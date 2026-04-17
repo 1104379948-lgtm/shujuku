@@ -191,8 +191,8 @@ const globalStateSheet = {
         ddl: `CREATE TABLE global_state ( -- 全局数据表
   row_id INTEGER PRIMARY KEY, -- 行号
   current_location TEXT NOT NULL, -- 主角当前所在地点
-  current_time TEXT NOT NULL, -- 当前时间
-  prev_scene_time TEXT, -- 上轮场景时间
+  current_time TEXT NOT NULL CHECK(current_time GLOB '????-??-?? ??:??'), -- 当前时间
+  prev_scene_time TEXT CHECK(prev_scene_time IS NULL OR prev_scene_time GLOB '????-??-?? ??:??'), -- 上轮场景时间
   elapsed_time TEXT -- 经过的时间
 );`
     },
@@ -342,10 +342,10 @@ const importantCharsSheet = {
   row_id INTEGER PRIMARY KEY, -- 行号
   name TEXT NOT NULL, -- 姓名
   gender_age TEXT NOT NULL, -- 性别/年龄
-  brief_intro TEXT, -- 一句话介绍
+  brief_intro TEXT CHECK(brief_intro IS NULL OR LENGTH(brief_intro) <= 20), -- 一句话介绍
   appearance TEXT, -- 外貌特征
   key_items TEXT, -- 持有的重要物品
-  is_absent TEXT NOT NULL DEFAULT '否', -- 是否离场
+  is_absent TEXT NOT NULL DEFAULT '否' CHECK(is_absent IN ('是', '否')), -- 是否离场
   past_experience TEXT -- 过往经历
 );`
     },
@@ -426,7 +426,7 @@ const protagonistSkillsSheet = {
         ddl: `CREATE TABLE protagonist_skills ( -- 主角技能表
   row_id INTEGER PRIMARY KEY, -- 行号
   skill_name TEXT NOT NULL, -- 技能名称
-  skill_type TEXT NOT NULL, -- 技能类型
+  skill_type TEXT NOT NULL CHECK(skill_type IN ('被动', '主动')), -- 技能类型
   skill_level TEXT, -- 等级/阶段
   effect_desc TEXT -- 效果描述
 );`
@@ -499,7 +499,7 @@ const inventorySheet = {
         ddl: `CREATE TABLE inventory ( -- 背包物品表
   row_id INTEGER PRIMARY KEY, -- 行号
   item_name TEXT NOT NULL, -- 物品名称
-  quantity INTEGER NOT NULL DEFAULT 1, -- 数量
+  quantity INTEGER NOT NULL DEFAULT 1 CHECK(quantity > 0), -- 数量
   description TEXT, -- 描述/效果
   category TEXT NOT NULL -- 类别
 );`
@@ -572,7 +572,7 @@ const questsEventsSheet = {
         ddl: `CREATE TABLE quests_events ( -- 任务与事件表
   row_id INTEGER PRIMARY KEY, -- 行号
   quest_name TEXT NOT NULL, -- 任务名称
-  quest_type TEXT NOT NULL, -- 任务类型
+  quest_type TEXT NOT NULL CHECK(quest_type IN ('主线任务', '支线任务')), -- 任务类型
   issuer TEXT, -- 发布者
   detail_desc TEXT, -- 详细描述
   current_progress TEXT, -- 当前进度
@@ -655,8 +655,8 @@ const chronicleSheet = {
   time_span TEXT NOT NULL, -- 时间跨度
   location TEXT NOT NULL, -- 地点
   chronicle_text TEXT NOT NULL, -- 纪要
-  summary TEXT, -- 概览
-  code_index TEXT NOT NULL -- 编码索引
+  summary TEXT CHECK(summary IS NULL OR LENGTH(summary) <= 40), -- 概览
+  code_index TEXT NOT NULL CHECK(code_index GLOB 'AM[0-9]*' AND LENGTH(code_index) >= 4) -- 编码索引
 );`
     },
     content: [
