@@ -103,8 +103,8 @@ function checkAndMarkInstance() {
  * 纯常量定义，不依赖运行时环境。
  * 从 src/core/01_header_and_env.js 迁移而来。
  */
-/** 调试模式开关 */
-const DEBUG_MODE_ACU = true;
+/** 调试模式开关（控制 console.log 输出，不影响日志缓冲区） */
+const DEBUG_MODE_ACU = false;
 /**
  * 唯一脚本标识符
  * 重要：如需创建独立副本，请修改此值为全新的唯一英文名称
@@ -1258,6 +1258,8 @@ let _nextId = 1;
 const _subscribers = new Set();
 /** 已出现过的所有标签（供 UI 过滤器使用） */
 const _knownTags = new Set();
+/** debug 级别日志是否写入缓冲区（默认关闭，减少性能开销） */
+let _debugLogEnabled = false;
 // ═══════════════════════════════════════════════════════════════
 // 公共 API
 // ═══════════════════════════════════════════════════════════════
@@ -1312,10 +1314,27 @@ function formatArgs(args) {
     }).join(' ');
 }
 /**
+ * 设置 debug 级别日志是否写入缓冲区
+ * 关闭时 debug 日志不会进入内存缓冲区，也不会通知订阅者，大幅减少性能开销
+ */
+function setDebugLogEnabled(enabled) {
+    _debugLogEnabled = enabled;
+}
+/**
+ * 获取 debug 级别日志是否启用
+ */
+function isDebugLogEnabled() {
+    return _debugLogEnabled;
+}
+/**
  * 推送一条日志到缓冲区
  * 由 logDebug_ACU / logWarn_ACU / logError_ACU 调用
+ * 当 debug 日志禁用时，debug 级别的日志会被跳过
  */
 function pushLog(level, args) {
+    // debug 级别日志禁用时直接跳过，避免性能开销
+    if (level === 'debug' && !_debugLogEnabled)
+        return;
     const tag = extractTag(args);
     _knownTags.add(tag);
     const entry = {
@@ -1394,6 +1413,7 @@ function _resetForTesting() {
     _nextId = 1;
     _subscribers.clear();
     _knownTags.clear();
+    _debugLogEnabled = false;
 }
 
 /**
@@ -1589,7 +1609,10 @@ function normalizeExcludeRules_ACU(excludeRulesInput, legacyExcludeTags = '') {
 function logDebug_ACU(...args) {
     if (DEBUG_MODE_ACU)
         console.log(`[${SCRIPT_ID_PREFIX_ACU}]`, ...args);
-    pushLog('debug', [`[${SCRIPT_ID_PREFIX_ACU}]`, ...args]);
+    // 仅当 debug 日志启用时才写入缓冲区，避免性能开销
+    if (isDebugLogEnabled()) {
+        pushLog('debug', [`[${SCRIPT_ID_PREFIX_ACU}]`, ...args]);
+    }
 }
 function logError_ACU(...args) {
     console.error(`[${SCRIPT_ID_PREFIX_ACU}]`, ...args);
@@ -1618,123 +1641,87 @@ function parseTableTemplateJson_ACU({ stripSeedRows = false } = {}) {
     try {
         let cleanTemplate = TABLE_TEMPLATE_ACU.trim();
         cleanTemplate = cleanTemplate.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-        // [调试] 输出模板字符串的前100个字符，帮助诊断问题
-        logDebug_ACU('[模板解析] cleanTemplate前100字符:', cleanTemplate.substring(0, 100));
-        logDebug_ACU('[模板解析] cleanTemplate长度:', cleanTemplate.length);
-        logDebug_ACU('[模板解析] 首字符:', JSON.stringify(cleanTemplate[0]));
-        logDebug_ACU('[模板解析] 尾字符:', JSON.stringify(cleanTemplate[cleanTemplate.length - 1]));
         // [修复2026-03-06] 处理DEFAULT_TABLE_TEMPLATE_ACU的双重JSON编码问题
-        // DEFAULT_TABLE_TEMPLATE_ACU 使用模板字符串定义，格式是：`"{...}"`
-        // 问题：模板字符串中的 \n 会被解释为实际换行符，\t 被解释为制表符等
-        // 而JSON规范不允许字符串中包含未转义的控制字符
-        // 解决方案：先将实际的控制字符转义回JSON兼容格式
         function escapeStringForJson_ACU(str) {
-            // 将字符串中的控制字符转义为JSON兼容格式
-            // 注意顺序很重要：先转义反斜杠，再转义双引号，最后转义控制字符
             return str
-                .replace(/\\/g, '\\\\') // 先转义反斜杠
-                .replace(/"/g, '\\"') // 转义双引号
-                .replace(/\n/g, '\\n') // 换行符
-                .replace(/\r/g, '\\r') // 回车符
-                .replace(/\t/g, '\\t'); // 制表符
+                .replace(/\\/g, '\\\\')
+                .replace(/"/g, '\\"')
+                .replace(/\n/g, '\\n')
+                .replace(/\r/g, '\\r')
+                .replace(/\t/g, '\\t');
         }
         let obj = null;
         // 如果模板字符串以双引号开头和结尾，说明是被引号包围的JSON字符串
         if (cleanTemplate.startsWith('"') && cleanTemplate.endsWith('"')) {
-            logDebug_ACU('[模板解析] 检测到双引号包围格式');
             try {
-                // 方案1：尝试直接解析（如果模板字符串中的转义序列正确）
+                // 方案1：尝试直接解析
                 try {
-                    logDebug_ACU('[模板解析] 尝试方案1：直接解析...');
                     const unquoted = JSON.parse(cleanTemplate);
-                    logDebug_ACU('[模板解析] 方案1第一次解析成功，类型:', typeof unquoted);
                     if (typeof unquoted === 'string') {
                         obj = safeJsonParse_ACU(unquoted, null);
-                        logDebug_ACU('[模板解析] 方案1第二次解析结果:', obj ? '成功' : '失败');
-                        if (obj) {
-                            logDebug_ACU('[模板解析] 方案1成功！');
+                        if (obj)
                             return stripSeedRows ? stripSeedRowsFromTemplate_ACU(obj) : obj;
-                        }
                     }
                     else if (typeof unquoted === 'object' && unquoted !== null) {
-                        logDebug_ACU('[模板解析] 方案1直接得到对象！');
                         return stripSeedRows ? stripSeedRowsFromTemplate_ACU(unquoted) : unquoted;
                     }
                 }
                 catch (e1) {
-                    logDebug_ACU('[模板解析] 方案1失败:', e1.message);
+                    // 方案1失败，继续方案2
                 }
                 // 方案2：转义控制字符后再解析
-                logDebug_ACU('[模板解析] 尝试方案2：转义后解析...');
-                // 去掉首尾引号，转义内部的控制字符，然后解析
                 const innerContent = cleanTemplate.slice(1, -1);
                 const escapedContent = escapeStringForJson_ACU(innerContent);
                 const rewrapped = '"' + escapedContent + '"';
                 try {
                     const unquoted = JSON.parse(rewrapped);
-                    logDebug_ACU('[模板解析] 方案2第一次解析成功，类型:', typeof unquoted);
                     if (typeof unquoted === 'string') {
                         obj = safeJsonParse_ACU(unquoted, null);
-                        logDebug_ACU('[模板解析] 方案2第二次解析结果:', obj ? '成功' : '失败');
-                        if (obj) {
-                            logDebug_ACU('[模板解析] 方案2成功！');
+                        if (obj)
                             return stripSeedRows ? stripSeedRowsFromTemplate_ACU(obj) : obj;
-                        }
-                        // 如果safeJsonParse失败，尝试直接JSON.parse
                         try {
                             obj = JSON.parse(unquoted);
-                            if (obj) {
-                                logDebug_ACU('[模板解析] 方案2（fallback）成功！');
+                            if (obj)
                                 return stripSeedRows ? stripSeedRowsFromTemplate_ACU(obj) : obj;
-                            }
                         }
                         catch (e3) {
-                            logDebug_ACU('[模板解析] 方案2 fallback失败:', e3.message);
+                            // fallback 也失败
                         }
                     }
                     else if (typeof unquoted === 'object' && unquoted !== null) {
-                        logDebug_ACU('[模板解析] 方案2直接得到对象！');
                         return stripSeedRows ? stripSeedRowsFromTemplate_ACU(unquoted) : unquoted;
                     }
                 }
                 catch (e2) {
-                    logDebug_ACU('[模板解析] 方案2失败:', e2.message);
+                    // 方案2失败
                 }
             }
             catch (e) {
-                logDebug_ACU('[模板解析] 双引号格式处理失败:', e.message);
+                // 双引号格式处理失败
             }
         }
-        else {
-            logDebug_ACU('[模板解析] 不是双引号包围格式，尝试常规解析...');
-        }
-        // 如果上述处理失败，尝试常规解析
+        // 常规解析
         if (!obj) {
-            logDebug_ACU('[模板解析] 尝试safeJsonParse_ACU...');
             obj = safeJsonParse_ACU(cleanTemplate, null);
-            logDebug_ACU('[模板解析] safeJsonParse_ACU结果:', obj ? '成功' : '失败');
         }
-        // 如果还是失败，尝试转义后解析
+        // 转义后解析
         if (!obj && typeof cleanTemplate === 'string') {
-            logDebug_ACU('[模板解析] 尝试转义后解析...');
             try {
                 const escaped = escapeStringForJson_ACU(cleanTemplate);
                 obj = safeJsonParse_ACU(escaped, null);
-                logDebug_ACU('[模板解析] 转义后解析结果:', obj ? '成功' : '失败');
             }
             catch (e) {
-                logDebug_ACU('[模板解析] 转义后解析异常:', e.message);
+                // 转义后解析异常
             }
         }
         if (!obj) {
-            logError_ACU('Failed to parse TABLE_TEMPLATE_ACU: safeJsonParse returned null');
+            logError_ACU('[模板解析] 所有解析方案均失败，模板长度:', cleanTemplate.length, '首字符:', JSON.stringify(cleanTemplate[0]));
             return null;
         }
-        logDebug_ACU('[模板解析] 最终成功！');
         return stripSeedRows ? stripSeedRowsFromTemplate_ACU(obj) : obj;
     }
     catch (e) {
-        logError_ACU('Failed to parse TABLE_TEMPLATE_ACU.', e);
+        logError_ACU('[模板解析] 解析异常:', e);
         return null;
     }
 }
@@ -33968,11 +33955,15 @@ let _pendingEntries = [];
 let _filterLevel = 'all';
 let _filterTag = 'all';
 let _filterKeyword = '';
-/** 是否自动滚动到底部 */
+/** 是否自动滚动到顶部（最新日志在顶部） */
 let _autoScroll = true;
 /** 批量渲染缓冲（防止高频 DOM 操作） */
 let _renderBuffer = [];
 let _renderRAFId = null;
+/** 日志 tab 是否当前可见（不可见时跳过 DOM 操作） */
+let _tabVisible = false;
+/** 不可见期间是否有新日志到达（切回时需要全量重绘） */
+let _dirtyWhileHidden = false;
 // ═══════════════════════════════════════════════════════════════
 // HTML 生成
 // ═══════════════════════════════════════════════════════════════
@@ -34021,6 +34012,10 @@ function generateLogViewerTabHTML() {
             <input id="${SCRIPT_ID_PREFIX_ACU}-log-autoscroll" type="checkbox" checked />
             自动滚动
           </label>
+          <label style="display: flex; align-items: center; gap: 4px; font-size: 0.85em; cursor: pointer;" title="开启后 Debug 级别日志会写入缓冲区（可能影响性能）">
+            <input id="${SCRIPT_ID_PREFIX_ACU}-log-debug-toggle" type="checkbox" />
+            采集Debug日志
+          </label>
           <span id="${SCRIPT_ID_PREFIX_ACU}-log-count" class="notes" style="font-size: 0.8em;"></span>
         </div>
 
@@ -34048,15 +34043,22 @@ async function bindLogViewerEvents_ACU() {
     const $clearBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-clear`);
     const $exportBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-export`);
     const $autoScrollCheckbox = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-autoscroll`);
+    const $debugToggle = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-debug-toggle`);
     const $logCount = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-count`);
-    // 初始化：渲染已有的历史日志
-    renderAllLogs($logList);
-    updateLogCount($logCount);
-    refreshTagFilter($tagFilter);
+    // 初始化 debug 开关状态
+    $debugToggle.prop('checked', isDebugLogEnabled());
+    // 初始化 tab 可见性
+    _tabVisible = false;
+    _dirtyWhileHidden = true; // 首次打开时标记为脏，切到日志 tab 时再渲染
     // 订阅新日志
     if (_unsubscribe)
         _unsubscribe(); // 防止重复订阅
     _unsubscribe = subscribe((entry) => {
+        // tab 不可见时跳过所有 DOM 操作，仅标记脏位
+        if (!_tabVisible) {
+            _dirtyWhileHidden = true;
+            return;
+        }
         if (_paused) {
             _pendingEntries.push(entry);
             updateLogCount($logCount);
@@ -34073,6 +34075,31 @@ async function bindLogViewerEvents_ACU() {
             });
         }
     });
+    // tab 切换时的可见性管理
+    // 监听 tab 按钮点击，判断当前是否切到了日志 tab
+    if ($popupInstance_ACU) {
+        $popupInstance_ACU.find('.acu-tab-button').on('click.acuLogViewer', function () {
+            const tabId = jQuery_API_ACU(this).data('tab');
+            const wasVisible = _tabVisible;
+            _tabVisible = (tabId === 'log-viewer');
+            // 切到日志 tab 且有脏数据时，全量重绘
+            if (_tabVisible && !wasVisible && _dirtyWhileHidden) {
+                _dirtyWhileHidden = false;
+                renderAllLogs($logList);
+                updateLogCount($logCount);
+                refreshTagFilter($tagFilter);
+            }
+        });
+        // 检查当前是否已经在日志 tab
+        const $activeTab = $popupInstance_ACU.find('.acu-tab-button.active');
+        if ($activeTab.length && $activeTab.data('tab') === 'log-viewer') {
+            _tabVisible = true;
+            _dirtyWhileHidden = false;
+            renderAllLogs($logList);
+            updateLogCount($logCount);
+            refreshTagFilter($tagFilter);
+        }
+    }
     // 级别过滤
     $levelFilter.on('change', function () {
         _filterLevel = jQuery_API_ACU(this).val();
@@ -34101,13 +34128,13 @@ async function bindLogViewerEvents_ACU() {
         }
         else {
             jQuery_API_ACU(this).html('<i class="fa-solid fa-pause"></i> 暂停');
-            // 恢复时渲染暂停期间积累的日志
+            // 恢复时渲染暂停期间积累的日志（最新的插入到顶部）
             if (_pendingEntries.length > 0) {
-                for (const entry of _pendingEntries) {
-                    appendLogEntry($logList, entry);
+                for (let i = _pendingEntries.length - 1; i >= 0; i--) {
+                    prependLogEntry($logList, _pendingEntries[i]);
                 }
                 _pendingEntries = [];
-                scrollToBottom($logList);
+                scrollToTop($logList);
             }
         }
     });
@@ -34125,6 +34152,11 @@ async function bindLogViewerEvents_ACU() {
     // 自动滚动
     $autoScrollCheckbox.on('change', function () {
         _autoScroll = jQuery_API_ACU(this).prop('checked');
+    });
+    // Debug 日志采集开关
+    $debugToggle.on('change', function () {
+        const enabled = jQuery_API_ACU(this).prop('checked');
+        setDebugLogEnabled(enabled);
     });
 }
 // ═══════════════════════════════════════════════════════════════
@@ -34165,50 +34197,54 @@ function renderLogEntryHTML(entry) {
 }
 /**
  * 渲染所有日志（全量重绘，用于过滤条件变化时）
+ * 最新日志显示在最上面（倒序）
  */
 function renderAllLogs($logList) {
     const allLogs = getAllLogs();
     const filtered = allLogs.filter(matchesFilter);
-    const html = filtered.map(renderLogEntryHTML).join('');
+    // 倒序：最新的在最上面
+    const reversed = filtered.slice().reverse();
+    const html = reversed.map(renderLogEntryHTML).join('');
     $logList.html(html);
-    scrollToBottom($logList);
+    scrollToTop($logList);
 }
 /**
- * 追加单条日志到列表（增量渲染）
+ * 在列表顶部插入单条日志（增量渲染，最新在最上面）
  */
-function appendLogEntry($logList, entry) {
+function prependLogEntry($logList, entry) {
     if (!matchesFilter(entry))
         return;
     const html = renderLogEntryHTML(entry);
-    $logList.append(html);
+    $logList.prepend(html);
 }
 /**
- * 刷新渲染缓冲区（批量追加）
+ * 刷新渲染缓冲区（批量插入到顶部）
  */
 function flushRenderBuffer($logList) {
     if (_renderBuffer.length === 0)
         return;
     const entries = _renderBuffer.splice(0);
+    // 新日志插入到顶部，最新的排最前
     let html = '';
-    for (const entry of entries) {
-        if (matchesFilter(entry)) {
-            html += renderLogEntryHTML(entry);
+    for (let i = entries.length - 1; i >= 0; i--) {
+        if (matchesFilter(entries[i])) {
+            html += renderLogEntryHTML(entries[i]);
         }
     }
     if (html) {
-        $logList.append(html);
-        scrollToBottom($logList);
+        $logList.prepend(html);
+        scrollToTop($logList);
     }
 }
 /**
- * 滚动到底部
+ * 滚动到顶部（最新日志在顶部）
  */
-function scrollToBottom($logList) {
+function scrollToTop($logList) {
     if (!_autoScroll)
         return;
     const el = $logList[0];
     if (el) {
-        el.scrollTop = el.scrollHeight;
+        el.scrollTop = 0;
     }
 }
 /**
@@ -34258,6 +34294,28 @@ function exportLogs() {
     a.download = `acu-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     a.click();
     URL.revokeObjectURL(url);
+}
+// ═══════════════════════════════════════════════════════════════
+// 清理函数（弹窗关闭时调用）
+// ═══════════════════════════════════════════════════════════════
+/**
+ * 清理日志查看器资源（取消订阅、清空缓冲区）
+ * 必须在弹窗关闭时调用，否则订阅者回调会持续操作已销毁的 DOM
+ */
+function cleanupLogViewer_ACU() {
+    if (_unsubscribe) {
+        _unsubscribe();
+        _unsubscribe = null;
+    }
+    if (_renderRAFId !== null) {
+        cancelAnimationFrame(_renderRAFId);
+        _renderRAFId = null;
+    }
+    _renderBuffer = [];
+    _pendingEntries = [];
+    _tabVisible = false;
+    _dirtyWhileHidden = false;
+    _paused = false;
 }
 
 /**
@@ -36994,6 +37052,8 @@ async function openAutoCardPopup_ACU() {
         startMaximized: false, // 由 rememberState 自动管理，首次打开时不全屏
         onClose: () => {
             logDebug_ACU('ACU Window closed');
+            // 清理日志查看器订阅，防止幽灵 DOM 操作和内存泄漏
+            cleanupLogViewer_ACU();
             _set_$popupInstance_ACU(null);
         },
         onReady: async ($window) => {
