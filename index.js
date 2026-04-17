@@ -19148,7 +19148,7 @@ async function executeAutoMergeBatch_ACU(prepared, batch, accumulatedSummary) {
     const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            const messagesToUse = JSON.parse(JSON.stringify(settings_ACU.charCardPrompt || [DEFAULT_CHAR_CARD_PROMPT_ACU]));
+            const messagesToUse = JSON.parse(JSON.stringify(settings_ACU.charCardPrompt || [isSqliteMode() ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU]));
             const mainPromptSegment = messagesToUse.find((m) => (String(m?.mainSlot || '').toUpperCase() === 'A') || m?.isMain) ||
                 messagesToUse.find((m) => m && m.content && m.content.includes("你接下来需要扮演一个填表用的美杜莎"));
             if (mainPromptSegment) {
@@ -23985,7 +23985,7 @@ function syncMergeSettingsToUI_ACU(s) {
         $el.val(v); };
     const setChecked = (id, v) => { const $el = find(id); if ($el.length)
         $el.prop('checked', !!v); };
-    setVal('merge-prompt-template', s.mergeSummaryPrompt || DEFAULT_MERGE_SUMMARY_PROMPT_ACU);
+    setVal('merge-prompt-template', s.mergeSummaryPrompt || (isSqliteMode() ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU));
     setVal('merge-target-count', s.mergeTargetCount || 1);
     setVal('merge-batch-size', s.mergeBatchSize || 5);
     setVal('merge-start-index', s.mergeStartIndex || 1);
@@ -30748,6 +30748,7 @@ async function resetAllToDefaults_ACU() {
     }
     try {
         settings_ACU.charCardPrompt = isSqliteMode() ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU;
+        settings_ACU.mergeSummaryPrompt = isSqliteMode() ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU;
         saveSettingsAndNotify_ACU();
         const templateResetOk = await resetTableTemplate_ACU({
             showToast: false,
@@ -31002,7 +31003,7 @@ async function executeMergeBatches_ACU(config, onBatchProgress, checkAbort) {
                 return { success: false, accumulatedSummary, error: '用户终止操作', failedBatchIndex: i };
             }
             onBatchProgress?.(i, totalBatches, attempt, maxRetries);
-            let messagesToUse = JSON.parse(JSON.stringify(settings_ACU.charCardPrompt || [DEFAULT_CHAR_CARD_PROMPT_ACU]));
+            let messagesToUse = JSON.parse(JSON.stringify(settings_ACU.charCardPrompt || [isSqliteMode() ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU]));
             let mainPromptSegment = messagesToUse.find((m) => (String(m?.mainSlot || '').toUpperCase() === 'A') || m?.isMain) ||
                 messagesToUse.find((m) => m && m.content && m.content.includes("你接下来需要扮演一个填表用的美杜莎"));
             if (mainPromptSegment) {
