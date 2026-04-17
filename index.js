@@ -7134,6 +7134,71 @@ function buildColumnNameMap(ddl) {
     }
     return { sqlToChinese, chineseToSql };
 }
+/**
+ * 根据列在 DDL 中的位置索引获取英文列名
+ * 索引从 0 开始，对应 content[0] 中的位置（包含 row_id）
+ *
+ * @param ddl CREATE TABLE 语句
+ * @param index 列索引（对应 content[0] 的位置，0 通常是 row_id）
+ * @returns 英文列名，找不到返回 null
+ */
+function getDDLColumnNameByIndex(ddl, index) {
+    const columns = parseDDLColumnNames(ddl);
+    if (index < 0 || index >= columns.length)
+        return null;
+    return columns[index];
+}
+/**
+ * 更新 DDL 中指定列的注释（中文名）
+ * 按行扫描 DDL，找到指定列名的行，替换其 `-- 注释` 部分。
+ * 如果该行没有注释，则在行尾添加 `-- 新注释`。
+ *
+ * @param ddl 原始 CREATE TABLE 语句
+ * @param columnName 要更新注释的英文列名
+ * @param newComment 新的注释内容（中文名）
+ * @returns 更新后的 DDL 字符串；如果找不到列名则返回原 DDL
+ */
+function updateDDLColumnComment(ddl, columnName, newComment) {
+    if (!ddl || !columnName || !newComment)
+        return ddl;
+    const lines = ddl.split('\n');
+    let found = false;
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (!trimmed)
+            continue;
+        // 检查该行是否以目标列名开头（列定义行）
+        const colMatch = trimmed.match(/^(\w+)\s+/);
+        if (!colMatch || colMatch[1] !== columnName)
+            continue;
+        // 找到目标列，替换或添加注释
+        found = true;
+        const line = lines[i];
+        // 情况 1：行内已有 `-- 注释`，替换注释内容
+        const commentMatch = line.match(/^(.*?)(--\s*).+?(,?\s*)$/);
+        if (commentMatch) {
+            lines[i] = `${commentMatch[1]}-- ${newComment}${commentMatch[3]}`;
+            break;
+        }
+        // 情况 2：行内没有注释，需要添加
+        // 先检查行尾是否有逗号
+        const trailingCommaMatch = line.match(/^(.*?)(,\s*)$/);
+        if (trailingCommaMatch) {
+            // 有逗号：在逗号前插入注释 → `  col TEXT, -- 注释`
+            // 按照项目约定格式：逗号在注释前 → `  col TEXT, -- 注释`
+            lines[i] = `${trailingCommaMatch[1]}, -- ${newComment}`;
+        }
+        else {
+            // 无逗号（最后一列）：直接在行尾添加注释
+            lines[i] = `${line.trimEnd()} -- ${newComment}`;
+        }
+        break;
+    }
+    if (!found) {
+        logWarn_ACU(`[Schema] updateDDLColumnComment: 未找到列 "${columnName}"，DDL 未修改`);
+    }
+    return lines.join('\n');
+}
 // ═══════════════════════════════════════════════════════════════
 // 内部工具函数
 // ═══════════════════════════════════════════════════════════════
@@ -8955,18 +9020,18 @@ class SqlTableService {
      * 按需建表：每次执行 SQL 操作前，检查模板中的表是否都已存在于 SQLite。
      *
      * 三种场景：
-     * 1. 新卡第一次填表：SQLite 中无任何用户表 → 全量从模板建表
+     * 1. 新卡第一次填表：SQLite 中无任何用户表 → 全量建表
      * 2. 老卡正常运行：所有表都已存在 → 直接返回（幂等）
      * 3. 中途加表：模板中新增了一张表，但 SQLite 中没有 → 只建缺失的表
      *
-     * 设计意图：建表延迟到第一次 applyEdits/executeQuery/executeMutation，
-     * 确保使用的是「此刻」最新的模板 DDL，而非「进入聊天那一刻」的快照。
+     * DDL 来源优先级：
+     * 1. currentJsonTableData_ACU 中的 sourceData.ddl（可能来自指导表，包含用户在可视化编辑器中的修改）
+     * 2. 全局模板中的 sourceData.ddl（fallback）
      */
     _ensureTablesFromTemplate() {
         const existingTables = new Set(this.engine.getTableNames());
         const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true });
         if (!templateData) {
-            // 没有模板（可能模板未配置），如果已有表则正常运行，否则报错
             if (existingTables.size > 0)
                 return;
             throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
@@ -8975,19 +9040,38 @@ class SqlTableService {
         const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
         const missingSheets = {};
         for (const key of sheetKeys) {
-            const sheet = templateData[key];
-            if (!sheet || !sheet.sourceData?.ddl)
+            // [修复] 优先从 currentJsonTableData_ACU 获取 sheet 数据（可能包含指导表中用户修改过的 DDL），
+            // fallback 到全局模板。这样用户在可视化编辑器中修改 DDL 后，建表时用的是新 DDL。
+            const liveSheet = currentJsonTableData_ACU?.[key];
+            const sheet = liveSheet || templateData[key];
+            if (!sheet)
                 continue;
-            const tableName = parseDDLTableName(sheet.sourceData.ddl);
+            const ddl = generateDDL(sheet);
+            const tableName = parseDDLTableName(ddl);
             if (tableName && !existingTables.has(tableName)) {
                 missingSheets[key] = sheet;
+            }
+        }
+        // 同时检查 currentJsonTableData_ACU 中是否有模板中不存在的表（用户可能在指导表中新增了表）
+        if (currentJsonTableData_ACU) {
+            const liveSheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
+            for (const key of liveSheetKeys) {
+                if (missingSheets[key])
+                    continue; // 已在上面处理过
+                const sheet = currentJsonTableData_ACU[key];
+                if (!sheet?.sourceData?.ddl)
+                    continue;
+                const tableName = parseDDLTableName(sheet.sourceData.ddl);
+                if (tableName && !existingTables.has(tableName)) {
+                    missingSheets[key] = sheet;
+                }
             }
         }
         // 所有表都已存在，无需建表
         if (Object.keys(missingSheets).length === 0)
             return;
         logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
-        // 构造只包含缺失表的 templateData 子集，交给 syncBridge 建表
+        // 构造只包含缺失表的数据子集，交给 syncBridge 建表
         const partialData = { mate: templateData.mate };
         for (const [key, sheet] of Object.entries(missingSheets)) {
             partialData[key] = sheet;
@@ -24444,9 +24528,41 @@ function handleManualSelectNone_ACU() {
  * 加载批次基础数据：从聊天记录中为每个表格查找最新数据
  * 纯业务逻辑，不涉及任何 UI 操作
  */
+/**
+ * [辅助] 从聊天记录加载旧数据覆盖 sheet 后，恢复指导表基底中的关键结构字段。
+ *
+ * 背景：loadBatchBaseData_ACU 从聊天记录中加载旧数据时，会整体覆盖 mergedBatchData[sheetKey]。
+ * 但指导表基底中可能包含用户在可视化编辑器中修改过的 sourceData.ddl 和表头（content[0]），
+ * 这些结构信息不应该被聊天记录中的旧数据覆盖。
+ *
+ * 只恢复 sourceData（含 DDL）和表头（content[0]），其他字段（name/uid/updateConfig/exportConfig）
+ * 保留聊天记录中的值，因为它们可能在聊天过程中被合法修改。
+ */
+function restoreGuideStructure(mergedSheet, guideSheet) {
+    if (!guideSheet || typeof guideSheet !== 'object')
+        return;
+    if (!mergedSheet || typeof mergedSheet !== 'object')
+        return;
+    // 恢复 sourceData（包含 DDL、note 等用户在可视化编辑器中修改的关键配置）
+    if (guideSheet.sourceData)
+        mergedSheet.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+    // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的
+    if (Array.isArray(guideSheet.content) && guideSheet.content.length > 0 &&
+        Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
+        mergedSheet.content[0] = JSON.parse(JSON.stringify(guideSheet.content[0]));
+    }
+}
 function loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData) {
     const batchFoundSheets = {};
     batchSheetKeys.forEach(k => batchFoundSheets[k] = false);
+    // [修复] 保存指导表基底中每个 sheet 的结构快照（sourceData/DDL/表头/表名等），
+    // 以便从聊天记录加载旧数据覆盖后恢复。防止旧数据中的旧 DDL/旧表头覆盖用户在可视化编辑器中的修改。
+    const guideSnapshots = {};
+    batchSheetKeys.forEach(k => {
+        if (mergedBatchData[k] && typeof mergedBatchData[k] === 'object') {
+            guideSnapshots[k] = mergedBatchData[k];
+        }
+    });
     for (let j = firstMessageIndexOfBatch - 1; j >= 0; j--) {
         const msg = chatHistory[j];
         if (msg.is_user)
@@ -24458,6 +24574,7 @@ function loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsola
             Object.keys(independentData).forEach(storedSheetKey => {
                 if (batchFoundSheets[storedSheetKey] === false && mergedBatchData[storedSheetKey]) {
                     mergedBatchData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
+                    restoreGuideStructure(mergedBatchData[storedSheetKey], guideSnapshots[storedSheetKey]);
                     batchFoundSheets[storedSheetKey] = true;
                 }
             });
@@ -24477,6 +24594,7 @@ function loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsola
                 Object.keys(independentData).forEach(storedSheetKey => {
                     if (batchFoundSheets[storedSheetKey] === false && mergedBatchData[storedSheetKey]) {
                         mergedBatchData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
+                        restoreGuideStructure(mergedBatchData[storedSheetKey], guideSnapshots[storedSheetKey]);
                         batchFoundSheets[storedSheetKey] = true;
                     }
                 });
@@ -24486,6 +24604,7 @@ function loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsola
                 Object.keys(standardData).forEach(k => {
                     if (k.startsWith('sheet_') && batchFoundSheets[k] === false && mergedBatchData[k]) {
                         mergedBatchData[k] = JSON.parse(JSON.stringify(standardData[k]));
+                        restoreGuideStructure(mergedBatchData[k], guideSnapshots[k]);
                         batchFoundSheets[k] = true;
                     }
                 });
@@ -24495,6 +24614,7 @@ function loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsola
                 Object.keys(summaryData).forEach(k => {
                     if (k.startsWith('sheet_') && batchFoundSheets[k] === false && mergedBatchData[k]) {
                         mergedBatchData[k] = JSON.parse(JSON.stringify(summaryData[k]));
+                        restoreGuideStructure(mergedBatchData[k], guideSnapshots[k]);
                         batchFoundSheets[k] = true;
                     }
                 });
@@ -24838,6 +24958,16 @@ async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData
             });
             if (!batchResult.success) {
                 _set_isAutoUpdatingCard_ACU$1(false);
+                // [修复] 填表失败时，processUpdatesBatch 内部的 loadBatchBaseData 已经用聊天记录中的旧数据
+                // 覆盖了 currentJsonTableData_ACU（包括旧表头）。必须调用 refreshData 恢复到正确状态，
+                // 否则用户重新打开可视化编辑器时会看到旧表头（指导表中的新表头不会被应用）。
+                try {
+                    await loadAllChatMessages_ACU();
+                    await refreshData();
+                }
+                catch (e) {
+                    logWarn_ACU('[Manual Update] 填表失败后恢复数据时出错:', e);
+                }
                 return { success: false, error: batchResult.error || '手动更新失败或被终止。' };
             }
             await loadAllChatMessages_ACU();
@@ -27315,7 +27445,21 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
     // Bind Config Events
     $colList.on('input', '.acu-col-input', function () {
         const idx = parseInt(jQuery_API_ACU(this).data('idx'));
-        headers[idx] = jQuery_API_ACU(this).val();
+        const newValue = jQuery_API_ACU(this).val();
+        headers[idx] = newValue;
+        // [方案B] SQLite 模式下，用户改表头时自动同步更新 DDL 注释
+        if (isSqliteMode() && sheet.sourceData?.ddl) {
+            const ddlColumns = parseDDLColumnNames(sheet.sourceData.ddl);
+            // idx 对应 content[0] 的位置（包含 row_id），DDL 列名顺序与 content[0] 一致
+            if (idx >= 0 && idx < ddlColumns.length && ddlColumns[idx] !== 'row_id') {
+                sheet.sourceData.ddl = updateDDLColumnComment(sheet.sourceData.ddl, ddlColumns[idx], newValue);
+                // 同步更新 DDL 编辑器的显示（如果可见）
+                const $ddlTextarea = jQuery_API_ACU('#cfg-ddl');
+                if ($ddlTextarea.length) {
+                    $ddlTextarea.val(sheet.sourceData.ddl);
+                }
+            }
+        }
     });
     $colList.on('click', '.acu-col-btn', function () {
         const idx = parseInt(jQuery_API_ACU(this).data('idx'));
@@ -28806,37 +28950,36 @@ async function saveVisualizerChanges_ACU(saveToTemplate = false) {
     applySpecialIndexSequenceToSummaryTables_ACU(orderedData);
     // First, apply changes to local variable (使用排序后的数据)
     _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(orderedData)));
-    // [新增] 可视化编辑器属于“用户显式修改表结构/表名/顺序”的入口：
-    // 覆盖式更新聊天第一层的“空白指导表”（仅表头+参数，无数据行），让后续合并/显示/填表参数都以此为准。
-    // 仅“保存到当前聊天”会把这次修改沉淀为当前聊天模板预设；“保存到全局”只更新全局预设与当前全局选择，不会自动清除当前聊天本地预设。
-    if (!saveToTemplate) {
-        try {
-            const isolationKey = getCurrentIsolationKey_ACU();
-            // 需求4（澄清版）：可视化编辑器触发指导表更新时，只更新表名/表头/表格参数，不修改指导表基础数据（seedRows）。
-            // - 若当前聊天/标签已存在指导表：必须继承其 seedRows
-            // - 若不存在指导表：从当前模板提取预置数据作为 seedRows（需求1）
-            const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
-            const templateObjForSeed = parseTableTemplateJson_ACU({ stripSeedRows: false });
-            const guideData = buildChatSheetGuideDataFromData_ACU(currentJsonTableData_ACU, {
-                preserveSeedRowsFromGuideData: existingGuide,
-                seedRowsFromTemplateObj: templateObjForSeed,
+    // [修复] 可视化编辑器属于"用户显式修改表结构/表名/顺序"的入口：
+    // 覆盖式更新聊天第一层的"空白指导表"（仅表头+参数，无数据行），让后续合并/显示/填表参数都以此为准。
+    // [Bug Fix] 无论"保存到当前聊天"还是"保存到全局"，都必须更新指导表，
+    // 否则"保存到全局"后点击填表时，指导表中的旧表头会覆盖用户的修改。
+    try {
+        const guideIsolationKey = getCurrentIsolationKey_ACU();
+        // 需求4（澄清版）：可视化编辑器触发指导表更新时，只更新表名/表头/表格参数，不修改指导表基础数据（seedRows）。
+        // - 若当前聊天/标签已存在指导表：必须继承其 seedRows
+        // - 若不存在指导表：从当前模板提取预置数据作为 seedRows（需求1）
+        const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(guideIsolationKey);
+        const templateObjForSeed = parseTableTemplateJson_ACU({ stripSeedRows: false });
+        const guideData = buildChatSheetGuideDataFromData_ACU(currentJsonTableData_ACU, {
+            preserveSeedRowsFromGuideData: existingGuide,
+            seedRowsFromTemplateObj: templateObjForSeed,
+        });
+        if (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) {
+            const syncTemplateScope = !saveToTemplate; // "保存到全局"时不同步模板作用域（由 applyTemplatePresetToCurrent 处理）
+            const templateScopeSource = materializeDataFromSheetGuide_ACU(guideData, { includeSeedRows: true });
+            setChatSheetGuideDataForIsolationKey_ACU(guideIsolationKey, guideData, {
+                reason: 'visualizer_save',
+                syncTemplateScope,
+                templateSource: templateScopeSource,
+                presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
+                source: 'visualizer_save',
             });
-            if (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) {
-                const syncTemplateScope = true;
-                const templateScopeSource = materializeDataFromSheetGuide_ACU(guideData, { includeSeedRows: true });
-                setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, {
-                    reason: 'visualizer_save',
-                    syncTemplateScope,
-                    templateSource: templateScopeSource,
-                    presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey }),
-                    source: 'visualizer_save',
-                });
-                logDebug_ACU(`[SheetGuide] Overwrote chat sheet guide from visualizer for tag [${isolationKey || '无标签'}] (tables=${Object.keys(guideData).filter(k => k.startsWith('sheet_')).length}).`);
-            }
+            logDebug_ACU(`[SheetGuide] Overwrote chat sheet guide from visualizer for tag [${guideIsolationKey || '无标签'}] (tables=${Object.keys(guideData).filter(k => k.startsWith('sheet_')).length}, saveToTemplate=${saveToTemplate}).`);
         }
-        catch (e) {
-            logWarn_ACU('[SheetGuide] Failed to overwrite sheet guide from visualizer:', e);
-        }
+    }
+    catch (e) {
+        logWarn_ACU('[SheetGuide] Failed to overwrite sheet guide from visualizer:', e);
     }
     // [新机制] 不再使用 settings_ACU.tableKeyOrder 强制固定顺序（顺序由每张表的 orderNo 决定）
     // 记录本次需要彻底清理的 key（真正清理会在“写回所有楼层”之后执行，防止后续写回把旧表带回）
