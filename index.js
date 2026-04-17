@@ -37729,6 +37729,17 @@ function mainInitialize_ACU() {
                         return;
                     }
                     applyTemplateScopeForCurrentChat_ACU();
+                    // [6.7.3] SQLite 模式下，切换聊天后需要重建内存数据库（初始化 SQLite 引擎）
+                    if (isSqliteMode()) {
+                        logDebug_ACU('[SQLite] CHAT_CHANGED: 重建内存数据库...');
+                        try {
+                            await reloadStorageProvider();
+                            logDebug_ACU('[SQLite] CHAT_CHANGED: 内存数据库重建完成');
+                        }
+                        catch (e) {
+                            logError_ACU(`[SQLite] CHAT_CHANGED: 数据库重建失败: ${e?.message}`);
+                        }
+                    }
                     // 3. 刷新数据（UI 刷新由 presentation 层负责）
                     await refreshMergedDataAndNotifyWithUI_ACU();
                     // [新增] 再次强制刷新状态显示，确保UI同步
