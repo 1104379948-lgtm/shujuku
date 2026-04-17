@@ -12941,7 +12941,21 @@ async function executeSinglePlotTask_ACU(task, sharedContext, runtimeOptions = {
                 logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复过短: ${tempMessage.length}/${minLength}`);
             }
             if (attemptIndex < maxRetries - 1) {
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                // 可被 abort 信号中断的等待，避免用户点中止后还要等 5 秒
+                await new Promise(resolve => {
+                    const signal = abortController_ACU?.signal;
+                    if (signal?.aborted) {
+                        resolve();
+                        return;
+                    }
+                    const timer = setTimeout(() => { cleanup(); resolve(); }, 5000);
+                    const onAbort = () => { clearTimeout(timer); cleanup(); resolve(); };
+                    const cleanup = () => { try {
+                        signal?.removeEventListener('abort', onAbort);
+                    }
+                    catch (_) { } };
+                    signal?.addEventListener('abort', onAbort, { once: true });
+                });
             }
         }
         if (!rawResponse) {
@@ -37496,6 +37510,12 @@ async function runOptimizationLogicWithUI_ACU(userMessage, options = {}) {
                 try {
                     if ($toast)
                         toastr_API_ACU.clear($toast);
+                }
+                catch (e) { }
+                // DOM 级兜底：确保 toast 元素被彻底移除，防止 toastr.clear 不生效
+                try {
+                    if ($toast && $toast.closest)
+                        $toast.closest('.toast').remove();
                 }
                 catch (e) { }
                 _set_isProcessing_Plot_ACU(false);
