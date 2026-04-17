@@ -8952,30 +8952,58 @@ class SqlTableService {
         }
     }
     /**
-     * 延迟建表：第一次执行 SQL 操作时，如果 SQLite 中没有用户表，
-     * 则从当前模板 DDL 建表。
+     * 按需建表：每次执行 SQL 操作前，检查模板中的表是否都已存在于 SQLite。
      *
-     * 设计意图：新开卡时 loadFromChat 只初始化引擎不建表，
-     * 建表延迟到第一次 applyEdits/executeQuery/executeMutation，
+     * 三种场景：
+     * 1. 新卡第一次填表：SQLite 中无任何用户表 → 全量从模板建表
+     * 2. 老卡正常运行：所有表都已存在 → 直接返回（幂等）
+     * 3. 中途加表：模板中新增了一张表，但 SQLite 中没有 → 只建缺失的表
+     *
+     * 设计意图：建表延迟到第一次 applyEdits/executeQuery/executeMutation，
      * 确保使用的是「此刻」最新的模板 DDL，而非「进入聊天那一刻」的快照。
-     *
-     * 幂等：如果已有表则直接返回，不会重复建表。
      */
     _ensureTablesFromTemplate() {
-        // 已有用户表，无需建表
-        const existingTables = this.engine.getTableNames();
-        if (existingTables.length > 0)
-            return;
-        logDebug_ACU('[SqlTableService] SQLite 中无用户表，从模板 DDL 延迟建表...');
+        const existingTables = new Set(this.engine.getTableNames());
         const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true });
         if (!templateData) {
+            // 没有模板（可能模板未配置），如果已有表则正常运行，否则报错
+            if (existingTables.size > 0)
+                return;
             throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
         }
-        // 从模板建表 + 灌数据
-        this.syncBridge.loadFromTableData(templateData);
-        _set_currentJsonTableData_ACU(templateData);
-        this._buildNameMapper(templateData);
-        logDebug_ACU(`[SqlTableService] 延迟建表完成，共 ${this.engine.getTableNames().length} 张表`);
+        // 收集模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
+        const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
+        const missingSheets = {};
+        for (const key of sheetKeys) {
+            const sheet = templateData[key];
+            if (!sheet || !sheet.sourceData?.ddl)
+                continue;
+            const tableName = parseDDLTableName(sheet.sourceData.ddl);
+            if (tableName && !existingTables.has(tableName)) {
+                missingSheets[key] = sheet;
+            }
+        }
+        // 所有表都已存在，无需建表
+        if (Object.keys(missingSheets).length === 0)
+            return;
+        logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
+        // 构造只包含缺失表的 templateData 子集，交给 syncBridge 建表
+        const partialData = { mate: templateData.mate };
+        for (const [key, sheet] of Object.entries(missingSheets)) {
+            partialData[key] = sheet;
+        }
+        this.syncBridge.loadFromTableData(partialData);
+        // 合并新建的表到当前 JSON 视图
+        if (currentJsonTableData_ACU) {
+            for (const [key, sheet] of Object.entries(missingSheets)) {
+                currentJsonTableData_ACU[key] = sheet;
+            }
+        }
+        else {
+            _set_currentJsonTableData_ACU(templateData);
+        }
+        this._buildNameMapper(currentJsonTableData_ACU || templateData);
+        logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
     }
 }
 // ═══════════════════════════════════════════════════════════════
@@ -9155,6 +9183,21 @@ async function switchStorageMode(mode) {
             await currentProvider.loadFromChat();
         }
         throw e;
+    }
+}
+/**
+ * 立即销毁当前 Provider 实例，释放内存数据库资源
+ * 用于换卡/换聊天时在状态重置之前立即清理旧数据库，
+ * 避免 1200ms 延迟窗口内的数据不一致问题。
+ *
+ * 销毁后 getStorageProvider() 会触发懒初始化创建新实例。
+ * 调用方应在适当时机调用 reloadStorageProvider() 重建并加载数据。
+ */
+function disposeStorageProvider() {
+    if (currentProvider) {
+        logDebug_ACU(`[StorageStrategy] 销毁当前 Provider: ${currentProvider.mode}`);
+        currentProvider.dispose();
+        currentProvider = null;
     }
 }
 /**
@@ -37724,6 +37767,15 @@ function mainInitialize_ACU() {
             }
             SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName) => {
                 logDebug_ACU(`ACU CHAT_CHANGED event: ${chatFileName}`);
+                // [修复] 换卡/换聊天时，立即销毁旧的 SQLite 数据库实例
+                // 必须在 resetScriptStateForNewChat 之前执行，避免 1200ms 延迟窗口内的数据不一致
+                // 仅在 chatFileName 有效时才销毁（无效时 resetScriptState 会直接 return 保留现有状态）
+                if (chatFileName && typeof chatFileName === 'string' && chatFileName.trim() !== '' && chatFileName.trim() !== 'null') {
+                    if (isSqliteMode()) {
+                        disposeStorageProvider();
+                        logDebug_ACU('[SQLite] CHAT_CHANGED: 立即销毁旧数据库实例');
+                    }
+                }
                 await resetScriptStateForNewChat_ACU(chatFileName);
                 // [触发门控] generationGate 重置已搬到 service 层的 resetScriptStateForNewChat_ACU 中
                 // [触发门控] 每次切换聊天都尝试安装一次 capture 钩子（防止 DOM 重新渲染导致丢失）          installSendIntentCaptureHooks_ACU();
@@ -37998,6 +38050,19 @@ function mainInitialize_ACU() {
             await loadPresetAndCleanCharacterData_ACU();
             // 再次强制刷新数据和UI，确保初始加载时表格显示正确
             await loadAllChatMessages_ACU();
+            // [修复] SQLite 模式下，启动时初始化内存数据库
+            // 老卡（有聊天历史数据）会从聊天记录合并数据建表
+            // 新卡（无数据）只初始化引擎，建表延迟到第一次填表时
+            if (isSqliteMode()) {
+                logDebug_ACU('[SQLite] initWithChatId: 初始化内存数据库...');
+                try {
+                    await reloadStorageProvider();
+                    logDebug_ACU('[SQLite] initWithChatId: 内存数据库初始化完成');
+                }
+                catch (e) {
+                    logError_ACU(`[SQLite] initWithChatId: 数据库初始化失败: ${e?.message}`);
+                }
+            }
             await refreshMergedDataAndNotifyWithUI_ACU();
             if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
                 updateCardUpdateStatusDisplay_ACU();
