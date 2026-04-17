@@ -11640,13 +11640,27 @@ function getConnectionManagerProfiles_ACU() {
 /**
  * 获取宿主平台的 HTTP 请求头（包含 CSRF token 等认证信息）
  * 封装 SillyTavern.getRequestHeaders()，不可用时返回空对象。
- * service 层通过本函数获取请求头，不再直接访问 SillyTavern 全局对象。
- * @returns 请求头对象
+ *
+ * 注意：主窗口的 window.SillyTavern 只有 {libs, getContext}，
+ * getRequestHeaders 在 getContext() 返回的对象里。
+ * 所以必须通过 SillyTavern_API_ACU（已被 Proxy 包装）或 getContext() 获取。
  */
 function getHostRequestHeaders_ACU() {
     try {
-        const headers = globalThis.SillyTavern?.getRequestHeaders?.();
-        return (headers && typeof headers === 'object') ? headers : {};
+        // 优先通过 SillyTavern_API_ACU（插件模式下已被 Proxy 包装，每次读取走 getContext()）
+        if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.getRequestHeaders === 'function') {
+            const headers = SillyTavern_API_ACU.getRequestHeaders();
+            if (headers && typeof headers === 'object')
+                return headers;
+        }
+        // fallback：直接调用 getContext()（覆盖 SillyTavern_API_ACU 尚未初始化的场景）
+        const ctx = globalThis.SillyTavern?.getContext?.();
+        if (ctx && typeof ctx.getRequestHeaders === 'function') {
+            const headers = ctx.getRequestHeaders();
+            if (headers && typeof headers === 'object')
+                return headers;
+        }
+        return {};
     }
     catch {
         logWarn_ACU('[AIGateway] getRequestHeaders 不可用，返回空对象');
