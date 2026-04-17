@@ -2282,15 +2282,45 @@ async function initTavernSettingsBridge_ACU() {
     // 插件运行在酒馆主窗口中，直接从 window 获取酒馆全局对象，无需 import() 或 script 注入
     if (isExtensionMode()) {
         logDebug_ACU('[TavernStorage] 插件模式：直接从 window 获取酒馆设置对象...');
-        // 获取 extension_settings：优先从 SillyTavern.extensionSettings，后备从 window 全局
+        // 获取 extension_settings：多个来源 fallback
+        // 1. SillyTavern.extensionSettings（iframe API 暴露的属性）
+        // 2. SillyTavern.getContext()?.extensionSettings（通过 getContext 获取）
+        // 3. window.extension_settings（酒馆主窗口的全局变量，插件可直接访问）
         try {
             const st = window.SillyTavern;
             if (st && st.extensionSettings) {
                 tavernExtensionSettingsRoot_ACU = st.extensionSettings;
+                logDebug_ACU('[TavernStorage] 插件模式：从 SillyTavern.extensionSettings 获取成功');
             }
         }
         catch (e) {
             logWarn_ACU('[TavernStorage] 插件模式：从 SillyTavern.extensionSettings 获取失败:', e);
+        }
+        // fallback: SillyTavern.getContext()?.extensionSettings
+        if (!tavernExtensionSettingsRoot_ACU) {
+            try {
+                const ctx = window.SillyTavern?.getContext?.();
+                if (ctx && ctx.extensionSettings) {
+                    tavernExtensionSettingsRoot_ACU = ctx.extensionSettings;
+                    logDebug_ACU('[TavernStorage] 插件模式：从 SillyTavern.getContext().extensionSettings 获取成功');
+                }
+            }
+            catch (e) {
+                logWarn_ACU('[TavernStorage] 插件模式：从 getContext().extensionSettings 获取失败:', e);
+            }
+        }
+        // fallback: window.extension_settings（酒馆主窗口全局变量）
+        if (!tavernExtensionSettingsRoot_ACU) {
+            try {
+                const globalExtSettings = window.extension_settings;
+                if (globalExtSettings && typeof globalExtSettings === 'object') {
+                    tavernExtensionSettingsRoot_ACU = globalExtSettings;
+                    logDebug_ACU('[TavernStorage] 插件模式：从 window.extension_settings 获取成功');
+                }
+            }
+            catch (e) {
+                logWarn_ACU('[TavernStorage] 插件模式：从 window.extension_settings 获取失败:', e);
+            }
         }
         // 获取 saveSettingsDebounced / saveSettings
         if (typeof window.saveSettingsDebounced === 'function')
@@ -37817,23 +37847,42 @@ function mainInitialize_ACU() {
         // [新增修复]：为了解决作为角色脚本加载时可能错过初始CHAT_CHANGED事件的问题，
         // 我们在初始化时主动获取一次当前聊天信息并进行设置。
         // 这确保了无论脚本何时加载，都能正确初始化。
+        // [修复] 添加轮询重试机制：如果 chatId 暂时不可用，持续轮询直到可用
+        const initWithChatId = async (chatId) => {
+            logDebug_ACU(`ACU: Initializing with current chat on load: ${chatId}`);
+            await resetScriptStateForNewChat_ACU(chatId);
+            await loadPresetAndCleanCharacterData_ACU();
+            // 再次强制刷新数据和UI，确保初始加载时表格显示正确
+            await loadAllChatMessages_ACU();
+            await refreshMergedDataAndNotifyWithUI_ACU();
+            if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
+                updateCardUpdateStatusDisplay_ACU();
+            }
+        };
         if (SillyTavern_API_ACU && SillyTavern_API_ACU.chatId) {
-            logDebug_ACU(`ACU: Initializing with current chat on load: ${SillyTavern_API_ACU.chatId}`);
-            // 修复：将初始加载延迟到下一个事件循环，以避免在SillyTavern完全准备好之前运行初始化，从而解决新聊天的竞态条件。
-            // [新增] 使用延迟初始化确保UI就绪
+            // chatId 已可用，延迟初始化
             setTimeout(async () => {
-                await resetScriptStateForNewChat_ACU(SillyTavern_API_ACU.chatId);
-                await loadPresetAndCleanCharacterData_ACU();
-                // 再次强制刷新数据和UI，确保初始加载时表格显示正确
-                await loadAllChatMessages_ACU();
-                await refreshMergedDataAndNotifyWithUI_ACU();
-                if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
-                    updateCardUpdateStatusDisplay_ACU();
-                }
+                await initWithChatId(SillyTavern_API_ACU.chatId);
             }, 1000);
         }
         else {
-            logWarn_ACU('ACU: Could not get current chat ID on initial load. Waiting for CHAT_CHANGED event.');
+            // chatId 暂时不可用，启动轮询重试（每200ms检查一次，最多等15秒）
+            logWarn_ACU('ACU: chatId not available on initial load. Starting polling...');
+            let pollCount = 0;
+            const maxPolls = 75; // 200ms × 75 = 15秒
+            const pollTimer = setInterval(async () => {
+                pollCount++;
+                const chatId = SillyTavern_API_ACU?.chatId;
+                if (chatId) {
+                    clearInterval(pollTimer);
+                    logDebug_ACU(`ACU: chatId became available after ${pollCount * 200}ms polling: ${chatId}`);
+                    await initWithChatId(chatId);
+                }
+                else if (pollCount >= maxPolls) {
+                    clearInterval(pollTimer);
+                    logWarn_ACU(`ACU: chatId still not available after ${maxPolls * 200}ms polling. Waiting for CHAT_CHANGED event.`);
+                }
+            }, 200);
         }
     }
     else {
@@ -39696,19 +39745,39 @@ _forceExtensionMode();
 /**
  * 等待 TavernHelper 就绪。
  * 酒馆插件的加载顺序不确定，TavernHelper 可能还没挂载到 window 上。
+ * 同时需要等待 extensionSettings 就绪，否则设置桥接会失败。
  */
-async function waitForTavernHelper(maxWaitMs = 10000) {
+async function waitForTavernHelper(maxWaitMs = 15000) {
     const start = Date.now();
     let pollCount = 0;
+    let lastStatus = '';
     while (Date.now() - start < maxWaitMs) {
-        if (window.TavernHelper && window.SillyTavern) {
-            logDebug_ACU(`[插件启动] TavernHelper 就绪，等待了 ${Date.now() - start}ms（轮询 ${pollCount} 次）`);
+        const hasTH = !!window.TavernHelper;
+        const hasST = !!window.SillyTavern;
+        // extensionSettings 可能在 SillyTavern 全局对象上，也可能是独立的全局变量
+        const hasExtSettings = !!(window.SillyTavern?.extensionSettings ||
+            window.extension_settings);
+        const status = `TH=${hasTH},ST=${hasST},ExtSettings=${hasExtSettings}`;
+        if (status !== lastStatus) {
+            logDebug_ACU(`[插件启动] 等待就绪... ${status} (${Date.now() - start}ms)`);
+            lastStatus = status;
+        }
+        if (hasTH && hasST && hasExtSettings) {
+            logDebug_ACU(`[插件启动] TavernHelper + extensionSettings 就绪，等待了 ${Date.now() - start}ms（轮询 ${pollCount} 次）`);
             return true;
         }
         pollCount++;
         await new Promise(r => setTimeout(r, 100));
     }
-    logError_ACU(`[插件启动] 等待 TavernHelper 超时（${maxWaitMs}ms），TavernHelper=${!!window.TavernHelper}，SillyTavern=${!!window.SillyTavern}`);
+    // 超时后降级：如果 TavernHelper 和 SillyTavern 存在但 extensionSettings 不存在，仍然允许启动
+    // （设置会走 IndexedDB fallback）
+    const hasTH = !!window.TavernHelper;
+    const hasST = !!window.SillyTavern;
+    if (hasTH && hasST) {
+        logWarn_ACU(`[插件启动] extensionSettings 未就绪（${maxWaitMs}ms），但 TavernHelper 和 SillyTavern 可用，降级启动`);
+        return true;
+    }
+    logError_ACU(`[插件启动] 等待 TavernHelper 超时（${maxWaitMs}ms），TavernHelper=${hasTH}，SillyTavern=${hasST}`);
     return false;
 }
 /**
