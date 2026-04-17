@@ -2279,54 +2279,42 @@ async function initTavernSettingsBridge_ACU() {
         return false;
     logDebug_ACU('[TavernStorage] 开始初始化酒馆设置桥接...');
     // ── 插件模式快速路径 ──
-    // 插件运行在酒馆主窗口中，直接从 window 获取酒馆全局对象，无需 import() 或 script 注入
+    // 插件运行在酒馆主窗口中。主窗口的 window.SillyTavern 只有 {libs, getContext}，
+    // 所有真正的 API 都必须通过 SillyTavern.getContext() 这个函数调用来获取。
+    // 酒馆源码证实：extensionSettings 和 saveSettingsDebounced 都在 getContext() 返回值中。
     if (isExtensionMode()) {
-        logDebug_ACU('[TavernStorage] 插件模式：直接从 window 获取酒馆设置对象...');
-        // 获取 extension_settings：多个来源 fallback
-        // 1. SillyTavern.extensionSettings（iframe API 暴露的属性）
-        // 2. SillyTavern.getContext()?.extensionSettings（通过 getContext 获取）
-        // 3. window.extension_settings（酒馆主窗口的全局变量，插件可直接访问）
+        logDebug_ACU('[TavernStorage] 插件模式：通过 SillyTavern.getContext() 获取设置对象...');
         try {
             const st = window.SillyTavern;
-            if (st && st.extensionSettings) {
-                tavernExtensionSettingsRoot_ACU = st.extensionSettings;
-                logDebug_ACU('[TavernStorage] 插件模式：从 SillyTavern.extensionSettings 获取成功');
+            if (st && typeof st.getContext === 'function') {
+                const ctx = st.getContext();
+                if (ctx) {
+                    if (ctx.extensionSettings) {
+                        tavernExtensionSettingsRoot_ACU = ctx.extensionSettings;
+                        logDebug_ACU('[TavernStorage] 插件模式：extensionSettings 获取成功');
+                    }
+                    else {
+                        logWarn_ACU('[TavernStorage] 插件模式：getContext().extensionSettings 为空');
+                    }
+                    if (typeof ctx.saveSettingsDebounced === 'function') {
+                        tavernSaveSettingsFn_ACU = ctx.saveSettingsDebounced;
+                        logDebug_ACU('[TavernStorage] 插件模式：saveSettingsDebounced 获取成功');
+                    }
+                    else {
+                        logWarn_ACU('[TavernStorage] 插件模式：getContext().saveSettingsDebounced 不是函数');
+                    }
+                }
+                else {
+                    logWarn_ACU('[TavernStorage] 插件模式：getContext() 返回空值');
+                }
+            }
+            else {
+                logWarn_ACU('[TavernStorage] 插件模式：SillyTavern.getContext 不可用');
             }
         }
         catch (e) {
-            logWarn_ACU('[TavernStorage] 插件模式：从 SillyTavern.extensionSettings 获取失败:', e);
+            logError_ACU('[TavernStorage] 插件模式：调用 getContext() 失败:', e);
         }
-        // fallback: SillyTavern.getContext()?.extensionSettings
-        if (!tavernExtensionSettingsRoot_ACU) {
-            try {
-                const ctx = window.SillyTavern?.getContext?.();
-                if (ctx && ctx.extensionSettings) {
-                    tavernExtensionSettingsRoot_ACU = ctx.extensionSettings;
-                    logDebug_ACU('[TavernStorage] 插件模式：从 SillyTavern.getContext().extensionSettings 获取成功');
-                }
-            }
-            catch (e) {
-                logWarn_ACU('[TavernStorage] 插件模式：从 getContext().extensionSettings 获取失败:', e);
-            }
-        }
-        // fallback: window.extension_settings（酒馆主窗口全局变量）
-        if (!tavernExtensionSettingsRoot_ACU) {
-            try {
-                const globalExtSettings = window.extension_settings;
-                if (globalExtSettings && typeof globalExtSettings === 'object') {
-                    tavernExtensionSettingsRoot_ACU = globalExtSettings;
-                    logDebug_ACU('[TavernStorage] 插件模式：从 window.extension_settings 获取成功');
-                }
-            }
-            catch (e) {
-                logWarn_ACU('[TavernStorage] 插件模式：从 window.extension_settings 获取失败:', e);
-            }
-        }
-        // 获取 saveSettingsDebounced / saveSettings
-        if (typeof window.saveSettingsDebounced === 'function')
-            tavernSaveSettingsFn_ACU = window.saveSettingsDebounced;
-        else if (typeof window.saveSettings === 'function')
-            tavernSaveSettingsFn_ACU = window.saveSettings;
         logDebug_ACU(`[TavernStorage] 插件模式初始化完成: settings=${!!tavernExtensionSettingsRoot_ACU}, save=${!!tavernSaveSettingsFn_ACU}`);
         return !!tavernExtensionSettingsRoot_ACU;
     }
@@ -22025,7 +22013,57 @@ function attemptToLoadCoreApis_ACU() {
     const hostWin = getHostWindow();
     const mode = isExtensionMode() ? '插件' : '油猴脚本';
     logDebug_ACU(`[CoreAPI] 运行模式: ${mode}, hostWin === window: ${hostWin === window}`);
-    _set_SillyTavern_API_ACU(typeof hostWin.SillyTavern !== 'undefined' ? hostWin.SillyTavern : window.SillyTavern);
+    // ═══════════════════════════════════════════════════════════════
+    // 插件模式特殊处理：主窗口的 window.SillyTavern 只有 {libs, getContext}
+    // 所有真正的 API（chatId/eventSource/eventTypes/chat/saveChat 等）必须通过
+    // SillyTavern.getContext() 才能拿到，而且 getContext() 返回的是"当前快照"，
+    // 属性值会随酒馆状态变化。所以用 Proxy 包装：每次属性读取都重新调用 getContext()
+    // 取最新快照，这样既不用改所有消费者代码，又保证读到最新值。
+    //
+    // 油猴脚本模式下，iframe 的 window.SillyTavern 本身就是扁平化的 API 对象
+    // （由酒馆助手封装），保持原样直接赋值。
+    // ═══════════════════════════════════════════════════════════════
+    let stApi;
+    if (isExtensionMode()) {
+        const rawST = hostWin.SillyTavern || window.SillyTavern;
+        if (rawST && typeof rawST.getContext === 'function') {
+            // Proxy：每次属性读取都通过 getContext() 拿当前快照
+            stApi = new Proxy({}, {
+                get(_target, prop) {
+                    try {
+                        const ctx = rawST.getContext();
+                        if (!ctx)
+                            return undefined;
+                        return ctx[prop];
+                    }
+                    catch (e) {
+                        // getContext 抛异常时静默返回 undefined，让调用方的空值检查生效
+                        return undefined;
+                    }
+                },
+                has(_target, prop) {
+                    try {
+                        const ctx = rawST.getContext();
+                        return !!ctx && prop in ctx;
+                    }
+                    catch (e) {
+                        return false;
+                    }
+                },
+            });
+            logDebug_ACU('[CoreAPI] 插件模式：已用 Proxy 包装 SillyTavern API（每次读取都走 getContext()）');
+        }
+        else {
+            // getContext 不存在，降级为直接使用 rawST（避免整个系统崩溃）
+            stApi = rawST;
+            logWarn_ACU('[CoreAPI] 插件模式：SillyTavern.getContext 不可用，降级为直接访问 SillyTavern 对象');
+        }
+    }
+    else {
+        // 油猴脚本模式：iframe 下的 window.SillyTavern 已经是扁平 API
+        stApi = typeof hostWin.SillyTavern !== 'undefined' ? hostWin.SillyTavern : window.SillyTavern;
+    }
+    _set_SillyTavern_API_ACU(stApi);
     _set_TavernHelper_API_ACU(typeof hostWin.TavernHelper !== 'undefined' ? hostWin.TavernHelper : window.TavernHelper);
     _set_jQuery_API_ACU(typeof hostWin.$ !== 'undefined' ? hostWin.$ : window.jQuery);
     _set_toastr_API_ACU(hostWin.toastr || (typeof window.toastr !== 'undefined' ? window.toastr : null));
@@ -39745,39 +39783,58 @@ _forceExtensionMode();
 /**
  * 等待 TavernHelper 就绪。
  * 酒馆插件的加载顺序不确定，TavernHelper 可能还没挂载到 window 上。
- * 同时需要等待 extensionSettings 就绪，否则设置桥接会失败。
+ *
+ * 关键事实：酒馆主窗口的 window.SillyTavern 只有 {libs, getContext}。
+ * 所有真正的 API 都必须通过 SillyTavern.getContext() 拿到。
+ * 所以就绪检查的正确方式是调用 getContext() 并验证关键字段存在。
  */
 async function waitForTavernHelper(maxWaitMs = 15000) {
     const start = Date.now();
     let pollCount = 0;
     let lastStatus = '';
-    while (Date.now() - start < maxWaitMs) {
+    const probe = () => {
         const hasTH = !!window.TavernHelper;
         const hasST = !!window.SillyTavern;
-        // extensionSettings 可能在 SillyTavern 全局对象上，也可能是独立的全局变量
-        const hasExtSettings = !!(window.SillyTavern?.extensionSettings ||
-            window.extension_settings);
-        const status = `TH=${hasTH},ST=${hasST},ExtSettings=${hasExtSettings}`;
+        const hasGetContext = typeof window.SillyTavern?.getContext === 'function';
+        let hasExtSettings = false;
+        let hasEventSource = false;
+        let hasSaveFn = false;
+        if (hasGetContext) {
+            try {
+                const ctx = window.SillyTavern.getContext();
+                hasExtSettings = !!ctx?.extensionSettings;
+                hasEventSource = !!(ctx?.eventSource && ctx?.eventTypes);
+                hasSaveFn = typeof ctx?.saveSettingsDebounced === 'function';
+            }
+            catch (e) {
+                // getContext 抛异常说明酒馆还没完全初始化
+            }
+        }
+        return { hasTH, hasST, hasGetContext, hasExtSettings, hasEventSource, hasSaveFn };
+    };
+    while (Date.now() - start < maxWaitMs) {
+        const p = probe();
+        const status = `TH=${p.hasTH},ST=${p.hasST},GC=${p.hasGetContext},Ext=${p.hasExtSettings},Evt=${p.hasEventSource},Save=${p.hasSaveFn}`;
         if (status !== lastStatus) {
             logDebug_ACU(`[插件启动] 等待就绪... ${status} (${Date.now() - start}ms)`);
             lastStatus = status;
         }
-        if (hasTH && hasST && hasExtSettings) {
-            logDebug_ACU(`[插件启动] TavernHelper + extensionSettings 就绪，等待了 ${Date.now() - start}ms（轮询 ${pollCount} 次）`);
+        // 全部就绪：TavernHelper + SillyTavern.getContext() + 核心 API 字段
+        if (p.hasTH && p.hasST && p.hasGetContext && p.hasExtSettings && p.hasEventSource && p.hasSaveFn) {
+            logDebug_ACU(`[插件启动] 酒馆 API 全部就绪，等待了 ${Date.now() - start}ms（轮询 ${pollCount} 次）`);
             return true;
         }
         pollCount++;
         await new Promise(r => setTimeout(r, 100));
     }
-    // 超时后降级：如果 TavernHelper 和 SillyTavern 存在但 extensionSettings 不存在，仍然允许启动
-    // （设置会走 IndexedDB fallback）
-    const hasTH = !!window.TavernHelper;
-    const hasST = !!window.SillyTavern;
-    if (hasTH && hasST) {
-        logWarn_ACU(`[插件启动] extensionSettings 未就绪（${maxWaitMs}ms），但 TavernHelper 和 SillyTavern 可用，降级启动`);
+    // 超时降级：如果 TavernHelper + SillyTavern + getContext 都有，即使某些字段暂缺也允许启动
+    // （后续 Proxy 每次读取都会重新调 getContext()，可能某些字段稍后会就绪）
+    const p = probe();
+    if (p.hasTH && p.hasST && p.hasGetContext) {
+        logWarn_ACU(`[插件启动] 部分 API 未就绪（${maxWaitMs}ms），但 getContext 可用，降级启动。Ext=${p.hasExtSettings},Evt=${p.hasEventSource},Save=${p.hasSaveFn}`);
         return true;
     }
-    logError_ACU(`[插件启动] 等待 TavernHelper 超时（${maxWaitMs}ms），TavernHelper=${hasTH}，SillyTavern=${hasST}`);
+    logError_ACU(`[插件启动] 等待 TavernHelper 超时（${maxWaitMs}ms），TH=${p.hasTH},ST=${p.hasST},GC=${p.hasGetContext}`);
     return false;
 }
 /**
