@@ -9,16 +9,6 @@
  */
 /** 互斥检测全局标记键名 */
 const ACU_INSTANCE_FLAG = '__ACU_STAR_DB_III_LOADED__';
-/**
- * 运行模式枚举
- */
-var RuntimeMode;
-(function (RuntimeMode) {
-    /** 油猴脚本模式：运行在 iframe 中 */
-    RuntimeMode["Userscript"] = "userscript";
-    /** 酒馆插件模式：运行在主窗口中 */
-    RuntimeMode["Extension"] = "extension";
-})(RuntimeMode || (RuntimeMode = {}));
 /** 缓存检测结果，避免重复计算 */
 let _cachedMode = null;
 /**
@@ -26,7 +16,7 @@ let _cachedMode = null;
  * 必须在任何其他模块访问 runtime-env 之前调用。
  */
 function _forceExtensionMode() {
-    _cachedMode = RuntimeMode.Extension;
+    _cachedMode = "extension" /* RuntimeMode.Extension */;
 }
 /**
  * 检测当前运行模式。
@@ -44,26 +34,26 @@ function detectRuntimeMode() {
         if (typeof window.parent !== 'undefined' && window.parent !== window) {
             // 尝试访问 parent 的属性，确认不是跨域 iframe
             void window.parent.document;
-            _cachedMode = RuntimeMode.Userscript;
+            _cachedMode = "userscript" /* RuntimeMode.Userscript */;
         }
         else {
-            _cachedMode = RuntimeMode.Extension;
+            _cachedMode = "extension" /* RuntimeMode.Extension */;
         }
     }
     catch (e) {
         // 跨域 iframe 访问 parent.document 会抛错，这种情况不太可能出现在酒馆环境
         // 保守地认为是油猴脚本模式
-        _cachedMode = RuntimeMode.Userscript;
+        _cachedMode = "userscript" /* RuntimeMode.Userscript */;
     }
     return _cachedMode;
 }
 /** 是否为油猴脚本模式 */
 function isUserscriptMode() {
-    return detectRuntimeMode() === RuntimeMode.Userscript;
+    return detectRuntimeMode() === "userscript" /* RuntimeMode.Userscript */;
 }
 /** 是否为酒馆插件模式 */
 function isExtensionMode() {
-    return detectRuntimeMode() === RuntimeMode.Extension;
+    return detectRuntimeMode() === "extension" /* RuntimeMode.Extension */;
 }
 /**
  * 获取酒馆主窗口引用。
@@ -37429,9 +37419,7 @@ async function openAutoCardPopup_ACU() {
  * 从 features/startup/01_ready_and_menu.js 迁移而来
  */
 function addAutoCardMenuItem_ACU() {
-    const parentDoc = SillyTavern_API_ACU?.Chat?.document
-        ? SillyTavern_API_ACU.Chat.document
-        : (window.parent || window).document;
+    const parentDoc = (window.parent || window).document;
     if (!parentDoc || !jQuery_API_ACU) {
         logError_ACU('Cannot find parent document or jQuery for ACU menu.');
         return false;
@@ -37843,9 +37831,7 @@ async function runOptimizationLogicWithUI_ACU(userMessage, options = {}) {
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 function installSendIntentCaptureHooks_ACU() {
     try {
-        const parentDoc = SillyTavern_API_ACU?.Chat?.document
-            ? SillyTavern_API_ACU.Chat.document
-            : (window.parent || window).document;
+        const parentDoc = (window.parent || window).document;
         const doc = parentDoc || document;
         if (!window.__ACU_sendIntentHooksInstalled) {
             window.__ACU_sendIntentHooksInstalled = { send: false, enter: false };
