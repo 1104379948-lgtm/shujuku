@@ -8050,6 +8050,12 @@ async function mergeAllIndependentTables_ACU() {
                 if (!foundSheets[storedSheetKey]) {
                     mergedData[storedSheetKey] = JSON.parse(JSON.stringify(independentData[storedSheetKey]));
                     foundSheets[storedSheetKey] = true;
+                    // [修复] 如果数据来自基底状态消息（seedGreeting 写入的模板初始数据），
+                    // 在 sheet 上标记 _acu_from_base_state，供 SqlTableService.loadFromChat 区分
+                    // "基底数据"和"AI 真正填写的数据"，避免因基底数据提前建表
+                    if (tagData._acu_base_state === GREETING_LOCAL_BASE_STATE_MARKER_ACU) {
+                        mergedData[storedSheetKey]._acu_from_base_state = true;
+                    }
                     // 更新表格状态
                     let wasUpdated = false;
                     if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
@@ -8807,11 +8813,19 @@ class SqlTableService {
             // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，
             // 还是仅仅是从模板/指导表 fallback 生成的空壳结构（只有表头没有数据行）。
             // 空壳结构不应触发建表——用户可能还要改表结构。
+            // [修复] 同时排除来自基底状态消息的数据（seedGreeting 写入的模板初始数据），
+            // 这些数据虽然 content.length > 1（包含 seedRows），但不是 AI 真正填写的数据，
+            // 不应触发建表——建表延迟到第一次写操作时由 _ensureTablesFromTemplate 完成。
             const hasRealDataRows = mergedData && Object.keys(mergedData)
                 .filter(k => k.startsWith('sheet_'))
                 .some(k => {
                 const sheet = mergedData[k];
-                return sheet?.content && Array.isArray(sheet.content) && sheet.content.length > 1;
+                if (!sheet?.content || !Array.isArray(sheet.content) || sheet.content.length <= 1)
+                    return false;
+                // 来自基底状态的数据（seedGreeting 写入）不算真实数据行
+                if (sheet._acu_from_base_state)
+                    return false;
+                return true;
             });
             if (!mergedData || !hasRealDataRows) {
                 // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
