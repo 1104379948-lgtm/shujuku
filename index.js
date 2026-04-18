@@ -13230,10 +13230,12 @@ async function executeSinglePlotTask_ACU(task, sharedContext, runtimeOptions = {
                     const timer = setTimeout(() => { cleanup(); resolve(); }, 5000);
                     const onAbort = () => { clearTimeout(timer); cleanup(); resolve(); };
                     const cleanup = () => { try {
-                        signal?.removeEventListener('abort', onAbort);
+                        if (signal)
+                            signal.onabort = null;
                     }
                     catch (_) { } };
-                    signal?.addEventListener('abort', onAbort, { once: true });
+                    if (signal)
+                        signal.onabort = onAbort;
                 });
             }
         }
@@ -27151,6 +27153,12 @@ function renderTemplatePresetSelect_ACU($select, { keepValue = true } = {}) {
     }
     catch (e) { }
 }
+
+/**
+ * service/table/schema-helpers.ts — DDL/Schema 工具函数的 service 层 re-export
+ *
+ * presentation 层不应直接引用 data 层，通过此文件中转。
+ */
 
 /**
  * DDL 校验纯函数 — 从 jQuery 事件处理器中提取，方便单元测试
