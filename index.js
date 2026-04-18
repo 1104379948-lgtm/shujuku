@@ -8796,8 +8796,9 @@ class SqlTableService {
             const mergedData = await mergeAllIndependentTables_ACU();
             if (!mergedData) {
                 // 新开卡场景：没有聊天历史数据
-                // 只初始化引擎，不建表——建表延迟到第一次 applyEdits/executeQuery/executeMutation 时
-                // 这样能确保使用的是「第一次填表那一刻」的最新模板 DDL，而非「进入聊天那一刻」的快照
+                // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
+                // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
+                // 注意：executeQuery（只读）不触发建表，避免前端查询意外提前锁定表结构
                 logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
                 this._initialized = true;
                 return { loaded: false, source: 'empty' };
@@ -8906,10 +8907,13 @@ class SqlTableService {
     }
     /**
      * 执行 SQL 查询（SELECT）
+     *
+     * 注意：不触发 _ensureTablesFromTemplate()。
+     * 新开卡场景下表尚未创建，查询会抛出 "no such table" 错误——这是预期行为。
+     * 建表只在写操作（applyEdits/executeMutation）时触发，确保用户有机会在首次填表前修改表结构。
      */
     executeQuery(sql, params) {
         this._ensureInitialized();
-        this._ensureTablesFromTemplate();
         const result = this.engine.query(sql, params);
         return {
             columns: result.columns,
@@ -9007,7 +9011,11 @@ class SqlTableService {
         }
     }
     /**
-     * 按需建表：每次执行 SQL 操作前，检查模板中的表是否都已存在于 SQLite。
+     * 按需建表：在写操作（applyEdits/executeMutation）前，检查模板中的表是否都已存在于 SQLite。
+     *
+     * 仅在写操作时调用，不在只读查询（executeQuery）时调用。
+     * 这样新开卡场景下，用户可以在首次填表前自由修改表结构（DDL），
+     * 直到 AI 真正往表里写数据时才锁定表结构并建表。
      *
      * 三种场景：
      * 1. 新卡第一次填表：SQLite 中无任何用户表 → 全量建表
