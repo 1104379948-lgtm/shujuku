@@ -11838,7 +11838,9 @@ function formatTableForSqliteMode(table, tableIndex, sheetKey, guideData) {
         }
     }
     // 输出当前数据（注释格式的表格）
-    const headers = table.content[0] || [];
+    // 优先使用 DDL 中的英文列名作为表头，避免 AI 看到中文列名后用中文属性名写 SQL
+    const ddlColumnNames = parseDDLColumnNames(ddl);
+    const headers = (ddlColumnNames.length > 0) ? ddlColumnNames : (table.content[0] || []);
     text += `\n-- 当前数据 (${rowsToProcess.length} rows)\n`;
     text += `-- | ${headers.join(' | ')} |\n`;
     rowsToProcess.forEach((row) => {
