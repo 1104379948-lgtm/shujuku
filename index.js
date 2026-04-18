@@ -8794,12 +8794,29 @@ class SqlTableService {
             await this.engine.init();
             // 从聊天消息合并出最新 JSON 快照
             const mergedData = await mergeAllIndependentTables_ACU();
-            if (!mergedData) {
-                // 新开卡场景：没有聊天历史数据
+            // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，
+            // 还是仅仅是从模板/指导表 fallback 生成的空壳结构（只有表头没有数据行）。
+            // 空壳结构不应触发建表——用户可能还要改表结构。
+            const hasRealDataRows = mergedData && Object.keys(mergedData)
+                .filter(k => k.startsWith('sheet_'))
+                .some(k => {
+                const sheet = mergedData[k];
+                return sheet?.content && Array.isArray(sheet.content) && sheet.content.length > 1;
+            });
+            if (!mergedData || !hasRealDataRows) {
+                // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
                 // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
                 // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
                 // 注意：executeQuery（只读）不触发建表，避免前端查询意外提前锁定表结构
-                logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
+                if (mergedData) {
+                    // 空壳结构：仍然更新 JSON 视图（前端需要显示表头），但不建 SQLite 表
+                    _set_currentJsonTableData_ACU(mergedData);
+                    this._buildNameMapper(mergedData);
+                    logDebug_ACU('[SqlTableService] 检测到空壳结构（仅表头无数据行），引擎已就绪，等待第一次填表时建表');
+                }
+                else {
+                    logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
+                }
                 this._initialized = true;
                 return { loaded: false, source: 'empty' };
             }
@@ -9011,7 +9028,7 @@ class SqlTableService {
         }
     }
     /**
-     * 按需建表：在写操作（applyEdits/executeMutation）前，检查模板中的表是否都已存在于 SQLite。
+     * 按需建表：在写操作（applyEdits/executeMutation）前，检查当前聊天模板中的表是否都已存在于 SQLite。
      *
      * 仅在写操作时调用，不在只读查询（executeQuery）时调用。
      * 这样新开卡场景下，用户可以在首次填表前自由修改表结构（DDL），
@@ -9022,24 +9039,32 @@ class SqlTableService {
      * 2. 老卡正常运行：所有表都已存在 → 直接返回（幂等）
      * 3. 中途加表：模板中新增了一张表，但 SQLite 中没有 → 只建缺失的表
      *
+     * 模板来源优先级（只使用当前聊天模板预设）：
+     * 1. 当前聊天的 chat_override 模板快照
+     * 2. 当前聊天的 preset_link 链接的全局预设
+     * 3. 全局模板（inherit_global 或无聊天级模板时的 fallback）
+     *
      * DDL 来源优先级：
      * 1. currentJsonTableData_ACU 中的 sourceData.ddl（可能来自指导表，包含用户在可视化编辑器中的修改）
-     * 2. 全局模板中的 sourceData.ddl（fallback）
+     * 2. 当前聊天模板中的 sourceData.ddl（fallback）
      */
     _ensureTablesFromTemplate() {
         const existingTables = new Set(this.engine.getTableNames());
-        const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true });
+        // [修复] 优先从当前聊天模板预设获取模板，而不是依赖全局变量 TABLE_TEMPLATE_ACU
+        // 这样确保建表时只使用当前聊天模板预设的内容，不会混入全局模板的表
+        const templateData = this._resolveCurrentChatTemplate();
         if (!templateData) {
             if (existingTables.size > 0)
                 return;
             throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
         }
-        // 收集模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
+        // 收集当前聊天模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
         const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
+        const templateSheetKeySet = new Set(sheetKeys);
         const missingSheets = {};
         for (const key of sheetKeys) {
-            // [修复] 优先从 currentJsonTableData_ACU 获取 sheet 数据（可能包含指导表中用户修改过的 DDL），
-            // fallback 到全局模板。这样用户在可视化编辑器中修改 DDL 后，建表时用的是新 DDL。
+            // 优先从 currentJsonTableData_ACU 获取 sheet 数据（可能包含指导表中用户修改过的 DDL），
+            // fallback 到当前聊天模板。这样用户在可视化编辑器中修改 DDL 后，建表时用的是新 DDL。
             const liveSheet = currentJsonTableData_ACU?.[key];
             const sheet = liveSheet || templateData[key];
             if (!sheet)
@@ -9050,12 +9075,15 @@ class SqlTableService {
                 missingSheets[key] = sheet;
             }
         }
-        // 同时检查 currentJsonTableData_ACU 中是否有模板中不存在的表（用户可能在指导表中新增了表）
+        // [修复] 检查 currentJsonTableData_ACU 中是否有当前聊天模板中存在但上面未处理的表
+        // 注意：只允许建当前聊天模板中存在的表，不建其他来源的表
         if (currentJsonTableData_ACU) {
             const liveSheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
             for (const key of liveSheetKeys) {
                 if (missingSheets[key])
                     continue; // 已在上面处理过
+                if (!templateSheetKeySet.has(key))
+                    continue; // 不在当前聊天模板中，跳过
                 const sheet = currentJsonTableData_ACU[key];
                 if (!sheet?.sourceData?.ddl)
                     continue;
@@ -9070,9 +9098,21 @@ class SqlTableService {
             return;
         logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
         // 构造只包含缺失表的数据子集，交给 syncBridge 建表
+        // [修复] 同时为缺失表注入 seedRows（初始数据），使建表后 SQLite 中包含初版快照
+        // 设计文档 Q9 确认：seedRows 是初版快照，应写入 SQLite 作为真实数据
         const partialData = { mate: templateData.mate };
         for (const [key, sheet] of Object.entries(missingSheets)) {
-            partialData[key] = sheet;
+            const sheetCopy = JSON.parse(JSON.stringify(sheet));
+            // 如果 sheet 的 content 只有表头（stripSeedRows 后的空壳），尝试注入 seedRows
+            if (Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
+                const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
+                if (Array.isArray(seedRows) && seedRows.length > 0) {
+                    // seedRows 是不含表头的纯数据行，拼接到表头后面
+                    sheetCopy.content = [sheetCopy.content[0] || [], ...seedRows];
+                    logDebug_ACU(`[SqlTableService] 表 ${key} (${sheetCopy.name}) 注入 ${seedRows.length} 行 seedRows 作为初版快照`);
+                }
+            }
+            partialData[key] = sheetCopy;
         }
         this.syncBridge.loadFromTableData(partialData);
         // 合并新建的表到当前 JSON 视图
@@ -9086,6 +9126,47 @@ class SqlTableService {
         }
         this._buildNameMapper(currentJsonTableData_ACU || templateData);
         logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
+    }
+    /**
+     * 解析当前聊天模板预设，返回 stripSeedRows 后的模板对象。
+     *
+     * 优先级：
+     * 1. chat_override —— 当前聊天的专属模板快照
+     * 2. preset_link  —— 当前聊天链接的全局预设
+     * 3. inherit_global / 无聊天级模板 —— fallback 到 parseTableTemplateJson_ACU（全局模板）
+     */
+    _resolveCurrentChatTemplate() {
+        try {
+            const scopeState = getCurrentChatTemplateScopeState_ACU();
+            if (scopeState) {
+                let templateStr = null;
+                if (scopeState.mode === 'chat_override' && scopeState.templateStr) {
+                    // 场景 1：当前聊天有专属模板快照
+                    templateStr = scopeState.templateStr;
+                }
+                else if (scopeState.mode === 'preset_link' && scopeState.presetName) {
+                    // 场景 2：当前聊天链接了全局预设
+                    const preset = getTemplatePreset_ACU(scopeState.presetName);
+                    if (preset?.templateStr) {
+                        templateStr = preset.templateStr;
+                    }
+                }
+                if (templateStr) {
+                    const parsed = safeJsonParse_ACU(templateStr, null);
+                    if (parsed && typeof parsed === 'object') {
+                        const stripped = stripSeedRowsFromTemplate_ACU(JSON.parse(JSON.stringify(parsed)));
+                        logDebug_ACU(`[SqlTableService] 使用当前聊天模板预设 (mode=${scopeState.mode})`);
+                        return stripped;
+                    }
+                }
+            }
+        }
+        catch (e) {
+            logWarn_ACU(`[SqlTableService] 获取当前聊天模板快照失败，fallback 到全局模板: ${e?.message}`);
+        }
+        // 场景 3：inherit_global 或无聊天级模板，fallback 到全局模板
+        logDebug_ACU('[SqlTableService] 使用全局模板 (inherit_global)');
+        return parseTableTemplateJson_ACU({ stripSeedRows: true });
     }
 }
 // ═══════════════════════════════════════════════════════════════
