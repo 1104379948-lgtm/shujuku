@@ -11678,7 +11678,7 @@ async function prepareAIInput_ACU(messages, updateMode = 'standard', targetSheet
         const effectiveAllRows = (allRows.length > 0) ? allRows : (seedRows.length > 0 ? seedRows : []);
         if (effectiveAllRows.length === 0) {
             tableDataText += `[${tableIndex}:${table.name}]\n`;
-            const headers = table.content[0] ? table.content[0].slice(1).map((h, i) => `[${i}:${h}]`).join(', ') : 'No Headers';
+            const headers = table.content[0] ? table.content[0].slice(1).map((h, i) => `[${i + 1}:${h}]`).join(', ') : 'No Headers';
             tableDataText += `  Columns: ${headers}\n`;
             if (table.sourceData) {
                 tableDataText += `  - Note: ${table.sourceData.note || 'N/A'}\n`;
@@ -11689,7 +11689,7 @@ async function prepareAIInput_ACU(messages, updateMode = 'standard', targetSheet
         }
         else {
             tableDataText += `[${tableIndex}:${table.name}]\n`;
-            const headers = table.content[0] ? table.content[0].slice(1).map((h, i) => `[${i}:${h}]`).join(', ') : 'No Headers';
+            const headers = table.content[0] ? table.content[0].slice(1).map((h, i) => `[${i + 1}:${h}]`).join(', ') : 'No Headers';
             tableDataText += `  Columns: ${headers}\n`;
             if (table.sourceData) {
                 tableDataText += `  - Note: ${table.sourceData.note || 'N/A'}\n`;
