@@ -14818,10 +14818,30 @@ async function resetScriptStateForNewChat_ACU(chatFileName) {
 async function getInjectionTargetLorebook_ACU() {
     const worldbookConfig = getCurrentWorldbookConfig_ACU();
     const target = worldbookConfig.injectionTarget;
+    let lorebookName = null;
     if (target === 'character') {
-        return await getCurrentCharPrimaryLorebook_ACU();
+        lorebookName = await getCurrentCharPrimaryLorebook_ACU();
     }
-    return target; // 直接返回世界书名称
+    else {
+        lorebookName = target || null;
+    }
+    // [防御] 验证世界书是否真实存在于 SillyTavern 的世界书列表中
+    // 防止 SillyTavern API 返回残留/缓存的不存在世界书名称导致报错
+    // 验证不通过时静默返回 null，不输出警告（避免用户看到无意义的重复警告）
+    if (lorebookName) {
+        try {
+            const availableBooks = await listLorebooks_ACU();
+            if (!availableBooks.includes(lorebookName)) {
+                logDebug_ACU(`[Worldbook] 注入目标世界书 "${lorebookName}" 不存在于可用列表中，静默跳过。`);
+                return null;
+            }
+        }
+        catch (e) {
+            // 验证失败时静默降级，不打扰用户
+            return null;
+        }
+    }
+    return lorebookName;
 }
 // [新增] 辅助函数：生成带隔离标识的条目前缀/注释
 function getIsolationPrefix_ACU() {
