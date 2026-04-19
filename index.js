@@ -2240,6 +2240,11 @@ const TAVERN_BRIDGE_GLOBAL_KEY_ACU = '__ACU_USERSCRIPT_BRIDGE__';
 const TAVERN_BRIDGE_INJECTED_FLAG_ACU = '__ACU_USERSCRIPT_BRIDGE_INJECTED__';
 const sleep_ACU = (ms) => new Promise(r => setTimeout(r, ms));
 let tavernBridgeErrorReported_ACU = false;
+// ── userscript 路径专用状态（插件路径不使用这些变量）──
+/** userscript 模式下 bridge 初始化是否已完成（无论成功或失败） */
+let _tavernBridgeInitCompleted_ACU = false;
+/** userscript 模式下是否已报告过"根对象不可用"（防止重复刷屏） */
+let _tavernRootUnavailableWarnReported_ACU = false;
 // ── 桥接函数 ──
 function tryReadBridgeFromTop_ACU() {
     try {
@@ -2375,14 +2380,35 @@ async function initTavernSettingsBridge_ACU() {
         }
     }
     catch (e) { /* ignore */ }
+    // ── userscript 路径：标记 bridge 初始化已完成（无论是否成功获取 root）──
+    _tavernBridgeInitCompleted_ACU = true;
     return !!tavernExtensionSettingsRoot_ACU;
 }
 function getTavernSettingsNamespace_ACU() {
     tryReadBridgeFromTop_ACU();
     const root = tavernExtensionSettingsRoot_ACU;
     if (!root) {
-        logWarn_ACU('[TavernStorage] 酒馆设置根对象不可用, 返回 null');
+        // ── 插件模式：保持原有行为（bridge 在 waitForTavernHelper 中已确保就绪）──
+        if (isExtensionMode()) {
+            logWarn_ACU('[TavernStorage] 酒馆设置根对象不可用, 返回 null');
+            return null;
+        }
+        // ── userscript 模式：bridge 初始化未完成时安静降级，完成后只告警一次 ──
+        if (!_tavernBridgeInitCompleted_ACU) {
+            // bridge 还在初始化中，不打印任何告警，安静返回 null 让调用方走 IndexedDB/localStorage 回退
+            return null;
+        }
+        // bridge 初始化已完成但仍拿不到 root → 只告警一次
+        if (!_tavernRootUnavailableWarnReported_ACU) {
+            _tavernRootUnavailableWarnReported_ACU = true;
+            logWarn_ACU('[TavernStorage] 酒馆设置根对象不可用, 返回 null（后续将使用 IndexedDB/localStorage 降级存储）');
+        }
         return null;
+    }
+    // root 可用 → 如果之前标记过不可用，清除标记以便后续状态变化能重新报告
+    if (_tavernRootUnavailableWarnReported_ACU) {
+        _tavernRootUnavailableWarnReported_ACU = false;
+        logDebug_ACU('[TavernStorage] 酒馆设置根对象已恢复可用');
     }
     if (!root.__userscripts)
         root.__userscripts = {};
@@ -2603,6 +2629,8 @@ function _resetTavernStorageState_ACU() {
     tavernExtensionSettingsRoot_ACU = null;
     tavernSaveSettingsFn_ACU = null;
     tavernBridgeErrorReported_ACU = false;
+    _tavernBridgeInitCompleted_ACU = false;
+    _tavernRootUnavailableWarnReported_ACU = false;
 }
 
 /**
@@ -6354,25 +6382,25 @@ function getAugmentedNamespace(n) {
 
 var sqlAsmMemoryGrowth$1 = {exports: {}};
 
-var _shim_node_fs = {}; const readFileSync = () => null;
+var _shim_fs = {}; const readFileSync = () => null;
 
-var _shim_node_fs$1 = /*#__PURE__*/Object.freeze({
+var _shim_fs$1 = /*#__PURE__*/Object.freeze({
     __proto__: null,
-    default: _shim_node_fs,
+    default: _shim_fs,
     readFileSync: readFileSync
 });
 
-var require$$0 = /*@__PURE__*/getAugmentedNamespace(_shim_node_fs$1);
+var require$$0 = /*@__PURE__*/getAugmentedNamespace(_shim_fs$1);
 
-var _shim_node_crypto = {}; const randomFillSync = (buf) => { for(let i=0;i<buf.length;i++) buf[i]=Math.random()*256|0; return buf; };
+var _shim_crypto = {}; const randomFillSync = (buf) => { for(let i=0;i<buf.length;i++) buf[i]=Math.random()*256|0; return buf; };
 
-var _shim_node_crypto$1 = /*#__PURE__*/Object.freeze({
+var _shim_crypto$1 = /*#__PURE__*/Object.freeze({
     __proto__: null,
-    default: _shim_node_crypto,
+    default: _shim_crypto,
     randomFillSync: randomFillSync
 });
 
-var require$$1 = /*@__PURE__*/getAugmentedNamespace(_shim_node_crypto$1);
+var require$$1 = /*@__PURE__*/getAugmentedNamespace(_shim_crypto$1);
 
 var sqlAsmMemoryGrowth = sqlAsmMemoryGrowth$1.exports;
 
@@ -22425,13 +22453,40 @@ function attemptToLoadCoreApis_ACU() {
         }
     }
     else {
-        // 油猴脚本模式：iframe 下的 window.SillyTavern 已经是扁平 API
-        stApi = typeof hostWin.SillyTavern !== 'undefined' ? hostWin.SillyTavern : window.SillyTavern;
+        // ═══════════════════════════════════════════════════════════════
+        // 油猴脚本模式：运行在酒馆助手创建的 iframe 中。
+        //
+        // 关键事实：iframe 自身的 window.SillyTavern 是酒馆助手注入的
+        // 扁平化 API 对象（包含 chatId/eventSource/eventTypes 等），
+        // 而 window.parent（hostWin）上的 SillyTavern 只有
+        // {libs, getContext} 骨架，不含业务字段。
+        //
+        // 因此必须优先使用 iframe 自身的对象，把 parent 作为 fallback。
+        // 这与旧版 userscript 的行为一致：
+        //   SillyTavern_API_ACU = typeof SillyTavern !== 'undefined'
+        //     ? SillyTavern : parentWin.SillyTavern;
+        // ═══════════════════════════════════════════════════════════════
+        const iframeST = typeof window.SillyTavern !== 'undefined' ? window.SillyTavern : undefined;
+        const parentST = typeof hostWin.SillyTavern !== 'undefined' ? hostWin.SillyTavern : undefined;
+        // 优先使用 iframe 自身的扁平化 API（含 chatId 等业务字段），
+        // fallback 到 parent 的骨架对象
+        stApi = iframeST || parentST;
+        if (iframeST) {
+            logDebug_ACU('[CoreAPI] 油猴脚本模式：使用 iframe 自身的 SillyTavern 扁平 API');
+        }
+        else if (parentST) {
+            logWarn_ACU('[CoreAPI] 油猴脚本模式：iframe 自身无 SillyTavern，降级使用 parent 的骨架对象（可能缺少 chatId 等字段）');
+        }
     }
     _set_SillyTavern_API_ACU(stApi);
-    _set_TavernHelper_API_ACU(typeof hostWin.TavernHelper !== 'undefined' ? hostWin.TavernHelper : window.TavernHelper);
-    _set_jQuery_API_ACU(typeof hostWin.$ !== 'undefined' ? hostWin.$ : window.jQuery);
-    _set_toastr_API_ACU(hostWin.toastr || (typeof window.toastr !== 'undefined' ? window.toastr : null));
+    // TavernHelper/jQuery/toastr 同理：优先 iframe 自身，fallback 到 parent
+    const iframeTH = typeof window.TavernHelper !== 'undefined' ? window.TavernHelper : undefined;
+    const parentTH = typeof hostWin.TavernHelper !== 'undefined' ? hostWin.TavernHelper : undefined;
+    _set_TavernHelper_API_ACU(iframeTH || parentTH);
+    const iframe$ = typeof window.$ !== 'undefined' ? window.$ : undefined;
+    const parent$ = typeof hostWin.$ !== 'undefined' ? hostWin.$ : undefined;
+    _set_jQuery_API_ACU(iframe$ || parent$);
+    _set_toastr_API_ACU((typeof window.toastr !== 'undefined' ? window.toastr : null) || hostWin.toastr || null);
     _set_coreApisAreReady_ACU(!!(SillyTavern_API_ACU &&
         TavernHelper_API_ACU &&
         jQuery_API_ACU &&
@@ -30700,6 +30755,163 @@ const VISUALIZER_CSS_ACU = `
     #acu-visualizer-content #acu-vis-add-row i,
     #acu-visualizer-content #acu-vis-add-row div {
         color: var(--vis-accent) !important;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       AI 改表助手面板
+       使用 flex containment 模式确保内部滚动
+       ═══════════════════════════════════════════════════════════════ */
+    #acu-vis-assistant-host {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+    .acu-vis-assistant-panel {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        height: 100%;
+        flex-shrink: 0;
+    }
+    .acu-vis-assistant-header {
+        flex-shrink: 0;
+    }
+    .acu-vis-assistant-body {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+    }
+    .acu-vis-assistant-body::-webkit-scrollbar {
+        width: 4px;
+    }
+    .acu-vis-assistant-body::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    .acu-vis-assistant-body::-webkit-scrollbar-thumb {
+        background: var(--vis-border-color);
+        border-radius: 1px;
+    }
+    .acu-vis-assistant-body::-webkit-scrollbar-thumb:hover {
+        background: var(--vis-text-mute);
+    }
+    /* assistant 内的区块样式 */
+    .acu-assistant-section {
+        padding: 12px;
+        background: var(--vis-bg-light);
+        border: 1px solid var(--vis-border-color);
+        border-radius: 2px;
+        margin-bottom: 12px;
+    }
+    .acu-assistant-title {
+        font-size: 12px;
+        color: var(--vis-text-mute);
+        letter-spacing: 1px;
+        margin-bottom: 8px;
+    }
+    .acu-assistant-diff-block {
+        margin-bottom: 8px;
+        font-size: 13px;
+    }
+    .acu-assistant-diff-block strong {
+        color: var(--vis-text-dim);
+        letter-spacing: 1px;
+    }
+    .acu-assistant-diff-block ul {
+        margin: 4px 0 0 12px;
+        padding: 0;
+        list-style: none;
+    }
+    .acu-assistant-diff-block li {
+        padding: 2px 0;
+        color: var(--vis-text-main);
+    }
+    .acu-assistant-risk-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    .acu-assistant-risk-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+    }
+    .acu-assistant-risk-item span {
+        font-size: 13px;
+        color: var(--vis-text-main);
+    }
+    .acu-assistant-actions-row {
+        padding-top: 12px;
+        border-top: 1px solid var(--vis-border-color);
+    }
+    /* assistant session meta */
+    .acu-assistant-session-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding: 10px 12px;
+        background: var(--vis-bg-stats);
+        border: 1px solid var(--vis-border-color);
+        border-radius: 2px;
+        margin-bottom: 12px;
+        font-size: 12px;
+    }
+    .acu-assistant-meta-item {
+        color: var(--vis-text-dim);
+    }
+    .acu-assistant-error-text {
+        color: #c55;
+    }
+    /* assistant round history */
+    .acu-assistant-round-item {
+        border: 1px solid var(--vis-border-color);
+        border-radius: 2px;
+        margin-bottom: 8px;
+        background: var(--vis-bg-stats);
+    }
+    .acu-assistant-round-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        cursor: default;
+    }
+    .acu-assistant-round-badge {
+        font-size: 11px;
+        color: var(--vis-accent);
+        background: rgba(125, 73, 64, 0.10);
+        padding: 2px 6px;
+        border-radius: 1px;
+        letter-spacing: 1px;
+    }
+    .acu-assistant-round-summary {
+        flex: 1;
+        min-width: 0;
+        font-size: 13px;
+        color: var(--vis-text-main);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .acu-assistant-round-op-count {
+        font-size: 11px;
+        color: var(--vis-text-mute);
+    }
+    .acu-assistant-round-toggle {
+        padding: 4px 8px;
+        font-size: 11px;
+    }
+    .acu-assistant-round-detail {
+        padding: 8px 12px;
+        border-top: 1px solid var(--vis-border-color);
+        background: var(--vis-bg-light);
+    }
+    .acu-assistant-round-detail .acu-assistant-section {
+        margin-bottom: 8px;
+        padding: 8px;
+    }
+    .acu-assistant-round-detail .acu-assistant-section:last-child {
+        margin-bottom: 0;
     }
   `;
 
