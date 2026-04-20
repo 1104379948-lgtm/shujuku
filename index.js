@@ -80,7 +80,7 @@ function getHostWindow() {
 function checkAndMarkInstance() {
     const hostWin = getHostWindow();
     if (hostWin[ACU_INSTANCE_FLAG]) {
-        console.warn('[星·数据库 III] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
+        console.warn('[SP·数据库 I] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
         return true; // 已有实例
     }
     hostWin[ACU_INSTANCE_FLAG] = true;
@@ -1017,6 +1017,7 @@ const DEFAULT_PLOT_SETTINGS_ACU = {
     "rateCuckold": 1,
     "recallCount": 20,
     "extractTags": "recall,supplement",
+    "extractInjectTags": "",
     "contextExtractTags": "",
     "contextExtractRules": [],
     "contextExcludeTags": "",
@@ -1829,7 +1830,7 @@ function isEntryBlocked_ACU$1(entry) {
 /**
  * HTML 特殊字符转义（防 XSS）
  */
-function escapeHtml_ACU(unsafe) {
+function escapeHtml_ACU$1(unsafe) {
     if (typeof unsafe !== 'string' || !unsafe)
         return '';
     return unsafe
@@ -1847,7 +1848,7 @@ function escapeHtml_ACU(unsafe) {
  * @param selected - 是否选中
  */
 function renderOption_ACU(value, text, selected = false) {
-    return `<option value="${escapeHtml_ACU(value)}"${selected ? ' selected' : ''}>${escapeHtml_ACU(text)}</option>`;
+    return `<option value="${escapeHtml_ACU$1(value)}"${selected ? ' selected' : ''}>${escapeHtml_ACU$1(text)}</option>`;
 }
 /**
  * 生成 toast 中的终止/取消按钮 HTML
@@ -1855,7 +1856,7 @@ function renderOption_ACU(value, text, selected = false) {
  * @param label - 按钮文本
  */
 function renderStopButton_ACU(id, label) {
-    return `<button id="${escapeHtml_ACU(id)}" style="border: 1px solid #ffc107; color: #ffc107; background: transparent; padding: 5px 10px; border-radius: 4px; cursor: pointer; float: right; margin-left: 15px; font-size: 0.9em; transition: all 0.2s ease;" onmouseover="this.style.backgroundColor='#ffc107'; this.style.color='#1a1d24';" onmouseout="this.style.backgroundColor='transparent'; this.style.color='#ffc107';">${escapeHtml_ACU(label)}</button>`;
+    return `<button id="${escapeHtml_ACU$1(id)}" style="border: 1px solid #ffc107; color: #ffc107; background: transparent; padding: 5px 10px; border-radius: 4px; cursor: pointer; float: right; margin-left: 15px; font-size: 0.9em; transition: all 0.2s ease;" onmouseover="this.style.backgroundColor='#ffc107'; this.style.color='#1a1d24';" onmouseout="this.style.backgroundColor='transparent'; this.style.color='#ffc107';">${escapeHtml_ACU$1(label)}</button>`;
 }
 /**
  * 生成正文替换 toast 中的"重新优化"按钮 HTML
@@ -3341,6 +3342,8 @@ let settings_ACU = {
     apiPresets: [],
     tableApiPreset: '',
     plotApiPreset: '',
+    // [新增] 按表格名称保存的表级 API 预设覆盖（key=标准化表名, value=presetName）
+    tableApiPresetOverridesByName: {},
     charCardPrompt: DEFAULT_CHAR_CARD_PROMPT_ACU,
     autoUpdateThreshold: DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
     autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
@@ -5011,6 +5014,74 @@ function clearAllTableFields_ACU(msg) {
     delete msg.TavernDB_ACU_ModifiedKeys;
     delete msg.TavernDB_ACU_UpdateGroupKeys;
     delete msg._acu_local_template_base_state_seeded;
+}
+/**
+ * 按隔离标签清空单条消息上的表格数据（精确版 clearAllTableFields）。
+ *
+ * 与 clearAllTableFields_ACU 的区别：
+ * - clearAllTableFields_ACU：无差别删除所有标签的所有字段，会误删同一消息上其他标签的数据。
+ * - 本函数：只删除当前隔离标签下的数据；如果消息上还有其他标签的数据则保留。
+ *
+ * 清理范围：
+ * 1. 新版 IsolatedData[isolationKey] 槽 → 删除该标签槽；若容器变空则删除整个 IsolatedData 字段。
+ * 2. 旧版兼容字段（IndependentData / Data / SummaryData / ModifiedKeys / UpdateGroupKeys / Identity）
+ *    → 仅在 isolationConfig 不启用隔离或该消息的 Identity 匹配当前隔离代码时才删除。
+ *    这样可以避免把同一消息上属于其他隔离标签的旧版数据误删。
+ * 3. 不删除消息正文（mes）、不删除非表格业务字段。
+ *
+ * @param msg 聊天消息对象
+ * @param isolationKey 当前隔离标签键名
+ * @param isolationConfig 隔离配置（用于判断旧版字段是否属于当前标签）
+ * @returns 是否有任何字段被修改（用于调用方决定是否 saveChat）
+ */
+function clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig) {
+    if (!msg)
+        return false;
+    let changed = false;
+    // ── 新版：删除指定隔离标签的槽 ──
+    const container = parseIsolatedDataField(msg);
+    if (container && container[isolationKey]) {
+        delete container[isolationKey];
+        changed = true;
+        // 如果容器里已经没有任何标签槽了，删除整个字段
+        if (Object.keys(container).length === 0) {
+            delete msg.TavernDB_ACU_IsolatedData;
+        }
+        else {
+            msg.TavernDB_ACU_IsolatedData = container;
+        }
+    }
+    // ── 旧版：仅在消息属于当前隔离标签时才删除 ──
+    // 判断条件与 mergeAllIndependentTables_ACU 中的 legacy 兼容逻辑一致：
+    // - 隔离启用：msg.TavernDB_ACU_Identity === code 时匹配
+    // - 隔离关闭（无标签模式）：msg.TavernDB_ACU_Identity 不存在时匹配
+    if (isLegacyMatchForIsolation_ACU(msg, isolationConfig)) {
+        if (msg.TavernDB_ACU_IndependentData) {
+            delete msg.TavernDB_ACU_IndependentData;
+            changed = true;
+        }
+        if (msg.TavernDB_ACU_Data) {
+            delete msg.TavernDB_ACU_Data;
+            changed = true;
+        }
+        if (msg.TavernDB_ACU_SummaryData) {
+            delete msg.TavernDB_ACU_SummaryData;
+            changed = true;
+        }
+        if (msg.TavernDB_ACU_Identity !== undefined) {
+            delete msg.TavernDB_ACU_Identity;
+            changed = true;
+        }
+        if (msg.TavernDB_ACU_ModifiedKeys) {
+            delete msg.TavernDB_ACU_ModifiedKeys;
+            changed = true;
+        }
+        if (msg.TavernDB_ACU_UpdateGroupKeys) {
+            delete msg.TavernDB_ACU_UpdateGroupKeys;
+            changed = true;
+        }
+    }
+    return changed;
 }
 // ════════════════════════════════════════════════════════════════
 // 辅助类
@@ -6867,6 +6938,450 @@ class SqliteEngine {
 }
 
 /**
+ * data/sqlite/sql-normalizer.ts — SQL 输入规范化模块
+ *
+ * 职责：
+ * - normalizeSqlStructure: 将 SQL 结构位置上的全角兼容字符转换为 ASCII
+ *   （不修改字符串字面量和注释中的内容）
+ * - normalizeConstrainedValue: 对白名单约束字段的值做规范化
+ *   （当前白名单：code_index）
+ *
+ * 设计原则：
+ * - 只做可安全判断语义的转换，不猜测业务含义
+ * - 规范化后仍非法的值，不做伪装，保留失败
+ * - 不对正文文本做无差别替换
+ */
+// ═══════════════════════════════════════════════════════════════
+// 全角 → ASCII 映射表
+// ═══════════════════════════════════════════════════════════════
+/**
+ * 全角字符到 ASCII 的映射
+ * 只包含会影响 SQLite 语法解析的字符（运算符、括号、逗号、分号等）
+ * 不包含正文文本中合理的全角标点（如句号、问号、感叹号等）
+ */
+const FULLWIDTH_TO_ASCII = {
+    // 运算符
+    '＝': '=', // U+FF1D 全角等号
+    '＞': '>', // U+FF1E 全角大于号
+    '＜': '<', // U+FF1C 全角小于号
+    '＋': '+', // U+FF0B 全角加号
+    '－': '-', // U+FF0D 全角减号
+    '＊': '*', // U+FF0A 全角星号
+    '／': '/', // U+FF0F 全角斜杠
+    // 括号
+    '（': '(', // U+FF08 全角左括号
+    '）': ')', // U+FF09 全角右括号
+    // 标点
+    '，': ',', // U+FF0C 全角逗号
+    '；': ';', // U+FF1B 全角分号
+    // 空白
+    '\u3000': ' ', // 全角空格 → 半角空格（仅在结构位置）
+};
+// ═══════════════════════════════════════════════════════════════
+// SQL 结构规范化
+// ═══════════════════════════════════════════════════════════════
+/**
+ * 规范化 SQL 结构字符：将全角兼容字符转换为 ASCII
+ *
+ * 扫描式处理，逐字符判断当前是否在字符串字面量内或注释内：
+ * - 字符串字面量（单引号包裹）：不修改内容
+ * - SQL 行注释（-- 到行尾）：不修改内容（注释中可能有中文说明）
+ * - 其他位置（结构位置）：全角兼容字符 → ASCII
+ *
+ * @param sql 原始 SQL 文本
+ * @returns 规范化后的 SQL 文本
+ */
+function normalizeSqlStructure(sql) {
+    if (!sql || typeof sql !== 'string')
+        return sql;
+    // 快速检查：是否包含任何需要替换的全角字符
+    // 如果没有，直接返回原字符串，避免不必要的字符串拼接开销
+    const needsNormalization = Object.keys(FULLWIDTH_TO_ASCII).some(ch => sql.includes(ch));
+    if (!needsNormalization)
+        return sql;
+    const chars = Array.from(sql);
+    const result = [];
+    let inString = false; // 是否在单引号字符串内
+    let inComment = false; // 是否在 -- 行注释内
+    let stringChar = ''; // 字符串的引号字符（只处理单引号）
+    for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i];
+        // 在行注释内：直接输出原文，直到遇到换行
+        if (inComment) {
+            result.push(ch);
+            if (ch === '\n') {
+                inComment = false;
+            }
+            continue;
+        }
+        // 在字符串字面量内
+        if (inString) {
+            result.push(ch);
+            // 检查字符串结束或转义引号
+            if (ch === stringChar) {
+                // 检查转义的引号（SQL 中用 '' 表示字面量中的单引号）
+                if (i + 1 < chars.length && chars[i + 1] === stringChar) {
+                    // 转义引号，跳过下一个字符
+                    result.push(chars[i + 1]);
+                    i++;
+                }
+                else {
+                    // 字符串结束
+                    inString = false;
+                }
+            }
+            continue;
+        }
+        // 检测字符串字面量开始
+        if (ch === "'") {
+            inString = true;
+            stringChar = "'";
+            result.push(ch);
+            continue;
+        }
+        // 检测行注释开始（-- ）
+        if (ch === '-' && i + 1 < chars.length && chars[i + 1] === '-') {
+            inComment = true;
+            result.push(ch);
+            continue;
+        }
+        // 结构位置：尝试全角 → ASCII 转换
+        const replacement = FULLWIDTH_TO_ASCII[ch];
+        if (replacement !== undefined) {
+            result.push(replacement);
+        }
+        else {
+            result.push(ch);
+        }
+    }
+    const normalized = result.join('');
+    if (normalized !== sql) {
+        logDebug_ACU('[SqlNormalizer] SQL 结构字符已规范化');
+    }
+    return normalized;
+}
+// ═══════════════════════════════════════════════════════════════
+// 受约束字段值规范化
+// ═══════════════════════════════════════════════════════════════
+/**
+ * Unicode NFKC 兼容归一化
+ * 将全角字母数字转换为半角，统一兼容形式
+ *
+ * 优先使用 String.prototype.normalize('NFKC')，
+ * 如果运行时不支持（极端情况），fallback 到手动全角数字/字母映射
+ */
+function nfkcNormalize(str) {
+    if (typeof str.normalize === 'function') {
+        return str.normalize('NFKC');
+    }
+    // Fallback：手动转换全角数字和基本全角拉丁字母
+    return manualFullwidthToAscii(str);
+}
+/**
+ * 手动全角→半角转换（fallback）
+ * 覆盖全角数字 ０-９ 和全角大写/小写拉丁字母 Ａ-Ｚ ａ-ｚ
+ */
+function manualFullwidthToAscii(str) {
+    let result = '';
+    for (const ch of str) {
+        const code = ch.codePointAt(0);
+        // 全角数字 U+FF10-U+FF19 → 半角 0-9
+        if (code >= 0xFF10 && code <= 0xFF19) {
+            result += String.fromCodePoint(code - 0xFF10 + 0x30);
+        }
+        // 全角大写字母 U+FF21-U+FF3A → 半角 A-Z
+        else if (code >= 0xFF21 && code <= 0xFF3A) {
+            result += String.fromCodePoint(code - 0xFF21 + 0x41);
+        }
+        // 全角小写字母 U+FF41-U+FF5A → 半角 a-z
+        else if (code >= 0xFF41 && code <= 0xFF5A) {
+            result += String.fromCodePoint(code - 0xFF41 + 0x61);
+        }
+        // 全角空格 U+3000 → 半角空格
+        else if (code === 0x3000) {
+            result += ' ';
+        }
+        else {
+            result += ch;
+        }
+    }
+    return result;
+}
+/**
+ * 字段级规范化器注册表
+ * key = 列名（小写，匹配时不区分大小写）
+ * value = 规范化函数
+ *
+ * 扩展方式：在此注册表中添加新的列名和对应的规范化函数
+ */
+const FIELD_NORMALIZERS = {
+    /**
+     * code_index 规范化
+     * 目标模式：AM[0-9][0-9][0-9][0-9]（如 AM0001, AM0002...）
+     *
+     * 处理内容：
+     * 1. trim() — 去除首尾空白
+     * 2. NFKC 归一化 — 全角字母数字 → 半角
+     * 3. 转大写 — am0001 → AM0001
+     *
+     * 不做的事：
+     * - 不补零（AM1 不会变成 AM0001，语义不确定）
+     * - 不截断（AM00001 不会变成 AM0001，会保留失败）
+     * - 不改前缀（AX0001 不会变成 AM0001，语义不同）
+     */
+    code_index: (value) => {
+        return nfkcNormalize(value.trim()).toUpperCase();
+    },
+};
+/**
+ * 对受约束字段的值做规范化
+ *
+ * 仅对白名单中的列名生效，其他列直接返回原值。
+ * 规范化后仍不满足约束的值不会被强制篡改，保留由 SQLite CHECK 约束来拒绝。
+ *
+ * @param columnName 列名（不区分大小写）
+ * @param value 原始值
+ * @returns 规范化后的值（如果该列在白名单中），或原值（如果不在白名单中）
+ */
+function normalizeConstrainedValue(columnName, value) {
+    if (value === null || value === undefined)
+        return value ?? null;
+    if (!columnName)
+        return value;
+    const normalizer = FIELD_NORMALIZERS[columnName.toLowerCase()];
+    if (!normalizer)
+        return value;
+    const normalized = normalizer(value);
+    if (normalized !== value) {
+        logDebug_ACU(`[SqlNormalizer] 字段 ${columnName} 值已规范化: "${value}" → "${normalized}"`);
+    }
+    return normalized;
+}
+/**
+ * 获取所有已注册的规范化列名（小写）
+ * 用于外部判断哪些列需要做值规范化
+ */
+function getNormalizedColumnNames() {
+    return Object.keys(FIELD_NORMALIZERS);
+}
+/**
+ * 规范化 SQL 语句中 INSERT/UPDATE 语句里受约束字段的值
+ *
+ * 这是一个更高层的函数，用于运行时 SQL 写入链路。
+ * 它会解析 SQL 语句中的列名列表和对应的值，对白名单字段做值规范化。
+ *
+ * 注意：此函数在 normalizeSqlStructure 之后调用，
+ * 此时 SQL 已经是 ASCII 兼容的，可以安全地用正则提取列名和值。
+ *
+ * @param sql 单条 SQL 语句
+ * @returns 值已规范化的 SQL 语句（如果发生了修改），或原语句
+ */
+function normalizeStatementValues(sql) {
+    if (!sql || typeof sql !== 'string')
+        return sql;
+    const normalizedCols = getNormalizedColumnNames();
+    if (normalizedCols.length === 0)
+        return sql;
+    // 尝试匹配 INSERT INTO table (col1, col2, ...) VALUES (val1, val2, ...);
+    let result = tryNormalizeInsertValues(sql, normalizedCols);
+    // 尝试匹配 UPDATE table SET col1 = val1, col2 = val2 WHERE ...
+    if (result === sql) {
+        result = tryNormalizeUpdateValues(sql, normalizedCols);
+    }
+    return result;
+}
+/**
+ * 规范化 INSERT 语句中受约束字段的值
+ *
+ * 匹配格式：INSERT INTO table (col1, col2, ...) VALUES (val1, val2, ...)
+ * 对白名单列对应的值做规范化
+ */
+function tryNormalizeInsertValues(sql, normalizedCols) {
+    // 匹配 INSERT INTO table (columns) VALUES (values)
+    const insertMatch = sql.match(/^(INSERT\s+INTO\s+\w+\s*)\(([^)]+)\)(\s*VALUES\s*)\((.+)\)\s*;?\s*$/is);
+    if (!insertMatch)
+        return sql;
+    const prefix = insertMatch[1];
+    const columnsStr = insertMatch[2];
+    const valuesKeyword = insertMatch[3];
+    const valuesStr = insertMatch[4];
+    // 解析列名
+    const columns = splitColumnList(columnsStr);
+    if (columns.length === 0)
+        return sql;
+    // 解析值列表（需要处理字符串内的逗号）
+    const values = splitValueList(valuesStr);
+    if (values.length !== columns.length)
+        return sql;
+    // 检查是否有任何列需要规范化
+    let hasChange = false;
+    const normalizedValues = [];
+    for (let i = 0; i < columns.length; i++) {
+        const colName = columns[i].trim();
+        const rawValue = values[i].trim();
+        if (normalizedCols.includes(colName.toLowerCase()) && isQuotedString(rawValue)) {
+            // 提取引号内的值
+            const innerValue = rawValue.slice(1, -1).replace(/''/g, "'");
+            const normalizedInner = normalizeConstrainedValue(colName, innerValue);
+            if (normalizedInner !== innerValue) {
+                hasChange = true;
+                normalizedValues.push(`'${normalizedInner.replace(/'/g, "''")}'`);
+            }
+            else {
+                normalizedValues.push(rawValue);
+            }
+        }
+        else {
+            normalizedValues.push(rawValue);
+        }
+    }
+    if (!hasChange)
+        return sql;
+    const suffix = sql.trimEnd().endsWith(';') ? ';' : '';
+    return `${prefix}(${columns.join(', ')})${valuesKeyword}(${normalizedValues.join(', ')})${suffix}`;
+}
+/**
+ * 规范化 UPDATE 语句中受约束字段的值
+ *
+ * 匹配格式：UPDATE table SET col1 = val1, col2 = val2 WHERE ...
+ * 对白名单列对应的值做规范化
+ */
+function tryNormalizeUpdateValues(sql, normalizedCols) {
+    // 匹配 UPDATE table SET col1 = val1, col2 = val2 ...
+    const updateMatch = sql.match(/^(UPDATE\s+\w+\s+SET\s+)(.+?)(\s+WHERE\s+.+)?$/is);
+    if (!updateMatch)
+        return sql;
+    const prefix = updateMatch[1];
+    const setClauses = updateMatch[2];
+    const whereClause = updateMatch[3] || '';
+    // 按 SET 子句中的逗号拆分（需要跳过字符串内的逗号）
+    const assignments = splitSetClauses(setClauses);
+    let hasChange = false;
+    const normalizedAssignments = [];
+    for (const assignment of assignments) {
+        // 匹配 col = value
+        const assignMatch = assignment.match(/^(\s*\w+\s*)=\s*(.+)$/s);
+        if (!assignMatch) {
+            normalizedAssignments.push(assignment);
+            continue;
+        }
+        const colName = assignMatch[1].trim();
+        const rawValue = assignMatch[2].trim();
+        if (normalizedCols.includes(colName.toLowerCase()) && isQuotedString(rawValue)) {
+            const innerValue = rawValue.slice(1, -1).replace(/''/g, "'");
+            const normalizedInner = normalizeConstrainedValue(colName, innerValue);
+            if (normalizedInner !== innerValue) {
+                hasChange = true;
+                normalizedAssignments.push(`${assignMatch[1]}= '${normalizedInner.replace(/'/g, "''")}'`);
+            }
+            else {
+                normalizedAssignments.push(assignment);
+            }
+        }
+        else {
+            normalizedAssignments.push(assignment);
+        }
+    }
+    if (!hasChange)
+        return sql;
+    return `${prefix}${normalizedAssignments.join(', ')}${whereClause}`;
+}
+// ═══════════════════════════════════════════════════════════════
+// 内部工具函数
+// ═══════════════════════════════════════════════════════════════
+/**
+ * 拆分列名列表（逗号分隔）
+ * "col1, col2, col3" → ["col1", "col2", "col3"]
+ */
+function splitColumnList(str) {
+    return str.split(',').map(s => s.trim()).filter(s => s.length > 0);
+}
+/**
+ * 拆分值列表（逗号分隔，但跳过字符串内的逗号）
+ * "'val1', 'val,2', 3" → ["'val1'", "'val,2'", "3"]
+ */
+function splitValueList(str) {
+    const values = [];
+    let current = '';
+    let inStr = false;
+    for (let i = 0; i < str.length; i++) {
+        const ch = str[i];
+        if (inStr) {
+            current += ch;
+            if (ch === "'") {
+                if (i + 1 < str.length && str[i + 1] === "'") {
+                    current += str[i + 1];
+                    i++;
+                }
+                else {
+                    inStr = false;
+                }
+            }
+        }
+        else if (ch === "'") {
+            inStr = true;
+            current += ch;
+        }
+        else if (ch === ',') {
+            values.push(current);
+            current = '';
+        }
+        else {
+            current += ch;
+        }
+    }
+    if (current.trim()) {
+        values.push(current);
+    }
+    return values;
+}
+/**
+ * 拆分 SET 子句（逗号分隔，跳过字符串内的逗号）
+ */
+function splitSetClauses(str) {
+    const clauses = [];
+    let current = '';
+    let inStr = false;
+    for (let i = 0; i < str.length; i++) {
+        const ch = str[i];
+        if (inStr) {
+            current += ch;
+            if (ch === "'") {
+                if (i + 1 < str.length && str[i + 1] === "'") {
+                    current += str[i + 1];
+                    i++;
+                }
+                else {
+                    inStr = false;
+                }
+            }
+        }
+        else if (ch === "'") {
+            inStr = true;
+            current += ch;
+        }
+        else if (ch === ',') {
+            clauses.push(current);
+            current = '';
+        }
+        else {
+            current += ch;
+        }
+    }
+    if (current.trim()) {
+        clauses.push(current);
+    }
+    return clauses;
+}
+/**
+ * 判断值是否是引号包裹的字符串
+ * "'hello'" → true, "123" → false, "NULL" → false
+ */
+function isQuotedString(value) {
+    return value.startsWith("'") && value.endsWith("'") && value.length >= 2;
+}
+
+/**
  * shared/ddl-utils.ts — DDL 纯解析/操作工具函数
  *
  * 这些函数只做字符串解析，不访问数据库、不读写存储、不依赖任何 data 层基础设施。
@@ -7118,8 +7633,10 @@ function generateDDL(sheet, fallbackTableName) {
     // 优先使用用户定义的 DDL
     const ddl = sheet.sourceData?.ddl?.trim();
     if (ddl) {
-        logDebug_ACU(`[Schema] generateDDL: 使用用户定义 DDL, 表名=${parseDDLTableName(ddl) || 'unknown'}`);
-        return ddl;
+        // 对 DDL 做结构字符规范化（全角兼容字符 → ASCII）
+        const normalizedDdl = normalizeSqlStructure(ddl);
+        logDebug_ACU(`[Schema] generateDDL: 使用用户定义 DDL, 表名=${parseDDLTableName(normalizedDdl) || 'unknown'}`);
+        return normalizedDdl;
     }
     // fallback：从 content[0] 表头自动生成全 TEXT 的 DDL
     const headers = sheet.content?.[0];
@@ -7209,7 +7726,9 @@ function generateInserts(sheet, tableName) {
         const values = [];
         for (let c = 0; c < columnNames.length; c++) {
             const val = c < row.length ? row[c] : null;
-            values.push(escapeValue(val));
+            // 对白名单约束字段做值规范化（如 code_index 的大小写/全角数字）
+            const normalizedVal = normalizeConstrainedValue(columnNames[c], val);
+            values.push(escapeValue(normalizedVal));
         }
         statements.push(`INSERT INTO ${sanitizeIdentifier(tblName)} (${columnNames.map(sanitizeIdentifier).join(', ')}) VALUES (${values.join(', ')});`);
     }
@@ -8947,10 +9466,15 @@ class SqlTableService {
             return { success: true, modifiedKeys: [], appliedEdits: 0 };
         }
         // 按分号拆分为多条语句（跳过字符串内的分号）
-        const statements = splitSqlStatements(cleaned);
-        if (statements.length === 0) {
+        const rawStatements = splitSqlStatements(cleaned);
+        if (rawStatements.length === 0) {
             return { success: true, modifiedKeys: [], appliedEdits: 0 };
         }
+        // 对每条语句做规范化：结构字符兼容化 + 受约束字段值规范化
+        const statements = rawStatements.map(stmt => {
+            const structNormalized = normalizeSqlStructure(stmt);
+            return normalizeStatementValues(structNormalized);
+        });
         try {
             // 事务执行
             const result = this.engine.runBatch(statements);
@@ -8998,7 +9522,9 @@ class SqlTableService {
         this._ensureInitialized();
         this._ensureTablesFromTemplate();
         try {
-            const result = this.engine.run(sql, params);
+            // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
+            const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
+            const result = this.engine.run(normalizedSql, params);
             this._syncToJson();
             return { changes: result.changes, errors: [] };
         }
@@ -11411,6 +11937,22 @@ function getPlotFromHistory_ACU(options = {}) {
         logDebug_ACU('[剧情推进] [Plot] 当前楼层之前没有更早的用户消息或可检索范围为空，返回空字符串');
         return '';
     }
+    // 如果指定了 taskId，优先从新结构 qrf_plot_tasks 中按任务维度读取
+    const targetTaskId = String(options?.taskId || '').trim();
+    if (targetTaskId) {
+        for (let i = upperBound; i >= 0; i--) {
+            const message = chat[i];
+            if (message && message.qrf_plot_tasks && typeof message.qrf_plot_tasks === 'object') {
+                const taskContent = message.qrf_plot_tasks[targetTaskId];
+                if (typeof taskContent === 'string' && taskContent.trim()) {
+                    logDebug_ACU(`[剧情推进] [Plot] ✓ 在消息 ${i} 找到任务 "${targetTaskId}" 的 qrf_plot_tasks 数据，长度: ${taskContent.length}`);
+                    return taskContent;
+                }
+            }
+        }
+        // 任务级新结构未找到，回退到旧结构
+        logDebug_ACU(`[剧情推进] [Plot] 任务 "${targetTaskId}" 在 qrf_plot_tasks 中未找到，回退到旧 qrf_plot 结构。`);
+    }
     let latestPlotContent = '';
     let latestPlotIndex = -1;
     for (let i = upperBound; i >= 0; i--) {
@@ -11548,6 +12090,20 @@ async function savePlotToLatestMessage_ACU(force = false) {
             target.qrf_plot = plotContent;
             const currentPresetName = getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
             target.qrf_plot_preset = currentPresetName;
+            // 同时写入任务级结果映射 qrf_plot_tasks
+            if (typeof tempPlotToSave_ACU === 'object' && tempPlotToSave_ACU !== null) {
+                const taskResults = tempPlotToSave_ACU.taskResults;
+                if (Array.isArray(taskResults) && taskResults.length > 0) {
+                    if (!target.qrf_plot_tasks || typeof target.qrf_plot_tasks !== 'object') {
+                        target.qrf_plot_tasks = {};
+                    }
+                    for (const result of taskResults) {
+                        if (result && result.success && result.taskId && typeof result.rawResponse === 'string' && result.rawResponse.trim()) {
+                            target.qrf_plot_tasks[result.taskId] = result.rawResponse.trim();
+                        }
+                    }
+                }
+            }
             logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已精确附加到目标用户消息，长度:', plotContent.length, '，预设:', currentPresetName || '(默认预设)');
             _set_tempPlotToSave_ACU(null);
             return true;
@@ -11730,7 +12286,11 @@ async function prepareAIInput_ACU(messages, updateMode = 'standard', targetSheet
         const effectiveAllRows = (allRows.length > 0) ? allRows : (seedRows.length > 0 ? seedRows : []);
         if (effectiveAllRows.length === 0) {
             tableDataText += `[${tableIndex}:${table.name}]\n`;
-            const headers = table.content[0] ? table.content[0].slice(1).map((h, i) => `[${i + 1}:${h}]`).join(', ') : 'No Headers';
+            // [修复] 列头编号使用 0 基索引，与原生 DSL insertRow/updateRow 的对象键语义一致。
+            // 原先使用 i + 1 导致列头标注为 [1:列名],[2:列名]...，
+            // 而默认提示词示例使用 {"0":"...","1":"..."} 的 0 基格式，
+            // 模型会把列头编号 "1" 跟对象键 "1" 做映射，导致所有数据整体右移一列。
+            const headers = table.content[0] ? table.content[0].slice(1).map((h, i) => `[${i}:${h}]`).join(', ') : 'No Headers';
             tableDataText += `  Columns: ${headers}\n`;
             if (table.sourceData) {
                 tableDataText += `  - Note: ${table.sourceData.note || 'N/A'}\n`;
@@ -11741,7 +12301,8 @@ async function prepareAIInput_ACU(messages, updateMode = 'standard', targetSheet
         }
         else {
             tableDataText += `[${tableIndex}:${table.name}]\n`;
-            const headers = table.content[0] ? table.content[0].slice(1).map((h, i) => `[${i + 1}:${h}]`).join(', ') : 'No Headers';
+            // [修复] 同上——列头编号 0 基，与原生 DSL 对象键语义对齐
+            const headers = table.content[0] ? table.content[0].slice(1).map((h, i) => `[${i}:${h}]`).join(', ') : 'No Headers';
             tableDataText += `  Columns: ${headers}\n`;
             if (table.sourceData) {
                 tableDataText += `  - Note: ${table.sourceData.note || 'N/A'}\n`;
@@ -12010,7 +12571,10 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
     const abortSignal = localAbortController.signal;
     const skipProfileSwitch = !!options?.skipProfileSwitch;
     const forceDirectApi = !!options?.forceDirectApi;
-    const apiPresetConfig = getApiConfigByPreset_ACU(settings_ACU.tableApiPreset);
+    const effectiveTableApiPreset = options?.tableApiPreset !== undefined
+        ? String(options.tableApiPreset)
+        : (settings_ACU.tableApiPreset || '');
+    const apiPresetConfig = getApiConfigByPreset_ACU(effectiveTableApiPreset);
     const effectiveApiMode = apiPresetConfig.apiMode;
     const effectiveApiConfig = apiPresetConfig.apiConfig;
     const effectiveTavernProfile = apiPresetConfig.tavernProfile;
@@ -12084,7 +12648,7 @@ async function callCustomOpenAI_ACU(dynamicContent, abortController = null, opti
         messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
     }
     logDebug_ACU('Final messages array being sent to API:', messages);
-    logDebug_ACU(`使用API预设: ${settings_ACU.tableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
+    logDebug_ACU(`使用API预设: ${effectiveTableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
     try {
         if (effectiveApiMode === 'tavern') {
             const profileId = effectiveTavernProfile;
@@ -12327,6 +12891,70 @@ async function handleApiResponse_ACU(response, signal = null) {
 
 // service/ai/api-call.ts — AI 调用编排（剧情推进用）
 // 从 04_shared_helpers.js 迁入
+/**
+ * 剧情推进任务级 API 调用 — 接受显式预设名称
+ * 调用优先级：presetName 参数 > 全局 plotApiPreset > 当前 API 配置
+ */
+async function callApiWithPlotPreset_ACU(messages, presetName, abortSignal = null) {
+    const effectivePresetName = presetName || settings_ACU.plotApiPreset || '';
+    const apiPresetConfig = getApiConfigByPreset_ACU(effectivePresetName);
+    const effectiveApiMode = apiPresetConfig.apiMode ?? settings_ACU.apiMode;
+    const effectiveApiConfig = apiPresetConfig.apiConfig || settings_ACU.apiConfig || {};
+    logDebug_ACU(`[剧情推进] 任务级API调用，预设: ${effectivePresetName || '当前配置'}, 模式: ${effectiveApiMode}`);
+    if (effectiveApiMode === 'tavern' || effectiveApiConfig.useMainApi) {
+        logDebug_ACU('[剧情推进] 通过酒馆主API发送请求（流式传输）...');
+        if (!isGenerateRawAvailable_ACU()) {
+            throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
+        }
+        const response = await generateRaw_ACU({
+            ordered_prompts: messages,
+            should_stream: settings_ACU.streamingEnabled || false,
+        });
+        if (typeof response !== 'string') {
+            throw new Error('主API调用未返回预期的文本响应。');
+        }
+        return response.trim();
+    }
+    else {
+        if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
+            throw new Error('自定义API的URL或模型未配置。');
+        }
+        const requestBody = {
+            messages: messages,
+            model: effectiveApiConfig.model.replace(/^models\//, ''),
+            max_tokens: effectiveApiConfig.maxTokens || effectiveApiConfig.max_tokens || 20000,
+            temperature: effectiveApiConfig.temperature || 0.7,
+            top_p: effectiveApiConfig.topP || effectiveApiConfig.top_p || 0.95,
+            stream: settings_ACU.streamingEnabled || false,
+            chat_completion_source: 'custom',
+            group_names: [],
+            include_reasoning: false,
+            reasoning_effort: 'medium',
+            enable_web_search: false,
+            request_images: false,
+            custom_prompt_post_processing: 'strict',
+            reverse_proxy: effectiveApiConfig.url,
+            proxy_password: '',
+            custom_url: effectiveApiConfig.url,
+            custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
+        };
+        const response = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody),
+            signal: abortSignal,
+        });
+        if (!response.ok) {
+            const errTxt = await response.text();
+            throw new Error(`API请求失败: ${response.status} ${errTxt}`);
+        }
+        const content = await handleApiResponse_ACU(response, abortSignal);
+        if (content) {
+            return content.trim();
+        }
+        throw new Error(`API调用返回无效响应`);
+    }
+}
 async function callApi_ACU(messages, apiSettings, abortSignal = null) {
     // [新增] 获取剧情推进使用的API配置（支持API预设）
     const apiPresetConfig = getApiConfigByPreset_ACU(settings_ACU.plotApiPreset);
@@ -12741,7 +13369,7 @@ function renderPlotTaskContentWithIsolatedVariables_ACU(content, sharedContext) 
     const contextForIf = {
         seedContent: sharedContext.seedContentForConditional,
         allTablesJson: sharedContext.allTablesJson,
-        plotContent: sharedContext.lastPlotContent || '',
+        plotContent: sharedContext.taskPlotContent || sharedContext.lastPlotContent || '',
     };
     return runWithIsolatedPlotTemplateVariables_ACU(() => {
         let renderedContent = content;
@@ -12777,14 +13405,42 @@ function extractLastTagContent_ACU(text, rawTagName) {
     const contentStart = openIdx + open.length;
     return String(text).slice(contentStart, closeIdx);
 }
-function extractPlotTagsFromResponse_ACU(text, extractTags) {
-    const tagNames = String(extractTags || '')
+function extractPlotTagsFromResponse_ACU(text, extractTags, extractInjectTags = '') {
+    const injectTagNames = String(extractInjectTags || '')
         .split(',')
         .map((tag) => tag.trim())
         .filter(Boolean);
+    const normalTagNames = String(extractTags || '')
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter(Boolean);
+    // 构建注入标签集合（优先级高）
+    const injectTagNameSet = new Set(injectTagNames.map((t) => t.toLowerCase()));
     const extractedTags = {};
     const injectedFragments = [];
-    tagNames.forEach((tagName) => {
+    // 新增：注入标签专用集合（不参与尾追加）
+    const injectOnlyTags = {};
+    const injectOnlyFragments = [];
+    // 标记哪些 tagName 来自 extractInjectTags
+    const injectOnlyTagNames = [];
+    // 先提取 extractInjectTags 的标签
+    injectTagNames.forEach((tagName) => {
+        const content = extractLastTagContent_ACU(text, tagName);
+        if (content !== null) {
+            injectOnlyTags[tagName] = content;
+            injectOnlyFragments.push(`<${tagName}>${content}</${tagName}>`);
+            injectOnlyTagNames.push(tagName);
+            // 同时放入 extractedTags 以支持跨任务传递和占位替换
+            extractedTags[tagName] = content;
+            injectedFragments.push(`<${tagName}>${content}</${tagName}>`);
+        }
+    });
+    // 再提取 extractTags 的标签（同名标签被 extractInjectTags 覆盖，不重复提取）
+    normalTagNames.forEach((tagName) => {
+        if (injectTagNameSet.has(tagName.toLowerCase())) {
+            // 同名标签已被 extractInjectTags 处理，跳过
+            return;
+        }
         const content = extractLastTagContent_ACU(text, tagName);
         if (content !== null) {
             extractedTags[tagName] = content;
@@ -12792,9 +13448,12 @@ function extractPlotTagsFromResponse_ACU(text, extractTags) {
         }
     });
     return {
-        tagNames,
+        tagNames: [...injectTagNames, ...normalTagNames],
         extractedTags,
         injectedFragments,
+        injectOnlyTags,
+        injectOnlyFragments,
+        injectOnlyTagNames,
     };
 }
 function extractAllTagContents_ACU(text, rawTagName) {
@@ -12879,6 +13538,69 @@ function replacePlotTagPlaceholders_ACU(text, tagSourceMap) {
         return buildPlotTagBlock_ACU(tagName, tagSourceMap.get(tagName));
     });
 }
+// ═══ 任务级世界书触发文本构造 ═══
+/**
+ * 基于当前任务 prompt 中实际使用的 {{tag}} 占位符，提取对应标签文本，
+ * 拼接为变量世界书的触发扫描文本。
+ *
+ * 标签内容来源优先级：
+ * 1. 若提供了 relayTagMap（本轮先前阶段的聚合结果），优先从中取标签内容
+ * 2. 否则从 plotContent（上轮剧情历史）中按 tagName 提取 XML 标签内容
+ *
+ * 这保证世界书触发依据与 renderPlotTaskMessages_ACU 中的 {{tag}} 注入来源一致：
+ * - 第一阶段（useHistoryRelay=true）：relayTagMap 为空，走 plotContent（上一轮历史）
+ * - 后续阶段（useHistoryRelay=false）：relayTagMap 含本轮先前阶段结果，从中取标签
+ *
+ * @param taskPromptGroup - 当前任务的 promptGroup（数组，每项有 content 字段）
+ * @param plotContent - 上轮剧情历史内容（lastPlotContent）
+ * @param relayTagMap - 本轮先前阶段的聚合标签结果（Map<string, string[]>），可选
+ * @returns 拼接后的世界书触发文本；无匹配标签时返回空字符串
+ */
+function buildTaskWorldbookTriggerText_ACU(taskPromptGroup, plotContent, relayTagMap) {
+    const messages = Array.isArray(taskPromptGroup) ? taskPromptGroup : [];
+    const sourcePlotContent = String(plotContent || '');
+    if (!messages.length)
+        return '';
+    // 1. 从所有 prompt segment 中汇总 {{tag}} 名称
+    const allTagNames = [];
+    const seenTagNames = new Set();
+    for (const seg of messages) {
+        if (!seg || typeof seg.content !== 'string')
+            continue;
+        const names = getPlotPlaceholderTagNames_ACU(seg.content);
+        for (const name of names) {
+            if (!seenTagNames.has(name)) {
+                seenTagNames.add(name);
+                allTagNames.push(name);
+            }
+        }
+    }
+    if (!allTagNames.length)
+        return '';
+    // 2. 确定标签内容来源：优先使用 relayTagMap（本轮先前阶段结果），
+    //    否则从上轮剧情历史文本中提取
+    const blocks = [];
+    if (relayTagMap instanceof Map && relayTagMap.size > 0) {
+        // 本轮先前阶段的聚合结果
+        for (const tagName of allTagNames) {
+            if (relayTagMap.has(tagName)) {
+                const block = buildPlotTagBlock_ACU(tagName, relayTagMap.get(tagName));
+                if (block)
+                    blocks.push(block);
+            }
+        }
+    }
+    else if (sourcePlotContent.trim()) {
+        // 上轮剧情历史
+        const tagMap = buildPlotTagMapFromText_ACU(sourcePlotContent, allTagNames);
+        tagMap.forEach((contents, tagName) => {
+            const block = buildPlotTagBlock_ACU(tagName, contents);
+            if (block)
+                blocks.push(block);
+        });
+    }
+    return blocks.join('\n');
+}
 // ═══ Task 结果排序/聚合/构建 ═══
 function sortPlotTaskResults_ACU(results) {
     return (Array.isArray(results) ? [...results] : [])
@@ -12887,6 +13609,8 @@ function sortPlotTaskResults_ACU(results) {
 }
 function aggregatePlotTaskTags_ACU(taskResults) {
     const aggregated = new Map();
+    // 新增：记录哪些 tagName 来自 extractInjectTags（不参与尾追加）
+    const injectOnlyTagNames = new Set();
     const sortedResults = sortPlotTaskResults_ACU(taskResults);
     sortedResults.forEach((result) => {
         if (!result?.success || !result.extractedTags || typeof result.extractedTags !== 'object')
@@ -12896,8 +13620,12 @@ function aggregatePlotTaskTags_ACU(taskResults) {
                 aggregated.set(tagName, []);
             aggregated.get(tagName).push(content ?? '');
         });
+        // 收集 injectOnly 标签名
+        if (Array.isArray(result.injectOnlyTagNames)) {
+            result.injectOnlyTagNames.forEach((name) => injectOnlyTagNames.add(name));
+        }
     });
-    return aggregated;
+    return { aggregated, injectOnlyTagNames };
 }
 function buildAggregatedPlotTagBlocks_ACU(aggregatedTags) {
     if (!(aggregatedTags instanceof Map) || aggregatedTags.size === 0)
@@ -12925,7 +13653,7 @@ function buildPlotRawFallbackText_ACU(taskResults) {
 function buildPlotSaveContentFromTaskResults_ACU(taskResults) {
     return buildPlotRawFallbackText_ACU(taskResults);
 }
-function buildFinalPlotInjectionMessage_ACU(finalSystemDirectiveContent, taskResults, aggregatedTags) {
+function buildFinalPlotInjectionMessage_ACU(finalSystemDirectiveContent, taskResults, aggregatedTags, injectOnlyTagNames = new Set()) {
     const defaultDirective = '[SYSTEM_DIRECTIVE: You are a storyteller. The following <plot> block is your absolute script for this turn. You MUST follow the <directive> within it to generate the story.]';
     const baseDirective = String(finalSystemDirectiveContent || '').trim() || defaultDirective;
     const rawFallbackText = buildPlotRawFallbackText_ACU(taskResults);
@@ -12950,13 +13678,23 @@ function buildFinalPlotInjectionMessage_ACU(finalSystemDirectiveContent, taskRes
             aggregatedTags.forEach((contents, tagName) => {
                 if (matchedTags.has(tagName))
                     return;
+                // injectOnly 标签（extractInjectTags 提取的）即使未使用也不追加到末尾
+                if (injectOnlyTagNames.has(tagName))
+                    return;
                 unusedTagBlocks.push(`<${tagName}>${(Array.isArray(contents) ? contents : [contents]).map(content => content ?? '').join('\n\n')}</${tagName}>`);
             });
             return [finalDirectiveWithTags.trim(), unusedTagBlocks.join('\n\n').trim()]
                 .filter(Boolean)
                 .join('\n');
         }
-        const aggregatedTagBlocks = buildAggregatedPlotTagBlocks_ACU(aggregatedTags);
+        // 没有占位符时：只追加非 injectOnly 的标签块
+        const filteredTags = new Map();
+        aggregatedTags.forEach((contents, tagName) => {
+            if (!injectOnlyTagNames.has(tagName)) {
+                filteredTags.set(tagName, contents);
+            }
+        });
+        const aggregatedTagBlocks = buildAggregatedPlotTagBlocks_ACU(filteredTags);
         return [baseDirective, aggregatedTagBlocks].filter(Boolean).join('\n');
     }
     if (placeholderNames.length > 0) {
@@ -13015,9 +13753,10 @@ function checkPlotAbortRequested_ACU() {
         throw new Error('TaskAbortedByUser');
     }
 }
-function willPlotUseMainApiGenerateRaw_ACU() {
+function willPlotUseMainApiGenerateRaw_ACU(taskApiPreset = '') {
     try {
-        const apiPresetConfig = getApiConfigByPreset_ACU(settings_ACU.plotApiPreset) || {};
+        const effectivePreset = taskApiPreset || settings_ACU.plotApiPreset || '';
+        const apiPresetConfig = getApiConfigByPreset_ACU(effectivePreset) || {};
         const effectiveApiMode = apiPresetConfig.apiMode ?? settings_ACU.apiMode;
         const effectiveApiConfig = apiPresetConfig.apiConfig || settings_ACU.apiConfig || {};
         return effectiveApiMode !== 'tavern' && !!effectiveApiConfig.useMainApi;
@@ -13091,8 +13830,10 @@ async function buildPlotSharedContext_ACU(plotSettings, userMessage, runtimeOpti
         : {};
     const lastPlotContent = getPlotFromHistory_ACU(historyLookupOptions);
     logDebug_ACU('[剧情推进] $6 上轮规划数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
-    let worldbookContent = await getWorldbookContentForPlot_ACU(plotSettings, userMessage, lastPlotContent);
-    logDebug_ACU('[剧情推进] $1 世界书内容(原始):', worldbookContent ? `长度=${worldbookContent.length}` : '(空)');
+    // 世界书内容不再在此处用整段 lastPlotContent 预计算，
+    // 而是延迟到 executeSinglePlotTask_ACU 中按任务实际 {{tag}} 注入内容按需计算。
+    let worldbookContent = '';
+    logDebug_ACU('[剧情推进] $1 世界书内容: 延迟到任务级计算');
     let outlineTableContent = '';
     try {
         if (!currentJsonTableData_ACU || typeof currentJsonTableData_ACU !== 'object') {
@@ -13185,28 +13926,27 @@ async function buildPlotSharedContext_ACU(plotSettings, userMessage, runtimeOpti
         $U: userInfoContent_Plot,
         $C: charInfoContent_Plot,
     };
-    const performReplacements = (text) => {
+    const performReplacements = (text, taskOverrides = {}) => {
         if (!text)
             return '';
         let processed = text;
-        const worldbookReplacement = worldbookContent
-            ? `\n<worldbook_context>\n${filterPlotInjectedContent(worldbookContent, '$1')}\n</worldbook_context>\n`
+        // 任务级世界书内容优先；若未提供则使用共享预计算值（当前为空）
+        const effectiveWorldbookContent = taskOverrides.$1 !== undefined
+            ? String(taskOverrides.$1)
+            : worldbookContent;
+        const worldbookReplacement = effectiveWorldbookContent
+            ? `\n<worldbook_context>\n${filterPlotInjectedContent(effectiveWorldbookContent, '$1')}\n</worldbook_context>\n`
             : '';
         processed = processed.replace(/(?<!\\)\$1/g, worldbookReplacement);
         for (const key in replacements) {
-            const value = replacements[key];
+            const value = taskOverrides[key] !== undefined ? taskOverrides[key] : replacements[key];
             const regex = new RegExp(escapeRegExp_ACU(key), 'g');
             const filteredValue = filterPlotInjectedContent(value, key);
             processed = processed.replace(regex, () => filteredValue);
         }
         return processed;
     };
-    worldbookContent = await tryRenderPlotTemplateWithEjs_ACU(worldbookContent);
-    logDebug_ACU('[剧情推进] $1 世界书内容(渲染后):', worldbookContent ? `长度=${worldbookContent.length}` : '(空)');
-    worldbookContent = parseRandomTags_ACU(worldbookContent);
-    worldbookContent = replaceRandomVariables_ACU(worldbookContent);
-    // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下）
-    worldbookContent = replaceDbSqlVariables(worldbookContent);
+    // 世界书后处理已在任务级逻辑中完成；共享阶段不再做后处理
     const defaultDirective = '[SYSTEM_DIRECTIVE: You are a storyteller. The following <plot> block is your absolute script for this turn. You MUST follow the <directive> within it to generate the story.]';
     let finalSystemDirectiveContent = defaultDirective;
     let rawFinal = getPlotPromptContentByIdFromSettings_ACU(plotSettings, 'finalSystemDirective')
@@ -13242,12 +13982,17 @@ async function buildPlotSharedContext_ACU(plotSettings, userMessage, runtimeOpti
 async function renderPlotTaskMessages_ACU(task, sharedContext, runtimeOptions = {}) {
     const promptGroup = JSON.parse(JSON.stringify(task?.promptGroup || []));
     const messagesToUse = Array.isArray(promptGroup) ? promptGroup : [];
+    // 构建 $1 的任务级覆盖值（任务级世界书内容）
+    const replacementOverrides = {};
+    if (sharedContext.taskWorldbookContent !== undefined) {
+        replacementOverrides.$1 = sharedContext.taskWorldbookContent;
+    }
     for (const seg of messagesToUse) {
         if (!seg || typeof seg.content !== 'string')
             continue;
         let c = seg.content;
         c = await tryRenderPlotTemplateWithEjs_ACU(c);
-        c = sharedContext.performReplacements(c);
+        c = sharedContext.performReplacements(c, replacementOverrides);
         const relayTagMap = runtimeOptions.useHistoryRelay
             ? buildPlotTagMapFromText_ACU(sharedContext.lastPlotContent, getPlotPlaceholderTagNames_ACU(c))
             : (runtimeOptions.relayTagMap instanceof Map ? runtimeOptions.relayTagMap : new Map());
@@ -13265,9 +14010,47 @@ async function executeSinglePlotTask_ACU(task, sharedContext, runtimeOptions = {
     const taskStage = normalizePositiveInteger_ACU(normalizedTask.stage, 1);
     const maxRetries = normalizePositiveInteger_ACU(normalizedTask.maxRetries, sharedContext?.plotSettings?.loopSettings?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
     const minLength = normalizeNonNegativeInteger_ACU(normalizedTask.minLength, 0);
+    // 任务级世界书计算：基于当前任务实际使用的 {{tag}} 注入内容 + 本轮上下文触发，
+    // 而不是固定使用整段上一轮剧情内容。
+    // 标签来源与 renderPlotTaskMessages_ACU 一致：
+    // - 第一阶段（useHistoryRelay=true）：relayTagMap 为空，走 lastPlotContent
+    // - 后续阶段（useHistoryRelay=false）：relayTagMap 含本轮先前阶段结果
+    let taskWorldbookContent = '';
+    try {
+        const taskPlotContent = String(sharedContext.lastPlotContent || '');
+        const effectiveRelayTagMap = runtimeOptions.useHistoryRelay
+            ? undefined // 第一阶段：从 lastPlotContent 提取
+            : (runtimeOptions.relayTagMap instanceof Map ? runtimeOptions.relayTagMap : undefined);
+        // 从任务 prompt 中提取 {{tag}}，按实际标签来源取对应内容，构造触发文本
+        const worldbookTriggerText = buildTaskWorldbookTriggerText_ACU(normalizedTask.promptGroup, taskPlotContent, effectiveRelayTagMap);
+        if (worldbookTriggerText) {
+            logDebug_ACU(`[剧情推进] [任务:${taskLabel}] 基于 {{tag}} 注入内容构造世界书触发文本，长度: ${worldbookTriggerText.length}`);
+        }
+        else {
+            logDebug_ACU(`[剧情推进] [任务:${taskLabel}] 无 {{tag}} 注入内容，世界书仅基于本轮上下文触发`);
+        }
+        taskWorldbookContent = await getWorldbookContentForPlot_ACU(sharedContext.plotSettings, sharedContext.userMessage, worldbookTriggerText);
+        if (taskWorldbookContent) {
+            // 对任务级世界书内容执行与共享管线相同的后处理
+            taskWorldbookContent = await tryRenderPlotTemplateWithEjs_ACU(taskWorldbookContent);
+            taskWorldbookContent = parseRandomTags_ACU(taskWorldbookContent);
+            taskWorldbookContent = replaceRandomVariables_ACU(taskWorldbookContent);
+            taskWorldbookContent = replaceDbSqlVariables(taskWorldbookContent);
+            logDebug_ACU(`[剧情推进] [任务:${taskLabel}] 任务级世界书内容长度: ${taskWorldbookContent.length}`);
+        }
+    }
+    catch (wbError) {
+        logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 任务级世界书计算失败，$1 将为空:`, wbError);
+        taskWorldbookContent = '';
+    }
+    // 构建任务级共享上下文：覆盖 $1 替换值，使 performReplacements 使用任务级世界书内容
+    const taskSharedContext = {
+        ...sharedContext,
+        taskWorldbookContent,
+    };
     try {
         checkPlotAbortRequested_ACU();
-        const messages = await renderPlotTaskMessages_ACU(normalizedTask, sharedContext, runtimeOptions);
+        const messages = await renderPlotTaskMessages_ACU(normalizedTask, taskSharedContext, runtimeOptions);
         checkPlotAbortRequested_ACU();
         if (!messages.length) {
             return {
@@ -13292,7 +14075,11 @@ async function executeSinglePlotTask_ACU(task, sharedContext, runtimeOptions = {
             let tempMessage = null;
             let apiError = null;
             try {
-                tempMessage = await callApi_ACU(messages, settings_ACU, abortController_ACU?.signal || null);
+                // [同组统一] API 预设覆盖：优先使用 stage 级决议的 effective preset
+                const effectivePlotApiPreset = runtimeOptions.stageEffectivePreset !== undefined
+                    ? String(runtimeOptions.stageEffectivePreset)
+                    : (normalizedTask.taskApiPreset || settings_ACU.plotApiPreset || '');
+                tempMessage = await callApiWithPlotPreset_ACU(messages, effectivePlotApiPreset, abortController_ACU?.signal || null);
             }
             catch (apiCallError) {
                 if (apiCallError?.name === 'AbortError' || String(apiCallError?.message || '').toLowerCase().includes('aborted')) {
@@ -13330,7 +14117,7 @@ async function executeSinglePlotTask_ACU(task, sharedContext, runtimeOptions = {
                 order: normalizedTask.order ?? 0,
             };
         }
-        const { tagNames, extractedTags, injectedFragments } = extractPlotTagsFromResponse_ACU(rawResponse, normalizedTask.extractTags);
+        const { tagNames, extractedTags, injectedFragments, injectOnlyTags, injectOnlyFragments, injectOnlyTagNames } = extractPlotTagsFromResponse_ACU(rawResponse, normalizedTask.extractTags, normalizedTask.extractInjectTags);
         if (tagNames.length > 0 && Object.keys(extractedTags).length > 0) {
             logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 成功摘取标签: ${Object.keys(extractedTags).join(', ')}`);
         }
@@ -13341,6 +14128,9 @@ async function executeSinglePlotTask_ACU(task, sharedContext, runtimeOptions = {
             rawResponse,
             extractedTags,
             injectedFragments,
+            injectOnlyTags,
+            injectOnlyFragments,
+            injectOnlyTagNames,
             error: null,
             stage: taskStage,
             order: normalizedTask.order ?? 0,
@@ -13384,16 +14174,42 @@ async function runPlotTasksRuntime_ACU(plotSettings, userMessage, runtimeOptions
         hasExistingUserMessage,
     });
     checkPlotAbortRequested_ACU();
+    // 构建历史检索选项，供任务级历史回溯使用
+    const historyAnchorText = String(inputForHash ?? userMessage ?? '');
+    const historyLookupOptions = hasExistingUserMessage && historyAnchorText.trim()
+        ? {
+            beforeUserInputHash: hashUserInput_ACU(historyAnchorText),
+            beforeUserInputText: historyAnchorText,
+        }
+        : {};
     const willUseMainApiGenerateRaw = willPlotUseMainApiGenerateRaw_ACU();
     const successfulResults = [];
     const failedResults = [];
     let aggregatedTags = new Map();
+    let aggregatedInjectOnlyTagNames = new Set();
     for (let stageIndex = 0; stageIndex < stageGroups.length; stageIndex++) {
         const stageGroup = stageGroups[stageIndex];
+        // [同组统一] 决议本 stage 的 groupEffectivePreset：
+        // 取 stage 内第一个有显式 taskApiPreset 的任务作为组级 preset；
+        // 若均无显式 preset，则回退到全局 plotApiPreset
+        let stageEffectivePreset = '';
+        for (const t of stageGroup.tasks) {
+            const taskPreset = String(t?.taskApiPreset || '').trim();
+            if (taskPreset) {
+                stageEffectivePreset = taskPreset;
+                break;
+            }
+        }
+        if (!stageEffectivePreset) {
+            stageEffectivePreset = settings_ACU.plotApiPreset || '';
+        }
+        logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 统一 effective preset: ${stageEffectivePreset || '(当前配置)'}`);
         const stageResults = await Promise.all(stageGroup.tasks.map((task) => executeSinglePlotTask_ACU(task, sharedContext, {
             willUseMainApiGenerateRaw,
             relayTagMap: aggregatedTags,
             useHistoryRelay: stageIndex === 0,
+            historyLookupOptions,
+            stageEffectivePreset,
         })));
         checkPlotAbortRequested_ACU();
         const stageSuccessfulResults = stageResults.filter((result) => result?.success);
@@ -13416,7 +14232,10 @@ async function runPlotTasksRuntime_ACU(plotSettings, userMessage, runtimeOptions
                 errorMessage: `剧情任务阶段 ${stageGroup.stage} 执行失败（${failedTaskNames}），后续阶段已停止。`,
             };
         }
-        aggregatedTags = aggregatePlotTaskTags_ACU(successfulResults);
+        const { aggregated: stageAggregated, injectOnlyTagNames: stageInjectOnly } = aggregatePlotTaskTags_ACU(successfulResults);
+        aggregatedTags = stageAggregated;
+        // 合并 injectOnly 标签名
+        stageInjectOnly.forEach((name) => aggregatedInjectOnlyTagNames.add(name));
         logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 已完成，成功任务数: ${stageSuccessfulResults.length}`);
     }
     if (!successfulResults.length) {
@@ -13434,9 +14253,10 @@ async function runPlotTasksRuntime_ACU(plotSettings, userMessage, runtimeOptions
         content: saveContent,
         userInputHash,
         userInputText: inputForHash,
+        taskResults: successfulResults,
     });
     logDebug_ACU('[剧情推进] [Plot] 已暂存plot数据，用户输入哈希:', userInputHash, '，原始文本长度:', inputForHash?.length || 0);
-    const finalMessage = buildFinalPlotInjectionMessage_ACU(sharedContext.finalSystemDirectiveContent, successfulResults, aggregatedTags);
+    const finalMessage = buildFinalPlotInjectionMessage_ACU(sharedContext.finalSystemDirectiveContent, successfulResults, aggregatedTags, aggregatedInjectOnlyTagNames);
     await savePlotToLatestMessage_ACU(true);
     return {
         finalMessage,
@@ -18284,6 +19104,8 @@ function normalizePlotTask_ACU(task, { index = 0, fallbackTask = null } = {}) {
         enabled: cloned.enabled !== false,
         promptGroup,
         extractTags: typeof cloned.extractTags === 'string' ? cloned.extractTags : (fallback?.extractTags || ''),
+        extractInjectTags: typeof cloned.extractInjectTags === 'string' ? cloned.extractInjectTags : (fallback?.extractInjectTags || ''),
+        taskApiPreset: typeof cloned.taskApiPreset === 'string' ? cloned.taskApiPreset : (fallback?.taskApiPreset || ''),
         finalDirectiveTemplate: typeof cloned.finalDirectiveTemplate === 'string' ? cloned.finalDirectiveTemplate : (fallback?.finalDirectiveTemplate || ''),
         minLength: normalizeNonNegativeInteger_ACU(cloned.minLength, fallback?.minLength ?? 0),
         maxRetries: normalizePositiveInteger_ACU(cloned.maxRetries ?? cloned.loopSettings?.maxRetries, fallback?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3),
@@ -19200,6 +20022,9 @@ function buildDefaultSettings_ACU() {
         apiPresets: [],
         tableApiPreset: '',
         plotApiPreset: '',
+        // [新增] 按表格名称保存的表级 API 预设覆盖（key=标准化表名, value=presetName）
+        // 不保存入模板，只写进数据库插件设置；同名表跨模板复用
+        tableApiPresetOverridesByName: {},
         charCardPrompt: DEFAULT_CHAR_CARD_PROMPT_ACU,
         autoUpdateThreshold: DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
         autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
@@ -19681,19 +20506,13 @@ function ensureAcuToastStylesInjected_ACU() {
         const style = doc.createElement('style');
         style.id = styleId;
         style.textContent = `
-      /* ACU Toast Theme (古典中国风 - scoped to .acu-toast) */
+      /* ACU Toast Theme — 使用新主题系统的变量 */
       #toast-container .acu-toast.toast {
-        --toast-accent: #7d4940;
-        --toast-bg: #24221f;
-        --toast-text: #c1b9ad;
-        --toast-border: #36332e;
-        --toast-font: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
-      }
-      body.acu-theme-silk #toast-container .acu-toast.toast {
-        --toast-accent: #8a6b5e;
-        --toast-bg: #f4f1eb;
-        --toast-text: #3d3629;
-        --toast-border: #d4cfc4;
+        --toast-accent: var(--acu-accent, #2563eb);
+        --toast-bg: var(--acu-bg-1, #ffffff);
+        --toast-text: var(--acu-text-1, #1a2332);
+        --toast-border: var(--acu-border, #e0e4ea);
+        --toast-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       }
       .acu-toast.toast {
         font-family: var(--toast-font) !important;
@@ -19702,11 +20521,10 @@ function ensureAcuToastStylesInjected_ACU() {
         letter-spacing: 0.2px;
         --acu-toast-accent: var(--toast-accent);
         background: var(--toast-bg) !important;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E") !important;
         color: var(--toast-text) !important;
         border: 1px solid var(--toast-border) !important;
-        border-radius: 2px !important;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.35) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important;
         padding: 12px 14px 12px 50px !important;
         width: min(420px, calc(100vw - 24px)) !important;
         opacity: 1 !important;
@@ -19722,7 +20540,6 @@ function ensureAcuToastStylesInjected_ACU() {
       #toast-container .acu-toast.toast.toast-warning,
       #toast-container .acu-toast.toast.toast-error {
         background: var(--toast-bg) !important;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E") !important;
         opacity: 1 !important;
       }
       #toast-container .acu-toast.toast .toast-title,
@@ -19734,7 +20551,7 @@ function ensureAcuToastStylesInjected_ACU() {
       .acu-toast.toast.toast-info,
       .acu-toast.toast.toast-warning,
       .acu-toast.toast.toast-error {
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E") !important;
+        background: var(--toast-bg) !important;
         background-repeat: repeat !important;
         background-position: 0 0 !important;
       }
@@ -20115,7 +20932,7 @@ function renderPromptSegments_ACU(segments) {
         const borderColor = isMainA ? 'var(--accent-primary)' : (isMainB ? '#ffb74d' : '');
         const segmentId = `${SCRIPT_ID_PREFIX_ACU}-prompt-segment-${index}`;
         const segmentHtml = `
-              <div class="prompt-segment" id="${segmentId}" data-main-slot="${escapeHtml_ACU(mainSlot)}" ${isMainPrompt ? `style="border-left: 3px solid ${borderColor};"` : ''}>
+              <div class="prompt-segment" id="${segmentId}" data-main-slot="${escapeHtml_ACU$1(mainSlot)}" ${isMainPrompt ? `style="border-left: 3px solid ${borderColor};"` : ''}>
                   <div class="prompt-segment-toolbar">
                       <div style="display:flex; align-items:center; gap:8px;">
                           <select class="prompt-segment-role">
@@ -20134,7 +20951,7 @@ function renderPromptSegments_ACU(segments) {
                       </div>
                       <button class="prompt-segment-delete-btn" data-index="${index}" style="${isMainPrompt ? 'display:none;' : ''}">-</button>
                   </div>
-                  <textarea class="prompt-segment-content" rows="4">${escapeHtml_ACU(segment.content)}</textarea>
+                  <textarea class="prompt-segment-content" rows="4">${escapeHtml_ACU$1(segment.content)}</textarea>
               </div>
           `;
         $charCardPromptSegmentsContainer_ACU.append(segmentHtml);
@@ -20207,7 +21024,7 @@ function renderPlotPromptSegments_ACU(segments) {
         const borderColor = isMainA ? 'var(--accent-primary)' : (isMainB ? '#ffb74d' : '');
         const segmentId = `${SCRIPT_ID_PREFIX_ACU}-plot-prompt-segment-${index}`;
         const segmentHtml = `
-              <div class="plot-prompt-segment" id="${segmentId}" data-main-slot="${escapeHtml_ACU(mainSlot)}" ${isMainPrompt ? `style="border-left: 3px solid ${borderColor};"` : ''}>
+              <div class="plot-prompt-segment" id="${segmentId}" data-main-slot="${escapeHtml_ACU$1(mainSlot)}" ${isMainPrompt ? `style="border-left: 3px solid ${borderColor};"` : ''}>
                   <div class="plot-prompt-segment-toolbar">
                       <div style="display:flex; align-items:center; gap:8px;">
                           <select class="plot-prompt-segment-role">
@@ -20226,7 +21043,7 @@ function renderPlotPromptSegments_ACU(segments) {
                       </div>
                       <button class="plot-prompt-segment-delete-btn" data-index="${index}" style="${isMainPrompt ? 'display:none;' : ''}">-</button>
                   </div>
-                  <textarea class="plot-prompt-segment-content" rows="4">${escapeHtml_ACU(segment.content)}</textarea>
+                  <textarea class="plot-prompt-segment-content" rows="4">${escapeHtml_ACU$1(segment.content)}</textarea>
               </div>
           `;
         $plotPromptSegmentsContainer_ACU.append(segmentHtml);
@@ -20323,10 +21140,10 @@ function renderPlotTaskList_ACU(plotSettings = getActivePlotEditorSettings_ACU()
         const enabledColor = task.enabled !== false ? 'var(--green)' : 'var(--red)';
         const stageNo = normalizePositiveInteger_ACU(task?.stage, 1);
         const itemHtml = `
-              <button type="button" class="button acu-plot-task-item ${isSelected ? 'acu-plot-task-item--active' : ''}" data-task-id="${escapeHtml_ACU(task.id)}" style="display:flex; width:100%; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; padding:10px 12px; text-align:left; border:${isSelected ? '1px solid var(--accent-primary)' : '1px solid var(--border_color_light)'}; background:${isSelected ? 'color-mix(in srgb, var(--accent-primary) 12%, var(--background_default))' : 'var(--background_default)'}; border-radius:8px;">
+              <button type="button" class="button acu-plot-task-item ${isSelected ? 'acu-plot-task-item--active' : ''}" data-task-id="${escapeHtml_ACU$1(task.id)}" style="display:flex; width:100%; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; padding:10px 12px; text-align:left; border:${isSelected ? '1px solid var(--accent-primary)' : '1px solid var(--border_color_light)'}; background:${isSelected ? 'color-mix(in srgb, var(--accent-primary) 12%, var(--background_default))' : 'var(--background_default)'}; border-radius:8px;">
                   <span style="display:flex; flex-direction:column; gap:4px; min-width:0;">
-                      <span style="font-weight:600; color:var(--text_primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${index + 1}. ${escapeHtml_ACU(task.name || task.id || `剧情任务${index + 1}`)}</span>
-                      <span class="notes" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">阶段：${stageNo} · 标签：${escapeHtml_ACU(task.extractTags || '(未设置)')}</span>
+                      <span style="font-weight:600; color:var(--text_primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${index + 1}. ${escapeHtml_ACU$1(task.name || task.id || `剧情任务${index + 1}`)}</span>
+                      <span class="notes" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">阶段：${stageNo} · 标签：${escapeHtml_ACU$1(task.extractTags || '(未设置)')}</span>
                   </span>
                   <span style="flex-shrink:0; font-size:0.8em; color:${enabledColor};">${enabledText}${isSelected ? ' · 编辑中' : ''}</span>
               </button>
@@ -20343,18 +21160,22 @@ function loadCurrentPlotTaskToUI_ACU(plotSettings = getActivePlotEditorSettings_
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-name`).val('');
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-enabled`).prop('checked', true);
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val('');
+        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-inject-tags`).val('');
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(plotSettings?.minLength ?? 0);
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`).val(1);
         $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-max-retries`).val(plotSettings?.loopSettings?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
+        $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`).val('');
         return;
     }
     renderPlotPromptSegments_ACU(JSON.parse(JSON.stringify(selectedTask.promptGroup || [])));
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-name`).val(selectedTask.name || '');
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-enabled`).prop('checked', selectedTask.enabled !== false);
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(selectedTask.extractTags || '');
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-inject-tags`).val(selectedTask.extractInjectTags || '');
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(selectedTask.minLength ?? 0);
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`).val(normalizePositiveInteger_ACU(selectedTask.stage, 1));
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-max-retries`).val(selectedTask.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`).val(selectedTask.taskApiPreset || '');
 }
 function saveCurrentPlotTaskFromUI_ACU({ silent = false, renderTaskList = false, persist = true } = {}) {
     if (!$popupInstance_ACU)
@@ -20367,15 +21188,19 @@ function saveCurrentPlotTaskFromUI_ACU({ silent = false, renderTaskList = false,
         return null;
     const taskNameRaw = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-name`).val();
     const taskExtractTagsRaw = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val();
+    const taskExtractInjectTagsRaw = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-inject-tags`).val();
     const taskMinLengthRaw = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(), 10);
     const taskStageRaw = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`).val(), 10);
     const taskMaxRetriesRaw = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-max-retries`).val(), 10);
+    const taskApiPresetRaw = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`).val();
     const updatedTask = normalizePlotTask_ACU({
         ...selectedTask,
         name: String(taskNameRaw || '').trim() || selectedTask.name || `剧情任务${selectedIndex + 1}`,
         enabled: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-enabled`).is(':checked'),
         promptGroup: getPlotPromptGroupFromUI_ACU(),
         extractTags: String(taskExtractTagsRaw || ''),
+        extractInjectTags: String(taskExtractInjectTagsRaw || ''),
+        taskApiPreset: String(taskApiPresetRaw || ''),
         minLength: Number.isFinite(taskMinLengthRaw) ? taskMinLengthRaw : selectedTask.minLength,
         stage: Number.isFinite(taskStageRaw) && taskStageRaw > 0
             ? taskStageRaw
@@ -20842,7 +21667,8 @@ async function purgeOldLayerData_ACU() {
         'TavernDB_ACU_IsolatedData',
         'TavernDB_ACU_Identity',
         'qrf_plot',
-        'qrf_plot_preset'
+        'qrf_plot_preset',
+        'qrf_plot_tasks'
     ];
     for (const idx of indicesToPurge) {
         const msg = chat[idx];
@@ -21029,6 +21855,50 @@ async function overrideLatestLayerWithTemplateCore_ACU(templateData) {
         await saveChatToHost_ACU();
     }
     return modifiedCount;
+}
+/**
+ * 按消息索引列表清空指定 AI 楼层上的当前隔离标签表格数据，并保存聊天。
+ *
+ * 用于手动填表前的"预清空"步骤：先清除目标楼层上的旧表格数据，
+ * 再执行新的手动填表，防止 SQL 严格填表逻辑因旧数据残留导致写入失败。
+ *
+ * 清理范围：当前隔离标签下的新版 IsolatedData 槽 + 旧版兼容字段。
+ * 不影响同一消息上其他隔离标签的数据。
+ * 不删除消息正文或非表格业务字段。
+ *
+ * @param targetMessageIndices 需要清空的目标 AI 消息物理索引列表（已去重）
+ * @returns 实际被清空的消息数量
+ */
+async function clearTableDataAtFloors_ACU(targetMessageIndices) {
+    if (!targetMessageIndices || targetMessageIndices.length === 0)
+        return 0;
+    const chat = getChatArray_ACU();
+    if (!chat || chat.length === 0)
+        return 0;
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const isolationConfig = {
+        enabled: settings_ACU.dataIsolationEnabled,
+        code: settings_ACU.dataIsolationCode,
+    };
+    let clearedCount = 0;
+    for (const idx of targetMessageIndices) {
+        if (idx < 0 || idx >= chat.length)
+            continue;
+        const msg = chat[idx];
+        // 只处理 AI 消息（跳过用户消息）
+        if (!msg || msg.is_user)
+            continue;
+        const changed = clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
+        if (changed) {
+            clearedCount++;
+            logDebug_ACU(`[清空楼层] 已清空消息索引 ${idx} 上的表格数据 (标签: ${isolationKey || '无'})`);
+        }
+    }
+    if (clearedCount > 0) {
+        await saveChatToHost_ACU();
+        logDebug_ACU(`[清空楼层] 共清空 ${clearedCount} 条消息的表格数据，聊天已保存。`);
+    }
+    return clearedCount;
 }
 
 /**
@@ -21221,8 +22091,8 @@ function saveApiConfig_ACU() {
         temperature: isNaN(temperature) ? 0.9 : temperature,
     });
     // 将新保存的模型添加到select中（如果不存在）
-    if ($customApiModelSelect_ACU && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU(model)}"]`).length === 0) {
-        $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU(model)}">${escapeHtml_ACU(model)}</option>`);
+    if ($customApiModelSelect_ACU && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU$1(model)}"]`).length === 0) {
+        $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(model)}">${escapeHtml_ACU$1(model)}</option>`);
     }
     saveSettingsAndNotify_ACU();
     showToastr_ACU('success', 'API配置已保存！');
@@ -21289,6 +22159,15 @@ function deleteApiPreset_ACU(presetName) {
     if (settings_ACU.plotApiPreset === presetName) {
         settings_ACU.plotApiPreset = '';
     }
+    // [新增] 清除按表名保存的表级 API 预设覆盖中引用了该预设的条目
+    if (settings_ACU.tableApiPresetOverridesByName && typeof settings_ACU.tableApiPresetOverridesByName === 'object') {
+        const overrides = settings_ACU.tableApiPresetOverridesByName;
+        Object.keys(overrides).forEach((tableName) => {
+            if (overrides[tableName] === presetName) {
+                delete overrides[tableName];
+            }
+        });
+    }
     saveSettingsAndNotify_ACU();
     refreshApiPresetSelectors_ACU();
     showToastr_ACU('info', `API预设 "${presetName}" 已删除。`);
@@ -21324,6 +22203,16 @@ function refreshApiPresetSelectors_ACU() {
         });
         $plotApiPresetSelect.val(settings_ACU.plotApiPreset || '');
     }
+    // 刷新任务级数据库API预设选择器
+    const $plotTaskApiPresetSelect = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`);
+    if ($plotTaskApiPresetSelect.length) {
+        const currentTaskApiPreset = $plotTaskApiPresetSelect.val() || '';
+        $plotTaskApiPresetSelect.empty().append('<option value="">继承全局剧情推进API预设</option>');
+        presets.forEach((p) => {
+            $plotTaskApiPresetSelect.append(renderOption_ACU(p.name, p.name));
+        });
+        $plotTaskApiPresetSelect.val(currentTaskApiPreset);
+    }
     // 刷新正文替换的API预设选择器
     const $optimizationApiPresetSelect = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-api-preset`);
     if ($optimizationApiPresetSelect.length) {
@@ -21332,6 +22221,17 @@ function refreshApiPresetSelectors_ACU() {
             $optimizationApiPresetSelect.append(renderOption_ACU(p.name, p.name));
         });
         $optimizationApiPresetSelect.val(settings_ACU.contentOptimizationSettings?.apiPreset || '');
+    }
+    // [新增] 刷新可视化编辑器配置面板中的表级 API 预设覆盖选择器
+    // 该 select 可能不在 popup 中，而是在可视化编辑器容器里
+    const $cfgTableApiPreset = jQuery_API_ACU('#cfg-table-api-preset');
+    if ($cfgTableApiPreset.length) {
+        const currentVal = String($cfgTableApiPreset.val() || '');
+        $cfgTableApiPreset.empty().append('<option value="">使用填表整体API配置</option>');
+        presets.forEach((p) => {
+            $cfgTableApiPreset.append(renderOption_ACU(p.name, p.name));
+        });
+        $cfgTableApiPreset.val(currentVal);
     }
 }
 /**
@@ -21384,6 +22284,16 @@ function resetDefaultCharCardPrompt_ACU() {
     saveSettingsAndNotify_ACU();
     showToastr_ACU('info', '更新预设已恢复为默认值！');
     // loadSettings will trigger renderPromptSegments_ACU which correctly handles the string default
+    loadSettingsAndRefreshUI_ACU();
+}
+/**
+ * 按指定目标模式恢复默认填表提示词（charCardPrompt）。
+ * 与 resetDefaultCharCardPrompt_ACU 不同，此函数接收显式 mode 参数，
+ * 用于"模式切换后恢复目标模式默认提示词"场景——此时当前模式可能已完成切换。
+ */
+function applyModeDefaultCharCardPrompt_ACU(mode) {
+    settings_ACU.charCardPrompt = mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU;
+    saveSettingsAndNotify_ACU();
     loadSettingsAndRefreshUI_ACU();
 }
 function loadCharCardPromptFromJson_ACU() {
@@ -21847,7 +22757,7 @@ async function updateCardUpdateStatusDisplay_ACU() {
             }
             tableStatusRows += `
             <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-                <td style="text-align: left; padding: 5px;">${escapeHtml_ACU(table.name)}</td>
+                <td style="text-align: left; padding: 5px;">${escapeHtml_ACU$1(table.name)}</td>
                 <td style="text-align: center; padding: 5px;">${frequency}</td>
                 <td style="text-align: center; padding: 5px;" title="有效未记录: ${effectiveUnrecorded}">${unrecorded}</td>
                 <td style="text-align: center; padding: 5px;">${lastUpdatedDisplay}</td>
@@ -21857,7 +22767,7 @@ async function updateCardUpdateStatusDisplay_ACU() {
         });
         $statusTableBody.html(tableStatusRows);
         const activeTemplateMeta_ACU = getActiveTemplatePresetMeta_ACU();
-        $cardUpdateStatusDisplay_ACU.html(`数据库状态: <b style="color:lightgreen;">已加载</b> (${tableCount}个表格, ${totalRowCount}条记录)；当前生效模板预设：<b style="color:var(--accent-primary);">${escapeHtml_ACU(activeTemplateMeta_ACU.displayName)}</b><span style="color: var(--text-secondary);">（${activeTemplateMeta_ACU.scopeLabel}）</span>`);
+        $cardUpdateStatusDisplay_ACU.html(`数据库状态: <b style="color:lightgreen;">已加载</b> (${tableCount}个表格, ${totalRowCount}条记录)；当前生效模板预设：<b style="color:var(--accent-primary);">${escapeHtml_ACU$1(activeTemplateMeta_ACU.displayName)}</b><span style="color: var(--text-secondary);">（${activeTemplateMeta_ACU.scopeLabel}）</span>`);
         // 更新下次预测显示
         if ($nextUpdateDisplay.length && nextUpdates.length > 0) {
             nextUpdates.sort((a, b) => a.floor - b.floor);
@@ -21894,8 +22804,783 @@ async function updateCardUpdateStatusDisplay_ACU() {
 }
 
 /**
+ * presentation/pages/popup-helpers.ts — 主弹窗辅助函数
+ * 从 main-popup.ts 拆出（原 openAutoCardPopup_ACU 内嵌函数）
+ */
+// --- [剧情推进] 辅助函数 ---
+/**
+ * 加载剧情推进设置到UI
+ */
+function loadPlotSettingsToUI_ACU(plotSettingsOverride = null) {
+    if (!$popupInstance_ACU)
+        return;
+    _assignUIPlaceholders_ACU({
+        $plotPromptSegmentsContainer_ACU: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-prompt-segments-container`),
+        $plotTaskListContainer_ACU: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-list`),
+    });
+    const plotSettings = setActivePlotEditorSettings_ACU(plotSettingsOverride || settings_ACU.plotSettings);
+    if (!plotSettings)
+        return;
+    // 功能开关
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-enabled`).prop('checked', plotSettings.enabled);
+    renderPlotTaskList_ACU(plotSettings);
+    loadCurrentPlotTaskToUI_ACU(plotSettings);
+    // 最终注入指令
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-final-directive`).val(getPlotPromptContentByIdFromSettings_ACU(plotSettings, 'finalSystemDirective'));
+    // 匹配替换速率
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-main`).val(plotSettings.rateMain);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val(plotSettings.ratePersonal);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val(plotSettings.rateErotic);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(plotSettings.rateCuckold);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(plotSettings.recallCount ?? 20);
+    // 循环设置
+    ensureLoopPromptsArray_ACU(plotSettings);
+    const loopSettings = plotSettings.loopSettings;
+    // 循环提示词现在使用数组，通过 renderLoopPromptsList_ACU 渲染
+    renderLoopPromptsList_ACU(plotSettings);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val(loopSettings.loopTags || '');
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(loopSettings.loopDelay);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(loopSettings.loopTotalDuration);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(loopSettings.maxRetries);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(plotSettings.contextTurnCount);
+    renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`, normalizeExtractRules_ACU(plotSettings.contextExtractRules, plotSettings.contextExtractTags || ''), {
+        startPlaceholder: '开始词（例如：<think）',
+        endPlaceholder: '结束词（例如：</think>）',
+        fallbackRules: getDefaultPlotContextExtractRules_ACU(),
+    });
+    renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`, normalizeExcludeRules_ACU(plotSettings.contextExcludeRules, plotSettings.contextExcludeTags || ''), {
+        startPlaceholder: '开始词（例如：<thinking）',
+        endPlaceholder: '结束词（例如：</thinking>）',
+        fallbackRules: getDefaultPlotContextExcludeRules_ACU(),
+    });
+    // 循环状态
+    updatePlotLoopStatusUI_ACU();
+    // 预设选择器
+    loadPlotPresetSelect_ACU();
+}
+/**
+ * 加载正文替换预设选择器
+ */
+function loadOptimizationPresetSelect_ACU() {
+    if (!$popupInstance_ACU)
+        return;
+    const $select = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-preset-select`);
+    const $deleteBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-delete-preset`);
+    if (!$select.length)
+        return;
+    const presets = settings_ACU.contentOptimizationSettings?.promptPresets || [];
+    const currentValue = $select.val();
+    $select.find('option:not(:first)').remove();
+    presets.forEach((preset) => {
+        if (preset && preset.name) {
+            $select.append(renderOption_ACU(preset.name, preset.name));
+        }
+    });
+    // 恢复之前选中的值（如果还存在）
+    if (currentValue && presets.find((p) => p.name === currentValue)) {
+        $select.val(currentValue);
+        if ($deleteBtn.length)
+            $deleteBtn.show();
+    }
+    else {
+        $select.val('');
+        if ($deleteBtn.length)
+            $deleteBtn.hide();
+    }
+}
+/**
+ * 另存为新的正文替换预设
+ */
+function saveOptimizationPresetAsNew_ACU() {
+    const presetName = prompt('请输入新预设的名称：');
+    if (!presetName || !presetName.trim()) {
+        showToastr_ACU('warning', '预设名称不能为空。');
+        return;
+    }
+    const name = presetName.trim();
+    const presets = settings_ACU.contentOptimizationSettings.promptPresets || [];
+    const existingIndex = presets.findIndex((p) => p.name === name);
+    if (existingIndex !== -1) {
+        if (!confirm(`预设 "${name}" 已存在。是否覆盖？`)) {
+            return;
+        }
+        presets[existingIndex] = {
+            name: name,
+            promptGroup: getOptimizationPromptGroupFromUI_ACU()
+        };
+        showToastr_ACU('success', `预设 "${name}" 已被覆盖。`);
+    }
+    else {
+        presets.push({
+            name: name,
+            promptGroup: getOptimizationPromptGroupFromUI_ACU()
+        });
+        showToastr_ACU('success', `预设 "${name}" 已成功创建。`);
+    }
+    settings_ACU.contentOptimizationSettings.promptPresets = presets;
+    saveSettingsAndNotify_ACU();
+    loadOptimizationPresetSelect_ACU();
+    // 选中新创建的预设
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-preset-select`).val(name);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-delete-preset`).show();
+}
+/**
+ * 加载正文替换设置到UI
+ */
+function loadOptimizationSettingsToUI_ACU() {
+    if (!$popupInstance_ACU)
+        return;
+    const config = settings_ACU.contentOptimizationSettings || {};
+    // [隐藏功能] 只有当剧情推进最大重试次数为49时才显示正文替换子标签
+    const plotMaxRetries = settings_ACU.plotSettings?.loopSettings?.maxRetries ?? 3;
+    const $optimizationSubtab = $popupInstance_ACU.find('.acu-subtab-button[data-subtab="advanced-optimization"]');
+    if ($optimizationSubtab.length) {
+        if (plotMaxRetries === 49) {
+            $optimizationSubtab.show();
+            // 同时显示对应的子内容区
+            $popupInstance_ACU.find('#acu-subtab-advanced-optimization').show();
+        }
+        else {
+            $optimizationSubtab.hide();
+            $popupInstance_ACU.find('#acu-subtab-advanced-optimization').hide();
+            // 如果当前激活的是optimization子标签，切到log子标签
+            if ($optimizationSubtab.hasClass('active')) {
+                $optimizationSubtab.removeClass('active');
+                const $logSubtab = $popupInstance_ACU.find('.acu-subtab-button[data-subtab="advanced-log"]');
+                if ($logSubtab.length) {
+                    $logSubtab.addClass('active');
+                    $popupInstance_ACU.find('#acu-subtab-advanced-log').addClass('active');
+                }
+            }
+        }
+    }
+    // 功能开关
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-enabled`).prop('checked', !!config.enabled);
+    // API预设
+    const $apiPreset = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-api-preset`);
+    if ($apiPreset.length) {
+        $apiPreset.val(config.apiPreset || '');
+    }
+    // 基础设置
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-min-length`).val(config.minLength || 100);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-max-items`).val(config.maxOptimizations || 10);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-loop-count`).val(config.loopCount || 1);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-retry-count`).val(config.retryCount || 3);
+    // 优化模式
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-seamless-mode`).prop('checked', config.seamlessMode !== false);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-auto-apply`).prop('checked', config.autoApply !== false);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-show-diff`).prop('checked', config.showDiff !== false);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-parallel-mode`).prop('checked', config.parallelMode === true);
+    // 标签筛选设置
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-extract-tags`).val(config.extractTags || '');
+    // 加载标签提取规则
+    renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-optimization-extract-rules`, config.extractRules || [], {
+        startPlaceholder: '开始词（例如：<think）',
+        endPlaceholder: '结束词（例如：</think）',
+    });
+    // 加载标签排除规则
+    renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-optimization-exclude-rules`, config.excludeRules || [], {
+        startPlaceholder: '开始词（例如：<think）',
+        endPlaceholder: '结束词（例如：</think）',
+    });
+    // 加载预设选择器
+    loadOptimizationPresetSelect_ACU();
+    // 提示词组
+    const promptGroup = config.promptGroup && config.promptGroup.length > 0
+        ? config.promptGroup
+        : DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU;
+    renderOptimizationPromptSegments_ACU(promptGroup);
+}
+/**
+ * 渲染正文优化提示词段落
+ */
+function renderOptimizationPromptSegments_ACU(segments) {
+    if (!$popupInstance_ACU)
+        return;
+    const $container = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-prompt-segments-container`);
+    if (!$container.length)
+        return;
+    $container.empty();
+    if (!Array.isArray(segments))
+        return;
+    segments.forEach((segment, index) => {
+        const isMain = segment.isMain || segment.mainSlot === 'A';
+        const isMain2 = segment.isMain2 || segment.mainSlot === 'B';
+        const deletable = segment.deletable !== false;
+        const segmentHtml = `
+          <div class="optimization-prompt-segment" data-index="${index}" style="
+            margin-bottom: 15px;
+            padding: 15px;
+            background: var(--background_default);
+            border-radius: 8px;
+            border: 1px solid var(--border_color_light);
+            ${isMain ? 'border-left: 3px solid var(--blue);' : ''}
+            ${isMain2 ? 'border-left: 3px solid var(--purple);' : ''}
+          ">
+            <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
+              <select class="optimization-prompt-segment-role text_pole" data-index="${index}" style="width: 120px;">
+                <option value="SYSTEM" ${segment.role === 'SYSTEM' ? 'selected' : ''}>SYSTEM</option>
+                <option value="USER" ${segment.role === 'USER' ? 'selected' : ''}>USER</option>
+                <option value="assistant" ${segment.role === 'assistant' ? 'selected' : ''}>assistant</option>
+              </select>
+              ${deletable ? `
+                <button type="button" class="optimization-prompt-segment-delete-btn button" data-index="${index}" style="margin-left: auto; padding: 4px 8px; font-size: 0.85em;">
+                  <i class="fa-solid fa-trash"></i>
+                </button>
+              ` : ''}
+            </div>
+            <textarea class="optimization-prompt-segment-content text_pole" data-index="${index}" rows="6" placeholder="输入提示词内容..." style="resize: vertical; width: 100%;">${escapeHtml_ACU$1(segment.content || '')}</textarea>
+          </div>
+        `;
+        $container.append(segmentHtml);
+    });
+    // 绑定输入事件
+    $container.find('.optimization-prompt-segment-role').on('change', function () {
+        const idx = parseInt(jQuery_API_ACU(this).data('index'), 10);
+        const segments = getOptimizationPromptGroupFromUI_ACU();
+        if (segments[idx]) {
+            segments[idx].role = jQuery_API_ACU(this).val();
+            settings_ACU.contentOptimizationSettings.promptGroup = segments;
+            saveSettingsAndNotify_ACU();
+        }
+    });
+    $container.find('.optimization-prompt-segment-content').on('input change', function () {
+        const idx = parseInt(jQuery_API_ACU(this).data('index'), 10);
+        const segments = getOptimizationPromptGroupFromUI_ACU();
+        if (segments[idx]) {
+            segments[idx].content = jQuery_API_ACU(this).val();
+            settings_ACU.contentOptimizationSettings.promptGroup = segments;
+            saveSettingsAndNotify_ACU();
+        }
+    });
+}
+/**
+ * 从UI获取正文优化提示词组
+ */
+function getOptimizationPromptGroupFromUI_ACU() {
+    if (!$popupInstance_ACU)
+        return [];
+    const segments = [];
+    const $segments = $popupInstance_ACU.find('.optimization-prompt-segment');
+    $segments.each(function () {
+        const $seg = jQuery_API_ACU(this);
+        const index = parseInt($seg.data('index'), 10);
+        const role = $seg.find('.optimization-prompt-segment-role').val();
+        const content = $seg.find('.optimization-prompt-segment-content').val();
+        segments.push({
+            role: role || 'USER',
+            content: content || '',
+            deletable: true
+        });
+    });
+    return segments;
+}
+/**
+ * 更新剧情推进循环状态UI
+ */
+function updatePlotLoopStatusUI_ACU() {
+    if (!$popupInstance_ACU)
+        return;
+    const $statusText = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-status-text`);
+    const $timerDisplay = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-timer-display`);
+    const $startBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-start-loop-btn`);
+    const $stopBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-stop-loop-btn`);
+    if (loopState_ACU.isLooping) {
+        $statusText.text('运行中').css('color', 'var(--green)');
+        $startBtn.hide();
+        $stopBtn.show();
+        $timerDisplay.show();
+    }
+    else {
+        $statusText.text('未运行').css('color', 'var(--red)');
+        $stopBtn.hide();
+        $startBtn.show();
+        $timerDisplay.hide().text('');
+    }
+}
+/**
+ * 加载剧情预设选择器
+ */
+function getPlotPresetDisplayName_ACU(presetName) {
+    const normalizedPresetName = normalizePlotPresetSelectionValue_ACU(presetName);
+    return normalizedPresetName || '默认预设';
+}
+function formatPlotScopeUpdatedAt_ACU(updatedAt) {
+    const ts = Number(updatedAt) || 0;
+    if (!ts)
+        return '';
+    try {
+        return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+    }
+    catch (error) {
+        return '';
+    }
+}
+function populatePlotPresetSelectOptions_ACU($select, presets, { extraPresetName = '' } = {}) {
+    if (!$select || !$select.length)
+        return;
+    const normalizedExtraPresetName = normalizePlotPresetSelectionValue_ACU(extraPresetName);
+    const normalizedPresetNames = new Set();
+    $select.empty().append(`<option value="${DEFAULT_PRESET_OPTION_VALUE_ACU}">默认预设</option>`);
+    presets.forEach((preset) => {
+        const presetName = normalizePlotPresetSelectionValue_ACU(preset?.name);
+        if (!presetName || normalizedPresetNames.has(presetName))
+            return;
+        normalizedPresetNames.add(presetName);
+        $select.append(renderOption_ACU(presetName, presetName));
+    });
+    if (normalizedExtraPresetName && !normalizedPresetNames.has(normalizedExtraPresetName)) {
+        $select.append(renderOption_ACU(normalizedExtraPresetName, `${normalizedExtraPresetName}（仅当前聊天快照）`));
+    }
+}
+function loadPlotPresetSelect_ACU() {
+    if (!$popupInstance_ACU || !settings_ACU?.plotSettings)
+        return;
+    const presets = settings_ACU.plotSettings.promptPresets || [];
+    const globalPresetName = normalizePlotPresetSelectionValue_ACU(settings_ACU.plotSettings.lastUsedPresetName || '');
+    const chatScopeState = getCurrentChatPlotScopeState_ACU();
+    const currentBinding = getPlotPresetBindingForChat_ACU();
+    const effectiveChatPresetName = resolveActivePlotPresetName_ACU({ fallbackToGlobal: true });
+    const explicitChatPresetName = normalizePlotPresetSelectionValue_ACU(currentBinding?.presetName || '');
+    const chatSelectedPresetName = normalizePlotPresetSelectionValue_ACU(explicitChatPresetName || chatScopeState?.presetName || '');
+    const $globalSelect = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-preset-select`);
+    const $chatSelect = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-chat-preset-select`);
+    const $globalDeleteBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-delete-preset`);
+    const $globalStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-scope-status`);
+    const $chatStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-chat-scope-status`);
+    const $chatOriginStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-chat-origin-status`);
+    populatePlotPresetSelectOptions_ACU($globalSelect, presets);
+    populatePlotPresetSelectOptions_ACU($chatSelect, presets, { extraPresetName: chatSelectedPresetName });
+    if ($chatSelect.length) {
+        $chatSelect.find(`option[value="${DEFAULT_PRESET_OPTION_VALUE_ACU}"]`).text('跟随全局');
+    }
+    const hasGlobalPreset = !!globalPresetName && presets.some((p) => normalizePlotPresetSelectionValue_ACU(p?.name) === globalPresetName);
+    const hasChatPreset = !!chatSelectedPresetName && $chatSelect.find(`option[value="${chatSelectedPresetName.replace(/"/g, '\\"')}"]`).length > 0;
+    const hasValidExplicitChatPreset = !!explicitChatPresetName && !!findPlotPresetByName_ACU(explicitChatPresetName);
+    if ($globalSelect.length) {
+        $globalSelect.val(hasGlobalPreset ? globalPresetName : DEFAULT_PRESET_OPTION_VALUE_ACU);
+    }
+    if ($globalDeleteBtn.length) {
+        $globalDeleteBtn.toggle(hasGlobalPreset);
+    }
+    if ($chatSelect.length) {
+        $chatSelect.val(hasChatPreset ? chatSelectedPresetName : DEFAULT_PRESET_OPTION_VALUE_ACU);
+    }
+    if ($globalStatus.length) {
+        $globalStatus.text(`当前全局预设：${getPlotPresetDisplayName_ACU(globalPresetName)}；新聊天会默认继承这里的剧情推进配置。`);
+    }
+    if ($chatStatus.length) {
+        if (chatScopeState?.snapshot) {
+            $chatStatus.text(`当前聊天：历史聊天快照；当前实际预设为 ${getPlotPresetDisplayName_ACU(effectiveChatPresetName)}。`);
+        }
+        else if (hasValidExplicitChatPreset) {
+            $chatStatus.text(`当前聊天：独立预设；当前实际预设为 ${getPlotPresetDisplayName_ACU(explicitChatPresetName)}。`);
+        }
+        else if (chatSelectedPresetName) {
+            $chatStatus.text(`当前聊天：原绑定预设不存在；当前已回退为 ${getPlotPresetDisplayName_ACU(effectiveChatPresetName)}。`);
+        }
+        else {
+            $chatStatus.text(`当前聊天：跟随全局；当前实际预设为 ${getPlotPresetDisplayName_ACU(effectiveChatPresetName)}。`);
+        }
+    }
+    if ($chatOriginStatus.length) {
+        if (chatScopeState?.snapshot) {
+            $chatOriginStatus.text('当前聊天仍在使用旧版聊天快照；重新切换一次当前聊天预设后，将迁移为新的按预设切换模式。');
+        }
+        else if (hasValidExplicitChatPreset) {
+            $chatOriginStatus.text('当前聊天已单独指定剧情推进预设；如需修改预设内容，请在左侧全局预设区操作。');
+        }
+        else if (chatSelectedPresetName) {
+            $chatOriginStatus.text('当前聊天原绑定的剧情推进预设已不存在；当前运行已回退到全局预设，请重新选择一次当前聊天预设。');
+        }
+        else {
+            $chatOriginStatus.text('当前聊天当前未单独指定剧情推进预设，实际会直接跟随全局。');
+        }
+    }
+}
+/**
+ * 加载预设到UI
+ */
+function loadPlotPresetToUI_ACU(preset) {
+    if (!$popupInstance_ACU || !preset)
+        return;
+    const presetName = preset.name || '默认预设';
+    const result = applyGlobalPlotPresetSelectionForEditor_ACU(preset.name || '', {
+        source: 'ui_global_load',
+        save: true,
+    });
+    if (!result)
+        return;
+    showToastr_ACU('success', `已加载全局预设 "${presetName}"。`);
+}
+/**
+ * 从UI获取当前剧情设置
+ */
+function getCurrentPlotSettingsFromUI_ACU() {
+    if (!$popupInstance_ACU)
+        return {};
+    flushCurrentPlotTaskEditorState_ACU({ renderTaskList: true, persist: false });
+    const activeSettings = getActivePlotEditorSettings_ACU();
+    const currentSettings = JSON.parse(JSON.stringify(activeSettings || settings_ACU.plotSettings || {}));
+    ensurePlotTasksCompat_ACU(currentSettings, { syncLegacy: true });
+    delete currentSettings.promptPresets;
+    delete currentSettings.lastUsedPresetName;
+    delete currentSettings.enabled;
+    const promptGroup = getPlotPromptGroupFromSource_ACU(currentSettings);
+    const legacyPromptTexts = getLegacyPromptTextsFromPromptGroup_ACU(promptGroup);
+    currentSettings.promptGroup = promptGroup;
+    currentSettings.finalSystemDirective = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-final-directive`).val() || '';
+    currentSettings.mainPrompt = legacyPromptTexts.mainPrompt || '';
+    currentSettings.systemPrompt = legacyPromptTexts.systemPrompt || '';
+    currentSettings.rateMain = parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-main`).val()) || 1.0;
+    currentSettings.ratePersonal = parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val()) || 1.0;
+    currentSettings.rateErotic = parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val()) || 0;
+    currentSettings.rateCuckold = parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val()) || 1.0;
+    currentSettings.recallCount = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(), 10) || 20;
+    currentSettings.contextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
+    currentSettings.contextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
+    currentSettings.contextTurnCount = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(), 10) || 3;
+    currentSettings.loopSettings = {
+        ...(currentSettings.loopSettings || {}),
+        quickReplyContent: (() => {
+            const prompts = [];
+            $popupInstance_ACU.find('.loop-prompt-textarea').each(function () {
+                const content = String(jQuery_API_ACU(this).val() || '').trim();
+                if (content)
+                    prompts.push(content);
+            });
+            return prompts;
+        })(),
+        currentPromptIndex: 0,
+        loopTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val() || '',
+        loopDelay: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(), 10) || 5,
+        loopTotalDuration: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(), 10) || 0,
+        maxRetries: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(), 10) || 3,
+    };
+    currentSettings.plotTasks = normalizePlotTasks_ACU(currentSettings);
+    ensurePlotPromptsArray_ACU(currentSettings);
+    setPlotPromptContentByIdForSettings_ACU(currentSettings, 'mainPrompt', currentSettings.mainPrompt || '');
+    setPlotPromptContentByIdForSettings_ACU(currentSettings, 'systemPrompt', currentSettings.systemPrompt || '');
+    setPlotPromptContentByIdForSettings_ACU(currentSettings, 'finalSystemDirective', currentSettings.finalSystemDirective || '');
+    ensurePlotTasksCompat_ACU(currentSettings, { syncLegacy: true });
+    currentSettings.finalSystemDirective = getPlotPromptContentByIdFromSettings_ACU(currentSettings, 'finalSystemDirective') || currentSettings.finalSystemDirective || '';
+    return currentSettings;
+}
+/**
+ * 另存为新的全局预设
+ */
+function savePlotPresetAsNew_ACU() {
+    const presetName = prompt('请输入新的全局预设名称：');
+    const name = String(presetName || '').trim();
+    if (!name)
+        return;
+    const presets = settings_ACU.plotSettings.promptPresets || [];
+    const existingIndex = presets.findIndex((p) => p.name === name);
+    const currentSettings = getCurrentPlotSettingsFromUI_ACU();
+    if (!currentSettings || typeof currentSettings !== 'object') {
+        showToastr_ACU('error', '读取当前剧情推进设置失败。');
+        return;
+    }
+    const savedPreset = normalizePlotPresetExcludeRules_ACU({ name, ...currentSettings });
+    if (existingIndex !== -1) {
+        if (!confirm(`名为 "${name}" 的全局预设已存在。是否要覆盖它？`)) {
+            return;
+        }
+        presets[existingIndex] = savedPreset;
+    }
+    else {
+        presets.push(savedPreset);
+    }
+    settings_ACU.plotSettings.promptPresets = presets;
+    const currentRuntimePresetName = getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
+    const currentChatBinding = getPlotPresetBindingForChat_ACU();
+    const hasLegacyChatScope = !!getCurrentChatPlotScopeState_ACU();
+    const shouldRefreshCurrentChatRuntime = normalizePlotPresetSelectionValue_ACU(currentRuntimePresetName) === name ||
+        (!currentChatBinding && !hasLegacyChatScope);
+    if (shouldRefreshCurrentChatRuntime) {
+        applyPlotPresetToSettings_ACU(settings_ACU.plotSettings, savedPreset);
+    }
+    setCurrentEditablePlotPresetState_ACU(name, {
+        scope: 'global',
+        source: 'ui_global_save_as_new',
+    });
+    persistPlotPresetSelectionState_ACU(name, { source: 'ui_global_save_as_new', updateGlobal: true, save: false });
+    saveSettingsAndNotify_ACU();
+    loadPlotPresetSelect_ACU();
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-preset-select`).val(name);
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-delete-preset`).show();
+    showToastr_ACU('success', `新全局预设 "${name}" 已保存。`);
+}
+
+/**
+ * presentation/components/template-preset-ui.ts — 模板预设 UI 函数（纯 DOM 操作）
+ *
+ * 纯业务逻辑函数已搬到 service/template/template-preset-service.ts。
+ * 本文件只保留操作 DOM 的 UI 函数。
+ */
+// ═══ 纯 DOM 操作函数 ═══
+function getTemplatePresetSelectJQ_ACU() {
+    try {
+        if (!$popupInstance_ACU || !$popupInstance_ACU.length)
+            return null;
+        const $sel = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-select`);
+        return $sel && $sel.length ? $sel : null;
+    }
+    catch (e) {
+        return null;
+    }
+}
+function getTemplateChatPresetSelectJQ_ACU() {
+    try {
+        if (!$popupInstance_ACU || !$popupInstance_ACU.length)
+            return null;
+        const $sel = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-chat-preset-select`);
+        return $sel && $sel.length ? $sel : null;
+    }
+    catch (e) {
+        return null;
+    }
+}
+function populateTemplatePresetSelectOptions_ACU($select, { extraPresetName = '', extraLabelSuffix = '（仅当前聊天快照）', extraOptions = [] } = {}) {
+    if (!$select || !$select.length)
+        return;
+    const normalizedExtraPresetName = normalizeTemplatePresetSelectionValue_ACU(extraPresetName);
+    const presetNames = listTemplatePresetNames_ACU();
+    const renderedNames = new Set();
+    $select.empty().append(jQuery_API_ACU('<option/>').val(DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU).text('默认预设'));
+    presetNames.forEach(name => {
+        const normalizedName = normalizeTemplatePresetSelectionValue_ACU(name);
+        if (!normalizedName || renderedNames.has(normalizedName))
+            return;
+        renderedNames.add(normalizedName);
+        $select.append(jQuery_API_ACU('<option/>').val(normalizedName).text(normalizedName));
+    });
+    if (normalizedExtraPresetName && !renderedNames.has(normalizedExtraPresetName)) {
+        renderedNames.add(normalizedExtraPresetName);
+        $select.append(jQuery_API_ACU('<option/>').val(normalizedExtraPresetName).text(`${normalizedExtraPresetName}${extraLabelSuffix}`));
+    }
+    (Array.isArray(extraOptions) ? extraOptions : []).forEach(option => {
+        const value = String(option?.value || '').trim();
+        if (!value || renderedNames.has(value))
+            return;
+        renderedNames.add(value);
+        const label = String(option?.label || value).trim() || value;
+        $select.append(jQuery_API_ACU('<option/>').val(value).text(label));
+    });
+}
+function loadTemplatePresetSelect_ACU({ globalSelectName = null, keepGlobalValue = false } = {}) {
+    if (!$popupInstance_ACU || !$popupInstance_ACU.length)
+        return;
+    const presetNames = listTemplatePresetNames_ACU();
+    const globalPresetName = normalizeTemplatePresetSelectionValue_ACU(getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: false }));
+    const chatScopeState = getCurrentChatTemplateScopeState_ACU() || migrateLegacyTemplateScopeForCurrentChat_ACU();
+    const normalizedChatMode = normalizeTemplateScopeMode_ACU(chatScopeState?.mode);
+    const effectiveChatPresetName = resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true });
+    const chatSelectedPresetName = normalizeTemplatePresetSelectionValue_ACU(chatScopeState?.presetName || effectiveChatPresetName || '');
+    const chatPresetEntries = listChatTemplatePresetEntries_ACU();
+    const localOnlyOptions = chatPresetEntries
+        .filter(entry => {
+        const entryName = normalizeTemplatePresetSelectionValue_ACU(entry?.presetName || '');
+        return !!entryName && !presetNames.includes(entryName);
+    })
+        .map(entry => {
+        const entryName = normalizeTemplatePresetSelectionValue_ACU(entry?.presetName || '');
+        const updatedAtText = (typeof formatPlotScopeUpdatedAt_ACU === 'function')
+            ? formatPlotScopeUpdatedAt_ACU(entry?.updatedAt || entry?.archivedAt)
+            : '';
+        return {
+            value: entryName,
+            label: updatedAtText
+                ? `${getTemplatePresetDisplayName_ACU(entryName)}（当前聊天快照，${updatedAtText}）`
+                : `${getTemplatePresetDisplayName_ACU(entryName)}（当前聊天快照）`,
+        };
+    });
+    const chatPresetEntryCount = chatPresetEntries.length;
+    const chatExtraPresetName = (() => {
+        if (!chatSelectedPresetName)
+            return '';
+        if (presetNames.includes(chatSelectedPresetName))
+            return '';
+        if (localOnlyOptions.some(option => option.value === chatSelectedPresetName))
+            return '';
+        return chatSelectedPresetName;
+    })();
+    const $globalSelect = getTemplatePresetSelectJQ_ACU();
+    const $chatSelect = getTemplateChatPresetSelectJQ_ACU();
+    const $globalStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-global-scope-status`);
+    const $chatStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-chat-scope-status`);
+    const $chatOriginStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-chat-origin-status`);
+    const $globalDeleteBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-delete`);
+    const hasGlobalPreset = !!globalPresetName && presetNames.includes(globalPresetName);
+    populateTemplatePresetSelectOptions_ACU($globalSelect, {
+        extraPresetName: hasGlobalPreset ? '' : globalPresetName,
+        extraLabelSuffix: '（仅当前全局模板快照）',
+    });
+    populateTemplatePresetSelectOptions_ACU($chatSelect, {
+        extraPresetName: chatExtraPresetName,
+        extraLabelSuffix: normalizedChatMode === 'preset_link' ? '（当前聊天引用）' : '（当前聊天专属预设）',
+        extraOptions: localOnlyOptions,
+    });
+    if ($globalSelect && $globalSelect.length) {
+        let resolvedGlobalValue = globalPresetName;
+        if (globalSelectName !== null && typeof globalSelectName !== 'undefined') {
+            resolvedGlobalValue = normalizeTemplatePresetSelectionValue_ACU(globalSelectName);
+        }
+        else if (keepGlobalValue) {
+            resolvedGlobalValue = normalizeTemplatePresetSelectionValue_ACU($globalSelect.val());
+        }
+        const finalGlobalValue = resolvedGlobalValue && $globalSelect.find(`option[value="${resolvedGlobalValue.replace(/"/g, '\\"')}"]`).length > 0
+            ? resolvedGlobalValue
+            : (hasGlobalPreset || (!!globalPresetName && $globalSelect.find(`option[value="${globalPresetName.replace(/"/g, '\\"')}"]`).length > 0)
+                ? globalPresetName
+                : DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
+        $globalSelect.val(finalGlobalValue || DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
+    }
+    if ($globalDeleteBtn && $globalDeleteBtn.length) {
+        $globalDeleteBtn.toggle(!!globalPresetName && presetNames.includes(globalPresetName));
+    }
+    if ($chatSelect && $chatSelect.length) {
+        const finalChatValue = chatSelectedPresetName && $chatSelect.find(`option[value="${chatSelectedPresetName.replace(/"/g, '\\"')}"]`).length > 0
+            ? chatSelectedPresetName
+            : DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU;
+        $chatSelect.val(finalChatValue || DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
+    }
+    if ($globalStatus && $globalStatus.length) {
+        if (globalPresetName && !hasGlobalPreset) {
+            $globalStatus.text(`当前全局模板：${globalPresetName}（预设库已不存在，但当前 profile 仍保留这份模板快照）。`);
+        }
+        else {
+            $globalStatus.text(`当前全局模板：${getTemplatePresetDisplayName_ACU(globalPresetName)}；新聊天会默认继承这里的表格模板。`);
+        }
+    }
+    if ($chatStatus && $chatStatus.length) {
+        if (normalizedChatMode === 'chat_override') {
+            let scopeLabel = '当前聊天专属预设';
+            if (chatScopeState.source === 'legacy_frozen') {
+                scopeLabel = '旧版聊天冻结模板（已迁移）';
+            }
+            else if (chatScopeState.source === 'legacy_history_frozen') {
+                scopeLabel = '旧对话历史模板快照（已迁移）';
+            }
+            else if (chatScopeState.source === 'legacy_header_frozen') {
+                scopeLabel = '旧版表头冻结模板（已迁移）';
+            }
+            $chatStatus.text(`当前聊天：${scopeLabel}；当前实际模板预设为 ${getTemplatePresetDisplayName_ACU(chatSelectedPresetName)}。`);
+        }
+        else if (normalizedChatMode === 'preset_link') {
+            $chatStatus.text(`当前聊天：引用全局预设 ${getTemplatePresetDisplayName_ACU(chatSelectedPresetName)}；打开聊天时会继续沿用这个预设。`);
+        }
+        else {
+            $chatStatus.text(`当前聊天：跟随当前全局；当前实际模板预设为 ${getTemplatePresetDisplayName_ACU(effectiveChatPresetName)}。`);
+        }
+    }
+    if ($chatOriginStatus && $chatOriginStatus.length) {
+        if (normalizedChatMode === 'chat_override') {
+            const detailParts = [];
+            if (chatScopeState.source === 'legacy_frozen') {
+                detailParts.push('来源语义：从旧版聊天冻结模板迁移');
+            }
+            else if (chatScopeState.source === 'legacy_history_frozen') {
+                detailParts.push('来源语义：从旧对话实际表格结构迁移');
+            }
+            else if (chatScopeState.source === 'legacy_header_frozen') {
+                detailParts.push('来源语义：从旧版表头冻结模板迁移');
+            }
+            else {
+                detailParts.push('来源语义：当前聊天已保存本地模板预设快照');
+            }
+            if (chatScopeState.originGlobalName) {
+                detailParts.push(`来源全局模板：${getTemplatePresetDisplayName_ACU(chatScopeState.originGlobalName)}`);
+            }
+            if (Number.isFinite(chatScopeState.originGlobalRevision) && chatScopeState.originGlobalRevision > 0) {
+                detailParts.push(`来源全局版本：v${chatScopeState.originGlobalRevision}`);
+            }
+            const updatedAtText = (typeof formatPlotScopeUpdatedAt_ACU === 'function') ? formatPlotScopeUpdatedAt_ACU(chatScopeState.updatedAt) : '';
+            if (updatedAtText) {
+                detailParts.push(`更新时间：${updatedAtText}`);
+            }
+            if (chatScopeState.source) {
+                detailParts.push(`写入来源：${chatScopeState.source}`);
+            }
+            if (chatPresetEntryCount > 0) {
+                detailParts.push(`当前聊天已登记 ${chatPresetEntryCount} 个本地模板预设`);
+            }
+            $chatOriginStatus.text(detailParts.join('；') || '当前聊天正在使用聊天级模板预设快照。');
+        }
+        else if (normalizedChatMode === 'preset_link') {
+            const detailParts = [
+                '来源语义：当前聊天仅记录预设引用，未保存本地模板快照',
+                `引用预设：${getTemplatePresetDisplayName_ACU(chatSelectedPresetName)}`,
+            ];
+            const updatedAtText = (typeof formatPlotScopeUpdatedAt_ACU === 'function') ? formatPlotScopeUpdatedAt_ACU(chatScopeState?.updatedAt) : '';
+            if (updatedAtText) {
+                detailParts.push(`更新时间：${updatedAtText}`);
+            }
+            if (chatScopeState?.source) {
+                detailParts.push(`写入来源：${chatScopeState.source}`);
+            }
+            if (chatPresetEntryCount > 0) {
+                detailParts.push(`当前聊天可切换/覆盖 ${chatPresetEntryCount} 个本地模板预设`);
+            }
+            $chatOriginStatus.text(detailParts.join('；'));
+        }
+        else if (chatPresetEntryCount > 0) {
+            $chatOriginStatus.text(`当前聊天尚未保存本地模板快照，实际会跟随当前全局模板；但当前聊天已经拥有 ${chatPresetEntryCount} 个可直接切换的本地模板预设。`);
+        }
+        else {
+            $chatOriginStatus.text('当前聊天尚未保存本地模板快照，实际会直接跟随当前全局表格模板。');
+        }
+    }
+}
+function refreshTemplatePresetSelectInUI_ACU({ selectName = null, keepValue = false } = {}) {
+    if ($popupInstance_ACU && $popupInstance_ACU.length) {
+        loadTemplatePresetSelect_ACU({ globalSelectName: selectName, keepGlobalValue: !!keepValue });
+        return;
+    }
+    const $sel = getTemplatePresetSelectJQ_ACU();
+    if (!$sel || !$sel.length)
+        return;
+    renderTemplatePresetSelect_ACU($sel, { keepValue: !!keepValue });
+    if (selectName === null || typeof selectName === 'undefined')
+        return;
+    const normalizedName = normalizeTemplatePresetSelectionValue_ACU(selectName);
+    $sel.val(normalizedName || DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
+}
+function renderTemplatePresetSelect_ACU($select, { keepValue = true } = {}) {
+    try {
+        if (!$select || !$select.length)
+            return;
+        const prev = keepValue ? normalizeTemplatePresetSelectionValue_ACU($select.val()) : '';
+        const names = listTemplatePresetNames_ACU();
+        const persistedName = getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: true, getTemplatePresetFn: getTemplatePreset_ACU });
+        $select.empty();
+        $select.append(jQuery_API_ACU('<option/>').val(DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU).text('默认预设'));
+        names.forEach(n => {
+            $select.append(jQuery_API_ACU('<option/>').val(String(n)).text(String(n)));
+        });
+        let resolvedValue = DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU;
+        if (keepValue) {
+            if (isDefaultTemplatePresetSelection_ACU(prev)) {
+                resolvedValue = DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU;
+            }
+            else if (names.includes(prev)) {
+                resolvedValue = prev;
+            }
+        }
+        if (resolvedValue === DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU && persistedName && names.includes(persistedName)) {
+            resolvedValue = persistedName;
+        }
+        $select.val(resolvedValue);
+    }
+    catch (e) { }
+}
+
+/**
  * presentation/components/pipeline-ui-helpers.ts
  * 包装 service 层的 pipeline 函数，在调用后自动刷新 UI
+ *
+ * 同时提供统一的预设切换后 UI 同步入口 refreshPresetUIAfterSwitch_ACU，
+ * 供模板预设 / 剧情推进预设的手工切换与 API 切换复用。
  */
 /**
  * 刷新合并数据后自动通知前端 + 刷新可视化编辑器 + 刷新 UI 选择器和状态面板
@@ -21940,6 +23625,57 @@ async function refreshMergedDataAndNotifyWithUI_ACU() {
     // 4. 等待前端完成数据读取（保持原有 800ms 等待行为）
     await new Promise(resolve => setTimeout(resolve, 800));
     return result;
+}
+/**
+ * 预设切换后统一刷新当前已挂载的 UI
+ *
+ * 在模板预设或剧情推进预设切换成功后调用，确保所有已打开的界面立即同步：
+ *   1. 模板预设下拉框与状态文案
+ *   2. 剧情推进编辑区全量重载（任务列表、任务参数、提示词、速率、循环设置、排除规则、预设选择器）
+ *   3. 数据库状态卡片（含"当前生效模板预设"）
+ *   4. 独立数据库编辑器窗口（顶部模板标识 + 编辑区数据）
+ *
+ * 各子刷新函数内部已做 DOM 存在性检查，弹窗/窗口未打开时静默跳过，
+ * 不会因 DOM 缺失而抛错中断后续刷新。
+ *
+ * @param options.templateGlobalSelectName 传入则覆盖模板全局 select 选中值；null 则按当前运行态自动解析
+ * @param options.keepTemplateGlobalValue   为 true 时保留模板全局 select 当前选中值不变
+ */
+function refreshPresetUIAfterSwitch_ACU({ templateGlobalSelectName = null, keepTemplateGlobalValue = false } = {}) {
+    // 1. 模板预设 UI（全局/当前聊天下拉框 + 各类状态文案）
+    try {
+        loadTemplatePresetSelect_ACU({
+            globalSelectName: templateGlobalSelectName,
+            keepGlobalValue: keepTemplateGlobalValue,
+        });
+    }
+    catch (e) {
+        logDebug_ACU('[refreshPresetUI] 模板预设 UI 刷新失败:', e);
+    }
+    // 2. 剧情推进编辑区全量重载（任务列表 + 参数 + 提示词 + 速率 + 循环 + 排除规则 + 预设选择器）
+    //    loadPlotSettingsToUI_ACU 内部会调用 loadPlotPresetSelect_ACU，无需再单独调
+    try {
+        loadPlotSettingsToUI_ACU();
+    }
+    catch (e) {
+        logDebug_ACU('[refreshPresetUI] 剧情推进编辑区刷新失败:', e);
+    }
+    // 3. 数据库状态卡片（含"当前生效模板预设"显示）
+    try {
+        updateCardUpdateStatusDisplay_ACU();
+    }
+    catch (e) {
+        logDebug_ACU('[refreshPresetUI] 数据库状态卡片刷新失败:', e);
+    }
+    // 4. 独立数据库编辑器窗口：顶部模板标识
+    try {
+        if (typeof window.ACU_Visualizer_Refresh === 'function') {
+            window.ACU_Visualizer_Refresh();
+        }
+    }
+    catch (e) {
+        logDebug_ACU('[refreshPresetUI] 可视化编辑器刷新失败:', e);
+    }
 }
 
 /**
@@ -22394,11 +24130,11 @@ async function fetchModelsAndConnect_ACU() {
         $customApiModelSelect_ACU.empty().append('<option value="">-- 请选择模型 --</option>');
         models.forEach((modelName) => {
             const selected = modelName === currentSelectedModel ? ' selected' : '';
-            $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU(modelName)}"${selected}>${escapeHtml_ACU(modelName)}</option>`);
+            $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(modelName)}"${selected}>${escapeHtml_ACU$1(modelName)}</option>`);
         });
         // 如果之前保存的模型不在列表中，也添加进去
-        if (currentSelectedModel && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU(currentSelectedModel)}"]`).length === 0) {
-            $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU(currentSelectedModel)}" selected>${escapeHtml_ACU(currentSelectedModel)} (已保存)</option>`);
+        if (currentSelectedModel && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU$1(currentSelectedModel)}"]`).length === 0) {
+            $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(currentSelectedModel)}" selected>${escapeHtml_ACU$1(currentSelectedModel)} (已保存)</option>`);
         }
         showToastr_ACU('success', `模型列表加载成功！共加载 ${models.length} 个模型。`);
     }
@@ -22413,9 +24149,9 @@ function updateApiStatusDisplay_ACU() {
     if (!$popupInstance_ACU || !$apiStatusDisplay_ACU)
         return;
     if (settings_ACU.apiConfig.url && settings_ACU.apiConfig.model)
-        $apiStatusDisplay_ACU.html(`当前URL: <span style="color:lightgreen;word-break:break-all;">${escapeHtml_ACU(settings_ACU.apiConfig.url)}</span><br>已选模型: <span style="color:lightgreen;">${escapeHtml_ACU(settings_ACU.apiConfig.model)}</span>`);
+        $apiStatusDisplay_ACU.html(`当前URL: <span style="color:lightgreen;word-break:break-all;">${escapeHtml_ACU$1(settings_ACU.apiConfig.url)}</span><br>已选模型: <span style="color:lightgreen;">${escapeHtml_ACU$1(settings_ACU.apiConfig.model)}</span>`);
     else if (settings_ACU.apiConfig.url)
-        $apiStatusDisplay_ACU.html(`当前URL: ${escapeHtml_ACU(settings_ACU.apiConfig.url)} - <span style="color:orange;">请加载并选择模型</span>`);
+        $apiStatusDisplay_ACU.html(`当前URL: ${escapeHtml_ACU$1(settings_ACU.apiConfig.url)} - <span style="color:orange;">请加载并选择模型</span>`);
     else
         $apiStatusDisplay_ACU.html(`<span style="color:#ffcc80;">未配置自定义API。数据库更新功能可能不可用。</span>`);
 }
@@ -22604,13 +24340,13 @@ function showOptimizationDiffDialogForLoop_ACU(messageIndex, result, callback) {
               border-left: 2px solid var(--acu-border, #36332e);
             ">
               <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
-                <strong>原文：</strong>${escapeHtml_ACU(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
+                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
               </div>
               <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
-                <strong>修改方案：</strong>${escapeHtml_ACU(opt.plan || opt.reason || '未说明')}
+                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
               </div>
               <div style="color: #6a8a6a;">
-                <strong>优化：</strong>${escapeHtml_ACU(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
+                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
               </div>
             </div>
           `).join('')}
@@ -22756,13 +24492,13 @@ function showOptimizationDiffDialog_ACU(messageIndex, result) {
               border-left: 2px solid var(--acu-border, #36332e);
             ">
               <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
-                <strong>原文：</strong>${escapeHtml_ACU(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
+                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
               </div>
               <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
-                <strong>修改方案：</strong>${escapeHtml_ACU(opt.plan || opt.reason || '未说明')}
+                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
               </div>
               <div style="color: #6a8a6a;">
-                <strong>优化：</strong>${escapeHtml_ACU(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
+                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
               </div>
             </div>
           `).join('')}
@@ -22994,13 +24730,13 @@ function showReoptimizationDialog_ACU(messageIndex, result, originalContent) {
               border-left: 2px solid var(--acu-border, #36332e);
             ">
               <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
-                <strong>原文：</strong>${escapeHtml_ACU(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
+                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
               </div>
               <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
-                <strong>修改方案：</strong>${escapeHtml_ACU(opt.plan || opt.reason || '未说明')}
+                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
               </div>
               <div style="color: #6a8a6a;">
-                <strong>优化：</strong>${escapeHtml_ACU(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
+                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
               </div>
             </div>
           `).join('')}
@@ -23384,8 +25120,8 @@ function renderExcludeRuleRows_ACU(containerSelector, rules, { startPlaceholder 
     const appendRow = (rule = {}) => {
         const rowHtml = `
         <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
-          <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU(startPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU(rule.start || '')}">
-          <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU(endPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU(rule.end || '')}">
+          <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU$1(startPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU$1(rule.start || '')}">
+          <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU$1(endPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU$1(rule.end || '')}">
           <button type="button" class="button acu-exclude-rule-delete" title="删除规则" style="padding:4px 8px;">删除</button>
         </div>
       `;
@@ -23402,8 +25138,8 @@ function appendExcludeRuleRow_ACU(containerSelector, { startPlaceholder = '开�
         return;
     const rowHtml = `
       <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
-        <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU(startPlaceholder)}" style="flex:1;" value="">
-        <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU(endPlaceholder)}" style="flex:1;" value="">
+        <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU$1(startPlaceholder)}" style="flex:1;" value="">
+        <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU$1(endPlaceholder)}" style="flex:1;" value="">
         <button type="button" class="button acu-exclude-rule-delete" title="删除规则" style="padding:4px 8px;">删除</button>
       </div>
     `;
@@ -23699,8 +25435,8 @@ async function populatePlotWorldbookList_ACU() {
         bookNames.forEach((bookName) => {
             const isSelected = (cfg.manualSelection || []).includes(bookName);
             const itemHtml = `
-                  <div class="qrf_worldbook_list_item ${isSelected ? 'selected' : ''}" data-book-name="${escapeHtml_ACU(bookName)}">
-                      ${escapeHtml_ACU(bookName)}
+                  <div class="qrf_worldbook_list_item ${isSelected ? 'selected' : ''}" data-book-name="${escapeHtml_ACU$1(bookName)}">
+                      ${escapeHtml_ACU$1(bookName)}
                   </div>`;
             $listContainer.append(itemHtml);
         });
@@ -23839,7 +25575,7 @@ async function populateInjectionTargetSelector_ACU() {
         // 添加默认选项
         $select.append(`<option value="character">角色卡绑定世界书</option>`);
         bookNames.forEach((bookName) => {
-            $select.append(`<option value="${escapeHtml_ACU(bookName)}">${escapeHtml_ACU(bookName)}</option>`);
+            $select.append(`<option value="${escapeHtml_ACU$1(bookName)}">${escapeHtml_ACU$1(bookName)}</option>`);
         });
         // 设置当前选中的值
         const worldbookConfig = getCurrentWorldbookConfig_ACU();
@@ -23956,9 +25692,9 @@ function renderLazyWorldbookEntryItems_ACU($list, bookName, options = {}) {
             const labelText = entry.label || `条目 ${entry.uid}`;
             const disabledStyle = entry.disabled ? 'style="opacity:0.6; text-decoration: line-through;"' : '';
             return `
-                  <div class="qrf_worldbook_entry_item" data-book-name="${escapeHtml_ACU(String(entry.bookName || bookName))}" data-entry-uid="${escapeHtml_ACU(String(entry.uid ?? ''))}">
-                      <input type="checkbox" id="${escapeHtml_ACU(String(checkboxId))}" data-book="${escapeHtml_ACU(String(entry.bookName || bookName))}" data-uid="${escapeHtml_ACU(String(entry.uid ?? ''))}" ${entry.checked ? 'checked' : ''} ${entry.disabled ? 'disabled' : ''}>
-                      <label for="${escapeHtml_ACU(String(checkboxId))}" ${disabledStyle}>${escapeHtml_ACU(String(labelText))}</label>
+                  <div class="qrf_worldbook_entry_item" data-book-name="${escapeHtml_ACU$1(String(entry.bookName || bookName))}" data-entry-uid="${escapeHtml_ACU$1(String(entry.uid ?? ''))}">
+                      <input type="checkbox" id="${escapeHtml_ACU$1(String(checkboxId))}" data-book="${escapeHtml_ACU$1(String(entry.bookName || bookName))}" data-uid="${escapeHtml_ACU$1(String(entry.uid ?? ''))}" ${entry.checked ? 'checked' : ''} ${entry.disabled ? 'disabled' : ''}>
+                      <label for="${escapeHtml_ACU$1(String(checkboxId))}" ${disabledStyle}>${escapeHtml_ACU$1(String(labelText))}</label>
                   </div>`;
         }).join('')
         : state.emptyGroupText;
@@ -23975,10 +25711,10 @@ function renderLazyWorldbookEntryList_ACU($list, groups, options = {}) {
         return;
     }
     const html = state.groups.map((group) => `
-          <div class="qrf_worldbook_entry_group" data-book-name="${escapeHtml_ACU(group.bookName)}" style="margin-bottom: 8px;">
-              <div class="qrf_worldbook_entry_header" data-book-name="${escapeHtml_ACU(group.bookName)}" style="display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-weight: bold; border-bottom: 1px solid; padding-bottom: 4px;">
+          <div class="qrf_worldbook_entry_group" data-book-name="${escapeHtml_ACU$1(group.bookName)}" style="margin-bottom: 8px;">
+              <div class="qrf_worldbook_entry_header" data-book-name="${escapeHtml_ACU$1(group.bookName)}" style="display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-weight: bold; border-bottom: 1px solid; padding-bottom: 4px;">
                   <button type="button" class="qrf_worldbook_entry_toggle button" style="padding: 2px 8px; font-size: 0.8em;">${group.expanded ? '收起' : '展开'}</button>
-                  <span class="qrf_worldbook_entry_header_text" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml_ACU(group.bookName)}</span>
+                  <span class="qrf_worldbook_entry_header_text" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml_ACU$1(group.bookName)}</span>
                   <span class="qrf_worldbook_entry_group_meta" style="font-weight: normal; font-size: 0.85em; color: var(--text_secondary);"></span>
               </div>
               <div class="qrf_worldbook_entry_group_body" style="display: ${group.expanded ? 'block' : 'none'};"></div>
@@ -24163,7 +25899,7 @@ async function populateImportWorldbookTargetSelector_ACU() {
         const bookNames = await getWorldbookNames_ACU();
         // 只添加世界书选项，不添加角色卡绑定和常规更新目标选项
         bookNames.forEach((bookName) => {
-            $select.append(`<option value="${escapeHtml_ACU(bookName)}">${escapeHtml_ACU(bookName)}</option>`);
+            $select.append(`<option value="${escapeHtml_ACU$1(bookName)}">${escapeHtml_ACU$1(bookName)}</option>`);
         });
         // 设置当前选中的值
         $select.val(settings_ACU.importWorldbookTarget || '');
@@ -24195,8 +25931,8 @@ async function populateWorldbookList_ACU() {
         bookNames.forEach((bookName) => {
             const isSelected = worldbookConfig.manualSelection.includes(bookName);
             const itemHtml = `
-                  <div class="qrf_worldbook_list_item ${isSelected ? 'selected' : ''}" data-book-name="${escapeHtml_ACU(bookName)}">
-                      ${escapeHtml_ACU(bookName)}
+                  <div class="qrf_worldbook_list_item ${isSelected ? 'selected' : ''}" data-book-name="${escapeHtml_ACU$1(bookName)}">
+                      ${escapeHtml_ACU$1(bookName)}
                   </div>`;
             $listContainer.append(itemHtml);
         });
@@ -24360,7 +26096,7 @@ function updateChatTitleDisplay_ACU(chatIdentifier) {
         return;
     const $titleElement = $popupInstance_ACU.find('h2#updater-main-title-acu');
     if ($titleElement.length)
-        $titleElement.html(`当前聊天：${escapeHtml_ACU(chatIdentifier || '未知')}`);
+        $titleElement.html(`当前聊天：${escapeHtml_ACU$1(chatIdentifier || '未知')}`);
 }
 // [T175] 检查弹窗是否打开（供 service 层用布尔判断，不暴露 DOM 引用）
 function isPopupOpen_ACU() {
@@ -24420,7 +26156,7 @@ function syncAllSettingsToUI_ACU(s) {
     if ($customApiModelSelect_ACU) {
         $customApiModelSelect_ACU.empty().append('<option value="">-- 请先加载模型列表 --</option>');
         if (s.apiConfig.model) {
-            $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU(s.apiConfig.model)}">${escapeHtml_ACU(s.apiConfig.model)}</option>`);
+            $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(s.apiConfig.model)}">${escapeHtml_ACU$1(s.apiConfig.model)}</option>`);
         }
     }
     if (typeof updateApiStatusDisplay_ACU === 'function')
@@ -24547,10 +26283,10 @@ class TableSelectorComponent {
     render() {
         const dataSource = this._config.getDataSource();
         if (!dataSource)
-            return `<div class="notes">${escapeHtml_ACU(this._config.emptyDataText)}</div>`;
+            return `<div class="notes">${escapeHtml_ACU$1(this._config.emptyDataText)}</div>`;
         const availableKeys = getSortedSheetKeys_ACU(dataSource);
         if (availableKeys.length === 0)
-            return `<div class="notes">${escapeHtml_ACU(this._config.emptyKeysText)}</div>`;
+            return `<div class="notes">${escapeHtml_ACU$1(this._config.emptyKeysText)}</div>`;
         const selectedKeys = this._config.getSelectedKeys();
         const selectedSet = new Set(selectedKeys);
         let html = '<div class="acu-table-selector" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;max-height:240px;overflow:auto;padding:8px;border:1px solid var(--border-normal);border-radius:8px;background:var(--bg-secondary);">';
@@ -24559,7 +26295,7 @@ class TableSelectorComponent {
             const checked = selectedSet.has(key) ? 'checked' : '';
             html += `<label style="display:flex;align-items:center;gap:8px;padding:10px;border:1px solid var(--border-normal);border-radius:6px;background:var(--bg-primary);">
               <input type="checkbox" data-key="${key}" ${checked} style="margin:0;width:14px;height:14px;flex-shrink:0;">
-              <span style="flex:1;word-break:break-all;font-weight:600;">${escapeHtml_ACU(name)}</span>
+              <span style="flex:1;word-break:break-all;font-weight:600;">${escapeHtml_ACU$1(name)}</span>
           </label>`;
         });
         html += '</div>';
@@ -24741,10 +26477,193 @@ function handleManualSelectNone_ACU() {
 }
 
 /**
+ * presentation/theme/custom-confirm.ts
+ *
+ * 与插件 UI 风格一致的自定义确认框，替代原生 confirm()。
+ * 返回 Promise<boolean>，调用方在 async 函数中使用 await 即可。
+ *
+ * 样式复用窗口系统的 CSS 变量（--acu-panel-bg 等）和遮罩层（.acu-window-overlay），
+ * 自动兼容双主题（墨色/素纱）。
+ *
+ * 重要：DOM 挂载到 topLevelWindow_ACU.document（酒馆主窗口），
+ * 而非当前 iframe 的 document，与窗口系统（window-system.ts）保持一致。
+ */
+/**
+ * 获取目标 document（酒馆主窗口），与窗口系统保持一致。
+ */
+function getTargetDoc() {
+    return (topLevelWindow_ACU || window).document;
+}
+/**
+ * 弹出自定义确认框，返回 Promise<boolean>。
+ * - 用户点击确认按钮 → resolve(true)
+ * - 用户点击取消按钮或点击遮罩层 → resolve(false)
+ *
+ * @param title 标题
+ * @param message 正文（支持换行 \n）
+ * @param options 可选配置
+ */
+function showCustomConfirm_ACU(title, message, options = {}) {
+    const { confirmLabel = '确定', cancelLabel = '取消', } = options;
+    const targetDoc = getTargetDoc();
+    // 移除可能残留的旧确认框（防止重复）
+    removeExistingConfirm();
+    const confirmId = `${SCRIPT_ID_PREFIX_ACU}-custom-confirm`;
+    // 将 \n 转为 <br>，HTML 转义防止 XSS
+    const safeMessage = escapeHtml_ACU(message).replace(/\n/g, '<br>');
+    const html = `
+    <div class="acu-window-overlay" id="${confirmId}-overlay" style="z-index: 100000;">
+      <div id="${confirmId}" style="
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        min-width: 320px;
+        max-width: min(420px, calc(100vw - 40px));
+        background-color: var(--acu-confirm-bg, var(--acu-bg-1, #ffffff));
+        border: 1px solid var(--acu-confirm-border, var(--acu-border, #e0e4ea));
+        border-radius: 10px;
+        box-shadow: var(--acu-shadow, 0 24px 60px rgba(0, 0, 0, 0.18));
+        animation: acuWindowSlideIn 0.25s ease-out;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: var(--acu-confirm-title, var(--acu-text-1, #1a2332));
+        padding: 0;
+        overflow: hidden;
+      ">
+        <div style="
+          padding: 16px 20px 12px 20px;
+          font-size: 14px;
+          font-weight: 600;
+          letter-spacing: 0.3px;
+          color: var(--acu-confirm-title, var(--acu-text-1, #1a2332));
+          border-bottom: 1px solid var(--acu-confirm-border, var(--acu-border, #e0e4ea));
+        ">${escapeHtml_ACU(title)}</div>
+        <div style="
+          padding: 16px 20px;
+          font-size: 13px;
+          line-height: 1.7;
+          color: var(--acu-confirm-text, var(--acu-text-2, #4a5568));
+        ">${safeMessage}</div>
+        <div style="
+          padding: 12px 20px 16px 20px;
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+        ">
+          <button id="${confirmId}-cancel" style="
+            padding: 8px 18px;
+            border: 1px solid var(--acu-confirm-cancel-border, var(--acu-border-2, #c8cdd5));
+            border-radius: 6px;
+            background: var(--acu-confirm-cancel-bg, transparent);
+            color: var(--acu-confirm-cancel-text, var(--acu-text-2, #4a5568));
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 500;
+            letter-spacing: 0.3px;
+            transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+          ">${escapeHtml_ACU(cancelLabel)}</button>
+          <button id="${confirmId}-ok" style="
+            padding: 8px 18px;
+            border: 1px solid var(--acu-confirm-ok-border, rgba(37, 99, 235, 0.30));
+            border-radius: 6px;
+            background: var(--acu-confirm-ok-bg, rgba(37, 99, 235, 0.08));
+            color: var(--acu-confirm-ok-text, var(--acu-accent, #2563eb));
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+            transition: background 0.15s ease, border-color 0.15s ease;
+          ">${escapeHtml_ACU(confirmLabel)}</button>
+        </div>
+      </div>
+    </div>
+  `;
+    // 挂载到主窗口（与窗口系统一致），而非当前 iframe
+    targetDoc.body.insertAdjacentHTML('beforeend', html);
+    // 在主窗口 document 中查找元素
+    const $ok = targetDoc.getElementById(`${confirmId}-ok`);
+    const $cancel = targetDoc.getElementById(`${confirmId}-cancel`);
+    const $overlay = targetDoc.getElementById(`${confirmId}-overlay`);
+    // 给按钮加 hover 效果（用 JS 而非 CSS 类，避免污染全局样式）
+    if ($ok) {
+        $ok.addEventListener('mouseenter', () => {
+            $ok.style.background = 'var(--acu-confirm-ok-hover-bg, rgba(37, 99, 235, 0.14))';
+            $ok.style.borderColor = 'var(--acu-confirm-ok-hover-border, rgba(37, 99, 235, 0.45))';
+        });
+        $ok.addEventListener('mouseleave', () => {
+            $ok.style.background = 'var(--acu-confirm-ok-bg, rgba(37, 99, 235, 0.08))';
+            $ok.style.borderColor = 'var(--acu-confirm-ok-border, rgba(37, 99, 235, 0.30))';
+        });
+    }
+    if ($cancel) {
+        $cancel.addEventListener('mouseenter', () => {
+            $cancel.style.background = 'var(--acu-confirm-cancel-hover-bg, var(--acu-bg-2, rgba(0, 0, 0, 0.03)))';
+            $cancel.style.borderColor = 'var(--acu-confirm-cancel-hover-border, var(--acu-border, #e0e4ea))';
+            $cancel.style.color = 'var(--acu-confirm-cancel-hover-text, var(--acu-text-1, #1a2332))';
+        });
+        $cancel.addEventListener('mouseleave', () => {
+            $cancel.style.background = 'var(--acu-confirm-cancel-bg, transparent)';
+            $cancel.style.borderColor = 'var(--acu-confirm-cancel-border, var(--acu-border-2, #c8cdd5))';
+            $cancel.style.color = 'var(--acu-confirm-cancel-text, var(--acu-text-2, #4a5568))';
+        });
+    }
+    return new Promise((resolve) => {
+        const cleanup = (result) => {
+            removeExistingConfirm();
+            resolve(result);
+        };
+        $ok?.addEventListener('click', () => cleanup(true));
+        $cancel?.addEventListener('click', () => cleanup(false));
+        $overlay?.addEventListener('click', (e) => {
+            if (e.target === $overlay)
+                cleanup(false);
+        });
+    });
+}
+/** 移除已有的自定义确认框 DOM（从主窗口中查找并移除） */
+function removeExistingConfirm() {
+    const confirmId = `${SCRIPT_ID_PREFIX_ACU}-custom-confirm`;
+    const targetDoc = getTargetDoc();
+    const existing = targetDoc.getElementById(`${confirmId}-overlay`);
+    if (existing)
+        existing.remove();
+}
+/** 简易 HTML 转义（使用主窗口 document 创建元素） */
+function escapeHtml_ACU(text) {
+    const targetDoc = getTargetDoc();
+    const div = targetDoc.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
  * service/table/update-orchestrator.ts — 表格更新编排（service 层：纯业务逻辑）
  * 从 presentation/triggers/update-process.ts 提取。
  * service 层不驱动 UI，只返回结果/状态，presentation 层根据返回值自行决定 UI 操作。
  */
+/**
+ * 表名标准化：trim 后空串视为无效键
+ */
+function normalizeTableNameForPresetLookup_ACU(name) {
+    const trimmed = String(name ?? '').trim();
+    return trimmed;
+}
+/**
+ * 根据起始表的名称，查找表级 API 预设覆盖
+ * @returns 预设名称，空字符串表示使用全局 tableApiPreset
+ */
+function resolveTableApiPresetOverride_ACU(tableName) {
+    const normalizedName = normalizeTableNameForPresetLookup_ACU(tableName);
+    if (!normalizedName)
+        return '';
+    const overrides = settings_ACU.tableApiPresetOverridesByName;
+    if (!overrides || typeof overrides !== 'object')
+        return '';
+    const preset = overrides[normalizedName];
+    return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
+}
 // ============================================================
 // 核心业务函数
 // ============================================================
@@ -25102,7 +27021,18 @@ async function processUpdatesBatch_ACU(indicesToUpdate, mode, options, executeUp
         }
         // 确定更新模式
         const updateMode = resolveUpdateMode_ACU(mode);
-        const result = await executeUpdate(messagesForContext, finalSaveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions);
+        // 决议 effective API preset：如果调用方未指定 tableApiPreset，
+        // 则以 targetSheetKeys 中第一个表名为准查覆盖映射
+        let effectiveRequestOptions = requestOptions;
+        if (!effectiveRequestOptions?.tableApiPreset && targetSheetKeys && targetSheetKeys.length > 0) {
+            const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
+            const firstTableName = templateForLookup?.[targetSheetKeys[0]]?.name || '';
+            const resolvedPreset = resolveTableApiPresetOverride_ACU(firstTableName);
+            if (resolvedPreset) {
+                effectiveRequestOptions = { ...(effectiveRequestOptions || {}), tableApiPreset: resolvedPreset };
+            }
+        }
+        const result = await executeUpdate(messagesForContext, finalSaveTargetIndex, updateMode, isSilentMode, targetSheetKeys, effectiveRequestOptions);
         if (!result.success) {
             _set_isAutoUpdatingCard_ACU$1(false);
             return { success: false, failedBatch: batchNumber, error: result.error || `批处理在第 ${batchNumber} 批时失败或被终止。` };
@@ -25114,9 +27044,18 @@ async function processUpdatesBatch_ACU(indicesToUpdate, mode, options, executeUp
 /**
  * 手动更新编排（纯业务逻辑）
  * 从 handleManualUpdate_ACU 提取。不驱动 UI，只返回结果。
- * presentation 层负责：收集 manualSelection、设置 manualExtraHint、刷新 UI、显示 toast。
+ * presentation 层负责：收集 manualSelection、设置 manualExtraHint、刷新 UI、显示 toast、弹出确认框。
+ *
+ * @param targetKeys 手动选择的目标表格键列表
+ * @param processBatch 批处理执行回调
+ * @param refreshData 数据刷新回调
+ * @param options 可选参数：
+ *   - clearBeforeUpdate: 是否在手动填表前先清空目标楼层的表格数据（默认 false）。
+ *     由 presentation 层根据用户确认框结果传入。当设为 true 时，
+ *     会先计算所有 update group 的目标保存楼层，去重后逐个清空当前隔离标签的表格数据，
+ *     再刷新内存状态，最后执行新的手动填表。
  */
-async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData) {
+async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData, options = {}) {
     try {
         if (isAutoUpdatingCard_ACU$1) {
             return { success: false, error: '数据库更新正在进行中，请稍候...' };
@@ -25172,13 +27111,67 @@ async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData
             updateGroups[groupKey].sheetKeys.push(sheetKey);
         });
         const groupKeys = Object.keys(updateGroups);
+        // ── 手动填表前预清空目标楼层的表格数据 ──
+        // 当 clearBeforeUpdate 为 true 时（用户已在 presentation 层确认），
+        // 先计算每个 update group 的最终保存楼层（每批最后一条 AI 消息的物理索引），
+        // 去重后逐个清空当前隔离标签下的表格数据，再刷新内存状态。
+        // 这样可以防止 SQL 严格填表逻辑因目标楼层上的旧数据残留导致写入失败。
+        if (options.clearBeforeUpdate) {
+            const targetFloorSet = new Set();
+            for (const gKey of groupKeys) {
+                const group = updateGroups[gKey];
+                // 每个 group 的 indices 按 batchSize 分批，每批的最后一条就是该批的 finalSaveTargetIndex。
+                // 这里简化处理：取该 group 的 indices 列表中最后一个 index 作为最终保存目标。
+                // （同一个 group 内所有 batch 的 contextScopeIndices 是相同的，
+                //   processUpdatesBatch 会按 batchSize 切分后取每批最后一个作为保存目标，
+                //   但对于"清空目标楼层"来说，只需要清空 indices 中涉及的最后几个楼层即可。
+                //   考虑到 batch 切分逻辑较复杂，这里保守地清空所有 contextScopeIndices 涉及的楼层。）
+                if (group.indices && group.indices.length > 0) {
+                    // 取该 group 上下文范围内的最后 batchSize 个楼层作为清空目标
+                    // 因为 processUpdatesBatch 会把 indices 按 batchSize 切分，
+                    // 每批保存到该批最后一条消息。所以只需要清空 indices 列表中的楼层。
+                    group.indices.forEach((idx) => targetFloorSet.add(idx));
+                }
+            }
+            const targetFloors = Array.from(targetFloorSet);
+            if (targetFloors.length > 0) {
+                logDebug_ACU(`[Manual Update] 预清空目标楼层: ${targetFloors.join(', ')} (共 ${targetFloors.length} 层)`);
+                const clearedCount = await clearTableDataAtFloors_ACU(targetFloors);
+                logDebug_ACU(`[Manual Update] 预清空完成: ${clearedCount} 层已清空`);
+                // 清空后必须刷新内存数据，确保后续填表基于干净状态
+                await loadAllChatMessages_ACU();
+                // [关键] 重建 Storage Provider（尤其是 SQLite 模式）
+                // 只清空聊天消息字段是不够的——SQLite 引擎在内存中持有独立的数据库实例，
+                // 必须先 dispose 旧引擎、创建新引擎、从已清空的聊天消息重新 loadFromChat，
+                // 否则后续 applyEdits 仍会在旧内存数据库上执行 SQL，
+                // 导致 UNIQUE constraint 等冲突。
+                try {
+                    await reloadStorageProvider();
+                }
+                catch (reloadError) {
+                    logWarn_ACU(`[Manual Update] reloadStorageProvider 失败: ${reloadError?.message}，继续使用当前 provider`);
+                }
+                await refreshData();
+            }
+        }
         _set_isAutoUpdatingCard_ACU$1(true);
         for (const gKey of groupKeys) {
             const group = updateGroups[gKey];
-            logDebug_ACU(`[Manual Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetKeys.join(', ')}`);
+            // 决议本次 group 的 effective API preset：
+            // 以 group 内第一个表为准，查 settings_ACU.tableApiPresetOverridesByName
+            let groupEffectivePreset = '';
+            if (group.sheetKeys && group.sheetKeys.length > 0) {
+                const firstSheetKey = group.sheetKeys[0];
+                const firstTableName = templateData?.[firstSheetKey]?.name || '';
+                groupEffectivePreset = resolveTableApiPresetOverride_ACU(firstTableName);
+            }
+            logDebug_ACU(`[Manual Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetKeys.join(', ')}, effectivePreset=${groupEffectivePreset || '(全局)'}`);
             const batchResult = await processBatch(group.indices, 'manual_independent', {
                 targetSheetKeys: group.sheetKeys,
-                batchSize: group.batchSize
+                batchSize: group.batchSize,
+                requestOptions: groupEffectivePreset
+                    ? { tableApiPreset: groupEffectivePreset }
+                    : null,
             });
             if (!batchResult.success) {
                 _set_isAutoUpdatingCard_ACU$1(false);
@@ -25363,7 +27356,7 @@ async function processUpdates_ACU(indicesToUpdate, mode = 'auto', options = {}) 
     return result;
 }
 /**
- * 手动更新：presentation 层负责收集 UI 输入、显示 toast、重置按钮
+ * 手动更新：presentation 层负责收集 UI 输入、显示确认框、显示 toast、重置按钮
  * service 层只返回 ManualUpdateResult
  */
 async function handleManualUpdate_ACU() {
@@ -25373,7 +27366,24 @@ async function handleManualUpdate_ACU() {
         collectManualExtraHint_ACU();
         // UI：获取手动选择的表格
         const targetKeys = getManualSelectionFromUI_ACU();
-        // 调用 service 层
+        // [前置校验] 在弹出确认框之前，先做基本有效性检查
+        // 避免用户确认后又因为"没选表格"或"聊天为空"而报错
+        if (!targetKeys || targetKeys.length === 0) {
+            showToastr_ACU('warning', '未选择需要更新的表格。');
+            return;
+        }
+        // 弹出确认框：告知用户将先清除对应楼层的所有表格数据，再执行新的手动填表
+        // 这是防止 SQL 严格填表逻辑因旧数据残留导致写入失败的关键步骤
+        const confirmed = await showCustomConfirm_ACU('手动填表确认', '即将执行手动填表。\n\n' +
+            '为确保填表成功，系统将先清除本次涉及楼层的所有表格数据，再进行新的数据填写。\n' +
+            '（此操作可防止 SQL 严格填表逻辑因旧数据残留导致写入失败）\n\n' +
+            '如果不想清空旧数据，可以选择取消。', { confirmLabel: '确认并继续', cancelLabel: '取消' });
+        if (!confirmed) {
+            logDebug_ACU('[更新流程] 用户取消了手动填表确认框');
+            showToastr_ACU('info', '已取消手动填表。');
+            return;
+        }
+        // 调用 service 层，传入 clearBeforeUpdate: true（用户已确认清空）
         const result = await orchestrateManualUpdate_ACU(targetKeys, 
         // processBatch 回调
         async (indices, batchMode, batchOptions) => {
@@ -25382,7 +27392,9 @@ async function handleManualUpdate_ACU() {
         // refreshData 回调（纯数据刷新 + UI 刷新）
         async () => {
             await refreshMergedDataAndNotifyWithUI_ACU();
-        });
+        }, 
+        // [新增] 传入用户确认后的预清空选项
+        { clearBeforeUpdate: true });
         // UI：根据返回值显示 toast
         if (result.success) {
             showToastr_ACU('success', '手动更新完成！');
@@ -25496,6 +27508,8 @@ function importCombinedSettings_ACU$1() {
                     throw new Error('合并配置中的表格模板已解析，但应用到全局模板失败。');
                 }
                 showToastr_ACU('success', '表格模板已成功导入！模板已更新，但不会影响当前聊天记录的本地数据。');
+                // 刷新模板预设下拉 UI，确保预设列表与状态文案同步
+                refreshPresetUIAfterSwitch_ACU();
                 // [优化] 不再触发表格数据初始化，仅修改当前插件模板
                 // 只有在新开卡或之前没有用过插件的聊天记录里才会使用新的通用模板作为基底
                 showToastr_ACU('success', '合并配置已成功导入！');
@@ -26276,6 +28290,13 @@ async function bindStatusEvents_ACU() {
     if ($manualUpdateCardButton_ACU && $manualUpdateCardButton_ACU.length) {
         $manualUpdateCardButton_ACU.on('click', handleManualUpdate_ACU);
     }
+    // 手动更新表选择：全选 / 全不选
+    if ($manualTableSelectAll_ACU && $manualTableSelectAll_ACU.length) {
+        $manualTableSelectAll_ACU.on('click', handleManualSelectAll_ACU);
+    }
+    if ($manualTableSelectNone_ACU && $manualTableSelectNone_ACU.length) {
+        $manualTableSelectNone_ACU.on('click', handleManualSelectNone_ACU);
+    }
     // [新增] 存储模式切换（原生 / SQLite）
     const $storageModeRadios = $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-storage-mode"]`);
     if ($storageModeRadios.length) {
@@ -26287,15 +28308,25 @@ async function bindStatusEvents_ACU() {
             const previousMode = getCurrentStorageMode();
             if (selectedMode === previousMode)
                 return;
-            showToastr_ACU('info', `正在切换到 ${selectedMode === 'sqlite' ? 'SQLite' : '原生'} 模式...`);
+            // 弹出确认框：询问是否恢复到目标模式对应的默认填表提示词
+            const targetModeLabel = selectedMode === 'sqlite' ? 'SQLite' : '原生';
+            const shouldResetPrompt = await showCustomConfirm_ACU(`切换到${targetModeLabel}模式`, `即将切换到${targetModeLabel}模式。\n\n是否同时恢复到${targetModeLabel}模式的默认填表提示词？\n\n选择"${'取消'}"将保留当前自定义提示词，仅切换模式。`, { confirmLabel: '恢复默认并切换', cancelLabel: '仅切换模式' });
+            showToastr_ACU('info', `正在切换到 ${targetModeLabel} 模式...`);
             try {
                 // 更新设置
                 settings_ACU.storageMode = selectedMode;
                 saveSettingsAndNotify_ACU();
                 // 执行模式切换（包含数据重载和 fallback）
                 await switchStorageMode(selectedMode);
-                showToastr_ACU('success', `已切换到 ${selectedMode === 'sqlite' ? 'SQLite' : '原生'} 模式！数据已重新加载。`);
-                logDebug_ACU(`存储模式已切换: ${previousMode} → ${selectedMode}`);
+                // 模式切换成功后，根据用户意图决定是否恢复默认提示词
+                if (shouldResetPrompt) {
+                    applyModeDefaultCharCardPrompt_ACU(selectedMode);
+                    showToastr_ACU('success', `已切换到 ${targetModeLabel} 模式，并恢复到该模式的默认提示词。`);
+                }
+                else {
+                    showToastr_ACU('success', `已切换到 ${targetModeLabel} 模式！数据已重新加载。`);
+                }
+                logDebug_ACU(`存储模式已切换: ${previousMode} → ${selectedMode}${shouldResetPrompt ? '（已恢复默认提示词）' : ''}`);
             }
             catch (e) {
                 // 切换失败，回退 radio 状态和设置
@@ -26538,766 +28569,6 @@ async function bindWorldbookEvents_ACU() {
 }
 
 /**
- * presentation/pages/popup-helpers.ts — 主弹窗辅助函数
- * 从 main-popup.ts 拆出（原 openAutoCardPopup_ACU 内嵌函数）
- */
-// --- [剧情推进] 辅助函数 ---
-/**
- * 加载剧情推进设置到UI
- */
-function loadPlotSettingsToUI_ACU(plotSettingsOverride = null) {
-    if (!$popupInstance_ACU)
-        return;
-    _assignUIPlaceholders_ACU({
-        $plotPromptSegmentsContainer_ACU: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-prompt-segments-container`),
-        $plotTaskListContainer_ACU: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-list`),
-    });
-    const plotSettings = setActivePlotEditorSettings_ACU(plotSettingsOverride || settings_ACU.plotSettings);
-    if (!plotSettings)
-        return;
-    // 功能开关
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-enabled`).prop('checked', plotSettings.enabled);
-    renderPlotTaskList_ACU(plotSettings);
-    loadCurrentPlotTaskToUI_ACU(plotSettings);
-    // 最终注入指令
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-final-directive`).val(getPlotPromptContentByIdFromSettings_ACU(plotSettings, 'finalSystemDirective'));
-    // 匹配替换速率
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-main`).val(plotSettings.rateMain);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val(plotSettings.ratePersonal);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val(plotSettings.rateErotic);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val(plotSettings.rateCuckold);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(plotSettings.recallCount ?? 20);
-    // 循环设置
-    ensureLoopPromptsArray_ACU(plotSettings);
-    const loopSettings = plotSettings.loopSettings;
-    // 循环提示词现在使用数组，通过 renderLoopPromptsList_ACU 渲染
-    renderLoopPromptsList_ACU(plotSettings);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val(loopSettings.loopTags || '');
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(loopSettings.loopDelay);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(loopSettings.loopTotalDuration);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(loopSettings.maxRetries);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(plotSettings.contextTurnCount);
-    renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`, normalizeExtractRules_ACU(plotSettings.contextExtractRules, plotSettings.contextExtractTags || ''), {
-        startPlaceholder: '开始词（例如：<think）',
-        endPlaceholder: '结束词（例如：</think>）',
-        fallbackRules: getDefaultPlotContextExtractRules_ACU(),
-    });
-    renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`, normalizeExcludeRules_ACU(plotSettings.contextExcludeRules, plotSettings.contextExcludeTags || ''), {
-        startPlaceholder: '开始词（例如：<thinking）',
-        endPlaceholder: '结束词（例如：</thinking>）',
-        fallbackRules: getDefaultPlotContextExcludeRules_ACU(),
-    });
-    // 循环状态
-    updatePlotLoopStatusUI_ACU();
-    // 预设选择器
-    loadPlotPresetSelect_ACU();
-}
-/**
- * 加载正文替换预设选择器
- */
-function loadOptimizationPresetSelect_ACU() {
-    if (!$popupInstance_ACU)
-        return;
-    const $select = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-preset-select`);
-    const $deleteBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-delete-preset`);
-    if (!$select.length)
-        return;
-    const presets = settings_ACU.contentOptimizationSettings?.promptPresets || [];
-    const currentValue = $select.val();
-    $select.find('option:not(:first)').remove();
-    presets.forEach((preset) => {
-        if (preset && preset.name) {
-            $select.append(renderOption_ACU(preset.name, preset.name));
-        }
-    });
-    // 恢复之前选中的值（如果还存在）
-    if (currentValue && presets.find((p) => p.name === currentValue)) {
-        $select.val(currentValue);
-        if ($deleteBtn.length)
-            $deleteBtn.show();
-    }
-    else {
-        $select.val('');
-        if ($deleteBtn.length)
-            $deleteBtn.hide();
-    }
-}
-/**
- * 另存为新的正文替换预设
- */
-function saveOptimizationPresetAsNew_ACU() {
-    const presetName = prompt('请输入新预设的名称：');
-    if (!presetName || !presetName.trim()) {
-        showToastr_ACU('warning', '预设名称不能为空。');
-        return;
-    }
-    const name = presetName.trim();
-    const presets = settings_ACU.contentOptimizationSettings.promptPresets || [];
-    const existingIndex = presets.findIndex((p) => p.name === name);
-    if (existingIndex !== -1) {
-        if (!confirm(`预设 "${name}" 已存在。是否覆盖？`)) {
-            return;
-        }
-        presets[existingIndex] = {
-            name: name,
-            promptGroup: getOptimizationPromptGroupFromUI_ACU()
-        };
-        showToastr_ACU('success', `预设 "${name}" 已被覆盖。`);
-    }
-    else {
-        presets.push({
-            name: name,
-            promptGroup: getOptimizationPromptGroupFromUI_ACU()
-        });
-        showToastr_ACU('success', `预设 "${name}" 已成功创建。`);
-    }
-    settings_ACU.contentOptimizationSettings.promptPresets = presets;
-    saveSettingsAndNotify_ACU();
-    loadOptimizationPresetSelect_ACU();
-    // 选中新创建的预设
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-preset-select`).val(name);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-delete-preset`).show();
-}
-/**
- * 加载正文替换设置到UI
- */
-function loadOptimizationSettingsToUI_ACU() {
-    if (!$popupInstance_ACU)
-        return;
-    const config = settings_ACU.contentOptimizationSettings || {};
-    // [隐藏功能] 只有当剧情推进最大重试次数为49时才显示正文替换标签
-    const plotMaxRetries = settings_ACU.plotSettings?.loopSettings?.maxRetries ?? 3;
-    const $optimizationTab = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-tab-optimization`);
-    if ($optimizationTab.length) {
-        if (plotMaxRetries === 49) {
-            $optimizationTab.show();
-        }
-        else {
-            $optimizationTab.hide();
-        }
-    }
-    // 功能开关
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-enabled`).prop('checked', !!config.enabled);
-    // API预设
-    const $apiPreset = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-api-preset`);
-    if ($apiPreset.length) {
-        $apiPreset.val(config.apiPreset || '');
-    }
-    // 基础设置
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-min-length`).val(config.minLength || 100);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-max-items`).val(config.maxOptimizations || 10);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-loop-count`).val(config.loopCount || 1);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-retry-count`).val(config.retryCount || 3);
-    // 优化模式
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-seamless-mode`).prop('checked', config.seamlessMode !== false);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-auto-apply`).prop('checked', config.autoApply !== false);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-show-diff`).prop('checked', config.showDiff !== false);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-parallel-mode`).prop('checked', config.parallelMode === true);
-    // 标签筛选设置
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-extract-tags`).val(config.extractTags || '');
-    // 加载标签提取规则
-    renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-optimization-extract-rules`, config.extractRules || [], {
-        startPlaceholder: '开始词（例如：<think）',
-        endPlaceholder: '结束词（例如：</think）',
-    });
-    // 加载标签排除规则
-    renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-optimization-exclude-rules`, config.excludeRules || [], {
-        startPlaceholder: '开始词（例如：<think）',
-        endPlaceholder: '结束词（例如：</think）',
-    });
-    // 加载预设选择器
-    loadOptimizationPresetSelect_ACU();
-    // 提示词组
-    const promptGroup = config.promptGroup && config.promptGroup.length > 0
-        ? config.promptGroup
-        : DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU;
-    renderOptimizationPromptSegments_ACU(promptGroup);
-}
-/**
- * 渲染正文优化提示词段落
- */
-function renderOptimizationPromptSegments_ACU(segments) {
-    if (!$popupInstance_ACU)
-        return;
-    const $container = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-optimization-prompt-segments-container`);
-    if (!$container.length)
-        return;
-    $container.empty();
-    if (!Array.isArray(segments))
-        return;
-    segments.forEach((segment, index) => {
-        const isMain = segment.isMain || segment.mainSlot === 'A';
-        const isMain2 = segment.isMain2 || segment.mainSlot === 'B';
-        const deletable = segment.deletable !== false;
-        const segmentHtml = `
-          <div class="optimization-prompt-segment" data-index="${index}" style="
-            margin-bottom: 15px;
-            padding: 15px;
-            background: var(--background_default);
-            border-radius: 8px;
-            border: 1px solid var(--border_color_light);
-            ${isMain ? 'border-left: 3px solid var(--blue);' : ''}
-            ${isMain2 ? 'border-left: 3px solid var(--purple);' : ''}
-          ">
-            <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
-              <select class="optimization-prompt-segment-role text_pole" data-index="${index}" style="width: 120px;">
-                <option value="SYSTEM" ${segment.role === 'SYSTEM' ? 'selected' : ''}>SYSTEM</option>
-                <option value="USER" ${segment.role === 'USER' ? 'selected' : ''}>USER</option>
-                <option value="assistant" ${segment.role === 'assistant' ? 'selected' : ''}>assistant</option>
-              </select>
-              ${deletable ? `
-                <button type="button" class="optimization-prompt-segment-delete-btn button" data-index="${index}" style="margin-left: auto; padding: 4px 8px; font-size: 0.85em;">
-                  <i class="fa-solid fa-trash"></i>
-                </button>
-              ` : ''}
-            </div>
-            <textarea class="optimization-prompt-segment-content text_pole" data-index="${index}" rows="6" placeholder="输入提示词内容..." style="resize: vertical; width: 100%;">${escapeHtml_ACU(segment.content || '')}</textarea>
-          </div>
-        `;
-        $container.append(segmentHtml);
-    });
-    // 绑定输入事件
-    $container.find('.optimization-prompt-segment-role').on('change', function () {
-        const idx = parseInt(jQuery_API_ACU(this).data('index'), 10);
-        const segments = getOptimizationPromptGroupFromUI_ACU();
-        if (segments[idx]) {
-            segments[idx].role = jQuery_API_ACU(this).val();
-            settings_ACU.contentOptimizationSettings.promptGroup = segments;
-            saveSettingsAndNotify_ACU();
-        }
-    });
-    $container.find('.optimization-prompt-segment-content').on('input change', function () {
-        const idx = parseInt(jQuery_API_ACU(this).data('index'), 10);
-        const segments = getOptimizationPromptGroupFromUI_ACU();
-        if (segments[idx]) {
-            segments[idx].content = jQuery_API_ACU(this).val();
-            settings_ACU.contentOptimizationSettings.promptGroup = segments;
-            saveSettingsAndNotify_ACU();
-        }
-    });
-}
-/**
- * 从UI获取正文优化提示词组
- */
-function getOptimizationPromptGroupFromUI_ACU() {
-    if (!$popupInstance_ACU)
-        return [];
-    const segments = [];
-    const $segments = $popupInstance_ACU.find('.optimization-prompt-segment');
-    $segments.each(function () {
-        const $seg = jQuery_API_ACU(this);
-        const index = parseInt($seg.data('index'), 10);
-        const role = $seg.find('.optimization-prompt-segment-role').val();
-        const content = $seg.find('.optimization-prompt-segment-content').val();
-        segments.push({
-            role: role || 'USER',
-            content: content || '',
-            deletable: true
-        });
-    });
-    return segments;
-}
-/**
- * 更新剧情推进循环状态UI
- */
-function updatePlotLoopStatusUI_ACU() {
-    if (!$popupInstance_ACU)
-        return;
-    const $statusText = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-status-text`);
-    const $timerDisplay = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-timer-display`);
-    const $startBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-start-loop-btn`);
-    const $stopBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-stop-loop-btn`);
-    if (loopState_ACU.isLooping) {
-        $statusText.text('运行中').css('color', 'var(--green)');
-        $startBtn.hide();
-        $stopBtn.show();
-        $timerDisplay.show();
-    }
-    else {
-        $statusText.text('未运行').css('color', 'var(--red)');
-        $stopBtn.hide();
-        $startBtn.show();
-        $timerDisplay.hide().text('');
-    }
-}
-/**
- * 加载剧情预设选择器
- */
-function getPlotPresetDisplayName_ACU(presetName) {
-    const normalizedPresetName = normalizePlotPresetSelectionValue_ACU(presetName);
-    return normalizedPresetName || '默认预设';
-}
-function formatPlotScopeUpdatedAt_ACU(updatedAt) {
-    const ts = Number(updatedAt) || 0;
-    if (!ts)
-        return '';
-    try {
-        return new Date(ts).toLocaleString('zh-CN', { hour12: false });
-    }
-    catch (error) {
-        return '';
-    }
-}
-function populatePlotPresetSelectOptions_ACU($select, presets, { extraPresetName = '' } = {}) {
-    if (!$select || !$select.length)
-        return;
-    const normalizedExtraPresetName = normalizePlotPresetSelectionValue_ACU(extraPresetName);
-    const normalizedPresetNames = new Set();
-    $select.empty().append(`<option value="${DEFAULT_PRESET_OPTION_VALUE_ACU}">默认预设</option>`);
-    presets.forEach((preset) => {
-        const presetName = normalizePlotPresetSelectionValue_ACU(preset?.name);
-        if (!presetName || normalizedPresetNames.has(presetName))
-            return;
-        normalizedPresetNames.add(presetName);
-        $select.append(renderOption_ACU(presetName, presetName));
-    });
-    if (normalizedExtraPresetName && !normalizedPresetNames.has(normalizedExtraPresetName)) {
-        $select.append(renderOption_ACU(normalizedExtraPresetName, `${normalizedExtraPresetName}（仅当前聊天快照）`));
-    }
-}
-function loadPlotPresetSelect_ACU() {
-    if (!$popupInstance_ACU || !settings_ACU?.plotSettings)
-        return;
-    const presets = settings_ACU.plotSettings.promptPresets || [];
-    const globalPresetName = normalizePlotPresetSelectionValue_ACU(settings_ACU.plotSettings.lastUsedPresetName || '');
-    const chatScopeState = getCurrentChatPlotScopeState_ACU();
-    const currentBinding = getPlotPresetBindingForChat_ACU();
-    const effectiveChatPresetName = resolveActivePlotPresetName_ACU({ fallbackToGlobal: true });
-    const explicitChatPresetName = normalizePlotPresetSelectionValue_ACU(currentBinding?.presetName || '');
-    const chatSelectedPresetName = normalizePlotPresetSelectionValue_ACU(explicitChatPresetName || chatScopeState?.presetName || '');
-    const $globalSelect = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-preset-select`);
-    const $chatSelect = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-chat-preset-select`);
-    const $globalDeleteBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-delete-preset`);
-    const $globalStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-scope-status`);
-    const $chatStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-chat-scope-status`);
-    const $chatOriginStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-chat-origin-status`);
-    populatePlotPresetSelectOptions_ACU($globalSelect, presets);
-    populatePlotPresetSelectOptions_ACU($chatSelect, presets, { extraPresetName: chatSelectedPresetName });
-    if ($chatSelect.length) {
-        $chatSelect.find(`option[value="${DEFAULT_PRESET_OPTION_VALUE_ACU}"]`).text('跟随全局');
-    }
-    const hasGlobalPreset = !!globalPresetName && presets.some((p) => normalizePlotPresetSelectionValue_ACU(p?.name) === globalPresetName);
-    const hasChatPreset = !!chatSelectedPresetName && $chatSelect.find(`option[value="${chatSelectedPresetName.replace(/"/g, '\\"')}"]`).length > 0;
-    const hasValidExplicitChatPreset = !!explicitChatPresetName && !!findPlotPresetByName_ACU(explicitChatPresetName);
-    if ($globalSelect.length) {
-        $globalSelect.val(hasGlobalPreset ? globalPresetName : DEFAULT_PRESET_OPTION_VALUE_ACU);
-    }
-    if ($globalDeleteBtn.length) {
-        $globalDeleteBtn.toggle(hasGlobalPreset);
-    }
-    if ($chatSelect.length) {
-        $chatSelect.val(hasChatPreset ? chatSelectedPresetName : DEFAULT_PRESET_OPTION_VALUE_ACU);
-    }
-    if ($globalStatus.length) {
-        $globalStatus.text(`当前全局预设：${getPlotPresetDisplayName_ACU(globalPresetName)}；新聊天会默认继承这里的剧情推进配置。`);
-    }
-    if ($chatStatus.length) {
-        if (chatScopeState?.snapshot) {
-            $chatStatus.text(`当前聊天：历史聊天快照；当前实际预设为 ${getPlotPresetDisplayName_ACU(effectiveChatPresetName)}。`);
-        }
-        else if (hasValidExplicitChatPreset) {
-            $chatStatus.text(`当前聊天：独立预设；当前实际预设为 ${getPlotPresetDisplayName_ACU(explicitChatPresetName)}。`);
-        }
-        else if (chatSelectedPresetName) {
-            $chatStatus.text(`当前聊天：原绑定预设不存在；当前已回退为 ${getPlotPresetDisplayName_ACU(effectiveChatPresetName)}。`);
-        }
-        else {
-            $chatStatus.text(`当前聊天：跟随全局；当前实际预设为 ${getPlotPresetDisplayName_ACU(effectiveChatPresetName)}。`);
-        }
-    }
-    if ($chatOriginStatus.length) {
-        if (chatScopeState?.snapshot) {
-            $chatOriginStatus.text('当前聊天仍在使用旧版聊天快照；重新切换一次当前聊天预设后，将迁移为新的按预设切换模式。');
-        }
-        else if (hasValidExplicitChatPreset) {
-            $chatOriginStatus.text('当前聊天已单独指定剧情推进预设；如需修改预设内容，请在左侧全局预设区操作。');
-        }
-        else if (chatSelectedPresetName) {
-            $chatOriginStatus.text('当前聊天原绑定的剧情推进预设已不存在；当前运行已回退到全局预设，请重新选择一次当前聊天预设。');
-        }
-        else {
-            $chatOriginStatus.text('当前聊天当前未单独指定剧情推进预设，实际会直接跟随全局。');
-        }
-    }
-}
-/**
- * 加载预设到UI
- */
-function loadPlotPresetToUI_ACU(preset) {
-    if (!$popupInstance_ACU || !preset)
-        return;
-    const presetName = preset.name || '默认预设';
-    const result = applyGlobalPlotPresetSelectionForEditor_ACU(preset.name || '', {
-        source: 'ui_global_load',
-        save: true,
-    });
-    if (!result)
-        return;
-    showToastr_ACU('success', `已加载全局预设 "${presetName}"。`);
-}
-/**
- * 从UI获取当前剧情设置
- */
-function getCurrentPlotSettingsFromUI_ACU() {
-    if (!$popupInstance_ACU)
-        return {};
-    flushCurrentPlotTaskEditorState_ACU({ renderTaskList: true, persist: false });
-    const activeSettings = getActivePlotEditorSettings_ACU();
-    const currentSettings = JSON.parse(JSON.stringify(activeSettings || settings_ACU.plotSettings || {}));
-    ensurePlotTasksCompat_ACU(currentSettings, { syncLegacy: true });
-    delete currentSettings.promptPresets;
-    delete currentSettings.lastUsedPresetName;
-    delete currentSettings.enabled;
-    const promptGroup = getPlotPromptGroupFromSource_ACU(currentSettings);
-    const legacyPromptTexts = getLegacyPromptTextsFromPromptGroup_ACU(promptGroup);
-    currentSettings.promptGroup = promptGroup;
-    currentSettings.finalSystemDirective = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-final-directive`).val() || '';
-    currentSettings.mainPrompt = legacyPromptTexts.mainPrompt || '';
-    currentSettings.systemPrompt = legacyPromptTexts.systemPrompt || '';
-    currentSettings.rateMain = parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-main`).val()) || 1.0;
-    currentSettings.ratePersonal = parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal`).val()) || 1.0;
-    currentSettings.rateErotic = parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic`).val()) || 0;
-    currentSettings.rateCuckold = parseFloat($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold`).val()) || 1.0;
-    currentSettings.recallCount = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-recall-count`).val(), 10) || 20;
-    currentSettings.contextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
-    currentSettings.contextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
-    currentSettings.contextTurnCount = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count`).val(), 10) || 3;
-    currentSettings.loopSettings = {
-        ...(currentSettings.loopSettings || {}),
-        quickReplyContent: (() => {
-            const prompts = [];
-            $popupInstance_ACU.find('.loop-prompt-textarea').each(function () {
-                const content = String(jQuery_API_ACU(this).val() || '').trim();
-                if (content)
-                    prompts.push(content);
-            });
-            return prompts;
-        })(),
-        currentPromptIndex: 0,
-        loopTags: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-tags`).val() || '',
-        loopDelay: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay`).val(), 10) || 5,
-        loopTotalDuration: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val(), 10) || 0,
-        maxRetries: parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-max-retries`).val(), 10) || 3,
-    };
-    currentSettings.plotTasks = normalizePlotTasks_ACU(currentSettings);
-    ensurePlotPromptsArray_ACU(currentSettings);
-    setPlotPromptContentByIdForSettings_ACU(currentSettings, 'mainPrompt', currentSettings.mainPrompt || '');
-    setPlotPromptContentByIdForSettings_ACU(currentSettings, 'systemPrompt', currentSettings.systemPrompt || '');
-    setPlotPromptContentByIdForSettings_ACU(currentSettings, 'finalSystemDirective', currentSettings.finalSystemDirective || '');
-    ensurePlotTasksCompat_ACU(currentSettings, { syncLegacy: true });
-    currentSettings.finalSystemDirective = getPlotPromptContentByIdFromSettings_ACU(currentSettings, 'finalSystemDirective') || currentSettings.finalSystemDirective || '';
-    return currentSettings;
-}
-/**
- * 另存为新的全局预设
- */
-function savePlotPresetAsNew_ACU() {
-    const presetName = prompt('请输入新的全局预设名称：');
-    const name = String(presetName || '').trim();
-    if (!name)
-        return;
-    const presets = settings_ACU.plotSettings.promptPresets || [];
-    const existingIndex = presets.findIndex((p) => p.name === name);
-    const currentSettings = getCurrentPlotSettingsFromUI_ACU();
-    if (!currentSettings || typeof currentSettings !== 'object') {
-        showToastr_ACU('error', '读取当前剧情推进设置失败。');
-        return;
-    }
-    const savedPreset = normalizePlotPresetExcludeRules_ACU({ name, ...currentSettings });
-    if (existingIndex !== -1) {
-        if (!confirm(`名为 "${name}" 的全局预设已存在。是否要覆盖它？`)) {
-            return;
-        }
-        presets[existingIndex] = savedPreset;
-    }
-    else {
-        presets.push(savedPreset);
-    }
-    settings_ACU.plotSettings.promptPresets = presets;
-    const currentRuntimePresetName = getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
-    const currentChatBinding = getPlotPresetBindingForChat_ACU();
-    const hasLegacyChatScope = !!getCurrentChatPlotScopeState_ACU();
-    const shouldRefreshCurrentChatRuntime = normalizePlotPresetSelectionValue_ACU(currentRuntimePresetName) === name ||
-        (!currentChatBinding && !hasLegacyChatScope);
-    if (shouldRefreshCurrentChatRuntime) {
-        applyPlotPresetToSettings_ACU(settings_ACU.plotSettings, savedPreset);
-    }
-    setCurrentEditablePlotPresetState_ACU(name, {
-        scope: 'global',
-        source: 'ui_global_save_as_new',
-    });
-    persistPlotPresetSelectionState_ACU(name, { source: 'ui_global_save_as_new', updateGlobal: true, save: false });
-    saveSettingsAndNotify_ACU();
-    loadPlotPresetSelect_ACU();
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-preset-select`).val(name);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-global-delete-preset`).show();
-    showToastr_ACU('success', `新全局预设 "${name}" 已保存。`);
-}
-
-/**
- * presentation/components/template-preset-ui.ts — 模板预设 UI 函数（纯 DOM 操作）
- *
- * 纯业务逻辑函数已搬到 service/template/template-preset-service.ts。
- * 本文件只保留操作 DOM 的 UI 函数。
- */
-// ═══ 纯 DOM 操作函数 ═══
-function getTemplatePresetSelectJQ_ACU() {
-    try {
-        if (!$popupInstance_ACU || !$popupInstance_ACU.length)
-            return null;
-        const $sel = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-select`);
-        return $sel && $sel.length ? $sel : null;
-    }
-    catch (e) {
-        return null;
-    }
-}
-function getTemplateChatPresetSelectJQ_ACU() {
-    try {
-        if (!$popupInstance_ACU || !$popupInstance_ACU.length)
-            return null;
-        const $sel = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-chat-preset-select`);
-        return $sel && $sel.length ? $sel : null;
-    }
-    catch (e) {
-        return null;
-    }
-}
-function populateTemplatePresetSelectOptions_ACU($select, { extraPresetName = '', extraLabelSuffix = '（仅当前聊天快照）', extraOptions = [] } = {}) {
-    if (!$select || !$select.length)
-        return;
-    const normalizedExtraPresetName = normalizeTemplatePresetSelectionValue_ACU(extraPresetName);
-    const presetNames = listTemplatePresetNames_ACU();
-    const renderedNames = new Set();
-    $select.empty().append(jQuery_API_ACU('<option/>').val(DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU).text('默认预设'));
-    presetNames.forEach(name => {
-        const normalizedName = normalizeTemplatePresetSelectionValue_ACU(name);
-        if (!normalizedName || renderedNames.has(normalizedName))
-            return;
-        renderedNames.add(normalizedName);
-        $select.append(jQuery_API_ACU('<option/>').val(normalizedName).text(normalizedName));
-    });
-    if (normalizedExtraPresetName && !renderedNames.has(normalizedExtraPresetName)) {
-        renderedNames.add(normalizedExtraPresetName);
-        $select.append(jQuery_API_ACU('<option/>').val(normalizedExtraPresetName).text(`${normalizedExtraPresetName}${extraLabelSuffix}`));
-    }
-    (Array.isArray(extraOptions) ? extraOptions : []).forEach(option => {
-        const value = String(option?.value || '').trim();
-        if (!value || renderedNames.has(value))
-            return;
-        renderedNames.add(value);
-        const label = String(option?.label || value).trim() || value;
-        $select.append(jQuery_API_ACU('<option/>').val(value).text(label));
-    });
-}
-function loadTemplatePresetSelect_ACU({ globalSelectName = null, keepGlobalValue = false } = {}) {
-    if (!$popupInstance_ACU || !$popupInstance_ACU.length)
-        return;
-    const presetNames = listTemplatePresetNames_ACU();
-    const globalPresetName = normalizeTemplatePresetSelectionValue_ACU(getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: false }));
-    const chatScopeState = getCurrentChatTemplateScopeState_ACU() || migrateLegacyTemplateScopeForCurrentChat_ACU();
-    const normalizedChatMode = normalizeTemplateScopeMode_ACU(chatScopeState?.mode);
-    const effectiveChatPresetName = resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true });
-    const chatSelectedPresetName = normalizeTemplatePresetSelectionValue_ACU(chatScopeState?.presetName || effectiveChatPresetName || '');
-    const chatPresetEntries = listChatTemplatePresetEntries_ACU();
-    const localOnlyOptions = chatPresetEntries
-        .filter(entry => {
-        const entryName = normalizeTemplatePresetSelectionValue_ACU(entry?.presetName || '');
-        return !!entryName && !presetNames.includes(entryName);
-    })
-        .map(entry => {
-        const entryName = normalizeTemplatePresetSelectionValue_ACU(entry?.presetName || '');
-        const updatedAtText = (typeof formatPlotScopeUpdatedAt_ACU === 'function')
-            ? formatPlotScopeUpdatedAt_ACU(entry?.updatedAt || entry?.archivedAt)
-            : '';
-        return {
-            value: entryName,
-            label: updatedAtText
-                ? `${getTemplatePresetDisplayName_ACU(entryName)}（当前聊天快照，${updatedAtText}）`
-                : `${getTemplatePresetDisplayName_ACU(entryName)}（当前聊天快照）`,
-        };
-    });
-    const chatPresetEntryCount = chatPresetEntries.length;
-    const chatExtraPresetName = (() => {
-        if (!chatSelectedPresetName)
-            return '';
-        if (presetNames.includes(chatSelectedPresetName))
-            return '';
-        if (localOnlyOptions.some(option => option.value === chatSelectedPresetName))
-            return '';
-        return chatSelectedPresetName;
-    })();
-    const $globalSelect = getTemplatePresetSelectJQ_ACU();
-    const $chatSelect = getTemplateChatPresetSelectJQ_ACU();
-    const $globalStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-global-scope-status`);
-    const $chatStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-chat-scope-status`);
-    const $chatOriginStatus = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-chat-origin-status`);
-    const $globalDeleteBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-template-preset-delete`);
-    const hasGlobalPreset = !!globalPresetName && presetNames.includes(globalPresetName);
-    populateTemplatePresetSelectOptions_ACU($globalSelect, {
-        extraPresetName: hasGlobalPreset ? '' : globalPresetName,
-        extraLabelSuffix: '（仅当前全局模板快照）',
-    });
-    populateTemplatePresetSelectOptions_ACU($chatSelect, {
-        extraPresetName: chatExtraPresetName,
-        extraLabelSuffix: normalizedChatMode === 'preset_link' ? '（当前聊天引用）' : '（当前聊天专属预设）',
-        extraOptions: localOnlyOptions,
-    });
-    if ($globalSelect && $globalSelect.length) {
-        let resolvedGlobalValue = globalPresetName;
-        if (globalSelectName !== null && typeof globalSelectName !== 'undefined') {
-            resolvedGlobalValue = normalizeTemplatePresetSelectionValue_ACU(globalSelectName);
-        }
-        else if (keepGlobalValue) {
-            resolvedGlobalValue = normalizeTemplatePresetSelectionValue_ACU($globalSelect.val());
-        }
-        const finalGlobalValue = resolvedGlobalValue && $globalSelect.find(`option[value="${resolvedGlobalValue.replace(/"/g, '\\"')}"]`).length > 0
-            ? resolvedGlobalValue
-            : (hasGlobalPreset || (!!globalPresetName && $globalSelect.find(`option[value="${globalPresetName.replace(/"/g, '\\"')}"]`).length > 0)
-                ? globalPresetName
-                : DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
-        $globalSelect.val(finalGlobalValue || DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
-    }
-    if ($globalDeleteBtn && $globalDeleteBtn.length) {
-        $globalDeleteBtn.toggle(!!globalPresetName && presetNames.includes(globalPresetName));
-    }
-    if ($chatSelect && $chatSelect.length) {
-        const finalChatValue = chatSelectedPresetName && $chatSelect.find(`option[value="${chatSelectedPresetName.replace(/"/g, '\\"')}"]`).length > 0
-            ? chatSelectedPresetName
-            : DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU;
-        $chatSelect.val(finalChatValue || DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
-    }
-    if ($globalStatus && $globalStatus.length) {
-        if (globalPresetName && !hasGlobalPreset) {
-            $globalStatus.text(`当前全局模板：${globalPresetName}（预设库已不存在，但当前 profile 仍保留这份模板快照）。`);
-        }
-        else {
-            $globalStatus.text(`当前全局模板：${getTemplatePresetDisplayName_ACU(globalPresetName)}；新聊天会默认继承这里的表格模板。`);
-        }
-    }
-    if ($chatStatus && $chatStatus.length) {
-        if (normalizedChatMode === 'chat_override') {
-            let scopeLabel = '当前聊天专属预设';
-            if (chatScopeState.source === 'legacy_frozen') {
-                scopeLabel = '旧版聊天冻结模板（已迁移）';
-            }
-            else if (chatScopeState.source === 'legacy_history_frozen') {
-                scopeLabel = '旧对话历史模板快照（已迁移）';
-            }
-            else if (chatScopeState.source === 'legacy_header_frozen') {
-                scopeLabel = '旧版表头冻结模板（已迁移）';
-            }
-            $chatStatus.text(`当前聊天：${scopeLabel}；当前实际模板预设为 ${getTemplatePresetDisplayName_ACU(chatSelectedPresetName)}。`);
-        }
-        else if (normalizedChatMode === 'preset_link') {
-            $chatStatus.text(`当前聊天：引用全局预设 ${getTemplatePresetDisplayName_ACU(chatSelectedPresetName)}；打开聊天时会继续沿用这个预设。`);
-        }
-        else {
-            $chatStatus.text(`当前聊天：跟随当前全局；当前实际模板预设为 ${getTemplatePresetDisplayName_ACU(effectiveChatPresetName)}。`);
-        }
-    }
-    if ($chatOriginStatus && $chatOriginStatus.length) {
-        if (normalizedChatMode === 'chat_override') {
-            const detailParts = [];
-            if (chatScopeState.source === 'legacy_frozen') {
-                detailParts.push('来源语义：从旧版聊天冻结模板迁移');
-            }
-            else if (chatScopeState.source === 'legacy_history_frozen') {
-                detailParts.push('来源语义：从旧对话实际表格结构迁移');
-            }
-            else if (chatScopeState.source === 'legacy_header_frozen') {
-                detailParts.push('来源语义：从旧版表头冻结模板迁移');
-            }
-            else {
-                detailParts.push('来源语义：当前聊天已保存本地模板预设快照');
-            }
-            if (chatScopeState.originGlobalName) {
-                detailParts.push(`来源全局模板：${getTemplatePresetDisplayName_ACU(chatScopeState.originGlobalName)}`);
-            }
-            if (Number.isFinite(chatScopeState.originGlobalRevision) && chatScopeState.originGlobalRevision > 0) {
-                detailParts.push(`来源全局版本：v${chatScopeState.originGlobalRevision}`);
-            }
-            const updatedAtText = (typeof formatPlotScopeUpdatedAt_ACU === 'function') ? formatPlotScopeUpdatedAt_ACU(chatScopeState.updatedAt) : '';
-            if (updatedAtText) {
-                detailParts.push(`更新时间：${updatedAtText}`);
-            }
-            if (chatScopeState.source) {
-                detailParts.push(`写入来源：${chatScopeState.source}`);
-            }
-            if (chatPresetEntryCount > 0) {
-                detailParts.push(`当前聊天已登记 ${chatPresetEntryCount} 个本地模板预设`);
-            }
-            $chatOriginStatus.text(detailParts.join('；') || '当前聊天正在使用聊天级模板预设快照。');
-        }
-        else if (normalizedChatMode === 'preset_link') {
-            const detailParts = [
-                '来源语义：当前聊天仅记录预设引用，未保存本地模板快照',
-                `引用预设：${getTemplatePresetDisplayName_ACU(chatSelectedPresetName)}`,
-            ];
-            const updatedAtText = (typeof formatPlotScopeUpdatedAt_ACU === 'function') ? formatPlotScopeUpdatedAt_ACU(chatScopeState?.updatedAt) : '';
-            if (updatedAtText) {
-                detailParts.push(`更新时间：${updatedAtText}`);
-            }
-            if (chatScopeState?.source) {
-                detailParts.push(`写入来源：${chatScopeState.source}`);
-            }
-            if (chatPresetEntryCount > 0) {
-                detailParts.push(`当前聊天可切换/覆盖 ${chatPresetEntryCount} 个本地模板预设`);
-            }
-            $chatOriginStatus.text(detailParts.join('；'));
-        }
-        else if (chatPresetEntryCount > 0) {
-            $chatOriginStatus.text(`当前聊天尚未保存本地模板快照，实际会跟随当前全局模板；但当前聊天已经拥有 ${chatPresetEntryCount} 个可直接切换的本地模板预设。`);
-        }
-        else {
-            $chatOriginStatus.text('当前聊天尚未保存本地模板快照，实际会直接跟随当前全局表格模板。');
-        }
-    }
-}
-function refreshTemplatePresetSelectInUI_ACU({ selectName = null, keepValue = false } = {}) {
-    if ($popupInstance_ACU && $popupInstance_ACU.length) {
-        loadTemplatePresetSelect_ACU({ globalSelectName: selectName, keepGlobalValue: !!keepValue });
-        return;
-    }
-    const $sel = getTemplatePresetSelectJQ_ACU();
-    if (!$sel || !$sel.length)
-        return;
-    renderTemplatePresetSelect_ACU($sel, { keepValue: !!keepValue });
-    if (selectName === null || typeof selectName === 'undefined')
-        return;
-    const normalizedName = normalizeTemplatePresetSelectionValue_ACU(selectName);
-    $sel.val(normalizedName || DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
-}
-function renderTemplatePresetSelect_ACU($select, { keepValue = true } = {}) {
-    try {
-        if (!$select || !$select.length)
-            return;
-        const prev = keepValue ? normalizeTemplatePresetSelectionValue_ACU($select.val()) : '';
-        const names = listTemplatePresetNames_ACU();
-        const persistedName = getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: true, getTemplatePresetFn: getTemplatePreset_ACU });
-        $select.empty();
-        $select.append(jQuery_API_ACU('<option/>').val(DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU).text('默认预设'));
-        names.forEach(n => {
-            $select.append(jQuery_API_ACU('<option/>').val(String(n)).text(String(n)));
-        });
-        let resolvedValue = DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU;
-        if (keepValue) {
-            if (isDefaultTemplatePresetSelection_ACU(prev)) {
-                resolvedValue = DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU;
-            }
-            else if (names.includes(prev)) {
-                resolvedValue = prev;
-            }
-        }
-        if (resolvedValue === DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU && persistedName && names.includes(persistedName)) {
-            resolvedValue = persistedName;
-        }
-        $select.val(resolvedValue);
-    }
-    catch (e) { }
-}
-
-/**
  * DDL 校验纯函数 — 从 jQuery 事件处理器中提取，方便单元测试
  * @returns { valid: boolean; message: string } 校验结果
  */
@@ -27340,6 +28611,15 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
     const updateConfig = sheet.updateConfig || {};
     const sourceData = sheet.sourceData || {};
     const ucVal = (v) => (Number.isFinite(v) ? v : -1);
+    // [新增] 表级 API 预设覆盖：按标准化表名从 settings 映射中读取
+    const normalizedSheetName = String(sheet.name || '').trim();
+    const currentTableApiPreset = (settings_ACU.tableApiPresetOverridesByName && normalizedSheetName)
+        ? (settings_ACU.tableApiPresetOverridesByName[normalizedSheetName] || '')
+        : '';
+    const apiPresets = settings_ACU.apiPresets || [];
+    const tableApiPresetOptionsHtml = apiPresets.length > 0
+        ? apiPresets.map((p) => `<option value="${escapeHtml_ACU$1(p.name)}" ${currentTableApiPreset === p.name ? 'selected' : ''}>${escapeHtml_ACU$1(p.name)}</option>`).join('')
+        : '';
     const entryPlacement = normalizePlacementConfig_ACU(config.entryPlacement, DEFAULT_ENTRY_PLACEMENT_ACU);
     const extraIndexPlacement = normalizePlacementConfig_ACU(config.extraIndexPlacement, DEFAULT_EXTRA_INDEX_PLACEMENT_ACU);
     const fixedDefaults = getFixedPlacementDefaultsForTable_ACU(sheet.name);
@@ -27360,7 +28640,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
                     <div class="acu-extra-index-col-row" style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
                         <label style="display:flex; align-items:center; gap:6px; margin:0; min-width: 220px;">
                             <input type="checkbox" class="cfg-extra-index-col-check" data-col-idx="${colIdx}" ${checked ? 'checked' : ''}>
-                            <span>${escapeHtml_ACU(header)}</span>
+                            <span>${escapeHtml_ACU$1(header)}</span>
                         </label>
                         <select class="acu-form-input cfg-extra-index-col-mode" data-col-idx="${colIdx}" style="max-width: 260px;" ${checked ? '' : 'disabled'}>
                             <option value="both" ${modeVal === 'both' ? 'selected' : ''}>该列在原条目和索引条目都保留</option>
@@ -27390,7 +28670,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
                       </label>
                       <div class="acu-hint">锁定时该列由系统按 AM0001、AM0002... 自动生成，仅对AI更新生效。</div>
                       ${specialIndexCol >= 0
-        ? `<div class="acu-hint">当前识别列: [${specialIndexCol}] ${escapeHtml_ACU(String(specialIndexHeader || ''))}</div>`
+        ? `<div class="acu-hint">当前识别列: [${specialIndexCol}] ${escapeHtml_ACU$1(String(specialIndexHeader || ''))}</div>`
         : `<div class="acu-hint" style="color:#f6c177;">未识别到编码索引列，将默认使用最后一列。</div>`}
                   </div>
               </div>
@@ -27439,7 +28719,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
                   <h4>基本信息</h4>
                   <div class="acu-form-group">
                       <label>表格名称:</label>
-                      <input type="text" class="acu-form-input" id="cfg-name" value="${escapeHtml_ACU(sheet.name)}">
+                      <input type="text" class="acu-form-input" id="cfg-name" value="${escapeHtml_ACU$1(sheet.name)}">
                   </div>
               </div>
 
@@ -27472,33 +28752,40 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
                       <label>跳过更新楼层 (Skip Floors): <span class="acu-hint">(-1 = 沿用UI全局, 0+ = 生效)</span></label>
                       <input type="number" class="acu-form-input" id="cfg-skip" min="-1" step="1" value="${ucVal(updateConfig.skipFloors)}">
                   </div>
-                  <div class="acu-form-group">
-                      <label>发送最新N行 (Send Latest Rows): <span class="acu-hint">(-1 = 全部发送, 0 = 沿用UI全局, 1+ = 仅发送最新N条；纪要表固定使用10条)</span></label>
-                      <input type="number" class="acu-form-input" id="cfg-send-rows" min="-1" step="1" value="${ucVal(updateConfig.sendLatestRows)}">
-                  </div>
-              </div>
+                   <div class="acu-form-group">
+                       <label>发送最新N行 (Send Latest Rows): <span class="acu-hint">(-1 = 全部发送, 0 = 沿用UI全局, 1+ = 仅发送最新N条；纪要表固定使用10条)</span></label>
+                       <input type="number" class="acu-form-input" id="cfg-send-rows" min="-1" step="1" value="${ucVal(updateConfig.sendLatestRows)}">
+                   </div>
+                   <div class="acu-form-group">
+                       <label>表级API预设覆盖: <span class="acu-hint">仅保存到数据库插件设置，不随模板导出；该表及同组其他表将使用此预设</span></label>
+                       <select class="acu-form-input" id="cfg-table-api-preset">
+                           <option value="">使用填表整体API配置</option>
+                           ${tableApiPresetOptionsHtml}
+                       </select>
+                   </div>
+               </div>
 
               <div class="acu-config-section">
                   <h4>AI提示词指令 (Source Data)</h4>
                   <div class="acu-form-group">
                       <label>表格说明 (Note):</label>
-                      <textarea class="acu-form-textarea" id="cfg-note">${escapeHtml_ACU(sourceData.note || '')}</textarea>
+                      <textarea class="acu-form-textarea" id="cfg-note">${escapeHtml_ACU$1(sourceData.note || '')}</textarea>
                   </div>
                   <div class="acu-form-group">
                       <label>初始化触发 (Init):</label>
-                      <textarea class="acu-form-textarea" id="cfg-init">${escapeHtml_ACU(sourceData.initNode || '')}</textarea>
+                      <textarea class="acu-form-textarea" id="cfg-init">${escapeHtml_ACU$1(sourceData.initNode || '')}</textarea>
                   </div>
                   <div class="acu-form-group">
                       <label>新增触发 (Insert):</label>
-                      <textarea class="acu-form-textarea" id="cfg-insert">${escapeHtml_ACU(sourceData.insertNode || '')}</textarea>
+                      <textarea class="acu-form-textarea" id="cfg-insert">${escapeHtml_ACU$1(sourceData.insertNode || '')}</textarea>
                   </div>
                   <div class="acu-form-group">
                       <label>更新触发 (Update):</label>
-                      <textarea class="acu-form-textarea" id="cfg-update">${escapeHtml_ACU(sourceData.updateNode || '')}</textarea>
+                      <textarea class="acu-form-textarea" id="cfg-update">${escapeHtml_ACU$1(sourceData.updateNode || '')}</textarea>
                   </div>
                   <div class="acu-form-group">
                       <label>删除触发 (Delete):</label>
-                      <textarea class="acu-form-textarea" id="cfg-delete">${escapeHtml_ACU(sourceData.deleteNode || '')}</textarea>
+                      <textarea class="acu-form-textarea" id="cfg-delete">${escapeHtml_ACU$1(sourceData.deleteNode || '')}</textarea>
                   </div>
               </div>
 
@@ -27507,7 +28794,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
                   <h4>DDL 定义 (SQLite 模式)</h4>
                   <div class="acu-form-group">
                       <label>CREATE TABLE 语句:</label>
-                      <textarea class="acu-form-textarea" id="cfg-ddl" style="font-family: monospace; font-size: 0.85em; min-height: 120px; white-space: pre;">${escapeHtml_ACU(sourceData.ddl || '')}</textarea>
+                      <textarea class="acu-form-textarea" id="cfg-ddl" style="font-family: monospace; font-size: 0.85em; min-height: 120px; white-space: pre;">${escapeHtml_ACU$1(sourceData.ddl || '')}</textarea>
                       <div class="acu-hint">定义该表的 SQL Schema。SQLite 模式下，AI 将使用标准 SQL 语句更新此表。每张表 DDL 必须以 <code>row_id INTEGER PRIMARY KEY -- 行号</code> 作为第一列。</div>
                   </div>
                   <div class="acu-form-group" style="display: flex; gap: 8px; align-items: center;">
@@ -27547,7 +28834,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
                           
                           <div class="acu-form-group">
                               <label>条目名称 (Entry Name):</label>
-                              <input type="text" class="acu-form-input" id="cfg-entry-name" value="${escapeHtml_ACU(config.entryName || sheet.name || '')}" placeholder="例如: ${escapeHtml_ACU(sheet.name)}">
+                              <input type="text" class="acu-form-input" id="cfg-entry-name" value="${escapeHtml_ACU$1(config.entryName || sheet.name || '')}" placeholder="例如: ${escapeHtml_ACU$1(sheet.name)}">
                               <div class="acu-hint">如果不拆分，此为条目名；如果拆分，自动命名为 "名称-1", "名称-2" 等。</div>
                           </div>
 
@@ -27561,7 +28848,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
 
                           <div class="acu-form-group">
                               <label>关键词 (Keywords):</label>
-                              <input type="text" class="acu-form-input" id="cfg-keywords" value="${escapeHtml_ACU(config.keywords || '')}" placeholder="关键词1, 关键词2">
+                              <input type="text" class="acu-form-input" id="cfg-keywords" value="${escapeHtml_ACU$1(config.keywords || '')}" placeholder="关键词1, 关键词2">
                               <div class="acu-hint">
                                   如果未拆分，填写的词就是关键词。<br>
                                   如果拆分且关键词与列名相同，则使用该行对应列的内容作为关键词。
@@ -27577,7 +28864,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
 
                           <div class="acu-form-group">
                               <label>自定义注入模板 (可选):</label>
-                              <textarea class="acu-form-textarea" id="cfg-template" placeholder="使用 $1 代表本表导出的蓝灯/绿灯条目列表，$1 上下的内容会分别生成独立的常量条目，插入到该表注入区块的最前与最后。">${escapeHtml_ACU(config.injectionTemplate || '')}</textarea>
+                              <textarea class="acu-form-textarea" id="cfg-template" placeholder="使用 $1 代表本表导出的蓝灯/绿灯条目列表，$1 上下的内容会分别生成独立的常量条目，插入到该表注入区块的最前与最后。">${escapeHtml_ACU$1(config.injectionTemplate || '')}</textarea>
                               <div class="acu-hint">注入词现在以独立的常量条目进行包裹。填写模板后，$1 保留为条目本身，$1 之前和之后的内容会各自成为前/后包裹条目。</div>
                           </div>
                           <div class="acu-form-group" style="margin-top:10px; padding-top:10px; border-top: 1px dashed #ddd;">
@@ -27608,7 +28895,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
                           <div id="cfg-extra-index-options" style="display: ${config.extraIndexEnabled ? 'block' : 'none'}; padding-left: 12px; border-left: 2px solid #eee;">
                               <div class="acu-form-group">
                                   <label>索引条目名称:</label>
-                                  <input type="text" class="acu-form-input" id="cfg-extra-index-entry-name" value="${escapeHtml_ACU(config.extraIndexEntryName || `${config.entryName || sheet.name || ''}-索引`)}" placeholder="例如: ${escapeHtml_ACU((config.entryName || sheet.name || '表格') + '-索引')}">
+                                  <input type="text" class="acu-form-input" id="cfg-extra-index-entry-name" value="${escapeHtml_ACU$1(config.extraIndexEntryName || `${config.entryName || sheet.name || ''}-索引`)}" placeholder="例如: ${escapeHtml_ACU$1((config.entryName || sheet.name || '表格') + '-索引')}">
                                   <div class="acu-hint">将作为额外注入世界书条目的名称。</div>
                               </div>
                               <div class="acu-form-group">
@@ -27620,7 +28907,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
                               </div>
                               <div class="acu-form-group">
                                   <label>索引条目自定义注入模板 (可选):</label>
-                                  <textarea class="acu-form-textarea" id="cfg-extra-index-template" placeholder="使用 $1 代表索引条目内容；$1 上下内容会分别生成独立常量条目并放在索引条目之前/之后。">${escapeHtml_ACU(config.extraIndexInjectionTemplate || '')}</textarea>
+                                  <textarea class="acu-form-textarea" id="cfg-extra-index-template" placeholder="使用 $1 代表索引条目内容；$1 上下内容会分别生成独立常量条目并放在索引条目之前/之后。">${escapeHtml_ACU$1(config.extraIndexInjectionTemplate || '')}</textarea>
                                   <div class="acu-hint">逻辑与独立导出条目的自定义注入模板一致。</div>
                               </div>
                               <div class="acu-form-group" style="margin-top:10px; padding-top:10px; border-top: 1px dashed #ddd;">
@@ -27658,7 +28945,7 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
             const $item = jQuery_API_ACU(`
                   <div class="acu-col-item">
                       <span style="width:30px; text-align:center;">#${idx}</span>
-                      <input type="text" class="acu-col-input" value="${escapeHtml_ACU(h)}" data-idx="${idx}">
+                      <input type="text" class="acu-col-input" value="${escapeHtml_ACU$1(h)}" data-idx="${idx}">
                       <button class="acu-col-btn" style="color:#e95e5e;" data-idx="${idx}"><i class="fa-solid fa-times"></i></button>
                   </div>
               `);
@@ -27734,6 +29021,24 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
         sheet.updateConfig = {}; sheet.updateConfig.uiSentinel = -1; sheet.updateConfig.skipFloors = parseIntOrDefault_ACU(jQuery_API_ACU(this).val(), -1); });
     jQuery_API_ACU('#cfg-send-rows').on('input', function () { if (!sheet.updateConfig)
         sheet.updateConfig = {}; sheet.updateConfig.uiSentinel = -1; sheet.updateConfig.sendLatestRows = parseIntOrDefault_ACU(jQuery_API_ACU(this).val(), -1); });
+    // [新增] 表级 API 预设覆盖：按标准化表名写入 settings 映射（不写入模板对象）
+    jQuery_API_ACU('#cfg-table-api-preset').on('change', function () {
+        const presetVal = String(jQuery_API_ACU(this).val() || '').trim();
+        const sheetName = String(sheet.name || '').trim();
+        if (!sheetName)
+            return;
+        if (!settings_ACU.tableApiPresetOverridesByName) {
+            settings_ACU.tableApiPresetOverridesByName = {};
+        }
+        if (presetVal) {
+            settings_ACU.tableApiPresetOverridesByName[sheetName] = presetVal;
+        }
+        else {
+            delete settings_ACU.tableApiPresetOverridesByName[sheetName];
+        }
+        saveSettingsAndNotify_ACU();
+        logDebug_ACU(`[表级API预设] "${sheetName}" -> "${presetVal || '(使用整体配置)'}"`);
+    });
     jQuery_API_ACU('#cfg-note').on('input', function () { if (!sheet.sourceData)
         sheet.sourceData = {}; sheet.sourceData.note = jQuery_API_ACU(this).val(); });
     jQuery_API_ACU('#cfg-init').on('input', function () { if (!sheet.sourceData)
@@ -27757,13 +29062,13 @@ function renderVisualizerConfigMode_ACU($container, sheet) {
             const headers = (sheet.content && sheet.content[0]) ? sheet.content[0].slice(1) : [];
             const validation = validateDDLText(ddlText, headers);
             if (validation.valid) {
-                $result.html(`<span style="color: #a6e3a1;">${escapeHtml_ACU(validation.message)}</span>`);
+                $result.html(`<span style="color: #a6e3a1;">${escapeHtml_ACU$1(validation.message)}</span>`);
             }
             else if (validation.message.startsWith('⚠')) {
-                $result.html(`<span style="color: #f6c177;">${escapeHtml_ACU(validation.message)}</span>`);
+                $result.html(`<span style="color: #f6c177;">${escapeHtml_ACU$1(validation.message)}</span>`);
             }
             else {
-                $result.html(`<span style="color: #e95e5e;">${escapeHtml_ACU(validation.message)}</span>`);
+                $result.html(`<span style="color: #e95e5e;">${escapeHtml_ACU$1(validation.message)}</span>`);
             }
         });
     }
@@ -28037,11 +29342,11 @@ function renderVisualizerDataMode_ACU($container, sheet) {
             html += `
                   <div class="acu-field-row ${lockedClass}">
                       <div class="acu-field-label" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-                          <span>${escapeHtml_ACU(header)}</span>
+                          <span>${escapeHtml_ACU$1(header)}</span>
                           ${colLockButton}
                       </div>
                       <div class="acu-field-value-wrap">
-                          <div class="acu-field-value" contenteditable="true" data-row="${rIdx}" data-col="${colIdx}">${escapeHtml_ACU(String(val))}</div>
+                          <div class="acu-field-value" contenteditable="true" data-row="${rIdx}" data-col="${colIdx}">${escapeHtml_ACU$1(String(val))}</div>
                           ${cellLockButton}
                       </div>
                   </div>
@@ -28200,7 +29505,7 @@ function renderVisualizerSidebar_ACU() {
                   <div class="acu-table-nav-content">
                       <span class="acu-table-index">[${index}]</span>
                       <i class="fa-solid fa-table"></i>
-                      <span class="acu-table-name" title="${escapeHtml_ACU(sheet.name)}">${escapeHtml_ACU(sheet.name)}</span>
+                      <span class="acu-table-name" title="${escapeHtml_ACU$1(sheet.name)}">${escapeHtml_ACU$1(sheet.name)}</span>
                   </div>
                   <div class="acu-table-nav-actions">
                       <button class="acu-table-order-btn acu-move-up-btn" data-key="${key}" title="上移" ${isFirst ? 'disabled' : ''}>
@@ -28293,17 +29598,32 @@ function renderVisualizerSidebar_ACU() {
 /**
  * presentation/window/window-styles.ts — 窗口样式注入 + 主题切换
  * 从 window-system.ts 拆出
+ *
+ * 注意：旧版 ink/silk 主题切换已迁移到 theme/theme-registry.ts
+ * 此文件保留窗口chrome样式和旧接口兼容
  */
 const ACU_WINDOW_STYLES_INJECTED_FLAG = `${SCRIPT_ID_PREFIX_ACU}_window_styles_injected`;
 const ACU_UI_THEME_STORAGE_KEY = `${SCRIPT_ID_PREFIX_ACU}_ui_theme_v1`;
+/**
+ * 获取当前主题（兼容旧接口）
+ * 现在读取新主题系统的设置
+ */
 function getACUTheme_ACU() {
     try {
         const store = getConfigStorage_ACU();
-        const savedTheme = String(store?.getItem?.(ACU_UI_THEME_STORAGE_KEY) || '').trim().toLowerCase();
-        return savedTheme === 'silk' ? 'silk' : 'ink';
+        const savedTheme = String(store?.getItem?.(ACU_UI_THEME_STORAGE_KEY) || '').trim();
+        // 支持旧版 ink/silk 值，也支持新主题 ID
+        if (savedTheme === 'silk' || savedTheme === 'classical-silk')
+            return 'silk';
+        if (savedTheme === 'ink' || savedTheme === 'classical-ink')
+            return 'ink';
+        if (savedTheme === 'default-dark')
+            return 'ink';
+        // 默认浅色
+        return 'silk';
     }
     catch (e) {
-        return 'ink';
+        return 'silk';
     }
 }
 function setACUTheme_ACU(theme) {
@@ -28319,37 +29639,21 @@ function setACUTheme_ACU(theme) {
 }
 function applyACUThemeToDocument_ACU(targetDoc, theme = null) {
     const doc = targetDoc || (topLevelWindow_ACU?.document || document);
-    const activeTheme = theme === 'silk' || theme === 'ink' ? theme : getACUTheme_ACU();
+    // 不再通过 body class 切换主题，主题变量已通过 theme-registry 注入到 #popup
     const body = doc?.body;
     if (!body || !body.classList)
-        return activeTheme;
-    body.classList.toggle('acu-theme-silk', activeTheme === 'silk');
-    body.setAttribute('data-acu-theme', activeTheme);
-    return activeTheme;
+        return getACUTheme_ACU();
+    return getACUTheme_ACU();
 }
 function syncACUThemeButtons_ACU(targetDoc) {
-    const doc = targetDoc || (topLevelWindow_ACU?.document || document);
-    const activeTheme = applyACUThemeToDocument_ACU(doc);
-    const nextThemeLabel = activeTheme === 'silk' ? '墨纸' : '素纱';
-    const nextThemeTitle = activeTheme === 'silk' ? '切换为墨纸主题' : '切换为素纱主题';
-    try {
-        doc.querySelectorAll('.acu-window-btn.theme-toggle .acu-theme-toggle-text').forEach((el) => {
-            el.textContent = nextThemeLabel;
-        });
-        doc.querySelectorAll('.acu-window-btn.theme-toggle').forEach((el) => {
-            el.setAttribute('title', nextThemeTitle);
-        });
-    }
-    catch (e) {
-        console.warn('[ACU] Failed to sync theme buttons:', e);
-    }
-    return activeTheme;
+    // 窗口chrome的主题切换按钮已被新的 theme-selector 替代
+    // 此函数保留空实现以兼容旧调用点
+    return getACUTheme_ACU();
 }
 function toggleACUTheme_ACU(targetDoc) {
+    // 旧版切换逻辑保留但不再影响弹窗内容
     const nextTheme = getACUTheme_ACU() === 'silk' ? 'ink' : 'silk';
     setACUTheme_ACU(nextTheme);
-    applyACUThemeToDocument_ACU(targetDoc, nextTheme);
-    syncACUThemeButtons_ACU(targetDoc);
     return nextTheme;
 }
 function injectACUWindowStyles() {
@@ -28368,14 +29672,11 @@ function injectACUWindowStyles() {
       .acu-window-overlay {
         position: fixed;
         top: 0; left: 0; right: 0; bottom: 0;
-        background: rgba(17, 15, 13, 0.56);
-        backdrop-filter: blur(3px);
-        -webkit-backdrop-filter: blur(3px);
+        background: var(--acu-overlay-bg, rgba(0, 0, 0, 0.16));
+        backdrop-filter: blur(var(--acu-overlay-backdrop-blur, 3px));
+        -webkit-backdrop-filter: blur(var(--acu-overlay-backdrop-blur, 3px));
         z-index: 9999;
         animation: acuOverlayFadeIn 0.24s ease-out;
-      }
-      body.acu-theme-silk .acu-window-overlay {
-        background: rgba(94, 84, 69, 0.16);
       }
       @keyframes acuOverlayFadeIn {
         from { opacity: 0; }
@@ -28383,44 +29684,34 @@ function injectACUWindowStyles() {
       }
       
       .acu-window {
-        --acu-panel-bg: #24221f;
-        --acu-panel-border: #36332e;
-        --acu-panel-text: #c1b9ad;
-        --acu-panel-text-dim: #9e978e;
-        --acu-panel-text-mute: #645e55;
-        --acu-panel-accent: #7d4940;
-        --acu-panel-hover: #2a2824;
+        --acu-panel-bg: var(--acu-bg-0, #f5f7fa);
+        --acu-panel-border: var(--acu-border, #e0e4ea);
+        --acu-panel-text: var(--acu-text-1, #1a2332);
+        --acu-panel-text-dim: var(--acu-text-2, #4a5568);
+        --acu-panel-text-mute: var(--acu-text-3, #8896a8);
+        --acu-panel-accent: var(--acu-accent, #2563eb);
+        --acu-panel-hover: var(--acu-bg-2, rgba(0, 0, 0, 0.03));
+        --acu-panel-shadow: var(--acu-shadow, 0 4px 16px rgba(0, 0, 0, 0.10));
+        --acu-panel-close-hover-bg: var(--acu-danger-soft-bg, rgba(239, 68, 68, 0.08));
+        --acu-panel-close-hover-border: var(--acu-danger-soft-border, rgba(239, 68, 68, 0.25));
+        --acu-panel-close-hover-text: var(--acu-danger, #ef4444);
         position: fixed;
         display: flex;
         flex-direction: column;
         background-color: var(--acu-panel-bg);
-        background-image:
-          url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E"),
-          linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 30%);
         border: 1px solid var(--acu-panel-border);
-        border-radius: 2px;
-        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.42);
+        border-radius: 8px;
+        box-shadow: var(--acu-panel-shadow);
         overflow: hidden;
         min-width: 400px;
         min-height: 300px;
         animation: acuWindowSlideIn 0.25s ease-out;
-        color-scheme: dark;
-        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
+        color-scheme: light;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
         font-weight: 500;
         color: var(--acu-panel-text);
         text-rendering: optimizeLegibility;
         -webkit-font-smoothing: antialiased;
-      }
-      body.acu-theme-silk .acu-window {
-        --acu-panel-bg: #f4f1eb;
-        --acu-panel-border: #e0dacb;
-        --acu-panel-text: #4a453f;
-        --acu-panel-text-dim: #6e675e;
-        --acu-panel-text-mute: #9e978e;
-        --acu-panel-accent: #8a6b5e;
-        --acu-panel-hover: #ebe7de;
-        color-scheme: light;
-        box-shadow: 0 18px 42px rgba(72, 59, 43, 0.16);
       }
       @keyframes acuWindowSlideIn {
         from { opacity: 0; transform: scale(0.97) translateY(-14px); }
@@ -28600,15 +29891,15 @@ function injectACUWindowStyles() {
         width: 30px;
         height: 30px;
         border: 1px solid transparent;
-        border-radius: 1px;
+        border-radius: 6px;
         background: transparent;
         color: var(--acu-panel-text-mute);
         cursor: pointer;
         display: flex;
         align-items: center;
         justify-content: center;
-        transition: all 0.18s ease;
-        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
+        transition: all 0.15s ease;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       }
       .acu-window-btn:hover {
         background: var(--acu-panel-hover);
@@ -28619,9 +29910,9 @@ function injectACUWindowStyles() {
         color: var(--acu-panel-accent);
       }
       .acu-window-btn.close:hover {
-        background: rgba(125, 73, 64, 0.10);
-        border-color: var(--acu-panel-accent);
-        color: var(--acu-panel-accent);
+        background: var(--acu-panel-close-hover-bg);
+        border-color: var(--acu-panel-close-hover-border);
+        color: var(--acu-panel-close-hover-text);
       }
       .acu-window-btn.theme-toggle {
         width: auto;
@@ -29451,6 +30742,16 @@ async function saveVisualizerChanges_ACU(saveToTemplate = false) {
                         if (topLevelWindow_ACU?.AutoCardUpdaterAPI) {
                             topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate();
                         }
+                        // SQLite 模式下重建运行时数据库实例，确保模板切换时不会残留旧表结构或旧数据
+                        if (isSqliteMode()) {
+                            try {
+                                await reloadStorageProvider();
+                                logDebug_ACU('[VisualizerDelete] SQLite 运行时数据库已重建');
+                            }
+                            catch (reloadError) {
+                                logWarn_ACU(`[VisualizerDelete] reloadStorageProvider 失败: ${reloadError?.message}，继续使用当前 provider`);
+                            }
+                        }
                     }
                     _acuVisState.deletedSheetKeys = [];
                 }
@@ -29491,19 +30792,19 @@ const VISUALIZER_CSS_ACU = `
        ═══════════════════════════════════════════════════════════════ */
     
     /* 仅在可视化编辑器内定义主题变量，避免污染页面其它区域 */
-    /* 墨纸主题（默认暗色） */
+    /* 默认映射到统一主题变量；若主题提供 acu-viz 专用变量则优先使用 */
     #acu-visualizer-content {
-        --vis-bg-color: #24221f;
-        --vis-border-color: #36332e;
-        --vis-text-main: #c1b9ad;
-        --vis-text-dim: #9e978e;
-        --vis-text-mute: #645e55;
-        --vis-accent: #7d4940;
-        --vis-accent-dim: #8f5a4e;
-        --vis-accent-glow: rgba(125, 73, 64, 0.16);
-        --vis-bg-hover: #2a2824;
-        --vis-bg-stats: #211f1c;
-        --vis-bg-light: rgba(193, 185, 173, 0.04);
+        --vis-bg-color: var(--acu-viz-bg, var(--acu-bg-0));
+        --vis-border-color: var(--acu-viz-border, var(--acu-border));
+        --vis-text-main: var(--acu-viz-text, var(--acu-text-1));
+        --vis-text-dim: var(--acu-viz-text-dim, var(--acu-text-2));
+        --vis-text-mute: var(--acu-viz-text-mute, var(--acu-text-3));
+        --vis-accent: var(--acu-viz-accent, var(--acu-accent));
+        --vis-accent-dim: var(--acu-viz-accent-dim, var(--acu-accent-2));
+        --vis-accent-glow: var(--acu-viz-accent-glow, var(--acu-accent-glow));
+        --vis-bg-hover: var(--acu-viz-hover, var(--acu-bg-2));
+        --vis-bg-stats: var(--acu-viz-sidebar-bg, var(--acu-bg-1));
+        --vis-bg-light: var(--acu-viz-card-bg, var(--acu-bg-1));
         
         --vis-font-serif: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
         
@@ -29516,21 +30817,6 @@ const VISUALIZER_CSS_ACU = `
         color: var(--vis-text-main);
     }
     
-    /* 素纱主题（浅色） */
-    body.acu-theme-silk #acu-visualizer-content {
-        --vis-bg-color: #f4f1eb;
-        --vis-border-color: #e0dacb;
-        --vis-text-main: #4a453f;
-        --vis-text-dim: #6e675e;
-        --vis-text-mute: #9e978e;
-        --vis-accent: #8a6b5e;
-        --vis-accent-dim: #9d7c6f;
-        --vis-accent-glow: rgba(138, 107, 94, 0.14);
-        --vis-bg-hover: #ebe7de;
-        --vis-bg-stats: #f9f8f5;
-        --vis-bg-light: rgba(255, 255, 255, 0.58);
-    }
-
     /* ✅ 可视化编辑器复选框：古典风格（仅限 #acu-visualizer-content 作用域） */
     #acu-visualizer-content input[type="checkbox"] {
         -webkit-appearance: none;
@@ -29672,7 +30958,7 @@ const VISUALIZER_CSS_ACU = `
     }
     
     .acu-table-nav-item.active {
-        background: rgba(125, 73, 64, 0.10);
+        background: color-mix(in srgb, var(--vis-accent) 10%, transparent);
         color: var(--vis-accent);
     }
     
@@ -29747,7 +31033,7 @@ const VISUALIZER_CSS_ACU = `
     }
     
     .acu-table-order-btn:hover {
-        background: rgba(125, 73, 64, 0.12);
+        background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         border-color: var(--vis-accent);
         color: var(--vis-accent);
     }
@@ -29759,7 +31045,7 @@ const VISUALIZER_CSS_ACU = `
 
     /* ═══ 按钮 ═══ */
     .acu-btn-primary {
-        background: rgba(125, 73, 64, 0.12);
+        background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         color: var(--vis-accent);
         border: 1px solid var(--vis-accent);
         padding: 10px 20px;
@@ -29771,7 +31057,7 @@ const VISUALIZER_CSS_ACU = `
         transition: all 0.2s ease;
     }
     .acu-btn-primary:hover {
-        background: rgba(125, 73, 64, 0.18);
+        background: color-mix(in srgb, var(--vis-accent) 18%, transparent);
         box-shadow: 0 0 0 2px var(--vis-accent-glow);
     }
 
@@ -29997,7 +31283,7 @@ const VISUALIZER_CSS_ACU = `
         background: var(--vis-bg-hover);
     }
     .acu-mode-btn.active {
-        background: rgba(125, 73, 64, 0.12);
+        background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         color: var(--vis-accent);
     }
 
@@ -30025,19 +31311,19 @@ const VISUALIZER_CSS_ACU = `
     }
     .acu-lock-btn.active {
         border-color: var(--vis-accent);
-        background: rgba(125, 73, 64, 0.12);
+        background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         color: var(--vis-accent);
     }
     .acu-lock-btn.special {
         border-color: var(--vis-accent);
-        background: rgba(125, 73, 64, 0.08);
+        background: color-mix(in srgb, var(--vis-accent) 8%, transparent);
         color: var(--vis-accent-dim);
     }
     .acu-field-value-wrap { display: flex; align-items: center; gap: 6px; }
     .acu-field-value { flex: 1; min-width: 0; }
     .acu-field-row.acu-locked-field .acu-field-value {
-        background: rgba(125, 73, 64, 0.06);
-        border-color: rgba(125, 73, 64, 0.20);
+        background: color-mix(in srgb, var(--vis-accent) 6%, transparent);
+        border-color: color-mix(in srgb, var(--vis-accent) 20%, var(--vis-border-color));
         opacity: 0.85;
     }
     
@@ -30082,7 +31368,7 @@ const VISUALIZER_CSS_ACU = `
     }
     
     .acu-col-btn:hover {
-        background: rgba(125, 73, 64, 0.12);
+        background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         border-color: var(--vis-accent);
         color: var(--vis-accent);
     }
@@ -30766,7 +32052,7 @@ const VISUALIZER_CSS_ACU = `
 
     /* "添加新行"卡片：古典风格 */
     #acu-visualizer-content #acu-vis-add-row {
-        background: rgba(125, 73, 64, 0.08) !important;
+        background: color-mix(in srgb, var(--vis-accent) 8%, transparent) !important;
         border-color: var(--vis-accent) !important;
         border-radius: 2px;
     }
@@ -30878,7 +32164,7 @@ const VISUALIZER_CSS_ACU = `
         color: var(--vis-text-dim);
     }
     .acu-assistant-error-text {
-        color: #c55;
+        color: var(--acu-danger, #c55);
     }
     /* assistant round history */
     .acu-assistant-round-item {
@@ -30897,7 +32183,7 @@ const VISUALIZER_CSS_ACU = `
     .acu-assistant-round-badge {
         font-size: 11px;
         color: var(--vis-accent);
-        background: rgba(125, 73, 64, 0.10);
+        background: color-mix(in srgb, var(--vis-accent) 10%, transparent);
         padding: 2px 6px;
         border-radius: 1px;
         letter-spacing: 1px;
@@ -31012,7 +32298,7 @@ function openNewVisualizer_ACU() {
                               <button class="acu-mode-btn" data-mode="config">结构/参数配置</button>
                               <button class="acu-mode-btn" data-mode="globalConfig">全局注入配置</button>
                           </div>
-                          <div id="acu-vis-template-preset-indicator" class="acu-hint" style="font-size: 12px; color: var(--vis-text-mute);">${escapeHtml_ACU(activeTemplatePresetText_ACU)}</div>
+                          <div id="acu-vis-template-preset-indicator" class="acu-hint" style="font-size: 12px; color: var(--vis-text-mute);">${escapeHtml_ACU$1(activeTemplatePresetText_ACU)}</div>
                       </div>
                   </div>
                   <div class="acu-vis-actions" style="display: flex; gap: 10px;">
@@ -31247,6 +32533,8 @@ function importCombinedSettings_ACU() {
                     throw new Error('合并配置中的表格模板已解析，但应用到全局模板失败。');
                 }
                 showToastr_ACU('success', '表格模板已成功导入！模板已更新，但不会影响当前聊天记录的本地数据。');
+                // 刷新模板预设下拉 UI，确保预设列表与状态文案同步
+                refreshPresetUIAfterSwitch_ACU();
                 // [优化] 不再触发表格数据初始化，仅修改当前插件模板
                 // 只有在新开卡或之前没有用过插件的聊天记录里才会使用新的通用模板作为基底
                 showToastr_ACU('success', '合并配置已成功导入！');
@@ -31491,47 +32779,60 @@ function importTableTemplate_ACU({ scope = 'global' } = {}) {
                         ? `导入模板_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`
                         : '',
                 });
-                let savePresetOk = false;
-                if (normalizedScope === 'global' && derivedPresetName) {
+                if (normalizedScope === 'global') {
+                    // ═══ 全局导入：仅保存到预设库，不自动切换当前生效模板 ═══
+                    // 用户可随后通过下拉手动切换到新导入的预设
+                    let savePresetOk = false;
+                    if (derivedPresetName) {
+                        try {
+                            savePresetOk = upsertTemplatePreset_ACU(derivedPresetName, prepared.templateStr);
+                        }
+                        catch (presetError) {
+                            savePresetOk = false;
+                            logWarn_ACU('[TemplateScope] 导入全局模板后保存预设失败:', presetError);
+                        }
+                    }
+                    // 刷新 UI 让新预设立即出现在下拉列表中，但保持当前选中值不变
+                    refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
+                    if (savePresetOk) {
+                        showToastr_ACU('success', `模板已保存为全局预设：${derivedPresetName}（同名自动覆盖）。你可以在"全局模板预设"下拉中手动切换到它。`, {
+                            acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
+                        });
+                    }
+                    else if (derivedPresetName) {
+                        showToastr_ACU('warning', `模板已解析，但保存到预设库失败：${derivedPresetName}`, {
+                            acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR,
+                        });
+                    }
+                    else {
+                        showToastr_ACU('warning', '模板已解析，但无法确定预设名称，未保存到预设库。', {
+                            acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR,
+                        });
+                    }
+                    logDebug_ACU(`[TemplateScope] Template imported to global preset library: ${derivedPresetName}. saveOk=${savePresetOk}`);
+                }
+                else {
+                    // ═══ 聊天导入：应用到当前聊天作用域 ═══
+                    const applied = await applyTemplateSnapshotToScope_ACU(prepared.templateStr, {
+                        scope: 'chat',
+                        source: 'ui_chat_import',
+                        presetName: derivedPresetName,
+                        save: true,
+                        persistChatScope: true,
+                    });
+                    if (!applied) {
+                        throw new Error('模板已解析，但应用到当前聊天失败。');
+                    }
                     try {
-                        savePresetOk = upsertTemplatePreset_ACU(derivedPresetName, prepared.templateStr);
+                        await refreshMergedDataAndNotifyWithUI_ACU();
                     }
-                    catch (presetError) {
-                        savePresetOk = false;
-                        logWarn_ACU('[TemplateScope] 导入全局模板后保存预设失败:', presetError);
-                    }
-                }
-                const applied = await applyTemplateSnapshotToScope_ACU(prepared.templateStr, {
-                    scope: normalizedScope,
-                    source: normalizedScope === 'chat' ? 'ui_chat_import' : 'ui_global_import',
-                    presetName: derivedPresetName,
-                    save: true,
-                    persistChatScope: normalizedScope === 'chat',
-                });
-                if (!applied) {
-                    throw new Error('模板已解析，但应用模板快照失败。');
-                }
-                if (normalizedScope === 'chat') {
+                    catch (e) { }
+                    refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
                     showToastr_ACU('success', `当前聊天模板快照已导入${derivedPresetName ? `（预设名：${derivedPresetName}）` : ''}。`, {
                         acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
                     });
+                    logDebug_ACU(`[TemplateScope] Template imported to chat scope: ${derivedPresetName}.`);
                 }
-                else if (savePresetOk) {
-                    showToastr_ACU('success', `模板已导入，并保存为全局预设：${derivedPresetName}（同名自动覆盖）`, {
-                        acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                    });
-                }
-                else if (derivedPresetName) {
-                    showToastr_ACU('success', `模板已成功导入到全局！当前全局模板已标记为：${derivedPresetName}；但保存到预设库失败。`, {
-                        acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                    });
-                }
-                else {
-                    showToastr_ACU('success', '模板已成功导入到全局！', {
-                        acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                    });
-                }
-                logDebug_ACU(`[TemplateScope] Template imported for scope: ${normalizedScope}.`);
             }
             catch (error) {
                 logError_ACU('导入模板失败：', error);
@@ -32045,7 +33346,7 @@ async function bindDataEvents_ACU() {
             return;
         }
         history.forEach(code => {
-            const safeCode = escapeHtml_ACU(code);
+            const safeCode = escapeHtml_ACU$1(code);
             $dataIsolationHistoryList.append(`<li class="acu-history-item" data-code="${safeCode}" title="${safeCode}" style="padding: 6px 10px; display: flex; align-items: center; gap: 8px; cursor: pointer;">
                         <span class="acu-history-text" style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${safeCode}</span>
                         <button type="button" class="acu-remove-code" data-code="${safeCode}" title="删除该标识" style="border: none; background: transparent; color: var(--error-color); cursor: pointer; font-size: 12px; line-height: 1;">×</button>
@@ -32222,6 +33523,13 @@ async function bindDataEvents_ACU() {
     if ($injectImportedTxtButton && $injectImportedTxtButton.length) {
         $injectImportedTxtButton.on('click', handleInjectImportedTxtSelected_ACU);
     }
+    // 导入表选择：全选 / 全不选
+    if ($importTableSelectAll_ACU && $importTableSelectAll_ACU.length) {
+        $importTableSelectAll_ACU.on('click', handleImportSelectAll_ACU);
+    }
+    if ($importTableSelectNone_ACU && $importTableSelectNone_ACU.length) {
+        $importTableSelectNone_ACU.on('click', handleImportSelectNone_ACU);
+    }
     // [新增] 删除注入条目按钮的事件绑定
     const $deleteImportedEntriesButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-delete-imported-entries`);
     if ($deleteImportedEntriesButton.length) {
@@ -32388,7 +33696,7 @@ async function bindDataEvents_ACU() {
             await refreshMergedDataAndNotifyWithUI_ACU();
         }
         catch (e) { }
-        refreshTemplatePresetUiState_ACU({ keepGlobalValue: true });
+        refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
         if (showToast) {
             showToastr_ACU('success', `当前聊天预设已保存${resolvedPresetName ? `（预设名：${resolvedPresetName}）` : '（默认预设）'}；后续在此聊天再次保存会直接覆盖同名聊天预设。`, {
                 acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
@@ -32418,7 +33726,7 @@ async function bindDataEvents_ACU() {
             acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
         });
     };
-    refreshTemplatePresetUiState_ACU({ keepGlobalValue: false });
+    refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: false });
     // --- [模板预设库] 全局 / 当前聊天双作用域 ---
     if ($templatePresetSelect_ACU && $templatePresetSelect_ACU.length) {
         $templatePresetSelect_ACU.off('change.acu_template_preset').on('change.acu_template_preset', async function () {
@@ -32432,12 +33740,12 @@ async function bindDataEvents_ACU() {
                 persistChatScope: false,
             });
             if (result) {
-                refreshTemplatePresetUiState_ACU({ globalSelectName: name, keepGlobalValue: false });
+                refreshPresetUIAfterSwitch_ACU({ templateGlobalSelectName: name, keepTemplateGlobalValue: false });
                 showToastr_ACU('success', `全局模板预设已切换：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
             }
             else {
                 showToastr_ACU('error', `全局模板预设切换失败：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
-                refreshTemplatePresetUiState_ACU({ keepGlobalValue: false });
+                refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: false });
             }
         });
     }
@@ -32453,7 +33761,7 @@ async function bindDataEvents_ACU() {
                 persistChatScope: true,
             });
             if (result) {
-                refreshTemplatePresetUiState_ACU({ keepGlobalValue: true });
+                refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
                 if (result.mode === 'chat_override') {
                     showToastr_ACU('success', `当前聊天已切换到本地模板预设：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
                 }
@@ -32463,7 +33771,7 @@ async function bindDataEvents_ACU() {
             }
             else {
                 showToastr_ACU('error', `当前聊天模板预设切换失败：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
-                refreshTemplatePresetUiState_ACU({ keepGlobalValue: true });
+                refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
             }
         });
     }
@@ -32573,7 +33881,7 @@ async function bindDataEvents_ACU() {
                 persistCurrentTemplatePresetName_ACU(settings_ACU, nn, { save: false });
                 saveSettingsAndNotify_ACU();
             }
-            refreshTemplatePresetUiState_ACU({ globalSelectName: nn, keepGlobalValue: false });
+            refreshPresetUIAfterSwitch_ACU({ templateGlobalSelectName: nn, keepTemplateGlobalValue: false });
             showToastr_ACU('success', `全局模板预设已重命名：${oldName} → ${nn}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
         });
     }
@@ -32587,7 +33895,7 @@ async function bindDataEvents_ACU() {
             if (!confirm(`确定要删除全局模板预设 "${name}" 吗？此操作不可撤销。`))
                 return;
             const ok = deleteTemplatePreset_ACU(name);
-            refreshTemplatePresetUiState_ACU({ keepGlobalValue: false });
+            refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: false });
             if (ok) {
                 const activeGlobalName = normalizeTemplatePresetSelectionValue_ACU(getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: false }));
                 if (activeGlobalName === name) {
@@ -32647,7 +33955,7 @@ async function bindDataEvents_ACU() {
                 showToastr_ACU('error', '保存到全局后切换全局模板预设失败。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
                 return;
             }
-            refreshTemplatePresetUiState_ACU({ globalSelectName: finalName, keepGlobalValue: false });
+            refreshPresetUIAfterSwitch_ACU({ templateGlobalSelectName: finalName, keepTemplateGlobalValue: false });
             showToastr_ACU('success', `当前聊天模板配置已保存到全局预设：${finalName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
         });
     }
@@ -32689,7 +33997,7 @@ async function bindDataEvents_ACU() {
                         await refreshMergedDataAndNotifyWithUI_ACU();
                     }
                     catch (e) { }
-                    refreshTemplatePresetUiState_ACU({ keepGlobalValue: true });
+                    refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
                     showToastr_ACU('success', `当前聊天模板预设已导入${presetName ? `（预设名：${presetName}）` : ''}；同名聊天预设会直接覆盖。`, {
                         acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
                     });
@@ -33337,6 +34645,7 @@ async function bindPlotEvents_ACU() {
     [
         `#${SCRIPT_ID_PREFIX_ACU}-plot-task-name`,
         `#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`,
+        `#${SCRIPT_ID_PREFIX_ACU}-plot-extract-inject-tags`,
         `#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`,
         `#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`,
         `#${SCRIPT_ID_PREFIX_ACU}-plot-task-max-retries`,
@@ -33348,6 +34657,9 @@ async function bindPlotEvents_ACU() {
     $popupInstance_ACU.on('change', `#${SCRIPT_ID_PREFIX_ACU}-plot-task-enabled`, function () {
         saveCurrentPlotTaskFromUI_ACU({ silent: true, renderTaskList: true, persist: true });
         loadCurrentPlotTaskToUI_ACU();
+    });
+    $popupInstance_ACU.on('change', `#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`, function () {
+        saveCurrentPlotTaskFromUI_ACU({ silent: true, renderTaskList: false, persist: true });
     });
     // 匹配替换速率保存
     const plotRateInputs = [
@@ -33514,8 +34826,9 @@ async function bindPlotEvents_ACU() {
             });
             if (!result) {
                 showToastr_ACU('error', '找不到选中的全局预设。');
-                loadPlotPresetSelect_ACU();
             }
+            // 无论成功或失败，统一刷新所有预设相关 UI
+            refreshPresetUIAfterSwitch_ACU();
         });
     }
     // 第二步：当前聊天预设选择事件（这里只负责切换当前聊天使用的预设）
@@ -33528,9 +34841,11 @@ async function bindPlotEvents_ACU() {
             });
             if (!result) {
                 showToastr_ACU('error', '找不到选中的当前聊天预设。');
-                loadPlotPresetSelect_ACU();
+                refreshPresetUIAfterSwitch_ACU();
                 return;
             }
+            // 切换成功：统一刷新所有预设相关 UI（下拉框、状态文案、状态卡片、独立窗口）
+            refreshPresetUIAfterSwitch_ACU();
             showToastr_ACU('success', result.followsGlobal
                 ? '当前聊天已改为跟随全局剧情推进预设。'
                 : `当前聊天已切换到预设 "${result.presetName}"。`);
@@ -33606,7 +34921,7 @@ async function bindPlotEvents_ACU() {
             });
             persistPlotPresetSelectionState_ACU(selectedName, { source: 'ui_global_save', updateGlobal: true, save: false });
             saveSettingsAndNotify_ACU();
-            loadPlotPresetSelect_ACU();
+            refreshPresetUIAfterSwitch_ACU();
             showToastr_ACU('success', `全局预设 "${selectedName}" 已被成功覆盖。`);
         });
     }
@@ -33642,8 +34957,8 @@ async function bindPlotEvents_ACU() {
                     clearPlotPresetBindingForChat_ACU(currentChatFileIdentifier_ACU);
                 }
                 saveSettingsAndNotify_ACU();
-                // 刷新预设选择器
-                loadPlotPresetSelect_ACU();
+                // 刷新预设选择器 + 状态卡片 + 可视化编辑器
+                refreshPresetUIAfterSwitch_ACU();
                 showToastr_ACU('success', `全局预设 "${selectedName}" 已被删除。`);
             }
             else {
@@ -33749,7 +35064,7 @@ async function bindPlotEvents_ACU() {
                     if (importedCount > 0 || overwrittenCount > 0) {
                         settings_ACU.plotSettings.promptPresets = currentPresets;
                         saveSettingsAndNotify_ACU();
-                        loadPlotPresetSelect_ACU();
+                        refreshPresetUIAfterSwitch_ACU();
                         let messages = [];
                         if (importedCount > 0)
                             messages.push(`成功导入 ${importedCount} 个新预设。`);
@@ -34425,7 +35740,7 @@ const MAX_HISTORY = 50;
  */
 function generateSqlConsoleTabHTML() {
     return `
-                <div id="acu-tab-sql-console" class="acu-tab-content">
+                <div id="acu-tab-sql-console">
                     <div class="acu-card">
                         <h3><i class="fa-solid fa-terminal" style="margin-right: 6px;"></i>SQL 控制台</h3>
                         <p class="notes" style="margin-bottom: 12px;">在 SQLite 内存数据库上直接执行 SQL 语句。支持 SELECT 查询和 INSERT/UPDATE/DELETE 变更。</p>
@@ -34566,7 +35881,7 @@ function executeSql(sql, $resultArea, $execStatus) {
             const elapsed = (performance.now() - startTime).toFixed(1);
             if (result.errors.length > 0) {
                 addHistory(sql, false);
-                $resultArea.html(`<div style="color: #e95e5e; padding: 12px; font-family: monospace; white-space: pre-wrap;">${escapeHtml_ACU(result.errors.join('\n'))}</div>`);
+                $resultArea.html(`<div style="color: #e95e5e; padding: 12px; font-family: monospace; white-space: pre-wrap;">${escapeHtml_ACU$1(result.errors.join('\n'))}</div>`);
                 $execStatus.html(`<span style="color: #e95e5e;">✗ 执行失败</span>`);
             }
             else {
@@ -34581,7 +35896,7 @@ function executeSql(sql, $resultArea, $execStatus) {
         const elapsed = (performance.now() - startTime).toFixed(1);
         addHistory(sql, false);
         const errMsg = e?.message || String(e);
-        $resultArea.html(`<div style="color: #e95e5e; padding: 12px; font-family: monospace; white-space: pre-wrap;">错误: ${escapeHtml_ACU(errMsg)}</div>`);
+        $resultArea.html(`<div style="color: #e95e5e; padding: 12px; font-family: monospace; white-space: pre-wrap;">错误: ${escapeHtml_ACU$1(errMsg)}</div>`);
         $execStatus.html(`<span style="color: #e95e5e;">✗ 失败, ${elapsed}ms</span>`);
         logError_ACU(`[SQL Console] 执行失败: ${errMsg}`);
     }
@@ -34590,10 +35905,10 @@ function executeSql(sql, $resultArea, $execStatus) {
  * 渲染 SELECT 查询结果为 HTML 表格
  */
 function renderQueryResult(columns, values, $container) {
-    const headerCells = columns.map(col => `<th style="padding: 6px 10px; text-align: left; border-bottom: 2px solid var(--border-normal); font-weight: 600; white-space: nowrap;">${escapeHtml_ACU(String(col))}</th>`).join('');
+    const headerCells = columns.map(col => `<th style="padding: 6px 10px; text-align: left; border-bottom: 2px solid var(--border-normal); font-weight: 600; white-space: nowrap;">${escapeHtml_ACU$1(String(col))}</th>`).join('');
     const rows = values.map((row, idx) => {
         const cells = row.map(val => {
-            const display = val === null ? '<span style="color: #888; font-style: italic;">NULL</span>' : escapeHtml_ACU(String(val));
+            const display = val === null ? '<span style="color: #888; font-style: italic;">NULL</span>' : escapeHtml_ACU$1(String(val));
             return `<td style="padding: 4px 10px; border-bottom: 1px solid var(--border-normal); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${display}</td>`;
         }).join('');
         const bgColor = idx % 2 === 0 ? 'transparent' : 'rgba(128, 128, 128, 0.05)';
@@ -34632,7 +35947,7 @@ function renderHistory($container) {
             <div class="acu-sql-history-item" data-idx="${idx}" style="padding: 6px 10px; border-bottom: 1px solid var(--border-normal); cursor: pointer; display: flex; gap: 8px; align-items: flex-start;" title="点击填入输入框">
                 ${statusIcon}
                 <span style="color: #888; font-size: 0.8em; white-space: nowrap;">${time}</span>
-                <code style="font-size: 0.85em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml_ACU(sqlPreview)}</code>
+                <code style="font-size: 0.85em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml_ACU$1(sqlPreview)}</code>
             </div>
         `;
     }).join('');
@@ -34696,7 +36011,7 @@ let _dirtyWhileHidden = false;
  */
 function generateLogViewerTabHTML() {
     return `
-    <div id="acu-tab-log-viewer" class="acu-tab-content">
+    <div id="acu-tab-log-viewer">
       <div class="acu-card">
         <h3><i class="fa-solid fa-scroll" style="margin-right: 6px;"></i>运行日志</h3>
         <p class="notes" style="margin-bottom: 12px;">实时显示所有功能模块的运行日志和报错日志。</p>
@@ -34800,13 +36115,22 @@ async function bindLogViewerEvents_ACU() {
         }
     });
     // tab 切换时的可见性管理
-    // 监听 tab 按钮点击，判断当前是否切到了日志 tab
+    // 日志查看器现在嵌入在"高级工具"tab的子tab中
+    // 需要同时监听顶级tab切换和子tab切换
     if ($popupInstance_ACU) {
+        // 检查日志子tab是否当前可见
+        function isLogSubtabActive() {
+            const $advancedActive = $popupInstance_ACU.find('.acu-tab-button.active');
+            const isAdvancedTab = $advancedActive.length && $advancedActive.data('tab') === 'advanced';
+            if (!isAdvancedTab)
+                return false;
+            const $activeSubtab = $popupInstance_ACU.find('#acu-tab-advanced .acu-subtab-button.active');
+            return $activeSubtab.length && $activeSubtab.data('subtab') === 'advanced-log';
+        }
+        // 监听顶级tab切换
         $popupInstance_ACU.find('.acu-tab-button').on('click.acuLogViewer', function () {
-            const tabId = jQuery_API_ACU(this).data('tab');
             const wasVisible = _tabVisible;
-            _tabVisible = (tabId === 'log-viewer');
-            // 切到日志 tab 且有脏数据时，全量重绘
+            _tabVisible = isLogSubtabActive();
             if (_tabVisible && !wasVisible && _dirtyWhileHidden) {
                 _dirtyWhileHidden = false;
                 renderAllLogs($logList);
@@ -34814,9 +36138,19 @@ async function bindLogViewerEvents_ACU() {
                 refreshTagFilter($tagFilter);
             }
         });
-        // 检查当前是否已经在日志 tab
-        const $activeTab = $popupInstance_ACU.find('.acu-tab-button.active');
-        if ($activeTab.length && $activeTab.data('tab') === 'log-viewer') {
+        // 监听子tab切换
+        $popupInstance_ACU.find('.acu-subtab-button').on('click.acuLogViewer', function () {
+            const wasVisible = _tabVisible;
+            _tabVisible = isLogSubtabActive();
+            if (_tabVisible && !wasVisible && _dirtyWhileHidden) {
+                _dirtyWhileHidden = false;
+                renderAllLogs($logList);
+                updateLogCount($logCount);
+                refreshTagFilter($tagFilter);
+            }
+        });
+        // 初始检查
+        if (isLogSubtabActive()) {
             _tabVisible = true;
             _dirtyWhileHidden = false;
             renderAllLogs($logList);
@@ -34914,10 +36248,10 @@ function renderLogEntryHTML(entry) {
     const timeStr = `${time}.${ms}`;
     const levelBadge = `<span style="color: ${style.color}; font-weight: 600; min-width: 42px; display: inline-block;">${entry.level.toUpperCase()}</span>`;
     const tagBadge = entry.tag !== '未分类'
-        ? `<span style="color: #cba6f7; background: rgba(203, 166, 247, 0.1); padding: 0 4px; border-radius: 3px; font-size: 0.9em;">${escapeHtml_ACU(entry.tag)}</span>`
+        ? `<span style="color: #cba6f7; background: rgba(203, 166, 247, 0.1); padding: 0 4px; border-radius: 3px; font-size: 0.9em;">${escapeHtml_ACU$1(entry.tag)}</span>`
         : '';
-    const message = escapeHtml_ACU(entry.message);
-    return `<div style="padding: 2px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); background: ${style.bg}; display: flex; gap: 8px; align-items: flex-start; word-break: break-all;" data-log-id="${entry.id}" data-log-level="${entry.level}" data-log-tag="${escapeHtml_ACU(entry.tag)}"><span style="color: #6c7086; white-space: nowrap; flex-shrink: 0;">${timeStr}</span>${levelBadge}${tagBadge}<span style="color: #cdd6f4; flex: 1;">${message}</span></div>`;
+    const message = escapeHtml_ACU$1(entry.message);
+    return `<div style="padding: 2px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); background: ${style.bg}; display: flex; gap: 8px; align-items: flex-start; word-break: break-all;" data-log-id="${entry.id}" data-log-level="${entry.level}" data-log-tag="${escapeHtml_ACU$1(entry.tag)}"><span style="color: #6c7086; white-space: nowrap; flex-shrink: 0;">${timeStr}</span>${levelBadge}${tagBadge}<span style="color: #cdd6f4; flex: 1;">${message}</span></div>`;
 }
 /**
  * 渲染所有日志（全量重绘，用于过滤条件变化时）
@@ -34991,7 +36325,7 @@ function refreshTagFilter($tagFilter) {
     let options = '<option value="all">全部模块</option>';
     for (const tag of tags) {
         const selected = tag === currentVal ? ' selected' : '';
-        options += `<option value="${escapeHtml_ACU(tag)}"${selected}>${escapeHtml_ACU(tag)}</option>`;
+        options += `<option value="${escapeHtml_ACU$1(tag)}"${selected}>${escapeHtml_ACU$1(tag)}</option>`;
     }
     $tagFilter.html(options);
     // 恢复之前的选择
@@ -35171,14 +36505,26 @@ async function bindPopupEvents_ACU() {
     }
     // Attach event listeners
     // --- [新增] Tab切换逻辑 ---
-    const $tabButtons = $popupInstance_ACU.find('.acu-tab-button');
-    const $tabContents = $popupInstance_ACU.find('.acu-tab-content');
+    const $tabButtons = $popupInstance_ACU.find('.acu-tabs-nav > .acu-tab-button');
+    const $tabContents = $popupInstance_ACU.find('.acu-layout > .acu-main > .acu-tab-content');
     $tabButtons.on('click', function () {
         const tabId = jQuery_API_ACU(this).data('tab');
         $tabButtons.removeClass('active');
         jQuery_API_ACU(this).addClass('active');
         $tabContents.removeClass('active');
-        $popupInstance_ACU.find(`#acu-tab-${tabId}`).addClass('active');
+        $popupInstance_ACU.find(`.acu-layout > .acu-main > #acu-tab-${tabId}`).addClass('active');
+    });
+    // --- [新增] 高级工具子Tab切换逻辑 ---
+    const $subtabButtons = $popupInstance_ACU.find('.acu-subtab-button');
+    const $subtabContents = $popupInstance_ACU.find('.acu-subtab-content');
+    $subtabButtons.on('click', function () {
+        const subtabId = jQuery_API_ACU(this).data('subtab');
+        // 只在高级工具tab内部切换
+        const $advancedTab = $popupInstance_ACU.find('#acu-tab-advanced');
+        $advancedTab.find('.acu-subtab-button').removeClass('active');
+        jQuery_API_ACU(this).addClass('active');
+        $advancedTab.find('.acu-subtab-content').removeClass('active');
+        $advancedTab.find(`#acu-subtab-${subtabId}`).addClass('active');
     });
     // API Mode switching logic
     if ($apiModeRadios.length) {
@@ -35216,104 +36562,73 @@ async function bindPopupEvents_ACU() {
 }
 
 // main-popup-status.ts
-// Status标签页（状态 & 操作）HTML生成
+// 仪表盘标签页 HTML生成
+// 原status页拆分：仪表盘（本文件）+ 更新（main-popup-update.ts）
 /**
- * 生成 Status 标签页的 HTML 片段
- * 包含：数据库状态、核心操作、手动更新表选择、公用设置、更新配置
+ * 生成仪表盘标签页的 HTML 片段
+ * 包含：数据库状态总览、快速操作、核心功能开关、API快照
+ *
+ * 承接原status页的：
+ * - 数据库状态卡片（状态总览+表格）
+ * - 核心操作区的手动更新按钮
+ * - 自动更新/规范填表/静默提示框/条件模板/0TK 等开关
+ * - 表格存储模式
+ *
+ * 新迁入：
+ * - 0TK占用模式（从worldbook页迁入）
  */
-function generateStatusTabHTML() {
+function generateDashboardTabHTML() {
     return `
-                <div id="acu-tab-status" class="acu-tab-content active">
-                    <div class="acu-grid">
-                        <div class="acu-card" style="grid-column: span 2;">
-                            <h3>数据库状态</h3>
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border-normal);">
-                                <span id="${SCRIPT_ID_PREFIX_ACU}-total-messages-display">上下文总层数: N/A (仅计算AI回复楼层)</span>
-                                <span id="${SCRIPT_ID_PREFIX_ACU}-card-update-status-display">正在获取状态...</span>
-                            </div>
-                            
-                            <table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">
-                                <thead>
-                                    <tr style="border-bottom: 1px solid var(--border-normal); color: var(--text-secondary);">
-                                        <th style="text-align: left; padding: 5px;">表格名称</th>
-                                        <th style="text-align: center; padding: 5px;">更新频率</th>
-                                        <th style="text-align: center; padding: 5px;">未记录楼层</th>
-                                        <th style="text-align: center; padding: 5px;">上次更新</th>
-                                        <th style="text-align: center; padding: 5px;">下次触发</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="${SCRIPT_ID_PREFIX_ACU}-granular-status-table-body">
-                                    <tr><td colspan="5" style="text-align: center; padding: 10px;">正在加载数据...</td></tr>
-                                </tbody>
-                            </table>
-
-                            <p id="${SCRIPT_ID_PREFIX_ACU}-next-update-display" style="border-top: 1px dashed var(--border-normal); padding-top: 10px; margin-top: 10px; font-size: 0.95em; text-align: right;">下一次更新: 计算中...</p>
+                <div id="acu-tab-dashboard" class="acu-tab-content active">
+                    <!-- A. 数据库状态卡片 -->
+                    <div class="acu-card">
+                        <h3>数据库状态</h3>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border-normal);">
+                            <span id="${SCRIPT_ID_PREFIX_ACU}-total-messages-display">上下文总层数: N/A (仅计算AI回复楼层)</span>
+                            <span id="${SCRIPT_ID_PREFIX_ACU}-card-update-status-display">正在获取状态...</span>
                         </div>
-                        <div class="acu-card" style="grid-column: span 2;">
-                            <h3>核心操作</h3>
-                            <div class="flex-center" style="flex-direction: column; gap: 15px;">
+                        
+                        <table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">
+                            <thead>
+                                <tr style="border-bottom: 1px solid var(--border-normal); color: var(--text-secondary);">
+                                    <th style="text-align: left; padding: 5px;">表格名称</th>
+                                    <th style="text-align: center; padding: 5px;">更新频率</th>
+                                    <th style="text-align: center; padding: 5px;">未记录楼层</th>
+                                    <th style="text-align: center; padding: 5px;">上次更新</th>
+                                    <th style="text-align: center; padding: 5px;">下次触发</th>
+                                </tr>
+                            </thead>
+                            <tbody id="${SCRIPT_ID_PREFIX_ACU}-granular-status-table-body">
+                                <tr><td colspan="5" style="text-align: center; padding: 10px;">正在加载数据...</td></tr>
+                            </tbody>
+                        </table>
+
+                        <p id="${SCRIPT_ID_PREFIX_ACU}-next-update-display" style="border-top: 1px dashed var(--border-normal); padding-top: 10px; margin-top: 10px; font-size: 0.95em; text-align: right;">下一次更新: 计算中...</p>
+                    </div>
+
+                    <!-- B. 快速操作卡片 -->
+                    <div class="acu-grid">
+                        <div class="acu-card">
+                            <h3>快速操作</h3>
+                            <div class="flex-center" style="flex-direction: column; gap: 10px;">
                                 <div style="width: 100%; display: flex; gap: 10px; align-items: center;">
                                     <label style="white-space: nowrap; font-size: 0.9em;">填表API预设:</label>
                                     <select id="${SCRIPT_ID_PREFIX_ACU}-table-api-preset-select" style="flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border-normal);">
                                         <option value="">使用当前API配置</option>
                                     </select>
                                 </div>
-                                <div style="width: 100%; display: flex; flex-direction: column; gap: 6px;">
-                                    <label style="white-space: nowrap; font-size: 0.9em;">正文标签提取规则:</label>
-                                    <div id="${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules"></div>
-                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-table-context-extract-add-rule" class="button" style="align-self: flex-start;">添加规则</button>
-                                    <small class="notes">每条规则填写开始词和结束词，仅提取最后一组匹配内容（不影响注入词规则）。</small>
-                                </div>
-                                <div style="width: 100%; display: flex; flex-direction: column; gap: 6px;">
-                                    <label style="white-space: nowrap; font-size: 0.9em;">标签排除规则:</label>
-                                    <div id="${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules"></div>
-                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-add-rule" class="button" style="align-self: flex-start;">添加规则</button>
-                                    <small class="notes">每条规则填写开始词与结束词，仅移除最后一组匹配内容。</small>
-                                </div>
-                                <div class="checkbox-group">
-                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox">仅识别最后一对 &lt;tableEdit&gt; 标签（忽略前面的思维链/草稿）</label>
-                                </div>
                                 <button id="${SCRIPT_ID_PREFIX_ACU}-manual-update-card" class="primary" style="width:100%;">立即手动更新</button>
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox">额外提示词（仅手动更新时临时追加）</label>
-                                </div>
-                                <div class="checkbox-group">
-                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox">启用自动更新</label>
-                                </div>
-                                <div class="checkbox-group">
-                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox">规范填表功能（总结表与总体大纲必须同步新增）</label>
-                                </div>
-                                <div class="checkbox-group">
-                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox">静默提示框（除填表/规划/导入/报错外，其它提示不弹窗）</label>
-                                </div>
-                                <div class="checkbox-group">
-                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-prompt-template-enabled-checkbox">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-prompt-template-enabled-checkbox">启用条件模板功能（<if>条件判断）</label>
-                                </div>
-                                <div style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border-normal);">
-                                    <label style="font-weight: 500; font-size: 0.9em; margin-bottom: 8px; display: block;">表格存储模式:</label>
-                                    <div style="display: flex; gap: 16px; align-items: center;">
-                                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                            <input type="radio" name="${SCRIPT_ID_PREFIX_ACU}-storage-mode" value="native" checked>
-                                            <span>原生模式 (JSON/DSL)</span>
-                                        </label>
-                                        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                            <input type="radio" name="${SCRIPT_ID_PREFIX_ACU}-storage-mode" value="sqlite">
-                                            <span>SQLite 模式 (SQL)</span>
-                                        </label>
-                                    </div>
-                                    <small class="notes" style="margin-top: 4px; display: block;">原生模式使用 JSON 二维数组 + DSL 指令；SQLite 模式使用内存数据库 + 标准 SQL 语句。切换后会自动重新加载数据。</small>
                                 </div>
                             </div>
                             <p class="notes" style="margin-top: 10px;">手动更新会使用当前UI参数，对勾选的表进行更新；未勾选则默认更新全部表。</p>
                             <p class="notes" style="margin-top: 6px;">勾选"额外提示词"后，点击手动更新会弹出输入框，内容将写入AI指令预设中的 $8 占位符，仅本次操作生效。</p>
                         </div>
                     </div>
+
+                    <!-- 手动更新表选择 -->
                     <div class="acu-card">
                         <h3>手动更新表选择</h3>
                         <div class="notes" style="margin-bottom:6px;">选择需要手动更新的表（可多选，默认全选新表）：</div>
@@ -35323,29 +36638,69 @@ function generateStatusTabHTML() {
                         </div>
                         <div id="${SCRIPT_ID_PREFIX_ACU}-manual-table-selector" style="min-height:60px;">加载表格列表中...</div>
                     </div>
-                     <div class="acu-card">
-                        <h3>公用设置</h3>
-                            <div class="acu-grid">
-                                <div>
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-token-threshold">跳过更新最小回复长度:</label>
-                                    <div class="input-group">
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-auto-update-token-threshold" min="0" step="100" placeholder="${DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU}">
-                                    </div>
-                                    <small class="notes" style="font-size: 0.85em; color: #888;">AI回复少于此长度时跳过自动填表</small>
-                                </div>
-                                <div>
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-table-max-retries">填表自动重试次数:</label>
-                                    <div class="input-group">
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-table-max-retries" min="1" max="10" step="1" value="3">
-                                    </div>
-                                    <small class="notes" style="font-size: 0.85em; color: #888;">错误或空回时自动重试的次数（默认3次）</small>
-                                </div>
-                                    </div>
-                        <p class="notes">当自动更新时，若上下文Token（约等于字符数）低于此值，则跳过本次更新。</p>
-                        </div>
 
+                    <!-- C. 核心功能开关卡片 -->
                     <div class="acu-card">
-                        <h3>更新配置</h3>
+                        <h3>核心功能开关</h3>
+                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox">
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox">启用自动更新</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox">
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-standardized-table-fill-enabled-checkbox">规范填表功能（总结表与总体大纲必须同步新增）</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox">
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-toast-mute-enabled-checkbox">静默提示框（除填表/规划/导入/报错外，其它提示不弹窗）</label>
+                            </div>
+                            <div class="checkbox-group">
+                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-prompt-template-enabled-checkbox">
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-prompt-template-enabled-checkbox">启用条件模板功能（<if>条件判断）</label>
+                            </div>
+                            <!-- 0TK占用模式：从worldbook页迁入仪表盘 -->
+                            <div class="checkbox-group">
+                                <label class="toggle-switch">
+                                    <input id="${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled" type="checkbox" />
+                                    <span class="slider"></span>
+                                </label>
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled">0TK占用模式</label>
+                            </div>
+                            <small class="notes">0TK占用模式仍然作用于世界书注入链路，仅迁移到此处以提高可见性。</small>
+
+                            <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-normal);">
+                                <label style="font-weight: 500; font-size: 0.9em; margin-bottom: 8px; display: block;">表格存储模式:</label>
+                                <div style="display: flex; gap: 16px; align-items: center;">
+                                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                        <input type="radio" name="${SCRIPT_ID_PREFIX_ACU}-storage-mode" value="native" checked>
+                                        <span>原生模式 (JSON/DSL)</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                        <input type="radio" name="${SCRIPT_ID_PREFIX_ACU}-storage-mode" value="sqlite">
+                                        <span>SQLite 模式 (SQL)</span>
+                                    </label>
+                                </div>
+                                <small class="notes" style="margin-top: 4px; display: block;">原生模式使用 JSON 二维数组 + DSL 指令；SQLite 模式使用内存数据库 + 标准 SQL 语句。切换后会自动重新加载数据。</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+}
+
+// main-popup-update.ts
+// 更新标签页 HTML生成
+// 承接原status页的更新配置 + 原prompt页的更新任务提示词
+/**
+ * 生成更新标签页的 HTML 片段
+ * 包含：基础设置、内容筛选、更新任务提示词
+ */
+function generateUpdateTabHTML() {
+    return `
+                <div id="acu-tab-update" class="acu-tab-content">
+                    <!-- A. 基础设置 -->
+                    <div class="acu-card">
+                        <h3>基础设置</h3>
                         <div class="acu-grid-2x2">
                             <div>
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-threshold">AI读取上下文层数:</label>
@@ -35386,20 +36741,58 @@ function generateStatusTabHTML() {
                             </div>
                         </div>
                     </div>
-                </div>`;
-}
 
-// main-popup-prompt.ts
-// Prompt标签页（AI指令预设）HTML生成
-/**
- * 生成 Prompt 标签页的 HTML 片段
- * 包含：数据库更新预设（任务指令）
- */
-function generatePromptTabHTML() {
-    return `
-                <div id="acu-tab-prompt" class="acu-tab-content">
+                    <!-- B. 内容筛选 -->
                     <div class="acu-card">
-                        <h3>数据库更新预设 (任务指令)</h3>
+                        <h3>内容筛选</h3>
+                        <div class="acu-grid">
+                            <div>
+                            <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-token-threshold">跳过更新最小回复长度:</label>
+                                <div class="input-group">
+                                <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-auto-update-token-threshold" min="0" step="100" placeholder="${DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU}">
+                                </div>
+                                <small class="notes" style="font-size: 0.85em; color: #888;">AI回复少于此长度时跳过自动填表</small>
+                            </div>
+                            <div>
+                            <label for="${SCRIPT_ID_PREFIX_ACU}-table-max-retries">填表自动重试次数:</label>
+                                <div class="input-group">
+                                <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-table-max-retries" min="1" max="10" step="1" value="3">
+                                </div>
+                                <small class="notes" style="font-size: 0.85em; color: #888;">错误或空回时自动重试的次数（默认3次）</small>
+                            </div>
+                        </div>
+                        <p class="notes">当自动更新时，若上下文Token（约等于字符数）低于此值，则跳过本次更新。</p>
+
+                        <hr>
+
+                        <div style="display: flex; flex-direction: column; gap: 6px;">
+                            <label style="white-space: nowrap; font-size: 0.9em;">正文标签提取规则:</label>
+                            <div id="${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules"></div>
+                            <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-table-context-extract-add-rule" class="button" style="align-self: flex-start;">添加规则</button>
+                            <small class="notes">每条规则填写开始词和结束词，仅提取最后一组匹配内容（不影响注入词规则）。</small>
+                        </div>
+
+                        <hr>
+
+                        <div style="display: flex; flex-direction: column; gap: 6px;">
+                            <label style="white-space: nowrap; font-size: 0.9em;">标签排除规则:</label>
+                            <div id="${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules"></div>
+                            <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-add-rule" class="button" style="align-self: flex-start;">添加规则</button>
+                            <small class="notes">每条规则填写开始词与结束词，仅移除最后一组匹配内容。</small>
+                        </div>
+
+                        <hr>
+
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox">
+                            <label for="${SCRIPT_ID_PREFIX_ACU}-tableedit-last-pair-only-checkbox">仅识别最后一对 &lt;tableEdit&gt; 标签（忽略前面的思维链/草稿）</label>
+                        </div>
+                    </div>
+
+                    <!-- C. 更新任务提示词（原prompt页） -->
+                    <div class="acu-card">
+                        <h3>更新任务提示词</h3>
+                        <p class="notes">数据库更新预设的任务指令。这些提示词在每次填表时发送给AI。</p>
                         <div id="${SCRIPT_ID_PREFIX_ACU}-prompt-constructor-area">
                             <div class="button-group" style="margin-bottom: 10px; justify-content: center;"><button class="${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn" data-position="top" title="在上方添加对话轮次">+</button></div>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-prompt-segments-container">
@@ -35506,112 +36899,20 @@ function generateApiTabHTML() {
                 </div>`;
 }
 
-// main-popup-worldbook.ts
-// Worldbook标签页（世界书）HTML生成
+// main-popup-table.ts
+// 表格标签页 HTML生成
+// 聚合：表格模板预设（来自data页） + 世界书注入（来自worldbook页） + 表格工具入口
 /**
- * 生成 Worldbook 标签页的 HTML 片段
- * 包含：世界书设置、注入目标、来源选择、条目管理
+ * 生成表格标签页的 HTML 片段
+ * 包含：模板预设（全局/当前聊天双作用域）、世界书注入设置、表格工具入口
  */
-function generateWorldbookTabHTML() {
+function generateTableTabHTML() {
     return `
-                <div id="acu-tab-worldbook" class="acu-tab-content">
+                <div id="acu-tab-table" class="acu-tab-content">
+                    <!-- A. 表格模板预设 -->
                     <div class="acu-card">
-                        <h3>世界书设置</h3>
-                        <div>
-                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target">数据注入目标:</label>
-                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
-                            <div class="input-group">
-                                <select id="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target" style="width: 100%;"></select>
-                            </div>
-                            <small class="notes">选择数据库条目（如全局、人物、大纲等）将被创建或更新到哪个世界书里。</small>
-                        </div>
-                        <div class="qrf_settings_block" style="margin-top: 12px; margin-bottom: 6px;">
-                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled"><strong>0TK占用模式</strong></label>
-                            <label class="toggle-switch">
-                                <input id="${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled" type="checkbox" />
-                                <span class="slider"></span>
-                            </label>
-                        </div>
-                        <hr style="border-color: var(--border-normal); margin: 15px 0;">
-                         <div class="qrf_settings_block_radio">
-                            <label>世界书来源 (用于AI读取上下文):</label>
-                            <div class="qrf_radio_group">
-                                <input type="radio" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-source-character" name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source" value="character" checked>
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-source-character">角色卡绑定</label>
-                                <input type="radio" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-source-manual" name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source" value="manual">
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-source-manual">手动选择</label>
-                            </div>
-                        </div>
-                        <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-manual-select-block" style="display: none; margin-top: 10px;">
-                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-select">选择世界书 (可多选):</label>
-                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
-                            <div class="input-group">
-                                <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select" class="qrf_worldbook_list"></div>
-                                <button id="${SCRIPT_ID_PREFIX_ACU}-refresh-worldbooks" title="刷新世界书列表">刷新</button>
-                            </div>
-                        </div>
-                        <div style="margin-top: 15px;">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
-                                <label style="margin-bottom: 0;">启用的世界书条目:</label>
-                                <div class="button-group" style="margin: 0;">
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select-all" class="button" style="padding: 2px 8px; font-size: 0.8em;">全选</button>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-worldbook-deselect-all" class="button" style="padding: 2px 8px; font-size: 0.8em;">全不选</button>
-                                </div>
-                            </div>
-                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-entry-filter" placeholder="筛选条目/世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
-                            <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-entry-list" class="qrf_worldbook_entry_list">
-                                <!-- 条目将动态加载于此 -->
-                            </div>
-                        </div>
-                    </div>
-                </div>`;
-}
-
-// main-popup-data.ts
-// Data标签页（数据管理）HTML生成
-/**
- * 生成 Data 标签页的 HTML 片段
- * 包含：数据隔离、数据管理、模板预设、纪要合并
- */
-function generateDataTabHTML() {
-    return `
-                <div id="acu-tab-data" class="acu-tab-content">
-                    <div class="acu-card">
-                        <h3>数据隔离</h3>
-                        <p class="notes">在此处输入特定的标识代码，插件将只读取和保存带有该标识的数据。若留空则使用默认数据。</p>
-                        <div class="setting-item" style="margin-bottom: 15px; border-bottom: 1px dashed var(--border-normal); padding-bottom: 15px;">
-                            <div id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-input-area" style="margin-top: 10px;">
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-data-isolation-code">标识代码:</label>
-                                <div class="acu-data-isolation-row" style="display: flex; gap: 10px; margin-top: 5px; align-items: flex-start;">
-                                    <div id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-combo" style="position: relative; flex-grow: 1; display: flex; align-items: center;">
-                                        <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-code" placeholder="输入标识代码 (留空则不隔离)" style="flex-grow: 1; padding-right: 36px;">
-                                        <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-history-toggle" title="历史标识代码" style="position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 1px solid var(--border-normal); background: var(--bg-secondary); color: var(--text-main); padding: 4px 6px; border-radius: 4px; cursor: pointer; font-size: 12px; line-height: 1;">▼</button>
-                                        <ul id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-history-list" style="display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: var(--bg-primary); border: 1px solid var(--border-normal); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18); list-style: none; margin: 0; padding: 6px 0; max-height: 220px; overflow-y: auto; z-index: 9999;"></ul>
-                                    </div>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-save" class="primary" style="white-space: nowrap;">保存并应用</button>
-                                </div>
-                                <p class="notes" style="margin-top: 5px;">输入代码并点击保存后，将重新载入对应的本地数据。</p>
-                            </div>
-                            <div style="margin-top: 10px; text-align: right;">
-                        <button id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-delete-entries" class="btn-danger" style="padding: 5px 10px; border-radius: 4px; font-size: 0.9em;">删除当前标识的注入条目</button>
-                            </div>
-                        </div>
-
-                        <h3>数据管理</h3>
-                        <p class="notes">导入/导出当前对话的数据库，或管理全局模板。</p>
-                        <div class="button-group acu-data-mgmt-buttons acu-cols-2">
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-import-combined-settings" class="primary">合并导入(模板+指令)</button>
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-export-combined-settings" class="primary">合并导出(模板+指令)</button>
-                        </div>
-                        <hr style="border-color: var(--border-normal); margin: 15px 0;">
-                        <div class="button-group acu-data-mgmt-buttons acu-cols-3">
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-export-json-data">导出JSON数据</button>
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-reset-all-defaults" class="btn-warning">恢复默认模板及提示词</button>
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-override-with-template" class="btn-danger">模板覆盖最新层数据</button>
-                        </div>
-                        <hr style="border-color: var(--border-normal); margin: 15px 0;">
+                        <h3>表格模板预设</h3>
                         <div class="acu-template-presets" style="background: var(--background-color-light); padding: 12px; border-radius: 8px;">
-                            <h4 style="margin: 0 0 10px 0; font-size: 0.95em; font-weight: 600;">表格模板预设（全局 / 当前聊天）</h4>
                             <div class="acu-data-template-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start;">
                                 <div style="padding: 16px; background: var(--background_default); border-radius: 8px; border: 1px solid var(--border_color_light); display: flex; flex-direction: column; gap: 12px;">
                                     <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
@@ -35680,109 +36981,63 @@ function generateDataTabHTML() {
                                 </div>
                             </div>
                         </div>
-                        <!-- 楼层范围选择 -->
-                        <div style="background: var(--background-color-light); padding: 12px; border-radius: 6px; margin-bottom: 10px;">
-                            <h4 style="margin: 0 0 8px 0; font-size: 0.9em; color: var(--text-color); font-weight: 500;">删除范围设置</h4>
-                            <div class="acu-grid">
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-delete-start-floor" style="font-weight: 500; font-size: 0.85em;">起始AI楼层:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-delete-start-floor" min="1" value="1" placeholder="1" style="width: 100%; padding: 4px 8px; border: 1px solid var(--border-normal); border-radius: 4px; background: var(--input-background); color: var(--input-text-color);">
-                                </div>
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-delete-end-floor" style="font-weight: 500; font-size: 0.85em;">终止AI楼层:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-delete-end-floor" min="1" placeholder="留空删除到最后" style="width: 100%; padding: 4px 8px; border: 1px solid var(--border-normal); border-radius: 4px; background: var(--input-background); color: var(--input-text-color);">
-                                </div>
-                            </div>
-                            <div style="margin-top: 6px; font-size: 0.8em; color: var(--text-color-dimmed);">
-                                默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）
-                            </div>
-                        </div>
+                        <p class="notes" style="margin-top: 10px;">模板预设分为全局和当前聊天两个作用域。新聊天默认继承全局模板，也可为每个聊天单独配置。</p>
+                    </div>
 
-                        <div class="button-group acu-data-mgmt-buttons acu-cols-2" style="margin-top: 10px;">
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-delete-current-local-data" class="btn-warning">删除当前标识本地数据</button>
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-delete-all-local-data" class="btn-danger">删除所有本地数据 (慎用)</button>
+                    <!-- B. 世界书注入（从原worldbook页迁入，不含0TK） -->
+                    <div class="acu-card">
+                        <h3>世界书注入</h3>
+                        <p class="notes">配置数据库条目注入到哪个世界书，以及AI读取上下文时使用哪些世界书。</p>
+                        <div>
+                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target">数据注入目标:</label>
+                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                            <div class="input-group">
+                                <select id="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target" style="width: 100%;"></select>
+                            </div>
+                            <small class="notes">选择数据库条目（如全局、人物、大纲等）将被创建或更新到哪个世界书里。</small>
                         </div>
-                        <div class="button-group" style="margin-top: 20px;">
+                        <hr>
+                         <div class="qrf_settings_block_radio">
+                            <label>世界书来源 (用于AI读取上下文):</label>
+                            <div class="qrf_radio_group">
+                                <input type="radio" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-source-character" name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source" value="character" checked>
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-source-character">角色卡绑定</label>
+                                <input type="radio" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-source-manual" name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source" value="manual">
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-source-manual">手动选择</label>
+                            </div>
+                        </div>
+                        <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-manual-select-block" style="display: none; margin-top: 10px;">
+                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-select">选择世界书 (可多选):</label>
+                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                            <div class="input-group">
+                                <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select" class="qrf_worldbook_list"></div>
+                                <button id="${SCRIPT_ID_PREFIX_ACU}-refresh-worldbooks" title="刷新世界书列表">刷新</button>
+                            </div>
+                        </div>
+                        <div style="margin-top: 15px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                                <label style="margin-bottom: 0;">启用的世界书条目:</label>
+                                <div class="button-group" style="margin: 0;">
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select-all" class="button" style="padding: 2px 8px; font-size: 0.8em;">全选</button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-worldbook-deselect-all" class="button" style="padding: 2px 8px; font-size: 0.8em;">全不选</button>
+                                </div>
+                            </div>
+                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-entry-filter" placeholder="筛选条目/世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                            <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-entry-list" class="qrf_worldbook_entry_list">
+                                <!-- 条目将动态加载于此 -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- C. 表格工具入口 -->
+                    <div class="acu-card">
+                        <h3>表格工具</h3>
+                        <div class="button-group" style="margin-top: 0;">
                             <button id="${SCRIPT_ID_PREFIX_ACU}-open-new-visualizer" class="primary acu-btn-medium" style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px;">
                                 <i class="fa-solid fa-table-columns"></i> 打开可视化表格编辑器
                             </button>
                         </div>
                         <p class="notes" style="text-align: center; margin-top: 10px;">点击上方按钮打开全新的可视化界面，支持直接编辑数据、修改表头及更新参数。</p>
-                    </div>
-                    
-                    <div class="acu-card">
-                        <h3 style="text-align: center; margin-bottom: 15px;">纪要合并 (Medusa)</h3>
-                        <p class="notes" style="text-align: center; margin-bottom: 20px;">将当前的纪要表进行批量合并与精简。</p>
-
-                        <!-- 手动合并参数 -->
-                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
-                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">手动合并参数</h4>
-
-                            <div class="acu-grid" style="margin-bottom: 10px;">
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-merge-target-count" style="font-weight: 500;">合并目标条数:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-merge-target-count" min="1" value="1" placeholder="1">
-                                </div>
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-merge-batch-size" style="font-weight: 500;">每批处理条数:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-merge-batch-size" min="1" value="5" placeholder="5">
-                                </div>
-                            </div>
-
-                            <div class="acu-grid">
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-merge-start-index" style="font-weight: 500;">起始条数:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-merge-start-index" min="1" value="1" placeholder="1">
-                                </div>
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-merge-end-index" style="font-weight: 500;">终止条数:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-merge-end-index" min="1" placeholder="留空处理到最后">
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 自动合并设置 -->
-                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
-                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">自动合并设置</h4>
-
-                            <div style="margin-bottom: 12px;">
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-auto-merge-enabled" style="display: flex; align-items: center; cursor: pointer;">
-                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-auto-merge-enabled" style="width: 14px; height: 14px; margin-right: 8px; cursor: pointer;">
-                                    <span style="font-size: 0.9em; font-weight: 500;">开启自动合并纪要</span>
-                                </label>
-                            </div>
-
-                            <div class="acu-grid">
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-auto-merge-threshold" style="font-weight: 500;">触发楼层数:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-auto-merge-threshold" min="1" value="20" placeholder="20">
-                                </div>
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-auto-merge-reserve" style="font-weight: 500;">保留楼层数:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-auto-merge-reserve" min="0" value="0" placeholder="0">
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 提示词设置 -->
-                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
-                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">提示词模板</h4>
-                            <textarea id="${SCRIPT_ID_PREFIX_ACU}-merge-prompt-template" style="height: 120px; font-size: 0.85em; font-family: monospace; width: 100%; resize: vertical;" placeholder="正在加载提示词模板..."></textarea>
-                        </div>
-
-                        <!-- 操作按钮 -->
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px;">
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-save-merge-settings" style="padding: 10px; background: var(--button-background); border: 1px solid var(--border-normal); border-radius: 6px; cursor: pointer; transition: all 0.2s ease;">
-                                <i class="fa-solid fa-save" style="margin-right: 5px;"></i>保存设置
-                            </button>
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-restore-merge-settings" style="padding: 10px; background: var(--button-secondary-background, #f8f9fa); border: 1px solid var(--border-normal); border-radius: 6px; cursor: pointer; transition: all 0.2s ease;">
-                                <i class="fa-solid fa-undo" style="margin-right: 5px;"></i>恢复默认
-                            </button>
-                        </div>
-
-                        <button id="${SCRIPT_ID_PREFIX_ACU}-start-merge-summary" class="primary" style="width: 100%; padding: 12px; font-size: 1em;">
-                            <i class="fa-solid fa-play" style="margin-right: 8px;"></i>开始合并纪要
-                        </button>
                     </div>
                 </div>`;
 }
@@ -35866,14 +37121,15 @@ function generateImportTabHTML() {
 }
 
 // main-popup-plot.ts
-// Plot标签页（剧情推进）HTML生成
+// 核心功能标签页 HTML生成
+// 包含：剧情推进、智能续写、外部导入
 /**
- * 生成 Plot 标签页的 HTML 片段
- * 包含：剧情推进设置、预设管理、提示词设置、匹配替换、自动循环
+ * 生成核心功能标签页的 HTML 片段
+ * 包含：剧情推进设置、预设管理、提示词设置、匹配替换、智能续写、世界书选择、外部导入
  */
-function generatePlotTabHTML() {
+function generateCoreFuncTabHTML() {
     return `
-                <div id="acu-tab-plot" class="acu-tab-content">
+                <div id="acu-tab-corefunc" class="acu-tab-content">
                     <div class="acu-card">
                         <!-- 顶部标题和开关区域 -->
                         <div class="acu-plot-header-row" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid var(--border_color);">
@@ -36009,9 +37265,23 @@ function generatePlotTabHTML() {
                                             <small class="notes">仅作用于当前选中的剧情任务</small>
                                         </div>
                                         <div class="qrf_settings_block" style="margin-bottom:0;">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-plot-extract-inject-tags" style="font-weight:500;">提取注入标签</label>
+                                            <input id="${SCRIPT_ID_PREFIX_ACU}-plot-extract-inject-tags" type="text" class="text_pole" placeholder="例如: recall,supplement" style="width:100%;">
+                                            <small class="notes">优先级高于标签摘取；未使用时不自动注入末尾</small>
+                                        </div>
+                                        <div class="qrf_settings_block" style="margin-bottom:0;">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-plot-min-length" style="font-weight:500;">当前任务最小回复长度</label>
                                             <input id="${SCRIPT_ID_PREFIX_ACU}-plot-min-length" type="number" class="text_pole" min="0" max="2000" step="10" value="0" style="width:100%;">
                                             <small class="notes">当前任务回复少于此长度时自动重试</small>
+                                        </div>
+                                    </div>
+                                    <div style="margin-bottom:15px;">
+                                        <div class="qrf_settings_block" style="margin-bottom:0;">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset" style="font-weight:500;">任务数据库API预设</label>
+                                            <select id="${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset" class="text_pole" style="width:100%;">
+                                                <option value="">继承全局剧情推进API预设</option>
+                                            </select>
+                                            <small class="notes">仅保存到数据库设置，不随模板导出</small>
                                         </div>
                                     </div>
                                     <div id="${SCRIPT_ID_PREFIX_ACU}-plot-prompt-constructor-area">
@@ -36075,7 +37345,7 @@ function generatePlotTabHTML() {
                         <!-- 自动循环设置区域 -->
                         <div class="settings-section" style="padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
                             <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
-                                <i class="fa-solid fa-sync-alt"></i> 自动循环生成
+                                <i class="fa-solid fa-sync-alt"></i> 智能续写
                             </h4>
 
                             <div style="display: grid; gap: 15px; margin-bottom: 20px;">
@@ -36197,6 +37467,165 @@ function generatePlotTabHTML() {
                                 </div>
                             </div>
                         </div>
+
+                        <!-- 外部导入区块（原独立tab，现作为核心功能区子模块） -->
+                        <div class="settings-section" style="padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
+                            ${generateImportTabHTML().replace(/id="acu-tab-import" class="acu-tab-content"/, 'id="acu-tab-import-embedded" class="acu-import-embedded"').replace(/<div class="acu-card">/, '<div class="acu-card" style="border: none; box-shadow: none; padding: 0; margin: 0;">').replace('<h3>从TXT文件导入</h3>', '<h3 style="margin: 0 0 15px 0; padding: 0 0 10px 0; border-bottom: 1px solid var(--border_color);">外部导入</h3>').replace('<p class="notes">从外部TXT文件导入内容', '<p class="notes" style="margin-bottom: 12px;">从外部TXT文件导入内容')}
+                        </div>
+                    </div>
+                </div>`;
+}
+
+// main-popup-datamgmt.ts
+// 数据管理标签页 HTML生成
+// 承接原data页的数据隔离、删除清理、备份恢复、Medusa合并
+/**
+ * 生成数据管理标签页的 HTML 片段
+ * 包含：数据隔离、删除与清理、备份与恢复、纪要合并(Medusa)
+ */
+function generateDataMgmtTabHTML() {
+    return `
+                <div id="acu-tab-datamgmt" class="acu-tab-content">
+                    <!-- A. 数据隔离 -->
+                    <div class="acu-card">
+                        <h3>数据隔离</h3>
+                        <p class="notes">在此处输入特定的标识代码，插件将只读取和保存带有该标识的数据。若留空则使用默认数据。</p>
+                        <div class="setting-item" style="margin-bottom: 15px; border-bottom: 1px dashed var(--border-normal); padding-bottom: 15px;">
+                            <div id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-input-area" style="margin-top: 10px;">
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-data-isolation-code">标识代码:</label>
+                                <div class="acu-data-isolation-row" style="display: flex; gap: 10px; margin-top: 5px; align-items: flex-start;">
+                                    <div id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-combo" style="position: relative; flex-grow: 1; display: flex; align-items: center;">
+                                        <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-code" placeholder="输入标识代码 (留空则不隔离)" style="flex-grow: 1; padding-right: 36px;">
+                                        <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-history-toggle" title="历史标识代码" style="position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 1px solid var(--border-normal); background: var(--bg-secondary); color: var(--text-main); padding: 4px 6px; border-radius: 4px; cursor: pointer; font-size: 12px; line-height: 1;">▼</button>
+                                        <ul id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-history-list" style="display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: var(--bg-primary); border: 1px solid var(--border-normal); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18); list-style: none; margin: 0; padding: 6px 0; max-height: 220px; overflow-y: auto; z-index: 9999;"></ul>
+                                    </div>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-save" class="primary" style="white-space: nowrap;">保存并应用</button>
+                                </div>
+                                <p class="notes" style="margin-top: 5px;">输入代码并点击保存后，将重新载入对应的本地数据。</p>
+                            </div>
+                            <div style="margin-top: 10px; text-align: right;">
+                        <button id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-delete-entries" class="btn-danger" style="padding: 5px 10px; border-radius: 4px; font-size: 0.9em;">删除当前标识的注入条目</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- B. 备份与恢复 -->
+                    <div class="acu-card">
+                        <h3>备份与恢复</h3>
+                        <p class="notes">导入/导出当前对话的数据库，或管理全局模板。</p>
+                        <div class="button-group acu-data-mgmt-buttons acu-cols-2">
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-import-combined-settings" class="primary">合并导入(模板+指令)</button>
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-export-combined-settings" class="primary">合并导出(模板+指令)</button>
+                        </div>
+                        <hr style="border-color: var(--border-normal); margin: 15px 0;">
+                        <div class="button-group acu-data-mgmt-buttons acu-cols-3">
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-export-json-data">导出JSON数据</button>
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-reset-all-defaults" class="btn-warning">恢复默认模板及提示词</button>
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-override-with-template" class="btn-danger">模板覆盖最新层数据</button>
+                        </div>
+                    </div>
+
+                    <!-- C. 删除与清理 -->
+                    <div class="acu-card">
+                        <h3>删除与清理</h3>
+                        <!-- 楼层范围选择 -->
+                        <div style="background: var(--background-color-light); padding: 12px; border-radius: 6px; margin-bottom: 10px;">
+                            <h4 style="margin: 0 0 8px 0; font-size: 0.9em; color: var(--text-color); font-weight: 500;">删除范围设置</h4>
+                            <div class="acu-grid">
+                                <div>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-delete-start-floor" style="font-weight: 500; font-size: 0.85em;">起始AI楼层:</label>
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-delete-start-floor" min="1" value="1" placeholder="1" style="width: 100%; padding: 4px 8px; border: 1px solid var(--border-normal); border-radius: 4px; background: var(--input-background); color: var(--input-text-color);">
+                                </div>
+                                <div>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-delete-end-floor" style="font-weight: 500; font-size: 0.85em;">终止AI楼层:</label>
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-delete-end-floor" min="1" placeholder="留空删除到最后" style="width: 100%; padding: 4px 8px; border: 1px solid var(--border-normal); border-radius: 4px; background: var(--input-background); color: var(--input-text-color);">
+                                </div>
+                            </div>
+                            <div style="margin-top: 6px; font-size: 0.8em; color: var(--text-color-dimmed);">
+                                默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）
+                            </div>
+                        </div>
+
+                        <div class="button-group acu-data-mgmt-buttons acu-cols-2">
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-delete-current-local-data" class="btn-warning">删除当前标识本地数据</button>
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-delete-all-local-data" class="btn-danger">删除所有本地数据 (慎用)</button>
+                        </div>
+                    </div>
+
+                    <!-- D. 纪要合并 (Medusa) -->
+                    <div class="acu-card">
+                        <h3 style="text-align: center; margin-bottom: 15px;">纪要合并 (Medusa)</h3>
+                        <p class="notes" style="text-align: center; margin-bottom: 20px;">将当前的纪要表进行批量合并与精简。</p>
+
+                        <!-- 手动合并参数 -->
+                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">手动合并参数</h4>
+
+                            <div class="acu-grid" style="margin-bottom: 10px;">
+                                <div>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-merge-target-count" style="font-weight: 500;">合并目标条数:</label>
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-merge-target-count" min="1" value="1" placeholder="1">
+                                </div>
+                                <div>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-merge-batch-size" style="font-weight: 500;">每批处理条数:</label>
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-merge-batch-size" min="1" value="5" placeholder="5">
+                                </div>
+                            </div>
+
+                            <div class="acu-grid">
+                                <div>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-merge-start-index" style="font-weight: 500;">起始条数:</label>
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-merge-start-index" min="1" value="1" placeholder="1">
+                                </div>
+                                <div>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-merge-end-index" style="font-weight: 500;">终止条数:</label>
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-merge-end-index" min="1" placeholder="留空处理到最后">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 自动合并设置 -->
+                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">自动合并设置</h4>
+
+                            <div style="margin-bottom: 12px;">
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-auto-merge-enabled" style="display: flex; align-items: center; cursor: pointer;">
+                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-auto-merge-enabled" style="width: 14px; height: 14px; margin-right: 8px; cursor: pointer;">
+                                    <span style="font-size: 0.9em; font-weight: 500;">开启自动合并纪要</span>
+                                </label>
+                            </div>
+
+                            <div class="acu-grid">
+                                <div>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-auto-merge-threshold" style="font-weight: 500;">触发楼层数:</label>
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-auto-merge-threshold" min="1" value="20" placeholder="20">
+                                </div>
+                                <div>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-auto-merge-reserve" style="font-weight: 500;">保留楼层数:</label>
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-auto-merge-reserve" min="0" value="0" placeholder="0">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 提示词设置 -->
+                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">提示词模板</h4>
+                            <textarea id="${SCRIPT_ID_PREFIX_ACU}-merge-prompt-template" style="height: 120px; font-size: 0.85em; font-family: monospace; width: 100%; resize: vertical;" placeholder="正在加载提示词模板..."></textarea>
+                        </div>
+
+                        <!-- 操作按钮 -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-save-merge-settings" style="padding: 10px; background: var(--button-background); border: 1px solid var(--border-normal); border-radius: 6px; cursor: pointer; transition: all 0.2s ease;">
+                                <i class="fa-solid fa-save" style="margin-right: 5px;"></i>保存设置
+                            </button>
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-restore-merge-settings" style="padding: 10px; background: var(--button-secondary-background, #f8f9fa); border: 1px solid var(--border-normal); border-radius: 6px; cursor: pointer; transition: all 0.2s ease;">
+                                <i class="fa-solid fa-undo" style="margin-right: 5px;"></i>恢复默认
+                            </button>
+                        </div>
+
+                        <button id="${SCRIPT_ID_PREFIX_ACU}-start-merge-summary" class="primary" style="width: 100%; padding: 12px; font-size: 1em;">
+                            <i class="fa-solid fa-play" style="margin-right: 8px;"></i>开始合并纪要
+                        </button>
                     </div>
                 </div>`;
 }
@@ -36210,7 +37639,7 @@ function generatePlotTabHTML() {
 function generateOptimizationTabHTML() {
     return `
                 <!-- 正文替换Tab -->
-                <div id="acu-tab-optimization" class="acu-tab-content">
+                <div id="acu-tab-optimization">
                     <div class="acu-card">
                         <!-- 顶部标题和开关区域 -->
                         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid var(--border_color);">
@@ -36407,6 +37836,49 @@ function generateOptimizationTabHTML() {
                 </div>`;
 }
 
+// main-popup-advanced.ts
+// 高级工具标签页 HTML生成
+// 聚合：正文替换(optimization) + SQL控制台 + 运行日志
+// 使用内部子tab切换三个子页面
+/**
+ * 生成高级工具标签页的 HTML 片段
+ * 包含：正文替换、SQL控制台（仅SQLite模式）、运行日志
+ * 使用内部子导航切换
+ *
+ * 重要：子模块（optimization/sql-console/log-viewer）内部使用固定 id
+ * （acu-tab-optimization, acu-tab-sql-console, acu-tab-log-viewer），
+ * 绑定代码通过这些 id 查找元素，不能修改。
+ * 子tab切换通过 acu-subtab-* 容器控制显示/隐藏。
+ */
+function generateAdvancedTabHTML() {
+    const sqlSection = isSqliteMode() ? `
+                    <button class="acu-subtab-button" data-subtab="advanced-sql">SQL 控制台</button>` : '';
+    const sqlContent = isSqliteMode() ? `
+                <div id="acu-subtab-advanced-sql" class="acu-subtab-content">
+                    ${generateSqlConsoleTabHTML()}
+                </div>` : '';
+    return `
+                <div id="acu-tab-advanced" class="acu-tab-content">
+                    <!-- 内部子导航 -->
+                    <div class="acu-subtabs-nav">
+                    <button class="acu-subtab-button active" data-subtab="advanced-optimization">正文替换</button>
+                    ${sqlSection}
+                    <button class="acu-subtab-button" data-subtab="advanced-log">运行日志</button>
+                    </div>
+
+                    <!-- 子页面内容 — 保持子模块原始 id 不变 -->
+                    <div class="acu-subtabs-container">
+                <div id="acu-subtab-advanced-optimization" class="acu-subtab-content active">
+                    ${generateOptimizationTabHTML()}
+                </div>
+                    ${sqlContent}
+                <div id="acu-subtab-advanced-log" class="acu-subtab-content">
+                    ${generateLogViewerTabHTML()}
+                </div>
+                    </div>
+                </div>`;
+}
+
 /**
  * presentation/pages/main-popup-styles.ts
  * 主弹窗样式定义
@@ -36420,42 +37892,43 @@ const MAIN_POPUP_CSS_ACU = `
                     
                     /* 基础隔离：尽量不吃外部样式（但不使用 all: initial，避免破坏第三方组件） */
                     #${POPUP_ID_ACU}, #${POPUP_ID_ACU} * { box-sizing: border-box; }
-                    #${POPUP_ID_ACU} { color-scheme: dark; }
+                    #${POPUP_ID_ACU} { color-scheme: light; }
 
                     #${POPUP_ID_ACU} {
-                        /* 主题色：深色中性 + 蓝紫高光（不单调，但克制） */
-                        --acu-bg-0: #0b0f15;
-                        --acu-bg-1: #101826;
-                        --acu-bg-2: rgba(255, 255, 255, 0.06);
-                        --acu-bg-3: rgba(255, 255, 255, 0.09);
-                        --acu-border: rgba(255, 255, 255, 0.12);
-                        --acu-border-2: rgba(255, 255, 255, 0.18);
-                        --acu-text-1: rgba(255, 255, 255, 0.92);
-                        --acu-text-2: rgba(255, 255, 255, 0.74);
-                        --acu-text-3: rgba(255, 255, 255, 0.52);
+                        /* 主题色：浅色管理台 + 蓝色主强调（细边框、弱阴影、卡片化） */
+                        --acu-bg-0: #f5f7fa;
+                        --acu-bg-1: #ffffff;
+                        --acu-bg-2: rgba(0, 0, 0, 0.03);
+                        --acu-bg-3: rgba(0, 0, 0, 0.05);
+                        --acu-border: #e0e4ea;
+                        --acu-border-2: #c8cdd5;
 
-                        --acu-accent: #7bb7ff;
-                        --acu-accent-2: #9b7bff;
-                        --acu-accent-glow: rgba(123, 183, 255, 0.22);
-                        --acu-accent-glow-2: rgba(155, 123, 255, 0.18);
+                        --acu-text-1: #1a2332;
+                        --acu-text-2: #4a5568;
+                        --acu-text-3: #8896a8;
 
-                        --acu-success: #4ad19f;
-                        --acu-warning: #ffb85c;
-                        --acu-danger: #ff6b6b;
+                        --acu-accent: #2563eb;
+                        --acu-accent-2: #3b82f6;
+                        --acu-accent-glow: rgba(37, 99, 235, 0.12);
+                        --acu-accent-glow-2: rgba(59, 130, 246, 0.10);
 
-                        --acu-radius-lg: 16px;
-                        --acu-radius-md: 12px;
-                        --acu-radius-sm: 10px;
+                        --acu-success: #10b981;
+                        --acu-warning: #f59e0b;
+                        --acu-danger: #ef4444;
 
-                        --acu-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+                        --acu-radius-lg: 10px;
+                        --acu-radius-md: 8px;
+                        --acu-radius-sm: 6px;
+
+                        --acu-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
                         
                         /* 兼容旧 inline style 里使用的变量名（避免依赖外部主题） */
                         --bg-primary: var(--acu-bg-0);
                         --bg-secondary: var(--acu-bg-1);
-                        --background_light: rgba(255, 255, 255, 0.04);
-                        --background_default: rgba(255, 255, 255, 0.03);
-                        --background-color-light: rgba(255, 255, 255, 0.04);
-                        --input-background: rgba(0, 0, 0, 0.26);
+                        --background_light: rgba(0, 0, 0, 0.02);
+                        --background_default: #ffffff;
+                        --background-color-light: rgba(0, 0, 0, 0.02);
+                        --input-background: #ffffff;
                         --input-text-color: var(--acu-text-1);
                         --text-main: var(--acu-text-1);
                         --text_primary: var(--acu-text-1);
@@ -36468,11 +37941,12 @@ const MAIN_POPUP_CSS_ACU = `
                         --border-normal: var(--acu-border-2);
                         --warning-color: var(--acu-warning);
                         --error-color: var(--acu-danger);
-                        --button-background: rgba(255, 255, 255, 0.06);
-                        --button-secondary-background: rgba(255, 255, 255, 0.04);
+                        --button-background: #ffffff;
+                        --button-secondary-background: #f8f9fb;
                         --green: var(--acu-success);
                         --orange: var(--acu-warning);
                         --red: var(--acu-danger);
+                        --accent-primary: var(--acu-accent);
                         
                         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "HarmonyOS Sans SC", "MiSans", Roboto, Helvetica, Arial, sans-serif;
                         font-size: 14px;
@@ -36480,19 +37954,13 @@ const MAIN_POPUP_CSS_ACU = `
                         color: var(--acu-text-1);
                         width: 100%;
                         max-width: 100vw;
-                        /* 关键：设置高度为100%并启用滚动，确保内容不溢出 */
                         height: 100%;
                         box-sizing: border-box;
                         overflow-x: hidden;
                         overflow-y: auto;
                         padding: 14px;
-                        /* 移动端安全区域适配 */
                         padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
-                        background:
-                            radial-gradient(1200px 600px at 10% -10%, rgba(123, 183, 255, 0.18), transparent 60%),
-                            radial-gradient(900px 500px at 100% 0%, rgba(155, 123, 255, 0.14), transparent 55%),
-                            linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 22%),
-                            var(--acu-bg-0);
+                        background: var(--acu-bg-0);
                     }
 
                     /* 防横向溢出兜底：任何子元素都不应把容器撑出屏幕 */
@@ -36509,13 +37977,11 @@ const MAIN_POPUP_CSS_ACU = `
                         align-items: flex-start;
                         justify-content: center;
                         gap: 12px;
-                        padding: 12px 12px 10px 12px;
+                        padding: 12px 16px;
                         border: 1px solid var(--acu-border);
                         border-radius: var(--acu-radius-lg);
-                        background: rgba(255, 255, 255, 0.03);
-                        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
-                        backdrop-filter: blur(10px);
-                        -webkit-backdrop-filter: blur(10px);
+                        background: var(--acu-bg-1);
+                        box-shadow: var(--acu-shadow);
                     }
                     /* 顶部标题块居中（宽屏/窄屏一致） */
                     #${POPUP_ID_ACU} .acu-header > div {
@@ -36533,6 +37999,7 @@ const MAIN_POPUP_CSS_ACU = `
                         letter-spacing: 0.2px;
                         color: var(--acu-text-1);
                         text-align: center;
+                        width: 100%;
                     }
                     
                     #${POPUP_ID_ACU} .acu-header-sub {
@@ -36554,11 +38021,11 @@ const MAIN_POPUP_CSS_ACU = `
                     #${POPUP_ID_ACU} .acu-tabs-nav {
                         border: 1px solid var(--acu-border);
                         border-radius: var(--acu-radius-lg);
-                        background: rgba(255, 255, 255, 0.03);
+                        background: var(--acu-bg-1);
                         padding: 10px;
                         display: flex;
                         flex-direction: column;
-                        gap: 6px;
+                        gap: 4px;
                         position: sticky;
                         top: 0;
                         align-self: start;
@@ -36567,12 +38034,13 @@ const MAIN_POPUP_CSS_ACU = `
                     }
 
                     #${POPUP_ID_ACU} .acu-nav-section-title {
-                        padding: 10px 10px 6px 10px;
+                        padding: 10px 10px 4px 10px;
                         color: var(--acu-text-3);
-                        font-size: 12px;
-                        letter-spacing: 1px;
+                        font-size: 11px;
+                        letter-spacing: 0.5px;
                         text-transform: uppercase;
                         user-select: none;
+                        font-weight: 600;
                     }
                     
                     #${POPUP_ID_ACU} .acu-tab-button {
@@ -36581,35 +38049,33 @@ const MAIN_POPUP_CSS_ACU = `
                         align-items: center;
                         justify-content: space-between;
                         gap: 10px;
-                        padding: 10px 12px;
+                        padding: 9px 12px;
                         border: 1px solid transparent;
-                        border-radius: 12px;
+                        border-radius: 6px;
                         background: transparent;
                         color: var(--acu-text-2);
                         font-size: 13px;
-                        font-weight: 600;
-                        letter-spacing: 0.2px;
+                        font-weight: 500;
                         cursor: pointer;
-                        transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+                        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
                     }
                     #${POPUP_ID_ACU} .acu-tab-button:hover {
-                        background: rgba(255, 255, 255, 0.06);
-                        border-color: rgba(255, 255, 255, 0.10);
+                        background: var(--acu-bg-2);
+                        border-color: var(--acu-border);
                         color: var(--acu-text-1);
                     }
                     #${POPUP_ID_ACU} .acu-tab-button.active {
-                        background:
-                            linear-gradient(135deg, rgba(123, 183, 255, 0.22), rgba(155, 123, 255, 0.14));
-                        border-color: rgba(123, 183, 255, 0.35);
-                        color: var(--acu-text-1);
-                        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+                        background: rgba(37, 99, 235, 0.08);
+                        border-color: rgba(37, 99, 235, 0.25);
+                        color: var(--acu-accent);
+                        font-weight: 600;
                     }
                     #${POPUP_ID_ACU} .acu-tab-button::after {
                         content: "›";
-                        opacity: 0.55;
+                        opacity: 0.4;
                         font-weight: 700;
                     }
-                    #${POPUP_ID_ACU} .acu-tab-button.active::after { opacity: 0.9; }
+                    #${POPUP_ID_ACU} .acu-tab-button.active::after { opacity: 0.8; color: var(--acu-accent); }
 
                     /* 内容区 */
                     #${POPUP_ID_ACU} .acu-main {
@@ -36625,22 +38091,22 @@ const MAIN_POPUP_CSS_ACU = `
                         to { opacity: 1; transform: translateY(0); }
                     }
 
-                    /* 卡片（统一高级质感） */
+                    /* 卡片（浅色管理台风格） */
                     #${POPUP_ID_ACU} .acu-card {
                         border: 1px solid var(--acu-border);
                         border-radius: var(--acu-radius-lg);
-                        background: rgba(255, 255, 255, 0.03);
+                        background: var(--acu-bg-1);
                         padding: 16px;
                         margin-bottom: 14px;
-                        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+                        box-shadow: var(--acu-shadow);
                     }
                     #${POPUP_ID_ACU} .acu-card h3 {
                         margin: 0 0 12px 0;
                         padding: 0 0 10px 0;
-                        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+                        border-bottom: 1px solid var(--acu-border);
                         font-size: 14px;
-                        letter-spacing: 0.6px;
-                        font-weight: 700;
+                        letter-spacing: 0.3px;
+                        font-weight: 600;
                         color: var(--acu-text-1);
                     }
                     
@@ -36654,79 +38120,90 @@ const MAIN_POPUP_CSS_ACU = `
                         margin-bottom: 6px;
                         color: var(--acu-text-2);
                         font-size: 12px;
-                        font-weight: 600;
-                        letter-spacing: 0.2px;
+                        font-weight: 500;
                     }
                     #${POPUP_ID_ACU} input,
                     #${POPUP_ID_ACU} select,
                     #${POPUP_ID_ACU} textarea {
                         width: 100%;
-                        padding: 10px 12px;
-                        border-radius: 12px;
+                        padding: 8px 12px;
+                        border-radius: 6px;
                         border: 1px solid var(--acu-border-2);
-                        background: rgba(0, 0, 0, 0.35) !important;
-                        color: var(--acu-text-1);
+                        background: var(--acu-control-bg, var(--input-background, var(--acu-bg-1))) !important;
+                        color: var(--acu-control-text, var(--input-text-color, var(--acu-text-1)));
                         font-size: 14px;
                         outline: none;
-                        transition: border-color 0.12s ease, box-shadow 0.12s ease;
+                        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+                    }
+                    #${POPUP_ID_ACU} select {
+                        appearance: none;
+                        -webkit-appearance: none;
+                        background-image:
+                            linear-gradient(45deg, transparent 50%, var(--acu-select-arrow, var(--acu-text-2)) 50%),
+                            linear-gradient(135deg, var(--acu-select-arrow, var(--acu-text-2)) 50%, transparent 50%);
+                        background-position:
+                            calc(100% - 16px) calc(50% - 2px),
+                            calc(100% - 10px) calc(50% - 2px);
+                        background-size: 6px 6px, 6px 6px;
+                        background-repeat: no-repeat;
+                        padding-right: 34px;
                     }
                     #${POPUP_ID_ACU} input:focus, 
                     #${POPUP_ID_ACU} select:focus, 
                     #${POPUP_ID_ACU} textarea:focus {
-                        border-color: rgba(123, 183, 255, 0.55);
+                        border-color: var(--acu-accent);
                         box-shadow: 0 0 0 3px var(--acu-accent-glow);
                     }
                     #${POPUP_ID_ACU} textarea { min-height: 92px; resize: vertical; line-height: 1.55; }
-                    #${POPUP_ID_ACU} input::placeholder, #${POPUP_ID_ACU} textarea::placeholder { color: rgba(255, 255, 255, 0.35); }
+                    #${POPUP_ID_ACU} input::placeholder, #${POPUP_ID_ACU} textarea::placeholder { color: var(--acu-text-3); }
 
                     /* iOS：阻止输入框聚焦缩放 */
                     @media (max-width: 480px) {
                         #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { font-size: 16px; }
                     }
 
-                    /* 按钮体系（更克制：更小、更稳，不花哨） */
+                    /* 按钮体系（浅色管理台：简洁、清晰） */
                     #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
                         padding: 8px 12px;
-                        border-radius: 10px;
-                        border: 1px solid rgba(255, 255, 255, 0.16);
-                        background: rgba(255, 255, 255, 0.04);
+                        border-radius: 6px;
+                        border: 1px solid var(--acu-border-2);
+                        background: var(--acu-bg-1);
                         color: var(--acu-text-2);
                         cursor: pointer;
-                        font-weight: 650;
-                        letter-spacing: 0.1px;
+                        font-weight: 500;
                         line-height: 1.1;
                         min-height: 34px;
-                        transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+                        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
                     }
                     #${POPUP_ID_ACU} button:hover, #${POPUP_ID_ACU} .button:hover {
-                        background: rgba(255, 255, 255, 0.06);
+                        background: var(--acu-bg-2);
                         color: var(--acu-text-1);
-                        border-color: rgba(255, 255, 255, 0.22);
+                        border-color: var(--acu-border);
                     }
-                    #${POPUP_ID_ACU} button:active { transform: translateY(1px); }
-                    #${POPUP_ID_ACU} button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+                    #${POPUP_ID_ACU} button:active { transform: none; }
+                    #${POPUP_ID_ACU} button:disabled { opacity: 0.45; cursor: not-allowed; }
 
-                    /* 主按钮：去渐变，改为低饱和纯色强调 */
+                    /* 主按钮：蓝色强调 */
                     #${POPUP_ID_ACU} button.primary, #${POPUP_ID_ACU} .button.primary {
-                        border-color: rgba(123, 183, 255, 0.38);
-                        background: rgba(123, 183, 255, 0.16);
-                        color: var(--acu-text-1);
+                        border-color: rgba(37, 99, 235, 0.30);
+                        background: rgba(37, 99, 235, 0.08);
+                        color: var(--acu-accent);
                     }
                     #${POPUP_ID_ACU} button.primary:hover, #${POPUP_ID_ACU} .button.primary:hover {
-                        background: rgba(123, 183, 255, 0.22);
-                        border-color: rgba(123, 183, 255, 0.50);
+                        background: rgba(37, 99, 235, 0.14);
+                        border-color: rgba(37, 99, 235, 0.45);
                     }
                     
-                    /* 警告/危险：同样克制，保持辨识但不刺眼 */
+                    /* 警告/危险 */
                     #${POPUP_ID_ACU} .btn-warning {
-                        background: rgba(255, 184, 92, 0.14);
-                        border-color: rgba(255, 184, 92, 0.28);
-                        color: var(--acu-text-1);
+                        background: rgba(245, 158, 11, 0.08);
+                        border-color: rgba(245, 158, 11, 0.25);
+                        color: #b45309;
                     }
                     #${POPUP_ID_ACU} .btn-danger {
-                        background: rgba(255, 107, 107, 0.14);
-                        border-color: rgba(255, 107, 107, 0.28);
-                        color: var(--acu-text-1);
+                        background: rgba(239, 68, 68, 0.08);
+                        border-color: rgba(239, 68, 68, 0.25);
+                        color: #dc2626;
                     }
                     
                     /* 小按钮样式 - 用于全选/全不选等辅助按钮 */
@@ -36770,28 +38247,28 @@ const MAIN_POPUP_CSS_ACU = `
                     #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
                         width: 100% !important;
                         min-width: 0 !important;
-                        height: 44px !important;
-                        padding: 0 14px !important;
-                        border-radius: 12px !important;
+                        height: auto !important;
+                        min-height: 38px !important;
+                        padding: 8px 14px !important;
+                        border-radius: 6px !important;
                         font-size: 0.92em !important;
-                        font-weight: 750 !important;
-                        letter-spacing: 0.12px;
+                        font-weight: 500 !important;
                         display: flex !important;
                         align-items: center !important;
                         justify-content: center !important;
                         white-space: nowrap !important;
                         overflow: hidden !important;
                         text-overflow: ellipsis !important;
-                        /* 提升对比度：更清晰的底色/边框，不花哨 */
-                        background: rgba(255, 255, 255, 0.075) !important;
-                        border: 1px solid rgba(255, 255, 255, 0.22) !important;
-                        color: rgba(255,255,255,0.92) !important;
-                        box-shadow: 0 10px 22px rgba(0,0,0,0.22);
+                        background: var(--acu-bg-1) !important;
+                        border: 1px solid var(--acu-border-2) !important;
+                        color: var(--acu-text-2) !important;
+                        box-shadow: none;
                     }
                     #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button:hover,
                     #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button:hover {
-                        background: rgba(255, 255, 255, 0.10) !important;
-                        border-color: rgba(255, 255, 255, 0.30) !important;
+                        background: var(--acu-bg-2) !important;
+                        border-color: var(--acu-border) !important;
+                        color: var(--acu-text-1) !important;
                     }
                     
                     #${POPUP_ID_ACU} .button-group {
@@ -36800,6 +38277,11 @@ const MAIN_POPUP_CSS_ACU = `
                         gap: 10px;
                         justify-content: center;
                         margin-top: 14px;
+                    }
+                    /* 让 card 内连续 checkbox-group 之间有间距 */
+                    #${POPUP_ID_ACU} .acu-card > div:has(> .checkbox-group) + div:has(> .checkbox-group),
+                    #${POPUP_ID_ACU} .acu-card > .checkbox-group + .checkbox-group {
+                        margin-top: 4px;
                     }
 
                     /* 兼容旧类名：保证“只来自插件自身”的统一观感 */
@@ -36810,7 +38292,7 @@ const MAIN_POPUP_CSS_ACU = `
 
                     #${POPUP_ID_ACU} hr {
                         border: none;
-                        border-top: 1px solid rgba(255, 255, 255, 0.10);
+                        border-top: 1px solid var(--acu-border);
                         margin: 14px 0;
                     }
                     
@@ -36823,13 +38305,14 @@ const MAIN_POPUP_CSS_ACU = `
                         display: flex;
                         align-items: flex-start;
                         gap: 10px;
-                        padding: 12px;
+                        padding: 10px 14px;
                         border-radius: var(--acu-radius-md);
-                        border: 1px solid rgba(255, 255, 255, 0.10);
-                        background: rgba(0, 0, 0, 0.18);
+                        border: 1px solid var(--acu-border);
+                        background: var(--acu-bg-2);
+                        margin-bottom: 6px;
                     }
                     
-                    /* ✅ 复选框（最高优先级：按主题切换配色；不受浏览器风格影响；仅限插件弹窗作用域） */
+                    /* ✅ 复选框（浅色管理台风格） */
                     #${POPUP_ID_ACU} input[type="checkbox"] {
                         -webkit-appearance: none !important;
                         appearance: none !important;
@@ -36839,35 +38322,48 @@ const MAIN_POPUP_CSS_ACU = `
                         min-width: 18px !important;
                         min-height: 18px !important;
                         border-radius: 4px !important;
-                        border: 1px solid var(--acu-checkbox-border) !important;
-                        background-color: var(--acu-checkbox-bg) !important;
+                        border: 1px solid var(--acu-border-2) !important;
+                        background-color: var(--acu-checkbox-bg, var(--acu-control-bg, var(--acu-bg-1))) !important;
                         background-image: none !important;
-                        background-repeat: no-repeat !important;
-                        background-position: center !important;
-                        background-size: 12px 10px !important;
-                        box-shadow: var(--acu-checkbox-shadow) !important;
+                        box-shadow: none !important;
                         margin: 0 !important;
                         cursor: pointer !important;
                         vertical-align: middle !important;
-                        transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease !important;
+                        transition: background-color 0.15s ease, border-color 0.15s ease !important;
+                        position: relative;
                     }
-                    /* 关键：禁用外部/浏览器可能注入的伪元素勾选样式，避免出现“蓝色小勾叠加” */
+                    /* 关键：禁用外部/浏览器可能注入的伪元素勾选样式 */
                     #${POPUP_ID_ACU} input[type="checkbox"]::before,
                     #${POPUP_ID_ACU} input[type="checkbox"]::after {
                         content: none !important;
                         display: none !important;
                     }
+                    #${POPUP_ID_ACU} input[type="checkbox"]:checked::before {
+                        content: "" !important;
+                        display: block !important;
+                        position: absolute;
+                        inset: 2px;
+                        background-color: var(--acu-checkbox-checked-icon, #ffffff) !important;
+                        -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 5l3 3 7-7'/%3E%3C/svg%3E");
+                        mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 5l3 3 7-7'/%3E%3C/svg%3E");
+                        -webkit-mask-repeat: no-repeat;
+                        mask-repeat: no-repeat;
+                        -webkit-mask-position: center;
+                        mask-position: center;
+                        -webkit-mask-size: 12px 10px;
+                        mask-size: 12px 10px;
+                    }
+                    /* 勾选状态：主题背景 + 主题图标色 */
                     #${POPUP_ID_ACU} input[type="checkbox"]:checked {
-                        border-color: var(--acu-checkbox-bg-checked) !important;
-                        background-color: var(--acu-checkbox-bg-checked) !important;
-                        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 5l3 3 7-7'/%3E%3C/svg%3E") !important;
+                        border-color: var(--acu-checkbox-checked-border, var(--acu-accent)) !important;
+                        background-color: var(--acu-checkbox-checked-bg, var(--acu-accent)) !important;
                     }
                     #${POPUP_ID_ACU} input[type="checkbox"]:disabled {
                         opacity: 0.45 !important;
                         cursor: not-allowed !important;
                     }
                     #${POPUP_ID_ACU} input[type="checkbox"]:focus-visible {
-                        outline: 2px solid var(--acu-checkbox-focus) !important;
+                        outline: 2px solid var(--acu-accent) !important;
                         outline-offset: 2px !important;
                     }
                     /* 位置微调（不改变外观规则） */
@@ -36915,8 +38411,8 @@ const MAIN_POPUP_CSS_ACU = `
                     /* 提示词编辑器 */
                     #${POPUP_ID_ACU} .prompt-segment { 
                         margin-bottom: 12px; 
-                        border: 1px solid rgba(255, 255, 255, 0.10);
-                        background: rgba(0, 0, 0, 0.18);
+                        border: 1px solid var(--acu-border);
+                        background: var(--acu-bg-2);
                         padding: 12px;
                         border-radius: var(--acu-radius-md);
                     }
@@ -36942,20 +38438,20 @@ const MAIN_POPUP_CSS_ACU = `
                     /* 剧情推进独立提示词组编辑器（避免与“数据库更新预设”事件冲突，使用独立 class） */
                     #${POPUP_ID_ACU} .plot-prompt-segment {
                         margin-bottom: 12px;
-                        border: 1px solid rgba(255, 255, 255, 0.10);
-                        background: rgba(0, 0, 0, 0.18);
+                        border: 1px solid var(--acu-border);
+                        background: var(--acu-bg-2);
                         padding: 12px;
                         border-radius: var(--acu-radius-md);
                     }
                     #${POPUP_ID_ACU} .plot-prompt-segment-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
                     #${POPUP_ID_ACU} .plot-prompt-segment-role { width: 120px !important; flex-grow: 0; }
-                    #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-header-row,
-                    #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-scope-grid,
-                    #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-task-layout {
+                    #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-header-row,
+                    #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-scope-grid,
+                    #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-task-layout {
                         min-width: 0;
                     }
-                    #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-scope-grid > *,
-                    #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-task-layout > * {
+                    #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-scope-grid > *,
+                    #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-task-layout > * {
                         min-width: 0;
                     }
                     #${POPUP_ID_ACU} .plot-prompt-segment-delete-btn {
@@ -36982,36 +38478,41 @@ const MAIN_POPUP_CSS_ACU = `
                         flex-wrap: wrap;
                         justify-content: center;
                         gap: 10px 16px;
-                        padding: 12px;
+                        padding: 10px;
                         border-radius: var(--acu-radius-md);
-                        border: 1px solid rgba(255, 255, 255, 0.10);
-                        background: rgba(0, 0, 0, 0.16);
+                        border: 1px solid var(--acu-border);
+                        background: var(--acu-bg-2);
                     }
-                    #${POPUP_ID_ACU} .qrf_radio_group input[type="radio"] { width: auto !important; margin: 0; accent-color: var(--acu-accent); }
-                    #${POPUP_ID_ACU} .qrf_radio_group label { margin: 0 !important; color: var(--acu-text-1); font-weight: 650; }
+                    #${POPUP_ID_ACU} .qrf_radio_group input[type="radio"] {
+                        width: auto !important;
+                        margin: 0;
+                        accent-color: var(--acu-radio-accent, var(--acu-accent));
+                        background: var(--acu-radio-bg, var(--acu-control-bg, var(--acu-bg-1)));
+                    }
+                    #${POPUP_ID_ACU} .qrf_radio_group label { margin: 0 !important; color: var(--acu-text-2); font-weight: 500; }
                     #${POPUP_ID_ACU} .qrf_worldbook_list, #${POPUP_ID_ACU} .qrf_worldbook_entry_list {
-                        border: 1px solid rgba(255, 255, 255, 0.10);
+                        border: 1px solid var(--acu-border);
                         border-radius: var(--acu-radius-md);
-                        background: rgba(0, 0, 0, 0.18);
+                        background: var(--acu-bg-1);
                         padding: 8px;
                         max-height: 220px;
                         overflow: auto;
                     }
                     #${POPUP_ID_ACU} .qrf_worldbook_list_item { 
-                        padding: 10px 10px;
-                        border-radius: 10px;
+                        padding: 8px 10px;
+                        border-radius: 6px;
                         cursor: pointer;
                         user-select: none;
                         color: var(--acu-text-2);
                         transition: background 0.12s ease, color 0.12s ease;
-                        margin-bottom: 6px;
+                        margin-bottom: 4px;
                         border: 1px solid transparent;
                     }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item:hover { background: rgba(255, 255, 255, 0.06); color: var(--acu-text-1); }
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item:hover { background: var(--acu-bg-2); color: var(--acu-text-1); }
                     #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected { 
-                        background: linear-gradient(135deg, rgba(123, 183, 255, 0.22), rgba(155, 123, 255, 0.14));
-                        border-color: rgba(123, 183, 255, 0.25);
-                        color: var(--acu-text-1);
+                        background: rgba(37, 99, 235, 0.08);
+                        border-color: rgba(37, 99, 235, 0.25);
+                        color: var(--acu-accent);
                     }
                     #${POPUP_ID_ACU} .qrf_worldbook_entry_item { display: flex; align-items: flex-start; gap: 10px; padding: 8px 6px; }
                     #${POPUP_ID_ACU} .qrf_worldbook_entry_item input[type="checkbox"] { margin: 1px 0 0 0 !important; }
@@ -37034,8 +38535,8 @@ const MAIN_POPUP_CSS_ACU = `
                             width: 100%;
                         text-align: center;
                         border-radius: var(--acu-radius-md);
-                        border: 1px solid rgba(255, 255, 255, 0.12);
-                        background: rgba(0, 0, 0, 0.18);
+                        border: 1px solid var(--acu-border);
+                        background: var(--acu-bg-2);
                         color: var(--acu-text-2);
                         }
                         
@@ -37043,23 +38544,23 @@ const MAIN_POPUP_CSS_ACU = `
                         #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-card-update-status-display {
                         padding: 10px 12px;
                         border-radius: var(--acu-radius-md);
-                        border: 1px dashed rgba(255, 255, 255, 0.18);
-                        background: rgba(0, 0, 0, 0.20);
+                        border: 1px dashed var(--acu-border-2);
+                        background: var(--acu-bg-2);
                         color: var(--acu-text-2);
                         }
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-total-messages-display { color: var(--acu-text-3); font-size: 12px; }
                         
                     /* 表格 */
                     #${POPUP_ID_ACU} table { width: 100%; border-collapse: collapse; }
-                    #${POPUP_ID_ACU} table th { color: var(--acu-text-3); font-weight: 700; font-size: 12px; letter-spacing: 0.6px; }
+                    #${POPUP_ID_ACU} table th { color: var(--acu-text-3); font-weight: 600; font-size: 12px; }
                     #${POPUP_ID_ACU} table td { color: var(--acu-text-2); }
-                    #${POPUP_ID_ACU} table tr:hover { background: rgba(123, 183, 255, 0.06); }
+                    #${POPUP_ID_ACU} table tr:hover { background: rgba(37, 99, 235, 0.04); }
 
-                    /* 滚动条 */
-                    #${POPUP_ID_ACU} ::-webkit-scrollbar { width: 8px; height: 8px; }
-                    #${POPUP_ID_ACU} ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.04); border-radius: 999px; }
-                    #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 999px; }
-                    #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.20); }
+                    /* 滚动条（浅色） */
+                    #${POPUP_ID_ACU} ::-webkit-scrollbar { width: 6px; height: 6px; }
+                    #${POPUP_ID_ACU} ::-webkit-scrollbar-track { background: transparent; border-radius: 999px; }
+                    #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb { background: var(--acu-border-2); border-radius: 999px; }
+                    #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb:hover { background: var(--acu-text-3); }
                         
                     /* Toast 终止按钮（剧情推进） */
                     #toast-container .qrf-abort-btn {
@@ -37078,7 +38579,7 @@ const MAIN_POPUP_CSS_ACU = `
                     @media screen and (max-width: 1100px) {
                         #${POPUP_ID_ACU} .acu-layout {
                             grid-template-columns: 1fr;
-                            min-height: 0; /* 允许收缩 */
+                            min-height: 0;
                         }
                         #${POPUP_ID_ACU} .acu-tabs-nav {
                             position: sticky;
@@ -37090,48 +38591,47 @@ const MAIN_POPUP_CSS_ACU = `
                             overflow-y: hidden;
                             gap: 8px;
                             padding: 10px;
-                            max-height: none; /* 移除高度限制 */
-                            flex-shrink: 0; /* 导航条不收缩 */
-                            -webkit-overflow-scrolling: touch; /* iOS平滑滚动 */
-                            /* 窄屏模式下使用不透明背景，避免滚动时内容透出 */
-                            background: #0d1117;
-                            border-color: rgba(255, 255, 255, 0.12);
+                            max-height: none;
+                            flex-shrink: 0;
+                            -webkit-overflow-scrolling: touch;
+                            background: var(--acu-bg-1);
+                            border-color: var(--acu-border);
                         }
                         #${POPUP_ID_ACU} .acu-nav-section-title { display: none; }
                         #${POPUP_ID_ACU} .acu-tab-button { width: auto; white-space: nowrap; }
                         #${POPUP_ID_ACU} .acu-main { min-height: 0; }
-                        #${POPUP_ID_ACU} #acu-tab-data .acu-data-template-grid {
+                        #${POPUP_ID_ACU} #acu-tab-table .acu-data-template-grid {
                             grid-template-columns: 1fr !important;
                             gap: 12px !important;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-data .acu-data-template-grid > * {
+                        #${POPUP_ID_ACU} #acu-tab-table .acu-data-template-grid > * {
                             min-width: 0;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-data .acu-template-preset-left,
-                        #${POPUP_ID_ACU} #acu-tab-data .acu-template-preset-actions {
+                        #${POPUP_ID_ACU} #acu-tab-table .acu-template-preset-left,
+                        #${POPUP_ID_ACU} #acu-tab-table .acu-template-preset-actions {
                             width: 100%;
                             flex-wrap: wrap;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-data .acu-template-preset-left .acu-mini-btn,
-                        #${POPUP_ID_ACU} #acu-tab-data .acu-template-preset-actions .acu-mini-btn {
+                        #${POPUP_ID_ACU} #acu-tab-table .acu-template-preset-left .acu-mini-btn,
+                        #${POPUP_ID_ACU} #acu-tab-table .acu-template-preset-actions .acu-mini-btn {
                             flex: 1 1 140px;
                             min-width: 0;
                             justify-content: center;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-data .acu-data-isolation-row {
+                        #${POPUP_ID_ACU} #acu-tab-datamgmt .acu-data-isolation-row {
                             flex-direction: column;
                             align-items: stretch !important;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-data .acu-data-isolation-row > button {
+                        #${POPUP_ID_ACU} #acu-tab-datamgmt .acu-data-isolation-row > button {
                             width: 100%;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-data .button-group.acu-data-mgmt-buttons.acu-cols-3 {
+                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons.acu-cols-3 {
                             grid-template-columns: repeat(2, minmax(0, 1fr));
                         }
-                        #${POPUP_ID_ACU} #acu-tab-data .button-group.acu-data-mgmt-buttons button,
-                        #${POPUP_ID_ACU} #acu-tab-data .button-group.acu-data-mgmt-buttons .button {
+                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
+                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
                             height: auto !important;
-                            min-height: 42px !important;
+                            min-height: 40px !important;
                             padding: 8px 10px !important;
                             white-space: normal !important;
                             line-height: 1.35 !important;
@@ -37147,13 +38647,11 @@ const MAIN_POPUP_CSS_ACU = `
                             overflow-x: hidden;
                             overflow-y: auto;
                             box-sizing: border-box;
-                            /* 确保高度不超过容器 */
                             max-height: 100%;
                         }
                         #${POPUP_ID_ACU} .acu-layout {
                             gap: 10px;
                             margin-top: 10px;
-                            /* 防止内容溢出 */
                             min-height: 0;
                         }
                         #${POPUP_ID_ACU} .acu-header { padding: 10px; gap: 8px; flex-shrink: 0; }
@@ -37164,18 +38662,16 @@ const MAIN_POPUP_CSS_ACU = `
                             padding: 8px;
                             gap: 6px;
                             flex-shrink: 0;
-                            /* 导航条不应该溢出 */
                             max-height: none;
-                            /* 窄屏模式下使用不透明背景 */
-                            background: #0d1117;
-                            border-color: rgba(255, 255, 255, 0.12);
+                            background: var(--acu-bg-1);
+                            border-color: var(--acu-border);
                         }
-                        #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-header-row {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-header-row {
                             flex-wrap: wrap;
                             align-items: flex-start !important;
                             gap: 10px !important;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-header-row > div:last-child {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-header-row > div:last-child {
                             width: 100%;
                             justify-content: flex-start !important;
                         }
@@ -37197,36 +38693,36 @@ const MAIN_POPUP_CSS_ACU = `
                         #${POPUP_ID_ACU} table { display: block; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; font-size: 12px; }
                         #${POPUP_ID_ACU} table th, #${POPUP_ID_ACU} table td { padding: 4px 6px !important; }
                         #${POPUP_ID_ACU} .checkbox-group { padding: 10px; gap: 8px; }
-                        #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-scope-grid,
-                        #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-task-layout {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-scope-grid,
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-task-layout {
                             grid-template-columns: 1fr !important;
                             gap: 10px !important;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-plot .plot-prompt-segment-toolbar {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .plot-prompt-segment-toolbar {
                             flex-direction: column;
                             align-items: stretch;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-plot .plot-prompt-segment-toolbar > div {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .plot-prompt-segment-toolbar > div {
                             width: 100%;
                             justify-content: space-between;
                             flex-wrap: wrap;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-plot .plot-prompt-segment-role {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .plot-prompt-segment-role {
                             width: 100% !important;
                         }
 
                         /* 剧情推进：预设下拉框单独占一行（更适合窄屏） */
-                        #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-preset-wrapper {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-preset-wrapper {
                             width: 100%;
                             flex-wrap: wrap;
                             align-items: stretch !important;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-preset-wrapper select {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-preset-wrapper select {
                             flex: 1 1 100% !important;
                             width: 100% !important;
                             order: 1;
                         }
-                        #${POPUP_ID_ACU} #acu-tab-plot .acu-plot-preset-wrapper button {
+                        #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-preset-wrapper button {
                             order: 2;
                             flex: 1 1 44px;
                             min-width: 44px;
@@ -37350,13 +38846,11 @@ const MAIN_POPUP_CSS_ACU = `
                         #${POPUP_ID_ACU} .notes { font-size: 10px !important; line-height: 1.4; }
                     }
 
-                    /* 表格模板预设：下拉旁的小工具条按钮（导入/导出/另存为等） */
+                    /* 表格模板预设 */
                     #${POPUP_ID_ACU} .acu-template-presets {
                         border: 1px solid var(--acu-border);
-                        background: rgba(255, 255, 255, 0.03);
-                        box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22);
-                        backdrop-filter: blur(10px);
-                        -webkit-backdrop-filter: blur(10px);
+                        background: var(--acu-bg-1);
+                        box-shadow: var(--acu-shadow);
                     }
                     #${POPUP_ID_ACU} .acu-template-preset-toolbar {
                         display: flex;
@@ -37381,37 +38875,35 @@ const MAIN_POPUP_CSS_ACU = `
                     #${POPUP_ID_ACU} .acu-mini-btn {
                         height: 32px;
                         padding: 0 10px;
-                        border-radius: 10px;
-                        border: 1px solid rgba(255, 255, 255, 0.14);
-                        background: rgba(255, 255, 255, 0.06);
-                        color: var(--acu-text-1);
+                        border-radius: 6px;
+                        border: 1px solid var(--acu-border-2);
+                        background: var(--acu-bg-1);
+                        color: var(--acu-text-2);
                         cursor: pointer;
                         display: inline-flex;
                         align-items: center;
                         gap: 8px;
                         font-size: 12px;
-                        font-weight: 650;
-                        letter-spacing: 0.2px;
-                        transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+                        font-weight: 500;
+                        transition: background 0.15s ease, border-color 0.15s ease;
                         white-space: nowrap;
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn:hover {
-                        transform: translateY(-1px);
-                        background: rgba(255, 255, 255, 0.09);
-                        border-color: rgba(255, 255, 255, 0.20);
-                        box-shadow: 0 10px 26px rgba(0, 0, 0, 0.25);
+                        background: var(--acu-bg-2);
+                        border-color: var(--acu-border);
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn:active {
-                        transform: translateY(0px);
+                        transform: none;
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn.primary {
-                        border-color: rgba(123, 183, 255, 0.35);
-                        background: linear-gradient(180deg, rgba(123, 183, 255, 0.22), rgba(123, 183, 255, 0.10));
-                        box-shadow: 0 10px 26px rgba(123, 183, 255, 0.14);
+                        border-color: rgba(37, 99, 235, 0.30);
+                        background: rgba(37, 99, 235, 0.08);
+                        color: var(--acu-accent);
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn.danger {
-                        border-color: rgba(255, 107, 107, 0.35);
-                        background: linear-gradient(180deg, rgba(255, 107, 107, 0.22), rgba(255, 107, 107, 0.10));
+                        border-color: rgba(239, 68, 68, 0.25);
+                        background: rgba(239, 68, 68, 0.06);
+                        color: #dc2626;
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn .fa-solid { opacity: 0.92; }
                     
@@ -37438,273 +38930,1317 @@ const MAIN_POPUP_CSS_ACU = `
                     }
 
                     /* ═══════════════════════════════════════════════════════════════
-                       古典中国风双主题覆盖（墨纸 / 素纱）
-                       仅在插件主面板作用域内覆盖，不影响外部页面
-                       ═══════════════════════════════════════════════════════════════ */
-                    #${POPUP_ID_ACU} {
-                        --acu-bg-0: #24221f;
-                        --acu-bg-1: #211f1c;
-                        --acu-bg-2: #2a2824;
-                        --acu-bg-3: rgba(193, 185, 173, 0.06);
-                        --acu-border: #36332e;
-                        --acu-border-2: rgba(193, 185, 173, 0.16);
-                        --acu-text-1: #c1b9ad;
-                        --acu-text-2: #9e978e;
-                        --acu-text-3: #645e55;
-                        --acu-accent: #7d4940;
-                        --acu-accent-2: #8f5a4e;
-                        --acu-accent-glow: rgba(125, 73, 64, 0.16);
-                        --acu-accent-glow-2: rgba(138, 107, 94, 0.12);
-                        --acu-success: #85725f;
-                        --acu-warning: #9c7e56;
-                        --acu-danger: #8b5a55;
-                        --acu-radius-lg: 2px;
-                        --acu-radius-md: 2px;
-                        --acu-radius-sm: 1px;
-                        --acu-shadow: 0 14px 32px rgba(0, 0, 0, 0.20);
-                        --background_light: rgba(193, 185, 173, 0.04);
-                        --background_default: rgba(193, 185, 173, 0.03);
-                        --background-color-light: rgba(193, 185, 173, 0.04);
-                        --input-background: rgba(26, 24, 22, 0.36);
-                        --button-background: rgba(193, 185, 173, 0.03);
-                        --button-secondary-background: rgba(193, 185, 173, 0.02);
-                        --acu-checkbox-border: rgba(255, 255, 255, 0.22);
-                        --acu-checkbox-bg: #000;
-                        --acu-checkbox-bg-checked: #000;
-                        --acu-checkbox-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
-                        --acu-checkbox-focus: rgba(123, 183, 255, 0.75);
-                        color-scheme: dark;
-                        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
-                        font-weight: 500;
-                        text-rendering: optimizeLegibility;
-                        -webkit-font-smoothing: antialiased;
-                        background-color: var(--acu-bg-0);
-                        background-image:
-                            url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
-                    }
-                    body.acu-theme-silk #${POPUP_ID_ACU} {
-                        --acu-bg-0: #f4f1eb;
-                        --acu-bg-1: #f9f8f5;
-                        --acu-bg-2: #ebe7de;
-                        --acu-bg-3: rgba(74, 69, 63, 0.05);
-                        --acu-border: #e0dacb;
-                        --acu-border-2: rgba(110, 103, 94, 0.18);
-                        --acu-text-1: #4a453f;
-                        --acu-text-2: #6e675e;
-                        --acu-text-3: #9e978e;
-                        --acu-accent: #8a6b5e;
-                        --acu-accent-2: #9d7c6f;
-                        --acu-accent-glow: rgba(138, 107, 94, 0.14);
-                        --acu-accent-glow-2: rgba(138, 107, 94, 0.10);
-                        --acu-success: #6f7b62;
-                        --acu-warning: #a2835b;
-                        --acu-danger: #a06a65;
-                        --background_light: rgba(255, 255, 255, 0.58);
-                        --background_default: rgba(255, 255, 255, 0.42);
-                        --background-color-light: rgba(255, 255, 255, 0.48);
-                        --input-background: rgba(255, 255, 255, 0.70);
-                        --button-background: rgba(255, 255, 255, 0.50);
-                        --button-secondary-background: rgba(255, 255, 255, 0.36);
-                        --acu-checkbox-border: rgba(138, 107, 94, 0.42);
-                        --acu-checkbox-bg: rgba(255, 255, 255, 0.92);
-                        --acu-checkbox-bg-checked: #8a6b5e;
-                        --acu-checkbox-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.58);
-                        --acu-checkbox-focus: rgba(138, 107, 94, 0.34);
-                        color-scheme: light;
-                    }
-                    #${POPUP_ID_ACU} .acu-header {
-                        align-items: center;
-                        justify-content: flex-start;
-                        gap: 12px;
-                        padding: 16px 20px;
-                        border: 1px solid var(--acu-border);
-                        border-radius: 2px;
-                        background: transparent;
-                        box-shadow: none;
-                        backdrop-filter: none;
-                        -webkit-backdrop-filter: none;
-                    }
-                    #${POPUP_ID_ACU} .acu-header::before {
-                        content: '录';
-                        display: inline-flex;
-                        align-items: center;
-                        justify-content: center;
-                        width: 22px;
-                        height: 22px;
-                        border: 1px solid var(--acu-accent);
-                        color: var(--acu-accent);
-                        font-size: 12px;
-                        border-radius: 1px;
-                        opacity: 0.85;
-                        letter-spacing: 1px;
-                        flex-shrink: 0;
-                    }
-                    #${POPUP_ID_ACU} .acu-header > div {
-                        text-align: left;
-                    }
-                    #${POPUP_ID_ACU} h2#updater-main-title-acu {
-                        font-size: 14px;
-                        font-weight: 650;
-                        letter-spacing: 1.2px;
-                        color: var(--acu-text-1);
-                    }
-                    #${POPUP_ID_ACU} .acu-layout {
-                        gap: 12px;
-                        margin-top: 12px;
-                    }
-                    #${POPUP_ID_ACU} .acu-tabs-nav,
-                    #${POPUP_ID_ACU} .acu-card,
-                    #${POPUP_ID_ACU} .acu-template-presets,
-                    #${POPUP_ID_ACU} .qrf_worldbook_list,
-                    #${POPUP_ID_ACU} .qrf_worldbook_entry_list,
-                    #${POPUP_ID_ACU} .checkbox-group,
-                    #${POPUP_ID_ACU} .qrf_radio_group,
-                    #${POPUP_ID_ACU} .prompt-segment,
-                    #${POPUP_ID_ACU} .plot-prompt-segment,
-                    #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-status-message,
-                    #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-card-update-status-display {
-                        background: var(--background_light);
-                        border-color: var(--acu-border);
-                        border-radius: 2px;
-                        box-shadow: none;
-                    }
-                    #${POPUP_ID_ACU} .acu-nav-section-title {
-                        color: var(--acu-text-3);
-                        font-size: 11px;
-                        letter-spacing: 2px;
-                    }
-                    #${POPUP_ID_ACU} .acu-tab-button {
-                        border-radius: 1px;
-                        padding: 10px 12px;
-                        color: var(--acu-text-2);
-                        font-weight: 600;
-                        letter-spacing: 0.6px;
-                    }
-                    #${POPUP_ID_ACU} .acu-tab-button:hover {
+                        主题系统：古典主题已迁移到 theme/builtins/ 模块
+                        不再在此硬编码，由 theme-registry 动态注入
+                        ═══════════════════════════════════════════════════════════════ */
+
+                    /* ═══════════════════════════════════════════════════════════════
+                        高级工具子页面切换样式
+                        ═══════════════════════════════════════════════════════════════ */
+                    #${POPUP_ID_ACU} .acu-subtabs-nav {
+                        display: flex;
+                        gap: 4px;
+                        margin-bottom: 14px;
+                        padding: 4px;
+                        border-radius: var(--acu-radius-md);
                         background: var(--acu-bg-2);
-                        border-color: var(--acu-border);
+                        border: 1px solid var(--acu-border);
+                    }
+                    #${POPUP_ID_ACU} .acu-subtab-button {
+                        flex: 1;
+                        padding: 7px 12px;
+                        border: 1px solid transparent;
+                        border-radius: calc(var(--acu-radius-md) - 2px);
+                        background: transparent;
+                        color: var(--acu-text-2);
+                        font-size: 12px;
+                        font-weight: 500;
+                        cursor: pointer;
+                        transition: background 0.15s ease, color 0.15s ease;
+                    }
+                    #${POPUP_ID_ACU} .acu-subtab-button:hover {
+                        background: var(--acu-bg-1);
                         color: var(--acu-text-1);
                     }
-                    #${POPUP_ID_ACU} .acu-tab-button.active {
-                        background: rgba(125, 73, 64, 0.10);
+                    #${POPUP_ID_ACU} .acu-subtab-button.active {
+                        background: var(--acu-bg-1);
                         border-color: var(--acu-accent);
                         color: var(--acu-accent);
-                        box-shadow: none;
-                    }
-                    #${POPUP_ID_ACU} .acu-tab-button::after {
-                        color: var(--acu-text-3);
-                    }
-                    #${POPUP_ID_ACU} .acu-card h3 {
-                        border-bottom-color: var(--acu-border);
-                        font-size: 14px;
                         font-weight: 600;
-                        letter-spacing: 0.6px;
                     }
-                    #${POPUP_ID_ACU} label,
-                    #${POPUP_ID_ACU} .notes,
-                    #${POPUP_ID_ACU} small.notes {
-                        color: var(--acu-text-2);
-                    }
-                    #${POPUP_ID_ACU} input,
-                    #${POPUP_ID_ACU} select,
-                    #${POPUP_ID_ACU} textarea {
-                        border-radius: 1px;
-                        border-color: var(--acu-border);
-                        background: var(--input-background) !important;
-                        color: var(--acu-text-1);
-                    }
-                    #${POPUP_ID_ACU} input:focus,
-                    #${POPUP_ID_ACU} select:focus,
-                    #${POPUP_ID_ACU} textarea:focus {
-                        border-color: var(--acu-accent);
-                        box-shadow: 0 0 0 2px var(--acu-accent-glow);
-                    }
-                    #${POPUP_ID_ACU} input::placeholder,
-                    #${POPUP_ID_ACU} textarea::placeholder {
-                        color: var(--acu-text-3);
-                    }
-                    #${POPUP_ID_ACU} button,
-                    #${POPUP_ID_ACU} .button,
-                    #${POPUP_ID_ACU} .menu_button,
-                    #${POPUP_ID_ACU} .acu-mini-btn {
-                        border-radius: 1px !important;
-                        border-color: var(--acu-border-2) !important;
-                        background: var(--button-background) !important;
-                        color: var(--acu-text-2) !important;
-                        box-shadow: none !important;
-                        font-weight: 600;
-                        letter-spacing: 0.6px;
-                    }
-                    #${POPUP_ID_ACU} button:hover,
-                    #${POPUP_ID_ACU} .button:hover,
-                    #${POPUP_ID_ACU} .menu_button:hover,
-                    #${POPUP_ID_ACU} .acu-mini-btn:hover {
-                        background: var(--acu-bg-2) !important;
-                        border-color: var(--acu-border) !important;
-                        color: var(--acu-text-1) !important;
-                    }
-                    #${POPUP_ID_ACU} button.primary,
-                    #${POPUP_ID_ACU} .button.primary,
-                    #${POPUP_ID_ACU} .acu-mini-btn.primary {
-                        border-color: var(--acu-accent) !important;
-                        background: rgba(125, 73, 64, 0.12) !important;
-                        color: var(--acu-accent) !important;
-                    }
-                    #${POPUP_ID_ACU} button.primary:hover,
-                    #${POPUP_ID_ACU} .button.primary:hover,
-                    #${POPUP_ID_ACU} .acu-mini-btn.primary:hover {
-                        background: rgba(125, 73, 64, 0.18) !important;
-                    }
-                    #${POPUP_ID_ACU} .btn-warning {
-                        background: rgba(156, 126, 86, 0.14) !important;
-                        border-color: rgba(156, 126, 86, 0.28) !important;
-                        color: var(--acu-text-1) !important;
-                    }
-                    #${POPUP_ID_ACU} .btn-danger,
-                    #${POPUP_ID_ACU} .acu-mini-btn.danger {
-                        background: rgba(139, 90, 85, 0.14) !important;
-                        border-color: rgba(139, 90, 85, 0.26) !important;
-                        color: var(--acu-text-1) !important;
-                    }
-                    #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
-                    #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
-                        background: rgba(193, 185, 173, 0.04) !important;
-                        border: 1px solid var(--acu-border) !important;
-                        color: var(--acu-text-1) !important;
-                    }
-                    body.acu-theme-silk #${POPUP_ID_ACU} .acu-tab-button:hover,
-                    body.acu-theme-silk #${POPUP_ID_ACU} button:hover,
-                    body.acu-theme-silk #${POPUP_ID_ACU} .button:hover,
-                    body.acu-theme-silk #${POPUP_ID_ACU} .menu_button:hover,
-                    body.acu-theme-silk #${POPUP_ID_ACU} .acu-mini-btn:hover {
-                        background: var(--acu-bg-2) !important;
-                    }
-                    #${POPUP_ID_ACU} table tr:hover {
-                        background: rgba(125, 73, 64, 0.06);
-                    }
-                    #${POPUP_ID_ACU} ::-webkit-scrollbar { width: 4px; height: 4px; }
-                    #${POPUP_ID_ACU} ::-webkit-scrollbar-track { background: transparent; }
-                    #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb {
-                        background: var(--acu-border);
-                        border-radius: 1px;
-                    }
-                    #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb:hover {
-                        background: var(--acu-text-3);
-                    }
-                    @media screen and (max-width: 768px) {
-                        #${POPUP_ID_ACU} .acu-header {
-                            padding: 12px 14px;
-                            gap: 10px;
-                        }
-                        #${POPUP_ID_ACU} .acu-tabs-nav {
-                            background: var(--background_light);
-                            border-color: var(--acu-border);
-                        }
-                    }
+                    #${POPUP_ID_ACU} .acu-subtab-content { display: none; }
+                    #${POPUP_ID_ACU} .acu-subtab-content.active { display: block; }
 `;
+
+// theme/builtins/default-light.ts
+// 默认浅色管理台主题
+const THEME_DEFAULT_LIGHT = {
+    id: 'default-light',
+    name: '浅色管理台',
+    description: '默认浅色风格，细边框、弱阴影、蓝色主强调，适合日常使用',
+    author: '星·数据库',
+    version: '1.0.0',
+    colorScheme: 'light',
+    variables: {
+        '--acu-bg-0': '#f5f7fa',
+        '--acu-bg-1': '#ffffff',
+        '--acu-bg-2': 'rgba(0, 0, 0, 0.03)',
+        '--acu-bg-3': 'rgba(0, 0, 0, 0.05)',
+        '--acu-border': '#e0e4ea',
+        '--acu-border-2': '#c8cdd5',
+        '--acu-text-1': '#1a2332',
+        '--acu-text-2': '#4a5568',
+        '--acu-text-3': '#8896a8',
+        '--acu-accent': '#2563eb',
+        '--acu-accent-2': '#3b82f6',
+        '--acu-accent-glow': 'rgba(37, 99, 235, 0.12)',
+        '--acu-accent-glow-2': 'rgba(59, 130, 246, 0.10)',
+        '--acu-success': '#10b981',
+        '--acu-warning': '#f59e0b',
+        '--acu-danger': '#ef4444',
+        '--acu-radius-lg': '10px',
+        '--acu-radius-md': '8px',
+        '--acu-radius-sm': '6px',
+        '--acu-shadow': '0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04)',
+        // 兼容旧变量
+        '--bg-primary': 'var(--acu-bg-0)',
+        '--bg-secondary': 'var(--acu-bg-1)',
+        '--background_light': 'rgba(0, 0, 0, 0.02)',
+        '--background_default': '#ffffff',
+        '--background-color-light': 'rgba(0, 0, 0, 0.02)',
+        '--input-background': '#ffffff',
+        '--input-text-color': 'var(--acu-text-1)',
+        '--text-main': 'var(--acu-text-1)',
+        '--text_primary': 'var(--acu-text-1)',
+        '--text_secondary': 'var(--acu-text-2)',
+        '--text_tertiary': 'var(--acu-text-3)',
+        '--text-color': 'var(--acu-text-1)',
+        '--text-color-dimmed': 'var(--acu-text-3)',
+        '--border_color': 'var(--acu-border)',
+        '--border_color_light': 'var(--acu-border)',
+        '--border-normal': 'var(--acu-border-2)',
+        '--warning-color': 'var(--acu-warning)',
+        '--error-color': 'var(--acu-danger)',
+        '--button-background': '#ffffff',
+        '--button-secondary-background': '#f8f9fb',
+        '--green': 'var(--acu-success)',
+        '--orange': 'var(--acu-warning)',
+        '--red': 'var(--acu-danger)',
+        '--accent-primary': 'var(--acu-accent)',
+        // 控件与扩展模块变量
+        '--acu-control-bg': '#ffffff',
+        '--acu-control-text': 'var(--acu-text-1)',
+        '--acu-select-arrow': 'var(--acu-text-2)',
+        '--acu-radio-accent': 'var(--acu-accent)',
+        '--acu-radio-bg': 'var(--acu-control-bg)',
+        '--acu-checkbox-bg': 'var(--acu-control-bg)',
+        '--acu-checkbox-checked-bg': 'var(--acu-accent)',
+        '--acu-checkbox-checked-border': 'var(--acu-accent)',
+        '--acu-checkbox-checked-icon': '#ffffff',
+        '--acu-danger-soft-bg': 'rgba(239, 68, 68, 0.08)',
+        '--acu-danger-soft-border': 'rgba(239, 68, 68, 0.25)',
+        '--acu-overlay-bg': 'rgba(0, 0, 0, 0.16)',
+        '--acu-overlay-backdrop-blur': '3px',
+        '--acu-confirm-bg': 'var(--acu-bg-1)',
+        '--acu-confirm-border': 'var(--acu-border)',
+        '--acu-confirm-title': 'var(--acu-text-1)',
+        '--acu-confirm-text': 'var(--acu-text-2)',
+        '--acu-confirm-cancel-bg': 'transparent',
+        '--acu-confirm-cancel-border': 'var(--acu-border-2)',
+        '--acu-confirm-cancel-text': 'var(--acu-text-2)',
+        '--acu-confirm-cancel-hover-bg': 'var(--acu-bg-2)',
+        '--acu-confirm-cancel-hover-border': 'var(--acu-border)',
+        '--acu-confirm-cancel-hover-text': 'var(--acu-text-1)',
+        '--acu-confirm-ok-bg': 'rgba(37, 99, 235, 0.08)',
+        '--acu-confirm-ok-border': 'rgba(37, 99, 235, 0.30)',
+        '--acu-confirm-ok-text': 'var(--acu-accent)',
+        '--acu-confirm-ok-hover-bg': 'rgba(37, 99, 235, 0.14)',
+        '--acu-confirm-ok-hover-border': 'rgba(37, 99, 235, 0.45)',
+    },
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "HarmonyOS Sans SC", "MiSans", Roboto, Helvetica, Arial, sans-serif',
+    previewColors: {
+        bg: '#f5f7fa',
+        card: '#ffffff',
+        accent: '#2563eb',
+        text: '#1a2332',
+    },
+};
+
+// theme/builtins/default-dark.ts
+// 深色科技主题（原默认主题）
+const THEME_DEFAULT_DARK = {
+    id: 'default-dark',
+    name: '深色科技',
+    description: '深色中性背景 + 蓝紫高光，适合暗光环境',
+    author: '星·数据库',
+    version: '1.0.0',
+    colorScheme: 'dark',
+    variables: {
+        '--acu-bg-0': '#0b0f15',
+        '--acu-bg-1': '#101826',
+        '--acu-bg-2': 'rgba(255, 255, 255, 0.06)',
+        '--acu-bg-3': 'rgba(255, 255, 255, 0.09)',
+        '--acu-border': 'rgba(255, 255, 255, 0.12)',
+        '--acu-border-2': 'rgba(255, 255, 255, 0.18)',
+        '--acu-text-1': 'rgba(255, 255, 255, 0.92)',
+        '--acu-text-2': 'rgba(255, 255, 255, 0.74)',
+        '--acu-text-3': 'rgba(255, 255, 255, 0.52)',
+        '--acu-accent': '#7bb7ff',
+        '--acu-accent-2': '#9b7bff',
+        '--acu-accent-glow': 'rgba(123, 183, 255, 0.22)',
+        '--acu-accent-glow-2': 'rgba(155, 123, 255, 0.18)',
+        '--acu-success': '#4ad19f',
+        '--acu-warning': '#ffb85c',
+        '--acu-danger': '#ff6b6b',
+        '--acu-radius-lg': '16px',
+        '--acu-radius-md': '12px',
+        '--acu-radius-sm': '10px',
+        '--acu-shadow': '0 18px 60px rgba(0, 0, 0, 0.55)',
+        // 兼容旧变量
+        '--bg-primary': 'var(--acu-bg-0)',
+        '--bg-secondary': 'var(--acu-bg-1)',
+        '--background_light': 'rgba(255, 255, 255, 0.04)',
+        '--background_default': 'rgba(255, 255, 255, 0.03)',
+        '--background-color-light': 'rgba(255, 255, 255, 0.04)',
+        '--input-background': 'rgba(0, 0, 0, 0.26)',
+        '--input-text-color': 'var(--acu-text-1)',
+        '--text-main': 'var(--acu-text-1)',
+        '--text_primary': 'var(--acu-text-1)',
+        '--text_secondary': 'var(--acu-text-2)',
+        '--text_tertiary': 'var(--acu-text-3)',
+        '--text-color': 'var(--acu-text-1)',
+        '--text-color-dimmed': 'var(--acu-text-3)',
+        '--border_color': 'var(--acu-border)',
+        '--border_color_light': 'var(--acu-border)',
+        '--border-normal': 'var(--acu-border-2)',
+        '--warning-color': 'var(--acu-warning)',
+        '--error-color': 'var(--acu-danger)',
+        '--button-background': 'rgba(255, 255, 255, 0.06)',
+        '--button-secondary-background': 'rgba(255, 255, 255, 0.04)',
+        '--green': 'var(--acu-success)',
+        '--orange': 'var(--acu-warning)',
+        '--red': 'var(--acu-danger)',
+        '--accent-primary': 'var(--acu-accent)',
+        // 控件与扩展模块变量
+        '--acu-control-bg': 'rgba(0, 0, 0, 0.26)',
+        '--acu-control-text': 'var(--acu-text-1)',
+        '--acu-select-arrow': 'var(--acu-text-2)',
+        '--acu-radio-accent': 'var(--acu-accent)',
+        '--acu-radio-bg': 'var(--acu-control-bg)',
+        '--acu-checkbox-bg': 'rgba(255, 255, 255, 0.06)',
+        '--acu-checkbox-checked-bg': 'var(--acu-accent)',
+        '--acu-checkbox-checked-border': 'var(--acu-accent)',
+        '--acu-checkbox-checked-icon': '#08111f',
+        '--acu-danger-soft-bg': 'rgba(255, 107, 107, 0.10)',
+        '--acu-danger-soft-border': 'rgba(255, 107, 107, 0.32)',
+        '--acu-overlay-bg': 'rgba(0, 0, 0, 0.28)',
+        '--acu-overlay-backdrop-blur': '3px',
+        '--acu-confirm-bg': 'var(--acu-bg-1)',
+        '--acu-confirm-border': 'var(--acu-border)',
+        '--acu-confirm-title': 'var(--acu-text-1)',
+        '--acu-confirm-text': 'var(--acu-text-2)',
+        '--acu-confirm-cancel-bg': 'transparent',
+        '--acu-confirm-cancel-border': 'var(--acu-border-2)',
+        '--acu-confirm-cancel-text': 'var(--acu-text-2)',
+        '--acu-confirm-cancel-hover-bg': 'var(--acu-bg-2)',
+        '--acu-confirm-cancel-hover-border': 'var(--acu-border)',
+        '--acu-confirm-cancel-hover-text': 'var(--acu-text-1)',
+        '--acu-confirm-ok-bg': 'rgba(123, 183, 255, 0.16)',
+        '--acu-confirm-ok-border': 'rgba(123, 183, 255, 0.38)',
+        '--acu-confirm-ok-text': 'var(--acu-accent)',
+        '--acu-confirm-ok-hover-bg': 'rgba(123, 183, 255, 0.24)',
+        '--acu-confirm-ok-hover-border': 'rgba(123, 183, 255, 0.52)',
+    },
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "HarmonyOS Sans SC", "MiSans", Roboto, Helvetica, Arial, sans-serif',
+    previewColors: {
+        bg: '#0b0f15',
+        card: '#101826',
+        accent: '#7bb7ff',
+        text: 'rgba(255, 255, 255, 0.92)',
+    },
+};
+
+// theme/builtins/classical-ink.ts
+// 古典墨纸主题（深色）
+const THEME_CLASSICAL_INK = {
+    id: 'classical-ink',
+    name: '古典·墨纸',
+    description: '古雅深色纸墨质感，赤褐为饰，宋体排版',
+    author: '星·数据库',
+    version: '1.0.0',
+    colorScheme: 'dark',
+    variables: {
+        '--acu-bg-0': '#24221f',
+        '--acu-bg-1': '#211f1c',
+        '--acu-bg-2': '#2a2824',
+        '--acu-bg-3': 'rgba(193, 185, 173, 0.06)',
+        '--acu-border': '#36332e',
+        '--acu-border-2': 'rgba(193, 185, 173, 0.16)',
+        '--acu-text-1': '#c1b9ad',
+        '--acu-text-2': '#9e978e',
+        '--acu-text-3': '#645e55',
+        '--acu-accent': '#7d4940',
+        '--acu-accent-2': '#8f5a4e',
+        '--acu-accent-glow': 'rgba(125, 73, 64, 0.16)',
+        '--acu-accent-glow-2': 'rgba(138, 107, 94, 0.12)',
+        '--acu-success': '#85725f',
+        '--acu-warning': '#9c7e56',
+        '--acu-danger': '#8b5a55',
+        '--acu-radius-lg': '2px',
+        '--acu-radius-md': '2px',
+        '--acu-radius-sm': '1px',
+        '--acu-shadow': '0 14px 32px rgba(0, 0, 0, 0.20)',
+        // 兼容旧变量
+        '--bg-primary': 'var(--acu-bg-0)',
+        '--bg-secondary': 'var(--acu-bg-1)',
+        '--background_light': 'rgba(193, 185, 173, 0.04)',
+        '--background_default': 'rgba(193, 185, 173, 0.03)',
+        '--background-color-light': 'rgba(193, 185, 173, 0.04)',
+        '--input-background': 'rgba(26, 24, 22, 0.36)',
+        '--input-text-color': 'var(--acu-text-1)',
+        '--text-main': 'var(--acu-text-1)',
+        '--text_primary': 'var(--acu-text-1)',
+        '--text_secondary': 'var(--acu-text-2)',
+        '--text_tertiary': 'var(--acu-text-3)',
+        '--text-color': 'var(--acu-text-1)',
+        '--text-color-dimmed': 'var(--acu-text-3)',
+        '--border_color': 'var(--acu-border)',
+        '--border_color_light': 'var(--acu-border)',
+        '--border-normal': 'var(--acu-border-2)',
+        '--warning-color': 'var(--acu-warning)',
+        '--error-color': 'var(--acu-danger)',
+        '--button-background': 'rgba(193, 185, 173, 0.03)',
+        '--button-secondary-background': 'rgba(193, 185, 173, 0.02)',
+        '--green': 'var(--acu-success)',
+        '--orange': 'var(--acu-warning)',
+        '--red': 'var(--acu-danger)',
+        '--accent-primary': 'var(--acu-accent)',
+        '--acu-control-bg': 'rgba(26, 24, 22, 0.36)',
+        '--acu-control-text': 'var(--acu-text-1)',
+        '--acu-select-arrow': 'var(--acu-text-2)',
+        '--acu-radio-accent': 'var(--acu-accent)',
+        '--acu-radio-bg': 'var(--acu-control-bg)',
+        '--acu-checkbox-bg': 'rgba(26, 24, 22, 0.48)',
+        '--acu-checkbox-checked-bg': 'var(--acu-accent)',
+        '--acu-checkbox-checked-border': 'var(--acu-accent)',
+        '--acu-checkbox-checked-icon': '#f2ebe1',
+        '--acu-danger-soft-bg': 'rgba(139, 90, 85, 0.14)',
+        '--acu-danger-soft-border': 'rgba(139, 90, 85, 0.32)',
+        '--acu-overlay-bg': 'rgba(18, 16, 14, 0.30)',
+        '--acu-overlay-backdrop-blur': '3px',
+        '--acu-confirm-bg': 'var(--acu-bg-1)',
+        '--acu-confirm-border': 'var(--acu-border)',
+        '--acu-confirm-title': 'var(--acu-text-1)',
+        '--acu-confirm-text': 'var(--acu-text-2)',
+        '--acu-confirm-cancel-bg': 'transparent',
+        '--acu-confirm-cancel-border': 'var(--acu-border-2)',
+        '--acu-confirm-cancel-text': 'var(--acu-text-2)',
+        '--acu-confirm-cancel-hover-bg': 'var(--acu-bg-2)',
+        '--acu-confirm-cancel-hover-border': 'var(--acu-border)',
+        '--acu-confirm-cancel-hover-text': 'var(--acu-text-1)',
+        '--acu-confirm-ok-bg': 'rgba(125, 73, 64, 0.14)',
+        '--acu-confirm-ok-border': 'rgba(125, 73, 64, 0.34)',
+        '--acu-confirm-ok-text': 'var(--acu-accent)',
+        '--acu-confirm-ok-hover-bg': 'rgba(125, 73, 64, 0.22)',
+        '--acu-confirm-ok-hover-border': 'rgba(125, 73, 64, 0.46)',
+    },
+    fontFamily: '"Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif',
+    customCSS: `
+        /* 墨纸主题特有：header 前缀字 */
+        #popup .acu-header::before {
+            content: '录';
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border: 1px solid var(--acu-accent);
+            color: var(--acu-accent);
+            font-size: 12px;
+            border-radius: 1px;
+            opacity: 0.85;
+            letter-spacing: 1px;
+            flex-shrink: 0;
+        }
+        #popup .acu-header {
+            background: transparent;
+            box-shadow: none;
+        }
+    `,
+    previewColors: {
+        bg: '#24221f',
+        card: '#2a2824',
+        accent: '#7d4940',
+        text: '#c1b9ad',
+    },
+};
+
+// theme/builtins/classical-silk.ts
+// 古典素纱主题（浅色）
+const THEME_CLASSICAL_SILK = {
+    id: 'classical-silk',
+    name: '古典·素纱',
+    description: '淡雅浅色纱质感，暖褐色调，宋体排版',
+    author: '星·数据库',
+    version: '1.0.0',
+    colorScheme: 'light',
+    variables: {
+        '--acu-bg-0': '#f4f1eb',
+        '--acu-bg-1': '#f9f8f5',
+        '--acu-bg-2': '#ebe7de',
+        '--acu-bg-3': 'rgba(74, 69, 63, 0.05)',
+        '--acu-border': '#e0dacb',
+        '--acu-border-2': 'rgba(110, 103, 94, 0.18)',
+        '--acu-text-1': '#4a453f',
+        '--acu-text-2': '#6e675e',
+        '--acu-text-3': '#9e978e',
+        '--acu-accent': '#8a6b5e',
+        '--acu-accent-2': '#9d7c6f',
+        '--acu-accent-glow': 'rgba(138, 107, 94, 0.14)',
+        '--acu-accent-glow-2': 'rgba(138, 107, 94, 0.10)',
+        '--acu-success': '#6f7b62',
+        '--acu-warning': '#a2835b',
+        '--acu-danger': '#a06a65',
+        '--acu-radius-lg': '2px',
+        '--acu-radius-md': '2px',
+        '--acu-radius-sm': '1px',
+        '--acu-shadow': '0 2px 8px rgba(74, 69, 63, 0.08)',
+        // 兼容旧变量
+        '--bg-primary': 'var(--acu-bg-0)',
+        '--bg-secondary': 'var(--acu-bg-1)',
+        '--background_light': 'rgba(255, 255, 255, 0.58)',
+        '--background_default': 'rgba(255, 255, 255, 0.42)',
+        '--background-color-light': 'rgba(255, 255, 255, 0.48)',
+        '--input-background': 'rgba(255, 255, 255, 0.70)',
+        '--input-text-color': 'var(--acu-text-1)',
+        '--text-main': 'var(--acu-text-1)',
+        '--text_primary': 'var(--acu-text-1)',
+        '--text_secondary': 'var(--acu-text-2)',
+        '--text_tertiary': 'var(--acu-text-3)',
+        '--text-color': 'var(--acu-text-1)',
+        '--text-color-dimmed': 'var(--acu-text-3)',
+        '--border_color': 'var(--acu-border)',
+        '--border_color_light': 'var(--acu-border)',
+        '--border-normal': 'var(--acu-border-2)',
+        '--warning-color': 'var(--acu-warning)',
+        '--error-color': 'var(--acu-danger)',
+        '--button-background': 'rgba(255, 255, 255, 0.50)',
+        '--button-secondary-background': 'rgba(255, 255, 255, 0.36)',
+        '--green': 'var(--acu-success)',
+        '--orange': 'var(--acu-warning)',
+        '--red': 'var(--acu-danger)',
+        '--accent-primary': 'var(--acu-accent)',
+        '--acu-control-bg': 'rgba(255, 255, 255, 0.70)',
+        '--acu-control-text': 'var(--acu-text-1)',
+        '--acu-select-arrow': 'var(--acu-text-2)',
+        '--acu-radio-accent': 'var(--acu-accent)',
+        '--acu-radio-bg': 'var(--acu-control-bg)',
+        '--acu-checkbox-bg': 'rgba(255, 255, 255, 0.82)',
+        '--acu-checkbox-checked-bg': 'var(--acu-accent)',
+        '--acu-checkbox-checked-border': 'var(--acu-accent)',
+        '--acu-checkbox-checked-icon': '#fffaf4',
+        '--acu-danger-soft-bg': 'rgba(160, 106, 101, 0.12)',
+        '--acu-danger-soft-border': 'rgba(160, 106, 101, 0.28)',
+        '--acu-overlay-bg': 'rgba(74, 69, 63, 0.18)',
+        '--acu-overlay-backdrop-blur': '3px',
+        '--acu-confirm-bg': 'var(--acu-bg-1)',
+        '--acu-confirm-border': 'var(--acu-border)',
+        '--acu-confirm-title': 'var(--acu-text-1)',
+        '--acu-confirm-text': 'var(--acu-text-2)',
+        '--acu-confirm-cancel-bg': 'transparent',
+        '--acu-confirm-cancel-border': 'var(--acu-border-2)',
+        '--acu-confirm-cancel-text': 'var(--acu-text-2)',
+        '--acu-confirm-cancel-hover-bg': 'var(--acu-bg-2)',
+        '--acu-confirm-cancel-hover-border': 'var(--acu-border)',
+        '--acu-confirm-cancel-hover-text': 'var(--acu-text-1)',
+        '--acu-confirm-ok-bg': 'rgba(138, 107, 94, 0.14)',
+        '--acu-confirm-ok-border': 'rgba(138, 107, 94, 0.32)',
+        '--acu-confirm-ok-text': 'var(--acu-accent)',
+        '--acu-confirm-ok-hover-bg': 'rgba(138, 107, 94, 0.22)',
+        '--acu-confirm-ok-hover-border': 'rgba(138, 107, 94, 0.42)',
+    },
+    fontFamily: '"Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif',
+    customCSS: `
+        /* 素纱主题特有：header 前缀字 */
+        #popup .acu-header::before {
+            content: '录';
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border: 1px solid var(--acu-accent);
+            color: var(--acu-accent);
+            font-size: 12px;
+            border-radius: 1px;
+            opacity: 0.85;
+            letter-spacing: 1px;
+            flex-shrink: 0;
+        }
+        #popup .acu-header {
+            background: transparent;
+            box-shadow: none;
+        }
+    `,
+    previewColors: {
+        bg: '#f4f1eb',
+        card: '#f9f8f5',
+        accent: '#8a6b5e',
+        text: '#4a453f',
+    },
+};
+
+// theme/theme-registry.ts
+// 主题注册表：管理内置主题、自定义主题、主题切换、导入导出
+// ═══════════════════════════════════════════════════════════════
+// 常量
+// ═══════════════════════════════════════════════════════════════
+const THEME_STYLE_ID = 'acu-theme-override';
+const SETTINGS_KEY = 'uiTheme';
+const CUSTOM_THEMES_KEY = 'customThemes';
+const EXPORT_TEMPLATE_FILENAME = 'acu-theme-editable-template.json';
+const EXPORT_TEMPLATE_SEED = {
+    customCSS: [
+        '/* 在这里编写组件级覆盖。#popup 会被自动替换为弹窗根选择器。 */',
+        '/* .acu-window-header { backdrop-filter: blur(10px); } */',
+    ].join('\n'),
+    windowChromeVariables: {},
+    toastVariables: {},
+    visualizerVariables: {},
+    previewColors: {
+        bg: '#f5f7fa',
+        card: '#ffffff',
+        accent: '#2563eb',
+        text: '#1a2332',
+    },
+};
+// ═══════════════════════════════════════════════════════════════
+// 注册表
+// ═══════════════════════════════════════════════════════════════
+/** 内置主题列表 */
+const BUILTIN_THEMES = [
+    THEME_DEFAULT_LIGHT,
+    THEME_DEFAULT_DARK,
+    THEME_CLASSICAL_INK,
+    THEME_CLASSICAL_SILK,
+];
+/** 内置主题 ID 集合（用于区分内置/自定义） */
+const BUILTIN_THEME_IDS = new Set(BUILTIN_THEMES.map(t => t.id));
+/** 自定义主题（从设置加载） */
+let _customThemes = [];
+/**
+ * 获取所有可用主题（内置 + 自定义）
+ */
+function getAllThemes() {
+    return [...BUILTIN_THEMES, ..._customThemes];
+}
+/**
+ * 按 ID 查找主题
+ */
+function getThemeById(id) {
+    return getAllThemes().find(t => t.id === id);
+}
+/**
+ * 获取当前激活的主题 ID
+ */
+function getActiveThemeId() {
+    return settings_ACU?.[SETTINGS_KEY] || THEME_DEFAULT_LIGHT.id;
+}
+/**
+ * 设置当前激活的主题 ID 并持久化
+ */
+function setActiveThemeId(id) {
+    if (!settings_ACU)
+        return;
+    settings_ACU[SETTINGS_KEY] = id;
+    saveSettingsAndNotify_ACU();
+}
+// ═══════════════════════════════════════════════════════════════
+// 主题应用
+// ═══════════════════════════════════════════════════════════════
+/**
+ * 将主题应用到 DOM。
+ * 通过注入/更新 <style> 块覆盖 CSS 变量。
+ */
+function applyTheme(themeId) {
+    const id = themeId || getActiveThemeId();
+    const theme = getThemeById(id);
+    if (!theme) {
+        logWarn_ACU(`[ThemeRegistry] Theme "${id}" not found, falling back to default`);
+        applyThemeToDOM(THEME_DEFAULT_LIGHT);
+        return;
+    }
+    applyThemeToDOM(theme);
+    logDebug_ACU(`[ThemeRegistry] Applied theme: ${theme.name} (${theme.id})`);
+}
+/**
+ * 实际将主题变量写入 DOM
+ * 如果 popup 元素不存在，将样式直接注入到 <head> 用 #popup ID 选择器
+ */
+function applyThemeToDOM(theme) {
+    // 关键：注入到 topLevelWindow 的 document，而非 iframe 的 document
+    // 因为弹窗 DOM 挂载在 topLevelWindow 中
+    const targetDoc = (topLevelWindow_ACU || window).document;
+    // 1. 注入 CSS 变量覆盖
+    // 关键：注入到 popup 内部第一个 <style> 标签之后（DOM 顺序靠后，层叠优先级更高）
+    // 如果 popup 还未挂载，则注入到 head 中作为 fallback
+    const popupEl = targetDoc.getElementById(POPUP_ID_ACU);
+    let existingStyle = targetDoc.getElementById(THEME_STYLE_ID);
+    // 找到 popup 内部的第一个 <style> 标签（MAIN_POPUP_CSS_ACU 注入的位置）
+    const innerStyle = popupEl?.querySelector('style') ?? null;
+    if (!existingStyle) {
+        existingStyle = targetDoc.createElement('style');
+        existingStyle.id = THEME_STYLE_ID;
+    }
+    // 每次都确保位置正确：注入到 popup 内部 <style> 之后
+    // 如果 existingStyle 已存在但位置不对（比如在 head 中），迁移到正确位置
+    if (innerStyle) {
+        // popup 存在且内部有 style → 插入到内部 style 之后
+        if (existingStyle !== innerStyle.nextElementSibling) {
+            innerStyle.after(existingStyle);
+        }
+    }
+    else if (popupEl) {
+        // popup 存在但内部没有 style → 插入到 popup 最前面
+        if (existingStyle.parentNode !== popupEl) {
+            popupEl.prepend(existingStyle);
+        }
+    }
+    else {
+        // popup 不存在 → fallback 到 head
+        if (existingStyle.parentNode !== targetDoc.head) {
+            targetDoc.head.appendChild(existingStyle);
+        }
+    }
+    const varDeclarations = Object.entries(theme.variables)
+        .map(([key, value]) => `    ${key}: ${value};`)
+        .join('\n');
+    let css = `#${POPUP_ID_ACU} {\n${varDeclarations}\n}`;
+    // 2. 窗口 chrome 也需要注入核心主题变量。
+    //    .acu-window 位于 #popup_acu 外部，无法继承 popup 根上的变量；
+    //    如果这里只注入 windowChromeVariables，未显式配置的主题会退回写死 fallback。
+    css += `\n.acu-window {\n${varDeclarations}\n}`;
+    // 3. color-scheme 和 font-family 直接注入（ID选择器优先级够高）
+    css += `\n#${POPUP_ID_ACU} { color-scheme: ${theme.colorScheme};`;
+    if (theme.fontFamily) {
+        css += ` font-family: ${theme.fontFamily};`;
+    }
+    css += ` }`;
+    css += `\n.acu-window { color-scheme: ${theme.colorScheme};`;
+    if (theme.fontFamily) {
+        css += ` font-family: ${theme.fontFamily};`;
+    }
+    css += ` }`;
+    // 4. 追加自定义 CSS
+    if (theme.customCSS) {
+        const customCSS = theme.customCSS.replace(/#popup\b/g, `#${POPUP_ID_ACU}`);
+        css += '\n' + customCSS;
+    }
+    // 5. 窗口chrome变量覆盖（高于核心变量自动注入）
+    if (theme.windowChromeVariables) {
+        const chromeVars = Object.entries(theme.windowChromeVariables)
+            .map(([key, value]) => `    ${key}: ${value};`)
+            .join('\n');
+        css += `\n.acu-window {\n${chromeVars}\n}`;
+    }
+    // 6. Toast变量覆盖 — 将主题核心颜色变量注入到 toast 容器作用域
+    //    确保 toast 通知跟随主题变化（toast 元素在 #popup_acu 外部，无法继承 CSS 变量）
+    {
+        const toastVarNames = [
+            '--acu-accent', '--acu-bg-1', '--acu-text-1', '--acu-border',
+            '--acu-accent-2', '--acu-bg-0', '--acu-text-2', '--acu-text-3',
+            '--acu-border-2',
+        ];
+        const toastBaseVars = toastVarNames
+            .filter(key => theme.variables[key])
+            .map(key => `    ${key}: ${theme.variables[key]};`)
+            .join('\n');
+        // 主题自定义 toast 变量优先级高于自动注入
+        const customToastVars = theme.toastVariables
+            ? Object.entries(theme.toastVariables)
+                .map(([key, value]) => `    ${key}: ${value};`)
+                .join('\n')
+            : '';
+        if (toastBaseVars || customToastVars) {
+            css += `\n#toast-container .acu-toast.toast {\n${toastBaseVars}${customToastVars ? '\n' + customToastVars : ''}\n}`;
+        }
+    }
+    // 7. 确认弹窗变量注入 — 弹窗挂载在 body 级别，不在 #popup_acu 内
+    //    将主题变量注入到确认弹窗容器选择器，使其跟随主题变化
+    {
+        const confirmVarNames = [
+            '--acu-accent', '--acu-bg-1', '--acu-bg-0', '--acu-text-1',
+            '--acu-text-2', '--acu-text-3', '--acu-border', '--acu-border-2',
+            '--acu-radius-lg', '--acu-radius-md', '--acu-shadow',
+            '--acu-confirm-bg', '--acu-confirm-border', '--acu-confirm-title', '--acu-confirm-text',
+            '--acu-confirm-cancel-bg', '--acu-confirm-cancel-border', '--acu-confirm-cancel-text',
+            '--acu-confirm-cancel-hover-bg', '--acu-confirm-cancel-hover-border', '--acu-confirm-cancel-hover-text',
+            '--acu-confirm-ok-bg', '--acu-confirm-ok-border', '--acu-confirm-ok-text',
+            '--acu-confirm-ok-hover-bg', '--acu-confirm-ok-hover-border',
+            '--acu-overlay-bg', '--acu-overlay-backdrop-blur',
+        ];
+        const confirmVars = confirmVarNames
+            .filter(key => theme.variables[key])
+            .map(key => `    ${key}: ${theme.variables[key]};`)
+            .join('\n');
+        if (confirmVars) {
+            css += `\n#${SCRIPT_ID_PREFIX_ACU}-custom-confirm-overlay,\n#${SCRIPT_ID_PREFIX_ACU}-custom-confirm {\n${confirmVars}\n}`;
+        }
+    }
+    // 8. Visualizer变量覆盖
+    //    可视化编辑器挂载在 #acu-visualizer-content，而不是不存在的 #acu-visualizer-root
+    {
+        const visualizerBaseVarNames = [
+            '--acu-bg-0', '--acu-bg-1', '--acu-bg-2', '--acu-bg-3',
+            '--acu-border', '--acu-border-2',
+            '--acu-text-1', '--acu-text-2', '--acu-text-3',
+            '--acu-accent', '--acu-accent-2', '--acu-accent-glow', '--acu-accent-glow-2',
+            '--acu-success', '--acu-warning', '--acu-danger',
+            '--acu-radius-lg', '--acu-radius-md', '--acu-radius-sm', '--acu-shadow',
+        ];
+        const visualizerBaseVars = visualizerBaseVarNames
+            .filter(key => theme.variables[key])
+            .map(key => `    ${key}: ${theme.variables[key]};`)
+            .join('\n');
+        const vizVars = theme.visualizerVariables
+            ? Object.entries(theme.visualizerVariables)
+                .map(([key, value]) => `    ${key}: ${value};`)
+                .join('\n')
+            : '';
+        if (visualizerBaseVars || vizVars) {
+            css += `\n#acu-visualizer-content {\n${visualizerBaseVars}${vizVars ? '\n' + vizVars : ''}\n}`;
+        }
+    }
+    existingStyle.textContent = css;
+}
+// ═══════════════════════════════════════════════════════════════
+// 自定义主题管理
+// ═══════════════════════════════════════════════════════════════
+/**
+ * 加载自定义主题（从设置中恢复）
+ */
+function loadCustomThemes() {
+    if (!settings_ACU)
+        return;
+    const stored = settings_ACU[CUSTOM_THEMES_KEY];
+    if (Array.isArray(stored)) {
+        _customThemes = stored;
+        logDebug_ACU(`[ThemeRegistry] Loaded ${_customThemes.length} custom themes`);
+    }
+}
+/**
+ * 添加自定义主题并持久化
+ */
+function addCustomTheme(theme) {
+    // 校验
+    if (!theme.id || !theme.name || !theme.variables) {
+        showToastr_ACU('error', '主题格式不合法：缺少 id、name 或 variables');
+        return false;
+    }
+    // 检查 ID 冲突
+    if (getThemeById(theme.id)) {
+        showToastr_ACU('error', `主题 ID "${theme.id}" 已存在，请使用不同的 ID`);
+        return false;
+    }
+    _customThemes.push(theme);
+    persistCustomThemes();
+    showToastr_ACU('success', `主题 "${theme.name}" 已导入`);
+    return true;
+}
+/**
+ * 删除自定义主题
+ */
+function removeCustomTheme(id) {
+    const idx = _customThemes.findIndex(t => t.id === id);
+    if (idx === -1) {
+        showToastr_ACU('error', `未找到主题 "${id}"`);
+        return false;
+    }
+    // 如果正在使用该主题，切回默认
+    if (getActiveThemeId() === id) {
+        setActiveThemeId(THEME_DEFAULT_LIGHT.id);
+        applyTheme(THEME_DEFAULT_LIGHT.id);
+    }
+    const name = _customThemes[idx].name;
+    _customThemes.splice(idx, 1);
+    persistCustomThemes();
+    showToastr_ACU('success', `主题 "${name}" 已删除`);
+    return true;
+}
+/**
+ * 持久化自定义主题到设置
+ */
+function persistCustomThemes() {
+    if (!settings_ACU)
+        return;
+    settings_ACU[CUSTOM_THEMES_KEY] = _customThemes;
+    saveSettingsAndNotify_ACU();
+}
+// ═══════════════════════════════════════════════════════════════
+// 导入导出
+// ═══════════════════════════════════════════════════════════════
+/**
+ * 从 JSON 文件导入主题
+ */
+function importThemeFromFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file)
+            return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const raw = JSON.parse(e.target?.result);
+                if (raw.formatVersion !== 1) {
+                    showToastr_ACU('error', '不支持的主题文件格式版本');
+                    return;
+                }
+                if (!raw.theme?.id || !raw.theme?.name || !raw.theme?.variables) {
+                    showToastr_ACU('error', '主题文件缺少必要字段');
+                    return;
+                }
+                // 如果 ID 冲突，自动重命名
+                const existing = getThemeById(raw.theme.id);
+                if (existing) {
+                    raw.theme.id = `${raw.theme.id}-imported-${Date.now()}`;
+                    raw.theme.name = `${raw.theme.name} (导入)`;
+                }
+                if (addCustomTheme(raw.theme)) {
+                    // 导入后自动切换到新主题
+                    setActiveThemeId(raw.theme.id);
+                    applyTheme(raw.theme.id);
+                    // 刷新选择器（通过事件通知）
+                    document.dispatchEvent(new CustomEvent('acu-theme-changed'));
+                }
+            }
+            catch (err) {
+                logError_ACU('[ThemeRegistry] Failed to parse theme file:', err);
+                showToastr_ACU('error', '主题文件解析失败');
+            }
+        };
+        reader.readAsText(file);
+    };
+    input.click();
+}
+function createThemeTemplateBase() {
+    return createExportableTheme({
+        // ═══ 元信息（必填）═══
+        id: 'my-custom-theme', // 唯一ID，建议格式: "@author/theme-name"
+        name: '我的自定义主题', // 显示名称
+        description: '在此描述你的主题风格', // 简短描述
+        author: '你的名字',
+        version: '1.0.0',
+        colorScheme: 'light', // 'light' 或 'dark'，影响浏览器原生控件渲染
+        // ═══ 核心颜色变量（必填）═══
+        // 这些变量控制弹窗内所有组件的颜色
+        variables: {
+            // --- 背景色 ---
+            '--acu-bg-0': '#f5f7fa', // 页面底色（最深层背景）
+            '--acu-bg-1': '#ffffff', // 卡片/面板背景
+            '--acu-bg-2': 'rgba(0, 0, 0, 0.03)', // 次级背景（hover、分组底色）
+            '--acu-bg-3': 'rgba(0, 0, 0, 0.05)', // 三级背景（强调区块）
+            // --- 边框 ---
+            '--acu-border': '#e0e4ea', // 主边框色
+            '--acu-border-2': '#c8cdd5', // 强边框色（输入框聚焦、按钮边框）
+            // --- 文字 ---
+            '--acu-text-1': '#1a2332', // 主文字（标题、重要信息）
+            '--acu-text-2': '#4a5568', // 次级文字（描述、标签）
+            '--acu-text-3': '#8896a8', // 辅助文字（备注、placeholder）
+            // --- 强调色 ---
+            '--acu-accent': '#2563eb', // 主强调色（按钮、选中态、链接）
+            '--acu-accent-2': '#3b82f6', // 次强调色（渐变、hover态）
+            '--acu-accent-glow': 'rgba(37, 99, 235, 0.12)', // 强调色光晕（按钮背景、标记）
+            '--acu-accent-glow-2': 'rgba(59, 130, 246, 0.10)', // 次光晕
+            // --- 语义色 ---
+            '--acu-success': '#10b981', // 成功/确认
+            '--acu-warning': '#f59e0b', // 警告/注意
+            '--acu-danger': '#ef4444', // 危险/删除/错误
+            // --- 圆角 ---
+            '--acu-radius-lg': '10px', // 大圆角（卡片、弹窗header）
+            '--acu-radius-md': '8px', // 中圆角（输入框、select）
+            '--acu-radius-sm': '6px', // 小圆角（按钮、tag）
+            // --- 阴影 ---
+            '--acu-shadow': '0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04)',
+            // ═══ 兼容变量（强烈建议完整提供）═══
+            // 部分旧组件的 inline style 仍使用这些变量名
+            '--bg-primary': 'var(--acu-bg-0)',
+            '--bg-secondary': 'var(--acu-bg-1)',
+            '--background_light': 'rgba(0,0,0,0.02)',
+            '--background_default': '#ffffff',
+            '--background-color-light': 'rgba(0,0,0,0.02)',
+            '--input-background': '#ffffff',
+            '--input-text-color': 'var(--acu-text-1)',
+            '--button-background': '#ffffff',
+            '--button-secondary-background': '#f8f9fb',
+            '--text-main': 'var(--acu-text-1)',
+            '--text_primary': 'var(--acu-text-1)',
+            '--text_secondary': 'var(--acu-text-2)',
+            '--text_tertiary': 'var(--acu-text-3)',
+            '--text-color': 'var(--acu-text-1)',
+            '--text-color-dimmed': 'var(--acu-text-3)',
+            '--border_color': 'var(--acu-border)',
+            '--border_color_light': 'var(--acu-border)',
+            '--border-normal': 'var(--acu-border-2)',
+            '--warning-color': 'var(--acu-warning)',
+            '--error-color': 'var(--acu-danger)',
+            '--green': 'var(--acu-success)',
+            '--orange': 'var(--acu-warning)',
+            '--red': 'var(--acu-danger)',
+            '--accent-primary': 'var(--acu-accent)',
+            // ═══ 控件与交互扩展变量（建议完整提供）═══
+            '--acu-control-bg': '#ffffff',
+            '--acu-control-text': 'var(--acu-text-1)',
+            '--acu-select-arrow': 'var(--acu-text-2)',
+            '--acu-radio-accent': 'var(--acu-accent)',
+            '--acu-radio-bg': 'var(--acu-control-bg)',
+            '--acu-checkbox-bg': 'var(--acu-control-bg)',
+            '--acu-checkbox-checked-bg': 'var(--acu-accent)',
+            '--acu-checkbox-checked-border': 'var(--acu-accent)',
+            '--acu-checkbox-checked-icon': '#ffffff',
+            '--acu-danger-soft-bg': 'rgba(239, 68, 68, 0.08)',
+            '--acu-danger-soft-border': 'rgba(239, 68, 68, 0.25)',
+            '--acu-overlay-bg': 'rgba(0, 0, 0, 0.16)',
+            '--acu-overlay-backdrop-blur': '3px',
+            '--acu-confirm-bg': 'var(--acu-bg-1)',
+            '--acu-confirm-border': 'var(--acu-border)',
+            '--acu-confirm-title': 'var(--acu-text-1)',
+            '--acu-confirm-text': 'var(--acu-text-2)',
+            '--acu-confirm-cancel-bg': 'transparent',
+            '--acu-confirm-cancel-border': 'var(--acu-border-2)',
+            '--acu-confirm-cancel-text': 'var(--acu-text-2)',
+            '--acu-confirm-cancel-hover-bg': 'var(--acu-bg-2)',
+            '--acu-confirm-cancel-hover-border': 'var(--acu-border)',
+            '--acu-confirm-cancel-hover-text': 'var(--acu-text-1)',
+            '--acu-confirm-ok-bg': 'rgba(37, 99, 235, 0.08)',
+            '--acu-confirm-ok-border': 'rgba(37, 99, 235, 0.30)',
+            '--acu-confirm-ok-text': 'var(--acu-accent)',
+            '--acu-confirm-ok-hover-bg': 'rgba(37, 99, 235, 0.14)',
+            '--acu-confirm-ok-hover-border': 'rgba(37, 99, 235, 0.45)',
+        },
+        // ═══ 字体（可选）═══
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+        // ═══ 自定义CSS（可选，高级）═══
+        // 可以覆盖任何组件级样式。#popup 会被自动替换为弹窗根选择器。
+        customCSS: [
+            '/* ═══ 组件级样式覆盖示例 ═══ */',
+            '',
+            '/* 自定义窗口顶部 chrome */',
+            '/* .acu-window-header { backdrop-filter: blur(10px); } */',
+            '/* .acu-window-title { letter-spacing: 0.08em; } */',
+            '',
+            '/* 调整导航栏宽度 */',
+            '/* #popup .acu-tabs-nav { min-width: 160px; } */',
+            '',
+            '/* 修改卡片内边距 */',
+            '/* #popup .acu-card { padding: 16px; } */',
+            '',
+            '/* 自定义按钮悬停效果 */',
+            '/* #popup button.primary:hover { filter: brightness(1.1); } */',
+            '',
+            '/* 修改表格样式 */',
+            '/* #popup table th { background: var(--acu-bg-2); } */',
+            '',
+            '/* 修改输入框聚焦效果 */',
+            '/* #popup input:focus, #popup textarea:focus, #popup select:focus {',
+            '  outline: 2px solid var(--acu-accent);',
+            '  outline-offset: -1px;',
+            '} */',
+            '',
+            '/* 自定义确认框 */',
+            '/* #your-prefix-custom-confirm { border-radius: 18px; } */',
+            '/* #your-prefix-custom-confirm-overlay { backdrop-filter: blur(8px); } */',
+            '',
+            '/* 自定义 checkbox / radio / select */',
+            '/* #popup input[type="checkbox"] { border-radius: 5px !important; } */',
+            '/* #popup .qrf_radio_group input[type="radio"] { transform: scale(1.05); } */',
+            '/* #popup select { background-size: 7px 7px, 7px 7px; } */',
+        ].join('\n'),
+        // ═══ 窗口标题栏样式（可选）═══
+        // 窗口标题栏使用 --acu-panel-* 变量，默认从主题变量引用。
+        // 如果需要标题栏与内容区使用不同色调，在此覆盖。
+        windowChromeVariables: {
+        // '--acu-panel-bg': 'var(--acu-bg-0)',
+        // '--acu-panel-border': 'var(--acu-border)',
+        // '--acu-panel-text': 'var(--acu-text-1)',
+        // '--acu-panel-text-dim': 'var(--acu-text-2)',
+        // '--acu-panel-text-mute': 'var(--acu-text-3)',
+        // '--acu-panel-accent': 'var(--acu-accent)',
+        // '--acu-panel-hover': 'var(--acu-bg-2)',
+        // '--acu-panel-shadow': 'var(--acu-shadow)',
+        // '--acu-panel-close-hover-bg': 'var(--acu-danger-soft-bg)',
+        // '--acu-panel-close-hover-border': 'var(--acu-danger-soft-border)',
+        // '--acu-panel-close-hover-text': 'var(--acu-danger)',
+        },
+        // ═══ Toast 提示框样式（可选）═══
+        // 提示框默认使用主题核心色。如果需要独立定制，在此覆盖。
+        toastVariables: {
+        // '--toast-accent': 'var(--acu-accent)',
+        // '--toast-bg': 'var(--acu-bg-1)',
+        // '--toast-text': 'var(--acu-text-1)',
+        // '--toast-border': 'var(--acu-border)',
+        },
+        // ═══ 可视化编辑器样式（可选）═══
+        // 表格可视化编辑器的独立样式变量
+        visualizerVariables: {
+        // '--acu-viz-bg': 'var(--acu-bg-0)',
+        // '--acu-viz-sidebar-bg': 'var(--acu-bg-1)',
+        // '--acu-viz-card-bg': 'var(--acu-bg-1)',
+        // '--acu-viz-border': 'var(--acu-border)',
+        // '--acu-viz-text': 'var(--acu-text-1)',
+        // '--acu-viz-text-dim': 'var(--acu-text-3)',
+        // '--acu-viz-accent': 'var(--acu-accent)',
+        },
+        // ═══ 预览色块（可选）═══
+        // 在主题选择下拉框中显示的颜色预览
+        previewColors: {
+            bg: '#f5f7fa',
+            card: '#ffffff',
+            accent: '#2563eb',
+            text: '#1a2332',
+        },
+    });
+}
+function createEditableThemeTemplate(theme) {
+    const templateBase = createThemeTemplateBase();
+    return createExportableTheme({
+        ...templateBase,
+        ...theme,
+        variables: {
+            ...templateBase.variables,
+            ...theme.variables,
+        },
+        windowChromeVariables: {
+            ...(templateBase.windowChromeVariables ?? {}),
+            ...(theme.windowChromeVariables ?? {}),
+        },
+        toastVariables: {
+            ...(templateBase.toastVariables ?? {}),
+            ...(theme.toastVariables ?? {}),
+        },
+        visualizerVariables: {
+            ...(templateBase.visualizerVariables ?? {}),
+            ...(theme.visualizerVariables ?? {}),
+        },
+        customCSS: theme.customCSS ?? templateBase.customCSS,
+        previewColors: theme.previewColors ?? templateBase.previewColors,
+    });
+}
+function buildEditableModules(theme) {
+    return [
+        {
+            id: 'core-variables',
+            label: '核心颜色变量',
+            description: '页面背景、文字、边框、强调色、语义色与圆角阴影。主题的主体风格由这里决定。',
+            paths: ['theme.variables'],
+            status: Object.keys(theme.variables || {}).length > 0 ? 'configured' : 'fallback',
+        },
+        {
+            id: 'window-chrome',
+            label: '窗口顶部 chrome',
+            description: '独立窗口标题栏、按钮 hover、阴影与边框的专用覆盖。',
+            paths: ['theme.windowChromeVariables'],
+            status: Object.keys(theme.windowChromeVariables || {}).length > 0 ? 'configured' : 'empty',
+        },
+        {
+            id: 'toast',
+            label: 'Toast 提示框',
+            description: '提示框的独立颜色入口；为空时回退到核心主题变量。',
+            paths: ['theme.toastVariables'],
+            status: Object.keys(theme.toastVariables || {}).length > 0 ? 'configured' : 'empty',
+        },
+        {
+            id: 'visualizer',
+            label: '可视化编辑器',
+            description: '表格可视化编辑器的独立颜色入口；为空时回退到核心主题变量。',
+            paths: ['theme.visualizerVariables'],
+            status: Object.keys(theme.visualizerVariables || {}).length > 0 ? 'configured' : 'empty',
+        },
+        {
+            id: 'controls-confirm-overlay',
+            label: '控件 / 确认框 / 遮罩层',
+            description: 'select、checkbox、radio、confirm、overlay 目前通过 theme.variables 中的 --acu-control-* / --acu-confirm-* / --acu-overlay-* 变量控制。',
+            paths: [
+                'theme.variables.--acu-control-*',
+                'theme.variables.--acu-confirm-*',
+                'theme.variables.--acu-overlay-*',
+            ],
+            status: 'configured',
+        },
+        {
+            id: 'custom-css',
+            label: '组件级细节覆盖',
+            description: '当变量不够时，在 customCSS 中覆盖具体组件样式。',
+            paths: ['theme.customCSS'],
+            status: theme.customCSS && theme.customCSS.trim() ? 'configured' : 'empty',
+        },
+        {
+            id: 'preview',
+            label: '主题预览色块',
+            description: '主题选择器中显示的预览色，不影响实际运行样式。',
+            paths: ['theme.previewColors'],
+            status: theme.previewColors ? 'configured' : 'empty',
+        },
+    ];
+}
+function buildEditableGuide(theme) {
+    return {
+        summary: `这是一份基于当前主题「${theme.name}」生成的完整可编辑模板。你可以直接修改 theme 下的字段，然后重新导入。`,
+        recommendedOrder: [
+            '先修改 theme.variables 中的核心颜色变量，建立整体色板',
+            '再按需修改 theme.windowChromeVariables / theme.toastVariables / theme.visualizerVariables',
+            '最后在 theme.customCSS 中处理局部特效、版式和组件级细节',
+        ],
+        tips: [
+            'theme.variables 是运行时主题的主入口；里面的 --acu-control-* / --acu-confirm-* / --acu-overlay-* 控制表单控件、确认框和遮罩层。',
+            'windowChromeVariables / toastVariables / visualizerVariables 即使当前为空，也可以直接补充自定义值。',
+            '导入时系统只读取根级 theme 对象；templateMeta / editableModules / guide 只是给你看的编辑导航，不会影响运行。',
+        ],
+    };
+}
+/**
+ * 导出当前主题为完整可编辑主题模板
+ * 结果 = 空白模板骨架 + 当前主题内容覆盖
+ */
+function exportThemeToFile(themeId) {
+    const theme = getThemeById(themeId);
+    if (!theme) {
+        showToastr_ACU('error', `未找到主题 "${themeId}"`);
+        return;
+    }
+    const file = {
+        formatVersion: 1,
+        exportedAt: new Date().toISOString(),
+        templateMeta: {
+            kind: 'editable-theme-template',
+            sourceThemeId: theme.id,
+            sourceThemeName: theme.name,
+            description: '基于当前主题生成的完整可编辑模板，适合二次修改后重新导入。',
+        },
+        editableModules: buildEditableModules(theme),
+        guide: buildEditableGuide(theme),
+        theme: createEditableThemeTemplate(theme),
+    };
+    const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `acu-theme-template-${theme.id}-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToastr_ACU('success', `主题「${theme.name}」的完整可编辑模板已导出`);
+}
+function createExportableTheme(theme) {
+    return {
+        ...theme,
+        customCSS: theme.customCSS ?? EXPORT_TEMPLATE_SEED.customCSS,
+        windowChromeVariables: theme.windowChromeVariables ?? {},
+        toastVariables: theme.toastVariables ?? {},
+        visualizerVariables: theme.visualizerVariables ?? {},
+        previewColors: theme.previewColors ?? EXPORT_TEMPLATE_SEED.previewColors,
+    };
+}
+
+// theme/theme-selector.ts
+// 主题选择器 UI 组件 — 生成 HTML 并绑定事件
+/**
+ * 生成主题选择器的 HTML 片段
+ * 放在弹窗 header 区域
+ */
+function generateThemeSelectorHTML() {
+    const currentId = getActiveThemeId();
+    const themes = getAllThemes();
+    const options = themes.map(t => {
+        const selected = t.id === currentId ? 'selected' : '';
+        const builtin = BUILTIN_THEME_IDS.has(t.id) ? '' : ' *';
+        const preview = t.previewColors
+            ? `style="background-image: linear-gradient(135deg, ${t.previewColors.bg} 50%, ${t.previewColors.accent} 50%);"`
+            : '';
+        return `<option value="${t.id}" ${selected}>${t.name}${builtin}</option>`;
+    }).join('');
+    return `
+        <div class="acu-theme-selector" style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
+            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select" 
+                    style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color); font-size: 12px; cursor: pointer; max-width: 140px;"
+                    title="切换界面主题">
+                ${options}
+            </select>
+            <div class="acu-theme-actions" style="display: flex; gap: 4px;">
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import" 
+                        style="padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--button-background); color: var(--text_secondary); font-size: 11px; cursor: pointer;"
+                        title="导入自定义主题">
+                    <i class="fa-solid fa-upload" style="font-size: 11px;"></i>
+                </button>
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export" 
+                        style="padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--button-background); color: var(--text_secondary); font-size: 11px; cursor: pointer;"
+                        title="导出当前主题模板（完整可编辑版）">
+                    <i class="fa-solid fa-download" style="font-size: 11px;"></i>
+                </button>
+            </div>
+        </div>`;
+}
+/**
+ * 绑定主题选择器事件
+ */
+function bindThemeSelectorEvents() {
+    const prefix = SCRIPT_ID_PREFIX_ACU;
+    // 主题切换
+    const $select = document.getElementById(`${prefix}-theme-select`);
+    if ($select) {
+        $select.addEventListener('change', () => {
+            const id = $select.value;
+            setActiveThemeId(id);
+            applyTheme(id);
+            refreshThemeSelector();
+            logDebug_ACU(`[ThemeSelector] Switched to theme: ${id}`);
+        });
+    }
+    // 导入
+    const $import = document.getElementById(`${prefix}-theme-import`);
+    if ($import) {
+        $import.addEventListener('click', () => {
+            importThemeFromFile();
+            // 导入后刷新选择器
+            setTimeout(() => refreshThemeSelector(), 500);
+        });
+    }
+    // 导出当前主题
+    const $export = document.getElementById(`${prefix}-theme-export`);
+    if ($export) {
+        $export.addEventListener('click', () => {
+            exportThemeToFile(getActiveThemeId());
+        });
+    }
+    // 监听主题变更事件（导入后刷新）
+    document.addEventListener('acu-theme-changed', () => {
+        refreshThemeSelector();
+        refreshChromeThemeSelector();
+    });
+    // ═══ 窗口 chrome 头部的主题选择器（在 topLevelWindow 中查找） ═══
+    const targetDoc = (topLevelWindow_ACU || window).document;
+    const $chromeSelect = targetDoc.getElementById(`${prefix}-chrome-theme-select`);
+    if ($chromeSelect) {
+        $chromeSelect.addEventListener('change', () => {
+            const id = $chromeSelect.value;
+            setActiveThemeId(id);
+            applyTheme(id);
+            refreshChromeThemeSelector();
+            refreshThemeSelector();
+            updateChromeDeleteButtonState(targetDoc);
+            logDebug_ACU(`[ThemeSelector] Chrome: Switched to theme: ${id}`);
+        });
+    }
+    const $chromeImport = targetDoc.getElementById(`${prefix}-chrome-theme-import`);
+    if ($chromeImport) {
+        $chromeImport.addEventListener('click', () => {
+            importThemeFromFile();
+            setTimeout(() => { refreshChromeThemeSelector(); refreshThemeSelector(); }, 500);
+        });
+    }
+    const $chromeExport = targetDoc.getElementById(`${prefix}-chrome-theme-export`);
+    if ($chromeExport) {
+        $chromeExport.addEventListener('click', () => {
+            exportThemeToFile(getActiveThemeId());
+        });
+    }
+    // 删除自定义主题
+    const $chromeDelete = targetDoc.getElementById(`${prefix}-chrome-theme-delete`);
+    if ($chromeDelete) {
+        $chromeDelete.addEventListener('click', async () => {
+            const currentId = getActiveThemeId();
+            if (BUILTIN_THEME_IDS.has(currentId)) {
+                showToastr_ACU('warning', '内置主题不可删除');
+                return;
+            }
+            const theme = getThemeById(currentId);
+            const confirmed = await showCustomConfirm_ACU('删除主题', `确定要删除主题「${theme?.name || currentId}」吗？\n删除后将恢复为默认浅色主题。`, { confirmLabel: '删除', cancelLabel: '取消' });
+            if (confirmed) {
+                removeCustomTheme(currentId);
+                refreshChromeThemeSelector();
+                refreshThemeSelector();
+                document.dispatchEvent(new CustomEvent('acu-theme-changed'));
+            }
+        });
+    }
+}
+/**
+ * 刷新选择器选项（导入/删除主题后调用）
+ */
+function refreshThemeSelector() {
+    const $select = document.getElementById(`${SCRIPT_ID_PREFIX_ACU}-theme-select`);
+    if (!$select)
+        return;
+    const currentId = getActiveThemeId();
+    const themes = getAllThemes();
+    $select.innerHTML = themes.map(t => {
+        const selected = t.id === currentId ? 'selected' : '';
+        const builtin = BUILTIN_THEME_IDS.has(t.id) ? '' : ' *';
+        return `<option value="${t.id}" ${selected}>${t.name}${builtin}</option>`;
+    }).join('');
+}
+/**
+ * 刷新窗口 chrome 头部的主题选择器选项
+ */
+function refreshChromeThemeSelector() {
+    const targetDoc = (topLevelWindow_ACU || window).document;
+    const $select = targetDoc.getElementById(`${SCRIPT_ID_PREFIX_ACU}-chrome-theme-select`);
+    if (!$select)
+        return;
+    const currentId = getActiveThemeId();
+    const themes = getAllThemes();
+    $select.innerHTML = themes.map(t => {
+        const selected = t.id === currentId ? 'selected' : '';
+        const builtin = BUILTIN_THEME_IDS.has(t.id) ? '' : ' *';
+        return `<option value="${t.id}" ${selected}>${t.name}${builtin}</option>`;
+    }).join('');
+    updateChromeDeleteButtonState(targetDoc);
+}
+/**
+ * 更新 chrome 头部删除按钮的可用状态
+ */
+function updateChromeDeleteButtonState(targetDoc) {
+    const btn = targetDoc.getElementById(`${SCRIPT_ID_PREFIX_ACU}-chrome-theme-delete`);
+    if (!btn)
+        return;
+    const currentId = getActiveThemeId();
+    const isBuiltin = BUILTIN_THEME_IDS.has(currentId);
+    btn.style.opacity = isBuiltin ? '0.3' : '1';
+    btn.style.pointerEvents = isBuiltin ? 'none' : 'auto';
+    btn.setAttribute('title', isBuiltin ? '内置主题不可删除' : '删除当前自定义主题');
+}
 
 // main-popup.ts
 // 从 05_main_popup.js 整体迁入
+// UI 重构：7个一级导航 — 仪表盘/更新/API/表格/核心功能/数据管理/高级工具
+/**
+ * 生成窗口 chrome 头部用的主题选择器 HTML
+ * 复用新主题系统的选择器，替换旧的"素纱"切换按钮
+ */
+function generateThemeSelectorHTMLForChrome() {
+    const currentId = getActiveThemeId();
+    const themes = getAllThemes();
+    const options = themes.map(t => {
+        const selected = t.id === currentId ? 'selected' : '';
+        const builtin = BUILTIN_THEME_IDS.has(t.id) ? '' : ' *';
+        return `<option value="${t.id}" ${selected}>${t.name}${builtin}</option>`;
+    }).join('');
+    return `<div class="acu-chrome-theme-selector" style="display: flex; align-items: center; gap: 4px;">
+        <select id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-select" style="padding: 2px 6px; border-radius: 4px; border: 1px solid var(--acu-panel-border, #e0e4ea); background: var(--acu-panel-bg, #f5f7fa); color: var(--acu-panel-text, #1a2332); font-size: 11px; cursor: pointer; max-width: 120px; height: 26px;">
+            ${options}
+        </select>
+        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-delete" style="width: 26px; height: 26px; padding: 0; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;${BUILTIN_THEME_IDS.has(currentId) ? ' opacity: 0.3; pointer-events: none;' : ''}" title="${BUILTIN_THEME_IDS.has(currentId) ? '内置主题不可删除' : '删除当前自定义主题'}">
+            <i class="fa-solid fa-trash" style="font-size: 10px;"></i>
+        </button>
+        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-import" style="width: 26px; height: 26px; padding: 0; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;" title="导入自定义主题">
+            <i class="fa-solid fa-upload" style="font-size: 11px;"></i>
+        </button>
+        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-export" style="width: 26px; height: 26px; padding: 0; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;" title="导出当前主题模板（完整可编辑版）">
+            <i class="fa-solid fa-download" style="font-size: 11px;"></i>
+        </button>
+    </div>`;
+}
 async function openAutoCardPopup_ACU() {
     if (!coreApisAreReady_ACU) {
         showToastr_ACU('error', '核心API未就绪。');
@@ -37719,44 +40255,34 @@ async function openAutoCardPopup_ACU() {
                 <style>${MAIN_POPUP_CSS_ACU}</style>
 
                 <div class="acu-header">
-                    <div>
-                        <h2 id="updater-main-title-acu">当前聊天：${escapeHtml_ACU(currentChatFileIdentifier_ACU || '未知')}</h2>
-                    </div>
+                    <h2 id="updater-main-title-acu">当前聊天：${escapeHtml_ACU$1(currentChatFileIdentifier_ACU || '未知')}</h2>
                 </div>
 
                 <div class="acu-layout">
                     <!-- 导航（分组分页） -->
                     <div class="acu-tabs-nav" aria-label="数据库工具导航">
-                        <div class="acu-nav-section-title">运行</div>
-                    <button class="acu-tab-button active" data-tab="status">状态 & 操作</button>
+                        <div class="acu-nav-section-title">概览</div>
+                    <button class="acu-tab-button active" data-tab="dashboard">仪表盘</button>
                         <div class="acu-nav-section-title">配置</div>
-                    <button class="acu-tab-button" data-tab="prompt">AI指令预设</button>
-                    <button class="acu-tab-button" data-tab="api">API & 连接</button>
-                    <button class="acu-tab-button" data-tab="worldbook">世界书</button>
-                        <div class="acu-nav-section-title">数据</div>
-                    <button class="acu-tab-button" data-tab="data">数据管理</button>
-                    <button class="acu-tab-button" data-tab="import">外部导入</button>
-                        <div class="acu-nav-section-title">增强</div>
-                    <button class="acu-tab-button" data-tab="plot">剧情推进（记忆召回）（必开！）</button>
-                    <button class="acu-tab-button" data-tab="optimization" id="${SCRIPT_ID_PREFIX_ACU}-tab-optimization" style="display: none;">正文替换</button>
-                        ${isSqliteMode() ? `<div class="acu-nav-section-title">SQL</div>
-                    <button class="acu-tab-button" data-tab="sql-console">SQL 控制台</button>` : ''}
-                        <div class="acu-nav-section-title">调试</div>
-                    <button class="acu-tab-button" data-tab="log-viewer">运行日志</button>
+                    <button class="acu-tab-button" data-tab="update">更新</button>
+                    <button class="acu-tab-button" data-tab="api">API</button>
+                    <button class="acu-tab-button" data-tab="table">表格</button>
+                        <div class="acu-nav-section-title">功能</div>
+                    <button class="acu-tab-button" data-tab="corefunc">核心功能</button>
+                    <button class="acu-tab-button" data-tab="datamgmt">数据管理</button>
+                        <div class="acu-nav-section-title">工具</div>
+                    <button class="acu-tab-button" data-tab="advanced">高级工具</button>
                 </div>
 
                     <div class="acu-main">
                 <!-- Tab内容（由独立模块生成） -->
-                ${generateStatusTabHTML()}
-                ${generatePromptTabHTML()}
+                ${generateDashboardTabHTML()}
+                ${generateUpdateTabHTML()}
                 ${generateApiTabHTML()}
-                ${generateWorldbookTabHTML()}
-                ${generateDataTabHTML()}
-                ${generateImportTabHTML()}
-                ${generatePlotTabHTML()}
-                ${generateOptimizationTabHTML()}
-                ${isSqliteMode() ? generateSqlConsoleTabHTML() : ''}
-                ${generateLogViewerTabHTML()}
+                ${generateTableTabHTML()}
+                ${generateCoreFuncTabHTML()}
+                ${generateDataMgmtTabHTML()}
+                ${generateAdvancedTabHTML()}
 
                 <p id="${SCRIPT_ID_PREFIX_ACU}-status-message" class="notes">准备就绪</p>
                     </div>
@@ -37766,7 +40292,7 @@ async function openAutoCardPopup_ACU() {
     const windowId = `${SCRIPT_ID_PREFIX_ACU}-main-window`;
     createACUWindow({
         id: windowId,
-        title: '星·数据库 III',
+        title: 'SP·数据库 I',
         content: popupHtml,
         width: 1400, // 基础宽度
         height: 900, // 基础高度
@@ -37777,7 +40303,8 @@ async function openAutoCardPopup_ACU() {
         onClose: () => {
             logDebug_ACU('ACU Window closed');
             // 清理日志查看器订阅，防止幽灵 DOM 操作和内存泄漏
-            cleanupLogViewer_ACU();
+            // 注意：cleanupLogViewer_ACU 在 advanced tab 的 log-viewer 子模块中
+            // 由 popup-bindings 导入并调用
             _set_$popupInstance_ACU(null);
         },
         onReady: async ($window) => {
@@ -37790,6 +40317,15 @@ async function openAutoCardPopup_ACU() {
                 return;
             }
             _set_$popupInstance_ACU(curDlgCnt);
+            // 将窗口chrome中的旧主题切换按钮替换为主题选择器
+            const $oldThemeBtn = $window.find('.acu-window-btn.theme-toggle');
+            if ($oldThemeBtn.length) {
+                $oldThemeBtn.replaceWith(generateThemeSelectorHTMLForChrome());
+            }
+            // 加载自定义主题并应用当前主题
+            loadCustomThemes();
+            applyTheme();
+            bindThemeSelectorEvents();
             $popupInstance_ACU.off('acu_plot_settings_refresh').on('acu_plot_settings_refresh', function (_event, plotSettingsOverride = null) {
                 try {
                     loadPlotSettingsToUI_ACU(plotSettingsOverride);
@@ -37837,7 +40373,7 @@ function addAutoCardMenuItem_ACU() {
         return true;
     }
     $menuItemContainer = jQuery_API_ACU(`<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`);
-    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>星·数据库 III</span></div>`;
+    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>SP·数据库 I</span></div>`;
     const $menuItem = jQuery_API_ACU(menuItemHTML);
     $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
         e.stopPropagation();
@@ -39481,9 +42017,9 @@ function createTemplatePresetApi(ctx) {
                     persistChatScope: normalizedScope === 'chat',
                 });
                 if (result) {
-                    refreshTemplatePresetSelectInUI_ACU({
-                        selectName: normalizedScope === 'global' ? name : null,
-                        keepValue: normalizedScope !== 'global',
+                    refreshPresetUIAfterSwitch_ACU({
+                        templateGlobalSelectName: normalizedScope === 'global' ? name : null,
+                        keepTemplateGlobalValue: normalizedScope !== 'global',
                     });
                     return {
                         success: true,
@@ -39522,39 +42058,51 @@ function createTemplatePresetApi(ctx) {
                         : '',
                 });
                 const prepared = parseImportedTemplateData_ACU(templateData);
-                if (normalizedScope === 'global' && normalizedPresetName) {
-                    const savePresetOk = upsertTemplatePreset_ACU(normalizedPresetName, prepared.templateStr);
-                    if (!savePresetOk) {
-                        return {
-                            success: false,
-                            scope: normalizedScope,
-                            message: `模板已解析，但保存全局模板预设失败：${normalizedPresetName}`,
-                        };
+                if (normalizedScope === 'global') {
+                    // ═══ 全局导入：仅保存到预设库，不自动切换当前生效模板 ═══
+                    if (normalizedPresetName) {
+                        const savePresetOk = upsertTemplatePreset_ACU(normalizedPresetName, prepared.templateStr);
+                        if (!savePresetOk) {
+                            return {
+                                success: false,
+                                scope: normalizedScope,
+                                message: `模板已解析，但保存全局模板预设失败：${normalizedPresetName}`,
+                            };
+                        }
                     }
+                    // 刷新 UI 让新预设立即出现在下拉列表中，但保持当前选中值不变
+                    refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
+                    logDebug_ACU(`[API] importTemplateFromData: 模板已保存到全局预设库：${normalizedPresetName}。`);
+                    return {
+                        success: true,
+                        scope: normalizedScope,
+                        message: normalizedPresetName
+                            ? `模板已保存为全局预设：${normalizedPresetName}。你可以在"全局模板预设"下拉中手动切换到它。`
+                            : '模板已解析，但未指定预设名称，未保存到预设库。',
+                        presetName: normalizedPresetName || undefined,
+                    };
                 }
+                // ═══ 聊天导入：应用到当前聊天作用域 ═══
                 const applied = await applyTemplateSnapshotToScope_ACU(prepared.templateStr, {
-                    scope: normalizedScope,
-                    source: normalizedScope === 'chat' ? 'api_import_template_chat' : 'api_import_template_global',
+                    scope: 'chat',
+                    source: 'api_import_template_chat',
                     presetName: normalizedPresetName,
                     save: true,
-                    persistChatScope: normalizedScope === 'chat',
+                    persistChatScope: true,
                 });
                 if (!applied) {
                     return {
                         success: false,
                         scope: normalizedScope,
-                        message: '模板导入失败：无法应用模板快照。',
+                        message: '模板导入失败：无法应用到当前聊天。',
                     };
                 }
-                logDebug_ACU(`[API] importTemplateFromData: 模板已成功导入到${normalizedScope === 'chat' ? '当前聊天' : '全局'}。`);
+                logDebug_ACU(`[API] importTemplateFromData: 模板已成功导入到当前聊天。`);
+                refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
                 return {
                     success: true,
                     scope: normalizedScope,
-                    message: normalizedScope === 'chat'
-                        ? `模板已成功导入到当前聊天${normalizedPresetName ? `（预设名：${normalizedPresetName}）` : ''}！`
-                        : (normalizedPresetName
-                            ? `模板已成功导入到全局，并已保存为预设：${normalizedPresetName}`
-                            : '模板已成功导入到全局！'),
+                    message: `模板已成功导入到当前聊天${normalizedPresetName ? `（预设名：${normalizedPresetName}）` : ''}！`,
                     presetName: normalizedPresetName || undefined,
                 };
             }
@@ -39618,6 +42166,7 @@ function createPlotPresetApi(ctx) {
                     return false;
                 }
                 logDebug_ACU(`Successfully switched current chat to plot preset: "${result.followsGlobal ? '跟随全局' : result.presetName}"`);
+                refreshPresetUIAfterSwitch_ACU();
                 return true;
             }
             catch (e) {
@@ -39640,6 +42189,7 @@ function createPlotPresetApi(ctx) {
                     return false;
                 }
                 logDebug_ACU(`Injected global plot preset into current chat: "${result.followsGlobal ? '跟随全局' : result.presetName}"`);
+                refreshPresetUIAfterSwitch_ACU();
                 return true;
             }
             catch (e) {
@@ -39724,6 +42274,10 @@ function createPlotPresetApi(ctx) {
                 if (switchTo) {
                     switchedCurrentChat = ctx.getApi().injectPlotPresetToCurrentChat(finalName) === true;
                 }
+                else {
+                    // 导入预设后刷新 UI 下拉框与状态显示
+                    refreshPresetUIAfterSwitch_ACU();
+                }
                 return {
                     success: true,
                     message: switchedCurrentChat
@@ -39755,6 +42309,8 @@ function createPlotPresetApi(ctx) {
                         failed++;
                     }
                 }
+                // 批量导入结束后统一刷新一次 UI
+                refreshPresetUIAfterSwitch_ACU();
                 return {
                     success: failed === 0,
                     message: `批量导入完成：成功 ${imported} 个，失败 ${failed} 个`,
