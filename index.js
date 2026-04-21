@@ -1536,7 +1536,7 @@ function hashUserInput_ACU(text) {
 /**
  * 非负整数归一化（fallback 默认 0）
  */
-function normalizeNonNegativeInteger_ACU(value, fallbackValue = 0) {
+function normalizeNonNegativeInteger_ACU$1(value, fallbackValue = 0) {
     const num = Number(value);
     if (Number.isFinite(num) && num >= 0)
         return Math.floor(num);
@@ -1546,7 +1546,7 @@ function normalizeNonNegativeInteger_ACU(value, fallbackValue = 0) {
 /**
  * 正整数归一化（fallback 默认 1）
  */
-function normalizePositiveInteger_ACU(value, fallbackValue = 1) {
+function normalizePositiveInteger_ACU$1(value, fallbackValue = 1) {
     const num = Number(value);
     if (Number.isFinite(num) && num > 0)
         return Math.floor(num);
@@ -5141,12 +5141,14 @@ function cloneIsolatedData_ACU(msg) {
 // service/table/table-service.ts — 表格数据操作 service 层
 // 从 data/repositories/table-repo.ts 迁入（消除 data 层越权）
 // ═══════════════════════════════════════════════════════════════
-/**
- * 保存独立表格数据到聊天记录。
- * 返回 { saved: boolean, messageIndex?: number, error?: string }
- * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
- */
-async function saveIndependentTableToChatHistory_ACU(targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, _skipPostRefresh = false) {
+async function persistTablesToChatMessage_ACU(options = {}) {
+    const { targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, trackAsUpdate = true, } = options;
+    /**
+     * 保存独立表格数据到聊天记录。
+     * 返回 { saved: boolean, messageIndex?: number, error?: string }
+     * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
+     */
+    const _skipPostRefresh = false;
     if (!currentJsonTableData_ACU) {
         logError_ACU('Save aborted: currentJsonTableData_ACU is null.');
         return { saved: false, error: 'currentJsonTableData is null' };
@@ -5215,17 +5217,17 @@ async function saveIndependentTableToChatHistory_ACU(targetMessageIndex = -1, ta
         }
     });
     currentTagData.independentData = independentData;
-    if (actuallyModifiedKeys.length > 0) {
+    if (trackAsUpdate && actuallyModifiedKeys.length > 0) {
         const existingModifiedKeys = currentTagData.modifiedKeys || [];
         currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...actuallyModifiedKeys])];
         logDebug_ACU(`[Tracking] Recorded modified keys for tag [${currentIsolationKey || '无标签'}] at index ${finalIndex}: ${currentTagData.modifiedKeys.join(', ')}`);
     }
-    if (updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length > 0) {
+    if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length > 0) {
         const existingGroupKeys = currentTagData.updateGroupKeys || [];
         currentTagData.updateGroupKeys = [...new Set([...existingGroupKeys, ...updateGroupKeys])];
         logDebug_ACU(`[Merge Update Success] Group keys for tag [${currentIsolationKey || '无标签'}] recorded at index ${finalIndex}: ${currentTagData.updateGroupKeys.join(', ')}`);
     }
-    else if (updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length === 0) {
+    else if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length === 0) {
         logDebug_ACU(`[Merge Update Failed] No tables were modified for tag [${currentIsolationKey || '无标签'}]. Group keys NOT recorded: ${updateGroupKeys.join(', ')}`);
     }
     writeIsolatedTagData_ACU(targetMessage, currentIsolationKey, currentTagData);
@@ -5252,6 +5254,19 @@ async function saveIndependentTableToChatHistory_ACU(targetMessageIndex = -1, ta
     await saveChatToHost_ACU();
     await new Promise(resolve => setTimeout(resolve, 500));
     return { saved: true, messageIndex: finalIndex };
+}
+/**
+ * 保存独立表格数据到聊天记录。
+ * 返回 { saved: boolean, messageIndex?: number, error?: string }
+ * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
+ */
+async function saveIndependentTableToChatHistory_ACU(targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, _skipPostRefresh = false) {
+    return persistTablesToChatMessage_ACU({
+        targetMessageIndex,
+        targetSheetKeys,
+        updateGroupKeys,
+        trackAsUpdate: true,
+    });
 }
 /**
  * 检查当前聊天是否为首次初始化（无任何已有表格数据）。
@@ -7399,7 +7414,7 @@ function parseDDLTableName(ddl) {
     if (!ddl)
         return null;
     // 匹配 CREATE TABLE [IF NOT EXISTS] table_name
-    const match = ddl.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/i);
+    const match = ddl.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)/i);
     return match ? match[1] : null;
 }
 /**
@@ -7441,7 +7456,7 @@ function parseDDLColumnNames(ddl) {
         if (/^(?:PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|CONSTRAINT)\b/i.test(withoutComments))
             continue;
         // 提取列名（第一个标识符）
-        const colMatch = withoutComments.match(/^(\w+)/);
+        const colMatch = withoutComments.match(/^([^\s,()]+)/);
         if (colMatch) {
             columns.push(colMatch[1]);
         }
@@ -7470,7 +7485,7 @@ function parseDDLColumnComments(ddl) {
         if (!trimmed)
             continue;
         // 匹配 column_name ... -- 注释（行内可能有逗号、CHECK 约束等）
-        const match = trimmed.match(/^(\w+)\s+.*?--\s*(.+?)\s*,?\s*$/);
+        const match = trimmed.match(/^([^\s,()]+)\s+.*?--\s*(.+?)\s*,?\s*$/);
         if (match) {
             comments.set(match[1], match[2]);
         }
@@ -7491,6 +7506,78 @@ function buildColumnNameMap(ddl) {
         chineseToSql.set(comment, colName);
     }
     return { sqlToChinese, chineseToSql };
+}
+function parseDDLColumnInfos_ACU(ddl) {
+    const columnNames = parseDDLColumnNames(ddl);
+    const comments = parseDDLColumnComments(ddl);
+    return columnNames.map((sqlName, index) => {
+        const rawComment = comments.get(sqlName);
+        const comment = typeof rawComment === 'string' && rawComment.trim() ? rawComment.trim() : null;
+        return {
+            index,
+            sqlName,
+            comment,
+        };
+    });
+}
+function isAsciiOnly_ACU(value) {
+    return /^[\x00-\x7F]+$/.test(String(value || ''));
+}
+function buildDDLHeaderMismatchMessage_ACU(index, ddlColumn, header) {
+    return ddlColumn.comment
+        ? `第 ${index + 1} 列不匹配：DDL 列名为「${ddlColumn.sqlName}」，注释为「${ddlColumn.comment}」，表头为「${header}」`
+        : `第 ${index + 1} 列不匹配：DDL 列名为「${ddlColumn.sqlName}」，表头为「${header}」`;
+}
+function validateDDLTextAgainstHeaders_ACU(ddlText, tableHeaders) {
+    const trimmed = String(ddlText || '').trim();
+    if (!trimmed) {
+        return { valid: false, message: '⚠ DDL 为空' };
+    }
+    if (!/CREATE\s+TABLE/i.test(trimmed)) {
+        return { valid: false, message: '✗ 不是有效的 CREATE TABLE 语句' };
+    }
+    const columnInfos = parseDDLColumnInfos_ACU(trimmed);
+    const firstColumn = columnInfos[0];
+    if (!firstColumn || firstColumn.sqlName.toLowerCase() !== 'row_id' || !/row_id\s+INTEGER\s+PRIMARY\s+KEY/i.test(trimmed)) {
+        return { valid: false, message: '✗ 缺少 row_id INTEGER PRIMARY KEY 列（必须作为第一列）' };
+    }
+    const normalizedHeaders = Array.isArray(tableHeaders)
+        ? tableHeaders.map((item) => String(item ?? '').trim()).filter(Boolean)
+        : [];
+    const comparableHeaders = normalizedHeaders[0] === 'row_id'
+        ? normalizedHeaders.slice(1)
+        : normalizedHeaders;
+    const comparableColumns = columnInfos.filter((item) => item.sqlName.toLowerCase() !== 'row_id');
+    const issues = [];
+    if (comparableColumns.length !== comparableHeaders.length) {
+        issues.push(`列数不匹配：DDL 有 ${comparableColumns.length} 列，表头有 ${comparableHeaders.length} 列`);
+    }
+    const compareLength = Math.min(comparableColumns.length, comparableHeaders.length);
+    for (let index = 0; index < compareLength; index += 1) {
+        const ddlColumn = comparableColumns[index];
+        const header = comparableHeaders[index];
+        const headerIsAscii = isAsciiOnly_ACU(header);
+        const sqlNameIsAscii = isAsciiOnly_ACU(ddlColumn.sqlName);
+        const matchesPhysical = ddlColumn.sqlName === header;
+        const matchesComment = !!ddlColumn.comment && ddlColumn.comment === header;
+        if (headerIsAscii) {
+            if (!matchesPhysical) {
+                issues.push(buildDDLHeaderMismatchMessage_ACU(index, ddlColumn, header));
+            }
+            continue;
+        }
+        if (!matchesComment) {
+            issues.push(buildDDLHeaderMismatchMessage_ACU(index, ddlColumn, header));
+            continue;
+        }
+        if (!sqlNameIsAscii) {
+            issues.push(`第 ${index + 1} 列不匹配：表头为「${header}」时，DDL 物理列名必须使用英文/ASCII，当前 DDL 列名为「${ddlColumn.sqlName}」，注释为「${ddlColumn.comment}」`);
+        }
+    }
+    if (issues.length > 0) {
+        return { valid: false, message: `⚠ DDL 列名与表头不完全匹配：${issues.join('；')}` };
+    }
+    return { valid: true, message: '✓ DDL 格式正确，列名与表头匹配' };
 }
 /**
  * 根据列在 DDL 中的位置索引获取英文列名
@@ -7526,7 +7613,7 @@ function updateDDLColumnComment(ddl, columnName, newComment) {
         if (!trimmed)
             continue;
         // 检查该行是否以目标列名开头（列定义行）
-        const colMatch = trimmed.match(/^(\w+)\s+/);
+        const colMatch = trimmed.match(/^([^\s,()]+)\s+/);
         if (!colMatch || colMatch[1] !== columnName)
             continue;
         // 找到目标列，替换或添加注释
@@ -7771,28 +7858,12 @@ function resultToContent(columns, values, chineseHeaders) {
  * @returns 校验结果
  */
 function validateDDLAgainstHeaders(ddl, headers) {
-    const ddlColumns = parseDDLColumnNames(ddl);
-    const ddlComments = parseDDLColumnComments(ddl);
-    const mismatches = [];
-    // 列数检查
-    const filteredHeaders = headers.filter(h => h !== null);
-    if (ddlColumns.length !== filteredHeaders.length) {
-        mismatches.push(`列数不匹配: DDL 有 ${ddlColumns.length} 列, content 表头有 ${filteredHeaders.length} 列`);
-    }
-    // 逐列检查：DDL 注释中的中文名应该和 content 表头对应
-    for (let i = 0; i < Math.min(ddlColumns.length, filteredHeaders.length); i++) {
-        const header = filteredHeaders[i];
-        const ddlCol = ddlColumns[i];
-        const ddlComment = ddlComments.get(ddlCol);
-        // row_id 列特殊处理
-        if (ddlCol === 'row_id' && header === 'row_id')
-            continue;
-        // 如果 DDL 有注释，检查注释是否和表头匹配
-        if (ddlComment && header && ddlComment !== header) {
-            mismatches.push(`第 ${i + 1} 列不匹配: DDL 列 "${ddlCol}" 注释 "${ddlComment}" ≠ 表头 "${header}"`);
-        }
-    }
-    return { valid: mismatches.length === 0, mismatches };
+    const normalizedHeaders = headers.filter(h => h !== null).map(h => String(h ?? ''));
+    const result = validateDDLTextAgainstHeaders_ACU(ddl, normalizedHeaders);
+    return {
+        valid: result.valid,
+        mismatches: result.valid ? [] : [result.message],
+    };
 }
 // ═══════════════════════════════════════════════════════════════
 // 内部工具函数
@@ -13605,7 +13676,7 @@ function buildTaskWorldbookTriggerText_ACU(taskPromptGroup, plotContent, relayTa
 function sortPlotTaskResults_ACU(results) {
     return (Array.isArray(results) ? [...results] : [])
         .filter(Boolean)
-        .sort((a, b) => (normalizePositiveInteger_ACU(a?.stage, 1) - normalizePositiveInteger_ACU(b?.stage, 1)) || ((a?.order ?? 0) - (b?.order ?? 0)));
+        .sort((a, b) => (normalizePositiveInteger_ACU$1(a?.stage, 1) - normalizePositiveInteger_ACU$1(b?.stage, 1)) || ((a?.order ?? 0) - (b?.order ?? 0)));
 }
 function aggregatePlotTaskTags_ACU(taskResults) {
     const aggregated = new Map();
@@ -13768,12 +13839,12 @@ function willPlotUseMainApiGenerateRaw_ACU(taskApiPreset = '') {
 function sortPlotTasksForRuntime_ACU(tasks) {
     return (Array.isArray(tasks) ? [...tasks] : [])
         .filter(Boolean)
-        .sort((a, b) => (normalizePositiveInteger_ACU(a?.stage, 1) - normalizePositiveInteger_ACU(b?.stage, 1)) || ((a?.order ?? 0) - (b?.order ?? 0)));
+        .sort((a, b) => (normalizePositiveInteger_ACU$1(a?.stage, 1) - normalizePositiveInteger_ACU$1(b?.stage, 1)) || ((a?.order ?? 0) - (b?.order ?? 0)));
 }
 function groupPlotTasksByStage_ACU(tasks) {
     const stageGroups = [];
     sortPlotTasksForRuntime_ACU(tasks).forEach((task) => {
-        const stageNo = normalizePositiveInteger_ACU(task?.stage, 1);
+        const stageNo = normalizePositiveInteger_ACU$1(task?.stage, 1);
         let currentGroup = stageGroups[stageGroups.length - 1];
         if (!currentGroup || currentGroup.stage !== stageNo) {
             currentGroup = { stage: stageNo, tasks: [] };
@@ -14007,9 +14078,9 @@ async function renderPlotTaskMessages_ACU(task, sharedContext, runtimeOptions = 
 async function executeSinglePlotTask_ACU(task, sharedContext, runtimeOptions = {}) {
     const normalizedTask = normalizePlotTask_ACU(task, { index: task?.order ?? 0, fallbackTask: task || null });
     const taskLabel = normalizedTask.name || normalizedTask.id || '未命名任务';
-    const taskStage = normalizePositiveInteger_ACU(normalizedTask.stage, 1);
-    const maxRetries = normalizePositiveInteger_ACU(normalizedTask.maxRetries, sharedContext?.plotSettings?.loopSettings?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
-    const minLength = normalizeNonNegativeInteger_ACU(normalizedTask.minLength, 0);
+    const taskStage = normalizePositiveInteger_ACU$1(normalizedTask.stage, 1);
+    const maxRetries = normalizePositiveInteger_ACU$1(normalizedTask.maxRetries, sharedContext?.plotSettings?.loopSettings?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
+    const minLength = normalizeNonNegativeInteger_ACU$1(normalizedTask.minLength, 0);
     // 任务级世界书计算：基于当前任务实际使用的 {{tag}} 注入内容 + 本轮上下文触发，
     // 而不是固定使用整段上一轮剧情内容。
     // 标签来源与 renderPlotTaskMessages_ACU 一致：
@@ -19107,13 +19178,13 @@ function normalizePlotTask_ACU(task, { index = 0, fallbackTask = null } = {}) {
         extractInjectTags: typeof cloned.extractInjectTags === 'string' ? cloned.extractInjectTags : (fallback?.extractInjectTags || ''),
         taskApiPreset: typeof cloned.taskApiPreset === 'string' ? cloned.taskApiPreset : (fallback?.taskApiPreset || ''),
         finalDirectiveTemplate: typeof cloned.finalDirectiveTemplate === 'string' ? cloned.finalDirectiveTemplate : (fallback?.finalDirectiveTemplate || ''),
-        minLength: normalizeNonNegativeInteger_ACU(cloned.minLength, fallback?.minLength ?? 0),
-        maxRetries: normalizePositiveInteger_ACU(cloned.maxRetries ?? cloned.loopSettings?.maxRetries, fallback?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3),
+        minLength: normalizeNonNegativeInteger_ACU$1(cloned.minLength, fallback?.minLength ?? 0),
+        maxRetries: normalizePositiveInteger_ACU$1(cloned.maxRetries ?? cloned.loopSettings?.maxRetries, fallback?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3),
         mergeStrategy: typeof cloned.mergeStrategy === 'string' && cloned.mergeStrategy.trim()
             ? cloned.mergeStrategy.trim()
             : (fallback?.mergeStrategy || 'append'),
-        stage: normalizePositiveInteger_ACU(cloned.stage, fallback?.stage ?? 1),
-        order: normalizeNonNegativeInteger_ACU(cloned.order, fallback?.order ?? index),
+        stage: normalizePositiveInteger_ACU$1(cloned.stage, fallback?.stage ?? 1),
+        order: normalizeNonNegativeInteger_ACU$1(cloned.order, fallback?.order ?? index),
     };
 }
 function buildLegacyWrappedPlotTask_ACU(source, { taskId = 'defaultPlotTask', taskName = '默认任务', order = 0 } = {}) {
@@ -19154,7 +19225,7 @@ function syncLegacyPlotSettingsFromTask_ACU(plotSettings, task) {
     const normalizedPromptGroup = getPlotPromptGroupFromSource_ACU(task);
     plotSettings.promptGroup = JSON.parse(JSON.stringify(normalizedPromptGroup));
     plotSettings.extractTags = typeof task.extractTags === 'string' ? task.extractTags : '';
-    plotSettings.minLength = normalizeNonNegativeInteger_ACU(task.minLength, 0);
+    plotSettings.minLength = normalizeNonNegativeInteger_ACU$1(task.minLength, 0);
     const legacyPromptTexts = getLegacyPromptTextsFromPromptGroup_ACU(normalizedPromptGroup);
     setPlotPromptContentByIdForSettings_ACU(plotSettings, 'mainPrompt', legacyPromptTexts.mainPrompt || '');
     setPlotPromptContentByIdForSettings_ACU(plotSettings, 'systemPrompt', legacyPromptTexts.systemPrompt || '');
@@ -20489,7 +20560,7 @@ var mergeLogic = /*#__PURE__*/Object.freeze({
 // toast.ts — presentation 层 toast 通知（含主题样式注入+消息过滤+去重）
 // 核心逻辑原位于 service/runtime/toast-service.ts，已搬回 presentation 层
 // toast 相关状态
-const ACU_TOAST_TITLE_ACU = '星·数据库';
+const ACU_TOAST_TITLE_ACU = 'SP·数据库';
 const _acuToastDedup_ACU = new Map(); // key -> ts
 let _acuToastStyleInjected_ACU = false;
 function _set__acuToastStyleInjected_ACU(v) { _acuToastStyleInjected_ACU = v; }
@@ -20627,6 +20698,7 @@ function ensureAcuToastStylesInjected_ACU() {
         font-family: var(--toast-font) !important;
         cursor: pointer !important;
         font-size: 0.85em;
+        box-shadow: none !important;
       }
       .acu-toast .qrf-abort-btn:hover {
         background: var(--toast-accent) !important;
@@ -21138,7 +21210,7 @@ function renderPlotTaskList_ACU(plotSettings = getActivePlotEditorSettings_ACU()
         const isSelected = selectedTask?.id === task.id;
         const enabledText = task.enabled !== false ? '启用' : '停用';
         const enabledColor = task.enabled !== false ? 'var(--green)' : 'var(--red)';
-        const stageNo = normalizePositiveInteger_ACU(task?.stage, 1);
+        const stageNo = normalizePositiveInteger_ACU$1(task?.stage, 1);
         const itemHtml = `
               <button type="button" class="button acu-plot-task-item ${isSelected ? 'acu-plot-task-item--active' : ''}" data-task-id="${escapeHtml_ACU$1(task.id)}" style="display:flex; width:100%; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; padding:10px 12px; text-align:left; border:${isSelected ? '1px solid var(--accent-primary)' : '1px solid var(--border_color_light)'}; background:${isSelected ? 'color-mix(in srgb, var(--accent-primary) 12%, var(--background_default))' : 'var(--background_default)'}; border-radius:8px;">
                   <span style="display:flex; flex-direction:column; gap:4px; min-width:0;">
@@ -21173,7 +21245,7 @@ function loadCurrentPlotTaskToUI_ACU(plotSettings = getActivePlotEditorSettings_
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-tags`).val(selectedTask.extractTags || '');
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-extract-inject-tags`).val(selectedTask.extractInjectTags || '');
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-min-length`).val(selectedTask.minLength ?? 0);
-    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`).val(normalizePositiveInteger_ACU(selectedTask.stage, 1));
+    $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`).val(normalizePositiveInteger_ACU$1(selectedTask.stage, 1));
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-max-retries`).val(selectedTask.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3);
     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`).val(selectedTask.taskApiPreset || '');
 }
@@ -21231,7 +21303,7 @@ function flushCurrentPlotTaskEditorState_ACU({ renderTaskList = false, persist =
 }
 function buildNewPlotTaskForUI_ACU(plotSettings = getActivePlotEditorSettings_ACU()) {
     const tasks = Array.isArray(plotSettings?.plotTasks) ? plotSettings.plotTasks : [];
-    const defaultStage = normalizePositiveInteger_ACU(tasks[tasks.length - 1]?.stage, 1);
+    const defaultStage = normalizePositiveInteger_ACU$1(tasks[tasks.length - 1]?.stage, 1);
     let serial = tasks.length + 1;
     let taskId = `plotTask${serial}`;
     while (tasks.some((task) => task && task.id === taskId)) {
@@ -21472,6 +21544,94 @@ function hideOptimizationOverlay_ACU() {
  * @param {string} newContent - 新内容
  */
 
+function isLegacyMatchForMessage_ACU(msg, settings) {
+    const msgIdentity = msg?.TavernDB_ACU_Identity;
+    if (settings?.dataIsolationEnabled) {
+        return msgIdentity === settings.dataIsolationCode;
+    }
+    return !msgIdentity;
+}
+function hasTableDataInMessage_ACU(msg, options) {
+    const { sheetKey, isSummaryTable, isolationKey, settings } = options;
+    if (msg?.TavernDB_ACU_IsolatedData?.[isolationKey]?.independentData?.[sheetKey]) {
+        return true;
+    }
+    if (!isLegacyMatchForMessage_ACU(msg, settings)) {
+        return false;
+    }
+    return !!(msg?.TavernDB_ACU_IndependentData?.[sheetKey]
+        || (isSummaryTable
+            ? msg?.TavernDB_ACU_SummaryData?.[sheetKey]
+            : msg?.TavernDB_ACU_Data?.[sheetKey]));
+}
+function hasTrackedUpdateInMessage_ACU(msg, options) {
+    const { sheetKey, isolationKey, settings } = options;
+    const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    const isolatedModifiedKeys = Array.isArray(tagData?.modifiedKeys) ? tagData.modifiedKeys : [];
+    const isolatedUpdateGroupKeys = Array.isArray(tagData?.updateGroupKeys) ? tagData.updateGroupKeys : [];
+    if (isolatedUpdateGroupKeys.includes(sheetKey) || isolatedModifiedKeys.includes(sheetKey)) {
+        return true;
+    }
+    if (!isLegacyMatchForMessage_ACU(msg, settings)) {
+        return false;
+    }
+    const legacyModifiedKeys = Array.isArray(msg?.TavernDB_ACU_ModifiedKeys) ? msg.TavernDB_ACU_ModifiedKeys : [];
+    const legacyUpdateGroupKeys = Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys) ? msg.TavernDB_ACU_UpdateGroupKeys : [];
+    return legacyUpdateGroupKeys.includes(sheetKey) || legacyModifiedKeys.includes(sheetKey);
+}
+function getLatestAiMessageIndexFromChat_ACU(chat) {
+    if (!Array.isArray(chat))
+        return -1;
+    for (let i = chat.length - 1; i >= 0; i -= 1) {
+        if (chat[i] && !chat[i].is_user)
+            return i;
+    }
+    return -1;
+}
+function countAiMessagesUpToIndex_ACU(chat, messageIndex) {
+    if (!Array.isArray(chat) || messageIndex < 0)
+        return 0;
+    let count = 0;
+    for (let i = 0; i <= messageIndex && i < chat.length; i += 1) {
+        if (chat[i] && !chat[i].is_user)
+            count += 1;
+    }
+    return count;
+}
+function resolveTableHistoryStateFromChat_ACU(chat, options) {
+    const latestAiMessageIndex = getLatestAiMessageIndexFromChat_ACU(chat);
+    let latestDataMessageIndex = -1;
+    let lastTrackedUpdateMessageIndex = -1;
+    if (Array.isArray(chat)) {
+        for (let i = chat.length - 1; i >= 0; i -= 1) {
+            const msg = chat[i];
+            if (!msg || msg.is_user)
+                continue;
+            if (latestDataMessageIndex === -1 && hasTableDataInMessage_ACU(msg, options)) {
+                latestDataMessageIndex = i;
+            }
+            if (lastTrackedUpdateMessageIndex === -1 && hasTrackedUpdateInMessage_ACU(msg, options)) {
+                lastTrackedUpdateMessageIndex = i;
+            }
+            if (latestDataMessageIndex !== -1 && lastTrackedUpdateMessageIndex !== -1) {
+                break;
+            }
+        }
+    }
+    if (lastTrackedUpdateMessageIndex === -1 && latestDataMessageIndex !== -1) {
+        lastTrackedUpdateMessageIndex = latestDataMessageIndex;
+    }
+    return {
+        latestAiMessageIndex,
+        latestDataMessageIndex,
+        lastTrackedUpdateMessageIndex,
+        latestDataAiFloor: countAiMessagesUpToIndex_ACU(chat, latestDataMessageIndex),
+        lastTrackedUpdateAiFloor: countAiMessagesUpToIndex_ACU(chat, lastTrackedUpdateMessageIndex),
+        hasAnyData: latestDataMessageIndex !== -1,
+        hasTrackedUpdate: lastTrackedUpdateMessageIndex !== -1,
+    };
+}
+
 /**
  * service/chat/chat-service.ts — 聊天数据服务
  *
@@ -21572,47 +21732,27 @@ async function saveCurrentDataForTable_ACU(sheetKey) {
             logWarn_ACU('saveCurrentDataForTable_ACU: No chat history.');
             return;
         }
-        // 查找最新的AI消息
-        for (let i = chat.length - 1; i >= 0; i--) {
-            if (!chat[i].is_user) {
-                const targetMessage = chat[i];
-                const sheet = currentJsonTableData_ACU[sheetKey];
-                const isSummaryTable = isSummaryOrOutlineTable_ACU(sheet.name);
-                const cleanSheet = sanitizeSheetForStorage_ACU(sheet);
-                if (isSummaryTable) {
-                    let summaryData = targetMessage.TavernDB_ACU_SummaryData;
-                    if (typeof summaryData === 'string') {
-                        try {
-                            summaryData = JSON.parse(summaryData);
-                        }
-                        catch (e) {
-                            summaryData = {};
-                        }
-                    }
-                    if (!summaryData)
-                        summaryData = {};
-                    summaryData[sheetKey] = cleanSheet;
-                    targetMessage.TavernDB_ACU_SummaryData = summaryData;
-                }
-                else {
-                    let standardData = targetMessage.TavernDB_ACU_Data;
-                    if (typeof standardData === 'string') {
-                        try {
-                            standardData = JSON.parse(standardData);
-                        }
-                        catch (e) {
-                            standardData = {};
-                        }
-                    }
-                    if (!standardData)
-                        standardData = {};
-                    standardData[sheetKey] = cleanSheet;
-                    targetMessage.TavernDB_ACU_Data = standardData;
-                }
-                await saveChatToHost_ACU();
-                break;
-            }
+        const sheet = currentJsonTableData_ACU[sheetKey];
+        const history = resolveTableHistoryStateFromChat_ACU(chat, {
+            sheetKey,
+            isSummaryTable: isSummaryOrOutlineTable_ACU(sheet.name),
+            isolationKey: getCurrentIsolationKey_ACU(),
+            settings: settings_ACU,
+        });
+        const fallbackLatestAiIndex = getLatestAiMessageIndexFromChat_ACU(chat);
+        const targetMessageIndex = history.latestDataMessageIndex !== -1
+            ? history.latestDataMessageIndex
+            : fallbackLatestAiIndex;
+        if (targetMessageIndex === -1) {
+            logWarn_ACU('saveCurrentDataForTable_ACU: No AI message available for persistence.');
+            return;
         }
+        await persistTablesToChatMessage_ACU({
+            targetMessageIndex,
+            targetSheetKeys: [sheetKey],
+            updateGroupKeys: null,
+            trackAsUpdate: history.latestDataMessageIndex === -1,
+        });
     }
     catch (e) {
         logError_ACU('saveCurrentDataForTable_ACU failed:', e);
@@ -21869,7 +22009,7 @@ async function overrideLatestLayerWithTemplateCore_ACU(templateData) {
  * @param targetMessageIndices 需要清空的目标 AI 消息物理索引列表（已去重）
  * @returns 实际被清空的消息数量
  */
-async function clearTableDataAtFloors_ACU(targetMessageIndices) {
+async function clearTableDataAtFloors_ACU(targetMessageIndices, targetSheetKeys = null) {
     if (!targetMessageIndices || targetMessageIndices.length === 0)
         return 0;
     const chat = getChatArray_ACU();
@@ -21888,7 +22028,9 @@ async function clearTableDataAtFloors_ACU(targetMessageIndices) {
         // 只处理 AI 消息（跳过用户消息）
         if (!msg || msg.is_user)
             continue;
-        const changed = clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
+        const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
+            ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
+            : clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
         if (changed) {
             clearedCount++;
             logDebug_ACU(`[清空楼层] 已清空消息索引 ${idx} 上的表格数据 (标签: ${isolationKey || '无'})`);
@@ -21899,6 +22041,60 @@ async function clearTableDataAtFloors_ACU(targetMessageIndices) {
         logDebug_ACU(`[清空楼层] 共清空 ${clearedCount} 条消息的表格数据，聊天已保存。`);
     }
     return clearedCount;
+}
+function purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys) {
+    if (!msg || !Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0)
+        return false;
+    let changed = false;
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    if (tagData && typeof tagData === 'object') {
+        if (tagData.independentData && typeof tagData.independentData === 'object') {
+            targetSheetKeys.forEach(sheetKey => {
+                if (tagData.independentData[sheetKey]) {
+                    delete tagData.independentData[sheetKey];
+                    changed = true;
+                }
+            });
+        }
+        if (Array.isArray(tagData.modifiedKeys)) {
+            tagData.modifiedKeys = tagData.modifiedKeys.filter((key) => !targetSheetKeys.includes(key));
+        }
+        if (Array.isArray(tagData.updateGroupKeys)) {
+            tagData.updateGroupKeys = tagData.updateGroupKeys.filter((key) => !targetSheetKeys.includes(key));
+        }
+    }
+    if (msg?.TavernDB_ACU_IndependentData && typeof msg.TavernDB_ACU_IndependentData === 'object') {
+        targetSheetKeys.forEach(sheetKey => {
+            if (msg.TavernDB_ACU_IndependentData[sheetKey]) {
+                delete msg.TavernDB_ACU_IndependentData[sheetKey];
+                changed = true;
+            }
+        });
+    }
+    if (msg?.TavernDB_ACU_Data && typeof msg.TavernDB_ACU_Data === 'object') {
+        targetSheetKeys.forEach(sheetKey => {
+            if (msg.TavernDB_ACU_Data[sheetKey]) {
+                delete msg.TavernDB_ACU_Data[sheetKey];
+                changed = true;
+            }
+        });
+    }
+    if (msg?.TavernDB_ACU_SummaryData && typeof msg.TavernDB_ACU_SummaryData === 'object') {
+        targetSheetKeys.forEach(sheetKey => {
+            if (msg.TavernDB_ACU_SummaryData[sheetKey]) {
+                delete msg.TavernDB_ACU_SummaryData[sheetKey];
+                changed = true;
+            }
+        });
+    }
+    if (Array.isArray(msg?.TavernDB_ACU_ModifiedKeys)) {
+        msg.TavernDB_ACU_ModifiedKeys = msg.TavernDB_ACU_ModifiedKeys.filter((key) => !targetSheetKeys.includes(key));
+    }
+    if (Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys)) {
+        msg.TavernDB_ACU_UpdateGroupKeys = msg.TavernDB_ACU_UpdateGroupKeys.filter((key) => !targetSheetKeys.includes(key));
+    }
+    return changed;
 }
 
 /**
@@ -22647,72 +22843,15 @@ async function updateCardUpdateStatusDisplay_ACU() {
             // [重构] 上次更新楼层计算：扫描聊天记录
             // 寻找该表格在历史记录中最后一次被更新的楼层
             // 支持合并更新逻辑：只要合并更新组内有任意表被修改，整组表都视为已更新
-            let lastUpdatedAiFloor = 0;
-            let foundInHistory = false;
-            // [数据隔离核心] 获取当前隔离标签键名
             const currentIsolationKey = getCurrentIsolationKey_ACU();
-            for (let i = chatHistory.length - 1; i >= 0; i--) {
-                const msg = chatHistory[i];
-                if (msg.is_user)
-                    continue;
-                let wasUpdated = false;
-                // [优先级1] 检查新版按标签分组存储 TavernDB_ACU_IsolatedData
-                if (msg.TavernDB_ACU_IsolatedData && msg.TavernDB_ACU_IsolatedData[currentIsolationKey]) {
-                    const tagData = msg.TavernDB_ACU_IsolatedData[currentIsolationKey];
-                    const modifiedKeys = tagData.modifiedKeys || [];
-                    const updateGroupKeys = tagData.updateGroupKeys || [];
-                    const independentData = tagData.independentData || {};
-                    if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                        wasUpdated = updateGroupKeys.includes(key);
-                    }
-                    else if (modifiedKeys.length > 0) {
-                        wasUpdated = modifiedKeys.includes(key);
-                    }
-                    else if (independentData[key]) {
-                        wasUpdated = true;
-                    }
-                }
-                // [优先级2] 兼容旧版存储格式 - 严格匹配隔离标签
-                if (!wasUpdated) {
-                    const msgIdentity = msg.TavernDB_ACU_Identity;
-                    let isLegacyMatch = false;
-                    if (settings_ACU.dataIsolationEnabled) {
-                        isLegacyMatch = (msgIdentity === settings_ACU.dataIsolationCode);
-                    }
-                    else {
-                        // 关闭隔离（无标签模式）：只匹配无标识数据
-                        isLegacyMatch = !msgIdentity;
-                    }
-                    if (isLegacyMatch) {
-                        const modifiedKeys = msg.TavernDB_ACU_ModifiedKeys || [];
-                        const updateGroupKeys = msg.TavernDB_ACU_UpdateGroupKeys || [];
-                        if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                            wasUpdated = updateGroupKeys.includes(key);
-                        }
-                        else if (modifiedKeys.length > 0) {
-                            wasUpdated = modifiedKeys.includes(key);
-                        }
-                        else {
-                            // 旧版兼容：没有 ModifiedKeys 字段时，回退到检查数据是否存在
-                            if (msg.TavernDB_ACU_IndependentData && msg.TavernDB_ACU_IndependentData[key]) {
-                                wasUpdated = true;
-                            }
-                            else if (isSummary && msg.TavernDB_ACU_SummaryData && msg.TavernDB_ACU_SummaryData[key]) {
-                                wasUpdated = true;
-                            }
-                            else if (!isSummary && msg.TavernDB_ACU_Data && msg.TavernDB_ACU_Data[key]) {
-                                wasUpdated = true;
-                            }
-                        }
-                    }
-                }
-                if (wasUpdated) {
-                    // 计算这是第几个 AI 回复
-                    lastUpdatedAiFloor = chatHistory.slice(0, i + 1).filter(m => !m.is_user).length;
-                    foundInHistory = true;
-                    break;
-                }
-            }
+            const history = resolveTableHistoryStateFromChat_ACU(chatHistory, {
+                sheetKey: key,
+                isSummaryTable: isSummary,
+                isolationKey: currentIsolationKey,
+                settings: settings_ACU,
+            });
+            const lastUpdatedAiFloor = history.lastTrackedUpdateAiFloor;
+            const foundInHistory = history.hasTrackedUpdate;
             const skipFloors = Math.max(0, (rawSkip === -1) ? globalSkip : rawSkip);
             // 下次触发 (包含skip)
             let triggerFloor = "N/A";
@@ -23368,6 +23507,12 @@ function populateTemplatePresetSelectOptions_ACU($select, { extraPresetName = ''
         $select.append(jQuery_API_ACU('<option/>').val(value).text(label));
     });
 }
+function hasOptionValue_ACU($select, value) {
+    if (!$select || !$select.length)
+        return false;
+    const normalizedValue = String(value ?? '');
+    return $select.find('option').toArray().some((option) => String(jQuery_API_ACU(option).val() ?? '') === normalizedValue);
+}
 function loadTemplatePresetSelect_ACU({ globalSelectName = null, keepGlobalValue = false } = {}) {
     if (!$popupInstance_ACU || !$popupInstance_ACU.length)
         return;
@@ -23429,9 +23574,9 @@ function loadTemplatePresetSelect_ACU({ globalSelectName = null, keepGlobalValue
         else if (keepGlobalValue) {
             resolvedGlobalValue = normalizeTemplatePresetSelectionValue_ACU($globalSelect.val());
         }
-        const finalGlobalValue = resolvedGlobalValue && $globalSelect.find(`option[value="${resolvedGlobalValue.replace(/"/g, '\\"')}"]`).length > 0
+        const finalGlobalValue = resolvedGlobalValue && hasOptionValue_ACU($globalSelect, resolvedGlobalValue)
             ? resolvedGlobalValue
-            : (hasGlobalPreset || (!!globalPresetName && $globalSelect.find(`option[value="${globalPresetName.replace(/"/g, '\\"')}"]`).length > 0)
+            : (hasGlobalPreset || (!!globalPresetName && hasOptionValue_ACU($globalSelect, globalPresetName))
                 ? globalPresetName
                 : DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
         $globalSelect.val(finalGlobalValue || DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
@@ -23440,7 +23585,7 @@ function loadTemplatePresetSelect_ACU({ globalSelectName = null, keepGlobalValue
         $globalDeleteBtn.toggle(!!globalPresetName && presetNames.includes(globalPresetName));
     }
     if ($chatSelect && $chatSelect.length) {
-        const finalChatValue = chatSelectedPresetName && $chatSelect.find(`option[value="${chatSelectedPresetName.replace(/"/g, '\\"')}"]`).length > 0
+        const finalChatValue = chatSelectedPresetName && hasOptionValue_ACU($chatSelect, chatSelectedPresetName)
             ? chatSelectedPresetName
             : DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU;
         $chatSelect.val(finalChatValue || DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU);
@@ -23720,66 +23865,13 @@ function buildAutoUpdatePlan_ACU(liveChat, tableData, settings, isolationKey) {
         const frequency = (rawFreq === -1) ? globalFrequency : rawFreq;
         const skipFloors = Math.max(0, (rawSkip === -1) ? globalSkip : rawSkip);
         const groupId = rawGroupId;
-        // 扫描聊天记录，查找该表上次更新的 AI 楼层数
-        let lastUpdatedAiFloor = 0;
-        for (let i = liveChat.length - 1; i >= 0; i--) {
-            const msg = liveChat[i];
-            if (msg.is_user)
-                continue;
-            let wasUpdated = false;
-            // [优先级1] 检查新版按标签分组存储 TavernDB_ACU_IsolatedData
-            if (msg.TavernDB_ACU_IsolatedData && msg.TavernDB_ACU_IsolatedData[isolationKey]) {
-                const tagData = msg.TavernDB_ACU_IsolatedData[isolationKey];
-                const modifiedKeys = tagData.modifiedKeys || [];
-                const updateGroupKeys = tagData.updateGroupKeys || [];
-                const independentData = tagData.independentData || {};
-                if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                    wasUpdated = updateGroupKeys.includes(sheetKey);
-                }
-                else if (modifiedKeys.length > 0) {
-                    wasUpdated = modifiedKeys.includes(sheetKey);
-                }
-                else if (independentData[sheetKey]) {
-                    wasUpdated = true;
-                }
-            }
-            // [优先级2] 兼容旧版存储格式 - 严格匹配隔离标签
-            if (!wasUpdated) {
-                const msgIdentity = msg.TavernDB_ACU_Identity;
-                let isLegacyMatch = false;
-                if (settings.dataIsolationEnabled) {
-                    isLegacyMatch = (msgIdentity === settings.dataIsolationCode);
-                }
-                else {
-                    isLegacyMatch = !msgIdentity;
-                }
-                if (isLegacyMatch) {
-                    const modifiedKeys = msg.TavernDB_ACU_ModifiedKeys || [];
-                    const updateGroupKeys = msg.TavernDB_ACU_UpdateGroupKeys || [];
-                    if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                        wasUpdated = updateGroupKeys.includes(sheetKey);
-                    }
-                    else if (modifiedKeys.length > 0) {
-                        wasUpdated = modifiedKeys.includes(sheetKey);
-                    }
-                    else {
-                        if (msg.TavernDB_ACU_IndependentData && msg.TavernDB_ACU_IndependentData[sheetKey]) {
-                            wasUpdated = true;
-                        }
-                        else if (isSummary && msg.TavernDB_ACU_SummaryData && msg.TavernDB_ACU_SummaryData[sheetKey]) {
-                            wasUpdated = true;
-                        }
-                        else if (!isSummary && msg.TavernDB_ACU_Data && msg.TavernDB_ACU_Data[sheetKey]) {
-                            wasUpdated = true;
-                        }
-                    }
-                }
-            }
-            if (wasUpdated) {
-                lastUpdatedAiFloor = liveChat.slice(0, i + 1).filter((m) => !m.is_user).length;
-                break;
-            }
-        }
+        const history = resolveTableHistoryStateFromChat_ACU(liveChat, {
+            sheetKey,
+            isSummaryTable: isSummary,
+            isolationKey,
+            settings,
+        });
+        const lastUpdatedAiFloor = history.lastTrackedUpdateAiFloor;
         // 计算未记录楼层数
         const effectiveUnrecordedFloors = Math.max(0, (totalAiMessages - skipFloors) - lastUpdatedAiFloor);
         logDebug_ACU(`[Trigger Check] Table: ${table.name}, TotalAI: ${totalAiMessages}, Skip: ${skipFloors}, LastUpdated: ${lastUpdatedAiFloor}, Unrecorded: ${effectiveUnrecordedFloors}, Freq: ${frequency}`);
@@ -23802,7 +23894,8 @@ function buildAutoUpdatePlan_ACU(liveChat, tableData, settings, isolationKey) {
                         sheetName: table.name,
                         indices: indicesToUpdate,
                         groupId,
-                        batchSize: (rawBatch === -1) ? (settings.updateBatchSize || 3) : ((rawBatch > 0) ? rawBatch : (settings.updateBatchSize || 3))
+                        batchSize: (rawBatch === -1) ? (settings.updateBatchSize || 3) : ((rawBatch > 0) ? rawBatch : (settings.updateBatchSize || 3)),
+                        scheduleSignature: [groupId, threshold, frequency, skipFloors, rawBatch].join('|'),
                     });
                 }
             }
@@ -23811,12 +23904,13 @@ function buildAutoUpdatePlan_ACU(liveChat, tableData, settings, isolationKey) {
     // 分组：将待更新的表按 (groupId + indices + batchSize) 进行分组
     const updateGroups = {};
     tablesToUpdate.forEach(item => {
-        const key = item.groupId + '|' + item.indices.join(',') + '|' + item.batchSize;
+        const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize;
         if (!updateGroups[key]) {
             updateGroups[key] = {
                 indices: item.indices,
                 batchSize: item.batchSize,
                 groupId: item.groupId,
+                scheduleSignature: item.scheduleSignature,
                 sheetKeys: [],
                 sheetNames: []
             };
@@ -26506,6 +26600,9 @@ function getTargetDoc() {
 function showCustomConfirm_ACU(title, message, options = {}) {
     const { confirmLabel = '确定', cancelLabel = '取消', } = options;
     const targetDoc = getTargetDoc();
+    const targetWindow = targetDoc.defaultView || topLevelWindow_ACU || window;
+    const viewportWidth = Number(targetWindow?.innerWidth || window.innerWidth || 0);
+    const isNarrowScreen = viewportWidth > 0 && viewportWidth <= 899;
     // 移除可能残留的旧确认框（防止重复）
     removeExistingConfirm();
     const confirmId = `${SCRIPT_ID_PREFIX_ACU}-custom-confirm`;
@@ -26515,11 +26612,13 @@ function showCustomConfirm_ACU(title, message, options = {}) {
     <div class="acu-window-overlay" id="${confirmId}-overlay" style="z-index: 100000;">
       <div id="${confirmId}" style="
         position: fixed;
-        top: 50%;
+        top: ${isNarrowScreen ? 'max(calc(env(safe-area-inset-top, 0px) + 72px), 12svh)' : '50%'};
         left: 50%;
-        transform: translate(-50%, -50%);
-        min-width: 320px;
-        max-width: min(420px, calc(100vw - 40px));
+        transform: translate(-50%, ${isNarrowScreen ? '0' : '-50%'});
+        min-width: ${isNarrowScreen ? 'min(280px, calc(100vw - 24px))' : '320px'};
+        width: min(420px, calc(100vw - ${isNarrowScreen ? '24px' : '40px'}));
+        max-width: min(420px, calc(100vw - ${isNarrowScreen ? '24px' : '40px'}));
+        max-height: calc(${isNarrowScreen ? '100dvh' : '100vh'} - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - ${isNarrowScreen ? '88px' : '40px'});
         background-color: var(--acu-confirm-bg, var(--acu-bg-1, #ffffff));
         border: 1px solid var(--acu-confirm-border, var(--acu-border, #e0e4ea));
         border-radius: 10px;
@@ -26529,6 +26628,8 @@ function showCustomConfirm_ACU(title, message, options = {}) {
         color: var(--acu-confirm-title, var(--acu-text-1, #1a2332));
         padding: 0;
         overflow: hidden;
+        display: flex;
+        flex-direction: column;
       ">
         <div style="
           padding: 16px 20px 12px 20px;
@@ -26543,38 +26644,45 @@ function showCustomConfirm_ACU(title, message, options = {}) {
           font-size: 13px;
           line-height: 1.7;
           color: var(--acu-confirm-text, var(--acu-text-2, #4a5568));
+          overflow-y: auto;
+          max-height: ${isNarrowScreen ? 'min(50dvh, calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 180px))' : 'none'};
         ">${safeMessage}</div>
         <div style="
-          padding: 12px 20px 16px 20px;
+          padding: 12px 20px calc(16px + env(safe-area-inset-bottom, 0px)) 20px;
           display: flex;
-          justify-content: flex-end;
+          justify-content: ${isNarrowScreen ? 'stretch' : 'flex-end'};
+          flex-direction: ${isNarrowScreen ? 'column-reverse' : 'row'};
           gap: 10px;
         ">
           <button id="${confirmId}-cancel" style="
-            padding: 8px 18px;
-            border: 1px solid var(--acu-confirm-cancel-border, var(--acu-border-2, #c8cdd5));
+            padding: 10px 18px;
+            border: 1px solid var(--acu-confirm-cancel-border, var(--acu-border-2, #c8cdd5)) !important;
             border-radius: 6px;
-            background: var(--acu-confirm-cancel-bg, transparent);
-            color: var(--acu-confirm-cancel-text, var(--acu-text-2, #4a5568));
+            background: var(--acu-confirm-cancel-bg, transparent) !important;
+            color: var(--acu-confirm-cancel-text, var(--acu-text-2, #4a5568)) !important;
             cursor: pointer;
             font-family: inherit;
             font-size: 13px;
             font-weight: 500;
             letter-spacing: 0.3px;
             transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+            box-shadow: none !important;
+            width: ${isNarrowScreen ? '100%' : 'auto'};
           ">${escapeHtml_ACU(cancelLabel)}</button>
           <button id="${confirmId}-ok" style="
-            padding: 8px 18px;
-            border: 1px solid var(--acu-confirm-ok-border, rgba(37, 99, 235, 0.30));
+            padding: 10px 18px;
+            border: 1px solid var(--acu-confirm-ok-border, rgba(37, 99, 235, 0.30)) !important;
             border-radius: 6px;
-            background: var(--acu-confirm-ok-bg, rgba(37, 99, 235, 0.08));
-            color: var(--acu-confirm-ok-text, var(--acu-accent, #2563eb));
+            background: var(--acu-confirm-ok-bg, rgba(37, 99, 235, 0.08)) !important;
+            color: var(--acu-confirm-ok-text, var(--acu-accent, #2563eb)) !important;
             cursor: pointer;
             font-family: inherit;
             font-size: 13px;
             font-weight: 600;
             letter-spacing: 0.3px;
             transition: background 0.15s ease, border-color 0.15s ease;
+            box-shadow: none !important;
+            width: ${isNarrowScreen ? '100%' : 'auto'};
           ">${escapeHtml_ACU(confirmLabel)}</button>
         </div>
       </div>
@@ -27096,10 +27204,14 @@ async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData
         const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
         const updateGroups = {};
         targetKeys.forEach((sheetKey) => {
-            const tableGroupId = Number.isFinite(templateData?.[sheetKey]?.updateConfig?.groupId)
-                ? Math.trunc(templateData[sheetKey].updateConfig.groupId)
+            const tableConfig = templateData?.[sheetKey]?.updateConfig || {};
+            const tableGroupId = Number.isFinite(tableConfig?.groupId)
+                ? Math.trunc(tableConfig.groupId)
                 : -1;
-            const groupKey = `${tableGroupId}|${contextScopeIndices.join(',')}|${uiBatchSize}`;
+            const tableFrequency = Number.isFinite(tableConfig?.updateFrequency) ? tableConfig.updateFrequency : -1;
+            const tableContextDepth = Number.isFinite(tableConfig?.contextDepth) ? tableConfig.contextDepth : -1;
+            const tableSkipFloors = Number.isFinite(tableConfig?.skipFloors) ? tableConfig.skipFloors : -1;
+            const groupKey = `${tableGroupId}|${tableFrequency}|${tableContextDepth}|${tableSkipFloors}|${contextScopeIndices.join(',')}|${uiBatchSize}`;
             if (!updateGroups[groupKey]) {
                 updateGroups[groupKey] = {
                     indices: contextScopeIndices,
@@ -27118,8 +27230,10 @@ async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData
         // 这样可以防止 SQL 严格填表逻辑因目标楼层上的旧数据残留导致写入失败。
         if (options.clearBeforeUpdate) {
             const targetFloorSet = new Set();
+            const targetSheetKeySet = new Set();
             for (const gKey of groupKeys) {
                 const group = updateGroups[gKey];
+                (group.sheetKeys || []).forEach((sheetKey) => targetSheetKeySet.add(sheetKey));
                 // 每个 group 的 indices 按 batchSize 分批，每批的最后一条就是该批的 finalSaveTargetIndex。
                 // 这里简化处理：取该 group 的 indices 列表中最后一个 index 作为最终保存目标。
                 // （同一个 group 内所有 batch 的 contextScopeIndices 是相同的，
@@ -27134,9 +27248,10 @@ async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData
                 }
             }
             const targetFloors = Array.from(targetFloorSet);
+            const targetSheetKeysForClear = Array.from(targetSheetKeySet);
             if (targetFloors.length > 0) {
                 logDebug_ACU(`[Manual Update] 预清空目标楼层: ${targetFloors.join(', ')} (共 ${targetFloors.length} 层)`);
-                const clearedCount = await clearTableDataAtFloors_ACU(targetFloors);
+                const clearedCount = await clearTableDataAtFloors_ACU(targetFloors, targetSheetKeysForClear);
                 logDebug_ACU(`[Manual Update] 预清空完成: ${clearedCount} 层已清空`);
                 // 清空后必须刷新内存数据，确保后续填表基于干净状态
                 await loadAllChatMessages_ACU();
@@ -27372,10 +27487,10 @@ async function handleManualUpdate_ACU() {
             showToastr_ACU('warning', '未选择需要更新的表格。');
             return;
         }
-        // 弹出确认框：告知用户将先清除对应楼层的所有表格数据，再执行新的手动填表
+        // 弹出确认框：告知用户将先清除对应楼层中本次选中表格的数据，再执行新的手动填表
         // 这是防止 SQL 严格填表逻辑因旧数据残留导致写入失败的关键步骤
         const confirmed = await showCustomConfirm_ACU('手动填表确认', '即将执行手动填表。\n\n' +
-            '为确保填表成功，系统将先清除本次涉及楼层的所有表格数据，再进行新的数据填写。\n' +
+            '为确保填表成功，系统将先清除本次涉及楼层中当前选中表格的数据，再进行新的数据填写。\n' +
             '（此操作可防止 SQL 严格填表逻辑因旧数据残留导致写入失败）\n\n' +
             '如果不想清空旧数据，可以选择取消。', { confirmLabel: '确认并继续', cancelLabel: '取消' });
         if (!confirmed) {
@@ -28569,42 +28684,175 @@ async function bindWorldbookEvents_ACU() {
 }
 
 /**
+ * presentation/pages/visualizer-sidebar.ts — 可视化编辑器侧栏
+ * 从 visualizer.ts 拆出
+ */
+function getOrderedSheetKeys_ACU() {
+    // 新机制：顺序由每张表的 orderNo 决定；编辑器内部仍保留一个数组用于“上移/下移”
+    //
+    // 重要：getSortedSheetKeys_ACU() 在“聊天已存在空白指导表(guide)”时，默认会按 guide 排序并且
+    // 过滤掉不在 guide 里的表。可视化编辑器允许用户新增表格，因此这里必须把“当前数据里存在但 guide
+    // 里不存在”的新表追加进顺序列表，否则新增表会立刻被过滤掉，进而导致“UI不显示/保存后丢失”。
+    // allKeys：忽略聊天 guide，拿到 tempData 里真实存在的全部表（含刚新增的表）
+    const allKeys = getSortedSheetKeys_ACU(_acuVisState.tempData, { ignoreChatGuide: true });
+    // guidedKeys：若 guide 存在，则为 guide 内已存在且在 tempData 中也存在的表（用于保持既有聊天顺序）
+    const guidedKeys = getSortedSheetKeys_ACU(_acuVisState.tempData, { ignoreChatGuide: false });
+    const baseOrder = (() => {
+        // guidedKeys 可能为空（无 guide 或 guide 读取失败），此时用 allKeys 作为基准
+        const base = (Array.isArray(guidedKeys) && guidedKeys.length) ? guidedKeys : allKeys;
+        // 追加不在 guide 里的新表，确保新增表可见且可保存
+        const missing = allKeys.filter((k) => !base.includes(k));
+        return [...base, ...missing];
+    })();
+    if (!_acuVisState.sheetOrder || !Array.isArray(_acuVisState.sheetOrder)) {
+        _acuVisState.sheetOrder = baseOrder;
+    }
+    // 确保顺序列表包含所有当前存在的表格，并移除已删除的表格
+    // existingKeys 使用 orderNo 排序（已对缺失编号做兜底补齐）
+    const existingKeys = allKeys;
+    // 过滤掉已删除的
+    _acuVisState.sheetOrder = _acuVisState.sheetOrder.filter((k) => existingKeys.includes(k));
+    // 添加新增的（未在顺序列表中的）
+    existingKeys.forEach((k) => {
+        if (!_acuVisState.sheetOrder.includes(k)) {
+            _acuVisState.sheetOrder.push(k);
+        }
+    });
+    // [新增] 强制去重，防止逻辑错误导致 key 重复
+    _acuVisState.sheetOrder = [...new Set(_acuVisState.sheetOrder)];
+    // 同步更新 tempData 内每张表的 orderNo（保证“移动顺序即更新编号”）
+    applySheetOrderNumbers_ACU(_acuVisState.tempData, _acuVisState.sheetOrder);
+    return _acuVisState.sheetOrder;
+}
+// [新增] 移动表格顺序
+function moveSheetOrder_ACU(key, direction) {
+    const order = getOrderedSheetKeys_ACU();
+    const currentIndex = order.indexOf(key);
+    if (currentIndex === -1)
+        return;
+    const newIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (newIndex < 0 || newIndex >= order.length)
+        return;
+    // 交换位置
+    [order[currentIndex], order[newIndex]] = [order[newIndex], order[currentIndex]];
+    _acuVisState.sheetOrder = order;
+    // [新机制] 移动后立即重编号（编号随调整顺序变化）
+    applySheetOrderNumbers_ACU(_acuVisState.tempData, _acuVisState.sheetOrder);
+    renderVisualizerSidebar_ACU();
+}
+function renderVisualizerSidebar_ACU() {
+    const $list = jQuery_API_ACU('#acu-vis-sidebar-list');
+    $list.empty();
+    const sheetKeys = getOrderedSheetKeys_ACU();
+    const totalSheets = sheetKeys.length;
+    sheetKeys.forEach((key, index) => {
+        const sheet = _acuVisState.tempData[key];
+        if (!sheet)
+            return;
+        const isActive = key === _acuVisState.currentSheetKey;
+        const isFirst = index === 0;
+        const isLast = index === totalSheets - 1;
+        const $item = jQuery_API_ACU(`
+              <div class="acu-table-nav-item ${isActive ? 'active' : ''}" data-key="${key}">
+                  <div class="acu-table-nav-content">
+                      <span class="acu-table-index">[${index}]</span>
+                      <i class="fa-solid fa-table"></i>
+                      <span class="acu-table-name" title="${escapeHtml_ACU$1(sheet.name)}">${escapeHtml_ACU$1(sheet.name)}</span>
+                  </div>
+                  <div class="acu-table-nav-actions">
+                      <button class="acu-table-order-btn acu-move-up-btn" data-key="${key}" title="上移" ${isFirst ? 'disabled' : ''}>
+                          <i class="fa-solid fa-chevron-up"></i>
+                      </button>
+                      <button class="acu-table-order-btn acu-move-down-btn" data-key="${key}" title="下移" ${isLast ? 'disabled' : ''}>
+                          <i class="fa-solid fa-chevron-down"></i>
+                      </button>
+                      <button class="acu-vis-del-table-btn" data-key="${key}" title="删除表格">
+                      <i class="fa-solid fa-trash"></i>
+                  </button>
+                  </div>
+              </div>
+          `);
+        // 点击选中表格
+        $item.on('click', function (e) {
+            if (jQuery_API_ACU(e.target).closest('.acu-table-order-btn, .acu-vis-del-table-btn').length)
+                return;
+            _acuVisState.currentSheetKey = key;
+            renderVisualizerSidebar_ACU();
+            renderVisualizerMain_ACU();
+        });
+        // 上移按钮
+        $item.find('.acu-move-up-btn').on('click', function (e) {
+            e.stopPropagation();
+            moveSheetOrder_ACU(key, 'up');
+        });
+        // 下移按钮
+        $item.find('.acu-move-down-btn').on('click', function (e) {
+            e.stopPropagation();
+            moveSheetOrder_ACU(key, 'down');
+        });
+        // 删除按钮
+        $item.find('.acu-vis-del-table-btn').on('click', function (e) {
+            e.stopPropagation();
+            const keyToDelete = jQuery_API_ACU(this).data('key');
+            const tableName = _acuVisState.tempData[keyToDelete] ? _acuVisState.tempData[keyToDelete].name : '未知';
+            if (confirm(`确定要删除表格 "${tableName}" 吗？此操作不可撤销。\n\n注意：删除后保存，该表格的数据和模板配置都将被移除。`)) {
+                // 记录删除队列：保存时会追溯整个聊天记录清除所有本地表格数据
+                if (!_acuVisState.deletedSheetKeys || !Array.isArray(_acuVisState.deletedSheetKeys)) {
+                    _acuVisState.deletedSheetKeys = [];
+                }
+                if (keyToDelete && !_acuVisState.deletedSheetKeys.includes(keyToDelete)) {
+                    _acuVisState.deletedSheetKeys.push(keyToDelete);
+                }
+                delete _acuVisState.tempData[keyToDelete];
+                // 从顺序列表中移除
+                _acuVisState.sheetOrder = _acuVisState.sheetOrder.filter((k) => k !== keyToDelete);
+                if (_acuVisState.currentSheetKey === keyToDelete) {
+                    const remainingKeys = getOrderedSheetKeys_ACU();
+                    _acuVisState.currentSheetKey = remainingKeys.length > 0 ? remainingKeys[0] : null;
+                }
+                renderVisualizerSidebar_ACU();
+                renderVisualizerMain_ACU();
+            }
+        });
+        $list.append($item);
+    });
+    // 新增表格按钮
+    const $addBtn = jQuery_API_ACU(`
+          <button class="acu-add-table-btn">
+              <i class="fa-solid fa-plus"></i> 新增表格
+          </button>
+      `);
+    $addBtn.on('click', function () {
+        const newName = prompt("请输入新表格的名称:", "新建表格");
+        if (newName) {
+            const newKey = 'sheet_' + Math.random().toString(36).substr(2, 9);
+            _acuVisState.tempData[newKey] = {
+                uid: newKey,
+                name: newName,
+                domain: "chat", type: "dynamic", enable: true, required: false,
+                content: [[null, "列1", "列2"]],
+                sourceData: { note: "新表格说明", initNode: "", insertNode: "", updateNode: "", deleteNode: "" },
+                // -1 = 沿用UI全局（新版默认）；updateFrequency=0 可用于"禁用该表自动更新"；groupId=-1 视为默认同组
+                updateConfig: { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1, sendLatestRows: -1, groupId: -1 },
+                exportConfig: buildDefaultExportConfig_ACU(newName),
+                [TABLE_ORDER_FIELD_ACU]: 999999 // 临时占位，稍后会被 getOrderedSheetKeys_ACU / applySheetOrderNumbers_ACU 重编号
+            };
+            // 添加到顺序列表末尾 (getOrderedSheetKeys_ACU 会自动同步新增的 key，无需手动 push)
+            getOrderedSheetKeys_ACU();
+            _acuVisState.currentSheetKey = newKey;
+            renderVisualizerSidebar_ACU();
+            renderVisualizerMain_ACU();
+        }
+    });
+    $list.append($addBtn);
+}
+
+/**
  * DDL 校验纯函数 — 从 jQuery 事件处理器中提取，方便单元测试
  * @returns { valid: boolean; message: string } 校验结果
  */
 function validateDDLText(ddlText, tableHeaders) {
-    const trimmed = (ddlText || '').trim();
-    if (!trimmed) {
-        return { valid: false, message: '⚠ DDL 为空' };
-    }
-    // 校验 1：是否包含 CREATE TABLE
-    if (!/CREATE\s+TABLE/i.test(trimmed)) {
-        return { valid: false, message: '✗ 不是有效的 CREATE TABLE 语句' };
-    }
-    // 校验 2：是否包含 row_id 主键列
-    if (!/row_id\s+INTEGER\s+PRIMARY\s+KEY/i.test(trimmed)) {
-        return { valid: false, message: '✗ 缺少 row_id INTEGER PRIMARY KEY 列（必须作为第一列）' };
-    }
-    // 校验 3：提取 DDL 列名，与当前表头对比
-    const colMatches = trimmed.match(/\(([^)]+)\)/s);
-    if (colMatches) {
-        const ddlCols = colMatches[1]
-            .split(',')
-            .map(c => c.trim().split(/\s+/)[0])
-            .filter(c => c && !c.startsWith('--'));
-        const ddlColsNoRowId = ddlCols.filter(c => c.toLowerCase() !== 'row_id');
-        const mismatch = ddlColsNoRowId.filter(c => !tableHeaders.includes(c));
-        const missing = tableHeaders.filter((h) => !ddlColsNoRowId.includes(h));
-        if (mismatch.length > 0 || missing.length > 0) {
-            let msg = '⚠ DDL 列名与表头不完全匹配：';
-            if (mismatch.length > 0)
-                msg += `DDL 多出: ${mismatch.join(', ')}；`;
-            if (missing.length > 0)
-                msg += `表头多出: ${missing.join(', ')}`;
-            return { valid: false, message: msg };
-        }
-    }
-    return { valid: true, message: '✓ DDL 格式正确，列名与表头匹配' };
+    return validateDDLTextAgainstHeaders_ACU(ddlText, tableHeaders);
 }
 function renderVisualizerConfigMode_ACU($container, sheet) {
     const config = ensureSheetExportConfigDefaults_ACU(sheet);
@@ -29209,9 +29457,18 @@ function renderVisualizerMain_ACU() {
         $main.html('<div style="text-align:center; padding:50px; color:#888;">请选择一个表格</div>');
         return;
     }
-    const sheet = _acuVisState.tempData[_acuVisState.currentSheetKey];
-    if (!sheet)
+    let sheet = _acuVisState.tempData[_acuVisState.currentSheetKey];
+    if (!sheet) {
+        const nextValidSheetKey = getOrderedSheetKeys_ACU().find((key) => !!_acuVisState.tempData[key]);
+        if (nextValidSheetKey) {
+            _acuVisState.currentSheetKey = nextValidSheetKey;
+            sheet = _acuVisState.tempData[nextValidSheetKey];
+        }
+    }
+    if (!sheet) {
+        $main.html('<div style="text-align:center; padding:50px; color:#888;">当前表格不可用，请重新选择或刷新数据。</div>');
         return;
+    }
     if (_acuVisState.mode === 'data') {
         renderVisualizerDataMode_ACU($main, sheet);
     }
@@ -29432,170 +29689,6 @@ function renderVisualizerDataMode_ACU($container, sheet) {
 }
 
 /**
- * presentation/pages/visualizer-sidebar.ts — 可视化编辑器侧栏
- * 从 visualizer.ts 拆出
- */
-function getOrderedSheetKeys_ACU() {
-    // 新机制：顺序由每张表的 orderNo 决定；编辑器内部仍保留一个数组用于“上移/下移”
-    //
-    // 重要：getSortedSheetKeys_ACU() 在“聊天已存在空白指导表(guide)”时，默认会按 guide 排序并且
-    // 过滤掉不在 guide 里的表。可视化编辑器允许用户新增表格，因此这里必须把“当前数据里存在但 guide
-    // 里不存在”的新表追加进顺序列表，否则新增表会立刻被过滤掉，进而导致“UI不显示/保存后丢失”。
-    // allKeys：忽略聊天 guide，拿到 tempData 里真实存在的全部表（含刚新增的表）
-    const allKeys = getSortedSheetKeys_ACU(_acuVisState.tempData, { ignoreChatGuide: true });
-    // guidedKeys：若 guide 存在，则为 guide 内已存在且在 tempData 中也存在的表（用于保持既有聊天顺序）
-    const guidedKeys = getSortedSheetKeys_ACU(_acuVisState.tempData, { ignoreChatGuide: false });
-    const baseOrder = (() => {
-        // guidedKeys 可能为空（无 guide 或 guide 读取失败），此时用 allKeys 作为基准
-        const base = (Array.isArray(guidedKeys) && guidedKeys.length) ? guidedKeys : allKeys;
-        // 追加不在 guide 里的新表，确保新增表可见且可保存
-        const missing = allKeys.filter((k) => !base.includes(k));
-        return [...base, ...missing];
-    })();
-    if (!_acuVisState.sheetOrder || !Array.isArray(_acuVisState.sheetOrder)) {
-        _acuVisState.sheetOrder = baseOrder;
-    }
-    // 确保顺序列表包含所有当前存在的表格，并移除已删除的表格
-    // existingKeys 使用 orderNo 排序（已对缺失编号做兜底补齐）
-    const existingKeys = allKeys;
-    // 过滤掉已删除的
-    _acuVisState.sheetOrder = _acuVisState.sheetOrder.filter((k) => existingKeys.includes(k));
-    // 添加新增的（未在顺序列表中的）
-    existingKeys.forEach((k) => {
-        if (!_acuVisState.sheetOrder.includes(k)) {
-            _acuVisState.sheetOrder.push(k);
-        }
-    });
-    // [新增] 强制去重，防止逻辑错误导致 key 重复
-    _acuVisState.sheetOrder = [...new Set(_acuVisState.sheetOrder)];
-    // 同步更新 tempData 内每张表的 orderNo（保证“移动顺序即更新编号”）
-    applySheetOrderNumbers_ACU(_acuVisState.tempData, _acuVisState.sheetOrder);
-    return _acuVisState.sheetOrder;
-}
-// [新增] 移动表格顺序
-function moveSheetOrder_ACU(key, direction) {
-    const order = getOrderedSheetKeys_ACU();
-    const currentIndex = order.indexOf(key);
-    if (currentIndex === -1)
-        return;
-    const newIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    if (newIndex < 0 || newIndex >= order.length)
-        return;
-    // 交换位置
-    [order[currentIndex], order[newIndex]] = [order[newIndex], order[currentIndex]];
-    _acuVisState.sheetOrder = order;
-    // [新机制] 移动后立即重编号（编号随调整顺序变化）
-    applySheetOrderNumbers_ACU(_acuVisState.tempData, _acuVisState.sheetOrder);
-    renderVisualizerSidebar_ACU();
-}
-function renderVisualizerSidebar_ACU() {
-    const $list = jQuery_API_ACU('#acu-vis-sidebar-list');
-    $list.empty();
-    const sheetKeys = getOrderedSheetKeys_ACU();
-    const totalSheets = sheetKeys.length;
-    sheetKeys.forEach((key, index) => {
-        const sheet = _acuVisState.tempData[key];
-        if (!sheet)
-            return;
-        const isActive = key === _acuVisState.currentSheetKey;
-        const isFirst = index === 0;
-        const isLast = index === totalSheets - 1;
-        const $item = jQuery_API_ACU(`
-              <div class="acu-table-nav-item ${isActive ? 'active' : ''}" data-key="${key}">
-                  <div class="acu-table-nav-content">
-                      <span class="acu-table-index">[${index}]</span>
-                      <i class="fa-solid fa-table"></i>
-                      <span class="acu-table-name" title="${escapeHtml_ACU$1(sheet.name)}">${escapeHtml_ACU$1(sheet.name)}</span>
-                  </div>
-                  <div class="acu-table-nav-actions">
-                      <button class="acu-table-order-btn acu-move-up-btn" data-key="${key}" title="上移" ${isFirst ? 'disabled' : ''}>
-                          <i class="fa-solid fa-chevron-up"></i>
-                      </button>
-                      <button class="acu-table-order-btn acu-move-down-btn" data-key="${key}" title="下移" ${isLast ? 'disabled' : ''}>
-                          <i class="fa-solid fa-chevron-down"></i>
-                      </button>
-                      <button class="acu-vis-del-table-btn" data-key="${key}" title="删除表格">
-                      <i class="fa-solid fa-trash"></i>
-                  </button>
-                  </div>
-              </div>
-          `);
-        // 点击选中表格
-        $item.on('click', function (e) {
-            if (jQuery_API_ACU(e.target).closest('.acu-table-order-btn, .acu-vis-del-table-btn').length)
-                return;
-            _acuVisState.currentSheetKey = key;
-            renderVisualizerSidebar_ACU();
-            renderVisualizerMain_ACU();
-        });
-        // 上移按钮
-        $item.find('.acu-move-up-btn').on('click', function (e) {
-            e.stopPropagation();
-            moveSheetOrder_ACU(key, 'up');
-        });
-        // 下移按钮
-        $item.find('.acu-move-down-btn').on('click', function (e) {
-            e.stopPropagation();
-            moveSheetOrder_ACU(key, 'down');
-        });
-        // 删除按钮
-        $item.find('.acu-vis-del-table-btn').on('click', function (e) {
-            e.stopPropagation();
-            const keyToDelete = jQuery_API_ACU(this).data('key');
-            const tableName = _acuVisState.tempData[keyToDelete] ? _acuVisState.tempData[keyToDelete].name : '未知';
-            if (confirm(`确定要删除表格 "${tableName}" 吗？此操作不可撤销。\n\n注意：删除后保存，该表格的数据和模板配置都将被移除。`)) {
-                // 记录删除队列：保存时会追溯整个聊天记录清除所有本地表格数据
-                if (!_acuVisState.deletedSheetKeys || !Array.isArray(_acuVisState.deletedSheetKeys)) {
-                    _acuVisState.deletedSheetKeys = [];
-                }
-                if (keyToDelete && !_acuVisState.deletedSheetKeys.includes(keyToDelete)) {
-                    _acuVisState.deletedSheetKeys.push(keyToDelete);
-                }
-                delete _acuVisState.tempData[keyToDelete];
-                // 从顺序列表中移除
-                _acuVisState.sheetOrder = _acuVisState.sheetOrder.filter((k) => k !== keyToDelete);
-                if (_acuVisState.currentSheetKey === keyToDelete) {
-                    const remainingKeys = getOrderedSheetKeys_ACU();
-                    _acuVisState.currentSheetKey = remainingKeys.length > 0 ? remainingKeys[0] : null;
-                }
-                renderVisualizerSidebar_ACU();
-                renderVisualizerMain_ACU();
-            }
-        });
-        $list.append($item);
-    });
-    // 新增表格按钮
-    const $addBtn = jQuery_API_ACU(`
-          <button class="acu-add-table-btn">
-              <i class="fa-solid fa-plus"></i> 新增表格
-          </button>
-      `);
-    $addBtn.on('click', function () {
-        const newName = prompt("请输入新表格的名称:", "新建表格");
-        if (newName) {
-            const newKey = 'sheet_' + Math.random().toString(36).substr(2, 9);
-            _acuVisState.tempData[newKey] = {
-                uid: newKey,
-                name: newName,
-                domain: "chat", type: "dynamic", enable: true, required: false,
-                content: [[null, "列1", "列2"]],
-                sourceData: { note: "新表格说明", initNode: "", insertNode: "", updateNode: "", deleteNode: "" },
-                // -1 = 沿用UI全局（新版默认）；updateFrequency=0 可用于"禁用该表自动更新"；groupId=-1 视为默认同组
-                updateConfig: { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1, sendLatestRows: -1, groupId: -1 },
-                exportConfig: buildDefaultExportConfig_ACU(newName),
-                [TABLE_ORDER_FIELD_ACU]: 999999 // 临时占位，稍后会被 getOrderedSheetKeys_ACU / applySheetOrderNumbers_ACU 重编号
-            };
-            // 添加到顺序列表末尾 (getOrderedSheetKeys_ACU 会自动同步新增的 key，无需手动 push)
-            getOrderedSheetKeys_ACU();
-            _acuVisState.currentSheetKey = newKey;
-            renderVisualizerSidebar_ACU();
-            renderVisualizerMain_ACU();
-        }
-    });
-    $list.append($addBtn);
-}
-
-/**
  * presentation/window/window-styles.ts — 窗口样式注入 + 主题切换
  * 从 window-system.ts 拆出
  *
@@ -29691,7 +29784,7 @@ function injectACUWindowStyles() {
         --acu-panel-text-mute: var(--acu-text-3, #8896a8);
         --acu-panel-accent: var(--acu-accent, #2563eb);
         --acu-panel-hover: var(--acu-bg-2, rgba(0, 0, 0, 0.03));
-        --acu-panel-shadow: var(--acu-shadow, 0 4px 16px rgba(0, 0, 0, 0.10));
+        --acu-panel-shadow: var(--acu-shadow, 0 1px 3px rgba(0, 0, 0, 0.06));
         --acu-panel-close-hover-bg: var(--acu-danger-soft-bg, rgba(239, 68, 68, 0.08));
         --acu-panel-close-hover-border: var(--acu-danger-soft-border, rgba(239, 68, 68, 0.25));
         --acu-panel-close-hover-text: var(--acu-danger, #ef4444);
@@ -29700,12 +29793,12 @@ function injectACUWindowStyles() {
         flex-direction: column;
         background-color: var(--acu-panel-bg);
         border: 1px solid var(--acu-panel-border);
-        border-radius: 8px;
-        box-shadow: var(--acu-panel-shadow);
+        border-radius: 10px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
         overflow: hidden;
         min-width: 400px;
         min-height: 300px;
-        animation: acuWindowSlideIn 0.25s ease-out;
+        animation: acuWindowSlideIn 0.22s ease-out;
         color-scheme: light;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
         font-weight: 500;
@@ -29753,6 +29846,28 @@ function injectACUWindowStyles() {
       
       /* 超窄屏模式下全屏时进一步优化 */
       @media screen and (max-width: 768px) {
+        .acu-window.acu-window-phone-fullscreen,
+        .acu-window.acu-window-phone-fullscreen.maximized {
+          top: 0 !important;
+          left: 0 !important;
+          right: 0 !important;
+          bottom: 0 !important;
+          width: 100vw !important;
+          width: 100dvw !important;
+          height: 100vh !important;
+          height: 100dvh !important;
+          min-width: 100vw !important;
+          min-width: 100dvw !important;
+          min-height: 100vh !important;
+          min-height: 100dvh !important;
+          max-width: 100vw !important;
+          max-width: 100dvw !important;
+          max-height: 100vh !important;
+          max-height: 100dvh !important;
+          border-radius: 0 !important;
+          border: none !important;
+          box-shadow: none !important;
+        }
         .acu-window {
           min-width: min(320px, calc(100vw - 12px)) !important; /* 手机端保留边距，避免遮挡底层界面 */
           min-height: min(360px, calc(100dvh - 12px)) !important;
@@ -29795,6 +29910,14 @@ function injectACUWindowStyles() {
           /* 确保body能正确滚动，使用flex布局撑满剩余空间 */
           flex: 1 1 0;
           min-height: 0; /* 关键：允许flex子元素收缩 */
+        }
+        .acu-window.acu-window-phone-fullscreen .acu-window-body {
+          flex: 1 1 auto;
+          min-height: 0;
+          height: auto;
+          max-height: none;
+          overflow-x: hidden;
+          overflow-y: auto;
         }
       }
       
@@ -29850,7 +29973,7 @@ function injectACUWindowStyles() {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 12px 16px;
+        padding: 10px 14px;
         background: transparent;
         border-bottom: 1px solid var(--acu-panel-border);
         cursor: move;
@@ -29859,13 +29982,13 @@ function injectACUWindowStyles() {
       }
       
       .acu-window-title {
-        font-size: 14px;
+        font-size: 13px;
         font-weight: 600;
-        letter-spacing: 1px;
+        letter-spacing: 0.5px;
         color: var(--acu-panel-text);
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         flex: 1;
         min-width: 0;
         overflow: hidden;
@@ -29888,11 +30011,11 @@ function injectACUWindowStyles() {
       }
       
       .acu-window-btn {
-        width: 30px;
-        height: 30px;
-        border: 1px solid transparent;
+        width: 28px;
+        height: 28px;
+        border: 1px solid transparent !important;
         border-radius: 6px;
-        background: transparent;
+        background: transparent !important;
         color: var(--acu-panel-text-mute);
         cursor: pointer;
         display: flex;
@@ -29900,19 +30023,22 @@ function injectACUWindowStyles() {
         justify-content: center;
         transition: all 0.15s ease;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        box-shadow: none !important;
       }
       .acu-window-btn:hover {
-        background: var(--acu-panel-hover);
-        border-color: var(--acu-panel-border);
+        background: var(--acu-panel-hover) !important;
+        border-color: var(--acu-panel-border) !important;
         color: var(--acu-panel-text);
+        box-shadow: none !important;
       }
       .acu-window-btn.maximize:hover {
         color: var(--acu-panel-accent);
       }
       .acu-window-btn.close:hover {
-        background: var(--acu-panel-close-hover-bg);
-        border-color: var(--acu-panel-close-hover-border);
+        background: var(--acu-panel-close-hover-bg) !important;
+        border-color: var(--acu-panel-close-hover-border) !important;
         color: var(--acu-panel-close-hover-text);
+        box-shadow: none !important;
       }
       .acu-window-btn.theme-toggle {
         width: auto;
@@ -30108,7 +30234,7 @@ function getWindowState_ACU(windowId) {
  * @returns {jQuery} 窗口jQuery对象
  */
 function createACUWindow(options) {
-    const { id, title = '窗口', content = '', width = 900, height = 700, modal = false, resizable = true, maximizable = true, startMaximized = false, rememberState = true, // 默认记住窗口状态
+    const { id, title = '窗口', content = '', width = 900, height = 700, modal = false, resizable = true, maximizable = true, startMaximized = false, forcePhoneFullscreen = false, rememberState = true, // 默认记住窗口状态
     onClose, onReady } = options;
     // 确保样式已注入
     injectACUWindowStyles();
@@ -30148,7 +30274,7 @@ function createACUWindow(options) {
         initialW = Math.max(400, Math.min(savedState.width, viewW - 40));
         initialH = Math.max(300, Math.min(savedState.height, viewH - 40));
     }
-    else if (isPhoneScreen) {
+    else if (isPhoneScreen && !forcePhoneFullscreen) {
         const phoneHorizontalMargin = 12;
         const phoneVerticalMargin = 12;
         const phoneMinWidth = Math.min(320, Math.max(280, viewW - phoneHorizontalMargin));
@@ -30156,19 +30282,23 @@ function createACUWindow(options) {
         initialW = Math.max(phoneMinWidth, Math.min(460, viewW - phoneHorizontalMargin));
         initialH = Math.max(phoneMinHeight, Math.min(Math.round(viewH * 0.82), viewH - phoneVerticalMargin));
     }
+    else if (isPhoneScreen && forcePhoneFullscreen) {
+        initialW = viewW;
+        initialH = viewH;
+    }
     else {
         initialW = Math.max(400, Math.min(width, viewW - 40));
         initialH = Math.max(300, Math.min(height, viewH - 40));
     }
     // 居中并确保不跑出屏幕
-    const screenEdgePadding = isPhoneScreen ? 6 : 20;
+    const screenEdgePadding = isPhoneScreen && !forcePhoneFullscreen ? 6 : 20;
     const initialX = Math.max(screenEdgePadding, Math.min((viewW - initialW) / 2, viewW - initialW - screenEdgePadding));
     const initialY = Math.max(screenEdgePadding, Math.min((viewH - initialH) / 2, viewH - initialH - screenEdgePadding));
     // 构建窗口HTML
     // ═══ 窄屏模式下不显示全屏按钮，只显示关闭按钮 ═══
     const showMaximizeBtn = maximizable && !isNarrowScreen;
     const windowHtml = `
-      <div class="acu-window" id="${id}" style="left:${initialX}px; top:${initialY}px; width:${initialW}px; height:${initialH}px;">
+      <div class="acu-window${forcePhoneFullscreen ? ' acu-window-phone-fullscreen' : ''}" id="${id}" data-phone-fullscreen="${forcePhoneFullscreen ? 'true' : 'false'}" style="left:${forcePhoneFullscreen && isPhoneScreen ? 0 : initialX}px; top:${forcePhoneFullscreen && isPhoneScreen ? 0 : initialY}px; width:${initialW}px; height:${initialH}px;">
         <div class="acu-window-header">
           <div class="acu-window-title">
             <i class="fa-solid fa-database"></i>
@@ -30181,7 +30311,7 @@ function createACUWindow(options) {
           </div>
         </div>
         <div class="acu-window-body">${content}</div>
-        ${resizable ? `
+        ${resizable && !(isPhoneScreen && forcePhoneFullscreen) ? `
           <div class="acu-window-resize-handle se"></div>
           <div class="acu-window-resize-handle e"></div>
           <div class="acu-window-resize-handle s"></div>
@@ -30204,6 +30334,17 @@ function createACUWindow(options) {
     $(targetDoc.body).append($window);
     applyACUThemeToDocument_ACU(targetDoc);
     syncACUThemeButtons_ACU(targetDoc);
+    // ═══ 动画完成后移除 animation 属性 ═══
+    // .acu-window 的 slide-in 动画引用了 transform，在 Chromium 内核中会为
+    // position:fixed 后代创建 containing block，导致子元素无法相对于视口定位。
+    // 动画结束后（0.22s）移除 animation 属性，消除 containing block。
+    // 使用 { once: true } 避免内存泄漏，同时用 setTimeout 作为兜底。
+    const winEl = $window[0];
+    if (winEl) {
+        const removeAnimation = () => { winEl.style.animation = 'none'; };
+        winEl.addEventListener('animationend', removeAnimation, { once: true });
+        setTimeout(removeAnimation, 400); // 兜底：略长于动画时长 0.22s
+    }
     // 注册到窗口管理器
     ACU_WindowManager.register(id, $window);
     // 点击窗口置顶
@@ -30277,9 +30418,13 @@ function createACUWindow(options) {
             doMaximize();
         }
     });
-    // ═══ 启动时全屏逻辑（优先级：窄屏强制全屏 > 保存的状态 > startMaximized参数）═══
-    // 平板窄屏默认全屏；手机模式保留边距式浮层，避免遮挡过多内容
-    if (isNarrowScreen && !isPhoneScreen && maximizable) {
+    // ═══ 启动时全屏逻辑（优先级：手机强制真全屏 > 平板窄屏最大化 > 保存的状态 > startMaximized参数）═══
+    // 手机 forcePhoneFullscreen 直接依赖专用 fullscreen CSS，不再叠加 maximized 语义；
+    // 否则会重新引入边距、圆角、resize 手柄与高度错位。
+    if (isPhoneScreen && forcePhoneFullscreen) {
+        isMaximized = false;
+    }
+    else if (isNarrowScreen && !isPhoneScreen && maximizable) {
         doMaximize();
     }
     else if (useSavedState && savedState.isMaximized && maximizable) {
@@ -30647,67 +30792,18 @@ async function saveVisualizerChanges_ACU(saveToTemplate = false) {
         const isolationKey = getCurrentIsolationKey_ACU();
         const allSheetKeys = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
         // 2.2 计算最新一条 AI 楼层索引，作为兜底
-        const latestAiIndex = (() => {
-            for (let i = chat.length - 1; i >= 0; i--) {
-                if (!chat[i].is_user)
-                    return i;
-            }
-            return -1;
-        })();
+        const latestAiIndex = getLatestAiMessageIndexFromChat_ACU(chat);
         // 2.3 查找每张表当前最新数据所在的原楼层
         const bucketByIndex = {};
         const resolveTargetIndexForSheet = (sheetKey) => {
             const table = currentJsonTableData_ACU[sheetKey];
-            const isSummaryTable = table ? isSummaryOrOutlineTable_ACU(table.name) : false;
-            for (let i = chat.length - 1; i >= 0; i--) {
-                const msg = chat[i];
-                if (msg.is_user)
-                    continue;
-                let wasUpdated = false;
-                // 优先：新格式（按标签分组）
-                if (msg.TavernDB_ACU_IsolatedData && msg.TavernDB_ACU_IsolatedData[isolationKey]) {
-                    const tagData = msg.TavernDB_ACU_IsolatedData[isolationKey];
-                    const modifiedKeys = tagData.modifiedKeys || [];
-                    const updateGroupKeys = tagData.updateGroupKeys || [];
-                    const independentData = tagData.independentData || {};
-                    if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                        wasUpdated = updateGroupKeys.includes(sheetKey);
-                    }
-                    else if (modifiedKeys.length > 0) {
-                        wasUpdated = modifiedKeys.includes(sheetKey);
-                    }
-                    else if (independentData[sheetKey]) {
-                        wasUpdated = true;
-                    }
-                }
-                // 兼容：旧格式（同样遵循隔离标签）
-                if (!wasUpdated) {
-                    const msgIdentity = msg.TavernDB_ACU_Identity;
-                    const isLegacyMatch = settings_ACU.dataIsolationEnabled
-                        ? msgIdentity === settings_ACU.dataIsolationCode
-                        : !msgIdentity;
-                    if (isLegacyMatch) {
-                        const modifiedKeys = msg.TavernDB_ACU_ModifiedKeys || [];
-                        const updateGroupKeys = msg.TavernDB_ACU_UpdateGroupKeys || [];
-                        if (updateGroupKeys.length > 0 && modifiedKeys.length > 0) {
-                            wasUpdated = updateGroupKeys.includes(sheetKey);
-                        }
-                        else if (modifiedKeys.length > 0) {
-                            wasUpdated = modifiedKeys.includes(sheetKey);
-                        }
-                        else {
-                            const hasLegacyData = (msg.TavernDB_ACU_IndependentData && msg.TavernDB_ACU_IndependentData[sheetKey]) ||
-                                (isSummaryTable
-                                    ? (msg.TavernDB_ACU_SummaryData && msg.TavernDB_ACU_SummaryData[sheetKey])
-                                    : (msg.TavernDB_ACU_Data && msg.TavernDB_ACU_Data[sheetKey]));
-                            wasUpdated = !!hasLegacyData;
-                        }
-                    }
-                }
-                if (wasUpdated)
-                    return i; // 找到最新的原始楼层
-            }
-            return latestAiIndex; // 未找到时回退到最新楼层
+            const history = resolveTableHistoryStateFromChat_ACU(chat, {
+                sheetKey,
+                isSummaryTable: table ? isSummaryOrOutlineTable_ACU(table.name) : false,
+                isolationKey,
+                settings: settings_ACU,
+            });
+            return history.latestDataMessageIndex !== -1 ? history.latestDataMessageIndex : latestAiIndex;
         };
         allSheetKeys.forEach(key => {
             const idx = resolveTargetIndexForSheet(key);
@@ -30730,7 +30826,7 @@ async function saveVisualizerChanges_ACU(saveToTemplate = false) {
                 const idx = parseInt(indexStr, 10);
                 if (Number.isNaN(idx))
                     continue;
-                await saveIndependentTableToChatHistory_ACU(idx, keys, keys, true);
+                await saveIndependentTableToChatHistory_ACU(idx, keys, null, true);
             }
             // 2.4.5 [关键] 如果本次在可视化编辑器删除了表格，则此处追溯整个聊天记录做“硬删除”
             // 说明：saveIndependentTableToChatHistory_ACU 只会覆盖/追加 keys，不会自动移除旧 keys，因此必须额外做一次全局清理。
@@ -30881,7 +30977,40 @@ const VISUALIZER_CSS_ACU = `
     }
     
     .acu-vis-actions { display: flex; gap: 10px; }
-    .acu-vis-content { flex: 1; display: flex; overflow: hidden; }
+    .acu-vis-content { flex: 1; display: flex; overflow: hidden; min-width: 0; }
+    .acu-vis-workspace {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        overflow: hidden;
+    }
+    .acu-vis-assistant-dock {
+        display: none;
+        flex: 0 0 420px;
+        min-width: 360px;
+        max-width: 460px;
+        border-left: 1px solid var(--vis-border-color);
+        background: var(--vis-bg-color);
+        min-height: 0;
+        overflow: hidden;
+    }
+    #acu-visualizer-content[data-assistant-layout="desktop-dock"] .acu-vis-assistant-dock {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+    #acu-visualizer-content[data-assistant-layout="fullscreen-overlay"] .acu-vis-assistant-dock {
+        display: none;
+    }
+    #acu-visualizer-content[data-assistant-layout="fullscreen-overlay"] #acu-vis-assistant-host {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100dvh;
+        z-index: 100001;
+        flex: none;
+        pointer-events: auto;
+    }
     
     /* ═══ 侧边栏 ═══ */
     .acu-vis-sidebar {
@@ -30911,12 +31040,25 @@ const VISUALIZER_CSS_ACU = `
     /* ═══ 主内容区 ═══ */
     .acu-vis-main {
         flex: 1;
+        min-width: 0;
         background: var(--vis-bg-color);
         background-image:
           url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
         color: var(--vis-text-main);
         overflow-y: auto;
         padding: 24px;
+    }
+    
+    /* ═══ AI 改表助手面板宿主 ═══ */
+    #acu-vis-assistant-host {
+        position: relative;
+        display: block;
+        width: 100%;
+        height: 100%;
+        min-width: 0;
+        min-height: 0;
+        z-index: 1;
+        pointer-events: none;
     }
     
     /* ═══ 表格导航项 ═══ */
@@ -31512,6 +31654,8 @@ const VISUALIZER_CSS_ACU = `
         /* 内容区域 - 垂直布局 */
         .acu-vis-content {
             flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
         }
         
         /* 侧边栏变为顶部横向滚动 */
@@ -31597,14 +31741,32 @@ const VISUALIZER_CSS_ACU = `
             margin-top: 0;
         }
         
+        .acu-vis-workspace {
+            flex: 1 1 auto;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
         /* 主内容区 */
         .acu-vis-main {
+            flex: 1 1 auto;
+            min-width: 0;
+            min-height: 0;
             padding: 16px;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
         }
         
         /* 数据卡片 */
         .acu-card-grid {
+            display: flex;
+            flex-direction: column;
+            flex-wrap: nowrap;
             gap: 12px;
+            align-content: stretch;
         }
         
         .acu-data-card {
@@ -31663,6 +31825,7 @@ const VISUALIZER_CSS_ACU = `
             padding: 10px 16px;
             font-size: 12px;
         }
+        
     }
     
     /* 手机 (≤480px) */
@@ -32066,9 +32229,31 @@ const VISUALIZER_CSS_ACU = `
        使用 flex containment 模式确保内部滚动
        ═══════════════════════════════════════════════════════════════ */
     #acu-vis-assistant-host {
-        display: flex;
-        flex-direction: column;
+        display: block;
         min-height: 0;
+        min-width: 0;
+        pointer-events: none;
+    }
+    #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"][data-open="true"] {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100dvh;
+        z-index: 100001;
+        pointer-events: auto;
+        touch-action: auto;
+    }
+    #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"][data-open="true"][data-minimized="true"] {
+        z-index: 100002;
+        pointer-events: none;
+    }
+    #acu-vis-assistant-host[data-assistant-mode="desktop"][data-open="true"] {
+        position: relative;
+        inset: auto;
+        width: auto;
+        height: auto;
+        pointer-events: auto;
+        z-index: 1;
     }
     .acu-vis-assistant-panel {
         display: flex;
@@ -32076,6 +32261,38 @@ const VISUALIZER_CSS_ACU = `
         min-height: 0;
         height: 100%;
         flex-shrink: 0;
+    }
+    #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"] .acu-vis-assistant-panel,
+    #acu-vis-assistant-host[data-assistant-mode="desktop"] .acu-vis-assistant-panel {
+        width: 100%;
+        max-width: 100%;
+    }
+    #acu-vis-assistant-host[data-open="false"] .acu-vis-assistant-panel {
+        pointer-events: none;
+    }
+    #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"] .acu-vis-assistant-panel {
+        pointer-events: auto;
+        touch-action: auto;
+    }
+    #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"][data-minimized="true"] .acu-vis-assistant-panel {
+        pointer-events: none;
+    }
+    .acu-vis-assistant-floating-restore {
+        display: none;
+    }
+    #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"][data-open="true"][data-minimized="true"] .acu-vis-assistant-floating-restore {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        position: fixed;
+        right: max(12px, calc(env(safe-area-inset-right, 0px) + 12px));
+        bottom: max(12px, calc(env(safe-area-inset-bottom, 0px) + 12px));
+        z-index: 100003;
+        pointer-events: auto;
+        border-radius: 999px;
+        box-shadow: 0 12px 32px color-mix(in srgb, var(--vis-text-main) 18%, transparent);
+        padding: 10px 14px;
+        max-width: min(calc(100vw - 24px), 320px);
     }
     .acu-vis-assistant-header {
         flex-shrink: 0;
@@ -32143,6 +32360,8 @@ const VISUALIZER_CSS_ACU = `
     .acu-assistant-risk-item span {
         font-size: 13px;
         color: var(--vis-text-main);
+        word-break: break-word;
+        overflow-wrap: anywhere;
     }
     .acu-assistant-actions-row {
         padding-top: 12px;
@@ -32165,6 +32384,40 @@ const VISUALIZER_CSS_ACU = `
     }
     .acu-assistant-error-text {
         color: var(--acu-danger, #c55);
+    }
+    @media (max-width: 1279px) {
+        #acu-visualizer-content[data-assistant-layout="expanded"] .acu-vis-sidebar {
+            flex: 0 0 136px;
+            min-width: 120px;
+            max-width: 150px;
+        }
+        #acu-visualizer-content[data-assistant-layout="expanded"] .acu-vis-main {
+            flex: 0 1 16%;
+        }
+        #acu-visualizer-content[data-assistant-layout="expanded"] #acu-vis-assistant-host {
+            flex: 1 1 84%;
+        }
+    }
+    @media (max-width: 899px) {
+        #acu-vis-assistant-host {
+            min-height: 0;
+        }
+        #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"][data-open="true"] .acu-vis-assistant-panel {
+            max-width: 100vw;
+            max-height: 100dvh;
+        }
+        #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"] .acu-assistant-actions-row {
+            padding-top: 10px;
+        }
+        #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"] .acu-assistant-risk-item {
+            align-items: flex-start;
+        }
+        #acu-vis-assistant-host[data-assistant-mode="fullscreen-overlay"][data-open="true"][data-minimized="true"] .acu-vis-assistant-floating-restore {
+            left: 12px;
+            right: 12px;
+            width: auto;
+            justify-content: center;
+        }
     }
     /* assistant round history */
     .acu-assistant-round-item {
@@ -32308,8 +32561,11 @@ function openNewVisualizer_ACU() {
                   </div>
               </div>
               <div class="acu-vis-content" style="flex: 1; display: flex; overflow: hidden;">
-                  <div class="acu-vis-sidebar" id="acu-vis-sidebar-list"></div>
-                  <div class="acu-vis-main" id="acu-vis-main-area"></div>
+                  <div class="acu-vis-workspace">
+                      <div class="acu-vis-sidebar" id="acu-vis-sidebar-list"></div>
+                      <div class="acu-vis-main" id="acu-vis-main-area"></div>
+                  </div>
+                  <div class="acu-vis-assistant-dock" id="acu-vis-assistant-dock"></div>
               </div>
           </div>
       `;
@@ -32327,6 +32583,7 @@ function openNewVisualizer_ACU() {
         resizable: true,
         maximizable: true,
         startMaximized: false, // 由 rememberState 自动管理，首次打开时不全屏
+        forcePhoneFullscreen: true,
         onClose: () => {
             if (!confirm('确定要关闭吗？未保存的修改将丢失。')) {
                 return false; // 阻止关闭（注意：当前实现会立即关闭，后续可优化）
@@ -33330,6 +33587,25 @@ async function bindDataEvents_ACU() {
     const $importCombinedSettingsButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-import-combined-settings`);
     const $exportCombinedSettingsButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-export-combined-settings`);
     const $openNewVisualizerButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-open-new-visualizer`);
+    const handleOpenVisualizerClick_ACU = async () => {
+        try {
+            const topLevelApi = topLevelWindow_ACU?.AutoCardUpdaterAPI;
+            if (topLevelApi?.openVisualizer) {
+                await topLevelApi.openVisualizer();
+                return;
+            }
+            await openNewVisualizer_ACU();
+        }
+        catch (e) {
+            logError_ACU('打开可视化表格编辑器失败:', e);
+            showToastr_ACU('error', `打开可视化表格编辑器失败: ${e?.message || '未知错误'}`);
+        }
+    };
+    if ($openNewVisualizerButton_ACU.length) {
+        $openNewVisualizerButton_ACU
+            .off('click.acu_visualizer')
+            .on('click.acu_visualizer', handleOpenVisualizerClick_ACU);
+    }
     const closeDataIsolationHistoryDropdown_ACU = () => {
         if ($dataIsolationCombo.length && $dataIsolationHistoryList.length) {
             $dataIsolationCombo.removeClass('open');
@@ -34069,16 +34345,6 @@ async function bindDataEvents_ACU() {
         $importCombinedSettingsButton.on('click', importCombinedSettings_ACU$1);
     if ($exportCombinedSettingsButton.length)
         $exportCombinedSettingsButton.on('click', exportCombinedSettings_ACU);
-    if ($openNewVisualizerButton_ACU.length) {
-        $openNewVisualizerButton_ACU.on('click', function () {
-            if (topLevelWindow_ACU.AutoCardUpdaterAPI && topLevelWindow_ACU.AutoCardUpdaterAPI.openVisualizer) {
-                topLevelWindow_ACU.AutoCardUpdaterAPI.openVisualizer();
-            }
-            else {
-                openNewVisualizer_ACU(); // Fallback direct call
-            }
-        });
-    }
     // [新增] 绑定合并总结按钮事件
     const $startMergeSummaryButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-start-merge-summary`);
     if ($startMergeSummaryButton.length) {
@@ -36567,35 +36833,26 @@ async function bindPopupEvents_ACU() {
 /**
  * 生成仪表盘标签页的 HTML 片段
  * 包含：数据库状态总览、快速操作、核心功能开关、API快照
- *
- * 承接原status页的：
- * - 数据库状态卡片（状态总览+表格）
- * - 核心操作区的手动更新按钮
- * - 自动更新/规范填表/静默提示框/条件模板/0TK 等开关
- * - 表格存储模式
- *
- * 新迁入：
- * - 0TK占用模式（从worldbook页迁入）
  */
 function generateDashboardTabHTML() {
     return `
                 <div id="acu-tab-dashboard" class="acu-tab-content active">
-                    <!-- A. 数据库状态卡片 -->
+                    <!-- A. 数据库状态 -->
                     <div class="acu-card">
                         <h3>数据库状态</h3>
-                        <div style="display: flex; justify-content: space-between; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border-normal);">
+                        <div class="acu-row-between" style="margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--acu-border);">
                             <span id="${SCRIPT_ID_PREFIX_ACU}-total-messages-display">上下文总层数: N/A (仅计算AI回复楼层)</span>
                             <span id="${SCRIPT_ID_PREFIX_ACU}-card-update-status-display">正在获取状态...</span>
                         </div>
                         
-                        <table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">
+                        <table class="acu-table">
                             <thead>
-                                <tr style="border-bottom: 1px solid var(--border-normal); color: var(--text-secondary);">
-                                    <th style="text-align: left; padding: 5px;">表格名称</th>
-                                    <th style="text-align: center; padding: 5px;">更新频率</th>
-                                    <th style="text-align: center; padding: 5px;">未记录楼层</th>
-                                    <th style="text-align: center; padding: 5px;">上次更新</th>
-                                    <th style="text-align: center; padding: 5px;">下次触发</th>
+                                <tr>
+                                    <th>表格名称</th>
+                                    <th>更新频率</th>
+                                    <th>未记录楼层</th>
+                                    <th>上次更新</th>
+                                    <th>下次触发</th>
                                 </tr>
                             </thead>
                             <tbody id="${SCRIPT_ID_PREFIX_ACU}-granular-status-table-body">
@@ -36603,46 +36860,43 @@ function generateDashboardTabHTML() {
                             </tbody>
                         </table>
 
-                        <p id="${SCRIPT_ID_PREFIX_ACU}-next-update-display" style="border-top: 1px dashed var(--border-normal); padding-top: 10px; margin-top: 10px; font-size: 0.95em; text-align: right;">下一次更新: 计算中...</p>
+                        <p id="${SCRIPT_ID_PREFIX_ACU}-next-update-display" class="notes" style="border-top: 1px dashed var(--acu-border); padding-top: 10px; margin-top: 10px; text-align: right;">下一次更新: 计算中...</p>
                     </div>
 
-                    <!-- B. 快速操作卡片 -->
-                    <div class="acu-grid">
-                        <div class="acu-card">
-                            <h3>快速操作</h3>
-                            <div class="flex-center" style="flex-direction: column; gap: 10px;">
-                                <div style="width: 100%; display: flex; gap: 10px; align-items: center;">
-                                    <label style="white-space: nowrap; font-size: 0.9em;">填表API预设:</label>
-                                    <select id="${SCRIPT_ID_PREFIX_ACU}-table-api-preset-select" style="flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border-normal);">
-                                        <option value="">使用当前API配置</option>
-                                    </select>
-                                </div>
-                                <button id="${SCRIPT_ID_PREFIX_ACU}-manual-update-card" class="primary" style="width:100%;">立即手动更新</button>
-                                <div class="checkbox-group">
-                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox">额外提示词（仅手动更新时临时追加）</label>
-                                </div>
-                            </div>
-                            <p class="notes" style="margin-top: 10px;">手动更新会使用当前UI参数，对勾选的表进行更新；未勾选则默认更新全部表。</p>
-                            <p class="notes" style="margin-top: 6px;">勾选"额外提示词"后，点击手动更新会弹出输入框，内容将写入AI指令预设中的 $8 占位符，仅本次操作生效。</p>
+                    <!-- B. 快速操作 -->
+                    <div class="acu-card">
+                        <h3>快速操作</h3>
+                        <div class="acu-row" style="margin-bottom: 10px;">
+                            <label style="white-space: nowrap;">填表API预设:</label>
+                            <select id="${SCRIPT_ID_PREFIX_ACU}-table-api-preset-select" style="flex: 1;">
+                                <option value="">使用当前API配置</option>
+                            </select>
                         </div>
+                        <div class="button-group" style="margin-bottom: 8px;">
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-manual-update-card" class="primary">立即手动更新</button>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox">
+                            <label for="${SCRIPT_ID_PREFIX_ACU}-manual-extra-hint-checkbox">额外提示词（仅手动更新时临时追加）</label>
+                        </div>
+                        <p class="notes">手动更新会使用当前UI参数，对勾选的表进行更新；未勾选则默认更新全部表。</p>
                     </div>
 
-                    <!-- 手动更新表选择 -->
+                    <!-- C. 手动更新表选择 -->
                     <div class="acu-card">
                         <h3>手动更新表选择</h3>
-                        <div class="notes" style="margin-bottom:6px;">选择需要手动更新的表（可多选，默认全选新表）：</div>
-                        <div class="button-group" style="justify-content:flex-start; gap:8px; margin-bottom:6px;">
+                        <p class="notes" style="margin-bottom:6px;">选择需要手动更新的表（可多选，默认全选新表）：</p>
+                        <div class="button-group" style="justify-content:flex-start; margin-bottom:8px;">
                             <button id="${SCRIPT_ID_PREFIX_ACU}-manual-table-select-all" class="button">全选</button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-manual-table-select-none" class="button">全不选</button>
                         </div>
                         <div id="${SCRIPT_ID_PREFIX_ACU}-manual-table-selector" style="min-height:60px;">加载表格列表中...</div>
                     </div>
 
-                    <!-- C. 核心功能开关卡片 -->
+                    <!-- D. 核心功能开关 -->
                     <div class="acu-card">
                         <h3>核心功能开关</h3>
-                        <div style="display: flex; flex-direction: column; gap: 8px;">
+                        <div class="acu-col">
                             <div class="checkbox-group">
                                 <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-enabled-checkbox">启用自动更新</label>
@@ -36657,32 +36911,27 @@ function generateDashboardTabHTML() {
                             </div>
                             <div class="checkbox-group">
                                 <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-prompt-template-enabled-checkbox">
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-prompt-template-enabled-checkbox">启用条件模板功能（<if>条件判断）</label>
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-prompt-template-enabled-checkbox">启用条件模板功能（&lt;if&gt;条件判断）</label>
                             </div>
-                            <!-- 0TK占用模式：从worldbook页迁入仪表盘 -->
                             <div class="checkbox-group">
-                                <label class="toggle-switch">
-                                    <input id="${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled" type="checkbox" />
-                                    <span class="slider"></span>
-                                </label>
+                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled">0TK占用模式</label>
                             </div>
                             <small class="notes">0TK占用模式仍然作用于世界书注入链路，仅迁移到此处以提高可见性。</small>
 
-                            <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-normal);">
-                                <label style="font-weight: 500; font-size: 0.9em; margin-bottom: 8px; display: block;">表格存储模式:</label>
-                                <div style="display: flex; gap: 16px; align-items: center;">
-                                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                        <input type="radio" name="${SCRIPT_ID_PREFIX_ACU}-storage-mode" value="native" checked>
-                                        <span>原生模式 (JSON/DSL)</span>
-                                    </label>
-                                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                        <input type="radio" name="${SCRIPT_ID_PREFIX_ACU}-storage-mode" value="sqlite">
-                                        <span>SQLite 模式 (SQL)</span>
-                                    </label>
-                                </div>
-                                <small class="notes" style="margin-top: 4px; display: block;">原生模式使用 JSON 二维数组 + DSL 指令；SQLite 模式使用内存数据库 + 标准 SQL 语句。切换后会自动重新加载数据。</small>
+                            <div class="acu-divider-dashed" style="margin: 4px 0;"></div>
+                            <label class="acu-label">表格存储模式:</label>
+                            <div class="acu-row" style="gap: 16px;">
+                                <label class="acu-row" style="cursor: pointer; gap: 6px;">
+                                    <input type="radio" name="${SCRIPT_ID_PREFIX_ACU}-storage-mode" value="native" checked>
+                                    <span>原生模式 (JSON/DSL)</span>
+                                </label>
+                                <label class="acu-row" style="cursor: pointer; gap: 6px;">
+                                    <input type="radio" name="${SCRIPT_ID_PREFIX_ACU}-storage-mode" value="sqlite">
+                                    <span>SQLite 模式 (SQL)</span>
+                                </label>
                             </div>
+                            <small class="notes">原生模式使用 JSON 二维数组 + DSL 指令；SQLite 模式使用内存数据库 + 标准 SQL 语句。切换后会自动重新加载数据。</small>
                         </div>
                     </div>
                 </div>`;
@@ -36814,7 +37063,6 @@ function generateUpdateTabHTML() {
 // API标签页（API & 连接）HTML生成
 /**
  * 生成 API 标签页的 HTML 片段
- * 包含：API模式选择、自定义API设置、API预设管理
  */
 function generateApiTabHTML() {
     return `
@@ -36831,7 +37079,7 @@ function generateApiTabHTML() {
                             </div>
                         </div>
 
-                        <div id="${SCRIPT_ID_PREFIX_ACU}-tavern-api-profile-block" style="display: none; margin-top: 15px;">
+                        <div id="${SCRIPT_ID_PREFIX_ACU}-tavern-api-profile-block" style="display: none; margin-top: 12px;">
                             <label for="${SCRIPT_ID_PREFIX_ACU}-tavern-api-profile-select">酒馆连接预设:</label>
                              <div class="input-group">
                                 <select id="${SCRIPT_ID_PREFIX_ACU}-tavern-api-profile-select"></select>
@@ -36840,20 +37088,22 @@ function generateApiTabHTML() {
                             <small class="notes">选择一个你在酒馆主设置中已经配置好的连接预设。</small>
                         </div>
 
-                        <div id="${SCRIPT_ID_PREFIX_ACU}-custom-api-settings-block" style="margin-top: 15px;">
+                        <div id="${SCRIPT_ID_PREFIX_ACU}-custom-api-settings-block" style="margin-top: 12px;">
                              <div class="checkbox-group">
                                 <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-use-main-api-checkbox">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-use-main-api-checkbox">使用主API (直接使用酒馆当前API和模型)</label>
                             </div>
-                             <div class="checkbox-group" style="margin-top: 10px;">
+                             <div class="checkbox-group">
                                 <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-streaming-enabled-checkbox">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-streaming-enabled-checkbox">启用流式传输 (Streaming)</label>
                             </div>
-                            <small class="notes" style="display: block; margin-left: 0; margin-bottom: 10px;">开启后，所有AI调用将使用流式传输，可减少首字节响应时间。默认关闭。</small>
+                            <small class="notes">开启后，所有AI调用将使用流式传输，可减少首字节响应时间。默认关闭。</small>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-custom-api-fields">
-                                <p class="notes" style="color:var(--warning-color);"><b>安全提示:</b>API密钥将保存在浏览器本地存储中。</p>
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-api-url">API基础URL:</label><input type="text" id="${SCRIPT_ID_PREFIX_ACU}-api-url">
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-api-key">API密钥(可选):</label><input type="password" id="${SCRIPT_ID_PREFIX_ACU}-api-key">
+                                <p class="notes" style="color: var(--acu-warning);"><b>安全提示:</b> API密钥将保存在浏览器本地存储中。</p>
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-api-url">API基础URL:</label>
+                                <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-api-url">
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-api-key">API密钥(可选):</label>
+                                <input type="password" id="${SCRIPT_ID_PREFIX_ACU}-api-key">
                                 <div class="acu-grid" style="margin-top: 10px;">
                                     <div>
                                         <label for="${SCRIPT_ID_PREFIX_ACU}-max-tokens">最大Tokens:</label>
@@ -36864,39 +37114,40 @@ function generateApiTabHTML() {
                                         <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-temperature" min="0" max="2" step="0.05" placeholder="0.9">
                                     </div>
                                 </div>
-                                <button id="${SCRIPT_ID_PREFIX_ACU}-load-models" style="margin-top: 15px; width: 100%;">加载模型列表</button>
+                                <div class="button-group" style="margin-top: 10px;">
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-load-models">加载模型列表</button>
+                                </div>
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-api-model-input" style="margin-top: 10px;">模型名称 (手动输入):</label>
-                                <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-api-model-input" class="text_pole" placeholder="输入模型名称或从下方选择" style="width: 100%;">
+                                <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-api-model-input" class="text_pole" placeholder="输入模型名称或从下方选择">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-api-model-select" style="margin-top: 8px;">或从列表选择:</label>
-                                <select id="${SCRIPT_ID_PREFIX_ACU}-api-model-select" class="text_pole" style="width: 100%;">
+                                <select id="${SCRIPT_ID_PREFIX_ACU}-api-model-select" class="text_pole">
                                     <option value="">-- 请先加载模型列表 --</option>
                                 </select>
                             </div>
-                            <div id="${SCRIPT_ID_PREFIX_ACU}-api-status" class="notes" style="margin-top:15px;">状态: 未配置</div>
+                            <div id="${SCRIPT_ID_PREFIX_ACU}-api-status" class="notes" style="margin-top:12px;">状态: 未配置</div>
                             <div class="button-group">
                                 <button id="${SCRIPT_ID_PREFIX_ACU}-save-config" class="primary">保存API</button>
                                 <button id="${SCRIPT_ID_PREFIX_ACU}-clear-config">清除API</button>
                             </div>
                             
                             <!-- API预设管理 -->
-                            <div style="margin-top: 20px; padding-top: 15px; border-top: 1px dashed var(--border-normal);">
-                                <h4 style="margin-bottom: 10px; font-size: 0.95em; color: var(--text-muted);">API预设管理</h4>
-                                <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-                                    <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-api-preset-name" placeholder="预设名称" style="flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border-normal);">
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-save-api-preset" class="primary" style="padding: 6px 12px;">保存为预设</button>
-                        </div>
-                                <div style="display: flex; gap: 8px; align-items: center;">
-                                    <select id="${SCRIPT_ID_PREFIX_ACU}-api-preset-select" style="flex: 1; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--border-normal);">
-                                        <option value="">-- 选择预设 --</option>
-                                    </select>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-load-api-preset" style="padding: 6px 12px;">加载</button>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-delete-api-preset" style="padding: 6px 12px; background: var(--error-color); color: white;">删除</button>
-                                </div>
-                                <small class="notes" style="display: block; margin-top: 8px;">保存当前API配置为预设，可在填表和剧情推进中分别选用。</small>
+                            <div class="acu-divider-dashed" style="margin: 16px 0 12px 0;"></div>
+                            <label class="acu-label">API预设管理</label>
+                            <div class="acu-row" style="margin-bottom: 8px;">
+                                <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-api-preset-name" placeholder="预设名称" style="flex: 1;">
+                                <button id="${SCRIPT_ID_PREFIX_ACU}-save-api-preset" class="primary">保存为预设</button>
                             </div>
+                            <div class="acu-row">
+                                <select id="${SCRIPT_ID_PREFIX_ACU}-api-preset-select" style="flex: 1;">
+                                    <option value="">-- 选择预设 --</option>
+                                </select>
+                                <button id="${SCRIPT_ID_PREFIX_ACU}-load-api-preset">加载</button>
+                                <button id="${SCRIPT_ID_PREFIX_ACU}-delete-api-preset" style="background: var(--acu-danger); color: white; border-color: var(--acu-danger);">删除</button>
+                            </div>
+                            <small class="notes">保存当前API配置为预设，可在填表和剧情推进中分别选用。</small>
                         </div>
                      </div>
-                </div>`;
+                 </div>`;
 }
 
 // main-popup-table.ts
@@ -36912,12 +37163,12 @@ function generateTableTabHTML() {
                     <!-- A. 表格模板预设 -->
                     <div class="acu-card">
                         <h3>表格模板预设</h3>
-                        <div class="acu-template-presets" style="background: var(--background-color-light); padding: 12px; border-radius: 8px;">
+                        <div class="acu-template-presets" style="background: var(--acu-bg-2); padding: 12px; border-radius: 8px;">
                             <div class="acu-data-template-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start;">
-                                <div style="padding: 16px; background: var(--background_default); border-radius: 8px; border: 1px solid var(--border_color_light); display: flex; flex-direction: column; gap: 12px;">
+                                <div style="padding: 16px; background: var(--acu-bg-1); border-radius: 8px; border: 1px solid var(--acu-border); display: flex; flex-direction: column; gap: 12px;">
                                     <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
                                         <div>
-                                            <div style="font-weight: 600; color: var(--text_primary);">全局正在使用</div>
+                                            <div style="font-weight: 600; color: var(--acu-text-1);">全局正在使用</div>
                                             <small id="${SCRIPT_ID_PREFIX_ACU}-template-global-scope-status" class="notes">新聊天会默认继承这里的表格模板</small>
                                         </div>
                                         <span style="padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--accent-primary) 12%, transparent); color: var(--accent-primary); font-size: 12px; font-weight: 600;">全局</span>
@@ -36954,13 +37205,13 @@ function generateTableTabHTML() {
                                     </div>
                                     <small class="notes">这里仅做全局模板预设库管理（导入 / 导出 / 另存为 / 重命名 / 删除）；需要覆盖保存全局模板时，请使用可视化编辑器顶部的"保存到全局"。</small>
                                 </div>
-                                <div style="padding: 16px; background: var(--background_default); border-radius: 8px; border: 1px solid var(--border_color_light); display: flex; flex-direction: column; gap: 12px;">
+                                <div style="padding: 16px; background: var(--acu-bg-1); border-radius: 8px; border: 1px solid var(--acu-border); display: flex; flex-direction: column; gap: 12px;">
                                     <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
                                         <div>
-                                            <div style="font-weight: 600; color: var(--text_primary);">当前聊天正在使用</div>
+                                            <div style="font-weight: 600; color: var(--acu-text-1);">当前聊天正在使用</div>
                                             <small id="${SCRIPT_ID_PREFIX_ACU}-template-chat-scope-status" class="notes">未做聊天级保存时，这里会直接跟随全局模板</small>
                                         </div>
-                                        <span style="padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--green) 14%, transparent); color: var(--green); font-size: 12px; font-weight: 600;">聊天</span>
+                                        <span style="padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-success) 14%, transparent); color: var(--acu-success); font-size: 12px; font-weight: 600;">聊天</span>
                                     </div>
                                     <div class="qrf_settings_block" style="margin-bottom: 0;">
                                         <label for="${SCRIPT_ID_PREFIX_ACU}-template-chat-preset-select" style="font-weight: 500;">当前聊天模板预设</label>
@@ -36990,7 +37241,7 @@ function generateTableTabHTML() {
                         <p class="notes">配置数据库条目注入到哪个世界书，以及AI读取上下文时使用哪些世界书。</p>
                         <div>
                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target">数据注入目标:</label>
-                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--acu-border-2); background: var(--acu-control-bg, var(--acu-bg-1)); color: var(--acu-control-text, var(--acu-text-1));">
                             <div class="input-group">
                                 <select id="${SCRIPT_ID_PREFIX_ACU}-worldbook-injection-target" style="width: 100%;"></select>
                             </div>
@@ -37008,7 +37259,7 @@ function generateTableTabHTML() {
                         </div>
                         <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-manual-select-block" style="display: none; margin-top: 10px;">
                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-select">选择世界书 (可多选):</label>
-                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--acu-border-2); background: var(--acu-control-bg, var(--acu-bg-1)); color: var(--acu-control-text, var(--acu-text-1));">
                             <div class="input-group">
                                 <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-select" class="qrf_worldbook_list"></div>
                                 <button id="${SCRIPT_ID_PREFIX_ACU}-refresh-worldbooks" title="刷新世界书列表">刷新</button>
@@ -37022,7 +37273,7 @@ function generateTableTabHTML() {
                                     <button id="${SCRIPT_ID_PREFIX_ACU}-worldbook-deselect-all" class="button" style="padding: 2px 8px; font-size: 0.8em;">全不选</button>
                                 </div>
                             </div>
-                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-entry-filter" placeholder="筛选条目/世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-entry-filter" placeholder="筛选条目/世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--acu-border-2); background: var(--acu-control-bg, var(--acu-bg-1)); color: var(--acu-control-text, var(--acu-text-1));">
                             <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-entry-list" class="qrf_worldbook_entry_list">
                                 <!-- 条目将动态加载于此 -->
                             </div>
@@ -37055,11 +37306,11 @@ function generateImportTabHTML() {
                         <h3>从TXT文件导入</h3>
                         <p class="notes">从外部TXT文件导入内容，按指定字符数分割，并作为独立条目注入指定的世界书。这些条目独立于聊天记录，不会被自动清除。</p>
                         
-                        <hr style="border-color: var(--border-normal); margin: 15px 0;">
+                        <hr style="border-color: var(--acu-border-2); margin: 15px 0;">
                         
                         <div>
                             <label for="${SCRIPT_ID_PREFIX_ACU}-import-worldbook-injection-target">导入数据注入目标世界书:</label>
-                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-import-worldbook-injection-target-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-import-worldbook-injection-target-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--acu-border-2); background: var(--acu-control-bg, var(--acu-bg-1)); color: var(--acu-control-text, var(--acu-text-1));">
                             <div class="input-group">
                                 <select id="${SCRIPT_ID_PREFIX_ACU}-import-worldbook-injection-target" style="width: 100%;"></select>
                                 <button id="${SCRIPT_ID_PREFIX_ACU}-refresh-import-worldbooks" title="刷新世界书列表">刷新</button>
@@ -37132,9 +37383,9 @@ function generateCoreFuncTabHTML() {
                 <div id="acu-tab-corefunc" class="acu-tab-content">
                     <div class="acu-card">
                         <!-- 顶部标题和开关区域 -->
-                        <div class="acu-plot-header-row" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid var(--border_color);">
+                        <div class="acu-plot-header-row" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid var(--acu-border);">
                             <div>
-                                <h3 style="margin: 0; color: var(--text_primary);">剧情推进设置</h3>
+                                <h3 style="margin: 0; color: var(--acu-text-1);">剧情推进设置</h3>
                                 <p class="notes" style="margin: 5px 0 0 0;">通过AI预处理用户输入，增强故事叙述质量和剧情连贯性</p>
                             </div>
                             <div style="display: flex; align-items: center; gap: 8px;">
@@ -37147,15 +37398,15 @@ function generateCoreFuncTabHTML() {
                         </div>
 
                         <!-- 预设管理区域 -->
-                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
+                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--acu-bg-2); border-radius: 8px; border: 1px solid var(--acu-border);">
+                            <h4 style="margin: 0 0 15px 0; color: var(--acu-text-1); display: flex; align-items: center; gap: 8px;">
                                 <i class="fa-solid fa-bookmark"></i> 预设管理
                             </h4>
                             <div class="acu-plot-scope-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start;">
-                                <div style="padding: 16px; background: var(--background_default); border-radius: 8px; border: 1px solid var(--border_color_light); display: flex; flex-direction: column; gap: 12px;">
+                                <div style="padding: 16px; background: var(--acu-bg-1); border-radius: 8px; border: 1px solid var(--acu-border); display: flex; flex-direction: column; gap: 12px;">
                                     <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
                                         <div>
-                                            <div style="font-weight: 600; color: var(--text_primary);">全局正在使用</div>
+                                            <div style="font-weight: 600; color: var(--acu-text-1);">全局正在使用</div>
                                             <small id="${SCRIPT_ID_PREFIX_ACU}-plot-global-scope-status" class="notes">新聊天会默认继承这里的剧情推进配置</small>
                                         </div>
                                         <span style="padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--accent-primary) 12%, transparent); color: var(--accent-primary); font-size: 12px; font-weight: 600;">全局</span>
@@ -37171,19 +37422,19 @@ function generateCoreFuncTabHTML() {
                                         <button id="${SCRIPT_ID_PREFIX_ACU}-plot-global-save-as-new-preset" class="menu_button" title="另存为新的全局预设" style="padding: 8px 12px;"><i class="fa-solid fa-file-export"></i></button>
                                         <button id="${SCRIPT_ID_PREFIX_ACU}-plot-global-import-presets" class="menu_button" title="导入到全局预设库" style="padding: 8px 12px;"><i class="fa-solid fa-upload"></i></button>
                                         <button id="${SCRIPT_ID_PREFIX_ACU}-plot-global-export-presets" class="menu_button" title="导出当前全局预设" style="padding: 8px 12px;"><i class="fa-solid fa-download"></i></button>
-                                        <button id="${SCRIPT_ID_PREFIX_ACU}-plot-global-reset-defaults" class="menu_button" title="恢复全局默认提示词" style="padding: 8px 12px; background-color: var(--orange); color: white;"><i class="fa-solid fa-undo"></i></button>
-                                        <button id="${SCRIPT_ID_PREFIX_ACU}-plot-global-delete-preset" class="menu_button" title="删除当前全局选中的预设" style="display: none; padding: 8px 12px; background-color: var(--red);"><i class="fa-solid fa-trash-alt"></i></button>
+                                        <button id="${SCRIPT_ID_PREFIX_ACU}-plot-global-reset-defaults" class="menu_button" title="恢复全局默认提示词" style="padding: 8px 12px; background-color: var(--acu-warning); color: white;"><i class="fa-solid fa-undo"></i></button>
+                                        <button id="${SCRIPT_ID_PREFIX_ACU}-plot-global-delete-preset" class="menu_button" title="删除当前全局选中的预设" style="display: none; padding: 8px 12px; background-color: var(--acu-danger);"><i class="fa-solid fa-trash-alt"></i></button>
                                         <input type="file" id="${SCRIPT_ID_PREFIX_ACU}-plot-global-preset-file-input" style="display: none;" accept=".json">
                                     </div>
                                     <small class="notes">全局预设区负责导入、导出、修改与保存；切换这里只会切换全局默认使用的剧情推进预设，不会直接改动当前聊天预设。</small>
                                 </div>
-                                <div style="padding: 16px; background: var(--background_default); border-radius: 8px; border: 1px solid var(--border_color_light); display: flex; flex-direction: column; gap: 12px;">
+                                <div style="padding: 16px; background: var(--acu-bg-1); border-radius: 8px; border: 1px solid var(--acu-border); display: flex; flex-direction: column; gap: 12px;">
                                     <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;">
                                         <div>
-                                            <div style="font-weight: 600; color: var(--text_primary);">当前聊天正在使用</div>
+                                            <div style="font-weight: 600; color: var(--acu-text-1);">当前聊天正在使用</div>
                                             <small id="${SCRIPT_ID_PREFIX_ACU}-plot-chat-scope-status" class="notes">未单独指定时，这里会直接跟随全局剧情推进预设</small>
                                         </div>
-                                        <span style="padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--green) 14%, transparent); color: var(--green); font-size: 12px; font-weight: 600;">聊天</span>
+                                        <span style="padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-success) 14%, transparent); color: var(--acu-success); font-size: 12px; font-weight: 600;">聊天</span>
                                     </div>
                                     <div class="qrf_settings_block" style="margin-bottom: 0;">
                                         <label for="${SCRIPT_ID_PREFIX_ACU}-plot-chat-preset-select" style="font-weight: 500;">当前聊天预设</label>
@@ -37194,7 +37445,7 @@ function generateCoreFuncTabHTML() {
                                     <small id="${SCRIPT_ID_PREFIX_ACU}-plot-chat-origin-status" class="notes">当前聊天预设这里只负责切换当前聊天使用的剧情推进预设；导入、导出、保存与修改统一在全局预设侧处理。</small>
                                 </div>
                             </div>
-                            <div class="qrf_settings_block" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border_color_light);">
+                            <div class="qrf_settings_block" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--acu-border);">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-plot-api-preset-select" style="font-weight: 500;">剧情推进API预设</label>
                                 <select id="${SCRIPT_ID_PREFIX_ACU}-plot-api-preset-select" class="text_pole" style="width: 100%; margin-top: 5px;">
                                     <option value="">使用当前API配置</option>
@@ -37204,12 +37455,12 @@ function generateCoreFuncTabHTML() {
                         </div>
 
                         <!-- 提示词设置区域（独立提示词组） -->
-                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
+                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--acu-bg-2); border-radius: 8px; border: 1px solid var(--acu-border);">
+                            <h4 style="margin: 0 0 15px 0; color: var(--acu-text-1); display: flex; align-items: center; gap: 8px;">
                                 <i class="fa-solid fa-edit"></i> 提示词设置
                             </h4>
-                            <div style="margin-bottom: 15px; padding: 12px; background: var(--background_default); border-radius: 6px; border-left: 3px solid var(--text_secondary);">
-                                <small class="notes" style="color: var(--text_secondary);">
+                            <div style="margin-bottom: 15px; padding: 12px; background: var(--acu-bg-1); border-radius: 6px; border-left: 3px solid var(--acu-text-2);">
+                                <small class="notes" style="color: var(--acu-text-2);">
                                     <strong>占位符说明：</strong><br>
                                     <code>$1</code> - 自动替换为世界书内容（默认开启）<br>
                                     <code>$6</code> - 自动替换为上一轮保存的剧情规划数据<br>
@@ -37222,7 +37473,7 @@ function generateCoreFuncTabHTML() {
                                 </small>
                             </div>
                             <div class="acu-plot-task-layout" style="display:grid; grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); gap:16px; align-items:start; margin-bottom:15px;">
-                                <div style="padding:12px; background:var(--background_default); border-radius:8px; border:1px solid var(--border_color_light);">
+                                <div style="padding:12px; background:var(--acu-bg-1); border-radius:8px; border:1px solid var(--acu-border);">
                                     <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px;">
                                         <label style="font-weight:600; margin:0;">剧情任务列表</label>
                                         <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-plot-task-add" class="button" style="padding:4px 10px;">新增</button>
@@ -37231,11 +37482,11 @@ function generateCoreFuncTabHTML() {
                                     <div class="button-group" style="justify-content:flex-start; gap:8px; margin-top:10px;">
                                         <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-plot-task-move-up" class="button">上移</button>
                                         <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-plot-task-move-down" class="button">下移</button>
-                                        <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-plot-task-delete" class="button" style="background:var(--red); color:#fff;">删除</button>
+                                        <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-plot-task-delete" class="button" style="background:var(--acu-danger); color:#fff;">删除</button>
                                     </div>
                                     <small class="notes" style="display:block; margin-top:10px;">每个任务都有独立提示词、独立标签摘取与独立重试次数；任务按阶段号执行：同阶段并发，不同阶段按编号顺序串行。</small>
                                 </div>
-                                <div style="padding:12px; background:var(--background_default); border-radius:8px; border:1px solid var(--border_color_light);">
+                                <div style="padding:12px; background:var(--acu-bg-1); border-radius:8px; border:1px solid var(--acu-border);">
                                     <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap:12px; margin-bottom:15px;">
                                         <div class="qrf_settings_block" style="margin-bottom:0;">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-plot-task-name" style="font-weight:500;">当前任务名称</label>
@@ -37306,45 +37557,45 @@ function generateCoreFuncTabHTML() {
 
 
                         <!-- 匹配替换设置区域 -->
-                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
+                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--acu-bg-2); border-radius: 8px; border: 1px solid var(--acu-border);">
+                            <h4 style="margin: 0 0 15px 0; color: var(--acu-text-1); display: flex; align-items: center; gap: 8px;">
                                 <i class="fa-solid fa-right-left"></i> 匹配替换
                             </h4>
-                            <small class="notes" style="display: block; margin-bottom: 15px; color: var(--text_secondary);">
+                            <small class="notes" style="display: block; margin-bottom: 15px; color: var(--acu-text-2);">
                                 在发送前，将下方设置的数值替换掉提示词中的占位符（sulv1-4、zhaohui）
                             </small>
                             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-rate-main" style="font-weight: 500;">主线剧情推进速率</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-rate-main" type="number" class="text_pole" step="0.05" value="1.0" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">占位符: sulv1</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">占位符: sulv1</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal" style="font-weight: 500;">个人线推进速率</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-rate-personal" type="number" class="text_pole" step="0.05" value="1.0" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">占位符: sulv2</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">占位符: sulv2</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic" style="font-weight: 500;">色情事件推进速率</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-rate-erotic" type="number" class="text_pole" step="0.05" value="0" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">占位符: sulv3</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">占位符: sulv3</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold" style="font-weight: 500;">绿帽线推进速率</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-rate-cuckold" type="number" class="text_pole" step="0.05" value="1.0" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">占位符: sulv4</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">占位符: sulv4</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-recall-count" style="font-weight: 500;">记忆召回数量</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-recall-count" type="number" class="text_pole" step="1" min="1" value="20" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">占位符: zhaohui</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">占位符: zhaohui</small>
                                 </div>
                             </div>
                         </div>
 
                         <!-- 自动循环设置区域 -->
-                        <div class="settings-section" style="padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
+                        <div class="settings-section" style="padding: 20px; background: var(--acu-bg-2); border-radius: 8px; border: 1px solid var(--acu-border);">
+                            <h4 style="margin: 0 0 15px 0; color: var(--acu-text-1); display: flex; align-items: center; gap: 8px;">
                                 <i class="fa-solid fa-sync-alt"></i> 智能续写
                             </h4>
 
@@ -37373,22 +37624,22 @@ function generateCoreFuncTabHTML() {
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay" style="font-weight: 500;">循环延时</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-loop-delay" type="number" class="text_pole" min="0" step="1" value="5" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">秒</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">秒</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration" style="font-weight: 500;">总时长</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration" type="number" class="text_pole" min="0" step="1" value="0" placeholder="60" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">分钟</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">分钟</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-max-retries" style="font-weight: 500;">自动循环失败上限</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-max-retries" type="number" class="text_pole" min="0" step="1" value="3" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">仅用于自动循环流程，不影响单个任务的 API 重试次数</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">仅用于自动循环流程，不影响单个任务的 API 重试次数</small>
                                 </div>
                                 <div class="qrf_settings_block" style="margin-bottom: 0;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count" style="font-weight: 500;">AI上下文</label>
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-plot-context-turn-count" type="number" class="text_pole" min="0" max="20" step="1" value="3" style="width: 100%;">
-                                    <small class="notes" style="color: var(--text_secondary);">AI输出楼层数（仅计算AI回复，不含用户输入）</small>
+                                    <small class="notes" style="color: var(--acu-text-2);">AI输出楼层数（仅计算AI回复，不含用户输入）</small>
                                 </div>
                             </div>
 
@@ -37408,7 +37659,7 @@ function generateCoreFuncTabHTML() {
                             </div>
 
                             <!-- [新增] 剧情推进世界书选择（与填表世界书选择互不干扰；UI风格与"世界书设置"页一致） -->
-                            <div class="qrf_settings_block" style="margin: 10px 0 18px 0; padding-top: 15px; border-top: 1px dashed var(--border_color_light);">
+                            <div class="qrf_settings_block" style="margin: 10px 0 18px 0; padding-top: 15px; border-top: 1px dashed var(--acu-border);">
                                 <label style="font-weight: 600; display:flex; align-items:center; gap:8px;">
                                     <i class="fa-solid fa-book"></i> 剧情推进世界书选择（独立）
                                 </label>
@@ -37426,7 +37677,7 @@ function generateCoreFuncTabHTML() {
 
                                 <div id="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-manual-select-block" style="display: none; margin-top: 10px;">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-select">选择世界书 (可多选):</label>
-                                    <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-select-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                                    <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-select-filter" placeholder="筛选世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--acu-border-2); background: var(--acu-control-bg, var(--acu-bg-1)); color: var(--acu-control-text, var(--acu-text-1));">
                                     <div class="input-group">
                                         <div id="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-select" class="qrf_worldbook_list"></div>
                                         <button id="${SCRIPT_ID_PREFIX_ACU}-plot-refresh-worldbooks" title="刷新世界书列表">刷新</button>
@@ -37441,7 +37692,7 @@ function generateCoreFuncTabHTML() {
                                             <button id="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-deselect-all" class="button" style="padding: 2px 8px; font-size: 0.8em;">全不选</button>
                                         </div>
                                     </div>
-                                    <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-entry-filter" placeholder="筛选条目/世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color);">
+                                    <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-entry-filter" placeholder="筛选条目/世界书..." style="width: 100%; margin: 6px 0 8px 0; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--acu-border-2); background: var(--acu-control-bg, var(--acu-bg-1)); color: var(--acu-control-text, var(--acu-text-1));">
                                     <div id="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-entry-list" class="qrf_worldbook_entry_list">
                                         <!-- 条目将动态加载于此 -->
                                     </div>
@@ -37449,19 +37700,19 @@ function generateCoreFuncTabHTML() {
                             </div>
 
                             <!-- 循环控制区域 -->
-                            <div style="border-top: 1px solid var(--border_color_light); padding-top: 20px;">
-                                <div id="${SCRIPT_ID_PREFIX_ACU}-plot-loop-status-indicator" style="text-align: center; margin-bottom: 15px; padding: 10px; background: var(--background_default); border-radius: 6px; border: 1px solid var(--border_color_light);">
-                                    <div style="font-weight: 600; color: var(--text_primary); margin-bottom: 5px;">循环状态</div>
-                                    <div style="color: var(--text_secondary);">
+                            <div style="border-top: 1px solid var(--acu-border); padding-top: 20px;">
+                                <div id="${SCRIPT_ID_PREFIX_ACU}-plot-loop-status-indicator" style="text-align: center; margin-bottom: 15px; padding: 10px; background: var(--acu-bg-1); border-radius: 6px; border: 1px solid var(--acu-border);">
+                                    <div style="font-weight: 600; color: var(--acu-text-1); margin-bottom: 5px;">循环状态</div>
+                                    <div style="color: var(--acu-text-2);">
                                         <span id="${SCRIPT_ID_PREFIX_ACU}-plot-loop-status-text">未运行</span>
-                                        <span id="${SCRIPT_ID_PREFIX_ACU}-plot-loop-timer-display" style="display:none; margin-left: 10px; color: var(--text_tertiary);"></span>
+                                        <span id="${SCRIPT_ID_PREFIX_ACU}-plot-loop-timer-display" style="display:none; margin-left: 10px; color: var(--acu-text-3);"></span>
                                     </div>
                                 </div>
                                 <div style="display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-plot-start-loop-btn" class="menu_button" style="padding: 12px 25px; background: var(--green); color: white; font-weight: 600; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; min-width: 140px; display: inline-flex; align-items: center; gap: 8px; justify-content: center;">
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-plot-start-loop-btn" class="menu_button" style="padding: 12px 25px; background: var(--acu-success); color: white; font-weight: 600; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; min-width: 140px; display: inline-flex; align-items: center; gap: 8px; justify-content: center;">
                                         <i class="fas fa-play"></i> 开始循环
                                     </button>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-plot-stop-loop-btn" class="menu_button" style="display: none; padding: 12px 25px; background: var(--red); color: white; font-weight: 600; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; min-width: 140px; display: inline-flex; align-items: center; gap: 8px; justify-content: center;">
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-plot-stop-loop-btn" class="menu_button" style="display: none; padding: 12px 25px; background: var(--acu-danger) !important; color: #fff !important; font-weight: 600; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; min-width: 140px; display: inline-flex; align-items: center; gap: 8px; justify-content: center;">
                                         <i class="fas fa-stop"></i> 停止循环
                                     </button>
                                 </div>
@@ -37469,8 +37720,8 @@ function generateCoreFuncTabHTML() {
                         </div>
 
                         <!-- 外部导入区块（原独立tab，现作为核心功能区子模块） -->
-                        <div class="settings-section" style="padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            ${generateImportTabHTML().replace(/id="acu-tab-import" class="acu-tab-content"/, 'id="acu-tab-import-embedded" class="acu-import-embedded"').replace(/<div class="acu-card">/, '<div class="acu-card" style="border: none; box-shadow: none; padding: 0; margin: 0;">').replace('<h3>从TXT文件导入</h3>', '<h3 style="margin: 0 0 15px 0; padding: 0 0 10px 0; border-bottom: 1px solid var(--border_color);">外部导入</h3>').replace('<p class="notes">从外部TXT文件导入内容', '<p class="notes" style="margin-bottom: 12px;">从外部TXT文件导入内容')}
+                        <div class="settings-section" style="padding: 20px; background: var(--acu-bg-2); border-radius: 8px; border: 1px solid var(--acu-border);">
+                            ${generateImportTabHTML().replace(/id="acu-tab-import" class="acu-tab-content"/, 'id="acu-tab-import-embedded" class="acu-import-embedded"').replace(/<div class="acu-card">/, '<div class="acu-card" style="border: none; box-shadow: none; padding: 0; margin: 0;">').replace('<h3>从TXT文件导入</h3>', '<h3 style="margin: 0 0 15px 0; padding: 0 0 10px 0; border-bottom: 1px solid var(--acu-border);">外部导入</h3>').replace('<p class="notes">从外部TXT文件导入内容', '<p class="notes" style="margin-bottom: 12px;">从外部TXT文件导入内容')}
                         </div>
                     </div>
                 </div>`;
@@ -37490,14 +37741,14 @@ function generateDataMgmtTabHTML() {
                     <div class="acu-card">
                         <h3>数据隔离</h3>
                         <p class="notes">在此处输入特定的标识代码，插件将只读取和保存带有该标识的数据。若留空则使用默认数据。</p>
-                        <div class="setting-item" style="margin-bottom: 15px; border-bottom: 1px dashed var(--border-normal); padding-bottom: 15px;">
+                        <div class="setting-item" style="margin-bottom: 15px; border-bottom: 1px dashed var(--acu-border-2); padding-bottom: 15px;">
                             <div id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-input-area" style="margin-top: 10px;">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-data-isolation-code">标识代码:</label>
                                 <div class="acu-data-isolation-row" style="display: flex; gap: 10px; margin-top: 5px; align-items: flex-start;">
                                     <div id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-combo" style="position: relative; flex-grow: 1; display: flex; align-items: center;">
                                         <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-code" placeholder="输入标识代码 (留空则不隔离)" style="flex-grow: 1; padding-right: 36px;">
-                                        <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-history-toggle" title="历史标识代码" style="position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 1px solid var(--border-normal); background: var(--bg-secondary); color: var(--text-main); padding: 4px 6px; border-radius: 4px; cursor: pointer; font-size: 12px; line-height: 1;">▼</button>
-                                        <ul id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-history-list" style="display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: var(--bg-primary); border: 1px solid var(--border-normal); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18); list-style: none; margin: 0; padding: 6px 0; max-height: 220px; overflow-y: auto; z-index: 9999;"></ul>
+                                        <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-history-toggle" title="历史标识代码" style="position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 1px solid var(--acu-border-2); background: var(--acu-bg-1); color: var(--acu-text-1); padding: 4px 6px; border-radius: 4px; cursor: pointer; font-size: 12px; line-height: 1;">▼</button>
+                                        <ul id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-history-list" style="display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: var(--acu-bg-0); border: 1px solid var(--acu-border-2); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18); list-style: none; margin: 0; padding: 6px 0; max-height: 220px; overflow-y: auto; z-index: 9999;"></ul>
                                     </div>
                                     <button id="${SCRIPT_ID_PREFIX_ACU}-data-isolation-save" class="primary" style="white-space: nowrap;">保存并应用</button>
                                 </div>
@@ -37513,12 +37764,12 @@ function generateDataMgmtTabHTML() {
                     <div class="acu-card">
                         <h3>备份与恢复</h3>
                         <p class="notes">导入/导出当前对话的数据库，或管理全局模板。</p>
-                        <div class="button-group acu-data-mgmt-buttons acu-cols-2">
+                        <div class="button-group acu-data-mgmt-buttons">
                             <button id="${SCRIPT_ID_PREFIX_ACU}-import-combined-settings" class="primary">合并导入(模板+指令)</button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-export-combined-settings" class="primary">合并导出(模板+指令)</button>
                         </div>
-                        <hr style="border-color: var(--border-normal); margin: 15px 0;">
-                        <div class="button-group acu-data-mgmt-buttons acu-cols-3">
+                        <hr style="border-color: var(--acu-border-2); margin: 15px 0;">
+                        <div class="button-group acu-data-mgmt-buttons">
                             <button id="${SCRIPT_ID_PREFIX_ACU}-export-json-data">导出JSON数据</button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-reset-all-defaults" class="btn-warning">恢复默认模板及提示词</button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-override-with-template" class="btn-danger">模板覆盖最新层数据</button>
@@ -37529,24 +37780,24 @@ function generateDataMgmtTabHTML() {
                     <div class="acu-card">
                         <h3>删除与清理</h3>
                         <!-- 楼层范围选择 -->
-                        <div style="background: var(--background-color-light); padding: 12px; border-radius: 6px; margin-bottom: 10px;">
-                            <h4 style="margin: 0 0 8px 0; font-size: 0.9em; color: var(--text-color); font-weight: 500;">删除范围设置</h4>
+                        <div style="background: var(--acu-bg-2); padding: 12px; border-radius: 6px; margin-bottom: 10px;">
+                            <h4 style="margin: 0 0 8px 0; font-size: 0.9em; color: var(--acu-text-1); font-weight: 500;">删除范围设置</h4>
                             <div class="acu-grid">
                                 <div>
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-delete-start-floor" style="font-weight: 500; font-size: 0.85em;">起始AI楼层:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-delete-start-floor" min="1" value="1" placeholder="1" style="width: 100%; padding: 4px 8px; border: 1px solid var(--border-normal); border-radius: 4px; background: var(--input-background); color: var(--input-text-color);">
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-delete-start-floor" min="1" value="1" placeholder="1" style="width: 100%; padding: 4px 8px; border: 1px solid var(--acu-border-2); border-radius: 4px; background: var(--acu-control-bg, var(--acu-bg-1)); color: var(--acu-control-text, var(--acu-text-1));">
                                 </div>
                                 <div>
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-delete-end-floor" style="font-weight: 500; font-size: 0.85em;">终止AI楼层:</label>
-                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-delete-end-floor" min="1" placeholder="留空删除到最后" style="width: 100%; padding: 4px 8px; border: 1px solid var(--border-normal); border-radius: 4px; background: var(--input-background); color: var(--input-text-color);">
+                                    <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-delete-end-floor" min="1" placeholder="留空删除到最后" style="width: 100%; padding: 4px 8px; border: 1px solid var(--acu-border-2); border-radius: 4px; background: var(--acu-control-bg, var(--acu-bg-1)); color: var(--acu-control-text, var(--acu-text-1));">
                                 </div>
                             </div>
-                            <div style="margin-top: 6px; font-size: 0.8em; color: var(--text-color-dimmed);">
+                            <div style="margin-top: 6px; font-size: 0.8em; color: var(--acu-text-3);">
                                 默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）
                             </div>
                         </div>
 
-                        <div class="button-group acu-data-mgmt-buttons acu-cols-2">
+                        <div class="button-group acu-data-mgmt-buttons">
                             <button id="${SCRIPT_ID_PREFIX_ACU}-delete-current-local-data" class="btn-warning">删除当前标识本地数据</button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-delete-all-local-data" class="btn-danger">删除所有本地数据 (慎用)</button>
                         </div>
@@ -37558,8 +37809,8 @@ function generateDataMgmtTabHTML() {
                         <p class="notes" style="text-align: center; margin-bottom: 20px;">将当前的纪要表进行批量合并与精简。</p>
 
                         <!-- 手动合并参数 -->
-                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
-                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">手动合并参数</h4>
+                        <div style="background: var(--acu-bg-2); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--acu-text-1); border-bottom: 1px solid var(--acu-border-2); padding-bottom: 8px;">手动合并参数</h4>
 
                             <div class="acu-grid" style="margin-bottom: 10px;">
                                 <div>
@@ -37585,8 +37836,8 @@ function generateDataMgmtTabHTML() {
                         </div>
 
                         <!-- 自动合并设置 -->
-                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
-                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">自动合并设置</h4>
+                        <div style="background: var(--acu-bg-2); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--acu-text-1); border-bottom: 1px solid var(--acu-border-2); padding-bottom: 8px;">自动合并设置</h4>
 
                             <div style="margin-bottom: 12px;">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-auto-merge-enabled" style="display: flex; align-items: center; cursor: pointer;">
@@ -37608,17 +37859,17 @@ function generateDataMgmtTabHTML() {
                         </div>
 
                         <!-- 提示词设置 -->
-                        <div style="background: var(--background-color-light); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
-                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--text-color); border-bottom: 1px solid var(--border-normal); padding-bottom: 8px;">提示词模板</h4>
+                        <div style="background: var(--acu-bg-2); padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                            <h4 style="margin: 0 0 12px 0; font-size: 1em; color: var(--acu-text-1); border-bottom: 1px solid var(--acu-border-2); padding-bottom: 8px;">提示词模板</h4>
                             <textarea id="${SCRIPT_ID_PREFIX_ACU}-merge-prompt-template" style="height: 120px; font-size: 0.85em; font-family: monospace; width: 100%; resize: vertical;" placeholder="正在加载提示词模板..."></textarea>
                         </div>
 
                         <!-- 操作按钮 -->
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px;">
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-save-merge-settings" style="padding: 10px; background: var(--button-background); border: 1px solid var(--border-normal); border-radius: 6px; cursor: pointer; transition: all 0.2s ease;">
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-save-merge-settings" style="padding: 10px; background: var(--acu-bg-1); border: 1px solid var(--acu-border-2); border-radius: 6px; cursor: pointer; transition: all 0.2s ease;">
                                 <i class="fa-solid fa-save" style="margin-right: 5px;"></i>保存设置
                             </button>
-                            <button id="${SCRIPT_ID_PREFIX_ACU}-restore-merge-settings" style="padding: 10px; background: var(--button-secondary-background, #f8f9fa); border: 1px solid var(--border-normal); border-radius: 6px; cursor: pointer; transition: all 0.2s ease;">
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-restore-merge-settings" style="padding: 10px; background: var(--acu-bg-2); border: 1px solid var(--acu-border-2); border-radius: 6px; cursor: pointer; transition: all 0.2s ease;">
                                 <i class="fa-solid fa-undo" style="margin-right: 5px;"></i>恢复默认
                             </button>
                         </div>
@@ -37634,20 +37885,18 @@ function generateDataMgmtTabHTML() {
 // Optimization标签页（正文替换）HTML生成
 /**
  * 生成 Optimization 标签页的 HTML 片段
- * 包含：正文替换设置、基础设置、优化模式、标签筛选、预设管理、优化提示词、手动测试
  */
 function generateOptimizationTabHTML() {
     return `
                 <!-- 正文替换Tab -->
                 <div id="acu-tab-optimization">
                     <div class="acu-card">
-                        <!-- 顶部标题和开关区域 -->
-                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid var(--border_color);">
+                        <div class="acu-card-header">
                             <div>
-                                <h3 style="margin: 0; color: var(--text_primary);">正文替换设置</h3>
-                                <p class="notes" style="margin: 5px 0 0 0;">AI生成正文后，自动替换内容（在填表之前执行）</p>
+                                <h3>正文替换设置</h3>
+                                <p class="notes">AI生成正文后，自动替换内容（在填表之前执行）</p>
                             </div>
-                            <div style="display: flex; align-items: center; gap: 8px;">
+                            <div class="acu-row" style="gap: 8px;">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-enabled" style="font-weight: 500; cursor: pointer;">启用功能</label>
                                 <label class="toggle-switch">
                                     <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-enabled" type="checkbox" />
@@ -37656,158 +37905,133 @@ function generateOptimizationTabHTML() {
                             </div>
                         </div>
 
-                        <!-- 基础设置区域 -->
-                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
-                                <i class="fa-solid fa-cog"></i> 基础设置
-                            </h4>
-                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
-                                <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-api-preset" style="font-weight: 500;">API预设</label>
-                                    <select id="${SCRIPT_ID_PREFIX_ACU}-optimization-api-preset" class="text_pole" style="width: 100%; margin-top: 5px;">
+                        <!-- 基础设置 -->
+                        <div class="acu-section">
+                            <h4 class="acu-section-title"><i class="fa-solid fa-cog"></i> 基础设置</h4>
+                            <div class="acu-grid-auto">
+                                <div>
+                                    <label class="acu-label" for="${SCRIPT_ID_PREFIX_ACU}-optimization-api-preset">API预设</label>
+                                    <select id="${SCRIPT_ID_PREFIX_ACU}-optimization-api-preset" class="text_pole">
                                         <option value="">使用当前API配置</option>
                                     </select>
                                     <small class="notes">选择正文替换使用的API配置，留空则使用酒馆当前API</small>
                                 </div>
-                                <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-min-length" style="font-weight: 500;">最小优化长度</label>
-                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-min-length" type="number" class="text_pole" min="0" step="10" value="100" style="width: 100%; margin-top: 5px;">
+                                <div>
+                                    <label class="acu-label" for="${SCRIPT_ID_PREFIX_ACU}-optimization-min-length">最小优化长度</label>
+                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-min-length" type="number" class="text_pole" min="0" step="10" value="100">
                                     <small class="notes">正文长度小于此值时跳过优化</small>
                                 </div>
-                                <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-max-items" style="font-weight: 500;">最大优化项数</label>
-                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-max-items" type="number" class="text_pole" min="1" max="100" step="1" value="10" style="width: 100%; margin-top: 5px;">
+                                <div>
+                                    <label class="acu-label" for="${SCRIPT_ID_PREFIX_ACU}-optimization-max-items">最大优化项数</label>
+                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-max-items" type="number" class="text_pole" min="1" max="100" step="1" value="10">
                                     <small class="notes">单次优化的最大修改项数（1-100）</small>
                                 </div>
-                                <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-loop-count" style="font-weight: 500;">循环优化次数</label>
-                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-loop-count" type="number" class="text_pole" min="1" max="10" step="1" value="1" style="width: 100%; margin-top: 5px;">
+                                <div>
+                                    <label class="acu-label" for="${SCRIPT_ID_PREFIX_ACU}-optimization-loop-count">循环优化次数</label>
+                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-loop-count" type="number" class="text_pole" min="1" max="10" step="1" value="1">
                                     <small class="notes">优化完成后再次优化，达到完整优化效果（1-10次）</small>
                                 </div>
-                                <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-retry-count" style="font-weight: 500;">自动重试次数</label>
-                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-retry-count" type="number" class="text_pole" min="1" max="10" step="1" value="3" style="width: 100%; margin-top: 5px;">
+                                <div>
+                                    <label class="acu-label" for="${SCRIPT_ID_PREFIX_ACU}-optimization-retry-count">自动重试次数</label>
+                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-retry-count" type="number" class="text_pole" min="1" max="10" step="1" value="3">
                                     <small class="notes">API调用失败时自动重试（1-10次，默认3次）</small>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- 优化模式设置 -->
-                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
-                                <i class="fa-solid fa-magic"></i> 优化模式
-                            </h4>
-                            <div style="display: grid; gap: 15px;">
+                        <!-- 优化模式 -->
+                        <div class="acu-section">
+                            <h4 class="acu-section-title"><i class="fa-solid fa-magic"></i> 优化模式</h4>
+                            <div class="acu-col">
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-optimization-seamless-mode" checked>
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-seamless-mode">无感替换模式</label>
-                                    <small class="notes" style="display: block; margin-left: 24px; margin-top: 4px;">显示"正在优化"遮罩，优化完成后直接显示结果，无闪烁</small>
                                 </div>
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-optimization-auto-apply" checked>
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-auto-apply">自动应用优化结果</label>
-                                    <small class="notes" style="display: block; margin-left: 24px; margin-top: 4px;">关闭时显示对比对话框，让用户选择是否应用</small>
                                 </div>
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-optimization-show-diff" checked>
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-show-diff">显示优化对比</label>
-                                    <small class="notes" style="display: block; margin-left: 24px; margin-top: 4px;">优化完成后显示修改摘要（非无感模式下有效）</small>
                                 </div>
                                 <div class="checkbox-group">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-optimization-parallel-mode">
                                     <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-parallel-mode">填表与正文替换并行执行</label>
-                                    <small class="notes" style="display: block; margin-left: 24px; margin-top: 4px;">勾选后填表不再等待正文替换完成，双方并行进行（默认关闭）</small>
                                 </div>
-                                <div style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--border_color_light);">
-                                    <label style="font-weight: 500; display: block; margin-bottom: 8px;">快捷操作</label>
-                                    <div style="display: flex; flex-direction: column; gap: 8px; align-items: stretch;">
-                                        <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-reoptimize-latest" class="menu_button" title="对最近一次已执行正文替换的 AI 回复，基于替换前原文重新优化并再次替换" style="width: 100%; min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: normal; line-height: 1.4; text-align: center; padding: 10px 14px;">
-                                            <i class="fa-solid fa-rotate-right"></i><span>重新优化上一次替换结果</span>
-                                        </button>
-                                    </div>
-                                    <small class="notes" style="display: block; margin-top: 6px; line-height: 1.5;">这里会定位"最近一次已经被正文替换过的 AI 回复"，并使用替换前保留的原文重新优化后再次替换。取消正文优化请使用进行中提示框里的"取消优化"按钮。</small>
+                                <div class="acu-divider-dashed" style="margin: 8px 0;"></div>
+                                <label class="acu-label">快捷操作</label>
+                                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-reoptimize-latest" title="对最近一次已执行正文替换的 AI 回复，基于替换前原文重新优化并再次替换" style="white-space: nowrap;">
+                                        <i class="fa-solid fa-rotate-right"></i> 重新优化
+                                    </button>
                                 </div>
+                                <small class="notes">定位"最近一次已经被正文替换过的 AI 回复"，使用替换前保留的原文重新优化后再次替换。取消正文优化请使用进行中提示框里的"取消优化"按钮。</small>
                             </div>
                         </div>
- 
-                        <!-- 标签筛选设置 -->
-                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
-                                <i class="fa-solid fa-filter"></i> 标签筛选
-                            </h4>
-                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px;">
-                                <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-extract-tags" style="font-weight: 500;">标签提取</label>
-                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-extract-tags" type="text" class="text_pole" placeholder="例如: think,plot" style="width: 100%; margin-top: 5px;">
+
+                        <!-- 标签筛选 -->
+                        <div class="acu-section">
+                            <h4 class="acu-section-title"><i class="fa-solid fa-filter"></i> 标签筛选</h4>
+                            <div class="acu-grid-auto" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));">
+                                <div>
+                                    <label class="acu-label" for="${SCRIPT_ID_PREFIX_ACU}-optimization-extract-tags">标签提取</label>
+                                    <input id="${SCRIPT_ID_PREFIX_ACU}-optimization-extract-tags" type="text" class="text_pole" placeholder="例如: think,plot">
                                     <small class="notes">仅提取指定标签内的内容进行优化</small>
                                 </div>
-                                <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label style="font-weight: 500;">正文标签提取规则</label>
+                                <div>
+                                    <label class="acu-label">正文标签提取规则</label>
                                     <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-extract-rules"></div>
-                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-optimization-extract-add-rule" class="button" style="margin-top: 6px;">添加规则</button>
+                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-optimization-extract-add-rule" class="button">添加规则</button>
                                     <small class="notes">每条规则填写开始词和结束词，仅提取最后一组匹配内容</small>
                                 </div>
-                                <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                    <label style="font-weight: 500;">标签排除规则</label>
+                                <div>
+                                    <label class="acu-label">标签排除规则</label>
                                     <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-exclude-rules"></div>
-                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-optimization-exclude-add-rule" class="button" style="margin-top: 6px;">添加规则</button>
+                                    <button type="button" id="${SCRIPT_ID_PREFIX_ACU}-optimization-exclude-add-rule" class="button">添加规则</button>
                                     <small class="notes">每条规则填写开始词和结束词，仅移除最后一组匹配内容</small>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- 预设管理区域 -->
-                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
-                                <i class="fa-solid fa-bookmark"></i> 预设管理
-                            </h4>
-                            <div class="qrf_settings_block" style="margin-bottom: 0;">
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-preset-select" style="font-weight: 500;">选择预设</label>
-                                <div class="qrf_preset_selector_wrapper acu-optimization-preset-wrapper" style="display: flex; gap: 8px; align-items: center; margin-top: 5px;">
-                                    <select id="${SCRIPT_ID_PREFIX_ACU}-optimization-preset-select" class="text_pole" style="flex: 1;">
+                        <!-- 预设管理 -->
+                        <div class="acu-section">
+                            <h4 class="acu-section-title"><i class="fa-solid fa-bookmark"></i> 预设管理</h4>
+                            <div>
+                                <label class="acu-label" for="${SCRIPT_ID_PREFIX_ACU}-optimization-preset-select">选择预设</label>
+                                <div class="acu-row-wrap" style="margin-top: 4px;">
+                                    <select id="${SCRIPT_ID_PREFIX_ACU}-optimization-preset-select" class="text_pole" style="flex: 1; min-width: 160px;">
                                         <option value="">-- 选择一个预设 --</option>
                                     </select>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-save-preset" class="menu_button" title="覆盖保存当前预设" style="padding: 8px 12px;"><i class="fa-solid fa-save"></i></button>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-save-as-new-preset" class="menu_button" title="另存为新预设" style="padding: 8px 12px;"><i class="fa-solid fa-file-export"></i></button>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-import-presets" class="menu_button" title="导入预设" style="padding: 8px 12px;"><i class="fa-solid fa-upload"></i></button>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-export-presets" class="menu_button" title="导出当前预设" style="padding: 8px 12px;"><i class="fa-solid fa-download"></i></button>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-reset-defaults" class="menu_button" title="恢复默认提示词" style="padding: 8px 12px; background-color: var(--orange); color: white;"><i class="fa-solid fa-undo"></i></button>
-                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-delete-preset" class="menu_button" title="删除当前选中的预设" style="display: none; padding: 8px 12px; background-color: var(--red);"><i class="fa-solid fa-trash-alt"></i></button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-save-preset" class="acu-btn-icon" title="覆盖保存当前预设"><i class="fa-solid fa-save"></i></button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-save-as-new-preset" class="acu-btn-icon" title="另存为新预设"><i class="fa-solid fa-file-export"></i></button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-import-presets" class="acu-btn-icon" title="导入预设"><i class="fa-solid fa-upload"></i></button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-export-presets" class="acu-btn-icon" title="导出当前预设"><i class="fa-solid fa-download"></i></button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-reset-defaults" class="acu-btn-icon" title="恢复默认提示词" style="color: var(--acu-warning);"><i class="fa-solid fa-undo"></i></button>
+                                    <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-delete-preset" class="acu-btn-icon" title="删除当前选中的预设" style="display: none; color: var(--acu-danger);"><i class="fa-solid fa-trash-alt"></i></button>
                                     <input type="file" id="${SCRIPT_ID_PREFIX_ACU}-optimization-preset-file-input" style="display: none;" accept=".json">
                                 </div>
                                 <small class="notes">选择预设应用提示词组设置，或保存当前配置为新预设</small>
                             </div>
                         </div>
 
-                        <!-- 提示词设置区域 -->
-                        <div class="settings-section" style="margin-bottom: 25px; padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
-                                <i class="fa-solid fa-edit"></i> 优化提示词
-                            </h4>
-                            <div style="margin-bottom: 15px; padding: 12px; background: var(--background_default); border-radius: 6px; border-left: 3px solid var(--text_secondary);">
-                                <small class="notes" style="color: var(--text_secondary);">
+                        <!-- 优化提示词 -->
+                        <div class="acu-section">
+                            <h4 class="acu-section-title"><i class="fa-solid fa-edit"></i> 优化提示词</h4>
+                            <div class="acu-info-panel">
+                                <small class="notes">
                                     <strong>占位符说明：</strong><br>
-                                    <code>$CONTENT</code> - 自动替换为需要优化的正文内容<br>
-                                    <code>$1</code> - 世界书内容（剧情推进专用）<br>
-                                    <code>$5</code> - 纪要表/总体大纲表内容<br>
-                                    <code>$6</code> - 上一轮剧情规划数据<br>
-                                    <code>$7</code> - 前文上下文（仅AI输出）<br>
-                                    <code>$8</code> - 本轮用户输入<br>
-                                    <code>$U</code> - 用户设定描述 (persona_description)<br>
-                                    <code>$C</code> - 角色描述 (char_description)<br>
-                                    <strong>输出格式：</strong>AI需返回JSON格式的优化指令，包含 optimizations 数组
+                                    <code>$CONTENT</code> - 需要优化的正文内容<br>
+                                    <code>$1</code> - 世界书内容 &nbsp; <code>$5</code> - 纪要表/大纲 &nbsp; <code>$6</code> - 上一轮规划<br>
+                                    <code>$7</code> - 前文上下文 &nbsp; <code>$8</code> - 本轮用户输入<br>
+                                    <code>$U</code> - 用户设定 &nbsp; <code>$C</code> - 角色描述<br>
+                                    <strong>输出格式：</strong>AI 需返回 JSON 格式的优化指令，包含 optimizations 数组
                                 </small>
                             </div>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-prompt-constructor-area">
-                                <div class="button-group" style="margin-bottom: 10px; justify-content: center;">
-                                    <button class="${SCRIPT_ID_PREFIX_ACU}-optimization-add-prompt-segment-btn" data-position="top" title="在上方添加对话轮次">+</button>
-                                </div>
-                                <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-prompt-segments-container">
-                                    <!-- 优化提示词段将动态插入这里 -->
-                                </div>
-                                <div class="button-group" style="margin-top: 10px; justify-content: center;">
-                                    <button class="${SCRIPT_ID_PREFIX_ACU}-optimization-add-prompt-segment-btn" data-position="bottom" title="在下方添加对话轮次">+</button>
-                                </div>
+                                <div class="button-group" style="margin-bottom: 10px; justify-content: center;"><button class="${SCRIPT_ID_PREFIX_ACU}-optimization-add-prompt-segment-btn" data-position="top" title="在上方添加对话轮次">+</button></div>
+                                <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-prompt-segments-container"></div>
+                                <div class="button-group" style="margin-top: 10px; justify-content: center;"><button class="${SCRIPT_ID_PREFIX_ACU}-optimization-add-prompt-segment-btn" data-position="bottom" title="在下方添加对话轮次">+</button></div>
                             </div>
                             <div class="button-group">
                                 <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-save-prompt-group" class="primary">保存提示词组</button>
@@ -37815,21 +38039,19 @@ function generateOptimizationTabHTML() {
                             </div>
                         </div>
 
-                        <!-- 手动测试区域 -->
-                        <div class="settings-section" style="padding: 20px; background: var(--background_light); border-radius: 8px; border: 1px solid var(--border_color_light);">
-                            <h4 style="margin: 0 0 15px 0; color: var(--text_primary); display: flex; align-items: center; gap: 8px;">
-                                <i class="fa-solid fa-flask"></i> 手动测试
-                            </h4>
-                            <div class="qrf_settings_block" style="margin-bottom: 15px;">
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-optimization-test-input" style="font-weight: 500;">测试文本</label>
-                                <textarea id="${SCRIPT_ID_PREFIX_ACU}-optimization-test-input" class="text_pole" rows="5" placeholder="输入需要优化的文本进行测试..." style="resize: vertical; margin-top: 5px;"></textarea>
+                        <!-- 手动测试 -->
+                        <div class="acu-section">
+                            <h4 class="acu-section-title"><i class="fa-solid fa-flask"></i> 手动测试</h4>
+                            <div>
+                                <label class="acu-label" for="${SCRIPT_ID_PREFIX_ACU}-optimization-test-input">测试文本</label>
+                                <textarea id="${SCRIPT_ID_PREFIX_ACU}-optimization-test-input" class="text_pole" rows="5" placeholder="输入需要优化的文本进行测试..."></textarea>
                             </div>
                             <div class="button-group">
                                 <button id="${SCRIPT_ID_PREFIX_ACU}-optimization-test-btn" class="primary">执行优化测试</button>
                             </div>
-                            <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-test-result" style="margin-top: 15px; display: none;">
-                                <label style="font-weight: 500;">优化结果</label>
-                                <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-test-output" style="margin-top: 8px; padding: 12px; background: var(--background_default); border-radius: 6px; border: 1px solid var(--border_color_light); max-height: 300px; overflow-y: auto; white-space: pre-wrap; font-size: 0.9em;"></div>
+                            <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-test-result" style="display: none; margin-top: 12px;">
+                                <label class="acu-label">优化结果</label>
+                                <div id="${SCRIPT_ID_PREFIX_ACU}-optimization-test-output" class="acu-result-panel"></div>
                             </div>
                         </div>
                     </div>
@@ -37974,14 +38196,14 @@ const MAIN_POPUP_CSS_ACU = `
                     /* 顶部标题条 */
                     #${POPUP_ID_ACU} .acu-header {
                         display: flex;
-                        align-items: flex-start;
+                        align-items: center;
                         justify-content: center;
                         gap: 12px;
-                        padding: 12px 16px;
+                        padding: 14px 18px;
                         border: 1px solid var(--acu-border);
-                        border-radius: var(--acu-radius-lg);
-                        background: var(--acu-bg-1);
-                        box-shadow: var(--acu-shadow);
+                        border-radius: 8px;
+                        background: linear-gradient(135deg, var(--acu-bg-1) 0%, var(--acu-bg-0) 100%);
+                        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
                     }
                     /* 顶部标题块居中（宽屏/窄屏一致） */
                     #${POPUP_ID_ACU} .acu-header > div {
@@ -37993,17 +38215,17 @@ const MAIN_POPUP_CSS_ACU = `
                         margin: 0;
                         padding: 0;
                         border: none;
-                        font-size: 16px;
-                        line-height: 1.35;
-                        font-weight: 650;
-                        letter-spacing: 0.2px;
+                        font-size: 15px;
+                        line-height: 1.4;
+                        font-weight: 600;
+                        letter-spacing: 0.5px;
                         color: var(--acu-text-1);
                         text-align: center;
                         width: 100%;
                     }
                     
                     #${POPUP_ID_ACU} .acu-header-sub {
-                        margin-top: 6px;
+                        margin-top: 4px;
                         font-size: 12px;
                         color: var(--acu-text-3);
                         text-align: center;
@@ -38011,33 +38233,34 @@ const MAIN_POPUP_CSS_ACU = `
 
                     #${POPUP_ID_ACU} .acu-layout {
                         display: grid;
-                        grid-template-columns: 240px minmax(0, 1fr);
+                        grid-template-columns: 200px minmax(0, 1fr);
                         gap: 14px;
                         margin-top: 14px;
-                        min-height: 0; /* 允许在flex布局中收缩 */
+                        min-height: 0;
                     }
 
-                    /* 导航（桌面：侧边栏；移动：顶部横向） */
+                    /* ═══ 导航：精致侧边栏 ═══ */
                     #${POPUP_ID_ACU} .acu-tabs-nav {
                         border: 1px solid var(--acu-border);
-                        border-radius: var(--acu-radius-lg);
+                        border-radius: 8px;
                         background: var(--acu-bg-1);
-                        padding: 10px;
+                        padding: 8px;
                         display: flex;
                         flex-direction: column;
-                        gap: 4px;
+                        gap: 2px;
                         position: sticky;
                         top: 0;
                         align-self: start;
                         max-height: calc(100vh - 180px);
                         overflow: auto;
+                        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
                     }
 
                     #${POPUP_ID_ACU} .acu-nav-section-title {
-                        padding: 10px 10px 4px 10px;
+                        padding: 8px 10px 3px 10px;
                         color: var(--acu-text-3);
-                        font-size: 11px;
-                        letter-spacing: 0.5px;
+                        font-size: 10px;
+                        letter-spacing: 1px;
                         text-transform: uppercase;
                         user-select: none;
                         font-weight: 600;
@@ -38048,16 +38271,16 @@ const MAIN_POPUP_CSS_ACU = `
                         display: flex;
                         align-items: center;
                         justify-content: space-between;
-                        gap: 10px;
-                        padding: 9px 12px;
+                        gap: 8px;
+                        padding: 8px 10px;
                         border: 1px solid transparent;
                         border-radius: 6px;
                         background: transparent;
-                        color: var(--acu-text-2);
-                        font-size: 13px;
+                        color: var(--acu-text-3);
+                        font-size: 12.5px;
                         font-weight: 500;
                         cursor: pointer;
-                        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+                        transition: all 0.15s ease;
                     }
                     #${POPUP_ID_ACU} .acu-tab-button:hover {
                         background: var(--acu-bg-2);
@@ -38065,16 +38288,19 @@ const MAIN_POPUP_CSS_ACU = `
                         color: var(--acu-text-1);
                     }
                     #${POPUP_ID_ACU} .acu-tab-button.active {
-                        background: rgba(37, 99, 235, 0.08);
-                        border-color: rgba(37, 99, 235, 0.25);
+                        background: var(--acu-accent-glow);
+                        border-color: var(--acu-accent);
                         color: var(--acu-accent);
                         font-weight: 600;
+                        box-shadow: inset 0 0 0 0.5px var(--acu-accent-glow-2);
                     }
                     #${POPUP_ID_ACU} .acu-tab-button::after {
                         content: "›";
-                        opacity: 0.4;
+                        opacity: 0;
                         font-weight: 700;
+                        transition: opacity 0.15s ease;
                     }
+                    #${POPUP_ID_ACU} .acu-tab-button:hover::after { opacity: 0.4; }
                     #${POPUP_ID_ACU} .acu-tab-button.active::after { opacity: 0.8; color: var(--acu-accent); }
 
                     /* 内容区 */
@@ -38091,20 +38317,20 @@ const MAIN_POPUP_CSS_ACU = `
                         to { opacity: 1; transform: translateY(0); }
                     }
 
-                    /* 卡片（浅色管理台风格） */
+                    /* ═══ 卡片：典雅轻薄 ═══ */
                     #${POPUP_ID_ACU} .acu-card {
                         border: 1px solid var(--acu-border);
-                        border-radius: var(--acu-radius-lg);
+                        border-radius: 8px;
                         background: var(--acu-bg-1);
                         padding: 16px;
                         margin-bottom: 14px;
-                        box-shadow: var(--acu-shadow);
+                        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
                     }
                     #${POPUP_ID_ACU} .acu-card h3 {
                         margin: 0 0 12px 0;
                         padding: 0 0 10px 0;
                         border-bottom: 1px solid var(--acu-border);
-                        font-size: 14px;
+                        font-size: 13px;
                         letter-spacing: 0.3px;
                         font-weight: 600;
                         color: var(--acu-text-1);
@@ -38125,34 +38351,38 @@ const MAIN_POPUP_CSS_ACU = `
                     #${POPUP_ID_ACU} input,
                     #${POPUP_ID_ACU} select,
                     #${POPUP_ID_ACU} textarea {
-                        width: 100%;
-                        padding: 8px 12px;
-                        border-radius: 6px;
-                        border: 1px solid var(--acu-border-2);
+                        width: 100% !important;
+                        padding: 8px 12px !important;
+                        border-radius: 6px !important;
+                        border: 1px solid var(--acu-border-2) !important;
                         background: var(--acu-control-bg, var(--input-background, var(--acu-bg-1))) !important;
-                        color: var(--acu-control-text, var(--input-text-color, var(--acu-text-1)));
-                        font-size: 14px;
-                        outline: none;
-                        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+                        color: var(--acu-control-text, var(--input-text-color, var(--acu-text-1))) !important;
+                        font-size: 14px !important;
+                        font-family: inherit !important;
+                        outline: none !important;
+                        line-height: 1.5 !important;
+                        box-shadow: none !important;
+                        transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
                     }
                     #${POPUP_ID_ACU} select {
-                        appearance: none;
-                        -webkit-appearance: none;
+                        appearance: none !important;
+                        -webkit-appearance: none !important;
                         background-image:
                             linear-gradient(45deg, transparent 50%, var(--acu-select-arrow, var(--acu-text-2)) 50%),
-                            linear-gradient(135deg, var(--acu-select-arrow, var(--acu-text-2)) 50%, transparent 50%);
+                            linear-gradient(135deg, var(--acu-select-arrow, var(--acu-text-2)) 50%, transparent 50%) !important;
                         background-position:
                             calc(100% - 16px) calc(50% - 2px),
-                            calc(100% - 10px) calc(50% - 2px);
-                        background-size: 6px 6px, 6px 6px;
-                        background-repeat: no-repeat;
-                        padding-right: 34px;
+                            calc(100% - 10px) calc(50% - 2px) !important;
+                        background-size: 6px 6px, 6px 6px !important;
+                        background-repeat: no-repeat !important;
+                        padding-right: 34px !important;
                     }
                     #${POPUP_ID_ACU} input:focus, 
                     #${POPUP_ID_ACU} select:focus, 
                     #${POPUP_ID_ACU} textarea:focus {
-                        border-color: var(--acu-accent);
-                        box-shadow: 0 0 0 3px var(--acu-accent-glow);
+                        border-color: var(--acu-accent) !important;
+                        box-shadow: 0 0 0 3px var(--acu-accent-glow) !important;
+                        outline: none !important;
                     }
                     #${POPUP_ID_ACU} textarea { min-height: 92px; resize: vertical; line-height: 1.55; }
                     #${POPUP_ID_ACU} input::placeholder, #${POPUP_ID_ACU} textarea::placeholder { color: var(--acu-text-3); }
@@ -38162,36 +38392,53 @@ const MAIN_POPUP_CSS_ACU = `
                         #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { font-size: 16px; }
                     }
 
-                    /* 按钮体系（浅色管理台：简洁、清晰） */
+                    /* ═══ 按钮体系：典雅肃静 ═══ */
                     #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
-                        padding: 8px 12px;
-                        border-radius: 6px;
-                        border: 1px solid var(--acu-border-2);
-                        background: var(--acu-bg-1);
-                        color: var(--acu-text-2);
-                        cursor: pointer;
-                        font-weight: 500;
-                        line-height: 1.1;
-                        min-height: 34px;
-                        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+                        padding: 8px 14px !important;
+                        border-radius: 6px !important;
+                        border: 1px solid var(--acu-border-2) !important;
+                        background: var(--acu-bg-1) !important;
+                        color: var(--acu-text-2) !important;
+                        cursor: pointer !important;
+                        font-weight: 500 !important;
+                        font-family: inherit !important;
+                        font-size: 13px !important;
+                        line-height: 1.3 !important;
+                        min-height: 34px !important;
+                        transition: all 0.18s ease !important;
+                        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
                     }
                     #${POPUP_ID_ACU} button:hover, #${POPUP_ID_ACU} .button:hover {
-                        background: var(--acu-bg-2);
-                        color: var(--acu-text-1);
-                        border-color: var(--acu-border);
+                        background: var(--acu-bg-2) !important;
+                        color: var(--acu-text-1) !important;
+                        border-color: var(--acu-border) !important;
+                        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.07) !important;
+                        transform: translateY(-0.5px) !important;
                     }
-                    #${POPUP_ID_ACU} button:active { transform: none; }
-                    #${POPUP_ID_ACU} button:disabled { opacity: 0.45; cursor: not-allowed; }
+                    #${POPUP_ID_ACU} button:active, #${POPUP_ID_ACU} .button:active {
+                        transform: translateY(0) !important;
+                        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+                    }
+                    #${POPUP_ID_ACU} button:disabled, #${POPUP_ID_ACU} .button:disabled {
+                        opacity: 0.45 !important;
+                        cursor: not-allowed !important;
+                        transform: none !important;
+                        box-shadow: none !important;
+                    }
 
-                    /* 主按钮：蓝色强调 */
+                    /* 主按钮：强调色填充 */
                     #${POPUP_ID_ACU} button.primary, #${POPUP_ID_ACU} .button.primary {
-                        border-color: rgba(37, 99, 235, 0.30);
-                        background: rgba(37, 99, 235, 0.08);
-                        color: var(--acu-accent);
+                        background: var(--acu-accent) !important;
+                        border-color: var(--acu-accent) !important;
+                        color: var(--acu-checkbox-checked-icon, #ffffff) !important;
+                        font-weight: 600 !important;
+                        box-shadow: 0 1px 3px var(--acu-accent-glow) !important;
                     }
                     #${POPUP_ID_ACU} button.primary:hover, #${POPUP_ID_ACU} .button.primary:hover {
-                        background: rgba(37, 99, 235, 0.14);
-                        border-color: rgba(37, 99, 235, 0.45);
+                        filter: brightness(1.08) !important;
+                        box-shadow: 0 3px 10px var(--acu-accent-glow-2) !important;
+                        border-color: var(--acu-accent) !important;
+                        color: var(--acu-checkbox-checked-icon, #ffffff) !important;
                     }
                     
                     /* 警告/危险 */
@@ -38227,14 +38474,41 @@ const MAIN_POPUP_CSS_ACU = `
                         height: 40px;
                     }
 
-                    /* 数据管理按钮组：2×2 / 3×3 网格，等宽等高（不随文字长度变化） */
+                    /* 数据管理按钮组：flex-wrap 自然宽度，按内容适配 */
                     #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons {
-                        display: grid !important; /* 覆盖 .button-group 的 flex，避免变成“一排下来” */
-                        gap: 12px !important;
-                        align-items: stretch;
-                        justify-items: stretch;
+                        display: flex !important;
+                        flex-wrap: wrap !important;
+                        gap: 10px !important;
+                        align-items: center;
+                        justify-content: center;
                         margin-top: 0;
                         min-width: 0;
+                    }
+
+                    #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
+                    #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
+                        width: auto !important;
+                        min-width: fit-content !important;
+                        height: auto !important;
+                        min-height: 36px !important;
+                        padding: 8px 16px !important;
+                        border-radius: 6px !important;
+                        font-size: 0.92em !important;
+                        font-weight: 500 !important;
+                        display: inline-flex !important;
+                        align-items: center !important;
+                        justify-content: center !important;
+                        white-space: nowrap !important;
+                        background: var(--acu-bg-1) !important;
+                        border: 1px solid var(--acu-border-2) !important;
+                        color: var(--acu-text-2) !important;
+                        box-shadow: none !important;
+                    }
+                    #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button:hover,
+                    #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button:hover {
+                        background: var(--acu-bg-2) !important;
+                        border-color: var(--acu-border) !important;
+                        color: var(--acu-text-1) !important;
                     }
                     #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons.acu-cols-2 {
                         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -38270,7 +38544,7 @@ const MAIN_POPUP_CSS_ACU = `
                         border-color: var(--acu-border) !important;
                         color: var(--acu-text-1) !important;
                     }
-                    
+
                     #${POPUP_ID_ACU} .button-group {
                         display: flex;
                         flex-wrap: wrap;
@@ -38282,6 +38556,29 @@ const MAIN_POPUP_CSS_ACU = `
                     #${POPUP_ID_ACU} .acu-card > div:has(> .checkbox-group) + div:has(> .checkbox-group),
                     #${POPUP_ID_ACU} .acu-card > .checkbox-group + .checkbox-group {
                         margin-top: 4px;
+                    }
+                    /* checkbox-group 网格容器：当 card 内有多组 checkbox-group 时自动网格排列 */
+                    #${POPUP_ID_ACU} .acu-card > div[style*="flex-direction: column"]:has(> .checkbox-group:nth-child(2)) {
+                        display: grid !important;
+                        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                        gap: 6px !important;
+                    }
+
+                    /* ═══ 勾选条目：轻量化设计 ═══ */
+                    #${POPUP_ID_ACU} .checkbox-group {
+                        display: flex !important;
+                        align-items: center !important;
+                        gap: 8px !important;
+                        padding: 7px 10px !important;
+                        border-radius: 6px !important;
+                        border: 1px solid transparent !important;
+                        background: transparent !important;
+                        margin-bottom: 2px !important;
+                        transition: background 0.15s ease, border-color 0.15s ease !important;
+                    }
+                    #${POPUP_ID_ACU} .checkbox-group:hover {
+                        background: var(--acu-bg-2) !important;
+                        border-color: var(--acu-border) !important;
                     }
 
                     /* 兼容旧类名：保证“只来自插件自身”的统一观感 */
@@ -38312,7 +38609,7 @@ const MAIN_POPUP_CSS_ACU = `
                         margin-bottom: 6px;
                     }
                     
-                    /* ✅ 复选框（浅色管理台风格） */
+                    /* ═══ 复选框：精致典雅风格 ═══ */
                     #${POPUP_ID_ACU} input[type="checkbox"] {
                         -webkit-appearance: none !important;
                         appearance: none !important;
@@ -38321,16 +38618,17 @@ const MAIN_POPUP_CSS_ACU = `
                         height: 18px !important;
                         min-width: 18px !important;
                         min-height: 18px !important;
-                        border-radius: 4px !important;
-                        border: 1px solid var(--acu-border-2) !important;
+                        border-radius: 5px !important;
+                        border: 1.5px solid var(--acu-border-2) !important;
                         background-color: var(--acu-checkbox-bg, var(--acu-control-bg, var(--acu-bg-1))) !important;
                         background-image: none !important;
                         box-shadow: none !important;
                         margin: 0 !important;
                         cursor: pointer !important;
                         vertical-align: middle !important;
-                        transition: background-color 0.15s ease, border-color 0.15s ease !important;
-                        position: relative;
+                        transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+                        position: relative !important;
+                        flex-shrink: 0 !important;
                     }
                     /* 关键：禁用外部/浏览器可能注入的伪元素勾选样式 */
                     #${POPUP_ID_ACU} input[type="checkbox"]::before,
@@ -38341,22 +38639,32 @@ const MAIN_POPUP_CSS_ACU = `
                     #${POPUP_ID_ACU} input[type="checkbox"]:checked::before {
                         content: "" !important;
                         display: block !important;
-                        position: absolute;
-                        inset: 2px;
+                        position: absolute !important;
+                        top: 50% !important;
+                        left: 50% !important;
+                        transform: translate(-50%, -50%) !important;
+                        width: 12px !important;
+                        height: 10px !important;
                         background-color: var(--acu-checkbox-checked-icon, #ffffff) !important;
-                        -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 5l3 3 7-7'/%3E%3C/svg%3E");
-                        mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M1 5l3 3 7-7'/%3E%3C/svg%3E");
-                        -webkit-mask-repeat: no-repeat;
-                        mask-repeat: no-repeat;
-                        -webkit-mask-position: center;
-                        mask-position: center;
-                        -webkit-mask-size: 12px 10px;
-                        mask-size: 12px 10px;
+                        -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M1 5l3 3 7-7'/%3E%3C/svg%3E") !important;
+                        mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M1 5l3 3 7-7'/%3E%3C/svg%3E") !important;
+                        -webkit-mask-repeat: no-repeat !important;
+                        mask-repeat: no-repeat !important;
+                        -webkit-mask-position: center !important;
+                        mask-position: center !important;
+                        -webkit-mask-size: 12px 10px !important;
+                        mask-size: 12px 10px !important;
+                        transition: transform 0.15s ease !important;
                     }
-                    /* 勾选状态：主题背景 + 主题图标色 */
+                    /* 勾选状态：主题背景 + 微缩放反馈 */
                     #${POPUP_ID_ACU} input[type="checkbox"]:checked {
                         border-color: var(--acu-checkbox-checked-border, var(--acu-accent)) !important;
                         background-color: var(--acu-checkbox-checked-bg, var(--acu-accent)) !important;
+                        transform: scale(1.05) !important;
+                    }
+                    /* 点击瞬间的微缩放 */
+                    #${POPUP_ID_ACU} input[type="checkbox"]:active {
+                        transform: scale(0.92) !important;
                     }
                     #${POPUP_ID_ACU} input[type="checkbox"]:disabled {
                         opacity: 0.45 !important;
@@ -38367,8 +38675,9 @@ const MAIN_POPUP_CSS_ACU = `
                         outline-offset: 2px !important;
                     }
                     /* 位置微调（不改变外观规则） */
-                    #${POPUP_ID_ACU} .checkbox-group input[type="checkbox"] { margin-top: 2px !important; }
-                    #${POPUP_ID_ACU} .checkbox-group label { margin: 0; color: var(--acu-text-1); font-size: 13px; font-weight: 600; }
+                    #${POPUP_ID_ACU} .checkbox-group input[type="checkbox"] { margin-top: 0 !important; }
+                    #${POPUP_ID_ACU} .checkbox-group label { margin: 0 !important; color: var(--acu-text-2) !important; font-size: 13px !important; font-weight: 500 !important; cursor: pointer !important; line-height: 1.4 !important; }
+                    #${POPUP_ID_ACU} .checkbox-group:hover label { color: var(--acu-text-1) !important; }
 
                     /* Toggle switch（剧情推进） */
                     #${POPUP_ID_ACU} .toggle-switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
@@ -38485,9 +38794,10 @@ const MAIN_POPUP_CSS_ACU = `
                     }
                     #${POPUP_ID_ACU} .qrf_radio_group input[type="radio"] {
                         width: auto !important;
-                        margin: 0;
-                        accent-color: var(--acu-radio-accent, var(--acu-accent));
-                        background: var(--acu-radio-bg, var(--acu-control-bg, var(--acu-bg-1)));
+                        margin: 0 !important;
+                        accent-color: var(--acu-radio-accent, var(--acu-accent)) !important;
+                        background: var(--acu-radio-bg, var(--acu-control-bg, var(--acu-bg-1))) !important;
+                        cursor: pointer !important;
                     }
                     #${POPUP_ID_ACU} .qrf_radio_group label { margin: 0 !important; color: var(--acu-text-2); font-weight: 500; }
                     #${POPUP_ID_ACU} .qrf_worldbook_list, #${POPUP_ID_ACU} .qrf_worldbook_entry_list {
@@ -38567,15 +38877,158 @@ const MAIN_POPUP_CSS_ACU = `
                         margin-left: 8px;
                         padding: 4px 10px;
                         border-radius: 999px;
-                        border: 1px solid rgba(255, 107, 107, 0.35);
-                        background: rgba(255, 107, 107, 0.20);
-                        color: #fff;
+                        border: 1px solid rgba(255, 107, 107, 0.35) !important;
+                        background: rgba(255, 107, 107, 0.20) !important;
+                        color: #fff !important;
                         cursor: pointer;
                         font-weight: 650;
                         white-space: nowrap;
+                        box-shadow: none !important;
                     }
 
-                    /* 响应式：移动端优先解决"超窄 + 两侧空白" -> 让内容尽量占满可用宽度 */
+                    /* ═══════════════════════════════════════════════════════════════
+                       工具类系统 — 替代 200+ 处 inline style
+                       ═══════════════════════════════════════════════════════════════ */
+
+                    /* 布局 */
+                    #${POPUP_ID_ACU} .acu-row { display: flex; align-items: center; gap: 10px; }
+                    #${POPUP_ID_ACU} .acu-row-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+                    #${POPUP_ID_ACU} .acu-row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+                    #${POPUP_ID_ACU} .acu-col { display: flex; flex-direction: column; gap: 8px; }
+                    #${POPUP_ID_ACU} .acu-col-sm { display: flex; flex-direction: column; gap: 6px; }
+                    #${POPUP_ID_ACU} .acu-grid-auto { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+
+                    /* 子区块（替代 settings-section 的 inline style） */
+                    #${POPUP_ID_ACU} .acu-section {
+                        padding: 16px;
+                        border-radius: 8px;
+                        background: var(--acu-bg-2);
+                        border: 1px solid var(--acu-border);
+                        margin-bottom: 16px;
+                    }
+                    #${POPUP_ID_ACU} .acu-section:last-child { margin-bottom: 0; }
+                    #${POPUP_ID_ACU} .acu-section-title {
+                        margin: 0 0 12px 0;
+                        color: var(--acu-text-1);
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+
+                    /* 分隔线 */
+                    #${POPUP_ID_ACU} .acu-divider {
+                        border: none;
+                        border-top: 1px solid var(--acu-border);
+                        margin: 14px 0;
+                    }
+                    #${POPUP_ID_ACU} .acu-divider-dashed {
+                        border: none;
+                        border-top: 1px dashed var(--acu-border);
+                        margin: 12px 0;
+                    }
+
+                    /* 按钮 */
+                    #${POPUP_ID_ACU} .acu-btn-full { width: 100%; }
+                    #${POPUP_ID_ACU} .acu-btn-icon {
+                        width: 32px; height: 32px; padding: 0;
+                        display: inline-flex; align-items: center; justify-content: center;
+                        border-radius: 6px; border: 1px solid var(--acu-border-2);
+                        background: var(--acu-bg-1); color: var(--acu-text-3);
+                        cursor: pointer; transition: all 0.15s ease;
+                    }
+                    #${POPUP_ID_ACU} .acu-btn-icon:hover {
+                        background: var(--acu-bg-2); color: var(--acu-text-1);
+                        border-color: var(--acu-border);
+                    }
+
+                    /* 徽章 */
+                    #${POPUP_ID_ACU} .acu-badge {
+                        padding: 2px 8px;
+                        border-radius: 999px;
+                        font-size: 0.75em;
+                        font-weight: 600;
+                        white-space: nowrap;
+                    }
+                    #${POPUP_ID_ACU} .acu-badge-accent {
+                        background: var(--acu-accent-glow);
+                        color: var(--acu-accent);
+                        border: 1px solid var(--acu-accent);
+                    }
+
+                    /* 信息面板（占位符说明等） */
+                    #${POPUP_ID_ACU} .acu-info-panel {
+                        padding: 10px 12px;
+                        background: var(--acu-bg-2);
+                        border-radius: 6px;
+                        border-left: 3px solid var(--acu-text-3);
+                        margin-bottom: 12px;
+                    }
+                    #${POPUP_ID_ACU} .acu-info-panel code {
+                        background: var(--acu-bg-3);
+                        padding: 1px 4px;
+                        border-radius: 3px;
+                        font-size: 0.9em;
+                    }
+
+                    /* 结果面板 */
+                    #${POPUP_ID_ACU} .acu-result-panel {
+                        padding: 12px;
+                        background: var(--acu-bg-2);
+                        border-radius: 6px;
+                        border: 1px solid var(--acu-border);
+                        max-height: 300px;
+                        overflow-y: auto;
+                        white-space: pre-wrap;
+                        font-size: 0.9em;
+                    }
+
+                    /* 表格 */
+                    #${POPUP_ID_ACU} .acu-table {
+                        width: 100%;
+                        border-collapse: collapse;
+                        font-size: 0.9em;
+                    }
+                    #${POPUP_ID_ACU} .acu-table th {
+                        text-align: left;
+                        padding: 6px 8px;
+                        border-bottom: 1px solid var(--acu-border);
+                        color: var(--acu-text-3);
+                        font-weight: 600;
+                        font-size: 0.9em;
+                    }
+                    #${POPUP_ID_ACU} .acu-table td {
+                        padding: 6px 8px;
+                        border-bottom: 1px solid var(--acu-bg-3);
+                    }
+                    #${POPUP_ID_ACU} .acu-table th:not(:first-child),
+                    #${POPUP_ID_ACU} .acu-table td:not(:first-child) {
+                        text-align: center;
+                    }
+
+                    /* 标签（inline label） */
+                    #${POPUP_ID_ACU} .acu-label {
+                        font-weight: 500;
+                        font-size: 0.9em;
+                        margin-bottom: 4px;
+                        display: block;
+                        color: var(--acu-text-2);
+                    }
+
+                    /* 顶部标题行（替代 optimization/plot 的 flex+border-bottom） */
+                    #${POPUP_ID_ACU} .acu-card-header {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        margin-bottom: 16px;
+                        padding-bottom: 12px;
+                        border-bottom: 1px solid var(--acu-border);
+                    }
+                    #${POPUP_ID_ACU} .acu-card-header h3 { margin: 0; color: var(--acu-text-1); }
+                    #${POPUP_ID_ACU} .acu-card-header .notes { margin: 4px 0 0 0; }
+
+                    /* ═══ 响应式 ≤1100px：导航变横向胶囊 ═══ */
                     @media screen and (max-width: 1100px) {
                         #${POPUP_ID_ACU} .acu-layout {
                             grid-template-columns: 1fr;
@@ -38589,17 +39042,36 @@ const MAIN_POPUP_CSS_ACU = `
                             align-items: center;
                             overflow-x: auto;
                             overflow-y: hidden;
-                            gap: 8px;
-                            padding: 10px;
+                            gap: 4px;
+                            padding: 6px;
                             max-height: none;
                             flex-shrink: 0;
                             -webkit-overflow-scrolling: touch;
                             background: var(--acu-bg-1);
                             border-color: var(--acu-border);
+                            border-radius: 8px;
                         }
                         #${POPUP_ID_ACU} .acu-nav-section-title { display: none; }
-                        #${POPUP_ID_ACU} .acu-tab-button { width: auto; white-space: nowrap; }
+                        #${POPUP_ID_ACU} .acu-tab-button {
+                            width: auto !important;
+                            white-space: nowrap !important;
+                            padding: 6px 12px !important;
+                            font-size: 12px !important;
+                            border-radius: 20px !important;
+                        }
+                        #${POPUP_ID_ACU} .acu-tab-button::after { display: none !important; }
+                        #${POPUP_ID_ACU} .acu-tab-button.active {
+                            background: var(--acu-accent) !important;
+                            border-color: var(--acu-accent) !important;
+                            color: var(--acu-checkbox-checked-icon, #ffffff) !important;
+                            box-shadow: none !important;
+                        }
                         #${POPUP_ID_ACU} .acu-main { min-height: 0; }
+                        /* 窄屏下 checkbox-group 容器使用2列网格 */
+                        #${POPUP_ID_ACU} .acu-card > div[style*="flex-direction: column"]:has(> .checkbox-group:nth-child(2)) {
+                            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+                            gap: 2px !important;
+                        }
                         #${POPUP_ID_ACU} #acu-tab-table .acu-data-template-grid {
                             grid-template-columns: 1fr !important;
                             gap: 12px !important;
@@ -38625,24 +39097,21 @@ const MAIN_POPUP_CSS_ACU = `
                         #${POPUP_ID_ACU} #acu-tab-datamgmt .acu-data-isolation-row > button {
                             width: 100%;
                         }
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons.acu-cols-3 {
-                            grid-template-columns: repeat(2, minmax(0, 1fr));
-                        }
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
                             height: auto !important;
-                            min-height: 40px !important;
-                            padding: 8px 10px !important;
+                            min-height: 34px !important;
+                            padding: 6px 10px !important;
                             white-space: normal !important;
                             line-height: 1.35 !important;
                         }
                     }
                     
-                    /* 手机横屏/小平板 (≤768px) */
+                    /* ═══ 手机横屏/小平板 (≤768px) ═══ */
                     @media screen and (max-width: 768px) {
                         #${POPUP_ID_ACU} {
-                            padding: 10px;
-                            padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+                            padding: 8px;
+                            padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
                             max-width: 100vw;
                             overflow-x: hidden;
                             overflow-y: auto;
@@ -38650,26 +39119,41 @@ const MAIN_POPUP_CSS_ACU = `
                             max-height: 100%;
                         }
                         #${POPUP_ID_ACU} .acu-layout {
-                            gap: 10px;
-                            margin-top: 10px;
+                            gap: 8px;
+                            margin-top: 8px;
                             min-height: 0;
                         }
-                        #${POPUP_ID_ACU} .acu-header { padding: 10px; gap: 8px; flex-shrink: 0; }
-                        #${POPUP_ID_ACU} h2#updater-main-title-acu { font-size: 14px; }
-                        #${POPUP_ID_ACU} .acu-card { padding: 12px; margin-bottom: 10px; }
-                        #${POPUP_ID_ACU} .acu-card h3 { font-size: 13px; margin-bottom: 10px; padding-bottom: 8px; }
+                        #${POPUP_ID_ACU} .acu-header { padding: 8px 10px; gap: 6px; flex-shrink: 0; border-radius: 6px; }
+                        #${POPUP_ID_ACU} h2#updater-main-title-acu { font-size: 13px; }
+                        #${POPUP_ID_ACU} .acu-card { padding: 10px; margin-bottom: 8px; border-radius: 6px; }
+                        #${POPUP_ID_ACU} .acu-card h3 { font-size: 12px; margin-bottom: 8px; padding-bottom: 6px; }
                         #${POPUP_ID_ACU} .acu-tabs-nav {
-                            padding: 8px;
-                            gap: 6px;
+                            padding: 4px;
+                            gap: 3px;
                             flex-shrink: 0;
                             max-height: none;
                             background: var(--acu-bg-1);
                             border-color: var(--acu-border);
+                            border-radius: 20px;
+                        }
+                        #${POPUP_ID_ACU} .acu-tab-button {
+                            padding: 5px 10px !important;
+                            font-size: 11px !important;
+                        }
+                        /* 768px以下 checkbox-group 更紧凑 */
+                        #${POPUP_ID_ACU} .checkbox-group {
+                            padding: 5px 8px !important;
+                            gap: 6px !important;
+                        }
+                        #${POPUP_ID_ACU} .checkbox-group label { font-size: 12px !important; }
+                        /* checkbox 网格更窄 */
+                        #${POPUP_ID_ACU} .acu-card > div[style*="flex-direction: column"]:has(> .checkbox-group:nth-child(2)) {
+                            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)) !important;
                         }
                         #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-header-row {
                             flex-wrap: wrap;
                             align-items: flex-start !important;
-                            gap: 10px !important;
+                            gap: 8px !important;
                         }
                         #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-header-row > div:last-child {
                             width: 100%;
@@ -38677,22 +39161,32 @@ const MAIN_POPUP_CSS_ACU = `
                         }
                     }
                     
+                    /* ═══ 手机竖屏 (≤520px) ═══ */
                     @media screen and (max-width: 520px) {
                         #${POPUP_ID_ACU} {
-                            padding: 8px;
-                            padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+                            padding: 6px;
+                            padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
                         }
-                        #${POPUP_ID_ACU} .acu-layout { gap: 8px; margin-top: 8px; min-height: 0; }
+                        #${POPUP_ID_ACU} .acu-layout { gap: 6px; margin-top: 6px; min-height: 0; }
                         #${POPUP_ID_ACU} .acu-main { min-height: 0; }
-                        #${POPUP_ID_ACU} .acu-grid, #${POPUP_ID_ACU} .acu-grid-2x2 { grid-template-columns: 1fr; gap: 8px; }
+                        #${POPUP_ID_ACU} .acu-grid, #${POPUP_ID_ACU} .acu-grid-2x2 { grid-template-columns: 1fr; gap: 6px; }
                         #${POPUP_ID_ACU} .acu-card[style*="grid-column: span 2"] { grid-column: auto !important; }
-                        #${POPUP_ID_ACU} .input-group { flex-direction: column; align-items: stretch; gap: 6px; }
+                        #${POPUP_ID_ACU} .input-group { flex-direction: column; align-items: stretch; gap: 4px; }
                         #${POPUP_ID_ACU} .input-group button { width: 100%; }
-                        #${POPUP_ID_ACU} .button-group { flex-direction: column; gap: 6px; }
-                        #${POPUP_ID_ACU} .button-group button { width: 100%; min-height: 32px; padding: 8px 12px; }
+                        #${POPUP_ID_ACU} .button-group { flex-wrap: wrap; gap: 4px; }
+                        #${POPUP_ID_ACU} .button-group button { flex: 1 1 auto; min-height: 32px; padding: 6px 8px; }
                         #${POPUP_ID_ACU} table { display: block; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; font-size: 12px; }
-                        #${POPUP_ID_ACU} table th, #${POPUP_ID_ACU} table td { padding: 4px 6px !important; }
-                        #${POPUP_ID_ACU} .checkbox-group { padding: 10px; gap: 8px; }
+                        #${POPUP_ID_ACU} table th, #${POPUP_ID_ACU} table td { padding: 3px 5px !important; }
+                        /* 极窄 checkbox：2列网格 + 紧凑行高 */
+                        #${POPUP_ID_ACU} .checkbox-group {
+                            padding: 4px 6px !important;
+                            gap: 5px !important;
+                        }
+                        #${POPUP_ID_ACU} .checkbox-group label { font-size: 11px !important; line-height: 1.3 !important; }
+                        #${POPUP_ID_ACU} .acu-card > div[style*="flex-direction: column"]:has(> .checkbox-group:nth-child(2)) {
+                            grid-template-columns: 1fr 1fr !important;
+                            gap: 1px !important;
+                        }
                         #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-scope-grid,
                         #${POPUP_ID_ACU} #acu-tab-corefunc .acu-plot-task-layout {
                             grid-template-columns: 1fr !important;
@@ -38745,105 +39239,106 @@ const MAIN_POPUP_CSS_ACU = `
                             height: 36px;
                         }
                         
-                        /* 移动端：仍保持网格（2列更好用），避免变回单列长列表 */
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons.acu-cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons.acu-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+                        /* 移动端：按钮自然宽度flex-wrap */
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
-                            height: 40px !important;
+                            min-height: 36px !important;
                             font-size: 0.9em !important;
-                            padding: 0 12px !important;
+                            padding: 6px 12px !important;
                         }
                     }
                     
-                    /* 极窄屏模式 (≤420px) */
+                    /* ═══ 极窄屏 (≤420px) ═══ */
                     @media screen and (max-width: 420px) {
-                        #${POPUP_ID_ACU} { 
-                            padding: 6px; 
-                            padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
-                        }
-                        #${POPUP_ID_ACU} .acu-layout { gap: 6px; margin-top: 6px; min-height: 0; }
-                        #${POPUP_ID_ACU} .acu-main { min-height: 0; }
-                        #${POPUP_ID_ACU} .acu-header { padding: 8px; flex-shrink: 0; }
-                        #${POPUP_ID_ACU} h2#updater-main-title-acu { font-size: 13px; line-height: 1.3; }
-                        #${POPUP_ID_ACU} .acu-card { padding: 10px; margin-bottom: 8px; border-radius: 10px; }
-                        #${POPUP_ID_ACU} .acu-card h3 { font-size: 12px; margin-bottom: 8px; padding-bottom: 6px; }
-                        #${POPUP_ID_ACU} .acu-tabs-nav { padding: 6px; gap: 4px; flex-shrink: 0; }
-                        #${POPUP_ID_ACU} .acu-tab-button { padding: 8px 10px; font-size: 12px; }
-                        #${POPUP_ID_ACU} label { font-size: 11px; margin-bottom: 4px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
-                            padding: 8px 10px; 
-                            border-radius: 8px;
-                        }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
-                            padding: 6px 10px; 
-                            min-height: 32px;
-                            border-radius: 8px;
-                        }
-                        #${POPUP_ID_ACU} .checkbox-group { padding: 8px; gap: 6px; border-radius: 8px; }
-                        #${POPUP_ID_ACU} .checkbox-group label { font-size: 12px; }
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
-                            height: 36px !important;
-                            font-size: 0.85em !important;
-                            padding: 0 10px !important;
-                            border-radius: 8px !important;
-                        }
-                    }
-                    
-                    /* 超小屏幕 (≤360px) */
-                    @media screen and (max-width: 360px) {
                         #${POPUP_ID_ACU} { 
                             padding: 4px; 
                             padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 4px; margin-top: 4px; min-height: 0; }
                         #${POPUP_ID_ACU} .acu-main { min-height: 0; }
-                        #${POPUP_ID_ACU} .acu-header { padding: 6px; border-radius: 8px; flex-shrink: 0; }
-                        #${POPUP_ID_ACU} h2#updater-main-title-acu { font-size: 12px; }
-                        #${POPUP_ID_ACU} .acu-header-sub { font-size: 10px; margin-top: 4px; }
-                        #${POPUP_ID_ACU} .acu-card { padding: 8px; margin-bottom: 6px; border-radius: 8px; }
+                        #${POPUP_ID_ACU} .acu-header { padding: 6px 8px; flex-shrink: 0; border-radius: 6px; }
+                        #${POPUP_ID_ACU} h2#updater-main-title-acu { font-size: 12px; line-height: 1.3; }
+                        #${POPUP_ID_ACU} .acu-card { padding: 8px; margin-bottom: 6px; border-radius: 6px; }
                         #${POPUP_ID_ACU} .acu-card h3 { font-size: 11px; margin-bottom: 6px; padding-bottom: 4px; }
-                        #${POPUP_ID_ACU} .acu-tabs-nav { padding: 4px; gap: 3px; border-radius: 8px; flex-shrink: 0; }
-                        #${POPUP_ID_ACU} .acu-tab-button { padding: 6px 8px; font-size: 11px; border-radius: 6px; }
-                        #${POPUP_ID_ACU} .acu-tab-button::after { display: none; }
-                        #${POPUP_ID_ACU} label { font-size: 10px; }
+                        #${POPUP_ID_ACU} .acu-tabs-nav { padding: 3px; gap: 2px; flex-shrink: 0; border-radius: 16px; }
+                        #${POPUP_ID_ACU} .acu-tab-button { padding: 4px 8px !important; font-size: 10px !important; }
+                        #${POPUP_ID_ACU} label { font-size: 10px; margin-bottom: 3px; }
                         #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
-                            padding: 6px 8px; 
-                            font-size: 14px; /* 保持16px防止iOS缩放 */
-                            border-radius: 6px;
-                        }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
-                            padding: 5px 8px; 
-                            min-height: 28px;
-                            font-size: 11px;
-                            border-radius: 6px;
-                        }
-                        #${POPUP_ID_ACU} .checkbox-group { padding: 6px; gap: 4px; border-radius: 6px; }
-                        #${POPUP_ID_ACU} .checkbox-group label { font-size: 11px; line-height: 1.3; }
-                        #${POPUP_ID_ACU} input[type="checkbox"] { 
-                            width: 16px !important; 
-                            height: 16px !important;
-                            min-width: 16px !important;
-                            min-height: 16px !important;
-                        }
-                        #${POPUP_ID_ACU} table { font-size: 11px; }
-                        #${POPUP_ID_ACU} table th, #${POPUP_ID_ACU} table td { padding: 3px 4px !important; }
-                        #${POPUP_ID_ACU} .button-group { gap: 4px; }
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons { gap: 6px !important; }
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons.acu-cols-3,
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons.acu-cols-2 { 
-                            grid-template-columns: repeat(2, minmax(0, 1fr)); 
-                        }
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
-                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
-                            height: 32px !important;
-                            font-size: 0.8em !important;
-                            padding: 0 6px !important;
+                            padding: 6px 8px !important; 
                             border-radius: 6px !important;
                         }
-                        #${POPUP_ID_ACU} hr { margin: 8px 0; }
-                        #${POPUP_ID_ACU} .notes { font-size: 10px !important; line-height: 1.4; }
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
+                            padding: 5px 8px !important; 
+                            min-height: 28px !important;
+                            font-size: 11px !important;
+                            border-radius: 6px !important;
+                        }
+                        #${POPUP_ID_ACU} .checkbox-group {
+                            padding: 3px 5px !important;
+                            gap: 4px !important;
+                        }
+                        #${POPUP_ID_ACU} .checkbox-group label { font-size: 10px !important; line-height: 1.25 !important; }
+                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
+                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
+                            min-height: 30px !important;
+                            font-size: 0.8em !important;
+                            padding: 4px 8px !important;
+                            border-radius: 6px !important;
+                        }
+                    }
+                    
+                    /* ═══ 超小屏 (≤360px) ═══ */
+                    @media screen and (max-width: 360px) {
+                        #${POPUP_ID_ACU} { 
+                            padding: 3px; 
+                            padding-bottom: calc(3px + env(safe-area-inset-bottom, 0px));
+                        }
+                        #${POPUP_ID_ACU} .acu-layout { gap: 3px; margin-top: 3px; min-height: 0; }
+                        #${POPUP_ID_ACU} .acu-main { min-height: 0; }
+                        #${POPUP_ID_ACU} .acu-header { padding: 5px 6px; border-radius: 6px; flex-shrink: 0; }
+                        #${POPUP_ID_ACU} h2#updater-main-title-acu { font-size: 11px; }
+                        #${POPUP_ID_ACU} .acu-header-sub { font-size: 9px; margin-top: 2px; }
+                        #${POPUP_ID_ACU} .acu-card { padding: 6px; margin-bottom: 4px; border-radius: 6px; }
+                        #${POPUP_ID_ACU} .acu-card h3 { font-size: 10px; margin-bottom: 4px; padding-bottom: 3px; }
+                        #${POPUP_ID_ACU} .acu-tabs-nav { padding: 3px; gap: 2px; border-radius: 14px; flex-shrink: 0; }
+                        #${POPUP_ID_ACU} .acu-tab-button { padding: 3px 6px !important; font-size: 10px !important; border-radius: 12px !important; }
+                        #${POPUP_ID_ACU} .acu-tab-button::after { display: none !important; }
+                        #${POPUP_ID_ACU} label { font-size: 9px; }
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
+                            padding: 5px 6px !important; 
+                            font-size: 14px !important;
+                            border-radius: 5px !important;
+                        }
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
+                            padding: 4px 6px !important; 
+                            min-height: 26px !important;
+                            font-size: 10px !important;
+                            border-radius: 5px !important;
+                        }
+                        #${POPUP_ID_ACU} .checkbox-group {
+                            padding: 2px 4px !important;
+                            gap: 3px !important;
+                        }
+                        #${POPUP_ID_ACU} .checkbox-group label { font-size: 9px !important; line-height: 1.2 !important; }
+                        #${POPUP_ID_ACU} input[type="checkbox"] { 
+                            width: 15px !important; 
+                            height: 15px !important;
+                            min-width: 15px !important;
+                            min-height: 15px !important;
+                        }
+                        #${POPUP_ID_ACU} table { font-size: 10px; }
+                        #${POPUP_ID_ACU} table th, #${POPUP_ID_ACU} table td { padding: 2px 3px !important; }
+                        #${POPUP_ID_ACU} .button-group { gap: 3px; }
+                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons { gap: 4px !important; }
+                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
+                        #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
+                            min-height: 28px !important;
+                            font-size: 0.75em !important;
+                            padding: 3px 6px !important;
+                            border-radius: 5px !important;
+                        }
+                        #${POPUP_ID_ACU} hr { margin: 6px 0; }
+                        #${POPUP_ID_ACU} .notes { font-size: 9px !important; line-height: 1.3; }
                     }
 
                     /* 表格模板预设 */
@@ -38924,7 +39419,7 @@ const MAIN_POPUP_CSS_ACU = `
                         #${POPUP_ID_ACU} .checkbox-group label { font-size: 10px; }
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
-                            height: 28px !important;
+                            min-height: 26px !important;
                             font-size: 0.75em !important;
                         }
                     }
@@ -39474,53 +39969,19 @@ function applyTheme(themeId) {
     logDebug_ACU(`[ThemeRegistry] Applied theme: ${theme.name} (${theme.id})`);
 }
 /**
- * 实际将主题变量写入 DOM
- * 如果 popup 元素不存在，将样式直接注入到 <head> 用 #popup ID 选择器
+ * 根据主题对象生成完整的 CSS 字符串。
+ * 包含 popup 变量、window chrome 变量、toast、confirm、visualizer、customCSS。
+ * 此函数不操作 DOM，仅返回 CSS 文本。
+ * 用于：① 预注入到 popupHtml 消除 FOUC  ② applyThemeToDOM 中复用
  */
-function applyThemeToDOM(theme) {
-    // 关键：注入到 topLevelWindow 的 document，而非 iframe 的 document
-    // 因为弹窗 DOM 挂载在 topLevelWindow 中
-    const targetDoc = (topLevelWindow_ACU || window).document;
-    // 1. 注入 CSS 变量覆盖
-    // 关键：注入到 popup 内部第一个 <style> 标签之后（DOM 顺序靠后，层叠优先级更高）
-    // 如果 popup 还未挂载，则注入到 head 中作为 fallback
-    const popupEl = targetDoc.getElementById(POPUP_ID_ACU);
-    let existingStyle = targetDoc.getElementById(THEME_STYLE_ID);
-    // 找到 popup 内部的第一个 <style> 标签（MAIN_POPUP_CSS_ACU 注入的位置）
-    const innerStyle = popupEl?.querySelector('style') ?? null;
-    if (!existingStyle) {
-        existingStyle = targetDoc.createElement('style');
-        existingStyle.id = THEME_STYLE_ID;
-    }
-    // 每次都确保位置正确：注入到 popup 内部 <style> 之后
-    // 如果 existingStyle 已存在但位置不对（比如在 head 中），迁移到正确位置
-    if (innerStyle) {
-        // popup 存在且内部有 style → 插入到内部 style 之后
-        if (existingStyle !== innerStyle.nextElementSibling) {
-            innerStyle.after(existingStyle);
-        }
-    }
-    else if (popupEl) {
-        // popup 存在但内部没有 style → 插入到 popup 最前面
-        if (existingStyle.parentNode !== popupEl) {
-            popupEl.prepend(existingStyle);
-        }
-    }
-    else {
-        // popup 不存在 → fallback 到 head
-        if (existingStyle.parentNode !== targetDoc.head) {
-            targetDoc.head.appendChild(existingStyle);
-        }
-    }
+function buildThemeCSS_ACU(theme) {
     const varDeclarations = Object.entries(theme.variables)
         .map(([key, value]) => `    ${key}: ${value};`)
         .join('\n');
     let css = `#${POPUP_ID_ACU} {\n${varDeclarations}\n}`;
-    // 2. 窗口 chrome 也需要注入核心主题变量。
-    //    .acu-window 位于 #popup_acu 外部，无法继承 popup 根上的变量；
-    //    如果这里只注入 windowChromeVariables，未显式配置的主题会退回写死 fallback。
+    // 窗口 chrome 核心主题变量
     css += `\n.acu-window {\n${varDeclarations}\n}`;
-    // 3. color-scheme 和 font-family 直接注入（ID选择器优先级够高）
+    // color-scheme 和 font-family
     css += `\n#${POPUP_ID_ACU} { color-scheme: ${theme.colorScheme};`;
     if (theme.fontFamily) {
         css += ` font-family: ${theme.fontFamily};`;
@@ -39531,20 +39992,19 @@ function applyThemeToDOM(theme) {
         css += ` font-family: ${theme.fontFamily};`;
     }
     css += ` }`;
-    // 4. 追加自定义 CSS
+    // 追加自定义 CSS
     if (theme.customCSS) {
         const customCSS = theme.customCSS.replace(/#popup\b/g, `#${POPUP_ID_ACU}`);
         css += '\n' + customCSS;
     }
-    // 5. 窗口chrome变量覆盖（高于核心变量自动注入）
+    // 窗口chrome变量覆盖
     if (theme.windowChromeVariables) {
         const chromeVars = Object.entries(theme.windowChromeVariables)
             .map(([key, value]) => `    ${key}: ${value};`)
             .join('\n');
         css += `\n.acu-window {\n${chromeVars}\n}`;
     }
-    // 6. Toast变量覆盖 — 将主题核心颜色变量注入到 toast 容器作用域
-    //    确保 toast 通知跟随主题变化（toast 元素在 #popup_acu 外部，无法继承 CSS 变量）
+    // Toast 变量覆盖
     {
         const toastVarNames = [
             '--acu-accent', '--acu-bg-1', '--acu-text-1', '--acu-border',
@@ -39555,7 +40015,6 @@ function applyThemeToDOM(theme) {
             .filter(key => theme.variables[key])
             .map(key => `    ${key}: ${theme.variables[key]};`)
             .join('\n');
-        // 主题自定义 toast 变量优先级高于自动注入
         const customToastVars = theme.toastVariables
             ? Object.entries(theme.toastVariables)
                 .map(([key, value]) => `    ${key}: ${value};`)
@@ -39565,8 +40024,7 @@ function applyThemeToDOM(theme) {
             css += `\n#toast-container .acu-toast.toast {\n${toastBaseVars}${customToastVars ? '\n' + customToastVars : ''}\n}`;
         }
     }
-    // 7. 确认弹窗变量注入 — 弹窗挂载在 body 级别，不在 #popup_acu 内
-    //    将主题变量注入到确认弹窗容器选择器，使其跟随主题变化
+    // 确认弹窗变量注入
     {
         const confirmVarNames = [
             '--acu-accent', '--acu-bg-1', '--acu-bg-0', '--acu-text-1',
@@ -39587,8 +40045,7 @@ function applyThemeToDOM(theme) {
             css += `\n#${SCRIPT_ID_PREFIX_ACU}-custom-confirm-overlay,\n#${SCRIPT_ID_PREFIX_ACU}-custom-confirm {\n${confirmVars}\n}`;
         }
     }
-    // 8. Visualizer变量覆盖
-    //    可视化编辑器挂载在 #acu-visualizer-content，而不是不存在的 #acu-visualizer-root
+    // Visualizer 变量覆盖
     {
         const visualizerBaseVarNames = [
             '--acu-bg-0', '--acu-bg-1', '--acu-bg-2', '--acu-bg-3',
@@ -39611,7 +40068,49 @@ function applyThemeToDOM(theme) {
             css += `\n#acu-visualizer-content {\n${visualizerBaseVars}${vizVars ? '\n' + vizVars : ''}\n}`;
         }
     }
-    existingStyle.textContent = css;
+    return css;
+}
+/**
+ * 获取当前主题的完整 CSS 字符串（用于预注入消除 FOUC）。
+ * 在 popup 创建之前调用，确保首帧即包含正确的主题样式。
+ */
+function getThemeCSS_ACU(themeId) {
+    const id = themeId || getActiveThemeId();
+    const theme = getThemeById(id);
+    if (!theme) {
+        return buildThemeCSS_ACU(THEME_DEFAULT_LIGHT);
+    }
+    return buildThemeCSS_ACU(theme);
+}
+/**
+ * 实际将主题变量写入 DOM
+ * 复用 buildThemeCSS_ACU 生成 CSS，注入到正确位置
+ */
+function applyThemeToDOM(theme) {
+    const targetDoc = (topLevelWindow_ACU || window).document;
+    const popupEl = targetDoc.getElementById(POPUP_ID_ACU);
+    let existingStyle = targetDoc.getElementById(THEME_STYLE_ID);
+    const innerStyle = popupEl?.querySelector('style') ?? null;
+    if (!existingStyle) {
+        existingStyle = targetDoc.createElement('style');
+        existingStyle.id = THEME_STYLE_ID;
+    }
+    if (innerStyle) {
+        if (existingStyle !== innerStyle.nextElementSibling) {
+            innerStyle.after(existingStyle);
+        }
+    }
+    else if (popupEl) {
+        if (existingStyle.parentNode !== popupEl) {
+            popupEl.prepend(existingStyle);
+        }
+    }
+    else {
+        if (existingStyle.parentNode !== targetDoc.head) {
+            targetDoc.head.appendChild(existingStyle);
+        }
+    }
+    existingStyle.textContent = buildThemeCSS_ACU(theme);
 }
 // ═══════════════════════════════════════════════════════════════
 // 自定义主题管理
@@ -40063,18 +40562,18 @@ function generateThemeSelectorHTML() {
     return `
         <div class="acu-theme-selector" style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
             <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select" 
-                    style="padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--input-background); color: var(--input-text-color); font-size: 12px; cursor: pointer; max-width: 140px;"
+                    style="padding: 4px 8px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-control-bg, #ffffff) !important; color: var(--acu-text-1, #1a2332) !important; font-size: 12px !important; cursor: pointer !important; max-width: 140px !important; font-family: inherit !important;"
                     title="切换界面主题">
                 ${options}
             </select>
             <div class="acu-theme-actions" style="display: flex; gap: 4px;">
                 <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import" 
-                        style="padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--button-background); color: var(--text_secondary); font-size: 11px; cursor: pointer;"
+                        style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导入自定义主题">
                     <i class="fa-solid fa-upload" style="font-size: 11px;"></i>
                 </button>
                 <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export" 
-                        style="padding: 4px 6px; border-radius: 4px; border: 1px solid var(--border-normal); background: var(--button-background); color: var(--text_secondary); font-size: 11px; cursor: pointer;"
+                        style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导出当前主题模板（完整可编辑版）">
                     <i class="fa-solid fa-download" style="font-size: 11px;"></i>
                 </button>
@@ -40227,16 +40726,16 @@ function generateThemeSelectorHTMLForChrome() {
         return `<option value="${t.id}" ${selected}>${t.name}${builtin}</option>`;
     }).join('');
     return `<div class="acu-chrome-theme-selector" style="display: flex; align-items: center; gap: 4px;">
-        <select id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-select" style="padding: 2px 6px; border-radius: 4px; border: 1px solid var(--acu-panel-border, #e0e4ea); background: var(--acu-panel-bg, #f5f7fa); color: var(--acu-panel-text, #1a2332); font-size: 11px; cursor: pointer; max-width: 120px; height: 26px;">
+        <select id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-select" style="padding: 2px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-panel-border, #e0e4ea) !important; background: var(--acu-panel-bg, #f5f7fa) !important; color: var(--acu-panel-text, #1a2332) !important; font-size: 11px !important; cursor: pointer !important; max-width: 120px !important; height: 26px !important; font-family: inherit !important;">
             ${options}
         </select>
-        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-delete" style="width: 26px; height: 26px; padding: 0; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;${BUILTIN_THEME_IDS.has(currentId) ? ' opacity: 0.3; pointer-events: none;' : ''}" title="${BUILTIN_THEME_IDS.has(currentId) ? '内置主题不可删除' : '删除当前自定义主题'}">
+        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-delete" style="width: 26px; height: 26px; padding: 0; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;${BUILTIN_THEME_IDS.has(currentId) ? ' opacity: 0.3; pointer-events: none;' : ''}" title="${BUILTIN_THEME_IDS.has(currentId) ? '内置主题不可删除' : '删除当前自定义主题'}">
             <i class="fa-solid fa-trash" style="font-size: 10px;"></i>
         </button>
-        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-import" style="width: 26px; height: 26px; padding: 0; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;" title="导入自定义主题">
+        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-import" style="width: 26px; height: 26px; padding: 0; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;" title="导入自定义主题">
             <i class="fa-solid fa-upload" style="font-size: 11px;"></i>
         </button>
-        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-export" style="width: 26px; height: 26px; padding: 0; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;" title="导出当前主题模板（完整可编辑版）">
+        <button id="${SCRIPT_ID_PREFIX_ACU}-chrome-theme-export" style="width: 26px; height: 26px; padding: 0; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--acu-panel-text-mute, #8896a8); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px;" title="导出当前主题模板（完整可编辑版）">
             <i class="fa-solid fa-download" style="font-size: 11px;"></i>
         </button>
     </div>`;
@@ -40250,9 +40749,14 @@ async function openAutoCardPopup_ACU() {
     // The state is managed by background event listeners. The popup should only display the current state.
     // Calling reset here could cause race conditions or incorrect state wipes.
     loadSettingsAndRefreshUI_ACU(); // Load latest settings into UI
+    // ═══ 关键：在创建窗口前预加载自定义主题并生成主题CSS ═══
+    // 这样主题CSS可以嵌入popupHtml，消除首帧闪变（FOUC）
+    loadCustomThemes();
+    const prebuiltThemeCSS = getThemeCSS_ACU();
     const popupHtml = `
             <div id="${POPUP_ID_ACU}" class="auto-card-updater-popup">
                 <style>${MAIN_POPUP_CSS_ACU}</style>
+                <style id="acu-theme-override">${prebuiltThemeCSS}</style>
 
                 <div class="acu-header">
                     <h2 id="updater-main-title-acu">当前聊天：${escapeHtml_ACU$1(currentChatFileIdentifier_ACU || '未知')}</h2>
@@ -40322,8 +40826,8 @@ async function openAutoCardPopup_ACU() {
             if ($oldThemeBtn.length) {
                 $oldThemeBtn.replaceWith(generateThemeSelectorHTMLForChrome());
             }
-            // 加载自定义主题并应用当前主题
-            loadCustomThemes();
+            // 主题已在创建窗口前预加载（loadCustomThemes + getThemeCSS_ACU），
+            // 此处仅调用 applyTheme 确保 DOM 中 <style> 元素位置正确（用于后续动态切换）
             applyTheme();
             bindThemeSelectorEvents();
             $popupInstance_ACU.off('acu_plot_settings_refresh').on('acu_plot_settings_refresh', function (_event, plotSettingsOverride = null) {
@@ -41466,45 +41970,15 @@ function findTableLatestFloor(targetSheetKey, tableName) {
     const chat = SillyTavern_API_ACU.chat;
     if (!chat || chat.length === 0)
         return -1;
-    const isSummaryTable = isSummaryOrOutlineTable_ACU(tableName);
-    const isolationKey = getCurrentIsolationKey_ACU();
-    // 从最新消息向前遍历，找到第一个包含该表数据的楼层
-    for (let i = chat.length - 1; i >= 0; i--) {
-        const msg = chat[i];
-        if (msg.is_user)
-            continue;
-        let hasTableData = false;
-        // 优先：新格式（按标签分组）
-        if (msg.TavernDB_ACU_IsolatedData && msg.TavernDB_ACU_IsolatedData[isolationKey]) {
-            const tagData = msg.TavernDB_ACU_IsolatedData[isolationKey];
-            const independentData = tagData.independentData || {};
-            if (independentData[targetSheetKey]) {
-                hasTableData = true;
-            }
-        }
-        // 兼容：旧格式
-        if (!hasTableData) {
-            const msgIdentity = msg.TavernDB_ACU_Identity;
-            const isLegacyMatch = settings_ACU.dataIsolationEnabled
-                ? msgIdentity === settings_ACU.dataIsolationCode
-                : !msgIdentity;
-            if (isLegacyMatch) {
-                const hasLegacyData = (msg.TavernDB_ACU_IndependentData && msg.TavernDB_ACU_IndependentData[targetSheetKey]) ||
-                    (isSummaryTable
-                        ? (msg.TavernDB_ACU_SummaryData && msg.TavernDB_ACU_SummaryData[targetSheetKey])
-                        : (msg.TavernDB_ACU_Data && msg.TavernDB_ACU_Data[targetSheetKey]));
-                hasTableData = !!hasLegacyData;
-            }
-        }
-        if (hasTableData)
-            return i;
-    }
-    // 找不到该表的楼层，回退到最新 AI 楼层
-    for (let i = chat.length - 1; i >= 0; i--) {
-        if (!chat[i].is_user)
-            return i;
-    }
-    return -1;
+    const history = resolveTableHistoryStateFromChat_ACU(chat, {
+        sheetKey: targetSheetKey,
+        isSummaryTable: isSummaryOrOutlineTable_ACU(tableName),
+        isolationKey: getCurrentIsolationKey_ACU(),
+        settings: settings_ACU,
+    });
+    if (history.latestDataMessageIndex !== -1)
+        return history.latestDataMessageIndex;
+    return history.latestAiMessageIndex;
 }
 /**
  * 保存表格到最新楼层并刷新世界书（updateRow / insertRow / deleteRow 共享）
@@ -41514,7 +41988,15 @@ async function saveToLatestFloorAndRefresh(targetSheetKey, tableName, ctx, metho
     if (tableLatestFloorIndex !== -1) {
         if (!skipChatSave) {
             logDebug_ACU(`${methodName}: Saving [${tableName}] to its latest floor ${tableLatestFloorIndex}`);
-            await saveIndependentTableToChatHistory_ACU(tableLatestFloorIndex, [targetSheetKey], [targetSheetKey], true);
+            const chat = SillyTavern_API_ACU.chat;
+            const history = resolveTableHistoryStateFromChat_ACU(chat, {
+                sheetKey: targetSheetKey,
+                isSummaryTable: isSummaryOrOutlineTable_ACU(tableName),
+                isolationKey: getCurrentIsolationKey_ACU(),
+                settings: settings_ACU,
+            });
+            const shouldTrackAsUpdate = history.latestDataMessageIndex === -1;
+            await saveIndependentTableToChatHistory_ACU(tableLatestFloorIndex, [targetSheetKey], shouldTrackAsUpdate ? [targetSheetKey] : null, true);
         }
         await refreshMergedDataAndNotifyWithUI_ACU();
         logDebug_ACU(`${methodName}: Worldbook refreshed after saving [${tableName}]`);
@@ -42522,6 +43004,13 @@ function createDataAdminApi(_ctx) {
             logError_ACU('overrideWithTemplate failed:', e);
             return false;
         } },
+        openVisualizer: async function () { try {
+            return await openNewVisualizer_ACU();
+        }
+        catch (e) {
+            logError_ACU('openVisualizer failed:', e);
+            return false;
+        } },
         // 导入TXT链路
         importTxtAndSplit: async function () { try {
             return await handleTxtImportAndSplit_ACU();
@@ -43100,6 +43589,2891 @@ apiRef = api;
 // --- 挂载到全局 ---
 topLevelWindow_ACU.AutoCardUpdaterAPI = api;
 
+function clone_ACU$2(value) {
+    if (value === undefined)
+        return value;
+    return JSON.parse(JSON.stringify(value));
+}
+function isObject_ACU(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+function stableStringify_ACU(value) {
+    return JSON.stringify(value);
+}
+function isSameValue_ACU(left, right) {
+    if (left === right)
+        return true;
+    return stableStringify_ACU(left) === stableStringify_ACU(right);
+}
+function createEmptyDiff_ACU() {
+    return {
+        addedSheets: [],
+        deletedSheets: [],
+        renamedSheets: [],
+        movedSheets: [],
+        patchedSourceDataSheets: [],
+        patchedUpdateConfigSheets: [],
+        patchedExportConfigSheets: [],
+        patchedContentSheets: [],
+        patchedSchemaSheets: [],
+        patchedLockSheets: [],
+        globalInjectionChanged: false,
+    };
+}
+function listChangedLeafKeys_ACU(beforeValue, afterValue, prefix = '') {
+    if (isObject_ACU(beforeValue) && isObject_ACU(afterValue)) {
+        const keys = Array.from(new Set([...Object.keys(beforeValue), ...Object.keys(afterValue)])).sort();
+        return keys.flatMap((key) => {
+            const nextPrefix = prefix ? `${prefix}.${key}` : key;
+            const hasBefore = Object.prototype.hasOwnProperty.call(beforeValue, key);
+            const hasAfter = Object.prototype.hasOwnProperty.call(afterValue, key);
+            if (!hasBefore || !hasAfter) {
+                return [nextPrefix];
+            }
+            return listChangedLeafKeys_ACU(beforeValue[key], afterValue[key], nextPrefix);
+        });
+    }
+    return isSameValue_ACU(beforeValue, afterValue) ? [] : (prefix ? [prefix] : []);
+}
+function listPatchLeafKeys_ACU(patch, prefix = '') {
+    if (!isObject_ACU(patch))
+        return prefix ? [prefix] : [];
+    const out = [];
+    Object.keys(patch).forEach((key) => {
+        const nextPrefix = prefix ? `${prefix}.${key}` : key;
+        const value = patch[key];
+        if (isObject_ACU(value)) {
+            out.push(...listPatchLeafKeys_ACU(value, nextPrefix));
+            return;
+        }
+        out.push(nextPrefix);
+    });
+    return out;
+}
+function applyStrictPatch_ACU(target, patch, path = '') {
+    Object.keys(patch).forEach((key) => {
+        if (!Object.prototype.hasOwnProperty.call(target, key)) {
+            throw new Error(`patch 包含未知字段: ${path}${key}`);
+        }
+        const nextValue = patch[key];
+        const currentValue = target[key];
+        if (isObject_ACU(nextValue)) {
+            if (!isObject_ACU(currentValue)) {
+                throw new Error(`patch 目标不是对象，无法递归覆盖: ${path}${key}`);
+            }
+            applyStrictPatch_ACU(currentValue, nextValue, `${path}${key}.`);
+            return;
+        }
+        target[key] = clone_ACU$2(nextValue);
+    });
+}
+function ensureSheetExists_ACU(dataObj, sheetKey) {
+    const sheet = dataObj?.[sheetKey];
+    if (!sheet || typeof sheet !== 'object') {
+        throw new Error(`找不到目标表: ${sheetKey}`);
+    }
+    return sheet;
+}
+function assertPatchTargetsCurrentSheet_ACU(op, currentSheetKey, selectedSheetKey, protocolVersion) {
+    if (protocolVersion !== 1)
+        return;
+    const opName = String(op?.op || 'patch_sheet');
+    const opSheetKey = String(op?.sheetKey || '');
+    if (opSheetKey !== String(selectedSheetKey || '')) {
+        throw new Error(`${opName} 的 sheetKey 必须与 draft.selectedSheetKey 一致`);
+    }
+    if (currentSheetKey && opSheetKey !== currentSheetKey) {
+        throw new Error(`${opName} 只能修改当前选中表`);
+    }
+}
+function createUniqueSheetKey_ACU(dataObj) {
+    let nextKey = '';
+    do {
+        nextKey = `sheet_${Math.random().toString(36).slice(2, 11)}`;
+    } while (dataObj[nextKey]);
+    return nextKey;
+}
+function getBaseOrderedSheetKeys_ACU(tempData, sheetOrder) {
+    const existingKeys = getSortedSheetKeys_ACU(tempData, { ignoreChatGuide: true });
+    const order = Array.isArray(sheetOrder) ? sheetOrder.filter((key) => existingKeys.includes(key)) : [];
+    existingKeys.forEach((key) => {
+        if (!order.includes(key))
+            order.push(key);
+    });
+    return order;
+}
+function normalizeFocusSheetKey_ACU(candidateData, orderedSheetKeys, focusSheetKey) {
+    if (focusSheetKey && candidateData[focusSheetKey]) {
+        return focusSheetKey;
+    }
+    return orderedSheetKeys[0] || null;
+}
+function getNormalizedGlobalInjectionConfig_ACU(dataObj) {
+    const rawValue = isObject_ACU(dataObj?.mate) ? dataObj.mate.globalInjectionConfig : undefined;
+    return ensureGlobalInjectionConfigDefaults_ACU(clone_ACU$2(rawValue));
+}
+function buildDefaultUpdateConfig_ACU() {
+    return {
+        uiSentinel: -1,
+        contextDepth: -1,
+        updateFrequency: -1,
+        batchSize: -1,
+        skipFloors: -1,
+        sendLatestRows: -1,
+        groupId: -1,
+    };
+}
+function buildDefaultSourceData_ACU(sheetName, headers) {
+    const normalizedHeaders = Array.isArray(headers)
+        ? headers.map((item) => String(item ?? '').trim()).filter(Boolean)
+        : [];
+    const combinedText = [sheetName, ...normalizedHeaders].join('|');
+    const primaryHeader = normalizedHeaders.find((item) => /名称|姓名|标题|编号|代号|ID|id/.test(item)) || normalizedHeaders[0] || '首列';
+    const isInventoryLike = /战利品|背包|物品|掉落|素材|装备|loot|inventory/i.test(combinedText);
+    if (isInventoryLike) {
+        const noteLines = [
+            `记录${sheetName || '该表'}中的物品或战利品条目，一行代表一种可被持续追踪的物品。优先使用「${primaryHeader}」定位同一条目，避免把同名物品重复新增成多行。`,
+            ...normalizedHeaders.map((header, index) => `- 列${index + 1}: ${header} - 请记录该物品的对应信息，并保持同一物品长期使用同一行更新。`),
+        ];
+        return {
+            note: noteLines.join('\n'),
+            initNode: '当剧情、设定或当前场景已经明确存在初始物品、掉落物或库存时，先初始化最基础的真实条目；如果没有明确信息，不要编造。',
+            insertNode: '当出现当前表中还没有记录的新物品、新战利品或新掉落来源时新增一行。',
+            updateNode: '当已有物品的数量、状态、类别、描述或来源发生变化时更新原有行；如果只是数量变化，优先更新数量，不要重复新增同名物品。',
+            deleteNode: '当物品被完全移除、耗尽、拾取后不再追踪或明确失效时删除；如果只是数量减少，优先更新而不是删后重建。',
+        };
+    }
+    const noteLines = [
+        `记录${sheetName || '该表'}中的条目。默认按一行一个条目理解；优先使用「${primaryHeader}」作为稳定标识。如果这是单行配置表，请在说明中明确“此表有且仅有一行”。`,
+        ...normalizedHeaders.map((header, index) => `- 列${index + 1}: ${header} - 请补充这一列记录的具体含义与约束。`),
+    ];
+    return {
+        note: noteLines.join('\n'),
+        initNode: '当该表为空且剧情、设定或现有资料已经明确存在应记录的内容时，先初始化最基础的真实条目；如果没有明确信息，不要编造。',
+        insertNode: '当出现当前表中不存在、且应被记录的新条目时新增一行；如果这是单行表，不要新增，改为更新现有行。',
+        updateNode: '当已记录条目的状态、数量、描述或其他字段发生变化时更新对应行；如果这是单行表，始终更新现有行。',
+        deleteNode: '当条目已明确失效、移除、耗尽或不应继续保留时删除；如果这是单行表，通常不要删除。',
+    };
+}
+function sanitizeAddSheetConfig_ACU(rawValue, baseValue, label) {
+    const nextValue = clone_ACU$2(baseValue);
+    if (rawValue == null)
+        return nextValue;
+    if (!isObject_ACU(rawValue)) {
+        throw new Error(`add_sheet.${label} 必须是对象`);
+    }
+    applyStrictPatch_ACU(nextValue, rawValue, `${label}.`);
+    return nextValue;
+}
+function buildNewSheet_ACU(op, newKey, orderNo) {
+    const sheetName = String(op?.sheetName || '').trim();
+    if (!sheetName) {
+        throw new Error('add_sheet 缺少 sheetName');
+    }
+    const headers = Array.isArray(op?.headers)
+        ? op.headers.map((item) => String(item ?? '').trim()).filter(Boolean)
+        : [];
+    if (headers.length === 0) {
+        throw new Error('add_sheet 至少需要一个表头');
+    }
+    assertHeadersUnique_ACU(headers);
+    const sourceData = sanitizeAddSheetConfig_ACU(op?.sourceData, buildDefaultSourceData_ACU(sheetName, headers), 'sourceData');
+    const updateConfigRaw = sanitizeAddSheetConfig_ACU(op?.updateConfig, buildDefaultUpdateConfig_ACU(), 'updateConfig');
+    const updateConfig = { ...updateConfigRaw, uiSentinel: -1 };
+    const exportConfig = sanitizeAddSheetConfig_ACU(op?.exportConfig, buildDefaultExportConfig_ACU(sheetName), 'exportConfig');
+    const sheet = {
+        uid: newKey,
+        name: sheetName,
+        domain: 'chat',
+        type: 'dynamic',
+        enable: true,
+        required: false,
+        content: [['row_id', ...headers]],
+        sourceData,
+        updateConfig,
+        exportConfig,
+        [TABLE_ORDER_FIELD_ACU]: orderNo,
+    };
+    ensureSheetExportConfigDefaults_ACU(sheet);
+    return sheet;
+}
+function insertAfterAnchor_ACU(orderedSheetKeys, newKey, insertAfterSheetKey) {
+    if (!insertAfterSheetKey) {
+        orderedSheetKeys.push(newKey);
+        return;
+    }
+    const idx = orderedSheetKeys.indexOf(insertAfterSheetKey);
+    if (idx === -1) {
+        throw new Error(`add_sheet 的 insertAfterSheetKey 不存在: ${insertAfterSheetKey}`);
+    }
+    orderedSheetKeys.splice(idx + 1, 0, newKey);
+}
+function moveSheetAroundAnchor_ACU(orderedSheetKeys, sheetKey, beforeSheetKey, afterSheetKey) {
+    const anchorCount = Number(!!beforeSheetKey) + Number(!!afterSheetKey);
+    if (anchorCount !== 1) {
+        throw new Error('move_sheet 必须且只能提供 beforeSheetKey 或 afterSheetKey 之一');
+    }
+    const fromIndex = orderedSheetKeys.indexOf(sheetKey);
+    if (fromIndex === -1) {
+        throw new Error(`move_sheet 目标表不存在: ${sheetKey}`);
+    }
+    const anchorKey = beforeSheetKey || afterSheetKey || '';
+    const anchorIndex = orderedSheetKeys.indexOf(anchorKey);
+    if (anchorIndex === -1) {
+        throw new Error(`move_sheet 锚点不存在: ${anchorKey}`);
+    }
+    if (anchorKey === sheetKey) {
+        throw new Error('move_sheet 不能以自身为锚点');
+    }
+    orderedSheetKeys.splice(fromIndex, 1);
+    const nextAnchorIndex = orderedSheetKeys.indexOf(anchorKey);
+    const insertIndex = beforeSheetKey ? nextAnchorIndex : nextAnchorIndex + 1;
+    orderedSheetKeys.splice(insertIndex, 0, sheetKey);
+}
+function getSheetHeaderRow_ACU(sheet, sheetKey) {
+    const headerRow = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : null;
+    if (!headerRow) {
+        throw new Error(`目标表 content 非法: ${sheetKey}`);
+    }
+    return headerRow;
+}
+function getSheetHeaders_ACU(sheet, sheetKey) {
+    return getSheetHeaderRow_ACU(sheet, sheetKey).slice(1).map((item) => String(item ?? '').trim());
+}
+function hasSheetDdl_ACU(sheet) {
+    return typeof sheet?.sourceData?.ddl === 'string' && !!sheet.sourceData.ddl.trim();
+}
+function assertNonEmptyColumnName_ACU(name, label) {
+    const normalized = String(name ?? '').trim();
+    if (!normalized) {
+        throw new Error(`${label} 必须是非空字符串`);
+    }
+    if (normalized === 'row_id') {
+        throw new Error(`${label} 不能为 row_id`);
+    }
+    return normalized;
+}
+function assertHeadersUnique_ACU(headers) {
+    const seen = new Set();
+    headers.forEach((header) => {
+        const normalized = assertNonEmptyColumnName_ACU(header, '列名');
+        if (seen.has(normalized)) {
+            throw new Error(`列名重复: ${normalized}`);
+        }
+        seen.add(normalized);
+    });
+}
+function validateDdlAgainstHeaders_ACU(ddlText, tableHeaders) {
+    return validateDDLTextAgainstHeaders_ACU(ddlText, tableHeaders);
+}
+function getEffectiveSpecialIndexLockEnabled_ACU(sheetKey, overrides) {
+    if (Object.prototype.hasOwnProperty.call(overrides, sheetKey)) {
+        return overrides[sheetKey];
+    }
+    return isSpecialIndexLockEnabled_ACU(sheetKey);
+}
+function maybeApplySpecialIndexSequenceToSheet_ACU(sheet, sheetKey, overrides) {
+    if (!sheet || !isSummaryOrOutlineTable_ACU(String(sheet?.name || '')))
+        return;
+    if (!getEffectiveSpecialIndexLockEnabled_ACU(sheetKey, overrides))
+        return;
+    const colIndex = getSummaryIndexColumnIndex_ACU(sheet);
+    if (colIndex < 0)
+        return;
+    applySummaryIndexSequenceToTable_ACU(sheet, colIndex);
+}
+function applySheetContentPatch_ACU(sheet, sheetKey, rawPatch) {
+    if (!isObject_ACU(rawPatch)) {
+        throw new Error('patch_sheet_content.patch 必须是对象');
+    }
+    const allowedKeys = new Set(['updateCells', 'addRows', 'deleteRows']);
+    Object.keys(rawPatch).forEach((key) => {
+        if (!allowedKeys.has(key)) {
+            throw new Error(`patch_sheet_content.patch 包含未知字段: ${key}`);
+        }
+    });
+    const headerRow = getSheetHeaderRow_ACU(sheet, sheetKey);
+    const headers = getSheetHeaders_ACU(sheet, sheetKey);
+    const changes = [];
+    const updateCells = Array.isArray(rawPatch.updateCells) ? rawPatch.updateCells : [];
+    const addRows = Array.isArray(rawPatch.addRows) ? rawPatch.addRows : [];
+    const deleteRows = Array.isArray(rawPatch.deleteRows) ? rawPatch.deleteRows : [];
+    updateCells.forEach((cellPatch, index) => {
+        if (!isObject_ACU(cellPatch)) {
+            throw new Error(`patch_sheet_content.updateCells[${index}] 必须是对象`);
+        }
+        const rowNumber = Number(cellPatch.rowNumber);
+        if (!Number.isInteger(rowNumber) || rowNumber <= 0) {
+            throw new Error(`patch_sheet_content.updateCells[${index}].rowNumber 必须是正整数`);
+        }
+        const row = sheet.content[rowNumber];
+        if (!Array.isArray(row)) {
+            throw new Error(`patch_sheet_content.updateCells[${index}] 指向不存在的行: ${rowNumber}`);
+        }
+        const columnName = assertNonEmptyColumnName_ACU(cellPatch.columnName, `patch_sheet_content.updateCells[${index}].columnName`);
+        const colIndex = headers.indexOf(columnName);
+        if (colIndex === -1) {
+            throw new Error(`patch_sheet_content.updateCells[${index}] 指向不存在的列: ${columnName}`);
+        }
+        row[colIndex + 1] = clone_ACU$2(cellPatch.value);
+        changes.push(`改单元格: 第${rowNumber}行.${columnName}`);
+    });
+    const normalizedDeleteRows = Array.from(new Set(deleteRows.map((item) => Number(item)))).sort((a, b) => b - a);
+    normalizedDeleteRows.forEach((rowNumber, index) => {
+        if (!Number.isInteger(rowNumber) || rowNumber <= 0) {
+            throw new Error(`patch_sheet_content.deleteRows[${index}] 必须是正整数`);
+        }
+        if (!Array.isArray(sheet.content[rowNumber])) {
+            throw new Error(`patch_sheet_content.deleteRows[${index}] 指向不存在的行: ${rowNumber}`);
+        }
+    });
+    normalizedDeleteRows.forEach((rowNumber) => {
+        sheet.content.splice(rowNumber, 1);
+    });
+    if (normalizedDeleteRows.length) {
+        changes.push(`删除 ${normalizedDeleteRows.length} 行（第 ${normalizedDeleteRows.slice().sort((a, b) => a - b).join(', ')} 行）`);
+    }
+    addRows.forEach((rowPatch, index) => {
+        if (!isObject_ACU(rowPatch)) {
+            throw new Error(`patch_sheet_content.addRows[${index}] 必须是对象`);
+        }
+        Object.keys(rowPatch).forEach((columnName) => {
+            if (!headers.includes(columnName)) {
+                throw new Error(`patch_sheet_content.addRows[${index}] 包含未知列: ${columnName}`);
+            }
+        });
+        const newRow = new Array(headerRow.length).fill('');
+        newRow[0] = null;
+        headers.forEach((header, headerIndex) => {
+            newRow[headerIndex + 1] = Object.prototype.hasOwnProperty.call(rowPatch, header)
+                ? clone_ACU$2(rowPatch[header])
+                : '';
+        });
+        sheet.content.push(newRow);
+    });
+    if (addRows.length) {
+        changes.push(`新增 ${addRows.length} 行`);
+    }
+    return changes;
+}
+function applySheetSchemaPatch_ACU(sheet, sheetKey, rawPatch) {
+    if (!isObject_ACU(rawPatch)) {
+        throw new Error('patch_sheet_schema.patch 必须是对象');
+    }
+    const allowedKeys = new Set(['renameColumns', 'addColumns', 'deleteColumns', 'ddl']);
+    Object.keys(rawPatch).forEach((key) => {
+        if (!allowedKeys.has(key)) {
+            throw new Error(`patch_sheet_schema.patch 包含未知字段: ${key}`);
+        }
+    });
+    const renameColumns = Array.isArray(rawPatch.renameColumns) ? rawPatch.renameColumns : [];
+    const addColumns = Array.isArray(rawPatch.addColumns) ? rawPatch.addColumns : [];
+    const deleteColumns = Array.isArray(rawPatch.deleteColumns) ? rawPatch.deleteColumns : [];
+    const nextDdl = typeof rawPatch.ddl === 'string' ? rawPatch.ddl.trim() : '';
+    const headerRow = getSheetHeaderRow_ACU(sheet, sheetKey);
+    const changes = [];
+    const highRiskLabels = [];
+    const hasExistingDdl = hasSheetDdl_ACU(sheet);
+    let workingDdl = hasExistingDdl ? String(sheet.sourceData.ddl || '') : '';
+    let ddlChanged = false;
+    if (hasExistingDdl && !nextDdl && (addColumns.length > 0 || deleteColumns.length > 0)) {
+        throw new Error('DDL 表执行增删列时必须同时提供 patch.ddl');
+    }
+    renameColumns.forEach((renamePatch, index) => {
+        if (!isObject_ACU(renamePatch)) {
+            throw new Error(`patch_sheet_schema.renameColumns[${index}] 必须是对象`);
+        }
+        const from = assertNonEmptyColumnName_ACU(renamePatch.from, `patch_sheet_schema.renameColumns[${index}].from`);
+        const to = assertNonEmptyColumnName_ACU(renamePatch.to, `patch_sheet_schema.renameColumns[${index}].to`);
+        const currentHeaders = getSheetHeaders_ACU(sheet, sheetKey);
+        const colIndex = currentHeaders.indexOf(from);
+        if (colIndex === -1) {
+            throw new Error(`patch_sheet_schema.renameColumns[${index}] 指向不存在的列: ${from}`);
+        }
+        if (currentHeaders.includes(to) && from !== to) {
+            throw new Error(`patch_sheet_schema.renameColumns[${index}] 目标列名已存在: ${to}`);
+        }
+        headerRow[colIndex + 1] = to;
+        changes.push(`列改名: ${from} -> ${to}`);
+        if (workingDdl) {
+            const ddlColumns = parseDDLColumnNames(workingDdl);
+            const ddlColumnName = ddlColumns[colIndex + 1];
+            if (ddlColumnName && ddlColumnName !== 'row_id') {
+                workingDdl = updateDDLColumnComment(workingDdl, ddlColumnName, to);
+                ddlChanged = true;
+            }
+        }
+    });
+    const deleteEntries = deleteColumns.map((columnName, index) => ({
+        name: assertNonEmptyColumnName_ACU(columnName, `patch_sheet_schema.deleteColumns[${index}]`),
+    }));
+    const deleteWithIndex = deleteEntries.map((item) => {
+        const currentHeaders = getSheetHeaders_ACU(sheet, sheetKey);
+        const colIndex = currentHeaders.indexOf(item.name);
+        if (colIndex === -1) {
+            throw new Error(`patch_sheet_schema.deleteColumns 指向不存在的列: ${item.name}`);
+        }
+        return { ...item, colIndex };
+    }).sort((left, right) => right.colIndex - left.colIndex);
+    deleteWithIndex.forEach(({ name, colIndex }) => {
+        headerRow.splice(colIndex + 1, 1);
+        sheet.content.slice(1).forEach((row) => {
+            if (Array.isArray(row))
+                row.splice(colIndex + 1, 1);
+        });
+        changes.push(`删除列: ${name}`);
+        highRiskLabels.push(`删除列: ${String(sheet.name || sheetKey)}.${name}`);
+    });
+    addColumns.forEach((columnPatch, index) => {
+        if (!isObject_ACU(columnPatch)) {
+            throw new Error(`patch_sheet_schema.addColumns[${index}] 必须是对象`);
+        }
+        const name = assertNonEmptyColumnName_ACU(columnPatch.name, `patch_sheet_schema.addColumns[${index}].name`);
+        const currentHeaders = getSheetHeaders_ACU(sheet, sheetKey);
+        if (currentHeaders.includes(name)) {
+            throw new Error(`patch_sheet_schema.addColumns[${index}] 目标列名已存在: ${name}`);
+        }
+        headerRow.push(name);
+        sheet.content.slice(1).forEach((row) => {
+            if (Array.isArray(row)) {
+                row.push(Object.prototype.hasOwnProperty.call(columnPatch, 'defaultValue') ? clone_ACU$2(columnPatch.defaultValue) : '');
+            }
+        });
+        changes.push(`新增列: ${name}`);
+    });
+    const finalHeaders = getSheetHeaders_ACU(sheet, sheetKey);
+    assertHeadersUnique_ACU(finalHeaders);
+    if (nextDdl) {
+        const ddlValidation = validateDdlAgainstHeaders_ACU(nextDdl, finalHeaders);
+        if (!ddlValidation.valid) {
+            throw new Error(`patch_sheet_schema.ddl 非法: ${ddlValidation.message}`);
+        }
+        if (!isObject_ACU(sheet.sourceData))
+            sheet.sourceData = {};
+        sheet.sourceData.ddl = nextDdl;
+        ddlChanged = true;
+        changes.push('DDL 已更新');
+        highRiskLabels.push(`更新 DDL: ${String(sheet.name || sheetKey)}`);
+    }
+    else if (workingDdl && ddlChanged) {
+        if (!isObject_ACU(sheet.sourceData))
+            sheet.sourceData = {};
+        sheet.sourceData.ddl = workingDdl;
+        changes.push('DDL 注释已同步');
+    }
+    return {
+        changes,
+        highRiskLabels,
+    };
+}
+function applySheetLockPatch_ACU(sheet, sheetKey, rawPatch) {
+    if (!isObject_ACU(rawPatch)) {
+        throw new Error('patch_sheet_locks.patch 必须是对象');
+    }
+    const allowedKeys = new Set(['rows', 'columns', 'cells', 'specialIndexLocked']);
+    Object.keys(rawPatch).forEach((key) => {
+        if (!allowedKeys.has(key)) {
+            throw new Error(`patch_sheet_locks.patch 包含未知字段: ${key}`);
+        }
+    });
+    const headers = getSheetHeaders_ACU(sheet, sheetKey);
+    const rowCount = Math.max(0, (Array.isArray(sheet?.content) ? sheet.content.length : 0) - 1);
+    const changes = [];
+    const rows = Array.isArray(rawPatch.rows) ? rawPatch.rows : [];
+    const columns = Array.isArray(rawPatch.columns) ? rawPatch.columns : [];
+    const cells = Array.isArray(rawPatch.cells) ? rawPatch.cells : [];
+    const normalized = {
+        sheetKey,
+        rows: [],
+        columns: [],
+        cells: [],
+    };
+    rows.forEach((item, index) => {
+        if (!isObject_ACU(item)) {
+            throw new Error(`patch_sheet_locks.rows[${index}] 必须是对象`);
+        }
+        const rowNumber = Number(item.rowNumber);
+        if (!Number.isInteger(rowNumber) || rowNumber <= 0 || rowNumber > rowCount) {
+            throw new Error(`patch_sheet_locks.rows[${index}] 指向不存在的行: ${rowNumber}`);
+        }
+        if (typeof item.locked !== 'boolean') {
+            throw new Error(`patch_sheet_locks.rows[${index}].locked 必须是布尔值`);
+        }
+        normalized.rows.push({ rowIndex: rowNumber - 1, locked: item.locked });
+        changes.push(`${item.locked ? '锁定' : '解锁'}第${rowNumber}行`);
+    });
+    columns.forEach((item, index) => {
+        if (!isObject_ACU(item)) {
+            throw new Error(`patch_sheet_locks.columns[${index}] 必须是对象`);
+        }
+        const columnName = assertNonEmptyColumnName_ACU(item.columnName, `patch_sheet_locks.columns[${index}].columnName`);
+        const colIndex = headers.indexOf(columnName);
+        if (colIndex === -1) {
+            throw new Error(`patch_sheet_locks.columns[${index}] 指向不存在的列: ${columnName}`);
+        }
+        if (typeof item.locked !== 'boolean') {
+            throw new Error(`patch_sheet_locks.columns[${index}].locked 必须是布尔值`);
+        }
+        normalized.columns.push({ colIndex, locked: item.locked });
+        changes.push(`${item.locked ? '锁定' : '解锁'}列: ${columnName}`);
+    });
+    cells.forEach((item, index) => {
+        if (!isObject_ACU(item)) {
+            throw new Error(`patch_sheet_locks.cells[${index}] 必须是对象`);
+        }
+        const rowNumber = Number(item.rowNumber);
+        if (!Number.isInteger(rowNumber) || rowNumber <= 0 || rowNumber > rowCount) {
+            throw new Error(`patch_sheet_locks.cells[${index}] 指向不存在的行: ${rowNumber}`);
+        }
+        const columnName = assertNonEmptyColumnName_ACU(item.columnName, `patch_sheet_locks.cells[${index}].columnName`);
+        const colIndex = headers.indexOf(columnName);
+        if (colIndex === -1) {
+            throw new Error(`patch_sheet_locks.cells[${index}] 指向不存在的列: ${columnName}`);
+        }
+        if (typeof item.locked !== 'boolean') {
+            throw new Error(`patch_sheet_locks.cells[${index}].locked 必须是布尔值`);
+        }
+        normalized.cells.push({ rowIndex: rowNumber - 1, colIndex, locked: item.locked });
+        changes.push(`${item.locked ? '锁定' : '解锁'}单元格: 第${rowNumber}行.${columnName}`);
+    });
+    if (rawPatch.specialIndexLocked != null) {
+        if (!isSummaryOrOutlineTable_ACU(String(sheet?.name || ''))) {
+            throw new Error('patch_sheet_locks.specialIndexLocked 仅支持纪要/大纲类表格');
+        }
+        if (typeof rawPatch.specialIndexLocked !== 'boolean') {
+            throw new Error('patch_sheet_locks.specialIndexLocked 必须是布尔值');
+        }
+        normalized.specialIndexLocked = rawPatch.specialIndexLocked;
+        changes.push(`${rawPatch.specialIndexLocked ? '启用' : '关闭'}编码索引列特殊锁定`);
+    }
+    return {
+        changes,
+        lockChange: normalized,
+    };
+}
+function hasAnyLockChange_ACU(lockChange) {
+    return lockChange.rows.length > 0
+        || lockChange.columns.length > 0
+        || lockChange.cells.length > 0
+        || typeof lockChange.specialIndexLocked === 'boolean';
+}
+function compileTemplateAssistantDraft_ACU(input) {
+    const tempData = isObject_ACU(input?.tempData) ? input.tempData : null;
+    if (!tempData) {
+        throw new Error('缺少 tempData');
+    }
+    const draft = input?.draft;
+    if (!draft || !Array.isArray(draft.operations)) {
+        throw new Error('缺少合法 draft.operations');
+    }
+    const protocolVersion = draft?.protocolVersion === 1 ? 1 : 2;
+    const candidateData = clone_ACU$2(tempData);
+    const orderedSheetKeys = getBaseOrderedSheetKeys_ACU(candidateData, input.sheetOrder);
+    const deletedSheetKeys = [];
+    const highRiskItems = [];
+    const lockChanges = [];
+    const diff = createEmptyDiff_ACU();
+    const specialIndexLockOverrides = {};
+    let focusSheetKey = input?.currentSheetKey || draft?.selectedSheetKey || null;
+    draft.operations.forEach((op) => {
+        const opName = String(op?.op || '');
+        if (!opName)
+            throw new Error('存在缺少 op 的操作');
+        if (opName === 'add_sheet') {
+            const newKey = createUniqueSheetKey_ACU(candidateData);
+            const newSheet = buildNewSheet_ACU(op, newKey, orderedSheetKeys.length);
+            candidateData[newKey] = newSheet;
+            insertAfterAnchor_ACU(orderedSheetKeys, newKey, op.insertAfterSheetKey);
+            focusSheetKey = newKey;
+            diff.addedSheets.push({ sheetKey: newKey, name: newSheet.name || newKey });
+            return;
+        }
+        if (opName === 'rename_sheet') {
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            const beforeName = String(sheet.name || '');
+            const afterName = String(op.newName || '').trim();
+            if (!afterName)
+                throw new Error('rename_sheet 缺少 newName');
+            sheet.name = afterName;
+            ensureSheetExportConfigDefaults_ACU(sheet);
+            diff.renamedSheets.push({ sheetKey: op.sheetKey, beforeName, afterName });
+            maybeApplySpecialIndexSequenceToSheet_ACU(sheet, op.sheetKey, specialIndexLockOverrides);
+            return;
+        }
+        if (opName === 'delete_sheet') {
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            diff.deletedSheets.push({ sheetKey: op.sheetKey, name: String(sheet.name || op.sheetKey) });
+            if (!deletedSheetKeys.includes(op.sheetKey))
+                deletedSheetKeys.push(op.sheetKey);
+            highRiskItems.push({ type: 'delete_sheet', label: `删除表: ${String(sheet.name || op.sheetKey)}` });
+            delete candidateData[op.sheetKey];
+            const idx = orderedSheetKeys.indexOf(op.sheetKey);
+            if (idx >= 0)
+                orderedSheetKeys.splice(idx, 1);
+            if (focusSheetKey === op.sheetKey)
+                focusSheetKey = null;
+            return;
+        }
+        if (opName === 'move_sheet') {
+            const beforeIndex = orderedSheetKeys.indexOf(op.sheetKey);
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            moveSheetAroundAnchor_ACU(orderedSheetKeys, op.sheetKey, op.beforeSheetKey, op.afterSheetKey);
+            const afterIndex = orderedSheetKeys.indexOf(op.sheetKey);
+            if (beforeIndex !== afterIndex) {
+                diff.movedSheets.push({ sheetKey: op.sheetKey, name: String(sheet.name || op.sheetKey), fromIndex: beforeIndex, toIndex: afterIndex });
+            }
+            return;
+        }
+        if (opName === 'patch_sheet_source_data') {
+            assertPatchTargetsCurrentSheet_ACU(op, input?.currentSheetKey, draft?.selectedSheetKey, protocolVersion);
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            if (Object.prototype.hasOwnProperty.call(op.patch || {}, 'ddl')) {
+                throw new Error('patch_sheet_source_data 不能直接修改 ddl，请改用 patch_sheet_schema.ddl');
+            }
+            if (!isObject_ACU(sheet.sourceData))
+                throw new Error(`目标表 sourceData 非法: ${op.sheetKey}`);
+            applyStrictPatch_ACU(sheet.sourceData, isObject_ACU(op.patch) ? op.patch : {});
+            diff.patchedSourceDataSheets.push({ sheetKey: op.sheetKey, name: String(sheet.name || op.sheetKey), keys: listPatchLeafKeys_ACU(op.patch) });
+            return;
+        }
+        if (opName === 'patch_sheet_update_config') {
+            assertPatchTargetsCurrentSheet_ACU(op, input?.currentSheetKey, draft?.selectedSheetKey, protocolVersion);
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            if (!isObject_ACU(sheet.updateConfig))
+                throw new Error(`目标表 updateConfig 非法: ${op.sheetKey}`);
+            applyStrictPatch_ACU(sheet.updateConfig, isObject_ACU(op.patch) ? op.patch : {});
+            sheet.updateConfig.uiSentinel = -1;
+            diff.patchedUpdateConfigSheets.push({ sheetKey: op.sheetKey, name: String(sheet.name || op.sheetKey), keys: listPatchLeafKeys_ACU(op.patch) });
+            return;
+        }
+        if (opName === 'patch_sheet_export_config') {
+            assertPatchTargetsCurrentSheet_ACU(op, input?.currentSheetKey, draft?.selectedSheetKey, protocolVersion);
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            ensureSheetExportConfigDefaults_ACU(sheet);
+            applyStrictPatch_ACU(sheet.exportConfig, isObject_ACU(op.patch) ? op.patch : {});
+            ensureSheetExportConfigDefaults_ACU(sheet);
+            diff.patchedExportConfigSheets.push({ sheetKey: op.sheetKey, name: String(sheet.name || op.sheetKey), keys: listPatchLeafKeys_ACU(op.patch) });
+            return;
+        }
+        if (opName === 'patch_sheet_content') {
+            assertPatchTargetsCurrentSheet_ACU(op, input?.currentSheetKey, draft?.selectedSheetKey, protocolVersion);
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            const changes = applySheetContentPatch_ACU(sheet, op.sheetKey, op.patch);
+            maybeApplySpecialIndexSequenceToSheet_ACU(sheet, op.sheetKey, specialIndexLockOverrides);
+            diff.patchedContentSheets.push({ sheetKey: op.sheetKey, name: String(sheet.name || op.sheetKey), changes });
+            return;
+        }
+        if (opName === 'patch_sheet_schema') {
+            assertPatchTargetsCurrentSheet_ACU(op, input?.currentSheetKey, draft?.selectedSheetKey, protocolVersion);
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            const schemaResult = applySheetSchemaPatch_ACU(sheet, op.sheetKey, op.patch);
+            maybeApplySpecialIndexSequenceToSheet_ACU(sheet, op.sheetKey, specialIndexLockOverrides);
+            diff.patchedSchemaSheets.push({ sheetKey: op.sheetKey, name: String(sheet.name || op.sheetKey), changes: schemaResult.changes });
+            schemaResult.highRiskLabels.forEach((label) => {
+                highRiskItems.push({ type: 'patch_sheet_schema', label });
+            });
+            return;
+        }
+        if (opName === 'patch_sheet_locks') {
+            assertPatchTargetsCurrentSheet_ACU(op, input?.currentSheetKey, draft?.selectedSheetKey, protocolVersion);
+            const sheet = ensureSheetExists_ACU(candidateData, op.sheetKey);
+            const lockResult = applySheetLockPatch_ACU(sheet, op.sheetKey, op.patch);
+            if (typeof lockResult.lockChange.specialIndexLocked === 'boolean') {
+                specialIndexLockOverrides[op.sheetKey] = lockResult.lockChange.specialIndexLocked;
+            }
+            maybeApplySpecialIndexSequenceToSheet_ACU(sheet, op.sheetKey, specialIndexLockOverrides);
+            diff.patchedLockSheets.push({ sheetKey: op.sheetKey, name: String(sheet.name || op.sheetKey), changes: lockResult.changes });
+            if (hasAnyLockChange_ACU(lockResult.lockChange)) {
+                lockChanges.push(lockResult.lockChange);
+            }
+            return;
+        }
+        if (opName === 'patch_global_injection_config') {
+            if (!isObject_ACU(candidateData.mate)) {
+                candidateData.mate = { type: 'chatSheets', version: 1 };
+            }
+            candidateData.mate.globalInjectionConfig = ensureGlobalInjectionConfigDefaults_ACU(candidateData.mate.globalInjectionConfig);
+            applyStrictPatch_ACU(candidateData.mate.globalInjectionConfig, isObject_ACU(op.patch) ? op.patch : {});
+            candidateData.mate.globalInjectionConfig = ensureGlobalInjectionConfigDefaults_ACU(candidateData.mate.globalInjectionConfig);
+            diff.globalInjectionChanged = true;
+            highRiskItems.push({ type: 'patch_global_injection_config', label: '修改全局注入配置' });
+            return;
+        }
+        throw new Error(`当前协议不支持的操作: ${opName}`);
+    });
+    orderedSheetKeys.forEach((sheetKey, index) => {
+        if (candidateData?.[sheetKey] && typeof candidateData[sheetKey] === 'object') {
+            candidateData[sheetKey][TABLE_ORDER_FIELD_ACU] = index;
+        }
+    });
+    if (focusSheetKey && !candidateData[focusSheetKey]) {
+        focusSheetKey = orderedSheetKeys[0] || null;
+    }
+    return {
+        candidateData,
+        orderedSheetKeys,
+        deletedSheetKeys,
+        focusSheetKey,
+        diff,
+        highRiskItems,
+        lockChanges,
+    };
+}
+function buildTemplateAssistantCumulativeCompileResult_ACU(input) {
+    const baselineData = isObject_ACU(input?.baselineData) ? input.baselineData : null;
+    const rawCandidateData = isObject_ACU(input?.candidateData) ? input.candidateData : null;
+    if (!baselineData) {
+        throw new Error('缺少 baselineData');
+    }
+    if (!rawCandidateData) {
+        throw new Error('缺少 candidateData');
+    }
+    const candidateData = clone_ACU$2(rawCandidateData);
+    const baselineOrderedSheetKeys = getBaseOrderedSheetKeys_ACU(baselineData, input.baselineSheetOrder);
+    const orderedSheetKeys = getBaseOrderedSheetKeys_ACU(candidateData, input.candidateSheetOrder);
+    const baselineSheetKeySet = new Set(baselineOrderedSheetKeys);
+    const candidateSheetKeySet = new Set(orderedSheetKeys);
+    const deletedSheetKeys = baselineOrderedSheetKeys.filter((sheetKey) => !candidateSheetKeySet.has(sheetKey));
+    const addedSheetKeys = orderedSheetKeys.filter((sheetKey) => !baselineSheetKeySet.has(sheetKey));
+    const baselineCommonOrderedKeys = baselineOrderedSheetKeys.filter((sheetKey) => candidateSheetKeySet.has(sheetKey));
+    const candidateCommonOrderedKeys = orderedSheetKeys.filter((sheetKey) => baselineSheetKeySet.has(sheetKey));
+    const diff = createEmptyDiff_ACU();
+    const highRiskItems = [];
+    addedSheetKeys.forEach((sheetKey) => {
+        const sheet = candidateData[sheetKey] || {};
+        diff.addedSheets.push({ sheetKey, name: String(sheet.name || sheetKey) });
+    });
+    deletedSheetKeys.forEach((sheetKey) => {
+        const sheet = baselineData[sheetKey] || {};
+        const name = String(sheet.name || sheetKey);
+        diff.deletedSheets.push({ sheetKey, name });
+        highRiskItems.push({ type: 'delete_sheet', label: `删除表: ${name}` });
+    });
+    baselineCommonOrderedKeys.forEach((sheetKey, commonIndex) => {
+        const beforeSheet = baselineData[sheetKey] || {};
+        const afterSheet = candidateData[sheetKey] || {};
+        const beforeName = String(beforeSheet.name || '');
+        const afterName = String(afterSheet.name || '');
+        if (beforeName !== afterName) {
+            diff.renamedSheets.push({ sheetKey, beforeName, afterName });
+        }
+        const candidateCommonIndex = candidateCommonOrderedKeys.indexOf(sheetKey);
+        if (candidateCommonIndex !== commonIndex) {
+            diff.movedSheets.push({
+                sheetKey,
+                name: afterName || beforeName || sheetKey,
+                fromIndex: baselineOrderedSheetKeys.indexOf(sheetKey),
+                toIndex: orderedSheetKeys.indexOf(sheetKey),
+            });
+        }
+        const changedSourceDataKeys = listChangedLeafKeys_ACU(beforeSheet.sourceData, afterSheet.sourceData);
+        if (changedSourceDataKeys.length) {
+            diff.patchedSourceDataSheets.push({ sheetKey, name: afterName || beforeName || sheetKey, keys: changedSourceDataKeys });
+        }
+        const changedUpdateConfigKeys = listChangedLeafKeys_ACU(beforeSheet.updateConfig, afterSheet.updateConfig);
+        if (changedUpdateConfigKeys.length) {
+            diff.patchedUpdateConfigSheets.push({ sheetKey, name: afterName || beforeName || sheetKey, keys: changedUpdateConfigKeys });
+        }
+        const changedExportConfigKeys = listChangedLeafKeys_ACU(beforeSheet.exportConfig, afterSheet.exportConfig);
+        if (changedExportConfigKeys.length) {
+            diff.patchedExportConfigSheets.push({ sheetKey, name: afterName || beforeName || sheetKey, keys: changedExportConfigKeys });
+        }
+        if (!isSameValue_ACU(beforeSheet.content, afterSheet.content)) {
+            diff.patchedContentSheets.push({ sheetKey, name: afterName || beforeName || sheetKey, changes: ['内容已修改'] });
+        }
+        const beforeDdl = String(beforeSheet?.sourceData?.ddl || '');
+        const afterDdl = String(afterSheet?.sourceData?.ddl || '');
+        if (beforeDdl !== afterDdl) {
+            diff.patchedSchemaSheets.push({ sheetKey, name: afterName || beforeName || sheetKey, changes: ['DDL 已更新'] });
+            highRiskItems.push({ type: 'patch_sheet_schema', label: `更新 DDL: ${afterName || beforeName || sheetKey}` });
+        }
+    });
+    diff.globalInjectionChanged = !isSameValue_ACU(getNormalizedGlobalInjectionConfig_ACU(baselineData), getNormalizedGlobalInjectionConfig_ACU(candidateData));
+    if (diff.globalInjectionChanged) {
+        highRiskItems.push({ type: 'patch_global_injection_config', label: '修改全局注入配置' });
+    }
+    orderedSheetKeys.forEach((sheetKey, index) => {
+        if (candidateData?.[sheetKey] && typeof candidateData[sheetKey] === 'object') {
+            candidateData[sheetKey][TABLE_ORDER_FIELD_ACU] = index;
+        }
+    });
+    return {
+        candidateData,
+        orderedSheetKeys,
+        deletedSheetKeys,
+        focusSheetKey: normalizeFocusSheetKey_ACU(candidateData, orderedSheetKeys, input.focusSheetKey),
+        diff,
+        highRiskItems,
+        lockChanges: [],
+    };
+}
+
+const joinLines_ACU = (...lines) => lines.join('\n');
+const TEMPLATE_ASSISTANT_EMBEDDED_REFERENCE_CHUNKS_ACU = [
+    {
+        sourceFile: 'syntax-reference (1).md',
+        section: '导读：两种运行模式的能力差异',
+        content: joinLines_ACU('## 导读：两种运行模式的能力差异', '', '语法能否生效取决于当前运行模式。**在看每一节前先对照这张表**：', '', '| 语法 | 原生（DSL）模式 | SQLite 模式 |', '|------|:---------------:|:-----------:|', '| `<random>` / `$random:` | ✅ | ✅ |', '| `<calc>` / `$calc:` | ✅ | ✅ |', '| `<max>` / `$max:` / `<min>` / `$min:` | ✅ | ✅ |', '| `<if seed="...">` | ✅ | ✅ |', '| `<if cell="...">` | ✅ | ✅ |', '| `<if cond="...">`（非 db:/sql:/v: 前缀部分） | ✅ | ✅ |', '| `{[db.表名.方法链]}` | ❌ | ✅ |', '| `{[db.expr/rand/calc/max/min(...)]}` | ❌ | ✅ |', '| `{[sql "SELECT..."]}` | ❌ | ✅ |', '| `{[... as 变量名]}` / `$v:变量名` | ❌ | ✅ |', '| `<if db="...">` / `<if sql="...">` | ❌ | ✅ |', '| `<if cond="db:... | sql:... | v:...">` 中的对应前缀 | ❌ | ✅ |', '', '> ⚠️ 在原生模式下书写仅 SQLite 支持的语法，标签会**原样保留**在文本中发给 AI，不会报错也不会替换。'),
+    },
+    {
+        sourceFile: 'syntax-reference (1).md',
+        section: '二、值替换变量（仅 SQLite 模式）/ 2.1 ORM 查询',
+        content: joinLines_ACU('## 二、值替换变量（仅 SQLite 模式）', '', '> 以下全部语法**只在 SQLite 模式生效**，原生模式下标签会原样保留。原因：它们都走 SQLite 引擎的 `executeQuery()`，原生模式下没有这个引擎。', '', '### 2.1 ORM 查询：`{[db.表名.方法链]}`', '', '```', '你身上有 {[db.背包物品表.where(\'物品名称\', \'铁剑\').get(\'数量\')]} 把铁剑。', '```', '', '→ **执行结果**：', '```', '你身上有 3 把铁剑。', '```', '', '底层实现是一个 `Proxy`：`db.背包物品表` 返回一个 `TableQueryBuilder`，后续所有方法是链式调用，最后由**终结方法**决定输出形式。', '', '#### 2.1.1 查询构建方法（返回 `TableQueryBuilder`，可继续链式）', '', '| 方法 | SQL 等价 | 示例 |', '|------|---------|------|', '| `.where(\'列\', \'值\')` | `列 = \'值\'` | `.where(\'姓名\', \'艾莉\')` |', '| `.where(\'列\', \'>\', 数值)` | `列 > 数值`（`>` `>=` `<` `<=` `!=` `=`） | `.where(\'数量\', \'>\', 2)` |', '| `.orWhere(\'列\', \'值\')` | 把当前 AND 组封存为一个 OR 分支，开新的 AND 组 | 见下方 OR 示例 |', '| `.whereIn(\'列\', [值...])` | `列 IN (...)`（空数组 → 永假） | `.whereIn(\'类别\', [\'武器\',\'消耗品\'])` |', '| `.whereLike(\'列\', \'模式\')` | `列 LIKE \'模式\'`（`%` 任意字符，`_` 单字符） | `.whereLike(\'物品名称\', \'%药水%\')` |', '| `.orderBy(\'列\', \'ASC\')` | `ORDER BY 列 ASC`（或 `\'DESC\'`） | `.orderBy(\'数量\', \'DESC\')` |', '| `.limit(数量)` | `LIMIT n` | `.limit(5)` |', '| `.offset(数量)` | `OFFSET n`（需配合 `limit`，内部若无 `limit` 会补 `LIMIT -1`） | `.limit(10).offset(20)` |', '', '#### 2.1.2 终结方法（返回具体值，结束链式）', '', '| 方法 | 返回类型 | 说明 |', '|------|---------|------|', '| `.get(\'列\')` | `string | number | null` | 第一行指定列的值 |', '| `.first()` | `Record<string,any> | null` | 第一行所有列组成的对象 |', '| `.list(\'列\')` | `Array<string|number>` | 某列所有行的值 |', '| `.all()` | `Array<Record<string,any>>` | 所有行所有列 |', '| `.count()` | `number` | `COUNT(*)` |', '| `.sum(\'列\')` / `.avg(\'列\')` / `.max(\'列\')` / `.min(\'列\')` | `number` | 聚合函数 |', '| `.exists()` | `boolean` | 是否存在至少一行 |', '| `.value(\'SQL表达式\')` | `string | number | null` | 在当前 WHERE 上下文里跑自定义 `SELECT <表达式>`，见下方示例 |', '| `.toSQL()` | `string` | 生成的 SQL（调试用） |'),
+    },
+    {
+        sourceFile: 'syntax-reference (1).md',
+        section: '三、<if> 条件标签 / 3.2 <if cell="表达式">',
+        content: joinLines_ACU('### 3.2 `<if cell="表达式">`', '', '比较表格单元格的值。', '', '**表达式格式**：`<单元格引用> <运算符> <比较值>`', '', '**运算符**：`>` `<` `>=` `<=` `==` `!=`。**全角运算符自动转半角**：`＞→>`、`＜→<`、`＝→==`、`≥→>=`、`≤/≦→<=`、`≠→!=`。', '', '**单元格引用的真实匹配规则**（旧文档写错过，以这里为准）：', '', '#### 三段式 `表名/行标识/列名`', '', '优先走 `getCellValue_ACU(tableName, rowName, colName)`：', '1. 按 `tableName` 精确匹配表', '2. 按 `colName` 在**表头**里精确匹配列', '3. 按 `rowName` 在**每一行的任意单元格**里精确匹配（**不是**只匹配首列）', '4. 若失败，再尝试把 `rowName` 和 `colName` 互换（兼容用户写反顺序）', '', '**示例**：', '```html', '<if cell="背包物品表/铁剑/数量 >= 3">铁剑库存充足。<else>铁剑库存不足。</if>', '<if cell="重要角色表/艾莉/是否离场 == 否">艾莉在场。</if>', '```', '→ **执行结果**（铁剑数量=3、艾莉是否离场=否）：', '```', '铁剑库存充足。', '艾莉在场。', '```'),
+    },
+    {
+        sourceFile: 'syntax-reference (1).md',
+        section: '三、<if> 条件标签 / 3.5 <if cond="...">',
+        content: joinLines_ACU('### 3.5 `<if cond="...">` — 统一条件表达式（最强）', '', '支持**所有前缀**和**完整的逻辑组合**。', '', '#### 可用前缀', '', '| 前缀 | 等价于 | 仅 SQLite 模式 |', '|------|-------|:-------------:|', '| `seed:<关键词表达式>` | `<if seed="...">`（但**被嵌入到 cond 里后 `&`/`,` 会冲突**，所以建议子表达式里不要再用 `,`/`&`，改用括号或拆分） | - |', '| `cell:<单元格表达式>` | `<if cell="...">` | - |', '| `random:<变量名> 运算 值` | 和 `$random:` 做数值比较 | - |', '| `random:min-max 运算 值` | **内联随机数**：即用即生，用完就丢 | - |', '| `calc:<变量名> 运算 值` | 数值比较 | - |', '| `max:<变量名> 运算 值` | 数值比较 | - |', '| `min:<变量名> 运算 值` | 数值比较 | - |', '| `db:<ORM 表达式>` | `<if db="...">` | ✅ |', '| `sql:<SQL 语句>` | `<if sql="...">` | ✅ |', '| `v:<变量名>` | `$v:变量名` 的比较 / truthy | ✅ |', '| *（无前缀）* | 当关键词处理，等价于 `seed:` | - |', '', '#### 逻辑运算符和优先级', '', '| 运算符 | 含义 | 优先级 |', '|--------|------|:------:|', '| `()` | 括号分组 | 最高 |', '| `!` | 取反（一元前缀） | 高 |', '| `&` | AND | 中 |', '| `,` | OR | 最低 |', '', '> **实现细节**：是手写的**递归下降解析器**，`parseOrExpr → parseAndExpr → parsePrimary`。括号会正确改变优先级。', '', '> ⚠️ `cond` 中的子表达式**不要在自身内部再带** `,` 或 `&`（那些会被当成外层逻辑运算符切割）。如果 seed 的关键词本身就要用 `,`/`&`，请拆到独立 `<if seed>` 里。'),
+    },
+    {
+        sourceFile: 'syntax-reference (1).md',
+        section: '五、完整处理顺序（Pipeline） 与 六、真实内置表速查',
+        content: joinLines_ACU('## 五、完整处理顺序（Pipeline）', '', '**这是理解所有语法的关键**。每条提示词消息按下面顺序跑一遍：', '', '```', '1.  parseRandomTags_ACU         解析 <random>，无 id 的替换成数字，有 id 的存变量并抹掉标签', '2.  replaceRandomVariables_ACU  替换文本中的 $random:xxx', '3.  parseCalcTags_ACU           解析 <calc>，求值并存变量', '4.  parseMaxTags_ACU            解析 <max>', '5.  parseMinTags_ACU            解析 <min>', '6.  replaceCalcVariables_ACU    替换 $calc:xxx', '7.  replaceMaxVariables_ACU     替换 $max:xxx', '8.  replaceMinVariables_ACU     替换 $min:xxx', '9.  replaceDbSqlVariables       ──（仅 SQLite 模式，否则跳过）──', '       9a. replaceDbExpressions    替换 {[db...]} 和 {[db... as X]}', '       9b. replaceSqlExpressions   替换 {[sql "..."]} 和 {[sql "..." as X]}', '       9c. replaceVarReferences    替换剩余的 $v:xxx', '10. parseIfBlockRecursive_ACU   解析 <if>，选中分支后对分支内容先替换 $v:，再递归解析嵌套 <if>', '```', '', '**重要推论**：', '', '- **`<calc expr="$v:xxx + 1" />` 不生效**：因为第 3 步 `parseCalcTags` 在第 9 步 `$v:` 替换**之前**就跑了，此时 `$v:` 还没替换成值，进 `evaluateCalcExpression` 会被当成非法字符拒绝。想用 `$v:` 做算术，请改用 `{[db.calc("$v:... + 1") as y]}`。', '- **`<if cond="calc:dice > 3">` 要求 `<calc id="dice">` 写在 `<if>` 之前**（否则 calcVariables 里还没这个 id）。', '- **每条消息变量都是独立的**：`_dbSqlVars` 在 `replaceDbSqlVariables` 入口处 `clearDbSqlVariables()` 清空；`randomVariables/calcVariables/maxVariables/minVariables` 在各自 `parseXxxTags` 入口处清空。消息与消息之间**不共享**变量。', '', '## 六、真实内置表速查（写示例时直接套用）', '', '> ⚠️ 示例里不要用 "角色属性表"、"事件表"、"地点表"、"装备表" 这种**不存在的表名**。也不要用 "主角信息表/主角/生命值" 这种**不存在的列**。下面是 8 张真实内置表的**完整列清单**：', '', '| 中文表名 | 英文表名 | 全部列（中文） | 业务主键 |', '|---------|---------|--------------|---------|', '| 全局数据表 | `global_state` | 主角当前所在地点、当前时间、上轮场景时间、经过的时间 | `row_id = 1`（单行） |', '| 主角信息表 | `protagonist_info` | 人物名称、性别/年龄、外貌特征、职业/身份、过往经历、性格特点 | `row_id = 1`（单行） |', '| 主角技能表 | `protagonist_skills` | 技能名称、技能类型、等级/阶段、效果描述 | 技能名称 UNIQUE |', '| 重要角色表 | `important_characters` | 姓名、性别/年龄、一句话介绍、外貌特征、持有的重要物品、是否离场、过往经历 | 姓名 UNIQUE |', '| 背包物品表 | `inventory` | 物品名称、数量、描述/效果、类别 | 物品名称 UNIQUE |', '| 任务与事件表 | `quests_events` | 任务名称、任务类型、发布者、详细描述、当前进度、任务时限、奖励、惩罚 | 任务名称 UNIQUE |', '| 纪要表 | `chronicle` | 时间跨度、地点、纪要、概览、编码索引 | 编码索引 UNIQUE |', '| 选项表 | `options` | 选项一、选项二、选项三、选项四 | `row_id = 1`（单行） |'),
+    },
+    {
+        sourceFile: 'SQL模板语法从0开始上手教程.txt',
+        section: '第一个能用的例子（先看这个）',
+        content: joinLines_ACU('第一个能用的例子（先看这个）', '════════════════════════════════════════', '', '假设你的背包里有 3 把铁剑，你想在提示词里自动显示这个数字。', '', '    你身上有 {[db.背包物品表.where(\'物品名称\', \'铁剑\').get(\'数量\')]} 把铁剑。', '', '运行后：', '', '    你身上有 3 把铁剑。', '', '这一行代码，每个部分是什么意思：', '', '    {[                   固定开头，照抄', '    db                   代表「数据库」，照抄', '    .背包物品表           表名，换成你自己的表', '    .where               筛选的关键词，照抄', '    (\'物品名称\', \'铁剑\')   「哪一列 等于 哪个值」，引号必须英文单引号', '    .get                 取值的关键词，照抄', '    (\'数量\')             要拿的列名，引号必须英文单引号', '    ]}                   固定结尾，照抄', '', '你能改的只有中文部分（表名、列名、要找的值）。', '英文部分（db、where、get）一个字母都不能改。', '', '这个例子需要在 SQLite 模式下才能用。怎么知道自己开的是什么模式：', '看设置里有没有"启用 SQLite"或者类似选项，开了就是 SQLite 模式，没开就是原生模式。', '如果你写了 {[db...]} 结果屏幕上原样显示没变成数字，就是模式没开。'),
+    },
+    {
+        sourceFile: 'SQL模板语法从0开始上手教程.txt',
+        section: '变量 · 存一个值反复用（as 和 $v:） 与 db 特殊方法',
+        content: joinLines_ACU('变量 · 存一个值反复用（as 和 $v:）', '════════════════════════════════════════', '', '🔵 本章需要 SQLite 模式', '', '📋 模板', '', '    {[db.<表名>.where(...).get(...) as <变量名>]}', '    后面用 $v:<变量名> 取出来', '', '📖 字段讲解', '', '    as             「命名为」的关键词，照抄', '    <变量名>       你给这个值起的名字', '                   · 只能用英文、数字、下划线', '                   · 不能用中文', '                   · 不能以数字开头', '    $v:            固定前缀，冒号不能省', '    $v:<变量名>    代表那个变量的值', '', '    🔴 变量只在当前这一条消息里有效。', '        下一条消息会清空，要继续用就得在新消息里重新查一遍。', '', '    🔴 带 as 的 {[... as x]} 标签本身会消失，值存进 $v:x 里。', '        屏幕上看不到原来的标签是正常的。', '', '💡 实操例子', '', '    {[db.背包物品表.where(\'物品名称\',\'铁剑\').get(\'数量\') as sword_cnt]}', '    {[db.重要角色表.where(\'是否离场\',\'否\').count() as alive_cnt]}', '    ', '    你有 $v:sword_cnt 把铁剑，场上还有 $v:alive_cnt 位同伴。', '', 'db 特殊方法 · db.expr 直接算一段 SQL', '════════════════════════════════════════', '', '📋 模板', '', '    {[db.expr("<SQL表达式>")]}', '    {[db.expr("<SQL表达式>") as <变量名>]}', '', '💡 实操例子', '', '    {[db.expr("3 + 5 * 2")]}', '    铁剑数量 × 2：{[db.expr("(SELECT 数量 FROM 背包物品表 WHERE 物品名称=\'铁剑\') * 2")]}', '', 'db 特殊方法 · db.rand 随机整数', '════════════════════════════════════════', '', '📋 模板', '', '    {[db.rand(<最小>, <最大>)]}', '    {[db.rand(<最小>, <最大>) as <变量名>]}', '', '💡 实操例子', '', '    {[db.rand(1, 100) as luck_roll]}', '    本次幸运值：$v:luck_roll'),
+    },
+    {
+        sourceFile: 'SQL模板语法从0开始上手教程.txt',
+        section: 'if · 按关键词判断 / 按单元格的值判断 / 按 db 与 SQL 查询结果判断 / 万能组合条件',
+        content: joinLines_ACU('if · 按关键词判断（if seed）', '════════════════════════════════════════', '', '🟢 原生模式和 SQLite 模式都能用', '', '📋 模板', '', '    只显示成立内容：', '        <if seed="<关键词>"><内容></if>', '    ', '    带 else（不成立时显示另一段）：', '        <if seed="<关键词>"><成立时内容><else><不成立时内容></if>', '', 'if · 按单元格的值判断（if cell）', '════════════════════════════════════════', '', '📋 模板（永远用这个三段式）', '', '    <if cell="<表名>/<行标识>/<列名> <运算符> <比较值>"><内容></if>', '', '    🔴 一定要用三段式（表名/行标识/列名）。', '        不要写成两段式（表名/列名），那种写法逻辑反直觉，容易错。', '', '💡 实操例子', '', '    <if cell="背包物品表/铁剑/数量 >= 3">铁剑库存充足。<else>铁剑库存不足。</if>', '    <if cell="重要角色表/艾莉/是否离场 == 否">艾莉还在。</if>', '', 'if · 按 db 查询结果判断（if db）', '════════════════════════════════════════', '', '🔵 本章需要 SQLite 模式', '', '📋 模板', '', '    <if db="<db 链式表达式或布尔判断>"><内容></if>', '', '💡 实操例子', '', '    <if db="db.背包物品表.count() > 2">物品超过 2 种。</if>', '    <if db="db.背包物品表.where(\'物品名称\',\'铁剑\').exists()">有铁剑。</if>', '', 'if · 按 SQL 查询结果判断（if sql）', '════════════════════════════════════════', '', '📋 模板', '', '    <if sql="<SELECT 语句>"><内容></if>', '', '💡 实操例子', '', '    <if sql="SELECT 1 FROM 背包物品表 WHERE 物品名称=\'铁剑\'">有铁剑。</if>', '    <if sql="SELECT COUNT(*) FROM 重要角色表 WHERE 是否离场=\'否\'">存在未离场角色。</if>', '', 'if · 万能组合条件（if cond）', '════════════════════════════════════════', '', '这个最强，可以把前面所有 if 类型揉在一起写。', '', '📋 模板', '', '    <if cond="<前缀>:<表达式> <逻辑符> <前缀>:<表达式>"><内容></if>', '', '    🔸 可以用的前缀（就是告诉系统这段是哪种条件）：', '', '        seed:     关键词条件        例：seed:战斗', '        cell:     单元格比较        例：cell:背包物品表/铁剑/数量 > 2', '        random:   内联随机          例：random:1-100 > 80', '        db:       db 条件           例：db:背包物品表.count() > 2', '        sql:      SQL 条件          例：sql:SELECT COUNT(*) FROM 背包物品表', '        v:        变量条件          例：v:sword_cnt > 0', '', '    🔴 seed: 里不要自己塞 , 和 &：', '        错：<if cond="seed:A,B & cell:xxx/yyy > 10">', '        对：<if cond="(seed:A, seed:B) & cell:xxx/yyy > 10">', '', '    🔴 用 v: 之前必须先用 {[... as x]} 存好变量。', '        变量要出现在同一条消息里，而且要写在 <if> 的前面。'),
+    },
+];
+function buildTemplateAssistantEmbeddedReferenceText_ACU() {
+    return TEMPLATE_ASSISTANT_EMBEDDED_REFERENCE_CHUNKS_ACU
+        .map((chunk) => [
+        `【原文嵌入 / ${chunk.sourceFile} / ${chunk.section}】`,
+        chunk.content,
+    ].join('\n'))
+        .join('\n\n----------------------------------------\n\n');
+}
+
+const TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU = ['note', 'initNode', 'insertNode', 'updateNode', 'deleteNode'];
+const TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEY_SET_ACU = new Set(TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU);
+class TemplateAssistantSessionStoppedError_ACU extends Error {
+    constructor(stopReason) {
+        super(stopReason === 'cancelled' ? '模板助手会话已取消' : '模板助手会话已过期');
+        this.name = 'TemplateAssistantSessionStoppedError_ACU';
+        this.stopReason = stopReason;
+    }
+}
+const DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU = 3;
+const DEFAULT_TEMPLATE_ASSISTANT_MAX_REPAIR_RETRIES_ACU = 1;
+function clone_ACU$1(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+function normalizePositiveInteger_ACU(value, fallback) {
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized))
+        return fallback;
+    const integer = Math.floor(normalized);
+    return integer > 0 ? integer : fallback;
+}
+function normalizeNonNegativeInteger_ACU(value, fallback) {
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized))
+        return fallback;
+    const integer = Math.floor(normalized);
+    return integer >= 0 ? integer : fallback;
+}
+function asObject_ACU(value, fallback = {}) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : fallback;
+}
+function trimAssistantMessage_ACU(value) {
+    return String(value ?? '').trim();
+}
+function normalizePriorTurns_ACU(priorTurns) {
+    if (!Array.isArray(priorTurns))
+        return [];
+    return priorTurns
+        .map((turn) => ({
+        user: trimAssistantMessage_ACU(turn?.user),
+        assistant: trimAssistantMessage_ACU(turn?.assistant),
+    }))
+        .filter((turn) => !!turn.user || !!turn.assistant);
+}
+function buildTemplateAssistantMessages_ACU(input, baseFingerprint) {
+    const messages = [
+        { role: 'system', content: buildSystemPrompt_ACU() },
+    ];
+    normalizePriorTurns_ACU(input.priorTurns).forEach((turn) => {
+        if (turn.user) {
+            messages.push({ role: 'user', content: turn.user });
+        }
+        if (turn.assistant) {
+            messages.push({ role: 'assistant', content: turn.assistant });
+        }
+    });
+    messages.push({ role: 'user', content: buildUserPrompt_ACU(input, baseFingerprint) });
+    return messages;
+}
+function sanitizeSourceDataSnapshotForAssistant_ACU(value) {
+    const sourceData = asObject_ACU(value);
+    const sanitized = {};
+    TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU.forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(sourceData, key)) {
+            sanitized[key] = clone_ACU$1(sourceData[key]);
+        }
+    });
+    return sanitized;
+}
+function validateSourceDataPayload_ACU(value, label) {
+    if (value == null)
+        return;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(`${label} 必须是对象`);
+    }
+    Object.keys(value).forEach((key) => {
+        if (TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEY_SET_ACU.has(key))
+            return;
+        if (key === 'ddl') {
+            throw new Error(`${label} 不能直接修改 ddl，请改用 patch_sheet_schema.ddl`);
+        }
+        throw new Error(`${label} 包含未知字段: ${key}`);
+    });
+}
+function extractHeaders_ACU(sheet) {
+    return Array.isArray(sheet?.content?.[0]) ? sheet.content[0].slice(1).map((item) => String(item ?? '')) : [];
+}
+function getSheetSnapshot_ACU(tempData, sheetKey) {
+    const sheet = tempData?.[sheetKey] || {};
+    return {
+        sheetKey,
+        name: String(sheet?.name || ''),
+        orderNo: Number.isFinite(sheet?.orderNo) ? sheet.orderNo : null,
+        headers: extractHeaders_ACU(sheet),
+        content: clone_ACU$1(Array.isArray(sheet?.content) ? sheet.content : []),
+        sourceData: sanitizeSourceDataSnapshotForAssistant_ACU(sheet?.sourceData),
+        updateConfig: clone_ACU$1(asObject_ACU(sheet?.updateConfig)),
+        exportConfig: clone_ACU$1(asObject_ACU(sheet?.exportConfig)),
+    };
+}
+function getSelectedSheetSnapshot_ACU(tempData, sheetKey) {
+    if (!sheetKey || !tempData?.[sheetKey])
+        return null;
+    return getSheetSnapshot_ACU(tempData, sheetKey);
+}
+function buildSheetSummary_ACU(tempData) {
+    const sheetKeys = getSortedSheetKeys_ACU(tempData, { ignoreChatGuide: true });
+    return sheetKeys.map((sheetKey) => {
+        const sheet = tempData[sheetKey] || {};
+        return {
+            sheetKey,
+            name: String(sheet.name || ''),
+            orderNo: Number.isFinite(sheet.orderNo) ? sheet.orderNo : null,
+            headers: extractHeaders_ACU(sheet),
+            rowCount: Math.max(0, (Array.isArray(sheet?.content) ? sheet.content.length : 0) - 1),
+        };
+    });
+}
+function buildDetailedSheetSnapshots_ACU(tempData) {
+    return buildSheetSummary_ACU(tempData).map((item) => getSheetSnapshot_ACU(tempData, item.sheetKey));
+}
+function buildTemplateAssistantFingerprint_ACU(tempData) {
+    const normalized = asObject_ACU(tempData);
+    const sheetKeys = getSortedSheetKeys_ACU(normalized, { ignoreChatGuide: true });
+    const snapshot = {
+        globalInjectionConfig: getGlobalInjectionConfigFromData_ACU(normalized, { ensureWriteBack: false }),
+        sheets: sheetKeys.map((sheetKey) => {
+            const sheet = normalized[sheetKey] || {};
+            return {
+                sheetKey,
+                uid: sheet.uid ?? '',
+                name: sheet.name ?? '',
+                orderNo: sheet.orderNo ?? null,
+                content: Array.isArray(sheet?.content) ? sheet.content : [],
+                sourceData: asObject_ACU(sheet.sourceData),
+                updateConfig: asObject_ACU(sheet.updateConfig),
+                exportConfig: asObject_ACU(sheet.exportConfig),
+            };
+        }),
+    };
+    return `acu-struct:${hashUserInput_ACU(safeJsonStringify_ACU(snapshot, '{}'))}`;
+}
+function getLastTaggedDraftText_ACU(aiText) {
+    const tagPattern = /<templateAssistantDraft>([\s\S]*?)<\/templateAssistantDraft>/g;
+    const matches = Array.from(String(aiText || '').matchAll(tagPattern));
+    if (!matches.length) {
+        throw new Error('AI 响应中未找到 <templateAssistantDraft> 标签');
+    }
+    return String(matches[matches.length - 1][1] || '').trim();
+}
+function parseTemplateAssistantDraft_ACU(aiText) {
+    const jsonText = getLastTaggedDraftText_ACU(aiText);
+    let parsed = null;
+    try {
+        parsed = JSON.parse(jsonText);
+    }
+    catch (error) {
+        throw new Error(`assistant draft JSON 解析失败: ${error?.message || '未知错误'}`);
+    }
+    return validateTemplateAssistantDraft_ACU(parsed);
+}
+function validatePatchSheetBoundary_ACU(op, selectedSheetKey, currentSheetKey, protocolVersion) {
+    if (protocolVersion !== 1)
+        return;
+    if (op.sheetKey !== selectedSheetKey) {
+        throw new Error(`${op.op} 的 sheetKey 必须与 draft.selectedSheetKey 一致`);
+    }
+    if (currentSheetKey && op.sheetKey !== currentSheetKey) {
+        throw new Error(`${op.op} 只能修改当前选中表`);
+    }
+}
+function validateTemplateAssistantContentPatch_ACU(op) {
+    const patch = op?.patch;
+    const allowedKeys = new Set(['updateCells', 'addRows', 'deleteRows']);
+    Object.keys(patch).forEach((key) => {
+        if (!allowedKeys.has(key)) {
+            throw new Error(`patch_sheet_content.patch 包含未知字段: ${key}`);
+        }
+    });
+    const updateCells = patch?.updateCells;
+    const addRows = patch?.addRows;
+    const deleteRows = patch?.deleteRows;
+    const hasAnyOperation = (Array.isArray(updateCells) && updateCells.length > 0)
+        || (Array.isArray(addRows) && addRows.length > 0)
+        || (Array.isArray(deleteRows) && deleteRows.length > 0);
+    if (!hasAnyOperation) {
+        throw new Error('patch_sheet_content 至少需要 updateCells、addRows、deleteRows 之一');
+    }
+    if (updateCells != null) {
+        if (!Array.isArray(updateCells)) {
+            throw new Error('patch_sheet_content.patch.updateCells 必须是数组');
+        }
+        updateCells.forEach((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                throw new Error(`patch_sheet_content.patch.updateCells[${index}] 必须是对象`);
+            }
+            if (!Number.isInteger(item.rowNumber) || item.rowNumber <= 0) {
+                throw new Error(`patch_sheet_content.patch.updateCells[${index}].rowNumber 必须是正整数`);
+            }
+            if (typeof item.columnName !== 'string' || !item.columnName.trim()) {
+                throw new Error(`patch_sheet_content.patch.updateCells[${index}].columnName 必须是非空字符串`);
+            }
+            if (!Object.prototype.hasOwnProperty.call(item, 'value')) {
+                throw new Error(`patch_sheet_content.patch.updateCells[${index}].value 缺失`);
+            }
+        });
+    }
+    if (addRows != null) {
+        if (!Array.isArray(addRows)) {
+            throw new Error('patch_sheet_content.patch.addRows 必须是数组');
+        }
+        addRows.forEach((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                throw new Error(`patch_sheet_content.patch.addRows[${index}] 必须是对象`);
+            }
+        });
+    }
+    if (deleteRows != null) {
+        if (!Array.isArray(deleteRows)) {
+            throw new Error('patch_sheet_content.patch.deleteRows 必须是数组');
+        }
+        deleteRows.forEach((rowNumber, index) => {
+            if (!Number.isInteger(rowNumber) || rowNumber <= 0) {
+                throw new Error(`patch_sheet_content.patch.deleteRows[${index}] 必须是正整数`);
+            }
+        });
+    }
+}
+function validateTemplateAssistantSchemaPatch_ACU(op) {
+    const patch = op?.patch;
+    const allowedKeys = new Set(['renameColumns', 'addColumns', 'deleteColumns', 'ddl']);
+    Object.keys(patch).forEach((key) => {
+        if (!allowedKeys.has(key)) {
+            throw new Error(`patch_sheet_schema.patch 包含未知字段: ${key}`);
+        }
+    });
+    const renameColumns = patch?.renameColumns;
+    const addColumns = patch?.addColumns;
+    const deleteColumns = patch?.deleteColumns;
+    const ddl = patch?.ddl;
+    const hasAnyOperation = (Array.isArray(renameColumns) && renameColumns.length > 0)
+        || (Array.isArray(addColumns) && addColumns.length > 0)
+        || (Array.isArray(deleteColumns) && deleteColumns.length > 0)
+        || (typeof ddl === 'string' && !!ddl.trim());
+    if (!hasAnyOperation) {
+        throw new Error('patch_sheet_schema 至少需要 renameColumns、addColumns、deleteColumns、ddl 之一');
+    }
+    if (renameColumns != null) {
+        if (!Array.isArray(renameColumns)) {
+            throw new Error('patch_sheet_schema.patch.renameColumns 必须是数组');
+        }
+        renameColumns.forEach((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                throw new Error(`patch_sheet_schema.patch.renameColumns[${index}] 必须是对象`);
+            }
+            if (typeof item.from !== 'string' || !item.from.trim()) {
+                throw new Error(`patch_sheet_schema.patch.renameColumns[${index}].from 必须是非空字符串`);
+            }
+            if (typeof item.to !== 'string' || !item.to.trim()) {
+                throw new Error(`patch_sheet_schema.patch.renameColumns[${index}].to 必须是非空字符串`);
+            }
+        });
+    }
+    if (addColumns != null) {
+        if (!Array.isArray(addColumns)) {
+            throw new Error('patch_sheet_schema.patch.addColumns 必须是数组');
+        }
+        addColumns.forEach((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                throw new Error(`patch_sheet_schema.patch.addColumns[${index}] 必须是对象`);
+            }
+            if (typeof item.name !== 'string' || !item.name.trim()) {
+                throw new Error(`patch_sheet_schema.patch.addColumns[${index}].name 必须是非空字符串`);
+            }
+        });
+    }
+    if (deleteColumns != null) {
+        if (!Array.isArray(deleteColumns)) {
+            throw new Error('patch_sheet_schema.patch.deleteColumns 必须是数组');
+        }
+        deleteColumns.forEach((item, index) => {
+            if (typeof item !== 'string' || !item.trim()) {
+                throw new Error(`patch_sheet_schema.patch.deleteColumns[${index}] 必须是非空字符串`);
+            }
+        });
+    }
+    if (ddl != null && (typeof ddl !== 'string' || !ddl.trim())) {
+        throw new Error('patch_sheet_schema.patch.ddl 必须是非空字符串');
+    }
+}
+function validateTemplateAssistantLockPatch_ACU(op) {
+    const patch = op?.patch;
+    const allowedKeys = new Set(['rows', 'columns', 'cells', 'specialIndexLocked']);
+    Object.keys(patch).forEach((key) => {
+        if (!allowedKeys.has(key)) {
+            throw new Error(`patch_sheet_locks.patch 包含未知字段: ${key}`);
+        }
+    });
+    const rows = patch?.rows;
+    const columns = patch?.columns;
+    const cells = patch?.cells;
+    const hasAnyOperation = (Array.isArray(rows) && rows.length > 0)
+        || (Array.isArray(columns) && columns.length > 0)
+        || (Array.isArray(cells) && cells.length > 0)
+        || typeof patch?.specialIndexLocked === 'boolean';
+    if (!hasAnyOperation) {
+        throw new Error('patch_sheet_locks 至少需要 rows、columns、cells、specialIndexLocked 之一');
+    }
+    if (rows != null) {
+        if (!Array.isArray(rows)) {
+            throw new Error('patch_sheet_locks.patch.rows 必须是数组');
+        }
+        rows.forEach((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                throw new Error(`patch_sheet_locks.patch.rows[${index}] 必须是对象`);
+            }
+            if (!Number.isInteger(item.rowNumber) || item.rowNumber <= 0) {
+                throw new Error(`patch_sheet_locks.patch.rows[${index}].rowNumber 必须是正整数`);
+            }
+            if (typeof item.locked !== 'boolean') {
+                throw new Error(`patch_sheet_locks.patch.rows[${index}].locked 必须是布尔值`);
+            }
+        });
+    }
+    if (columns != null) {
+        if (!Array.isArray(columns)) {
+            throw new Error('patch_sheet_locks.patch.columns 必须是数组');
+        }
+        columns.forEach((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                throw new Error(`patch_sheet_locks.patch.columns[${index}] 必须是对象`);
+            }
+            if (typeof item.columnName !== 'string' || !item.columnName.trim()) {
+                throw new Error(`patch_sheet_locks.patch.columns[${index}].columnName 必须是非空字符串`);
+            }
+            if (typeof item.locked !== 'boolean') {
+                throw new Error(`patch_sheet_locks.patch.columns[${index}].locked 必须是布尔值`);
+            }
+        });
+    }
+    if (cells != null) {
+        if (!Array.isArray(cells)) {
+            throw new Error('patch_sheet_locks.patch.cells 必须是数组');
+        }
+        cells.forEach((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                throw new Error(`patch_sheet_locks.patch.cells[${index}] 必须是对象`);
+            }
+            if (!Number.isInteger(item.rowNumber) || item.rowNumber <= 0) {
+                throw new Error(`patch_sheet_locks.patch.cells[${index}].rowNumber 必须是正整数`);
+            }
+            if (typeof item.columnName !== 'string' || !item.columnName.trim()) {
+                throw new Error(`patch_sheet_locks.patch.cells[${index}].columnName 必须是非空字符串`);
+            }
+            if (typeof item.locked !== 'boolean') {
+                throw new Error(`patch_sheet_locks.patch.cells[${index}].locked 必须是布尔值`);
+            }
+        });
+    }
+    if (patch?.specialIndexLocked != null && typeof patch.specialIndexLocked !== 'boolean') {
+        throw new Error('patch_sheet_locks.patch.specialIndexLocked 必须是布尔值');
+    }
+}
+function validateTemplateAssistantDraft_ACU(draft) {
+    if (!draft || typeof draft !== 'object') {
+        throw new Error('assistant draft 必须是对象');
+    }
+    if (draft.protocolVersion !== 1 && draft.protocolVersion !== 2) {
+        throw new Error('assistant draft.protocolVersion 必须为 1 或 2');
+    }
+    if (draft.mode !== 'modify_current_template_incremental') {
+        throw new Error('assistant draft.mode 非法');
+    }
+    if (typeof draft.baseFingerprint !== 'string' || !draft.baseFingerprint.trim()) {
+        throw new Error('assistant draft.baseFingerprint 缺失');
+    }
+    if (typeof draft.selectedSheetKey !== 'string' || !draft.selectedSheetKey.trim()) {
+        throw new Error('assistant draft.selectedSheetKey 必须是非空字符串');
+    }
+    if (typeof draft.summary !== 'string') {
+        throw new Error('assistant draft.summary 必须是字符串');
+    }
+    if (!Array.isArray(draft.warnings)) {
+        throw new Error('assistant draft.warnings 必须是数组');
+    }
+    if (!Array.isArray(draft.operations)) {
+        throw new Error('assistant draft.operations 必须是数组');
+    }
+    const protocolVersion = draft.protocolVersion;
+    if (protocolVersion === 2) {
+        if (typeof draft.requestId !== 'string' || !draft.requestId.trim()) {
+            throw new Error('assistant draft.requestId 必须是非空字符串');
+        }
+        if (draft.atomic !== true) {
+            throw new Error('assistant draft.atomic 目前必须为 true');
+        }
+    }
+    draft.operations.forEach((op, index) => {
+        if (!op || typeof op !== 'object') {
+            throw new Error(`operations[${index}] 必须是对象`);
+        }
+        const opName = String(op.op || '');
+        const allowedOps = new Set([
+            'add_sheet',
+            'rename_sheet',
+            'delete_sheet',
+            'move_sheet',
+            'patch_sheet_source_data',
+            'patch_sheet_update_config',
+            'patch_sheet_export_config',
+            'patch_global_injection_config',
+            ...(protocolVersion === 2 ? ['patch_sheet_content', 'patch_sheet_schema', 'patch_sheet_locks'] : []),
+        ]);
+        if (!allowedOps.has(opName)) {
+            throw new Error(`operations[${index}] 包含当前协议不支持的操作: ${opName}`);
+        }
+        if (opName === 'replace_sheet_schema') {
+            throw new Error('当前协议禁止 replace_sheet_schema');
+        }
+        if (opName.startsWith('patch_sheet_')) {
+            if (typeof op.sheetKey !== 'string' || !op.sheetKey) {
+                throw new Error(`${opName} 缺少 sheetKey`);
+            }
+            if (!op.patch || typeof op.patch !== 'object' || Array.isArray(op.patch)) {
+                throw new Error(`${opName} 缺少合法 patch 对象`);
+            }
+        }
+        if (opName === 'add_sheet') {
+            validateSourceDataPayload_ACU(op.sourceData, 'add_sheet.sourceData');
+        }
+        if (opName === 'patch_sheet_source_data') {
+            validateSourceDataPayload_ACU(op.patch, 'patch_sheet_source_data.patch');
+        }
+        if (opName === 'patch_sheet_content') {
+            validateTemplateAssistantContentPatch_ACU(op);
+        }
+        if (opName === 'patch_sheet_schema') {
+            validateTemplateAssistantSchemaPatch_ACU(op);
+        }
+        if (opName === 'patch_sheet_locks') {
+            validateTemplateAssistantLockPatch_ACU(op);
+        }
+    });
+    const normalizedBase = {
+        protocolVersion,
+        mode: 'modify_current_template_incremental',
+        baseFingerprint: draft.baseFingerprint,
+        selectedSheetKey: String(draft.selectedSheetKey || ''),
+        summary: String(draft.summary || ''),
+        warnings: draft.warnings.map((item) => String(item ?? '')),
+        operations: draft.operations.map((item) => clone_ACU$1(item)),
+    };
+    if (protocolVersion === 2) {
+        return {
+            ...normalizedBase,
+            protocolVersion: 2,
+            requestId: String(draft.requestId || ''),
+            atomic: true,
+        };
+    }
+    return {
+        ...normalizedBase,
+        protocolVersion: 1,
+    };
+}
+function buildSystemPrompt_ACU() {
+    const embeddedReferenceText = buildTemplateAssistantEmbeddedReferenceText_ACU();
+    return [
+        '你是 visualizer 内的模板改表助手。',
+        '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。',
+        '严格使用 protocolVersion=2、mode="modify_current_template_incremental"、atomic=true。',
+        '下面会附带两份本地语法文档的原文分块嵌入内容；这些内容不是摘要，而是从 `syntax-reference (1).md` 和 `SQL模板语法从0开始上手教程.txt` 摘取的原文片段。凡是涉及提示词模板、条件表达式、SQLite 查询、变量、内置表、执行顺序、常见踩坑时，优先以这些原文片段为准。',
+        '如果需求信息不足、字段缺失、或当前协议无法安全表达，仍然必须返回合法 draft：summary 简述原因、warnings 写明原因、operations 输出空数组；不要输出追问文本，不要输出非法操作。',
+        '严格只允许以下操作：add_sheet、rename_sheet、delete_sheet、move_sheet、patch_sheet_source_data、patch_sheet_update_config、patch_sheet_export_config、patch_sheet_content、patch_sheet_schema、patch_sheet_locks、patch_global_injection_config。',
+        '每个 operations[i] 必须使用 op 字段表示操作名；禁止使用 type、operation、action 等别名。',
+        '严格禁止任何直接保存行为。',
+        'add_sheet 必须同时提供非空 sheetName 和至少一个 headers 项；并且应尽量同时提供 sourceData.note、sourceData.initNode、sourceData.insertNode、sourceData.updateNode、sourceData.deleteNode；sheetName 缺失时不要猜名字，直接返回空 operations。',
+        'add_sheet.sourceData 与 patch_sheet_source_data.patch 只允许 note、initNode、insertNode、updateNode、deleteNode 五个字段；禁止出现 ddl、sql、schema、createTable 等字段。',
+        '新建表时，不要只给空壳。sourceData.note 要写清这张表记录什么、一行代表什么、是单行表还是多行表、各列含义、哪列可以作为稳定标识。sourceData.initNode/insertNode/updateNode/deleteNode 要写清何时初始化、何时新增、何时更新、何时删除。',
+        '当用户只表达“新增某某表”但没有给出表头时，可以根据表名语义生成一组最小、合理、通用、可直接用于后续剧情更新的 headers；自定义表头尽量避免使用带 / 的列名；不要伪造数据行。',
+        '物品/战利品/库存类表，优先考虑“物品名称、数量、描述/效果、类别、备注、来源/掉落来源”等能直接支撑后续更新的列；其中应至少包含一个稳定标识列。',
+        '默认优先 add_sheet + 完整 sourceData，让新表立刻具备初始化/新增/更新/删除指引；除非用户明确要求 DDL、字段类型、约束或 SQLite 建表语句，否则不要主动输出 patch_sheet_schema.ddl。',
+        '即使用户要求“顺便写 SQL/DDL”，也不要把 ddl 或 sql 塞进 add_sheet.sourceData；新建表时优先输出 headers + 合法的五段 sourceData。',
+        '如果当前 headers 主要是中文，自定义 ddl 只有在你能提供英文/ASCII 物理列名，并用 `-- 中文表头` 注释按原顺序一一对应时才安全；除非用户明确要求并且已经给出可直接落地的列名方案，否则不要生成 ddl。',
+        '示例 add_sheet：{"op":"add_sheet","sheetName":"角色关系表","headers":["角色A","角色B","关系","备注"]}。',
+        '示例（库存/战利品类）add_sheet：{"op":"add_sheet","sheetName":"战利品表","headers":["物品名称","数量","描述/效果","类别"],"sourceData":{"note":"记录战利品条目，一行代表一种物品。","initNode":"当剧情或设定已经明确存在初始战利品时初始化。","insertNode":"出现新的战利品时新增。","updateNode":"已有战利品数量或状态变化时更新。","deleteNode":"战利品被清空、移除或失效时删除。"}}。',
+        'patch_sheet_source_data 不能修改 ddl；DDL 只能通过 patch_sheet_schema.patch.ddl 修改。',
+        '当前协议校验会逐列对比 patch_sheet_schema.patch.ddl 与当前 headers：ASCII/英文 headers 必须由同名物理列匹配；中文 headers 必须使用英文/ASCII 物理列名，并用 `-- 中文表头` 注释匹配。第一列必须是 row_id INTEGER PRIMARY KEY。',
+        '正确示例（中文 headers）：CREATE TABLE loot_table ( -- 战利品表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  item_name TEXT, -- 物品名称\n  quantity INTEGER, -- 数量\n  time_span TEXT NOT NULL, -- 时间跨度\n  remarks TEXT -- 备注\n);',
+        '即使是 row_id INTEGER PRIMARY KEY 这一行，也必须保留 `-- 行号` 注释，不能省略。',
+        '错误示例：CREATE TABLE loot_table (\n  row_id INTEGER PRIMARY KEY,\n  物品名称 TEXT,\n  数量 INTEGER\n); 这种把中文表头直接写成物理列名的 ddl 会被拒绝；即使再写 `-- 物品名称` 这类同名注释也不合法。',
+        '不要为刚 add_sheet 的新表生成依赖真实 sheetKey 的 follow-up patch 来补 DDL 或 starter rows；当前同一份 draft 无法可靠引用尚未落地的新表。',
+        'patch_sheet_content.patch 只允许使用 updateCells、addRows、deleteRows；其中 rowNumber 必须使用 1-based 行号，列使用 columnName。',
+        'patch_sheet_schema.patch 只允许使用 renameColumns、addColumns、deleteColumns、ddl。',
+        'patch_sheet_locks.patch 只允许使用 rows、columns、cells、specialIndexLocked；rows/cells 使用 1-based rowNumber，列使用 columnName，所有锁变更都必须显式给出 locked 布尔值。',
+        'move_sheet 只能提供 beforeSheetKey 或 afterSheetKey 之一。',
+        'add_sheet 不要生成最终 sheetKey，本地会自动生成。',
+        'patch 对象只能填写当前结构里真实存在的字段、表头和表格，不要猜测未知字段。',
+        '顶层 JSON 必须包含 protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、operations。',
+        'warnings 必须是字符串数组；没有则输出空数组。',
+        '如果无法生成合法操作，请保持 warnings 为字符串数组，并让 operations=[]，不要输出协议外字段。',
+        embeddedReferenceText,
+    ].join('\n');
+}
+function buildUserPrompt_ACU(input, baseFingerprint) {
+    const tempData = input.tempData;
+    const payload = {
+        userRequest: String(input.userRequest || '').trim(),
+        baseFingerprint,
+        selectedSheetKey: input.currentSheetKey || '',
+        selectedSheet: getSelectedSheetSnapshot_ACU(tempData, input.currentSheetKey),
+        sheetCount: buildSheetSummary_ACU(tempData).length,
+        allSheets: buildDetailedSheetSnapshots_ACU(tempData),
+        globalInjectionConfig: getGlobalInjectionConfigFromData_ACU(tempData, { ensureWriteBack: false }),
+        constraints: {
+            protocolVersion: 2,
+            requestIdRequired: true,
+            atomicOnly: true,
+            allowCrossSheetPatch: true,
+            patchSourceDataForbidDdl: true,
+            sourceDataAllowedKeys: [...TEMPLATE_ASSISTANT_SOURCE_DATA_ALLOWED_KEYS_ACU],
+            addSheetSourceDataForbidDdl: true,
+            allowStructuredContentPatch: true,
+            allowStructuredSchemaPatch: true,
+            allowStructuredLockPatch: true,
+            contentPatchRowNumberBase: 1,
+            lockPatchRowNumberBase: 1,
+            preferRichSourceDataForAddSheet: true,
+            defaultNoDdlForNewSheetUnlessExplicitlyRequested: true,
+            ddlMustPreserveHeaderOrder: true,
+            ddlChineseHeadersRequireCommentMapping: true,
+            ddlChineseHeadersForbidChinesePhysicalNames: true,
+            ddlPhysicalColumnNamesShouldBeAsciiWhenHeadersAreChinese: true,
+            avoidSlashInNewCustomHeaders: true,
+            cannotPatchNewSheetAfterAddInSameDraft: true,
+            redactExistingSourceDataDdlFromSnapshots: true,
+        },
+    };
+    return safeJsonStringify_ACU(payload, '{}');
+}
+function buildSessionRoundUserRequest_ACU(options) {
+    const chunks = [String(options.userRequest || '').trim()];
+    if (options.round > 1) {
+        chunks.push(`补充说明：当前是第 ${options.round}/${options.maxRounds} 轮，输入数据已经包含前面轮次产生的内存草稿结果。请只继续未完成的改动；如果已经无需继续修改，请返回空 operations。`);
+    }
+    if (options.repairReason) {
+        chunks.push(`修复要求：上一轮 assistant 草稿未通过本地校验，原因是：${options.repairReason}。请修复草稿并继续完成需求，仍然只能输出合法 draft JSON。`);
+    }
+    return chunks.filter(Boolean).join('\n\n');
+}
+function getTemplateAssistantSessionAbortReason_ACU(guard) {
+    if (guard?.isCancelled?.())
+        return 'cancelled';
+    if (guard?.isStale?.())
+        return 'stale';
+    return null;
+}
+function assertTemplateAssistantSessionActive_ACU(guard) {
+    const stopReason = getTemplateAssistantSessionAbortReason_ACU(guard);
+    if (stopReason) {
+        throw new TemplateAssistantSessionStoppedError_ACU(stopReason);
+    }
+}
+function createTemplateAssistantSessionGuard_ACU() {
+    let version = 0;
+    let cancelled = false;
+    return {
+        createRunGuard() {
+            const capturedVersion = version;
+            return {
+                isCancelled: () => cancelled,
+                isStale: () => !cancelled && capturedVersion !== version,
+            };
+        },
+        invalidate() {
+            version += 1;
+        },
+        cancel() {
+            cancelled = true;
+            version += 1;
+        },
+        reset() {
+            cancelled = false;
+            version += 1;
+        },
+    };
+}
+function buildTemplateAssistantNoopDraft_ACU(baseFingerprint, selectedSheetKey, summary = '', warnings = []) {
+    return {
+        protocolVersion: 2,
+        mode: 'modify_current_template_incremental',
+        requestId: 'template-assistant-noop',
+        baseFingerprint,
+        atomic: true,
+        selectedSheetKey: String(selectedSheetKey || ''),
+        summary,
+        warnings: warnings.map((item) => String(item ?? '')),
+        operations: [],
+    };
+}
+function appendUniqueByJson_ACU(target, source) {
+    const seen = new Set(target.map((item) => safeJsonStringify_ACU(item, 'null')));
+    source.forEach((item) => {
+        const key = safeJsonStringify_ACU(item, 'null');
+        if (seen.has(key))
+            return;
+        seen.add(key);
+        target.push(clone_ACU$1(item));
+    });
+}
+function aggregateCompileResults_ACU(params) {
+    const aggregated = {
+        candidateData: clone_ACU$1(params.workingTempData),
+        orderedSheetKeys: Array.isArray(params.workingSheetOrder)
+            ? [...params.workingSheetOrder]
+            : (params.baselineSheetOrder ? [...params.baselineSheetOrder] : []),
+        deletedSheetKeys: [],
+        focusSheetKey: params.workingCurrentSheetKey || params.currentSheetKey,
+        diff: {
+            addedSheets: [],
+            deletedSheets: [],
+            renamedSheets: [],
+            movedSheets: [],
+            patchedSourceDataSheets: [],
+            patchedUpdateConfigSheets: [],
+            patchedExportConfigSheets: [],
+            patchedContentSheets: [],
+            patchedSchemaSheets: [],
+            patchedLockSheets: [],
+            globalInjectionChanged: false,
+        },
+        highRiskItems: [],
+        lockChanges: [],
+    };
+    params.rounds.forEach((round) => {
+        appendUniqueByJson_ACU(aggregated.deletedSheetKeys, round.perRoundCompileResult.deletedSheetKeys || []);
+        appendUniqueByJson_ACU(aggregated.diff.addedSheets, round.perRoundCompileResult.diff?.addedSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.deletedSheets, round.perRoundCompileResult.diff?.deletedSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.renamedSheets, round.perRoundCompileResult.diff?.renamedSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.movedSheets, round.perRoundCompileResult.diff?.movedSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.patchedSourceDataSheets, round.perRoundCompileResult.diff?.patchedSourceDataSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.patchedUpdateConfigSheets, round.perRoundCompileResult.diff?.patchedUpdateConfigSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.patchedExportConfigSheets, round.perRoundCompileResult.diff?.patchedExportConfigSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.patchedContentSheets, round.perRoundCompileResult.diff?.patchedContentSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.patchedSchemaSheets, round.perRoundCompileResult.diff?.patchedSchemaSheets || []);
+        appendUniqueByJson_ACU(aggregated.diff.patchedLockSheets, round.perRoundCompileResult.diff?.patchedLockSheets || []);
+        if (round.perRoundCompileResult.diff?.globalInjectionChanged) {
+            aggregated.diff.globalInjectionChanged = true;
+        }
+        appendUniqueByJson_ACU(aggregated.highRiskItems, round.perRoundCompileResult.highRiskItems || []);
+        appendUniqueByJson_ACU(aggregated.lockChanges, round.perRoundCompileResult.lockChanges || []);
+        if (round.perRoundCompileResult.focusSheetKey) {
+            aggregated.focusSheetKey = round.perRoundCompileResult.focusSheetKey;
+        }
+    });
+    if (aggregated.focusSheetKey && !aggregated.candidateData?.[aggregated.focusSheetKey]) {
+        aggregated.focusSheetKey = aggregated.orderedSheetKeys[0] || null;
+    }
+    return aggregated;
+}
+function getTemplateAssistantApplyBaselineFingerprint_ACU(result) {
+    const originalBaseFingerprint = String(result?.originalBaseFingerprint || '').trim();
+    if (originalBaseFingerprint) {
+        return originalBaseFingerprint;
+    }
+    if (Array.isArray(result?.rounds) || !!result?.session) {
+        return '';
+    }
+    return String(result?.draft?.baseFingerprint || '').trim();
+}
+function emitTemplateAssistantRoundComplete_ACU(onRoundComplete, round, rounds, maxRounds) {
+    if (typeof onRoundComplete !== 'function')
+        return;
+    try {
+        onRoundComplete({
+            round: clone_ACU$1(round),
+            rounds: clone_ACU$1(rounds),
+            maxRounds,
+        });
+    }
+    catch (error) {
+        logError_ACU('[TemplateAssistant] onRoundComplete 执行失败', {
+            errorMessage: error?.message || '未知错误',
+            round: round.round,
+        });
+    }
+}
+async function generateTemplateAssistantDraft_ACU(input) {
+    const tempData = asObject_ACU(input?.tempData);
+    const userRequest = String(input?.userRequest || '').trim();
+    if (!userRequest) {
+        throw new Error('请输入改表需求');
+    }
+    if (!String(input?.currentSheetKey || '').trim()) {
+        throw new Error('请先选中一个表后再使用 AI 改表助手');
+    }
+    const baseFingerprint = buildTemplateAssistantFingerprint_ACU(tempData);
+    const messages = buildTemplateAssistantMessages_ACU({ ...input, tempData }, baseFingerprint);
+    const overridePreset = String(input?.tableApiPreset || '').trim();
+    let effectivePreset = overridePreset;
+    if (!effectivePreset) {
+        effectivePreset = settings_ACU.tableApiPreset || '';
+        const currentSheet = input.currentSheetKey ? tempData[input.currentSheetKey] : null;
+        const currentTableName = String(currentSheet?.name || '').trim();
+        if (currentTableName) {
+            const overrides = settings_ACU.tableApiPresetOverridesByName;
+            if (overrides && typeof overrides === 'object' && typeof overrides[currentTableName] === 'string' && overrides[currentTableName].trim()) {
+                effectivePreset = overrides[currentTableName].trim();
+            }
+        }
+    }
+    const aiRawText = await callAIWithPreset_ACU(messages, effectivePreset);
+    if (!aiRawText) {
+        throw new Error('AI 未返回有效内容');
+    }
+    let draft;
+    try {
+        draft = parseTemplateAssistantDraft_ACU(aiRawText);
+    }
+    catch (error) {
+        logError_ACU('[TemplateAssistant] draft 解析失败', {
+            currentSheetKey: input.currentSheetKey,
+            baseFingerprint,
+            userRequest,
+            errorMessage: error?.message || '未知错误',
+            aiRawText,
+        });
+        throw error;
+    }
+    if (draft.baseFingerprint !== baseFingerprint) {
+        throw new Error('AI 返回的 baseFingerprint 与当前结构不一致');
+    }
+    draft.operations.forEach((op) => {
+        if (String(op?.op || '').startsWith('patch_sheet_')) {
+            validatePatchSheetBoundary_ACU(op, draft.selectedSheetKey, input.currentSheetKey, draft.protocolVersion);
+        }
+    });
+    const compileResult = compileTemplateAssistantDraft_ACU({
+        tempData,
+        sheetOrder: input.sheetOrder,
+        currentSheetKey: input.currentSheetKey,
+        draft,
+    });
+    return {
+        draft,
+        aiRawText,
+        messages,
+        compileResult,
+    };
+}
+async function runTemplateAssistantSession_ACU(input) {
+    const tempData = asObject_ACU(input?.tempData);
+    const currentSheetKey = String(input?.currentSheetKey || '').trim();
+    const userRequest = String(input?.userRequest || '').trim();
+    if (!userRequest) {
+        throw new Error('请输入改表需求');
+    }
+    if (!currentSheetKey) {
+        throw new Error('请先选中一个表后再使用 AI 改表助手');
+    }
+    const maxRounds = normalizePositiveInteger_ACU(input?.maxRounds, DEFAULT_TEMPLATE_ASSISTANT_MAX_ROUNDS_ACU);
+    const maxRepairRetries = normalizeNonNegativeInteger_ACU(input?.maxRepairRetries, DEFAULT_TEMPLATE_ASSISTANT_MAX_REPAIR_RETRIES_ACU);
+    const originalTempData = clone_ACU$1(tempData);
+    const originalSheetOrder = Array.isArray(input?.sheetOrder) ? [...input.sheetOrder] : null;
+    const originalBaseFingerprint = buildTemplateAssistantFingerprint_ACU(originalTempData);
+    const rounds = [];
+    const basePriorTurns = normalizePriorTurns_ACU(input?.priorTurns);
+    const onRoundComplete = input?.onRoundComplete;
+    let workingTempData = clone_ACU$1(originalTempData);
+    let workingSheetOrder = Array.isArray(originalSheetOrder) ? [...originalSheetOrder] : null;
+    let workingCurrentSheetKey = currentSheetKey;
+    let workingFingerprint = originalBaseFingerprint;
+    let stopReason = 'max_rounds';
+    let repairRetriesUsed = 0;
+    let lastErrorMessage = '';
+    let lastResult = null;
+    outerLoop: for (let round = 1; round <= maxRounds; round += 1) {
+        let repairReason = '';
+        while (true) {
+            assertTemplateAssistantSessionActive_ACU(input.guard);
+            const roundUserRequest = buildSessionRoundUserRequest_ACU({
+                userRequest,
+                round,
+                maxRounds,
+                repairReason,
+            });
+            try {
+                const historyForRound = [
+                    ...basePriorTurns,
+                    ...rounds.map((item) => ({
+                        user: item.userRequest,
+                        assistant: item.aiRawText,
+                    })),
+                ];
+                const result = await generateTemplateAssistantDraft_ACU({
+                    tempData: workingTempData,
+                    currentSheetKey: workingCurrentSheetKey,
+                    sheetOrder: workingSheetOrder,
+                    userRequest: roundUserRequest,
+                    priorTurns: historyForRound,
+                    tableApiPreset: input.tableApiPreset,
+                });
+                assertTemplateAssistantSessionActive_ACU(input.guard);
+                lastResult = result;
+                const hasOperations = result.draft.operations.length > 0;
+                const nextWorkingTempData = hasOperations ? clone_ACU$1(result.compileResult.candidateData || {}) : clone_ACU$1(workingTempData);
+                const nextWorkingSheetOrder = hasOperations
+                    ? (Array.isArray(result.compileResult.orderedSheetKeys) ? [...result.compileResult.orderedSheetKeys] : [])
+                    : (Array.isArray(workingSheetOrder) ? [...workingSheetOrder] : null);
+                const nextWorkingFingerprint = hasOperations ? buildTemplateAssistantFingerprint_ACU(nextWorkingTempData) : workingFingerprint;
+                const roundRecord = {
+                    round,
+                    userRequest: roundUserRequest,
+                    draft: result.draft,
+                    aiRawText: result.aiRawText,
+                    messages: result.messages,
+                    perRoundCompileResult: result.compileResult,
+                    workingFingerprint: nextWorkingFingerprint,
+                };
+                rounds.push(roundRecord);
+                emitTemplateAssistantRoundComplete_ACU(onRoundComplete, roundRecord, rounds, maxRounds);
+                if (!hasOperations) {
+                    stopReason = 'empty_operations';
+                    break outerLoop;
+                }
+                workingTempData = nextWorkingTempData;
+                workingSheetOrder = nextWorkingSheetOrder;
+                workingCurrentSheetKey = result.compileResult.focusSheetKey || workingCurrentSheetKey;
+                if (nextWorkingFingerprint === workingFingerprint) {
+                    workingFingerprint = nextWorkingFingerprint;
+                    stopReason = 'repeated_working_fingerprint';
+                    break outerLoop;
+                }
+                workingFingerprint = nextWorkingFingerprint;
+                lastErrorMessage = '';
+                if (round === maxRounds) {
+                    stopReason = 'max_rounds';
+                    break outerLoop;
+                }
+                break;
+            }
+            catch (error) {
+                assertTemplateAssistantSessionActive_ACU(input.guard);
+                lastErrorMessage = error?.message || '未知错误';
+                if (repairRetriesUsed >= maxRepairRetries) {
+                    stopReason = 'repair_retry_capped';
+                    break outerLoop;
+                }
+                repairRetriesUsed += 1;
+                repairReason = lastErrorMessage;
+            }
+        }
+    }
+    const compileResult = rounds.length
+        ? aggregateCompileResults_ACU({
+            baselineSheetOrder: originalSheetOrder,
+            currentSheetKey,
+            rounds,
+            workingTempData,
+            workingSheetOrder,
+            workingCurrentSheetKey,
+        })
+        : buildTemplateAssistantCumulativeCompileResult_ACU({
+            baselineData: originalTempData,
+            baselineSheetOrder: originalSheetOrder,
+            candidateData: workingTempData,
+            candidateSheetOrder: workingSheetOrder,
+            focusSheetKey: workingCurrentSheetKey,
+        });
+    const finalDraft = lastResult?.draft || buildTemplateAssistantNoopDraft_ACU(originalBaseFingerprint, currentSheetKey);
+    const finalWorkingFingerprint = buildTemplateAssistantFingerprint_ACU(compileResult.candidateData || workingTempData);
+    return {
+        draft: finalDraft,
+        aiRawText: lastResult?.aiRawText || '',
+        messages: lastResult?.messages || [],
+        compileResult,
+        originalBaseFingerprint,
+        rounds,
+        session: {
+            originalBaseFingerprint,
+            finalWorkingFingerprint,
+            stopReason,
+            roundsExecuted: rounds.length,
+            maxRounds,
+            repairRetriesUsed,
+            maxRepairRetries,
+            lastErrorMessage,
+        },
+    };
+}
+
+function clone_ACU(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+function applyTemplateAssistantDraftToVisualizer_ACU(result) {
+    const baselineFingerprint = getTemplateAssistantApplyBaselineFingerprint_ACU(result);
+    const currentFingerprint = buildTemplateAssistantFingerprint_ACU(_acuVisState.tempData || {});
+    if (!baselineFingerprint || currentFingerprint !== baselineFingerprint) {
+        showToastr_ACU('warning', '当前结构已变化，assistant 草稿已失效，请重新生成。');
+        return false;
+    }
+    const nextTempData = clone_ACU(result.compileResult.candidateData || {});
+    const nextSheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
+        ? [...result.compileResult.orderedSheetKeys]
+        : [];
+    const nextDeletedKeys = new Set(Array.isArray(_acuVisState.deletedSheetKeys) ? _acuVisState.deletedSheetKeys : []);
+    (result.compileResult.deletedSheetKeys || []).forEach((key) => nextDeletedKeys.add(key));
+    _acuVisState.tempData = nextTempData;
+    _acuVisState.sheetOrder = nextSheetOrder;
+    applySheetOrderNumbers_ACU(_acuVisState.tempData, _acuVisState.sheetOrder);
+    _acuVisState.deletedSheetKeys = Array.from(nextDeletedKeys);
+    (result.compileResult.lockChanges || []).forEach((change) => {
+        const currentLockState = getTableLocksForSheet_ACU(change.sheetKey);
+        (change.rows || []).forEach((item) => {
+            if (item.locked)
+                currentLockState.rows.add(item.rowIndex);
+            else
+                currentLockState.rows.delete(item.rowIndex);
+        });
+        (change.columns || []).forEach((item) => {
+            if (item.locked)
+                currentLockState.cols.add(item.colIndex);
+            else
+                currentLockState.cols.delete(item.colIndex);
+        });
+        (change.cells || []).forEach((item) => {
+            const key = `${item.rowIndex}:${item.colIndex}`;
+            if (item.locked)
+                currentLockState.cells.add(key);
+            else
+                currentLockState.cells.delete(key);
+        });
+        saveTableLocksForSheet_ACU(change.sheetKey, currentLockState);
+        if (typeof change.specialIndexLocked === 'boolean') {
+            setSpecialIndexLockEnabled_ACU(change.sheetKey, change.specialIndexLocked);
+        }
+    });
+    const currentSheetKey = _acuVisState.currentSheetKey;
+    if (currentSheetKey && _acuVisState.tempData?.[currentSheetKey]) {
+        _acuVisState.currentSheetKey = currentSheetKey;
+    }
+    else if (result.compileResult.focusSheetKey && _acuVisState.tempData?.[result.compileResult.focusSheetKey]) {
+        _acuVisState.currentSheetKey = result.compileResult.focusSheetKey;
+    }
+    else {
+        _acuVisState.currentSheetKey = _acuVisState.sheetOrder[0] || null;
+    }
+    renderVisualizerSidebar_ACU();
+    renderVisualizerMain_ACU();
+    showToastr_ACU('success', 'assistant 草稿已应用到当前编辑器临时态。');
+    return true;
+}
+
+const assistantUiState_ACU = {
+    isOpen: false,
+    isMinimized: false,
+    userRequest: '',
+    isGenerating: false,
+    transcript: [],
+    pendingScrollTop: 0,
+    pendingScrollMode: 'preserve',
+    maxRoundsInput: '3',
+    tableApiPreset: '',
+    guardController: null,
+    runningSessionId: 0,
+};
+function generateTurnId_ACU() {
+    return `turn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+const NEAR_BOTTOM_THRESHOLD_ACU = 50;
+const DEFAULT_MAX_ROUNDS_ACU = 3;
+const MOBILE_VIEWPORT_MAX_ACU = 899;
+const COMPACT_VIEWPORT_MAX_ACU = 1279;
+function getAssistantViewportWidth_ACU() {
+    // 使用顶层窗口的宽度，而非 iframe 的宽度
+    // 在油猴模式下 globalThis.window 是 iframe，innerWidth 可能很窄
+    const topWin = topLevelWindow_ACU;
+    const width = Number(topWin?.innerWidth);
+    if (Number.isFinite(width) && width > 0)
+        return width;
+    // 兜底：尝试当前窗口
+    const fallback = Number(globalThis?.window?.innerWidth);
+    if (Number.isFinite(fallback) && fallback > 0)
+        return fallback;
+    return 1440;
+}
+function getAssistantViewportMode_ACU() {
+    const width = getAssistantViewportWidth_ACU();
+    if (width <= COMPACT_VIEWPORT_MAX_ACU)
+        return 'fullscreen-overlay';
+    return 'desktop';
+}
+function getAssistantPanelWidth_ACU(mode) {
+    if (mode === 'fullscreen-overlay')
+        return '100vw';
+    return '420px';
+}
+/**
+ * Portal 模式：将 #acu-vis-assistant-host 从 #acu-visualizer-content 移到 document.body，
+ * 以绕过 .acu-window 的 overflow:hidden + animation(transform) 创建的 containing block，
+ * 使 position:fixed 能正确相对于视口定位。
+ *
+ * 移出后在宿主元素上注入 --vis-* CSS 变量，保持样式与编辑器一致。
+ */
+const ASSISTANT_HOST_ID_ACU$1 = 'acu-vis-assistant-host';
+const VISUALIZER_ROOT_SELECTOR_ACU$1 = '#acu-visualizer-content';
+const VISUALIZER_ASSISTANT_DOCK_SELECTOR_ACU = '#acu-vis-assistant-dock';
+/** --vis-* CSS 变量声明，与 visualizer-styles.ts 中 #acu-visualizer-content 的定义保持同步 */
+const VIS_PORTAL_VARIABLES_ACU = [
+    '--vis-bg-color:var(--acu-viz-bg, var(--acu-bg-0))',
+    '--vis-border-color:var(--acu-viz-border, var(--acu-border))',
+    '--vis-text-main:var(--acu-viz-text, var(--acu-text-1))',
+    '--vis-text-dim:var(--acu-viz-text-dim, var(--acu-text-2))',
+    '--vis-text-mute:var(--acu-viz-text-mute, var(--acu-text-3))',
+    '--vis-accent:var(--acu-viz-accent, var(--acu-accent))',
+    '--vis-accent-dim:var(--acu-viz-accent-dim, var(--acu-accent-2))',
+    '--vis-accent-glow:var(--acu-viz-accent-glow, var(--acu-accent-glow))',
+    '--vis-bg-hover:var(--acu-viz-hover, var(--acu-bg-2))',
+    '--vis-bg-stats:var(--acu-viz-sidebar-bg, var(--acu-bg-1))',
+    '--vis-bg-light:var(--acu-viz-card-bg, var(--acu-bg-1))',
+    '--vis-font-serif:"Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif',
+].join(';');
+function getPortalDocument_ACU() {
+    return topLevelWindow_ACU?.document ?? (typeof document !== 'undefined' ? document : null);
+}
+/**
+ * 管理宿主元素的 portal 状态。
+ * - fullscreen-overlay + open → 移到 body，注入 CSS 变量
+ * - 其他情况 → 移回 #acu-vis-assistant-dock，清除变量
+ */
+function ensureAssistantHostPortal_ACU(mode, isOpen) {
+    const doc = getPortalDocument_ACU();
+    if (!doc)
+        return;
+    const host = doc.getElementById(ASSISTANT_HOST_ID_ACU$1);
+    if (!host)
+        return;
+    const shouldPortal = mode === 'fullscreen-overlay' && isOpen;
+    const isInBody = host.parentElement === doc.body;
+    const dock = doc.querySelector(VISUALIZER_ASSISTANT_DOCK_SELECTOR_ACU);
+    if (shouldPortal) {
+        host.style.pointerEvents = 'auto';
+        if (!isInBody) {
+            host.style.cssText += `;${VIS_PORTAL_VARIABLES_ACU}`;
+            doc.body.appendChild(host);
+        }
+        return;
+    }
+    if (dock && host.parentElement !== dock) {
+        dock.appendChild(host);
+    }
+    else if (!dock && isInBody) {
+        host.remove();
+    }
+    clearPortalVariables_ACU(host);
+    host.style.pointerEvents = isOpen ? 'auto' : 'none';
+}
+/** 从宿主元素的 inline style 中移除 portal 注入的 CSS 变量 */
+function clearPortalVariables_ACU(host) {
+    const style = host.getAttribute('style') || '';
+    const cleaned = style.split(';').filter((s) => {
+        const prop = s.trim().startsWith('--vis-');
+        return !prop;
+    }).join(';');
+    host.setAttribute('style', cleaned);
+}
+function buildAssistantPanelStyle_ACU(mode, display) {
+    const common = `display:${display}; flex-direction:column; min-height:0; overflow:hidden; background:var(--vis-assistant-window-bg, var(--vis-bg-color, #111827)); color:var(--vis-text-main, #f3f4f6); box-shadow:0 20px 48px color-mix(in srgb, var(--vis-text-main, #f3f4f6) 18%, transparent); pointer-events:auto; overscroll-behavior:contain; opacity:1;`;
+    if (mode === 'fullscreen-overlay') {
+        return `${common} position:fixed; inset:0; width:100vw; min-height:100vh; height:100dvh; border-left:none; z-index:100002; background:var(--vis-assistant-window-bg, var(--vis-bg-color, #111827)); padding:env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px);`;
+    }
+    return `${common} width:${getAssistantPanelWidth_ACU(mode)}; height:100%; max-height:100%; align-self:stretch; border-left:1px solid var(--vis-border-color); flex:1 1 auto;`;
+}
+function buildAssistantHeaderStyle_ACU(mode) {
+    const compactPadding = mode === 'fullscreen-overlay' ? '12px 12px 10px' : '12px 14px';
+    const sticky = mode === 'fullscreen-overlay' ? 'position:sticky; top:0; z-index:2; background:var(--vis-assistant-window-bg, var(--vis-bg-color));' : '';
+    return `padding:${compactPadding}; border-bottom:1px solid var(--vis-border-color); display:flex; justify-content:space-between; align-items:center; gap:10px; ${sticky}`;
+}
+function buildAssistantScrollFrameStyle_ACU(mode) {
+    const margin = mode === 'fullscreen-overlay' ? '8px 12px 8px' : '12px 14px 8px';
+    const minHeight = mode === 'fullscreen-overlay' ? '180px' : '420px';
+    const flexValue = mode === 'fullscreen-overlay' ? '1 1 auto' : '1 1 420px';
+    return `flex:${flexValue}; min-height:${minHeight}; margin:${margin}; border:1px solid var(--vis-border-color); border-radius:12px; background:var(--vis-assistant-surface-bg, var(--vis-bg-light, rgba(255,255,255,0.08))); overflow:hidden; display:flex; flex-direction:column; pointer-events:auto; overscroll-behavior:contain;`;
+}
+function buildAssistantChatContainerStyle_ACU(mode) {
+    const padding = mode === 'fullscreen-overlay' ? '12px' : '16px';
+    return `flex:1 1 auto; min-height:0; height:100%; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; touch-action:pan-y; pointer-events:auto; padding:${padding}; display:flex; flex-direction:column; gap:12px; align-items:stretch; background:transparent; justify-content:flex-start;`;
+}
+function buildAssistantFooterStyle_ACU(mode) {
+    const padding = mode === 'fullscreen-overlay' ? '12px 12px calc(12px + env(safe-area-inset-bottom, 0px))' : '12px 14px 14px';
+    return `padding:${padding}; border-top:1px solid var(--vis-border-color); flex:0 0 auto;`;
+}
+function shouldShowFloatingRestore_ACU(mode) {
+    return mode === 'fullscreen-overlay' && assistantUiState_ACU.isOpen && assistantUiState_ACU.isMinimized;
+}
+function isPanelVisible_ACU(mode) {
+    if (!assistantUiState_ACU.isOpen)
+        return false;
+    if (mode !== 'fullscreen-overlay')
+        return true;
+    return !assistantUiState_ACU.isMinimized;
+}
+function minimizeVisualizerTemplateAssistant_ACU() {
+    if (getAssistantViewportMode_ACU() !== 'fullscreen-overlay') {
+        assistantUiState_ACU.isOpen = false;
+        assistantUiState_ACU.isMinimized = false;
+        renderVisualizerTemplateAssistantPanel_ACU();
+        return;
+    }
+    assistantUiState_ACU.isOpen = true;
+    assistantUiState_ACU.isMinimized = true;
+    renderVisualizerTemplateAssistantPanel_ACU();
+}
+function restoreVisualizerTemplateAssistant_ACU() {
+    assistantUiState_ACU.isOpen = true;
+    assistantUiState_ACU.isMinimized = false;
+    renderVisualizerTemplateAssistantPanel_ACU();
+}
+function buildAssistantControlRowStyle_ACU(mode) {
+    if (mode === 'fullscreen-overlay') {
+        return 'display:flex; flex-direction:column; align-items:stretch; gap:6px; margin-bottom:8px;';
+    }
+    return 'display:flex; align-items:center; gap:8px; margin-bottom:8px;';
+}
+function buildAssistantActionRowStyle_ACU(mode) {
+    if (mode === 'fullscreen-overlay') {
+        return 'display:flex; flex-direction:column; gap:8px; margin-top:8px;';
+    }
+    return 'display:flex; gap:8px; margin-top:8px;';
+}
+function buildAssistantBubbleStyle_ACU(role, mode) {
+    const maxWidth = mode === 'fullscreen-overlay' ? '100%' : '82%';
+    const minWidth = mode === 'fullscreen-overlay' ? '0' : role === 'assistant' ? '240px' : role === 'error' ? '220px' : '180px';
+    const base = `max-width:${maxWidth}; width:fit-content; min-width:${minWidth}; padding:${mode === 'fullscreen-overlay' ? '10px 12px' : '12px 14px'}; box-shadow:0 10px 24px color-mix(in srgb, var(--vis-text-main) 12%, transparent); color:var(--vis-text-main); word-break:break-word; overflow-wrap:anywhere;`;
+    if (role === 'assistant') {
+        return `${base} border-radius:16px 16px 16px 4px; background:var(--vis-assistant-bubble-bg, var(--vis-bg-light)); border:1px solid var(--vis-border-color);`;
+    }
+    if (role === 'error') {
+        return `${base} border-radius:16px 16px 16px 4px; background:color-mix(in srgb, var(--acu-danger, #c55) 12%, var(--vis-bg-light)); border:1px solid color-mix(in srgb, var(--acu-danger, #c55) 36%, var(--vis-border-color));`;
+    }
+    return `${base} border-radius:16px 16px 4px 16px; background:color-mix(in srgb, var(--vis-accent) 12%, var(--vis-bg-light)); border:1px solid color-mix(in srgb, var(--vis-accent) 38%, var(--vis-border-color));`;
+}
+function normalizeMaxRounds_ACU(input) {
+    const normalized = Number(input);
+    if (!Number.isFinite(normalized))
+        return DEFAULT_MAX_ROUNDS_ACU;
+    const integer = Math.floor(normalized);
+    return integer > 0 ? integer : DEFAULT_MAX_ROUNDS_ACU;
+}
+function isNearBottom_ACU(container) {
+    if (!container)
+        return true;
+    const scrollTop = container.scrollTop;
+    const clientHeight = container.clientHeight;
+    const scrollHeight = container.scrollHeight;
+    return scrollTop + clientHeight >= scrollHeight - NEAR_BOTTOM_THRESHOLD_ACU;
+}
+function getChatContainerElement_ACU() {
+    const $container = getHost_ACU().find('.acu-chat-container');
+    return $container.length ? $container[0] : null;
+}
+function getMaxScrollTop_ACU(container) {
+    if (!container)
+        return 0;
+    return Math.max(0, Number(container.scrollHeight || 0) - Number(container.clientHeight || 0));
+}
+function captureScrollState_ACU(mode) {
+    const container = getChatContainerElement_ACU();
+    const currentScrollTop = container?.scrollTop ?? 0;
+    const maxScrollTop = getMaxScrollTop_ACU(container);
+    assistantUiState_ACU.pendingScrollMode = mode === 'append' && isNearBottom_ACU(container)
+        ? 'stick-bottom'
+        : 'preserve';
+    assistantUiState_ACU.pendingScrollTop = assistantUiState_ACU.pendingScrollMode === 'stick-bottom'
+        ? maxScrollTop
+        : currentScrollTop;
+}
+function restoreScrollState_ACU(container) {
+    if (!container)
+        return;
+    if (assistantUiState_ACU.pendingScrollMode === 'stick-bottom') {
+        container.scrollTop = getMaxScrollTop_ACU(container);
+        return;
+    }
+    container.scrollTop = assistantUiState_ACU.pendingScrollTop;
+}
+function clearAssistantDraftState_ACU() {
+    assistantUiState_ACU.transcript = [];
+}
+function resolveEffectiveTableApiPreset_ACU() {
+    const currentSheetKey = _acuVisState.currentSheetKey || null;
+    const currentSheet = currentSheetKey ? _acuVisState.tempData?.[currentSheetKey] : null;
+    const currentTableName = String(currentSheet?.name || '').trim();
+    if (currentTableName) {
+        const overrides = settings_ACU.tableApiPresetOverridesByName;
+        if (overrides && typeof overrides === 'object' && typeof overrides[currentTableName] === 'string' && overrides[currentTableName].trim()) {
+            return overrides[currentTableName].trim();
+        }
+    }
+    return String(settings_ACU.tableApiPreset || '').trim();
+}
+function syncAssistantTableApiPreset_ACU() {
+    assistantUiState_ACU.tableApiPreset = resolveEffectiveTableApiPreset_ACU();
+}
+function buildAssistantTableApiPresetOptionsHtml_ACU() {
+    const apiPresets = Array.isArray(settings_ACU.apiPresets) ? settings_ACU.apiPresets : [];
+    const currentValue = String(assistantUiState_ACU.tableApiPreset || '').trim();
+    const presetOptions = apiPresets
+        .map((preset) => {
+        const name = String(preset?.name || '').trim();
+        if (!name)
+            return '';
+        return `<option value="${escapeHtml_ACU$1(name)}" ${currentValue === name ? 'selected' : ''}>${escapeHtml_ACU$1(name)}</option>`;
+    })
+        .filter(Boolean)
+        .join('');
+    return `<option value="" ${!currentValue ? 'selected' : ''}>当前配置</option>${presetOptions}`;
+}
+function createNewGuardController_ACU() {
+    assistantUiState_ACU.guardController = createTemplateAssistantSessionGuard_ACU();
+    assistantUiState_ACU.runningSessionId += 1;
+}
+function invalidateActiveSession_ACU() {
+    if (assistantUiState_ACU.guardController) {
+        assistantUiState_ACU.guardController.invalidate();
+    }
+    if (assistantUiState_ACU.isGenerating) {
+        assistantUiState_ACU.isGenerating = false;
+        showToastr_ACU('warning', '会话已失效（结构变化或切表）');
+    }
+}
+function cancelActiveSession_ACU() {
+    if (assistantUiState_ACU.guardController) {
+        assistantUiState_ACU.guardController.cancel();
+    }
+    if (assistantUiState_ACU.isGenerating) {
+        assistantUiState_ACU.isGenerating = false;
+        showToastr_ACU('warning', '模板助手会话已取消');
+        renderVisualizerTemplateAssistantPanel_ACU();
+    }
+}
+function isFinalAssistantTurn_ACU(turn) {
+    return turn.phase === 'final';
+}
+function getAssistantDraft_ACU(turn) {
+    return isFinalAssistantTurn_ACU(turn) ? turn.result.draft : turn.roundData.draft;
+}
+function getAssistantCompileResult_ACU(turn) {
+    return isFinalAssistantTurn_ACU(turn) ? turn.result.compileResult : turn.roundData.perRoundCompileResult;
+}
+function getAssistantAiRawText_ACU(turn) {
+    return isFinalAssistantTurn_ACU(turn) ? turn.result.aiRawText : turn.roundData.aiRawText;
+}
+function buildAssistantRoundProgressLabel_ACU(turn) {
+    if (isFinalAssistantTurn_ACU(turn)) {
+        return buildSessionMetaSummary_ACU(turn.result);
+    }
+    return `第 ${turn.roundData.round} / ${turn.maxRounds} 轮`;
+}
+function buildPriorTurnsFromTranscript_ACU(transcript) {
+    const priorTurns = [];
+    for (let i = 0; i < transcript.length; i++) {
+        const turn = transcript[i];
+        if (turn.type === 'user') {
+            const userContent = String(turn.content || '').trim();
+            if (!userContent)
+                continue;
+            // 查找紧跟的 assistant turn（可能不存在或中间有 error turn）
+            let assistantText = undefined;
+            for (let j = i + 1; j < transcript.length; j++) {
+                const nextTurn = transcript[j];
+                if (nextTurn.type === 'user') {
+                    // 遇到下一个 user turn，说明当前 user 没有对应的 assistant
+                    break;
+                }
+                if (nextTurn.type === 'assistant' && isFinalAssistantTurn_ACU(nextTurn)) {
+                    assistantText = String(getAssistantAiRawText_ACU(nextTurn) || '').trim();
+                }
+                // error turn 跳过，继续查找可能的 assistant
+            }
+            priorTurns.push({
+                user: userContent,
+                assistant: assistantText || undefined,
+            });
+        }
+    }
+    return priorTurns;
+}
+function getRiskConfirmationKey_ACU(index) {
+    return String(index);
+}
+function isHighRiskItemAutoConfirmed_ACU(item) {
+    return item?.type === 'patch_sheet_schema';
+}
+function isHighRiskItemConfirmed_ACU(turn, index) {
+    const item = getAssistantCompileResult_ACU(turn).highRiskItems[index];
+    if (!item)
+        return true;
+    if (isHighRiskItemAutoConfirmed_ACU(item)) {
+        return turn.riskConfirmations[getRiskConfirmationKey_ACU(index)] !== false;
+    }
+    return !!turn.riskConfirmations[getRiskConfirmationKey_ACU(index)];
+}
+function getHost_ACU() {
+    return jQuery_API_ACU('#acu-vis-assistant-host');
+}
+function getHostElement_ACU() {
+    const doc = topLevelWindow_ACU?.document ?? (typeof document !== 'undefined' ? document : null);
+    if (!doc)
+        return null;
+    return doc.querySelector('#acu-vis-assistant-host');
+}
+function readDataAttrFromElement_ACU(node, name) {
+    if (!node || typeof node !== 'object' || !('getAttribute' in node))
+        return '';
+    return String(node.getAttribute(`data-${name}`) || '');
+}
+function getApplyButtonElement_ACU() {
+    const doc = topLevelWindow_ACU?.document ?? (typeof document !== 'undefined' ? document : null);
+    if (!doc)
+        return null;
+    return doc.querySelector('#acu-vis-assistant-apply');
+}
+function getSelectedSheetLabel_ACU() {
+    const sheetKey = _acuVisState.currentSheetKey;
+    const sheet = sheetKey ? _acuVisState.tempData?.[sheetKey] : null;
+    if (!sheetKey || !sheet)
+        return '当前未选中表';
+    return `${sheet.name || sheetKey} (${sheetKey})`;
+}
+function buildSessionStopReasonLabel_ACU(result) {
+    const stopReason = String(result.session?.stopReason || '');
+    switch (stopReason) {
+        case 'empty_operations':
+            return '空操作停止';
+        case 'repeated_working_fingerprint':
+            return '重复状态停止';
+        case 'repair_retry_capped':
+            return '修复重试已达上限';
+        case 'max_rounds':
+            return '达到轮次上限';
+        default:
+            return '';
+    }
+}
+function buildSessionMetaSummary_ACU(result) {
+    if (!result.session)
+        return '';
+    const parts = [`会话${result.session.roundsExecuted}轮`];
+    const stopReasonLabel = buildSessionStopReasonLabel_ACU(result);
+    if (stopReasonLabel)
+        parts.push(stopReasonLabel);
+    return parts.join(' · ');
+}
+function countDiffChanges_ACU(diff) {
+    let count = 0;
+    count += diff.addedSheets.length;
+    count += diff.deletedSheets.length;
+    count += diff.renamedSheets.length;
+    count += diff.movedSheets.length;
+    count += diff.patchedSourceDataSheets.length;
+    count += diff.patchedUpdateConfigSheets.length;
+    count += diff.patchedExportConfigSheets.length;
+    count += (diff.patchedContentSheets || []).length;
+    count += (diff.patchedSchemaSheets || []).length;
+    count += (diff.patchedLockSheets || []).length;
+    if (diff.globalInjectionChanged)
+        count += 1;
+    return count;
+}
+function buildDiffSummary_ACU(diff) {
+    const parts = [];
+    if (diff.addedSheets.length)
+        parts.push(`新增${diff.addedSheets.length}表`);
+    if (diff.deletedSheets.length)
+        parts.push(`删除${diff.deletedSheets.length}表`);
+    if (diff.renamedSheets.length)
+        parts.push(`重命名${diff.renamedSheets.length}表`);
+    if (diff.movedSheets.length)
+        parts.push(`移动${diff.movedSheets.length}表`);
+    const patchCount = diff.patchedSourceDataSheets.length + diff.patchedUpdateConfigSheets.length + diff.patchedExportConfigSheets.length + (diff.patchedContentSheets || []).length + (diff.patchedSchemaSheets || []).length + (diff.patchedLockSheets || []).length;
+    if (patchCount)
+        parts.push(`修改${patchCount}处`);
+    if (diff.globalInjectionChanged)
+        parts.push('全局配置变更');
+    return parts.length ? parts.join('、') : '无变更';
+}
+function buildDiffHtml_ACU(diff) {
+    const sections = [];
+    const renderList = (items) => items.length ? `<ul>${items.map((item) => `<li>${escapeHtml_ACU$1(item)}</li>`).join('')}</ul>` : '<div class="acu-hint">无</div>';
+    sections.push(`<div class="acu-assistant-diff-block"><strong>新增表</strong>${renderList(diff.addedSheets.map((item) => `${item.name} [${item.sheetKey}]`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>删除表</strong>${renderList(diff.deletedSheets.map((item) => `${item.name} [${item.sheetKey}]`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>重命名</strong>${renderList(diff.renamedSheets.map((item) => `${item.beforeName} -> ${item.afterName}`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>顺序变化</strong>${renderList(diff.movedSheets.map((item) => `${item.name}: ${item.fromIndex} -> ${item.toIndex}`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>sourceData patch</strong>${renderList(diff.patchedSourceDataSheets.map((item) => `${item.name}: ${item.keys.join(', ') || '字段已修改'}`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>updateConfig patch</strong>${renderList(diff.patchedUpdateConfigSheets.map((item) => `${item.name}: ${item.keys.join(', ') || '字段已修改'}`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>exportConfig patch</strong>${renderList(diff.patchedExportConfigSheets.map((item) => `${item.name}: ${item.keys.join(', ') || '字段已修改'}`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>content patch</strong>${renderList((diff.patchedContentSheets || []).map((item) => `${item.name}: ${item.changes.join('；') || '内容已修改'}`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>schema patch</strong>${renderList((diff.patchedSchemaSheets || []).map((item) => `${item.name}: ${item.changes.join('；') || '结构已修改'}`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>locks patch</strong>${renderList((diff.patchedLockSheets || []).map((item) => `${item.name}: ${item.changes.join('；') || '锁状态已修改'}`))}</div>`);
+    sections.push(`<div class="acu-assistant-diff-block"><strong>全局注入配置</strong>${diff.globalInjectionChanged ? '<div>已修改</div>' : '<div class="acu-hint">未修改</div>'}</div>`);
+    return sections.join('');
+}
+function areHighRiskItemsConfirmed_ACU(turn) {
+    return getAssistantCompileResult_ACU(turn).highRiskItems.every((_, index) => isHighRiskItemConfirmed_ACU(turn, index));
+}
+function syncLatestApplyButtonDisabledState_ACU(turn) {
+    const latestTurn = assistantUiState_ACU.transcript[assistantUiState_ACU.transcript.length - 1];
+    if (!latestTurn || latestTurn.type !== 'assistant' || latestTurn.id !== turn.id)
+        return;
+    if (!isFinalAssistantTurn_ACU(turn))
+        return;
+    const button = getApplyButtonElement_ACU();
+    if (!button)
+        return;
+    const applyDisabled = getAssistantCompileResult_ACU(turn).highRiskItems.length > 0 && !areHighRiskItemsConfirmed_ACU(turn);
+    button.disabled = applyDisabled;
+}
+function renderCollapsedSection_ACU(title, summary, sectionKey, expanded, detailContent) {
+    const expandIcon = expanded ? '▼' : '▶';
+    const detailStyle = expanded ? '' : 'display:none;';
+    return `
+        <div class="acu-collapsible-section" data-section-key="${escapeHtml_ACU$1(sectionKey)}">
+            <div class="acu-collapsed-summary" data-section-key="${escapeHtml_ACU$1(sectionKey)}">
+                <span class="acu-expand-toggle" data-section-key="${escapeHtml_ACU$1(sectionKey)}">${expandIcon}</span>
+                <span class="acu-summary-title">${escapeHtml_ACU$1(title)}</span>
+                <span class="acu-summary-text">${escapeHtml_ACU$1(summary)}</span>
+            </div>
+            <div class="acu-detail-block" data-section-key="${escapeHtml_ACU$1(sectionKey)}" style="${detailStyle}">
+                ${detailContent}
+            </div>
+        </div>
+    `;
+}
+function buildAssistantDetailSummary_ACU(turn) {
+    const draft = getAssistantDraft_ACU(turn);
+    const compileResult = getAssistantCompileResult_ACU(turn);
+    const parts = [];
+    const warningCount = draft.warnings.length;
+    const changeCount = countDiffChanges_ACU(compileResult.diff);
+    const riskCount = compileResult.highRiskItems.length;
+    const progressSummary = buildAssistantRoundProgressLabel_ACU(turn);
+    if (warningCount > 0)
+        parts.push(`警告${warningCount}条`);
+    if (changeCount > 0)
+        parts.push(`变更${changeCount}处`);
+    if (riskCount > 0)
+        parts.push(`高风险${riskCount}项`);
+    if (progressSummary)
+        parts.push(progressSummary);
+    return parts.length > 0 ? parts.join(' · ') : '无变更';
+}
+function buildAssistantDetailContent_ACU(turn) {
+    const draft = getAssistantDraft_ACU(turn);
+    const compileResult = getAssistantCompileResult_ACU(turn);
+    const sections = [];
+    const progressSummary = buildAssistantRoundProgressLabel_ACU(turn);
+    if (progressSummary) {
+        sections.push(`<div class="acu-assistant-diff-block"><strong>${isFinalAssistantTurn_ACU(turn) ? '会话信息' : '轮次信息'}</strong><div>${escapeHtml_ACU$1(progressSummary)}${isFinalAssistantTurn_ACU(turn) ? '' : '（中间结果，暂不可应用）'}</div></div>`);
+    }
+    // 警告部分
+    const warningsDetail = draft.warnings.length
+        ? `<ul>${draft.warnings.map((item) => `<li>${escapeHtml_ACU$1(item)}</li>`).join('')}</ul>`
+        : '<div class="acu-hint">无</div>';
+    sections.push(`<div class="acu-assistant-diff-block"><strong>警告</strong>${warningsDetail}</div>`);
+    // 变更部分
+    sections.push(`<div class="acu-assistant-diff-block"><strong>变更详情</strong>${buildDiffHtml_ACU(compileResult.diff)}</div>`);
+    // 高风险部分
+    const riskDetail = compileResult.highRiskItems.length
+        ? compileResult.highRiskItems.map((item, index) => {
+            const riskKey = getRiskConfirmationKey_ACU(index);
+            if (!isFinalAssistantTurn_ACU(turn)) {
+                return `<div class="acu-assistant-risk-item"><span>${escapeHtml_ACU$1(item.label)}</span></div>`;
+            }
+            return `
+                <label class="acu-assistant-risk-item">
+                    <input type="checkbox" class="acu-assistant-risk-confirm" data-turn-id="${escapeHtml_ACU$1(turn.id)}" data-risk-key="${escapeHtml_ACU$1(riskKey)}" ${isHighRiskItemConfirmed_ACU(turn, index) ? 'checked' : ''}>
+                    <span>${escapeHtml_ACU$1(item.label)}</span>
+                </label>
+            `;
+        }).join('')
+        : '<div class="acu-hint">无高风险操作</div>';
+    sections.push(`<div class="acu-assistant-diff-block"><strong>高风险确认</strong><div class="acu-assistant-risk-list">${riskDetail}</div></div>`);
+    return sections.join('');
+}
+function renderAssistantTurn_ACU(turn, isLatest, mode) {
+    const draft = getAssistantDraft_ACU(turn);
+    const compileResult = getAssistantCompileResult_ACU(turn);
+    const detailSummary = buildAssistantDetailSummary_ACU(turn);
+    const detailContent = buildAssistantDetailContent_ACU(turn);
+    const isExpanded = turn.expandedSections.details || false;
+    const applyDisabled = compileResult.highRiskItems.length > 0 && !areHighRiskItemsConfirmed_ACU(turn);
+    const applyHtml = isLatest && isFinalAssistantTurn_ACU(turn)
+        ? `<button id="acu-vis-assistant-apply" class="acu-btn-primary" data-turn-id="${escapeHtml_ACU$1(turn.id)}" ${applyDisabled ? 'disabled' : ''}>应用到编辑器</button>`
+        : '';
+    const turnLabel = isFinalAssistantTurn_ACU(turn) ? 'AI 助手' : `AI 助手 · 第 ${turn.roundData.round} / ${turn.maxRounds} 轮`;
+    return `
+        <div class="acu-chat-turn acu-chat-turn-assistant" data-turn-id="${escapeHtml_ACU$1(turn.id)}" style="display:flex; justify-content:flex-start;">
+            <div class="acu-message-bubble acu-message-bubble-assistant" style="${buildAssistantBubbleStyle_ACU('assistant', mode)}">
+                <div class="acu-chat-turn-label" style="font-size:12px; font-weight:600; opacity:0.78; margin-bottom:6px;">${escapeHtml_ACU$1(turnLabel)}</div>
+                <div class="acu-chat-turn-content">
+                    <div class="acu-assistant-summary" style="line-height:1.6; white-space:pre-wrap; word-break:break-word;">${escapeHtml_ACU$1(draft.summary || '（无摘要）')}</div>
+                </div>
+                ${renderCollapsedSection_ACU('详情', detailSummary, 'details', isExpanded, detailContent)}
+                ${applyHtml ? `<div class="acu-assistant-actions-row">${applyHtml}</div>` : ''}
+            </div>
+        </div>
+    `;
+}
+function renderErrorTurn_ACU(turn, mode) {
+    return `
+        <div class="acu-chat-turn acu-chat-turn-error" data-turn-id="${escapeHtml_ACU$1(turn.id)}" style="display:flex; justify-content:flex-start;">
+            <div class="acu-message-bubble acu-message-bubble-error" style="${buildAssistantBubbleStyle_ACU('error', mode)}">
+                <div class="acu-chat-turn-label" style="font-size:12px; font-weight:600; color:#ffb2b2; margin-bottom:6px;">执行错误</div>
+                <div class="acu-chat-turn-content">
+                    <div class="acu-error-message" style="line-height:1.6; white-space:pre-wrap; word-break:break-word;">${escapeHtml_ACU$1(turn.errorMessage)}</div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+function renderUserTurn_ACU(turn, mode) {
+    return `
+        <div class="acu-chat-turn acu-chat-turn-user" data-turn-id="${escapeHtml_ACU$1(turn.id)}" style="display:flex; justify-content:flex-end;">
+            <div class="acu-message-bubble acu-message-bubble-user" style="${buildAssistantBubbleStyle_ACU('user', mode)}">
+                <div class="acu-chat-turn-label" style="font-size:12px; font-weight:600; opacity:0.72; margin-bottom:6px; text-align:right;">你</div>
+                <div class="acu-chat-turn-content" style="line-height:1.6; white-space:pre-wrap; word-break:break-word; text-align:left;">
+                    ${escapeHtml_ACU$1(turn.content)}
+                </div>
+            </div>
+        </div>
+    `;
+}
+function renderTranscript_ACU() {
+    const transcript = assistantUiState_ACU.transcript;
+    const mode = getAssistantViewportMode_ACU();
+    if (transcript.length === 0) {
+        const emptyStateMinHeight = mode === 'fullscreen-overlay' ? '160px' : '340px';
+        const emptyStatePadding = mode === 'fullscreen-overlay' ? '16px' : '28px';
+        return `
+            <div class="acu-chat-transcript acu-chat-transcript-empty" style="flex:1 1 auto; min-height:0; height:100%; display:flex; flex-direction:column;">
+                <div class="acu-chat-empty-state" style="flex:1 1 auto; min-height:max(${emptyStateMinHeight}, 100%); height:100%; align-self:stretch; box-sizing:border-box; display:flex; align-items:center; justify-content:center; text-align:center; padding:${emptyStatePadding}; color:var(--vis-text-mute, #9ca3af); line-height:1.7; border:1px dashed color-mix(in srgb, var(--vis-border-color) 72%, transparent); border-radius:10px; background:color-mix(in srgb, var(--vis-bg-color, #111827) 72%, transparent);">
+                    <div>
+                        <div style="font-size:15px; font-weight:600; color:var(--vis-text-dim, #d1d5db); margin-bottom:10px;">AI 改表助手已就绪</div>
+                        <div style="font-size:12px;">输入修改需求后发送，聊天记录会显示在这里。</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    const html = transcript.map((turn, index) => {
+        const isLatest = index === transcript.length - 1;
+        switch (turn.type) {
+            case 'user':
+                return renderUserTurn_ACU(turn, mode);
+            case 'assistant':
+                return renderAssistantTurn_ACU(turn, isLatest, mode);
+            case 'error':
+                return renderErrorTurn_ACU(turn, mode);
+            default:
+                return '';
+        }
+    }).join('');
+    return `<div class="acu-chat-transcript">${html}</div>`;
+}
+function bindEvents_ACU() {
+    const $host = getHost_ACU();
+    if (!$host.length || !assistantUiState_ACU.isOpen)
+        return;
+    $host.find('#acu-vis-assistant-input').on('input', function () {
+        assistantUiState_ACU.userRequest = String(jQuery_API_ACU(this).val() || '');
+        // 更新按钮的disabled状态，避免重新渲染导致焦点丢失
+        const generateDisabled = assistantUiState_ACU.isGenerating || !String(assistantUiState_ACU.userRequest || '').trim();
+        const $btn = $host.find('#acu-vis-assistant-generate');
+        if ($btn.length) {
+            $btn.prop('disabled', generateDisabled);
+        }
+    });
+    $host.find('#acu-vis-assistant-max-rounds').on('input', function () {
+        assistantUiState_ACU.maxRoundsInput = String(jQuery_API_ACU(this).val() || '');
+    });
+    $host.find('#acu-vis-assistant-api-preset').on('change', function () {
+        assistantUiState_ACU.tableApiPreset = String(jQuery_API_ACU(this).val() || '').trim();
+    });
+    $host.find('#acu-vis-assistant-generate').on('click', async () => {
+        const requestSheetKey = _acuVisState.currentSheetKey || null;
+        const userRequest = assistantUiState_ACU.userRequest.trim();
+        if (!userRequest)
+            return;
+        captureScrollState_ACU('append');
+        const previewTurnIds = [];
+        const capturedSessionId = assistantUiState_ACU.runningSessionId + 1;
+        // 在添加当前用户轮次前构建 priorTurns（不包含当前请求）
+        const priorTurns = buildPriorTurnsFromTranscript_ACU(assistantUiState_ACU.transcript);
+        // 立即添加用户轮次
+        const userTurn = {
+            type: 'user',
+            id: generateTurnId_ACU(),
+            content: userRequest,
+            timestamp: Date.now(),
+        };
+        assistantUiState_ACU.transcript.push(userTurn);
+        try {
+            assistantUiState_ACU.isGenerating = true;
+            assistantUiState_ACU.userRequest = '';
+            createNewGuardController_ACU();
+            renderVisualizerTemplateAssistantPanel_ACU();
+            const result = await runTemplateAssistantSession_ACU({
+                tempData: JSON.parse(JSON.stringify(_acuVisState.tempData || {})),
+                currentSheetKey: requestSheetKey,
+                sheetOrder: Array.isArray(_acuVisState.sheetOrder) ? [..._acuVisState.sheetOrder] : null,
+                userRequest: userRequest,
+                priorTurns: priorTurns,
+                tableApiPreset: assistantUiState_ACU.tableApiPreset,
+                maxRounds: normalizeMaxRounds_ACU(assistantUiState_ACU.maxRoundsInput),
+                guard: assistantUiState_ACU.guardController?.createRunGuard() || null,
+                onRoundComplete: (progress) => {
+                    if (capturedSessionId !== assistantUiState_ACU.runningSessionId)
+                        return;
+                    if ((requestSheetKey || null) !== (_acuVisState.currentSheetKey || null))
+                        return;
+                    captureScrollState_ACU('append');
+                    const previewTurn = {
+                        type: 'assistant',
+                        phase: 'round',
+                        id: generateTurnId_ACU(),
+                        roundData: progress.round,
+                        maxRounds: progress.maxRounds,
+                        riskConfirmations: {},
+                        expandedSections: {},
+                        timestamp: Date.now(),
+                    };
+                    previewTurnIds.push(previewTurn.id);
+                    assistantUiState_ACU.transcript.push(previewTurn);
+                    renderVisualizerTemplateAssistantPanel_ACU();
+                },
+            });
+            if (capturedSessionId !== assistantUiState_ACU.runningSessionId) {
+                return;
+            }
+            if ((requestSheetKey || null) !== (_acuVisState.currentSheetKey || null)) {
+                assistantUiState_ACU.transcript = assistantUiState_ACU.transcript.filter((turn) => turn.id !== userTurn.id && !previewTurnIds.includes(turn.id));
+                const errorTurn = {
+                    type: 'error',
+                    id: generateTurnId_ACU(),
+                    errorMessage: '当前选中表已变化，请重新生成 assistant 草稿。',
+                    timestamp: Date.now(),
+                };
+                assistantUiState_ACU.transcript.push(errorTurn);
+                showToastr_ACU('warning', errorTurn.errorMessage);
+                renderVisualizerTemplateAssistantPanel_ACU();
+                return;
+            }
+            const finalAssistantTurn = {
+                type: 'assistant',
+                phase: 'final',
+                id: previewTurnIds[previewTurnIds.length - 1] || generateTurnId_ACU(),
+                result: result,
+                riskConfirmations: {},
+                expandedSections: {},
+                timestamp: Date.now(),
+            };
+            captureScrollState_ACU('append');
+            if (previewTurnIds.length > 0) {
+                const latestPreviewId = previewTurnIds[previewTurnIds.length - 1];
+                assistantUiState_ACU.transcript = assistantUiState_ACU.transcript.map((turn) => {
+                    if (turn.type === 'assistant' && turn.id === latestPreviewId) {
+                        return finalAssistantTurn;
+                    }
+                    return turn;
+                });
+            }
+            else {
+                assistantUiState_ACU.transcript.push(finalAssistantTurn);
+            }
+        }
+        catch (error) {
+            if (capturedSessionId !== assistantUiState_ACU.runningSessionId) {
+                return;
+            }
+            if (error instanceof TemplateAssistantSessionStoppedError_ACU) {
+                showToastr_ACU('warning', error.message);
+                return;
+            }
+            const errorTurn = {
+                type: 'error',
+                id: generateTurnId_ACU(),
+                errorMessage: error?.message || '生成失败',
+                timestamp: Date.now(),
+            };
+            assistantUiState_ACU.transcript.push(errorTurn);
+            showToastr_ACU('error', errorTurn.errorMessage);
+        }
+        finally {
+            assistantUiState_ACU.isGenerating = false;
+            renderVisualizerTemplateAssistantPanel_ACU();
+        }
+    });
+    $host.find('.acu-expand-toggle').on('click', function () {
+        const sectionKey = String(jQuery_API_ACU(this).data('section-key') || '');
+        // 找到对应的assistant turn
+        const $section = jQuery_API_ACU(this).closest('.acu-collapsible-section');
+        const $turn = jQuery_API_ACU(this).closest('.acu-chat-turn-assistant');
+        const turnId = $turn.data('turn-id');
+        const turn = assistantUiState_ACU.transcript.find(t => t.id === turnId && t.type === 'assistant');
+        if (turn) {
+            captureScrollState_ACU('preserve');
+            turn.expandedSections[sectionKey] = !turn.expandedSections[sectionKey];
+            renderVisualizerTemplateAssistantPanel_ACU();
+        }
+    });
+    $host.find('.acu-assistant-risk-confirm').on('change', function () {
+        const riskKey = readDataAttrFromElement_ACU(this, 'risk-key');
+        const turnId = readDataAttrFromElement_ACU(this, 'turn-id');
+        const turn = assistantUiState_ACU.transcript.find(t => t.id === turnId && t.type === 'assistant');
+        if (turn) {
+            turn.riskConfirmations[riskKey] = !!(this?.checked);
+            syncLatestApplyButtonDisabledState_ACU(turn);
+        }
+    });
+    $host.find('#acu-vis-assistant-apply').on('click', function () {
+        const turnId = readDataAttrFromElement_ACU(this, 'turn-id');
+        const turn = assistantUiState_ACU.transcript.find(t => t.id === turnId && t.type === 'assistant');
+        if (!turn || !isFinalAssistantTurn_ACU(turn))
+            return;
+        if (getAssistantCompileResult_ACU(turn).highRiskItems.length > 0 && !areHighRiskItemsConfirmed_ACU(turn)) {
+            showToastr_ACU('warning', '请先确认所有高风险项后再应用。');
+            return;
+        }
+        const applied = applyTemplateAssistantDraftToVisualizer_ACU(turn.result);
+        if (!applied)
+            return;
+        captureScrollState_ACU('preserve');
+        renderVisualizerTemplateAssistantPanel_ACU();
+    });
+    $host.find('#acu-vis-assistant-stop').on('click', () => {
+        cancelActiveSession_ACU();
+    });
+}
+function resetVisualizerTemplateAssistantState_ACU() {
+    assistantUiState_ACU.isOpen = false;
+    assistantUiState_ACU.isMinimized = false;
+    assistantUiState_ACU.userRequest = '';
+    assistantUiState_ACU.isGenerating = false;
+    assistantUiState_ACU.pendingScrollTop = 0;
+    assistantUiState_ACU.pendingScrollMode = 'preserve';
+    assistantUiState_ACU.maxRoundsInput = '3';
+    syncAssistantTableApiPreset_ACU();
+    invalidateActiveSession_ACU();
+    assistantUiState_ACU.guardController = null;
+    clearAssistantDraftState_ACU();
+    // ═══ 安全清理 portal：确保宿主从 body 移回或移除 ═══
+    ensureAssistantHostPortal_ACU('desktop', false);
+    renderVisualizerTemplateAssistantPanel_ACU();
+}
+function handleVisualizerTemplateAssistantSheetChange_ACU() {
+    captureScrollState_ACU('preserve');
+    invalidateActiveSession_ACU();
+    syncAssistantTableApiPreset_ACU();
+    const currentSheetKey = _acuVisState.currentSheetKey || null;
+    // 检查最新的assistant轮次是否是v1且需要清除
+    const lastAssistantTurn = [...assistantUiState_ACU.transcript].reverse().find((t) => t.type === 'assistant' && isFinalAssistantTurn_ACU(t));
+    if (lastAssistantTurn
+        && lastAssistantTurn.result.draft.protocolVersion === 1
+        && lastAssistantTurn.result.draft.selectedSheetKey !== currentSheetKey) {
+        clearAssistantDraftState_ACU();
+    }
+    renderVisualizerTemplateAssistantPanel_ACU();
+}
+function invalidateVisualizerTemplateAssistantSession_ACU() {
+    invalidateActiveSession_ACU();
+    renderVisualizerTemplateAssistantPanel_ACU();
+}
+function setVisualizerTemplateAssistantOpen_ACU(nextOpen) {
+    assistantUiState_ACU.isOpen = !!nextOpen;
+    assistantUiState_ACU.isMinimized = false;
+    renderVisualizerTemplateAssistantPanel_ACU();
+}
+function toggleVisualizerTemplateAssistant_ACU() {
+    const mode = getAssistantViewportMode_ACU();
+    if (mode === 'fullscreen-overlay' && assistantUiState_ACU.isOpen && assistantUiState_ACU.isMinimized) {
+        assistantUiState_ACU.isMinimized = false;
+    }
+    else {
+        assistantUiState_ACU.isOpen = !assistantUiState_ACU.isOpen;
+        if (!assistantUiState_ACU.isOpen) {
+            assistantUiState_ACU.isMinimized = false;
+        }
+    }
+    renderVisualizerTemplateAssistantPanel_ACU();
+}
+function renderVisualizerTemplateAssistantPanel_ACU() {
+    const $host = getHost_ACU();
+    if (!$host.length)
+        return;
+    const mode = getAssistantViewportMode_ACU();
+    // ═══ Portal：fullscreen-overlay 模式下仅在面板实际可见时将宿主移到 body，绕过窗口 containing block ═══
+    ensureAssistantHostPortal_ACU(mode, isPanelVisible_ACU(mode) || shouldShowFloatingRestore_ACU(mode));
+    const display = isPanelVisible_ACU(mode) ? 'flex' : 'none';
+    const showFloatingRestore = shouldShowFloatingRestore_ACU(mode);
+    const generateDisabled = assistantUiState_ACU.isGenerating || !String(assistantUiState_ACU.userRequest || '').trim();
+    const stopDisabled = !assistantUiState_ACU.isGenerating;
+    const hostElement = getHostElement_ACU();
+    if (hostElement) {
+        hostElement.setAttribute('data-assistant-mode', mode);
+        hostElement.setAttribute('data-open', assistantUiState_ACU.isOpen ? 'true' : 'false');
+        hostElement.setAttribute('data-minimized', showFloatingRestore ? 'true' : 'false');
+        hostElement.style.pointerEvents = isPanelVisible_ACU(mode) || showFloatingRestore ? 'auto' : 'none';
+        hostElement.style.opacity = isPanelVisible_ACU(mode) || showFloatingRestore ? '1' : '0';
+    }
+    const layoutDoc = topLevelWindow_ACU?.document ?? (typeof document !== 'undefined' ? document : null);
+    const layoutRoot = layoutDoc?.querySelector(VISUALIZER_ROOT_SELECTOR_ACU$1);
+    if (layoutRoot) {
+        if (mode === 'fullscreen-overlay' && isPanelVisible_ACU(mode)) {
+            layoutRoot.setAttribute('data-assistant-layout', 'fullscreen-overlay');
+        }
+        else if (assistantUiState_ACU.isOpen) {
+            layoutRoot.setAttribute('data-assistant-layout', 'desktop-dock');
+        }
+        else {
+            layoutRoot.setAttribute('data-assistant-layout', 'default');
+        }
+    }
+    $host.html(`
+        ${showFloatingRestore ? `
+            <button id="acu-vis-assistant-restore" class="acu-btn-primary acu-vis-assistant-floating-restore" type="button">
+                <i class="fa-solid fa-wand-magic-sparkles"></i>
+                <span>恢复 AI 改表助手</span>
+            </button>
+        ` : ''}
+        <div class="acu-vis-assistant-panel" data-assistant-mode="${escapeHtml_ACU$1(mode)}" style="${buildAssistantPanelStyle_ACU(mode, display)}">
+            <div class="acu-vis-assistant-header" style="${buildAssistantHeaderStyle_ACU(mode)}">
+                <div>
+                    <div style="font-weight:600;">AI 改表助手</div>
+                    <div class="acu-hint" style="font-size:12px; margin-top:4px;">当前表：${escapeHtml_ACU$1(getSelectedSheetLabel_ACU())}</div>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+                    ${mode === 'fullscreen-overlay' ? '<button id="acu-vis-assistant-minimize" class="acu-btn-secondary" type="button">最小化</button>' : ''}
+                    <button id="acu-vis-assistant-close" class="acu-btn-secondary" type="button">关闭</button>
+                </div>
+            </div>
+            <div class="acu-chat-scroll-frame" style="${buildAssistantScrollFrameStyle_ACU(mode)}">
+                <div class="acu-chat-container" style="${buildAssistantChatContainerStyle_ACU(mode)}">
+                    ${renderTranscript_ACU()}
+                </div>
+            </div>
+            <div class="acu-vis-assistant-footer" style="${buildAssistantFooterStyle_ACU(mode)}">
+                <div class="acu-assistant-control-row acu-assistant-max-rounds-row" style="${buildAssistantControlRowStyle_ACU(mode)}">
+                    <label for="acu-vis-assistant-max-rounds" style="font-size:12px; opacity:0.78; white-space:nowrap;">最大轮次</label>
+                    <input id="acu-vis-assistant-max-rounds" type="number" min="1" class="acu-form-input" style="${mode === 'fullscreen-overlay' ? 'width:100%; text-align:left;' : 'width:60px; text-align:center;'}" value="${escapeHtml_ACU$1(assistantUiState_ACU.maxRoundsInput)}">
+                </div>
+                <div class="acu-assistant-control-row acu-assistant-api-preset-row" style="${buildAssistantControlRowStyle_ACU(mode)}">
+                    <label for="acu-vis-assistant-api-preset" style="font-size:12px; opacity:0.78; white-space:nowrap;">API预设</label>
+                    <select id="acu-vis-assistant-api-preset" class="acu-form-input" style="flex:1; min-width:0; ${mode === 'fullscreen-overlay' ? 'width:100%;' : ''}">
+                        ${buildAssistantTableApiPresetOptionsHtml_ACU()}
+                    </select>
+                </div>
+                <textarea id="acu-vis-assistant-input" class="acu-form-textarea" style="min-height:${mode === 'fullscreen-overlay' ? '96px' : '80px'};" placeholder="例如：新增一张战利品表，并关闭旧表独立导出。">${escapeHtml_ACU$1(assistantUiState_ACU.userRequest)}</textarea>
+                <div class="acu-assistant-action-row" style="${buildAssistantActionRowStyle_ACU(mode)}">
+                    <button id="acu-vis-assistant-generate" class="acu-btn-primary" style="flex:1; ${mode === 'fullscreen-overlay' ? 'width:100%;' : ''}" ${generateDisabled ? 'disabled' : ''}>${assistantUiState_ACU.isGenerating ? '生成中...' : '发送'}</button>
+                    <button id="acu-vis-assistant-stop" class="acu-btn-secondary" style="${mode === 'fullscreen-overlay' ? 'width:100%;' : 'width:88px;'}" ${stopDisabled ? 'disabled' : ''}>停止</button>
+                </div>
+            </div>
+        </div>
+    `);
+    if (hostElement) {
+        hostElement.setAttribute('data-assistant-mode', mode);
+        hostElement.setAttribute('data-open', assistantUiState_ACU.isOpen ? 'true' : 'false');
+        hostElement.setAttribute('data-minimized', showFloatingRestore ? 'true' : 'false');
+        hostElement.style.pointerEvents = isPanelVisible_ACU(mode) || showFloatingRestore ? 'auto' : 'none';
+        hostElement.style.opacity = isPanelVisible_ACU(mode) || showFloatingRestore ? '1' : '0';
+    }
+    restoreScrollState_ACU(getChatContainerElement_ACU());
+    $host.find('#acu-vis-assistant-close').on('click', () => {
+        assistantUiState_ACU.isOpen = false;
+        assistantUiState_ACU.isMinimized = false;
+        renderVisualizerTemplateAssistantPanel_ACU();
+    });
+    $host.find('#acu-vis-assistant-minimize').on('click', () => {
+        minimizeVisualizerTemplateAssistant_ACU();
+    });
+    $host.find('#acu-vis-assistant-restore').on('click', () => {
+        restoreVisualizerTemplateAssistant_ACU();
+    });
+    bindEvents_ACU();
+}
+
+const VISUALIZER_ROOT_SELECTOR_ACU = '#acu-visualizer-content';
+const VISUALIZER_ACTIONS_SELECTOR_ACU = '.acu-vis-actions';
+const ASSISTANT_BUTTON_ID_ACU = 'acu-vis-assistant-btn';
+const ASSISTANT_HOST_ID_ACU = 'acu-vis-assistant-host';
+const ASSISTANT_DOCK_SELECTOR_ACU = '#acu-vis-assistant-dock';
+const LIFECYCLE_POLL_MS_ACU = 200;
+const DISABLE_AUTO_INIT_FLAG_ACU = '__ACU_DISABLE_TEMPLATE_ASSISTANT_ADDON_AUTO_INIT__';
+let addonInitialized_ACU = false;
+let lifecycleTimer_ACU = null;
+let visualizerObserver_ACU = null;
+let lastVisualizerOpen_ACU = false;
+let lastSheetKey_ACU = null;
+function getAddonDocument_ACU() {
+    if (topLevelWindow_ACU?.document) {
+        return topLevelWindow_ACU.document;
+    }
+    if (typeof document !== 'undefined') {
+        return document;
+    }
+    return null;
+}
+function getVisualizerRoot_ACU(doc = getAddonDocument_ACU()) {
+    if (!doc)
+        return null;
+    return doc.querySelector(VISUALIZER_ROOT_SELECTOR_ACU);
+}
+function createAssistantButton_ACU(doc) {
+    const button = doc.createElement('button');
+    button.id = ASSISTANT_BUTTON_ID_ACU;
+    button.className = 'acu-btn-secondary';
+    button.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> AI 改表助手';
+    button.addEventListener('click', () => {
+        toggleVisualizerTemplateAssistant_ACU();
+    });
+    return button;
+}
+function createAssistantHost_ACU(doc) {
+    const host = doc.createElement('div');
+    host.id = ASSISTANT_HOST_ID_ACU;
+    return host;
+}
+function ensureVisualizerTemplateAssistantAddonDom_ACU() {
+    const doc = getAddonDocument_ACU();
+    const root = getVisualizerRoot_ACU(doc);
+    if (!doc || !root)
+        return false;
+    let domChanged = false;
+    const actions = root.querySelector(VISUALIZER_ACTIONS_SELECTOR_ACU);
+    if (actions && !root.querySelector(`#${ASSISTANT_BUTTON_ID_ACU}`)) {
+        const button = createAssistantButton_ACU(doc);
+        actions.insertBefore(button, actions.firstChild);
+        domChanged = true;
+    }
+    const dock = root.querySelector(ASSISTANT_DOCK_SELECTOR_ACU);
+    if (!root.querySelector(`#${ASSISTANT_HOST_ID_ACU}`) && !doc.querySelector(`#${ASSISTANT_HOST_ID_ACU}`) && dock) {
+        dock.appendChild(createAssistantHost_ACU(doc));
+        domChanged = true;
+    }
+    if (domChanged) {
+        renderVisualizerTemplateAssistantPanel_ACU();
+    }
+    return true;
+}
+function syncVisualizerTemplateAssistantAddon_ACU(force = false) {
+    const hadVisualizer = lastVisualizerOpen_ACU;
+    const hasVisualizer = !!getVisualizerRoot_ACU();
+    if (hasVisualizer && !hadVisualizer) {
+        resetVisualizerTemplateAssistantState_ACU();
+        lastSheetKey_ACU = null;
+    }
+    if (!hasVisualizer && hadVisualizer) {
+        resetVisualizerTemplateAssistantState_ACU();
+        lastSheetKey_ACU = null;
+        lastVisualizerOpen_ACU = false;
+        return;
+    }
+    if (!hasVisualizer) {
+        lastVisualizerOpen_ACU = false;
+        return;
+    }
+    ensureVisualizerTemplateAssistantAddonDom_ACU();
+    const currentSheetKey = _acuVisState.currentSheetKey || null;
+    if (force || currentSheetKey !== lastSheetKey_ACU) {
+        lastSheetKey_ACU = currentSheetKey;
+        handleVisualizerTemplateAssistantSheetChange_ACU();
+    }
+    lastVisualizerOpen_ACU = true;
+}
+function startVisualizerObserver_ACU() {
+    const doc = getAddonDocument_ACU();
+    if (!doc?.body || typeof MutationObserver !== 'function')
+        return;
+    visualizerObserver_ACU = new MutationObserver(() => {
+        syncVisualizerTemplateAssistantAddon_ACU();
+    });
+    visualizerObserver_ACU.observe(doc.body, { childList: true, subtree: true });
+}
+function startLifecyclePoll_ACU() {
+    lifecycleTimer_ACU = globalThis.setInterval(() => {
+        syncVisualizerTemplateAssistantAddon_ACU();
+    }, LIFECYCLE_POLL_MS_ACU);
+}
+function stopVisualizerTemplateAssistantAddon_ACU() {
+    if (visualizerObserver_ACU) {
+        visualizerObserver_ACU.disconnect();
+        visualizerObserver_ACU = null;
+    }
+    if (lifecycleTimer_ACU !== null) {
+        globalThis.clearInterval(lifecycleTimer_ACU);
+        lifecycleTimer_ACU = null;
+    }
+    addonInitialized_ACU = false;
+    lastVisualizerOpen_ACU = false;
+    lastSheetKey_ACU = null;
+}
+function initVisualizerTemplateAssistantAddon_ACU() {
+    if (addonInitialized_ACU)
+        return;
+    addonInitialized_ACU = true;
+    startVisualizerObserver_ACU();
+    startLifecyclePoll_ACU();
+    syncVisualizerTemplateAssistantAddon_ACU(true);
+}
+if (!globalThis[DISABLE_AUTO_INIT_FLAG_ACU]) {
+    initVisualizerTemplateAssistantAddon_ACU();
+}
+
 /**
  * src/entry-extension.ts — 酒馆插件入口
  *
@@ -43188,6 +46562,7 @@ async function extensionMain() {
     }
     logDebug_ACU('[插件启动] TavernHelper 已就绪，开始初始化...');
     mainInitialize_ACU();
+    initVisualizerTemplateAssistantAddon_ACU();
 }
 // 插件加载时 DOM 已就绪，直接启动
 extensionMain();
