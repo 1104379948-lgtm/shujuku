@@ -1,0 +1,12 @@
+# spec-kit 本地工具链（不上传 git）
+.codebuddy/
+.specify/
+
+# Node.js
+node_modules/
+
+# 构建产物
+dist/
+
+# macOS
+.DS_Store

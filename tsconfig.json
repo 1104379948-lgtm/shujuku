@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "strict": false,
+    "strictBindCallApply": true,
+    "strictFunctionTypes": true,
+    "noImplicitThis": true,
+    "noImplicitAny": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["src/shared/*"],
+      "@data/*": ["src/data/*"],
+      "@service/*": ["src/service/*"],
+      "@presentation/*": ["src/presentation/*"]
+    },
+    "types": ["function", "iframe", "jquery", "sql-js"],
+    "typeRoots": ["./@types", "./node_modules/@types"]  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.js",
+    "@types/**/*.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "scripts",
+    "backups",
+    "src/data/models/defaults.ts"
+  ]
+}

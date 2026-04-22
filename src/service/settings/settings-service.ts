@@ -1,0 +1,569 @@
+// ═══════════════════════════════════════════════════════════════
+// service/settings/settings-service.ts — 设置加载/保存编排
+// 从 04_shared_helpers.js 迁入
+//
+// 这两个函数混合了数据读写 + UI 同步 + 运行时状态操作，
+// 属于 service 层（业务编排），不是纯 data 层。
+// ═══════════════════════════════════════════════════════════════
+
+import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normalizeIsolationCode_ACU } from '../../shared/data-constants';
+import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU} from '../../shared/defaults-json.js';
+import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU } from '../../shared/defaults';
+import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
+import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
+import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
+import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
+import { isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
+import { configIdbCacheLoaded_ACU, ensureConfigIdbCacheLoaded_ACU, getConfigStorage_ACU, initTavernSettingsBridge_ACU, migrateKeyToTavernStorageIfNeeded_ACU, pendingSettingsReloadFromIdb_ACU, _set_pendingSettingsReloadFromIdb_ACU} from '../../data/storage/tavern-storage';
+import { ensureTagRulesCompat_ACU } from '../plot/plot-logic';
+import { getDefaultTemplateSnapshot_ACU, getTemplatePreset_ACU } from '../template/template-preset-service';
+import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_settings_ACU} from '../runtime/state-manager';
+import { getCurrentCharSettings_ACU, getCurrentWorldbookConfig_ACU } from './settings-readers';
+import { getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
+import { safeJsonParse_ACU } from '../../shared/json-helpers';
+import { deepMerge_ACU, ensureSheetOrderNumbers_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+
+export function saveSettings_ACU(): { saved: boolean; storageType: 'tavern' | 'indexeddb' | 'memory'; warning?: string; error?: string } {
+  // 业务编排：同步隔离码到 globalMeta + 持久化
+  const code = normalizeIsolationCode_ACU(settings_ACU?.dataIsolationCode || globalMeta_ACU?.activeIsolationCode || '');
+  if (globalMeta_ACU && typeof globalMeta_ACU === 'object') {
+    globalMeta_ACU.activeIsolationCode = code;
+    if (code) addDataIsolationHistory_ACU(code, { save: false });
+    normalizeDataIsolationHistory_ACU(globalMeta_ACU.isolationCodeList);
+    saveGlobalMeta_ACU();
+  }
+
+  // 数据层：纯存储持久化
+  persistSettingsToStorage_ACU(settings_ACU, code);
+
+  try {
+      const store = (getConfigStorage_ACU)();
+      if (store && !store._isTavern) {
+          if ((isIndexedDbAvailable_ACU)()) {
+              void (initTavernSettingsBridge_ACU)();
+              return { saved: true, storageType: 'indexeddb', warning: '当前未连接酒馆设置：已保存到 IndexedDB（仅本浏览器可用）。' };
+          } else {
+              void (initTavernSettingsBridge_ACU)();
+              return { saved: true, storageType: 'memory', warning: '⚠️ 当前未连接酒馆设置且 IndexedDB 不可用，本次修改刷新后会丢失。' };
+          }
+      }
+      return { saved: true, storageType: 'tavern' };
+  } catch (error) {
+      logError_ACU('Failed to save settings:', error);
+      return { saved: false, storageType: 'memory', error: '保存设置时发生浏览器存储错误。' };
+  }
+}
+
+
+export   function loadSettings_ACU() {
+      // 确保酒馆设置桥接已就绪（best-effort，不阻塞）
+      void initTavernSettingsBridge_ACU();
+      // 尝试预载 IndexedDB 配置缓存（best-effort，不阻塞）
+      void ensureConfigIdbCacheLoaded_ACU().then(() => {
+          if (pendingSettingsReloadFromIdb_ACU) {
+              _set_pendingSettingsReloadFromIdb_ACU(false);
+              loadSettings_ACU();
+          }
+      });
+      // 可选迁移：把旧 localStorage 的设置/模板搬迁到酒馆设置（迁移开关默认为 false）
+      migrateKeyToTavernStorageIfNeeded_ACU(STORAGE_KEY_ALL_SETTINGS_ACU);
+      migrateKeyToTavernStorageIfNeeded_ACU(STORAGE_KEY_CUSTOM_TEMPLATE_ACU);
+
+      // 1) 读取全局元信息（跨标识共享：标识列表/当前标识）
+      loadGlobalMeta_ACU();
+
+      const store = getConfigStorage_ACU();
+      const legacySettingsJson = store?.getItem?.(STORAGE_KEY_ALL_SETTINGS_ACU);
+      if (!legacySettingsJson && !configIdbCacheLoaded_ACU && isIndexedDbAvailable_ACU()) {
+          if (!pendingSettingsReloadFromIdb_ACU) {
+              _set_pendingSettingsReloadFromIdb_ACU(true);
+              void ensureConfigIdbCacheLoaded_ACU().then(() => {
+                  if (pendingSettingsReloadFromIdb_ACU) {
+                      _set_pendingSettingsReloadFromIdb_ACU(false);
+                      loadSettings_ACU();
+                  }
+              });
+          }
+      }
+      const legacySettingsObj = legacySettingsJson ? safeJsonParse_ACU(legacySettingsJson, null) : null;
+      const legacyCode = normalizeIsolationCode_ACU(legacySettingsObj?.dataIsolationCode || '');
+
+      // 2) 一次性迁移：旧版"单份设置/单份模板" -> 当前标识对应 profile
+      if (!globalMeta_ACU.migratedLegacySingleStore && (legacySettingsObj || store?.getItem?.(STORAGE_KEY_CUSTOM_TEMPLATE_ACU))) {
+          const targetCode = legacyCode; // 旧版 code 就是当时的隔离标识
+          const hasProfileSettings = !!readProfileSettingsFromStorage_ACU(targetCode);
+          const hasProfileTemplate = !!readProfileTemplateFromStorage_ACU(targetCode);
+          try {
+              if (!hasProfileSettings && legacySettingsObj) {
+                  const toSave = sanitizeSettingsForProfileSave_ACU(legacySettingsObj);
+                  toSave.dataIsolationCode = targetCode;
+                  writeProfileSettingsToStorage_ACU(targetCode, toSave);
+              }
+              if (!hasProfileTemplate) {
+                  const legacyTemplate = store?.getItem?.(STORAGE_KEY_CUSTOM_TEMPLATE_ACU);
+                  if (legacyTemplate && String(legacyTemplate).trim()) {
+                      writeProfileTemplateToStorage_ACU(targetCode, legacyTemplate);
+                  }
+              }
+              // 同步迁移"标识列表"到 globalMeta（跨标识共享）
+              if (Array.isArray(legacySettingsObj?.dataIsolationHistory)) {
+                  globalMeta_ACU.isolationCodeList = legacySettingsObj.dataIsolationHistory;
+              }
+              if (targetCode) {
+                  globalMeta_ACU.activeIsolationCode = targetCode;
+                  // 确保 active 在列表里
+                  globalMeta_ACU.isolationCodeList = [targetCode, ...(globalMeta_ACU.isolationCodeList || [])];
+              }
+              normalizeDataIsolationHistory_ACU(globalMeta_ACU.isolationCodeList);
+              globalMeta_ACU.migratedLegacySingleStore = true;
+              saveGlobalMeta_ACU();
+              // 迁移完成后移除 legacy 键，避免后续反复读取造成混乱
+              try { store?.removeItem?.(STORAGE_KEY_ALL_SETTINGS_ACU); } catch (e) {}
+              try { store?.removeItem?.(STORAGE_KEY_CUSTOM_TEMPLATE_ACU); } catch (e) {}
+              logDebug_ACU(`[Profile] Migrated legacy single-store -> profile: ${targetCode || '(default)'}`);
+          } catch (e) {
+              logWarn_ACU('[Profile] Legacy migration failed (will keep legacy keys):', e);
+          }
+      }
+
+      // 3) 决定本次启动要加载的标识 code（优先 globalMeta.active，其次 legacyCode）
+      const activeCode = normalizeIsolationCode_ACU(globalMeta_ACU.activeIsolationCode || legacyCode || '');
+      globalMeta_ACU.activeIsolationCode = activeCode;
+      if (activeCode) addDataIsolationHistory_ACU(activeCode, { save: false });
+      normalizeDataIsolationHistory_ACU(globalMeta_ACU.isolationCodeList);
+      saveGlobalMeta_ACU();
+
+      // 4) 加载模板（按标识 profile）
+      loadTemplateFromStorage_ACU(activeCode);
+
+      // 5) 加载设置（按标识 profile）
+      const defaultSettings = buildDefaultSettings_ACU();
+
+      try {
+          const savedSettings = readProfileSettingsFromStorage_ACU(activeCode);
+          if (savedSettings) {
+
+              // [迁移逻辑] 检查旧的顶层 worldbookConfig
+              if (savedSettings.worldbookConfig) {
+                  logDebug_ACU('Migrating legacy worldbookConfig to character-specific settings.');
+                  // 如果存在，并且没有 characterSettings，则创建一个
+                  if (!savedSettings.characterSettings) {
+                      savedSettings.characterSettings = {};
+                  }
+                  // 将旧配置迁移到 'default' 或一个通用的键下，以便初次加载时使用
+                  // 这里我们假设它应该成为所有未配置角色的基础，但为了简单起见，我们只处理当前角色
+                  const charId = currentChatFileIdentifier_ACU || 'default';
+                  if (!savedSettings.characterSettings[charId]) {
+                       savedSettings.characterSettings[charId] = { worldbookConfig: savedSettings.worldbookConfig };
+                  }
+                  // 删除顶层配置
+                  delete savedSettings.worldbookConfig;
+              }
+              
+              // Deep merge saved settings into defaults to ensure new properties are added
+              _set_settings_ACU(deepMerge_ACU(defaultSettings, savedSettings));
+
+              // [剧情推进] 迁移/兜底：确保 plotWorldbookConfig 存在且结构完整
+              if (!settings_ACU.plotSettings) settings_ACU.plotSettings = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
+              if (!settings_ACU.plotSettings.plotWorldbookConfig) {
+                  // 兼容旧字段迁移：worldbookSource/selectedWorldbooks -> plotWorldbookConfig
+                  const legacySource = settings_ACU.plotSettings.worldbookSource || 'character';
+                  const legacyBooks = Array.isArray(settings_ACU.plotSettings.selectedWorldbooks) ? settings_ACU.plotSettings.selectedWorldbooks : [];
+                  settings_ACU.plotSettings.plotWorldbookConfig = buildDefaultPlotWorldbookConfig_ACU();
+                  settings_ACU.plotSettings.plotWorldbookConfig.source = (legacySource === 'manual') ? 'manual' : 'character';
+                  settings_ACU.plotSettings.plotWorldbookConfig.manualSelection = legacyBooks;
+              }
+              if (!settings_ACU.plotPresetBindings || typeof settings_ACU.plotPresetBindings !== 'object' || Array.isArray(settings_ACU.plotPresetBindings)) {
+                  settings_ACU.plotPresetBindings = {};
+              }
+              settings_ACU.currentTemplatePresetName = normalizeTemplatePresetSelectionValue_ACU(settings_ACU.currentTemplatePresetName || '');
+              if (typeof settings_ACU.plotSettings.lastUsedPresetName !== 'string') {
+                  settings_ACU.plotSettings.lastUsedPresetName = '';
+              }
+
+              // [Profile] 强制以 globalMeta.activeIsolationCode 作为当前标识
+              settings_ACU.dataIsolationCode = activeCode;
+              settings_ACU.dataIsolationEnabled = (activeCode !== '');
+
+              // 0TK 全局偏好：优先 globalMeta；若缺失则从旧 profile 字段迁移
+              if (typeof globalMeta_ACU.zeroTkOccupyModeGlobal === 'boolean') {
+                  settings_ACU.zeroTkOccupyModeDefault = (globalMeta_ACU.zeroTkOccupyModeGlobal === true);
+              } else {
+                  globalMeta_ACU.zeroTkOccupyModeGlobal = (settings_ACU.zeroTkOccupyModeDefault === true);
+                  saveGlobalMeta_ACU();
+              }
+
+              // 确保当前角色有配置
+              getCurrentCharSettings_ACU();
+              
+          } else {
+              // No saved settings, use the defaults
+              _set_settings_ACU(defaultSettings);
+              // [剧情推进] 默认兜底
+              if (!settings_ACU.plotSettings.plotWorldbookConfig) {
+                  settings_ACU.plotSettings.plotWorldbookConfig = buildDefaultPlotWorldbookConfig_ACU();
+              }
+              // [Profile] 强制以 globalMeta.activeIsolationCode 作为当前标识
+              settings_ACU.dataIsolationCode = activeCode;
+              settings_ACU.dataIsolationEnabled = (activeCode !== '');
+              if (typeof globalMeta_ACU.zeroTkOccupyModeGlobal === 'boolean') {
+                  settings_ACU.zeroTkOccupyModeDefault = (globalMeta_ACU.zeroTkOccupyModeGlobal === true);
+              } else {
+                  globalMeta_ACU.zeroTkOccupyModeGlobal = (settings_ACU.zeroTkOccupyModeDefault === true);
+                  saveGlobalMeta_ACU();
+              }
+          }
+      } catch (error) {
+          logError_ACU('Failed to load or parse settings, using defaults:', error);
+          _set_settings_ACU(buildDefaultSettings_ACU());
+          settings_ACU.dataIsolationCode = activeCode;
+          settings_ACU.dataIsolationEnabled = (activeCode !== '');
+      }
+
+      // [兼容] 旧标签排除字段自动迁移为新规则组结构
+      ensureTagRulesCompat_ACU(settings_ACU);
+
+      if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
+          settings_ACU.maxConcurrentGroups = 1;
+      }
+      logDebug_ACU('Settings loaded:', settings_ACU);
+  }
+
+  // loadSettingsAndRefreshUI_ACU 已搬到 presentation/components/settings-ui-helpers.ts
+
+
+export   function loadTemplateFromStorage_ACU(codeOverride: any = null) {
+      const code = normalizeIsolationCode_ACU(
+          (codeOverride !== null && typeof codeOverride !== 'undefined')
+              ? codeOverride
+              : (settings_ACU?.dataIsolationCode || globalMeta_ACU?.activeIsolationCode || ''),
+      );
+
+      // [更新参数哨兵迁移] 旧版本：0 表示"沿用UI"；新版本：-1 表示"沿用UI"，0 表示"禁用/不参与"（仅 updateFrequency 参与禁用语义）
+      function migrateTemplateUpdateConfigSentinel_ACU(templateObj: any) {
+          if (!templateObj || typeof templateObj !== 'object') return { changed: false, obj: templateObj };
+
+          const mate = (templateObj.mate && typeof templateObj.mate === 'object') ? templateObj.mate : null;
+          const alreadyMigrated = !!(mate && mate.updateConfigUiSentinel === -1);
+          if (alreadyMigrated) return { changed: false, obj: templateObj };
+
+          let changed = false;
+          const sheetKeys = Object.keys(templateObj).filter(k => k.startsWith('sheet_'));
+          for (const k of sheetKeys) {
+              const sheet = templateObj[k];
+              if (!sheet || typeof sheet !== 'object') continue;
+              const uc = sheet.updateConfig;
+              if (!uc || typeof uc !== 'object') continue;
+              // sheet 级标记：用于聊天记录里的表格对象（没有 mate）也能识别新语义
+              if (uc.uiSentinel !== -1) { uc.uiSentinel = -1; changed = true; }
+              for (const field of ['contextDepth', 'updateFrequency', 'batchSize', 'skipFloors']) {
+                  if (Object.prototype.hasOwnProperty.call(uc, field) && uc[field] === 0) {
+                      uc[field] = -1;
+                      changed = true;
+                  }
+              }
+          }
+
+          // 写入标记，避免后续把用户显式设置的 0(禁用) 再次误迁移
+          if (!templateObj.mate || typeof templateObj.mate !== 'object') {
+              templateObj.mate = { type: 'chatSheets', version: 1 };
+              changed = true;
+          } else {
+              if (!templateObj.mate.type) templateObj.mate.type = 'chatSheets';
+              if (!templateObj.mate.version) templateObj.mate.version = 1;
+          }
+          if (templateObj.mate.updateConfigUiSentinel !== -1) {
+              templateObj.mate.updateConfigUiSentinel = -1;
+              changed = true;
+          }
+          return { changed, obj: templateObj };
+      }
+
+      try {
+          const savedTemplate = readProfileTemplateFromStorage_ACU(code);
+          if (savedTemplate) {
+              // [修复] 使用 safeJsonParse_ACU 静默处理解析失败，避免误报错误提示
+              const parsedTemplate = safeJsonParse_ACU(savedTemplate, null);
+              if (parsedTemplate && parsedTemplate.mate && Object.keys(parsedTemplate).some(k => k.startsWith('sheet_'))) {
+                  // [迁移] 0(沿用UI) -> -1(沿用UI)，并写入标记
+                  migrateTemplateUpdateConfigSentinel_ACU(parsedTemplate);
+                  // [Profile] 模板载入时先补齐/修复顺序编号，并回写（编号可随导出/导入迁移）
+                  const sheetKeys = Object.keys(parsedTemplate).filter(k => k.startsWith('sheet_'));
+                  ensureSheetOrderNumbers_ACU(parsedTemplate, { baseOrderKeys: sheetKeys, forceRebuild: false });
+                  // [瘦身] 无论是否 changed，都清洗模板（去掉 domain/type/enable/triggerSend*/config/customStyles 等冗余字段）
+                  const sanitizedTemplate = sanitizeChatSheetsObject_ACU(parsedTemplate, { ensureMate: true });
+                  _set_TABLE_TEMPLATE_ACU(JSON.stringify(sanitizedTemplate));
+                  writeProfileTemplateToStorage_ACU(code, TABLE_TEMPLATE_ACU);
+                  logDebug_ACU(`[Profile] Template loaded for code: ${code || '(default)'}`);
+                  return;
+              } else if (parsedTemplate) {
+                  // 解析成功但格式不正确，静默回退到默认模板
+                  logDebug_ACU(`[Profile] Template format invalid for code: ${code || '(default)'}, using default.`);
+              }
+              // parsedTemplate 为 null 时表示解析失败，静默跳过（可能是旧的/其他标识的损坏数据）
+          }
+      } catch (error) {
+          // 静默处理异常，避免误报错误提示困扰用户
+          logDebug_ACU('[Profile] Template load skipped due to error, using default.', error?.message || error);
+      }
+
+      // No valid template found -> default
+      _set_TABLE_TEMPLATE_ACU(DEFAULT_TABLE_TEMPLATE_ACU);
+      // [新机制] 默认模板也补齐一次编号（仅写入当前 profile，不改源码常量）
+      try {
+          const obj = JSON.parse(TABLE_TEMPLATE_ACU);
+          // 默认模板也写入哨兵标记（便于后续识别新语义）
+          try { migrateTemplateUpdateConfigSentinel_ACU(obj); } catch (e) {}
+          const sheetKeys = Object.keys(obj).filter(k => k.startsWith('sheet_'));
+          if (ensureSheetOrderNumbers_ACU(obj, { baseOrderKeys: sheetKeys, forceRebuild: false })) {
+              const sanitizedTemplate = sanitizeChatSheetsObject_ACU(obj, { ensureMate: true });
+              _set_TABLE_TEMPLATE_ACU(JSON.stringify(sanitizedTemplate));
+          }
+      } catch (e) {
+          // ignore
+      }
+      try { writeProfileTemplateToStorage_ACU(code, TABLE_TEMPLATE_ACU); } catch (e) {}
+      logDebug_ACU(`[Profile] No valid template found, default persisted for code: ${code || '(default)'}`);
+  }
+
+
+export   function buildDefaultSettings_ACU() {
+      return {
+          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+          apiMode: 'custom',
+          tavernProfile: '',
+          streamingEnabled: false, // [新增] 流式传输开关（默认关闭）
+          apiPresets: [] as any[],
+          tableApiPreset: '',
+          plotApiPreset: '',
+          // [新增] 按表格名称保存的表级 API 预设覆盖（key=标准化表名, value=presetName）
+          // 不保存入模板，只写进数据库插件设置；同名表跨模板复用
+          tableApiPresetOverridesByName: {} as Record<string, string>,
+          charCardPrompt: DEFAULT_CHAR_CARD_PROMPT_ACU,
+          autoUpdateThreshold: DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
+          autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
+          autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
+          updateBatchSize: 3,
+          maxConcurrentGroups: 1,
+          autoUpdateEnabled: true,
+          standardizedTableFillEnabled: true, // [新增] 规范填表功能
+          toastMuteEnabled: false,
+          // [剧情推进] 设置
+          plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
+          plotPresetBindings: {}, // [剧情推进] 按聊天记录绑定剧情推进预设
+          currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
+          // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
+          tableContextExtractTags: '',
+          tableContextExtractRules: [] as any[],
+          // [填表功能] 正文标签排除：将指定标签内容从上下文中移除
+          tableContextExcludeTags: '',
+          tableContextExcludeRules: [] as any[],
+          // [填表功能] 仅识别最后一对 <tableEdit> 标签
+          tableEditLastPairOnly: true,
+          removeTags: '',
+          importSplitSize: 10000,
+          importPromptExcludeImportedWorldbookEntries: true, // [新增] 仅外部导入时，填表提示词中的世界书占位符屏蔽所有带"外部导入-"标签的条目
+          skipUpdateFloors: 0, // 跳过更新楼层（全局）
+          retainRecentLayers: 100, // [新增] 保留最近N层本地数据 (0或空=全部保留)
+          manualSelectedTables: [] as any[],
+          // [新增] 表格更新锁定（按聊天+隔离标签存储；仅对 updateRow 生效）
+          tableUpdateLocks: {},
+          // [新增] 总结表/总体大纲"编码索引列"特殊锁定（默认锁定）
+          specialIndexLocks: {},
+          // [新增] 0TK占用模式全局默认值：新对话会继承这个值
+          zeroTkOccupyModeDefault: false,
+          // [Profile] dataIsolationEnabled/code 由当前 profile 决定；history 走 globalMeta
+          dataIsolationCode: '',
+          dataIsolationHistory: [] as any[], // legacy 字段保留但不再持久化
+          characterSettings: {}, // Start with an empty object
+          knownCustomEntryNames: [] as any[], // [新增] 记录已创建的自定义条目名称，用于清理
+          mergeSummaryPrompt: DEFAULT_MERGE_SUMMARY_PROMPT_ACU, // [新增] 合并总结提示词
+          mergeTargetCount: 1, // [新增] 合并目标条数
+          mergeBatchSize: 5, // [新增] 合并批次大小
+          mergeStartIndex: 1, // [新增] 合并起始条数
+          mergeEndIndex: null as number | null, // [新增] 合并终止条数
+          autoMergeEnabled: false, // [新增] 是否开启自动合并总结
+          autoMergeThreshold: 20, // [新增] 自动合并总结楼层数
+          autoMergeReserve: 0, // [新增] 保留固定楼层数
+          deleteStartFloor: null as number | null, // [新增] 删除起始楼层 (null表示从头开始)
+          deleteEndFloor: null as number | null, // [新增] 删除终止楼层 (null表示到末尾)
+          // [新增] 酒馆提示词模板功能
+          promptTemplateSettings: {
+            enabled: true,           // 总开关
+            maxNestingDepth: 10,     // 最大嵌套深度
+            debugMode: false         // 调试模式
+          },
+          // [新增] 存储模式（默认原生模式，用户可切换到 SQLite）
+          storageMode: 'native' as const,
+          // [新增] 正文优化功能
+          contentOptimizationSettings: {
+            enabled: false,                    // 是否启用正文优化
+            apiPreset: '',                     // 优化使用的API预设（为空则使用当前配置）
+            seamlessMode: true,                // 无感替换模式：显示遮罩，优化完成后直接显示结果
+            autoApply: true,                   // 是否自动应用优化结果（关闭时显示对比让用户选择）
+            showDiff: true,                    // 是否显示优化对比（非无感模式下有效）
+            parallelMode: false,               // 填表与正文替换并行执行（默认关闭）
+            minLength: 100,                    // 最小优化长度阈值
+            maxOptimizations: 10,              // 单次最大优化项数
+            loopCount: 1,                      // 循环优化次数
+            retryCount: 3,                     // 自动重试次数（API调用失败时自动重试，默认3次）
+            extractTags: '',                   // 正文标签提取（从正文中提取指定标签内容进行优化）
+            extractRules: [] as any[],                  // 正文标签提取规则（结构化）
+            excludeTags: '',                   // 标签排除（优化时排除指定标签内容）
+            excludeRules: [] as any[],                  // 标签排除规则（结构化）
+            promptGroup: buildDefaultContentOptimizationPromptGroup_ACU(), // 提示词组（段落编辑器）
+            promptPresets: [] as any[],                 // 提示词组预设列表
+          },
+      };
+  }
+
+
+export   function applyTemplateScopeForCurrentChat_ACU({ isolationKey = getCurrentIsolationKey_ACU() } = {}) {
+      const normalizedKey = normalizeTemplateScopeIsolationKey_ACU(isolationKey);
+      const migratedScopeState = migrateLegacyTemplateScopeForCurrentChat_ACU({ isolationKey: normalizedKey });
+      const scopeState = getCurrentChatTemplateScopeState_ACU({ isolationKey: normalizedKey }) || migratedScopeState;
+      const selectedPresetName = normalizeTemplatePresetSelectionValue_ACU(scopeState?.presetName || '');
+      let targetSnapshot = null;
+
+      if (scopeState?.mode === 'chat_override' && scopeState?.templateStr) {
+          targetSnapshot = sanitizeTemplateSnapshotForChat_ACU(scopeState.templateStr);
+      } else if (scopeState?.mode === 'preset_link') {
+          if (selectedPresetName) {
+              targetSnapshot = sanitizeTemplateSnapshotForChat_ACU(getTemplatePreset_ACU(selectedPresetName)?.templateStr || null);
+          } else {
+              targetSnapshot = getDefaultTemplateSnapshot_ACU();
+          }
+      }
+
+      if (!targetSnapshot?.templateStr) {
+          targetSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU();
+      }
+      if (!targetSnapshot?.templateStr) return null;
+
+      _set_TABLE_TEMPLATE_ACU(targetSnapshot.templateStr);
+      if (scopeState?.mode === 'chat_override' && scopeState?.templateStr) {
+          logDebug_ACU(`[TemplateScope] Applied chat template override for key [${normalizedKey || '默认'}].`);
+          return {
+              mode: 'chat_override',
+              isolationKey: normalizedKey,
+              presetName: scopeState.presetName || '',
+          };
+      }
+      if (scopeState?.mode === 'preset_link') {
+          logDebug_ACU(`[TemplateScope] Applied linked global preset for key [${normalizedKey || '默认'}]: ${selectedPresetName || '默认预设'}.`);
+          return {
+              mode: 'preset_link',
+              isolationKey: normalizedKey,
+              presetName: selectedPresetName,
+          };
+      }
+
+      logDebug_ACU(`[TemplateScope] Applied global template for key [${normalizedKey || '默认'}].`);
+      return {
+          mode: 'inherit_global',
+          isolationKey: normalizedKey,
+          presetName: getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: false }),
+      };
+  }
+
+// [从 data/repositories/isolation-repo.ts 移入] 切换隔离 Profile（业务编排，不属于 data 层）
+export async function switchIsolationProfile_ACU(newCodeRaw: string): Promise<void> {
+    const newCode = normalizeIsolationCode_ACU(newCodeRaw);
+    const oldCode = normalizeIsolationCode_ACU(settings_ACU?.dataIsolationCode || '');
+
+    persistSettingsToStorage_ACU(settings_ACU, oldCode);
+
+    loadGlobalMeta_ACU();
+    if (oldCode) addDataIsolationHistory_ACU(oldCode, { save: false });
+    if (newCode) addDataIsolationHistory_ACU(newCode, { save: false });
+    globalMeta_ACU.activeIsolationCode = newCode;
+    normalizeDataIsolationHistory_ACU(globalMeta_ACU.isolationCodeList);
+    saveGlobalMeta_ACU();
+
+    ensureProfileExists_ACU(newCode, { seedFromCurrent: true, settings: settings_ACU });
+
+    loadSettings_ACU();
+    applyTemplateScopeForCurrentChat_ACU({ isolationKey: newCode });
+}
+
+// [从 data/repositories/template-preset-repo.ts 移入] 修改当前模板预设名 + 可选持久化
+export function persistCurrentTemplatePresetName_ACU(settingsObj: any, presetName: any, { save = true } = {}): string {
+    if (!settingsObj || typeof settingsObj !== 'object') return '';
+    const normalizedPresetName = normalizeTemplatePresetSelectionValue_ACU(presetName);
+    settingsObj.currentTemplatePresetName = normalizedPresetName;
+    if (save) {
+        const code = normalizeIsolationCode_ACU(settingsObj?.dataIsolationCode || globalMeta_ACU?.activeIsolationCode || '');
+        persistSettingsToStorage_ACU(settingsObj, code);
+    }
+    return normalizedPresetName;
+}
+
+// getCurrentCharSettings_ACU 和 getCurrentWorldbookConfig_ACU 已移至 settings-readers.ts
+// [从 popup-bindings.ts / api-registry.ts 提取] 切换 0TK 占用模式的完整业务流程
+export function setZeroTkOccupyMode_ACU(modeEnabled: boolean) {
+    const cfg = getCurrentWorldbookConfig_ACU();
+    cfg.zeroTkOccupyMode = !!modeEnabled;
+    cfg.outlineEntryEnabled = !cfg.zeroTkOccupyMode;
+    settings_ACU.zeroTkOccupyModeDefault = !!modeEnabled;
+    globalMeta_ACU.zeroTkOccupyModeGlobal = !!modeEnabled;
+    saveGlobalMeta_ACU();
+    saveSettings_ACU();
+}
+
+// ============================================================
+// 合并配置导入
+// ============================================================
+
+/**
+ * 导入合并配置中的 settings 字段
+ * 纯业务逻辑：将 combinedData 中的各字段赋值到 settings 对象
+ * 不涉及 UI（toast、DOM 更新由 presentation 层负责）
+ * 
+ * @returns 被修改的字段名列表（供 presentation 层更新对应的 UI 元素）
+ */
+export function applyCombinedSettingsImport_ACU(combinedData: any): string[] {
+    const modifiedFields: string[] = [];
+
+    // 导入提示词
+    if (Array.isArray(combinedData.prompt)) {
+        settings_ACU.charCardPrompt = combinedData.prompt;
+        modifiedFields.push('charCardPrompt');
+    }
+
+    // 导入合并提示词
+    if (combinedData.mergeSummaryPrompt) {
+        settings_ACU.mergeSummaryPrompt = combinedData.mergeSummaryPrompt;
+        modifiedFields.push('mergeSummaryPrompt');
+    }
+
+    // 导入合并设置
+    if (typeof combinedData.mergeSummaryPrompt !== 'undefined' ||
+        typeof combinedData.autoMergeEnabled !== 'undefined') {
+
+        // 手动合并设置
+        settings_ACU.mergeTargetCount = combinedData.mergeTargetCount || 1;
+        settings_ACU.mergeBatchSize = combinedData.mergeBatchSize || 5;
+        settings_ACU.mergeStartIndex = combinedData.mergeStartIndex || 1;
+        settings_ACU.mergeEndIndex = combinedData.mergeEndIndex || null;
+        modifiedFields.push('mergeTargetCount', 'mergeBatchSize', 'mergeStartIndex', 'mergeEndIndex');
+
+        // 自动合并设置
+        settings_ACU.autoMergeEnabled = combinedData.autoMergeEnabled || false;
+        settings_ACU.autoMergeThreshold = combinedData.autoMergeThreshold || 20;
+        settings_ACU.autoMergeReserve = combinedData.autoMergeReserve || 0;
+        modifiedFields.push('autoMergeEnabled', 'autoMergeThreshold', 'autoMergeReserve');
+
+        // 删除楼层范围设置
+        settings_ACU.deleteStartFloor = combinedData.deleteStartFloor || null;
+        settings_ACU.deleteEndFloor = combinedData.deleteEndFloor || null;
+        modifiedFields.push('deleteStartFloor', 'deleteEndFloor');
+    }
+
+    saveSettings_ACU();
+    return modifiedFields;
+}
+
+// re-export data 层基础设施（供 presentation 层通过 service 层访问，避免 presentation→data 直接依赖）
+export { getConfigStorage_ACU, persistTavernSettings_ACU } from '../../data/storage/tavern-storage';
+export { saveCurrentProfileTemplate_ACU } from '../../data/repositories/profile-repo';
+export { getDataIsolationHistory_ACU, removeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
