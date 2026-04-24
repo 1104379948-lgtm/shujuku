@@ -80,7 +80,7 @@ function getHostWindow() {
 function checkAndMarkInstance() {
     const hostWin = getHostWindow();
     if (hostWin[ACU_INSTANCE_FLAG]) {
-        console.warn('[SP·数据库 I] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
+        console.warn('[SP·数据库 II] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
         return true; // 已有实例
     }
     hostWin[ACU_INSTANCE_FLAG] = true;
@@ -2739,6 +2739,9 @@ const defaultVectorMemoryConfig_ACU = {
     embeddingEndpoint: '',
     embeddingApiKey: '',
     embeddingModel: '',
+    rerankEndpoint: '',
+    rerankApiKey: '',
+    rerankModel: '',
     vectorNamespace: 'chat',
     entryComment: 'TavernDB-ACU-VectorMemory',
     entryKey: 'TavernDB-ACU-VectorMemory-Key',
@@ -5307,6 +5310,9 @@ function normalizeVectorMemoryConfig_ACU(rawConfig) {
         embeddingEndpoint: normalizeTextField_ACU(source.embeddingEndpoint, defaults.embeddingEndpoint),
         embeddingApiKey: normalizeTextField_ACU(source.embeddingApiKey, defaults.embeddingApiKey),
         embeddingModel: normalizeTextField_ACU(source.embeddingModel, defaults.embeddingModel),
+        rerankEndpoint: normalizeTextField_ACU(source.rerankEndpoint, defaults.rerankEndpoint),
+        rerankApiKey: normalizeTextField_ACU(source.rerankApiKey, defaults.rerankApiKey),
+        rerankModel: normalizeTextField_ACU(source.rerankModel, defaults.rerankModel),
         vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
         entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
         entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
@@ -5353,6 +5359,29 @@ function getVectorMemoryNamespace_ACU(chatFileIdentifier) {
     const config = getCurrentVectorMemoryConfig_ACU();
     const chatKey = cleanChatName_ACU(chatFileIdentifier || currentChatFileIdentifier_ACU || 'default');
     return `${config.vectorNamespace}:${chatKey}`;
+}
+function hasVectorMemoryRerankConfig_ACU(configInput) {
+    const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+    return !!(config.rerankEndpoint && config.rerankModel);
+}
+function validateVectorMemoryRerankConfig_ACU(configInput) {
+    const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+    const errors = [];
+    const hasRerankEndpoint = !!config.rerankEndpoint;
+    const hasRerankModel = !!config.rerankModel;
+    if (!hasRerankEndpoint && !hasRerankModel) {
+        return {
+            valid: false,
+            errors: [],
+        };
+    }
+    if (hasRerankEndpoint !== hasRerankModel) {
+        errors.push('rerankEndpoint 和 rerankModel 必须同时填写或同时留空');
+    }
+    return {
+        valid: errors.length === 0,
+        errors,
+    };
 }
 function collectVectorMemoryCommonErrors_ACU(config) {
     const errors = [];
@@ -9419,7 +9448,7 @@ function getActiveRemoteMemorySnapshot_ACU() {
     return null;
 }
 
-function normalizeEndpoint_ACU(endpoint) {
+function normalizeEndpoint_ACU$1(endpoint) {
     return String(endpoint || '').trim().replace(/\/+$/, '');
 }
 function buildEmbeddingHeaders_ACU(apiKey) {
@@ -9440,7 +9469,7 @@ function normalizeEmbeddingArray_ACU(value) {
         .filter((item) => Number.isFinite(item));
 }
 async function createEmbeddings_ACU(request) {
-    const endpoint = normalizeEndpoint_ACU(request.endpoint);
+    const endpoint = normalizeEndpoint_ACU$1(request.endpoint);
     const input = Array.isArray(request.input)
         ? request.input.map((item) => String(item ?? '')).filter((item) => item.trim())
         : [];
@@ -24487,6 +24516,15 @@ async function bindWorldbookEvents_ACU() {
     bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-embedding-api-key`, 'change', ($input) => {
         updateVectorMemoryField_ACU('embeddingApiKey', String($input.val() ?? '').trim());
     });
+    bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-endpoint`, 'change', ($input) => {
+        updateVectorMemoryField_ACU('rerankEndpoint', String($input.val() ?? '').trim());
+    });
+    bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-model`, 'change', ($input) => {
+        updateVectorMemoryField_ACU('rerankModel', String($input.val() ?? '').trim());
+    });
+    bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key`, 'change', ($input) => {
+        updateVectorMemoryField_ACU('rerankApiKey', String($input.val() ?? '').trim());
+    });
     bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit`, 'change', ($input) => {
         const defaults = getDefaultVectorMemoryConfig_ACU();
         updateVectorMemoryField_ACU('summaryChunkSentenceCount', parseIntegerField_ACU($input.val(), defaults.summaryChunkSentenceCount));
@@ -28344,6 +28382,9 @@ function syncAllSettingsToUI_ACU(s) {
     setVal('worldbook-vector-memory-embedding-endpoint', vectorMemoryConfig.embeddingEndpoint);
     setVal('worldbook-vector-memory-embedding-model', vectorMemoryConfig.embeddingModel);
     setVal('worldbook-vector-memory-embedding-api-key', vectorMemoryConfig.embeddingApiKey);
+    setVal('worldbook-vector-memory-rerank-endpoint', vectorMemoryConfig.rerankEndpoint || '');
+    setVal('worldbook-vector-memory-rerank-model', vectorMemoryConfig.rerankModel || '');
+    setVal('worldbook-vector-memory-rerank-api-key', vectorMemoryConfig.rerankApiKey || '');
     setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
     setChecked('worldbook-vector-memory-archive-without-summary', vectorMemoryConfig.archiveWithoutSummary === true);
     setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);
@@ -40901,7 +40942,7 @@ function generateTableTabHTML() {
                             </div>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block" style="display: none; margin-top: 12px;">
                                 <div class="acu-section" style="margin-bottom: 12px;">
-                                    <div class="acu-section-title">召回参数</div>
+                                    <div class="acu-section-title">召回与筛选参数</div>
                                     <div class="acu-grid-auto">
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-threshold">近记忆保留阈值</label>
@@ -40914,19 +40955,19 @@ function generateTableTabHTML() {
                                             <small class="notes">超过保留阈值后，还需额外累计这么多条旧纪要，才会触发一次远记忆归档。</small>
                                         </div>
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk">召回 TopK</label>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk">最终注入 TopK</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk" min="1" step="1" placeholder="20">
-                                            <small class="notes">每次召回最多返回的候选记忆数量。</small>
+                                            <small class="notes">每次召回后最终写入世界书的记忆数量上限；启用 Rerank 后这里仍然控制最终保留数量。</small>
                                         </div>
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-min-score">最小分数</label>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-min-score">Embedding 预筛最小分数</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-min-score" min="0" max="1" step="0.01" placeholder="0.75">
-                                            <small class="notes">低于该相似度分数的结果将被忽略。</small>
+                                            <small class="notes">先用 embedding 相似度筛掉过低候选；启用 Rerank 后，这里仍只控制预筛阶段。</small>
                                         </div>
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-recall-candidate-limit">候选召回上限</label>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-recall-candidate-limit">预筛候选上限</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-recall-candidate-limit" min="1" step="1" placeholder="100">
-                                            <small class="notes">本地相似度计算后保留的候选数量，不能小于 TopK。</small>
+                                            <small class="notes">embedding 本地预筛后保留的候选数量，也是 Rerank 的最大输入数；不能小于 TopK。</small>
                                         </div>
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-namespace">命名空间前缀</label>
@@ -40954,6 +40995,27 @@ function generateTableTabHTML() {
                                             <small class="notes">敏感信息不写入默认值；需要时再单独配置。</small>
                                         </div>
                                     </div>
+                                </div>
+                                <div class="acu-section" style="margin-bottom: 12px;">
+                                    <div class="acu-section-title">Rerank 设置（可选）</div>
+                                    <div class="acu-grid-auto">
+                                        <div class="acu-col-sm">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-endpoint">Rerank Endpoint</label>
+                                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-endpoint" placeholder="https://example.com/rerank">
+                                            <small class="notes">留空则不启用真实 Rerank；仅使用 embedding 预筛 + 本地启发式排序。</small>
+                                        </div>
+                                        <div class="acu-col-sm">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-model">Rerank Model</label>
+                                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-model" placeholder="bge-reranker-v2-m3">
+                                            <small class="notes">必须与 Endpoint 同时填写；填写后会对预筛候选做真实重排。</small>
+                                        </div>
+                                        <div class="acu-col-sm">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key">Rerank API Key</label>
+                                            <input type="password" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key" placeholder="留空表示不附带 Authorization">
+                                            <small class="notes">可与 Embedding 使用不同鉴权；若服务不需要鉴权可留空。</small>
+                                        </div>
+                                    </div>
+                                    <small class="notes" style="display: block; margin-top: 8px;">启用真实 Rerank 后，Embedding 仍负责召回预筛，TopK 仍控制最终注入数量；这三者不是互相替代关系。</small>
                                 </div>
                                 <div class="acu-section" style="margin-bottom: 12px;">
                                     <div class="acu-section-title">归档参数</div>
@@ -41033,7 +41095,7 @@ function generateTableTabHTML() {
                                 </div>
                                 <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
                                     <small class="notes">大总结查看入口：当前在“数据管理”页的“远记忆总结管理”面板中。这里直接写明，避免入口藏得像根本没做。</small>
-                                    <small class="notes">本方案只依赖 Embedding 接口，不再要求独立 Vector Store。命中的是远记忆 chunk，但注入世界书时会回卷整条远记忆大总结。</small>
+                                    <small class="notes">本方案以 Embedding 预筛为基础；若额外配置 Rerank，则会先预筛再重排，仍不要求独立 Vector Store。命中的是远记忆 chunk，但注入世界书时会回卷整条远记忆大总结。</small>
                                 </div>
                             </div>
                         </div>
@@ -43511,7 +43573,7 @@ async function openAutoCardPopup_ACU() {
     const windowId = `${SCRIPT_ID_PREFIX_ACU}-main-window`;
     createACUWindow({
         id: windowId,
-        title: 'SP·数据库 I',
+        title: 'SP·数据库 II',
         content: popupHtml,
         width: 1400, // 基础宽度
         height: 900, // 基础高度
@@ -43592,7 +43654,7 @@ function addAutoCardMenuItem_ACU() {
         return true;
     }
     $menuItemContainer = jQuery_API_ACU(`<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`);
-    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>SP·数据库 I</span></div>`;
+    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>SP·数据库 II</span></div>`;
     const $menuItem = jQuery_API_ACU(menuItemHTML);
     $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
         e.stopPropagation();
@@ -43742,6 +43804,82 @@ async function generateVectorRecallKeywords_ACU(input) {
             errors: [error instanceof Error ? error.message : String(error)],
         };
     }
+}
+
+function normalizeEndpoint_ACU(endpoint) {
+    return String(endpoint || '').trim().replace(/\/+$/, '');
+}
+function buildRerankHeaders_ACU(apiKey) {
+    const headers = {
+        ...getHostRequestHeaders_ACU(),
+        'Content-Type': 'application/json',
+    };
+    if (apiKey) {
+        headers.Authorization = `Bearer ${apiKey}`;
+    }
+    return headers;
+}
+function normalizeRerankItem_ACU(item, fallbackIndex) {
+    if (!item || typeof item !== 'object') {
+        return null;
+    }
+    const rawIndex = item.index ?? item.document_index ?? item.documentIndex;
+    const rawScore = item.relevance_score ?? item.relevanceScore ?? item.score;
+    const index = Number.isFinite(Number(rawIndex)) ? Math.floor(Number(rawIndex)) : fallbackIndex;
+    const relevanceScore = Number(rawScore);
+    if (!Number.isFinite(index) || index < 0 || !Number.isFinite(relevanceScore)) {
+        return null;
+    }
+    return {
+        index,
+        relevanceScore,
+    };
+}
+function extractRerankResults_ACU(payload) {
+    const rawResults = Array.isArray(payload?.results)
+        ? payload.results
+        : Array.isArray(payload?.data?.results)
+            ? payload.data.results
+            : Array.isArray(payload?.data)
+                ? payload.data
+                : [];
+    return rawResults
+        .map((item, index) => normalizeRerankItem_ACU(item, index))
+        .filter((item) => !!item);
+}
+async function createRerankScores_ACU(request) {
+    const endpoint = normalizeEndpoint_ACU(request.endpoint);
+    const model = String(request.model || '').trim();
+    const query = String(request.query || '').trim();
+    const documents = Array.isArray(request.documents)
+        ? request.documents.map((item) => String(item ?? '').trim())
+        : [];
+    if (!endpoint) {
+        throw new Error('Rerank endpoint 为空。');
+    }
+    if (!model) {
+        throw new Error('Rerank model 为空。');
+    }
+    if (!query) {
+        return [];
+    }
+    if (documents.length === 0 || documents.every((item) => !item)) {
+        return [];
+    }
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: buildRerankHeaders_ACU(request.apiKey),
+        body: JSON.stringify({
+            model,
+            query,
+            documents,
+        }),
+    });
+    if (!response.ok) {
+        throw new Error(`Rerank 请求失败: ${response.status} ${await response.text()}`);
+    }
+    const payload = await response.json();
+    return extractRerankResults_ACU(payload);
 }
 
 function normalizeQueryText_ACU(queryText) {
@@ -43942,6 +44080,44 @@ function rerankBatchCandidates_ACU(chunkCandidates, ruleMatchedBatches) {
     })
         .sort((a, b) => b.finalScore - a.finalScore);
 }
+function rerankBatchCandidatesWithModel_ACU(candidates, rerankResults) {
+    if (!Array.isArray(rerankResults) || rerankResults.length === 0) {
+        return candidates;
+    }
+    const rerankMap = new Map();
+    rerankResults.forEach((item, index) => {
+        const candidateIndex = Number(item?.index);
+        const relevanceScore = Number(item?.relevanceScore);
+        if (!Number.isFinite(candidateIndex) || candidateIndex < 0 || !Number.isFinite(relevanceScore)) {
+            return;
+        }
+        rerankMap.set(Math.floor(candidateIndex), relevanceScore);
+    });
+    return candidates
+        .map((candidate, index) => ({
+        candidate,
+        originalIndex: index,
+        rerankScore: rerankMap.get(index),
+    }))
+        .sort((left, right) => {
+        const leftHasRerank = Number.isFinite(left.rerankScore);
+        const rightHasRerank = Number.isFinite(right.rerankScore);
+        if (leftHasRerank && rightHasRerank) {
+            return Number(right.rerankScore) - Number(left.rerankScore);
+        }
+        if (leftHasRerank) {
+            return -1;
+        }
+        if (rightHasRerank) {
+            return 1;
+        }
+        return left.originalIndex - right.originalIndex;
+    })
+        .map(({ candidate, rerankScore }) => ({
+        ...candidate,
+        finalScore: Number.isFinite(rerankScore) ? Number(rerankScore) : candidate.finalScore,
+    }));
+}
 function buildRecallMatchesFromCandidates_ACU(candidates, config) {
     return candidates
         .filter((candidate) => {
@@ -43994,6 +44170,7 @@ async function recallVectorMemory_ACU(queryTextInput, stateInput, configInput) {
             queryText,
             matches: [],
             errors: [],
+            warnings: [],
         };
     }
     if (!queryText) {
@@ -44004,6 +44181,7 @@ async function recallVectorMemory_ACU(queryTextInput, stateInput, configInput) {
             queryText,
             matches: [],
             errors: [],
+            warnings: [],
         };
     }
     if (!validation.valid) {
@@ -44014,6 +44192,7 @@ async function recallVectorMemory_ACU(queryTextInput, stateInput, configInput) {
             queryText,
             matches: [],
             errors: [...validation.errors],
+            warnings: [],
         };
     }
     if (!Array.isArray(state.remoteMemoryBatches) || state.remoteMemoryBatches.length === 0) {
@@ -44024,6 +44203,7 @@ async function recallVectorMemory_ACU(queryTextInput, stateInput, configInput) {
             queryText,
             matches: [],
             errors: [],
+            warnings: [],
         };
     }
     try {
@@ -44042,13 +44222,44 @@ async function recallVectorMemory_ACU(queryTextInput, stateInput, configInput) {
                 queryText,
                 matches: [],
                 errors: ['召回 embedding 结果为空'],
+                warnings: [],
             };
         }
         const chunkCandidates = collectScoredCandidates_ACU(state, queryEmbedding, config);
         const ruleMatchedBatches = collectRuleMatchedBatches_ACU(state, queryText);
-        const rerankedCandidates = rerankBatchCandidates_ACU(chunkCandidates, ruleMatchedBatches)
+        const heuristicCandidates = rerankBatchCandidates_ACU(chunkCandidates, ruleMatchedBatches)
             .slice(0, normalizeCandidateLimit_ACU(config));
-        const matches = buildRecallMatchesFromCandidates_ACU(rerankedCandidates, config);
+        const warnings = [];
+        let finalCandidates = heuristicCandidates;
+        const rerankValidation = validateVectorMemoryRerankConfig_ACU(config);
+        const hasRerankConfigInput = !!(config.rerankEndpoint || config.rerankModel || config.rerankApiKey);
+        if (heuristicCandidates.length > 1) {
+            if (rerankValidation.valid) {
+                try {
+                    const rerankResults = await createRerankScores_ACU({
+                        endpoint: config.rerankEndpoint,
+                        apiKey: config.rerankApiKey,
+                        model: config.rerankModel,
+                        query: queryText,
+                        documents: heuristicCandidates.map((candidate) => String(candidate.batch.summaryText || '').trim()),
+                    });
+                    if (rerankResults.length > 0) {
+                        finalCandidates = rerankBatchCandidatesWithModel_ACU(heuristicCandidates, rerankResults);
+                    }
+                    else {
+                        warnings.push('Rerank 结果为空，已回退本地启发式排序');
+                    }
+                }
+                catch (error) {
+                    logWarn_ACU('[向量记忆] Rerank 失败，已回退本地启发式排序:', error);
+                    warnings.push(`Rerank 失败，已回退本地启发式排序: ${error instanceof Error ? error.message : String(error)}`);
+                }
+            }
+            else if (hasRerankConfigInput && rerankValidation.errors.length > 0) {
+                warnings.push(...rerankValidation.errors.map((item) => `${item}；已回退本地启发式排序`));
+            }
+        }
+        const matches = buildRecallMatchesFromCandidates_ACU(finalCandidates, config);
         return {
             enabled: true,
             skipped: false,
@@ -44056,6 +44267,7 @@ async function recallVectorMemory_ACU(queryTextInput, stateInput, configInput) {
             queryText,
             matches,
             errors: [],
+            warnings,
         };
     }
     catch (error) {
@@ -44067,6 +44279,7 @@ async function recallVectorMemory_ACU(queryTextInput, stateInput, configInput) {
             queryText,
             matches: [],
             errors: [error instanceof Error ? error.message : String(error)],
+            warnings: [],
         };
     }
 }
@@ -44157,8 +44370,17 @@ function buildVectorRecallOrchestrationResult_ACU(partial) {
         recallQuery: '',
         usedKeywordFallback: false,
         errors: [],
+        warnings: [],
         ...partial,
     };
+}
+function buildCombinedRecallQuery_ACU(userInput, generatedKeywords) {
+    const normalizedUserInput = typeof userInput === 'string' ? userInput.trim() : '';
+    const normalizedKeywords = typeof generatedKeywords === 'string' ? generatedKeywords.trim() : '';
+    const segments = [normalizedUserInput, normalizedKeywords]
+        .filter((segment) => !!segment)
+        .filter((segment, index, array) => array.indexOf(segment) === index);
+    return segments.join('，');
 }
 async function orchestrateVectorRecallBeforeSend_ACU(userInput, options = {}) {
     const signature = buildVectorRecallSignature_ACU(userInput);
@@ -44244,13 +44466,29 @@ async function orchestrateVectorRecallBeforeSend_ACU(userInput, options = {}) {
                 shouldProceed: false,
             });
         }
+        const combinedRecallQuery = buildCombinedRecallQuery_ACU(signature, recallQuery);
+        if (!combinedRecallQuery) {
+            return buildVectorRecallOrchestrationResult_ACU({
+                intercepted: true,
+                signature,
+                blocking: true,
+                blockStage: 'keyword_generation',
+                blockReason: '联合召回查询为空。',
+                recallQuery,
+                usedKeywordFallback,
+                errors: ['联合召回查询为空'],
+                shouldProceed: false,
+            });
+        }
         // ── 阶段2：向量召回 + 世界书同步 ──
-        const recallResult = await recallVectorMemory_ACU(recallQuery, activeSnapshot.vectorState, config);
+        const recallResult = await recallVectorMemory_ACU(combinedRecallQuery, activeSnapshot.vectorState, config);
         const syncResult = await syncVectorMemoryLorebookEntry_ACU(recallResult.matches, config);
         const recallErrors = Array.isArray(recallResult?.errors) ? [...recallResult.errors] : [];
+        const recallWarnings = Array.isArray(recallResult?.warnings) ? [...recallResult.warnings] : [];
         const syncErrors = Array.isArray(syncResult?.errors) ? [...syncResult.errors] : [];
         const worldbookReady = !!syncResult && syncResult.skipped !== true && syncErrors.length === 0;
         const errors = [...keywordErrors, ...recallErrors, ...syncErrors];
+        const warnings = [...recallWarnings];
         if (recallErrors.length > 0 || !worldbookReady) {
             return buildVectorRecallOrchestrationResult_ACU({
                 intercepted: true,
@@ -44260,9 +44498,10 @@ async function orchestrateVectorRecallBeforeSend_ACU(userInput, options = {}) {
                 blocking: true,
                 blockStage: recallErrors.length > 0 ? 'recall' : 'worldbook_sync',
                 blockReason: recallErrors[0] || syncErrors[0] || '向量记忆发送前预处理未完成。',
-                recallQuery,
+                recallQuery: combinedRecallQuery,
                 usedKeywordFallback,
                 errors,
+                warnings,
                 shouldProceed: false,
             });
         }
@@ -44276,9 +44515,10 @@ async function orchestrateVectorRecallBeforeSend_ACU(userInput, options = {}) {
             syncResult,
             completedBeforeContinuation: true,
             worldbookReady: true,
-            recallQuery,
+            recallQuery: combinedRecallQuery,
             usedKeywordFallback,
             errors,
+            warnings,
         });
     }
     catch (error) {
