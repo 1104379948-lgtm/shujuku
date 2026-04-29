@@ -8725,13 +8725,24 @@ async function purgeOldLayerData_ACU() {
         logDebug_ACU('[数据清理] 聊天记录为空，跳过清理。');
         return;
     }
-    // 收集所有包含本地数据的消息索引（排除 chat[0]，保护指导表）
+    const localDataKeys = [
+        'TavernDB_ACU_Data',
+        'TavernDB_ACU_SummaryData',
+        'TavernDB_ACU_IndependentData',
+        'TavernDB_ACU_ModifiedKeys',
+        'TavernDB_ACU_UpdateGroupKeys',
+        'TavernDB_ACU_IsolatedData',
+        'TavernDB_ACU_Identity',
+        'TavernDB_ACU_LocalMessageAnchor',
+        'qrf_plot',
+        'qrf_plot_preset',
+        'qrf_plot_tasks'
+    ];
+    // 收集所有包含本地数据的消息索引（排除 chat[0]，保护指导表）。候选判断必须与删除字段集合一致。
     const dataMessageIndices = [];
     for (let i = 1; i < chat.length; i++) {
         const msg = chat[i];
-        if (msg && (msg.TavernDB_ACU_Data ||
-            msg.TavernDB_ACU_SummaryData ||
-            msg.qrf_plot)) {
+        if (msg && localDataKeys.some(key => Object.prototype.hasOwnProperty.call(msg, key))) {
             dataMessageIndices.push(i);
         }
     }
@@ -8747,26 +8758,13 @@ async function purgeOldLayerData_ACU() {
     }
     logDebug_ACU(`[数据清理] 将清理 ${indicesToPurge.length} 层消息的本地数据（保留最近 ${retainCount} 层）...`);
     let purgedCount = 0;
-    const keysToDelete = [
-        'TavernDB_ACU_Data',
-        'TavernDB_ACU_SummaryData',
-        'TavernDB_ACU_IndependentData',
-        'TavernDB_ACU_ModifiedKeys',
-        'TavernDB_ACU_UpdateGroupKeys',
-        'TavernDB_ACU_IsolatedData',
-        'TavernDB_ACU_Identity',
-        'TavernDB_ACU_LocalMessageAnchor',
-        'qrf_plot',
-        'qrf_plot_preset',
-        'qrf_plot_tasks'
-    ];
     for (const idx of indicesToPurge) {
         const msg = chat[idx];
         if (!msg)
             continue;
         let modified = false;
-        for (const key of keysToDelete) {
-            if (msg.hasOwnProperty(key)) {
+        for (const key of localDataKeys) {
+            if (Object.prototype.hasOwnProperty.call(msg, key)) {
                 delete msg[key];
                 modified = true;
             }
@@ -17587,18 +17585,18 @@ async function updateReadableLorebookEntry_ACU(createIfNeeded = false, isImport 
         }
     }
     // Call all the individual entry updaters
-    await updateImportantPersonsRelatedEntries_ACU(importantPersonsTable, isImport);
-    await updateSummaryTableEntries_ACU(summaryTable, isImport);
-    await updateOutlineTableEntry_ACU(outlineTable, isImport);
+    await updateImportantPersonsRelatedEntries_ACU(importantPersonsTable, isImport, targetLorebookOverride);
+    await updateSummaryTableEntries_ACU(summaryTable, isImport, targetLorebookOverride);
+    await updateOutlineTableEntry_ACU(outlineTable, isImport, targetLorebookOverride);
     // [修复] 自定义导出/按行拆分条目是否需要注入，应以 mergedData 中是否存在真实单元格数据为准，
     // 不能再依赖 readableText 判空。
     // 否则当所有表格都开启“按行拆分”后，readableText 会为空，进而误判为“数据库为空”，
     // 导致本应创建的拆分世界书条目被整体跳过。
     if (hasNonEmptyCellData_ACU) {
-        await updateCustomTableExports_ACU(mergedData, isImport);
+        await updateCustomTableExports_ACU(mergedData, isImport, targetLorebookOverride);
     }
     else {
-        await updateCustomTableExports_ACU(null, isImport); // 仅清理旧自定义导出条目，不创建新条目
+        await updateCustomTableExports_ACU(null, isImport, targetLorebookOverride); // 仅清理旧自定义导出条目，不创建新条目
     }
     // [修复] 外部导入时优先使用 targetLorebookOverride 参数，避免临时修改 worldbookConfig 被兜底补齐逻辑覆盖
     const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
@@ -18716,10 +18714,10 @@ function splitKeywordsByComma_ACU(text) {
         return [];
     return raw.split(/[,，]/).map(k => k.trim()).filter(Boolean);
 }
-async function updateOutlineTableEntry_ACU(outlineTable, isImport = false) {
+async function updateOutlineTableEntry_ACU(outlineTable, isImport = false, targetLorebookOverride = null) {
     if (!isWorldbookApiAvailable_ACU())
         return;
-    const primaryLorebookName = await getInjectionTargetLorebook_ACU();
+    const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
     if (!primaryLorebookName) {
         logWarn_ACU('Cannot update outline table entry: No injection target lorebook set.');
         return;
@@ -18835,10 +18833,10 @@ async function updateOutlineTableEntry_ACU(outlineTable, isImport = false) {
         logError_ACU('Failed to update outline table lorebook entry:', error);
     }
 }
-async function updateSummaryTableEntries_ACU(summaryTable, isImport = false) {
+async function updateSummaryTableEntries_ACU(summaryTable, isImport = false, targetLorebookOverride = null) {
     if (!isWorldbookApiAvailable_ACU())
         return;
-    const primaryLorebookName = await getInjectionTargetLorebook_ACU();
+    const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
     if (!primaryLorebookName) {
         logWarn_ACU('Cannot update summary entries: No injection target lorebook set.');
         return;
@@ -18929,10 +18927,10 @@ async function updateSummaryTableEntries_ACU(summaryTable, isImport = false) {
         logError_ACU('Failed to update summary lorebook entries:', error);
     }
 }
-async function updateImportantPersonsRelatedEntries_ACU(importantPersonsTable, isImport = false) {
+async function updateImportantPersonsRelatedEntries_ACU(importantPersonsTable, isImport = false, targetLorebookOverride = null) {
     if (!isWorldbookApiAvailable_ACU())
         return;
-    const primaryLorebookName = await getInjectionTargetLorebook_ACU();
+    const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
     if (!primaryLorebookName) {
         logWarn_ACU('Cannot update important persons entries: No injection target lorebook set.');
         return;
@@ -19093,10 +19091,10 @@ async function updateImportantPersonsRelatedEntries_ACU(importantPersonsTable, i
 // [新增] 处理自定义表格导出逻辑
 // [修复] 当 mergedData 为空/null 时，仍需执行"清理旧自定义导出条目"逻辑，
 // 避免删除楼层回溯到空数据时旧条目残留在世界书中。
-async function updateCustomTableExports_ACU(mergedData, isImport = false) {
+async function updateCustomTableExports_ACU(mergedData, isImport = false, targetLorebookOverride = null) {
     if (!isWorldbookApiAvailable_ACU())
         return;
-    const primaryLorebookName = await getInjectionTargetLorebook_ACU();
+    const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
     if (!primaryLorebookName)
         return;
     const IMPORT_PREFIX = getImportBatchPrefix_ACU$1();
@@ -25177,14 +25175,21 @@ function refreshApiPresetSelectors_ACU() {
         });
         $plotApiPresetSelect.val(settings_ACU.plotApiPreset || '');
     }
-    // 刷新任务级数据库API预设选择器
+    // 刷新任务级剧情推进API预设选择器。优先使用当前编辑任务的持久化值，避免新开对话/刷新预设列表时被 DOM 空值覆盖。
     const $plotTaskApiPresetSelect = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`);
     if ($plotTaskApiPresetSelect.length) {
-        const currentTaskApiPreset = $plotTaskApiPresetSelect.val() || '';
+        const { selectedTask } = getCurrentPlotTaskEditorState_ACU(settings_ACU.plotSettings, { autoSelect: false });
+        const currentTaskApiPreset = String(selectedTask?.taskApiPreset || $plotTaskApiPresetSelect.val() || '');
+        const hasCurrentPreset = currentTaskApiPreset
+            ? presets.some((p) => p && p.name === currentTaskApiPreset)
+            : true;
         $plotTaskApiPresetSelect.empty().append('<option value="">继承全局剧情推进API预设</option>');
         presets.forEach((p) => {
             $plotTaskApiPresetSelect.append(renderOption_ACU(p.name, p.name));
         });
+        if (currentTaskApiPreset && !hasCurrentPreset) {
+            $plotTaskApiPresetSelect.append(renderOption_ACU(currentTaskApiPreset, `已保存但当前不可用：${currentTaskApiPreset}`));
+        }
         $plotTaskApiPresetSelect.val(currentTaskApiPreset);
     }
     // 刷新正文替换的API预设选择器
@@ -29318,17 +29323,13 @@ async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData
             const tableGroupId = Number.isFinite(tableConfig?.groupId)
                 ? Math.trunc(tableConfig.groupId)
                 : -1;
-            const tableFrequency = Number.isFinite(tableConfig?.updateFrequency) ? tableConfig.updateFrequency : -1;
-            const tableContextDepth = Number.isFinite(tableConfig?.contextDepth) ? tableConfig.contextDepth : -1;
-            const tableSkipFloors = Number.isFinite(tableConfig?.skipFloors) ? tableConfig.skipFloors : -1;
-            const tableBatchSize = Number.isFinite(tableConfig?.batchSize) && tableConfig.batchSize > 0
-                ? Math.trunc(tableConfig.batchSize)
-                : uiBatchSize;
-            const groupKey = `${tableGroupId}|${tableFrequency}|${tableContextDepth}|${tableSkipFloors}|${contextScopeIndices.join(',')}|${tableBatchSize}`;
+            // 手动更新只允许受分组参数与手动 UI/全局参数影响。
+            // 模板中的 updateFrequency/contextDepth/skipFloors/batchSize 属于自动更新策略，不能参与手动批次拆分。
+            const groupKey = `${tableGroupId}|${contextScopeIndices.join(',')}|${uiBatchSize}`;
             if (!updateGroups[groupKey]) {
                 updateGroups[groupKey] = {
                     indices: contextScopeIndices,
-                    batchSize: tableBatchSize,
+                    batchSize: uiBatchSize,
                     groupId: tableGroupId,
                     sheetKeys: [],
                 };
@@ -38735,6 +38736,7 @@ async function bindPlotEvents_ACU() {
     // 第一步：全局预设选择事件
     if ($plotPresetSelect.length) {
         $plotPresetSelect.on('change', function () {
+            flushCurrentPlotTaskEditorState_ACU({ renderTaskList: false, persist: true });
             const selectedName = normalizePlotPresetSelectionValue_ACU(jQuery_API_ACU(this).val());
             const result = applyGlobalPlotPresetSelectionForEditor_ACU(selectedName, {
                 source: 'ui_global_select',
@@ -38750,6 +38752,7 @@ async function bindPlotEvents_ACU() {
     // 第二步：当前聊天预设选择事件（这里只负责切换当前聊天使用的预设）
     if ($plotChatPresetSelect.length) {
         $plotChatPresetSelect.on('change', function () {
+            flushCurrentPlotTaskEditorState_ACU({ renderTaskList: false, persist: true });
             const selectedName = normalizePlotPresetSelectionValue_ACU(jQuery_API_ACU(this).val());
             const result = switchCurrentChatPlotPreset_ACU(selectedName, {
                 source: 'ui',
@@ -38888,6 +38891,7 @@ async function bindPlotEvents_ACU() {
             if (!confirm('确定要恢复全局默认的剧情推进提示词吗？这将覆盖当前的提示词设置，并重置"标签摘取"。')) {
                 return;
             }
+            flushCurrentPlotTaskEditorState_ACU({ renderTaskList: false, persist: true });
             const result = applyGlobalPlotPresetSelectionForEditor_ACU('', {
                 source: 'ui_global_reset',
                 save: true,
@@ -38902,13 +38906,13 @@ async function bindPlotEvents_ACU() {
     // 全局预设文件导入
     if ($plotPresetFileInput.length) {
         $plotPresetFileInput.on('change', function (e) {
-            const file = e.target.files[0];
+            const file = (e.target.files || [])[0];
             if (!file)
                 return;
             const reader = new FileReader();
             reader.onload = function (e) {
                 try {
-                    const importedPresets = JSON.parse(e.target.result);
+                    const importedPresets = JSON.parse(String(e.target?.result || ''));
                     if (!Array.isArray(importedPresets)) {
                         throw new Error('JSON文件格式不正确，根节点必须是一个数组。');
                     }
@@ -44382,6 +44386,18 @@ function buildCombinedRecallQuery_ACU(userInput, generatedKeywords) {
         .filter((segment, index, array) => array.indexOf(segment) === index);
     return segments.join('，');
 }
+function hasRecallableRemoteMemoryBatches_ACU(batches) {
+    return Array.isArray(batches) && batches.some((batch) => {
+        const batchId = String(batch?.batchId || '').trim();
+        const summaryText = String(batch?.summaryText || '').trim();
+        const chunks = Array.isArray(batch?.chunks) ? batch.chunks : [];
+        return !!batchId && !!summaryText && chunks.some((chunk) => {
+            const text = String(chunk?.text || '').trim();
+            const vector = Array.isArray(chunk?.vector) ? chunk.vector : [];
+            return !!text && vector.some((value) => Number.isFinite(Number(value)));
+        });
+    });
+}
 async function orchestrateVectorRecallBeforeSend_ACU(userInput, options = {}) {
     const signature = buildVectorRecallSignature_ACU(userInput);
     const config = normalizeVectorMemoryConfig_ACU(options.configInput ?? getCurrentVectorMemoryConfig_ACU());
@@ -44427,11 +44443,12 @@ async function orchestrateVectorRecallBeforeSend_ACU(userInput, options = {}) {
         const remoteMemoryBatches = Array.isArray(activeSnapshot?.vectorState?.remoteMemoryBatches)
             ? activeSnapshot.vectorState.remoteMemoryBatches
             : [];
-        if (!activeSnapshot || remoteMemoryBatches.length === 0) {
+        if (!activeSnapshot || !hasRecallableRemoteMemoryBatches_ACU(remoteMemoryBatches)) {
             return buildVectorRecallOrchestrationResult_ACU({
                 skipped: true,
                 shouldProceed: true,
                 signature,
+                warnings: ['当前聊天没有可召回的向量归档数据，已跳过关键词生成。'],
             });
         }
         // ── 阶段1：关键词生成 ──
@@ -44985,6 +45002,8 @@ function mainInitialize_ACU() {
         }
         const vectorPreprocessResult = await orchestrateVectorRecallBeforeSend_ACU(normalizedInput, {
             previousSignature: generationGate_ACU.lastVectorRecallSignature,
+            // 每次用户主动发送都必须重新计算向量并覆盖世界书条目；previousSignature 仅保留作诊断，不参与 fresh send 去重。
+            force: true,
         });
         // ── 缓存 gate 结果到全局状态 ──
         generationGate_ACU.lastVectorRecallResult = vectorPreprocessResult;
@@ -45240,6 +45259,9 @@ function mainInitialize_ACU() {
                                 logDebug_ACU('[向量记忆] 召回完成，无匹配的远记忆');
                             }
                         }
+                        // 向量召回可能耗时超过 USER_SEND_TRIGGER_TTL_MS_ACU；本事件在召回前已通过 fresh gate，
+                        // 因此必须延续本次发送资格给剧情推进，不能让 TTL 过期导致直接正文生成。
+                        generationGate_ACU.lastUserSendIntentAt = Date.now();
                     } // end if (vectorInputText && isRecentUserSendIntent_ACU)
                     // ── 阶段2：剧情推进（仅当启用时执行） ──
                     // [去重] 若同一文本刚被 TavernHelper.generate 钩子处理过，跳过剧情推进
