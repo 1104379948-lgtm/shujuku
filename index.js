@@ -17921,6 +17921,25 @@ async function deleteAllGeneratedEntries_ACU$1(targetLorebook = null) {
                 }
             });
         }
+        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+        const vectorEntryComments = new Set();
+        const addVectorEntryComment_ACU = (value) => {
+            const comment = String(value || '').trim();
+            if (comment)
+                vectorEntryComments.add(comment);
+        };
+        addVectorEntryComment_ACU(vectorMemoryConfig.entryComment);
+        addVectorEntryComment_ACU(defaultVectorMemoryConfig_ACU.entryComment);
+        const isVectorMemoryEntryComment_ACU = (comment) => {
+            if (settings_ACU.dataIsolationEnabled) {
+                if (!isolationPrefix)
+                    return false;
+                return Array.from(vectorEntryComments).some(vectorComment => comment === isolationPrefix + vectorComment);
+            }
+            if (comment.startsWith('ACU-['))
+                return false;
+            return Array.from(vectorEntryComments).some(vectorComment => comment === vectorComment);
+        };
         const uidsToDelete = allEntries
             .filter(entry => {
             if (!entry.comment)
@@ -17936,6 +17955,9 @@ async function deleteAllGeneratedEntries_ACU$1(targetLorebook = null) {
                 if (entry.comment.startsWith('外部导入-'))
                     return false;
             }
+            // [向量记忆] 向量召回条目属于脚本生成的世界书注入槽，新开对话时必须随数据库生成条目一起清理。
+            if (isVectorMemoryEntryComment_ACU(entry.comment))
+                return true;
             if (settings_ACU.dataIsolationEnabled) {
                 // 隔离模式：只删除匹配当前标识前缀的
                 if (!isolationPrefix)
@@ -18545,6 +18567,25 @@ async function deleteAllGeneratedEntries_ACU(targetLorebook = null) {
                 }
             });
         }
+        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+        const vectorEntryComments = new Set();
+        const addVectorEntryComment_ACU = (value) => {
+            const comment = String(value || '').trim();
+            if (comment)
+                vectorEntryComments.add(comment);
+        };
+        addVectorEntryComment_ACU(vectorMemoryConfig.entryComment);
+        addVectorEntryComment_ACU(defaultVectorMemoryConfig_ACU.entryComment);
+        const isVectorMemoryEntryComment_ACU = (comment) => {
+            if (settings_ACU.dataIsolationEnabled) {
+                if (!isolationPrefix)
+                    return false;
+                return Array.from(vectorEntryComments).some(vectorComment => comment === isolationPrefix + vectorComment);
+            }
+            if (comment.startsWith('ACU-['))
+                return false;
+            return Array.from(vectorEntryComments).some(vectorComment => comment === vectorComment);
+        };
         const uidsToDelete = allEntries
             .filter(entry => {
             if (!entry.comment)
@@ -18560,6 +18601,9 @@ async function deleteAllGeneratedEntries_ACU(targetLorebook = null) {
                 if (entry.comment.startsWith('外部导入-'))
                     return false;
             }
+            // [向量记忆] 向量召回条目属于脚本生成的世界书注入槽，新开对话时必须随数据库生成条目一起清理。
+            if (isVectorMemoryEntryComment_ACU(entry.comment))
+                return true;
             if (settings_ACU.dataIsolationEnabled) {
                 // 隔离模式：只删除匹配当前标识前缀的
                 if (!isolationPrefix)
@@ -24477,6 +24521,7 @@ async function bindWorldbookEvents_ACU() {
     bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`, 'change', ($input) => {
         updateVectorMemoryField_ACU('enabled', $input.is(':checked'));
         toggleVectorMemoryConfigBlock_ACU();
+        syncManualUpdateButtonAvailability_ACU();
     });
     bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-threshold`, 'change', ($input) => {
         const defaults = getDefaultVectorMemoryConfig_ACU();
@@ -28236,6 +28281,29 @@ function updateTableFillStatus_ACU(text) {
     if ($statusMessageSpan_ACU)
         $statusMessageSpan_ACU.text(text);
 }
+function isVectorMemoryManualUpdateBlocked_ACU() {
+    try {
+        return getCurrentVectorMemoryConfig_ACU().enabled === true;
+    }
+    catch (e) {
+        return false;
+    }
+}
+function syncManualUpdateButtonAvailability_ACU() {
+    if (!$manualUpdateCardButton_ACU)
+        return;
+    if (isVectorMemoryManualUpdateBlocked_ACU()) {
+        $manualUpdateCardButton_ACU
+            .prop('disabled', true)
+            .text('请先关闭向量功能')
+            .attr('title', '向量功能启用时不可手动更新表格，请先关闭向量功能。');
+        return;
+    }
+    $manualUpdateCardButton_ACU
+        .prop('disabled', false)
+        .text('立即手动更新')
+        .removeAttr('title');
+}
 // [T173] 填表停止按钮绑定
 function bindTableFillStopButton_ACU(buttonId, onStop) {
     const $stopButton = jQuery_API_ACU(`#${buttonId}`);
@@ -28243,9 +28311,7 @@ function bindTableFillStopButton_ACU(buttonId, onStop) {
         $stopButton.off('click.acu_stop').on('click.acu_stop', function (e) {
             e.stopPropagation();
             e.preventDefault();
-            if ($manualUpdateCardButton_ACU) {
-                $manualUpdateCardButton_ACU.prop('disabled', false).text('立即手动更新');
-            }
+            syncManualUpdateButtonAvailability_ACU();
             jQuery_API_ACU(this).closest('.toast').remove();
             if (typeof onStop === 'function')
                 onStop();
@@ -28254,9 +28320,7 @@ function bindTableFillStopButton_ACU(buttonId, onStop) {
 }
 // [T173] 重置手动更新按钮状态
 function resetManualUpdateButton_ACU() {
-    if ($manualUpdateCardButton_ACU) {
-        $manualUpdateCardButton_ACU.prop('disabled', false).text('立即手动更新');
-    }
+    syncManualUpdateButtonAvailability_ACU();
 }
 // [T174] 更新聊天标题显示
 function updateChatTitleDisplay_ACU(chatIdentifier) {
@@ -28402,6 +28466,7 @@ function syncAllSettingsToUI_ACU(s) {
     const $vectorMemoryBlock = find('worldbook-vector-memory-config-block');
     if ($vectorMemoryBlock.length)
         $vectorMemoryBlock.toggle(vectorMemoryConfig.enabled === true);
+    syncManualUpdateButtonAvailability_ACU();
     const $outlineToggle = find('worldbook-outline-entry-enabled');
     if ($outlineToggle.length) {
         let mode = worldbookConfig.zeroTkOccupyMode;
@@ -29622,6 +29687,13 @@ async function processUpdates_ACU(indicesToUpdate, mode = 'auto', options = {}) 
 async function handleManualUpdate_ACU() {
     logDebug_ACU('[更新流程] handleManualUpdate: 开始手动更新');
     try {
+        if (isVectorMemoryManualUpdateBlocked_ACU()) {
+            syncManualUpdateButtonAvailability_ACU();
+            showToastr_ACU('warning', '请先关闭向量功能。', {
+                acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
+            });
+            return;
+        }
         // UI：收集手动额外提示
         collectManualExtraHint_ACU();
         // UI：获取手动选择的表格
