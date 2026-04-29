@@ -17883,6 +17883,23 @@ async function updateReadableLorebookEntry_ACU(createIfNeeded = false, isImport 
         }
     }
 }
+function buildVectorMemoryEntryCommentsForCleanup_ACU$1() {
+    const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+    const isolationPrefix = getIsolationPrefix_ACU();
+    const comments = new Set();
+    const addRawComment_ACU = (value) => {
+        const rawComment = String(value || '').trim();
+        if (!rawComment)
+            return;
+        comments.add(rawComment);
+        if (isolationPrefix) {
+            comments.add(`${isolationPrefix}${rawComment}`);
+        }
+    };
+    addRawComment_ACU(vectorMemoryConfig.entryComment);
+    addRawComment_ACU(defaultVectorMemoryConfig_ACU.entryComment);
+    return comments;
+}
 async function deleteAllGeneratedEntries_ACU$1(targetLorebook = null) {
     const primaryLorebookName = targetLorebook || (await getInjectionTargetLorebook_ACU());
     if (!primaryLorebookName)
@@ -17921,25 +17938,8 @@ async function deleteAllGeneratedEntries_ACU$1(targetLorebook = null) {
                 }
             });
         }
-        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
-        const vectorEntryComments = new Set();
-        const addVectorEntryComment_ACU = (value) => {
-            const comment = String(value || '').trim();
-            if (comment)
-                vectorEntryComments.add(comment);
-        };
-        addVectorEntryComment_ACU(vectorMemoryConfig.entryComment);
-        addVectorEntryComment_ACU(defaultVectorMemoryConfig_ACU.entryComment);
-        const isVectorMemoryEntryComment_ACU = (comment) => {
-            if (settings_ACU.dataIsolationEnabled) {
-                if (!isolationPrefix)
-                    return false;
-                return Array.from(vectorEntryComments).some(vectorComment => comment === isolationPrefix + vectorComment);
-            }
-            if (comment.startsWith('ACU-['))
-                return false;
-            return Array.from(vectorEntryComments).some(vectorComment => comment === vectorComment);
-        };
+        const vectorEntryCommentsForCleanup = buildVectorMemoryEntryCommentsForCleanup_ACU$1();
+        const isVectorMemoryEntryComment_ACU = (comment) => vectorEntryCommentsForCleanup.has(comment);
         const uidsToDelete = allEntries
             .filter(entry => {
             if (!entry.comment)
@@ -18465,6 +18465,13 @@ async function resetScriptStateForNewChat_ACU(chatFileName) {
     // [FIX] Reload all settings to ensure template is not stale for new chats.
     // MUST be called AFTER setting currentChatFileIdentifier_ACU so it loads the correct character settings.
     loadSettings_ACU();
+    try {
+        await deleteAllGeneratedEntries_ACU();
+        logDebug_ACU('[Worldbook] New chat reset: cleaned generated entries including vector memory slot.');
+    }
+    catch (e) {
+        logWarn_ACU('[Worldbook] New chat reset cleanup failed:', e);
+    }
     _set_allChatMessages_ACU([]);
     _set_lastTotalAiMessages_ACU(0); // 重置 AI 消息计数
     // [重构] 切换聊天时重置触发门控状态（从 init.ts CHAT_CHANGED 回调搬入 service 层）
@@ -18529,6 +18536,23 @@ function getIsolationPrefix_ACU() {
     }
     return '';
 }
+function buildVectorMemoryEntryCommentsForCleanup_ACU() {
+    const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+    const isolationPrefix = getIsolationPrefix_ACU();
+    const comments = new Set();
+    const addRawComment_ACU = (value) => {
+        const rawComment = String(value || '').trim();
+        if (!rawComment)
+            return;
+        comments.add(rawComment);
+        if (isolationPrefix) {
+            comments.add(`${isolationPrefix}${rawComment}`);
+        }
+    };
+    addRawComment_ACU(vectorMemoryConfig.entryComment);
+    addRawComment_ACU(defaultVectorMemoryConfig_ACU.entryComment);
+    return comments;
+}
 async function deleteAllGeneratedEntries_ACU(targetLorebook = null) {
     const primaryLorebookName = targetLorebook || (await getInjectionTargetLorebook_ACU());
     if (!primaryLorebookName)
@@ -18567,25 +18591,8 @@ async function deleteAllGeneratedEntries_ACU(targetLorebook = null) {
                 }
             });
         }
-        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
-        const vectorEntryComments = new Set();
-        const addVectorEntryComment_ACU = (value) => {
-            const comment = String(value || '').trim();
-            if (comment)
-                vectorEntryComments.add(comment);
-        };
-        addVectorEntryComment_ACU(vectorMemoryConfig.entryComment);
-        addVectorEntryComment_ACU(defaultVectorMemoryConfig_ACU.entryComment);
-        const isVectorMemoryEntryComment_ACU = (comment) => {
-            if (settings_ACU.dataIsolationEnabled) {
-                if (!isolationPrefix)
-                    return false;
-                return Array.from(vectorEntryComments).some(vectorComment => comment === isolationPrefix + vectorComment);
-            }
-            if (comment.startsWith('ACU-['))
-                return false;
-            return Array.from(vectorEntryComments).some(vectorComment => comment === vectorComment);
-        };
+        const vectorEntryCommentsForCleanup = buildVectorMemoryEntryCommentsForCleanup_ACU();
+        const isVectorMemoryEntryComment_ACU = (comment) => vectorEntryCommentsForCleanup.has(comment);
         const uidsToDelete = allEntries
             .filter(entry => {
             if (!entry.comment)
