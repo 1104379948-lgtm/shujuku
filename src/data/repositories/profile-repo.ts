@@ -16,6 +16,8 @@ export let globalMeta_ACU: any = {
     isolationCodeList: [] as string[],
     migratedLegacySingleStore: false,
     zeroTkOccupyModeGlobal: false,
+    summaryVectorIndexModeGlobal: false,
+    plotEnabledGlobal: true,
 };
 
 export function buildDefaultGlobalMeta_ACU(): any {
@@ -25,6 +27,8 @@ export function buildDefaultGlobalMeta_ACU(): any {
         isolationCodeList: [],
         migratedLegacySingleStore: false,
         zeroTkOccupyModeGlobal: false,
+        summaryVectorIndexModeGlobal: false,
+        plotEnabledGlobal: true,
     };
 }
 

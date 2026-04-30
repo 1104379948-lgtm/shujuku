@@ -1,7 +1,10 @@
 import { DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU } from '../../shared/defaults-json.js';
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
+import { getCurrentVectorMemoryConfig_ACU } from '../../service/vector/vector-memory-config';
+import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../../service/vector/summary-vector-index-state-service';
 import { renderPromptSegments_ACU } from './plot-editors';
+import { renderKeywordPromptGroupToUI_ACU, renderSummaryPromptGroupToUI_ACU } from '../pages/popup-bindings-worldbook';
 import { renderImportTableSelector_ACU, renderManualTableSelector_ACU } from './table-selector';
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { escapeHtml_ACU } from '../../shared/html-helpers';
@@ -25,16 +28,47 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
     if ($statusMessageSpan_ACU) $statusMessageSpan_ACU.text(text);
   }
 
+  const MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU = 'acu-manual-update-vector-soft-disabled';
+ 
+  export function isVectorMemoryManualUpdateBlocked_ACU() {
+    try {
+        return getCurrentVectorMemoryConfig_ACU().enabled === true;
+    } catch (e) {
+        return false;
+    }
+  }
+ 
+  export function shouldShowVectorMemoryManualUpdateWarning_ACU() {
+    return isVectorMemoryManualUpdateBlocked_ACU();
+  }
+ 
+  export function syncManualUpdateButtonAvailability_ACU() {
+    if (!$manualUpdateCardButton_ACU) return;
+ 
+    if (shouldShowVectorMemoryManualUpdateWarning_ACU()) {
+        $manualUpdateCardButton_ACU
+            .prop('disabled', false)
+            .addClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
+            .text('请先关闭向量功能')
+            .attr('title', '向量功能启用时不建议手动更新表格；特殊场景下仍可点击执行。');
+        return;
+    }
+ 
+    $manualUpdateCardButton_ACU
+        .prop('disabled', false)
+        .removeClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
+        .text('立即手动更新')
+        .removeAttr('title');
+  }
+
   // [T173] 填表停止按钮绑定
-  export function bindTableFillStopButton_ACU(localAbortController: any, onStop: any) {
-    const $stopButton = jQuery_API_ACU('#acu-stop-update-btn');
+  export function bindTableFillStopButton_ACU(buttonId: string, onStop: any) {
+    const $stopButton = jQuery_API_ACU(`#${buttonId}`);
     if ($stopButton.length) {
         $stopButton.off('click.acu_stop').on('click.acu_stop', function(e) {
             e.stopPropagation();
             e.preventDefault();
-            if ($manualUpdateCardButton_ACU) {
-                $manualUpdateCardButton_ACU.prop('disabled', false).text('立即手动更新');
-            }
+            syncManualUpdateButtonAvailability_ACU();
             jQuery_API_ACU(this).closest('.toast').remove();
             if (typeof onStop === 'function') onStop();
         });
@@ -43,9 +77,7 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
 
   // [T173] 重置手动更新按钮状态
   export function resetManualUpdateButton_ACU() {
-    if ($manualUpdateCardButton_ACU) {
-        $manualUpdateCardButton_ACU.prop('disabled', false).text('立即手动更新');
-    }
+    syncManualUpdateButtonAvailability_ACU();
   }
 
   // [T174] 更新聊天标题显示
@@ -132,14 +164,58 @@ setVal('merge-prompt-template', s.mergeSummaryPrompt || (isSqliteMode() ? DEFAUL
       if ($tableMaxRetriesInput_ACU) $tableMaxRetriesInput_ACU.val(s.tableMaxRetries || 3);
       syncMergeSettingsToUI_ACU(s);
       const worldbookConfig = getCurrentWorldbookConfig_ACU();
+      const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
       $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source"]`).filter(`[value="${worldbookConfig.source}"]`).prop('checked', true);
       if (typeof updateWorldbookSourceView_ACU === 'function') updateWorldbookSourceView_ACU();
       if (typeof populateInjectionTargetSelector_ACU === 'function') populateInjectionTargetSelector_ACU();
+      setChecked('worldbook-vector-memory-enabled', vectorMemoryConfig.enabled);
+      setVal('worldbook-vector-memory-threshold', vectorMemoryConfig.threshold);
+      setVal('worldbook-vector-memory-archive-trigger-count', (vectorMemoryConfig as any).archiveTriggerCount || vectorMemoryConfig.archiveBatchSize);
+      setVal('worldbook-vector-memory-archive-batch-size', vectorMemoryConfig.archiveBatchSize);
+      setVal('worldbook-vector-memory-archive-max-concurrency', (vectorMemoryConfig as any).archiveMaxConcurrency || 3);
+      setVal('worldbook-vector-memory-topk', vectorMemoryConfig.topK);
+      setVal('worldbook-vector-memory-min-score', vectorMemoryConfig.minScore);
+      setVal('worldbook-vector-memory-namespace', vectorMemoryConfig.vectorNamespace);
+      setVal('worldbook-vector-memory-embedding-endpoint', vectorMemoryConfig.embeddingEndpoint);
+      setVal('worldbook-vector-memory-embedding-model', vectorMemoryConfig.embeddingModel);
+      setVal('worldbook-vector-memory-embedding-api-key', vectorMemoryConfig.embeddingApiKey);
+      setVal('worldbook-vector-memory-rerank-endpoint', (vectorMemoryConfig as any).rerankEndpoint || '');
+      setVal('worldbook-vector-memory-rerank-model', (vectorMemoryConfig as any).rerankModel || '');
+      setVal('worldbook-vector-memory-rerank-api-key', (vectorMemoryConfig as any).rerankApiKey || '');
+      setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
+      setChecked('worldbook-vector-memory-archive-without-summary', (vectorMemoryConfig as any).archiveWithoutSummary === true);
+      setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);
+      setVal('worldbook-vector-memory-entry-comment', vectorMemoryConfig.entryComment);
+      setVal('worldbook-vector-memory-entry-key', vectorMemoryConfig.entryKey);
+      setVal('worldbook-vector-memory-keyword-api-preset', vectorMemoryConfig.keywordApiPreset);
+      setVal('worldbook-vector-memory-keyword-context-pair-count', (vectorMemoryConfig as any).keywordContextPairCount || 1);
+      renderKeywordPromptGroupToUI_ACU((vectorMemoryConfig as any).keywordPromptGroup || []);
+      renderSummaryPromptGroupToUI_ACU((vectorMemoryConfig as any).summaryPromptGroup || []);
+      const $vectorMemoryBlock = find('worldbook-vector-memory-config-block');
+      if ($vectorMemoryBlock.length) $vectorMemoryBlock.toggle(vectorMemoryConfig.enabled === true);
+      syncManualUpdateButtonAvailability_ACU();
       const $outlineToggle = find('worldbook-outline-entry-enabled');
       if ($outlineToggle.length) {
           let mode = worldbookConfig.zeroTkOccupyMode;
           if (typeof mode === 'undefined' && typeof worldbookConfig.outlineEntryEnabled !== 'undefined') mode = (worldbookConfig.outlineEntryEnabled === false);
           $outlineToggle.prop('checked', mode === true);
+      }
+      setChecked('worldbook-summary-vector-index-mode-enabled', worldbookConfig.summaryVectorIndexModeEnabled === true);
+      const $summaryVectorIndexHint = find('summary-vector-index-archive-hint');
+      if ($summaryVectorIndexHint.length) {
+          const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
+          const activeSummaryVectorIndexSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
+          const activeSummaryVectorIndexState = activeSummaryVectorIndexSnapshot?.summaryVectorIndexState || null;
+          const summaryVectorIndexRowCount = activeSummaryVectorIndexState?.rowCount || (Array.isArray(activeSummaryVectorIndexState?.rows) ? activeSummaryVectorIndexState.rows.length : 0);
+          const summaryVectorIndexChunkCount = activeSummaryVectorIndexState?.chunkCount || (Array.isArray(activeSummaryVectorIndexState?.chunks) ? activeSummaryVectorIndexState.chunks.length : 0);
+          const hasSummaryVectorIndexArchive = !!activeSummaryVectorIndexState;
+          $summaryVectorIndexHint.text(summaryVectorIndexEnabled
+              ? hasSummaryVectorIndexArchive
+                  ? summaryVectorIndexRowCount >= 100
+                      ? `向量混合交火增强方案已启用；当前可用归档：${summaryVectorIndexRowCount} 条纪要，${summaryVectorIndexChunkCount} 个 chunks，已达到 100 条门槛，发送前会执行关键词召回和概要索引覆盖。请确认已配置好向量模型以及 rerank 模型。`
+                      : `向量混合交火增强方案已启用；当前可用归档：${summaryVectorIndexRowCount}/100 条纪要，${summaryVectorIndexChunkCount} 个 chunks。未满 100 条前，发送时不会触发关键词召回和概要索引覆盖注入，自动归档仍会在填表保存后继续累积。请确认已配置好向量模型以及 rerank 模型。`
+                  : '向量混合交火增强方案已启用，但当前聊天尚无纪要向量索引归档；未满 100 条前发送时不会触发关键词召回和概要索引覆盖注入，自动归档仍会在填表保存后继续累积。请确认已配置好向量模型以及 rerank 模型。'
+              : '使用前请先配置好向量模型以及 rerank 模型；开启后会自动累积纪要向量索引，归档纪要满 100 条后才会在发送前执行关键词召回并覆盖概要索引；旧对话需要点击“立即执行远记忆归档”按钮完成纪要向量索引归档。');
       }
       if ($useMainApiCheckbox_ACU) { $useMainApiCheckbox_ACU.prop('checked', s.apiConfig.useMainApi); if (typeof updateCustomApiInputsState_ACU === 'function') updateCustomApiInputsState_ACU(); }
       if ($streamingEnabledCheckbox_ACU) $streamingEnabledCheckbox_ACU.prop('checked', s.streamingEnabled || false);

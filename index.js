@@ -2841,6 +2841,7 @@ $CONTENT
         migratedLegacySingleStore: false,
         zeroTkOccupyModeGlobal: false,
         summaryVectorIndexModeGlobal: false,
+        plotEnabledGlobal: true,
     };
     function buildDefaultGlobalMeta_ACU() {
         return {
@@ -2850,6 +2851,7 @@ $CONTENT
             migratedLegacySingleStore: false,
             zeroTkOccupyModeGlobal: false,
             summaryVectorIndexModeGlobal: false,
+            plotEnabledGlobal: true,
         };
     }
     function loadGlobalMeta_ACU() {
@@ -22605,10 +22607,12 @@ $CONTENT
         if (!plotSettings || !preset) {
             return { normalizedPreset: null, promptGroup: [], finalDirective: '' };
         }
+        const preservedEnabled = plotSettings.enabled === true;
         const normalizedPreset = normalizePlotPresetExcludeRules_ACU(preset);
         const finalDirective = getPlotFinalDirectiveFromSource_ACU(normalizedPreset);
         ensurePlotPromptsArray_ACU(plotSettings);
         ensureLoopPromptsArray_ACU(plotSettings);
+        plotSettings.enabled = preservedEnabled;
         plotSettings.plotTasks = normalizePlotTasks_ACU(normalizedPreset);
         plotSettings.promptGroup = JSON.parse(JSON.stringify(getPlotPromptGroupFromSource_ACU(normalizedPreset)));
         plotSettings.finalSystemDirective = finalDirective || '';
@@ -22638,6 +22642,7 @@ $CONTENT
     function resetPlotSettingsToDefault_ACU(plotSettings) {
         if (!plotSettings || typeof plotSettings !== 'object')
             return null;
+        const preservedEnabled = plotSettings.enabled === true;
         const preservedPromptPresets = Array.isArray(plotSettings.promptPresets)
             ? JSON.parse(JSON.stringify(plotSettings.promptPresets))
             : [];
@@ -22648,6 +22653,7 @@ $CONTENT
         const defaults = cloneDefaultPlotSettingsForPreset_ACU();
         Object.keys(plotSettings).forEach((key) => { delete plotSettings[key]; });
         Object.assign(plotSettings, defaults);
+        plotSettings.enabled = preservedEnabled;
         plotSettings.promptPresets = preservedPromptPresets;
         plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
         plotSettings.globalRevision = preservedGlobalRevision;
@@ -22662,6 +22668,7 @@ $CONTENT
         const normalizedSnapshot = sanitizePlotSettingsSnapshotForChat_ACU(snapshot);
         if (!normalizedSnapshot)
             return null;
+        const preservedEnabled = plotSettings.enabled === true;
         const preservedPromptPresets = Array.isArray(plotSettings.promptPresets)
             ? JSON.parse(JSON.stringify(plotSettings.promptPresets))
             : [];
@@ -22672,6 +22679,7 @@ $CONTENT
         const defaults = cloneDefaultPlotSettingsForPreset_ACU();
         Object.keys(plotSettings).forEach((key) => { delete plotSettings[key]; });
         Object.assign(plotSettings, defaults, normalizedSnapshot);
+        plotSettings.enabled = preservedEnabled;
         plotSettings.promptPresets = preservedPromptPresets;
         plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
         plotSettings.globalRevision = preservedGlobalRevision;
@@ -22953,6 +22961,17 @@ $CONTENT
     // 这两个函数混合了数据读写 + UI 同步 + 运行时状态操作，
     // 属于 service 层（业务编排），不是纯 data 层。
     // ═══════════════════════════════════════════════════════════════
+    function applyGlobalPlotEnabledSetting_ACU() {
+        if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object' || Array.isArray(settings_ACU.plotSettings)) {
+            settings_ACU.plotSettings = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
+        }
+        if (typeof globalMeta_ACU.plotEnabledGlobal !== 'boolean') {
+            globalMeta_ACU.plotEnabledGlobal = settings_ACU.plotSettings.enabled === false ? false : true;
+            saveGlobalMeta_ACU();
+        }
+        settings_ACU.plotSettings.enabled = globalMeta_ACU.plotEnabledGlobal === true;
+        return settings_ACU.plotSettings.enabled;
+    }
     function saveSettings_ACU() {
         // 业务编排：同步隔离码到 globalMeta + 持久化
         const code = normalizeIsolationCode_ACU(settings_ACU?.dataIsolationCode || globalMeta_ACU?.activeIsolationCode || '');
@@ -23101,6 +23120,7 @@ $CONTENT
                     settings_ACU.plotSettings.plotWorldbookConfig.source = (legacySource === 'manual') ? 'manual' : 'character';
                     settings_ACU.plotSettings.plotWorldbookConfig.manualSelection = legacyBooks;
                 }
+                applyGlobalPlotEnabledSetting_ACU();
                 if (!settings_ACU.plotPresetBindings || typeof settings_ACU.plotPresetBindings !== 'object' || Array.isArray(settings_ACU.plotPresetBindings)) {
                     settings_ACU.plotPresetBindings = {};
                 }
@@ -23156,6 +23176,7 @@ $CONTENT
                 if (!settings_ACU.plotSettings.plotWorldbookConfig) {
                     settings_ACU.plotSettings.plotWorldbookConfig = buildDefaultPlotWorldbookConfig_ACU();
                 }
+                applyGlobalPlotEnabledSetting_ACU();
                 // [Profile] 强制以 globalMeta.activeIsolationCode 作为当前标识
                 settings_ACU.dataIsolationCode = activeCode;
                 settings_ACU.dataIsolationEnabled = (activeCode !== '');
@@ -23542,6 +23563,16 @@ $CONTENT
         return normalizedPresetName;
     }
     // getCurrentCharSettings_ACU 和 getCurrentWorldbookConfig_ACU 已移至 settings-readers.ts
+    function setGlobalPlotEnabled_ACU(modeEnabled) {
+        const enabled = !!modeEnabled;
+        if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object' || Array.isArray(settings_ACU.plotSettings)) {
+            settings_ACU.plotSettings = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
+        }
+        settings_ACU.plotSettings.enabled = enabled;
+        globalMeta_ACU.plotEnabledGlobal = enabled;
+        saveGlobalMeta_ACU();
+        return enabled;
+    }
     // [从 popup-bindings.ts / api-registry.ts 提取] 切换 0TK 占用模式的完整业务流程
     function setZeroTkOccupyMode_ACU(modeEnabled) {
         const enabled = !!modeEnabled;
@@ -29440,6 +29471,7 @@ $CONTENT
         if ($statusMessageSpan_ACU)
             $statusMessageSpan_ACU.text(text);
     }
+    const MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU = 'acu-manual-update-vector-soft-disabled';
     function isVectorMemoryManualUpdateBlocked_ACU() {
         try {
             return getCurrentVectorMemoryConfig_ACU().enabled === true;
@@ -29448,18 +29480,23 @@ $CONTENT
             return false;
         }
     }
+    function shouldShowVectorMemoryManualUpdateWarning_ACU() {
+        return isVectorMemoryManualUpdateBlocked_ACU();
+    }
     function syncManualUpdateButtonAvailability_ACU() {
         if (!$manualUpdateCardButton_ACU)
             return;
-        if (isVectorMemoryManualUpdateBlocked_ACU()) {
+        if (shouldShowVectorMemoryManualUpdateWarning_ACU()) {
             $manualUpdateCardButton_ACU
-                .prop('disabled', true)
+                .prop('disabled', false)
+                .addClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
                 .text('请先关闭向量功能')
-                .attr('title', '向量功能启用时不可手动更新表格，请先关闭向量功能。');
+                .attr('title', '向量功能启用时不建议手动更新表格；特殊场景下仍可点击执行。');
             return;
         }
         $manualUpdateCardButton_ACU
             .prop('disabled', false)
+            .removeClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
             .text('立即手动更新')
             .removeAttr('title');
     }
@@ -30877,12 +30914,11 @@ $CONTENT
     async function handleManualUpdate_ACU() {
         logDebug_ACU('[更新流程] handleManualUpdate: 开始手动更新');
         try {
-            if (isVectorMemoryManualUpdateBlocked_ACU()) {
+            if (shouldShowVectorMemoryManualUpdateWarning_ACU()) {
                 syncManualUpdateButtonAvailability_ACU();
-                showToastr_ACU('warning', '请先关闭向量功能。', {
+                showToastr_ACU('warning', '向量功能启用时不建议手动更新表格；本次将继续执行。', {
                     acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
                 });
-                return;
             }
             // UI：收集手动额外提示
             collectManualExtraHint_ACU();
@@ -39935,7 +39971,7 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
         const $plotEnabledCheckbox = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-enabled`);
         if ($plotEnabledCheckbox.length) {
             $plotEnabledCheckbox.on('change', function () {
-                settings_ACU.plotSettings.enabled = jQuery_API_ACU(this).is(':checked');
+                setGlobalPlotEnabled_ACU(jQuery_API_ACU(this).is(':checked'));
                 saveSettingsAndNotify_ACU();
             });
         }
@@ -43769,7 +43805,8 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
                         transform: translateY(0) !important;
                         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
                     }
-                    #${POPUP_ID_ACU} button:disabled, #${POPUP_ID_ACU} .button:disabled {
+                    #${POPUP_ID_ACU} button:disabled, #${POPUP_ID_ACU} .button:disabled,
+                    #${POPUP_ID_ACU} button.acu-manual-update-vector-soft-disabled {
                         opacity: 0.45 !important;
                         cursor: not-allowed !important;
                         transform: none !important;

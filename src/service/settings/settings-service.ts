@@ -8,7 +8,7 @@
 
 import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normalizeIsolationCode_ACU } from '../../shared/data-constants';
 import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU} from '../../shared/defaults-json.js';
-import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU } from '../../shared/defaults';
+import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -22,6 +22,20 @@ import { getCurrentCharSettings_ACU, getCurrentWorldbookConfig_ACU } from './set
 import { getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { deepMerge_ACU, ensureSheetOrderNumbers_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+
+function applyGlobalPlotEnabledSetting_ACU(): boolean {
+  if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object' || Array.isArray(settings_ACU.plotSettings)) {
+    settings_ACU.plotSettings = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
+  }
+
+  if (typeof globalMeta_ACU.plotEnabledGlobal !== 'boolean') {
+    globalMeta_ACU.plotEnabledGlobal = settings_ACU.plotSettings.enabled === false ? false : true;
+    saveGlobalMeta_ACU();
+  }
+
+  settings_ACU.plotSettings.enabled = globalMeta_ACU.plotEnabledGlobal === true;
+  return settings_ACU.plotSettings.enabled;
+}
 
 export function saveSettings_ACU(): { saved: boolean; storageType: 'tavern' | 'indexeddb' | 'memory'; warning?: string; error?: string } {
   // 业务编排：同步隔离码到 globalMeta + 持久化
@@ -173,6 +187,7 @@ export   function loadSettings_ACU() {
                   settings_ACU.plotSettings.plotWorldbookConfig.source = (legacySource === 'manual') ? 'manual' : 'character';
                   settings_ACU.plotSettings.plotWorldbookConfig.manualSelection = legacyBooks;
               }
+              applyGlobalPlotEnabledSetting_ACU();
               if (!settings_ACU.plotPresetBindings || typeof settings_ACU.plotPresetBindings !== 'object' || Array.isArray(settings_ACU.plotPresetBindings)) {
                   settings_ACU.plotPresetBindings = {};
               }
@@ -185,16 +200,44 @@ export   function loadSettings_ACU() {
               settings_ACU.dataIsolationCode = activeCode;
               settings_ACU.dataIsolationEnabled = (activeCode !== '');
 
-              // 0TK 全局偏好：优先 globalMeta；若缺失则从旧 profile 字段迁移
+              // 0TK / 纪要向量索引全局偏好：优先 globalMeta；若缺失则从旧 profile 字段迁移
               if (typeof globalMeta_ACU.zeroTkOccupyModeGlobal === 'boolean') {
                   settings_ACU.zeroTkOccupyModeDefault = (globalMeta_ACU.zeroTkOccupyModeGlobal === true);
               } else {
                   globalMeta_ACU.zeroTkOccupyModeGlobal = (settings_ACU.zeroTkOccupyModeDefault === true);
                   saveGlobalMeta_ACU();
               }
+              if (typeof globalMeta_ACU.summaryVectorIndexModeGlobal === 'boolean') {
+                  settings_ACU.summaryVectorIndexModeDefault = (globalMeta_ACU.summaryVectorIndexModeGlobal === true);
+              } else {
+                  globalMeta_ACU.summaryVectorIndexModeGlobal = (settings_ACU.summaryVectorIndexModeDefault === true);
+                  saveGlobalMeta_ACU();
+              }
+              if (settings_ACU.summaryVectorIndexModeDefault === true) {
+                  settings_ACU.zeroTkOccupyModeDefault = false;
+                  globalMeta_ACU.zeroTkOccupyModeGlobal = false;
+                  saveGlobalMeta_ACU();
+              }
 
               // 确保当前角色有配置
               getCurrentCharSettings_ACU();
+              if (!settings_ACU.characterSettings || typeof settings_ACU.characterSettings !== 'object') {
+                  settings_ACU.characterSettings = {};
+              }
+              const defaultWorldbookConfig = JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU));
+              Object.keys(settings_ACU.characterSettings).forEach((charId) => {
+                  const charSettings = settings_ACU.characterSettings[charId];
+                  if (!charSettings || typeof charSettings !== 'object') return;
+                  const worldbookConfig = charSettings.worldbookConfig;
+                  if (!worldbookConfig || typeof worldbookConfig !== 'object' || Array.isArray(worldbookConfig)) {
+                      charSettings.worldbookConfig = JSON.parse(JSON.stringify(defaultWorldbookConfig));
+                      return;
+                  }
+                  charSettings.worldbookConfig = deepMerge_ACU(
+                      JSON.parse(JSON.stringify(defaultWorldbookConfig)),
+                      worldbookConfig,
+                  );
+              });
               
           } else {
               // No saved settings, use the defaults
@@ -203,6 +246,7 @@ export   function loadSettings_ACU() {
               if (!settings_ACU.plotSettings.plotWorldbookConfig) {
                   settings_ACU.plotSettings.plotWorldbookConfig = buildDefaultPlotWorldbookConfig_ACU();
               }
+              applyGlobalPlotEnabledSetting_ACU();
               // [Profile] 强制以 globalMeta.activeIsolationCode 作为当前标识
               settings_ACU.dataIsolationCode = activeCode;
               settings_ACU.dataIsolationEnabled = (activeCode !== '');
@@ -210,6 +254,17 @@ export   function loadSettings_ACU() {
                   settings_ACU.zeroTkOccupyModeDefault = (globalMeta_ACU.zeroTkOccupyModeGlobal === true);
               } else {
                   globalMeta_ACU.zeroTkOccupyModeGlobal = (settings_ACU.zeroTkOccupyModeDefault === true);
+                  saveGlobalMeta_ACU();
+              }
+              if (typeof globalMeta_ACU.summaryVectorIndexModeGlobal === 'boolean') {
+                  settings_ACU.summaryVectorIndexModeDefault = (globalMeta_ACU.summaryVectorIndexModeGlobal === true);
+              } else {
+                  globalMeta_ACU.summaryVectorIndexModeGlobal = (settings_ACU.summaryVectorIndexModeDefault === true);
+                  saveGlobalMeta_ACU();
+              }
+              if (settings_ACU.summaryVectorIndexModeDefault === true) {
+                  settings_ACU.zeroTkOccupyModeDefault = false;
+                  globalMeta_ACU.zeroTkOccupyModeGlobal = false;
                   saveGlobalMeta_ACU();
               }
           }
@@ -222,6 +277,54 @@ export   function loadSettings_ACU() {
 
       // [兼容] 旧标签排除字段自动迁移为新规则组结构
       ensureTagRulesCompat_ACU(settings_ACU);
+
+      // [向量记忆] 一次性迁移：从角色级 worldbookConfig.vectorMemory 提升到全局 vectorMemoryConfig
+      // 扫描所有角色设置，找到第一个 enabled=true 或有非默认字段的 vectorMemory 配置
+      if (!settings_ACU.vectorMemoryConfig || typeof settings_ACU.vectorMemoryConfig !== 'object' || Array.isArray(settings_ACU.vectorMemoryConfig)) {
+          let bestSource: any = null;
+          const charSettings = settings_ACU.characterSettings;
+          if (charSettings && typeof charSettings === 'object') {
+              for (const charId of Object.keys(charSettings)) {
+                  const vm = charSettings[charId]?.worldbookConfig?.vectorMemory;
+                  if (vm && typeof vm === 'object' && !Array.isArray(vm)) {
+                      // 优先选择 enabled=true 的配置
+                      if (vm.enabled === true) {
+                          bestSource = vm;
+                          break;
+                      }
+                      // 其次选择第一个非空配置
+                      if (!bestSource) {
+                          bestSource = vm;
+                      }
+                  }
+              }
+          }
+          settings_ACU.vectorMemoryConfig = bestSource
+              ? JSON.parse(JSON.stringify(bestSource))
+              : JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU));
+          if (bestSource) {
+              logDebug_ACU('[向量记忆] 已从角色级配置迁移到全局 vectorMemoryConfig');
+          }
+      }
+
+      // [向量记忆] spv2.1.2 一次性刷新默认归档/召回参数。
+      // 只刷新本次版本要求的默认项，不覆盖 endpoint/key/model/enabled/namespace/世界书条目标识等用户连接与身份配置。
+      if (settings_ACU.vectorMemoryConfig && typeof settings_ACU.vectorMemoryConfig === 'object' && !Array.isArray(settings_ACU.vectorMemoryConfig)) {
+          const vectorConfig = settings_ACU.vectorMemoryConfig as any;
+          if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
+              vectorConfig.archiveTriggerCount = defaultVectorMemoryConfig_ACU.archiveTriggerCount;
+              vectorConfig.archiveBatchSize = defaultVectorMemoryConfig_ACU.archiveBatchSize;
+              vectorConfig.archiveMaxConcurrency = defaultVectorMemoryConfig_ACU.archiveMaxConcurrency;
+              vectorConfig.topK = defaultVectorMemoryConfig_ACU.topK;
+              vectorConfig.minScore = defaultVectorMemoryConfig_ACU.minScore;
+              vectorConfig.summaryPromptGroup = JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU.summaryPromptGroup || []));
+              vectorConfig.keywordPromptGroup = JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU.keywordPromptGroup || []));
+              vectorConfig.defaultsRefreshVersion = VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU;
+              logDebug_ACU(`[向量记忆] 已刷新默认归档/召回/关键词参数: ${VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU}`);
+          }
+      }
+
+      refreshDefaultTableTemplateOnce_ACU(activeCode);
 
       if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
           settings_ACU.maxConcurrentGroups = 1;
@@ -327,6 +430,36 @@ export   function loadTemplateFromStorage_ACU(codeOverride: any = null) {
   }
 
 
+function refreshDefaultTableTemplateOnce_ACU(activeCode: string) {
+      try {
+          if (!settings_ACU || typeof settings_ACU !== 'object') return;
+          if (settings_ACU.tableTemplateDefaultsRefreshVersion === TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU) return;
+
+          const currentPresetName = normalizeTemplatePresetSelectionValue_ACU(settings_ACU.currentTemplatePresetName || '');
+          if (currentPresetName) {
+              settings_ACU.tableTemplateDefaultsRefreshVersion = TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU;
+              saveSettings_ACU();
+              logDebug_ACU(`[模板默认值] 当前全局模板使用命名预设，跳过默认模板刷新并记录版本: ${TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU}`);
+              return;
+          }
+
+          const defaultSnapshot = getDefaultTemplateSnapshot_ACU();
+          if (!defaultSnapshot?.templateStr) {
+              logWarn_ACU('[模板默认值] 默认表格模板快照无效，跳过一次性刷新。');
+              return;
+          }
+
+          const code = normalizeIsolationCode_ACU(activeCode || settings_ACU.dataIsolationCode || globalMeta_ACU?.activeIsolationCode || '');
+          _set_TABLE_TEMPLATE_ACU(defaultSnapshot.templateStr);
+          writeProfileTemplateToStorage_ACU(code, TABLE_TEMPLATE_ACU);
+          settings_ACU.tableTemplateDefaultsRefreshVersion = TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU;
+          saveSettings_ACU();
+          logDebug_ACU(`[模板默认值] 已刷新当前 profile 默认表格模板: ${TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU}`);
+      } catch (error) {
+          logWarn_ACU('[模板默认值] 默认表格模板一次性刷新失败:', error);
+      }
+  }
+
 export   function buildDefaultSettings_ACU() {
       return {
           apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
@@ -352,6 +485,7 @@ export   function buildDefaultSettings_ACU() {
           plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
           plotPresetBindings: {}, // [剧情推进] 按聊天记录绑定剧情推进预设
           currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
+          tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
           // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
           tableContextExtractTags: '',
           tableContextExtractRules: [] as any[],
@@ -372,6 +506,8 @@ export   function buildDefaultSettings_ACU() {
           specialIndexLocks: {},
           // [新增] 0TK占用模式全局默认值：新对话会继承这个值
           zeroTkOccupyModeDefault: false,
+          // [新增] 向量混合交火增强方案全局默认值：新对话会继承这个值
+          summaryVectorIndexModeDefault: false,
           // [Profile] dataIsolationEnabled/code 由当前 profile 决定；history 走 globalMeta
           dataIsolationCode: '',
           dataIsolationHistory: [] as any[], // legacy 字段保留但不再持久化
@@ -414,6 +550,8 @@ export   function buildDefaultSettings_ACU() {
             promptGroup: buildDefaultContentOptimizationPromptGroup_ACU(), // 提示词组（段落编辑器）
             promptPresets: [] as any[],                 // 提示词组预设列表
           },
+          // [向量记忆] 全局配置，跟随数据库设置而非角色/对话
+          vectorMemoryConfig: null as any,
       };
   }
 
@@ -499,13 +637,51 @@ export function persistCurrentTemplatePresetName_ACU(settingsObj: any, presetNam
 }
 
 // getCurrentCharSettings_ACU 和 getCurrentWorldbookConfig_ACU 已移至 settings-readers.ts
+export function setGlobalPlotEnabled_ACU(modeEnabled: boolean): boolean {
+    const enabled = !!modeEnabled;
+    if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object' || Array.isArray(settings_ACU.plotSettings)) {
+        settings_ACU.plotSettings = JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU));
+    }
+
+    settings_ACU.plotSettings.enabled = enabled;
+    globalMeta_ACU.plotEnabledGlobal = enabled;
+    saveGlobalMeta_ACU();
+    return enabled;
+}
+
 // [从 popup-bindings.ts / api-registry.ts 提取] 切换 0TK 占用模式的完整业务流程
 export function setZeroTkOccupyMode_ACU(modeEnabled: boolean) {
+    const enabled = !!modeEnabled;
+    settings_ACU.zeroTkOccupyModeDefault = enabled;
+    globalMeta_ACU.zeroTkOccupyModeGlobal = enabled;
+    if (enabled) {
+        settings_ACU.summaryVectorIndexModeDefault = false;
+        globalMeta_ACU.summaryVectorIndexModeGlobal = false;
+    }
+
+    // 0TK 与向量混合交火增强方案是全局互斥开关；worldbookConfig 里的同名字段只是兼容投影。
     const cfg = getCurrentWorldbookConfig_ACU();
-    cfg.zeroTkOccupyMode = !!modeEnabled;
-    cfg.outlineEntryEnabled = !cfg.zeroTkOccupyMode;
-    settings_ACU.zeroTkOccupyModeDefault = !!modeEnabled;
-    globalMeta_ACU.zeroTkOccupyModeGlobal = !!modeEnabled;
+    cfg.zeroTkOccupyMode = enabled;
+    cfg.summaryVectorIndexModeEnabled = enabled ? false : (globalMeta_ACU.summaryVectorIndexModeGlobal === true);
+    cfg.outlineEntryEnabled = cfg.summaryVectorIndexModeEnabled === true ? true : !cfg.zeroTkOccupyMode;
+    saveGlobalMeta_ACU();
+    saveSettings_ACU();
+}
+
+export function setSummaryVectorIndexMode_ACU(modeEnabled: boolean) {
+    const enabled = !!modeEnabled;
+    settings_ACU.summaryVectorIndexModeDefault = enabled;
+    globalMeta_ACU.summaryVectorIndexModeGlobal = enabled;
+    if (enabled) {
+        settings_ACU.zeroTkOccupyModeDefault = false;
+        globalMeta_ACU.zeroTkOccupyModeGlobal = false;
+    }
+
+    // 0TK 与向量混合交火增强方案是全局互斥开关；worldbookConfig 里的同名字段只是兼容投影。
+    const cfg = getCurrentWorldbookConfig_ACU();
+    cfg.summaryVectorIndexModeEnabled = enabled;
+    cfg.zeroTkOccupyMode = enabled ? false : (globalMeta_ACU.zeroTkOccupyModeGlobal === true);
+    cfg.outlineEntryEnabled = cfg.summaryVectorIndexModeEnabled === true ? true : !cfg.zeroTkOccupyMode;
     saveGlobalMeta_ACU();
     saveSettings_ACU();
 }

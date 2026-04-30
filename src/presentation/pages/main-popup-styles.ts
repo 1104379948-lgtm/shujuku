@@ -318,7 +318,8 @@ export const MAIN_POPUP_CSS_ACU = `
                         transform: translateY(0) !important;
                         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
                     }
-                    #${POPUP_ID_ACU} button:disabled, #${POPUP_ID_ACU} .button:disabled {
+                    #${POPUP_ID_ACU} button:disabled, #${POPUP_ID_ACU} .button:disabled,
+                    #${POPUP_ID_ACU} button.acu-manual-update-vector-soft-disabled {
                         opacity: 0.45 !important;
                         cursor: not-allowed !important;
                         transform: none !important;

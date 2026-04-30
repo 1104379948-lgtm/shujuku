@@ -424,10 +424,12 @@ export function applyPlotPresetToSettings_ACU(plotSettings: Record<string, any>,
     if (!plotSettings || !preset) {
       return { normalizedPreset: null, promptGroup: [], finalDirective: '' };
     }
+    const preservedEnabled = plotSettings.enabled === true;
     const normalizedPreset = normalizePlotPresetExcludeRules_ACU(preset);
     const finalDirective = getPlotFinalDirectiveFromSource_ACU(normalizedPreset);
     ensurePlotPromptsArray_ACU(plotSettings);
     ensureLoopPromptsArray_ACU(plotSettings);
+    plotSettings.enabled = preservedEnabled;
     plotSettings.plotTasks = normalizePlotTasks_ACU(normalizedPreset);
     plotSettings.promptGroup = JSON.parse(JSON.stringify(getPlotPromptGroupFromSource_ACU(normalizedPreset)));
     plotSettings.finalSystemDirective = finalDirective || '';
@@ -457,6 +459,7 @@ export function applyPlotPresetToSettings_ACU(plotSettings: Record<string, any>,
 
 export function resetPlotSettingsToDefault_ACU(plotSettings: Record<string, any>) {
     if (!plotSettings || typeof plotSettings !== 'object') return null;
+    const preservedEnabled = plotSettings.enabled === true;
     const preservedPromptPresets = Array.isArray(plotSettings.promptPresets)
       ? JSON.parse(JSON.stringify(plotSettings.promptPresets))
       : [];
@@ -467,6 +470,7 @@ export function resetPlotSettingsToDefault_ACU(plotSettings: Record<string, any>
     const defaults = cloneDefaultPlotSettingsForPreset_ACU();
     Object.keys(plotSettings).forEach((key: string) => { delete plotSettings[key]; });
     Object.assign(plotSettings, defaults);
+    plotSettings.enabled = preservedEnabled;
     plotSettings.promptPresets = preservedPromptPresets;
     plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
     plotSettings.globalRevision = preservedGlobalRevision;
@@ -480,6 +484,7 @@ export function replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings: Record<
     if (!plotSettings || typeof plotSettings !== 'object') return null;
     const normalizedSnapshot = sanitizePlotSettingsSnapshotForChat_ACU(snapshot);
     if (!normalizedSnapshot) return null;
+    const preservedEnabled = plotSettings.enabled === true;
     const preservedPromptPresets = Array.isArray(plotSettings.promptPresets)
       ? JSON.parse(JSON.stringify(plotSettings.promptPresets))
       : [];
@@ -490,6 +495,7 @@ export function replaceCurrentPlotSettingsWithSnapshot_ACU(plotSettings: Record<
     const defaults = cloneDefaultPlotSettingsForPreset_ACU();
     Object.keys(plotSettings).forEach((key: string) => { delete plotSettings[key]; });
     Object.assign(plotSettings, defaults, normalizedSnapshot);
+    plotSettings.enabled = preservedEnabled;
     plotSettings.promptPresets = preservedPromptPresets;
     plotSettings.lastUsedPresetName = preservedLastUsedPresetName;
     plotSettings.globalRevision = preservedGlobalRevision;

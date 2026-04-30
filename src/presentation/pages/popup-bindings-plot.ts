@@ -8,9 +8,10 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU, nor
 import { jQuery_API_ACU } from '../dom-utils';
 import { getCharLorebooks_ACU, getLorebookEntries_ACU } from '../../service/worldbook/worldbook-service';
 import { settings_ACU, currentChatFileIdentifier_ACU } from '../../service/runtime/state-manager';
+import { setGlobalPlotEnabled_ACU } from '../../service/settings/settings-service';
 import { $popupInstance_ACU, $plotPromptSegmentsContainer_ACU, $plotTaskListContainer_ACU, _assignUIPlaceholders_ACU } from '../state/ui-refs';
 import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
-import { addPlotTaskFromUI_ACU, deleteCurrentPlotTaskFromUI_ACU, getPlotPromptGroupFromUI_ACU, loadCurrentPlotTaskToUI_ACU, moveCurrentPlotTask_ACU, renderPlotPromptSegments_ACU, renderPlotTaskList_ACU, saveCurrentPlotTaskFromUI_ACU, schedulePlotTaskAutoSave_ACU, selectPlotTaskForEditing_ACU } from '../components/plot-editors';
+import { addPlotTaskFromUI_ACU, deleteCurrentPlotTaskFromUI_ACU, flushCurrentPlotTaskEditorState_ACU, getPlotPromptGroupFromUI_ACU, loadCurrentPlotTaskToUI_ACU, moveCurrentPlotTask_ACU, renderPlotPromptSegments_ACU, renderPlotTaskList_ACU, saveCurrentPlotTaskFromUI_ACU, schedulePlotTaskAutoSave_ACU, selectPlotTaskForEditing_ACU } from '../components/plot-editors';
 import { appendExcludeRuleRow_ACU, applyGlobalPlotPresetSelectionForEditor_ACU, applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensureLoopPromptsArray_ACU, ensurePlotTasksCompat_ACU, getActivePlotEditorSettings_ACU, getCurrentRuntimePlotPresetName_ACU, getPlotPresetBindingForChat_ACU, isDefaultPlotPresetSelection_ACU, normalizePlotPresetExcludeRules_ACU, normalizePlotPresetSelectionValue_ACU, persistPlotPresetSelectionState_ACU, readExcludeRulesFromRows_ACU, renderLoopPromptsList_ACU, saveLoopPromptsFromUI_ACU, setActivePlotEditorSettings_ACU, setCurrentEditablePlotPresetState_ACU, setPlotPromptContentByIdForSettings_ACU, stripPlotPresetWorldbookEntrySelectionForExport_ACU, switchCurrentChatPlotPreset_ACU } from '../components/optimization-ui';
 import { buildDefaultPlotPromptGroup_ACU } from '../../service/plot/plot-state';
 import { getCurrentChatPlotScopeState_ACU } from '../../service/template/chat-scope';
@@ -28,8 +29,8 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       // 剧情推进功能开关
       const $plotEnabledCheckbox = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-enabled`);
       if ($plotEnabledCheckbox.length) {
-        $plotEnabledCheckbox.on('change', function() {
-          settings_ACU.plotSettings.enabled = jQuery_API_ACU(this).is(':checked');
+        $plotEnabledCheckbox.on('change', function(this: HTMLElement) {
+          setGlobalPlotEnabled_ACU(jQuery_API_ACU(this).is(':checked'));
           saveSettingsAndNotify_ACU();
         });
       }
@@ -39,7 +40,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       // 1) 最终注入指令仍使用原字段（兼容旧数据/旧编辑器）
       const $plotFinalDirective = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-final-directive`);
       if ($plotFinalDirective.length) {
-        $plotFinalDirective.on('input change', function() {
+        $plotFinalDirective.on('input change', function(this: HTMLElement) {
           const value = jQuery_API_ACU(this).val() as string || '';
           const plotSettings = getActivePlotEditorSettings_ACU();
           if (!plotSettings) return;
@@ -66,26 +67,26 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       } catch (e) {}
 
       // 任务切换/新增/删除/排序
-      $popupInstance_ACU.on('click', '.acu-plot-task-item', function() {
+      $popupInstance_ACU.on('click', '.acu-plot-task-item', function(this: HTMLElement) {
         const taskId = jQuery_API_ACU(this).data('task-id');
         if (!taskId) return;
         selectPlotTaskForEditing_ACU(taskId, { saveCurrent: true });
       });
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-add`).on('click', function() {
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-add`).on('click', function(this: HTMLElement) {
         addPlotTaskFromUI_ACU();
       });
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-delete`).on('click', function() {
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-delete`).on('click', function(this: HTMLElement) {
         deleteCurrentPlotTaskFromUI_ACU();
       });
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-move-up`).on('click', function() {
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-move-up`).on('click', function(this: HTMLElement) {
         moveCurrentPlotTask_ACU('up');
       });
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-move-down`).on('click', function() {
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-task-move-down`).on('click', function(this: HTMLElement) {
         moveCurrentPlotTask_ACU('down');
       });
 
       // 添加段落
-      $popupInstance_ACU.on('click', `.${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn`, function() {
+      $popupInstance_ACU.on('click', `.${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn`, function(this: HTMLElement) {
         const position = jQuery_API_ACU(this).data('position');
         const newSegment = { role: 'USER', content: '', deletable: true };
         let segments = getPlotPromptGroupFromUI_ACU();
@@ -96,7 +97,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       });
 
       // 删除段落
-      $popupInstance_ACU.on('click', '.plot-prompt-segment-delete-btn', function() {
+      $popupInstance_ACU.on('click', '.plot-prompt-segment-delete-btn', function(this: HTMLElement) {
         const indexToDelete = jQuery_API_ACU(this).data('index');
         let segments = getPlotPromptGroupFromUI_ACU();
         segments.splice(indexToDelete, 1);
@@ -105,7 +106,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       });
 
       // A/B 槽位唯一
-      $popupInstance_ACU.on('change', '.plot-prompt-segment-main-slot', function() {
+      $popupInstance_ACU.on('change', '.plot-prompt-segment-main-slot', function(this: HTMLElement) {
         const $currentSegment = jQuery_API_ACU(this).closest('.plot-prompt-segment');
         const selected = String(jQuery_API_ACU(this).val() || '').toUpperCase();
 
@@ -113,7 +114,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
           $plotPromptSegmentsContainer_ACU
             .find('.plot-prompt-segment')
             .not($currentSegment)
-            .each(function() {
+            .each(function(this: HTMLElement) {
               const $seg = jQuery_API_ACU(this);
               const v = String($seg.find('.plot-prompt-segment-main-slot').val() || '').toUpperCase();
               if (v === selected) {
@@ -123,7 +124,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         }
 
         // 刷新样式/删除按钮
-        $plotPromptSegmentsContainer_ACU.find('.plot-prompt-segment').each(function() {
+        $plotPromptSegmentsContainer_ACU.find('.plot-prompt-segment').each(function(this: HTMLElement) {
           const $seg = jQuery_API_ACU(this);
           const slot = String($seg.find('.plot-prompt-segment-main-slot').val() || '').toUpperCase();
           const isA = slot === 'A';
@@ -141,7 +142,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         schedulePlotTaskAutoSave_ACU({ renderTaskList: false });
       });
 
-      $popupInstance_ACU.on('input change', '.plot-prompt-segment-role, .plot-prompt-segment-content', function() {
+      $popupInstance_ACU.on('input change', '.plot-prompt-segment-role, .plot-prompt-segment-content', function(this: HTMLElement) {
         schedulePlotTaskAutoSave_ACU({ renderTaskList: false });
       });
 
@@ -154,15 +155,15 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         `#${SCRIPT_ID_PREFIX_ACU}-plot-task-stage`,
         `#${SCRIPT_ID_PREFIX_ACU}-plot-task-max-retries`,
       ].forEach(selector => {
-        $popupInstance_ACU.on('input change', selector, function() {
+        $popupInstance_ACU.on('input change', selector, function(this: HTMLElement) {
           schedulePlotTaskAutoSave_ACU({ renderTaskList: true });
         });
       });
-      $popupInstance_ACU.on('change', `#${SCRIPT_ID_PREFIX_ACU}-plot-task-enabled`, function() {
+      $popupInstance_ACU.on('change', `#${SCRIPT_ID_PREFIX_ACU}-plot-task-enabled`, function(this: HTMLElement) {
         saveCurrentPlotTaskFromUI_ACU({ silent: true, renderTaskList: true, persist: true });
         loadCurrentPlotTaskToUI_ACU();
       });
-      $popupInstance_ACU.on('change', `#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`, function() {
+      $popupInstance_ACU.on('change', `#${SCRIPT_ID_PREFIX_ACU}-plot-task-api-preset`, function(this: HTMLElement) {
         saveCurrentPlotTaskFromUI_ACU({ silent: true, renderTaskList: false, persist: true });
       });
 
@@ -178,7 +179,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       plotRateInputs.forEach(({ id, key, defaultValue }) => {
         const $input = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-${id}`);
         if ($input.length) {
-          $input.on('input change', function() {
+          $input.on('input change', function(this: HTMLElement) {
             const plotSettings = getActivePlotEditorSettings_ACU();
             if (!plotSettings) return;
             plotSettings[key] = parseFloat(jQuery_API_ACU(this).val() as string) || defaultValue;
@@ -200,7 +201,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       plotPersistentInputs.forEach(({ id, key, type }) => {
         const $input = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-${id}`);
         if ($input.length) {
-          $input.on('input change', function() {
+          $input.on('input change', function(this: HTMLElement) {
             const plotSettings = getActivePlotEditorSettings_ACU();
             if (!plotSettings) return;
 
@@ -225,19 +226,19 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       });
 
       // 剧情推进正文标签提取规则编辑器
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-add-rule`).on('click', function() {
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-add-rule`).on('click', function(this: HTMLElement) {
         appendExcludeRuleRow_ACU(
           `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`,
           { startPlaceholder: '开始词（例如：<think）', endPlaceholder: '结束词（例如：</think>）' },
         );
       });
-      $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-end`, function() {
+      $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-end`, function(this: HTMLElement) {
         const plotSettings = getActivePlotEditorSettings_ACU();
         if (!plotSettings) return;
         plotSettings.contextExtractRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules`);
         saveSettingsAndNotify_ACU();
       });
-      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-delete`, function() {
+      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-extract-rules .acu-exclude-rule-delete`, function(this: HTMLElement) {
         const plotSettings = getActivePlotEditorSettings_ACU();
         if (!plotSettings) return;
         const $row = jQuery_API_ACU(this).closest('.acu-exclude-rule-row');
@@ -247,19 +248,19 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       });
 
       // 剧情推进标签排除规则编辑器
-      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-add-rule`).on('click', function() {
+      $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-add-rule`).on('click', function(this: HTMLElement) {
         appendExcludeRuleRow_ACU(
           `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`,
           { startPlaceholder: '开始词（例如：<thinking）', endPlaceholder: '结束词（例如：</thinking>）' },
         );
       });
-      $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-end`, function() {
+      $popupInstance_ACU.on('input', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-start, #${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-end`, function(this: HTMLElement) {
         const plotSettings = getActivePlotEditorSettings_ACU();
         if (!plotSettings) return;
         plotSettings.contextExcludeRules = readExcludeRulesFromRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules`);
         saveSettingsAndNotify_ACU();
       });
-      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-delete`, function() {
+      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-context-exclude-rules .acu-exclude-rule-delete`, function(this: HTMLElement) {
         const plotSettings = getActivePlotEditorSettings_ACU();
         if (!plotSettings) return;
         const $row = jQuery_API_ACU(this).closest('.acu-exclude-rule-row');
@@ -275,7 +276,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       renderLoopPromptsList_ACU();
 
       // 添加提示词按钮
-      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt`, function() {
+      $popupInstance_ACU.on('click', `#${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt`, function(this: HTMLElement) {
         const plotSettings = getActivePlotEditorSettings_ACU();
         if (!plotSettings) return;
         ensureLoopPromptsArray_ACU(plotSettings);
@@ -291,7 +292,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       });
 
       // 删除提示词按钮
-      $popupInstance_ACU.on('click', '.loop-prompt-delete-btn', function() {
+      $popupInstance_ACU.on('click', '.loop-prompt-delete-btn', function(this: HTMLElement) {
         const index = parseInt(jQuery_API_ACU(this).data('index'), 10);
         if (isNaN(index)) return;
 
@@ -313,7 +314,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
 
       // 提示词内容变化时自动保存（防抖）
       let saveLoopPromptsTimeout: ReturnType<typeof setTimeout> | null = null;
-      $popupInstance_ACU.on('input', '.loop-prompt-textarea', function() {
+      $popupInstance_ACU.on('input', '.loop-prompt-textarea', function(this: HTMLElement) {
         clearTimeout(saveLoopPromptsTimeout!);
         saveLoopPromptsTimeout = setTimeout(() => {
           saveLoopPromptsFromUI_ACU();
@@ -333,7 +334,8 @@ export async function bindPlotEvents_ACU(): Promise<void> {
 
       // 第一步：全局预设选择事件
       if ($plotPresetSelect.length) {
-        $plotPresetSelect.on('change', function() {
+        $plotPresetSelect.on('change', function(this: HTMLElement) {
+          flushCurrentPlotTaskEditorState_ACU({ renderTaskList: false, persist: true });
           const selectedName = normalizePlotPresetSelectionValue_ACU(jQuery_API_ACU(this).val());
           const result = applyGlobalPlotPresetSelectionForEditor_ACU(selectedName, {
             source: 'ui_global_select',
@@ -350,7 +352,8 @@ export async function bindPlotEvents_ACU(): Promise<void> {
 
       // 第二步：当前聊天预设选择事件（这里只负责切换当前聊天使用的预设）
       if ($plotChatPresetSelect.length) {
-        $plotChatPresetSelect.on('change', function() {
+        $plotChatPresetSelect.on('change', function(this: HTMLElement) {
+          flushCurrentPlotTaskEditorState_ACU({ renderTaskList: false, persist: true });
           const selectedName = normalizePlotPresetSelectionValue_ACU(jQuery_API_ACU(this).val());
           const result = switchCurrentChatPlotPreset_ACU(selectedName, {
             source: 'ui',
@@ -377,14 +380,14 @@ export async function bindPlotEvents_ACU(): Promise<void> {
 
       // 导入全局预设
       if ($plotImportPresets.length) {
-        $plotImportPresets.on('click', function() {
+        $plotImportPresets.on('click', function(this: HTMLElement) {
           $plotPresetFileInput.click();
         });
       }
 
       // 导出全局预设
       if ($plotExportPresets.length) {
-        $plotExportPresets.on('click', function() {
+        $plotExportPresets.on('click', function(this: HTMLElement) {
           const selectedName = normalizePlotPresetSelectionValue_ACU($plotPresetSelect.val());
           if (isDefaultPlotPresetSelection_ACU(selectedName)) {
             showToastr_ACU('info', '默认预设不支持直接导出，请先另存为自定义预设。');
@@ -418,7 +421,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
 
       // 保存全局预设
       if ($plotSavePreset.length) {
-        $plotSavePreset.on('click', function() {
+        $plotSavePreset.on('click', function(this: HTMLElement) {
           const selectedName = normalizePlotPresetSelectionValue_ACU($plotPresetSelect.val());
           if (isDefaultPlotPresetSelection_ACU(selectedName)) {
             // 如果当前是默认预设，则等同于"另存为新的全局预设"
@@ -467,14 +470,14 @@ export async function bindPlotEvents_ACU(): Promise<void> {
 
       // 另存为新的全局预设
       if ($plotSaveAsNewPreset.length) {
-        $plotSaveAsNewPreset.on('click', function() {
+        $plotSaveAsNewPreset.on('click', function(this: HTMLElement) {
           savePlotPresetAsNew_ACU();
         });
       }
 
       // 删除全局预设
       if ($plotDeletePreset.length) {
-        $plotDeletePreset.on('click', function() {
+        $plotDeletePreset.on('click', function(this: HTMLElement) {
           const selectedName = normalizePlotPresetSelectionValue_ACU($plotPresetSelect.val());
           if (isDefaultPlotPresetSelection_ACU(selectedName)) {
             showToastr_ACU('warning', '默认全局预设不能删除。');
@@ -515,11 +518,12 @@ export async function bindPlotEvents_ACU(): Promise<void> {
 
       // 恢复全局默认提示词
       if ($plotResetDefaults.length) {
-        $plotResetDefaults.on('click', function() {
+        $plotResetDefaults.on('click', function(this: HTMLElement) {
           if (!confirm('确定要恢复全局默认的剧情推进提示词吗？这将覆盖当前的提示词设置，并重置"标签摘取"。')) {
             return;
           }
 
+          flushCurrentPlotTaskEditorState_ACU({ renderTaskList: false, persist: true });
           const result = applyGlobalPlotPresetSelectionForEditor_ACU('', {
             source: 'ui_global_reset',
             save: true,
@@ -536,14 +540,14 @@ export async function bindPlotEvents_ACU(): Promise<void> {
 
       // 全局预设文件导入
       if ($plotPresetFileInput.length) {
-        $plotPresetFileInput.on('change', function(e) {
-          const file = (e.target as HTMLInputElement).files[0];
+        $plotPresetFileInput.on('change', function(this: HTMLElement, e: Event) {
+          const file = ((e.target as HTMLInputElement).files || [])[0];
           if (!file) return;
 
           const reader = new FileReader();
-          reader.onload = function(e) {
+          reader.onload = function(e: ProgressEvent<FileReader>) {
             try {
-              const importedPresets = JSON.parse(e.target.result as string);
+              const importedPresets = JSON.parse(String(e.target?.result || ''));
 
               if (!Array.isArray(importedPresets)) {
                 throw new Error('JSON文件格式不正确，根节点必须是一个数组。');
@@ -652,7 +656,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       const $stopLoopBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-stop-loop-btn`);
 
       if ($startLoopBtn.length) {
-        $startLoopBtn.on('click', function() {
+        $startLoopBtn.on('click', function(this: HTMLElement) {
           const duration = parseInt($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-loop-total-duration`).val() as string, 10);
           if (!duration || duration <= 0) {
             showToastr_ACU('warning', '请设置一个大于0的总倒计时 (分钟) 才能启动循环。');
@@ -667,7 +671,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
       }
 
       if ($stopLoopBtn.length) {
-        $stopLoopBtn.on('click', function() {
+        $stopLoopBtn.on('click', function(this: HTMLElement) {
           stopAutoLoop_ACU();
           jQuery_API_ACU(this).hide();
           $startLoopBtn.css('display', 'inline-flex').show();
@@ -687,7 +691,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         const $plotWbRadios = $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-source"]`);
         if ($plotWbRadios.length) {
           $plotWbRadios.filter(`[value="${cfg.source || 'character'}"]`).prop('checked', true);
-          $plotWbRadios.off('change.acu_plot_wb').on('change.acu_plot_wb', async function() {
+          $plotWbRadios.off('change.acu_plot_wb').on('change.acu_plot_wb', async function(this: HTMLElement) {
             const v = jQuery_API_ACU(this).val();
             cfg.source = (v === 'manual') ? 'manual' : 'character';
             saveSettingsAndNotify_ACU();
@@ -700,7 +704,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         const $plotWbListFilter = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-select-filter`);
         const $plotEntryFilter = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-entry-filter`);
         if ($plotWbList.length) {
-          $plotWbList.off('click.acu_plot_wb').on('click.acu_plot_wb', '.qrf_worldbook_list_item', async function() {
+          $plotWbList.off('click.acu_plot_wb').on('click.acu_plot_wb', '.qrf_worldbook_list_item', async function(this: HTMLElement) {
             const bookName = jQuery_API_ACU(this).data('book-name');
             if (!bookName) return;
             let selection = Array.isArray(cfg.manualSelection) ? cfg.manualSelection : [];
@@ -712,7 +716,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
           });
         }
         if ($plotWbListFilter.length) {
-          $plotWbListFilter.off('input.acu_plot_wb').on('input.acu_plot_wb', function() {
+          $plotWbListFilter.off('input.acu_plot_wb').on('input.acu_plot_wb', function(this: HTMLElement) {
             applyWorldbookListFilter_ACU($plotWbList, jQuery_API_ACU(this).val());
           });
         }
@@ -776,24 +780,24 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         };
 
         if ($plotSelectAll.length) {
-          $plotSelectAll.off('click.acu_plot_wb').on('click.acu_plot_wb', async function() {
+          $plotSelectAll.off('click.acu_plot_wb').on('click.acu_plot_wb', async function(this: HTMLElement) {
             await setPlotEntriesSelection_ACU('all');
           });
         }
         if ($plotDeselectAll.length) {
-          $plotDeselectAll.off('click.acu_plot_wb').on('click.acu_plot_wb', async function() {
+          $plotDeselectAll.off('click.acu_plot_wb').on('click.acu_plot_wb', async function(this: HTMLElement) {
             await setPlotEntriesSelection_ACU('none');
           });
         }
         if ($plotSelectNoneLegacy.length) {
-          $plotSelectNoneLegacy.off('click.acu_plot_wb').on('click.acu_plot_wb', async function() {
+          $plotSelectNoneLegacy.off('click.acu_plot_wb').on('click.acu_plot_wb', async function(this: HTMLElement) {
             await setPlotEntriesSelection_ACU('none');
           });
         }
 
         const $plotRefreshWorldbooks = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-refresh-worldbooks`);
         if ($plotRefreshWorldbooks.length) {
-          $plotRefreshWorldbooks.off('click.acu_plot_wb').on('click.acu_plot_wb', async function() {
+          $plotRefreshWorldbooks.off('click.acu_plot_wb').on('click.acu_plot_wb', async function(this: HTMLElement) {
             await updatePlotWorldbookSourceView_ACU();
           });
         }
@@ -801,7 +805,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         // 条目勾选
         const $plotEntryList = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-entry-list`);
         if ($plotEntryList.length) {
-          $plotEntryList.off('change.acu_plot_wb').on('change.acu_plot_wb', 'input[type="checkbox"]', function() {
+          $plotEntryList.off('change.acu_plot_wb').on('change.acu_plot_wb', 'input[type="checkbox"]', function(this: HTMLElement) {
             const bookName = jQuery_API_ACU(this).data('book');
             const uid = jQuery_API_ACU(this).data('uid');
             if (!bookName || uid === undefined || uid === null) return;
@@ -814,19 +818,19 @@ export async function bindPlotEvents_ACU(): Promise<void> {
             updateLazyWorldbookEntryCheckedState_ACU($plotEntryList, bookName, uid, checked);
             saveSettingsAndNotify_ACU();
           });
-          $plotEntryList.off('click.acu_plot_wb_toggle').on('click.acu_plot_wb_toggle', '.qrf_worldbook_entry_toggle', function() {
+          $plotEntryList.off('click.acu_plot_wb_toggle').on('click.acu_plot_wb_toggle', '.qrf_worldbook_entry_toggle', function(this: HTMLElement) {
             const bookName = jQuery_API_ACU(this).closest('.qrf_worldbook_entry_group').data('book-name');
             if (!bookName) return;
             toggleLazyWorldbookEntryGroup_ACU($plotEntryList, bookName);
           });
-          $plotEntryList.off('click.acu_plot_wb_more').on('click.acu_plot_wb_more', '.qrf_worldbook_entry_load_more', function() {
+          $plotEntryList.off('click.acu_plot_wb_more').on('click.acu_plot_wb_more', '.qrf_worldbook_entry_load_more', function(this: HTMLElement) {
             const bookName = jQuery_API_ACU(this).closest('.qrf_worldbook_entry_group').data('book-name');
             if (!bookName) return;
             renderLazyWorldbookEntryItems_ACU($plotEntryList, bookName);
           });
         }
         if ($plotEntryFilter.length) {
-          $plotEntryFilter.off('input.acu_plot_wb').on('input.acu_plot_wb', function() {
+          $plotEntryFilter.off('input.acu_plot_wb').on('input.acu_plot_wb', function(this: HTMLElement) {
             applyWorldbookEntryFilter_ACU($plotEntryList, jQuery_API_ACU(this).val() as string);
           });
         }
