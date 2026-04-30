@@ -13,6 +13,7 @@ import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsol
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
+import { getCurrentVectorMemoryConfig_ACU } from '../vector/vector-memory-config';
 import { isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
 import { configIdbCacheLoaded_ACU, ensureConfigIdbCacheLoaded_ACU, getConfigStorage_ACU, initTavernSettingsBridge_ACU, migrateKeyToTavernStorageIfNeeded_ACU, pendingSettingsReloadFromIdb_ACU, _set_pendingSettingsReloadFromIdb_ACU} from '../../data/storage/tavern-storage';
 import { ensureTagRulesCompat_ACU } from '../plot/plot-logic';
@@ -676,6 +677,11 @@ export function setSummaryVectorIndexMode_ACU(modeEnabled: boolean) {
         settings_ACU.zeroTkOccupyModeDefault = false;
         globalMeta_ACU.zeroTkOccupyModeGlobal = false;
     }
+
+    // 向量混合交火增强方案会复用普通向量模型/API/rerank 配置；启停交火时必须同步启停普通向量开关。
+    // 这里只改 enabled，不覆盖模型、API、rerank、namespace 等用户配置。
+    const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+    vectorMemoryConfig.enabled = enabled;
 
     // 0TK 与向量混合交火增强方案是全局互斥开关；worldbookConfig 里的同名字段只是兼容投影。
     const cfg = getCurrentWorldbookConfig_ACU();

@@ -3101,93 +3101,6 @@ $CONTENT
     }
 
     /**
-     * service/plot/plot-state.ts — 剧情推进运行时状态 + 纯逻辑函数
-     *
-     * 从 presentation/components/plot-editors.ts 搬入。
-     * 这些状态变量和函数不涉及 DOM 操作。
-     */
-    // ═══ 状态变量 ═══
-    let activePlotEditorSettings_ACU = null;
-    let currentPlotTaskEditorId_ACU = '';
-    let currentEditablePlotPresetState_ACU = {
-        initialized: false,
-        presetName: '',
-        scope: 'resolved',
-        source: '',
-    };
-    // ═══ setter 函数 ═══
-    function _set_activePlotEditorSettings_ACU(v) { activePlotEditorSettings_ACU = v; }
-    function _set_currentPlotTaskEditorId_ACU(v) { currentPlotTaskEditorId_ACU = v; }
-    function _set_currentEditablePlotPresetState_ACU(v) { currentEditablePlotPresetState_ACU = v; }
-    // ═══ 纯逻辑函数 ═══
-    function buildDefaultPlotPromptGroup_ACU({ mainAContent = '', mainBContent = '' } = {}) {
-        const src = DEFAULT_PLOT_PROMPT_GROUP_ACU;
-        const base = Array.isArray(src)
-            ? JSON.parse(JSON.stringify(src))
-            : (typeof src === 'string' && src.trim() ? [{ role: 'USER', content: src, deletable: false, mainSlot: 'A', isMain: true }] : []);
-        const getMainSlot = (seg) => {
-            if (!seg)
-                return '';
-            const slot = String(seg.mainSlot || '').toUpperCase();
-            if (slot === 'A' || slot === 'B')
-                return slot;
-            if (seg.isMain)
-                return 'A';
-            if (seg.isMain2)
-                return 'B';
-            return '';
-        };
-        let aIdx = base.findIndex((s) => getMainSlot(s) === 'A');
-        let bIdx = base.findIndex((s) => getMainSlot(s) === 'B');
-        if (aIdx === -1) {
-            base.unshift({ role: 'SYSTEM', content: '', deletable: false, mainSlot: 'A', isMain: true });
-            aIdx = 0;
-        }
-        if (bIdx === -1) {
-            base.splice(aIdx + 1, 0, { role: 'USER', content: '', deletable: false, mainSlot: 'B', isMain2: true });
-            bIdx = aIdx + 1;
-        }
-        if (mainAContent && base[aIdx])
-            base[aIdx].content = String(mainAContent);
-        if (mainBContent && base[bIdx])
-            base[bIdx].content = String(mainBContent);
-        return base;
-    }
-    function getLegacyPlotPromptContent_ACU(plotSettings, promptId) {
-        try {
-            const p = plotSettings?.prompts;
-            if (!p)
-                return '';
-            if (Array.isArray(p)) {
-                const item = p.find(x => x && x.id === promptId);
-                return item?.content || '';
-            }
-            if (typeof p === 'object')
-                return p[promptId] || '';
-        }
-        catch (e) { }
-        return '';
-    }
-    function ensurePlotPromptGroup_ACU(plotSettings, { persist = false } = {}) {
-        if (!plotSettings)
-            return;
-        if (Array.isArray(plotSettings.promptGroup) && plotSettings.promptGroup.length > 0)
-            return;
-        const legacyMain = getLegacyPlotPromptContent_ACU(plotSettings, 'mainPrompt') || (DEFAULT_PLOT_SETTINGS_ACU?.prompts?.[0]?.content || '');
-        const legacySystem = getLegacyPlotPromptContent_ACU(plotSettings, 'systemPrompt') || (DEFAULT_PLOT_SETTINGS_ACU?.prompts?.[1]?.content || '');
-        plotSettings.promptGroup = buildDefaultPlotPromptGroup_ACU({
-            mainAContent: legacyMain,
-            mainBContent: legacySystem,
-        });
-        if (persist) {
-            try {
-                saveSettings_ACU();
-            }
-            catch (e) { }
-        }
-    }
-
-    /**
      * shared/host-api.ts — 宿主平台 API 引用
      * SillyTavern、TavernHelper、jQuery、toastr 的运行时引用。
      * 属于 shared 层，任何层均可 import。
@@ -3550,6 +3463,385 @@ $CONTENT
     function _set_newMessageDebounceTimer_ACU$1(v) { newMessageDebounceTimer_ACU$1 = v; }
 
     /**
+     * service/settings/settings-readers.ts — 设置读取器（纯读取，无持久化副作用）
+     *
+     * 从 settings-service.ts 提取。这些函数只读取/规范化 settings 中的数据，
+     * 不执行保存操作。其他子模块应优先从此文件 import，而非 settings-service.ts。
+     */
+    /**
+     * 获取当前角色的专属设置。
+     * 业务逻辑：读 settings → deep merge 默认值 → 写回（确保字段完整）。
+     * 注意：此函数有"规范化写回"的副作用（补全缺失字段），但不触发持久化。
+     */
+    function getCurrentCharSettings_ACU() {
+        const charId = currentChatFileIdentifier_ACU || 'default';
+        if (!settings_ACU.characterSettings) {
+            settings_ACU.characterSettings = {};
+        }
+        const globalSummaryVectorIndexEnabled = (typeof globalMeta_ACU?.summaryVectorIndexModeGlobal === 'boolean')
+            ? (globalMeta_ACU.summaryVectorIndexModeGlobal === true)
+            : (settings_ACU?.summaryVectorIndexModeDefault === true);
+        const globalZeroTkEnabled = globalSummaryVectorIndexEnabled
+            ? false
+            : (typeof globalMeta_ACU?.zeroTkOccupyModeGlobal === 'boolean')
+                ? (globalMeta_ACU.zeroTkOccupyModeGlobal === true)
+                : (settings_ACU?.zeroTkOccupyModeDefault === true);
+        if (!settings_ACU.characterSettings[charId]) {
+            const worldbookConfigForNewChat = JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU));
+            // 0TK 与向量混合交火增强方案是全局互斥开关，不是聊天级配置。
+            // 这里保留 worldbookConfig 字段只是为了兼容既有调用方读取。
+            worldbookConfigForNewChat.summaryVectorIndexModeEnabled = globalSummaryVectorIndexEnabled;
+            worldbookConfigForNewChat.zeroTkOccupyMode = globalZeroTkEnabled;
+            worldbookConfigForNewChat.outlineEntryEnabled = globalSummaryVectorIndexEnabled ? true : !globalZeroTkEnabled;
+            settings_ACU.characterSettings[charId] = {
+                worldbookConfig: worldbookConfigForNewChat,
+            };
+            logDebug_ACU(`Created new character settings for: ${charId}`);
+        }
+        try {
+            const existingCfg = settings_ACU.characterSettings[charId].worldbookConfig || {};
+            const mergedCfg = deepMerge_ACU(JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU)), existingCfg);
+            // 强制使用全局状态覆盖旧聊天残留字段，避免模式跟着对话走。
+            mergedCfg.summaryVectorIndexModeEnabled = globalSummaryVectorIndexEnabled;
+            mergedCfg.zeroTkOccupyMode = globalZeroTkEnabled;
+            mergedCfg.outlineEntryEnabled = globalSummaryVectorIndexEnabled ? true : !globalZeroTkEnabled;
+            // [向量记忆] vectorMemory 不再跟随世界书配置规范化，
+            // 已迁移到 settings_ACU.vectorMemoryConfig（全局数据库级）。
+            // 保留 mergedCfg.vectorMemory 的旧数据引用以兼容迁移读取。
+            settings_ACU.characterSettings[charId].worldbookConfig = mergedCfg;
+        }
+        catch (e) {
+            // ignore
+        }
+        return settings_ACU.characterSettings[charId];
+    }
+    /** 获取当前角色的世界书配置 */
+    function getCurrentWorldbookConfig_ACU() {
+        return getCurrentCharSettings_ACU().worldbookConfig;
+    }
+
+    function normalizeArchiveTriggerCount_ACU(value, fallbackValue) {
+        const normalized = normalizePositiveInteger_ACU$1(value, fallbackValue);
+        return Math.max(1, normalized);
+    }
+    function cloneDefaultVectorMemoryConfig_ACU() {
+        return JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU));
+    }
+    function normalizeMinScore_ACU$2(value, fallbackValue) {
+        const num = Number(value);
+        if (!Number.isFinite(num))
+            return fallbackValue;
+        if (num < 0)
+            return 0;
+        if (num > 1)
+            return 1;
+        return num;
+    }
+    function normalizeTextField_ACU(value, fallbackValue = '') {
+        if (typeof value !== 'string')
+            return fallbackValue;
+        return value.trim();
+    }
+    function normalizeKeywordPromptGroup_ACU(value, fallbackValue) {
+        if (!Array.isArray(value) || value.length === 0) {
+            return JSON.parse(JSON.stringify(fallbackValue));
+        }
+        const validRoles = new Set(['system', 'assistant', 'user']);
+        const segments = [];
+        for (const item of value) {
+            if (!item || typeof item !== 'object')
+                continue;
+            const role = typeof item.role === 'string'
+                ? item.role.toLowerCase().trim()
+                : 'system';
+            const content = typeof item.content === 'string'
+                ? item.content.trim()
+                : '';
+            if (!content)
+                continue;
+            segments.push({
+                role: validRoles.has(role) ? role : 'system',
+                content,
+                deletable: item.deletable !== false,
+            });
+        }
+        return segments.length > 0
+            ? segments
+            : JSON.parse(JSON.stringify(fallbackValue));
+    }
+    function getDefaultVectorMemoryConfig_ACU() {
+        return cloneDefaultVectorMemoryConfig_ACU();
+    }
+    function normalizeVectorMemoryConfig_ACU(rawConfig) {
+        const defaults = cloneDefaultVectorMemoryConfig_ACU();
+        const source = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig)
+            ? rawConfig
+            : {};
+        const archiveBatchSize = normalizePositiveInteger_ACU$1(source.archiveBatchSize, defaults.archiveBatchSize);
+        const archiveTriggerCount = normalizeArchiveTriggerCount_ACU(source.archiveTriggerCount, defaults.archiveTriggerCount ?? archiveBatchSize);
+        const archiveMaxConcurrency = normalizePositiveInteger_ACU$1(source.archiveMaxConcurrency, defaults.archiveMaxConcurrency ?? 3);
+        return {
+            enabled: source.enabled === true,
+            threshold: normalizePositiveInteger_ACU$1(source.threshold, defaults.threshold),
+            archiveTriggerCount,
+            archiveBatchSize,
+            archiveMaxConcurrency,
+            topK: normalizePositiveInteger_ACU$1(source.topK, defaults.topK),
+            minScore: normalizeMinScore_ACU$2(source.minScore, defaults.minScore),
+            embeddingEndpoint: normalizeTextField_ACU(source.embeddingEndpoint, defaults.embeddingEndpoint),
+            embeddingApiKey: normalizeTextField_ACU(source.embeddingApiKey, defaults.embeddingApiKey),
+            embeddingModel: normalizeTextField_ACU(source.embeddingModel, defaults.embeddingModel),
+            rerankEndpoint: normalizeTextField_ACU(source.rerankEndpoint, defaults.rerankEndpoint),
+            rerankApiKey: normalizeTextField_ACU(source.rerankApiKey, defaults.rerankApiKey),
+            rerankModel: normalizeTextField_ACU(source.rerankModel, defaults.rerankModel),
+            vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
+            entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
+            entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
+            summaryChunkSentenceCount: normalizePositiveInteger_ACU$1(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
+            summaryPromptGroupId: normalizeTextField_ACU(source.summaryPromptGroupId, defaults.summaryPromptGroupId) || defaults.summaryPromptGroupId,
+            archiveWithoutSummary: source.archiveWithoutSummary === true,
+            summaryPromptGroup: normalizeKeywordPromptGroup_ACU(source.summaryPromptGroup, defaults.summaryPromptGroup || []),
+            keywordApiPreset: normalizeTextField_ACU(source.keywordApiPreset, defaults.keywordApiPreset),
+            keywordContextPairCount: normalizePositiveInteger_ACU$1(source.keywordContextPairCount, defaults.keywordContextPairCount),
+            keywordPromptGroup: normalizeKeywordPromptGroup_ACU(source.keywordPromptGroup, defaults.keywordPromptGroup),
+            recallCandidateLimit: normalizePositiveInteger_ACU$1(source.recallCandidateLimit, defaults.recallCandidateLimit),
+        };
+    }
+    /**
+     * 获取当前向量记忆配置。
+     *
+     * 配置存储在 settings_ACU.vectorMemoryConfig（全局数据库级）。
+     * loadSettings_ACU() 已负责从旧位置（worldbookConfig.vectorMemory）迁移。
+     *
+     * 返回的始终是经过 normalize 的完整配置对象。
+     * 对返回值的直接修改会反映到 settings_ACU.vectorMemoryConfig（引用），
+     * 但不会自动持久化——需要调用 saveSettingsAndNotify_ACU()。
+     */
+    function getCurrentVectorMemoryConfig_ACU() {
+        const globalConfig = settings_ACU.vectorMemoryConfig;
+        if (globalConfig && typeof globalConfig === 'object' && !Array.isArray(globalConfig)) {
+            // 已有全局配置，normalize 后直接返回引用（UI 写入需要引用）
+            const normalized = normalizeVectorMemoryConfig_ACU(globalConfig);
+            Object.assign(globalConfig, normalized);
+            return globalConfig;
+        }
+        // 兜底：全局配置不存在时（loadSettings 未覆盖到的边界情况），
+        // 从当前角色的世界书配置迁移
+        const worldbookConfig = getCurrentWorldbookConfig_ACU();
+        const legacyConfig = worldbookConfig?.vectorMemory;
+        const source = (legacyConfig && typeof legacyConfig === 'object' && !Array.isArray(legacyConfig))
+            ? legacyConfig
+            : {};
+        const migrated = normalizeVectorMemoryConfig_ACU(source);
+        settings_ACU.vectorMemoryConfig = migrated;
+        return migrated;
+    }
+    function getVectorMemoryNamespace_ACU(chatFileIdentifier) {
+        const config = getCurrentVectorMemoryConfig_ACU();
+        const chatKey = cleanChatName_ACU(chatFileIdentifier || currentChatFileIdentifier_ACU || 'default');
+        return `${config.vectorNamespace}:${chatKey}`;
+    }
+    function hasVectorMemoryRerankConfig_ACU(configInput) {
+        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+        return !!(config.rerankEndpoint && config.rerankModel);
+    }
+    function validateVectorMemoryRerankConfig_ACU(configInput) {
+        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+        const errors = [];
+        const hasRerankEndpoint = !!config.rerankEndpoint;
+        const hasRerankModel = !!config.rerankModel;
+        if (!hasRerankEndpoint && !hasRerankModel) {
+            return {
+                valid: false,
+                errors: [],
+            };
+        }
+        if (hasRerankEndpoint !== hasRerankModel) {
+            errors.push('rerankEndpoint 和 rerankModel 必须同时填写或同时留空');
+        }
+        return {
+            valid: errors.length === 0,
+            errors,
+        };
+    }
+    function collectVectorMemoryCommonErrors_ACU(config) {
+        const errors = [];
+        if (!config.embeddingEndpoint) {
+            errors.push('缺少 embeddingEndpoint');
+        }
+        if (!config.embeddingModel) {
+            errors.push('缺少 embeddingModel');
+        }
+        if (config.threshold < 1) {
+            errors.push('threshold 必须大于 0');
+        }
+        if (config.archiveTriggerCount < 1) {
+            errors.push('archiveTriggerCount 必须大于 0');
+        }
+        if (config.archiveBatchSize < 1) {
+            errors.push('archiveBatchSize 必须大于 0');
+        }
+        if (config.archiveMaxConcurrency < 1) {
+            errors.push('archiveMaxConcurrency 必须大于 0');
+        }
+        if (config.summaryChunkSentenceCount < 1) {
+            errors.push('summaryChunkSentenceCount 必须大于 0');
+        }
+        if (!config.summaryPromptGroupId) {
+            errors.push('缺少 summaryPromptGroupId');
+        }
+        if (config.recallCandidateLimit < config.topK) {
+            errors.push('recallCandidateLimit 不能小于 topK');
+        }
+        return errors;
+    }
+    function validateVectorIndexBuildConfig_ACU(configInput) {
+        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+        const errors = collectVectorMemoryCommonErrors_ACU(config);
+        return {
+            valid: errors.length === 0,
+            errors,
+        };
+    }
+    function validateVectorMemoryConfig_ACU(configInput) {
+        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+        const errors = collectVectorMemoryCommonErrors_ACU(config);
+        if (!config.entryComment) {
+            errors.push('缺少 entryComment');
+        }
+        if (!config.entryKey) {
+            errors.push('缺少 entryKey');
+        }
+        return {
+            valid: errors.length === 0,
+            errors,
+        };
+    }
+    function getEffectiveSummaryVectorIndexConfig_ACU(configInput) {
+        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+        return {
+            ...config,
+            enabled: true,
+            minScore: 0.4,
+            topK: 100,
+            recallCandidateLimit: 100,
+            summaryChunkSentenceCount: 2,
+            summaryIndexMinScore: 0.4,
+            summaryIndexCandidateLimit: 100,
+            summaryIndexChunkSentenceCount: 2,
+        };
+    }
+    function validateSummaryVectorIndexConfig_ACU(configInput) {
+        const config = getEffectiveSummaryVectorIndexConfig_ACU(configInput);
+        const errors = [];
+        if (!config.embeddingEndpoint) {
+            errors.push('缺少 embeddingEndpoint');
+        }
+        if (!config.embeddingModel) {
+            errors.push('缺少 embeddingModel');
+        }
+        const rerankValidation = validateVectorMemoryRerankConfig_ACU(config);
+        errors.push(...rerankValidation.errors);
+        return {
+            valid: errors.length === 0,
+            errors,
+        };
+    }
+    function isVectorMemoryEnabled_ACU(configInput) {
+        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+        if (!config.enabled)
+            return false;
+        return validateVectorMemoryConfig_ACU(config).valid;
+    }
+
+    /**
+     * service/plot/plot-state.ts — 剧情推进运行时状态 + 纯逻辑函数
+     *
+     * 从 presentation/components/plot-editors.ts 搬入。
+     * 这些状态变量和函数不涉及 DOM 操作。
+     */
+    // ═══ 状态变量 ═══
+    let activePlotEditorSettings_ACU = null;
+    let currentPlotTaskEditorId_ACU = '';
+    let currentEditablePlotPresetState_ACU = {
+        initialized: false,
+        presetName: '',
+        scope: 'resolved',
+        source: '',
+    };
+    // ═══ setter 函数 ═══
+    function _set_activePlotEditorSettings_ACU(v) { activePlotEditorSettings_ACU = v; }
+    function _set_currentPlotTaskEditorId_ACU(v) { currentPlotTaskEditorId_ACU = v; }
+    function _set_currentEditablePlotPresetState_ACU(v) { currentEditablePlotPresetState_ACU = v; }
+    // ═══ 纯逻辑函数 ═══
+    function buildDefaultPlotPromptGroup_ACU({ mainAContent = '', mainBContent = '' } = {}) {
+        const src = DEFAULT_PLOT_PROMPT_GROUP_ACU;
+        const base = Array.isArray(src)
+            ? JSON.parse(JSON.stringify(src))
+            : (typeof src === 'string' && src.trim() ? [{ role: 'USER', content: src, deletable: false, mainSlot: 'A', isMain: true }] : []);
+        const getMainSlot = (seg) => {
+            if (!seg)
+                return '';
+            const slot = String(seg.mainSlot || '').toUpperCase();
+            if (slot === 'A' || slot === 'B')
+                return slot;
+            if (seg.isMain)
+                return 'A';
+            if (seg.isMain2)
+                return 'B';
+            return '';
+        };
+        let aIdx = base.findIndex((s) => getMainSlot(s) === 'A');
+        let bIdx = base.findIndex((s) => getMainSlot(s) === 'B');
+        if (aIdx === -1) {
+            base.unshift({ role: 'SYSTEM', content: '', deletable: false, mainSlot: 'A', isMain: true });
+            aIdx = 0;
+        }
+        if (bIdx === -1) {
+            base.splice(aIdx + 1, 0, { role: 'USER', content: '', deletable: false, mainSlot: 'B', isMain2: true });
+            bIdx = aIdx + 1;
+        }
+        if (mainAContent && base[aIdx])
+            base[aIdx].content = String(mainAContent);
+        if (mainBContent && base[bIdx])
+            base[bIdx].content = String(mainBContent);
+        return base;
+    }
+    function getLegacyPlotPromptContent_ACU(plotSettings, promptId) {
+        try {
+            const p = plotSettings?.prompts;
+            if (!p)
+                return '';
+            if (Array.isArray(p)) {
+                const item = p.find(x => x && x.id === promptId);
+                return item?.content || '';
+            }
+            if (typeof p === 'object')
+                return p[promptId] || '';
+        }
+        catch (e) { }
+        return '';
+    }
+    function ensurePlotPromptGroup_ACU(plotSettings, { persist = false } = {}) {
+        if (!plotSettings)
+            return;
+        if (Array.isArray(plotSettings.promptGroup) && plotSettings.promptGroup.length > 0)
+            return;
+        const legacyMain = getLegacyPlotPromptContent_ACU(plotSettings, 'mainPrompt') || (DEFAULT_PLOT_SETTINGS_ACU?.prompts?.[0]?.content || '');
+        const legacySystem = getLegacyPlotPromptContent_ACU(plotSettings, 'systemPrompt') || (DEFAULT_PLOT_SETTINGS_ACU?.prompts?.[1]?.content || '');
+        plotSettings.promptGroup = buildDefaultPlotPromptGroup_ACU({
+            mainAContent: legacyMain,
+            mainBContent: legacySystem,
+        });
+        if (persist) {
+            try {
+                saveSettings_ACU();
+            }
+            catch (e) { }
+        }
+    }
+
+    /**
      * service/worldbook/injection-engine-config.ts — 放置配置常量与默认值
      * 从 injection-engine.ts 拆出
      */
@@ -3845,64 +4137,6 @@ $CONTENT
         for (let i = 0; i < size; i++)
             used.add(s + i);
         return s;
-    }
-
-    /**
-     * service/settings/settings-readers.ts — 设置读取器（纯读取，无持久化副作用）
-     *
-     * 从 settings-service.ts 提取。这些函数只读取/规范化 settings 中的数据，
-     * 不执行保存操作。其他子模块应优先从此文件 import，而非 settings-service.ts。
-     */
-    /**
-     * 获取当前角色的专属设置。
-     * 业务逻辑：读 settings → deep merge 默认值 → 写回（确保字段完整）。
-     * 注意：此函数有"规范化写回"的副作用（补全缺失字段），但不触发持久化。
-     */
-    function getCurrentCharSettings_ACU() {
-        const charId = currentChatFileIdentifier_ACU || 'default';
-        if (!settings_ACU.characterSettings) {
-            settings_ACU.characterSettings = {};
-        }
-        const globalSummaryVectorIndexEnabled = (typeof globalMeta_ACU?.summaryVectorIndexModeGlobal === 'boolean')
-            ? (globalMeta_ACU.summaryVectorIndexModeGlobal === true)
-            : (settings_ACU?.summaryVectorIndexModeDefault === true);
-        const globalZeroTkEnabled = globalSummaryVectorIndexEnabled
-            ? false
-            : (typeof globalMeta_ACU?.zeroTkOccupyModeGlobal === 'boolean')
-                ? (globalMeta_ACU.zeroTkOccupyModeGlobal === true)
-                : (settings_ACU?.zeroTkOccupyModeDefault === true);
-        if (!settings_ACU.characterSettings[charId]) {
-            const worldbookConfigForNewChat = JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU));
-            // 0TK 与向量混合交火增强方案是全局互斥开关，不是聊天级配置。
-            // 这里保留 worldbookConfig 字段只是为了兼容既有调用方读取。
-            worldbookConfigForNewChat.summaryVectorIndexModeEnabled = globalSummaryVectorIndexEnabled;
-            worldbookConfigForNewChat.zeroTkOccupyMode = globalZeroTkEnabled;
-            worldbookConfigForNewChat.outlineEntryEnabled = globalSummaryVectorIndexEnabled ? true : !globalZeroTkEnabled;
-            settings_ACU.characterSettings[charId] = {
-                worldbookConfig: worldbookConfigForNewChat,
-            };
-            logDebug_ACU(`Created new character settings for: ${charId}`);
-        }
-        try {
-            const existingCfg = settings_ACU.characterSettings[charId].worldbookConfig || {};
-            const mergedCfg = deepMerge_ACU(JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU)), existingCfg);
-            // 强制使用全局状态覆盖旧聊天残留字段，避免模式跟着对话走。
-            mergedCfg.summaryVectorIndexModeEnabled = globalSummaryVectorIndexEnabled;
-            mergedCfg.zeroTkOccupyMode = globalZeroTkEnabled;
-            mergedCfg.outlineEntryEnabled = globalSummaryVectorIndexEnabled ? true : !globalZeroTkEnabled;
-            // [向量记忆] vectorMemory 不再跟随世界书配置规范化，
-            // 已迁移到 settings_ACU.vectorMemoryConfig（全局数据库级）。
-            // 保留 mergedCfg.vectorMemory 的旧数据引用以兼容迁移读取。
-            settings_ACU.characterSettings[charId].worldbookConfig = mergedCfg;
-        }
-        catch (e) {
-            // ignore
-        }
-        return settings_ACU.characterSettings[charId];
-    }
-    /** 获取当前角色的世界书配置 */
-    function getCurrentWorldbookConfig_ACU() {
-        return getCurrentCharSettings_ACU().worldbookConfig;
     }
 
     /**
@@ -5408,240 +5642,6 @@ $CONTENT
         if (!container)
             return {};
         return safeClone(container);
-    }
-
-    function normalizeArchiveTriggerCount_ACU(value, fallbackValue) {
-        const normalized = normalizePositiveInteger_ACU$1(value, fallbackValue);
-        return Math.max(1, normalized);
-    }
-    function cloneDefaultVectorMemoryConfig_ACU() {
-        return JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU));
-    }
-    function normalizeMinScore_ACU$2(value, fallbackValue) {
-        const num = Number(value);
-        if (!Number.isFinite(num))
-            return fallbackValue;
-        if (num < 0)
-            return 0;
-        if (num > 1)
-            return 1;
-        return num;
-    }
-    function normalizeTextField_ACU(value, fallbackValue = '') {
-        if (typeof value !== 'string')
-            return fallbackValue;
-        return value.trim();
-    }
-    function normalizeKeywordPromptGroup_ACU(value, fallbackValue) {
-        if (!Array.isArray(value) || value.length === 0) {
-            return JSON.parse(JSON.stringify(fallbackValue));
-        }
-        const validRoles = new Set(['system', 'assistant', 'user']);
-        const segments = [];
-        for (const item of value) {
-            if (!item || typeof item !== 'object')
-                continue;
-            const role = typeof item.role === 'string'
-                ? item.role.toLowerCase().trim()
-                : 'system';
-            const content = typeof item.content === 'string'
-                ? item.content.trim()
-                : '';
-            if (!content)
-                continue;
-            segments.push({
-                role: validRoles.has(role) ? role : 'system',
-                content,
-                deletable: item.deletable !== false,
-            });
-        }
-        return segments.length > 0
-            ? segments
-            : JSON.parse(JSON.stringify(fallbackValue));
-    }
-    function getDefaultVectorMemoryConfig_ACU() {
-        return cloneDefaultVectorMemoryConfig_ACU();
-    }
-    function normalizeVectorMemoryConfig_ACU(rawConfig) {
-        const defaults = cloneDefaultVectorMemoryConfig_ACU();
-        const source = rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig)
-            ? rawConfig
-            : {};
-        const archiveBatchSize = normalizePositiveInteger_ACU$1(source.archiveBatchSize, defaults.archiveBatchSize);
-        const archiveTriggerCount = normalizeArchiveTriggerCount_ACU(source.archiveTriggerCount, defaults.archiveTriggerCount ?? archiveBatchSize);
-        const archiveMaxConcurrency = normalizePositiveInteger_ACU$1(source.archiveMaxConcurrency, defaults.archiveMaxConcurrency ?? 3);
-        return {
-            enabled: source.enabled === true,
-            threshold: normalizePositiveInteger_ACU$1(source.threshold, defaults.threshold),
-            archiveTriggerCount,
-            archiveBatchSize,
-            archiveMaxConcurrency,
-            topK: normalizePositiveInteger_ACU$1(source.topK, defaults.topK),
-            minScore: normalizeMinScore_ACU$2(source.minScore, defaults.minScore),
-            embeddingEndpoint: normalizeTextField_ACU(source.embeddingEndpoint, defaults.embeddingEndpoint),
-            embeddingApiKey: normalizeTextField_ACU(source.embeddingApiKey, defaults.embeddingApiKey),
-            embeddingModel: normalizeTextField_ACU(source.embeddingModel, defaults.embeddingModel),
-            rerankEndpoint: normalizeTextField_ACU(source.rerankEndpoint, defaults.rerankEndpoint),
-            rerankApiKey: normalizeTextField_ACU(source.rerankApiKey, defaults.rerankApiKey),
-            rerankModel: normalizeTextField_ACU(source.rerankModel, defaults.rerankModel),
-            vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
-            entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
-            entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
-            summaryChunkSentenceCount: normalizePositiveInteger_ACU$1(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
-            summaryPromptGroupId: normalizeTextField_ACU(source.summaryPromptGroupId, defaults.summaryPromptGroupId) || defaults.summaryPromptGroupId,
-            archiveWithoutSummary: source.archiveWithoutSummary === true,
-            summaryPromptGroup: normalizeKeywordPromptGroup_ACU(source.summaryPromptGroup, defaults.summaryPromptGroup || []),
-            keywordApiPreset: normalizeTextField_ACU(source.keywordApiPreset, defaults.keywordApiPreset),
-            keywordContextPairCount: normalizePositiveInteger_ACU$1(source.keywordContextPairCount, defaults.keywordContextPairCount),
-            keywordPromptGroup: normalizeKeywordPromptGroup_ACU(source.keywordPromptGroup, defaults.keywordPromptGroup),
-            recallCandidateLimit: normalizePositiveInteger_ACU$1(source.recallCandidateLimit, defaults.recallCandidateLimit),
-        };
-    }
-    /**
-     * 获取当前向量记忆配置。
-     *
-     * 配置存储在 settings_ACU.vectorMemoryConfig（全局数据库级）。
-     * loadSettings_ACU() 已负责从旧位置（worldbookConfig.vectorMemory）迁移。
-     *
-     * 返回的始终是经过 normalize 的完整配置对象。
-     * 对返回值的直接修改会反映到 settings_ACU.vectorMemoryConfig（引用），
-     * 但不会自动持久化——需要调用 saveSettingsAndNotify_ACU()。
-     */
-    function getCurrentVectorMemoryConfig_ACU() {
-        const globalConfig = settings_ACU.vectorMemoryConfig;
-        if (globalConfig && typeof globalConfig === 'object' && !Array.isArray(globalConfig)) {
-            // 已有全局配置，normalize 后直接返回引用（UI 写入需要引用）
-            const normalized = normalizeVectorMemoryConfig_ACU(globalConfig);
-            Object.assign(globalConfig, normalized);
-            return globalConfig;
-        }
-        // 兜底：全局配置不存在时（loadSettings 未覆盖到的边界情况），
-        // 从当前角色的世界书配置迁移
-        const worldbookConfig = getCurrentWorldbookConfig_ACU();
-        const legacyConfig = worldbookConfig?.vectorMemory;
-        const source = (legacyConfig && typeof legacyConfig === 'object' && !Array.isArray(legacyConfig))
-            ? legacyConfig
-            : {};
-        const migrated = normalizeVectorMemoryConfig_ACU(source);
-        settings_ACU.vectorMemoryConfig = migrated;
-        return migrated;
-    }
-    function getVectorMemoryNamespace_ACU(chatFileIdentifier) {
-        const config = getCurrentVectorMemoryConfig_ACU();
-        const chatKey = cleanChatName_ACU(chatFileIdentifier || currentChatFileIdentifier_ACU || 'default');
-        return `${config.vectorNamespace}:${chatKey}`;
-    }
-    function hasVectorMemoryRerankConfig_ACU(configInput) {
-        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
-        return !!(config.rerankEndpoint && config.rerankModel);
-    }
-    function validateVectorMemoryRerankConfig_ACU(configInput) {
-        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
-        const errors = [];
-        const hasRerankEndpoint = !!config.rerankEndpoint;
-        const hasRerankModel = !!config.rerankModel;
-        if (!hasRerankEndpoint && !hasRerankModel) {
-            return {
-                valid: false,
-                errors: [],
-            };
-        }
-        if (hasRerankEndpoint !== hasRerankModel) {
-            errors.push('rerankEndpoint 和 rerankModel 必须同时填写或同时留空');
-        }
-        return {
-            valid: errors.length === 0,
-            errors,
-        };
-    }
-    function collectVectorMemoryCommonErrors_ACU(config) {
-        const errors = [];
-        if (!config.embeddingEndpoint) {
-            errors.push('缺少 embeddingEndpoint');
-        }
-        if (!config.embeddingModel) {
-            errors.push('缺少 embeddingModel');
-        }
-        if (config.threshold < 1) {
-            errors.push('threshold 必须大于 0');
-        }
-        if (config.archiveTriggerCount < 1) {
-            errors.push('archiveTriggerCount 必须大于 0');
-        }
-        if (config.archiveBatchSize < 1) {
-            errors.push('archiveBatchSize 必须大于 0');
-        }
-        if (config.archiveMaxConcurrency < 1) {
-            errors.push('archiveMaxConcurrency 必须大于 0');
-        }
-        if (config.summaryChunkSentenceCount < 1) {
-            errors.push('summaryChunkSentenceCount 必须大于 0');
-        }
-        if (!config.summaryPromptGroupId) {
-            errors.push('缺少 summaryPromptGroupId');
-        }
-        if (config.recallCandidateLimit < config.topK) {
-            errors.push('recallCandidateLimit 不能小于 topK');
-        }
-        return errors;
-    }
-    function validateVectorIndexBuildConfig_ACU(configInput) {
-        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
-        const errors = collectVectorMemoryCommonErrors_ACU(config);
-        return {
-            valid: errors.length === 0,
-            errors,
-        };
-    }
-    function validateVectorMemoryConfig_ACU(configInput) {
-        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
-        const errors = collectVectorMemoryCommonErrors_ACU(config);
-        if (!config.entryComment) {
-            errors.push('缺少 entryComment');
-        }
-        if (!config.entryKey) {
-            errors.push('缺少 entryKey');
-        }
-        return {
-            valid: errors.length === 0,
-            errors,
-        };
-    }
-    function getEffectiveSummaryVectorIndexConfig_ACU(configInput) {
-        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
-        return {
-            ...config,
-            enabled: true,
-            minScore: 0.4,
-            topK: 100,
-            recallCandidateLimit: 100,
-            summaryChunkSentenceCount: 2,
-            summaryIndexMinScore: 0.4,
-            summaryIndexCandidateLimit: 100,
-            summaryIndexChunkSentenceCount: 2,
-        };
-    }
-    function validateSummaryVectorIndexConfig_ACU(configInput) {
-        const config = getEffectiveSummaryVectorIndexConfig_ACU(configInput);
-        const errors = [];
-        if (!config.embeddingEndpoint) {
-            errors.push('缺少 embeddingEndpoint');
-        }
-        if (!config.embeddingModel) {
-            errors.push('缺少 embeddingModel');
-        }
-        const rerankValidation = validateVectorMemoryRerankConfig_ACU(config);
-        errors.push(...rerankValidation.errors);
-        return {
-            valid: errors.length === 0,
-            errors,
-        };
-    }
-    function isVectorMemoryEnabled_ACU(configInput) {
-        const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
-        if (!config.enabled)
-            return false;
-        return validateVectorMemoryConfig_ACU(config).valid;
     }
 
     function normalizeText_ACU$7(value) {
@@ -23598,6 +23598,10 @@ $CONTENT
             settings_ACU.zeroTkOccupyModeDefault = false;
             globalMeta_ACU.zeroTkOccupyModeGlobal = false;
         }
+        // 向量混合交火增强方案会复用普通向量模型/API/rerank 配置；启停交火时必须同步启停普通向量开关。
+        // 这里只改 enabled，不覆盖模型、API、rerank、namespace 等用户配置。
+        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+        vectorMemoryConfig.enabled = enabled;
         // 0TK 与向量混合交火增强方案是全局互斥开关；worldbookConfig 里的同名字段只是兼容投影。
         const cfg = getCurrentWorldbookConfig_ACU();
         cfg.summaryVectorIndexModeEnabled = enabled;
@@ -25622,8 +25626,10 @@ $CONTENT
             return getCurrentVectorMemoryConfig_ACU();
         };
         const toggleVectorMemoryConfigBlock_ACU = () => {
-            const vectorMemoryConfig = ensureVectorMemoryConfig_ACU();
-            $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(vectorMemoryConfig.enabled === true);
+            const worldbookConfig = getCurrentWorldbookConfig_ACU();
+            const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
+            $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`).prop('checked', summaryVectorIndexEnabled);
+            $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(summaryVectorIndexEnabled);
         };
         const updateVectorMemoryField_ACU = (field, value) => {
             const vectorMemoryConfig = ensureVectorMemoryConfig_ACU();
@@ -25685,7 +25691,8 @@ $CONTENT
             $refreshWorldbooksButton.on('click', populateWorldbookList_ACU);
         }
         bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`, 'change', ($input) => {
-            updateVectorMemoryField_ACU('enabled', $input.is(':checked'));
+            const worldbookConfig = getCurrentWorldbookConfig_ACU();
+            $input.prop('checked', worldbookConfig.summaryVectorIndexModeEnabled === true);
             toggleVectorMemoryConfigBlock_ACU();
             syncManualUpdateButtonAvailability_ACU();
         });
@@ -25969,6 +25976,9 @@ $CONTENT
             $summaryVectorIndexModeToggle.off('change.acu_summary_vector_index_mode').on('change.acu_summary_vector_index_mode', function () {
                 const modeEnabled = jQuery_API_ACU(this).is(':checked');
                 setSummaryVectorIndexMode_ACU(modeEnabled);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`).prop('checked', modeEnabled);
+                $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(modeEnabled);
+                syncManualUpdateButtonAvailability_ACU();
                 if (modeEnabled) {
                     $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled`).prop('checked', false);
                 }
@@ -29631,12 +29641,13 @@ $CONTENT
         syncMergeSettingsToUI_ACU(s);
         const worldbookConfig = getCurrentWorldbookConfig_ACU();
         const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+        const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
         $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source"]`).filter(`[value="${worldbookConfig.source}"]`).prop('checked', true);
         if (typeof updateWorldbookSourceView_ACU === 'function')
             updateWorldbookSourceView_ACU();
         if (typeof populateInjectionTargetSelector_ACU === 'function')
             populateInjectionTargetSelector_ACU();
-        setChecked('worldbook-vector-memory-enabled', vectorMemoryConfig.enabled);
+        setChecked('worldbook-vector-memory-enabled', summaryVectorIndexEnabled);
         setVal('worldbook-vector-memory-threshold', vectorMemoryConfig.threshold);
         setVal('worldbook-vector-memory-archive-trigger-count', vectorMemoryConfig.archiveTriggerCount || vectorMemoryConfig.archiveBatchSize);
         setVal('worldbook-vector-memory-archive-batch-size', vectorMemoryConfig.archiveBatchSize);
@@ -29661,7 +29672,7 @@ $CONTENT
         renderSummaryPromptGroupToUI_ACU(vectorMemoryConfig.summaryPromptGroup || []);
         const $vectorMemoryBlock = find('worldbook-vector-memory-config-block');
         if ($vectorMemoryBlock.length)
-            $vectorMemoryBlock.toggle(vectorMemoryConfig.enabled === true);
+            $vectorMemoryBlock.toggle(summaryVectorIndexEnabled);
         syncManualUpdateButtonAvailability_ACU();
         const $outlineToggle = find('worldbook-outline-entry-enabled');
         if ($outlineToggle.length) {
@@ -29670,10 +29681,9 @@ $CONTENT
                 mode = (worldbookConfig.outlineEntryEnabled === false);
             $outlineToggle.prop('checked', mode === true);
         }
-        setChecked('worldbook-summary-vector-index-mode-enabled', worldbookConfig.summaryVectorIndexModeEnabled === true);
+        setChecked('worldbook-summary-vector-index-mode-enabled', summaryVectorIndexEnabled);
         const $summaryVectorIndexHint = find('summary-vector-index-archive-hint');
         if ($summaryVectorIndexHint.length) {
-            const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
             const activeSummaryVectorIndexSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
             const activeSummaryVectorIndexState = activeSummaryVectorIndexSnapshot?.summaryVectorIndexState || null;
             const summaryVectorIndexRowCount = activeSummaryVectorIndexState?.rowCount || (Array.isArray(activeSummaryVectorIndexState?.rows) ? activeSummaryVectorIndexState.rows.length : 0);
@@ -42465,10 +42475,10 @@ insertRow(1, ["时间2", "大纲事件2...", "关键词"]);
                         <div style="margin-top: 15px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: 8px; background: var(--acu-bg-2);">
                             <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
                                 <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled" style="font-weight: 600; margin-bottom: 4px; display: block;">向量远记忆召回</label>
-                                    <small class="notes">发送前基于远记忆大总结的向量 chunk 召回相关长期记忆，并同步到专用世界书条目。</small>
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled" style="font-weight: 600; margin-bottom: 4px; display: block;">向量模型与召回配置</label>
+                                    <small class="notes">这里仅配置向量混合交火增强方案复用的 Embedding、Rerank 与召回参数；启停由上方“向量混合交火增强方案”控制。</small>
                                 </div>
-                                <label style="display: inline-flex; align-items: center; gap: 8px; margin: 0; white-space: nowrap;">
+                                <label id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled-toggle-row" style="display: none; align-items: center; gap: 8px; margin: 0; white-space: nowrap;">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled">
                                     <span>启用向量记忆</span>
                                 </label>

@@ -165,10 +165,11 @@ setVal('merge-prompt-template', s.mergeSummaryPrompt || (isSqliteMode() ? DEFAUL
       syncMergeSettingsToUI_ACU(s);
       const worldbookConfig = getCurrentWorldbookConfig_ACU();
       const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+      const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
       $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source"]`).filter(`[value="${worldbookConfig.source}"]`).prop('checked', true);
       if (typeof updateWorldbookSourceView_ACU === 'function') updateWorldbookSourceView_ACU();
       if (typeof populateInjectionTargetSelector_ACU === 'function') populateInjectionTargetSelector_ACU();
-      setChecked('worldbook-vector-memory-enabled', vectorMemoryConfig.enabled);
+      setChecked('worldbook-vector-memory-enabled', summaryVectorIndexEnabled);
       setVal('worldbook-vector-memory-threshold', vectorMemoryConfig.threshold);
       setVal('worldbook-vector-memory-archive-trigger-count', (vectorMemoryConfig as any).archiveTriggerCount || vectorMemoryConfig.archiveBatchSize);
       setVal('worldbook-vector-memory-archive-batch-size', vectorMemoryConfig.archiveBatchSize);
@@ -192,7 +193,7 @@ setVal('merge-prompt-template', s.mergeSummaryPrompt || (isSqliteMode() ? DEFAUL
       renderKeywordPromptGroupToUI_ACU((vectorMemoryConfig as any).keywordPromptGroup || []);
       renderSummaryPromptGroupToUI_ACU((vectorMemoryConfig as any).summaryPromptGroup || []);
       const $vectorMemoryBlock = find('worldbook-vector-memory-config-block');
-      if ($vectorMemoryBlock.length) $vectorMemoryBlock.toggle(vectorMemoryConfig.enabled === true);
+      if ($vectorMemoryBlock.length) $vectorMemoryBlock.toggle(summaryVectorIndexEnabled);
       syncManualUpdateButtonAvailability_ACU();
       const $outlineToggle = find('worldbook-outline-entry-enabled');
       if ($outlineToggle.length) {
@@ -200,10 +201,9 @@ setVal('merge-prompt-template', s.mergeSummaryPrompt || (isSqliteMode() ? DEFAUL
           if (typeof mode === 'undefined' && typeof worldbookConfig.outlineEntryEnabled !== 'undefined') mode = (worldbookConfig.outlineEntryEnabled === false);
           $outlineToggle.prop('checked', mode === true);
       }
-      setChecked('worldbook-summary-vector-index-mode-enabled', worldbookConfig.summaryVectorIndexModeEnabled === true);
+      setChecked('worldbook-summary-vector-index-mode-enabled', summaryVectorIndexEnabled);
       const $summaryVectorIndexHint = find('summary-vector-index-archive-hint');
       if ($summaryVectorIndexHint.length) {
-          const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
           const activeSummaryVectorIndexSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
           const activeSummaryVectorIndexState = activeSummaryVectorIndexSnapshot?.summaryVectorIndexState || null;
           const summaryVectorIndexRowCount = activeSummaryVectorIndexState?.rowCount || (Array.isArray(activeSummaryVectorIndexState?.rows) ? activeSummaryVectorIndexState.rows.length : 0);
