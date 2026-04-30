@@ -24,6 +24,70 @@ export const DEFAULT_AUTO_UPDATE_FREQUENCY_ACU = 1;
 export const DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU = 500;
 export const AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU = 2000;
 
+// --- 一次性默认值刷新版本标记 ---
+export const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.1.2-keyword-retry';
+export const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.2-table-template-defaults';
+
+// --- 向量记忆全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
+export const defaultVectorMemoryConfig_ACU = {
+  enabled: false,
+  threshold: 50,
+  archiveTriggerCount: 9,
+  archiveBatchSize: 3,
+  archiveMaxConcurrency: 3,
+  topK: 10,
+  minScore: 0.6,
+  embeddingEndpoint: '',
+  embeddingApiKey: '',
+  embeddingModel: '',
+  rerankEndpoint: '',
+  rerankApiKey: '',
+  rerankModel: '',
+  vectorNamespace: 'chat',
+  entryComment: 'TavernDB-ACU-VectorMemory',
+  entryKey: 'TavernDB-ACU-VectorMemory-Key',
+  summaryChunkSentenceCount: 2,
+  summaryPromptGroupId: 'remote-memory-archive-default',
+  archiveWithoutSummary: false,
+  summaryPromptGroup: [
+    {
+      role: 'system',
+      content: '你负责将一批较早的纪要条目整理为可供长期召回的远记忆大总结。\n'
+        + '目标：生成一条可被向量召回使用的高密度长期记忆。\n'
+        + '硬性长度约束：最终输出最高 500TK；如果信息过多，优先压缩表达，不要扩写。\n'
+        + '内容优先级：人物关系、关键事件、目标变化、冲突、重要道具、地点、时间线、未解决伏笔。\n'
+        + '输出要求：只输出最终远记忆大总结正文；不要写解释、前言、编号说明、标题、Markdown 列表，也不要复述你的任务。',
+      deletable: false,
+    },
+    {
+      role: 'user',
+      content: '以下是需要归档成远记忆大总结的一批较早纪要条目：\n<纪要批次>\n$SUMMARY_SOURCE_ROWS\n</纪要批次>\n\n请在 500TK 以内输出一条信息密度高、可检索、可长期保存的远记忆大总结正文。只输出正文。',
+      deletable: true,
+    },
+  ],
+  keywordApiPreset: '',
+  keywordContextPairCount: 1,
+  keywordGenerationMaxAttempts: 3,
+  keywordPromptGroup: [
+    {
+      role: 'system',
+      content: '你负责为向量记忆召回生成检索关键词。\n'
+        + '你会看到最近对话上下文和当前用户输入。\n'
+        + '请输出最相关的 12 个简洁关键词或短语，优先保留人物、地点、时间、事件、目标、道具、组织等检索价值高的信息。\n'
+        + '禁止输出解释、句子、编号、前后缀说明。\n'
+        + '多个关键词请使用中文逗号分隔。\n'
+        + '如果当前输入信息很少，也必须尽量提炼可检索的核心词；不足 12 个时用最接近当前语境的检索词补足。',
+      deletable: false,
+    },
+    {
+      role: 'user',
+      content: '最近上下文：\n$RECENT_CONTEXT\n\n当前用户输入：\n$USER_INPUT\n\n请仅输出最相关的 12 个关键词。',
+      deletable: true,
+    },
+  ],
+  recallCandidateLimit: 100,
+};
+
 // --- 全局世界书默认配置 ---
 export const defaultWorldbookConfig_ACU = {
   source: 'character',
@@ -32,6 +96,9 @@ export const defaultWorldbookConfig_ACU = {
   injectionTarget: 'character',
   outlineEntryEnabled: true,
   zeroTkOccupyMode: false,
+  summaryVectorIndexModeEnabled: false,
+  // vectorMemory 保留引用以兼容旧数据迁移读取，但新数据写入 settings_ACU.vectorMemoryConfig
+  vectorMemory: defaultVectorMemoryConfig_ACU,
 };
 
 import { DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU } from './defaults-json.js';
