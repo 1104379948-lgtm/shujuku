@@ -308,8 +308,8 @@ export   function loadSettings_ACU() {
           }
       }
 
-      // [向量记忆] spv2.1.2 一次性刷新默认归档/召回参数。
-      // 只刷新本次版本要求的默认项，不覆盖 endpoint/key/model/enabled/namespace/世界书条目标识等用户连接与身份配置。
+      // [向量记忆] 一次性刷新默认归档/召回/关键词提示词参数。
+      // 只刷新版本要求的默认项，不覆盖 endpoint/key/model/enabled/namespace/世界书条目标识等用户连接与身份配置。
       if (settings_ACU.vectorMemoryConfig && typeof settings_ACU.vectorMemoryConfig === 'object' && !Array.isArray(settings_ACU.vectorMemoryConfig)) {
           const vectorConfig = settings_ACU.vectorMemoryConfig as any;
           if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
