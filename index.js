@@ -2742,7 +2742,7 @@ $CONTENT
     const DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU = 500;
     const AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU = 2000;
     // --- 一次性默认值刷新版本标记 ---
-    const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.1.3-keyword-prefill';
+    const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.1.4-summary-index-archive-concurrency';
     const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.2-table-template-defaults';
     // --- 向量记忆全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
     const defaultVectorMemoryConfig_ACU = {
@@ -2751,6 +2751,7 @@ $CONTENT
         archiveTriggerCount: 9,
         archiveBatchSize: 3,
         archiveMaxConcurrency: 3,
+        summaryIndexArchiveMaxConcurrency: 50,
         topK: 10,
         minScore: 0.6,
         embeddingEndpoint: '',
@@ -3727,6 +3728,8 @@ $CONTENT
     }
     function getEffectiveSummaryVectorIndexConfig_ACU(configInput) {
         const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
+        const defaults = cloneDefaultVectorMemoryConfig_ACU();
+        const summaryIndexArchiveMaxConcurrency = normalizePositiveInteger_ACU$1(config.summaryIndexArchiveMaxConcurrency, Number(defaults.summaryIndexArchiveMaxConcurrency) || 50);
         return {
             ...config,
             enabled: true,
@@ -3737,6 +3740,7 @@ $CONTENT
             summaryIndexMinScore: 0.4,
             summaryIndexCandidateLimit: 100,
             summaryIndexChunkSentenceCount: 2,
+            summaryIndexArchiveMaxConcurrency,
         };
     }
     function validateSummaryVectorIndexConfig_ACU(configInput) {
@@ -10989,6 +10993,30 @@ $CONTENT
             .filter((row) => row.chunkIds.length > 0);
         return { rows: indexedRows, chunks };
     }
+    async function buildChunksWithRowConcurrencyLimit_ACU(rows, options) {
+        if (!Array.isArray(rows) || rows.length === 0) {
+            return { rows: [], chunks: [] };
+        }
+        const maxRowsPerBatch = Math.max(1, Math.floor(Number(options.maxRowsPerBatch) || 50));
+        const allRows = [];
+        const allChunks = [];
+        for (let startIndex = 0; startIndex < rows.length; startIndex += maxRowsPerBatch) {
+            const rowBatch = rows.slice(startIndex, startIndex + maxRowsPerBatch);
+            if (rowBatch.length === 0)
+                continue;
+            const batchResult = await buildChunksWithEmbeddings_ACU(rowBatch, {
+                snapshotMessageId: options.snapshotMessageId,
+                sentenceCount: options.sentenceCount,
+                embeddingEndpoint: options.embeddingEndpoint,
+                embeddingApiKey: options.embeddingApiKey,
+                embeddingModel: options.embeddingModel,
+                existingSequenceBase: allChunks.length,
+            });
+            allRows.push(...batchResult.rows);
+            allChunks.push(...batchResult.chunks);
+        }
+        return { rows: allRows, chunks: allChunks };
+    }
     async function archiveSummaryVectorIndexNow_ACU(options = {}) {
         const config = getEffectiveSummaryVectorIndexConfig_ACU();
         const validation = validateSummaryVectorIndexConfig_ACU(config);
@@ -11061,12 +11089,13 @@ $CONTENT
             const reusableRowKeySet = new Set(reusable.reusableRows.map((row) => row.rowKey));
             const rowsNeedingEmbedding = prepared.rows.filter((row) => !reusableRowKeySet.has(row.rowKey));
             const embedded = rowsNeedingEmbedding.length > 0
-                ? await buildChunksWithEmbeddings_ACU(rowsNeedingEmbedding, {
+                ? await buildChunksWithRowConcurrencyLimit_ACU(rowsNeedingEmbedding, {
                     snapshotMessageId,
                     sentenceCount: config.summaryIndexChunkSentenceCount,
                     embeddingEndpoint: config.embeddingEndpoint,
                     embeddingApiKey: config.embeddingApiKey,
                     embeddingModel: config.embeddingModel,
+                    maxRowsPerBatch: config.summaryIndexArchiveMaxConcurrency,
                 })
                 : { rows: [], chunks: [] };
             const finalRows = [...reusable.reusableRows, ...embedded.rows].sort((a, b) => a.rowOrder - b.rowOrder || a.rowKey.localeCompare(b.rowKey));
@@ -23253,6 +23282,7 @@ $CONTENT
                 vectorConfig.archiveTriggerCount = defaultVectorMemoryConfig_ACU.archiveTriggerCount;
                 vectorConfig.archiveBatchSize = defaultVectorMemoryConfig_ACU.archiveBatchSize;
                 vectorConfig.archiveMaxConcurrency = defaultVectorMemoryConfig_ACU.archiveMaxConcurrency;
+                vectorConfig.summaryIndexArchiveMaxConcurrency = defaultVectorMemoryConfig_ACU.summaryIndexArchiveMaxConcurrency || 50;
                 vectorConfig.topK = defaultVectorMemoryConfig_ACU.topK;
                 vectorConfig.minScore = defaultVectorMemoryConfig_ACU.minScore;
                 vectorConfig.summaryPromptGroup = JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU.summaryPromptGroup || []));
