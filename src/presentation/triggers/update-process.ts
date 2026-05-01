@@ -203,7 +203,15 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
         mode,
         options,
         // executeUpdate 回调：创建 AbortController 并调用 presentation 层的 proceedWithCardUpdate
-        async (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => {
+        async (
+            messagesToUse: any[],
+            saveTargetIndex: number,
+            updateMode: string,
+            isSilentMode: boolean,
+            targetSheetKeys: string[] | null,
+            requestOptions: Record<string, any> | null,
+            progressContext: BatchUpdateProgressContext
+        ): Promise<CardUpdateResult> => {
             return proceedWithCardUpdate_ACU(messagesToUse, '', saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext);
         }
     );

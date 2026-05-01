@@ -39,8 +39,10 @@ export function getCurrentCharSettings_ACU() {
             JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU)),
             existingCfg,
         );
-        mergedCfg.zeroTkOccupyMode = globalZeroTkDefault;
-        mergedCfg.outlineEntryEnabled = !globalZeroTkDefault;
+        const globalSummaryVectorIndexEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
+        mergedCfg.summaryVectorIndexModeEnabled = globalSummaryVectorIndexEnabled;
+        mergedCfg.zeroTkOccupyMode = globalSummaryVectorIndexEnabled ? false : globalZeroTkDefault;
+        mergedCfg.outlineEntryEnabled = globalSummaryVectorIndexEnabled ? true : !mergedCfg.zeroTkOccupyMode;
         settings_ACU.characterSettings[charId].worldbookConfig = mergedCfg;
     } catch (e) {
         // ignore

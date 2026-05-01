@@ -132,10 +132,13 @@ export function generateTableTabHTML(): string {
                         </div>
                         <hr>
                         <div style="margin-top: 15px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: 8px; background: var(--acu-bg-2);">
-                            <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
-                                <div>
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled" style="font-weight: 600; margin-bottom: 4px; display: block;">向量模型与召回配置</label>
-                                    <small class="notes">这里仅配置向量混合交火增强方案复用的 Embedding、Rerank 与召回参数；启停由上方“向量混合交火增强方案”控制。</small>
+                            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap;">
+                                <div style="flex: 1 1 280px; min-width: 240px;">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled" style="font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                        <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled" style="width: 14px; height: 14px; cursor: pointer;">
+                                        <span>启用交火模式向量索引（外置存储）</span>
+                                    </label>
+                                    <small class="notes">开启后会随纪要表更新自动累积外置向量索引；聊天记录只保存 manifest，向量分片写入 /user/files。下方配置 Embedding、Rerank 与召回参数。</small>
                                 </div>
                                 <label id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled-toggle-row" style="display: none; align-items: center; gap: 8px; margin: 0; white-space: nowrap;">
                                     <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled">
@@ -144,37 +147,34 @@ export function generateTableTabHTML(): string {
                             </div>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block" style="display: none; margin-top: 12px;">
                                 <div class="acu-section" style="margin-bottom: 12px;">
-                                    <div class="acu-section-title">召回与筛选参数</div>
+                                    <div class="acu-section-title">交火模式纪要索引参数</div>
                                     <div class="acu-grid-auto">
+                                        <input type="hidden" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-threshold">
+                                        <input type="hidden" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-trigger-count">
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-threshold">近记忆保留阈值</label>
-                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-threshold" min="1" step="1" placeholder="50">
-                                            <small class="notes">纪要表中始终保留的最近条目数；未超过该值时不会自动归档。</small>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-summary-index-keyword-min-rows">发送前交火触发阈值</label>
+                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-summary-index-keyword-min-rows" min="1" step="1" placeholder="100">
+                                            <small class="notes">纪要表有效行数达到该值后，发送前会生成关键词并召回概要列 chunk；未达到时保留原概要索引流程。</small>
                                         </div>
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-trigger-count">超额触发数量</label>
-                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-trigger-count" min="1" step="1" placeholder="12">
-                                            <small class="notes">超过保留阈值后，还需额外累计这么多条旧纪要，才会触发一次远记忆归档。</small>
-                                        </div>
-                                        <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk">最终注入 TopK</label>
-                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk" min="1" step="1" placeholder="20">
-                                            <small class="notes">每次召回后最终写入世界书的记忆数量上限；启用 Rerank 后这里仍然控制最终保留数量。</small>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk">最终覆盖 TopK</label>
+                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk" min="1" step="1" placeholder="10">
+                                            <small class="notes">Rerank 后选中的纪要数量上限；写入原概要索引条目时会重新按纪要表原始顺序排列。</small>
                                         </div>
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-min-score">Embedding 预筛最小分数</label>
-                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-min-score" min="0" max="1" step="0.01" placeholder="0.75">
-                                            <small class="notes">先用 embedding 相似度筛掉过低候选；启用 Rerank 后，这里仍只控制预筛阶段。</small>
+                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-min-score" min="0" max="1" step="0.01" placeholder="0.40">
+                                            <small class="notes">发送前先用 query embedding 对纪要 chunk 预筛；Rerank 只会处理通过预筛的候选。</small>
                                         </div>
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-recall-candidate-limit">预筛候选上限</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-recall-candidate-limit" min="1" step="1" placeholder="100">
-                                            <small class="notes">embedding 本地预筛后保留的候选数量，也是 Rerank 的最大输入数；不能小于 TopK。</small>
+                                            <small class="notes">Embedding 本地预筛后保留的候选数量，也是 Rerank 的最大输入数；不能小于 TopK。</small>
                                         </div>
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-namespace">命名空间前缀</label>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-namespace">索引命名空间前缀</label>
                                             <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-namespace" placeholder="chat">
-                                            <small class="notes">最终会与当前聊天标识拼接，形成实际 namespace。</small>
+                                            <small class="notes">用于区分不同聊天的外置索引缓存；会与当前聊天标识拼接。</small>
                                         </div>
                                     </div>
                                 </div>
@@ -220,51 +220,31 @@ export function generateTableTabHTML(): string {
                                     <small class="notes" style="display: block; margin-top: 8px;">启用真实 Rerank 后，Embedding 仍负责召回预筛，TopK 仍控制最终注入数量；这三者不是互相替代关系。</small>
                                 </div>
                                 <div class="acu-section" style="margin-bottom: 12px;">
-                                    <div class="acu-section-title">归档参数</div>
+                                    <div class="acu-section-title">外置索引写入参数</div>
                                     <div class="acu-grid-auto">
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit">概要分块句数</label>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit">概要列分块句数</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit" min="1" step="1" placeholder="2">
-                                            <small class="notes">单个远记忆总结 chunk 最多包含几句；命中后会回卷整条大总结。</small>
+                                            <small class="notes">仅对纪要表概要列文本分块。数值越小召回越精细，但外置分片数量会增加。</small>
                                         </div>
                                         <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-batch-size">单批归档数量</label>
-                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-batch-size" min="1" step="1" placeholder="4">
-                                            <small class="notes">达到触发条件后，会把本轮应归档的最早超额纪要按这个数量切成多批处理。</small>
-                                        </div>
-                                        <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-max-concurrency">归档并发数</label>
-                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-max-concurrency" min="1" step="1" placeholder="3">
-                                            <small class="notes">当本轮需要归档多个批次时，最多并发处理这么多批；全部成功后才统一删除原纪要并写入远记忆。</small>
-                                        </div>
-                                        <div class="acu-col-sm" style="display: flex; flex-direction: column; justify-content: flex-end;">
-                                            <label style="display: inline-flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-                                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-without-summary">
-                                                <span>不进行总结直接归档</span>
-                                            </label>
-                                            <small class="notes">勾选后跳过大总结生成，直接将本批纪要正文整理后向量化归档；其它召回与世界书逻辑保持不变。</small>
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-max-concurrency">每批归档行数</label>
+                                            <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-max-concurrency" min="1" step="1" placeholder="30">
+                                            <small class="notes">填表保存完成后会立即归档；多条新增/变更纪要按该数量拆分 embedding 批次。</small>
                                         </div>
                                     </div>
+                                    <input type="hidden" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-batch-size">
+                                    <input type="hidden" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-without-summary">
                                 </div>
                                 <div class="acu-section" style="margin-bottom: 0;">
-                                    <div class="acu-section-title">条目与调用</div>
+                                    <div class="acu-section-title">关键词生成</div>
                                     <div class="acu-grid-auto">
-                                        <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-entry-comment">条目备注 Comment</label>
-                                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-entry-comment" placeholder="TavernDB-ACU-VectorMemory">
-                                            <small class="notes">用于识别专用向量记忆世界书条目。</small>
-                                        </div>
-                                        <div class="acu-col-sm">
-                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-entry-key">条目 Key</label>
-                                            <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-entry-key" placeholder="TavernDB-ACU-VectorMemory-Key">
-                                            <small class="notes">用于向世界书写入统一的记忆召回条目。</small>
-                                        </div>
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-api-preset">关键词 API 预设</label>
                                             <select id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-api-preset" class="text_pole" style="width: 100%;">
                                                 <option value="">使用当前API配置</option>
                                             </select>
-                                            <small class="notes">仅用于"生成关键词"阶段；留空则使用当前主 API 配置，不再误用填表 API 预设。</small>
+                                            <small class="notes">仅用于发送前“关键词生成”阶段；留空则使用当前主 API 配置。</small>
                                         </div>
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-context-pair-count">关键词上下文读取层数</label>
@@ -274,7 +254,7 @@ export function generateTableTabHTML(): string {
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-max-attempts">关键词生成最大尝试次数</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-max-attempts" min="1" step="1" placeholder="3">
-                                            <small class="notes">发送前关键词生成最多尝试几次；原生向量和向量混合交火增强方案共用此配置。</small>
+                                            <small class="notes">关键词生成失败时会回退到用户输入本身参与召回，不阻断原始发送。</small>
                                         </div>
                                     </div>
                                 </div>
@@ -289,20 +269,10 @@ export function generateTableTabHTML(): string {
                                     <small class="notes" style="margin-bottom: 8px; display: block;">可用占位符：$RECENT_CONTEXT（最近上下文）、$USER_INPUT（当前用户输入）。</small>
                                     <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-prompt-group" style="display: flex; flex-direction: column; gap: 8px;"></div>
                                 </div>
-                                <div class="acu-section" style="margin-bottom: 12px;">
-                                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
-                                        <div class="acu-section-title" style="margin-bottom: 0;">大总结提示词</div>
-                                        <div style="display: flex; gap: 6px;">
-                                            <button id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-summary-prompt-reset" class="acu-btn-small" style="font-size: 12px;">重置为默认</button>
-                                            <button id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-summary-prompt-add" class="acu-btn-small" style="font-size: 12px;">添加段落</button>
-                                        </div>
-                                    </div>
-                                    <small class="notes" style="margin-bottom: 8px; display: block;">可用占位符：$SUMMARY_SOURCE_ROWS（待归档纪要批次正文）。</small>
-                                    <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-summary-prompt-group" style="display: flex; flex-direction: column; gap: 8px;"></div>
-                                </div>
+                                <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-summary-prompt-group" style="display: none;"></div>
                                 <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
-                                    <small class="notes">大总结查看入口：当前在“数据管理”页的“远记忆总结管理”面板中。这里直接写明，避免入口藏得像根本没做。</small>
-                                    <small class="notes">本方案以 Embedding 预筛为基础；若额外配置 Rerank，则会先预筛再重排，仍不要求独立 Vector Store。命中的是远记忆 chunk，但注入世界书时会回卷整条远记忆大总结。</small>
+                                    <small class="notes">交火模式发送前会依次执行：关键词生成 → 用户输入与关键词合并 embedding → 概要列 chunk 预筛 → 可选 Rerank 重排序 → 按纪要表原顺序覆盖原概要索引条目。</small>
+                                    <small class="notes">IndexedDB 只作为可丢弃缓存；权威向量分片保存在 /user/files，聊天记录只保存 manifest，不再把完整向量塞进聊天记录。</small>
                                 </div>
                             </div>
                         </div>
@@ -316,11 +286,11 @@ export function generateTableTabHTML(): string {
                                 <i class="fa-solid fa-table-columns"></i> 打开可视化表格编辑器
                             </button>
                             <button id="${SCRIPT_ID_PREFIX_ACU}-build-vector-index-now" class="acu-btn-medium" style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px;">
-                                <i class="fa-solid fa-brain"></i> 立即执行远记忆归档
+                                <i class="fa-solid fa-brain"></i> 立即构建交火纪要索引
                             </button>
                         </div>
                         <p class="notes" style="text-align: center; margin-top: 10px;">点击上方按钮打开全新的可视化界面，支持直接编辑数据、修改表头及更新参数。</p>
-                        <p class="notes" style="text-align: center; margin-top: 6px;">“立即执行远记忆归档”会先保存当前表格，再检测旧纪要是否超过阈值；达到后会把最早一批纪要归档成远记忆大总结并删除已成功归档的原始条目。</p>
+                        <p class="notes" style="text-align: center; margin-top: 6px;">“立即构建交火纪要索引”会把当前纪要表生成外置向量索引文件；后续纪要增删改会同步更新对应索引分片。</p>
                     </div>
                 </div>`;
 }

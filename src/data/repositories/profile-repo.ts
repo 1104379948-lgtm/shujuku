@@ -18,6 +18,7 @@ export let globalMeta_ACU: any = {
     zeroTkOccupyModeGlobal: false,
     summaryVectorIndexModeGlobal: false,
     plotEnabledGlobal: true,
+    vectorMemoryConfigGlobal: null,
 };
 
 export function buildDefaultGlobalMeta_ACU(): any {
@@ -29,6 +30,7 @@ export function buildDefaultGlobalMeta_ACU(): any {
         zeroTkOccupyModeGlobal: false,
         summaryVectorIndexModeGlobal: false,
         plotEnabledGlobal: true,
+        vectorMemoryConfigGlobal: null,
     };
 }
 
@@ -96,5 +98,8 @@ export function sanitizeSettingsForProfileSave_ACU(settingsObj: any): any {
     const cloned = safeJsonParse_ACU(safeJsonStringify_ACU(settingsObj, '{}'), {});
     delete cloned.dataIsolationHistory;
     delete cloned.dataIsolationEnabled;
+    // 交火/向量模型 API 配置是全局配置，权威副本存放在 globalMeta.vectorMemoryConfigGlobal。
+    // profile payload 中继续保存会导致切换隔离标识后旧值反向污染全局配置。
+    delete cloned.vectorMemoryConfig;
     return cloned;
 }

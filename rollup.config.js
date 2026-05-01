@@ -28,10 +28,10 @@ const BUILD_MODE = process.env.BUILD_MODE || 'userscript';
 // UserScript 头（仅油猴脚本使用）
 // ═══════════════════════════════════════════════════════════════
 const USER_SCRIPT_BANNER = `// ==UserScript==
-// @name         数据库-可定制副本
+// @name         SP·数据库 III
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  为不同的角色卡提供独立的、使用不同默认模板的数据库。通过修改 @name 和 UNIQUE_SCRIPT_ID 来创建互不干扰的副本。
+// @version      2.0.0
+// @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
 // @author       Cline (AI Assisted)
 // @match        */*
 // @grant        none

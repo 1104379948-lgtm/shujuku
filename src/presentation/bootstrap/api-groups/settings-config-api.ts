@@ -10,7 +10,7 @@ import { openAutoCardPopup_ACU } from '../../pages/main-popup';
 import { openNewVisualizer_ACU } from '../../pages/visualizer';
 import { showToastr_ACU } from '../../theme/toast';
 import { handleManualUpdate_ACU } from '../../triggers/update-process';
-import { deleteApiPreset_ACU, loadApiPreset_ACU, saveApiPreset_ACU } from '../../triggers/settings-ui-sync';
+import { deleteApiPreset_ACU, loadApiPreset_ACU } from '../../triggers/settings-ui-sync';
 import { saveSettingsAndNotify_ACU } from '../../components/settings-ui-helpers';
 import type { ApiGroupContext } from './callback-api';
 
@@ -241,20 +241,35 @@ export function createSettingsConfigApi(_ctx: ApiGroupContext): Record<string, F
                     logError_ACU('saveApiPreset: Invalid presetData');
                     return false;
                 }
-                if (!presetData.name || typeof presetData.name !== 'string') {
+                if (!presetData.name || typeof presetData.name !== 'string' || presetData.name.trim() === '') {
                     logError_ACU('saveApiPreset: preset name is required');
                     return false;
                 }
 
                 const newPreset = {
                     name: presetData.name.trim(),
-                    apiMode: presetData.apiMode || 'custom',
-                    apiConfig: presetData.apiConfig || {},
-                    tavernProfile: presetData.tavernProfile || ''
+                    apiMode: typeof presetData.apiMode === 'string' && presetData.apiMode.trim()
+                        ? presetData.apiMode.trim()
+                        : (settings_ACU.apiMode || 'custom'),
+                    apiConfig: presetData.apiConfig && typeof presetData.apiConfig === 'object'
+                        ? JSON.parse(JSON.stringify(presetData.apiConfig))
+                        : JSON.parse(JSON.stringify(settings_ACU.apiConfig || {})),
+                    tavernProfile: typeof presetData.tavernProfile === 'string'
+                        ? presetData.tavernProfile
+                        : (settings_ACU.tavernProfile || '')
                 };
 
-                saveApiPreset_ACU(newPreset.name);
-                logDebug_ACU(`API preset saved: ${newPreset.name}`);
+                if (!Array.isArray(settings_ACU.apiPresets)) {
+                    settings_ACU.apiPresets = [];
+                }
+                const existingIndex = settings_ACU.apiPresets.findIndex((p: any) => p?.name === newPreset.name);
+                if (existingIndex >= 0) {
+                    settings_ACU.apiPresets[existingIndex] = newPreset;
+                } else {
+                    settings_ACU.apiPresets.push(newPreset);
+                }
+                saveSettingsAndNotify_ACU();
+                logDebug_ACU(`API preset saved from external API: ${newPreset.name}`);
                 return true;
             } catch (e) {
                 logError_ACU('saveApiPreset failed:', e);
@@ -290,7 +305,11 @@ export function createSettingsConfigApi(_ctx: ApiGroupContext): Record<string, F
                     return false;
                 }
 
-                deleteApiPreset_ACU(presetName);
+                const deleted = deleteApiPreset_ACU(presetName);
+                if (!deleted) {
+                    logError_ACU(`deleteApiPreset: Preset "${presetName}" not found`);
+                    return false;
+                }
                 logDebug_ACU(`API preset deleted: ${presetName}`);
                 return true;
             } catch (e) {

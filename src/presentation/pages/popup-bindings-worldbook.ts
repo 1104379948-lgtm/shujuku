@@ -6,6 +6,7 @@ import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { jQuery_API_ACU } from '../dom-utils';
 import { getCharLorebooks_ACU, getLorebookEntries_ACU, setLorebookEntries_ACU, isWorldbookApiAvailable_ACU } from '../../service/worldbook/worldbook-service';
+import { globalMeta_ACU, saveGlobalMeta_ACU } from '../../data/repositories/profile-repo';
 import { settings_ACU, currentJsonTableData_ACU } from '../../service/runtime/state-manager';
 import { $popupInstance_ACU } from '../state/ui-refs';
 import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
@@ -114,10 +115,24 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
           $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`).prop('checked', summaryVectorIndexEnabled);
           $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(summaryVectorIndexEnabled);
       };
-      const updateVectorMemoryField_ACU = (field: string, value: any) => {
+      const logVectorMemorySaveResult_ACU = (fieldNames: string[], result: ReturnType<typeof saveSettingsAndNotify_ACU>) => {
+          const safeFieldNames = fieldNames.map(field => /key/i.test(field) ? `${field}(redacted)` : field).join(',');
+          logDebug_ACU(`[交火模式配置] 已保存字段: ${safeFieldNames}; storage=${result.storageType}${result.warning ? `; warning=${result.warning}` : ''}${result.error ? `; error=${result.error}` : ''}`);
+      };
+      const updateVectorMemoryFields_ACU = (patch: Record<string, any>) => {
           const vectorMemoryConfig = ensureVectorMemoryConfig_ACU();
-          (vectorMemoryConfig as any)[field] = value;
-          saveSettingsAndNotify_ACU();
+          globalMeta_ACU.vectorMemoryConfigGlobal = vectorMemoryConfig;
+          settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+          Object.keys(patch).forEach((field) => {
+              (globalMeta_ACU.vectorMemoryConfigGlobal as any)[field] = patch[field];
+          });
+          settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+          saveGlobalMeta_ACU();
+          const result = saveSettingsAndNotify_ACU();
+          logVectorMemorySaveResult_ACU(Object.keys(patch), result);
+      };
+      const updateVectorMemoryField_ACU = (field: string, value: any) => {
+          updateVectorMemoryFields_ACU({ [field]: value });
       };
       const parseIntegerField_ACU = (rawValue: any, fallbackValue: number) => {
           const parsed = Number.parseInt(String(rawValue ?? '').trim(), 10);
@@ -130,7 +145,15 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
       const bindVectorMemoryInput_ACU = (selector: string, eventName: string, updater: ($input: any) => any) => {
           const $input = $popupInstance_ACU.find(selector);
           if (!$input.length) return;
-          $input.off(`${eventName}.acu_vector_memory`).on(`${eventName}.acu_vector_memory`, function() {
+          const events = String(eventName || 'change')
+              .split(/\s+/)
+              .map(event => event.trim())
+              .filter(Boolean);
+          const namespacedEvents = events.map(event => `${event}.acu_vector_memory`).join(' ');
+          for (const event of events) {
+              $input.off(`${event}.acu_vector_memory`);
+          }
+          $input.on(namespacedEvents, function() {
               updater(jQuery_API_ACU(this));
           });
       };
@@ -179,76 +202,84 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
           toggleVectorMemoryConfigBlock_ACU();
           syncManualUpdateButtonAvailability_ACU();
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-threshold`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-threshold`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('threshold', parseIntegerField_ACU($input.val(), defaults.threshold));
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-trigger-count`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-trigger-count`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('archiveTriggerCount', parseIntegerField_ACU($input.val(), (defaults as any).archiveTriggerCount || defaults.archiveBatchSize));
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-batch-size`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-batch-size`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('archiveBatchSize', parseIntegerField_ACU($input.val(), defaults.archiveBatchSize));
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-max-concurrency`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-max-concurrency`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
-          updateVectorMemoryField_ACU('archiveMaxConcurrency', parseIntegerField_ACU($input.val(), (defaults as any).archiveMaxConcurrency || 3));
+          const value = parseIntegerField_ACU($input.val(), (defaults as any).summaryIndexArchiveMaxConcurrency || (defaults as any).archiveMaxConcurrency || 30);
+          updateVectorMemoryFields_ACU({
+              summaryIndexArchiveMaxConcurrency: value,
+              archiveMaxConcurrency: value,
+          });
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-summary-index-keyword-min-rows`, 'input change', ($input) => {
+          const defaults = getDefaultVectorMemoryConfig_ACU();
+          updateVectorMemoryField_ACU('summaryIndexKeywordMinRows', parseIntegerField_ACU($input.val(), (defaults as any).summaryIndexKeywordMinRows || 100));
+      });
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-topk`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('topK', parseIntegerField_ACU($input.val(), defaults.topK));
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-min-score`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-min-score`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('minScore', parseFloatField_ACU($input.val(), defaults.minScore));
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-namespace`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-namespace`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('vectorNamespace', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-embedding-endpoint`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-embedding-endpoint`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('embeddingEndpoint', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-embedding-model`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-embedding-model`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('embeddingModel', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-embedding-api-key`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-embedding-api-key`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('embeddingApiKey', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-endpoint`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-endpoint`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('rerankEndpoint', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-model`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-model`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('rerankModel', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('rerankApiKey', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('summaryChunkSentenceCount', parseIntegerField_ACU($input.val(), defaults.summaryChunkSentenceCount));
       });
       bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-archive-without-summary`, 'change', ($input) => {
           updateVectorMemoryField_ACU('archiveWithoutSummary', $input.is(':checked'));
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-recall-candidate-limit`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-recall-candidate-limit`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('recallCandidateLimit', parseIntegerField_ACU($input.val(), defaults.recallCandidateLimit));
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-entry-comment`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-entry-comment`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('entryComment', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-entry-key`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-entry-key`, 'input change', ($input) => {
           updateVectorMemoryField_ACU('entryKey', String($input.val() ?? '').trim());
       });
       bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-api-preset`, 'change', ($input) => {
           updateVectorMemoryField_ACU('keywordApiPreset', String($input.val() ?? '').trim());
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-context-pair-count`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-context-pair-count`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('keywordContextPairCount', parseIntegerField_ACU($input.val(), defaults.keywordContextPairCount));
       });
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-max-attempts`, 'change', ($input) => {
+      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-max-attempts`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('keywordGenerationMaxAttempts', parseIntegerField_ACU($input.val(), (defaults as any).keywordGenerationMaxAttempts || 3));
       });
@@ -269,7 +300,7 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
                   const segments = readFn();
                   updateVectorMemoryField_ACU(fieldName, segments);
               });
-              $container.on('change', 'select, textarea', function () {
+              $container.on('input change', 'select, textarea', function () {
                   const segments = readFn();
                   updateVectorMemoryField_ACU(fieldName, segments);
               });
@@ -500,15 +531,17 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
               const activeState = activeSnapshot?.summaryVectorIndexState || null;
               const archivedRowCount = activeState?.rowCount || (Array.isArray(activeState?.rows) ? activeState.rows.length : 0);
               const hasArchive = !!activeState;
+              const vectorConfig = getCurrentVectorMemoryConfig_ACU();
+              const summaryIndexKeywordMinRows = Math.max(1, Math.floor(Number((vectorConfig as any).summaryIndexKeywordMinRows || 100)));
               showToastr_ACU(
-                  !modeEnabled || archivedRowCount >= 100 ? 'info' : 'warning',
+                  !modeEnabled || archivedRowCount >= summaryIndexKeywordMinRows ? 'info' : 'warning',
                   modeEnabled
                       ? hasArchive
-                          ? archivedRowCount >= 100
-                              ? `向量混合交火增强方案已启用。当前纪要向量索引 ${archivedRowCount} 条，已达到 100 条门槛；发送前将跳过普通远记忆召回，并使用已归档纪要索引筛选概要索引。`
-                              : `向量混合交火增强方案已启用。当前纪要向量索引 ${archivedRowCount}/100 条；未满 100 条前，用户发送不会触发关键词召回或世界书覆盖注入，自动归档仍会在填表保存后继续累积。`
-                          : '向量混合交火增强方案已启用。当前聊天尚无纪要向量索引归档；未满 100 条前，用户发送不会触发关键词召回或世界书覆盖注入，自动归档仍会在填表保存后继续累积。'
-                      : '向量混合交火增强方案已禁用，概要索引将回到原本的全量纪要表流程。',
+                          ? archivedRowCount >= summaryIndexKeywordMinRows
+                              ? `交火模式纪要索引已启用。当前纪要向量索引 ${archivedRowCount} 条，已达到 ${summaryIndexKeywordMinRows} 条门槛；发送前会召回概要列 chunk、执行可选 Rerank，并按纪要表原顺序覆盖原概要索引条目。`
+                              : `交火模式纪要索引已启用。当前纪要向量索引 ${archivedRowCount}/${summaryIndexKeywordMinRows} 条；未达到门槛前，用户发送不会触发交火召回，填表保存后仍会立即归档并继续累积。`
+                          : '交火模式纪要索引已启用。当前聊天尚无纪要向量索引归档；完成一次纪要表填写后会自动归档，也可手动构建。'
+                      : '交火模式纪要索引已禁用，概要索引将回到原本的全量纪要表流程。',
               );
           });
       }

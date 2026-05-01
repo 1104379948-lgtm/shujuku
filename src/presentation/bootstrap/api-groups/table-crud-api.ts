@@ -20,6 +20,8 @@ import { getStorageProvider } from '../../../service/table/table-storage-strateg
 import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
 import { resolveTableHistoryStateFromChat_ACU } from '../../../service/table/table-history';
+import { archiveSummaryVectorIndexNow_ACU } from '../../../service/vector/summary-vector-index-archive-service';
+import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
 
 /**
  * 从 sheet 解析英文物理表名
@@ -108,6 +110,29 @@ function resolveColumnForSheet(
     return { englishColName, chineseColName };
 }
 
+function toSqlValueParam_ACU(value: any): string | number | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
+    if (typeof value === 'boolean') return value ? 1 : 0;
+    return String(value);
+}
+
+function assertSqlMutationChanged_ACU(
+    methodName: string,
+    actionLabel: string,
+    result: { changes: number; errors: string[] },
+): boolean {
+    if (result.errors.length > 0) {
+        logError_ACU(`${methodName} SQL failed: ${result.errors.join(', ')}`);
+        return false;
+    }
+    if (result.changes <= 0) {
+        logWarn_ACU(`${methodName}: SQL executed but affected 0 rows. action=${actionLabel}`);
+        return false;
+    }
+    return true;
+}
+
 /**
  * 查找指定表格数据所在的最新聊天楼层索引
  * 复用逻辑：updateRow / insertRow / deleteRow 共享此函数
@@ -125,8 +150,41 @@ function findTableLatestFloor(targetSheetKey: string, tableName: string): number
     return history.latestAiMessageIndex;
 }
 
+async function syncSummaryVectorIndexAfterTableEdit_ACU(
+    tableName: string,
+    methodName: string,
+    tableLatestFloorIndex: number,
+    skipSync?: boolean,
+): Promise<void> {
+    if (skipSync) {
+        logDebug_ACU(`${methodName}: Skip summary vector index sync for [${tableName}] because this edit is marked as batch/import mode.`);
+        return;
+    }
+    if (!isSummaryOrOutlineTable_ACU(tableName)) return;
+    if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true) return;
+
+    const chat = SillyTavern_API_ACU.chat as ACUMessage[];
+    const preferredTargetIndex = tableLatestFloorIndex >= 0 && chat?.[tableLatestFloorIndex] && !chat[tableLatestFloorIndex].is_user
+        ? tableLatestFloorIndex
+        : undefined;
+
+    try {
+        const result = await archiveSummaryVectorIndexNow_ACU({
+            targetMessageIndex: preferredTargetIndex,
+            mode: 'sync',
+        });
+        if (!result.success && !result.skipped) {
+            logWarn_ACU(`${methodName}: Summary vector index sync failed after editing [${tableName}]. reason=${result.reason || 'unknown'}`, result.errors || []);
+        } else {
+            logDebug_ACU(`${methodName}: Summary vector index snapshot synced after editing [${tableName}]. reason=${result.reason || 'ok'}`);
+        }
+    } catch (error) {
+        logError_ACU(`${methodName}: Summary vector index sync threw after editing [${tableName}].`, error);
+    }
+}
+
 /**
- * 保存表格到最新楼层并刷新世界书（updateRow / insertRow / deleteRow 共享）
+ * 保存表格到最新楼层并刷新世界书（updateCell / updateRow / insertRow / deleteRow 共享）
  */
 async function saveToLatestFloorAndRefresh(
     targetSheetKey: string,
@@ -137,24 +195,24 @@ async function saveToLatestFloorAndRefresh(
 ): Promise<void> {
     const tableLatestFloorIndex = findTableLatestFloor(targetSheetKey, tableName);
 
-        if (tableLatestFloorIndex !== -1) {
-            if (!skipChatSave) {
-                logDebug_ACU(`${methodName}: Saving [${tableName}] to its latest floor ${tableLatestFloorIndex}`);
-                const chat = SillyTavern_API_ACU.chat as ACUMessage[];
-                const history = resolveTableHistoryStateFromChat_ACU(chat, {
-                    sheetKey: targetSheetKey,
-                    isSummaryTable: isSummaryOrOutlineTable_ACU(tableName),
-                    isolationKey: getCurrentIsolationKey_ACU(),
-                    settings: settings_ACU,
-                });
-                const shouldTrackAsUpdate = history.latestDataMessageIndex === -1;
-                await saveIndependentTableToChatHistory_ACU(
-                    tableLatestFloorIndex,
-                    [targetSheetKey],
-                    shouldTrackAsUpdate ? [targetSheetKey] : null,
-                    true,
-                );
-            }
+    if (tableLatestFloorIndex !== -1) {
+        if (!skipChatSave) {
+            logDebug_ACU(`${methodName}: Saving [${tableName}] to its latest floor ${tableLatestFloorIndex}`);
+            const chat = SillyTavern_API_ACU.chat as ACUMessage[];
+            const history = resolveTableHistoryStateFromChat_ACU(chat, {
+                sheetKey: targetSheetKey,
+                isSummaryTable: isSummaryOrOutlineTable_ACU(tableName),
+                isolationKey: getCurrentIsolationKey_ACU(),
+                settings: settings_ACU,
+            });
+            const shouldTrackAsUpdate = history.latestDataMessageIndex === -1;
+            await saveIndependentTableToChatHistory_ACU(
+                tableLatestFloorIndex,
+                [targetSheetKey],
+                shouldTrackAsUpdate ? [targetSheetKey] : null,
+                true,
+            );
+        }
         await refreshMergedDataAndNotifyWithUI_ACU();
         logDebug_ACU(`${methodName}: Worldbook refreshed after saving [${tableName}]`);
     } else {
@@ -162,6 +220,7 @@ async function saveToLatestFloorAndRefresh(
         await saveCurrentDataForTable_ACU(targetSheetKey);
     }
 
+    await syncSummaryVectorIndexAfterTableEdit_ACU(tableName, methodName, tableLatestFloorIndex, skipChatSave);
     (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate();
 }
 
@@ -219,13 +278,18 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                 }
 
                 if (isSqliteMode()) {
-                    // SQLite 模式：用英文物理表名和英文列名生成 UPDATE SQL
+                    // SQLite 模式：用英文物理表名和英文列名生成 UPDATE SQL；值统一走参数绑定，避免 row_id/单元格值字符串破坏 SQL。
                     const rowId = targetSheet.content[rowIndex][0]; // row_id 是第一列
-                    const escapedVal = value === null || value === undefined ? 'NULL' : `'${String(value).replace(/'/g, "''")}'`;
-                    const sql = `UPDATE ${quoteIdentifier(englishTableName)} SET ${quoteIdentifier(englishColName)} = ${escapedVal} WHERE row_id = ${rowId};`;
-                    const result = getStorageProvider().executeMutation(sql);
-                    if (result.errors.length > 0) {
-                        logError_ACU(`updateCell SQL failed: ${result.errors.join(', ')}`);
+                    if (rowId === undefined || rowId === null) {
+                        logError_ACU(`updateCell: row_id not found at index ${rowIndex}`);
+                        return false;
+                    }
+                    const sql = `UPDATE ${quoteIdentifier(englishTableName)} SET ${quoteIdentifier(englishColName)} = ? WHERE ${quoteIdentifier('row_id')} = ?;`;
+                    const result = getStorageProvider().executeMutation(sql, [
+                        toSqlValueParam_ACU(value),
+                        toSqlValueParam_ACU(rowId),
+                    ]);
+                    if (!assertSqlMutationChanged_ACU('updateCell', `table=${englishTableName}, row_id=${rowId}, col=${englishColName}`, result)) {
                         return false;
                     }
                     logDebug_ACU(`updateCell: [SQLite] Updated [${englishTableName}] row_id=${rowId}, col=${englishColName}`);
@@ -246,8 +310,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                     logDebug_ACU(`updateCell: Updated [${tableName}] row ${rowIndex}, col ${colIdentifier} = ${value}`);
                 }
 
-                await saveCurrentDataForTable_ACU(targetSheetKey);
-                (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate();
+                await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'updateCell');
 
                 return true;
             } catch (e) {
@@ -284,6 +347,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         return false;
                     }
                     const setClauses: string[] = [];
+                    const params: (string | number | null)[] = [];
                     const headers = targetSheet.content[0] || [];
                     for (const colName in data) {
                         if (colName === 'isImportMode') continue; // 跳过内部标记
@@ -292,18 +356,17 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             logWarn_ACU(`updateRow: Column "${colName}" not found in table "${tableName}".`);
                             continue;
                         }
-                        const val = data[colName];
-                        const escapedVal = val === null || val === undefined ? 'NULL' : `'${String(val).replace(/'/g, "''")}'`;
-                        setClauses.push(`${quoteIdentifier(englishColName)} = ${escapedVal}`);
+                        setClauses.push(`${quoteIdentifier(englishColName)} = ?`);
+                        params.push(toSqlValueParam_ACU(data[colName]));
                     }
                     if (setClauses.length === 0) {
                         logWarn_ACU('updateRow: No valid columns to update.');
-                        return true;
+                        return false;
                     }
-                    const sql = `UPDATE ${quoteIdentifier(englishTableName)} SET ${setClauses.join(', ')} WHERE row_id = ${rowId};`;
-                    const result = getStorageProvider().executeMutation(sql);
-                    if (result.errors.length > 0) {
-                        logError_ACU(`updateRow SQL failed: ${result.errors.join(', ')}`);
+                    params.push(toSqlValueParam_ACU(rowId));
+                    const sql = `UPDATE ${quoteIdentifier(englishTableName)} SET ${setClauses.join(', ')} WHERE ${quoteIdentifier('row_id')} = ?;`;
+                    const result = getStorageProvider().executeMutation(sql, params);
+                    if (!assertSqlMutationChanged_ACU('updateRow', `table=${englishTableName}, row_id=${rowId}, cols=${setClauses.length}`, result)) {
                         return false;
                     }
                     logDebug_ACU(`updateRow: [SQLite] Updated ${setClauses.length} cols in [${englishTableName}] row_id=${rowId}`);
@@ -333,6 +396,10 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         }
                     }
 
+                    if (updated === 0) {
+                        logWarn_ACU(`updateRow: No valid columns updated in [${tableName}] row ${rowIndex}.`);
+                        return false;
+                    }
                     logDebug_ACU(`updateRow: Updated ${updated} cells in [${tableName}] row ${rowIndex}`);
                 }
 
@@ -363,28 +430,33 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
 
                 if (isSqliteMode()) {
                     // SQLite 模式：用英文物理表名和英文列名生成 INSERT SQL
+                    const beforeLength = targetSheet.content.length;
                     const colNames: string[] = [];
-                    const values: string[] = [];
+                    const params: (string | number | null)[] = [];
                     for (const colName in data) {
                         const { englishColName, chineseColName } = resolveColumnForSheet(englishTableName, colName);
                         // 跳过 row_id（自增主键），同时检查英文形态和原始名，防止用户传中文"行号"等变体
                         if (englishColName === 'row_id' || colName === 'row_id') continue;
                         if (!headers.includes(chineseColName)) continue;
                         colNames.push(quoteIdentifier(englishColName));
-                        const val = data[colName];
-                        values.push(val === null || val === undefined ? 'NULL' : `'${String(val).replace(/'/g, "''")}'`);
+                        params.push(toSqlValueParam_ACU(data[colName]));
                     }
+                    const placeholders = colNames.map(() => '?').join(', ');
                     const sql = colNames.length > 0
-                        ? `INSERT INTO ${quoteIdentifier(englishTableName)} (${colNames.join(', ')}) VALUES (${values.join(', ')});`
+                        ? `INSERT INTO ${quoteIdentifier(englishTableName)} (${colNames.join(', ')}) VALUES (${placeholders});`
                         : `INSERT INTO ${quoteIdentifier(englishTableName)} DEFAULT VALUES;`;
-                    const result = getStorageProvider().executeMutation(sql);
-                    if (result.errors.length > 0) {
-                        logError_ACU(`insertRow SQL failed: ${result.errors.join(', ')}`);
+                    const result = getStorageProvider().executeMutation(sql, params);
+                    if (!assertSqlMutationChanged_ACU('insertRow', `table=${englishTableName}, cols=${colNames.length}`, result)) {
                         return -1;
                     }
-                    // 获取新插入行在 JSON 视图中的索引
-                    const newIndex = targetSheet.content.length; // executeMutation 已同步 JSON 视图
-                    logDebug_ACU(`insertRow: [SQLite] Inserted row in [${englishTableName}]`);
+                    const refreshedTarget = findTargetSheet(tableName);
+                    const refreshedLength = refreshedTarget?.sheet?.content?.length ?? 0;
+                    if (!refreshedTarget || refreshedLength <= beforeLength) {
+                        logError_ACU(`insertRow: SQLite mutation succeeded but refreshed JSON view did not contain a new row for [${tableName}].`);
+                        return -1;
+                    }
+                    const newIndex = refreshedLength - 1;
+                    logDebug_ACU(`insertRow: [SQLite] Inserted row in [${englishTableName}] at index ${newIndex}`);
 
                     await saveToLatestFloorAndRefresh(targetSheetKey, targetSheet.name, ctx, 'insertRow');
                     return newIndex;
@@ -441,16 +513,15 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                 }
 
                 if (isSqliteMode()) {
-                    // SQLite 模式：用英文物理表名生成 DELETE SQL
+                    // SQLite 模式：用英文物理表名生成 DELETE SQL；row_id 走参数绑定，避免字符串 row_id 删除失效。
                     const rowId = targetSheet.content[rowIndex]?.[0];
                     if (rowId === undefined || rowId === null) {
                         logError_ACU(`deleteRow: row_id not found at index ${rowIndex}`);
                         return false;
                     }
-                    const sql = `DELETE FROM ${quoteIdentifier(englishTableName)} WHERE row_id = ${rowId};`;
-                    const result = getStorageProvider().executeMutation(sql);
-                    if (result.errors.length > 0) {
-                        logError_ACU(`deleteRow SQL failed: ${result.errors.join(', ')}`);
+                    const sql = `DELETE FROM ${quoteIdentifier(englishTableName)} WHERE ${quoteIdentifier('row_id')} = ?;`;
+                    const result = getStorageProvider().executeMutation(sql, [toSqlValueParam_ACU(rowId)]);
+                    if (!assertSqlMutationChanged_ACU('deleteRow', `table=${englishTableName}, row_id=${rowId}`, result)) {
                         return false;
                     }
                     logDebug_ACU(`deleteRow: [SQLite] Deleted row_id=${rowId} from [${englishTableName}]`);

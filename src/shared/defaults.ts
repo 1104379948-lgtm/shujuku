@@ -25,10 +25,10 @@ export const DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU = 500;
 export const AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU = 2000;
 
 // --- 一次性默认值刷新版本标记 ---
-export const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.1.5-summary-index-archive-resume';
+export const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.2-crossfire-default-summary-index-params';
 export const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.2-table-template-defaults';
 
-// --- 向量记忆全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
+// --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
 export const defaultVectorMemoryConfig_ACU = {
   enabled: false,
   threshold: 50,
@@ -36,8 +36,8 @@ export const defaultVectorMemoryConfig_ACU = {
   archiveBatchSize: 3,
   archiveMaxConcurrency: 3,
   summaryIndexArchiveMaxConcurrency: 30,
-  topK: 10,
-  minScore: 0.6,
+  topK: 100,
+  minScore: 0.45,
   embeddingEndpoint: '',
   embeddingApiKey: '',
   embeddingModel: '',
@@ -47,6 +47,7 @@ export const defaultVectorMemoryConfig_ACU = {
   vectorNamespace: 'chat',
   entryComment: 'TavernDB-ACU-VectorMemory',
   entryKey: 'TavernDB-ACU-VectorMemory-Key',
+  summaryIndexKeywordMinRows: 100,
   summaryChunkSentenceCount: 2,
   summaryPromptGroupId: 'remote-memory-archive-default',
   archiveWithoutSummary: false,
@@ -72,27 +73,30 @@ export const defaultVectorMemoryConfig_ACU = {
   keywordPromptGroup: [
     {
       role: 'system',
-      content: '你负责为向量记忆召回生成检索关键词。\n'
+      content: '你负责为交火模式纪要索引召回生成检索关键词。\n'
         + '你会看到最近对话上下文和当前用户输入。\n'
-        + '目标：输出最相关的 12 个简洁关键词或短语，用于向量召回与重排序。\n'
+        + '目标：输出最相关的 12 个简洁关键词或短语，用于纪要索引召回与重排序。\n'
         + '优先级：人物、地点、时间、事件、目标、冲突、道具、组织、关系变化、未解决问题。\n'
-        + '硬性格式：只输出关键词本身；禁止输出解释、句子、编号、标题、前后缀说明。\n'
-        + '分隔符：多个关键词必须使用中文逗号分隔。\n'
-        + '数量：尽量输出 12 个；信息不足时也要用最接近当前语境的检索词补足。',
+        + '输出必须包含显示思维链条，并严格使用以下结构：\n'
+        + '<thinking>\n'
+        + '逐步分析最近上下文、当前用户输入、涉及人物、地点、时间、事件、目标、冲突、道具、组织、关系变化和未解决问题。\n'
+        + '</thinking>\n'
+        + '关键词：关键词1，关键词2，关键词3\n'
+        + '硬性要求：关键词行只放关键词或短语，不要放解释句；多个关键词必须使用中文逗号分隔；尽量输出 12 个，最多 24 个。',
       deletable: false,
     },
     {
       role: 'user',
-      content: '最近上下文：\n$RECENT_CONTEXT\n\n当前用户输入：\n$USER_INPUT\n\n请根据以上内容生成向量召回检索关键词。',
+      content: '最近上下文：\n$RECENT_CONTEXT\n\n当前用户输入：\n$USER_INPUT\n\n请根据以上内容生成交火模式纪要索引召回关键词。先在 <thinking> 中显示你的检索分析，再输出“关键词：”行。',
       deletable: true,
     },
     {
       role: 'assistant',
-      content: '关键词：',
+      content: '<thinking>\n交火关键词检索思维：我将逐步分析当前输入需要召回的纪要索引关键词。',
       deletable: true,
     },
   ],
-  recallCandidateLimit: 100,
+  recallCandidateLimit: 500,
 };
 
 // --- 全局世界书默认配置 ---

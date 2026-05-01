@@ -6,6 +6,10 @@
  */
 
 import type { Sheet_ACU } from '../../shared/models/table-data';
+import type {
+    ChatSummaryVectorIndexManifest_ACU,
+    ChatSummaryVectorIndexState_ACU,
+} from '../../service/vector/summary-vector-index-types';
 
 // ── 新版按标签分组存储 ──
 
@@ -14,9 +18,22 @@ export interface IsolationTagData_ACU {
     independentData: Record<string, Sheet_ACU>;
     modifiedKeys: string[];
     updateGroupKeys: string[];
+    /** 旧版/兼容向量记忆状态。保留字段是为了不破坏已有聊天记录。 */
+    vectorMemoryState?: any;
+    /** 交火模式纪要向量索引轻量状态。新外置模式下不应保存完整 vector 数组。 */
+    summaryVectorIndexState?: ChatSummaryVectorIndexState_ACU | null;
+    /** 外置向量索引 manifest。聊天记录只保存定位和校验信息。 */
+    summaryVectorIndexManifest?: ChatSummaryVectorIndexManifest_ACU | null;
     /** 基底状态标记（首楼初始化时写入） */
     _acu_base_state?: string;
 }
+
+export type {
+    ChatSummaryVectorIndexChunk_ACU,
+    ChatSummaryVectorIndexManifest_ACU,
+    ChatSummaryVectorIndexRow_ACU,
+    ChatSummaryVectorIndexState_ACU,
+} from '../../service/vector/summary-vector-index-types';
 
 /** 按标签分组的容器（TavernDB_ACU_IsolatedData 的类型） */
 export interface IsolatedDataContainer_ACU {

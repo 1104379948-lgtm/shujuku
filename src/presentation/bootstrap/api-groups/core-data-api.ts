@@ -21,6 +21,8 @@ import { getEffectiveAutoUpdateThreshold_ACU } from '../../../service/runtime/he
 import { proceedWithCardUpdate_ACU } from '../../triggers/update-process';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import { showToastr_ACU } from '../../theme/toast';
+import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
+import { archiveSummaryVectorIndexNow_ACU } from '../../../service/vector/summary-vector-index-archive-service';
 import type { ApiGroupContext } from './callback-api';
 
 export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function> {
@@ -43,6 +45,7 @@ export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function
                     _set_currentJsonTableData_ACU(sanitizeChatSheetsObject_ACU(newData, { ensureMate: true }));
                     logDebug_ACU('Successfully imported new table data into memory.');
 
+                    let targetMessageIndexForVectorSync = -1;
                     const chat = SillyTavern_API_ACU.chat;
                     if (chat && chat.length > 0) {
                         let targetMessage: ACUMessage | null = null;
@@ -51,6 +54,7 @@ export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function
                             if (!chat[i].is_user) {
                                 targetMessage = chat[i];
                                 finalIndex = i;
+                                targetMessageIndexForVectorSync = i;
                                 break;
                             }
                         }
@@ -140,6 +144,29 @@ export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function
                     }
 
                     await refreshMergedDataAndNotifyWithUI_ACU();
+
+                    const importedSummaryTables = Object.keys(currentJsonTableData_ACU || {})
+                        .filter(k => k.startsWith('sheet_'))
+                        .some(k => {
+                            const table = currentJsonTableData_ACU?.[k];
+                            return table?.name && isSummaryOrOutlineTable_ACU(table.name);
+                        });
+                    if (importedSummaryTables && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                        try {
+                            const syncResult = await archiveSummaryVectorIndexNow_ACU({
+                                targetMessageIndex: targetMessageIndexForVectorSync >= 0 ? targetMessageIndexForVectorSync : undefined,
+                                mode: 'sync',
+                            });
+                            if (!syncResult.success && !syncResult.skipped) {
+                                logWarn_ACU(`[importTableAsJson] 交火向量索引同步失败: reason=${syncResult.reason || 'unknown'}`, syncResult.errors || []);
+                            } else {
+                                logDebug_ACU(`[importTableAsJson] 交火向量索引已同步: reason=${syncResult.reason || 'ok'}`);
+                            }
+                        } catch (syncError) {
+                            logError_ACU('[importTableAsJson] 交火向量索引同步异常（表格导入已完成）:', syncError);
+                        }
+                    }
+
                     return true;
                 } else {
                     throw new Error('导入的JSON缺少关键结构 (mate, sheet_*)。');
@@ -159,39 +186,44 @@ export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function
                 return false;
             }
             _set_isAutoUpdatingCard_ACU(true);
-            await loadAllChatMessages_ACU();
-            const chatHistory = SillyTavern_API_ACU.chat || [];
-            const currentThreshold = getEffectiveAutoUpdateThreshold_ACU('manual_update');
+            try {
+                await loadAllChatMessages_ACU();
+                const chatHistory = SillyTavern_API_ACU.chat || [];
+                const currentThreshold = getEffectiveAutoUpdateThreshold_ACU('manual_update');
 
-            const allAiMessageIndices = chatHistory
-                .map((msg: any, index: number) => !msg.is_user ? index : -1)
-                .filter((index: number) => index !== -1);
+                const allAiMessageIndices = chatHistory
+                    .map((msg: any, index: number) => !msg.is_user ? index : -1)
+                    .filter((index: number) => index !== -1);
 
-            const numberOfAiMessages = allAiMessageIndices.length;
+                const numberOfAiMessages = allAiMessageIndices.length;
 
-            let sliceStartIndex = 0;
-            if (numberOfAiMessages > currentThreshold) {
-                const firstRelevantAiMessageMapIndex = numberOfAiMessages - currentThreshold;
-                const previousAiMessageMapIndex = firstRelevantAiMessageMapIndex - 1;
-                if (previousAiMessageMapIndex >= 0) {
-                    sliceStartIndex = allAiMessageIndices[previousAiMessageMapIndex] + 1;
+                let sliceStartIndex = 0;
+                if (numberOfAiMessages > currentThreshold) {
+                    const firstRelevantAiMessageMapIndex = numberOfAiMessages - currentThreshold;
+                    const previousAiMessageMapIndex = firstRelevantAiMessageMapIndex - 1;
+                    if (previousAiMessageMapIndex >= 0) {
+                        sliceStartIndex = allAiMessageIndices[previousAiMessageMapIndex] + 1;
+                    }
                 }
-            }
 
-            if (sliceStartIndex > 0 &&
-                chatHistory[sliceStartIndex] &&
-                !chatHistory[sliceStartIndex].is_user &&
-                chatHistory[sliceStartIndex - 1] &&
-                chatHistory[sliceStartIndex - 1].is_user)
-            {
-                sliceStartIndex = sliceStartIndex - 1;
-                logDebug_ACU(`Adjusted slice start index to ${sliceStartIndex} to include preceding user message.`);
-            }
+                if (sliceStartIndex > 0 &&
+                    chatHistory[sliceStartIndex] &&
+                    !chatHistory[sliceStartIndex].is_user &&
+                    chatHistory[sliceStartIndex - 1] &&
+                    chatHistory[sliceStartIndex - 1].is_user)
+                {
+                    sliceStartIndex = sliceStartIndex - 1;
+                    logDebug_ACU(`Adjusted slice start index to ${sliceStartIndex} to include preceding user message.`);
+                }
 
-            const messagesToProcess = chatHistory.slice(sliceStartIndex);
-            const success = await proceedWithCardUpdate_ACU(messagesToProcess);
-            _set_isAutoUpdatingCard_ACU(false);
-            return success;
+                const messagesToProcess = chatHistory.slice(sliceStartIndex);
+                return await proceedWithCardUpdate_ACU(messagesToProcess);
+            } catch (error) {
+                logError_ACU('triggerUpdate failed:', error);
+                return false;
+            } finally {
+                _set_isAutoUpdatingCard_ACU(false);
+            }
         },
     };
 }

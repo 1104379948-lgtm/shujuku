@@ -25,8 +25,31 @@ import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
 import { clearTableFieldsForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
 import { persistTablesToChatMessage_ACU } from '../table/table-service';
 import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../table/table-history';
+import { deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
+import { assignSummaryVectorIndexStateToTagData_ACU } from '../vector/summary-vector-index-state-service';
 
 // ─── 业务逻辑函数（从 presentation 层搬迁） ───
+
+async function deleteVectorIndexManifestFromTagData_ACU(tagData: any): Promise<boolean> {
+    if (!tagData || typeof tagData !== 'object') return false;
+    const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
+    if (manifest) {
+        await deleteSummaryVectorIndexExternal_ACU(manifest);
+    }
+    const hadState = !!tagData.summaryVectorIndexState || !!tagData.summaryVectorIndexManifest;
+    if (hadState) {
+        assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+    }
+    return hadState || !!manifest;
+}
+
+function tableListContainsSummaryOrOutline_ACU(targetSheetKeys: string[]): boolean {
+    if (!Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0) return false;
+    return targetSheetKeys.some((sheetKey) => {
+        const table = currentJsonTableData_ACU?.[sheetKey];
+        return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
+    });
+}
 
 /**
  * 替换聊天消息内容（正文优化核心逻辑）
@@ -330,11 +353,16 @@ export async function deleteLocalDataInChatCore_ACU(
             }
             if (msg.TavernDB_ACU_IsolatedData) {
                 if (mode === 'all') {
+                    const isolatedData = msg.TavernDB_ACU_IsolatedData;
+                    for (const key of Object.keys(isolatedData)) {
+                        await deleteVectorIndexManifestFromTagData_ACU(isolatedData[key]);
+                    }
                     delete msg.TavernDB_ACU_IsolatedData;
                     modified = true;
                 } else {
                     const currentIsolationKey = getCurrentIsolationKey_ACU();
                     if (msg.TavernDB_ACU_IsolatedData[currentIsolationKey]) {
+                        await deleteVectorIndexManifestFromTagData_ACU(msg.TavernDB_ACU_IsolatedData[currentIsolationKey]);
                         delete msg.TavernDB_ACU_IsolatedData[currentIsolationKey];
                         if (Object.keys(msg.TavernDB_ACU_IsolatedData).length === 0) {
                             delete msg.TavernDB_ACU_IsolatedData;
@@ -464,6 +492,9 @@ export async function clearTableDataAtFloors_ACU(targetMessageIndices: number[],
         enabled: settings_ACU.dataIsolationEnabled,
         code: settings_ACU.dataIsolationCode,
     };
+    const clearsSummaryOrOutline = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
+        ? tableListContainsSummaryOrOutline_ACU(targetSheetKeys)
+        : true;
 
     let clearedCount = 0;
 
@@ -476,6 +507,12 @@ export async function clearTableDataAtFloors_ACU(targetMessageIndices: number[],
         const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
             ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
             : clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
+        if (clearsSummaryOrOutline) {
+            const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
+                logDebug_ACU(`[清空楼层] 已删除消息索引 ${idx} 上的交火向量索引外置文件引用。`);
+            }
+        }
         if (changed) {
             clearedCount++;
             logDebug_ACU(`[清空楼层] 已清空消息索引 ${idx} 上的表格数据 (标签: ${isolationKey || '无'})`);

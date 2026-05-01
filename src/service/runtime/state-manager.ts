@@ -22,6 +22,8 @@ import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU } from '../../s
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU } from '../../shared/defaults';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+import { globalMeta_ACU } from '../../data/repositories/profile-repo';
 
 export const NEW_MESSAGE_DEBOUNCE_DELAY_ACU = 500;
 
@@ -94,19 +96,40 @@ export function isRecentUserSend_ACU() {
   return (Date.now() - generationGate_ACU.lastUserMessageAt) <= USER_SEND_TRIGGER_TTL_MS_ACU;
 }
 
-export function shouldProcessPlotForGeneration_ACU(type: any, params: any, dryRun: any) {
-  if (dryRun) return false;
-  if (!settings_ACU?.plotSettings?.enabled) return false;
-  if (isQuietLikeGeneration_ACU(type, params)) return false;
-  if (params?.automatic_trigger) return false;
+function hasFreshUserGenerationTrigger_ACU() {
   const chat = getChatArray_ACU();
   const id = generationGate_ACU.lastUserMessageId;
   const msg = (chat && typeof id === 'number') ? chat[id] : null;
   const hasFreshUserMessage = !!(msg && msg.is_user && id === (chat.length - 1) && isRecentUserSend_ACU());
   const hasFreshIntent = isRecentUserSendIntent_ACU();
-  const result = hasFreshUserMessage || hasFreshIntent;
-  logDebug_ACU(`[状态管理] shouldProcessPlot: type=${type}, dryRun=${dryRun}, freshMsg=${hasFreshUserMessage}, freshIntent=${hasFreshIntent}, result=${result}`);
-  return result;
+  return { hasFreshUserMessage, hasFreshIntent, result: hasFreshUserMessage || hasFreshIntent };
+}
+
+export function shouldProcessPlotForGeneration_ACU(type: any, params: any, dryRun: any) {
+  if (dryRun) return false;
+  if (!settings_ACU?.plotSettings?.enabled) return false;
+  if (isQuietLikeGeneration_ACU(type, params)) return false;
+  if (params?.automatic_trigger) return false;
+  const fresh = hasFreshUserGenerationTrigger_ACU();
+  logDebug_ACU(`[状态管理] shouldProcessPlot: type=${type}, dryRun=${dryRun}, freshMsg=${fresh.hasFreshUserMessage}, freshIntent=${fresh.hasFreshIntent}, result=${fresh.result}`);
+  return fresh.result;
+}
+
+export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, params: any, dryRun: any) {
+  if (dryRun) return false;
+  if (type === 'regenerate') return false;
+  if (isQuietLikeGeneration_ACU(type, params)) return false;
+  if (params?.automatic_trigger) return false;
+  const worldbookConfig = getCurrentWorldbookConfig_ACU();
+  const globalEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
+  const worldbookProjectionEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
+  if (!globalEnabled) {
+    logDebug_ACU(`[状态管理] shouldProcessSummaryVectorIndex: type=${type}, dryRun=${dryRun}, globalEnabled=false, worldbookProjection=${worldbookProjectionEnabled}, result=false`);
+    return false;
+  }
+  const fresh = hasFreshUserGenerationTrigger_ACU();
+  logDebug_ACU(`[状态管理] shouldProcessSummaryVectorIndex: type=${type}, dryRun=${dryRun}, globalEnabled=${globalEnabled}, worldbookProjection=${worldbookProjectionEnabled}, freshMsg=${fresh.hasFreshUserMessage}, freshIntent=${fresh.hasFreshIntent}, result=${fresh.result}`);
+  return fresh.result;
 }
 
 export function shouldProcessAutoTableUpdateForGenerationEnded_ACU() {

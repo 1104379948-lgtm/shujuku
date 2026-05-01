@@ -77,7 +77,36 @@ export function generateDataMgmtTabHTML(): string {
                         </div>
                     </div>
 
-                    <!-- D. 纪要合并 (Medusa) -->
+                    <!-- D. 交火模式索引管理 -->
+                    <div class="acu-card">
+                        <h3>交火模式索引管理</h3>
+                        <p class="notes">聊天记录只保存轻量 manifest；向量分片保存在 /user/files，IndexedDB 只作为可丢弃临时缓存。</p>
+                        <div style="background: var(--acu-bg-2); padding: 12px; border-radius: 6px; margin-bottom: 10px;">
+                            <label for="${SCRIPT_ID_PREFIX_ACU}-vector-index-mode-enabled" style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
+                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-vector-index-mode-enabled" style="width: 14px; height: 14px; cursor: pointer;">
+                                <span style="font-weight: 600;">启用交火模式向量索引（外置存储）</span>
+                            </label>
+                            <small class="notes">这是交火模式的启停入口；开启后会随纪要表数据增删改自动维护外置索引文件。下面的按钮只负责刷新状态、清缓存或删除当前索引资产。</small>
+                        </div>
+                        <div id="${SCRIPT_ID_PREFIX_ACU}-vector-index-stats" style="background: var(--acu-bg-2); padding: 12px; border-radius: 6px; margin-bottom: 10px; font-size: 0.9em; line-height: 1.7;">
+                            <div>状态：<span data-acu-vector-index-field="status">未加载</span></div>
+                            <div>索引ID：<span data-acu-vector-index-field="indexId">-</span></div>
+                            <div>后端：<span data-acu-vector-index-field="backend">-</span></div>
+                            <div>行 / 块：<span data-acu-vector-index-field="rowsChunks">0 / 0</span></div>
+                            <div>Base / Delta 分片：<span data-acu-vector-index-field="shards">0 / 0</span></div>
+                            <div>Tombstone 行 / 块：<span data-acu-vector-index-field="tombstones">0 / 0</span></div>
+                            <div>外置文件体积：<span data-acu-vector-index-field="externalBytes">0 B</span></div>
+                            <div>临时缓存体积：<span data-acu-vector-index-field="cacheBytes">0 B</span></div>
+                            <div>更新时间：<span data-acu-vector-index-field="updatedAt">-</span></div>
+                        </div>
+                        <div class="button-group acu-data-mgmt-buttons">
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-vector-index-refresh">刷新索引状态</button>
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-vector-index-clear-cache" class="btn-warning">清空临时缓存</button>
+                            <button id="${SCRIPT_ID_PREFIX_ACU}-vector-index-delete-current" class="btn-danger">删除当前交火索引</button>
+                        </div>
+                    </div>
+
+                    <!-- E. 纪要合并 (Medusa) -->
                     <div class="acu-card">
                         <h3 style="text-align: center; margin-bottom: 15px;">纪要合并 (Medusa)</h3>
                         <p class="notes" style="text-align: center; margin-bottom: 20px;">将当前的纪要表进行批量合并与精简。</p>

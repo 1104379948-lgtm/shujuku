@@ -1,0 +1,228 @@
+import { SillyTavern_API_ACU } from '../../shared/host-api';
+import { logWarn_ACU } from '../../shared/utils';
+import type {
+    SummaryVectorIndexExternalFileRef_ACU,
+    SummaryVectorIndexExternalFileRole_ACU,
+    SummaryVectorIndexRegistryFile_ACU,
+} from '../../service/vector/summary-vector-index-types';
+import { SUMMARY_VECTOR_INDEX_REGISTRY_PATH_ACU } from '../../service/vector/summary-vector-index-types';
+
+export interface VectorIndexFileWriteResult_ACU {
+    ok: boolean;
+    ref?: SummaryVectorIndexExternalFileRef_ACU;
+    error?: string;
+}
+
+export interface VectorIndexFileDeleteResult_ACU {
+    ok: boolean;
+    path: string;
+    error?: string;
+}
+
+function getRequestHeaders_ACU(): Record<string, string> {
+    const contextHeaders = (SillyTavern_API_ACU as any)?.getRequestHeaders?.();
+    const headers: Record<string, string> = {
+        ...(contextHeaders && typeof contextHeaders === 'object' ? contextHeaders : {}),
+    };
+    if (!headers['Content-Type'] && !headers['content-type']) {
+        headers['Content-Type'] = 'application/json';
+    }
+    return headers;
+}
+
+function normalizeError_ACU(error: any): string {
+    return String(error?.message || error || '未知错误');
+}
+
+function normalizeFileNamePart_ACU(value: string): string {
+    return String(value || 'default')
+        .replace(/[^a-zA-Z0-9_-]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 96) || 'default';
+}
+
+export function buildVectorIndexFileName_ACU(parts: {
+    chatKey: string;
+    isolationKey: string;
+    indexId: string;
+    role: SummaryVectorIndexExternalFileRole_ACU;
+    shardId?: string;
+}): string {
+    const chatKey = normalizeFileNamePart_ACU(parts.chatKey);
+    const isolationKey = normalizeFileNamePart_ACU(parts.isolationKey || 'default');
+    const indexId = normalizeFileNamePart_ACU(parts.indexId);
+    const shardId = parts.shardId ? `_${normalizeFileNamePart_ACU(parts.shardId)}` : '';
+    return `TavernDB_ACU_vector_${chatKey}_${isolationKey}_${indexId}_${parts.role}${shardId}.json`;
+}
+
+function getUserFileUrl_ACU(path: string): string {
+    return `/user/files/${encodeURIComponent(path)}?t=${Date.now()}`;
+}
+
+async function encodeBase64_ACU(text: string): Promise<string> {
+    const blob = new Blob([text], { type: 'application/json' });
+    return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = String(reader.result || '');
+            const base64 = result.includes(',') ? result.split(',')[1] : result;
+            resolve(base64);
+        };
+        reader.onerror = () => reject(new Error('Base64 encoding failed'));
+        reader.readAsDataURL(blob);
+    });
+}
+
+export async function sha256Text_ACU(text: string): Promise<string> {
+    const cryptoApi = globalThis.crypto;
+    if (cryptoApi?.subtle) {
+        const data = new TextEncoder().encode(text);
+        const digest = await cryptoApi.subtle.digest('SHA-256', data);
+        return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    }
+    let hash = 0;
+    for (let index = 0; index < text.length; index++) {
+        hash = ((hash << 5) - hash) + text.charCodeAt(index);
+        hash |= 0;
+    }
+    return `fallback-${Math.abs(hash)}`;
+}
+
+export async function uploadVectorIndexJsonFile_ACU(params: {
+    path: string;
+    role: SummaryVectorIndexExternalFileRole_ACU;
+    data: any;
+    shardId?: string;
+    chunkCount?: number;
+    rowCount?: number;
+    status?: SummaryVectorIndexExternalFileRef_ACU['status'];
+}): Promise<VectorIndexFileWriteResult_ACU> {
+    try {
+        const json = JSON.stringify(params.data);
+        const checksum = await sha256Text_ACU(json);
+        const base64Data = await encodeBase64_ACU(json);
+        const response = await fetch('/api/files/upload', {
+            method: 'POST',
+            headers: getRequestHeaders_ACU(),
+            body: JSON.stringify({
+                name: params.path,
+                data: base64Data,
+            }),
+        });
+        if (!response.ok) {
+            const detail = await response.text().catch(() => response.statusText);
+            return { ok: false, error: `上传失败 ${response.status}: ${detail}` };
+        }
+        const now = new Date().toISOString();
+        return {
+            ok: true,
+            ref: {
+                role: params.role,
+                path: params.path,
+                shardId: params.shardId,
+                byteSize: new Blob([json]).size,
+                checksum,
+                chunkCount: params.chunkCount,
+                rowCount: params.rowCount,
+                createdAt: now,
+                updatedAt: now,
+                status: params.status || 'ready',
+            },
+        };
+    } catch (error) {
+        return { ok: false, error: normalizeError_ACU(error) };
+    }
+}
+
+export async function readVectorIndexJsonFile_ACU<T = any>(path: string): Promise<{ ok: boolean; data?: T; error?: string; status?: number }> {
+    try {
+        const response = await fetch(getUserFileUrl_ACU(path));
+        if (!response.ok) {
+            return { ok: false, status: response.status, error: `读取失败 ${response.status}: ${response.statusText}` };
+        }
+        return { ok: true, data: await response.json() as T };
+    } catch (error) {
+        return { ok: false, error: normalizeError_ACU(error) };
+    }
+}
+
+export async function deleteVectorIndexFile_ACU(path: string): Promise<VectorIndexFileDeleteResult_ACU> {
+    try {
+        const response = await fetch('/api/files/delete', {
+            method: 'POST',
+            headers: getRequestHeaders_ACU(),
+            body: JSON.stringify({ path }),
+        });
+        if (!response.ok) {
+            const detail = await response.text().catch(() => response.statusText);
+            return { ok: false, path, error: `删除失败 ${response.status}: ${detail}` };
+        }
+        return { ok: true, path };
+    } catch (error) {
+        return { ok: false, path, error: normalizeError_ACU(error) };
+    }
+}
+
+export async function loadVectorIndexRegistry_ACU(): Promise<SummaryVectorIndexRegistryFile_ACU> {
+    const loaded = await readVectorIndexJsonFile_ACU<SummaryVectorIndexRegistryFile_ACU>(SUMMARY_VECTOR_INDEX_REGISTRY_PATH_ACU);
+    if (!loaded.ok || !loaded.data || typeof loaded.data !== 'object') {
+        return { version: 1, updatedAt: new Date().toISOString(), files: [] };
+    }
+    return {
+        version: 1,
+        updatedAt: String(loaded.data.updatedAt || new Date().toISOString()),
+        files: Array.isArray(loaded.data.files) ? loaded.data.files : [],
+    };
+}
+
+export async function saveVectorIndexRegistry_ACU(registry: SummaryVectorIndexRegistryFile_ACU): Promise<void> {
+    const next: SummaryVectorIndexRegistryFile_ACU = {
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        files: Array.isArray(registry.files) ? registry.files : [],
+    };
+    const saved = await uploadVectorIndexJsonFile_ACU({
+        path: SUMMARY_VECTOR_INDEX_REGISTRY_PATH_ACU,
+        role: 'registry',
+        data: next,
+        status: 'ready',
+    });
+    if (!saved.ok) {
+        logWarn_ACU('[交火向量索引] registry 保存失败:', saved.error);
+    }
+}
+
+export async function registerVectorIndexFiles_ACU(files: SummaryVectorIndexExternalFileRef_ACU[]): Promise<void> {
+    if (!Array.isArray(files) || files.length === 0) return;
+    const registry = await loadVectorIndexRegistry_ACU();
+    const byPath = new Map(registry.files.map((file) => [file.path, file]));
+    files.forEach((file) => byPath.set(file.path, file));
+    registry.files = Array.from(byPath.values());
+    await saveVectorIndexRegistry_ACU(registry);
+}
+
+export async function unregisterVectorIndexFiles_ACU(paths: string[]): Promise<void> {
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    const pathSet = new Set(paths);
+    const registry = await loadVectorIndexRegistry_ACU();
+    registry.files = registry.files.filter((file) => !pathSet.has(file.path));
+    await saveVectorIndexRegistry_ACU(registry);
+}
+
+export async function deleteRegisteredVectorIndexFilesWhere_ACU(
+    predicate: (file: SummaryVectorIndexExternalFileRef_ACU) => boolean,
+): Promise<string[]> {
+    const registry = await loadVectorIndexRegistry_ACU();
+    const removableFiles = registry.files.filter((file) => file?.path && predicate(file));
+    const removablePaths = Array.from(new Set(removableFiles.map((file) => file.path).filter(Boolean)));
+    if (removablePaths.length === 0) return [];
+
+    for (const path of removablePaths) {
+        const result = await deleteVectorIndexFile_ACU(path);
+        if (!result.ok) {
+            logWarn_ACU('[交火向量索引] registry 作用域清理外置文件失败:', path, result.error);
+        }
+    }
+    await unregisterVectorIndexFiles_ACU(removablePaths);
+    return removablePaths;
+}

@@ -11,6 +11,8 @@ import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { getChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
+import { archiveSummaryVectorIndexNow_ACU } from '../vector/summary-vector-index-archive-service';
+import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 
@@ -62,6 +64,14 @@ export interface CardUpdateProgressEvent {
     attempt?: number;
     maxRetries?: number;
     message?: string;
+    currentBatch?: number;
+    totalBatches?: number;
+}
+
+/** 批处理进度上下文 */
+export interface BatchUpdateProgressContext {
+    currentBatch: number;
+    totalBatches: number;
 }
 
 /** executeCardUpdateCore 的返回值 */
@@ -267,14 +277,26 @@ export async function executeCardUpdateCore_ACU(
     targetSheetKeys: string[] | null,
     requestOptions: Record<string, any> | null,
     abortController: AbortController,
+    progressContext: BatchUpdateProgressContext | null = null,
     onProgress?: (event: CardUpdateProgressEvent) => void
 ): Promise<CardUpdateResult> {
+    const emitProgress = (event: CardUpdateProgressEvent): void => {
+        onProgress?.({
+            ...event,
+            ...(progressContext
+                ? {
+                    currentBatch: progressContext.currentBatch,
+                    totalBatches: progressContext.totalBatches,
+                }
+                : {}),
+        });
+    };
     let success = false;
     let modifiedKeys: string[] = [];
     const maxRetries = settings_ACU.tableMaxRetries || 3;
 
     try {
-        onProgress?.({ phase: 'preparing' });
+        emitProgress({ phase: 'preparing' });
 
         const dynamicContent = await prepareAIInput_ACU(messagesToUse, updateMode, targetSheetKeys, {
             excludeImportTaggedWorldbookEntries: isImportMode && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
@@ -291,7 +313,7 @@ export async function executeCardUpdateCore_ACU(
                 return { success: false, modifiedKeys: [], aborted: true };
             }
 
-            onProgress?.({ phase: 'calling_ai', attempt, maxRetries });
+            emitProgress({ phase: 'calling_ai', attempt, maxRetries });
 
             if (lastSqlError && isSqliteMode()) {
                 const markerIndex = dynamicContent.tableDataText.indexOf(SQL_ERROR_MARKER);
@@ -317,7 +339,7 @@ export async function executeCardUpdateCore_ACU(
                     throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
                 }
 
-                onProgress?.({ phase: 'parsing' });
+                emitProgress({ phase: 'parsing' });
 
                 const parseResult = parseAndApplyTableEdits_ACU(aiResponse, updateMode, isImportMode);
 
@@ -353,7 +375,7 @@ export async function executeCardUpdateCore_ACU(
                 if (attempt < maxRetries) {
                     const waitTime = 5000;
                     logDebug_ACU(`等待 ${waitTime}ms 后重试...`);
-                    onProgress?.({ phase: 'retry', attempt, maxRetries, message: error.message?.substring(0, 50) });
+                    emitProgress({ phase: 'retry', attempt, maxRetries, message: error.message?.substring(0, 50) });
                     await new Promise(resolve => setTimeout(resolve, waitTime));
                     continue;
                 } else {
@@ -364,7 +386,7 @@ export async function executeCardUpdateCore_ACU(
 
         if (success) {
             if (!isImportMode) {
-                onProgress?.({ phase: 'saving' });
+                emitProgress({ phase: 'saving' });
 
                 let keysToPersist = modifiedKeys;
                 if (targetSheetKeys && Array.isArray(targetSheetKeys)) {
@@ -408,13 +430,26 @@ export async function executeCardUpdateCore_ACU(
                     logDebug_ACU("No tables were modified by AI, skipping save to chat history.");
                 }
 
-                await updateReadableLorebookEntry_ACU(true);
+                    await updateReadableLorebookEntry_ACU(true);
+
+                    if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                        try {
+                            const archiveResult = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: saveTargetIndex, mode: 'append' });
+                            if (!archiveResult.success && !archiveResult.skipped) {
+                                logWarn_ACU('[交火模式纪要索引] 填表完成后自动归档失败:', archiveResult.errors?.join('; ') || archiveResult.reason || 'unknown_error');
+                            } else {
+                                logDebug_ACU(`[交火模式纪要索引] 填表完成后自动归档完成：rows=${archiveResult.indexedRowCount}, chunks=${archiveResult.chunkCount}, skipped=${archiveResult.skipped}, reason=${archiveResult.reason || ''}`);
+                            }
+                        } catch (archiveError) {
+                            logWarn_ACU('[交火模式纪要索引] 填表完成后自动归档异常，已保留本次表格保存结果:', archiveError);
+                        }
+                    }
             } else {
-                onProgress?.({ phase: 'chunk_done' });
+                emitProgress({ phase: 'chunk_done' });
                 logDebug_ACU("Import mode: skipping save to chat history for this chunk.");
             }
 
-            onProgress?.({ phase: 'complete' });
+            emitProgress({ phase: 'complete' });
         }
         return { success, modifiedKeys };
 
@@ -437,7 +472,15 @@ export async function processUpdatesBatch_ACU(
     indicesToUpdate: number[],
     mode: string,
     options: any,
-    executeUpdate: (messagesToUse: any[], saveTargetIndex: number, updateMode: string, isSilentMode: boolean, targetSheetKeys: string[] | null, requestOptions: Record<string, any> | null) => Promise<CardUpdateResult>
+    executeUpdate: (
+        messagesToUse: any[],
+        saveTargetIndex: number,
+        updateMode: string,
+        isSilentMode: boolean,
+        targetSheetKeys: string[] | null,
+        requestOptions: Record<string, any> | null,
+        progressContext: BatchUpdateProgressContext
+    ) => Promise<CardUpdateResult>
 ): Promise<BatchUpdateResult> {
     if (!indicesToUpdate || indicesToUpdate.length === 0) {
         return { success: true };
@@ -518,7 +561,15 @@ export async function processUpdatesBatch_ACU(
             }
         }
 
-        const result = await executeUpdate(messagesForContext, finalSaveTargetIndex, updateMode, isSilentMode, targetSheetKeys, effectiveRequestOptions);
+        const result = await executeUpdate(
+            messagesForContext,
+            finalSaveTargetIndex,
+            updateMode,
+            isSilentMode,
+            targetSheetKeys,
+            effectiveRequestOptions,
+            { currentBatch: batchNumber, totalBatches: batches.length }
+        );
 
         if (!result.success) {
             _set_isAutoUpdatingCard_ACU(false);

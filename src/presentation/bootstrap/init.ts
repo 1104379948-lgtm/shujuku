@@ -8,7 +8,7 @@ import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync';
 import { handleChatCompletionReady_ACU, loadPresetAndCleanCharacterData_ACU } from '../../service/runtime/helpers-remaining';
 import { SillyTavern_API_ACU } from '../../shared/host-api';
-import { currentChatFileIdentifier_ACU, generationGate_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessAutoTableUpdateForGenerationEnded_ACU, shouldProcessPlotForGeneration_ACU, _set_isProcessing_Plot_ACU} from '../../service/runtime/state-manager';
+import { currentChatFileIdentifier_ACU, generationGate_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessAutoTableUpdateForGenerationEnded_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_isProcessing_Plot_ACU} from '../../service/runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { reloadStorageProvider, disposeStorageProvider } from '../../service/table/table-storage-strategy';
@@ -23,6 +23,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-d
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync';
 import { enterLoopRetryFlow_ACU, onLoopGenerationEnded_ACU, stopAutoLoop_ACU } from '../triggers/auto-loop';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
+import { processSummaryVectorIndexBeforeGenerationWithUI_ACU } from '../components/summary-vector-index-ui';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 function installSendIntentCaptureHooks_ACU() {
@@ -142,6 +143,12 @@ export   function mainInitialize_ACU() {
                   return (window as any).original_TavernHelper_generate_ACU.apply(this, args);
                 }
 
+                if (shouldProcessSummaryVectorIndexForGeneration_ACU('tavernhelper', { quiet_prompt: options.quiet_prompt, automatic_trigger: options.automatic_trigger }, false)) {
+                  const userInput = String(options.user_input || options.prompt || getSendTextareaValue_ACU() || '').trim();
+                  const summaryVectorResult = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput, source: 'tavernhelper' });
+                  logDebug_ACU(`[交火模式纪要索引] TavernHelper.generate 发送前处理完成：success=${summaryVectorResult.success}, skipped=${summaryVectorResult.skipped === true}, reason=${summaryVectorResult.reason || 'none'}, keywords=${summaryVectorResult.keywordCount ?? 0}, injected=${summaryVectorResult.injectedCount ?? 0}`);
+                }
+
                 // [重构] 调用 service 层编排函数，传入 UI 规划回调
                 const result = await orchestrateTavernHelperHook_ACU(options, runOptimizationLogicWithUI_ACU);
 
@@ -251,7 +258,22 @@ export   function mainInitialize_ACU() {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS, async (type: any, params: any, dryRun: any) => {
             // 前置过滤（纯 UI/宿主层判断）
             if (params?._qrf_processed_by_hook) return;
-            if (!shouldProcessPlotForGeneration_ACU(type, params, dryRun)) return;
+            const shouldProcessSummaryVectorIndex = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
+            const shouldProcessPlot = shouldProcessPlotForGeneration_ACU(type, params, dryRun);
+            if (!shouldProcessSummaryVectorIndex && !shouldProcessPlot) return;
+            if (shouldProcessSummaryVectorIndex) {
+              try {
+                const chatForSummaryIndex = SillyTavern_API_ACU.chat;
+                const lastUserText = (chatForSummaryIndex?.length && (chatForSummaryIndex as any)[chatForSummaryIndex.length - 1]?.is_user)
+                  ? String((chatForSummaryIndex as any)[chatForSummaryIndex.length - 1].mes || '')
+                  : String(getSendTextareaValue_ACU() || params?.prompt || '');
+                const summaryVectorResult = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: lastUserText, source: 'generation_after_commands' });
+                logDebug_ACU(`[交火模式纪要索引] GENERATION_AFTER_COMMANDS 发送前处理完成：success=${summaryVectorResult.success}, skipped=${summaryVectorResult.skipped === true}, reason=${summaryVectorResult.reason || 'none'}, keywords=${summaryVectorResult.keywordCount ?? 0}, injected=${summaryVectorResult.injectedCount ?? 0}`);
+              } catch (error) {
+                logWarn_ACU('[交火模式纪要索引] 发送前注入失败，继续原始生成:', error);
+              }
+            }
+            if (!shouldProcessPlot) return;
             if (type === 'regenerate' || isProcessing_Plot_ACU) return;
 
             // [去重] 若同一文本刚被 TavernHelper.generate 钩子处理过，跳过
@@ -320,7 +342,10 @@ export   function mainInitialize_ACU() {
             }
 
             // ── 策略2：输入框文本 ──
-            if (!isRecentUserSendIntent_ACU()) return;
+            // shouldProcessPlot 是本次 GENERATION_AFTER_COMMANDS 事件开始时捕获的授权。
+            // 交火召回可能耗时超过 USER_SEND_TRIGGER_TTL_MS_ACU；这里不能再用 TTL 二次否决，
+            // 否则会出现“交火已覆盖纪要索引，但剧情推进被跳过并直接正文生成”的断链。
+            if (!shouldProcessPlot && !isRecentUserSendIntent_ACU()) return;
             const textInBox = getSendTextareaValue_ACU();
 
             // [重构] 调用 service 层策略2编排

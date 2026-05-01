@@ -279,12 +279,15 @@ export   function loadSettings_ACU() {
       // [兼容] 旧标签排除字段自动迁移为新规则组结构
       ensureTagRulesCompat_ACU(settings_ACU);
 
-      // [向量记忆] 一次性迁移：从角色级 worldbookConfig.vectorMemory 提升到全局 vectorMemoryConfig
-      // 扫描所有角色设置，找到第一个 enabled=true 或有非默认字段的 vectorMemory 配置
-      if (!settings_ACU.vectorMemoryConfig || typeof settings_ACU.vectorMemoryConfig !== 'object' || Array.isArray(settings_ACU.vectorMemoryConfig)) {
+      // [交火模式配置] 权威配置存放在 globalMeta.vectorMemoryConfigGlobal（跨 profile 全局）。
+      // settings_ACU.vectorMemoryConfig 只保留为运行时投影，兼容旧调用方。
+      if (!globalMeta_ACU.vectorMemoryConfigGlobal || typeof globalMeta_ACU.vectorMemoryConfigGlobal !== 'object' || Array.isArray(globalMeta_ACU.vectorMemoryConfigGlobal)) {
           let bestSource: any = null;
+          if (settings_ACU.vectorMemoryConfig && typeof settings_ACU.vectorMemoryConfig === 'object' && !Array.isArray(settings_ACU.vectorMemoryConfig)) {
+              bestSource = settings_ACU.vectorMemoryConfig;
+          }
           const charSettings = settings_ACU.characterSettings;
-          if (charSettings && typeof charSettings === 'object') {
+          if (!bestSource && charSettings && typeof charSettings === 'object') {
               for (const charId of Object.keys(charSettings)) {
                   const vm = charSettings[charId]?.worldbookConfig?.vectorMemory;
                   if (vm && typeof vm === 'object' && !Array.isArray(vm)) {
@@ -300,34 +303,123 @@ export   function loadSettings_ACU() {
                   }
               }
           }
-          settings_ACU.vectorMemoryConfig = bestSource
+          globalMeta_ACU.vectorMemoryConfigGlobal = bestSource
               ? JSON.parse(JSON.stringify(bestSource))
               : JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU));
-          if (bestSource) {
-              logDebug_ACU('[向量记忆] 已从角色级配置迁移到全局 vectorMemoryConfig');
+          saveGlobalMeta_ACU();
+          logDebug_ACU(bestSource
+              ? '[交火模式配置] 已从旧 profile/角色配置迁移到全局 globalMeta.vectorMemoryConfigGlobal'
+              : '[交火模式配置] 已初始化全局 globalMeta.vectorMemoryConfigGlobal');
+      }
+      settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+
+      // [交火模式] 一次性补齐默认归档/召回/关键词提示词参数。
+      // 只能补缺失字段，绝不能在版本刷新时覆盖用户已经填写的模型、API、召回参数或提示词。
+      let shouldPersistSettingsAfterLoad_ACU = false;
+      if (globalMeta_ACU.vectorMemoryConfigGlobal && typeof globalMeta_ACU.vectorMemoryConfigGlobal === 'object' && !Array.isArray(globalMeta_ACU.vectorMemoryConfigGlobal)) {
+          const vectorConfig = globalMeta_ACU.vectorMemoryConfigGlobal as any;
+          if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
+              const cloneDefaultValue_ACU = (value: any) => JSON.parse(JSON.stringify(value));
+              const fillMissing_ACU = (key: string, value: any) => {
+                  if (typeof vectorConfig[key] === 'undefined' || vectorConfig[key] === null || vectorConfig[key] === '') {
+                      vectorConfig[key] = cloneDefaultValue_ACU(value);
+                      shouldPersistSettingsAfterLoad_ACU = true;
+                  }
+              };
+              const fillMissingPromptGroup_ACU = (key: string, value: any[]) => {
+                  if (!Array.isArray(vectorConfig[key]) || vectorConfig[key].length === 0) {
+                      vectorConfig[key] = cloneDefaultValue_ACU(value || []);
+                      shouldPersistSettingsAfterLoad_ACU = true;
+                  }
+              };
+              const normalizePromptGroupForCompare_ACU = (value: any) => JSON.stringify(
+                  (Array.isArray(value) ? value : [])
+                      .map((segment: any) => ({
+                          role: String(segment?.role || '').toLowerCase().trim(),
+                          content: String(segment?.content || '').trim(),
+                      }))
+                      .filter((segment: any) => segment.role || segment.content),
+              );
+              const legacyKeywordPromptGroups_ACU = [
+                  [
+                      {
+                          role: 'system',
+                          content: '你负责为交火模式纪要索引召回生成检索关键词。\n'
+                              + '你会看到最近对话上下文和当前用户输入。\n'
+                              + '目标：输出最相关的 12 个简洁关键词或短语，用于纪要索引召回与重排序。\n'
+                              + '优先级：人物、地点、时间、事件、目标、冲突、道具、组织、关系变化、未解决问题。\n'
+                              + '硬性格式：只输出关键词本身；禁止输出解释、句子、编号、标题、前后缀说明。\n'
+                              + '分隔符：多个关键词必须使用中文逗号分隔。\n'
+                              + '数量：尽量输出 12 个；信息不足时也要用最接近当前语境的检索词补足。',
+                      },
+                      {
+                          role: 'user',
+                          content: '最近上下文：\n$RECENT_CONTEXT\n\n当前用户输入：\n$USER_INPUT\n\n请根据以上内容生成交火模式纪要索引召回关键词。',
+                      },
+                      {
+                          role: 'assistant',
+                          content: '关键词：',
+                      },
+                  ],
+                  [
+                      {
+                          role: 'system',
+                          content: '你负责为交火模式纪要索引召回生成检索关键词。\n'
+                              + '你会看到最近对话上下文和当前用户输入。\n'
+                              + '目标：输出最相关的 12 个简洁关键词或短语，用于纪要索引召回与重排序。\n'
+                              + '优先级：人物、地点、时间、事件、目标、冲突、道具、组织、关系变化、未解决问题。\n',
+                      },
+                      {
+                          role: 'user',
+                          content: '最近上下文：\n$RECENT_CONTEXT\n\n当前用户输入：\n$USER_INPUT\n\n请根据以上内容生成交火模式纪要索引召回关键词。',
+                      },
+                  ],
+              ];
+              const currentKeywordPromptSignature_ACU = normalizePromptGroupForCompare_ACU(vectorConfig.keywordPromptGroup);
+              const isLegacyKeywordPromptGroup_ACU = legacyKeywordPromptGroups_ACU
+                  .some((legacyGroup) => currentKeywordPromptSignature_ACU === normalizePromptGroupForCompare_ACU(legacyGroup));
+
+              const fillMissingOrLegacyDefault_ACU = (key: string, value: any, legacyValues: any[]) => {
+                  const currentValue = vectorConfig[key];
+                  const isMissing = typeof currentValue === 'undefined' || currentValue === null || currentValue === '';
+                  const isLegacyDefault = legacyValues.some((legacyValue) => currentValue === legacyValue);
+                  if (isMissing || isLegacyDefault) {
+                      vectorConfig[key] = cloneDefaultValue_ACU(value);
+                      shouldPersistSettingsAfterLoad_ACU = true;
+                  }
+              };
+
+              fillMissing_ACU('archiveTriggerCount', defaultVectorMemoryConfig_ACU.archiveTriggerCount);
+              fillMissing_ACU('archiveBatchSize', defaultVectorMemoryConfig_ACU.archiveBatchSize);
+              fillMissing_ACU('archiveMaxConcurrency', defaultVectorMemoryConfig_ACU.archiveMaxConcurrency);
+              fillMissing_ACU('summaryIndexArchiveMaxConcurrency', (defaultVectorMemoryConfig_ACU as any).summaryIndexArchiveMaxConcurrency || 30);
+              fillMissingOrLegacyDefault_ACU('topK', defaultVectorMemoryConfig_ACU.topK, [10]);
+              fillMissingOrLegacyDefault_ACU('minScore', defaultVectorMemoryConfig_ACU.minScore, [0.4, 0.6]);
+              fillMissingOrLegacyDefault_ACU('recallCandidateLimit', defaultVectorMemoryConfig_ACU.recallCandidateLimit, [100]);
+              fillMissingPromptGroup_ACU('summaryPromptGroup', defaultVectorMemoryConfig_ACU.summaryPromptGroup || []);
+              if (isLegacyKeywordPromptGroup_ACU || !Array.isArray(vectorConfig.keywordPromptGroup) || vectorConfig.keywordPromptGroup.length === 0) {
+                  vectorConfig.keywordPromptGroup = cloneDefaultValue_ACU(defaultVectorMemoryConfig_ACU.keywordPromptGroup || []);
+                  shouldPersistSettingsAfterLoad_ACU = true;
+                  logDebug_ACU('[交火模式配置] 已一次性刷新旧版关键词生成提示词为 <thinking> 预填充版本');
+              } else {
+                  fillMissingPromptGroup_ACU('keywordPromptGroup', defaultVectorMemoryConfig_ACU.keywordPromptGroup || []);
+                  logDebug_ACU('[交火模式配置] 检测到用户自定义关键词提示词，保留现有配置，仅记录默认刷新版本');
+              }
+              fillMissing_ACU('keywordGenerationMaxAttempts', (defaultVectorMemoryConfig_ACU as any).keywordGenerationMaxAttempts || 3);
+              vectorConfig.defaultsRefreshVersion = VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU;
+              shouldPersistSettingsAfterLoad_ACU = true;
+              logDebug_ACU(`[交火模式配置] 已补齐缺失默认参数并记录版本: ${VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU}`);
           }
       }
 
-      // [向量记忆] 一次性刷新默认归档/召回/关键词提示词参数。
-      // 只刷新版本要求的默认项，不覆盖 endpoint/key/model/enabled/namespace/世界书条目标识等用户连接与身份配置。
-      if (settings_ACU.vectorMemoryConfig && typeof settings_ACU.vectorMemoryConfig === 'object' && !Array.isArray(settings_ACU.vectorMemoryConfig)) {
-          const vectorConfig = settings_ACU.vectorMemoryConfig as any;
-          if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
-              vectorConfig.archiveTriggerCount = defaultVectorMemoryConfig_ACU.archiveTriggerCount;
-              vectorConfig.archiveBatchSize = defaultVectorMemoryConfig_ACU.archiveBatchSize;
-              vectorConfig.archiveMaxConcurrency = defaultVectorMemoryConfig_ACU.archiveMaxConcurrency;
-              vectorConfig.summaryIndexArchiveMaxConcurrency = (defaultVectorMemoryConfig_ACU as any).summaryIndexArchiveMaxConcurrency || 30;
-              vectorConfig.topK = defaultVectorMemoryConfig_ACU.topK;
-              vectorConfig.minScore = defaultVectorMemoryConfig_ACU.minScore;
-              vectorConfig.summaryPromptGroup = JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU.summaryPromptGroup || []));
-              vectorConfig.keywordPromptGroup = JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU.keywordPromptGroup || []));
-              vectorConfig.keywordGenerationMaxAttempts = (defaultVectorMemoryConfig_ACU as any).keywordGenerationMaxAttempts || 3;
-              vectorConfig.defaultsRefreshVersion = VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU;
-              logDebug_ACU(`[向量记忆] 已刷新默认归档/召回/关键词参数: ${VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU}`);
-          }
-      }
+      settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
 
       refreshDefaultTableTemplateOnce_ACU(activeCode);
+      if (shouldPersistSettingsAfterLoad_ACU) {
+          saveGlobalMeta_ACU();
+          persistSettingsToStorage_ACU(settings_ACU, activeCode);
+          logDebug_ACU(`[交火模式配置] 已持久化全局默认参数刷新版本: ${VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU}`);
+      }
 
       if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
           settings_ACU.maxConcurrentGroups = 1;

@@ -7,6 +7,7 @@ import { applyOptimizations_ACU } from '../../shared/text-optimization';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { saveOptimizationBaseToCache_ACU, loadOptimizationBaseFromCache_ACU } from '../../data/storage/optimization-cache-storage';
 import { formatOutlineTableForPlot_ACU, formatSummaryIndexForPlot_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, getWorldbookContentForPlot_ACU, parseCalcTags_ACU, parseIfBlockRecursive_ACU, parseMaxTags_ACU, parseMinTags_ACU, parseRandomTags_ACU, replaceCalcVariables_ACU, replaceMaxVariables_ACU, replaceMinVariables_ACU, replaceRandomVariables_ACU } from '../runtime/helpers-remaining';
+import { getSummaryIndexContentForPlot_ACU } from '../runtime/plot-runtime/plot-data-format';
 import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
 /**
  * service/optimization/content-optimization.ts — 正文优化服务逻辑
@@ -33,10 +34,10 @@ import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
       $U: '',   // 用户设定描述
       $C: ''    // 角色描述
     };
+    const plotSettings = settings_ACU.plotSettings || {};
 
     try {
       // $1: 世界书内容（使用剧情推进的世界书读取逻辑）
-      const plotSettings = settings_ACU.plotSettings || {};
       placeholders.$1 = await getWorldbookContentForPlot_ACU(plotSettings, userMessage, '');
       // [新增] 对世界书内容进行随机数处理
       placeholders.$1 = parseRandomTags_ACU(placeholders.$1);
@@ -49,15 +50,19 @@ import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
     }
 
     try {
-      // $5: 纪要表/总体大纲表内容
-      if (currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object') {
+      // $5: 纪要索引内容。交火模式会先覆盖世界书“纪要索引”条目；读取不到时再回退本地纪要表/总体大纲。
+      const summaryIndexWorldbookContent = await getSummaryIndexContentForPlot_ACU(plotSettings);
+      if (typeof summaryIndexWorldbookContent === 'string' && summaryIndexWorldbookContent.trim()) {
+        placeholders.$5 = summaryIndexWorldbookContent;
+        logDebug_ACU('[正文优化] $5 使用世界书纪要索引条目内容:', placeholders.$5 ? `长度=${placeholders.$5.length}` : '(空)');
+      } else if (currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object') {
         const summaryIndexResult = formatSummaryIndexForPlot_ACU(currentJsonTableData_ACU);
         if (summaryIndexResult.success) {
           placeholders.$5 = summaryIndexResult.content;
         } else {
           placeholders.$5 = formatOutlineTableForPlot_ACU(currentJsonTableData_ACU);
         }
-        logDebug_ACU('[正文优化] $5 纪要表内容:', placeholders.$5 ? `长度=${placeholders.$5.length}` : '(空)');
+        logDebug_ACU('[正文优化] $5 未找到世界书纪要索引条目，使用本地表格内容:', placeholders.$5 ? `长度=${placeholders.$5.length}` : '(空)');
       }
     } catch (e) {
       logWarn_ACU('[正文优化] 获取纪要表内容失败:', e);

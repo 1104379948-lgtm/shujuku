@@ -128,11 +128,16 @@ import { abortableDelay } from '../../../shared/abortable-delay';
           }
         } catch (e) { logWarn_ACU('[剧情任务] 合并表格数据失败, 剧情推进可能使用过时数据:', e); }
       }
-      if (currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object') {
+
+      const summaryIndexWorldbookContent = await getSummaryIndexContentForPlot_ACU(plotSettings);
+      if (typeof summaryIndexWorldbookContent === 'string' && summaryIndexWorldbookContent.trim()) {
+        outlineTableContent = summaryIndexWorldbookContent;
+        logDebug_ACU('[剧情推进] $5 使用世界书纪要索引条目内容');
+      } else if (currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object') {
         const summaryIndexResult = formatSummaryIndexForPlot_ACU(currentJsonTableData_ACU);
         if (summaryIndexResult.success) {
           outlineTableContent = summaryIndexResult.content;
-          logDebug_ACU('[剧情推进] $5 使用纪要表的概要和编码索引列');
+          logDebug_ACU('[剧情推进] $5 未找到世界书纪要索引条目，使用纪要表的概要和编码索引列');
         } else {
           logDebug_ACU('[剧情推进] $5 纪要表读取失败，回退使用总体大纲表。原因:', summaryIndexResult.content);
           outlineTableContent = formatOutlineTableForPlot_ACU(currentJsonTableData_ACU);

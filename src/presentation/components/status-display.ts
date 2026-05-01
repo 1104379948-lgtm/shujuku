@@ -32,7 +32,7 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
  
   export function isVectorMemoryManualUpdateBlocked_ACU() {
     try {
-        return getCurrentVectorMemoryConfig_ACU().enabled === true;
+        return getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true;
     } catch (e) {
         return false;
     }
@@ -49,8 +49,8 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
         $manualUpdateCardButton_ACU
             .prop('disabled', false)
             .addClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
-            .text('请先关闭向量功能')
-            .attr('title', '向量功能启用时不建议手动更新表格；特殊场景下仍可点击执行。');
+            .text('请先关闭交火索引')
+            .attr('title', '交火模式纪要索引启用时不建议手动更新表格；特殊场景下仍可点击执行。');
         return;
     }
  
@@ -173,7 +173,8 @@ setVal('merge-prompt-template', s.mergeSummaryPrompt || (isSqliteMode() ? DEFAUL
       setVal('worldbook-vector-memory-threshold', vectorMemoryConfig.threshold);
       setVal('worldbook-vector-memory-archive-trigger-count', (vectorMemoryConfig as any).archiveTriggerCount || vectorMemoryConfig.archiveBatchSize);
       setVal('worldbook-vector-memory-archive-batch-size', vectorMemoryConfig.archiveBatchSize);
-      setVal('worldbook-vector-memory-archive-max-concurrency', (vectorMemoryConfig as any).archiveMaxConcurrency || 3);
+      setVal('worldbook-vector-memory-archive-max-concurrency', (vectorMemoryConfig as any).summaryIndexArchiveMaxConcurrency || (vectorMemoryConfig as any).archiveMaxConcurrency || 30);
+      setVal('worldbook-vector-memory-summary-index-keyword-min-rows', (vectorMemoryConfig as any).summaryIndexKeywordMinRows || 100);
       setVal('worldbook-vector-memory-topk', vectorMemoryConfig.topK);
       setVal('worldbook-vector-memory-min-score', vectorMemoryConfig.minScore);
       setVal('worldbook-vector-memory-namespace', vectorMemoryConfig.vectorNamespace);
@@ -203,6 +204,7 @@ setVal('merge-prompt-template', s.mergeSummaryPrompt || (isSqliteMode() ? DEFAUL
           $outlineToggle.prop('checked', mode === true);
       }
       setChecked('worldbook-summary-vector-index-mode-enabled', summaryVectorIndexEnabled);
+      setChecked('vector-index-mode-enabled', summaryVectorIndexEnabled);
       const $summaryVectorIndexHint = find('summary-vector-index-archive-hint');
       if ($summaryVectorIndexHint.length) {
           const activeSummaryVectorIndexSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
@@ -210,13 +212,14 @@ setVal('merge-prompt-template', s.mergeSummaryPrompt || (isSqliteMode() ? DEFAUL
           const summaryVectorIndexRowCount = activeSummaryVectorIndexState?.rowCount || (Array.isArray(activeSummaryVectorIndexState?.rows) ? activeSummaryVectorIndexState.rows.length : 0);
           const summaryVectorIndexChunkCount = activeSummaryVectorIndexState?.chunkCount || (Array.isArray(activeSummaryVectorIndexState?.chunks) ? activeSummaryVectorIndexState.chunks.length : 0);
           const hasSummaryVectorIndexArchive = !!activeSummaryVectorIndexState;
+          const summaryIndexKeywordMinRows = Number((vectorMemoryConfig as any).summaryIndexKeywordMinRows || 100);
           $summaryVectorIndexHint.text(summaryVectorIndexEnabled
               ? hasSummaryVectorIndexArchive
-                  ? summaryVectorIndexRowCount >= 100
-                      ? `向量混合交火增强方案已启用；当前可用归档：${summaryVectorIndexRowCount} 条纪要，${summaryVectorIndexChunkCount} 个 chunks，已达到 100 条门槛，发送前会执行关键词召回和概要索引覆盖。请确认已配置好向量模型以及 rerank 模型。`
-                      : `向量混合交火增强方案已启用；当前可用归档：${summaryVectorIndexRowCount}/100 条纪要，${summaryVectorIndexChunkCount} 个 chunks。未满 100 条前，发送时不会触发关键词召回和概要索引覆盖注入，自动归档仍会在填表保存后继续累积。请确认已配置好向量模型以及 rerank 模型。`
-                  : '向量混合交火增强方案已启用，但当前聊天尚无纪要向量索引归档；未满 100 条前发送时不会触发关键词召回和概要索引覆盖注入，自动归档仍会在填表保存后继续累积。请确认已配置好向量模型以及 rerank 模型。'
-              : '使用前请先配置好向量模型以及 rerank 模型；开启后会自动累积纪要向量索引，归档纪要满 100 条后才会在发送前执行关键词召回并覆盖概要索引；旧对话需要点击“立即执行远记忆归档”按钮完成纪要向量索引归档。');
+                  ? summaryVectorIndexRowCount >= summaryIndexKeywordMinRows
+                      ? `交火模式纪要索引已启用；当前可用索引：${summaryVectorIndexRowCount} 条纪要，${summaryVectorIndexChunkCount} 个概要列 chunks，已达到 ${summaryIndexKeywordMinRows} 条门槛。发送前会生成关键词、召回概要列 chunks、执行可选 Rerank，并按纪要表原顺序覆盖原概要索引条目。`
+                      : `交火模式纪要索引已启用；当前可用索引：${summaryVectorIndexRowCount}/${summaryIndexKeywordMinRows} 条纪要，${summaryVectorIndexChunkCount} 个概要列 chunks。未达到门槛前，发送时不会触发交火召回，填表保存后仍会立即归档并继续累积外置索引。`
+                  : `交火模式纪要索引已启用，但当前聊天尚无外置纪要向量索引；完成一次纪要表填写后会自动归档，也可点击“立即构建交火纪要索引”手动构建。`
+              : '使用前请先配置好 Embedding 模型以及可选 Rerank 模型；开启后会在纪要表填写完成时立即归档外置概要列向量索引，达到门槛后发送前覆盖原概要索引条目。');
       }
       if ($useMainApiCheckbox_ACU) { $useMainApiCheckbox_ACU.prop('checked', s.apiConfig.useMainApi); if (typeof updateCustomApiInputsState_ACU === 'function') updateCustomApiInputsState_ACU(); }
       if ($streamingEnabledCheckbox_ACU) $streamingEnabledCheckbox_ACU.prop('checked', s.streamingEnabled || false);

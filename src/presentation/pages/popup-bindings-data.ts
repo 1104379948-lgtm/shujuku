@@ -16,10 +16,10 @@ import { saveSettingsAndNotify_ACU, loadSettingsAndRefreshUI_ACU } from '../comp
 import { updateImportStatusUI_ACU, handleTxtImportAndSplit_ACU } from '../components/import-status-ui';
 import { clearImportLocalStorage_ACU, clearImportedEntries_ACU, deleteImportedEntries_ACU, handleInjectImportedTxtSelected_ACU } from '../triggers/import-process';
 import { importCombinedSettings_ACU } from '../triggers/admin-ui';
-import { applyTemplateScopeForCurrentChat_ACU, getDataIsolationHistory_ACU, removeDataIsolationHistory_ACU, switchIsolationProfile_ACU, persistCurrentTemplatePresetName_ACU } from '../../service/settings/settings-service';
-import { deleteAllGeneratedEntries_ACU } from '../../service/worldbook/pipeline';
+import { applyTemplateScopeForCurrentChat_ACU, getDataIsolationHistory_ACU, removeDataIsolationHistory_ACU, switchIsolationProfile_ACU, persistCurrentTemplatePresetName_ACU, setSummaryVectorIndexMode_ACU } from '../../service/settings/settings-service';
+import { deleteAllGeneratedEntries_ACU, updateReadableLorebookEntry_ACU } from '../../service/worldbook/pipeline';
 import { refreshMergedDataAndNotifyWithUI_ACU, refreshPresetUIAfterSwitch_ACU } from '../components/pipeline-ui-helpers';
-import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
+import { loadOrCreateJsonTableFromChatHistory_ACU, saveIndependentTableToChatHistory_ACU } from '../../service/table/table-service';
 import { getTemplatePreset_ACU, applyTemplatePresetToCurrent_ACU, applyTemplateSnapshotToScope_ACU, deleteTemplatePreset_ACU, ensureUniqueTemplatePresetName_ACU, normalizeTemplateForPresetSave_ACU, parseImportedTemplateData_ACU, persistTemplateScopeSelectionState_ACU, resolveActiveTemplatePresetName_ACU, upsertTemplatePreset_ACU } from '../../service/template/template-preset-service';
 import { getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../../service/template/chat-scope';
 import { loadTemplatePresetSelect_ACU } from '../components/template-preset-ui';
@@ -32,6 +32,66 @@ import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-d
 import { populateImportWorldbookTargetSelector_ACU } from '../components/worldbook-selector';
 import { saveApiConfig_ACU, clearApiConfig_ACU, fetchModelsAndConnect_ACU, loadApiPreset_ACU, saveApiPreset_ACU, deleteApiPreset_ACU, saveCustomCharCardPrompt_ACU, saveImportSplitSize_ACU, resetDefaultCharCardPrompt_ACU, updateCustomApiInputsState_ACU, refreshApiPresetSelectors_ACU } from '../triggers/settings-ui-sync';
 import { handleImportSelectAll_ACU, handleImportSelectNone_ACU } from '../components/table-selector';
+import { getAggregatedSummaryVectorIndexSnapshot_ACU, getLatestSummaryVectorIndexSnapshotState_ACU } from '../../service/vector/summary-vector-index-state-service';
+import { archiveSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-archive-service';
+import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
+import { syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
+import { deleteSummaryVectorIndexExternal_ACU, getSummaryVectorIndexStats_ACU } from '../../service/vector/summary-vector-index-storage-service';
+import { clearVectorIndexTempCache_ACU } from '../../data/storage/vector-index-temp-cache';
+import { getChatArray_ACU, getLastMessageIndex_ACU, saveChatToHost_ACU } from '../../service/chat/chat-service';
+import { readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { assignSummaryVectorIndexStateToTagData_ACU } from '../../service/vector/summary-vector-index-state-service';
+
+function formatBytes_ACU(bytes: number): string {
+    const value = Math.max(0, Number(bytes) || 0);
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / 1024 / 1024).toFixed(2)} MB`;
+}
+
+async function refreshVectorIndexStatsPanel_ACU(): Promise<void> {
+    const snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
+    const state = snapshot?.summaryVectorIndexState || null;
+    const manifest = state?.manifest || null;
+    const stats = await getSummaryVectorIndexStats_ACU(manifest);
+    const $panel = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-stats`);
+    if (!$panel.length) return;
+    const setField = (field: string, value: string): void => {
+        $panel.find(`[data-acu-vector-index-field="${field}"]`).text(value);
+    };
+    setField('status', stats.status || 'none');
+    setField('indexId', stats.indexId || '-');
+    setField('backend', stats.backend || 'none');
+    setField('rowsChunks', `${stats.rowCount} / ${stats.chunkCount}`);
+    setField('shards', `${stats.baseShardCount} / ${stats.deltaShardCount}`);
+    setField('tombstones', `${stats.tombstoneRowCount} / ${stats.tombstoneChunkCount}`);
+    setField('externalBytes', formatBytes_ACU(stats.externalTotalBytes));
+    setField('cacheBytes', formatBytes_ACU(stats.cacheTotalBytes));
+    setField('updatedAt', stats.updatedAt || '-');
+}
+
+async function deleteCurrentVectorIndexFromChat_ACU(): Promise<boolean> {
+    const snapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
+    if (!snapshot?.layers?.length) return false;
+    const chat = getChatArray_ACU();
+    let changed = false;
+    for (const layer of snapshot.layers) {
+        const message = chat[layer.messageIndex];
+        if (!message || message.is_user) continue;
+        const tagData = readIsolatedTagData_ACU(message, layer.isolationKey);
+        const manifest = tagData?.summaryVectorIndexManifest || tagData?.summaryVectorIndexState?.manifest || null;
+        if (manifest) {
+            await deleteSummaryVectorIndexExternal_ACU(manifest);
+        }
+        if (tagData) {
+            assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+            writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
+            changed = true;
+        }
+    }
+    if (changed) await saveChatToHost_ACU();
+    return changed;
+}
 
 /**
  * 绑定数据管理标签页的所有事件（数据隔离 + 外部导入 + 模板预设 + 数据管理按钮）
@@ -68,6 +128,33 @@ export async function bindDataEvents_ACU(): Promise<void> {
       const $importCombinedSettingsButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-import-combined-settings`);
       const $exportCombinedSettingsButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-export-combined-settings`);
       const $openNewVisualizerButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-open-new-visualizer`);
+      const $vectorIndexModeEnabled_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-mode-enabled`);
+      const $vectorIndexRefreshButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-refresh`);
+      const $vectorIndexClearCacheButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-clear-cache`);
+      const $vectorIndexDeleteCurrentButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-delete-current`);
+      const $buildVectorIndexNowButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-build-vector-index-now`);
+
+      const syncSummaryVectorIndexModeToggles_ACU = (modeEnabled: boolean): void => {
+          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-mode-enabled`).prop('checked', modeEnabled);
+          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled`).prop('checked', modeEnabled);
+          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`).prop('checked', modeEnabled);
+          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(modeEnabled);
+          if (modeEnabled) {
+              $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-outline-entry-enabled`).prop('checked', false);
+          }
+          syncManualUpdateButtonAvailability_ACU();
+      };
+
+      const handleSummaryVectorIndexModeChange_ACU = (modeEnabled: boolean): void => {
+          setSummaryVectorIndexMode_ACU(modeEnabled);
+          syncSummaryVectorIndexModeToggles_ACU(modeEnabled);
+          showToastr_ACU(
+              modeEnabled ? 'success' : 'info',
+              modeEnabled
+                  ? '交火模式向量索引已启用：后续会随纪要表数据维护外置索引文件。'
+                  : '交火模式向量索引已关闭：已有外置索引文件不会自动删除，可在下方手动删除当前索引。',
+          );
+      };
 
       const handleOpenVisualizerClick_ACU = async () => {
           try {
@@ -87,6 +174,74 @@ export async function bindDataEvents_ACU(): Promise<void> {
           $openNewVisualizerButton_ACU
               .off('click.acu_visualizer')
               .on('click.acu_visualizer', handleOpenVisualizerClick_ACU);
+      }
+
+      syncSummaryVectorIndexModeToggles_ACU(getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true);
+      if ($vectorIndexModeEnabled_ACU.length) {
+          $vectorIndexModeEnabled_ACU.off('change.acu_vector_index_mode').on('change.acu_vector_index_mode', function() {
+              handleSummaryVectorIndexModeChange_ACU(jQuery_API_ACU(this).is(':checked'));
+          });
+      }
+
+      void refreshVectorIndexStatsPanel_ACU();
+      if ($vectorIndexRefreshButton_ACU.length) {
+          $vectorIndexRefreshButton_ACU.off('click.acu_vector_index').on('click.acu_vector_index', async () => {
+              await refreshVectorIndexStatsPanel_ACU();
+              showToastr_ACU('success', '交火模式索引状态已刷新。');
+          });
+      }
+      if ($vectorIndexClearCacheButton_ACU.length) {
+          $vectorIndexClearCacheButton_ACU.off('click.acu_vector_index').on('click.acu_vector_index', async () => {
+              await clearVectorIndexTempCache_ACU();
+              await refreshVectorIndexStatsPanel_ACU();
+              showToastr_ACU('success', '交火模式临时缓存已清空。');
+          });
+      }
+      if ($buildVectorIndexNowButton_ACU.length) {
+          $buildVectorIndexNowButton_ACU.off('click.acu_vector_index_archive').on('click.acu_vector_index_archive', async () => {
+              $buildVectorIndexNowButton_ACU.prop('disabled', true).text('正在重建交火索引快照...');
+              try {
+                  if (!currentJsonTableData_ACU) {
+                      await loadOrCreateJsonTableFromChatHistory_ACU();
+                  }
+                  if (!currentJsonTableData_ACU) {
+                      showToastr_ACU('warning', '数据库未加载，无法重建交火索引快照。');
+                      return;
+                  }
+                  const summaryKey = Object.keys(currentJsonTableData_ACU).find((key) => {
+                      const table = currentJsonTableData_ACU?.[key];
+                      const name = String(table?.name || '');
+                      return name === '纪要表' || name === '总结表' || name === '总体大纲' || name.includes('纪要') || name.includes('总结');
+                  });
+                  if (summaryKey) {
+                      await saveIndependentTableToChatHistory_ACU(getLastMessageIndex_ACU(), [summaryKey], [summaryKey]);
+                  }
+                  const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
+                  await refreshVectorIndexStatsPanel_ACU();
+                  if (result.success && !result.skipped) {
+                      await updateReadableLorebookEntry_ACU(true);
+                      try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
+                      showToastr_ACU('success', `交火索引快照重建完成：${result.indexedRowCount || 0} 行，${result.chunkCount || 0} 个 chunks。`);
+                      return;
+                  }
+                  const reasonText = result.errors?.length ? result.errors.join('；') : (result.reason || '无可重建内容');
+                  showToastr_ACU(result.success ? 'info' : 'error', `交火索引快照未完成：${reasonText}`);
+              } catch (e: any) {
+                  logError_ACU('交火索引快照重建按钮执行失败:', e);
+                  showToastr_ACU('error', `交火索引快照重建失败: ${e?.message || '未知错误'}`);
+              } finally {
+                  $buildVectorIndexNowButton_ACU.prop('disabled', false).html('<i class="fa-solid fa-brain"></i> 立即重建交火索引快照');
+              }
+          });
+      }
+
+      if ($vectorIndexDeleteCurrentButton_ACU.length) {
+          $vectorIndexDeleteCurrentButton_ACU.off('click.acu_vector_index').on('click.acu_vector_index', async () => {
+              if (!confirm('确定要删除当前交火模式外置向量索引吗？这会删除 /user/files 中的索引分片，并清除聊天记录中的 manifest。')) return;
+              const deleted = await deleteCurrentVectorIndexFromChat_ACU();
+              await refreshVectorIndexStatsPanel_ACU();
+              showToastr_ACU(deleted ? 'success' : 'info', deleted ? '当前交火模式索引已删除。' : '当前聊天没有可删除的交火模式索引。');
+          });
       }
 
         const closeDataIsolationHistoryDropdown_ACU = () => {

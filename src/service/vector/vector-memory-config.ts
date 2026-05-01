@@ -1,5 +1,6 @@
 import { defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { cleanChatName_ACU, normalizePositiveInteger_ACU } from '../../shared/utils';
+import { globalMeta_ACU, saveGlobalMeta_ACU } from '../../data/repositories/profile-repo';
 import { currentChatFileIdentifier_ACU, settings_ACU } from '../runtime/state-manager';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 
@@ -26,6 +27,7 @@ export interface VectorMemoryConfig_ACU {
     vectorNamespace: string;
     entryComment: string;
     entryKey: string;
+    summaryIndexKeywordMinRows: number;
     summaryChunkSentenceCount: number;
     summaryPromptGroupId: string;
     archiveWithoutSummary: boolean;
@@ -130,6 +132,10 @@ export function normalizeVectorMemoryConfig_ACU(rawConfig: any): VectorMemoryCon
         vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
         entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
         entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
+        summaryIndexKeywordMinRows: normalizePositiveInteger_ACU(
+            (source as any).summaryIndexKeywordMinRows,
+            (defaults as any).summaryIndexKeywordMinRows || 100,
+        ),
         summaryChunkSentenceCount: normalizePositiveInteger_ACU(source.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount),
         summaryPromptGroupId: normalizeTextField_ACU(source.summaryPromptGroupId, defaults.summaryPromptGroupId) || defaults.summaryPromptGroupId,
         archiveWithoutSummary: source.archiveWithoutSummary === true,
@@ -143,22 +149,31 @@ export function normalizeVectorMemoryConfig_ACU(rawConfig: any): VectorMemoryCon
 }
 
 /**
- * 获取当前向量记忆配置。
+ * 获取当前向量记忆/交火配置。
  *
- * 配置存储在 settings_ACU.vectorMemoryConfig（全局数据库级）。
- * loadSettings_ACU() 已负责从旧位置（worldbookConfig.vectorMemory）迁移。
+ * 权威配置存储在 globalMeta_ACU.vectorMemoryConfigGlobal（跨 profile 全局）。
+ * settings_ACU.vectorMemoryConfig 只保留为运行时投影，避免旧调用方崩溃。
  *
  * 返回的始终是经过 normalize 的完整配置对象。
- * 对返回值的直接修改会反映到 settings_ACU.vectorMemoryConfig（引用），
- * 但不会自动持久化——需要调用 saveSettingsAndNotify_ACU()。
+ * 对返回值的直接修改会反映到 globalMeta_ACU.vectorMemoryConfigGlobal（引用），
+ * 但不会自动持久化——需要调用 saveSettingsAndNotify_ACU() 或 saveGlobalMeta_ACU()。
  */
 export function getCurrentVectorMemoryConfig_ACU(): VectorMemoryConfig_ACU {
-    const globalConfig = settings_ACU.vectorMemoryConfig;
-    if (globalConfig && typeof globalConfig === 'object' && !Array.isArray(globalConfig)) {
-        // 已有全局配置，normalize 后直接返回引用（UI 写入需要引用）
-        const normalized = normalizeVectorMemoryConfig_ACU(globalConfig);
-        Object.assign(globalConfig, normalized);
-        return globalConfig as VectorMemoryConfig_ACU;
+    const metaConfig = globalMeta_ACU?.vectorMemoryConfigGlobal;
+    if (metaConfig && typeof metaConfig === 'object' && !Array.isArray(metaConfig)) {
+        const normalized = normalizeVectorMemoryConfig_ACU(metaConfig);
+        Object.assign(metaConfig, normalized);
+        settings_ACU.vectorMemoryConfig = metaConfig;
+        return metaConfig as VectorMemoryConfig_ACU;
+    }
+
+    const profileConfig = settings_ACU.vectorMemoryConfig;
+    if (profileConfig && typeof profileConfig === 'object' && !Array.isArray(profileConfig)) {
+        const migrated = normalizeVectorMemoryConfig_ACU(profileConfig);
+        globalMeta_ACU.vectorMemoryConfigGlobal = migrated;
+        settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+        saveGlobalMeta_ACU();
+        return globalMeta_ACU.vectorMemoryConfigGlobal as VectorMemoryConfig_ACU;
     }
 
     // 兜底：全局配置不存在时（loadSettings 未覆盖到的边界情况），
@@ -170,8 +185,10 @@ export function getCurrentVectorMemoryConfig_ACU(): VectorMemoryConfig_ACU {
         : {};
 
     const migrated = normalizeVectorMemoryConfig_ACU(source);
-    settings_ACU.vectorMemoryConfig = migrated;
-    return migrated;
+    globalMeta_ACU.vectorMemoryConfigGlobal = migrated;
+    settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+    saveGlobalMeta_ACU();
+    return globalMeta_ACU.vectorMemoryConfigGlobal as VectorMemoryConfig_ACU;
 }
 
 export function getVectorMemoryNamespace_ACU(chatFileIdentifier?: string | null): string {
@@ -274,26 +291,42 @@ export interface SummaryVectorIndexEffectiveConfig_ACU extends VectorMemoryConfi
     summaryIndexCandidateLimit: number;
     summaryIndexChunkSentenceCount: number;
     summaryIndexArchiveMaxConcurrency: number;
+    summaryIndexKeywordMinRows: number;
 }
 
 export function getEffectiveSummaryVectorIndexConfig_ACU(configInput?: any): SummaryVectorIndexEffectiveConfig_ACU {
     const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
     const defaults = cloneDefaultVectorMemoryConfig_ACU() as any;
+    const topK = normalizePositiveInteger_ACU(config.topK, defaults.topK);
+    const minScore = normalizeMinScore_ACU(config.minScore, defaults.minScore);
+    const recallCandidateLimit = Math.max(
+        topK,
+        normalizePositiveInteger_ACU(config.recallCandidateLimit, defaults.recallCandidateLimit || topK),
+    );
+    const summaryChunkSentenceCount = normalizePositiveInteger_ACU(
+        config.summaryChunkSentenceCount,
+        defaults.summaryChunkSentenceCount || 2,
+    );
     const summaryIndexArchiveMaxConcurrency = normalizePositiveInteger_ACU(
         (config as any).summaryIndexArchiveMaxConcurrency,
         Number(defaults.summaryIndexArchiveMaxConcurrency) || 30,
     );
+    const summaryIndexKeywordMinRows = normalizePositiveInteger_ACU(
+        (config as any).summaryIndexKeywordMinRows,
+        Number((defaults as any).summaryIndexKeywordMinRows) || 100,
+    );
     return {
         ...config,
         enabled: true,
-        minScore: 0.4,
-        topK: 100,
-        recallCandidateLimit: 100,
-        summaryChunkSentenceCount: 2,
-        summaryIndexMinScore: 0.4,
-        summaryIndexCandidateLimit: 100,
-        summaryIndexChunkSentenceCount: 2,
+        minScore,
+        topK,
+        recallCandidateLimit,
+        summaryChunkSentenceCount,
+        summaryIndexMinScore: minScore,
+        summaryIndexCandidateLimit: recallCandidateLimit,
+        summaryIndexChunkSentenceCount: summaryChunkSentenceCount,
         summaryIndexArchiveMaxConcurrency,
+        summaryIndexKeywordMinRows,
     };
 }
 
@@ -305,6 +338,9 @@ export function validateSummaryVectorIndexConfig_ACU(configInput?: any): VectorM
     }
     if (!config.embeddingModel) {
         errors.push('缺少 embeddingModel');
+    }
+    if (config.summaryIndexKeywordMinRows < 1) {
+        errors.push('summaryIndexKeywordMinRows 必须大于 0');
     }
     const rerankValidation = validateVectorMemoryRerankConfig_ACU(config);
     errors.push(...rerankValidation.errors);

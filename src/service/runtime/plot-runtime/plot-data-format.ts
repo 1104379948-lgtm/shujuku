@@ -51,27 +51,33 @@ import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine';
     try {
       const plotCfg = plotSettings?.plotWorldbookConfig;
       const worldbookSource = plotCfg?.source || 'character';
-      let bookNames = [];
+      let bookNames: string[] = [];
       
-      if (worldbookSource === 'manual' && plotCfg?.manualSelection?.length) {
+      if (worldbookSource === 'manual' && Array.isArray(plotCfg?.manualSelection) && plotCfg.manualSelection.length) {
         bookNames = plotCfg.manualSelection;
       } else {
         try {
           const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
           if (charLorebooks.primary) bookNames.push(charLorebooks.primary);
           if (charLorebooks.secondary) bookNames.push(charLorebooks.secondary);
+          if (Array.isArray(charLorebooks.additional)) bookNames.push(...charLorebooks.additional);
         } catch (e) {
           return null;
         }
       }
+      bookNames = [...new Set(bookNames.map((name: any) => String(name || '').trim()).filter(Boolean))];
       
       const isoPrefix = getIsolationPrefix_ACU();
-      const targetComment = isoPrefix + 'TavernDB-ACU-CustomExport-纪要索引';
+      const baseComment = 'TavernDB-ACU-CustomExport-纪要索引';
+      const targetComment = isoPrefix + baseComment;
       
       for (const bookName of bookNames) {
         try {
           const entries = await getLorebookEntries_ACU(bookName);
-          const indexEntry = entries?.find(e => e.comment === targetComment);
+          const indexEntry = entries?.find((entry: any) => {
+            const comment = String(entry?.comment || '').trim();
+            return comment === targetComment || comment.endsWith(baseComment);
+          });
           if (indexEntry?.content) {
             logDebug_ACU('[剧情推进] $5 从世界书纪要索引条目获取成功' + (indexEntry.enabled ? '' : '(条目已禁用)'));
             return indexEntry.content;

@@ -11,6 +11,7 @@ import type {
     ChatSummaryVectorIndexState_ACU,
 } from '../../data/models/chat-message-data';
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
+import type { VectorEmbeddingResult_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { getChatArray_ACU } from '../chat/chat-service';
@@ -27,7 +28,14 @@ import {
     assignSummaryVectorIndexStateToTagData_ACU,
     getAggregatedSummaryVectorIndexSnapshot_ACU,
 } from './summary-vector-index-state-service';
+import {
+    deleteSummaryVectorIndexExternal_ACU,
+    loadSummaryVectorIndexChunksFromManifest_ACU,
+    persistSummaryVectorIndexSnapshot_ACU,
+} from './summary-vector-index-storage-service';
 import { hashUserInput_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+
+type SummaryVectorIndexArchiveMode_ACU = 'append' | 'sync';
 
 export interface SummaryVectorIndexArchiveResult_ACU {
     success: boolean;
@@ -165,15 +173,7 @@ function buildPreparedRows_ACU(table: any, summaryKey: string): {
         const location = locationColIdx >= 0 ? normalizeText_ACU(row?.[locationColIdx]) : '';
         const summary = normalizeText_ACU(row?.[summaryColIdx]);
         const indexCode = normalizeText_ACU(row?.[indexColIdx]);
-        const sourceParts: string[] = [];
-        headerRow.forEach((header: any, colIndex: number) => {
-            if (colIndex === 0 || colIndex === summaryColIdx || colIndex === indexColIdx) return;
-            const headerText = normalizeText_ACU(header);
-            const cellText = normalizeText_ACU(row?.[colIndex]);
-            if (!headerText || !cellText) return;
-            sourceParts.push(`${headerText}: ${cellText}`);
-        });
-        const vectorSourceText = normalizeText_ACU(sourceParts.join('\n'));
+        const vectorSourceText = summary;
         if (!summary || !indexCode || !vectorSourceText) {
             skippedRowCount += 1;
             return;
@@ -196,10 +196,19 @@ function buildPreparedRows_ACU(table: any, summaryKey: string): {
     return { rows: preparedRows, skippedRowCount, error: '' };
 }
 
-function resolveTargetMessageIndex_ACU(_preferredIndex?: number): number {
+function resolveTargetMessageIndex_ACU(preferredIndex?: number): number {
     const chat = getChatArray_ACU();
     if (!Array.isArray(chat) || chat.length === 0) {
         return -1;
+    }
+
+    const normalizedPreferredIndex = Math.floor(Number(preferredIndex));
+    if (Number.isFinite(normalizedPreferredIndex)) {
+        const preferredMessage = chat[normalizedPreferredIndex];
+        if (preferredMessage && !preferredMessage.is_user) {
+            return normalizedPreferredIndex;
+        }
+        logWarn_ACU('[纪要向量索引] 指定归档目标楼层无效，回退到最新 AI 楼层:', preferredIndex);
     }
 
     return getLatestAiMessageIndexFromChat_ACU(chat);
@@ -254,7 +263,7 @@ function buildLayerStateWithRows_ACU(
         return null;
     }
     return {
-        schemaVersion: 1,
+        version: 1,
         snapshotMessageId: options.snapshotMessageId || baseState?.snapshotMessageId || '',
         sourceTableKey: options.sourceTableKey || baseState?.sourceTableKey || '',
         sourceTableName: options.sourceTableName || baseState?.sourceTableName || '纪要表',
@@ -351,7 +360,7 @@ async function buildChunksWithEmbeddings_ACU(
         return { rows: [], chunks: [] };
     }
 
-    const embeddings = await createEmbeddings_ACU({
+    const embeddings: VectorEmbeddingResult_ACU[] = await createEmbeddings_ACU({
         endpoint: options.embeddingEndpoint,
         apiKey: options.embeddingApiKey,
         model: options.embeddingModel,
@@ -359,7 +368,7 @@ async function buildChunksWithEmbeddings_ACU(
     });
 
     const embeddingMap = new Map<number, number[]>();
-    embeddings.forEach((item) => {
+    embeddings.forEach((item: VectorEmbeddingResult_ACU): void => {
         if (Array.isArray(item.embedding) && item.embedding.length > 0) {
             embeddingMap.set(item.index, item.embedding);
         }
@@ -416,9 +425,63 @@ function buildFinalSummaryVectorIndexRowsAndChunks_ACU(
     return { rows: finalRows, chunks: finalChunks };
 }
 
+async function hydrateAggregatedSummaryVectorIndexSnapshot_ACU(
+    snapshot: ReturnType<typeof getAggregatedSummaryVectorIndexSnapshot_ACU>,
+): Promise<ReturnType<typeof getAggregatedSummaryVectorIndexSnapshot_ACU>> {
+    if (!snapshot) return snapshot;
+    const hydratedLayers = [] as NonNullable<typeof snapshot>['layers'];
+    const rowOwners = new Map<string, { messageIndex: number; row: ChatSummaryVectorIndexRow_ACU }>();
+    const mergedRows = new Map<string, ChatSummaryVectorIndexRow_ACU>();
+    const mergedChunks = new Map<string, ChatSummaryVectorIndexChunk_ACU>();
+    let latestState: ChatSummaryVectorIndexState_ACU | null = null;
+
+    for (const layer of snapshot.layers) {
+        const state = cloneSummaryVectorIndexState_ACU(layer.summaryVectorIndexState);
+        if (!state) continue;
+        if (state.manifest && (!Array.isArray(state.chunks) || state.chunks.length === 0)) {
+            try {
+                const externalChunks = await loadSummaryVectorIndexChunksFromManifest_ACU(state.manifest);
+                if (externalChunks.length > 0) {
+                    state.chunks = externalChunks;
+                }
+            } catch (error) {
+                logWarn_ACU('[纪要向量索引] 加载历史外置分片失败，保留该层 manifest，禁止因缺失 chunks 清理旧层:', error);
+            }
+        }
+        hydratedLayers.push({ ...layer, summaryVectorIndexState: state });
+        latestState = state;
+        state.rows.forEach((row) => {
+            if (row.status === 'removed') {
+                mergedRows.delete(row.rowKey);
+                rowOwners.delete(row.rowKey);
+                return;
+            }
+            mergedRows.set(row.rowKey, row);
+            rowOwners.set(row.rowKey, { messageIndex: layer.messageIndex, row });
+        });
+        (state.chunks || []).forEach((chunk) => mergedChunks.set(chunk.chunkId, chunk));
+    }
+
+    if (hydratedLayers.length === 0 || !latestState) return snapshot;
+    const rows = Array.from(mergedRows.values());
+    const chunks = Array.from(mergedChunks.values()).filter((chunk) => mergedRows.has(chunk.rowKey));
+    return {
+        summaryVectorIndexState: {
+            ...latestState,
+            rows,
+            ...(chunks.length > 0 ? { chunks } : {}),
+            rowCount: rows.length || latestState.rowCount,
+            chunkCount: chunks.length || latestState.chunkCount,
+        },
+        layers: hydratedLayers,
+        rowOwners,
+    };
+}
+
 async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     chat: any[];
     aggregatedSnapshot: ReturnType<typeof getAggregatedSummaryVectorIndexSnapshot_ACU>;
+    embeddingModel: string;
     preparedRows: SummaryVectorArchivePreparedRow_ACU[];
     finalRows: ChatSummaryVectorIndexRow_ACU[];
     finalChunks: ChatSummaryVectorIndexChunk_ACU[];
@@ -428,108 +491,181 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     sourceTableName: string;
     indexedAt: string;
     skippedRowCount: number;
+    mode: SummaryVectorIndexArchiveMode_ACU;
 }): Promise<void> {
+    const message = options.chat[options.targetMessageIndex];
+    if (!message || message.is_user) return;
+
     const preparedByKey = new Map(options.preparedRows.map((row) => [row.rowKey, row]));
-    const rowsByKey = new Map(options.finalRows.map((row) => [row.rowKey, row]));
-    const chunksByRowKey = new Map<string, ChatSummaryVectorIndexChunk_ACU[]>();
-    options.finalChunks.forEach((chunk) => {
-        const list = chunksByRowKey.get(chunk.rowKey) || [];
+    const finalRowsByKey = new Map(options.finalRows.map((row) => [row.rowKey, row]));
+    const previousState = cloneSummaryVectorIndexState_ACU(options.aggregatedSnapshot?.summaryVectorIndexState);
+    const previousRows = Array.isArray(previousState?.rows) ? previousState!.rows.filter((row) => row.status !== 'removed') : [];
+    const previousChunks = Array.isArray(previousState?.chunks) ? previousState!.chunks : [];
+    const previousChunksByRowKey = new Map<string, ChatSummaryVectorIndexChunk_ACU[]>();
+    previousChunks.forEach((chunk) => {
+        const list = previousChunksByRowKey.get(chunk.rowKey) || [];
         list.push({ ...chunk });
-        chunksByRowKey.set(chunk.rowKey, list);
+        previousChunksByRowKey.set(chunk.rowKey, list);
     });
-    const targetRowKeysByMessageIndex = new Map<number, Set<string>>();
-    const touchedMessageIndexes = new Set<number>();
+
+    const nextRowsByKey = new Map<string, ChatSummaryVectorIndexRow_ACU>();
+    const nextChunksById = new Map<string, ChatSummaryVectorIndexChunk_ACU>();
+    if (options.mode === 'append') {
+        previousRows.forEach((row) => nextRowsByKey.set(row.rowKey, { ...row }));
+        previousChunks.forEach((chunk) => nextChunksById.set(chunk.chunkId, { ...chunk }));
+    } else {
+        previousRows.forEach((row) => {
+            if (preparedByKey.has(row.rowKey)) nextRowsByKey.set(row.rowKey, { ...row });
+        });
+        previousChunks.forEach((chunk) => {
+            if (preparedByKey.has(chunk.rowKey)) nextChunksById.set(chunk.chunkId, { ...chunk });
+        });
+    }
 
     options.finalRows.forEach((row) => {
-        const owner = options.aggregatedSnapshot?.rowOwners.get(row.rowKey);
-        const ownerStateRow = owner?.row;
-        const preparedRow = preparedByKey.get(row.rowKey);
-        const ownerFingerprint = ownerStateRow ? getSummaryRowFingerprintFromStateRow_ACU(ownerStateRow) : '';
-        const isReusableAtOwner = !!preparedRow && !!owner && ownerFingerprint === preparedRow.sourceFingerprint;
-        const writeMessageIndex = owner && isReusableAtOwner ? owner.messageIndex : (owner?.messageIndex ?? options.targetMessageIndex);
-        const rowSet = targetRowKeysByMessageIndex.get(writeMessageIndex) || new Set<string>();
-        rowSet.add(row.rowKey);
-        targetRowKeysByMessageIndex.set(writeMessageIndex, rowSet);
-        touchedMessageIndexes.add(writeMessageIndex);
-    });
-
-    (options.aggregatedSnapshot?.rowOwners || new Map()).forEach((owner, rowKey) => {
-        if (!preparedByKey.has(rowKey)) {
-            touchedMessageIndexes.add(owner.messageIndex);
-        }
-    });
-    touchedMessageIndexes.add(options.targetMessageIndex);
-
-    for (const messageIndex of Array.from(touchedMessageIndexes).sort((left, right) => left - right)) {
-        const message = options.chat[messageIndex];
-        if (!message || message.is_user) continue;
-        const layer = options.aggregatedSnapshot?.layers.find((item) => item.messageIndex === messageIndex) || null;
-        const layerState = cloneSummaryVectorIndexState_ACU(layer?.summaryVectorIndexState);
-        const layerRows = Array.isArray(layerState?.rows) ? [...layerState.rows] : [];
-        const layerChunks = Array.isArray(layerState?.chunks) ? [...layerState.chunks] : [];
-        const keepRowKeys = new Set(layerRows.map((row) => row.rowKey).filter((rowKey) => preparedByKey.has(rowKey) && !rowsByKey.has(rowKey)));
-        const assignedRowKeys = targetRowKeysByMessageIndex.get(messageIndex) || new Set<string>();
-        assignedRowKeys.forEach((rowKey) => keepRowKeys.add(rowKey));
-
-        const nextRows = Array.from(keepRowKeys)
-            .map((rowKey) => rowsByKey.get(rowKey) || layerRows.find((row) => row.rowKey === rowKey) || null)
-            .filter((row): row is ChatSummaryVectorIndexRow_ACU => !!row);
-        const nextChunks: ChatSummaryVectorIndexChunk_ACU[] = [];
-        nextRows.forEach((row) => {
-            const sourceChunks = rowsByKey.has(row.rowKey)
-                ? (chunksByRowKey.get(row.rowKey) || [])
-                : layerChunks.filter((chunk) => row.chunkIds.includes(chunk.chunkId));
-            sourceChunks.forEach((chunk) => nextChunks.push({ ...chunk }));
+        nextRowsByKey.set(row.rowKey, { ...row });
+        const validChunkIds = new Set(row.chunkIds || []);
+        Array.from(nextChunksById.values()).forEach((chunk) => {
+            if (chunk.rowKey === row.rowKey && !validChunkIds.has(chunk.chunkId)) nextChunksById.delete(chunk.chunkId);
         });
+    });
+    options.finalChunks.forEach((chunk) => nextChunksById.set(chunk.chunkId, { ...chunk }));
 
-        const snapshotForMessage = messageIndex === options.targetMessageIndex
-            ? options.snapshotMessageId
-            : (layerState?.snapshotMessageId || resolveRemoteMemorySnapshotAnchor_ACU(options.chat, messageIndex)?.anchor || options.snapshotMessageId);
-        const nextState = buildLayerStateWithRows_ACU(layerState, nextRows, nextChunks, {
-            snapshotMessageId: snapshotForMessage,
+    const removedRowKeys: string[] = [];
+    if (options.mode === 'sync') {
+        previousRows.forEach((row) => {
+            if (!preparedByKey.has(row.rowKey)) {
+                removedRowKeys.push(row.rowKey);
+                nextRowsByKey.delete(row.rowKey);
+                (previousChunksByRowKey.get(row.rowKey) || []).forEach((chunk) => nextChunksById.delete(chunk.chunkId));
+            }
+        });
+    }
+    const replacedRowKeys = options.finalRows
+        .filter((row) => {
+            const previous = previousRows.find((item) => item.rowKey === row.rowKey);
+            return !!previous && getSummaryRowFingerprintFromStateRow_ACU(previous) !== getSummaryRowFingerprintFromStateRow_ACU(row);
+        })
+        .map((row) => row.rowKey);
+
+    const nextRows = Array.from(nextRowsByKey.values())
+        .filter((row) => row.rowKey && row.rowId && row.summary && row.indexCode && Array.isArray(row.chunkIds) && row.chunkIds.length > 0)
+        .sort((left, right) => left.rowOrder - right.rowOrder || left.rowKey.localeCompare(right.rowKey));
+    const validRowKeys = new Set(nextRows.map((row) => row.rowKey));
+    const validChunkIds = new Set(nextRows.flatMap((row) => row.chunkIds));
+    const nextChunks = Array.from(nextChunksById.values())
+        .filter((chunk) => validRowKeys.has(chunk.rowKey) && validChunkIds.has(chunk.chunkId) && Array.isArray(chunk.vector) && chunk.vector.length > 0)
+        .map((chunk, index) => ({ ...chunk, sequence: index }));
+    const nextState = buildLayerStateWithRows_ACU(previousState, nextRows, nextChunks, {
+        snapshotMessageId: options.snapshotMessageId,
+        sourceTableKey: options.sourceTableKey,
+        sourceTableName: options.sourceTableName,
+        indexedAt: options.indexedAt,
+        skippedRowCount: options.skippedRowCount,
+    });
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const existingTagData = readIsolatedTagData_ACU(message, isolationKey) || {
+        independentData: {},
+        modifiedKeys: [],
+        updateGroupKeys: [],
+    };
+    const nextIsolatedData = cloneIsolatedData_ACU(message);
+    const nextTagData = {
+        independentData: existingTagData.independentData || {},
+        modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
+        updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
+        ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
+        ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
+    } as any;
+    if (nextState) {
+        const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
+        const persisted = await persistSummaryVectorIndexSnapshot_ACU({
+            chatKey: options.snapshotMessageId,
+            isolationKey,
+            previousManifest,
+            previousBatchRefs: previousManifest?.batchRefs || previousState?.manifest?.batchRefs || [],
+            rows: nextState.rows,
+            chunks: nextChunks,
+            snapshotMessageId: options.snapshotMessageId,
             sourceTableKey: options.sourceTableKey,
             sourceTableName: options.sourceTableName,
             indexedAt: options.indexedAt,
-            skippedRowCount: messageIndex === options.targetMessageIndex ? options.skippedRowCount : layerState?.skippedRowCount,
+            skippedRowCount: nextState.skippedRowCount,
+            embeddingModel: options.embeddingModel,
+            activeRowKeys: nextState.rows.map((row) => row.rowKey),
+            removedRowKeys,
+            replacedRowKeys,
+            parentIndexIds: previousManifest?.indexId ? [previousManifest.indexId] : [],
+            snapshotRevision: previousManifest?.snapshot?.revision || 0,
+            sourceMessageIndex: options.targetMessageIndex,
         });
-        const isolationKey = getCurrentIsolationKey_ACU();
-        const existingTagData = readIsolatedTagData_ACU(message, isolationKey) || {
-            independentData: {},
-            modifiedKeys: [],
-            updateGroupKeys: [],
-        };
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const nextTagData = {
-            independentData: existingTagData.independentData || {},
-            modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-            updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        } as any;
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, nextState);
-        nextIsolatedData[isolationKey] = nextTagData;
-        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-        writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
-        const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, messageIndex);
-        if (anchorForMessage?.anchor) {
-            persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
-        }
-        writeMessageIdentity_ACU(message, {
-            enabled: settings_ACU.dataIsolationEnabled,
-            code: settings_ACU.dataIsolationCode,
-        });
-        writeLegacyCompatData_ACU(
-            message,
-            nextTagData.independentData || {},
-            nextTagData.modifiedKeys || [],
-            nextTagData.updateGroupKeys || [],
-        );
+        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
+        logDebug_ACU(`[纪要向量索引] 已写入最新层完整快照 manifest：rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}, batches=${persisted.manifest.batchRefs?.length || 0}`);
+    } else {
+        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
     }
-
+    nextIsolatedData[isolationKey] = nextTagData;
+    message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+    writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
+    const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
+    if (anchorForMessage?.anchor) {
+        persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
+    }
+    writeMessageIdentity_ACU(message, {
+        enabled: settings_ACU.dataIsolationEnabled,
+        code: settings_ACU.dataIsolationCode,
+    });
+    writeLegacyCompatData_ACU(
+        message,
+        nextTagData.independentData || {},
+        nextTagData.modifiedKeys || [],
+        nextTagData.updateGroupKeys || [],
+    );
     await saveChatToHost_ACU();
 }
 
-export async function archiveSummaryVectorIndexNow_ACU(options: { targetMessageIndex?: number } = {}): Promise<SummaryVectorIndexArchiveResult_ACU> {
+async function clearSummaryVectorIndexCheckpoint_ACU(params: {
+    chat: any[];
+    targetMessageIndex: number;
+}): Promise<boolean> {
+    const message = params.chat?.[params.targetMessageIndex];
+    if (!message || message.is_user) return false;
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const existingTagData = readIsolatedTagData_ACU(message, isolationKey);
+    const manifest = existingTagData?.summaryVectorIndexManifest || existingTagData?.summaryVectorIndexState?.manifest || null;
+    if (manifest) {
+        await deleteSummaryVectorIndexExternal_ACU(manifest);
+    }
+    if (!existingTagData?.summaryVectorIndexState && !existingTagData?.summaryVectorIndexManifest) return !!manifest;
+
+    const nextIsolatedData = cloneIsolatedData_ACU(message);
+    const nextTagData = {
+        independentData: existingTagData.independentData || {},
+        modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
+        updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
+        ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
+        ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
+    } as any;
+    assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
+    nextIsolatedData[isolationKey] = nextTagData;
+    message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+    writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
+    writeMessageIdentity_ACU(message, {
+        enabled: settings_ACU.dataIsolationEnabled,
+        code: settings_ACU.dataIsolationCode,
+    });
+    writeLegacyCompatData_ACU(
+        message,
+        nextTagData.independentData || {},
+        nextTagData.modifiedKeys || [],
+        nextTagData.updateGroupKeys || [],
+    );
+    await saveChatToHost_ACU();
+    logDebug_ACU(`[纪要向量索引] 当前纪要表无有效条目，已清理目标楼层交火索引 manifest: messageIndex=${params.targetMessageIndex}`);
+    return true;
+}
+
+export async function archiveSummaryVectorIndexNow_ACU(options: { targetMessageIndex?: number; mode?: SummaryVectorIndexArchiveMode_ACU } = {}): Promise<SummaryVectorIndexArchiveResult_ACU> {
     const config = getEffectiveSummaryVectorIndexConfig_ACU();
     const validation = validateSummaryVectorIndexConfig_ACU(config);
     if (!validation.valid) {
@@ -589,6 +725,31 @@ export async function archiveSummaryVectorIndexNow_ACU(options: { targetMessageI
         });
     }
     if (prepared.rows.length === 0) {
+        const archiveMode: SummaryVectorIndexArchiveMode_ACU = options.mode === 'append' ? 'append' : 'sync';
+        if (archiveMode === 'sync') {
+            try {
+                const cleared = await clearSummaryVectorIndexCheckpoint_ACU({ chat, targetMessageIndex });
+                return buildResult_ACU({
+                    success: true,
+                    skipped: !cleared,
+                    summaryKey: selectedSummary.summaryKey,
+                    messageIndex: targetMessageIndex,
+                    skippedRowCount: prepared.skippedRowCount,
+                    reason: cleared ? 'summary_vector_index_cleared_no_effective_rows' : 'no_effective_rows',
+                });
+            } catch (error: any) {
+                logWarn_ACU('[纪要向量索引] 清理空纪要表索引失败:', error);
+                return buildResult_ACU({
+                    success: false,
+                    skipped: false,
+                    summaryKey: selectedSummary.summaryKey,
+                    messageIndex: targetMessageIndex,
+                    skippedRowCount: prepared.skippedRowCount,
+                    reason: 'summary_vector_index_clear_failed',
+                    errors: [normalizeText_ACU(error?.message) || '纪要向量索引清理失败'],
+                });
+            }
+        }
         return buildResult_ACU({
             success: true,
             skipped: true,
@@ -600,7 +761,9 @@ export async function archiveSummaryVectorIndexNow_ACU(options: { targetMessageI
     }
 
     try {
-        const aggregatedSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
+        const archiveMode: SummaryVectorIndexArchiveMode_ACU = options.mode === 'append' ? 'append' : 'sync';
+        logDebug_ACU(`[纪要向量索引] 本次归档模式: ${archiveMode}`);
+        const aggregatedSnapshot = await hydrateAggregatedSummaryVectorIndexSnapshot_ACU(getAggregatedSummaryVectorIndexSnapshot_ACU());
         const existingState = cloneSummaryVectorIndexState_ACU(aggregatedSnapshot?.summaryVectorIndexState);
         const reusable = buildExistingReusableRows_ACU(prepared.rows, existingState);
         const reusableRowKeySet = new Set(reusable.reusableRows.map((row) => row.rowKey));
@@ -637,6 +800,7 @@ export async function archiveSummaryVectorIndexNow_ACU(options: { targetMessageI
                 await writeSummaryVectorIndexCheckpoint_ACU({
                     chat,
                     aggregatedSnapshot,
+                    embeddingModel: config.embeddingModel,
                     preparedRows: prepared.rows,
                     finalRows: checkpointResult.rows,
                     finalChunks: checkpointResult.chunks,
@@ -646,6 +810,7 @@ export async function archiveSummaryVectorIndexNow_ACU(options: { targetMessageI
                     sourceTableName,
                     indexedAt,
                     skippedRowCount: prepared.skippedRowCount,
+                    mode: archiveMode,
                 });
             }
         }
@@ -668,6 +833,7 @@ export async function archiveSummaryVectorIndexNow_ACU(options: { targetMessageI
             await writeSummaryVectorIndexCheckpoint_ACU({
                 chat,
                 aggregatedSnapshot,
+                embeddingModel: config.embeddingModel,
                 preparedRows: prepared.rows,
                 finalRows: finalResult.rows,
                 finalChunks: finalResult.chunks,
@@ -677,6 +843,7 @@ export async function archiveSummaryVectorIndexNow_ACU(options: { targetMessageI
                 sourceTableName,
                 indexedAt,
                 skippedRowCount: prepared.skippedRowCount,
+                mode: archiveMode,
             });
         }
 

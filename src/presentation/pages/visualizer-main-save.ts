@@ -34,6 +34,8 @@ import { closeACUWindow } from '../window/window-system';
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
 import { resolveTableHistoryStateFromChat_ACU, getLatestAiMessageIndexFromChat_ACU } from '../../service/table/table-history';
+import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
+import { archiveSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-archive-service';
 
 
   export async function saveVisualizerChanges_ACU(saveToTemplate = false) {
@@ -100,6 +102,11 @@ import { resolveTableHistoryStateFromChat_ACU, getLatestAiMessageIndexFromChat_A
       } catch (e) {
           logWarn_ACU('[SheetGuide] Failed to overwrite sheet guide from visualizer:', e);
       }
+      const shouldSyncSummaryVectorIndexAfterSave_ACU = getSortedSheetKeys_ACU(currentJsonTableData_ACU).some((sheetKey) => {
+          const table = currentJsonTableData_ACU?.[sheetKey];
+          return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
+      });
+
       // [新机制] 不再使用 settings_ACU.tableKeyOrder 强制固定顺序（顺序由每张表的 orderNo 决定）
       // 记录本次需要彻底清理的 key（真正清理会在“写回所有楼层”之后执行，防止后续写回把旧表带回）
       const deletedKeysToPurge_ACU = Array.isArray(_acuVisState.deletedSheetKeys) ? [..._acuVisState.deletedSheetKeys] : [];
@@ -327,6 +334,25 @@ import { resolveTableHistoryStateFromChat_ACU, getLatestAiMessageIndexFromChat_A
 
               // 2.5 所有保存完成后再统一刷新，确保读取最新数据再进行后续操作
               await refreshMergedDataAndNotifyWithUI_ACU();
+              if (shouldSyncSummaryVectorIndexAfterSave_ACU && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                  try {
+                      const archiveResult = await archiveSummaryVectorIndexNow_ACU({
+                          targetMessageIndex: latestAiIndex !== -1 ? latestAiIndex : undefined,
+                          mode: 'sync',
+                      });
+                      if (!archiveResult.success) {
+                          logWarn_ACU('[VisualizerVectorIndex] 交火索引快照同步失败:', archiveResult.reason, archiveResult.errors);
+                          showToastr_ACU('warning', `表格已保存，但交火索引同步失败：${archiveResult.reason || 'unknown'}`);
+                      } else if (archiveResult.skipped) {
+                          logDebug_ACU(`[VisualizerVectorIndex] 交火索引快照同步跳过: ${archiveResult.reason || 'skipped'}`);
+                      } else {
+                          logDebug_ACU(`[VisualizerVectorIndex] 交火索引快照已同步: rows=${archiveResult.indexedRowCount}, chunks=${archiveResult.chunkCount}, reason=${archiveResult.reason || 'ok'}`);
+                      }
+                  } catch (error) {
+                      logWarn_ACU('[VisualizerVectorIndex] 交火索引快照同步异常:', error);
+                      showToastr_ACU('warning', '表格已保存，但交火索引同步异常，请查看控制台日志。');
+                  }
+              }
               if ($popupInstance_ACU && $popupInstance_ACU.length) {
                   loadTemplatePresetSelect_ACU({ keepGlobalValue: false });
               }
