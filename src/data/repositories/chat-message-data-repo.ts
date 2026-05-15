@@ -225,6 +225,7 @@ export function initIsolatedTagSlot_ACU(msg: any, isolationKey: string): Isolati
             independentData: {},
             modifiedKeys: [],
             updateGroupKeys: [],
+            attemptedUpdateKeys: [],
         };
     }
     return msg.TavernDB_ACU_IsolatedData[isolationKey];
@@ -237,17 +238,22 @@ export function initIsolatedTagSlot_ACU(msg: any, isolationKey: string): Isolati
  * @param independentData 独立表格数据
  * @param modifiedKeys 修改键列表
  * @param updateGroupKeys 更新组键列表
+ * @param attemptedUpdateKeys 已尝试更新/已检查的键列表（可能没有实际数据变更）
  */
 export function writeLegacyCompatData_ACU(
     msg: any,
     independentData: Record<string, Sheet_ACU>,
     modifiedKeys: string[],
     updateGroupKeys: string[],
+    attemptedUpdateKeys?: string[],
 ): void {
     if (!msg) return;
     msg.TavernDB_ACU_IndependentData = independentData;
     msg.TavernDB_ACU_ModifiedKeys = modifiedKeys;
     msg.TavernDB_ACU_UpdateGroupKeys = updateGroupKeys;
+    if (Array.isArray(attemptedUpdateKeys)) {
+        msg.TavernDB_ACU_AttemptedUpdateKeys = attemptedUpdateKeys;
+    }
 }
 
 /**
@@ -361,6 +367,17 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
                 });
             }
 
+            // 从 attemptedUpdateKeys 中移除
+            if (Array.isArray(tagData.attemptedUpdateKeys)) {
+                sheetKeys.forEach(k => {
+                    const r = removeFromArray(tagData.attemptedUpdateKeys, k);
+                    if (r.changed) {
+                        tagData.attemptedUpdateKeys = r.result;
+                        msgChanged = true;
+                    }
+                });
+            }
+
             // ── V2：checkpoint + delta 字段级清理 ──
             if (tagData.tablePersistenceV2 && typeof tagData.tablePersistenceV2 === 'object') {
                 const pruneResult = pruneTablePersistenceLayerSheetKeysV2_ACU(
@@ -425,6 +442,15 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
             if (r.changed) { next = r.result; any = true; }
         });
         if (any) { msg.TavernDB_ACU_UpdateGroupKeys = next; msgChanged = true; }
+    }
+    if (Array.isArray(msg.TavernDB_ACU_AttemptedUpdateKeys)) {
+        let next = [...msg.TavernDB_ACU_AttemptedUpdateKeys];
+        let any = false;
+        sheetKeys.forEach(k => {
+            const r = removeFromArray(next, k);
+            if (r.changed) { next = r.result; any = true; }
+        });
+        if (any) { msg.TavernDB_ACU_AttemptedUpdateKeys = next; msgChanged = true; }
     }
 
     // ── 旧版：标准表 ──

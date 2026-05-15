@@ -55,6 +55,8 @@ export interface ChatMessageACUExtensions {
     TavernDB_ACU_ModifiedKeys?: string[];
     /** ACU 更新组 key 列表 */
     TavernDB_ACU_UpdateGroupKeys?: string[];
+    /** ACU 已尝试更新/已检查 key 列表，可能没有实际数据变更 */
+    TavernDB_ACU_AttemptedUpdateKeys?: string[];
     /** 剧情处理标记 */
     _plot_processed?: boolean;
     /** QRF 来自规划标记 */

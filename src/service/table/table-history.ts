@@ -79,8 +79,11 @@ function hasTrackedUpdateInMessage_ACU(msg: any, options: ResolveTableHistoryOpt
 
     const isolatedModifiedKeys = Array.isArray(tagData?.modifiedKeys) ? tagData.modifiedKeys : [];
     const isolatedUpdateGroupKeys = Array.isArray(tagData?.updateGroupKeys) ? tagData.updateGroupKeys : [];
+    const isolatedAttemptedUpdateKeys = Array.isArray(tagData?.attemptedUpdateKeys) ? tagData.attemptedUpdateKeys : [];
 
-    if (isolatedUpdateGroupKeys.includes(sheetKey) || isolatedModifiedKeys.includes(sheetKey)) {
+    if (isolatedUpdateGroupKeys.includes(sheetKey)
+        || isolatedModifiedKeys.includes(sheetKey)
+        || isolatedAttemptedUpdateKeys.includes(sheetKey)) {
         return true;
     }
 
@@ -90,7 +93,10 @@ function hasTrackedUpdateInMessage_ACU(msg: any, options: ResolveTableHistoryOpt
 
     const legacyModifiedKeys = Array.isArray(msg?.TavernDB_ACU_ModifiedKeys) ? msg.TavernDB_ACU_ModifiedKeys : [];
     const legacyUpdateGroupKeys = Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys) ? msg.TavernDB_ACU_UpdateGroupKeys : [];
-    return legacyUpdateGroupKeys.includes(sheetKey) || legacyModifiedKeys.includes(sheetKey);
+    const legacyAttemptedUpdateKeys = Array.isArray(msg?.TavernDB_ACU_AttemptedUpdateKeys)
+        ? msg.TavernDB_ACU_AttemptedUpdateKeys
+        : [];
+    return legacyUpdateGroupKeys.includes(sheetKey) || legacyModifiedKeys.includes(sheetKey) || legacyAttemptedUpdateKeys.includes(sheetKey);
 }
 
 export function getLatestAiMessageIndexFromChat_ACU(chat: ACUMessage[] | any[]): number {

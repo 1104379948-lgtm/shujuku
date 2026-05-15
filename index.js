@@ -5373,6 +5373,7 @@ function initIsolatedTagSlot_ACU(msg, isolationKey) {
             independentData: {},
             modifiedKeys: [],
             updateGroupKeys: [],
+            attemptedUpdateKeys: [],
         };
     }
     return msg.TavernDB_ACU_IsolatedData[isolationKey];
@@ -5384,13 +5385,17 @@ function initIsolatedTagSlot_ACU(msg, isolationKey) {
  * @param independentData 独立表格数据
  * @param modifiedKeys 修改键列表
  * @param updateGroupKeys 更新组键列表
+ * @param attemptedUpdateKeys 已尝试更新/已检查的键列表（可能没有实际数据变更）
  */
-function writeLegacyCompatData_ACU(msg, independentData, modifiedKeys, updateGroupKeys) {
+function writeLegacyCompatData_ACU(msg, independentData, modifiedKeys, updateGroupKeys, attemptedUpdateKeys) {
     if (!msg)
         return;
     msg.TavernDB_ACU_IndependentData = independentData;
     msg.TavernDB_ACU_ModifiedKeys = modifiedKeys;
     msg.TavernDB_ACU_UpdateGroupKeys = updateGroupKeys;
+    if (Array.isArray(attemptedUpdateKeys)) {
+        msg.TavernDB_ACU_AttemptedUpdateKeys = attemptedUpdateKeys;
+    }
 }
 /**
  * 写入旧版 Data 和 SummaryData 字段。
@@ -5496,6 +5501,16 @@ function purgeSheetKeysFromMessage_ACU(msg, sheetKeys) {
                     }
                 });
             }
+            // 从 attemptedUpdateKeys 中移除
+            if (Array.isArray(tagData.attemptedUpdateKeys)) {
+                sheetKeys.forEach(k => {
+                    const r = removeFromArray(tagData.attemptedUpdateKeys, k);
+                    if (r.changed) {
+                        tagData.attemptedUpdateKeys = r.result;
+                        msgChanged = true;
+                    }
+                });
+            }
             // ── V2：checkpoint + delta 字段级清理 ──
             if (tagData.tablePersistenceV2 && typeof tagData.tablePersistenceV2 === 'object') {
                 const pruneResult = pruneTablePersistenceLayerSheetKeysV2_ACU(tagData.tablePersistenceV2, sheetKeys);
@@ -5568,6 +5583,21 @@ function purgeSheetKeysFromMessage_ACU(msg, sheetKeys) {
         });
         if (any) {
             msg.TavernDB_ACU_UpdateGroupKeys = next;
+            msgChanged = true;
+        }
+    }
+    if (Array.isArray(msg.TavernDB_ACU_AttemptedUpdateKeys)) {
+        let next = [...msg.TavernDB_ACU_AttemptedUpdateKeys];
+        let any = false;
+        sheetKeys.forEach(k => {
+            const r = removeFromArray(next, k);
+            if (r.changed) {
+                next = r.result;
+                any = true;
+            }
+        });
+        if (any) {
+            msg.TavernDB_ACU_AttemptedUpdateKeys = next;
             msgChanged = true;
         }
     }
@@ -6588,7 +6618,7 @@ function protectAgainstAccidentalEmptyAfterData_ACU(options) {
     return protectedAfterData;
 }
 async function persistTablesToChatMessage_ACU(options = {}) {
-    const { targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, trackingSheetKeys = targetSheetKeys, trackAsUpdate = true, beforeData = undefined, afterData = undefined, allowClearingTargetSheets = false, } = options;
+    const { targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, trackingSheetKeys = targetSheetKeys, trackAsUpdate = true, attemptedUpdateKeys = null, beforeData = undefined, afterData = undefined, allowClearingTargetSheets = false, } = options;
     /**
      * 保存独立表格数据到聊天记录。
      * 返回 { saved: boolean, messageIndex?: number, error?: string }
@@ -6647,6 +6677,7 @@ async function persistTablesToChatMessage_ACU(options = {}) {
             independentData: {},
             modifiedKeys: [],
             updateGroupKeys: [],
+            attemptedUpdateKeys: [],
         };
     }
     const currentTagData = isolatedData[currentIsolationKey];
@@ -6659,6 +6690,14 @@ async function persistTablesToChatMessage_ACU(options = {}) {
         ? trackingSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.length > 0)
         : []);
     const actuallyModifiedKeys = keysToSave.filter(sheetKey => trackingKeySet.has(sheetKey));
+    const attemptedKeysToRecord = Array.isArray(attemptedUpdateKeys)
+        ? Array.from(new Set(attemptedUpdateKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))))
+        : [];
+    if (trackAsUpdate && attemptedKeysToRecord.length > 0) {
+        const existingAttemptedKeys = Array.isArray(currentTagData.attemptedUpdateKeys) ? currentTagData.attemptedUpdateKeys : [];
+        currentTagData.attemptedUpdateKeys = [...new Set([...existingAttemptedKeys, ...attemptedKeysToRecord])];
+        logDebug_ACU(`[Tracking] Recorded attempted update keys for tag [${currentIsolationKey || '无标签'}] at index ${finalIndex}: ${currentTagData.attemptedUpdateKeys.join(', ')}`);
+    }
     if (trackAsUpdate && actuallyModifiedKeys.length > 0) {
         const existingModifiedKeys = currentTagData.modifiedKeys || [];
         currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...actuallyModifiedKeys])];
@@ -18642,7 +18681,10 @@ function hasTrackedUpdateInMessage_ACU(msg, options) {
     }
     const isolatedModifiedKeys = Array.isArray(tagData?.modifiedKeys) ? tagData.modifiedKeys : [];
     const isolatedUpdateGroupKeys = Array.isArray(tagData?.updateGroupKeys) ? tagData.updateGroupKeys : [];
-    if (isolatedUpdateGroupKeys.includes(sheetKey) || isolatedModifiedKeys.includes(sheetKey)) {
+    const isolatedAttemptedUpdateKeys = Array.isArray(tagData?.attemptedUpdateKeys) ? tagData.attemptedUpdateKeys : [];
+    if (isolatedUpdateGroupKeys.includes(sheetKey)
+        || isolatedModifiedKeys.includes(sheetKey)
+        || isolatedAttemptedUpdateKeys.includes(sheetKey)) {
         return true;
     }
     if (!isLegacyMatchForMessage_ACU(msg, settings)) {
@@ -18650,7 +18692,10 @@ function hasTrackedUpdateInMessage_ACU(msg, options) {
     }
     const legacyModifiedKeys = Array.isArray(msg?.TavernDB_ACU_ModifiedKeys) ? msg.TavernDB_ACU_ModifiedKeys : [];
     const legacyUpdateGroupKeys = Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys) ? msg.TavernDB_ACU_UpdateGroupKeys : [];
-    return legacyUpdateGroupKeys.includes(sheetKey) || legacyModifiedKeys.includes(sheetKey);
+    const legacyAttemptedUpdateKeys = Array.isArray(msg?.TavernDB_ACU_AttemptedUpdateKeys)
+        ? msg.TavernDB_ACU_AttemptedUpdateKeys
+        : [];
+    return legacyUpdateGroupKeys.includes(sheetKey) || legacyModifiedKeys.includes(sheetKey) || legacyAttemptedUpdateKeys.includes(sheetKey);
 }
 function getLatestAiMessageIndexFromChat_ACU(chat) {
     if (!Array.isArray(chat))
@@ -33854,6 +33899,14 @@ function isHeaderOnlySheet_ACU(sheet) {
 function cloneJson_ACU(value) {
     return JSON.parse(JSON.stringify(value));
 }
+function isAutoUpdateMode_ACU(updateMode) {
+    return typeof updateMode === 'string' && updateMode.startsWith('auto_');
+}
+function normalizeAttemptedUpdateKeys_ACU(targetSheetKeys) {
+    if (!Array.isArray(targetSheetKeys))
+        return [];
+    return Array.from(new Set(targetSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))));
+}
 function resolveRowIdentityColumnIndex_ACU(header) {
     if (!Array.isArray(header) || header.length === 0)
         return 0;
@@ -34071,6 +34124,8 @@ async function executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImpor
     let success = false;
     let modifiedKeys = [];
     const maxRetries = settings_ACU.tableMaxRetries || 3;
+    const isAutoUpdateMode = isAutoUpdateMode_ACU(updateMode);
+    const attemptedUpdateKeys = normalizeAttemptedUpdateKeys_ACU(targetSheetKeys);
     try {
         emitProgress({ phase: 'preparing' });
         const deferredAiResponse = executionOptions.deferredAiResponse || null;
@@ -34256,6 +34311,7 @@ async function executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImpor
                             trackAsUpdate: true,
                             beforeData: successfulBeforeData,
                             afterData: finalAfterData,
+                            attemptedUpdateKeys: isAutoUpdateMode ? attemptedUpdateKeys : null,
                         });
                         if (!saveResult.saved) {
                             return { success: false, modifiedKeys, error: '无法将更新后的数据库保存到聊天记录。' };
@@ -34263,7 +34319,27 @@ async function executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImpor
                     }
                 }
                 else {
-                    logDebug_ACU("No tables were modified by AI, skipping save to chat history.");
+                    if (isAutoUpdateMode && attemptedUpdateKeys.length > 0) {
+                        if (!successfulBeforeData || !successfulAfterData) {
+                            return { success: false, modifiedKeys, error: '无法捕获无变更自动填表前后数据库快照，已中止保存调度标记。' };
+                        }
+                        const saveAttemptResult = await persistTablesToChatMessage_ACU({
+                            targetMessageIndex: saveTargetIndex,
+                            targetSheetKeys: attemptedUpdateKeys,
+                            trackingSheetKeys: [],
+                            updateGroupKeys: null,
+                            trackAsUpdate: true,
+                            beforeData: successfulBeforeData,
+                            afterData: successfulAfterData,
+                            attemptedUpdateKeys,
+                        });
+                        if (!saveAttemptResult.saved) {
+                            return { success: false, modifiedKeys, error: '无法将无变更自动填表调度标记保存到聊天记录。' };
+                        }
+                    }
+                    else {
+                        logDebug_ACU("No tables were modified by AI, skipping save to chat history.");
+                    }
                 }
                 if (!executionOptions.deferPersistence) {
                     await updateReadableLorebookEntry_ACU(true);

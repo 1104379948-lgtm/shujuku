@@ -208,6 +208,17 @@ function cloneJson_ACU<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function isAutoUpdateMode_ACU(updateMode: string): boolean {
+    return typeof updateMode === 'string' && updateMode.startsWith('auto_');
+}
+
+function normalizeAttemptedUpdateKeys_ACU(targetSheetKeys: string[] | null): string[] {
+    if (!Array.isArray(targetSheetKeys)) return [];
+    return Array.from(new Set(
+        targetSheetKeys.filter((sheetKey): sheetKey is string => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_')),
+    ));
+}
+
 function resolveRowIdentityColumnIndex_ACU(header: any): number {
     if (!Array.isArray(header) || header.length === 0) return 0;
     const rowIdIndex = header.findIndex((cell: any) => String(cell ?? '').trim().toLowerCase() === 'row_id');
@@ -443,6 +454,8 @@ export async function executeCardUpdateCore_ACU(
     let success = false;
     let modifiedKeys: string[] = [];
     const maxRetries = settings_ACU.tableMaxRetries || 3;
+    const isAutoUpdateMode = isAutoUpdateMode_ACU(updateMode);
+    const attemptedUpdateKeys = normalizeAttemptedUpdateKeys_ACU(targetSheetKeys);
 
     try {
         emitProgress({ phase: 'preparing' });
@@ -653,13 +666,33 @@ export async function executeCardUpdateCore_ACU(
                             trackAsUpdate: true,
                             beforeData: successfulBeforeData,
                             afterData: finalAfterData,
+                            attemptedUpdateKeys: isAutoUpdateMode ? attemptedUpdateKeys : null,
                         });
                         if (!saveResult.saved) {
                             return { success: false, modifiedKeys, error: '无法将更新后的数据库保存到聊天记录。' };
                         }
                     }
                 } else {
-                    logDebug_ACU("No tables were modified by AI, skipping save to chat history.");
+                    if (isAutoUpdateMode && attemptedUpdateKeys.length > 0) {
+                        if (!successfulBeforeData || !successfulAfterData) {
+                            return { success: false, modifiedKeys, error: '无法捕获无变更自动填表前后数据库快照，已中止保存调度标记。' };
+                        }
+                        const saveAttemptResult = await persistTablesToChatMessage_ACU({
+                            targetMessageIndex: saveTargetIndex,
+                            targetSheetKeys: attemptedUpdateKeys,
+                            trackingSheetKeys: [],
+                            updateGroupKeys: null,
+                            trackAsUpdate: true,
+                            beforeData: successfulBeforeData,
+                            afterData: successfulAfterData,
+                            attemptedUpdateKeys,
+                        });
+                        if (!saveAttemptResult.saved) {
+                            return { success: false, modifiedKeys, error: '无法将无变更自动填表调度标记保存到聊天记录。' };
+                        }
+                    } else {
+                        logDebug_ACU("No tables were modified by AI, skipping save to chat history.");
+                    }
                 }
 
                 if (!executionOptions.deferPersistence) {

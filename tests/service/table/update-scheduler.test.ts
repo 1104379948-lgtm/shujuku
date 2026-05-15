@@ -315,6 +315,55 @@ describe('buildAutoUpdatePlan_ACU', () => {
     expect(plan.tablesToUpdate[0].indices).toContain(7);
   });
 
+  it('无变更 attemptedUpdateKeys 会推进高频表调度门禁，避免每层重复触发', () => {
+    const tableData = {
+      sheet_0: { name: '高频表', updateConfig: { updateFrequency: 3 } },
+    };
+
+    const baseChat = [
+      { is_user: true },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            independentData: {},
+            modifiedKeys: [],
+            updateGroupKeys: [],
+            attemptedUpdateKeys: ['sheet_0'],
+          },
+        },
+      },
+    ];
+
+    const oneFloorAfterAttempt = [
+      ...baseChat,
+      { is_user: true },
+      { is_user: false },
+    ];
+    const planAfterOneFloor = buildAutoUpdatePlan_ACU(oneFloorAfterAttempt, tableData, baseSettings, '');
+    expect(planAfterOneFloor.tablesToUpdate).toHaveLength(0);
+
+    const twoFloorsAfterAttempt = [
+      ...oneFloorAfterAttempt,
+      { is_user: true },
+      { is_user: false },
+    ];
+    const planAfterTwoFloors = buildAutoUpdatePlan_ACU(twoFloorsAfterAttempt, tableData, baseSettings, '');
+    expect(planAfterTwoFloors.tablesToUpdate).toHaveLength(0);
+
+    const threeFloorsAfterAttempt = [
+      ...twoFloorsAfterAttempt,
+      { is_user: true },
+      { is_user: false },
+    ];
+    const planAfterThreeFloors = buildAutoUpdatePlan_ACU(threeFloorsAfterAttempt, tableData, baseSettings, '');
+    expect(planAfterThreeFloors.tablesToUpdate).toHaveLength(1);
+    expect(planAfterThreeFloors.tablesToUpdate[0]).toEqual(expect.objectContaining({
+      sheetKey: 'sheet_0',
+    }));
+    expect(planAfterThreeFloors.tablesToUpdate[0].indices).toContain(7);
+  });
+
   it('空表格数据返回空计划', () => {
     const liveChat = [{ is_user: true }, { is_user: false }];
     const plan = buildAutoUpdatePlan_ACU(liveChat, {}, baseSettings, '');

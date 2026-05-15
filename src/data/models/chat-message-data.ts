@@ -19,6 +19,8 @@ export interface IsolationTagData_ACU {
     independentData: Record<string, Sheet_ACU>;
     modifiedKeys: string[];
     updateGroupKeys: string[];
+    /** 已被自动更新流程考虑过的表键；可能没有产生实际数据变更。 */
+    attemptedUpdateKeys?: string[];
     /** V2 表格持久化层：checkpoint + row-level delta。 */
     tablePersistenceV2?: TablePersistenceLayerV2_ACU;
     /** 旧版/兼容向量记忆状态。保留字段是为了不破坏已有聊天记录。 */
@@ -69,6 +71,8 @@ export interface MessageTableFields_ACU {
     TavernDB_ACU_ModifiedKeys?: string[];
     /** 本次更新组的表格键列表 */
     TavernDB_ACU_UpdateGroupKeys?: string[];
+    /** 本次已被更新流程考虑过的表格键列表；可能没有实际数据变更 */
+    TavernDB_ACU_AttemptedUpdateKeys?: string[];
     /** 首楼模板基底状态标记（幂等用） */
     _acu_local_template_base_state_seeded?: string;
 }

@@ -78,6 +78,7 @@ const {
           independentData: {},
           modifiedKeys: [],
           updateGroupKeys: [],
+          attemptedUpdateKeys: [],
         };
       }
       return msg.TavernDB_ACU_IsolatedData[isolationKey];
@@ -259,6 +260,35 @@ describe('saveIndependentTableToChatHistory_ACU', () => {
     ]);
     expect(mockWriteLegacyCompatData).not.toHaveBeenCalled();
     expect(mockWriteLegacyStandardAndSummary).not.toHaveBeenCalled();
+  });
+
+  it('无数据变更时可只记录 attemptedUpdateKeys，且不污染 modifiedKeys/updateGroupKeys 或生成 V2 delta', async () => {
+    const aiMsg: any = { is_user: false, mes: 'AI no-op 回复' };
+    mockGetChatArray.mockReturnValue([aiMsg]);
+
+    const unchangedData = {
+      mate: { type: 'chatSheets' },
+      sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
+    } as any;
+
+    const result = await persistTablesToChatMessage_ACU({
+      targetMessageIndex: 0,
+      targetSheetKeys: ['sheet_0'],
+      trackingSheetKeys: [],
+      updateGroupKeys: null,
+      attemptedUpdateKeys: ['sheet_0'],
+      beforeData: unchangedData,
+      afterData: unchangedData,
+    });
+
+    expect(result.saved).toBe(true);
+    expect(mockWriteIsolatedTagData).toHaveBeenCalledTimes(1);
+    const writtenTagData = mockWriteIsolatedTagData.mock.calls[0][2];
+    expect(writtenTagData.attemptedUpdateKeys).toEqual(['sheet_0']);
+    expect(writtenTagData.modifiedKeys).toEqual([]);
+    expect(writtenTagData.updateGroupKeys).toEqual([]);
+    expect(writtenTagData.tablePersistenceV2?.delta).toBeUndefined();
+    expect(aiMsg.TavernDB_ACU_IsolatedData?.['']?.tablePersistenceV2?.delta).toBeUndefined();
   });
 
   it('同一目标消息连续保存时追加 deltas，而不是覆盖旧 delta', async () => {

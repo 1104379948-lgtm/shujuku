@@ -36,6 +36,7 @@ export interface TableSaveToChatOptions {
   beforeData?: TableDataObject_ACU | null;
   afterData?: TableDataObject_ACU | null;
   trackingSheetKeys?: string[] | null;
+  attemptedUpdateKeys?: string[] | null;
   trackAsUpdate?: boolean;
 }
 

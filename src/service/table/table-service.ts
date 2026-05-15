@@ -45,6 +45,11 @@ export interface TableChatPersistOptions_ACU {
    * 未传时沿用 targetSheetKeys，保持旧调用兼容。
    */
   trackingSheetKeys?: string[] | null;
+  /**
+   * 记录这些 sheet 已被更新流程考虑过；用于自动更新 no-op 推进调度门禁，
+   * 不表示数据发生了实际变更。
+   */
+  attemptedUpdateKeys?: string[] | null;
   trackAsUpdate?: boolean;
 }
 
@@ -121,6 +126,7 @@ export async function persistTablesToChatMessage_ACU(
     updateGroupKeys = null,
     trackingSheetKeys = targetSheetKeys,
     trackAsUpdate = true,
+    attemptedUpdateKeys = null,
     beforeData = undefined,
     afterData = undefined,
     allowClearingTargetSheets = false,
@@ -190,6 +196,7 @@ export async function persistTablesToChatMessage_ACU(
       independentData: {},
       modifiedKeys: [],
       updateGroupKeys: [],
+      attemptedUpdateKeys: [],
     };
   }
 
@@ -208,6 +215,16 @@ export async function persistTablesToChatMessage_ACU(
       : []
   );
   const actuallyModifiedKeys = keysToSave.filter(sheetKey => trackingKeySet.has(sheetKey));
+
+  const attemptedKeysToRecord = Array.isArray(attemptedUpdateKeys)
+    ? Array.from(new Set(attemptedUpdateKeys.filter((sheetKey): sheetKey is string => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))))
+    : [];
+
+  if (trackAsUpdate && attemptedKeysToRecord.length > 0) {
+    const existingAttemptedKeys = Array.isArray(currentTagData.attemptedUpdateKeys) ? currentTagData.attemptedUpdateKeys : [];
+    currentTagData.attemptedUpdateKeys = [...new Set([...existingAttemptedKeys, ...attemptedKeysToRecord])];
+    logDebug_ACU(`[Tracking] Recorded attempted update keys for tag [${currentIsolationKey || '无标签'}] at index ${finalIndex}: ${currentTagData.attemptedUpdateKeys.join(', ')}`);
+  }
 
   if (trackAsUpdate && actuallyModifiedKeys.length > 0) {
     const existingModifiedKeys = currentTagData.modifiedKeys || [];

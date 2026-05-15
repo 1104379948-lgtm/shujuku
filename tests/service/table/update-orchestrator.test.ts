@@ -774,6 +774,83 @@ describe('executeCardUpdateCore_ACU', () => {
     expect(phases).toContain('complete');
   });
 
+  it('auto 模式 AI 无实际修改时仍记录 attemptedUpdateKeys 推进调度门禁', async () => {
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>无需更新</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: [] });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true });
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      0, false, 'auto_standard', false,
+      ['sheet_0'], null, new AbortController()
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.modifiedKeys).toEqual([]);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageIndex: 0,
+      targetSheetKeys: ['sheet_0'],
+      trackingSheetKeys: [],
+      updateGroupKeys: null,
+      attemptedUpdateKeys: ['sheet_0'],
+      beforeData: expect.objectContaining({
+        sheet_0: expect.objectContaining({ content: [['row_id'], ['1']] }),
+      }),
+      afterData: expect.objectContaining({
+        sheet_0: expect.objectContaining({ content: [['row_id'], ['1']] }),
+      }),
+    }));
+  });
+
+  it('manual 模式 AI 无实际修改时不记录自动调度 attemptedUpdateKeys', async () => {
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>无需更新</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: [] });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      0, false, 'manual_independent', false,
+      ['sheet_0'], null, new AbortController()
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.modifiedKeys).toEqual([]);
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+  });
+
+  it('auto 模式混合结果保存实际修改表，并为全部目标表记录 attemptedUpdateKeys', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '测试表A', content: [['row_id'], ['1']] },
+      sheet_1: { name: '测试表B', content: [['row_id'], ['1']] },
+    };
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    mockParseAndApplyTableEdits.mockImplementation(() => {
+      mockCurrentJsonTableData.sheet_0.content.push(['2']);
+      return { success: true, modifiedKeys: ['sheet_0'] };
+    });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true });
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      0, false, 'auto_standard', false,
+      ['sheet_0', 'sheet_1'], null, new AbortController()
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.modifiedKeys).toEqual(['sheet_0']);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      targetSheetKeys: ['sheet_0'],
+      trackingSheetKeys: ['sheet_0'],
+      attemptedUpdateKeys: ['sheet_0', 'sheet_1'],
+    }));
+  });
+
   it('prepareAIInput 返回 null 时返回错误', async () => {
     mockPrepareAIInput.mockResolvedValue(null);
 
