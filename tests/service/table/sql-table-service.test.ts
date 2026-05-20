@@ -39,6 +39,7 @@ vi.mock('../../../src/shared/utils', () => ({
 let mockCurrentJsonTableData: any = null;
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentJsonTableData_ACU() { return mockCurrentJsonTableData; },
+  getCurrentIsolationKey_ACU: vi.fn(() => ''),
   _set_currentJsonTableData_ACU: vi.fn((v: any) => { mockCurrentJsonTableData = v; }),
 }));
 
@@ -75,9 +76,13 @@ vi.mock('../../../src/service/runtime/template-vars/name-mapper', () => ({
 // mock chat-scope（getEffectiveSeedRowsForSheet_ACU + getCurrentChatTemplateScopeState_ACU）
 const mockGetEffectiveSeedRows = vi.fn().mockReturnValue([]);
 const mockGetCurrentChatTemplateScopeState = vi.fn().mockReturnValue(null);
+const mockGetChatSheetGuideData = vi.fn().mockReturnValue(null);
+const mockMaterializeDataFromSheetGuide = vi.fn((guideData: any) => guideData);
 vi.mock('../../../src/service/template/chat-scope', () => ({
   getEffectiveSeedRowsForSheet_ACU: (...args: any[]) => mockGetEffectiveSeedRows(...args),
   getCurrentChatTemplateScopeState_ACU: (...args: any[]) => mockGetCurrentChatTemplateScopeState(...args),
+  getChatSheetGuideDataForIsolationKey_ACU: (...args: any[]) => mockGetChatSheetGuideData(...args),
+  materializeDataFromSheetGuide_ACU: (...args: any[]) => mockMaterializeDataFromSheetGuide(...args),
   sanitizeTemplateSnapshotForChat_ACU: vi.fn((source: any) => {
     if (!source) return null;
     return { templateStr: typeof source === 'string' ? source : JSON.stringify(source), templateObj: typeof source === 'string' ? JSON.parse(source) : source };
@@ -103,6 +108,7 @@ import {
   splitSqlStatements,
   extractTableNamesFromStatements,
 } from '../../../src/service/table/sql-table-service';
+import { parseTableTemplateJson_ACU } from '../../../src/shared/utils';
 
 // ═══════════════════════════════════════════════════════════════
 // 纯函数测试：splitSqlStatements
@@ -291,7 +297,10 @@ describe('SqlTableService', () => {
     mockCurrentJsonTableData = null;
     // 重置 mock 返回值，防止测试之间的状态泄漏
     mockGetEffectiveSeedRows.mockReturnValue([]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(null);
     mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
+    mockGetChatSheetGuideData.mockReturnValue(null);
+    mockMaterializeDataFromSheetGuide.mockImplementation((guideData: any) => guideData);
     mockGetTemplatePreset.mockReturnValue(null);
     service = new SqlTableService();
   });
@@ -327,6 +336,67 @@ describe('SqlTableService', () => {
       const result = await service.loadFromChat();
       expect(result.loaded).toBe(false);
       expect(result.source).toBe('empty');
+    });
+
+    it('新开卡无聊天数据时使用保留预置数据行的模板初始化 JSON 可见视图且不提前建表', async () => {
+      mockMergeAll.mockResolvedValue(null);
+      const templateWithSeedRows = JSON.parse(JSON.stringify({
+        ...testTableData,
+        sheet_0: {
+          ...testTableData.sheet_0,
+          content: [
+            ['row_id', 'item_name', 'quantity'],
+            ['1', '铁剑', '3'],
+            ['2', '治疗药水', '5'],
+          ],
+        },
+      }));
+      const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(templateWithSeedRows);
+
+      const result = await service.loadFromChat();
+      const currentData = service.getCurrentData();
+
+      expect(result.loaded).toBe(false);
+      expect(result.source).toBe('empty');
+      expect(parseTableTemplateJson_ACU).toHaveBeenCalledWith({ stripSeedRows: false });
+      expect((currentData as any).sheet_0.content).toEqual([
+        ['row_id', 'item_name', 'quantity'],
+        ['1', '铁剑', '3'],
+        ['2', '治疗药水', '5'],
+      ]);
+      expect(mockCurrentJsonTableData.sheet_0.content).toEqual((currentData as any).sheet_0.content);
+      expect(() => service.executeQuery('SELECT * FROM inventory')).toThrow();
+    });
+
+    it('新开卡已有指导表时优先物化指导表 seedRows 作为 JSON 可见视图且不提前建表', async () => {
+      mockMergeAll.mockResolvedValue(null);
+      const guideData = {
+        mate: { type: 'chatSheets', version: 2 },
+        sheet_0: {
+          uid: 'inventory',
+          name: '背包物品表',
+          sourceData: { ddl: TEST_DDL },
+          content: [['row_id', 'item_name', 'quantity']],
+          seedRows: [['1', '指导表铁剑', '7']],
+          orderNo: 0,
+        },
+      };
+      const materializedGuideData = {
+        mate: { type: 'chatSheets', version: 2 },
+        sheet_0: {
+          ...guideData.sheet_0,
+          content: [['row_id', 'item_name', 'quantity'], ['1', '指导表铁剑', '7']],
+        },
+      };
+      mockGetChatSheetGuideData.mockReturnValue(guideData);
+      mockMaterializeDataFromSheetGuide.mockReturnValue(materializedGuideData);
+
+      await service.loadFromChat();
+
+      expect(mockMaterializeDataFromSheetGuide).toHaveBeenCalledWith(guideData, { includeSeedRows: true });
+      expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '指导表铁剑', '7']]);
+      expect(() => service.executeQuery('SELECT * FROM inventory')).toThrow();
     });
 
     it('新开卡无数据后 getCurrentData 不应触发 _acu_sheet_meta 缺失错误或提前创建用户表', async () => {

@@ -10963,14 +10963,20 @@ class SqlTableService {
             if (!mergedData || (!hasRealDataRows && !shouldLoadMigratedLegacySnapshot)) {
                 // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
                 // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
-                // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
+                // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构。
+                // 注意：这里仍必须初始化 JSON 可见视图。模板中的预置数据行是新对话的初始可见数据，
+                // 但不能因此提前灌入 SQLite，否则会破坏“首次写入前可改 DDL”的约定。
                 // 注意：executeQuery（只读）不触发建表，避免前端查询意外提前锁定表结构
-                if (mergedData) {
-                    // 空壳结构：仍然更新 JSON 视图（前端需要显示表头），但不建 SQLite 表
-                    _set_currentJsonTableData_ACU(mergedData);
-                    this._buildNameMapper(mergedData);
-                    this._markCommitted(mergedData);
-                    logDebug_ACU('[SqlTableService] 检测到空壳结构（仅表头无数据行），引擎已就绪，等待第一次填表时建表');
+                const initialJsonView = mergedData
+                    ? mergedData
+                    : this._resolveInitialJsonViewFromTemplateOrGuide();
+                if (initialJsonView && this._hasSheetEntries(initialJsonView)) {
+                    _set_currentJsonTableData_ACU(initialJsonView);
+                    this._buildNameMapper(initialJsonView);
+                    this._markCommitted(initialJsonView);
+                    logDebug_ACU(mergedData
+                        ? '[SqlTableService] 检测到空壳结构（仅表头/模板基底），JSON 视图已初始化，引擎等待第一次填表时建表'
+                        : '[SqlTableService] 没有找到聊天表格数据，已使用模板/指导表初始化 JSON 可见视图，引擎等待第一次填表时建表');
                 }
                 else {
                     this._markCommitted(null);
@@ -11391,16 +11397,98 @@ class SqlTableService {
     /**
      * 解析当前聊天模板预设，返回 stripSeedRows 后的模板对象。
      *
+     * 该方法只供 SQLite 建表结构使用：必须剥离模板预置数据行，避免建表阶段把
+     * JSON 可见基底和真实 SQLite 数据源混在一起。新建对话的可见初始数据由
+     * _resolveInitialJsonViewFromTemplateOrGuide 单独负责。
+     */
+    _resolveCurrentChatTemplate() {
+        const templateObj = this._resolveCurrentChatTemplateObject(false)
+            || this._resolveTemplateFromCurrentJsonView();
+        if (!templateObj)
+            return null;
+        try {
+            const stripped = stripSeedRowsFromTemplate_ACU(JSON.parse(JSON.stringify(templateObj)));
+            return stripped;
+        }
+        catch (e) {
+            logWarn_ACU(`[SqlTableService] 剥离模板 seedRows 失败: ${e?.message}`);
+            return null;
+        }
+    }
+    /**
+     * 新建对话/空聊天阶段的 JSON 可见基底。
+     *
+     * 这里不向 SQLite 写入任何用户表，只为 UI、提示词和 getCurrentData 提供当前模板的
+     * 可见结构。优先使用指导表，因为它能表达当前聊天/隔离标签下已经确定的表头、顺序和 seedRows；
+     * 无指导表时再按当前聊天模板作用域解析完整模板（保留预置数据行）。
+     */
+    _resolveInitialJsonViewFromTemplateOrGuide() {
+        try {
+            const isolationKey = getCurrentIsolationKey_ACU();
+            const guideData = getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
+            if (guideData && typeof guideData === 'object' && Object.keys(guideData).some(k => k.startsWith('sheet_'))) {
+                const materialized = materializeDataFromSheetGuide_ACU(guideData, { includeSeedRows: true });
+                const materializedTableData = this._asTableDataObjectIfHasSheets(materialized);
+                if (materializedTableData)
+                    return materializedTableData;
+            }
+        }
+        catch (e) {
+            logWarn_ACU(`[SqlTableService] 从指导表初始化 JSON 可见视图失败，fallback 到模板: ${e?.message}`);
+        }
+        return this._resolveCurrentChatTemplateObject(true);
+    }
+    /**
+     * 当聊天记录已经合并出 header-only 空壳时，currentJsonTableData_ACU 本身就是当前聊天的
+     * 有效建表结构。此时全局模板可能解析失败或已经与聊天快照不同，不能因为模板 fallback 失败
+     * 就阻止首次写入物化 SQLite 表。
+     */
+    _resolveTemplateFromCurrentJsonView() {
+        if (!this._hasSheetEntries(currentJsonTableData_ACU))
+            return null;
+        try {
+            const cloned = JSON.parse(JSON.stringify(currentJsonTableData_ACU));
+            const hasBuildableSheet = Object.keys(cloned).some(key => {
+                if (!key.startsWith('sheet_'))
+                    return false;
+                const sheet = cloned[key];
+                return !!sheet && Array.isArray(sheet.content) && sheet.content.length > 0;
+            });
+            return hasBuildableSheet ? cloned : null;
+        }
+        catch (e) {
+            logWarn_ACU(`[SqlTableService] 从当前 JSON 视图解析建表结构失败: ${e?.message}`);
+            return null;
+        }
+    }
+    _asTableDataObjectIfHasSheets(value) {
+        if (!value || typeof value !== 'object')
+            return null;
+        const candidate = value;
+        if (!candidate.mate || typeof candidate.mate !== 'object')
+            return null;
+        const hasSheetEntries = Object.keys(candidate).some(key => {
+            if (!key.startsWith('sheet_'))
+                return false;
+            const sheet = candidate[key];
+            return !!sheet && typeof sheet === 'object' && Array.isArray(sheet.content);
+        });
+        return hasSheetEntries ? candidate : null;
+    }
+    /**
+     * 按当前聊天模板作用域解析模板对象。
+     *
      * 优先级：
      * 1. chat_override —— 当前聊天的专属模板快照
      * 2. preset_link  —— 当前聊天链接的全局预设
      * 3. inherit_global / 无聊天级模板 —— fallback 到 parseTableTemplateJson_ACU（全局模板）
      */
-    _resolveCurrentChatTemplate() {
+    _resolveCurrentChatTemplateObject(preserveSeedRows) {
         try {
             const scopeState = getCurrentChatTemplateScopeState_ACU();
             if (scopeState) {
                 let templateStr = null;
+                let scopeLogLabel = scopeState.mode;
                 if (scopeState.mode === 'chat_override' && scopeState.templateStr) {
                     // 场景 1：当前聊天有专属模板快照
                     templateStr = scopeState.templateStr;
@@ -11412,12 +11500,14 @@ class SqlTableService {
                         templateStr = preset.templateStr;
                     }
                 }
+                else if (scopeState.mode === 'preset_link') {
+                    scopeLogLabel = 'preset_link_missing';
+                }
                 if (templateStr) {
                     const parsed = safeJsonParse_ACU(templateStr, null);
                     if (parsed && typeof parsed === 'object') {
-                        const stripped = stripSeedRowsFromTemplate_ACU(JSON.parse(JSON.stringify(parsed)));
-                        logDebug_ACU(`[SqlTableService] 使用当前聊天模板预设 (mode=${scopeState.mode})`);
-                        return stripped;
+                        logDebug_ACU(`[SqlTableService] 使用当前聊天模板预设 (mode=${scopeLogLabel}, preserveSeedRows=${preserveSeedRows})`);
+                        return JSON.parse(JSON.stringify(parsed));
                     }
                 }
             }
@@ -11427,7 +11517,7 @@ class SqlTableService {
         }
         // 场景 3：inherit_global 或无聊天级模板，fallback 到全局模板
         logDebug_ACU('[SqlTableService] 使用全局模板 (inherit_global)');
-        return parseTableTemplateJson_ACU({ stripSeedRows: true });
+        return parseTableTemplateJson_ACU({ stripSeedRows: !preserveSeedRows });
     }
 }
 // ═══════════════════════════════════════════════════════════════
