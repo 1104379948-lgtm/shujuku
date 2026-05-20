@@ -80,6 +80,46 @@ function buildProgressMessage(event: CardUpdateProgressEvent): string {
     }
 }
 
+interface ActiveTableFillLoadingToast_ACU {
+    token: symbol;
+    toast: any;
+}
+
+let activeTableFillLoadingToast_ACU: ActiveTableFillLoadingToast_ACU | null = null;
+
+function createTableFillLoadingToastToken_ACU(): symbol {
+    return Symbol('acu-table-fill-loading-toast');
+}
+
+function clearToastSafely_ACU(toast: any) {
+    if (!toast || !toastr_API_ACU) return;
+    try {
+        toastr_API_ACU.clear(toast);
+    } catch (error) {
+        logWarn_ACU(`[更新流程] 清理填表进度 toast 失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+function registerActiveTableFillLoadingToast_ACU(token: symbol, toast: any) {
+    if (!toast) return;
+
+    if (activeTableFillLoadingToast_ACU?.toast && activeTableFillLoadingToast_ACU.token !== token) {
+        clearToastSafely_ACU(activeTableFillLoadingToast_ACU.toast);
+    }
+
+    activeTableFillLoadingToast_ACU = { token, toast };
+}
+
+function clearActiveTableFillLoadingToast_ACU(token: symbol) {
+    if (!activeTableFillLoadingToast_ACU || activeTableFillLoadingToast_ACU.token !== token) {
+        return;
+    }
+
+    const toastToClear = activeTableFillLoadingToast_ACU.toast;
+    activeTableFillLoadingToast_ACU = null;
+    clearToastSafely_ACU(toastToClear);
+}
+
 function updateLoadingToastMessage(loadingToast: any, message: string) {
     if (!loadingToast || !toastr_API_ACU) return;
     loadingToast.find('.acu-toast-progress-message').text(message);
@@ -130,6 +170,7 @@ export async function proceedWithCardUpdate_ACU(
     logDebug_ACU(`[更新流程] proceedWithCardUpdate: 消息数=${messagesToUse.length}, 模式=${updateMode}, 静默=${isSilentMode}, 目标表=${targetSheetKeys?.join(',') || '全部'}`);
     const localAbortController = new AbortController();
     let loadingToast: any = null;
+    const loadingToastToken = createTableFillLoadingToastToken_ACU();
     const stopButtonId = `acu-stop-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // UI：通知填表开始
@@ -160,6 +201,7 @@ export async function proceedWithCardUpdate_ACU(
                 }
             }
         });
+        registerActiveTableFillLoadingToast_ACU(loadingToastToken, loadingToast);
     }
 
     try {
@@ -190,10 +232,7 @@ export async function proceedWithCardUpdate_ACU(
 
         return result;
     } finally {
-        // UI：清除加载 toast
-        if (loadingToast && toastr_API_ACU) {
-            toastr_API_ACU.clear(loadingToast);
-        }
+        clearActiveTableFillLoadingToast_ACU(loadingToastToken);
     }
 }
 

@@ -35168,6 +35168,36 @@ function buildProgressMessage(event) {
             return `${batchLabel}：正在处理...`;
     }
 }
+let activeTableFillLoadingToast_ACU = null;
+function createTableFillLoadingToastToken_ACU() {
+    return Symbol('acu-table-fill-loading-toast');
+}
+function clearToastSafely_ACU(toast) {
+    if (!toast || !toastr_API_ACU)
+        return;
+    try {
+        toastr_API_ACU.clear(toast);
+    }
+    catch (error) {
+        logWarn_ACU(`[更新流程] 清理填表进度 toast 失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+function registerActiveTableFillLoadingToast_ACU(token, toast) {
+    if (!toast)
+        return;
+    if (activeTableFillLoadingToast_ACU?.toast && activeTableFillLoadingToast_ACU.token !== token) {
+        clearToastSafely_ACU(activeTableFillLoadingToast_ACU.toast);
+    }
+    activeTableFillLoadingToast_ACU = { token, toast };
+}
+function clearActiveTableFillLoadingToast_ACU(token) {
+    if (!activeTableFillLoadingToast_ACU || activeTableFillLoadingToast_ACU.token !== token) {
+        return;
+    }
+    const toastToClear = activeTableFillLoadingToast_ACU.toast;
+    activeTableFillLoadingToast_ACU = null;
+    clearToastSafely_ACU(toastToClear);
+}
 function updateLoadingToastMessage(loadingToast, message) {
     if (!loadingToast || !toastr_API_ACU)
         return;
@@ -35205,6 +35235,7 @@ async function proceedWithCardUpdate_ACU(messagesToUse, batchToastMessage = '正
     logDebug_ACU(`[更新流程] proceedWithCardUpdate: 消息数=${messagesToUse.length}, 模式=${updateMode}, 静默=${isSilentMode}, 目标表=${targetSheetKeys?.join(',') || '全部'}`);
     const localAbortController = new AbortController();
     let loadingToast = null;
+    const loadingToastToken = createTableFillLoadingToastToken_ACU();
     const stopButtonId = `acu-stop-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     // UI：通知填表开始
     if (!isSilentMode) {
@@ -35233,6 +35264,7 @@ async function proceedWithCardUpdate_ACU(messagesToUse, batchToastMessage = '正
                 }
             }
         });
+        registerActiveTableFillLoadingToast_ACU(loadingToastToken, loadingToast);
     }
     try {
         // 调用 service 层，传入进度回调（只接收纯数据事件）
@@ -35250,10 +35282,7 @@ async function proceedWithCardUpdate_ACU(messagesToUse, batchToastMessage = '正
         return result;
     }
     finally {
-        // UI：清除加载 toast
-        if (loadingToast && toastr_API_ACU) {
-            toastr_API_ACU.clear(loadingToast);
-        }
+        clearActiveTableFillLoadingToast_ACU(loadingToastToken);
     }
 }
 /**
