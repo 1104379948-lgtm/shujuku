@@ -206,10 +206,24 @@ export interface AutoUpdateOperations {
     purgeOldLayerData: () => Promise<void>;
 }
 
+function resolveAutoUpdateConcurrencyLimit_ACU(settings: any): number {
+    const configured = Number(settings?.maxConcurrentGroups);
+    if (!Number.isFinite(configured) || configured < 1) return 1;
+    return Math.max(1, Math.trunc(configured));
+}
+
+function isProcessUpdatesSuccess_ACU(result: any): boolean {
+    if (typeof result === 'boolean') return result;
+    if (result && typeof result === 'object' && typeof result.success === 'boolean') {
+        return result.success;
+    }
+    return !!result;
+}
+
 /**
- * 执行自动更新计划：并发分组执行 + 自动合并检测 + 旧数据清理
+ * 执行自动更新计划：按 maxConcurrentGroups 并发窗口执行 + 自动合并检测 + 旧数据清理
  * 
- * 纯业务编排逻辑：决定执行顺序、并发策略、错误处理。
+ * 纯业务编排逻辑：决定执行顺序、快照刷新屏障、错误处理。
  * 不驱动 UI，只返回结果。presentation 层根据返回值自行决定 UI 操作。
  */
 export async function executeAutoUpdatePlan_ACU(
@@ -223,40 +237,49 @@ export async function executeAutoUpdatePlan_ACU(
     if (groupKeys.length === 0) return { success: true, failedGroups: 0, totalGroups: 0 };
 
     const totalGroups = groupKeys.length;
-    const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
 
     setAutoUpdating(true);
 
     const failedGroupKeys: string[] = [];
-    for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
-        const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
-        const groupPromises = chunkKeys.map(key => (async () => {
+    const concurrencyLimit = resolveAutoUpdateConcurrencyLimit_ACU(settings);
+    for (let start = 0; start < groupKeys.length; start += concurrencyLimit) {
+        const windowKeys = groupKeys.slice(start, start + concurrencyLimit);
+        const settled = await Promise.allSettled(windowKeys.map(async key => {
             const group = updateGroups[key];
-            logDebug_ACU(`[Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
+            logDebug_ACU(`[Concurrent] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
 
-            const success = await ops.processUpdates(group.indices, 'auto_independent', {
+            const result = await ops.processUpdates(group.indices, 'auto_independent', {
                 targetSheetKeys: group.sheetKeys,
                 batchSize: group.batchSize,
                 requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
             });
 
-            return { key, success, sheetNames: group.sheetNames };
-        })());
+            return { key, group, success: isProcessUpdatesSuccess_ACU(result) };
+        }));
 
-        const results = await Promise.allSettled(groupPromises);
-        results.forEach((result, idx) => {
-            if (result.status === 'rejected' || !result.value?.success) {
-                failedGroupKeys.push(chunkKeys[idx]);
+        settled.forEach((result, index) => {
+            const key = windowKeys[index];
+            const group = updateGroups[key];
+            if (result.status === 'fulfilled') {
+                if (!result.value.success) failedGroupKeys.push(key);
+                return;
             }
+            failedGroupKeys.push(key);
+            logWarn_ACU(`自动分组更新异常 groupId=${group.groupId}, sheets=${group.sheetNames.join(', ')}:`, result.reason);
         });
+
+        // 自动更新的并发边界是 maxConcurrentGroups 窗口：窗口内不同分组并发，
+        // 窗口完成后统一刷新快照，再进入下一窗口。
+        await ops.loadAllChatMessages();
+        await ops.refreshData();
     }
 
     if (failedGroupKeys.length > 0) {
-        logWarn_ACU(`并发分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。`);
+        logWarn_ACU(`并发窗口分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。`);
     }
 
-    // 并发更新完成后统一刷新数据链条
-    logDebug_ACU(`All group updates completed. Forcing data refresh...`);
+    // 并发窗口更新完成后再做一次最终刷新，确保 UI 与后续自动合并读取的是最新快照。
+    logDebug_ACU(`All group updates completed with concurrency=${concurrencyLimit}. Forcing final data refresh...`);
     await ops.loadAllChatMessages();
     await ops.refreshData();
     await new Promise(resolve => setTimeout(resolve, 500));

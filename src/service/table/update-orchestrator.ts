@@ -1130,6 +1130,49 @@ async function commitMergedDeferredCommits_ACU(
     return { success: true };
 }
 
+function resolveManualConcurrentGroupLimit_ACU(): number {
+    const configured = Number(settings_ACU.maxConcurrentGroups);
+    if (!Number.isFinite(configured) || configured < 1) return 1;
+    return Math.max(1, Math.trunc(configured));
+}
+
+function splitIndicesIntoManualBatches_ACU(indices: number[], batchSize: number): number[][] {
+    if (!Array.isArray(indices) || indices.length === 0) return [];
+    const safeBatchSize = Number.isFinite(batchSize) && batchSize > 0 ? Math.trunc(batchSize) : 1;
+    const batches: number[][] = [];
+    for (let i = 0; i < indices.length; i += safeBatchSize) {
+        const batch = indices.slice(i, i + safeBatchSize);
+        if (batch.length > 0) batches.push(batch);
+    }
+    return batches;
+}
+
+async function runManualConcurrentWindow_ACU<T>(
+    items: T[],
+    concurrencyLimit: number,
+    task: (item: T, absoluteIndex: number) => Promise<void>,
+): Promise<{ success: boolean; error?: string }> {
+    const safeLimit = Number.isFinite(concurrencyLimit) && concurrencyLimit > 0 ? Math.trunc(concurrencyLimit) : 1;
+    for (let start = 0; start < items.length; start += safeLimit) {
+        const windowItems = items.slice(start, start + safeLimit);
+        const settled = await Promise.allSettled(windowItems.map((item, offset) => task(item, start + offset)));
+        for (const result of settled) {
+            if (result.status === 'fulfilled') continue;
+            const error = result.reason instanceof Error ? result.reason.message : String(result.reason || '手动更新分组并发执行失败。');
+            return { success: false, error };
+        }
+    }
+    return { success: true };
+}
+
+interface ManualUpdateGroupExecution_ACU {
+    key: string;
+    group: any;
+    groupOrder: number;
+    requestOptions: Record<string, any> | null;
+    batches: number[][];
+}
+
 /**
  * 手动更新编排（纯业务逻辑）
  * 从 handleManualUpdate_ACU 提取。不驱动 UI，只返回结果。
@@ -1272,102 +1315,128 @@ export async function orchestrateManualUpdate_ACU(
 
         _set_isAutoUpdatingCard_ACU(true);
         const failedGroups: Array<{ key: string; error?: string }> = [];
+        const concurrencyLimit = resolveManualConcurrentGroupLimit_ACU();
+        const manualGroups: ManualUpdateGroupExecution_ACU[] = groupKeys.map((gKey, groupOrder) => {
+            const group = updateGroups[gKey];
+            const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
+            const primaryTableName = primarySheetKey ? templateData?.[primarySheetKey]?.name : '';
+            const tableApiPreset = resolveTableApiPresetOverride_ACU(primaryTableName);
+            const requestOptions = tableApiPreset ? { tableApiPreset } : null;
+            return {
+                key: gKey,
+                group,
+                groupOrder,
+                requestOptions,
+                batches: splitIndicesIntoManualBatches_ACU(group.indices || [], group.batchSize),
+            };
+        });
+        const totalManualBatches = manualGroups.reduce((max, group) => Math.max(max, group.batches.length), 0);
 
-        // 手动分组采用两阶段提交：同一 chunk 内只并发 AI 生成；parse/apply 和持久化提交串行合并。
-        // 不能让 processBatch/executeCardUpdateCore 各自保存，否则 currentJsonTableData_ACU、SQLite provider、
-        // persistTablesToChatMessage_ACU 会重新暴露同目标楼层的并发 read-modify-write 风险。
-        const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
-        for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
-            const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
-            const preparedCalls: PreparedAiCall_ACU[] = [];
-            const deferredCommits: DeferredCommitPayload_ACU[] = [];
+        // 手动填表的并发边界是“同一批次内不同分组并发，批次之间串行”。
+        // 每一批次必须先收齐所有分组的 deferred commits，再通过 commitMergedDeferredCommits_ACU
+        // 做一次整体写入；提交完成并刷新快照后，下一批次才能读取新的基底。
+        for (let batchIndex = 0; batchIndex < totalManualBatches; batchIndex++) {
+            const activeGroups = manualGroups.filter(group => Array.isArray(group.batches[batchIndex]) && group.batches[batchIndex].length > 0);
+            if (activeGroups.length === 0) continue;
 
-            for (let groupOffset = 0; groupOffset < chunkKeys.length; groupOffset++) {
-                const gKey = chunkKeys[groupOffset];
-                const group = updateGroups[gKey];
-                const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
-                const primaryTableName = primarySheetKey ? templateData?.[primarySheetKey]?.name : '';
-                const tableApiPreset = resolveTableApiPresetOverride_ACU(primaryTableName);
-                const requestOptions = tableApiPreset ? { tableApiPreset } : null;
-                const prepareResult = await processBatch(group.indices, 'manual_independent', {
-                    targetSheetKeys: group.sheetKeys,
-                    batchSize: group.batchSize,
-                    requestOptions,
-                    groupKey: gKey,
-                    groupOrder: start + groupOffset,
-                    prepareAiCallOnly: true,
-                    deferApply: true,
-                    deferPersistence: true,
-                });
-                if (!prepareResult.success) {
-                    failedGroups.push({
-                        key: gKey,
-                        error: prepareResult.error || '手动更新分组准备 AI 请求失败。',
+            const preparedCallsByGroupKey = new Map<string, PreparedAiCall_ACU[]>();
+            const prepareWindowResult = await runManualConcurrentWindow_ACU(
+                activeGroups,
+                concurrencyLimit,
+                async groupExecution => {
+                    const batchIndices = groupExecution.batches[batchIndex];
+                    const prepareResult = await processBatch(batchIndices, 'manual_independent', {
+                        targetSheetKeys: groupExecution.group.sheetKeys,
+                        batchSize: groupExecution.group.batchSize,
+                        requestOptions: groupExecution.requestOptions,
+                        groupKey: groupExecution.key,
+                        groupOrder: groupExecution.groupOrder,
+                        prepareAiCallOnly: true,
+                        deferApply: true,
+                        deferPersistence: true,
                     });
-                    break;
-                }
-                preparedCalls.push(...(prepareResult.preparedAiCalls || []));
-            }
-
-            if (failedGroups.length > 0) {
+                    if (!prepareResult.success) {
+                        throw new Error(prepareResult.error || '手动更新分组准备 AI 请求失败。');
+                    }
+                    preparedCallsByGroupKey.set(groupExecution.key, prepareResult.preparedAiCalls || []);
+                },
+            );
+            if (!prepareWindowResult.success) {
+                failedGroups.push({
+                    key: `batch_${batchIndex + 1}`,
+                    error: prepareWindowResult.error || '手动更新批次准备 AI 请求失败。',
+                });
                 await loadAllChatMessages_ACU();
                 await refreshData();
                 break;
             }
 
-            const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCalls);
+            const preparedCallsForBatch = activeGroups.flatMap(groupExecution => preparedCallsByGroupKey.get(groupExecution.key) || []);
+            const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCallsForBatch);
             if (!generationResult.success) {
                 failedGroups.push({
-                    key: chunkKeys[0],
-                    error: generationResult.error || '手动更新分组 AI 生成失败。',
+                    key: `batch_${batchIndex + 1}`,
+                    error: generationResult.error || '手动更新批次 AI 生成失败。',
                 });
                 await loadAllChatMessages_ACU();
                 await refreshData();
                 break;
             }
 
-            for (let groupOffset = 0; groupOffset < chunkKeys.length; groupOffset++) {
-                const gKey = chunkKeys[groupOffset];
-                const group = updateGroups[gKey];
-                const groupPreparedCallIds = new Set(
-                    preparedCalls
-                        .filter(call => call.preparedCallId.startsWith(`${gKey}:`))
-                        .map(call => call.preparedCallId),
-                );
-                const groupDeferredResponses = generationResult.responses.filter(response =>
-                    response.preparedCallId ? groupPreparedCallIds.has(response.preparedCallId) : false,
-                );
-                const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
-                const primaryTableName = primarySheetKey ? templateData?.[primarySheetKey]?.name : '';
-                const tableApiPreset = resolveTableApiPresetOverride_ACU(primaryTableName);
-                const requestOptions = tableApiPreset ? { tableApiPreset } : null;
-                const applyResult = await processBatch(group.indices, 'manual_independent', {
-                    targetSheetKeys: group.sheetKeys,
-                    batchSize: group.batchSize,
-                    requestOptions,
-                    groupKey: gKey,
-                    groupOrder: start + groupOffset,
-                    deferPersistence: true,
-                    deferredResponses: groupDeferredResponses,
-                });
-                if (!applyResult.success) {
-                    failedGroups.push({
-                        key: gKey,
-                        error: applyResult.error || '手动更新分组串行应用失败。',
+            const responsesByPreparedCallId = new Map<string, DeferredAiResponse_ACU>();
+            generationResult.responses.forEach(response => {
+                if (response.preparedCallId) responsesByPreparedCallId.set(response.preparedCallId, response);
+            });
+
+            const deferredCommitsForBatch: DeferredCommitPayload_ACU[] = [];
+            const applyWindowResult = await runManualConcurrentWindow_ACU(
+                activeGroups,
+                concurrencyLimit,
+                async groupExecution => {
+                    const preparedCalls = preparedCallsByGroupKey.get(groupExecution.key) || [];
+                    const groupDeferredResponses = preparedCalls
+                        .map(call => responsesByPreparedCallId.get(call.preparedCallId))
+                        .filter((response): response is DeferredAiResponse_ACU => !!response);
+
+                    if (preparedCalls.length !== groupDeferredResponses.length) {
+                        throw new Error('手动更新批次缺少预生成 AI 响应，无法应用。');
+                    }
+
+                    const batchIndices = groupExecution.batches[batchIndex];
+                    const applyResult = await processBatch(batchIndices, 'manual_independent', {
+                        targetSheetKeys: groupExecution.group.sheetKeys,
+                        batchSize: groupExecution.group.batchSize,
+                        requestOptions: groupExecution.requestOptions,
+                        groupKey: groupExecution.key,
+                        groupOrder: groupExecution.groupOrder,
+                        deferPersistence: true,
+                        deferredResponses: groupDeferredResponses,
                     });
-                    break;
-                }
-                deferredCommits.push(...(applyResult.deferredCommits || []));
+                    if (!applyResult.success) {
+                        throw new Error(applyResult.error || '手动更新分组应用失败。');
+                    }
+                    deferredCommitsForBatch.push(...(applyResult.deferredCommits || []));
+                },
+            );
+            if (!applyWindowResult.success) {
+                failedGroups.push({
+                    key: `batch_${batchIndex + 1}`,
+                    error: applyWindowResult.error || '手动更新批次应用失败。',
+                });
+                await loadAllChatMessages_ACU();
+                await refreshData();
+                break;
             }
 
-            if (failedGroups.length === 0) {
-                const commitResult = await commitMergedDeferredCommits_ACU(deferredCommits);
-                if (!commitResult.success) {
-                    failedGroups.push({
-                        key: chunkKeys[0],
-                        error: commitResult.error || '手动更新合并提交失败。',
-                    });
-                }
+            const commitResult = await commitMergedDeferredCommits_ACU(deferredCommitsForBatch);
+            if (!commitResult.success) {
+                failedGroups.push({
+                    key: `batch_${batchIndex + 1}`,
+                    error: commitResult.error || '手动更新批次合并提交失败。',
+                });
+                await loadAllChatMessages_ACU();
+                await refreshData();
+                break;
             }
 
             await loadAllChatMessages_ACU();

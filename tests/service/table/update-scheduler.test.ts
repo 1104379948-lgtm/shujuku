@@ -539,7 +539,7 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(ops.purgeOldLayerData).toHaveBeenCalled();
   });
 
-  it('多组部分失败', async () => {
+  it('多组部分失败：同一并发窗口内都被调度，窗口完成后统一刷新', async () => {
     const plan = {
       tablesToUpdate: [],
       updateGroups: {
@@ -547,15 +547,69 @@ describe('executeAutoUpdatePlan_ACU', () => {
         'group_b': { indices: [1], batchSize: 2, groupId: 1, sheetKeys: ['sheet_1'], sheetNames: ['表B'] },
       },
     };
+    const events: string[] = [];
     const mockProcess = vi.fn()
-      .mockResolvedValueOnce(true)   // group_a 成功
-      .mockResolvedValueOnce(false); // group_b 失败
+      .mockImplementationOnce(async () => {
+        events.push('process:a');
+        return true;
+      })
+      .mockImplementationOnce(async () => {
+        events.push('process:b');
+        return false;
+      });
 
-    const ops = makeOps({ processUpdates: mockProcess });
+    const ops = makeOps({
+      processUpdates: mockProcess,
+      loadAllChatMessages: vi.fn(async () => { events.push('load'); }),
+      refreshData: vi.fn(async () => { events.push('refresh'); }),
+    });
     const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
     expect(result.success).toBe(false);
     expect(result.failedGroups).toBe(1);
     expect(result.totalGroups).toBe(2);
+    expect(events.slice(0, 4)).toEqual(['process:a', 'process:b', 'load', 'refresh']);
+  });
+
+  it('多组自动更新按 maxConcurrentGroups 并发窗口执行，并在窗口后刷新快照', async () => {
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: {
+        'group_a': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] },
+        'group_b': { indices: [3], batchSize: 2, groupId: 1, sheetKeys: ['sheet_1'], sheetNames: ['表B'] },
+      },
+    };
+    const events: string[] = [];
+    let activeProcessCount = 0;
+    let maxActiveProcessCount = 0;
+    const ops = makeOps({
+      processUpdates: vi.fn(async (_indices: number[], _mode: string, options: any) => {
+        activeProcessCount += 1;
+        maxActiveProcessCount = Math.max(maxActiveProcessCount, activeProcessCount);
+        events.push(`process:start:${options.targetSheetKeys[0]}`);
+        await Promise.resolve();
+        events.push(`process:end:${options.targetSheetKeys[0]}`);
+        activeProcessCount -= 1;
+        return true;
+      }),
+      loadAllChatMessages: vi.fn(async () => { events.push('load'); }),
+      refreshData: vi.fn(async () => { events.push('refresh'); }),
+    });
+
+    const result = await executeAutoUpdatePlan_ACU(plan, { maxConcurrentGroups: 2 }, mockSetAutoUpdating, ops);
+
+    expect(result.success).toBe(true);
+    expect(maxActiveProcessCount).toBe(2);
+    expect(events.slice(0, 6)).toEqual([
+      'process:start:sheet_0',
+      'process:start:sheet_1',
+      'process:end:sheet_0',
+      'process:end:sheet_1',
+      'load',
+      'refresh',
+    ]);
+    expect(ops.processUpdates).toHaveBeenCalledTimes(2);
+    expect(ops.loadAllChatMessages).toHaveBeenCalledTimes(2);
+    expect(ops.refreshData).toHaveBeenCalledTimes(3);
   });
 
   it('processUpdates 抛异常时计为失败', async () => {
