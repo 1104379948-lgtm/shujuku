@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mockShowToastr_ACU = vi.hoisted(() => vi.fn());
 const mockToastrClear_ACU = vi.hoisted(() => vi.fn());
 const mockExecuteCardUpdateCore_ACU = vi.hoisted(() => vi.fn());
+const mockProcessUpdatesBatch_ACU = vi.hoisted(() => vi.fn());
+const mockOrchestrateManualUpdate_ACU = vi.hoisted(() => vi.fn());
 const mockBindTableFillStopButton_ACU = vi.hoisted(() => vi.fn());
 const mockAbortAllActiveRequests_ACU = vi.hoisted(() => vi.fn());
 const mockSetIsAutoUpdating_ACU = vi.hoisted(() => vi.fn());
@@ -10,6 +12,9 @@ const mockSetWasStopped_ACU = vi.hoisted(() => vi.fn());
 const mockStatusText_ACU = vi.hoisted(() => vi.fn());
 const mockNotifyFillStart_ACU = vi.hoisted(() => vi.fn());
 const mockNotifyTableUpdate_ACU = vi.hoisted(() => vi.fn());
+const mockGetManualSelectionFromUI_ACU = vi.hoisted(() => vi.fn(() => []));
+const mockShowCustomConfirm_ACU = vi.hoisted(() => vi.fn());
+const mockRefreshMergedData_ACU = vi.hoisted(() => vi.fn());
 
 vi.mock('../../src/presentation/theme/toast', () => ({
   showToastr_ACU: mockShowToastr_ACU,
@@ -42,11 +47,11 @@ vi.mock('../../src/service/runtime/state-manager', () => ({
 }));
 
 vi.mock('../../src/presentation/components/table-selector', () => ({
-  getManualSelectionFromUI_ACU: vi.fn(() => []),
+  getManualSelectionFromUI_ACU: mockGetManualSelectionFromUI_ACU,
 }));
 
 vi.mock('../../src/presentation/theme/custom-confirm', () => ({
-  showCustomConfirm_ACU: vi.fn(),
+  showCustomConfirm_ACU: mockShowCustomConfirm_ACU,
 }));
 
 vi.mock('../../src/presentation/state/ui-refs', () => ({
@@ -84,19 +89,21 @@ vi.mock('../../src/presentation/triggers/settings-ui-sync', () => ({
 }));
 
 vi.mock('../../src/presentation/components/pipeline-ui-helpers', () => ({
-  refreshMergedDataAndNotifyWithUI_ACU: vi.fn(),
+  refreshMergedDataAndNotifyWithUI_ACU: mockRefreshMergedData_ACU,
 }));
 
 vi.mock('../../src/service/table/update-orchestrator', () => ({
-  processUpdatesBatch_ACU: vi.fn(),
+  processUpdatesBatch_ACU: mockProcessUpdatesBatch_ACU,
   executeCardUpdateCore_ACU: mockExecuteCardUpdateCore_ACU,
-  orchestrateManualUpdate_ACU: vi.fn(),
+  orchestrateManualUpdate_ACU: mockOrchestrateManualUpdate_ACU,
 }));
 
 function createToastStub(label: string) {
+  const text = vi.fn();
   return {
     label,
-    find: vi.fn(() => ({ text: vi.fn() })),
+    text,
+    find: vi.fn(() => ({ text })),
   };
 }
 
@@ -113,6 +120,9 @@ function createDeferred<T>() {
 describe('presentation/update-process loading toast lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetManualSelectionFromUI_ACU.mockReturnValue([]);
+    mockShowCustomConfirm_ACU.mockResolvedValue(true);
+    mockRefreshMergedData_ACU.mockResolvedValue(undefined);
   });
 
   it('replaces the previous table-fill loading toast when a new visible batch starts', async () => {
@@ -159,5 +169,26 @@ describe('presentation/update-process loading toast lifecycle', () => {
     expect(mockShowToastr_ACU).not.toHaveBeenCalled();
     expect(mockToastrClear_ACU).not.toHaveBeenCalled();
     expect(mockNotifyFillStart_ACU).not.toHaveBeenCalled();
+  });
+
+  it('updates the manual-update loading toast with batch progress and retry attempts', async () => {
+    const manualToast = createToastStub('manual');
+    mockShowToastr_ACU.mockReturnValue(manualToast);
+    mockGetManualSelectionFromUI_ACU.mockReturnValue(['sheet_0']);
+    mockShowCustomConfirm_ACU.mockResolvedValue(true);
+    mockOrchestrateManualUpdate_ACU.mockImplementation(async (_targetKeys, _processBatch, _refreshData, _options, onProgress) => {
+      onProgress({ phase: 'calling_ai', currentBatch: 2, totalBatches: 5, activeGroups: 3, stageLabel: 'AI生成', attempt: 1, maxRetries: 3 });
+      onProgress({ phase: 'retry', currentBatch: 2, totalBatches: 5, currentGroupKey: 'group-a:2:7', stageLabel: 'AI生成', attempt: 1, maxRetries: 3, retryDelayMs: 5000, message: '临时失败' });
+      return { success: true };
+    });
+
+    const { handleManualUpdate_ACU } = await import('../../src/presentation/triggers/update-process');
+
+    await handleManualUpdate_ACU();
+
+    expect(mockShowToastr_ACU).toHaveBeenCalledWith('info', expect.stringContaining('正在准备手动填表批次'), expect.objectContaining({ timeOut: 0 }));
+    expect(manualToast.text).toHaveBeenCalledWith('第 2/5 批（并发分组 3）：AI生成，第 1/3 次调用AI进行增量更新...');
+    expect(manualToast.text).toHaveBeenCalledWith('第 2/5 批（当前 group-a:2:7）：AI生成，第 1/3 次尝试失败，5秒后重试... (临时失败)');
+    expect(mockToastrClear_ACU).toHaveBeenCalledWith(manualToast);
   });
 });

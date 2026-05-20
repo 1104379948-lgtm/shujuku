@@ -72,13 +72,26 @@ export interface CardUpdateProgressEvent {
     message?: string;
     currentBatch?: number;
     totalBatches?: number;
+    stageLabel?: string;
+    currentGroupKey?: string;
+    activeGroups?: number;
+    completedGroups?: number;
+    totalGroups?: number;
+    retryDelayMs?: number;
 }
 
 /** 批处理进度上下文 */
 export interface BatchUpdateProgressContext {
     currentBatch: number;
     totalBatches: number;
+    stageLabel?: string;
+    currentGroupKey?: string;
+    activeGroups?: number;
+    completedGroups?: number;
+    totalGroups?: number;
 }
+
+type ManualProgressReporter_ACU = (event: CardUpdateProgressEvent) => void;
 
 export interface DeferredAiResponse_ACU {
     aiResponse: string;
@@ -444,17 +457,7 @@ export async function executeCardUpdateCore_ACU(
     onProgress?: (event: CardUpdateProgressEvent) => void,
     executionOptions: ExecuteCardUpdateOptions_ACU = {},
 ): Promise<CardUpdateResult> {
-    const emitProgress = (event: CardUpdateProgressEvent): void => {
-        onProgress?.({
-            ...event,
-            ...(progressContext
-                ? {
-                    currentBatch: progressContext.currentBatch,
-                    totalBatches: progressContext.totalBatches,
-                }
-                : {}),
-        });
-    };
+    const emitProgress = (event: CardUpdateProgressEvent): void => onProgress?.(mergeProgressContext_ACU(event, progressContext));
     let success = false;
     let modifiedKeys: string[] = [];
     const maxRetries = settings_ACU.tableMaxRetries || 3;
@@ -797,7 +800,7 @@ export async function processUpdatesBatch_ACU(
 
         const chatHistory = getChatArray_ACU();
         const isAutoUpdateMode = mode && mode.startsWith('auto');
-        const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled);
+        const isSilentMode = !!(options?.silent === true || (isAutoUpdateMode && settings_ACU.toastMuteEnabled));
 
         for (let i = 0; i < batches.length; i++) {
             const batchIndices = batches[i];
@@ -942,8 +945,27 @@ export async function processUpdatesBatch_ACU(
     }
 }
 
+function mergeProgressContext_ACU(
+    event: CardUpdateProgressEvent,
+    progressContext: BatchUpdateProgressContext | null | undefined,
+): CardUpdateProgressEvent {
+    if (!progressContext) return event;
+    return {
+        ...event,
+        currentBatch: event.currentBatch ?? progressContext.currentBatch,
+        totalBatches: event.totalBatches ?? progressContext.totalBatches,
+        stageLabel: event.stageLabel ?? progressContext.stageLabel,
+        currentGroupKey: event.currentGroupKey ?? progressContext.currentGroupKey,
+        activeGroups: event.activeGroups ?? progressContext.activeGroups,
+        completedGroups: event.completedGroups ?? progressContext.completedGroups,
+        totalGroups: event.totalGroups ?? progressContext.totalGroups,
+    };
+}
+
 async function generateDeferredResponsesForPreparedCalls_ACU(
     preparedCalls: PreparedAiCall_ACU[],
+    onProgress?: ManualProgressReporter_ACU,
+    progressContext: BatchUpdateProgressContext | null = null,
 ): Promise<{ success: boolean; responses: DeferredAiResponse_ACU[]; error?: string }> {
     if (preparedCalls.length === 0) {
         return { success: true, responses: [] };
@@ -951,8 +973,20 @@ async function generateDeferredResponsesForPreparedCalls_ACU(
 
     const settled = await Promise.allSettled(preparedCalls.map(async (prepared, chunkOrder) => {
         const abortController = new AbortController();
+        const maxRetries = settings_ACU.tableMaxRetries || 3;
+        let lastError: Error | null = null;
         logDebug_ACU(`[Manual Two-Phase] Generating preparedCallId=${prepared.preparedCallId}, target=${prepared.targetMessageIndex}.`);
-        const aiResponse = await callCustomOpenAI_ACU(prepared.dynamicContent, abortController, prepared.requestOptions);
+        for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+            onProgress?.(mergeProgressContext_ACU({
+                phase: 'calling_ai',
+                attempt,
+                maxRetries,
+                stageLabel: 'AI生成',
+                currentGroupKey: prepared.preparedCallId,
+            }, progressContext));
+
+            try {
+                const aiResponse = await callCustomOpenAI_ACU(prepared.dynamicContent, abortController, prepared.requestOptions);
         if (abortController.signal.aborted || wasStoppedByUser_ACU) {
             throw new Error('手动更新已终止。');
         }
@@ -975,6 +1009,30 @@ async function generateDeferredResponsesForPreparedCalls_ACU(
             targetSheetKeys: prepared.targetSheetKeys,
             requestOptions: prepared.requestOptions,
         } satisfies DeferredAiResponse_ACU;
+            } catch (error: any) {
+                lastError = error instanceof Error ? error : new Error(String(error || '手动更新分组生成异常。'));
+                if (abortController.signal.aborted || wasStoppedByUser_ACU || lastError.message === '手动更新已终止。') {
+                    throw lastError;
+                }
+                if (attempt < maxRetries) {
+                    const waitTime = 5000;
+                    onProgress?.(mergeProgressContext_ACU({
+                        phase: 'retry',
+                        attempt,
+                        maxRetries,
+                        message: lastError.message.substring(0, 50),
+                        stageLabel: 'AI生成',
+                        currentGroupKey: prepared.preparedCallId,
+                        retryDelayMs: waitTime,
+                    }, progressContext));
+                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                    continue;
+                }
+                throw lastError;
+            }
+        }
+
+        throw lastError || new Error('手动更新分组生成异常。');
     }));
 
     const responses: DeferredAiResponse_ACU[] = [];
@@ -1192,8 +1250,13 @@ export async function orchestrateManualUpdate_ACU(
     processBatch: (indices: number[], mode: string, options: any) => Promise<BatchUpdateResult>,
     refreshData: () => Promise<void>,
     options: { clearBeforeUpdate?: boolean } = {},
+    onProgress?: ManualProgressReporter_ACU,
 ): Promise<ManualUpdateResult> {
     try {
+        const emitManualProgress = (event: CardUpdateProgressEvent): void => {
+            onProgress?.(event);
+        };
+
         if (isAutoUpdatingCard_ACU) {
             return { success: false, error: '数据库更新正在进行中，请稍候...' };
         }
@@ -1339,6 +1402,13 @@ export async function orchestrateManualUpdate_ACU(
             const activeGroups = manualGroups.filter(group => Array.isArray(group.batches[batchIndex]) && group.batches[batchIndex].length > 0);
             if (activeGroups.length === 0) continue;
 
+            const manualBatchProgressContext: BatchUpdateProgressContext = {
+                currentBatch: batchIndex + 1,
+                totalBatches: totalManualBatches,
+                totalGroups: activeGroups.length,
+            };
+            emitManualProgress(mergeProgressContext_ACU({ phase: 'preparing', stageLabel: '准备批次请求', activeGroups: activeGroups.length }, manualBatchProgressContext));
+
             const preparedCallsByGroupKey = new Map<string, PreparedAiCall_ACU[]>();
             const prepareWindowResult = await runManualConcurrentWindow_ACU(
                 activeGroups,
@@ -1372,7 +1442,8 @@ export async function orchestrateManualUpdate_ACU(
             }
 
             const preparedCallsForBatch = activeGroups.flatMap(groupExecution => preparedCallsByGroupKey.get(groupExecution.key) || []);
-            const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCallsForBatch);
+            emitManualProgress(mergeProgressContext_ACU({ phase: 'calling_ai', attempt: 1, maxRetries: settings_ACU.tableMaxRetries || 3, stageLabel: 'AI生成', activeGroups: activeGroups.length }, manualBatchProgressContext));
+            const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCallsForBatch, emitManualProgress, manualBatchProgressContext);
             if (!generationResult.success) {
                 failedGroups.push({
                     key: `batch_${batchIndex + 1}`,
@@ -1389,6 +1460,7 @@ export async function orchestrateManualUpdate_ACU(
             });
 
             const deferredCommitsForBatch: DeferredCommitPayload_ACU[] = [];
+            emitManualProgress(mergeProgressContext_ACU({ phase: 'parsing', stageLabel: '应用批次结果', activeGroups: activeGroups.length }, manualBatchProgressContext));
             const applyWindowResult = await runManualConcurrentWindow_ACU(
                 activeGroups,
                 concurrencyLimit,
@@ -1428,6 +1500,7 @@ export async function orchestrateManualUpdate_ACU(
                 break;
             }
 
+            emitManualProgress(mergeProgressContext_ACU({ phase: 'saving', stageLabel: '合并提交批次', activeGroups: activeGroups.length }, manualBatchProgressContext));
             const commitResult = await commitMergedDeferredCommits_ACU(deferredCommitsForBatch);
             if (!commitResult.success) {
                 failedGroups.push({
@@ -1441,6 +1514,7 @@ export async function orchestrateManualUpdate_ACU(
 
             await loadAllChatMessages_ACU();
             await refreshData();
+            emitManualProgress(mergeProgressContext_ACU({ phase: 'complete', stageLabel: '批次完成', activeGroups: activeGroups.length, completedGroups: activeGroups.length }, manualBatchProgressContext));
 
             if (failedGroups.length > 0) {
                 break;

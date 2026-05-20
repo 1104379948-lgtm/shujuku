@@ -34308,17 +34308,7 @@ $CONTENT
      * presentation 层根据返回值和进度事件自行决定 UI 操作。
      */
     async function executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImportMode, updateMode, isSilentMode, targetSheetKeys, requestOptions, abortController, progressContext = null, onProgress, executionOptions = {}) {
-        const emitProgress = (event) => {
-            onProgress?.({
-                ...event,
-                ...(progressContext
-                    ? {
-                        currentBatch: progressContext.currentBatch,
-                        totalBatches: progressContext.totalBatches,
-                    }
-                    : {}),
-            });
-        };
+        const emitProgress = (event) => onProgress?.(mergeProgressContext_ACU(event, progressContext));
         let success = false;
         let modifiedKeys = [];
         const maxRetries = settings_ACU.tableMaxRetries || 3;
@@ -34615,7 +34605,7 @@ $CONTENT
             logDebug_ACU(`[${mode}] Processing ${indicesToUpdate.length} updates in ${batches.length} batches of size ${batchSize} (${isSummaryMode ? '总结表模式' : '标准表模式'}). Target Sheets: ${targetSheetKeys ? targetSheetKeys.length : 'All'}`);
             const chatHistory = getChatArray_ACU();
             const isAutoUpdateMode = mode && mode.startsWith('auto');
-            const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled);
+            const isSilentMode = !!(options?.silent === true || (isAutoUpdateMode && settings_ACU.toastMuteEnabled));
             for (let i = 0; i < batches.length; i++) {
                 const batchIndices = batches[i];
                 const batchNumber = i + 1;
@@ -34733,34 +34723,83 @@ $CONTENT
             _set_wasStoppedByUser_ACU$1(false);
         }
     }
-    async function generateDeferredResponsesForPreparedCalls_ACU(preparedCalls) {
+    function mergeProgressContext_ACU(event, progressContext) {
+        if (!progressContext)
+            return event;
+        return {
+            ...event,
+            currentBatch: event.currentBatch ?? progressContext.currentBatch,
+            totalBatches: event.totalBatches ?? progressContext.totalBatches,
+            stageLabel: event.stageLabel ?? progressContext.stageLabel,
+            currentGroupKey: event.currentGroupKey ?? progressContext.currentGroupKey,
+            activeGroups: event.activeGroups ?? progressContext.activeGroups,
+            completedGroups: event.completedGroups ?? progressContext.completedGroups,
+            totalGroups: event.totalGroups ?? progressContext.totalGroups,
+        };
+    }
+    async function generateDeferredResponsesForPreparedCalls_ACU(preparedCalls, onProgress, progressContext = null) {
         if (preparedCalls.length === 0) {
             return { success: true, responses: [] };
         }
         const settled = await Promise.allSettled(preparedCalls.map(async (prepared, chunkOrder) => {
             const abortController = new AbortController();
+            const maxRetries = settings_ACU.tableMaxRetries || 3;
+            let lastError = null;
             logDebug_ACU(`[Manual Two-Phase] Generating preparedCallId=${prepared.preparedCallId}, target=${prepared.targetMessageIndex}.`);
-            const aiResponse = await callCustomOpenAI_ACU(prepared.dynamicContent, abortController, prepared.requestOptions);
-            if (abortController.signal.aborted || wasStoppedByUser_ACU$1) {
-                throw new Error('手动更新已终止。');
+            for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+                onProgress?.(mergeProgressContext_ACU({
+                    phase: 'calling_ai',
+                    attempt,
+                    maxRetries,
+                    stageLabel: 'AI生成',
+                    currentGroupKey: prepared.preparedCallId,
+                }, progressContext));
+                try {
+                    const aiResponse = await callCustomOpenAI_ACU(prepared.dynamicContent, abortController, prepared.requestOptions);
+                    if (abortController.signal.aborted || wasStoppedByUser_ACU$1) {
+                        throw new Error('手动更新已终止。');
+                    }
+                    const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
+                    if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
+                        throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
+                    }
+                    if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+                        throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
+                    }
+                    return {
+                        aiResponse,
+                        targetMessageIndex: prepared.targetMessageIndex,
+                        preparedCallId: prepared.preparedCallId,
+                        chunkOrder,
+                        batchNumber: prepared.batchNumber,
+                        updateMode: prepared.updateMode,
+                        targetSheetKeys: prepared.targetSheetKeys,
+                        requestOptions: prepared.requestOptions,
+                    };
+                }
+                catch (error) {
+                    lastError = error instanceof Error ? error : new Error(String(error || '手动更新分组生成异常。'));
+                    if (abortController.signal.aborted || wasStoppedByUser_ACU$1 || lastError.message === '手动更新已终止。') {
+                        throw lastError;
+                    }
+                    if (attempt < maxRetries) {
+                        const waitTime = 5000;
+                        onProgress?.(mergeProgressContext_ACU({
+                            phase: 'retry',
+                            attempt,
+                            maxRetries,
+                            message: lastError.message.substring(0, 50),
+                            stageLabel: 'AI生成',
+                            currentGroupKey: prepared.preparedCallId,
+                            retryDelayMs: waitTime,
+                        }, progressContext));
+                        await new Promise(resolve => setTimeout(resolve, waitTime));
+                        continue;
+                    }
+                    throw lastError;
+                }
             }
-            const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
-            if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
-                throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
-            }
-            if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
-                throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
-            }
-            return {
-                aiResponse,
-                targetMessageIndex: prepared.targetMessageIndex,
-                preparedCallId: prepared.preparedCallId,
-                chunkOrder,
-                batchNumber: prepared.batchNumber,
-                updateMode: prepared.updateMode,
-                targetSheetKeys: prepared.targetSheetKeys,
-                requestOptions: prepared.requestOptions,
-            };
+            throw lastError || new Error('手动更新分组生成异常。');
         }));
         const responses = [];
         for (let index = 0; index < settled.length; index++) {
@@ -34937,8 +34976,11 @@ $CONTENT
      *     会先计算所有 update group 的目标保存楼层，去重后逐个清空当前隔离标签的表格数据，
      *     再刷新内存状态，最后执行新的手动填表。
      */
-    async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData, options = {}) {
+    async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData, options = {}, onProgress) {
         try {
+            const emitManualProgress = (event) => {
+                onProgress?.(event);
+            };
             if (isAutoUpdatingCard_ACU$1) {
                 return { success: false, error: '数据库更新正在进行中，请稍候...' };
             }
@@ -35067,6 +35109,12 @@ $CONTENT
                 const activeGroups = manualGroups.filter(group => Array.isArray(group.batches[batchIndex]) && group.batches[batchIndex].length > 0);
                 if (activeGroups.length === 0)
                     continue;
+                const manualBatchProgressContext = {
+                    currentBatch: batchIndex + 1,
+                    totalBatches: totalManualBatches,
+                    totalGroups: activeGroups.length,
+                };
+                emitManualProgress(mergeProgressContext_ACU({ phase: 'preparing', stageLabel: '准备批次请求', activeGroups: activeGroups.length }, manualBatchProgressContext));
                 const preparedCallsByGroupKey = new Map();
                 const prepareWindowResult = await runManualConcurrentWindow_ACU(activeGroups, concurrencyLimit, async (groupExecution) => {
                     const batchIndices = groupExecution.batches[batchIndex];
@@ -35095,7 +35143,8 @@ $CONTENT
                     break;
                 }
                 const preparedCallsForBatch = activeGroups.flatMap(groupExecution => preparedCallsByGroupKey.get(groupExecution.key) || []);
-                const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCallsForBatch);
+                emitManualProgress(mergeProgressContext_ACU({ phase: 'calling_ai', attempt: 1, maxRetries: settings_ACU.tableMaxRetries || 3, stageLabel: 'AI生成', activeGroups: activeGroups.length }, manualBatchProgressContext));
+                const generationResult = await generateDeferredResponsesForPreparedCalls_ACU(preparedCallsForBatch, emitManualProgress, manualBatchProgressContext);
                 if (!generationResult.success) {
                     failedGroups.push({
                         key: `batch_${batchIndex + 1}`,
@@ -35111,6 +35160,7 @@ $CONTENT
                         responsesByPreparedCallId.set(response.preparedCallId, response);
                 });
                 const deferredCommitsForBatch = [];
+                emitManualProgress(mergeProgressContext_ACU({ phase: 'parsing', stageLabel: '应用批次结果', activeGroups: activeGroups.length }, manualBatchProgressContext));
                 const applyWindowResult = await runManualConcurrentWindow_ACU(activeGroups, concurrencyLimit, async (groupExecution) => {
                     const preparedCalls = preparedCallsByGroupKey.get(groupExecution.key) || [];
                     const groupDeferredResponses = preparedCalls
@@ -35143,6 +35193,7 @@ $CONTENT
                     await refreshData();
                     break;
                 }
+                emitManualProgress(mergeProgressContext_ACU({ phase: 'saving', stageLabel: '合并提交批次', activeGroups: activeGroups.length }, manualBatchProgressContext));
                 const commitResult = await commitMergedDeferredCommits_ACU(deferredCommitsForBatch);
                 if (!commitResult.success) {
                     failedGroups.push({
@@ -35155,6 +35206,7 @@ $CONTENT
                 }
                 await loadAllChatMessages_ACU();
                 await refreshData();
+                emitManualProgress(mergeProgressContext_ACU({ phase: 'complete', stageLabel: '批次完成', activeGroups: activeGroups.length, completedGroups: activeGroups.length }, manualBatchProgressContext));
                 if (failedGroups.length > 0) {
                     break;
                 }
@@ -35236,27 +35288,49 @@ $CONTENT
         }
         return '当前批次';
     }
+    function buildGroupProgressLabel(event) {
+        const parts = [];
+        if (Number.isFinite(event.completedGroups) && Number.isFinite(event.totalGroups)) {
+            parts.push(`分组 ${event.completedGroups}/${event.totalGroups}`);
+        }
+        else if (Number.isFinite(event.activeGroups)) {
+            parts.push(`并发分组 ${event.activeGroups}`);
+        }
+        if (event.currentGroupKey) {
+            parts.push(`当前 ${event.currentGroupKey}`);
+        }
+        return parts.length > 0 ? `（${parts.join('，')}）` : '';
+    }
+    function buildRetryDelayLabel(event) {
+        const delayMs = Number(event.retryDelayMs);
+        if (Number.isFinite(delayMs) && delayMs > 0) {
+            return `${Math.ceil(delayMs / 1000)}秒后重试`;
+        }
+        return '即将重试';
+    }
     function buildProgressMessage(event) {
         const batchLabel = buildBatchProgressLabel(event);
+        const stagePrefix = event.stageLabel ? `${event.stageLabel}，` : '';
+        const groupLabel = buildGroupProgressLabel(event);
         switch (event.phase) {
             case 'preparing':
-                return `${batchLabel}：准备AI输入...`;
+                return `${batchLabel}${groupLabel}：${event.stageLabel || '准备AI输入'}...`;
             case 'calling_ai':
-                return `${batchLabel}：第 ${event.attempt || 1}/${event.maxRetries || 1} 次调用AI进行增量更新...`;
+                return `${batchLabel}${groupLabel}：${stagePrefix}第 ${event.attempt || 1}/${event.maxRetries || 1} 次调用AI进行增量更新...`;
             case 'parsing':
-                return `${batchLabel}：解析并应用AI返回的更新...`;
+                return `${batchLabel}${groupLabel}：${event.stageLabel || '解析并应用AI返回的更新'}...`;
             case 'saving':
-                return `${batchLabel}：正在将更新后的数据库保存到聊天记录...`;
+                return `${batchLabel}${groupLabel}：${event.stageLabel || '正在将更新后的数据库保存到聊天记录'}...`;
             case 'chunk_done':
-                return `${batchLabel}：分块处理成功...`;
+                return `${batchLabel}${groupLabel}：${event.stageLabel || '分块处理成功'}...`;
             case 'complete':
-                return `${batchLabel}：数据库增量更新成功！`;
+                return `${batchLabel}${groupLabel}：${event.stageLabel || '数据库增量更新成功！'}`;
             case 'retry':
-                return `${batchLabel}：第 ${event.attempt || 1}/${event.maxRetries || 1} 次尝试失败，5秒后重试...${event.message ? ` (${event.message})` : ''}`;
+                return `${batchLabel}${groupLabel}：${stagePrefix}第 ${event.attempt || 1}/${event.maxRetries || 1} 次尝试失败，${buildRetryDelayLabel(event)}...${event.message ? ` (${event.message})` : ''}`;
             case 'error':
-                return `${batchLabel}：错误：更新失败。`;
+                return `${batchLabel}${groupLabel}：${event.stageLabel || '错误：更新失败。'}`;
             default:
-                return `${batchLabel}：正在处理...`;
+                return `${batchLabel}${groupLabel}：${event.stageLabel || '正在处理'}...`;
         }
     }
     let activeTableFillLoadingToast_ACU = null;
@@ -35425,19 +35499,49 @@ $CONTENT
                 showToastr_ACU('info', '已取消手动填表。');
                 return;
             }
-            // 调用 service 层，传入 clearBeforeUpdate: true（用户已确认清空）
-            _set_wasStoppedByUser_ACU$1(false);
-            const result = await orchestrateManualUpdate_ACU(targetKeys, 
-            // processBatch 回调
-            async (indices, batchMode, batchOptions) => {
-                return processUpdates_ACU(indices, batchMode, batchOptions);
-            }, 
-            // refreshData 回调（纯数据刷新 + UI 刷新）
-            async () => {
-                await refreshMergedDataAndNotifyWithUI_ACU();
-            }, 
-            // [新增] 传入用户确认后的预清空选项
-            { clearBeforeUpdate: true });
+            const loadingToastToken = createTableFillLoadingToastToken_ACU();
+            let loadingToast = null;
+            const stopButtonId = `acu-manual-update-stop-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
+            const toastMessage = `<div><span class="acu-toast-progress-message">正在准备手动填表批次...</span>${stopButtonHtml}</div>`;
+            loadingToast = showToastr_ACU('info', toastMessage, {
+                timeOut: 0,
+                extendedTimeOut: 0,
+                tapToDismiss: false,
+                acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
+                onShown: function () {
+                    if (typeof bindTableFillStopButton_ACU === 'function') {
+                        bindTableFillStopButton_ACU(stopButtonId, () => {
+                            _set_wasStoppedByUser_ACU$1(true);
+                            abortAllActiveRequests_ACU$1();
+                            _set_isAutoUpdatingCard_ACU$1(false);
+                            updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
+                            updateLoadingToastMessage(loadingToast, '填表任务已终止，正在停止当前任务与后续批次...');
+                            showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
+                        });
+                    }
+                }
+            });
+            registerActiveTableFillLoadingToast_ACU(loadingToastToken, loadingToast);
+            let result;
+            try {
+                // 调用 service 层，传入 clearBeforeUpdate: true（用户已确认清空）
+                _set_wasStoppedByUser_ACU$1(false);
+                result = await orchestrateManualUpdate_ACU(targetKeys, 
+                // processBatch 回调
+                async (indices, batchMode, batchOptions) => {
+                    return processUpdates_ACU(indices, batchMode, { ...batchOptions, silent: true });
+                }, 
+                // refreshData 回调（纯数据刷新 + UI 刷新）
+                async () => {
+                    await refreshMergedDataAndNotifyWithUI_ACU();
+                }, 
+                // [新增] 传入用户确认后的预清空选项
+                { clearBeforeUpdate: true }, (event) => handleProgressEvent(event, false, loadingToast));
+            }
+            finally {
+                clearActiveTableFillLoadingToast_ACU(loadingToastToken);
+            }
             // UI：根据返回值显示 toast
             if (result.success) {
                 showToastr_ACU('success', '手动更新完成！');

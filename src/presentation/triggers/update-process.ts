@@ -56,27 +56,50 @@ function buildBatchProgressLabel(event: Partial<CardUpdateProgressEvent>): strin
     return '当前批次';
 }
 
+function buildGroupProgressLabel(event: Partial<CardUpdateProgressEvent>): string {
+    const parts: string[] = [];
+    if (Number.isFinite(event.completedGroups) && Number.isFinite(event.totalGroups)) {
+        parts.push(`分组 ${event.completedGroups}/${event.totalGroups}`);
+    } else if (Number.isFinite(event.activeGroups)) {
+        parts.push(`并发分组 ${event.activeGroups}`);
+    }
+    if (event.currentGroupKey) {
+        parts.push(`当前 ${event.currentGroupKey}`);
+    }
+    return parts.length > 0 ? `（${parts.join('，')}）` : '';
+}
+
+function buildRetryDelayLabel(event: Partial<CardUpdateProgressEvent>): string {
+    const delayMs = Number(event.retryDelayMs);
+    if (Number.isFinite(delayMs) && delayMs > 0) {
+        return `${Math.ceil(delayMs / 1000)}秒后重试`;
+    }
+    return '即将重试';
+}
+
 function buildProgressMessage(event: CardUpdateProgressEvent): string {
     const batchLabel = buildBatchProgressLabel(event);
+    const stagePrefix = event.stageLabel ? `${event.stageLabel}，` : '';
+    const groupLabel = buildGroupProgressLabel(event);
     switch (event.phase) {
         case 'preparing':
-            return `${batchLabel}：准备AI输入...`;
+            return `${batchLabel}${groupLabel}：${event.stageLabel || '准备AI输入'}...`;
         case 'calling_ai':
-            return `${batchLabel}：第 ${event.attempt || 1}/${event.maxRetries || 1} 次调用AI进行增量更新...`;
+            return `${batchLabel}${groupLabel}：${stagePrefix}第 ${event.attempt || 1}/${event.maxRetries || 1} 次调用AI进行增量更新...`;
         case 'parsing':
-            return `${batchLabel}：解析并应用AI返回的更新...`;
+            return `${batchLabel}${groupLabel}：${event.stageLabel || '解析并应用AI返回的更新'}...`;
         case 'saving':
-            return `${batchLabel}：正在将更新后的数据库保存到聊天记录...`;
+            return `${batchLabel}${groupLabel}：${event.stageLabel || '正在将更新后的数据库保存到聊天记录'}...`;
         case 'chunk_done':
-            return `${batchLabel}：分块处理成功...`;
+            return `${batchLabel}${groupLabel}：${event.stageLabel || '分块处理成功'}...`;
         case 'complete':
-            return `${batchLabel}：数据库增量更新成功！`;
+            return `${batchLabel}${groupLabel}：${event.stageLabel || '数据库增量更新成功！'}`;
         case 'retry':
-            return `${batchLabel}：第 ${event.attempt || 1}/${event.maxRetries || 1} 次尝试失败，5秒后重试...${event.message ? ` (${event.message})` : ''}`;
+            return `${batchLabel}${groupLabel}：${stagePrefix}第 ${event.attempt || 1}/${event.maxRetries || 1} 次尝试失败，${buildRetryDelayLabel(event)}...${event.message ? ` (${event.message})` : ''}`;
         case 'error':
-            return `${batchLabel}：错误：更新失败。`;
+            return `${batchLabel}${groupLabel}：${event.stageLabel || '错误：更新失败。'}`;
         default:
-            return `${batchLabel}：正在处理...`;
+            return `${batchLabel}${groupLabel}：${event.stageLabel || '正在处理'}...`;
     }
 }
 
@@ -311,21 +334,53 @@ export async function handleManualUpdate_ACU() {
             return;
         }
 
-        // 调用 service 层，传入 clearBeforeUpdate: true（用户已确认清空）
-        _set_wasStoppedByUser_ACU(false);
-        const result = await orchestrateManualUpdate_ACU(
-            targetKeys,
-            // processBatch 回调
-            async (indices, batchMode, batchOptions) => {
-                return processUpdates_ACU(indices, batchMode, batchOptions);
-            },
-            // refreshData 回调（纯数据刷新 + UI 刷新）
-            async () => {
-                await refreshMergedDataAndNotifyWithUI_ACU();
-            },
-            // [新增] 传入用户确认后的预清空选项
-            { clearBeforeUpdate: true }
-        );
+        const loadingToastToken = createTableFillLoadingToastToken_ACU();
+        let loadingToast: any = null;
+        const stopButtonId = `acu-manual-update-stop-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+        const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
+        const toastMessage = `<div><span class="acu-toast-progress-message">正在准备手动填表批次...</span>${stopButtonHtml}</div>`;
+        loadingToast = showToastr_ACU('info', toastMessage, {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
+            acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
+            onShown: function () {
+                if (typeof bindTableFillStopButton_ACU === 'function') {
+                    bindTableFillStopButton_ACU(stopButtonId, () => {
+                        _set_wasStoppedByUser_ACU(true);
+                        abortAllActiveRequests_ACU();
+                        _set_isAutoUpdatingCard_ACU(false);
+                        updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
+                        updateLoadingToastMessage(loadingToast, '填表任务已终止，正在停止当前任务与后续批次...');
+                        showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
+                    });
+                }
+            }
+        });
+        registerActiveTableFillLoadingToast_ACU(loadingToastToken, loadingToast);
+
+        let result: Awaited<ReturnType<typeof orchestrateManualUpdate_ACU>>;
+        try {
+            // 调用 service 层，传入 clearBeforeUpdate: true（用户已确认清空）
+            _set_wasStoppedByUser_ACU(false);
+            result = await orchestrateManualUpdate_ACU(
+                targetKeys,
+                // processBatch 回调
+                async (indices, batchMode, batchOptions) => {
+                    return processUpdates_ACU(indices, batchMode, { ...batchOptions, silent: true });
+                },
+                // refreshData 回调（纯数据刷新 + UI 刷新）
+                async () => {
+                    await refreshMergedDataAndNotifyWithUI_ACU();
+                },
+                // [新增] 传入用户确认后的预清空选项
+                { clearBeforeUpdate: true },
+                (event) => handleProgressEvent(event, false, loadingToast),
+            );
+        } finally {
+            clearActiveTableFillLoadingToast_ACU(loadingToastToken);
+        }
 
         // UI：根据返回值显示 toast
         if (result.success) {

@@ -1354,6 +1354,7 @@ describe('orchestrateManualUpdate_ACU', () => {
   });
 
   it('raw AI generation 失败时阻止本批 apply、commit 和后续批次', async () => {
+    vi.useFakeTimers();
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
 
@@ -1374,11 +1375,12 @@ describe('orchestrateManualUpdate_ACU', () => {
     };
     mockSettings.maxConcurrentGroups = 2;
     mockSettings.updateBatchSize = 1;
+    mockSettings.tableMaxRetries = 2;
 
     const events: string[] = [];
     mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
       events.push(`ai:${dynamicContent.label}`);
-      if (dynamicContent.label === 'b') return '缺少标签';
+      if (dynamicContent.label === 'b') throw new Error('分组B生成失败');
       return '<tableEdit>a</tableEdit>';
     });
 
@@ -1404,10 +1406,13 @@ describe('orchestrateManualUpdate_ACU', () => {
       return { success: true };
     });
 
-    const result = await orchestrateManualUpdate_ACU(['sheet_0', 'sheet_1'], mockProcessBatch, mockRefreshData);
+    const updatePromise = orchestrateManualUpdate_ACU(['sheet_0', 'sheet_1'], mockProcessBatch, mockRefreshData);
+    await vi.runAllTimersAsync();
+    const result = await updatePromise;
+    vi.useRealTimers();
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('AI响应中未找到完整有效的 <tableEdit> 标签');
+    expect(result.error).toContain('分组B生成失败');
     expect(mockProcessBatch).toHaveBeenCalledTimes(2);
     expect(mockProcessBatch.mock.calls.map(call => ({ sheet: call[2].targetSheetKeys[0], indices: call[0] }))).toEqual([
       { sheet: 'sheet_0', indices: [1] },
@@ -1423,7 +1428,9 @@ describe('orchestrateManualUpdate_ACU', () => {
       'prepare:sheet_1:1',
       'ai:a',
       'ai:b',
+      'ai:b',
     ]);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(3);
   });
 
   it('同批次 apply 失败时阻止整体 commit 和后续批次', async () => {
@@ -1496,6 +1503,85 @@ describe('orchestrateManualUpdate_ACU', () => {
       { sheet: 'sheet_0', indices: [1] },
       { sheet: 'sheet_1', indices: [1] },
     ]);
+  });
+
+
+  it('手动两阶段 AI 生成重试时持续上报批次进度和尝试次数', async () => {
+    vi.useFakeTimers();
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户1' },
+      { is_user: false, mes: 'AI回复1' },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '分组表A', updateConfig: { groupId: 0 } },
+    });
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '分组表A', content: [['row_id']], updateConfig: { groupId: 0 } },
+    };
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.updateBatchSize = 1;
+    mockSettings.tableMaxRetries = 2;
+
+    const progressEvents: CardUpdateProgressEvent[] = [];
+    mockCallCustomOpenAI
+      .mockRejectedValueOnce(new Error('临时网络失败'))
+      .mockResolvedValueOnce('<tableEdit>ok</tableEdit>');
+
+    mockProcessBatch.mockImplementation(async (indices: number[], _mode: string, options: any) => {
+      if (options.prepareAiCallOnly) {
+        return {
+          success: true,
+          preparedAiCalls: [{
+            preparedCallId: `${options.groupKey}:${indices[0]}:1`,
+            targetMessageIndex: 1,
+            batchNumber: 1,
+            updateMode: 'manual_independent',
+            targetSheetKeys: options.targetSheetKeys,
+            requestOptions: options.requestOptions,
+            dynamicContent: { label: 'sheet_0' },
+          }],
+        };
+      }
+
+      return {
+        success: true,
+        deferredCommits: [{
+          targetMessageIndex: 1,
+          targetSheetKeys: options.targetSheetKeys,
+          updateGroupKeys: options.targetSheetKeys,
+          trackingSheetKeys: options.targetSheetKeys,
+          beforeData: { sheet_0: { content: [['row_id']] } },
+          afterData: { sheet_0: { content: [['row_id'], ['ok']] } },
+          modifiedKeys: options.targetSheetKeys,
+        }],
+      };
+    });
+
+    const updatePromise = orchestrateManualUpdate_ACU(
+      ['sheet_0'],
+      mockProcessBatch,
+      mockRefreshData,
+      {},
+      event => progressEvents.push(event),
+    );
+
+    await vi.runAllTimersAsync();
+    const result = await updatePromise;
+    vi.useRealTimers();
+
+    expect(result.success).toBe(true);
+    expect(progressEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: 'preparing', currentBatch: 1, totalBatches: 1, stageLabel: '准备批次请求' }),
+      expect.objectContaining({ phase: 'retry', currentBatch: 1, totalBatches: 1, attempt: 1, maxRetries: 2, retryDelayMs: 5000, message: '临时网络失败' }),
+      expect.objectContaining({ phase: 'calling_ai', currentBatch: 1, totalBatches: 1, attempt: 2, maxRetries: 2, stageLabel: 'AI生成' }),
+      expect.objectContaining({ phase: 'parsing', currentBatch: 1, totalBatches: 1, stageLabel: '应用批次结果' }),
+      expect.objectContaining({ phase: 'saving', currentBatch: 1, totalBatches: 1, stageLabel: '合并提交批次' }),
+      expect.objectContaining({ phase: 'complete', currentBatch: 1, totalBatches: 1, stageLabel: '批次完成' }),
+    ]));
   });
 
   it('预清空时只按选中表调用清理', async () => {
