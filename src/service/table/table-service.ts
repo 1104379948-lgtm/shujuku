@@ -23,6 +23,7 @@ import { cloneIsolatedData_ACU, writeIsolatedTagData_ACU, writeMessageIdentity_A
 import { createTableDeltaFromBeforeAfter_ACU } from './table-delta-diff';
 import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
 import { clearCurrentIsolationLegacyTableSnapshots_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
+import { normalizeTableDataRowIdentity_ACU } from './table-row-identity';
 import {
   appendTablePersistenceDeltaToLayerV2_ACU,
   hasTablePersistenceDeltasV2_ACU,
@@ -244,7 +245,7 @@ export async function persistTablesToChatMessage_ACU(
     enabled: settings_ACU.dataIsolationEnabled,
     code: settings_ACU.dataIsolationCode,
   };
-  const resolvedBeforeData = beforeData !== undefined
+  const resolvedBeforeDataRaw = beforeData !== undefined
     ? beforeData
     : reconstructTablesFromChatDeltas_ACU(chat, {
       isolationKey: currentIsolationKey,
@@ -253,12 +254,14 @@ export async function persistTablesToChatMessage_ACU(
       targetMessageIndexExclusive: finalIndex,
       saveChatAfterMigration: false,
     }).data;
+  const resolvedBeforeData = normalizeTableDataRowIdentity_ACU(resolvedBeforeDataRaw, { sourceLabel: 'persistTablesToChatMessage.beforeData' });
   const resolvedAfterDataRaw = afterData !== undefined
     ? afterData
     : (JSON.parse(JSON.stringify(currentJsonTableData_ACU)) as TableDataObject_ACU);
+  const normalizedAfterDataRaw = normalizeTableDataRowIdentity_ACU(resolvedAfterDataRaw, { sourceLabel: 'persistTablesToChatMessage.afterData' });
   const resolvedAfterData = protectAgainstAccidentalEmptyAfterData_ACU({
     beforeData: resolvedBeforeData,
-    afterData: resolvedAfterDataRaw,
+    afterData: normalizedAfterDataRaw,
     targetSheetKeys: Array.isArray(targetSheetKeys) ? targetSheetKeys : null,
     allowClearingTargetSheets,
   });

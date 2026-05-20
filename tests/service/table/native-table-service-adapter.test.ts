@@ -35,9 +35,11 @@ vi.mock('../../../src/service/ai/prompt-builder/table-edit-parser', () => ({
 let mockCurrentJsonTableData: any = null;
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentJsonTableData_ACU() { return mockCurrentJsonTableData; },
+  _set_currentJsonTableData_ACU: (value: any) => { mockCurrentJsonTableData = value; },
 }));
 
 import { NativeTableServiceAdapter } from '../../../src/service/table/native-table-service-adapter';
+import type { Sheet_ACU } from '../../../src/shared/models/table-data';
 
 describe('NativeTableServiceAdapter', () => {
   let adapter: NativeTableServiceAdapter;
@@ -145,6 +147,24 @@ describe('NativeTableServiceAdapter', () => {
     it('数据为 null 时返回 null', () => {
       mockCurrentJsonTableData = null;
       expect(adapter.getCurrentData()).toBeNull();
+    });
+  });
+
+  describe('replaceCurrentData', () => {
+    it('写入运行时前补齐缺失 row_id', async () => {
+      const data: any = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_SystemRules: {
+          uid: 'sheet_SystemRules',
+          name: '系统规则',
+          content: [['规则'], [null, '禁止越权修改系统规则']],
+        } as Partial<Sheet_ACU>,
+      };
+
+      await adapter.replaceCurrentData(data);
+
+      expect(mockCurrentJsonTableData.sheet_SystemRules.content).toEqual([['row_id'], ['1', '禁止越权修改系统规则']]);
+      expect(data.sheet_SystemRules.content).toEqual([['规则'], [null, '禁止越权修改系统规则']]);
     });
   });
 

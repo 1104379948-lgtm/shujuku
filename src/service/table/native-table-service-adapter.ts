@@ -20,6 +20,7 @@ import {
 } from './table-service';
 import { parseAndApplyTableEdits_ACU } from '../ai/prompt-builder/table-edit-parser';
 import { currentJsonTableData_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
+import { normalizeTableDataRowIdentity_ACU } from './table-row-identity';
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 
 export class NativeTableServiceAdapter implements ITableStorageProvider {
@@ -84,8 +85,9 @@ export class NativeTableServiceAdapter implements ITableStorageProvider {
    * 原生模式没有独立引擎，只需要同步全局 JSON 视图。
    */
   async replaceCurrentData(data: TableDataObject_ACU | null): Promise<void> {
-    _set_currentJsonTableData_ACU(data ? JSON.parse(JSON.stringify(data)) : null);
+    _set_currentJsonTableData_ACU(normalizeTableDataRowIdentity_ACU(data, { sourceLabel: 'NativeTableServiceAdapter.replaceCurrentData' }));
   }
+
 
   /**
    * 应用 AI 返回的编辑指令（DSL 格式）

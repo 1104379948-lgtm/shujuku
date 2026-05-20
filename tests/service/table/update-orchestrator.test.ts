@@ -1275,7 +1275,7 @@ describe('orchestrateManualUpdate_ACU', () => {
           beforeData: { sheet_0: { content: [['row_id']] }, sheet_1: { content: [['row_id']] } },
           afterData: sheetKey === 'sheet_0'
             ? { sheet_0: { content: [['row_id'], ['a']] }, sheet_1: { content: [['row_id']] } }
-            : { sheet_0: { content: [['row_id'], ['a']] }, sheet_1: { content: [['row_id'], ['b']] } },
+            : { sheet_0: { content: [['row_id']] }, sheet_1: { content: [['row_id'], ['b']] } },
           modifiedKeys: options.targetSheetKeys,
         }],
       };

@@ -6,6 +6,7 @@ import { buildLegacyCheckpointFromChat_ACU, migrateLegacyCheckpointToRootMessage
 import { readTablePersistenceLayerV2_ACU } from './table-delta-repository';
 import type { ReconstructTablesFromChatDeltasOptions_ACU, TableCheckpointV2_ACU } from './table-delta-types';
 import { getTablePersistenceDeltasV2_ACU } from '../../shared/models/table-persistence-v2-utils';
+import { normalizeTableDataRowIdentity_ACU } from './table-row-identity';
 
 function cloneJson_ACU<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
@@ -18,6 +19,15 @@ function normalizeEndExclusive_ACU(chat: any[], targetMessageIndexExclusive?: nu
 
 function hasAnySheet_ACU(data: TableDataObject_ACU | null): boolean {
   return !!data && Object.keys(data).some(key => key.startsWith('sheet_'));
+}
+
+function normalizeReconstructedData_ACU(data: TableDataObject_ACU | null): TableDataObject_ACU | null {
+  return normalizeTableDataRowIdentity_ACU(data, { sourceLabel: 'reconstructTablesFromChatDeltas' });
+}
+
+function hasAnyNormalizedSheet_ACU(data: TableDataObject_ACU | null): TableDataObject_ACU | null {
+  const normalizedData = normalizeReconstructedData_ACU(data);
+  return hasAnySheet_ACU(normalizedData) ? normalizedData : null;
 }
 
 export interface ReconstructTablesFromChatDeltasContext_ACU {
@@ -73,8 +83,9 @@ export function reconstructTablesFromChatDeltas_ACU(
   }
 
   if (sawV2Checkpoint) {
+    const normalizedData = hasAnyNormalizedSheet_ACU(data);
     return {
-      data: hasAnySheet_ACU(data) ? data : null,
+      data: normalizedData,
       checkpoint,
       checkpointMessageIndex,
       usedLegacyMigration: false,
@@ -83,8 +94,9 @@ export function reconstructTablesFromChatDeltas_ACU(
   }
 
   if (options.allowLegacyMigration === false) {
+    const normalizedData = hasAnyNormalizedSheet_ACU(data);
     return {
-      data: hasAnySheet_ACU(data) ? data : null,
+      data: normalizedData,
       checkpoint: null,
       usedLegacyMigration: false,
       changed: false,
@@ -102,8 +114,9 @@ export function reconstructTablesFromChatDeltas_ACU(
   });
 
   if (!legacyResult.checkpoint || legacyResult.checkpointMessageIndex === undefined) {
+    const normalizedData = hasAnyNormalizedSheet_ACU(data);
     return {
-      data: hasAnySheet_ACU(data) ? data : null,
+      data: normalizedData,
       checkpoint: null,
       usedLegacyMigration: false,
       changed: false,
@@ -145,8 +158,9 @@ export function reconstructTablesFromChatDeltas_ACU(
     }
   }
 
+  const normalizedData = hasAnyNormalizedSheet_ACU(data);
   return {
-    data: hasAnySheet_ACU(data) ? data : null,
+    data: normalizedData,
     checkpoint,
     checkpointMessageIndex,
     usedLegacyMigration: true,

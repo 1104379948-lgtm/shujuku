@@ -5814,6 +5814,63 @@ function getSheetHeader_ACU(sheet) {
         return null;
     return cloneTableRow_ACU(sheet.content[0]);
 }
+function createFallbackRowIdFromIndex_ACU(rowIndex) {
+    return String(Math.max(1, rowIndex));
+}
+function normalizeRowForIdentity_ACU(row, rowId) {
+    const normalizedRow = cloneTableRow_ACU(row);
+    normalizedRow[0] = rowId;
+    return normalizedRow;
+}
+function normalizeHeaderForIdentity_ACU(header) {
+    if (!Array.isArray(header))
+        return ['row_id'];
+    const normalizedHeader = cloneTableRow_ACU(header);
+    normalizedHeader[0] = 'row_id';
+    return normalizedHeader;
+}
+function normalizeSheetRowIdentity_ACU(sheet, sheetKey = '', options = {}) {
+    if (!sheet || typeof sheet !== 'object')
+        return sheet;
+    if (!Array.isArray(sheet.content)) {
+        return JSON.parse(JSON.stringify(sheet));
+    }
+    const sourceLabel = options.sourceLabel || 'TableRowIdentity';
+    const content = sheet.content;
+    const normalizedContent = [];
+    normalizedContent[0] = normalizeHeaderForIdentity_ACU(content[0]);
+    for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
+        const row = content[rowIndex];
+        if (!Array.isArray(row)) {
+            logWarn_ACU(`[${sourceLabel}] Preserve non-array row while normalizing row_id at ${sheetKey || sheet.uid || 'unknown'}#${rowIndex}`);
+            normalizedContent[rowIndex] = row;
+            continue;
+        }
+        const explicitRowId = getRowIdFromRow_ACU(row);
+        normalizedContent[rowIndex] = explicitRowId
+            ? cloneTableRow_ACU(row)
+            : normalizeRowForIdentity_ACU(row, createFallbackRowIdFromIndex_ACU(rowIndex));
+    }
+    return {
+        ...JSON.parse(JSON.stringify(sheet)),
+        content: normalizedContent,
+    };
+}
+function normalizeTableDataRowIdentity_ACU(data, options = {}) {
+    if (!data || typeof data !== 'object')
+        return null;
+    const cloned = JSON.parse(JSON.stringify(data));
+    for (const key of Object.keys(cloned)) {
+        if (!key.startsWith('sheet_'))
+            continue;
+        const sheet = cloned[key];
+        const normalizedSheet = normalizeSheetRowIdentity_ACU(sheet, key, options);
+        if (normalizedSheet) {
+            cloned[key] = normalizedSheet;
+        }
+    }
+    return cloned;
+}
 function getDataRowsWithIdentity_ACU(sheet, sheetKey = '') {
     if (!sheet || !Array.isArray(sheet.content) || sheet.content.length <= 1)
         return [];
@@ -5824,15 +5881,13 @@ function getDataRowsWithIdentity_ACU(sheet, sheetKey = '') {
             logWarn_ACU(`[TableDelta] Skip non-array row at ${sheetKey || sheet?.uid || 'unknown'}#${rowIndex}`);
             continue;
         }
-        const rowId = getRowIdFromRow_ACU(row);
-        if (!rowId) {
-            logWarn_ACU(`[TableDelta] Skip row without row_id at ${sheetKey || sheet?.uid || 'unknown'}#${rowIndex}`);
-            continue;
-        }
+        const explicitRowId = getRowIdFromRow_ACU(row);
+        const rowId = explicitRowId || createFallbackRowIdFromIndex_ACU(rowIndex);
+        const normalizedRow = explicitRowId ? cloneTableRow_ACU(row) : normalizeRowForIdentity_ACU(row, rowId);
         rows.push({
             rowId,
             rowIndex,
-            row: cloneTableRow_ACU(row),
+            row: normalizedRow,
         });
     }
     return rows;
@@ -6461,6 +6516,13 @@ function normalizeEndExclusive_ACU(chat, targetMessageIndexExclusive) {
 function hasAnySheet_ACU$1(data) {
     return !!data && Object.keys(data).some(key => key.startsWith('sheet_'));
 }
+function normalizeReconstructedData_ACU(data) {
+    return normalizeTableDataRowIdentity_ACU(data, { sourceLabel: 'reconstructTablesFromChatDeltas' });
+}
+function hasAnyNormalizedSheet_ACU(data) {
+    const normalizedData = normalizeReconstructedData_ACU(data);
+    return hasAnySheet_ACU$1(normalizedData) ? normalizedData : null;
+}
 function reconstructTablesFromChatDeltas_ACU(chat, context, options = {}) {
     if (!Array.isArray(chat) || chat.length === 0) {
         return { data: null, checkpoint: null, usedLegacyMigration: false, changed: false };
@@ -6493,8 +6555,9 @@ function reconstructTablesFromChatDeltas_ACU(chat, context, options = {}) {
         }
     }
     if (sawV2Checkpoint) {
+        const normalizedData = hasAnyNormalizedSheet_ACU(data);
         return {
-            data: hasAnySheet_ACU$1(data) ? data : null,
+            data: normalizedData,
             checkpoint,
             checkpointMessageIndex,
             usedLegacyMigration: false,
@@ -6502,8 +6565,9 @@ function reconstructTablesFromChatDeltas_ACU(chat, context, options = {}) {
         };
     }
     if (options.allowLegacyMigration === false) {
+        const normalizedData = hasAnyNormalizedSheet_ACU(data);
         return {
-            data: hasAnySheet_ACU$1(data) ? data : null,
+            data: normalizedData,
             checkpoint: null,
             usedLegacyMigration: false,
             changed: false,
@@ -6519,8 +6583,9 @@ function reconstructTablesFromChatDeltas_ACU(chat, context, options = {}) {
         targetBoundaryMessageIndex: legacyBoundaryIndex,
     });
     if (!legacyResult.checkpoint || legacyResult.checkpointMessageIndex === undefined) {
+        const normalizedData = hasAnyNormalizedSheet_ACU(data);
         return {
-            data: hasAnySheet_ACU$1(data) ? data : null,
+            data: normalizedData,
             checkpoint: null,
             usedLegacyMigration: false,
             changed: false,
@@ -6554,8 +6619,9 @@ function reconstructTablesFromChatDeltas_ACU(chat, context, options = {}) {
             data = applyTableDelta_ACU(data, delta);
         }
     }
+    const normalizedData = hasAnyNormalizedSheet_ACU(data);
     return {
-        data: hasAnySheet_ACU$1(data) ? data : null,
+        data: normalizedData,
         checkpoint,
         checkpointMessageIndex,
         usedLegacyMigration: true,
@@ -6715,7 +6781,7 @@ async function persistTablesToChatMessage_ACU(options = {}) {
         enabled: settings_ACU.dataIsolationEnabled,
         code: settings_ACU.dataIsolationCode,
     };
-    const resolvedBeforeData = beforeData !== undefined
+    const resolvedBeforeDataRaw = beforeData !== undefined
         ? beforeData
         : reconstructTablesFromChatDeltas_ACU(chat, {
             isolationKey: currentIsolationKey,
@@ -6724,12 +6790,14 @@ async function persistTablesToChatMessage_ACU(options = {}) {
             targetMessageIndexExclusive: finalIndex,
             saveChatAfterMigration: false,
         }).data;
+    const resolvedBeforeData = normalizeTableDataRowIdentity_ACU(resolvedBeforeDataRaw, { sourceLabel: 'persistTablesToChatMessage.beforeData' });
     const resolvedAfterDataRaw = afterData !== undefined
         ? afterData
         : JSON.parse(JSON.stringify(currentJsonTableData_ACU));
+    const normalizedAfterDataRaw = normalizeTableDataRowIdentity_ACU(resolvedAfterDataRaw, { sourceLabel: 'persistTablesToChatMessage.afterData' });
     const resolvedAfterData = protectAgainstAccidentalEmptyAfterData_ACU({
         beforeData: resolvedBeforeData,
-        afterData: resolvedAfterDataRaw,
+        afterData: normalizedAfterDataRaw,
         targetSheetKeys: Array.isArray(targetSheetKeys) ? targetSheetKeys : null,
         allowClearingTargetSheets,
     });
@@ -7916,7 +7984,7 @@ class NativeTableServiceAdapter {
      * 原生模式没有独立引擎，只需要同步全局 JSON 视图。
      */
     async replaceCurrentData(data) {
-        _set_currentJsonTableData_ACU(data ? JSON.parse(JSON.stringify(data)) : null);
+        _set_currentJsonTableData_ACU(normalizeTableDataRowIdentity_ACU(data, { sourceLabel: 'NativeTableServiceAdapter.replaceCurrentData' }));
     }
     /**
      * 应用 AI 返回的编辑指令（DSL 格式）
@@ -10970,10 +11038,11 @@ class SqlTableService {
                 const initialJsonView = mergedData
                     ? mergedData
                     : this._resolveInitialJsonViewFromTemplateOrGuide();
-                if (initialJsonView && this._hasSheetEntries(initialJsonView)) {
-                    _set_currentJsonTableData_ACU(initialJsonView);
-                    this._buildNameMapper(initialJsonView);
-                    this._markCommitted(initialJsonView);
+                const normalizedInitialJsonView = normalizeTableDataRowIdentity_ACU(initialJsonView, { sourceLabel: 'SqlTableService.loadFromChat.initialJsonView' });
+                if (normalizedInitialJsonView && this._hasSheetEntries(normalizedInitialJsonView)) {
+                    _set_currentJsonTableData_ACU(normalizedInitialJsonView);
+                    this._buildNameMapper(normalizedInitialJsonView);
+                    this._markCommitted(normalizedInitialJsonView);
                     logDebug_ACU(mergedData
                         ? '[SqlTableService] 检测到空壳结构（仅表头/模板基底），JSON 视图已初始化，引擎等待第一次填表时建表'
                         : '[SqlTableService] 没有找到聊天表格数据，已使用模板/指导表初始化 JSON 可见视图，引擎等待第一次填表时建表');
@@ -10986,12 +11055,13 @@ class SqlTableService {
                 return { loaded: false, source: 'empty' };
             }
             // 将 JSON 数据加载到 SQLite
-            this.syncBridge.loadFromTableData(mergedData);
+            const normalizedMergedData = normalizeTableDataRowIdentity_ACU(mergedData, { sourceLabel: 'SqlTableService.loadFromChat.mergedData' });
+            this.syncBridge.loadFromTableData(normalizedMergedData);
             // 更新全局 JSON 视图
-            _set_currentJsonTableData_ACU(mergedData);
+            _set_currentJsonTableData_ACU(normalizedMergedData);
             // 从所有表的 DDL 构建中英文名称映射器
-            this._buildNameMapper(mergedData);
-            this._markCommitted(mergedData);
+            this._buildNameMapper(normalizedMergedData);
+            this._markCommitted(normalizedMergedData);
             this._initialized = true;
             logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
             return { loaded: true, source: 'merged' };
@@ -11064,7 +11134,7 @@ class SqlTableService {
         this.syncBridge = new SyncBridge(this.engine);
         await this.engine.init();
         if (data) {
-            const clonedData = this._cloneTableData(data);
+            const clonedData = normalizeTableDataRowIdentity_ACU(data, { sourceLabel: 'SqlTableService.replaceCurrentData' });
             this.syncBridge.loadFromTableData(clonedData);
             _set_currentJsonTableData_ACU(clonedData);
             this._buildNameMapper(clonedData);
@@ -33966,17 +34036,18 @@ function cloneTableDataForDelta_ACU(data) {
     return JSON.parse(JSON.stringify(data));
 }
 async function replaceRuntimeTableDataForDeferredApply_ACU(data, label) {
+    const normalizedData = normalizeTableDataRowIdentity_ACU(data, { sourceLabel: `${label}.replaceRuntime` });
     if (isSqliteMode()) {
         const provider = getStorageProvider();
-        await provider.replaceCurrentData(data);
+        await provider.replaceCurrentData(normalizedData);
         const providerCurrentData = provider.getCurrentData();
-        _set_currentJsonTableData_ACU(providerCurrentData || data);
-        if (!providerCurrentData && data) {
+        _set_currentJsonTableData_ACU(providerCurrentData || normalizedData);
+        if (!providerCurrentData && normalizedData) {
             logWarn_ACU(`${label} SQLite provider returned null current data after replace; falling back to provided data.`);
         }
         return;
     }
-    _set_currentJsonTableData_ACU(data ? cloneTableDataForDelta_ACU(data) : null);
+    _set_currentJsonTableData_ACU(normalizedData ? cloneTableDataForDelta_ACU(normalizedData) : null);
 }
 function hasRealDataRows_ACU(sheet) {
     const content = sheet?.content;
@@ -34529,22 +34600,23 @@ async function processUpdatesBatch_ACU(indicesToUpdate, mode, options, executeUp
                 const providerCurrentDataBeforeReplace = provider.getCurrentData();
                 const patchedCount = mergeProviderRowsIntoBatchSheets_ACU(mergedBatchData, providerCurrentDataBeforeReplace, batchSheetKeys);
                 if (patchedCount > 0) {
-                    logWarn_ACU(`[Batch ${batchNumber}] SQLite batch base preserved provider rows for ${patchedCount} sheet(s) before replacing runtime data.`);
+                    logDebug_ACU(`[Batch ${batchNumber}] SQLite batch base preserved provider rows for ${patchedCount} sheet(s) before replacing runtime data; this is a protective merge, not a fill failure.`);
                 }
-                await provider.replaceCurrentData(mergedBatchData);
+                const normalizedMergedBatchData = normalizeTableDataRowIdentity_ACU(mergedBatchData, { sourceLabel: `[Batch ${batchNumber}].mergedBatchData` });
+                await provider.replaceCurrentData(normalizedMergedBatchData);
                 const providerCurrentData = provider.getCurrentData();
                 if (providerCurrentData) {
                     _set_currentJsonTableData_ACU(providerCurrentData);
                     logDebug_ACU(`[Batch ${batchNumber}] SQLite provider current data exported to JSON before prompt preparation.`);
                 }
                 else {
-                    _set_currentJsonTableData_ACU(mergedBatchData);
+                    _set_currentJsonTableData_ACU(normalizedMergedBatchData);
                     logWarn_ACU(`[Batch ${batchNumber}] SQLite provider returned null current data after replace; falling back to merged batch data.`);
                 }
                 logDebug_ACU(`[Batch ${batchNumber}] SQLite provider replaced with batch base before prompt preparation.`);
             }
             else {
-                _set_currentJsonTableData_ACU(mergedBatchData);
+                _set_currentJsonTableData_ACU(normalizeTableDataRowIdentity_ACU(mergedBatchData, { sourceLabel: `[Batch ${batchNumber}].mergedBatchData` }));
             }
             logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
             // 计算上下文范围
@@ -34691,11 +34763,44 @@ function compareDeferredCommitOrder_ACU(a, b) {
             - (Number.isFinite(b.chunkOrder) ? Number(b.chunkOrder) : Number.MAX_SAFE_INTEGER)
         || String(a.preparedCallId || '').localeCompare(String(b.preparedCallId || ''));
 }
+function buildMergedAfterDataFromDeferredCommits_ACU(targetCommits, targetMessageIndex, isolationKey) {
+    if (!Array.isArray(targetCommits) || targetCommits.length === 0) {
+        return { afterData: null, error: `目标楼层 ${targetMessageIndex} 没有可合并的提交。` };
+    }
+    const firstCommit = targetCommits[0];
+    let mergedAfterData = cloneTableDataForDelta_ACU(firstCommit.beforeData);
+    if (!mergedAfterData) {
+        return { afterData: null, error: `无法捕获目标楼层 ${targetMessageIndex} 的初始提交快照，已中止保存以避免生成错误 delta。` };
+    }
+    for (const commit of targetCommits) {
+        const commitBeforeData = cloneTableDataForDelta_ACU(commit.beforeData);
+        const commitAfterData = cloneTableDataForDelta_ACU(commit.afterData);
+        if (!commitBeforeData || !commitAfterData) {
+            return { afterData: null, error: `无法捕获目标楼层 ${targetMessageIndex} 的分批提交快照，已中止保存以避免生成错误 delta。` };
+        }
+        const delta = createTableDeltaFromBeforeAfter_ACU({
+            before: commitBeforeData,
+            after: commitAfterData,
+            targetSheetKeys: commit.targetSheetKeys,
+            modifiedKeys: commit.modifiedKeys,
+            updateGroupKeys: commit.updateGroupKeys || [],
+            isolationKey,
+            targetMessageIndex,
+        });
+        if (!delta) {
+            logDebug_ACU(`[Manual Two-Phase][Commit ${targetMessageIndex}] Deferred commit ${commit.preparedCallId || commit.batchNumber || 'unknown'} produced no data delta; keeping accumulated afterData.`);
+            continue;
+        }
+        mergedAfterData = applyTableDelta_ACU(mergedAfterData, delta);
+    }
+    return { afterData: mergedAfterData };
+}
 async function commitMergedDeferredCommits_ACU(commits) {
     if (!Array.isArray(commits) || commits.length === 0) {
         logDebug_ACU('[Manual Two-Phase] No deferred commits to persist; skipping merged commit.');
         return { success: true };
     }
+    const isolationKey = getCurrentIsolationKey_ACU();
     const commitsByTarget = new Map();
     commits.forEach(commit => {
         const bucket = commitsByTarget.get(commit.targetMessageIndex) || [];
@@ -34710,11 +34815,11 @@ async function commitMergedDeferredCommits_ACU(commits) {
         if (targetCommits.length === 0)
             continue;
         const firstCommit = targetCommits[0];
-        const lastCommit = targetCommits[targetCommits.length - 1];
         const beforeData = cloneTableDataForDelta_ACU(firstCommit.beforeData);
-        const afterData = cloneTableDataForDelta_ACU(lastCommit.afterData);
+        const mergeResult = buildMergedAfterDataFromDeferredCommits_ACU(targetCommits, targetMessageIndex, isolationKey);
+        const afterData = mergeResult.afterData;
         if (!beforeData || !afterData) {
-            return { success: false, error: `无法捕获目标楼层 ${targetMessageIndex} 的合并提交快照，已中止保存以避免生成错误 delta。` };
+            return { success: false, error: mergeResult.error || `无法捕获目标楼层 ${targetMessageIndex} 的合并提交快照，已中止保存以避免生成错误 delta。` };
         }
         const targetSheetKeys = unionStrings_ACU(...targetCommits.map(commit => commit.targetSheetKeys));
         const trackingSheetKeys = unionStrings_ACU(...targetCommits.map(commit => commit.trackingSheetKeys));

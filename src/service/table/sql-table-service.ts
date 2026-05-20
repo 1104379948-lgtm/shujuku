@@ -39,6 +39,7 @@ import {
 } from '../template/chat-scope';
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
+import { normalizeTableDataRowIdentity_ACU } from './table-row-identity';
 
 export class SqlTableService implements ITableStorageProvider {
   readonly mode = 'sqlite' as const;
@@ -103,11 +104,12 @@ export class SqlTableService implements ITableStorageProvider {
         const initialJsonView = mergedData
           ? (mergedData as TableDataObject_ACU)
           : this._resolveInitialJsonViewFromTemplateOrGuide();
+        const normalizedInitialJsonView = normalizeTableDataRowIdentity_ACU(initialJsonView, { sourceLabel: 'SqlTableService.loadFromChat.initialJsonView' });
 
-        if (initialJsonView && this._hasSheetEntries(initialJsonView)) {
-          _set_currentJsonTableData_ACU(initialJsonView);
-          this._buildNameMapper(initialJsonView);
-          this._markCommitted(initialJsonView);
+        if (normalizedInitialJsonView && this._hasSheetEntries(normalizedInitialJsonView)) {
+          _set_currentJsonTableData_ACU(normalizedInitialJsonView);
+          this._buildNameMapper(normalizedInitialJsonView);
+          this._markCommitted(normalizedInitialJsonView);
           logDebug_ACU(mergedData
             ? '[SqlTableService] 检测到空壳结构（仅表头/模板基底），JSON 视图已初始化，引擎等待第一次填表时建表'
             : '[SqlTableService] 没有找到聊天表格数据，已使用模板/指导表初始化 JSON 可见视图，引擎等待第一次填表时建表'
@@ -121,15 +123,16 @@ export class SqlTableService implements ITableStorageProvider {
       }
 
       // 将 JSON 数据加载到 SQLite
-      this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU);
+      const normalizedMergedData = normalizeTableDataRowIdentity_ACU(mergedData as TableDataObject_ACU, { sourceLabel: 'SqlTableService.loadFromChat.mergedData' })!;
+      this.syncBridge.loadFromTableData(normalizedMergedData);
 
       // 更新全局 JSON 视图
-      _set_currentJsonTableData_ACU(mergedData as TableDataObject_ACU);
+      _set_currentJsonTableData_ACU(normalizedMergedData);
 
       // 从所有表的 DDL 构建中英文名称映射器
-      this._buildNameMapper(mergedData as TableDataObject_ACU);
+      this._buildNameMapper(normalizedMergedData);
 
-      this._markCommitted(mergedData as TableDataObject_ACU);
+      this._markCommitted(normalizedMergedData);
       this._initialized = true;
       logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
       return { loaded: true, source: 'merged' };
@@ -223,7 +226,7 @@ export class SqlTableService implements ITableStorageProvider {
     await this.engine.init();
 
     if (data) {
-      const clonedData = this._cloneTableData(data)!;
+      const clonedData = normalizeTableDataRowIdentity_ACU(data, { sourceLabel: 'SqlTableService.replaceCurrentData' })!;
       this.syncBridge.loadFromTableData(clonedData);
       _set_currentJsonTableData_ACU(clonedData);
       this._buildNameMapper(clonedData);

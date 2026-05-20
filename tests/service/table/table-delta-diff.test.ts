@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../../src/shared/models/table-data';
 import { createTableDeltaFromBeforeAfter_ACU } from '../../../src/service/table/table-delta-diff';
+import { logWarn_ACU } from '../../../src/shared/utils';
 
 vi.mock('../../../src/shared/utils', () => ({
   logWarn_ACU: vi.fn(),
@@ -104,6 +105,27 @@ describe('createTableDeltaFromBeforeAfter_ACU', () => {
     expect(delta.changesBySheet.sheet_0.rowChanges).toEqual([
       { op: 'delete', rowId: '1', rowIndexHint: 1 },
     ]);
+  });
+
+  it('新增行缺 row_id 时使用行号作为兼容身份生成 upsert', () => {
+    const before = makeData(makeSheet([['row_id', '规则']]));
+    const after = makeData(makeSheet([['row_id', '规则'], [null, '禁止越权修改系统规则']]));
+
+    const delta = createDelta(before, after)!;
+
+    expect(delta.changesBySheet.sheet_0.rowChanges).toEqual([
+      { op: 'upsert', rowId: '1', rowIndexHint: 1, row: ['1', '禁止越权修改系统规则'] },
+    ]);
+    expect(vi.mocked(logWarn_ACU)).not.toHaveBeenCalled();
+  });
+
+  it('删除缺 row_id 的旧行时使用行号作为兼容身份生成 delete', () => {
+    const before = makeData(makeSheet([['row_id', '规则'], [null, '旧系统规则']]));
+    const after = makeData(makeSheet([['row_id', '规则']]));
+
+    const delta = createDelta(before, after)!;
+
+    expect(delta.changesBySheet.sheet_0.rowChanges).toEqual([{ op: 'delete', rowId: '1', rowIndexHint: 1 }]);
   });
 
   it('表从存在变为不存在时生成 clearSheet', () => {

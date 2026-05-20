@@ -126,6 +126,19 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     ]);
   });
 
+  it('重建 checkpoint 数据时补齐缺失 row_id，避免脏行继续进入运行时', () => {
+    const chat = [
+      aiMessage({ version: 2, checkpoint: checkpoint(makeData(makeSheet([['规则'], [null, '禁止越权修改系统规则']]))) }),
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, context, { allowLegacyMigration: false });
+
+    expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([
+      ['row_id'],
+      ['1', '禁止越权修改系统规则'],
+    ]);
+  });
+
   it('同一消息同时存在 checkpoint 和 delta 时先 checkpoint 后 delta', () => {
     const chat = [
       aiMessage({

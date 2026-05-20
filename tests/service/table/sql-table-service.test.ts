@@ -971,6 +971,28 @@ describe('SqlTableService', () => {
       ]);
     });
 
+    it('替换 SQLite 快照前补齐缺失 row_id，保持 INTEGER PRIMARY KEY 可写入', async () => {
+      const batchData = JSON.parse(JSON.stringify(testTableData));
+      batchData.sheet_0.content = [
+        ['row_id', 'item_name', 'quantity'],
+        [null, '缺身份铁剑', '8'],
+        ['', '缺身份药水', '9'],
+      ];
+
+      await service.replaceCurrentData(batchData);
+
+      const queryResult = service.executeQuery('SELECT row_id, item_name, quantity FROM inventory ORDER BY row_id');
+      expect(queryResult.values).toEqual([
+        [1, '缺身份铁剑', 8],
+        [2, '缺身份药水', 9],
+      ]);
+      expect(mockCurrentJsonTableData.sheet_0.content).toEqual([
+        ['row_id', 'item_name', 'quantity'],
+        ['1', '缺身份铁剑', '8'],
+        ['2', '缺身份药水', '9'],
+      ]);
+    });
+
     it('连续 replaceCurrentData 加载同名表时不应因旧表残留失败', async () => {
       const firstBatch = JSON.parse(JSON.stringify(testTableData));
       firstBatch.sheet_0.content = [
