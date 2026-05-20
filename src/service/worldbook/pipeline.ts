@@ -566,18 +566,18 @@ export   async function refreshMergedDataAndNotify_ACU() {
     let mergedData = await mergeAllIndependentTables_ACU();
 
     // 当回溯找不到任何表格数据时（mergedData 为 null），
-    // 优先用"已保存指导表的物化结构（不展开 seedRows）"作为基底；
-    // 若不存在指导表，才使用"模板结构（不展开预置数据）"。
+    // 优先用"已保存指导表的物化结构（展开 seedRows）"作为初始可见数据；
+    // 若不存在指导表，才使用"模板完整初始数据（保留预置数据行）"。
     if (!mergedData) {
         const currentIsolationKey = getCurrentIsolationKey_ACU();
         const guide = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
         if (guide && typeof guide === 'object' && Object.keys(guide).some(k => k.startsWith('sheet_'))) {
-            logDebug_ACU('[回溯空数据] 无历史表格数据：使用已保存指导表物化结构（不展开 seedRows）作为基底。');
-            mergedData = materializeDataFromSheetGuide_ACU(guide, { includeSeedRows: false });
+            logDebug_ACU('[回溯空数据] 无历史表格数据：使用已保存指导表物化结构（展开 seedRows）作为初始可见数据。');
+            mergedData = materializeDataFromSheetGuide_ACU(guide, { includeSeedRows: true });
             _set_currentJsonTableData_ACU(mergedData);
         } else {
-            logDebug_ACU('[回溯空数据] 无历史表格数据且无指导表：使用模板结构（不展开预置数据）。');
-            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }); // 仅结构，不携带模板预置数据行
+            logDebug_ACU('[回溯空数据] 无历史表格数据且无指导表：使用模板完整初始数据（保留预置数据行）。');
+            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: false }); // 保留模板预置数据行，作为新对话初始可见数据
             if (templateData) {
                 mergedData = templateData;
                 _set_currentJsonTableData_ACU(templateData);

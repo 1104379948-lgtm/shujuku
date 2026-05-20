@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getTablePersistenceDeltasV2_ACU } from '../../src/shared/models/table-persistence-v2-utils';
+import { parseTableTemplateJson_ACU } from '../../src/shared/utils';
 
 // ── 构造可变 chat 数组模拟真实存储 ──
 const { mockChat, mockSettings, mockCurrentJsonTableDataRef } = vi.hoisted(() => ({
@@ -147,6 +148,7 @@ describe('I1: 表格数据完整生命周期', () => {
     expect(loadResult1.source).toBe('initialized');
     expect(mockCurrentJsonTableDataRef.value).not.toBeNull();
     expect(mockCurrentJsonTableDataRef.value.sheet_0).toBeDefined();
+    expect(parseTableTemplateJson_ACU).toHaveBeenCalledWith({ stripSeedRows: false });
 
     // 2. 模拟添加一条 AI 消息
     mockChat.push({ is_user: false, mes: 'AI回复' });

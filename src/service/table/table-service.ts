@@ -389,7 +389,7 @@ async function initializeJsonTableInChatHistory_ACU(): Promise<{ initialized: bo
   logDebug_ACU('No database found in chat history. Initializing a new one from template.');
 
   try {
-    _set_currentJsonTableData_ACU(parseTableTemplateJson_ACU({ stripSeedRows: true }));
+    _set_currentJsonTableData_ACU(parseTableTemplateJson_ACU({ stripSeedRows: false }));
     logDebug_ACU('Successfully initialized database in memory.');
   } catch (error) {
     logError_ACU('Failed to parse template and initialize database in memory:', error);

@@ -670,7 +670,7 @@ describe('refreshMergedDataAndNotify_ACU', () => {
     expect(result).toBeDefined();
   });
 
-  it('合并失败时使用指导表物化', async () => {
+  it('合并失败时使用指导表物化并展开 seedRows 作为初始可见数据', async () => {
     mockMergeAllIndependentTables.mockResolvedValue(null);
     const guideData = { sheet_0: { name: '指导表' } };
     mockGetChatSheetGuideDataForIsolationKey.mockReturnValue(guideData);
@@ -678,18 +678,18 @@ describe('refreshMergedDataAndNotify_ACU', () => {
     mockMaterializeDataFromSheetGuide.mockReturnValue(materializedData);
 
     await refreshMergedDataAndNotify_ACU();
-    expect(mockMaterializeDataFromSheetGuide).toHaveBeenCalledWith(guideData, { includeSeedRows: false });
+    expect(mockMaterializeDataFromSheetGuide).toHaveBeenCalledWith(guideData, { includeSeedRows: true });
     expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith(materializedData);
   });
 
-  it('无指导表时使用模板结构', async () => {
+  it('无指导表时使用保留预置数据行的模板初始数据', async () => {
     mockMergeAllIndependentTables.mockResolvedValue(null);
     mockGetChatSheetGuideDataForIsolationKey.mockReturnValue(null);
     const templateData = { mate: { type: 'chatSheets', version: 1 }, sheet_0: {} };
     mockParseTableTemplateJson.mockReturnValue(templateData);
 
     await refreshMergedDataAndNotify_ACU();
-    expect(mockParseTableTemplateJson).toHaveBeenCalledWith({ stripSeedRows: true });
+    expect(mockParseTableTemplateJson).toHaveBeenCalledWith({ stripSeedRows: false });
     expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith(templateData);
   });
 
