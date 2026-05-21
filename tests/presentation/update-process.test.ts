@@ -188,7 +188,12 @@ describe('presentation/update-process loading toast lifecycle', () => {
 
     expect(mockShowToastr_ACU).toHaveBeenCalledWith('info', expect.stringContaining('正在准备手动填表批次'), expect.objectContaining({ timeOut: 0 }));
     expect(manualToast.text).toHaveBeenCalledWith('第 2/5 批（并发分组 3）：AI生成，第 1/3 次调用AI进行增量更新...');
-    expect(manualToast.text).toHaveBeenCalledWith('第 2/5 批（当前 group-a:2:7）：AI生成，第 1/3 次尝试失败，5秒后重试... (临时失败)');
+    expect(manualToast.text).toHaveBeenCalledWith('第 2/5 批：AI生成，第 1/3 次尝试失败，5秒后重试... (临时失败)');
+    const renderedMessages = manualToast.text.mock.calls.map((call: any[]) => String(call[0]));
+    for (const message of renderedMessages) {
+      expect(message).not.toContain('group-a:2:7');
+      expect(message).not.toContain('当前 group-a');
+    }
     expect(mockToastrClear_ACU).toHaveBeenCalledWith(manualToast);
   });
 });

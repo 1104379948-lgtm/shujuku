@@ -63,9 +63,6 @@ function buildGroupProgressLabel(event: Partial<CardUpdateProgressEvent>): strin
     } else if (Number.isFinite(event.activeGroups)) {
         parts.push(`并发分组 ${event.activeGroups}`);
     }
-    if (event.currentGroupKey) {
-        parts.push(`当前 ${event.currentGroupKey}`);
-    }
     return parts.length > 0 ? `（${parts.join('，')}）` : '';
 }
 
