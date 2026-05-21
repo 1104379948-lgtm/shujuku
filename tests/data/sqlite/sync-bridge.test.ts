@@ -294,6 +294,58 @@ describe('SyncBridge', () => {
         [2, 'AM0002', '有效行'],
       ]);
     });
+
+    it('旧记录表头使用 SQL 列名但顺序与 DDL 不一致时应按表头映射', () => {
+      const reorderedSheet = makeSheet({
+        uid: 'legacy_reordered',
+        name: '旧顺序表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: `CREATE TABLE legacy_reordered (
+  row_id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  body TEXT,
+  status TEXT DEFAULT '待确认'
+);`,
+        },
+        content: [
+          ['row_id', 'body', 'title', 'status'],
+          ['1', '正文应该进入 body', '标题应该进入 title', '已确认'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_reordered: reorderedSheet }))).not.toThrow();
+
+      expect(engine.query('SELECT row_id, title, body, status FROM legacy_reordered;').values).toEqual([
+        [1, '标题应该进入 title', '正文应该进入 body', '已确认'],
+      ]);
+    });
+
+    it('旧记录表头使用 DDL 中文注释且顺序与 DDL 不一致时应按注释映射', () => {
+      const commentedSheet = makeSheet({
+        uid: 'legacy_comments',
+        name: '旧中文表头表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: `CREATE TABLE legacy_comments ( -- 旧中文表头表
+  row_id INTEGER PRIMARY KEY, -- 行号
+  title TEXT NOT NULL, -- 标题
+  body TEXT, -- 正文
+  status TEXT NOT NULL DEFAULT '待确认' -- 状态
+);`,
+        },
+        content: [
+          ['行号', '正文', '标题'],
+          ['1', '中文正文应该进入 body', '中文标题应该进入 title'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_comments: commentedSheet }))).not.toThrow();
+
+      expect(engine.query('SELECT row_id, title, body, status FROM legacy_comments;').values).toEqual([
+        [1, '中文标题应该进入 title', '中文正文应该进入 body', '待确认'],
+      ]);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════

@@ -9656,7 +9656,7 @@ $CONTENT
                 if (!validation.valid) {
                     logWarn_ACU(`[SyncBridge] 表 "${sheet.name}" (${sheetKey}) DDL 与表头不匹配:\n` +
                         validation.mismatches.map(m => `  - ${m}`).join('\n') +
-                        `\n将按位置映射继续加载，多余列数据可能丢失。`);
+                        `\n将使用旧表宽松列映射继续加载，无法匹配的旧列会被跳过并记录警告。`);
                 }
             }
             // loadFromTableData 的语义是用传入 JSON 快照替换 SQLite 中的当前表数据。
@@ -9709,7 +9709,8 @@ $CONTENT
             const effectiveColumns = ddlColumns.length > 0 ? ddlColumns : tableInfo.map(column => column.name);
             const columnInfoByName = new Map(tableInfo.map(column => [column.name, column]));
             const insertColumns = effectiveColumns.filter(column => columnInfoByName.has(column));
-            if (insertColumns.length === 0)
+            const mappingSummary = this._buildLegacyColumnMappings(content[0], insertColumns, ddl);
+            if (mappingSummary.mappings.length === 0)
                 return;
             let insertedRows = 0;
             let skippedEmptyRows = 0;
@@ -9719,19 +9720,19 @@ $CONTENT
                 const row = content[rowIndex];
                 if (!Array.isArray(row))
                     continue;
-                if (this._isLegacyPlaceholderRow(row, insertColumns)) {
+                if (this._isLegacyPlaceholderRow(row, mappingSummary.mappings)) {
                     skippedEmptyRows += 1;
                     continue;
                 }
                 const columnsForInsert = [];
                 const params = [];
                 let rowRepairCount = 0;
-                for (let columnIndex = 0; columnIndex < insertColumns.length; columnIndex += 1) {
-                    const columnName = insertColumns[columnIndex];
+                for (const mapping of mappingSummary.mappings) {
+                    const columnName = mapping.columnName;
                     const columnInfo = columnInfoByName.get(columnName);
                     if (!columnInfo)
                         continue;
-                    const rawValue = columnIndex < row.length ? row[columnIndex] : null;
+                    const rawValue = mapping.rowIndex !== null && mapping.rowIndex < row.length ? row[mapping.rowIndex] : null;
                     const prepared = this._prepareLegacyCellValue(rawValue, columnInfo);
                     if (prepared.omit)
                         continue;
@@ -9761,14 +9762,63 @@ $CONTENT
                     `插入 ${insertedRows} 行，修复 ${repairedCells} 个空约束单元，` +
                     `跳过 ${skippedEmptyRows} 行空占位，跳过 ${skippedInvalidRows} 行无效数据。`);
             }
+            if (mappingSummary.positionalFallbacks > 0 || mappingSummary.missingColumns > 0) {
+                logWarn_ACU(`[SyncBridge] 旧表 ${sheetKey} (${sheet.name}) 使用宽松列映射：` +
+                    `${mappingSummary.positionalFallbacks} 列按位置 fallback，` +
+                    `${mappingSummary.missingColumns} 列未在旧表头中找到。`);
+            }
+        }
+        _buildLegacyColumnMappings(rawHeaders, insertColumns, ddl) {
+            const headers = Array.isArray(rawHeaders) ? rawHeaders : [];
+            const headerIndex = this._buildLegacyHeaderIndex(headers);
+            const { sqlToChinese } = buildColumnNameMap(ddl);
+            const mappings = [];
+            let positionalFallbacks = 0;
+            let missingColumns = 0;
+            for (let columnIndex = 0; columnIndex < insertColumns.length; columnIndex += 1) {
+                const columnName = insertColumns[columnIndex];
+                const directIndex = headerIndex.get(this._normalizeLegacyHeader(columnName));
+                if (directIndex !== undefined) {
+                    mappings.push({ columnName, rowIndex: directIndex, source: 'header_sql' });
+                    continue;
+                }
+                const comment = sqlToChinese.get(columnName);
+                const commentIndex = comment ? headerIndex.get(this._normalizeLegacyHeader(comment)) : undefined;
+                if (commentIndex !== undefined) {
+                    mappings.push({ columnName, rowIndex: commentIndex, source: 'header_comment' });
+                    continue;
+                }
+                if (columnIndex < headers.length && this._normalizeLegacyHeader(headers[columnIndex])) {
+                    positionalFallbacks += 1;
+                    mappings.push({ columnName, rowIndex: columnIndex, source: 'position' });
+                    continue;
+                }
+                missingColumns += 1;
+                mappings.push({ columnName, rowIndex: null, source: 'missing' });
+            }
+            return { mappings, positionalFallbacks, missingColumns };
+        }
+        _buildLegacyHeaderIndex(headers) {
+            const index = new Map();
+            for (let i = 0; i < headers.length; i += 1) {
+                const normalized = this._normalizeLegacyHeader(headers[i]);
+                if (!normalized || index.has(normalized))
+                    continue;
+                index.set(normalized, i);
+            }
+            return index;
+        }
+        _normalizeLegacyHeader(value) {
+            return String(value ?? '').trim().toLowerCase();
         }
         /** 旧表中除 row_id 外全为空的行通常是历史占位空行，应跳过而不是写入约束表。 */
-        _isLegacyPlaceholderRow(row, columnNames) {
-            for (let index = 0; index < columnNames.length; index += 1) {
-                const columnName = columnNames[index];
+        _isLegacyPlaceholderRow(row, mappings) {
+            for (const mapping of mappings) {
+                const columnName = mapping.columnName;
                 if (columnName.toLowerCase() === 'row_id')
                     continue;
-                if (!this._isLegacyEmptyValue(index < row.length ? row[index] : null))
+                const value = mapping.rowIndex !== null && mapping.rowIndex < row.length ? row[mapping.rowIndex] : null;
+                if (!this._isLegacyEmptyValue(value))
                     return false;
             }
             return true;
