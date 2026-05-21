@@ -1723,6 +1723,59 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
+
+  it('SQL 模式下 deferred apply 失败时使用原始 dynamicContent 注入错误并重新生成', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+
+    mockSettings.tableMaxRetries = 2;
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '不应重新准备输入' });
+
+    let regeneratedTableDataText = '';
+    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
+      regeneratedTableDataText = dynamicContent.tableDataText;
+      return '<tableEdit>INSERT INTO fixed_table VALUES (1);</tableEdit>';
+    });
+
+    mockParseAndApplyTableEdits
+      .mockImplementationOnce(() => { throw new Error('SQL 语法错误: near "s"'); })
+      .mockImplementationOnce(() => mutateSheet0ForSuccessfulSave('2'));
+
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true });
+
+    const resultPromise = executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      0, false, 'manual_independent', false,
+      ['sheet_0'], { skipProfileSwitch: true, forceDirectApi: true }, new AbortController(),
+      null,
+      undefined,
+      {
+        deferredAiResponse: {
+          aiResponse: '<tableEdit>INSERT INTO broken_table VALUES (1);</tableEdit>',
+          targetMessageIndex: 0,
+          updateMode: 'manual_independent',
+          targetSheetKeys: ['sheet_0'],
+          requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
+          dynamicContent: { tableDataText: '原始手动批次数据' },
+        },
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const result = await resultPromise;
+
+    expect(result.success).toBe(true);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    expect(regeneratedTableDataText).toContain('原始手动批次数据');
+    expect(regeneratedTableDataText).toContain('SQL_ERROR_FEEDBACK');
+    expect(regeneratedTableDataText).toContain('SQL 语法错误: near "s"');
+    expect(result.error).toBeUndefined();
+
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
   it('非 SQL 模式下错误不注入 SQL_ERROR_FEEDBACK', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(isSqliteMode).mockReturnValue(false);

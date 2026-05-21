@@ -34333,7 +34333,7 @@ $CONTENT
             emitProgress({ phase: 'preparing' });
             const deferredAiResponse = executionOptions.deferredAiResponse || null;
             const dynamicContent = deferredAiResponse
-                ? null
+                ? deferredAiResponse.dynamicContent || null
                 : await prepareAIInput_ACU(messagesToUse, updateMode, targetSheetKeys, {
                     excludeImportTaggedWorldbookEntries: isImportMode && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
                 });
@@ -34366,6 +34366,7 @@ $CONTENT
                 if (wasStoppedByUser_ACU$1) {
                     return { success: false, modifiedKeys: [], aborted: true };
                 }
+                const shouldUseDeferredAiResponse = !!deferredAiResponse && attempt === 1;
                 emitProgress({ phase: 'calling_ai', attempt, maxRetries });
                 if (lastSqlError && isSqliteMode() && dynamicContent) {
                     const markerIndex = dynamicContent.tableDataText.indexOf(SQL_ERROR_MARKER);
@@ -34375,8 +34376,9 @@ $CONTENT
                     dynamicContent.tableDataText += `${SQL_ERROR_MARKER}[SQL执行错误，请修正后重新输出]\n错误信息: ${lastSqlError}`;
                 }
                 try {
-                    const aiResponse = deferredAiResponse?.aiResponse
-                        || await callCustomOpenAI_ACU(dynamicContent, abortController, requestOptions);
+                    const aiResponse = shouldUseDeferredAiResponse
+                        ? deferredAiResponse?.aiResponse
+                        : await callCustomOpenAI_ACU(dynamicContent, abortController, requestOptions);
                     if (abortController.signal.aborted || wasStoppedByUser_ACU$1) {
                         return { success: false, modifiedKeys: [], aborted: true };
                     }
@@ -34397,6 +34399,7 @@ $CONTENT
                                 updateMode,
                                 targetSheetKeys,
                                 requestOptions,
+                                dynamicContent,
                             },
                         };
                     }
@@ -34432,7 +34435,8 @@ $CONTENT
                     if (error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted') || wasStoppedByUser_ACU$1) {
                         return { success: false, modifiedKeys: [], aborted: true };
                     }
-                    if (deferredAiResponse) {
+                    const canRetryDeferredSqlApply = !!deferredAiResponse && isSqliteMode() && !!dynamicContent;
+                    if (deferredAiResponse && !canRetryDeferredSqlApply) {
                         return { success: false, modifiedKeys: [], error: `应用预生成填表结果失败: ${error.message}` };
                     }
                     else if (attempt < maxRetries) {
@@ -34790,6 +34794,7 @@ $CONTENT
                         updateMode: prepared.updateMode,
                         targetSheetKeys: prepared.targetSheetKeys,
                         requestOptions: prepared.requestOptions,
+                        dynamicContent: prepared.dynamicContent,
                     };
                 }
                 catch (error) {

@@ -121,6 +121,8 @@ export interface DeferredAiResponse_ACU {
     updateMode: string;
     targetSheetKeys: string[] | null;
     requestOptions: Record<string, any> | null;
+    /** Original prepared prompt context. Needed to regenerate AI output when applying a deferred SQL response fails. */
+    dynamicContent?: any;
 }
 
 export interface PreparedAiCall_ACU {
@@ -484,7 +486,7 @@ export async function executeCardUpdateCore_ACU(
 
         const deferredAiResponse = executionOptions.deferredAiResponse || null;
         const dynamicContent = deferredAiResponse
-            ? null
+            ? deferredAiResponse.dynamicContent || null
             : await prepareAIInput_ACU(messagesToUse, updateMode, targetSheetKeys, {
                 excludeImportTaggedWorldbookEntries: isImportMode && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
             });
@@ -520,6 +522,7 @@ export async function executeCardUpdateCore_ACU(
             if (wasStoppedByUser_ACU) {
                 return { success: false, modifiedKeys: [], aborted: true };
             }
+            const shouldUseDeferredAiResponse = !!deferredAiResponse && attempt === 1;
 
             emitProgress({ phase: 'calling_ai', attempt, maxRetries });
 
@@ -532,8 +535,9 @@ export async function executeCardUpdateCore_ACU(
             }
 
             try {
-                const aiResponse = deferredAiResponse?.aiResponse
-                    || await callCustomOpenAI_ACU(dynamicContent, abortController, requestOptions);
+                const aiResponse = shouldUseDeferredAiResponse
+                    ? deferredAiResponse?.aiResponse
+                    : await callCustomOpenAI_ACU(dynamicContent, abortController, requestOptions);
 
                 if (abortController.signal.aborted || wasStoppedByUser_ACU) {
                     return { success: false, modifiedKeys: [], aborted: true };
@@ -558,6 +562,7 @@ export async function executeCardUpdateCore_ACU(
                             updateMode,
                             targetSheetKeys,
                             requestOptions,
+                            dynamicContent,
                         },
                     };
                 }
@@ -602,7 +607,8 @@ export async function executeCardUpdateCore_ACU(
                     return { success: false, modifiedKeys: [], aborted: true };
                 }
 
-                if (deferredAiResponse) {
+                const canRetryDeferredSqlApply = !!deferredAiResponse && isSqliteMode() && !!dynamicContent;
+                if (deferredAiResponse && !canRetryDeferredSqlApply) {
                     return { success: false, modifiedKeys: [], error: `应用预生成填表结果失败: ${error.message}` };
                 } else if (attempt < maxRetries) {
                     const waitTime = 5000;
@@ -1023,6 +1029,7 @@ async function generateDeferredResponsesForPreparedCalls_ACU(
             updateMode: prepared.updateMode,
             targetSheetKeys: prepared.targetSheetKeys,
             requestOptions: prepared.requestOptions,
+            dynamicContent: prepared.dynamicContent,
         } satisfies DeferredAiResponse_ACU;
             } catch (error: any) {
                 lastError = error instanceof Error ? error : new Error(String(error || '手动更新分组生成异常。'));
