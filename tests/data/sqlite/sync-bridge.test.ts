@@ -213,6 +213,87 @@ describe('SyncBridge', () => {
       // 好的表应该正常加载
       expect(engine.getTableNames()).toContain('inventory');
     });
+
+    it('旧记录中的全空占位行不应因 NOT NULL 约束拖垮整张表', () => {
+      const optionsSheet = makeSheet({
+        uid: 'options',
+        name: '选项表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: `CREATE TABLE options (
+  row_id INTEGER PRIMARY KEY,
+  option_1 TEXT NOT NULL,
+  option_2 TEXT,
+  option_3 TEXT,
+  option_4 TEXT,
+  option_5 TEXT
+);`,
+        },
+        content: [
+          ['row_id', 'option_1', 'option_2', 'option_3', 'option_4', 'option_5'],
+          ['1', null, null, null, null, null],
+          ['2', '调查旧档案', null, null, null, null],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_options: optionsSheet }))).not.toThrow();
+
+      expect(engine.getTableNames()).toContain('options');
+      expect(engine.query('SELECT row_id, option_1, option_2 FROM options ORDER BY row_id;').values).toEqual([
+        [2, '调查旧档案', null],
+      ]);
+    });
+
+    it('旧记录中有业务内容的缺失 NOT NULL 文本列应被修复而不是整行丢失', () => {
+      const legacySheet = makeSheet({
+        uid: 'legacy_notes',
+        name: '旧纪要表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: `CREATE TABLE legacy_notes (
+  row_id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  body TEXT,
+  status TEXT NOT NULL DEFAULT '待确认'
+);`,
+        },
+        content: [
+          ['row_id', 'title', 'body', 'status'],
+          ['1', null, '旧记录正文仍然有价值', null],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_legacy: legacySheet }))).not.toThrow();
+
+      expect(engine.query('SELECT row_id, title, body, status FROM legacy_notes;').values).toEqual([
+        [1, '', '旧记录正文仍然有价值', '待确认'],
+      ]);
+    });
+
+    it('旧记录中单行仍违反 CHECK 约束时只跳过该行并保留其他有效行', () => {
+      const checkedSheet = makeSheet({
+        uid: 'checked_items',
+        name: '校验表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: `CREATE TABLE checked_items (
+  row_id INTEGER PRIMARY KEY,
+  code_index TEXT NOT NULL CHECK(code_index LIKE 'AM____'),
+  note TEXT
+);`,
+        },
+        content: [
+          ['row_id', 'code_index', 'note'],
+          ['1', 'BAD', '旧脏行'],
+          ['2', 'AM0002', '有效行'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_checked: checkedSheet }))).not.toThrow();
+      expect(engine.query('SELECT row_id, code_index, note FROM checked_items ORDER BY row_id;').values).toEqual([
+        [2, 'AM0002', '有效行'],
+      ]);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════

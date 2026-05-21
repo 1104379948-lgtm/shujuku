@@ -9665,11 +9665,8 @@ $CONTENT
             this._dropExistingUserTable(tableName);
             // 建表
             this.engine.run(ddl);
-            // 灌入数据
-            const inserts = generateInserts(sheet, tableName);
-            if (inserts.length > 0) {
-                this.engine.runBatch(inserts);
-            }
+            // 灌入旧 JSON 数据：按行兼容加载，避免一条旧脏行拖垮整张表。
+            this._insertLegacyCompatibleRows(sheetKey, sheet, tableName, ddl);
             // 写入元数据
             this.engine.run(`INSERT OR REPLACE INTO ${META_TABLE_NAME} (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json) VALUES (?, ?, ?, ?, ?, ?, ?);`, [
                 sheetKey,
@@ -9696,6 +9693,119 @@ $CONTENT
                 logDebug_ACU(`[SyncBridge] 替换加载前删除已存在表: ${tableName}`);
                 this.engine.run(`DROP TABLE ${tableName};`);
             }
+        }
+        /**
+         * 将旧 JSON content 兼容加载到 SQLite。
+         *
+         * 不能使用 SqliteEngine.runBatch：旧表记录可能包含全空占位行、缺列或 null，
+         * 一条不满足 NOT NULL/CHECK 的旧脏行不应导致整张表回滚丢失。
+         */
+        _insertLegacyCompatibleRows(sheetKey, sheet, tableName, ddl) {
+            const content = sheet.content;
+            if (!Array.isArray(content) || content.length < 2)
+                return;
+            const tableInfo = this.engine.getTableInfo(tableName);
+            const ddlColumns = parseDDLColumnNames(ddl);
+            const effectiveColumns = ddlColumns.length > 0 ? ddlColumns : tableInfo.map(column => column.name);
+            const columnInfoByName = new Map(tableInfo.map(column => [column.name, column]));
+            const insertColumns = effectiveColumns.filter(column => columnInfoByName.has(column));
+            if (insertColumns.length === 0)
+                return;
+            let insertedRows = 0;
+            let skippedEmptyRows = 0;
+            let skippedInvalidRows = 0;
+            let repairedCells = 0;
+            for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
+                const row = content[rowIndex];
+                if (!Array.isArray(row))
+                    continue;
+                if (this._isLegacyPlaceholderRow(row, insertColumns)) {
+                    skippedEmptyRows += 1;
+                    continue;
+                }
+                const columnsForInsert = [];
+                const params = [];
+                let rowRepairCount = 0;
+                for (let columnIndex = 0; columnIndex < insertColumns.length; columnIndex += 1) {
+                    const columnName = insertColumns[columnIndex];
+                    const columnInfo = columnInfoByName.get(columnName);
+                    if (!columnInfo)
+                        continue;
+                    const rawValue = columnIndex < row.length ? row[columnIndex] : null;
+                    const prepared = this._prepareLegacyCellValue(rawValue, columnInfo);
+                    if (prepared.omit)
+                        continue;
+                    if (prepared.repaired)
+                        rowRepairCount += 1;
+                    columnsForInsert.push(columnName);
+                    params.push(prepared.value);
+                }
+                if (columnsForInsert.length === 0) {
+                    skippedEmptyRows += 1;
+                    continue;
+                }
+                const placeholders = columnsForInsert.map(() => '?').join(', ');
+                const sql = `INSERT INTO ${this._sanitizeIdentifier(tableName)} (${columnsForInsert.map(column => this._sanitizeIdentifier(column)).join(', ')}) VALUES (${placeholders});`;
+                try {
+                    this.engine.run(sql, params);
+                    insertedRows += 1;
+                    repairedCells += rowRepairCount;
+                }
+                catch (e) {
+                    skippedInvalidRows += 1;
+                    logWarn_ACU(`[SyncBridge] 跳过旧表 ${sheetKey} (${sheet.name}) 第 ${rowIndex + 1} 行：${e?.message || e}`);
+                }
+            }
+            if (skippedEmptyRows > 0 || skippedInvalidRows > 0 || repairedCells > 0) {
+                logWarn_ACU(`[SyncBridge] 旧表 ${sheetKey} (${sheet.name}) 兼容加载完成：` +
+                    `插入 ${insertedRows} 行，修复 ${repairedCells} 个空约束单元，` +
+                    `跳过 ${skippedEmptyRows} 行空占位，跳过 ${skippedInvalidRows} 行无效数据。`);
+            }
+        }
+        /** 旧表中除 row_id 外全为空的行通常是历史占位空行，应跳过而不是写入约束表。 */
+        _isLegacyPlaceholderRow(row, columnNames) {
+            for (let index = 0; index < columnNames.length; index += 1) {
+                const columnName = columnNames[index];
+                if (columnName.toLowerCase() === 'row_id')
+                    continue;
+                if (!this._isLegacyEmptyValue(index < row.length ? row[index] : null))
+                    return false;
+            }
+            return true;
+        }
+        _prepareLegacyCellValue(rawValue, columnInfo) {
+            const isEmpty = this._isLegacyEmptyValue(rawValue);
+            if (!isEmpty) {
+                return { omit: false, value: rawValue, repaired: false };
+            }
+            if (columnInfo.pk) {
+                return { omit: true, value: null, repaired: false };
+            }
+            if (columnInfo.dflt_value !== null && columnInfo.dflt_value !== undefined) {
+                return { omit: true, value: null, repaired: false };
+            }
+            if (columnInfo.notnull) {
+                return { omit: false, value: this._fallbackValueForNotNullColumn(columnInfo), repaired: true };
+            }
+            return { omit: false, value: null, repaired: false };
+        }
+        _fallbackValueForNotNullColumn(columnInfo) {
+            const type = String(columnInfo.type || '').toUpperCase();
+            if (type.includes('INT'))
+                return 0;
+            if (type.includes('REAL') || type.includes('FLOA') || type.includes('DOUB'))
+                return 0;
+            if (type.includes('NUM') || type.includes('DEC'))
+                return 0;
+            return '';
+        }
+        _isLegacyEmptyValue(value) {
+            return value === null || value === undefined || String(value).trim() === '';
+        }
+        _sanitizeIdentifier(name) {
+            if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name))
+                return name;
+            throw new Error(`非法标识符: ${name}`);
         }
         /** 从 SQLite 导出单张表为 Sheet_ACU */
         _exportSheet(tableName, meta) {
