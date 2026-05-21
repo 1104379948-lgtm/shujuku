@@ -36,6 +36,21 @@ function resolveTableApiPresetOverride_ACU(tableName: any): string {
     const preset = overrides[normalizedName];
     return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
 }
+
+/**
+ * 手动两阶段填表应沿用自动填表的独立 AI 调用参数。
+ *
+ * 自动分组填表在 update-scheduler 中传入 skipProfileSwitch/forceDirectApi，避免并发填表时
+ * 频繁切换酒馆连接预设或错误复用主 API 通道。手动填表同样存在组内并发 AI 生成，不能漏掉这组参数。
+ */
+function buildManualAiRequestOptions_ACU(tableApiPreset: string): Record<string, any> {
+    const requestOptions: Record<string, any> = {
+        skipProfileSwitch: true,
+        forceDirectApi: true,
+    };
+    if (tableApiPreset) requestOptions.tableApiPreset = tableApiPreset;
+    return requestOptions;
+}
 import { checkIfFirstTimeInit_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { parseAndApplyTableEdits_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
@@ -1384,7 +1399,7 @@ export async function orchestrateManualUpdate_ACU(
             const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
             const primaryTableName = primarySheetKey ? templateData?.[primarySheetKey]?.name : '';
             const tableApiPreset = resolveTableApiPresetOverride_ACU(primaryTableName);
-            const requestOptions = tableApiPreset ? { tableApiPreset } : null;
+            const requestOptions = buildManualAiRequestOptions_ACU(tableApiPreset);
             return {
                 key: gKey,
                 group,

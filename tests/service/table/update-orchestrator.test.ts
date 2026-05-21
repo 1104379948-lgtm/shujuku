@@ -1871,23 +1871,23 @@ describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], mockProcessBatch, mockRefreshData);
     expect(result.success).toBe(true);
 
-    // 验证 processBatch 被调用时携带了 requestOptions.tableApiPreset
+    // 验证 processBatch 被调用时携带手动填表的 AI 调用参数，并保留表级覆盖预设
     const prepareOptions = mockProcessBatch.mock.calls[0][2];
     const applyOptions = mockProcessBatch.mock.calls[1][2];
-    expect(prepareOptions.requestOptions).toEqual({ tableApiPreset: 'special-preset' });
-    expect(applyOptions.requestOptions).toEqual({ tableApiPreset: 'special-preset' });
+    expect(prepareOptions.requestOptions).toEqual({ skipProfileSwitch: true, forceDirectApi: true, tableApiPreset: 'special-preset' });
+    expect(applyOptions.requestOptions).toEqual({ skipProfileSwitch: true, forceDirectApi: true, tableApiPreset: 'special-preset' });
     expect(mockCallCustomOpenAI).toHaveBeenCalledWith(
       { tableDataText: 'prepared' },
       expect.any(AbortController),
-      { tableApiPreset: 'special-preset' },
+      { skipProfileSwitch: true, forceDirectApi: true, tableApiPreset: 'special-preset' },
     );
     expect(applyOptions.deferredResponses[0]).toEqual(expect.objectContaining({
       preparedCallId: '0|1|3:1:1',
-      requestOptions: { tableApiPreset: 'special-preset' },
+      requestOptions: { skipProfileSwitch: true, forceDirectApi: true, tableApiPreset: 'special-preset' },
     }));
   });
 
-  it('表无覆盖预设时，requestOptions 为 null', async () => {
+  it('表无覆盖预设时，requestOptions 仍携带自动填表 AI 调用参数', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       { is_user: true },
@@ -1902,7 +1902,12 @@ describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {
 
     const processBatchCall = mockProcessBatch.mock.calls[0];
     const optionsArg = processBatchCall[2];
-    expect(optionsArg.requestOptions).toBeNull();
+    expect(optionsArg.requestOptions).toEqual({ skipProfileSwitch: true, forceDirectApi: true });
+    expect(mockCallCustomOpenAI).toHaveBeenCalledWith(
+      { tableDataText: 'prepared' },
+      expect.any(AbortController),
+      { skipProfileSwitch: true, forceDirectApi: true },
+    );
   });
 
   it('表名为空时忽略覆盖', async () => {
@@ -1921,7 +1926,7 @@ describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {
 
     const processBatchCall = mockProcessBatch.mock.calls[0];
     const optionsArg = processBatchCall[2];
-    expect(optionsArg.requestOptions).toBeNull();
+    expect(optionsArg.requestOptions).toEqual({ skipProfileSwitch: true, forceDirectApi: true });
   });
 
   it('表名有空格时进行标准化匹配', async () => {
@@ -1942,6 +1947,6 @@ describe('orchestrateManualUpdate_ACU — 表级 API 预设覆盖', () => {
 
     const processBatchCall = mockProcessBatch.mock.calls[0];
     const optionsArg = processBatchCall[2];
-    expect(optionsArg.requestOptions.tableApiPreset).toBe('trimmed-preset');
+    expect(optionsArg.requestOptions).toEqual({ skipProfileSwitch: true, forceDirectApi: true, tableApiPreset: 'trimmed-preset' });
   });
 });
