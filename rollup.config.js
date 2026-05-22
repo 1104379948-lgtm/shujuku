@@ -141,18 +141,23 @@ const extensionConfig = {
     ...sharedPlugins,
     createTsPlugin(),
     // 构建完成后生成标准 extension 产物，并同步根目录直装文件。
-    // SillyTavern 直装读取仓库根目录 manifest.json 中的 js: "index.js"，
-    // 所以 extension 构建成功后必须让根目录 index.js 始终等于 dist/extension/index.js。
+    // 根目录 index.js 是直装入口，必须使用 userscript bundle（dist/index.bundle.js）。
+    // dist/extension/index.js 是标准 extension 入口，二者不能互相覆盖。
     {
       name: 'sync-extension-artifacts',
       writeBundle() {
         const distExtensionDir = join(__dirname, 'dist', 'extension');
+        const distBundleIndex = join(__dirname, 'dist', 'index.bundle.js');
         const distIndex = join(distExtensionDir, 'index.js');
         const distManifest = join(distExtensionDir, 'manifest.json');
         const rootIndex = join(__dirname, 'index.js');
         const rootManifest = join(__dirname, 'manifest.json');
 
         mkdirSync(distExtensionDir, { recursive: true });
+
+        if (!existsSync(distBundleIndex)) {
+          throw new Error(`userscript 构建产物缺失: ${distBundleIndex}`);
+        }
 
         if (!existsSync(distIndex)) {
           throw new Error(`extension 构建产物缺失: ${distIndex}`);
@@ -168,8 +173,7 @@ const extensionConfig = {
           throw new Error(`extension manifest 复制失败: ${distManifest}`);
         }
 
-        copyFileSync(distIndex, rootIndex);
-        copyFileSync(distManifest, rootManifest);
+        copyFileSync(distBundleIndex, rootIndex);
       },
     },
   ],
