@@ -213,15 +213,23 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     ]);
   });
 
-  it('无 V2 但存在 legacy 快照时懒迁移为首个 AI 消息 checkpoint 并清理 legacy 源', () => {
+  it('无 V2 但存在 legacy 快照时懒迁移为最新 legacy AI 楼层 checkpoint 且不删除 legacy 源', () => {
     const chat: any[] = [
+      aiMessage(),
       {
         is_user: false,
         TavernDB_ACU_IndependentData: {
-          sheet_0: makeSheet([['row_id', '名称'], ['1', '铁剑']]),
+          sheet_0: makeSheet([['row_id', '名称'], ['1', '旧层铁剑']]),
         },
         TavernDB_ACU_ModifiedKeys: ['sheet_0'],
         TavernDB_ACU_UpdateGroupKeys: ['sheet_0'],
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: {
+          sheet_1: makeSheet([['row_id', '名称'], ['2', '最新层木盾']], { uid: 'sheet_1', name: '装备表' }),
+        },
+        TavernDB_ACU_ModifiedKeys: ['sheet_1'],
       },
     ];
 
@@ -229,20 +237,25 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
 
     expect(result.usedLegacyMigration).toBe(true);
     expect(result.changed).toBe(true);
-    expect(result.checkpointMessageIndex).toBe(0);
-    expect(result.checkpoint?.messageIndexHint).toBe(0);
+    expect(result.checkpointMessageIndex).toBe(2);
+    expect(result.checkpoint?.messageIndexHint).toBe(2);
     expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([
       ['row_id', '名称'],
-      ['1', '铁剑'],
+      ['1', '旧层铁剑'],
     ]);
-    expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.kind).toBe('checkpoint');
-    expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(0);
-    expect(chat[0].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[0].TavernDB_ACU_ModifiedKeys).toBeUndefined();
-    expect(chat[0].TavernDB_ACU_UpdateGroupKeys).toBeUndefined();
+    expect((result.data?.sheet_1 as Sheet_ACU).content).toEqual([
+      ['row_id', '名称'],
+      ['2', '最新层木盾'],
+    ]);
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.kind).toBe('checkpoint');
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(2);
+    expect(chat[1].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
+    expect(chat[1].TavernDB_ACU_ModifiedKeys).toEqual(['sheet_0']);
+    expect(chat[1].TavernDB_ACU_UpdateGroupKeys).toEqual(['sheet_0']);
+    expect(chat[2].TavernDB_ACU_IndependentData.sheet_1).toBeDefined();
   });
 
-  it('只有 V2 delta 没有 checkpoint 时先从 legacy 迁移到首楼 checkpoint 再回放 delta', () => {
+  it('只有 V2 delta 没有 checkpoint 时先从 latest legacy 楼层建立 checkpoint 再回放 delta', () => {
     const chat: any[] = [
       {
         is_user: false,
@@ -261,7 +274,7 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     expect(result.checkpoint?.messageIndexHint).toBe(0);
     expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('legacy-migration');
     expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(0);
-    expect(chat[0].TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
     expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([
       ['row_id', '名称'],
       ['2', '木盾'],
@@ -269,7 +282,7 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     ]);
   });
 
-  it('legacy 快照不在首楼时迁移到首个 AI 消息 checkpoint 并清理原 legacy 源', () => {
+  it('legacy 快照不在首楼时迁移到最新 legacy 楼层 checkpoint 并保留原 legacy 源', () => {
     const chat: any[] = [
       aiMessage(),
       { is_user: true },
@@ -286,18 +299,18 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
 
     expect(result.usedLegacyMigration).toBe(true);
     expect(result.changed).toBe(true);
-    expect(result.checkpointMessageIndex).toBe(0);
-    expect(result.checkpoint?.messageIndexHint).toBe(0);
-    expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.data.sheet_0.content).toEqual([
+    expect(result.checkpointMessageIndex).toBe(2);
+    expect(result.checkpoint?.messageIndexHint).toBe(2);
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.data.sheet_0.content).toEqual([
       ['row_id', '名称'],
       ['1', '后置旧快照'],
     ]);
-    expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(0);
-    expect(chat[2].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[2].TavernDB_ACU_ModifiedKeys).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(2);
+    expect(chat[2].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
+    expect(chat[2].TavernDB_ACU_ModifiedKeys).toEqual(['sheet_0']);
   });
 
-  it('legacy 数据层超过保留数量时迁移到最早保留层 checkpoint', () => {
+  it('legacy 数据层超过保留数量时 bootstrap 仍写最新参与 legacy 合并的楼层', () => {
     const chat: any[] = [
       aiMessage(),
       {
@@ -327,17 +340,17 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
 
     expect(result.usedLegacyMigration).toBe(true);
     expect(result.changed).toBe(true);
-    expect(result.checkpointMessageIndex).toBe(2);
-    expect(result.checkpoint?.messageIndexHint).toBe(2);
+    expect(result.checkpointMessageIndex).toBe(3);
+    expect(result.checkpoint?.messageIndexHint).toBe(3);
     expect(chat[0].TavernDB_ACU_IsolatedData).toBeUndefined();
-    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('legacy-migration');
-    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(2);
-    expect(chat[1].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[2].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[3].TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(chat[3].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('legacy-migration');
+    expect(chat[3].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(3);
+    expect(chat[1].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
+    expect(chat[2].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
+    expect(chat[3].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
   });
 
-  it('legacy 数据层未超过保留数量时仍迁移到首个 AI 消息 checkpoint', () => {
+  it('legacy 数据层未超过保留数量时迁移到最新 legacy AI 楼层 checkpoint', () => {
     const chat: any[] = [
       aiMessage(),
       {
@@ -361,11 +374,11 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
 
     expect(result.usedLegacyMigration).toBe(true);
     expect(result.changed).toBe(true);
-    expect(result.checkpointMessageIndex).toBe(0);
-    expect(result.checkpoint?.messageIndexHint).toBe(0);
-    expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('legacy-migration');
-    expect(chat[1].TavernDB_ACU_IndependentData).toBeUndefined();
-    expect(chat[2].TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(result.checkpointMessageIndex).toBe(2);
+    expect(result.checkpoint?.messageIndexHint).toBe(2);
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.source).toBe('legacy-migration');
+    expect(chat[1].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
+    expect(chat[2].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
   });
 
   it('已有 V2 checkpoint 时不再用更早 legacy 快照污染 V2 链', () => {
@@ -411,7 +424,41 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     ]);
   });
 
-  it('模板 key 不匹配时仍从 legacy 标准表生成首楼 checkpoint，避免旧聊天被显示为空', () => {
+  it('不按模板 key 过滤 legacy 旧表，避免旧 uid/sheet_key 变更导致丢表', () => {
+    const chat: any[] = [
+      {
+        is_user: false,
+        TavernDB_ACU_Data: {
+          mate: { type: 'chatSheets', version: 1 },
+          sheet_0: makeSheet([['row_id', '名称'], ['1', '命中模板表']]),
+          sheet_old_uid: makeSheet(
+            [['row_id', '名称'], ['legacy', '旧 uid 表数据']],
+            { uid: 'sheet_old_uid', name: '旧 uid 表' },
+          ),
+        },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0', 'sheet_old_uid'],
+        TavernDB_ACU_UpdateGroupKeys: ['sheet_0', 'sheet_old_uid'],
+      },
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, context, { saveChatAfterMigration: true });
+
+    expect(result.usedLegacyMigration).toBe(true);
+    expect(result.changed).toBe(true);
+    expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([
+      ['row_id', '名称'],
+      ['1', '命中模板表'],
+    ]);
+    expect((result.data?.sheet_old_uid as Sheet_ACU).content).toEqual([
+      ['row_id', '名称'],
+      ['legacy', '旧 uid 表数据'],
+    ]);
+    const checkpointData = chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.data;
+    expect(checkpointData.sheet_0).toBeDefined();
+    expect(checkpointData.sheet_old_uid).toBeDefined();
+  });
+
+  it('模板 key 不匹配时仍从 legacy 标准表生成 checkpoint，避免旧聊天被显示为空', () => {
     const chat: any[] = [
       {
         is_user: false,
@@ -440,6 +487,94 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
       ['row_id', '名称'],
       ['1', '旧聊天铁剑'],
     ]);
-    expect(chat[0].TavernDB_ACU_Data).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_Data.sheet_0).toBeDefined();
+  });
+
+  it('隔离开启且旧根字段缺少 Identity 时仍迁移当前聊天楼层 legacy 数据', () => {
+    const chat: any[] = [
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: {
+          sheet_0: makeSheet([['row_id', '名称'], ['1', '无 Identity 旧表']]),
+        },
+      },
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, {
+      isolationKey: 'role-a',
+      isolationConfig: { enabled: true, code: 'role-a' },
+      templateSheetKeys: ['sheet_9'],
+    }, { saveChatAfterMigration: true });
+
+    expect(result.usedLegacyMigration).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.checkpointMessageIndex).toBe(0);
+    expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([
+      ['row_id', '名称'],
+      ['1', '无 Identity 旧表'],
+    ]);
+    expect(chat[0].TavernDB_ACU_IndependentData.sheet_0).toBeDefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData['role-a'].tablePersistenceV2.checkpoint.data.sheet_0).toBeDefined();
+  });
+
+  it('Data 与 SummaryData 不按摘要表名过滤，旧版本放错容器也不丢表', () => {
+    const chat: any[] = [
+      {
+        is_user: false,
+        TavernDB_ACU_Data: {
+          sheet_summary_in_data: makeSheet(
+            [['row_id', '内容'], ['s1', '摘要容器错放 Data']],
+            { uid: 'sheet_summary_in_data', name: '剧情摘要表' },
+          ),
+        },
+        TavernDB_ACU_SummaryData: {
+          sheet_normal_in_summary: makeSheet(
+            [['row_id', '内容'], ['n1', '普通表错放 SummaryData']],
+            { uid: 'sheet_normal_in_summary', name: '普通物品表' },
+          ),
+        },
+      },
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, {
+      ...context,
+      templateSheetKeys: ['sheet_9'],
+    }, { saveChatAfterMigration: true });
+
+    expect(result.usedLegacyMigration).toBe(true);
+    expect((result.data?.sheet_summary_in_data as Sheet_ACU).content).toEqual([
+      ['row_id', '内容'],
+      ['s1', '摘要容器错放 Data'],
+    ]);
+    expect((result.data?.sheet_normal_in_summary as Sheet_ACU).content).toEqual([
+      ['row_id', '内容'],
+      ['n1', '普通表错放 SummaryData'],
+    ]);
+    const checkpointData = chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.data;
+    expect(checkpointData.sheet_summary_in_data).toBeDefined();
+    expect(checkpointData.sheet_normal_in_summary).toBeDefined();
+  });
+
+  it('legacy 后存在 delta-only 兼容层时 checkpoint 不写到 delta 后面，避免吞掉后续 delta', () => {
+    const chat: any[] = [
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: {
+          sheet_0: makeSheet([['row_id', '名称'], ['1', '铁剑']]),
+        },
+      },
+      aiMessage({ version: 2, delta: delta([{ op: 'upsert', rowId: '2', rowIndexHint: 1, row: ['2', '木盾'] }]) }),
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, context, { saveChatAfterMigration: true });
+
+    expect(result.checkpointMessageIndex).toBe(0);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.messageIndexHint).toBe(0);
+    expect(chat[1].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint).toBeUndefined();
+    expect((result.data?.sheet_0 as Sheet_ACU).content).toEqual([
+      ['row_id', '名称'],
+      ['2', '木盾'],
+      ['1', '铁剑'],
+    ]);
   });
 });

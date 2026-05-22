@@ -1,6 +1,5 @@
 import type { IsolationConfig_ACU } from '../../data/models/chat-message-data';
 import {
-  isLegacyMatchForIsolation_ACU,
   readIsolatedTagData_ACU,
   readLegacyIndependentData_ACU,
   readLegacyStandardData_ACU,
@@ -9,13 +8,9 @@ import {
   readUpdateGroupKeys_ACU,
 } from '../../data/repositories/chat-message-data-repo';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
-import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
-import { clearCurrentIsolationLegacyTableSnapshots_ACU, readTablePersistenceLayerV2_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
+import { readTablePersistenceLayerV2_ACU, writeTablePersistenceLayerV2_ACU } from './table-delta-repository';
 import type { TableCheckpointV2_ACU, TablePersistenceLayerV2_ACU } from './table-delta-types';
-import {
-  getTablePersistenceDeltasV2_ACU,
-  hasTablePersistenceDeltasV2_ACU,
-} from '../../shared/models/table-persistence-v2-utils';
+import { getTablePersistenceDeltasV2_ACU, hasTablePersistenceDeltasV2_ACU } from '../../shared/models/table-persistence-v2-utils';
 
 function cloneJson_ACU<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
@@ -39,9 +34,8 @@ function isSheetLike_ACU(value: unknown): value is Sheet_ACU {
   return !!value && typeof value === 'object' && Array.isArray((value as Sheet_ACU).content);
 }
 
-function shouldAcceptSheet_ACU(sheetKey: string, sheet: Sheet_ACU, templateSheetKeySet?: Set<string>): boolean {
+function shouldAcceptSheet_ACU(sheetKey: string, sheet: Sheet_ACU): boolean {
   if (!sheetKey.startsWith('sheet_')) return false;
-  if (templateSheetKeySet && !templateSheetKeySet.has(sheetKey)) return false;
   return isSheetLike_ACU(sheet);
 }
 
@@ -49,13 +43,12 @@ function mergeIndependentSnapshot_ACU(
   out: TableDataObject_ACU,
   foundSheets: Set<string>,
   independentData: Record<string, Sheet_ACU> | null | undefined,
-  templateSheetKeySet?: Set<string>,
 ): void {
   if (!independentData || typeof independentData !== 'object') return;
   Object.keys(independentData).forEach(sheetKey => {
     if (foundSheets.has(sheetKey)) return;
     const sheet = independentData[sheetKey];
-    if (!shouldAcceptSheet_ACU(sheetKey, sheet, templateSheetKeySet)) return;
+    if (!shouldAcceptSheet_ACU(sheetKey, sheet)) return;
     out[sheetKey] = cloneJson_ACU(sheet);
     foundSheets.add(sheetKey);
   });
@@ -65,15 +58,12 @@ function mergeLegacyContainer_ACU(
   out: TableDataObject_ACU,
   foundSheets: Set<string>,
   container: Record<string, unknown> | null | undefined,
-  options: { templateSheetKeySet?: Set<string>; summaryOnly: boolean },
 ): void {
   if (!container || typeof container !== 'object') return;
   Object.keys(container).forEach(sheetKey => {
     if (foundSheets.has(sheetKey)) return;
     const sheet = container[sheetKey] as Sheet_ACU;
-    if (!shouldAcceptSheet_ACU(sheetKey, sheet, options.templateSheetKeySet)) return;
-    const isSummary = isSummaryOrOutlineTable_ACU(sheet.name || '');
-    if (options.summaryOnly !== isSummary) return;
+    if (!shouldAcceptSheet_ACU(sheetKey, sheet)) return;
     out[sheetKey] = cloneJson_ACU(sheet);
     foundSheets.add(sheetKey);
   });
@@ -97,14 +87,11 @@ export function buildLegacyCheckpointFromChat_ACU(
   chat: any[],
   options: BuildLegacyCheckpointFromChatOptions_ACU,
 ): BuildLegacyCheckpointFromChatResult_ACU {
-  const templateSheetKeySet = Array.isArray(options.templateSheetKeys) && options.templateSheetKeys.length > 0
-    ? new Set(options.templateSheetKeys)
-    : undefined;
   const endIndex = Number.isFinite(options.targetBoundaryMessageIndex)
     ? Math.min(Math.trunc(Number(options.targetBoundaryMessageIndex)), chat.length - 1)
     : chat.length - 1;
 
-  const scanLegacySnapshots = (activeTemplateSheetKeySet?: Set<string>) => {
+  const scanLegacySnapshots = () => {
     const data = createEmptyTableData_ACU();
     const foundSheets = new Set<string>();
     const modifiedKeys = new Set<string>();
@@ -117,27 +104,19 @@ export function buildLegacyCheckpointFromChat_ACU(
 
       const tagData = readIsolatedTagData_ACU(message, options.isolationKey);
       if (tagData) {
-        mergeIndependentSnapshot_ACU(data, foundSheets, tagData.independentData, activeTemplateSheetKeySet);
+        mergeIndependentSnapshot_ACU(data, foundSheets, tagData.independentData);
         (tagData.modifiedKeys || []).forEach(key => modifiedKeys.add(key));
         (tagData.updateGroupKeys || []).forEach(key => updateGroupKeys.add(key));
         if (checkpointMessageIndex === undefined && foundSheets.size > 0) checkpointMessageIndex = i;
       }
 
-      if (!isLegacyMatchForIsolation_ACU(message, options.isolationConfig)) continue;
-
       const legacyIndependent = readLegacyIndependentData_ACU(message);
-      mergeIndependentSnapshot_ACU(data, foundSheets, legacyIndependent, activeTemplateSheetKeySet);
+      mergeIndependentSnapshot_ACU(data, foundSheets, legacyIndependent);
       readModifiedKeys_ACU(message).forEach(key => modifiedKeys.add(key));
       readUpdateGroupKeys_ACU(message).forEach(key => updateGroupKeys.add(key));
 
-      mergeLegacyContainer_ACU(data, foundSheets, readLegacyStandardData_ACU(message) as Record<string, unknown> | null, {
-        templateSheetKeySet: activeTemplateSheetKeySet,
-        summaryOnly: false,
-      });
-      mergeLegacyContainer_ACU(data, foundSheets, readLegacySummaryData_ACU(message) as Record<string, unknown> | null, {
-        templateSheetKeySet: activeTemplateSheetKeySet,
-        summaryOnly: true,
-      });
+      mergeLegacyContainer_ACU(data, foundSheets, readLegacyStandardData_ACU(message) as Record<string, unknown> | null);
+      mergeLegacyContainer_ACU(data, foundSheets, readLegacySummaryData_ACU(message) as Record<string, unknown> | null);
 
       if (checkpointMessageIndex === undefined && foundSheets.size > 0) checkpointMessageIndex = i;
     }
@@ -145,10 +124,7 @@ export function buildLegacyCheckpointFromChat_ACU(
     return { data, foundSheets, modifiedKeys, updateGroupKeys, checkpointMessageIndex };
   };
 
-  let scanResult = scanLegacySnapshots(templateSheetKeySet);
-  if (scanResult.foundSheets.size === 0 && templateSheetKeySet) {
-    scanResult = scanLegacySnapshots(undefined);
-  }
+  const scanResult = scanLegacySnapshots();
 
   const { data, foundSheets, modifiedKeys, updateGroupKeys, checkpointMessageIndex } = scanResult;
 
@@ -209,7 +185,7 @@ function hasAnySheetKey_ACU(value: unknown): boolean {
 function messageHasCurrentIsolationLocalTableLayer_ACU(
   message: any,
   isolationKey: string,
-  isolationConfig: IsolationConfig_ACU,
+  _isolationConfig: IsolationConfig_ACU,
 ): boolean {
   if (!message || message.is_user) return false;
 
@@ -221,7 +197,6 @@ function messageHasCurrentIsolationLocalTableLayer_ACU(
   if (Array.isArray(tagData?.modifiedKeys) && tagData.modifiedKeys.length > 0) return true;
   if (Array.isArray(tagData?.updateGroupKeys) && tagData.updateGroupKeys.length > 0) return true;
 
-  if (!isLegacyMatchForIsolation_ACU(message, isolationConfig)) return false;
   if (hasAnySheetKey_ACU(readLegacyIndependentData_ACU(message))) return true;
   if (hasAnySheetKey_ACU(readLegacyStandardData_ACU(message))) return true;
   if (hasAnySheetKey_ACU(readLegacySummaryData_ACU(message))) return true;
@@ -290,24 +265,24 @@ export function migrateLegacyCheckpointToRootMessage_ACU(
   checkpoint: TableCheckpointV2_ACU,
   options: { retainRecentLayers?: number } = {},
 ): LegacyRootCheckpointMigrationResult_ACU | null {
-  const anchorMessageIndex = resolveLegacyCheckpointAnchorMessageIndex_ACU(
-    chat,
-    isolationKey,
-    isolationConfig,
-    options.retainRecentLayers,
-  );
+  const hintedIndex = Number.isInteger(checkpoint.messageIndexHint) ? Number(checkpoint.messageIndexHint) : -1;
+  const anchorMessageIndex = hintedIndex >= 0 && hintedIndex < chat.length
+    ? hintedIndex
+    : resolveLegacyCheckpointAnchorMessageIndex_ACU(
+      chat,
+      isolationKey,
+      isolationConfig,
+      options.retainRecentLayers,
+    );
   if (anchorMessageIndex < 0) return null;
 
   const anchorMessage = chat[anchorMessageIndex];
   if (!anchorMessage || anchorMessage.is_user) return null;
 
+  // Legacy 快照来自当前聊天楼层：bootstrap 只写入最新参与 legacy 合并的 AI 楼层，旧字段交给 retention 自然淘汰。
   const rootCheckpoint = createLegacyRootCheckpoint_ACU(checkpoint, anchorMessageIndex);
 
   migrateLegacyCheckpointToMessage_ACU(anchorMessage, isolationKey, rootCheckpoint);
-
-  for (const message of chat) {
-    clearCurrentIsolationLegacyTableSnapshots_ACU(message, isolationKey, isolationConfig);
-  }
 
   return { messageIndex: anchorMessageIndex, checkpoint: rootCheckpoint };
 }

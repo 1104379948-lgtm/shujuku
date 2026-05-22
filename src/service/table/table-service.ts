@@ -372,12 +372,9 @@ export async function checkIfFirstTimeInit_ACU(): Promise<boolean> {
       return false;
     }
 
-    const isolationConfig = { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
-    if (isLegacyMatchForIsolation_ACU(message, isolationConfig)) {
-      const legacyIndep = readLegacyIndependentData_ACU(message);
-      if (legacyIndep && Object.keys(legacyIndep).some(k => k.startsWith('sheet_'))) {
-        return false;
-      }
+    const legacyIndep = readLegacyIndependentData_ACU(message);
+    if (legacyIndep && Object.keys(legacyIndep).some(k => k.startsWith('sheet_'))) {
+      return false;
     }
   }
 

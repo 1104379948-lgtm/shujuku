@@ -1,5 +1,5 @@
 import type { IsolationConfig_ACU } from '../../data/models/chat-message-data';
-import { initIsolatedTagSlot_ACU, isLegacyMatchForIsolation_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { initIsolatedTagSlot_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { logWarn_ACU } from '../../shared/utils';
 import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
@@ -96,9 +96,7 @@ function deleteCurrentIsolationTableFields_ACU(msg: any, isolationKey: string): 
   return true;
 }
 
-function deleteRootLegacyTableFields_ACU(msg: any, isolationConfig: IsolationConfig_ACU): boolean {
-  if (!isLegacyMatchForIsolation_ACU(msg, isolationConfig)) return false;
-
+function deleteRootLegacyTableFields_ACU(msg: any, _isolationConfig: IsolationConfig_ACU): boolean {
   let changed = false;
   const keysToDelete = [
     'TavernDB_ACU_Data',

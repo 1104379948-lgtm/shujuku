@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { reconstructTablesFromChatDeltas_ACU } from '../../../src/service/table/table-delta-reconstruct';
+import { messageHasLegacyTableSnapshot_ACU } from '../../../src/service/table/table-delta-repository';
 import { rollupCheckpointBeforePurge_ACU } from '../../../src/service/table/table-delta-retention';
 import type { TableLayerDeltaV2_ACU } from '../../../src/service/table/table-delta-types';
 
@@ -227,6 +228,40 @@ describe('rollupCheckpointBeforePurge_ACU', () => {
       ['row_id', '物品名'],
       ['2', '盾'],
       ['1', '剑'],
+    ]);
+  });
+
+  it('retention 自然淘汰根 legacy 时不因缺少 Identity 跳过旧表字段', () => {
+    const chat: any[] = [
+      { is_user: false },
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: {
+          sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '无 Identity 旧剑']] },
+        },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0'],
+      },
+      v2Message(deltaLayer('d-1', [['2', '盾']])),
+    ];
+    const isolatedContext = { enabled: true, code: 'role-a' } as any;
+
+    expect(messageHasLegacyTableSnapshot_ACU(chat[1], 'role-a', isolatedContext)).toBe(true);
+
+    const result = rollupCheckpointBeforePurge_ACU({
+      chat,
+      isolationKey: 'role-a',
+      isolationConfig: isolatedContext,
+      retainCount: 1,
+      dataMessageIndices: [1, 2],
+    });
+
+    expect(result.changed).toBe(true);
+    expect(chat[1].TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(chat[1].TavernDB_ACU_ModifiedKeys).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData['role-a'].tablePersistenceV2.checkpoint.source).toBe('retention-rollup');
+    expect(chat[2].TavernDB_ACU_IsolatedData['role-a'].tablePersistenceV2.checkpoint.data.sheet_0.content).toEqual([
+      ['row_id', '物品名'],
+      ['1', '无 Identity 旧剑'],
     ]);
   });
 

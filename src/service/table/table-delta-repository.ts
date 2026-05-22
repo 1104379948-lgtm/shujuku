@@ -140,11 +140,10 @@ export function messageHasTablePersistenceV2_ACU(msg: any, isolationKey: string)
 export function messageHasLegacyTableSnapshot_ACU(
   msg: any,
   isolationKey: string,
-  isolationConfig: IsolationConfig_ACU,
+  _isolationConfig: IsolationConfig_ACU,
 ): boolean {
   const tagData = readIsolatedTagData_ACU(msg, isolationKey);
   if (hasAnySheetKey_ACU(tagData?.independentData)) return true;
-  if (!isLegacyMatchForIsolation_ACU(msg, isolationConfig)) return false;
   return hasAnySheetKey_ACU(msg?.TavernDB_ACU_IndependentData)
     || hasAnySheetKey_ACU(msg?.TavernDB_ACU_Data)
     || hasAnySheetKey_ACU(msg?.TavernDB_ACU_SummaryData);
