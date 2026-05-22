@@ -160,14 +160,19 @@ async function rerankCandidates_ACU(config: any, query: string, candidates: Rank
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         const apiKey = normalizeText_ACU(config.rerankApiKey);
         if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+        const rerankInstruction = normalizeText_ACU(config.rerankInstruction);
+        const requestBody: Record<string, any> = {
+            model,
+            query,
+            documents: candidates.map((candidate) => candidate.chunk.text),
+        };
+        if (rerankInstruction) {
+            requestBody.instruction = rerankInstruction;
+        }
         const response = await fetch(endpoint, {
             method: 'POST',
             headers,
-            body: JSON.stringify({
-                model,
-                query,
-                documents: candidates.map((candidate) => candidate.chunk.text),
-            }),
+            body: JSON.stringify(requestBody),
         });
         if (!response.ok) throw new Error(await response.text().catch(() => response.statusText));
         const payload = await response.json();

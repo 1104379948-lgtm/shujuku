@@ -145,6 +145,12 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
       const find = (id: string) => $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-${id}`);
       const setVal = (id: string, v: any) => { const $el = find(id); if ($el.length) $el.val(v); };
       const setChecked = (id: string, v: any) => { const $el = find(id); if ($el.length) $el.prop('checked', !!v); };
+      setVal('api-extra-body-params', s.apiConfig.extraBodyParams || '');
+      setVal('api-excluded-body-params', s.apiConfig.excludedBodyParams || '');
+      setVal('api-extra-headers', s.apiConfig.extraHeaders || '');
+      setChecked('api-thinking-enabled', s.apiConfig.thinkingEnabled === true);
+      setVal('api-thinking-effort', s.apiConfig.thinkingEffort || 'none');
+
       setVal('import-split-size', s.importSplitSize);
       setChecked('import-prompt-exclude-imported-worldbook-entries', s.importPromptExcludeImportedWorldbookEntries !== false);
       if ($autoUpdateEnabledCheckbox_ACU) $autoUpdateEnabledCheckbox_ACU.prop('checked', s.autoUpdateEnabled);
@@ -175,6 +181,7 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
       setVal('worldbook-vector-memory-rerank-endpoint', (vectorMemoryConfig as any).rerankEndpoint || '');
       setVal('worldbook-vector-memory-rerank-model', (vectorMemoryConfig as any).rerankModel || '');
       setVal('worldbook-vector-memory-rerank-api-key', (vectorMemoryConfig as any).rerankApiKey || '');
+      setVal('worldbook-vector-memory-rerank-instruction', (vectorMemoryConfig as any).rerankInstruction || '');
       setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
       setChecked('worldbook-vector-memory-archive-without-summary', (vectorMemoryConfig as any).archiveWithoutSummary === true);
       setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);

@@ -361,6 +361,41 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
     });
     await expect(callCustomOpenAI_ACU({})).rejects.toThrow('内容为空');
   });
+
+  it('使用预设扩展配置合并请求体、请求头和思维链参数', async () => {
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: {
+        useMainApi: false,
+        url: 'https://api.example.com',
+        model: 'gpt-4',
+        apiKey: 'sk-test',
+        max_tokens: 4096,
+        extraBodyParams: 'top_k: 30',
+        excludedBodyParams: 'enable_web_search',
+        extraHeaders: 'CustomHeader: 自定义值',
+        thinkingEnabled: true,
+        thinkingEffort: 'max',
+      },
+      tavernProfile: '',
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'fetch回复' } }] }),
+    });
+
+    const result = await callCustomOpenAI_ACU({}, undefined, { tableApiPreset: 'table-preset' });
+
+    expect(result).toBe('fetch回复');
+    expect(mockGetApiConfigByPreset).toHaveBeenCalledWith('table-preset');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.top_k).toBe(30);
+    expect(body.thinking).toEqual({ type: 'enabled' });
+    expect(body.reasoning_effort).toBe('max');
+    expect(body).not.toHaveProperty('enable_web_search');
+    expect(body.custom_include_headers).toBe('Authorization: Bearer sk-test\nCustomHeader: 自定义值');
+  });
+
 });
 
 // ═══ callCustomOpenAI_ACU — tavern 模式 ═══

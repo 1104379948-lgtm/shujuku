@@ -185,6 +185,39 @@ describe('callAIWithPreset_ACU', () => {
     const result = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }], '预设B');
     expect(result).toBe('预设B回复');
   });
+
+  it('自定义 API 预设会应用附加 body、附加 headers、思维链和排除字段', async () => {
+    mockSettings.apiPresets = [{
+      name: '预设C',
+      apiMode: 'custom',
+      tavernProfile: '',
+      apiConfig: {
+        useMainApi: false,
+        url: 'https://api.example.com',
+        model: 'gpt-4',
+        apiKey: 'sk-test',
+        max_tokens: 4096,
+        extraBodyParams: 'top_k: 20',
+        excludedBodyParams: 'include_reasoning',
+        extraHeaders: 'CustomHeader: 自定义值',
+        thinkingEnabled: true,
+        thinkingEffort: 'max',
+      },
+    }];
+    mockFetch.mockResolvedValue({ ok: true });
+    mockHandleApiResponse.mockResolvedValue('预设C回复');
+
+    const result = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }], '预设C');
+
+    expect(result).toBe('预设C回复');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.top_k).toBe(20);
+    expect(body.thinking).toEqual({ type: 'enabled' });
+    expect(body.reasoning_effort).toBe('max');
+    expect(body).not.toHaveProperty('include_reasoning');
+    expect(body.custom_include_headers).toBe('Authorization: Bearer sk-test\nCustomHeader: 自定义值');
+  });
+
 });
 
 // ═══ callCustomOpenAI_ACU_Direct ═══

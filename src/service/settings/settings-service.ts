@@ -14,6 +14,8 @@ import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU,
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
 import { getCurrentVectorMemoryConfig_ACU } from '../vector/vector-memory-config';
+import { DEFAULT_API_REQUEST_OPTIONS_ACU } from '../ai/api-request-options';
+
 import { isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
 import { configIdbCacheLoaded_ACU, ensureConfigIdbCacheLoaded_ACU, getConfigStorage_ACU, initTavernSettingsBridge_ACU, migrateKeyToTavernStorageIfNeeded_ACU, pendingSettingsReloadFromIdb_ACU, _set_pendingSettingsReloadFromIdb_ACU} from '../../data/storage/tavern-storage';
 import { ensureTagRulesCompat_ACU } from '../plot/plot-logic';
@@ -545,7 +547,7 @@ function refreshDefaultTableTemplateOnce_ACU(activeCode: string) {
 
 export   function buildDefaultSettings_ACU() {
       return {
-          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, ...DEFAULT_API_REQUEST_OPTIONS_ACU },
           apiMode: 'custom',
           tavernProfile: '',
           streamingEnabled: false, // [新增] 流式传输开关（默认关闭）

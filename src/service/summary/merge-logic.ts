@@ -11,6 +11,7 @@ import { updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { saveIndependentTableToChatHistory_ACU } from '../table/table-service';
 import { extractTableEditInner_ACU } from '../ai/prompt-builder';
+import { applyApiRequestOptionsToBody_ACU, mergeCustomIncludeHeaders_ACU } from '../ai/api-request-options';
 
 // ═══ 自动合并纪要：触发检查 ═══
 
@@ -206,12 +207,12 @@ export async function executeAutoMergeBatch_ACU(
                     const res = await fetch(`/api/backends/chat-completions/generate`, {
                         method: 'POST',
                     headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
+                        body: JSON.stringify(applyApiRequestOptionsToBody_ACU({
                             "messages": finalMessages, "model": settings_ACU.apiConfig.model, "temperature": settings_ACU.apiConfig.temperature,
                             "max_tokens": settings_ACU.apiConfig.max_tokens || 4096, "stream": settings_ACU.streamingEnabled || false, "chat_completion_source": "custom",
                             "reverse_proxy": settings_ACU.apiConfig.url, "custom_url": settings_ACU.apiConfig.url,
-                            "custom_include_headers": settings_ACU.apiConfig.apiKey ? `Authorization: Bearer ${settings_ACU.apiConfig.apiKey}` : ""
-                        })
+                            "custom_include_headers": mergeCustomIncludeHeaders_ACU(settings_ACU.apiConfig.apiKey, settings_ACU.apiConfig.extraHeaders)
+                        }, settings_ACU.apiConfig))
                     });
                     if (!res.ok) throw new Error(`API请求失败: ${res.status} ${await res.text()}`);
                     aiResponseText = await handleApiResponse_ACU(res);

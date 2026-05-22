@@ -3,6 +3,7 @@
  */
 import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../../shared/defaults-json.js';
 import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
+import { DEFAULT_API_REQUEST_OPTIONS_ACU, normalizeApiRequestOptions_ACU } from '../../../service/ai/api-request-options';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
 import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, manualExtraHint_ACU, newMessageDebounceTimer_ACU, refreshCurrentPlotTaskApiPresetSelect_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU , _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_newMessageDebounceTimer_ACU} from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
@@ -147,6 +148,14 @@ import { getCurrentVectorMemoryConfig_ACU } from '../../../service/vector/vector
     const temperature = parseFloat($temperatureInput_ACU.val() as string);
 
 
+    const requestOptions = normalizeApiRequestOptions_ACU({
+      extraBodyParams: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-extra-body-params`).val(),
+      excludedBodyParams: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-excluded-body-params`).val(),
+      extraHeaders: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-extra-headers`).val(),
+      thinkingEnabled: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-thinking-enabled`).is(':checked'),
+      thinkingEffort: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-thinking-effort`).val(),
+    });
+
     if (!url) {
       showToastr_ACU('warning', 'API URL 不能为空。');
       return;
@@ -162,6 +171,7 @@ import { getCurrentVectorMemoryConfig_ACU } from '../../../service/vector/vector
         model,
         max_tokens: isNaN(max_tokens) ? 120000 : max_tokens,
         temperature: isNaN(temperature) ? 0.9 : temperature,
+        ...requestOptions,
     });
     // 将新保存的模型添加到select中（如果不存在）
     if ($customApiModelSelect_ACU && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU(model)}"]`).length === 0) {
@@ -173,7 +183,7 @@ import { getCurrentVectorMemoryConfig_ACU } from '../../../service/vector/vector
   }
 
   export function clearApiConfig_ACU() {
-    Object.assign(settings_ACU.apiConfig, { url: '', apiKey: '', model: '', max_tokens: 120000, temperature: 0.9 });
+    Object.assign(settings_ACU.apiConfig, { url: '', apiKey: '', model: '', max_tokens: 120000, temperature: 0.9, ...DEFAULT_API_REQUEST_OPTIONS_ACU });
     saveSettingsAndNotify_ACU();
     showToastr_ACU('info', 'API配置已清除！');
     loadSettingsAndRefreshUI_ACU();

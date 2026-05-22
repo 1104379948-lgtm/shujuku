@@ -221,6 +221,11 @@ export function generateTableTabHTML(): string {
                                             <input type="password" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key" placeholder="留空表示不附带 Authorization">
                                             <small class="notes">可与 Embedding 使用不同鉴权；若服务不需要鉴权可留空。</small>
                                         </div>
+                                        <div class="acu-col-sm">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction">Rerank 指令兼容文本</label>
+                                            <textarea id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction" rows="3" placeholder="默认：请判断查询与文档的相关性。\n按相关性降序排序。"></textarea>
+                                            <small class="notes">默认发送 instruction 字段：请判断查询与文档的相关性。按相关性降序排序。清空后才不发送 instruction 字段。</small>
+                                        </div>
                                     </div>
                                     <small class="notes" style="display: block; margin-top: 8px;">启用真实 Rerank 后，Embedding 仍负责召回预筛，TopK 仍控制最终注入数量；这三者不是互相替代关系。</small>
                                 </div>

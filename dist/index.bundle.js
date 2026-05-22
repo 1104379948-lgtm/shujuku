@@ -101,7 +101,7 @@
     function checkAndMarkInstance() {
         const hostWin = getHostWindow();
         if (hostWin[ACU_INSTANCE_FLAG]) {
-            console.warn('[SP·数据库 III] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
+            console.warn('[SP·数据库 IV] 检测到另一个实例已在运行，跳过初始化。请勿同时安装油猴脚本和酒馆插件。');
             return true; // 已有实例
         }
         hostWin[ACU_INSTANCE_FLAG] = true;
@@ -2761,6 +2761,7 @@ $CONTENT
     const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.6.3-keyword-prompt-content-based-refresh';
     const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.2-table-template-defaults';
     // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
+    const DEFAULT_RERANK_INSTRUCTION_ACU = '请判断查询与文档的相关性。\n按相关性降序排序。';
     const defaultVectorMemoryConfig_ACU = {
         enabled: false,
         threshold: 50,
@@ -2776,6 +2777,7 @@ $CONTENT
         rerankEndpoint: '',
         rerankApiKey: '',
         rerankModel: '',
+        rerankInstruction: DEFAULT_RERANK_INSTRUCTION_ACU,
         vectorNamespace: 'chat',
         entryComment: 'TavernDB-ACU-VectorMemory',
         entryKey: 'TavernDB-ACU-VectorMemory-Key',
@@ -3144,6 +3146,197 @@ $CONTENT
         return out.length > 80 ? out.slice(0, 80).trim() : out;
     }
 
+    const API_THINKING_EFFORT_VALUES_ACU = ['none', 'high', 'max'];
+    const DEFAULT_API_REQUEST_OPTIONS_ACU = {
+        extraBodyParams: '',
+        excludedBodyParams: '',
+        extraHeaders: '',
+        thinkingEnabled: false,
+        thinkingEffort: 'none',
+    };
+    const PROTECTED_BODY_KEYS_ACU = new Set([
+        'messages',
+        'model',
+        'reverse_proxy',
+        'custom_url',
+        'custom_include_headers',
+        'chat_completion_source',
+    ]);
+    function normalizeText_ACU$2(value) {
+        return typeof value === 'string' ? value.trim() : '';
+    }
+    function normalizeThinkingEffort_ACU(value) {
+        const normalized = normalizeText_ACU$2(value);
+        return API_THINKING_EFFORT_VALUES_ACU.includes(normalized)
+            ? normalized
+            : DEFAULT_API_REQUEST_OPTIONS_ACU.thinkingEffort;
+    }
+    function normalizeApiRequestOptions_ACU(apiConfig) {
+        const source = apiConfig && typeof apiConfig === 'object' ? apiConfig : {};
+        return {
+            extraBodyParams: normalizeText_ACU$2(source.extraBodyParams),
+            excludedBodyParams: normalizeText_ACU$2(source.excludedBodyParams),
+            extraHeaders: normalizeText_ACU$2(source.extraHeaders),
+            thinkingEnabled: source.thinkingEnabled === true,
+            thinkingEffort: normalizeThinkingEffort_ACU(source.thinkingEffort),
+        };
+    }
+    function getDefaultApiConfigRequestOptions_ACU() {
+        return { ...DEFAULT_API_REQUEST_OPTIONS_ACU };
+    }
+    function stripInlineComment_ACU(line) {
+        const hashIndex = line.indexOf('#');
+        return hashIndex >= 0 ? line.slice(0, hashIndex).trim() : line.trim();
+    }
+    function parseScalar_ACU(rawValue) {
+        const value = rawValue.trim();
+        if (!value)
+            return '';
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            return value.slice(1, -1);
+        }
+        if (value === 'true')
+            return true;
+        if (value === 'false')
+            return false;
+        if (value === 'null')
+            return null;
+        if (/^-?\d+(?:\.\d+)?$/.test(value))
+            return Number(value);
+        if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
+            try {
+                return JSON.parse(value);
+            }
+            catch {
+                return value;
+            }
+        }
+        return value;
+    }
+    function parseApiExtraBodyParams_ACU(raw) {
+        const text = normalizeText_ACU$2(raw);
+        if (!text)
+            return {};
+        try {
+            const parsed = JSON.parse(text);
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        }
+        catch {
+            // fall through to restricted YAML-like parser
+        }
+        const result = {};
+        const lines = text.split(/\r?\n/);
+        for (const sourceLine of lines) {
+            const line = stripInlineComment_ACU(sourceLine);
+            if (!line)
+                continue;
+            const separatorIndex = line.indexOf(':');
+            if (separatorIndex <= 0) {
+                logWarn_ACU(`[API附加主体参数] 忽略无法解析的行: ${sourceLine}`);
+                continue;
+            }
+            const key = line.slice(0, separatorIndex).trim();
+            if (!key || /\s/.test(key)) {
+                logWarn_ACU(`[API附加主体参数] 忽略非法字段名: ${key}`);
+                continue;
+            }
+            result[key] = parseScalar_ACU(line.slice(separatorIndex + 1));
+        }
+        return result;
+    }
+    function parseApiExcludedBodyParams_ACU(raw) {
+        const text = normalizeText_ACU$2(raw);
+        if (!text)
+            return [];
+        try {
+            const parsed = JSON.parse(text);
+            if (Array.isArray(parsed)) {
+                return parsed.map(item => normalizeText_ACU$2(item)).filter(Boolean);
+            }
+        }
+        catch {
+            // fall through to restricted YAML-like parser
+        }
+        return text
+            .split(/\r?\n|,/)
+            .map(line => stripInlineComment_ACU(line).replace(/^-\s*/, '').trim())
+            .filter(Boolean);
+    }
+    function parseApiExtraHeaders_ACU(raw) {
+        const text = normalizeText_ACU$2(raw);
+        if (!text)
+            return {};
+        try {
+            const parsed = JSON.parse(text);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return Object.fromEntries(Object.entries(parsed)
+                    .map(([key, value]) => [String(key).trim(), String(value ?? '').trim()])
+                    .filter(([key, value]) => key && value));
+            }
+        }
+        catch {
+            // fall through to restricted YAML-like parser
+        }
+        const result = {};
+        const lines = text.split(/\r?\n/);
+        for (const sourceLine of lines) {
+            const line = stripInlineComment_ACU(sourceLine);
+            if (!line)
+                continue;
+            const separatorIndex = line.indexOf(':');
+            if (separatorIndex <= 0) {
+                logWarn_ACU(`[API附加请求头] 忽略无法解析的行: ${sourceLine}`);
+                continue;
+            }
+            const key = line.slice(0, separatorIndex).trim();
+            const value = line.slice(separatorIndex + 1).trim();
+            if (!key || !value)
+                continue;
+            result[key] = value;
+        }
+        return result;
+    }
+    function mergeCustomIncludeHeaders_ACU(apiKey, extraHeadersRaw) {
+        const lines = [];
+        const normalizedApiKey = normalizeText_ACU$2(apiKey);
+        if (normalizedApiKey) {
+            lines.push(`Authorization: Bearer ${normalizedApiKey}`);
+        }
+        const extraHeaders = parseApiExtraHeaders_ACU(extraHeadersRaw);
+        Object.entries(extraHeaders).forEach(([key, value]) => {
+            if (!key || !value)
+                return;
+            if (key.toLowerCase() === 'authorization' && normalizedApiKey) {
+                logWarn_ACU('[API附加请求头] 已存在 API Key，忽略附加 Authorization 头，避免覆盖鉴权。');
+                return;
+            }
+            lines.push(`${key}: ${value}`);
+        });
+        return lines.join('\n');
+    }
+    function applyApiRequestOptionsToBody_ACU(requestBody, apiConfig) {
+        const body = requestBody && typeof requestBody === 'object' ? requestBody : {};
+        const options = normalizeApiRequestOptions_ACU(apiConfig);
+        const extraBodyParams = parseApiExtraBodyParams_ACU(options.extraBodyParams);
+        Object.entries(extraBodyParams).forEach(([key, value]) => {
+            if (PROTECTED_BODY_KEYS_ACU.has(key)) {
+                logWarn_ACU(`[API附加主体参数] 跳过受保护字段: ${key}`);
+                return;
+            }
+            body[key] = value;
+        });
+        if (options.thinkingEnabled && options.thinkingEffort !== 'none') {
+            body.thinking = { type: 'enabled' };
+            body.reasoning_effort = options.thinkingEffort;
+        }
+        const excludedBodyParams = parseApiExcludedBodyParams_ACU(options.excludedBodyParams);
+        excludedBodyParams.forEach((key) => {
+            if (key)
+                delete body[key];
+        });
+        return body;
+    }
+
     /**
      * shared/host-api.ts — 宿主平台 API 引用
      * SillyTavern、TavernHelper、jQuery、toastr 的运行时引用。
@@ -3445,7 +3638,7 @@ $CONTENT
     let currentJsonTableData_ACU = null;
     let independentTableStates_ACU = {};
     let settings_ACU = {
-        apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+        apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, ...DEFAULT_API_REQUEST_OPTIONS_ACU },
         apiMode: 'custom',
         streamingEnabled: false,
         tavernProfile: '',
@@ -3638,6 +3831,7 @@ $CONTENT
             rerankEndpoint: normalizeTextField_ACU(source.rerankEndpoint, defaults.rerankEndpoint),
             rerankApiKey: normalizeTextField_ACU(source.rerankApiKey, defaults.rerankApiKey),
             rerankModel: normalizeTextField_ACU(source.rerankModel, defaults.rerankModel),
+            rerankInstruction: normalizeTextField_ACU(source.rerankInstruction, defaults.rerankInstruction),
             vectorNamespace: normalizeTextField_ACU(source.vectorNamespace, defaults.vectorNamespace) || defaults.vectorNamespace,
             entryComment: normalizeTextField_ACU(source.entryComment, defaults.entryComment) || defaults.entryComment,
             entryKey: normalizeTextField_ACU(source.entryKey, defaults.entryKey) || defaults.entryKey,
@@ -6282,12 +6476,10 @@ $CONTENT
         const layer = readTablePersistenceLayerV2_ACU(msg, isolationKey);
         return !!(layer?.checkpoint || hasTablePersistenceDeltasV2_ACU(layer));
     }
-    function messageHasLegacyTableSnapshot_ACU(msg, isolationKey, isolationConfig) {
+    function messageHasLegacyTableSnapshot_ACU(msg, isolationKey, _isolationConfig) {
         const tagData = readIsolatedTagData_ACU(msg, isolationKey);
         if (hasAnySheetKey_ACU$2(tagData?.independentData))
             return true;
-        if (!isLegacyMatchForIsolation_ACU(msg, isolationConfig))
-            return false;
         return hasAnySheetKey_ACU$2(msg?.TavernDB_ACU_IndependentData)
             || hasAnySheetKey_ACU$2(msg?.TavernDB_ACU_Data)
             || hasAnySheetKey_ACU$2(msg?.TavernDB_ACU_SummaryData);
@@ -6312,50 +6504,42 @@ $CONTENT
     function isSheetLike_ACU(value) {
         return !!value && typeof value === 'object' && Array.isArray(value.content);
     }
-    function shouldAcceptSheet_ACU(sheetKey, sheet, templateSheetKeySet) {
+    function shouldAcceptSheet_ACU(sheetKey, sheet) {
         if (!sheetKey.startsWith('sheet_'))
-            return false;
-        if (templateSheetKeySet && !templateSheetKeySet.has(sheetKey))
             return false;
         return isSheetLike_ACU(sheet);
     }
-    function mergeIndependentSnapshot_ACU(out, foundSheets, independentData, templateSheetKeySet) {
+    function mergeIndependentSnapshot_ACU(out, foundSheets, independentData) {
         if (!independentData || typeof independentData !== 'object')
             return;
         Object.keys(independentData).forEach(sheetKey => {
             if (foundSheets.has(sheetKey))
                 return;
             const sheet = independentData[sheetKey];
-            if (!shouldAcceptSheet_ACU(sheetKey, sheet, templateSheetKeySet))
+            if (!shouldAcceptSheet_ACU(sheetKey, sheet))
                 return;
             out[sheetKey] = cloneJson_ACU$5(sheet);
             foundSheets.add(sheetKey);
         });
     }
-    function mergeLegacyContainer_ACU(out, foundSheets, container, options) {
+    function mergeLegacyContainer_ACU(out, foundSheets, container) {
         if (!container || typeof container !== 'object')
             return;
         Object.keys(container).forEach(sheetKey => {
             if (foundSheets.has(sheetKey))
                 return;
             const sheet = container[sheetKey];
-            if (!shouldAcceptSheet_ACU(sheetKey, sheet, options.templateSheetKeySet))
-                return;
-            const isSummary = isSummaryOrOutlineTable_ACU(sheet.name || '');
-            if (options.summaryOnly !== isSummary)
+            if (!shouldAcceptSheet_ACU(sheetKey, sheet))
                 return;
             out[sheetKey] = cloneJson_ACU$5(sheet);
             foundSheets.add(sheetKey);
         });
     }
     function buildLegacyCheckpointFromChat_ACU(chat, options) {
-        const templateSheetKeySet = Array.isArray(options.templateSheetKeys) && options.templateSheetKeys.length > 0
-            ? new Set(options.templateSheetKeys)
-            : undefined;
         const endIndex = Number.isFinite(options.targetBoundaryMessageIndex)
             ? Math.min(Math.trunc(Number(options.targetBoundaryMessageIndex)), chat.length - 1)
             : chat.length - 1;
-        const scanLegacySnapshots = (activeTemplateSheetKeySet) => {
+        const scanLegacySnapshots = () => {
             const data = createEmptyTableData_ACU();
             const foundSheets = new Set();
             const modifiedKeys = new Set();
@@ -6367,35 +6551,24 @@ $CONTENT
                     continue;
                 const tagData = readIsolatedTagData_ACU(message, options.isolationKey);
                 if (tagData) {
-                    mergeIndependentSnapshot_ACU(data, foundSheets, tagData.independentData, activeTemplateSheetKeySet);
+                    mergeIndependentSnapshot_ACU(data, foundSheets, tagData.independentData);
                     (tagData.modifiedKeys || []).forEach(key => modifiedKeys.add(key));
                     (tagData.updateGroupKeys || []).forEach(key => updateGroupKeys.add(key));
                     if (checkpointMessageIndex === undefined && foundSheets.size > 0)
                         checkpointMessageIndex = i;
                 }
-                if (!isLegacyMatchForIsolation_ACU(message, options.isolationConfig))
-                    continue;
                 const legacyIndependent = readLegacyIndependentData_ACU(message);
-                mergeIndependentSnapshot_ACU(data, foundSheets, legacyIndependent, activeTemplateSheetKeySet);
+                mergeIndependentSnapshot_ACU(data, foundSheets, legacyIndependent);
                 readModifiedKeys_ACU(message).forEach(key => modifiedKeys.add(key));
                 readUpdateGroupKeys_ACU(message).forEach(key => updateGroupKeys.add(key));
-                mergeLegacyContainer_ACU(data, foundSheets, readLegacyStandardData_ACU(message), {
-                    templateSheetKeySet: activeTemplateSheetKeySet,
-                    summaryOnly: false,
-                });
-                mergeLegacyContainer_ACU(data, foundSheets, readLegacySummaryData_ACU(message), {
-                    templateSheetKeySet: activeTemplateSheetKeySet,
-                    summaryOnly: true,
-                });
+                mergeLegacyContainer_ACU(data, foundSheets, readLegacyStandardData_ACU(message));
+                mergeLegacyContainer_ACU(data, foundSheets, readLegacySummaryData_ACU(message));
                 if (checkpointMessageIndex === undefined && foundSheets.size > 0)
                     checkpointMessageIndex = i;
             }
             return { data, foundSheets, modifiedKeys, updateGroupKeys, checkpointMessageIndex };
         };
-        let scanResult = scanLegacySnapshots(templateSheetKeySet);
-        if (scanResult.foundSheets.size === 0 && templateSheetKeySet) {
-            scanResult = scanLegacySnapshots(undefined);
-        }
+        const scanResult = scanLegacySnapshots();
         const { data, foundSheets, modifiedKeys, updateGroupKeys, checkpointMessageIndex } = scanResult;
         if (foundSheets.size === 0 || checkpointMessageIndex === undefined) {
             return { checkpoint: null, modifiedKeys: [], updateGroupKeys: [] };
@@ -6444,7 +6617,7 @@ $CONTENT
         return !!value && typeof value === 'object' && !Array.isArray(value)
             && Object.keys(value).some(key => key.startsWith('sheet_'));
     }
-    function messageHasCurrentIsolationLocalTableLayer_ACU(message, isolationKey, isolationConfig) {
+    function messageHasCurrentIsolationLocalTableLayer_ACU(message, isolationKey, _isolationConfig) {
         if (!message || message.is_user)
             return false;
         const layer = readTablePersistenceLayerV2_ACU(message, isolationKey);
@@ -6457,8 +6630,6 @@ $CONTENT
             return true;
         if (Array.isArray(tagData?.updateGroupKeys) && tagData.updateGroupKeys.length > 0)
             return true;
-        if (!isLegacyMatchForIsolation_ACU(message, isolationConfig))
-            return false;
         if (hasAnySheetKey_ACU$1(readLegacyIndependentData_ACU(message)))
             return true;
         if (hasAnySheetKey_ACU$1(readLegacyStandardData_ACU(message)))
@@ -6505,17 +6676,18 @@ $CONTENT
         };
     }
     function migrateLegacyCheckpointToRootMessage_ACU(chat, isolationKey, isolationConfig, checkpoint, options = {}) {
-        const anchorMessageIndex = resolveLegacyCheckpointAnchorMessageIndex_ACU(chat, isolationKey, isolationConfig, options.retainRecentLayers);
+        const hintedIndex = Number.isInteger(checkpoint.messageIndexHint) ? Number(checkpoint.messageIndexHint) : -1;
+        const anchorMessageIndex = hintedIndex >= 0 && hintedIndex < chat.length
+            ? hintedIndex
+            : resolveLegacyCheckpointAnchorMessageIndex_ACU(chat, isolationKey, isolationConfig, options.retainRecentLayers);
         if (anchorMessageIndex < 0)
             return null;
         const anchorMessage = chat[anchorMessageIndex];
         if (!anchorMessage || anchorMessage.is_user)
             return null;
+        // Legacy 快照来自当前聊天楼层：bootstrap 只写入最新参与 legacy 合并的 AI 楼层，旧字段交给 retention 自然淘汰。
         const rootCheckpoint = createLegacyRootCheckpoint_ACU(checkpoint, anchorMessageIndex);
         migrateLegacyCheckpointToMessage_ACU(anchorMessage, isolationKey, rootCheckpoint);
-        for (const message of chat) {
-            clearCurrentIsolationLegacyTableSnapshots_ACU(message, isolationKey, isolationConfig);
-        }
         return { messageIndex: anchorMessageIndex, checkpoint: rootCheckpoint };
     }
 
@@ -6884,12 +7056,9 @@ $CONTENT
             if (tagData?.independentData && Object.keys(tagData.independentData).some(k => k.startsWith('sheet_'))) {
                 return false;
             }
-            const isolationConfig = { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
-            if (isLegacyMatchForIsolation_ACU(message, isolationConfig)) {
-                const legacyIndep = readLegacyIndependentData_ACU(message);
-                if (legacyIndep && Object.keys(legacyIndep).some(k => k.startsWith('sheet_'))) {
-                    return false;
-                }
+            const legacyIndep = readLegacyIndependentData_ACU(message);
+            if (legacyIndep && Object.keys(legacyIndep).some(k => k.startsWith('sheet_'))) {
+                return false;
             }
         }
         return true;
@@ -14796,7 +14965,7 @@ $CONTENT
                     }
                     const generateUrl = `/api/backends/chat-completions/generate`;
                     const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
-                    const body = JSON.stringify({
+                    const requestBody = {
                         "messages": messages,
                         "model": effectiveApiConfig.model,
                         "temperature": effectiveApiConfig.temperature,
@@ -14813,8 +14982,10 @@ $CONTENT
                         "reverse_proxy": effectiveApiConfig.url,
                         "proxy_password": "",
                         "custom_url": effectiveApiConfig.url,
-                        "custom_include_headers": effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : ""
-                    });
+                        "custom_include_headers": mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders)
+                    };
+                    applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
+                    const body = JSON.stringify(requestBody);
                     logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
                     const response = await fetch(generateUrl, { method: 'POST', headers, body, signal: abortSignal });
                     if (!response.ok) {
@@ -14960,8 +15131,9 @@ $CONTENT
                 reverse_proxy: effectiveApiConfig.url,
                 proxy_password: '',
                 custom_url: effectiveApiConfig.url,
-                custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
+                custom_include_headers: mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders),
             };
+            applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
             const response = await fetch('/api/backends/chat-completions/generate', {
                 method: 'POST',
                 headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
@@ -15022,8 +15194,9 @@ $CONTENT
                 reverse_proxy: effectiveApiConfig.url,
                 proxy_password: '',
                 custom_url: effectiveApiConfig.url,
-                custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
+                custom_include_headers: mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders),
             };
+            applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
             const response = await fetch('/api/backends/chat-completions/generate', {
                 method: 'POST',
                 headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
@@ -15084,7 +15257,7 @@ $CONTENT
             }
             else {
                 const url = `/api/backends/chat-completions/generate`;
-                const body = JSON.stringify({
+                const requestBody = {
                     messages: messages,
                     model: settings_ACU.apiConfig.model,
                     max_tokens: settings_ACU.apiConfig.max_tokens,
@@ -15093,8 +15266,10 @@ $CONTENT
                     // ... other params
                     reverse_proxy: settings_ACU.apiConfig.url,
                     custom_url: settings_ACU.apiConfig.url,
-                    custom_include_headers: settings_ACU.apiConfig.apiKey ? `Authorization: Bearer ${settings_ACU.apiConfig.apiKey}` : ""
-                });
+                    custom_include_headers: mergeCustomIncludeHeaders_ACU(settings_ACU.apiConfig.apiKey, settings_ACU.apiConfig.extraHeaders)
+                };
+                applyApiRequestOptionsToBody_ACU(requestBody, settings_ACU.apiConfig);
+                const body = JSON.stringify(requestBody);
                 const res = await fetch(url, { method: 'POST', headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' }, body });
                 // 根据streamingEnabled设置选择响应处理方式
                 const content = await handleApiResponse_ACU(res);
@@ -15145,7 +15320,7 @@ $CONTENT
         if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
             throw new Error('自定义API的URL或模型未配置。');
         }
-        const body = JSON.stringify({
+        const requestBody = {
             messages,
             model: effectiveApiConfig.model,
             temperature: effectiveApiConfig.temperature || 1.0,
@@ -15162,8 +15337,10 @@ $CONTENT
             reverse_proxy: effectiveApiConfig.url,
             proxy_password: '',
             custom_url: effectiveApiConfig.url,
-            custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
-        });
+            custom_include_headers: mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders),
+        };
+        applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
+        const body = JSON.stringify(requestBody);
         const res = await fetch('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
@@ -19167,9 +19344,7 @@ $CONTENT
         }
         return true;
     }
-    function deleteRootLegacyTableFields_ACU(msg, isolationConfig) {
-        if (!isLegacyMatchForIsolation_ACU(msg, isolationConfig))
-            return false;
+    function deleteRootLegacyTableFields_ACU(msg, _isolationConfig) {
         let changed = false;
         const keysToDelete = [
             'TavernDB_ACU_Data',
@@ -25993,7 +26168,7 @@ $CONTENT
     }
     function buildDefaultSettings_ACU() {
         return {
-            apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+            apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, ...DEFAULT_API_REQUEST_OPTIONS_ACU },
             apiMode: 'custom',
             tavernProfile: '',
             streamingEnabled: false, // [新增] 流式传输开关（默认关闭）
@@ -26393,12 +26568,12 @@ $CONTENT
                         const res = await fetch(`/api/backends/chat-completions/generate`, {
                             method: 'POST',
                             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
+                            body: JSON.stringify(applyApiRequestOptionsToBody_ACU({
                                 "messages": finalMessages, "model": settings_ACU.apiConfig.model, "temperature": settings_ACU.apiConfig.temperature,
                                 "max_tokens": settings_ACU.apiConfig.max_tokens || 4096, "stream": settings_ACU.streamingEnabled || false, "chat_completion_source": "custom",
                                 "reverse_proxy": settings_ACU.apiConfig.url, "custom_url": settings_ACU.apiConfig.url,
-                                "custom_include_headers": settings_ACU.apiConfig.apiKey ? `Authorization: Bearer ${settings_ACU.apiConfig.apiKey}` : ""
-                            })
+                                "custom_include_headers": mergeCustomIncludeHeaders_ACU(settings_ACU.apiConfig.apiKey, settings_ACU.apiConfig.extraHeaders)
+                            }, settings_ACU.apiConfig))
                         });
                         if (!res.ok)
                             throw new Error(`API请求失败: ${res.status} ${await res.text()}`);
@@ -28451,6 +28626,9 @@ $CONTENT
         bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key`, 'input change', ($input) => {
             updateVectorMemoryField_ACU('rerankApiKey', String($input.val() ?? '').trim());
         });
+        bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction`, 'input change', ($input) => {
+            updateVectorMemoryField_ACU('rerankInstruction', String($input.val() ?? '').trim());
+        });
         bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit`, 'input change', ($input) => {
             const defaults = getDefaultVectorMemoryConfig_ACU();
             updateVectorMemoryField_ACU('summaryChunkSentenceCount', parseIntegerField_ACU($input.val(), defaults.summaryChunkSentenceCount));
@@ -29018,6 +29196,13 @@ $CONTENT
         const model = String($customApiModelInput_ACU.val() || '').trim();
         const max_tokens = parseInt($maxTokensInput_ACU.val(), 10);
         const temperature = parseFloat($temperatureInput_ACU.val());
+        const requestOptions = normalizeApiRequestOptions_ACU({
+            extraBodyParams: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-extra-body-params`).val(),
+            excludedBodyParams: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-excluded-body-params`).val(),
+            extraHeaders: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-extra-headers`).val(),
+            thinkingEnabled: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-thinking-enabled`).is(':checked'),
+            thinkingEffort: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-thinking-effort`).val(),
+        });
         if (!url) {
             showToastr_ACU('warning', 'API URL 不能为空。');
             return;
@@ -29032,6 +29217,7 @@ $CONTENT
             model,
             max_tokens: isNaN(max_tokens) ? 120000 : max_tokens,
             temperature: isNaN(temperature) ? 0.9 : temperature,
+            ...requestOptions,
         });
         // 将新保存的模型添加到select中（如果不存在）
         if ($customApiModelSelect_ACU && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU$1(model)}"]`).length === 0) {
@@ -29042,7 +29228,7 @@ $CONTENT
         loadSettingsAndRefreshUI_ACU();
     }
     function clearApiConfig_ACU() {
-        Object.assign(settings_ACU.apiConfig, { url: '', apiKey: '', model: '', max_tokens: 120000, temperature: 0.9 });
+        Object.assign(settings_ACU.apiConfig, { url: '', apiKey: '', model: '', max_tokens: 120000, temperature: 0.9, ...DEFAULT_API_REQUEST_OPTIONS_ACU });
         saveSettingsAndNotify_ACU();
         showToastr_ACU('info', 'API配置已清除！');
         loadSettingsAndRefreshUI_ACU();
@@ -32330,6 +32516,11 @@ $CONTENT
             $el.val(v); };
         const setChecked = (id, v) => { const $el = find(id); if ($el.length)
             $el.prop('checked', !!v); };
+        setVal('api-extra-body-params', s.apiConfig.extraBodyParams || '');
+        setVal('api-excluded-body-params', s.apiConfig.excludedBodyParams || '');
+        setVal('api-extra-headers', s.apiConfig.extraHeaders || '');
+        setChecked('api-thinking-enabled', s.apiConfig.thinkingEnabled === true);
+        setVal('api-thinking-effort', s.apiConfig.thinkingEffort || 'none');
         setVal('import-split-size', s.importSplitSize);
         setChecked('import-prompt-exclude-imported-worldbook-entries', s.importPromptExcludeImportedWorldbookEntries !== false);
         if ($autoUpdateEnabledCheckbox_ACU)
@@ -32368,6 +32559,7 @@ $CONTENT
         setVal('worldbook-vector-memory-rerank-endpoint', vectorMemoryConfig.rerankEndpoint || '');
         setVal('worldbook-vector-memory-rerank-model', vectorMemoryConfig.rerankModel || '');
         setVal('worldbook-vector-memory-rerank-api-key', vectorMemoryConfig.rerankApiKey || '');
+        setVal('worldbook-vector-memory-rerank-instruction', vectorMemoryConfig.rerankInstruction || '');
         setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
         setChecked('worldbook-vector-memory-archive-without-summary', vectorMemoryConfig.archiveWithoutSummary === true);
         setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);
@@ -46176,6 +46368,39 @@ $CONTENT
                                 <div class="button-group" style="margin-top: 10px;">
                                     <button id="${SCRIPT_ID_PREFIX_ACU}-load-models">加载模型列表</button>
                                 </div>
+                                <div class="acu-divider-dashed" style="margin: 14px 0 12px 0;"></div>
+                                <label class="acu-label">附加参数</label>
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-api-extra-body-params">包括主体参数</label>
+                                <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-extra-body-params" rows="6" class="text_pole" placeholder="聊天完成请求主体中要包含的参数（JSON 对象或简单 YAML）&#10;&#10;示例：&#10;top_k: 20&#10;repetition_penalty: 1.1"></textarea>
+                                <small class="notes">会合并进独立自定义 API 请求体；messages/model/reverse_proxy/custom_url 等关键字段会被保护，避免误覆盖基础请求。</small>
+
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-api-excluded-body-params" style="margin-top: 10px;">排除主体参数</label>
+                                <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-excluded-body-params" rows="5" class="text_pole" placeholder="要从聊天完成请求主体中排除的参数（JSON 数组或每行一个字段）&#10;&#10;示例：&#10;- frequency_penalty&#10;- presence_penalty"></textarea>
+                                <small class="notes">在附加参数和思维参数合并后执行，可用于移除某些服务不接受的字段，例如 reasoning_effort 或 thinking。</small>
+
+                                <label for="${SCRIPT_ID_PREFIX_ACU}-api-extra-headers" style="margin-top: 10px;">包含请求标头</label>
+                                <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-extra-headers" rows="5" class="text_pole" placeholder="聊天完成请求的附加上游请求头（JSON 对象或简单 YAML）&#10;&#10;示例：&#10;CustomHeader: 自定义值&#10;AnotherHeader: 自定义值"></textarea>
+                                <small class="notes">这些标头会并入 custom_include_headers 转发给自定义上游 API，不会写入插件调用酒馆后端的 fetch headers。</small>
+
+                                <div class="acu-grid" style="margin-top: 10px;">
+                                    <div>
+                                        <div class="checkbox-group">
+                                            <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-api-thinking-enabled">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-api-thinking-enabled">启用思维模式参数</label>
+                                        </div>
+                                        <small class="notes">开启后发送 <code>thinking: { type: 'enabled' }</code>。</small>
+                                    </div>
+                                    <div>
+                                        <label for="${SCRIPT_ID_PREFIX_ACU}-api-thinking-effort">思维强度</label>
+                                        <select id="${SCRIPT_ID_PREFIX_ACU}-api-thinking-effort" class="text_pole">
+                                            <option value="none">不启用</option>
+                                            <option value="high">high</option>
+                                            <option value="max">max</option>
+                                        </select>
+                                        <small class="notes">默认不启用；选择 high/max 并开启思维模式时写入 <code>reasoning_effort</code>。兼容规则：low/medium 可用 high 替代，xhigh 可用 max 替代。</small>
+                                    </div>
+                                </div>
+
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-api-model-input" style="margin-top: 10px;">模型名称 (手动输入):</label>
                                 <input type="text" id="${SCRIPT_ID_PREFIX_ACU}-api-model-input" class="text_pole" placeholder="输入模型名称或从下方选择">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-api-model-select" style="margin-top: 8px;">或从列表选择:</label>
@@ -46427,6 +46652,11 @@ $CONTENT
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key">Rerank API Key</label>
                                             <input type="password" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key" placeholder="留空表示不附带 Authorization">
                                             <small class="notes">可与 Embedding 使用不同鉴权；若服务不需要鉴权可留空。</small>
+                                        </div>
+                                        <div class="acu-col-sm">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction">Rerank 指令兼容文本</label>
+                                            <textarea id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction" rows="3" placeholder="默认：请判断查询与文档的相关性。\n按相关性降序排序。"></textarea>
+                                            <small class="notes">默认发送 instruction 字段：请判断查询与文档的相关性。按相关性降序排序。清空后才不发送 instruction 字段。</small>
                                         </div>
                                     </div>
                                     <small class="notes" style="display: block; margin-top: 8px;">启用真实 Rerank 后，Embedding 仍负责召回预筛，TopK 仍控制最终注入数量；这三者不是互相替代关系。</small>
@@ -48893,7 +49123,7 @@ $CONTENT
         const windowId = `${SCRIPT_ID_PREFIX_ACU}-main-window`;
         createACUWindow({
             id: windowId,
-            title: 'SP·数据库 III',
+            title: 'SP·数据库 IV',
             content: popupHtml,
             width: 1400, // 基础宽度
             height: 900, // 基础高度
@@ -48974,7 +49204,7 @@ $CONTENT
             return true;
         }
         $menuItemContainer = jQuery_API_ACU(`<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`);
-        const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>SP·数据库 III</span></div>`;
+        const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开数据库自动更新工具"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>SP·数据库 IV</span></div>`;
         const $menuItem = jQuery_API_ACU(menuItemHTML);
         $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
             e.stopPropagation();
@@ -49470,14 +49700,19 @@ $CONTENT
             const apiKey = normalizeText_ACU(config.rerankApiKey);
             if (apiKey)
                 headers.Authorization = `Bearer ${apiKey}`;
+            const rerankInstruction = normalizeText_ACU(config.rerankInstruction);
+            const requestBody = {
+                model,
+                query,
+                documents: candidates.map((candidate) => candidate.chunk.text),
+            };
+            if (rerankInstruction) {
+                requestBody.instruction = rerankInstruction;
+            }
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({
-                    model,
-                    query,
-                    documents: candidates.map((candidate) => candidate.chunk.text),
-                }),
+                body: JSON.stringify(requestBody),
             });
             if (!response.ok)
                 throw new Error(await response.text().catch(() => response.statusText));
@@ -52333,7 +52568,7 @@ $CONTENT
                                 return null;
                             }
                             const url = `/api/backends/chat-completions/generate`;
-                            const body = JSON.stringify({
+                            const requestBody = {
                                 "messages": messages,
                                 "model": effectiveApiConfig.model,
                                 "temperature": effectiveApiConfig.temperature || 1.0,
@@ -52350,9 +52585,10 @@ $CONTENT
                                 "reverse_proxy": effectiveApiConfig.url,
                                 "proxy_password": "",
                                 "custom_url": effectiveApiConfig.url,
-                                "custom_include_headers": effectiveApiConfig.apiKey ?
-                                    `Authorization: Bearer ${effectiveApiConfig.apiKey}` : ""
-                            });
+                                "custom_include_headers": mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders)
+                            };
+                            applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
+                            const body = JSON.stringify(requestBody);
                             const headers = {
                                 ...getHostRequestHeaders_ACU(),
                                 'Content-Type': 'application/json'
@@ -55328,7 +55564,7 @@ $CONTENT
     $(function () {
         // 互斥检测：如果已有实例（插件或另一个油猴脚本）在运行，跳过初始化
         if (checkAndMarkInstance()) {
-            console.warn('[SP·数据库 III] 油猴脚本检测到已有实例运行，跳过初始化。');
+            console.warn('[SP·数据库 IV] 油猴脚本检测到已有实例运行，跳过初始化。');
             return;
         }
         console.log('ACU_INIT_DEBUG: Document is ready, attempting to initialize ACU script (Userscript mode).');

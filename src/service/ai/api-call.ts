@@ -5,6 +5,7 @@ import { handleApiResponse_ACU } from './prompt-builder';
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { applyApiRequestOptionsToBody_ACU, mergeCustomIncludeHeaders_ACU } from './api-request-options';
 
 /**
  * 剧情推进任务级 API 调用 — 接受显式预设名称
@@ -53,8 +54,9 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName: str
         reverse_proxy: effectiveApiConfig.url,
         proxy_password: '',
         custom_url: effectiveApiConfig.url,
-        custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
+        custom_include_headers: mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders),
       };
+      applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
 
       const response = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
@@ -122,8 +124,9 @@ export   async function callApi_ACU(messages: any[], apiSettings: any, abortSign
         reverse_proxy: effectiveApiConfig.url,
         proxy_password: '',
         custom_url: effectiveApiConfig.url,
-        custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
+        custom_include_headers: mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders),
       };
+      applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
 
       const response = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
@@ -195,7 +198,7 @@ export   async function callCustomOpenAI_ACU_Direct(messages: any[]) {
              return await generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false });
           } else {
              const url = `/api/backends/chat-completions/generate`;
-             const body = JSON.stringify({
+             const requestBody = {
                  messages: messages,
                  model: settings_ACU.apiConfig.model,
                  max_tokens: settings_ACU.apiConfig.max_tokens,
@@ -204,8 +207,10 @@ export   async function callCustomOpenAI_ACU_Direct(messages: any[]) {
                  // ... other params
                  reverse_proxy: settings_ACU.apiConfig.url,
                  custom_url: settings_ACU.apiConfig.url,
-                 custom_include_headers: settings_ACU.apiConfig.apiKey ? `Authorization: Bearer ${settings_ACU.apiConfig.apiKey}` : ""
-             });
+                 custom_include_headers: mergeCustomIncludeHeaders_ACU(settings_ACU.apiConfig.apiKey, settings_ACU.apiConfig.extraHeaders)
+             };
+             applyApiRequestOptionsToBody_ACU(requestBody, settings_ACU.apiConfig);
+             const body = JSON.stringify(requestBody);
              const res = await fetch(url, { method: 'POST', headers: {...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json'}, body });
              // 根据streamingEnabled设置选择响应处理方式
              const content = await handleApiResponse_ACU(res);
@@ -264,7 +269,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
         throw new Error('自定义API的URL或模型未配置。');
     }
 
-    const body = JSON.stringify({
+    const requestBody = {
         messages,
         model: effectiveApiConfig.model,
         temperature: effectiveApiConfig.temperature || 1.0,
@@ -272,7 +277,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
         max_tokens: maxTokens,
         stream: settings_ACU.streamingEnabled || false,
         chat_completion_source: 'custom',
-        group_names: [],
+        group_names: [] as string[],
         include_reasoning: false,
         reasoning_effort: 'medium',
         enable_web_search: false,
@@ -281,8 +286,10 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
         reverse_proxy: effectiveApiConfig.url,
         proxy_password: '',
         custom_url: effectiveApiConfig.url,
-        custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
-    });
+        custom_include_headers: mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders),
+    };
+    applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
+    const body = JSON.stringify(requestBody);
 
     const res = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',

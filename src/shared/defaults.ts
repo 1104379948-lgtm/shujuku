@@ -29,6 +29,8 @@ export const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.6.3-keyword-prom
 export const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.2-table-template-defaults';
 
 // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
+export const DEFAULT_RERANK_INSTRUCTION_ACU = '请判断查询与文档的相关性。\n按相关性降序排序。';
+
 export const defaultVectorMemoryConfig_ACU = {
   enabled: false,
   threshold: 50,
@@ -44,6 +46,7 @@ export const defaultVectorMemoryConfig_ACU = {
   rerankEndpoint: '',
   rerankApiKey: '',
   rerankModel: '',
+  rerankInstruction: DEFAULT_RERANK_INSTRUCTION_ACU,
   vectorNamespace: 'chat',
   entryComment: 'TavernDB-ACU-VectorMemory',
   entryKey: 'TavernDB-ACU-VectorMemory-Key',

@@ -20,6 +20,8 @@
 
 import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU } from '../../shared/defaults';
+import { DEFAULT_API_REQUEST_OPTIONS_ACU } from '../ai/api-request-options';
+
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
@@ -149,7 +151,7 @@ export let currentJsonTableData_ACU: any = null;
 export let independentTableStates_ACU: any = {};
 
 export let settings_ACU: any = {
-    apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+    apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, ...DEFAULT_API_REQUEST_OPTIONS_ACU },
     apiMode: 'custom',
     streamingEnabled: false,
     tavernProfile: '',

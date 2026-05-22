@@ -16,6 +16,7 @@ import { deleteAllGeneratedEntries_ACU, updateReadableLorebookEntry_ACU } from '
 import { updateOutlineTableEntry_ACU } from '../../../service/worldbook/injection-engine';
 import { formatJsonToReadable_ACU } from '../../../service/runtime/helpers-remaining';
 import { getApiConfigByPreset_ACU } from '../../../service/ai/api-call';
+import { applyApiRequestOptionsToBody_ACU, mergeCustomIncludeHeaders_ACU } from '../../../service/ai/api-request-options';
 import { handleApiResponse_ACU } from '../../../service/ai/prompt-builder';
 import { cancelContentOptimization_ACU } from '../../../service/optimization/content-optimization';
 import { reoptimizeMessage_ACU } from '../../components/optimization-ui';
@@ -169,7 +170,7 @@ export function createWorldbookAiApi(_ctx: ApiGroupContext): Record<string, Func
                         }
 
                         const url = `/api/backends/chat-completions/generate`;
-                        const body = JSON.stringify({
+                        const requestBody = {
                             "messages": messages,
                             "model": effectiveApiConfig.model,
                             "temperature": effectiveApiConfig.temperature || 1.0,
@@ -177,7 +178,7 @@ export function createWorldbookAiApi(_ctx: ApiGroupContext): Record<string, Func
                             "max_tokens": maxTokens,
                             "stream": settings_ACU.streamingEnabled || false,
                             "chat_completion_source": "custom",
-                            "group_names": [],
+                            "group_names": [] as string[],
                             "include_reasoning": false,
                             "reasoning_effort": "medium",
                             "enable_web_search": false,
@@ -186,9 +187,10 @@ export function createWorldbookAiApi(_ctx: ApiGroupContext): Record<string, Func
                             "reverse_proxy": effectiveApiConfig.url,
                             "proxy_password": "",
                             "custom_url": effectiveApiConfig.url,
-                            "custom_include_headers": effectiveApiConfig.apiKey ?
-                                `Authorization: Bearer ${effectiveApiConfig.apiKey}` : ""
-                        });
+                            "custom_include_headers": mergeCustomIncludeHeaders_ACU(effectiveApiConfig.apiKey, effectiveApiConfig.extraHeaders)
+                        };
+                        applyApiRequestOptionsToBody_ACU(requestBody, effectiveApiConfig);
+                        const body = JSON.stringify(requestBody);
 
                         const headers = {
                             ...getHostRequestHeaders_ACU(),
