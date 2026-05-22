@@ -32837,6 +32837,12 @@ $CONTENT
                     logDebug_ACU(`[Batch ${batchNumber}] SQLite provider replaced with batch base before prompt preparation.`);
                 }
                 else {
+                    if (deferPersistence) {
+                        const patchedCount = mergeProviderRowsIntoBatchSheets_ACU(mergedBatchData, currentJsonTableData_ACU, batchSheetKeys);
+                        if (patchedCount > 0) {
+                            logDebug_ACU(`[Batch ${batchNumber}] Deferred batch base preserved runtime rows for ${patchedCount} sheet(s) before replacing current table data.`);
+                        }
+                    }
                     _set_currentJsonTableData_ACU(normalizeTableDataRowIdentity_ACU(mergedBatchData, { sourceLabel: `[Batch ${batchNumber}].mergedBatchData` }));
                 }
                 logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
@@ -33044,25 +33050,24 @@ $CONTENT
             return { afterData: null, error: `无法捕获目标楼层 ${targetMessageIndex} 的初始提交快照，已中止保存以避免生成错误 delta。` };
         }
         for (const commit of targetCommits) {
-            const commitBeforeData = cloneTableDataForDelta_ACU(commit.beforeData);
             const commitAfterData = cloneTableDataForDelta_ACU(commit.afterData);
-            if (!commitBeforeData || !commitAfterData) {
+            if (!commitAfterData) {
                 return { afterData: null, error: `无法捕获目标楼层 ${targetMessageIndex} 的分批提交快照，已中止保存以避免生成错误 delta。` };
             }
-            const delta = createTableDeltaFromBeforeAfter_ACU({
-                before: commitBeforeData,
-                after: commitAfterData,
-                targetSheetKeys: commit.targetSheetKeys,
-                modifiedKeys: commit.modifiedKeys,
-                updateGroupKeys: commit.updateGroupKeys || [],
-                isolationKey,
-                targetMessageIndex,
-            });
-            if (!delta) {
-                logDebug_ACU(`[Manual Two-Phase][Commit ${targetMessageIndex}] Deferred commit ${commit.preparedCallId || commit.batchNumber || 'unknown'} produced no data delta; keeping accumulated afterData.`);
+            const commitTargetSheetKeys = normalizeAttemptedUpdateKeys_ACU(commit.targetSheetKeys);
+            if (commitTargetSheetKeys.length === 0) {
+                logDebug_ACU(`[Manual Two-Phase][Commit ${targetMessageIndex}] Deferred commit ${commit.preparedCallId || commit.batchNumber || 'unknown'} has no target sheets; keeping accumulated afterData.`);
                 continue;
             }
-            mergedAfterData = applyTableDelta_ACU(mergedAfterData, delta);
+            for (const sheetKey of commitTargetSheetKeys) {
+                const nextSheet = commitAfterData[sheetKey];
+                if (nextSheet !== undefined) {
+                    mergedAfterData[sheetKey] = cloneJson_ACU(nextSheet);
+                }
+                else if (commit.allowClearingTargetSheets === true || commit.modifiedKeys.includes(sheetKey)) {
+                    delete mergedAfterData[sheetKey];
+                }
+            }
         }
         return { afterData: mergedAfterData };
     }

@@ -60,8 +60,6 @@ import { clearTableDataAtFloors_ACU } from '../chat/chat-service';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
 import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
-import { createTableDeltaFromBeforeAfter_ACU } from './table-delta-diff';
-import { applyTableDelta_ACU } from './table-delta-apply';
 import { normalizeTableDataRowIdentity_ACU } from './table-row-identity';
 
 // ============================================================
@@ -897,6 +895,16 @@ export async function processUpdatesBatch_ACU(
                 }
                 logDebug_ACU(`[Batch ${batchNumber}] SQLite provider replaced with batch base before prompt preparation.`);
             } else {
+                if (deferPersistence) {
+                    const patchedCount = mergeProviderRowsIntoBatchSheets_ACU(
+                        mergedBatchData,
+                        currentJsonTableData_ACU as TableDataObject_ACU | null,
+                        batchSheetKeys,
+                    );
+                    if (patchedCount > 0) {
+                        logDebug_ACU(`[Batch ${batchNumber}] Deferred batch base preserved runtime rows for ${patchedCount} sheet(s) before replacing current table data.`);
+                    }
+                }
                 _set_currentJsonTableData_ACU(normalizeTableDataRowIdentity_ACU(mergedBatchData as TableDataObject_ACU, { sourceLabel: `[Batch ${batchNumber}].mergedBatchData` }));
             }
             logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
@@ -1144,28 +1152,25 @@ function buildMergedAfterDataFromDeferredCommits_ACU(
     }
 
     for (const commit of targetCommits) {
-        const commitBeforeData = cloneTableDataForDelta_ACU(commit.beforeData);
         const commitAfterData = cloneTableDataForDelta_ACU(commit.afterData);
-        if (!commitBeforeData || !commitAfterData) {
+        if (!commitAfterData) {
             return { afterData: null, error: `无法捕获目标楼层 ${targetMessageIndex} 的分批提交快照，已中止保存以避免生成错误 delta。` };
         }
 
-        const delta = createTableDeltaFromBeforeAfter_ACU({
-            before: commitBeforeData,
-            after: commitAfterData,
-            targetSheetKeys: commit.targetSheetKeys,
-            modifiedKeys: commit.modifiedKeys,
-            updateGroupKeys: commit.updateGroupKeys || [],
-            isolationKey,
-            targetMessageIndex,
-        });
-
-        if (!delta) {
-            logDebug_ACU(`[Manual Two-Phase][Commit ${targetMessageIndex}] Deferred commit ${commit.preparedCallId || commit.batchNumber || 'unknown'} produced no data delta; keeping accumulated afterData.`);
+        const commitTargetSheetKeys = normalizeAttemptedUpdateKeys_ACU(commit.targetSheetKeys);
+        if (commitTargetSheetKeys.length === 0) {
+            logDebug_ACU(`[Manual Two-Phase][Commit ${targetMessageIndex}] Deferred commit ${commit.preparedCallId || commit.batchNumber || 'unknown'} has no target sheets; keeping accumulated afterData.`);
             continue;
         }
 
-        mergedAfterData = applyTableDelta_ACU(mergedAfterData, delta);
+        for (const sheetKey of commitTargetSheetKeys) {
+            const nextSheet = (commitAfterData as Record<string, any>)[sheetKey];
+            if (nextSheet !== undefined) {
+                (mergedAfterData as Record<string, any>)[sheetKey] = cloneJson_ACU(nextSheet);
+            } else if (commit.allowClearingTargetSheets === true || commit.modifiedKeys.includes(sheetKey)) {
+                delete (mergedAfterData as Record<string, any>)[sheetKey];
+            }
+        }
     }
 
     return { afterData: mergedAfterData };
