@@ -179,6 +179,30 @@ describe('resolveTableHistoryStateFromChat_ACU — V2 table persistence', () => 
     expect(state.hasTrackedUpdate).toBe(true);
   });
 
+
+  it('识别 isolated attemptedUpdateKeys 中的 tracked update 并推进楼层', () => {
+    const chat = [
+      { is_user: true },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            independentData: {},
+            modifiedKeys: [],
+            updateGroupKeys: [],
+            attemptedUpdateKeys: ['sheet_0'],
+          },
+        },
+      },
+    ];
+
+    const state = resolveTableHistoryStateFromChat_ACU(chat, makeOptions());
+
+    expect(state.lastTrackedUpdateMessageIndex).toBe(1);
+    expect(state.lastTrackedUpdateAiFloor).toBe(1);
+    expect(state.hasTrackedUpdate).toBe(true);
+  });
+
   it('按 isolationKey 只识别当前标签的 V2 layer', () => {
     const chat = [
       makeV2Message({

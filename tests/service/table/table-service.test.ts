@@ -273,7 +273,7 @@ describe('saveIndependentTableToChatHistory_ACU', () => {
 
     const result = await persistTablesToChatMessage_ACU({
       targetMessageIndex: 0,
-      targetSheetKeys: ['sheet_0'],
+      targetSheetKeys: [],
       trackingSheetKeys: [],
       updateGroupKeys: null,
       attemptedUpdateKeys: ['sheet_0'],

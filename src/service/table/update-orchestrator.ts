@@ -147,6 +147,7 @@ export interface DeferredCommitPayload_ACU {
     targetSheetKeys: string[];
     updateGroupKeys: string[] | null;
     trackingSheetKeys: string[];
+    attemptedUpdateKeys: string[];
     beforeData: TableDataObject_ACU;
     afterData: TableDataObject_ACU;
     modifiedKeys: string[];
@@ -680,6 +681,7 @@ export async function executeCardUpdateCore_ACU(
                                 targetSheetKeys: keysToActuallySave,
                                 updateGroupKeys: Array.isArray(updateGroupKeysToUse) ? updateGroupKeysToUse : null,
                                 trackingSheetKeys: keysToTrackAsUpdated,
+                                attemptedUpdateKeys,
                                 beforeData: successfulBeforeData,
                                 afterData: finalAfterData,
                                 modifiedKeys,
@@ -701,10 +703,32 @@ export async function executeCardUpdateCore_ACU(
                         }
                     }
                 } else {
-                    if (isAutoUpdateMode && attemptedUpdateKeys.length > 0) {
+                    if (attemptedUpdateKeys.length > 0 && (isAutoUpdateMode || executionOptions.deferPersistence)) {
                         if (!successfulBeforeData || !successfulAfterData) {
-                            return { success: false, modifiedKeys, error: '无法捕获无变更自动填表前后数据库快照，已中止保存调度标记。' };
+                            return { success: false, modifiedKeys, error: '无法捕获无变更填表前后数据库快照，已中止保存调度标记。' };
                         }
+                        if (executionOptions.deferPersistence) {
+                            return {
+                                success: true,
+                                modifiedKeys,
+                                deferredCommit: {
+                                    targetMessageIndex: saveTargetIndex,
+                                    preparedCallId: deferredAiResponse?.preparedCallId,
+                                    chunkOrder: deferredAiResponse?.chunkOrder,
+                                    batchNumber: deferredAiResponse?.batchNumber,
+                                    groupKey: deferredAiResponse?.groupKey,
+                                    groupOrder: deferredAiResponse?.groupOrder,
+                                    targetSheetKeys: [],
+                                    updateGroupKeys: null,
+                                    trackingSheetKeys: [],
+                                    attemptedUpdateKeys,
+                                    beforeData: successfulBeforeData,
+                                    afterData: successfulAfterData,
+                                    modifiedKeys: [],
+                                },
+                            };
+                        }
+
                         const saveAttemptResult = await persistTablesToChatMessage_ACU({
                             targetMessageIndex: saveTargetIndex,
                             targetSheetKeys: attemptedUpdateKeys,
@@ -716,7 +740,7 @@ export async function executeCardUpdateCore_ACU(
                             attemptedUpdateKeys,
                         });
                         if (!saveAttemptResult.saved) {
-                            return { success: false, modifiedKeys, error: '无法将无变更自动填表调度标记保存到聊天记录。' };
+                            return { success: false, modifiedKeys, error: '无法将无变更填表调度标记保存到聊天记录。' };
                         }
                     } else {
                         logDebug_ACU("No tables were modified by AI, skipping save to chat history.");
@@ -1174,8 +1198,9 @@ async function commitMergedDeferredCommits_ACU(
         const targetSheetKeys = unionStrings_ACU(...targetCommits.map(commit => commit.targetSheetKeys));
         const trackingSheetKeys = unionStrings_ACU(...targetCommits.map(commit => commit.trackingSheetKeys));
         const updateGroupKeys = unionStrings_ACU(...targetCommits.map(commit => commit.updateGroupKeys || []));
+        const attemptedUpdateKeys = unionStrings_ACU(...targetCommits.map(commit => commit.attemptedUpdateKeys || []));
 
-        if (targetSheetKeys.length === 0 && trackingSheetKeys.length === 0) {
+        if (targetSheetKeys.length === 0 && trackingSheetKeys.length === 0 && attemptedUpdateKeys.length === 0) {
             logDebug_ACU(`[Manual Two-Phase] No changed sheets for target ${targetMessageIndex}; skipping merged commit.`);
             continue;
         }
@@ -1189,6 +1214,7 @@ async function commitMergedDeferredCommits_ACU(
             trackAsUpdate: true,
             beforeData,
             afterData,
+            attemptedUpdateKeys,
         });
         if (!saveResult.saved) {
             return { success: false, error: `无法将目标楼层 ${targetMessageIndex} 的合并数据库保存到聊天记录。` };
@@ -1210,12 +1236,6 @@ async function commitMergedDeferredCommits_ACU(
     return { success: true };
 }
 
-function resolveManualConcurrentGroupLimit_ACU(): number {
-    const configured = Number(settings_ACU.maxConcurrentGroups);
-    if (!Number.isFinite(configured) || configured < 1) return 1;
-    return Math.max(1, Math.trunc(configured));
-}
-
 function splitIndicesIntoManualBatches_ACU(indices: number[], batchSize: number): number[][] {
     if (!Array.isArray(indices) || indices.length === 0) return [];
     const safeBatchSize = Number.isFinite(batchSize) && batchSize > 0 ? Math.trunc(batchSize) : 1;
@@ -1225,24 +1245,6 @@ function splitIndicesIntoManualBatches_ACU(indices: number[], batchSize: number)
         if (batch.length > 0) batches.push(batch);
     }
     return batches;
-}
-
-async function runManualConcurrentWindow_ACU<T>(
-    items: T[],
-    concurrencyLimit: number,
-    task: (item: T, absoluteIndex: number) => Promise<void>,
-): Promise<{ success: boolean; error?: string }> {
-    const safeLimit = Number.isFinite(concurrencyLimit) && concurrencyLimit > 0 ? Math.trunc(concurrencyLimit) : 1;
-    for (let start = 0; start < items.length; start += safeLimit) {
-        const windowItems = items.slice(start, start + safeLimit);
-        const settled = await Promise.allSettled(windowItems.map((item, offset) => task(item, start + offset)));
-        for (const result of settled) {
-            if (result.status === 'fulfilled') continue;
-            const error = result.reason instanceof Error ? result.reason.message : String(result.reason || '手动更新分组并发执行失败。');
-            return { success: false, error };
-        }
-    }
-    return { success: true };
 }
 
 interface ManualUpdateGroupExecution_ACU {
@@ -1400,7 +1402,6 @@ export async function orchestrateManualUpdate_ACU(
 
         _set_isAutoUpdatingCard_ACU(true);
         const failedGroups: Array<{ key: string; error?: string }> = [];
-        const concurrencyLimit = resolveManualConcurrentGroupLimit_ACU();
         const manualGroups: ManualUpdateGroupExecution_ACU[] = groupKeys.map((gKey, groupOrder) => {
             const group = updateGroups[gKey];
             const primarySheetKey = Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0 ? group.sheetKeys[0] : '';
@@ -1417,7 +1418,7 @@ export async function orchestrateManualUpdate_ACU(
         });
         const totalManualBatches = manualGroups.reduce((max, group) => Math.max(max, group.batches.length), 0);
 
-        // 手动填表的并发边界是“同一批次内不同分组并发，批次之间串行”。
+        // 手动填表的并发边界是“同一批次内 AI 生成可并发，prepare/apply 必须串行”。
         // 每一批次必须先收齐所有分组的 deferred commits，再通过 commitMergedDeferredCommits_ACU
         // 做一次整体写入；提交完成并刷新快照后，下一批次才能读取新的基底。
         for (let batchIndex = 0; batchIndex < totalManualBatches; batchIndex++) {
@@ -1432,10 +1433,9 @@ export async function orchestrateManualUpdate_ACU(
             emitManualProgress(mergeProgressContext_ACU({ phase: 'preparing', stageLabel: '准备批次请求', activeGroups: activeGroups.length }, manualBatchProgressContext));
 
             const preparedCallsByGroupKey = new Map<string, PreparedAiCall_ACU[]>();
-            const prepareWindowResult = await runManualConcurrentWindow_ACU(
-                activeGroups,
-                concurrencyLimit,
-                async groupExecution => {
+            let prepareBatchError: string | null = null;
+            for (const groupExecution of activeGroups) {
+                try {
                     const batchIndices = groupExecution.batches[batchIndex];
                     const prepareResult = await processBatch(batchIndices, 'manual_independent', {
                         targetSheetKeys: groupExecution.group.sheetKeys,
@@ -1451,12 +1451,15 @@ export async function orchestrateManualUpdate_ACU(
                         throw new Error(prepareResult.error || '手动更新分组准备 AI 请求失败。');
                     }
                     preparedCallsByGroupKey.set(groupExecution.key, prepareResult.preparedAiCalls || []);
-                },
-            );
-            if (!prepareWindowResult.success) {
+                } catch (error: any) {
+                    prepareBatchError = error?.message || String(error);
+                    break;
+                }
+            }
+            if (prepareBatchError) {
                 failedGroups.push({
                     key: `batch_${batchIndex + 1}`,
-                    error: prepareWindowResult.error || '手动更新批次准备 AI 请求失败。',
+                    error: prepareBatchError || '手动更新批次准备 AI 请求失败。',
                 });
                 await loadAllChatMessages_ACU();
                 await refreshData();
@@ -1483,10 +1486,9 @@ export async function orchestrateManualUpdate_ACU(
 
             const deferredCommitsForBatch: DeferredCommitPayload_ACU[] = [];
             emitManualProgress(mergeProgressContext_ACU({ phase: 'parsing', stageLabel: '应用批次结果', activeGroups: activeGroups.length }, manualBatchProgressContext));
-            const applyWindowResult = await runManualConcurrentWindow_ACU(
-                activeGroups,
-                concurrencyLimit,
-                async groupExecution => {
+            let applyBatchError: string | null = null;
+            for (const groupExecution of activeGroups) {
+                try {
                     const preparedCalls = preparedCallsByGroupKey.get(groupExecution.key) || [];
                     const groupDeferredResponses = preparedCalls
                         .map(call => responsesByPreparedCallId.get(call.preparedCallId))
@@ -1510,12 +1512,15 @@ export async function orchestrateManualUpdate_ACU(
                         throw new Error(applyResult.error || '手动更新分组应用失败。');
                     }
                     deferredCommitsForBatch.push(...(applyResult.deferredCommits || []));
-                },
-            );
-            if (!applyWindowResult.success) {
+                } catch (error: any) {
+                    applyBatchError = error?.message || String(error);
+                    break;
+                }
+            }
+            if (applyBatchError) {
                 failedGroups.push({
                     key: `batch_${batchIndex + 1}`,
-                    error: applyWindowResult.error || '手动更新批次应用失败。',
+                    error: applyBatchError || '手动更新批次应用失败。',
                 });
                 await loadAllChatMessages_ACU();
                 await refreshData();

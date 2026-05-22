@@ -680,6 +680,7 @@ describe('processUpdatesBatch_ACU', () => {
         targetSheetKeys: ['sheet_0'],
         updateGroupKeys: ['sheet_0'],
         trackingSheetKeys: ['sheet_0'],
+        attemptedUpdateKeys: ['sheet_0'],
         beforeData: { mate: {}, sheet_0: { content: [['row_id']] } },
         afterData: { mate: {}, sheet_0: { content: [['row_id'], ['1']] } },
         modifiedKeys: ['sheet_0'],
@@ -819,6 +820,44 @@ describe('executeCardUpdateCore_ACU', () => {
 
     expect(result.success).toBe(true);
     expect(result.modifiedKeys).toEqual([]);
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+  });
+
+  it('manual deferred 模式 AI 无实际修改时返回 attempt-only commit 推进批次门禁', async () => {
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: [] });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      0, false, 'manual_independent', false,
+      ['sheet_0'], { tableApiPreset: 'preset-a' }, new AbortController(),
+      null,
+      undefined,
+      {
+        deferPersistence: true,
+        deferredAiResponse: {
+          aiResponse: '<tableEdit>无需更新</tableEdit>',
+          targetMessageIndex: 0,
+          preparedCallId: 'g0:1:0',
+          chunkOrder: 0,
+          updateMode: 'manual_independent',
+          targetSheetKeys: ['sheet_0'],
+          requestOptions: { tableApiPreset: 'preset-a' },
+        },
+      }
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.modifiedKeys).toEqual([]);
+    expect(result.deferredCommit).toEqual(expect.objectContaining({
+      targetMessageIndex: 0,
+      targetSheetKeys: [],
+      trackingSheetKeys: [],
+      updateGroupKeys: null,
+      attemptedUpdateKeys: ['sheet_0'],
+      modifiedKeys: [],
+    }));
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
@@ -1069,6 +1108,7 @@ describe('executeCardUpdateCore_ACU', () => {
       preparedCallId: 'g0:1:2',
       targetSheetKeys: ['sheet_0'],
       trackingSheetKeys: ['sheet_0'],
+      attemptedUpdateKeys: ['sheet_0'],
       modifiedKeys: ['sheet_0'],
     }));
     expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
@@ -1202,7 +1242,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockProcessBatch).toHaveBeenCalled();
   });
 
-  it('多分组手动填表按批次屏障推进：同批次分组并发，完成后整体提交再进入下一批次', async () => {
+  it('多分组手动填表按批次屏障推进：prepare/apply 串行，AI 生成并发，完成后整体提交再进入下一批次', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
 
@@ -1275,6 +1315,7 @@ describe('orchestrateManualUpdate_ACU', () => {
           targetSheetKeys: options.targetSheetKeys,
           updateGroupKeys: options.targetSheetKeys,
           trackingSheetKeys: options.targetSheetKeys,
+          attemptedUpdateKeys: options.targetSheetKeys,
           beforeData: { sheet_0: { content: [['row_id']] }, sheet_1: { content: [['row_id']] } },
           afterData: sheetKey === 'sheet_0'
             ? { sheet_0: { content: [['row_id'], [value]] }, sheet_1: { content: [['row_id']] } }
@@ -1340,6 +1381,7 @@ describe('orchestrateManualUpdate_ACU', () => {
         sheet_0: expect.objectContaining({ content: [['row_id'], ['a1']] }),
         sheet_1: expect.objectContaining({ content: [['row_id'], ['b1']] }),
       }),
+      attemptedUpdateKeys: ['sheet_0', 'sheet_1'],
     }));
     expect(mockPersistTablesToChatMessage).toHaveBeenNthCalledWith(2, expect.objectContaining({
       targetMessageIndex: 3,
@@ -1350,8 +1392,106 @@ describe('orchestrateManualUpdate_ACU', () => {
         sheet_0: expect.objectContaining({ content: [['row_id'], ['a3']] }),
         sheet_1: expect.objectContaining({ content: [['row_id'], ['b3']] }),
       }),
+      attemptedUpdateKeys: ['sheet_0', 'sheet_1'],
+
     }));
   });
+
+  it('手动同批次实际修改与无变更混合时，attemptedUpdateKeys 覆盖全部目标但 tracking 只记录实际修改表', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户1' },
+      { is_user: false, mes: 'AI回复1' },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '分组表A', updateConfig: { groupId: 0 } },
+      sheet_1: { name: '分组表B', updateConfig: { groupId: 1 } },
+    });
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '分组表A', content: [['row_id']], updateConfig: { groupId: 0 } },
+      sheet_1: { name: '分组表B', content: [['row_id']], updateConfig: { groupId: 1 } },
+    };
+    mockSettings.updateBatchSize = 1;
+    mockSettings.tableApiPresetOverridesByName = { 分组表A: 'preset-a', 分组表B: 'preset-b' };
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true });
+    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => `<tableEdit>${dynamicContent.label}</tableEdit>`);
+
+    mockProcessBatch.mockImplementation(async (indices: number[], _mode: string, options: any) => {
+      const sheetKey = options.targetSheetKeys[0];
+      if (options.prepareAiCallOnly) {
+        return {
+          success: true,
+          preparedAiCalls: [{
+            preparedCallId: `${options.groupKey}:${indices[0]}:1`,
+            targetMessageIndex: 1,
+            batchNumber: 1,
+            updateMode: 'manual_independent',
+            targetSheetKeys: options.targetSheetKeys,
+            requestOptions: options.requestOptions,
+            dynamicContent: { label: sheetKey },
+          }],
+        };
+      }
+
+      if (sheetKey === 'sheet_0') {
+        return {
+          success: true,
+          deferredCommits: [{
+            targetMessageIndex: 1,
+            preparedCallId: options.deferredResponses[0].preparedCallId,
+            batchNumber: 1,
+            groupKey: options.groupKey,
+            groupOrder: options.groupOrder,
+            targetSheetKeys: ['sheet_0'],
+            updateGroupKeys: ['sheet_0'],
+            trackingSheetKeys: ['sheet_0'],
+            attemptedUpdateKeys: ['sheet_0'],
+            beforeData: { sheet_0: { content: [['row_id']] }, sheet_1: { content: [['row_id']] } },
+            afterData: { sheet_0: { content: [['row_id'], ['a1']] }, sheet_1: { content: [['row_id']] } },
+            modifiedKeys: ['sheet_0'],
+          }],
+        };
+      }
+
+      return {
+        success: true,
+        deferredCommits: [{
+          targetMessageIndex: 1,
+          preparedCallId: options.deferredResponses[0].preparedCallId,
+          batchNumber: 1,
+          groupKey: options.groupKey,
+          groupOrder: options.groupOrder,
+          targetSheetKeys: [],
+          updateGroupKeys: null,
+          trackingSheetKeys: [],
+          attemptedUpdateKeys: ['sheet_1'],
+          beforeData: { sheet_0: { content: [['row_id']] }, sheet_1: { content: [['row_id']] } },
+          afterData: { sheet_0: { content: [['row_id']] }, sheet_1: { content: [['row_id']] } },
+          modifiedKeys: [],
+        }],
+      };
+    });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0', 'sheet_1'], mockProcessBatch, mockRefreshData);
+
+    expect(result.success).toBe(true);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageIndex: 1,
+      targetSheetKeys: ['sheet_0'],
+      updateGroupKeys: ['sheet_0'],
+      trackingSheetKeys: ['sheet_0'],
+      attemptedUpdateKeys: ['sheet_0', 'sheet_1'],
+      afterData: expect.objectContaining({
+        sheet_0: expect.objectContaining({ content: [['row_id'], ['a1']] }),
+        sheet_1: expect.objectContaining({ content: [['row_id']] }),
+      }),
+    }));
+  });
+
 
   it('raw AI generation 失败时阻止本批 apply、commit 和后续批次', async () => {
     vi.useFakeTimers();
@@ -1483,6 +1623,7 @@ describe('orchestrateManualUpdate_ACU', () => {
         targetSheetKeys: options.targetSheetKeys,
         updateGroupKeys: options.targetSheetKeys,
         trackingSheetKeys: options.targetSheetKeys,
+        attemptedUpdateKeys: options.targetSheetKeys,
         beforeData: { sheet_0: { content: [['row_id']] } },
         afterData: { sheet_0: { content: [['row_id'], ['a']] } },
         modifiedKeys: options.targetSheetKeys,
@@ -1554,6 +1695,7 @@ describe('orchestrateManualUpdate_ACU', () => {
           targetSheetKeys: options.targetSheetKeys,
           updateGroupKeys: options.targetSheetKeys,
           trackingSheetKeys: options.targetSheetKeys,
+          attemptedUpdateKeys: options.targetSheetKeys,
           beforeData: { sheet_0: { content: [['row_id']] } },
           afterData: { sheet_0: { content: [['row_id'], ['ok']] } },
           modifiedKeys: options.targetSheetKeys,

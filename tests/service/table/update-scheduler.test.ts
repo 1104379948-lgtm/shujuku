@@ -539,7 +539,7 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(ops.purgeOldLayerData).toHaveBeenCalled();
   });
 
-  it('多组部分失败：同一并发窗口内都被调度，窗口完成后统一刷新', async () => {
+  it('多组部分失败：按分组串行执行，并在每组完成后刷新快照', async () => {
     const plan = {
       tablesToUpdate: [],
       updateGroups: {
@@ -567,10 +567,10 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.failedGroups).toBe(1);
     expect(result.totalGroups).toBe(2);
-    expect(events.slice(0, 4)).toEqual(['process:a', 'process:b', 'load', 'refresh']);
+    expect(events.slice(0, 6)).toEqual(['process:a', 'load', 'refresh', 'process:b', 'load', 'refresh']);
   });
 
-  it('多组自动更新按 maxConcurrentGroups 并发窗口执行，并在窗口后刷新快照', async () => {
+  it('多组自动更新忽略 maxConcurrentGroups 并发配置，按组串行执行并刷新快照', async () => {
     const plan = {
       tablesToUpdate: [],
       updateGroups: {
@@ -598,18 +598,21 @@ describe('executeAutoUpdatePlan_ACU', () => {
     const result = await executeAutoUpdatePlan_ACU(plan, { maxConcurrentGroups: 2 }, mockSetAutoUpdating, ops);
 
     expect(result.success).toBe(true);
-    expect(maxActiveProcessCount).toBe(2);
-    expect(events.slice(0, 6)).toEqual([
+    expect(maxActiveProcessCount).toBe(1);
+    expect(events.slice(0, 8)).toEqual([
       'process:start:sheet_0',
-      'process:start:sheet_1',
       'process:end:sheet_0',
+      'load',
+      'refresh',
+      'process:start:sheet_1',
       'process:end:sheet_1',
       'load',
       'refresh',
     ]);
+    expect(events.indexOf('process:start:sheet_1')).toBeGreaterThan(events.indexOf('refresh'));
     expect(ops.processUpdates).toHaveBeenCalledTimes(2);
-    expect(ops.loadAllChatMessages).toHaveBeenCalledTimes(2);
-    expect(ops.refreshData).toHaveBeenCalledTimes(3);
+    expect(ops.loadAllChatMessages).toHaveBeenCalledTimes(3);
+    expect(ops.refreshData).toHaveBeenCalledTimes(4);
   });
 
   it('processUpdates 抛异常时计为失败', async () => {
