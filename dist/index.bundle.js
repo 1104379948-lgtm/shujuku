@@ -30782,2260 +30782,6 @@ $CONTENT
         }
     }
 
-    /**
-     * service/table/update-scheduler.ts — 自动更新调度核心逻辑
-     * 从 presentation/triggers/settings-ui-sync/settings-ui-trigger.ts 的 triggerAutomaticUpdateIfNeeded_ACU 中提取
-     *
-     * 只负责「遍历表格检查更新条件 + 构建 tablesToUpdate 列表 + 分组」，不涉及 UI（toast/status）。
-     */
-    /**
-     * 构建自动更新计划：遍历所有表格，检查每个表的独立更新条件，返回需要更新的表列表和分组
-     *
-     * @param liveChat - 当前聊天记录数组
-     * @param tableData - 当前表格数据（currentJsonTableData_ACU）
-     * @param settings - 当前设置
-     * @param isolationKey - 当前隔离标签键名
-     * @returns AutoUpdatePlan 包含 tablesToUpdate 和 updateGroups
-     */
-    function buildAutoUpdatePlan_ACU(liveChat, tableData, settings, isolationKey) {
-        const tablesToUpdate = [];
-        const sheetKeys = getSortedSheetKeys_ACU(tableData);
-        // 预计算所有 AI 消息索引
-        const allAiMessageIndices = liveChat
-            .map((msg, index) => !msg.is_user ? index : -1)
-            .filter((index) => index !== -1);
-        const totalAiMessages = allAiMessageIndices.length;
-        // 统一的全局默认参数
-        const globalFrequency = settings.autoUpdateFrequency || 1;
-        const globalSkip = settings.skipUpdateFloors || 0;
-        for (const sheetKey of sheetKeys) {
-            const table = tableData[sheetKey];
-            if (!table)
-                continue;
-            const tableConfig = table.updateConfig || {};
-            const isSummary = isSummaryOrOutlineTable_ACU(table.name);
-            // 获取该表的更新配置 (优先使用表内配置，否则使用全局默认)
-            const rawDepth = Number.isFinite(tableConfig.contextDepth) ? tableConfig.contextDepth : -1;
-            const rawFreq = Number.isFinite(tableConfig.updateFrequency) ? tableConfig.updateFrequency : -1;
-            const rawSkip = Number.isFinite(tableConfig.skipFloors) ? tableConfig.skipFloors : -1;
-            const rawBatch = Number.isFinite(tableConfig.batchSize) ? tableConfig.batchSize : -1;
-            const rawGroupId = Number.isFinite(tableConfig.groupId) ? Math.trunc(tableConfig.groupId) : -1;
-            const threshold = (rawDepth === -1 || rawDepth === 0) ? (settings.autoUpdateThreshold || 3) : Math.max(0, rawDepth);
-            const frequency = (rawFreq === -1) ? globalFrequency : rawFreq;
-            const skipFloors = Math.max(0, (rawSkip === -1) ? globalSkip : rawSkip);
-            const groupId = rawGroupId;
-            const history = resolveTableHistoryStateFromChat_ACU(liveChat, {
-                sheetKey,
-                isSummaryTable: isSummary,
-                isolationKey,
-                settings,
-            });
-            const lastUpdatedAiFloor = history.lastTrackedUpdateAiFloor;
-            // 计算未记录楼层数
-            const effectiveUnrecordedFloors = Math.max(0, (totalAiMessages - skipFloors) - lastUpdatedAiFloor);
-            logDebug_ACU(`[Trigger Check] Table: ${table.name}, TotalAI: ${totalAiMessages}, Skip: ${skipFloors}, LastUpdated: ${lastUpdatedAiFloor}, Unrecorded: ${effectiveUnrecordedFloors}, Freq: ${frequency}`);
-            // updateFrequency=0：该表不参与自动更新
-            if (frequency > 0 && effectiveUnrecordedFloors >= frequency && threshold > 0) {
-                const effectiveAiIndices = skipFloors > 0
-                    ? allAiMessageIndices.slice(0, -skipFloors)
-                    : allAiMessageIndices;
-                const startIndexInAiArray = lastUpdatedAiFloor;
-                logDebug_ACU(`[Trigger Check] EffIndicesLen: ${effectiveAiIndices.length}, StartIndex: ${startIndexInAiArray}`);
-                if (startIndexInAiArray < effectiveAiIndices.length) {
-                    const unupdatedAiIndices = effectiveAiIndices.slice(startIndexInAiArray);
-                    const contextScopeIndices = effectiveAiIndices.slice(-threshold);
-                    const contextScopeSet = new Set(contextScopeIndices);
-                    logDebug_ACU(`[Trigger Check] Unupdated: ${unupdatedAiIndices.length}, ContextScope: ${contextScopeIndices.length}`);
-                    const indicesToUpdate = unupdatedAiIndices.filter((idx) => contextScopeSet.has(idx));
-                    if (indicesToUpdate.length > 0) {
-                        tablesToUpdate.push({
-                            sheetKey,
-                            sheetName: table.name,
-                            indices: indicesToUpdate,
-                            groupId,
-                            batchSize: (rawBatch === -1) ? (settings.updateBatchSize || 3) : ((rawBatch > 0) ? rawBatch : (settings.updateBatchSize || 3)),
-                            scheduleSignature: [groupId, threshold, frequency, skipFloors, rawBatch].join('|'),
-                        });
-                    }
-                }
-            }
-        }
-        // 分组：将待更新的表按 (groupId + indices + batchSize) 进行分组
-        const updateGroups = {};
-        tablesToUpdate.forEach(item => {
-            const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize;
-            if (!updateGroups[key]) {
-                updateGroups[key] = {
-                    indices: item.indices,
-                    batchSize: item.batchSize,
-                    groupId: item.groupId,
-                    scheduleSignature: item.scheduleSignature,
-                    sheetKeys: [],
-                    sheetNames: []
-                };
-            }
-            updateGroups[key].sheetKeys.push(item.sheetKey);
-            updateGroups[key].sheetNames.push(item.sheetName);
-        });
-        return { tablesToUpdate, updateGroups };
-    }
-    // ============================================================
-    // 前置检查
-    // ============================================================
-    /**
-     * 检查自动更新的前置条件
-     * 纯业务逻辑：不涉及 UI
-     */
-    function checkAutoUpdatePreConditions_ACU(settings, coreApisAreReady, isAutoUpdatingCard, currentJsonTableData, allChatMessagesLength) {
-        if (!settings.autoUpdateEnabled) {
-            return { canProceed: false, reason: 'Auto update is disabled via settings.' };
-        }
-        const apiIsConfigured = (settings.apiMode === 'custom' && (settings.apiConfig.useMainApi || (settings.apiConfig.url && settings.apiConfig.model))) || (settings.apiMode === 'tavern' && settings.tavernProfile);
-        if (!coreApisAreReady || isAutoUpdatingCard || !apiIsConfigured || !currentJsonTableData) {
-            return { canProceed: false, reason: 'Pre-flight checks failed.' };
-        }
-        if (allChatMessagesLength < 2) {
-            return { canProceed: false, reason: 'Chat history too short.' };
-        }
-        return { canProceed: true };
-    }
-    function isProcessUpdatesSuccess_ACU(result) {
-        if (typeof result === 'boolean')
-            return result;
-        if (result && typeof result === 'object' && typeof result.success === 'boolean') {
-            return result.success;
-        }
-        return !!result;
-    }
-    /**
-     * 执行自动更新计划：按分组串行执行 + 每组快照刷新屏障 + 自动合并检测 + 旧数据清理
-     *
-     * 纯业务编排逻辑：决定执行顺序、快照刷新屏障、错误处理。
-     * 不驱动 UI，只返回结果。presentation 层根据返回值自行决定 UI 操作。
-     */
-    async function executeAutoUpdatePlan_ACU(plan, settings, setAutoUpdating, ops) {
-        const { tablesToUpdate, updateGroups } = plan;
-        const groupKeys = Object.keys(updateGroups);
-        if (groupKeys.length === 0)
-            return { success: true, failedGroups: 0, totalGroups: 0 };
-        const totalGroups = groupKeys.length;
-        setAutoUpdating(true);
-        const failedGroupKeys = [];
-        for (const key of groupKeys) {
-            const group = updateGroups[key];
-            logDebug_ACU(`[Sequential] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
-            try {
-                const result = await ops.processUpdates(group.indices, 'auto_independent', {
-                    targetSheetKeys: group.sheetKeys,
-                    batchSize: group.batchSize,
-                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
-                });
-                if (!isProcessUpdatesSuccess_ACU(result)) {
-                    failedGroupKeys.push(key);
-                }
-            }
-            catch (e) {
-                failedGroupKeys.push(key);
-                logWarn_ACU(`自动分组更新异常 groupId=${group.groupId}, sheets=${group.sheetNames.join(', ')}:`, e);
-            }
-            // 自动更新会读写共享 runtime 表数据与聊天楼层 delta；每个分组完成后立即刷新，
-            // 让下一分组基于已落盘快照继续，避免并发应用时 before/after 快照互相污染。
-            await ops.loadAllChatMessages();
-            await ops.refreshData();
-        }
-        if (failedGroupKeys.length > 0) {
-            logWarn_ACU(`自动分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。`);
-        }
-        // 所有分组更新完成后再做一次最终刷新，确保 UI 与后续自动合并读取的是最新快照。
-        logDebug_ACU('All group updates completed sequentially. Forcing final data refresh...');
-        await ops.loadAllChatMessages();
-        await ops.refreshData();
-        await new Promise(resolve => setTimeout(resolve, 500));
-        setAutoUpdating(false);
-        await ops.refreshData();
-        // 自动合并总结检测
-        let autoMergeTriggered = false;
-        let autoMergeSuccess = false;
-        try {
-            const { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } = await Promise.resolve().then(function () { return mergeLogic; });
-            const trigger = checkAutoMergeTrigger_ACU();
-            if (trigger.shouldTrigger) {
-                autoMergeTriggered = true;
-                const prepared = prepareAutoMergeBatches_ACU({
-                    startIndex: 0, endIndex: trigger.mergeCount, targetCount: 1,
-                    batchSize: 5, promptTemplate: '', isAutoMode: true,
-                });
-                let acc = [];
-                for (let i = 0; i < prepared.batches.length; i++) {
-                    const batchResult = await executeAutoMergeBatch_ACU(prepared, prepared.batches[i], acc);
-                    acc = batchResult.accumulatedSummary;
-                }
-                await finalizeAutoMerge_ACU(prepared, acc);
-                autoMergeSuccess = true;
-            }
-        }
-        catch (e) {
-            logWarn_ACU('自动合并总结检测失败:', e);
-        }
-        // 清理超出保留层数的旧数据
-        try {
-            await ops.purgeOldLayerData();
-        }
-        catch (e) {
-            logWarn_ACU('清理旧层数据失败:', e);
-        }
-        return {
-            success: failedGroupKeys.length === 0,
-            failedGroups: failedGroupKeys.length,
-            totalGroups,
-            autoMergeTriggered,
-            autoMergeSuccess,
-        };
-    }
-    // ============================================================
-    // 楼层增加延迟逻辑
-    // ============================================================
-    /**
-     * 处理楼层增加延迟：当 AI 消息数增加时等待一段时间再继续
-     * 纯业务逻辑
-     */
-    async function handleFloorIncreaseDelay_ACU(totalAiMessages, lastTotalAiMessages, delayMs, getChatArray, setLastTotalAiMessages) {
-        if (totalAiMessages > lastTotalAiMessages) {
-            logDebug_ACU(`ACU: AI Message count increased (${lastTotalAiMessages} -> ${totalAiMessages}). Waiting ${delayMs}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delayMs));
-            const liveChat = getChatArray();
-            if (!liveChat || liveChat.length === 0)
-                return null;
-            const newTotal = liveChat.filter((m) => !m.is_user).length;
-            setLastTotalAiMessages(newTotal);
-            return { liveChat, totalAiMessages: newTotal };
-        }
-        else if (totalAiMessages < lastTotalAiMessages) {
-            setLastTotalAiMessages(totalAiMessages);
-        }
-        return undefined; // 不需要更新
-    }
-
-    async function triggerAutomaticUpdateIfNeeded_ACU() {
-        logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
-        // [重构] 调用 service 层前置检查
-        const preCheck = checkAutoUpdatePreConditions_ACU(settings_ACU, coreApisAreReady_ACU, isAutoUpdatingCard_ACU, currentJsonTableData_ACU, allChatMessages_ACU.length);
-        if (!preCheck.canProceed) {
-            logDebug_ACU(`ACU Auto-Trigger: ${preCheck.reason} Skipping.`);
-            return;
-        }
-        let liveChat = getChatArray_ACU();
-        if (!liveChat || liveChat.length === 0)
-            return;
-        let totalAiMessages = liveChat.filter(m => !m.is_user).length;
-        // [重构] 调用 service 层楼层增加延迟逻辑
-        const delayResult = await handleFloorIncreaseDelay_ACU(totalAiMessages, lastTotalAiMessages_ACU, AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU, getChatArray_ACU, _set_lastTotalAiMessages_ACU);
-        if (delayResult === null)
-            return; // chat 为空
-        if (delayResult) {
-            liveChat = delayResult.liveChat;
-            totalAiMessages = delayResult.totalAiMessages;
-        }
-        // [重构] 调用 service 层构建更新计划
-        const triggerIsolationKey = getCurrentIsolationKey_ACU();
-        const plan = buildAutoUpdatePlan_ACU(liveChat, currentJsonTableData_ACU, settings_ACU, triggerIsolationKey);
-        if (plan.tablesToUpdate.length === 0)
-            return;
-        // UI：显示开始 toast
-        const totalGroups = Object.keys(plan.updateGroups).length;
-        const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
-        if (totalGroups > maxConcurrentGroups) {
-            showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将分批并发处理 ${totalGroups} 组（每批最多 ${maxConcurrentGroups} 组）。`);
-        }
-        else {
-            showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
-        }
-        // 调用 service 层执行更新计划，传入纯业务操作委托（不含 UI 操作）
-        const result = await executeAutoUpdatePlan_ACU(plan, settings_ACU, _set_isAutoUpdatingCard_ACU, {
-            processUpdates: (indices, mode, options) => processUpdates_ACU(indices, mode, options),
-            refreshData: () => refreshMergedDataAndNotifyWithUI_ACU(),
-            loadAllChatMessages: () => loadAllChatMessages_ACU(),
-            purgeOldLayerData: () => purgeOldLayerData_ACU(),
-        });
-        // UI：根据返回值显示结果
-        if (result.failedGroups > 0) {
-            showToastr_ACU('warning', `并发分组更新有 ${result.failedGroups} 组失败，请查看日志。`);
-        }
-        if (result.autoMergeTriggered && result.autoMergeSuccess) {
-            showToastr_ACU('success', '自动合并纪要完成！');
-            try {
-                topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate();
-            }
-            catch (_) { }
-        }
-        if (typeof updateCardUpdateStatusDisplay_ACU === 'function')
-            updateCardUpdateStatusDisplay_ACU();
-    }
-    function collectManualExtraHint_ACU() {
-        _set_manualExtraHint_ACU$1('');
-        if (!$manualExtraHintCheckbox_ACU || !$manualExtraHintCheckbox_ACU.length)
-            return;
-        if (!$manualExtraHintCheckbox_ACU.is(':checked'))
-            return;
-        const userInput = prompt('请输入本次手动填表的额外提示词（可留空）：', '');
-        const trimmed = (userInput || '').trim();
-        if (!trimmed)
-            return;
-        _set_manualExtraHint_ACU$1(`以下为用户的额外填表要求，请严格遵守：${trimmed}`);
-    }
-    // [新增] 获取当前选中的手动更新表格列表（无效或为空则回退为全部表）
-    function getSelectedManualSheetKeys_ACU() {
-        if (!currentJsonTableData_ACU)
-            return [];
-        const availableKeys = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
-        const saved = Array.isArray(settings_ACU.manualSelectedTables) ? settings_ACU.manualSelectedTables : [];
-        // 未曾手动选择过：默认全选
-        if (!settings_ACU.hasManualSelection)
-            return availableKeys;
-        const validSaved = saved.filter((k) => availableKeys.includes(k));
-        // 已手动选择过：严格按保存的交集，不再自动补全新表，防止回退全选
-        return validSaved;
-    }
-
-    /**
-     * service/host/host-state-service.ts — 宿主运行时状态服务
-     *
-     * 中转 data/gateways/host-state-gateway 的所有方法。
-     * presentation 层通过本模块访问宿主运行时状态，不再直接调用 gateway。
-     * 后续可在此层统一添加日志、埋点、状态缓存等增值逻辑。
-     */
-
-    /**
-     * service/runtime/message-handler.ts — 新消息处理核心逻辑
-     * 从 presentation/triggers/settings-ui-sync/settings-ui-connect.ts 的 handleNewMessageDebounced_ACU 中提取
-     *
-     * 只负责「验证新消息是否应该触发更新 + 决定执行模式」，不涉及 UI（toast/防抖定时器）。
-     */
-    /**
-     * 评估新消息事件，决定应该执行什么操作
-     *
-     * @param liveChat - 当前聊天记录数组
-     * @param isAutoUpdating - 是否正在自动更新
-     * @param coreApisReady - 核心 API 是否就绪
-     * @param wasStoppedByUser - 是否被用户终止
-     * @param contentOptimizationSettings - 正文优化设置
-     * @returns MessageActionResult 包含 action 和 reason
-     */
-    function evaluateNewMessageAction_ACU(liveChat, isAutoUpdating, coreApisReady, wasStoppedByUser, contentOptimizationSettings) {
-        if (wasStoppedByUser) {
-            return { action: 'skip', reason: 'Skipping update check after user abort' };
-        }
-        if (isAutoUpdating) {
-            return { action: 'skip', reason: 'Auto-update already in progress' };
-        }
-        if (!coreApisReady) {
-            return { action: 'skip', reason: 'Core APIs not ready' };
-        }
-        if (!liveChat || liveChat.length === 0) {
-            return { action: 'skip', reason: 'No chat data available' };
-        }
-        const lastMessage = liveChat[liveChat.length - 1];
-        const lastMessageIndex = liveChat.length - 1;
-        // 如果最新消息不是AI回复，跳过
-        if (!lastMessage || lastMessage.is_user) {
-            return { action: 'skip', reason: 'Last message is not an AI reply' };
-        }
-        // 检查是否来自当前角色
-        const activeChar = getCurrentCharacterFallback_ACU();
-        const activeCharName = activeChar?.name;
-        if (activeCharName && lastMessage.name && lastMessage.name !== activeCharName) {
-            return { action: 'skip', reason: `AI reply from different character (${lastMessage.name} != ${activeCharName})` };
-        }
-        // 决定执行模式
-        const config = contentOptimizationSettings || {};
-        if (config.enabled) {
-            if (config.parallelMode) {
-                return { action: 'optimize_parallel', reason: 'Parallel mode enabled', lastMessageIndex };
-            }
-            else if (!config.autoApply && !config.seamlessMode) {
-                return { action: 'optimize_manual', reason: 'Manual confirmation mode', lastMessageIndex };
-            }
-            else {
-                return { action: 'optimize_then_update', reason: 'Sequential mode', lastMessageIndex };
-            }
-        }
-        return { action: 'update_only', reason: 'No content optimization configured', lastMessageIndex };
-    }
-
-    async function fetchModelsAndConnect_ACU() {
-        if (!$popupInstance_ACU ||
-            !$customApiUrlInput_ACU ||
-            !$customApiKeyInput_ACU ||
-            !$customApiModelSelect_ACU ||
-            !$apiStatusDisplay_ACU) {
-            logError_ACU('加载模型列表失败：UI元素未初始化。');
-            showToastr_ACU('error', 'UI未就绪。');
-            return;
-        }
-        const apiUrl = String($customApiUrlInput_ACU.val() || '').trim();
-        const apiKey = String($customApiKeyInput_ACU.val() || '');
-        if (!apiUrl) {
-            showToastr_ACU('warning', '请输入API基础URL。');
-            $apiStatusDisplay_ACU.text('状态:请输入API基础URL').css('color', 'orange');
-            return;
-        }
-        $apiStatusDisplay_ACU.text('状态: 正在检查API端点状态...').css('color', '#61afef');
-        showToastr_ACU('info', '正在检查自定义API端点状态...');
-        try {
-            // [重构] 调用 service 层获取模型列表
-            const result = await fetchAvailableModels_ACU(apiUrl, apiKey);
-            if (!result.success) {
-                throw new Error(result.error || '未知错误');
-            }
-            const models = result.models;
-            const currentSelectedModel = settings_ACU.apiConfig.model || '';
-            // UI 操作：填充模型下拉列表
-            $customApiModelSelect_ACU.empty().append('<option value="">-- 请选择模型 --</option>');
-            models.forEach((modelName) => {
-                const selected = modelName === currentSelectedModel ? ' selected' : '';
-                $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(modelName)}"${selected}>${escapeHtml_ACU$1(modelName)}</option>`);
-            });
-            // 如果之前保存的模型不在列表中，也添加进去
-            if (currentSelectedModel && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU$1(currentSelectedModel)}"]`).length === 0) {
-                $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(currentSelectedModel)}" selected>${escapeHtml_ACU$1(currentSelectedModel)} (已保存)</option>`);
-            }
-            showToastr_ACU('success', `模型列表加载成功！共加载 ${models.length} 个模型。`);
-        }
-        catch (error) {
-            logError_ACU('加载模型列表时出错:', error);
-            showToastr_ACU('error', `加载模型列表失败: ${error.message}`);
-            $apiStatusDisplay_ACU.text(`状态: 加载模型失败 - ${error.message}`).css('color', '#ff6b6b');
-        }
-        updateApiStatusDisplay_ACU();
-    }
-    function updateApiStatusDisplay_ACU() {
-        if (!$popupInstance_ACU || !$apiStatusDisplay_ACU)
-            return;
-        if (settings_ACU.apiConfig.url && settings_ACU.apiConfig.model)
-            $apiStatusDisplay_ACU.html(`当前URL: <span style="color:lightgreen;word-break:break-all;">${escapeHtml_ACU$1(settings_ACU.apiConfig.url)}</span><br>已选模型: <span style="color:lightgreen;">${escapeHtml_ACU$1(settings_ACU.apiConfig.model)}</span>`);
-        else if (settings_ACU.apiConfig.url)
-            $apiStatusDisplay_ACU.html(`当前URL: ${escapeHtml_ACU$1(settings_ACU.apiConfig.url)} - <span style="color:orange;">请加载并选择模型</span>`);
-        else
-            $apiStatusDisplay_ACU.html(`<span style="color:#ffcc80;">未配置自定义API。数据库更新功能可能不可用。</span>`);
-    }
-    function attemptToLoadCoreApis_ACU() {
-        // 根据运行模式选择宿主窗口
-        const hostWin = getHostWindow();
-        const mode = isExtensionMode() ? '插件' : '油猴脚本';
-        logDebug_ACU(`[CoreAPI] 运行模式: ${mode}, hostWin === window: ${hostWin === window}`);
-        // ═══════════════════════════════════════════════════════════════
-        // 插件模式特殊处理：主窗口的 window.SillyTavern 只有 {libs, getContext}
-        // 所有真正的 API（chatId/eventSource/eventTypes/chat/saveChat 等）必须通过
-        // SillyTavern.getContext() 才能拿到，而且 getContext() 返回的是"当前快照"，
-        // 属性值会随酒馆状态变化。所以用 Proxy 包装：每次属性读取都重新调用 getContext()
-        // 取最新快照，这样既不用改所有消费者代码，又保证读到最新值。
-        //
-        // 油猴脚本模式下，iframe 的 window.SillyTavern 本身就是扁平化的 API 对象
-        // （由酒馆助手封装），保持原样直接赋值。
-        // ═══════════════════════════════════════════════════════════════
-        let stApi;
-        if (isExtensionMode()) {
-            const rawST = hostWin.SillyTavern || window.SillyTavern;
-            if (rawST && typeof rawST.getContext === 'function') {
-                // Proxy：每次属性读取都通过 getContext() 拿当前快照
-                stApi = new Proxy({}, {
-                    get(_target, prop) {
-                        try {
-                            const ctx = rawST.getContext();
-                            if (!ctx)
-                                return undefined;
-                            return ctx[prop];
-                        }
-                        catch (e) {
-                            // getContext 抛异常时静默返回 undefined，让调用方的空值检查生效
-                            return undefined;
-                        }
-                    },
-                    has(_target, prop) {
-                        try {
-                            const ctx = rawST.getContext();
-                            return !!ctx && prop in ctx;
-                        }
-                        catch (e) {
-                            return false;
-                        }
-                    },
-                });
-                logDebug_ACU('[CoreAPI] 插件模式：已用 Proxy 包装 SillyTavern API（每次读取都走 getContext()）');
-            }
-            else {
-                // getContext 不存在，降级为直接使用 rawST（避免整个系统崩溃）
-                stApi = rawST;
-                logWarn_ACU('[CoreAPI] 插件模式：SillyTavern.getContext 不可用，降级为直接访问 SillyTavern 对象');
-            }
-        }
-        else {
-            // ═══════════════════════════════════════════════════════════════
-            // 油猴脚本模式：运行在酒馆助手创建的 iframe 中。
-            //
-            // 关键事实：iframe 自身的 window.SillyTavern 是酒馆助手注入的
-            // 扁平化 API 对象（包含 chatId/eventSource/eventTypes 等），
-            // 而 window.parent（hostWin）上的 SillyTavern 只有
-            // {libs, getContext} 骨架，不含业务字段。
-            //
-            // 因此必须优先使用 iframe 自身的对象，把 parent 作为 fallback。
-            // 这与旧版 userscript 的行为一致：
-            //   SillyTavern_API_ACU = typeof SillyTavern !== 'undefined'
-            //     ? SillyTavern : parentWin.SillyTavern;
-            // ═══════════════════════════════════════════════════════════════
-            const iframeST = typeof window.SillyTavern !== 'undefined' ? window.SillyTavern : undefined;
-            const parentST = typeof hostWin.SillyTavern !== 'undefined' ? hostWin.SillyTavern : undefined;
-            // 优先使用 iframe 自身的扁平化 API（含 chatId 等业务字段），
-            // fallback 到 parent 的骨架对象
-            stApi = iframeST || parentST;
-            if (iframeST) {
-                logDebug_ACU('[CoreAPI] 油猴脚本模式：使用 iframe 自身的 SillyTavern 扁平 API');
-            }
-            else if (parentST) {
-                logWarn_ACU('[CoreAPI] 油猴脚本模式：iframe 自身无 SillyTavern，降级使用 parent 的骨架对象（可能缺少 chatId 等字段）');
-            }
-        }
-        _set_SillyTavern_API_ACU(stApi);
-        // TavernHelper/jQuery/toastr 同理：优先 iframe 自身，fallback 到 parent
-        const iframeTH = typeof window.TavernHelper !== 'undefined' ? window.TavernHelper : undefined;
-        const parentTH = typeof hostWin.TavernHelper !== 'undefined' ? hostWin.TavernHelper : undefined;
-        _set_TavernHelper_API_ACU(iframeTH || parentTH);
-        const iframe$ = typeof window.$ !== 'undefined' ? window.$ : undefined;
-        const parent$ = typeof hostWin.$ !== 'undefined' ? hostWin.$ : undefined;
-        _set_jQuery_API_ACU(iframe$ || parent$);
-        _set_toastr_API_ACU((typeof window.toastr !== 'undefined' ? window.toastr : null) || hostWin.toastr || null);
-        _set_coreApisAreReady_ACU(!!(SillyTavern_API_ACU &&
-            TavernHelper_API_ACU &&
-            jQuery_API_ACU &&
-            TavernHelper_API_ACU.getChatMessages &&
-            TavernHelper_API_ACU.getLastMessageId &&
-            TavernHelper_API_ACU.getCurrentCharPrimaryLorebook &&
-            TavernHelper_API_ACU.getLorebookEntries &&
-            typeof TavernHelper_API_ACU.triggerSlash === 'function'));
-        if (!toastr_API_ACU)
-            logWarn_ACU('toastr_API_ACU is MISSING.');
-        if (coreApisAreReady_ACU)
-            logDebug_ACU('Core APIs successfully loaded/verified for AutoCardUpdater.');
-        else
-            logError_ACU('Failed to load one or more critical APIs for AutoCardUpdater.');
-        return coreApisAreReady_ACU;
-    }
-    async function handleNewMessageDebounced_ACU(eventType = 'unknown_acu') {
-        logDebug_ACU(`New message event (${eventType}) detected for ACU, debouncing for ${NEW_MESSAGE_DEBOUNCE_DELAY_ACU}ms...`);
-        clearTimeout(newMessageDebounceTimer_ACU);
-        _set_newMessageDebounceTimer_ACU(setTimeout(async () => {
-            // [健全性] 如果用户已经开始对话，则解除"开场白阶段世界书注入抑制"
-            try {
-                maybeLiftWorldbookSuppression_ACU();
-            }
-            catch (e) { }
-            await loadAllChatMessages_ACU();
-            const liveChat = getChatArray_ACU();
-            // [重构] 调用 service 层的 evaluateNewMessageAction_ACU 进行决策
-            const result = evaluateNewMessageAction_ACU(liveChat, isAutoUpdatingCard_ACU, coreApisAreReady_ACU, wasStoppedByUser_ACU, settings_ACU.contentOptimizationSettings);
-            logDebug_ACU(`[NewMessage] Evaluation result: action=${result.action}, reason=${result.reason}`);
-            if (result.action === 'skip') {
-                logDebug_ACU(`ACU: ${result.reason}. Skipping.`);
-                return;
-            }
-            switch (result.action) {
-                case 'optimize_parallel':
-                    logDebug_ACU('[正文优化] 并行模式已启用，正文优化与填表将同时进行...');
-                    await Promise.all([
-                        executeContentOptimization_ACU(result.lastMessageIndex),
-                        triggerAutomaticUpdateIfNeeded_ACU()
-                    ]);
-                    break;
-                case 'optimize_manual':
-                    logDebug_ACU('[正文优化] 手动确认模式：等待用户确认后再填表...');
-                    await executeContentOptimization_ACU(result.lastMessageIndex);
-                    break;
-                case 'optimize_then_update':
-                    await executeContentOptimization_ACU(result.lastMessageIndex);
-                    await triggerAutomaticUpdateIfNeeded_ACU();
-                    break;
-                case 'update_only':
-                    await triggerAutomaticUpdateIfNeeded_ACU();
-                    break;
-            }
-        }, NEW_MESSAGE_DEBOUNCE_DELAY_ACU));
-    }
-    // [重构] 核心触发逻辑：基于独立表格参数的触发检查
-
-    /**
-     * presentation/triggers/settings-ui-sync/index.ts
-     */
-
-    function showOptimizationDiffDialogForLoop_ACU(messageIndex, result, callback) {
-        const isLastLoop = result.currentLoop >= result.totalLoops;
-        const applyButtonText = isLastLoop ? '应用并完成' : '应用并继续';
-        const originalContent = getOriginalContent_ACU(messageIndex) || result.optimizedContent;
-        const dialogHtml = `
-      <div class="acu-optimization-dialog acu-dialog-classic" style="
-        position: fixed;
-        top: 10px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: var(--acu-bg-0, #24221f);
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
-        border: 1px solid var(--acu-border, #36332e);
-        border-radius: 2px;
-        padding: 20px;
-        max-width: 800px;
-        width: calc(100% - 20px);
-        max-height: calc(90vh - 20px);
-        overflow-y: auto;
-        z-index: 100000;
-        color: var(--acu-text, #c1b9ad);
-        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
-        box-sizing: border-box;
-      ">
-        <h3 style="margin: 0 0 8px 0; color: var(--acu-accent, #7d4940); font-size: 1.1em; letter-spacing: 1px;">正文替换建议</h3>
-        <p style="margin: 0 0 12px 0; color: var(--acu-text-dim, #8a8075);">${result.summary}</p>
-        ${result.totalLoops > 1 ? `<p style="margin: 0 0 12px 0; color: var(--acu-text-mute, #6a6055); font-size: 12px;">进度: 第 ${result.currentLoop}/${result.totalLoops} 轮</p>` : ''}
-        <div class="optimization-list" style="margin-bottom: 16px; max-height: 400px; overflow-y: auto;">
-          ${result.optimizations.map((opt, i) => `
-            <div class="optimization-item" style="
-              background: rgba(0, 0, 0, 0.2);
-              border-radius: 1px;
-              padding: 12px;
-              margin-bottom: 8px;
-              border-left: 2px solid var(--acu-border, #36332e);
-            ">
-              <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
-                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
-              </div>
-              <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
-                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
-              </div>
-              <div style="color: #6a8a6a;">
-                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
-              </div>
-            </div>
-          `).join('')}
-        </div>
-        <div style="display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding-bottom: 10px;">
-          <button id="acu-opt-cancel" style="
-            padding: 8px 16px;
-            border: 1px solid var(--acu-border, #36332e);
-            background: transparent;
-            color: var(--acu-text-dim, #8a8075);
-            border-radius: 1px;
-            cursor: pointer;
-            min-width: 80px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">取消优化</button>
-          ${!isLastLoop ? `
-          <button id="acu-opt-skip" style="
-            padding: 8px 16px;
-            border: 1px solid var(--acu-border, #36332e);
-            background: transparent;
-            color: var(--acu-text-dim, #8a8075);
-            border-radius: 1px;
-            cursor: pointer;
-            min-width: 80px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">跳过本轮</button>
-          ` : ''}
-          <button id="acu-opt-reoptimize" style="
-            padding: 8px 16px;
-            border: 1px solid var(--acu-accent, #7d4940);
-            background: transparent;
-            color: var(--acu-accent, #7d4940);
-            border-radius: 1px;
-            cursor: pointer;
-            min-width: 100px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">🔄 重新优化</button>
-          <button id="acu-opt-apply" style="
-            padding: 8px 16px;
-            border: none;
-            background: var(--acu-accent, #7d4940);
-            color: var(--acu-bg-0, #24221f);
-            border-radius: 1px;
-            cursor: pointer;
-            font-weight: 600;
-            min-width: 100px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">${applyButtonText}</button>
-        </div>
-      </div>
-      <div id="acu-opt-backdrop" style="
-        position: fixed;
-        top: 0; left: 0; right: 0; bottom: 0;
-        background: rgba(0, 0, 0, 0.6);
-        z-index: 99999;
-      "></div>
-    `;
-        jQuery_API_ACU('body').append(dialogHtml);
-        // 绑定取消事件
-        jQuery_API_ACU('#acu-opt-cancel, #acu-opt-backdrop').on('click', function () {
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-            callback('cancel');
-        });
-        // 绑定跳过事件（仅非最后一轮显示）
-        jQuery_API_ACU('#acu-opt-skip').on('click', function () {
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-            callback('skip');
-        });
-        // 绑定重新优化事件
-        jQuery_API_ACU('#acu-opt-reoptimize').on('click', async function () {
-            jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
-            // 关闭当前对话框
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-            // 获取原始内容并重新优化
-            const originalContent = getOriginalContent_ACU(messageIndex) || result.optimizedContent;
-            logDebug_ACU(`[正文优化] 用户点击重新优化，messageIndex=${messageIndex}`);
-            // 重新优化
-            await reoptimizeMessage_ACU(messageIndex);
-            // 触发回调，结束当前优化流程
-            callback('cancel');
-        });
-        // 绑定应用事件
-        jQuery_API_ACU('#acu-opt-apply').on('click', async function () {
-            jQuery_API_ACU(this).prop('disabled', true).text('处理中...');
-            logDebug_ACU(`[正文优化] 用户点击应用，isLastLoop=${isLastLoop}, messageIndex=${messageIndex}`);
-            logDebug_ACU(`[正文优化] optimizedContent长度: ${result.optimizedContent?.length || 0}`);
-            // 如果是最后一轮，先应用优化
-            if (isLastLoop) {
-                logDebug_ACU(`[正文优化] 准备调用 replaceChatMessage_ACU...`);
-                const success = await replaceChatMessage_ACU(messageIndex, result.optimizedContent, { originalContent: getOriginalContent_ACU(messageIndex) || originalContent });
-                logDebug_ACU(`[正文优化] replaceChatMessage_ACU 返回: ${success}`);
-                if (!success) {
-                    jQuery_API_ACU(this).prop('disabled', false).text(applyButtonText);
-                    showToastr_ACU('error', '应用失败');
-                    return;
-                }
-            }
-            else {
-                logDebug_ACU(`[正文优化] 非最后一轮，跳过应用，直接回调`);
-            }
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-            callback('apply');
-        });
-    }
-    /**
-     * 显示优化对比对话框
-     */
-    function showOptimizationDiffDialog_ACU(messageIndex, result) {
-        const originalContent = getOriginalContent_ACU(messageIndex) || result.optimizedContent;
-        const dialogHtml = `
-      <div class="acu-optimization-dialog acu-dialog-classic" style="
-        position: fixed;
-        top: 10px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: var(--acu-bg-0, #24221f);
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
-        border: 1px solid var(--acu-border, #36332e);
-        border-radius: 2px;
-        padding: 20px;
-        max-width: 800px;
-        width: calc(100% - 20px);
-        max-height: calc(90vh - 20px);
-        overflow-y: auto;
-        z-index: 100000;
-        color: var(--acu-text, #c1b9ad);
-        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
-        box-sizing: border-box;
-      ">
-        <h3 style="margin: 0 0 16px 0; color: var(--acu-accent, #7d4940); font-size: 1.1em; letter-spacing: 1px;">正文替换建议</h3>
-        <p style="margin: 0 0 12px 0; color: var(--acu-text-dim, #8a8075);">${result.summary || `共 ${result.optimizations.length} 处替换建议`}</p>
-        <div class="optimization-list" style="margin-bottom: 16px;">
-          ${result.optimizations.map((opt, i) => `
-            <div class="optimization-item" style="
-              background: rgba(0, 0, 0, 0.2);
-              border-radius: 1px;
-              padding: 12px;
-              margin-bottom: 8px;
-              border-left: 2px solid var(--acu-border, #36332e);
-            ">
-              <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
-                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
-              </div>
-              <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
-                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
-              </div>
-              <div style="color: #6a8a6a;">
-                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
-              </div>
-            </div>
-          `).join('')}
-        </div>
-        <div style="display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding-bottom: 10px;">
-          <button id="acu-opt-cancel" style="
-            padding: 8px 16px;
-            border: 1px solid var(--acu-border, #36332e);
-            background: transparent;
-            color: var(--acu-text-dim, #8a8075);
-            border-radius: 1px;
-            cursor: pointer;
-            min-width: 80px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">取消</button>
-          <button id="acu-opt-reoptimize" style="
-            padding: 8px 16px;
-            border: 1px solid var(--acu-accent, #7d4940);
-            background: transparent;
-            color: var(--acu-accent, #7d4940);
-            border-radius: 1px;
-            cursor: pointer;
-            min-width: 100px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">🔄 重新优化</button>
-          <button id="acu-opt-apply" style="
-            padding: 8px 16px;
-            border: none;
-            background: var(--acu-accent, #7d4940);
-            color: var(--acu-bg-0, #24221f);
-            border-radius: 1px;
-            cursor: pointer;
-            font-weight: 600;
-            min-width: 100px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">应用优化</button>
-        </div>
-      </div>
-      <div id="acu-opt-backdrop" style="
-        position: fixed;
-        top: 0; left: 0; right: 0; bottom: 0;
-        background: rgba(0, 0, 0, 0.6);
-        z-index: 99999;
-      "></div>
-    `;
-        jQuery_API_ACU('body').append(dialogHtml);
-        // 绑定事件
-        jQuery_API_ACU('#acu-opt-cancel, #acu-opt-backdrop').on('click', function () {
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-        });
-        // 绑定重新优化事件
-        jQuery_API_ACU('#acu-opt-reoptimize').on('click', async function () {
-            jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
-            // 关闭当前对话框
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-            logDebug_ACU(`[正文优化] 用户点击重新优化，messageIndex=${messageIndex}`);
-            // 重新优化
-            await reoptimizeMessage_ACU(messageIndex);
-        });
-        jQuery_API_ACU('#acu-opt-apply').on('click', async function () {
-            jQuery_API_ACU(this).prop('disabled', true).text('应用中...');
-            const success = await replaceChatMessage_ACU(messageIndex, result.optimizedContent, { originalContent: getOriginalContent_ACU(messageIndex) || originalContent });
-            if (success) {
-                jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-                showToastr_ACU('success', '优化已应用');
-                // [新增] 手动确认模式下，应用优化后触发填表
-                logDebug_ACU('[正文优化] 手动确认模式：应用优化后触发填表...');
-                await triggerAutomaticUpdateIfNeeded_ACU();
-            }
-            else {
-                jQuery_API_ACU(this).prop('disabled', false).text('应用优化');
-                showToastr_ACU('error', '应用失败');
-            }
-        });
-        // [新增] 取消时也触发填表（使用原文）
-        jQuery_API_ACU('#acu-opt-cancel').on('click', async function () {
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-            logDebug_ACU('[正文优化] 手动确认模式：用户取消优化，触发填表...');
-            await triggerAutomaticUpdateIfNeeded_ACU();
-        });
-    }
-    /**
-     * 显示优化结果摘要
-     */
-    function showOptimizationDiff_ACU(messageIndex, result) {
-        const message = `正文替换完成，共 ${result.optimizations.length} 处改进`;
-        const reoptButtonHtml = renderReoptButton_ACU();
-        const html = result.summary
-            ? `<div>${message}${reoptButtonHtml}<br><small style="opacity:0.7">${result.summary}</small></div>`
-            : `<div>${message}${reoptButtonHtml}</div>`;
-        const toast = showToastr_ACU('success', html, {
-            timeOut: 10000,
-            extendedTimeOut: 3000,
-            tapToDismiss: false,
-            onShown: function () {
-                jQuery_API_ACU('#acu-opt-toast-reoptimize').off('click.acu_reopt').on('click.acu_reopt', async function (e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
-                    if (toast && toastr_API_ACU)
-                        toastr_API_ACU.clear(toast);
-                    await reoptimizeMessage_ACU(messageIndex);
-                });
-            }
-        });
-    }
-    /**
-     * HTML转义
-     */
-    // === 以下为 presentation 层独有的 UI 函数（DOM 操作/渲染）===
-
-    // replaceChatMessage_ACU 和 getOriginalContent_ACU 已搬迁到 service/chat/chat-service.ts
-    // 通过文件顶部的 re-export 保持外部调用方兼容
-    /**
-     * 重新优化消息
-     * @param {number} messageIndex - 消息索引
-     * @returns {Promise<boolean>} 是否成功
-     */
-    async function reoptimizeMessage_ACU(messageIndex) {
-        const config = settings_ACU.contentOptimizationSettings || {};
-        _set_contentOptimizationAbortRequested_ACU(false);
-        // 检查是否启用
-        if (!config.enabled) {
-            showToastr_ACU('warning', '正文优化功能未启用');
-            return false;
-        }
-        const chat = getChatArray_ACU();
-        if (!chat || !chat[messageIndex]) {
-            showToastr_ACU('error', '消息不存在');
-            return false;
-        }
-        const message = chat[messageIndex];
-        // 跳过用户消息
-        if (message.is_user) {
-            showToastr_ACU('warning', '无法优化用户消息');
-            return false;
-        }
-        // 获取原始内容
-        const originalContent = getOriginalContent_ACU(messageIndex) || message.mes;
-        if (!originalContent) {
-            showToastr_ACU('error', '无法获取消息内容');
-            return false;
-        }
-        logDebug_ACU(`[重新优化] 开始重新优化消息 ${messageIndex}，内容长度: ${originalContent.length}`);
-        if (config.seamlessMode) {
-            showOptimizationOverlay_ACU('正在重新优化正文...');
-        }
-        else {
-            showOptimizationProgressToast_ACU('正在进行正文优化（重新优化）...');
-        }
-        try {
-            ensureOptimizationNotCancelled_ACU();
-            const result = await performContentOptimization_ACU(originalContent, {
-                currentLoop: 1,
-                userMessage: ''
-            });
-            hideOptimizationOverlay_ACU();
-            hideOptimizationProgressToast_ACU();
-            if (contentOptimizationAbortRequested_ACU) {
-                return false;
-            }
-            if (!result.success) {
-                showToastr_ACU('error', `重新优化失败: ${result.error || '未知错误'}`);
-                return false;
-            }
-            if (!result.optimizations || result.optimizations.length === 0) {
-                showToastr_ACU('info', '原文已足够好，无需优化');
-                return true;
-            }
-            showReoptimizationDialog_ACU(messageIndex, result, originalContent);
-            return true;
-        }
-        catch (error) {
-            hideOptimizationOverlay_ACU();
-            hideOptimizationProgressToast_ACU();
-            if (contentOptimizationAbortRequested_ACU || error?.message === '用户终止正文优化') {
-                logDebug_ACU('[重新优化] 用户已取消正文优化');
-                return false;
-            }
-            logError_ACU('[重新优化] 执行出错:', error);
-            showToastr_ACU('error', `重新优化失败: ${error.message}`);
-            return false;
-        }
-        finally {
-            hideOptimizationOverlay_ACU();
-            hideOptimizationProgressToast_ACU();
-            _set_contentOptimizationAbortRequested_ACU(false);
-        }
-    }
-    /**
-     * 显示重新优化对话框
-     * @param {number} messageIndex - 消息索引
-     * @param {object} result - 优化结果
-     * @param {string} originalContent - 原始内容
-     */
-    function showReoptimizationDialog_ACU(messageIndex, result, originalContent) {
-        const dialogHtml = `
-      <div class="acu-optimization-dialog acu-dialog-classic" style="
-        position: fixed;
-        top: 10px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: var(--acu-bg-0, #24221f);
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
-        border: 1px solid var(--acu-border, #36332e);
-        border-radius: 2px;
-        padding: 20px;
-        max-width: 800px;
-        width: calc(100% - 20px);
-        max-height: calc(90vh - 20px);
-        overflow-y: auto;
-        z-index: 100000;
-        color: var(--acu-text, #c1b9ad);
-        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
-        box-sizing: border-box;
-      ">
-        <h3 style="margin: 0 0 8px 0; color: var(--acu-accent, #7d4940); font-size: 1.1em; letter-spacing: 1px;">🔄 重新优化结果</h3>
-        <p style="margin: 0 0 12px 0; color: var(--acu-text-dim, #8a8075);">${result.summary}</p>
-        <div class="optimization-list" style="margin-bottom: 16px; max-height: 400px; overflow-y: auto;">
-          ${result.optimizations.map((opt, i) => `
-            <div class="optimization-item" style="
-              background: rgba(0, 0, 0, 0.2);
-              border-radius: 1px;
-              padding: 12px;
-              margin-bottom: 8px;
-              border-left: 2px solid var(--acu-border, #36332e);
-            ">
-              <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
-                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
-              </div>
-              <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
-                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
-              </div>
-              <div style="color: #6a8a6a;">
-                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
-              </div>
-            </div>
-          `).join('')}
-        </div>
-        <div style="display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding-bottom: 10px;">
-          <button id="acu-opt-cancel" style="
-            padding: 8px 16px;
-            border: 1px solid var(--acu-border, #36332e);
-            background: transparent;
-            color: var(--acu-text-dim, #8a8075);
-            border-radius: 1px;
-            cursor: pointer;
-            min-width: 80px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">取消</button>
-          <button id="acu-opt-reoptimize" style="
-            padding: 8px 16px;
-            border: 1px solid var(--acu-accent, #7d4940);
-            background: transparent;
-            color: var(--acu-accent, #7d4940);
-            border-radius: 1px;
-            cursor: pointer;
-            min-width: 100px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">🔄 再次优化</button>
-          <button id="acu-opt-apply" style="
-            padding: 8px 16px;
-            border: none;
-            background: var(--acu-accent, #7d4940);
-            color: var(--acu-bg-0, #24221f);
-            border-radius: 1px;
-            cursor: pointer;
-            font-weight: 600;
-            min-width: 100px;
-            flex-shrink: 0;
-            font-family: inherit;
-          ">应用优化</button>
-        </div>
-      </div>
-      <div id="acu-opt-backdrop" style="
-        position: fixed;
-        top: 0; left: 0; right: 0; bottom: 0;
-        background: rgba(0, 0, 0, 0.6);
-        z-index: 99999;
-      "></div>
-    `;
-        jQuery_API_ACU('body').append(dialogHtml);
-        // 绑定取消事件
-        jQuery_API_ACU('#acu-opt-cancel, #acu-opt-backdrop').on('click', function () {
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-        });
-        // 绑定再次优化事件
-        jQuery_API_ACU('#acu-opt-reoptimize').on('click', async function () {
-            jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
-            // 关闭当前对话框
-            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-            // 重新优化（使用原始内容）
-            await reoptimizeMessage_ACU(messageIndex);
-        });
-        // 绑定应用事件
-        jQuery_API_ACU('#acu-opt-apply').on('click', async function () {
-            jQuery_API_ACU(this).prop('disabled', true).text('应用中...');
-            const success = await replaceChatMessage_ACU(messageIndex, result.optimizedContent, { originalContent: getOriginalContent_ACU(messageIndex) || originalContent });
-            if (success) {
-                jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
-                showToastr_ACU('success', '优化已应用');
-            }
-            else {
-                jQuery_API_ACU(this).prop('disabled', false).text('应用优化');
-                showToastr_ACU('error', '应用失败');
-            }
-        });
-    }
-    /**
-     * 执行正文优化流程（在GENERATION_ENDED后调用）
-     * @param {number} messageIndex - AI消息索引
-     * @returns {Promise<boolean>} 是否成功
-     */
-    async function executeContentOptimization_ACU(messageIndex) {
-        const config = settings_ACU.contentOptimizationSettings || {};
-        _set_contentOptimizationAbortRequested_ACU(false);
-        // 检查是否启用
-        if (!config.enabled) {
-            return false;
-        }
-        const chat = getChatArray_ACU();
-        if (!chat || !chat[messageIndex]) {
-            return false;
-        }
-        const message = chat[messageIndex];
-        // 跳过用户消息
-        if (message.is_user) {
-            return false;
-        }
-        let content = message.mes || '';
-        setLastOptimizationBase_ACU({
-            messageIndex,
-            messageId: message.message_id,
-            baseContent: content
-        });
-        // [新增] 获取用户消息（用于$8占位符）
-        let userMessage = '';
-        for (let i = messageIndex - 1; i >= 0; i--) {
-            if (chat[i] && chat[i].is_user) {
-                userMessage = chat[i].mes || '';
-                break;
-            }
-        }
-        const extractTags = (config.extractTags || '').trim();
-        const extractRules = config.extractRules || [];
-        const excludeTags = (config.excludeTags || '').trim();
-        const excludeRules = config.excludeRules || [];
-        let processedContent = applyContextTagFilters_ACU(content, {
-            extractTags,
-            extractRules,
-            excludeTags,
-            excludeRules
-        });
-        const minLength = config.minLength || 100;
-        if (processedContent.length < minLength) {
-            logDebug_ACU(`[正文优化] 处理后正文长度 ${processedContent.length} 小于最小阈值 ${minLength}，跳过优化`);
-            return false;
-        }
-        const loopCount = config.loopCount || 1;
-        logDebug_ACU(`[正文优化] 开始优化消息 ${messageIndex}，原始长度 ${content.length}，处理后长度 ${processedContent.length}，循环次数: ${loopCount}`);
-        if (config.seamlessMode) {
-            showOptimizationOverlay_ACU(loopCount > 1 ? `正在优化正文 (1/${loopCount})...` : '正在优化正文...');
-        }
-        else {
-            showOptimizationProgressToast_ACU(loopCount > 1 ? `正在进行正文优化 (1/${loopCount})...` : '正在进行正文优化...');
-        }
-        try {
-            ensureOptimizationNotCancelled_ACU();
-            if (config.autoApply || config.seamlessMode) {
-                let currentContent = content;
-                let totalOptimizations = [];
-                let finalOptimizedContent = content;
-                for (let loop = 1; loop <= loopCount; loop++) {
-                    ensureOptimizationNotCancelled_ACU();
-                    logDebug_ACU(`[正文优化] 执行第 ${loop}/${loopCount} 轮优化`);
-                    if (config.seamlessMode && loopCount > 1) {
-                        showOptimizationOverlay_ACU(`正在优化正文 (${loop}/${loopCount})...`);
-                    }
-                    else if (!config.seamlessMode) {
-                        showOptimizationProgressToast_ACU(`正在进行正文优化 (${loop}/${loopCount})...`);
-                    }
-                    const result = await performContentOptimization_ACU(currentContent, {
-                        currentLoop: loop,
-                        userMessage: userMessage
-                    });
-                    ensureOptimizationNotCancelled_ACU();
-                    if (!result.success) {
-                        logDebug_ACU(`[正文优化] 第 ${loop} 轮优化失败:`, result.error);
-                        if (loop === 1) {
-                            if (config.seamlessMode) {
-                                hideOptimizationOverlay_ACU();
-                            }
-                            else {
-                                hideOptimizationProgressToast_ACU();
-                            }
-                            return false;
-                        }
-                        break;
-                    }
-                    if (!result.optimizations || result.optimizations.length === 0) {
-                        logDebug_ACU(`[正文优化] 第 ${loop} 轮无需优化，原文已足够好`);
-                        if (loop === 1) {
-                            if (config.seamlessMode) {
-                                hideOptimizationOverlay_ACU();
-                            }
-                            else {
-                                hideOptimizationProgressToast_ACU();
-                            }
-                            return true;
-                        }
-                        break;
-                    }
-                    totalOptimizations = totalOptimizations.concat(result.optimizations);
-                    finalOptimizedContent = result.optimizedContent;
-                    currentContent = result.optimizedContent;
-                    logDebug_ACU(`[正文优化] 第 ${loop} 轮完成，本轮 ${result.optimizations.length} 个优化项，累计 ${totalOptimizations.length} 个`);
-                }
-                if (totalOptimizations.length === 0) {
-                    logDebug_ACU('[正文优化] 所有轮次均无需优化');
-                    if (config.seamlessMode) {
-                        hideOptimizationOverlay_ACU();
-                    }
-                    else {
-                        hideOptimizationProgressToast_ACU();
-                    }
-                    return true;
-                }
-                await replaceChatMessage_ACU(messageIndex, finalOptimizedContent);
-                if (config.seamlessMode) {
-                    hideOptimizationOverlay_ACU();
-                }
-                else {
-                    hideOptimizationProgressToast_ACU();
-                }
-                if (config.showDiff && !config.seamlessMode) {
-                    showOptimizationDiff_ACU(messageIndex, {
-                        optimizations: totalOptimizations,
-                        summary: `共 ${loopCount} 轮优化，累计 ${totalOptimizations.length} 处改进`,
-                        optimizedContent: finalOptimizedContent
-                    });
-                }
-                else {
-                    showToastr_ACU('success', `正文优化完成，共 ${loopCount} 轮优化，累计 ${totalOptimizations.length} 处改进`);
-                }
-                return true;
-            }
-            else {
-                hideOptimizationProgressToast_ACU();
-                return await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, loopCount);
-            }
-        }
-        catch (error) {
-            if (contentOptimizationAbortRequested_ACU || error?.message === '用户终止正文优化') {
-                logDebug_ACU('[正文优化] 用户已取消正文优化');
-                return false;
-            }
-            logError_ACU('[正文优化] 执行出错:', error);
-            if (config.seamlessMode) {
-                hideOptimizationOverlay_ACU();
-            }
-            else {
-                hideOptimizationProgressToast_ACU();
-            }
-            return false;
-        }
-        finally {
-            hideOptimizationOverlay_ACU();
-            hideOptimizationProgressToast_ACU();
-            _set_contentOptimizationAbortRequested_ACU(false);
-        }
-    }
-    /**
-     * 执行正文优化（手动确认模式，逐轮确认）
-     * @param {number} messageIndex - 消息索引
-     * @param {string} content - 原始内容
-     * @param {string} userMessage - 用户消息
-     * @param {number} totalLoops - 总循环次数
-     * @param {number} currentLoop - 当前循环次数（内部使用）
-     * @param {string} currentContent - 当前内容（内部使用）
-     * @param {Array} totalOptimizations - 累计优化项（内部使用）
-     * @returns {Promise<boolean>} 是否成功
-     */
-    async function executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop = 1, currentContent = null, totalOptimizations = []) {
-        // 使用传入的当前内容，或者原始内容
-        let workingContent = currentContent !== null ? currentContent : content;
-        logDebug_ACU(`[正文优化-手动确认] 执行第 ${currentLoop}/${totalLoops} 轮优化`);
-        // 执行优化
-        const result = await performContentOptimization_ACU(workingContent, {
-            currentLoop: currentLoop,
-            userMessage: userMessage
-        });
-        if (!result.success) {
-            logDebug_ACU(`[正文优化-手动确认] 第 ${currentLoop} 轮优化失败:`, result.error);
-            // 如果是第一轮就失败，显示错误
-            if (currentLoop === 1) {
-                showToastr_ACU('error', `正文优化失败: ${result.error}`);
-                return false;
-            }
-            // 如果是后续轮次失败，使用之前的结果触发填表
-            await triggerAutomaticUpdateIfNeeded_ACU();
-            return true;
-        }
-        // 检查是否有实际优化
-        if (!result.optimizations || result.optimizations.length === 0) {
-            logDebug_ACU(`[正文优化-手动确认] 第 ${currentLoop} 轮无需优化，原文已足够好`);
-            // 如果没有优化项，检查是否还有下一轮
-            if (currentLoop < totalLoops) {
-                // 继续下一轮（使用当前内容）
-                return await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop + 1, workingContent, totalOptimizations);
-            }
-            else {
-                // 所有轮次完成，触发填表
-                if (totalOptimizations.length > 0) {
-                    showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${totalOptimizations.length} 处改进`);
-                }
-                else {
-                    showToastr_ACU('info', '正文无需优化');
-                }
-                await triggerAutomaticUpdateIfNeeded_ACU();
-                return true;
-            }
-        }
-        // 累积优化项
-        const newTotalOptimizations = totalOptimizations.concat(result.optimizations);
-        // 显示对比对话框
-        return new Promise((resolve) => {
-            showOptimizationDiffDialogForLoop_ACU(messageIndex, {
-                optimizations: result.optimizations,
-                summary: `第 ${currentLoop}/${totalLoops} 轮优化，本轮 ${result.optimizations.length} 处改进`,
-                optimizedContent: result.optimizedContent,
-                currentLoop: currentLoop,
-                totalLoops: totalLoops,
-                totalOptimizations: newTotalOptimizations
-            }, async (action) => {
-                if (action === 'apply') {
-                    // 用户确认应用
-                    if (currentLoop < totalLoops) {
-                        // 还有下一轮，继续优化
-                        const nextResult = await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop + 1, result.optimizedContent, newTotalOptimizations);
-                        resolve(nextResult);
-                    }
-                    else {
-                        // 所有轮次完成，应用最终结果并触发填表
-                        await replaceChatMessage_ACU(messageIndex, result.optimizedContent);
-                        showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${newTotalOptimizations.length} 处改进`);
-                        await triggerAutomaticUpdateIfNeeded_ACU();
-                        resolve(true);
-                    }
-                }
-                else if (action === 'skip') {
-                    // 用户跳过本轮，但继续下一轮
-                    if (currentLoop < totalLoops) {
-                        const nextResult = await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop + 1, workingContent, // 使用未优化的内容
-                        totalOptimizations // 不累积本轮优化项
-                        );
-                        resolve(nextResult);
-                    }
-                    else {
-                        // 最后一轮跳过
-                        if (totalOptimizations.length > 0) {
-                            // 如果有之前的优化，应用之前的结果
-                            // 注意：这里需要应用之前累积的优化内容
-                            await triggerAutomaticUpdateIfNeeded_ACU();
-                            showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${totalOptimizations.length} 处改进`);
-                        }
-                        else {
-                            showToastr_ACU('info', '正文优化已跳过');
-                        }
-                        await triggerAutomaticUpdateIfNeeded_ACU();
-                        resolve(true);
-                    }
-                }
-                else {
-                    // 用户取消，结束优化流程
-                    await triggerAutomaticUpdateIfNeeded_ACU();
-                    resolve(true);
-                }
-            });
-        });
-    }
-    /**
-     * 显示优化对比对话框（支持循环优化）
-     */
-
-    function schedulePlotSettingsUiRefresh_ACU(plotSettingsOverride = null) {
-        if (!$popupInstance_ACU || !$popupInstance_ACU.length)
-            return;
-        const refreshTarget = plotSettingsOverride || getActivePlotEditorSettings_ACU();
-        const $targetPopup = $popupInstance_ACU;
-        const runRefresh = () => {
-            if (!$popupInstance_ACU || !$popupInstance_ACU.length)
-                return;
-            if (!$targetPopup || !$targetPopup.length)
-                return;
-            $targetPopup.triggerHandler('acu_plot_settings_refresh', [refreshTarget]);
-        };
-        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-            window.requestAnimationFrame(() => window.requestAnimationFrame(runRefresh));
-            return;
-        }
-        setTimeout(runRefresh, 0);
-    }
-    function renderExcludeRuleRows_ACU(containerSelector, rules, { startPlaceholder = '开始词', endPlaceholder = '结束词', fallbackRules = [] } = {}) {
-        if (!$popupInstance_ACU)
-            return;
-        const $container = $popupInstance_ACU.find(containerSelector);
-        if (!$container.length)
-            return;
-        let normalized = normalizeExcludeRules_ACU(rules, '');
-        if (normalized.length === 0 && Array.isArray(fallbackRules) && fallbackRules.length > 0) {
-            normalized = normalizeExcludeRules_ACU(fallbackRules, '');
-        }
-        $container.empty();
-        const appendRow = (rule = {}) => {
-            const rowHtml = `
-        <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
-          <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU$1(startPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU$1(rule.start || '')}">
-          <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU$1(endPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU$1(rule.end || '')}">
-          <button type="button" class="button acu-exclude-rule-delete" title="删除规则" style="padding:4px 8px;">删除</button>
-        </div>
-      `;
-            $container.append(rowHtml);
-        };
-        const rows = normalized.length > 0 ? normalized : [{ start: '', end: '' }];
-        rows.forEach(rule => appendRow(rule));
-    }
-    function appendExcludeRuleRow_ACU(containerSelector, { startPlaceholder = '开始词', endPlaceholder = '结束词' } = {}) {
-        if (!$popupInstance_ACU)
-            return;
-        const $container = $popupInstance_ACU.find(containerSelector);
-        if (!$container.length)
-            return;
-        const rowHtml = `
-      <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
-        <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU$1(startPlaceholder)}" style="flex:1;" value="">
-        <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU$1(endPlaceholder)}" style="flex:1;" value="">
-        <button type="button" class="button acu-exclude-rule-delete" title="删除规则" style="padding:4px 8px;">删除</button>
-      </div>
-    `;
-        $container.append(rowHtml);
-    }
-    function readExcludeRulesFromRows_ACU(containerSelector) {
-        if (!$popupInstance_ACU)
-            return [];
-        const $container = $popupInstance_ACU.find(containerSelector);
-        if (!$container.length)
-            return [];
-        const collected = [];
-        $container.find('.acu-exclude-rule-row').each(function () {
-            const start = String(jQuery_API_ACU(this).find('.acu-exclude-rule-start').val() || '').trim();
-            const end = String(jQuery_API_ACU(this).find('.acu-exclude-rule-end').val() || '').trim();
-            if (start && end)
-                collected.push({ start, end });
-        });
-        return normalizeExcludeRules_ACU(collected, '');
-    }
-    function getPlotPromptContentById_ACU(promptId) {
-        return getPlotPromptContentByIdFromSettings_ACU(settings_ACU?.plotSettings, promptId);
-    }
-    function setPlotPromptContentById_ACU(promptId, content) {
-        setPlotPromptContentByIdForSettings_ACU(settings_ACU?.plotSettings, promptId, content);
-    }
-    // --- [剧情推进] 循环提示词列表渲染和管理 ---
-    function renderLoopPromptsList_ACU(plotSettingsOverride = null) {
-        const $container = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-prompts-container`);
-        if (!$container.length)
-            return;
-        const plotSettings = plotSettingsOverride || getActivePlotEditorSettings_ACU();
-        if (!plotSettings)
-            return;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const prompts = plotSettings.loopSettings.quickReplyContent || [];
-        $container.empty();
-        if (prompts.length === 0) {
-            $container.html('<div style="padding: 20px; text-align: center; color: var(--text_secondary); border: 1px dashed var(--border_color_light); border-radius: 6px;">暂无提示词，点击上方"添加提示词"按钮添加</div>');
-            return;
-        }
-        prompts.forEach((prompt, index) => {
-            const $item = jQuery_API_ACU('<div>', {
-                class: 'loop-prompt-item',
-                style: 'display: flex; gap: 8px; align-items: flex-start; padding: 10px; background: var(--background_light); border: 1px solid var(--border_color_light); border-radius: 6px;'
-            });
-            const $content = jQuery_API_ACU('<div>', {
-                style: 'flex: 1; display: flex; flex-direction: column; gap: 6px;'
-            });
-            $content.append(jQuery_API_ACU('<div>', {
-                style: 'display: flex; align-items: center; gap: 8px;'
-            }).append(jQuery_API_ACU('<span>', {
-                style: 'font-size: 0.85em; color: var(--text_secondary); font-weight: 500;',
-                text: `提示词 #${index + 1}`
-            })));
-            const $textarea = jQuery_API_ACU('<textarea>', {
-                class: 'loop-prompt-textarea text_pole',
-                'data-index': index,
-                rows: 2,
-                placeholder: '输入循环提示词内容...',
-                style: 'resize: vertical; width: 100%;',
-                text: prompt || ''
-            });
-            $content.append($textarea);
-            const $deleteBtn = jQuery_API_ACU('<button>', {
-                type: 'button',
-                class: 'loop-prompt-delete-btn button',
-                'data-index': index,
-                style: 'padding: 6px 10px; color: var(--danger); background: transparent; border: 1px solid var(--danger); border-radius: 4px; cursor: pointer; flex-shrink: 0;',
-                title: '删除此提示词',
-                html: '<i class="fa-solid fa-trash"></i>'
-            });
-            $item.append($content).append($deleteBtn);
-            $container.append($item);
-        });
-    }
-    function saveLoopPromptsFromUI_ACU() {
-        const plotSettings = getActivePlotEditorSettings_ACU();
-        if (!plotSettings)
-            return;
-        ensureLoopPromptsArray_ACU(plotSettings);
-        const prompts = [];
-        $popupInstance_ACU.find('.loop-prompt-textarea').each(function () {
-            const content = String(jQuery_API_ACU(this).val() || '').trim();
-            if (content) {
-                prompts.push(content);
-            }
-        });
-        plotSettings.loopSettings.quickReplyContent = prompts;
-        plotSettings.loopSettings.currentPromptIndex = 0; // 重置索引
-        saveSettingsAndNotify_ACU();
-    }
-    // --- [剧情推进] 临时替换"AI指令预设"(settings_ACU.charCardPrompt)，并在生成结束后恢复 ---
-    let plotPromptOverrideActive_ACU = false;
-    let plotPromptOverrideBackup_ACU = null;
-    // [剧情推进] 去重锁：避免同一次发送被 TavernHelper.generate 钩子 + GENERATION_AFTER_COMMANDS 双重处理导致重复 toast/误报失败
-    function buildPlotModifiedCharCardPrompt_ACU(original) {
-        const originalArr = Array.isArray(original)
-            ? original
-            : (typeof original === 'string' ? [{ role: 'USER', content: original }] : []);
-        const cloned = JSON.parse(JSON.stringify(originalArr));
-        const plotMain = (getPlotPromptContentById_ACU('mainPrompt') || '').trim();
-        const plotTask = (getPlotPromptContentById_ACU('systemPrompt') || '').trim();
-        if (!plotMain && !plotTask)
-            return cloned;
-        const getMainSlot = (seg) => {
-            if (!seg)
-                return '';
-            const slot = String(seg.mainSlot || '').toUpperCase();
-            if (slot === 'A' || slot === 'B')
-                return slot;
-            if (seg.isMain)
-                return 'A'; // 兼容旧字段
-            if (seg.isMain2)
-                return 'B'; // 兼容旧字段（若存在）
-            return '';
-        };
-        // 简化逻辑：只替换内容，不插入、不改role、不改结构
-        // 1) 定位主提示词A/B：优先 mainSlot，其次旧 isMain/isMain2
-        let mainAIdx = cloned.findIndex((p) => getMainSlot(p) === 'A');
-        let mainBIdx = cloned.findIndex((p) => getMainSlot(p) === 'B');
-        if (plotMain && mainAIdx !== -1 && cloned[mainAIdx]) {
-            cloned[mainAIdx].content = plotMain;
-        }
-        if (plotTask && mainBIdx !== -1 && cloned[mainBIdx]) {
-            cloned[mainBIdx].content = plotTask;
-        }
-        return cloned;
-    }
-    function applyPlotPromptOverride_ACU() {
-        if (plotPromptOverrideActive_ACU)
-            return;
-        if (!settings_ACU?.plotSettings?.enabled)
-            return;
-        const plotMain = (getPlotPromptContentById_ACU('mainPrompt') || '').trim();
-        const plotTask = (getPlotPromptContentById_ACU('systemPrompt') || '').trim();
-        if (!plotMain && !plotTask)
-            return;
-        plotPromptOverrideBackup_ACU = settings_ACU.charCardPrompt;
-        settings_ACU.charCardPrompt = buildPlotModifiedCharCardPrompt_ACU(plotPromptOverrideBackup_ACU);
-        plotPromptOverrideActive_ACU = true;
-        logDebug_ACU('[剧情推进] 已临时替换AI指令预设（charCardPrompt）。');
-    }
-    function restorePlotPromptOverride_ACU() {
-        if (!plotPromptOverrideActive_ACU)
-            return;
-        settings_ACU.charCardPrompt = plotPromptOverrideBackup_ACU;
-        plotPromptOverrideBackup_ACU = null;
-        plotPromptOverrideActive_ACU = false;
-        logDebug_ACU('[剧情推进] 已恢复AI指令预设（charCardPrompt）。');
-    }
-
-    /**
-     * presentation/components/optimization-ui/index.ts — 统一 re-export
-     */
-
-    // status-display.ts — 对应源文件有跨文件依赖，保留在原位
-    // [T172] 可视化编辑器刷新通知（从 service/worldbook/pipeline.ts 提取）
-    function notifyVisualizerRefresh_ACU() {
-        try {
-            jQuery_API_ACU(document).trigger('acu-visualizer-refresh-data');
-        }
-        catch (e) { }
-    }
-    // [T173] 填表状态消息更新
-    function updateTableFillStatus_ACU(text) {
-        if (!$statusMessageSpan_ACU && $popupInstance_ACU)
-            _assignUIPlaceholders_ACU({ $statusMessageSpan_ACU: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-status-message`) });
-        if ($statusMessageSpan_ACU)
-            $statusMessageSpan_ACU.text(text);
-    }
-    const MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU = 'acu-manual-update-vector-soft-disabled';
-    function isVectorMemoryManualUpdateBlocked_ACU() {
-        try {
-            return getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true;
-        }
-        catch (e) {
-            return false;
-        }
-    }
-    function shouldShowVectorMemoryManualUpdateWarning_ACU() {
-        return isVectorMemoryManualUpdateBlocked_ACU();
-    }
-    function syncManualUpdateButtonAvailability_ACU() {
-        if (!$manualUpdateCardButton_ACU)
-            return;
-        if (shouldShowVectorMemoryManualUpdateWarning_ACU()) {
-            $manualUpdateCardButton_ACU
-                .prop('disabled', false)
-                .addClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
-                .text('交火索引已启用')
-                .attr('title', '交火模式纪要索引启用时不建议手动更新表格；特殊场景下仍可点击执行。');
-            return;
-        }
-        $manualUpdateCardButton_ACU
-            .prop('disabled', false)
-            .removeClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
-            .text('立即手动更新')
-            .removeAttr('title');
-    }
-    // [T173] 填表停止按钮绑定
-    function bindTableFillStopButton_ACU(buttonId, onStop) {
-        const $stopButton = jQuery_API_ACU(`#${buttonId}`);
-        if ($stopButton.length) {
-            $stopButton.off('click.acu_stop').on('click.acu_stop', function (e) {
-                e.stopPropagation();
-                e.preventDefault();
-                syncManualUpdateButtonAvailability_ACU();
-                jQuery_API_ACU(this).closest('.toast').remove();
-                if (typeof onStop === 'function')
-                    onStop();
-            });
-        }
-    }
-    // [T173] 重置手动更新按钮状态
-    function resetManualUpdateButton_ACU() {
-        syncManualUpdateButtonAvailability_ACU();
-    }
-    // [T174] 更新聊天标题显示
-    function updateChatTitleDisplay_ACU(chatIdentifier) {
-        if (!$popupInstance_ACU)
-            return;
-        const $titleElement = $popupInstance_ACU.find('h2#updater-main-title-acu');
-        if ($titleElement.length)
-            $titleElement.html(`当前聊天：${escapeHtml_ACU$1(chatIdentifier || '未知')}`);
-    }
-    // [T175] 检查弹窗是否打开（供 service 层用布尔判断，不暴露 DOM 引用）
-    function isPopupOpen_ACU() {
-        return !!$popupInstance_ACU;
-    }
-    // [T177] 读取酒馆发送输入框的值
-    function getSendTextareaValue_ACU() {
-        try {
-            return jQuery_API_ACU('#send_textarea').val() || '';
-        }
-        catch (e) {
-            return '';
-        }
-    }
-    // [T177] 设置酒馆发送输入框的值并触发 input 事件
-    function setSendTextareaValue_ACU(text) {
-        try {
-            jQuery_API_ACU('#send_textarea').val(text);
-            jQuery_API_ACU('#send_textarea').trigger('input');
-        }
-        catch (e) { }
-    }
-    // [T178] 将删除设置同步到 UI。合并总结 UI 已停用，不再同步 merge/auto-merge 控件。
-    function syncMergeSettingsToUI_ACU(s) {
-        if (!$popupInstance_ACU)
-            return;
-        const find = (id) => $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-${id}`);
-        const setVal = (id, v) => { const $el = find(id); if ($el.length)
-            $el.val(v); };
-        setVal('delete-start-floor', s.deleteStartFloor || 1);
-        setVal('delete-end-floor', s.deleteEndFloor || '');
-    }
-    // [T179] 将全部设置同步到 UI（从 service/settings/settings-service.ts 提取）
-    function syncAllSettingsToUI_ACU(s) {
-        if (!$popupInstance_ACU)
-            return;
-        if ($customApiUrlInput_ACU)
-            $customApiUrlInput_ACU.val(s.apiConfig.url);
-        if ($customApiKeyInput_ACU)
-            $customApiKeyInput_ACU.val(s.apiConfig.apiKey);
-        if ($maxTokensInput_ACU)
-            $maxTokensInput_ACU.val(s.apiConfig.max_tokens);
-        if ($temperatureInput_ACU)
-            $temperatureInput_ACU.val(s.apiConfig.temperature);
-        if ($customApiModelInput_ACU)
-            $customApiModelInput_ACU.val(s.apiConfig.model || '');
-        if ($customApiModelSelect_ACU) {
-            $customApiModelSelect_ACU.empty().append('<option value="">-- 请先加载模型列表 --</option>');
-            if (s.apiConfig.model) {
-                $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(s.apiConfig.model)}">${escapeHtml_ACU$1(s.apiConfig.model)}</option>`);
-            }
-        }
-        if (typeof updateApiStatusDisplay_ACU === 'function')
-            updateApiStatusDisplay_ACU();
-        if ($charCardPromptSegmentsContainer_ACU)
-            renderPromptSegments_ACU(s.charCardPrompt);
-        if ($autoUpdateThresholdInput_ACU)
-            $autoUpdateThresholdInput_ACU.val(s.autoUpdateThreshold);
-        if ($autoUpdateFrequencyInput_ACU)
-            $autoUpdateFrequencyInput_ACU.val(s.autoUpdateFrequency);
-        if ($autoUpdateTokenThresholdInput_ACU)
-            $autoUpdateTokenThresholdInput_ACU.val(s.autoUpdateTokenThreshold);
-        if ($updateBatchSizeInput_ACU)
-            $updateBatchSizeInput_ACU.val(s.updateBatchSize);
-        if ($maxConcurrentGroupsInput_ACU)
-            $maxConcurrentGroupsInput_ACU.val(s.maxConcurrentGroups || 1);
-        if ($skipUpdateFloorsInput_ACU)
-            $skipUpdateFloorsInput_ACU.val(s.skipUpdateFloors || 0);
-        if ($retainRecentLayersInput_ACU)
-            $retainRecentLayersInput_ACU.val(s.retainRecentLayers || '');
-        if (typeof renderExcludeRuleRows_ACU === 'function') {
-            renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`, normalizeExtractRules_ACU(s.tableContextExtractRules, s.tableContextExtractTags || ''), { startPlaceholder: '开始词（例如：<think）', endPlaceholder: '结束词（例如：</think>）' });
-            renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`, normalizeExcludeRules_ACU(s.tableContextExcludeRules, s.tableContextExcludeTags || ''), { startPlaceholder: '开始词（例如：<thinking）', endPlaceholder: '结束词（例如：</thinking>）' });
-        }
-        const find = (id) => $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-${id}`);
-        const setVal = (id, v) => { const $el = find(id); if ($el.length)
-            $el.val(v); };
-        const setChecked = (id, v) => { const $el = find(id); if ($el.length)
-            $el.prop('checked', !!v); };
-        setVal('api-extra-body-params', s.apiConfig.extraBodyParams || '');
-        setVal('api-excluded-body-params', s.apiConfig.excludedBodyParams || '');
-        setVal('api-extra-headers', s.apiConfig.extraHeaders || '');
-        setChecked('api-thinking-enabled', s.apiConfig.thinkingEnabled === true);
-        setVal('api-thinking-effort', s.apiConfig.thinkingEffort || 'none');
-        setVal('import-split-size', s.importSplitSize);
-        setChecked('import-prompt-exclude-imported-worldbook-entries', s.importPromptExcludeImportedWorldbookEntries !== false);
-        if ($autoUpdateEnabledCheckbox_ACU)
-            $autoUpdateEnabledCheckbox_ACU.prop('checked', s.autoUpdateEnabled);
-        if ($standardizedTableFillEnabledCheckbox_ACU)
-            $standardizedTableFillEnabledCheckbox_ACU.prop('checked', s.standardizedTableFillEnabled !== false);
-        if ($toastMuteEnabledCheckbox_ACU)
-            $toastMuteEnabledCheckbox_ACU.prop('checked', !!s.toastMuteEnabled);
-        if ($promptTemplateEnabledCheckbox_ACU)
-            $promptTemplateEnabledCheckbox_ACU.prop('checked', s.promptTemplateSettings?.enabled !== false);
-        if ($tableEditLastPairOnlyCheckbox_ACU)
-            $tableEditLastPairOnlyCheckbox_ACU.prop('checked', s.tableEditLastPairOnly !== false);
-        if ($tableMaxRetriesInput_ACU)
-            $tableMaxRetriesInput_ACU.val(s.tableMaxRetries || 3);
-        syncMergeSettingsToUI_ACU(s);
-        const worldbookConfig = getCurrentWorldbookConfig_ACU();
-        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
-        const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
-        $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source"]`).filter(`[value="${worldbookConfig.source}"]`).prop('checked', true);
-        if (typeof updateWorldbookSourceView_ACU === 'function')
-            updateWorldbookSourceView_ACU();
-        if (typeof populateInjectionTargetSelector_ACU === 'function')
-            populateInjectionTargetSelector_ACU();
-        setChecked('worldbook-vector-memory-enabled', summaryVectorIndexEnabled);
-        setVal('worldbook-vector-memory-threshold', vectorMemoryConfig.threshold);
-        setVal('worldbook-vector-memory-archive-trigger-count', vectorMemoryConfig.archiveTriggerCount || vectorMemoryConfig.archiveBatchSize);
-        setVal('worldbook-vector-memory-archive-batch-size', vectorMemoryConfig.archiveBatchSize);
-        setVal('worldbook-vector-memory-archive-max-concurrency', vectorMemoryConfig.summaryIndexArchiveMaxConcurrency || vectorMemoryConfig.archiveMaxConcurrency || 30);
-        setVal('worldbook-vector-memory-summary-index-keyword-min-rows', vectorMemoryConfig.summaryIndexKeywordMinRows || 100);
-        setVal('worldbook-vector-memory-topk', vectorMemoryConfig.topK);
-        setVal('worldbook-vector-memory-min-score', vectorMemoryConfig.minScore);
-        setVal('worldbook-vector-memory-namespace', vectorMemoryConfig.vectorNamespace);
-        setVal('worldbook-vector-memory-embedding-endpoint', vectorMemoryConfig.embeddingEndpoint);
-        setVal('worldbook-vector-memory-embedding-model', vectorMemoryConfig.embeddingModel);
-        setVal('worldbook-vector-memory-embedding-api-key', vectorMemoryConfig.embeddingApiKey);
-        setVal('worldbook-vector-memory-rerank-endpoint', vectorMemoryConfig.rerankEndpoint || '');
-        setVal('worldbook-vector-memory-rerank-model', vectorMemoryConfig.rerankModel || '');
-        setVal('worldbook-vector-memory-rerank-api-key', vectorMemoryConfig.rerankApiKey || '');
-        setVal('worldbook-vector-memory-rerank-instruction', vectorMemoryConfig.rerankInstruction || '');
-        setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
-        setChecked('worldbook-vector-memory-archive-without-summary', vectorMemoryConfig.archiveWithoutSummary === true);
-        setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);
-        setVal('worldbook-vector-memory-recent-fixed-inject-count', vectorMemoryConfig.recentFixedInjectCount || 50);
-        setVal('worldbook-vector-memory-entry-comment', vectorMemoryConfig.entryComment);
-        setVal('worldbook-vector-memory-entry-key', vectorMemoryConfig.entryKey);
-        setVal('worldbook-vector-memory-keyword-api-preset', vectorMemoryConfig.keywordApiPreset);
-        setVal('worldbook-vector-memory-keyword-context-pair-count', vectorMemoryConfig.keywordContextPairCount || 1);
-        setVal('worldbook-vector-memory-keyword-generation-max-attempts', vectorMemoryConfig.keywordGenerationMaxAttempts || 3);
-        renderKeywordPromptGroupToUI_ACU(vectorMemoryConfig.keywordPromptGroup || []);
-        renderSummaryPromptGroupToUI_ACU(vectorMemoryConfig.summaryPromptGroup || []);
-        const $vectorMemoryBlock = find('worldbook-vector-memory-config-block');
-        if ($vectorMemoryBlock.length)
-            $vectorMemoryBlock.toggle(summaryVectorIndexEnabled);
-        syncManualUpdateButtonAvailability_ACU();
-        const $outlineToggle = find('worldbook-outline-entry-enabled');
-        if ($outlineToggle.length) {
-            let mode = worldbookConfig.zeroTkOccupyMode;
-            if (typeof mode === 'undefined' && typeof worldbookConfig.outlineEntryEnabled !== 'undefined')
-                mode = (worldbookConfig.outlineEntryEnabled === false);
-            $outlineToggle.prop('checked', mode === true);
-        }
-        setChecked('worldbook-summary-vector-index-mode-enabled', summaryVectorIndexEnabled);
-        setChecked('vector-index-mode-enabled', summaryVectorIndexEnabled);
-        const $summaryVectorIndexHint = find('summary-vector-index-archive-hint');
-        if ($summaryVectorIndexHint.length) {
-            const activeSummaryVectorIndexSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
-            const activeSummaryVectorIndexState = activeSummaryVectorIndexSnapshot?.summaryVectorIndexState || null;
-            const summaryVectorIndexRowCount = activeSummaryVectorIndexState?.rowCount || (Array.isArray(activeSummaryVectorIndexState?.rows) ? activeSummaryVectorIndexState.rows.length : 0);
-            const summaryVectorIndexChunkCount = activeSummaryVectorIndexState?.chunkCount || (Array.isArray(activeSummaryVectorIndexState?.chunks) ? activeSummaryVectorIndexState.chunks.length : 0);
-            const hasSummaryVectorIndexArchive = !!activeSummaryVectorIndexState;
-            const summaryIndexKeywordMinRows = Number(vectorMemoryConfig.summaryIndexKeywordMinRows || 100);
-            $summaryVectorIndexHint.text(summaryVectorIndexEnabled
-                ? hasSummaryVectorIndexArchive
-                    ? summaryVectorIndexRowCount >= summaryIndexKeywordMinRows
-                        ? `交火模式纪要索引已启用；当前可用索引：${summaryVectorIndexRowCount} 条纪要，${summaryVectorIndexChunkCount} 个概要列 chunks，已达到 ${summaryIndexKeywordMinRows} 条门槛。发送前会生成关键词、召回概要列 chunks、执行可选 Rerank，并按纪要表原顺序覆盖原概要索引条目。`
-                        : `交火模式纪要索引已启用；当前可用索引：${summaryVectorIndexRowCount}/${summaryIndexKeywordMinRows} 条纪要，${summaryVectorIndexChunkCount} 个概要列 chunks。未达到门槛前，发送时不会触发交火召回，填表保存后仍会立即归档并继续累积外置索引。`
-                    : `交火模式纪要索引已启用，但当前聊天尚无外置纪要向量索引；完成一次纪要表填写后会自动归档，也可点击“立即构建交火纪要索引”手动构建。`
-                : '使用前请先配置好 Embedding 模型以及可选 Rerank 模型；开启后会在纪要表填写完成时立即归档外置概要列向量索引，达到门槛后发送前覆盖原概要索引条目。');
-        }
-        if ($useMainApiCheckbox_ACU) {
-            $useMainApiCheckbox_ACU.prop('checked', s.apiConfig.useMainApi);
-            if (typeof updateCustomApiInputsState_ACU === 'function')
-                updateCustomApiInputsState_ACU();
-        }
-        if ($streamingEnabledCheckbox_ACU)
-            $streamingEnabledCheckbox_ACU.prop('checked', s.streamingEnabled || false);
-        if ($manualTableSelector_ACU && typeof renderManualTableSelector_ACU === 'function')
-            renderManualTableSelector_ACU();
-        if ($importTableSelector_ACU && typeof renderImportTableSelector_ACU === 'function')
-            renderImportTableSelector_ACU();
-        $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-api-mode"][value="${s.apiMode}"]`).prop('checked', true);
-        if (typeof updateApiModeView_ACU === 'function')
-            updateApiModeView_ACU(s.apiMode);
-    }
-    // [T180] 模拟点击酒馆发送按钮
-    function clickSendButton_ACU() {
-        try {
-            jQuery_API_ACU('#send_but').click();
-        }
-        catch (e) { }
-    }
-
-    /**
-     * presentation/components/settings-ui-helpers.ts
-     * 从 settings-service.ts 搬出的 UI 相关便捷函数
-     */
-    /**
-     * 加载设置后刷新 UI（presentation 层便捷函数）
-     */
-    function loadSettingsAndRefreshUI_ACU() {
-        loadSettings_ACU();
-        if (typeof syncAllSettingsToUI_ACU === 'function')
-            syncAllSettingsToUI_ACU(settings_ACU);
-    }
-    /**
-     * 保存设置并根据返回值弹 toast 通知（presentation 层便捷函数）
-     * service 层 saveSettings_ACU 只返回结果，UI 通知由此函数处理。
-     *
-     * 后台自动流程可能在设置加载门闸尚未放行时触发保存。那类保护性拒绝必须保留，
-     * 但不能把正常填表/世界书同步流程刷成连续 toast；用户主动保存仍然保留提示。
-     */
-    function saveSettingsAndNotify_ACU(options = {}) {
-        const result = saveSettings_ACU();
-        if (result.error) {
-            showToastr_ACU('error', result.error);
-        }
-        else if (result.warning) {
-            if (options.silentWarnings)
-                return result;
-            if (options.suppressLoadingWarning !== false && result.code === 'settings_loading')
-                return result;
-            const toastType = result.storageType === 'memory' ? 'warning' : 'info';
-            const timeOut = result.storageType === 'memory' ? 8000 : 6000;
-            showToastr_ACU(toastType, result.warning, { timeOut });
-        }
-        return result;
-    }
-
-    /**
-     * presentation/components/table-selector.ts — 表格选择器组件
-     *
-     * 使用 TableSelectorComponent 类消除 manual/import 两个选择器的重复代码。
-     * 原有导出函数保留作为兼容层，内部委托给组件实例。
-     */
-    // ─── TableSelectorComponent 类 ─────────────────────────
-    class TableSelectorComponent {
-        constructor(config) {
-            this._$container = null;
-            this._mounted = false;
-            this._config = config;
-        }
-        /** 生成选择器 HTML（纯函数） */
-        render() {
-            const dataSource = this._config.getDataSource();
-            if (!dataSource)
-                return `<div class="notes">${escapeHtml_ACU$1(this._config.emptyDataText)}</div>`;
-            const availableKeys = getSortedSheetKeys_ACU(dataSource);
-            if (availableKeys.length === 0)
-                return `<div class="notes">${escapeHtml_ACU$1(this._config.emptyKeysText)}</div>`;
-            const selectedKeys = this._config.getSelectedKeys();
-            const selectedSet = new Set(selectedKeys);
-            let html = '<div class="acu-table-selector" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;max-height:240px;overflow:auto;padding:8px;border:1px solid var(--border-normal);border-radius:8px;background:var(--bg-secondary);">';
-            availableKeys.forEach(key => {
-                const name = dataSource[key]?.name || key;
-                const checked = selectedSet.has(key) ? 'checked' : '';
-                html += `<label style="display:flex;align-items:center;gap:8px;padding:10px;border:1px solid var(--border-normal);border-radius:6px;background:var(--bg-primary);">
-              <input type="checkbox" data-key="${key}" ${checked} style="margin:0;width:14px;height:14px;flex-shrink:0;">
-              <span style="flex:1;word-break:break-all;font-weight:600;">${escapeHtml_ACU$1(name)}</span>
-          </label>`;
-            });
-            html += '</div>';
-            return html;
-        }
-        /** 挂载到容器：插入 HTML + 绑定事件 */
-        mount($container) {
-            if (this._mounted)
-                this.unmount();
-            this._$container = $container;
-            this._$container.html(this.render());
-            this._bindEvents();
-            this._mounted = true;
-        }
-        /** 卸载：清理事件 + 清空内容 */
-        unmount() {
-            if (this._$container) {
-                this._$container.off('change', 'input[type="checkbox"]');
-                this._$container.empty();
-            }
-            this._mounted = false;
-        }
-        /** 用新数据重新渲染（保持挂载状态） */
-        update() {
-            if (!this._$container || !this._$container.length)
-                return;
-            this._$container.off('change', 'input[type="checkbox"]');
-            this._$container.html(this.render());
-            this._bindEvents();
-        }
-        /** 从 UI 读取当前勾选的 keys */
-        getSelectionFromUI() {
-            if (!this._$container || !this._$container.length)
-                return [];
-            const keys = [];
-            this._$container.find('input[type="checkbox"]:checked').each(function () {
-                const k = jQuery_API_ACU(this).data('key');
-                if (k)
-                    keys.push(k);
-            });
-            return keys;
-        }
-        /** 全选 */
-        selectAll() {
-            const dataSource = this._config.getDataSource();
-            if (!dataSource)
-                return;
-            const keys = getSortedSheetKeys_ACU(dataSource);
-            this._config.saveSelection(keys);
-            this.update();
-        }
-        /** 全不选 */
-        selectNone() {
-            this._config.saveSelection([]);
-            this.update();
-        }
-        _bindEvents() {
-            if (!this._$container)
-                return;
-            const config = this._config;
-            this._$container.off('change', 'input[type="checkbox"]').on('change', 'input[type="checkbox"]', function () {
-                const checkedKeys = [];
-                config.getContainer()?.find('input[type="checkbox"]:checked').each(function () {
-                    const key = jQuery_API_ACU(this).data('key');
-                    if (key)
-                        checkedKeys.push(key);
-                });
-                config.saveSelection(checkedKeys);
-            });
-        }
-    }
-    // ─── 组件实例 ──────────────────────────────────────────
-    const manualSelector = new TableSelectorComponent({
-        getDataSource: () => currentJsonTableData_ACU || null,
-        getSelectedKeys: () => {
-            const resolved = getSelectedManualSheetKeys_ACU();
-            // 同步到 settings（保持原有行为）
-            if (!Array.isArray(settings_ACU.manualSelectedTables) || JSON.stringify(settings_ACU.manualSelectedTables) !== JSON.stringify(resolved)) {
-                settings_ACU.manualSelectedTables = resolved;
-                saveSettingsAndNotify_ACU();
-            }
-            return resolved;
-        },
-        getContainer: () => $manualTableSelector_ACU,
-        saveSelection: (keys) => {
-            settings_ACU.manualSelectedTables = keys;
-            settings_ACU.hasManualSelection = true;
-            saveSettingsAndNotify_ACU();
-        },
-        emptyDataText: '暂无表格可选。',
-        emptyKeysText: '暂无表格可选。',
-    });
-    const importSelector = new TableSelectorComponent({
-        getDataSource: () => getImportBaseTableData_ACU(),
-        getSelectedKeys: () => {
-            const resolved = getSelectedImportSheetKeys_ACU();
-            if (!Array.isArray(settings_ACU.importSelectedTables) || JSON.stringify(settings_ACU.importSelectedTables) !== JSON.stringify(resolved)) {
-                settings_ACU.importSelectedTables = resolved;
-                saveSettingsAndNotify_ACU();
-            }
-            return resolved;
-        },
-        getContainer: () => $importTableSelector_ACU,
-        saveSelection: (keys) => {
-            settings_ACU.importSelectedTables = keys;
-            settings_ACU.hasImportTableSelection = true;
-            saveSettingsAndNotify_ACU();
-        },
-        emptyDataText: '尚未加载表格结构。',
-        emptyKeysText: '暂无表格可选。',
-    });
-    // ─── 兼容层：保留原有导出函数签名 ─────────────────────
-    function renderManualTableSelector_ACU() {
-        const $container = $manualTableSelector_ACU;
-        if (!$container || !$container.length || !currentJsonTableData_ACU)
-            return;
-        manualSelector.mount($container);
-    }
-    function getManualSelectionFromUI_ACU() {
-        const keys = manualSelector.getSelectionFromUI();
-        if (keys.length > 0 || settings_ACU.hasManualSelection) {
-            settings_ACU.manualSelectedTables = keys;
-            settings_ACU.hasManualSelection = true;
-            saveSettingsAndNotify_ACU();
-            return keys;
-        }
-        return getSelectedManualSheetKeys_ACU();
-    }
-    // ─── 外部导入表格选择器 ────────────────────────────────
-    function getImportBaseTableData_ACU() {
-        try {
-            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true });
-            if (templateData)
-                return templateData;
-        }
-        catch (e) {
-            // ignore
-        }
-        return currentJsonTableData_ACU || null;
-    }
-    function getSelectedImportSheetKeys_ACU() {
-        const base = getImportBaseTableData_ACU();
-        if (!base)
-            return [];
-        const availableKeys = getSortedSheetKeys_ACU(base);
-        const saved = Array.isArray(settings_ACU.importSelectedTables) ? settings_ACU.importSelectedTables : [];
-        if (!settings_ACU.hasImportTableSelection)
-            return availableKeys;
-        const validSaved = saved.filter((k) => availableKeys.includes(k));
-        return validSaved;
-    }
-    function renderImportTableSelector_ACU() {
-        const $container = $importTableSelector_ACU;
-        if (!$container || !$container.length)
-            return;
-        importSelector.mount($container);
-    }
-    function getImportSelectionFromUI_ACU() {
-        const keys = importSelector.getSelectionFromUI();
-        if (keys.length > 0 || settings_ACU.hasImportTableSelection) {
-            settings_ACU.importSelectedTables = keys;
-            settings_ACU.hasImportTableSelection = true;
-            saveSettingsAndNotify_ACU();
-            return keys;
-        }
-        return getSelectedImportSheetKeys_ACU();
-    }
-    function handleImportSelectAll_ACU() {
-        importSelector.selectAll();
-    }
-    function handleImportSelectNone_ACU() {
-        importSelector.selectNone();
-    }
-    function handleManualSelectAll_ACU() {
-        manualSelector.selectAll();
-    }
-    function handleManualSelectNone_ACU() {
-        manualSelector.selectNone();
-    }
-
-    /**
-     * presentation/theme/custom-confirm.ts
-     *
-     * 与插件 UI 风格一致的自定义确认框，替代原生 confirm()。
-     * 返回 Promise<boolean>，调用方在 async 函数中使用 await 即可。
-     *
-     * 样式复用窗口系统的 CSS 变量（--acu-panel-bg 等）和遮罩层（.acu-window-overlay），
-     * 自动兼容双主题（墨色/素纱）。
-     *
-     * 重要：DOM 挂载到 topLevelWindow_ACU.document（酒馆主窗口），
-     * 而非当前 iframe 的 document，与窗口系统（window-system.ts）保持一致。
-     */
-    /**
-     * 获取目标 document（酒馆主窗口），与窗口系统保持一致。
-     */
-    function getTargetDoc() {
-        return (topLevelWindow_ACU || window).document;
-    }
-    /**
-     * 弹出自定义确认框，返回 Promise<boolean>。
-     * - 用户点击确认按钮 → resolve(true)
-     * - 用户点击取消按钮或点击遮罩层 → resolve(false)
-     *
-     * @param title 标题
-     * @param message 正文（支持换行 \n）
-     * @param options 可选配置
-     */
-    function showCustomConfirm_ACU(title, message, options = {}) {
-        const { confirmLabel = '确定', cancelLabel = '取消', } = options;
-        const targetDoc = getTargetDoc();
-        const targetWindow = targetDoc.defaultView || topLevelWindow_ACU || window;
-        const viewportWidth = Number(targetWindow?.innerWidth || window.innerWidth || 0);
-        const isNarrowScreen = viewportWidth > 0 && viewportWidth <= 899;
-        // 移除可能残留的旧确认框（防止重复）
-        removeExistingConfirm();
-        const confirmId = `${SCRIPT_ID_PREFIX_ACU}-custom-confirm`;
-        // 将 \n 转为 <br>，HTML 转义防止 XSS
-        const safeMessage = escapeHtml_ACU(message).replace(/\n/g, '<br>');
-        const html = `
-    <div class="acu-window-overlay" id="${confirmId}-overlay" style="z-index: 100000;">
-      <div id="${confirmId}" style="
-        position: fixed;
-        top: ${isNarrowScreen ? 'max(calc(env(safe-area-inset-top, 0px) + 72px), 12svh)' : '50%'};
-        left: 50%;
-        transform: translate(-50%, ${isNarrowScreen ? '0' : '-50%'});
-        min-width: ${isNarrowScreen ? 'min(280px, calc(100vw - 24px))' : '320px'};
-        width: min(420px, calc(100vw - ${isNarrowScreen ? '24px' : '40px'}));
-        max-width: min(420px, calc(100vw - ${isNarrowScreen ? '24px' : '40px'}));
-        max-height: calc(${isNarrowScreen ? '100dvh' : '100vh'} - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - ${isNarrowScreen ? '88px' : '40px'});
-        background-color: var(--acu-confirm-bg, var(--acu-bg-1, #ffffff));
-        border: 1px solid var(--acu-confirm-border, var(--acu-border, #e0e4ea));
-        border-radius: 10px;
-        box-shadow: var(--acu-shadow, 0 24px 60px rgba(0, 0, 0, 0.18));
-        animation: acuWindowSlideIn 0.25s ease-out;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-        color: var(--acu-confirm-title, var(--acu-text-1, #1a2332));
-        padding: 0;
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
-      ">
-        <div style="
-          padding: 16px 20px 12px 20px;
-          font-size: 14px;
-          font-weight: 600;
-          letter-spacing: 0.3px;
-          color: var(--acu-confirm-title, var(--acu-text-1, #1a2332));
-          border-bottom: 1px solid var(--acu-confirm-border, var(--acu-border, #e0e4ea));
-        ">${escapeHtml_ACU(title)}</div>
-        <div style="
-          padding: 16px 20px;
-          font-size: 13px;
-          line-height: 1.7;
-          color: var(--acu-confirm-text, var(--acu-text-2, #4a5568));
-          overflow-y: auto;
-          max-height: ${isNarrowScreen ? 'min(50dvh, calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 180px))' : 'none'};
-        ">${safeMessage}</div>
-        <div style="
-          padding: 12px 20px calc(16px + env(safe-area-inset-bottom, 0px)) 20px;
-          display: flex;
-          justify-content: ${isNarrowScreen ? 'stretch' : 'flex-end'};
-          flex-direction: ${isNarrowScreen ? 'column-reverse' : 'row'};
-          gap: 10px;
-        ">
-          <button id="${confirmId}-cancel" style="
-            padding: 10px 18px;
-            border: 1px solid var(--acu-confirm-cancel-border, var(--acu-border-2, #c8cdd5)) !important;
-            border-radius: 6px;
-            background: var(--acu-confirm-cancel-bg, transparent) !important;
-            color: var(--acu-confirm-cancel-text, var(--acu-text-2, #4a5568)) !important;
-            cursor: pointer;
-            font-family: inherit;
-            font-size: 13px;
-            font-weight: 500;
-            letter-spacing: 0.3px;
-            transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-            box-shadow: none !important;
-            width: ${isNarrowScreen ? '100%' : 'auto'};
-          ">${escapeHtml_ACU(cancelLabel)}</button>
-          <button id="${confirmId}-ok" style="
-            padding: 10px 18px;
-            border: 1px solid var(--acu-confirm-ok-border, rgba(37, 99, 235, 0.30)) !important;
-            border-radius: 6px;
-            background: var(--acu-confirm-ok-bg, rgba(37, 99, 235, 0.08)) !important;
-            color: var(--acu-confirm-ok-text, var(--acu-accent, #2563eb)) !important;
-            cursor: pointer;
-            font-family: inherit;
-            font-size: 13px;
-            font-weight: 600;
-            letter-spacing: 0.3px;
-            transition: background 0.15s ease, border-color 0.15s ease;
-            box-shadow: none !important;
-            width: ${isNarrowScreen ? '100%' : 'auto'};
-          ">${escapeHtml_ACU(confirmLabel)}</button>
-        </div>
-      </div>
-    </div>
-  `;
-        // 挂载到主窗口（与窗口系统一致），而非当前 iframe
-        targetDoc.body.insertAdjacentHTML('beforeend', html);
-        // 在主窗口 document 中查找元素
-        const $ok = targetDoc.getElementById(`${confirmId}-ok`);
-        const $cancel = targetDoc.getElementById(`${confirmId}-cancel`);
-        const $overlay = targetDoc.getElementById(`${confirmId}-overlay`);
-        // 给按钮加 hover 效果（用 JS 而非 CSS 类，避免污染全局样式）
-        if ($ok) {
-            $ok.addEventListener('mouseenter', () => {
-                $ok.style.background = 'var(--acu-confirm-ok-hover-bg, rgba(37, 99, 235, 0.14))';
-                $ok.style.borderColor = 'var(--acu-confirm-ok-hover-border, rgba(37, 99, 235, 0.45))';
-            });
-            $ok.addEventListener('mouseleave', () => {
-                $ok.style.background = 'var(--acu-confirm-ok-bg, rgba(37, 99, 235, 0.08))';
-                $ok.style.borderColor = 'var(--acu-confirm-ok-border, rgba(37, 99, 235, 0.30))';
-            });
-        }
-        if ($cancel) {
-            $cancel.addEventListener('mouseenter', () => {
-                $cancel.style.background = 'var(--acu-confirm-cancel-hover-bg, var(--acu-bg-2, rgba(0, 0, 0, 0.03)))';
-                $cancel.style.borderColor = 'var(--acu-confirm-cancel-hover-border, var(--acu-border, #e0e4ea))';
-                $cancel.style.color = 'var(--acu-confirm-cancel-hover-text, var(--acu-text-1, #1a2332))';
-            });
-            $cancel.addEventListener('mouseleave', () => {
-                $cancel.style.background = 'var(--acu-confirm-cancel-bg, transparent)';
-                $cancel.style.borderColor = 'var(--acu-confirm-cancel-border, var(--acu-border-2, #c8cdd5))';
-                $cancel.style.color = 'var(--acu-confirm-cancel-text, var(--acu-text-2, #4a5568))';
-            });
-        }
-        return new Promise((resolve) => {
-            const cleanup = (result) => {
-                removeExistingConfirm();
-                resolve(result);
-            };
-            $ok?.addEventListener('click', () => cleanup(true));
-            $cancel?.addEventListener('click', () => cleanup(false));
-            $overlay?.addEventListener('click', (e) => {
-                if (e.target === $overlay)
-                    cleanup(false);
-            });
-        });
-    }
-    /** 移除已有的自定义确认框 DOM（从主窗口中查找并移除） */
-    function removeExistingConfirm() {
-        const confirmId = `${SCRIPT_ID_PREFIX_ACU}-custom-confirm`;
-        const targetDoc = getTargetDoc();
-        const existing = targetDoc.getElementById(`${confirmId}-overlay`);
-        if (existing)
-            existing.remove();
-    }
-    /** 简易 HTML 转义（使用主窗口 document 创建元素） */
-    function escapeHtml_ACU(text) {
-        const targetDoc = getTargetDoc();
-        const div = targetDoc.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
     function normalizeEmbeddingVector_ACU(value) {
         if (!Array.isArray(value))
             return [];
@@ -35635,6 +33381,2273 @@ $CONTENT
             _set_manualExtraHint_ACU$1('');
             _set_isAutoUpdatingCard_ACU$1(false);
         }
+    }
+
+    /**
+     * service/table/update-scheduler.ts — 自动更新调度核心逻辑
+     * 从 presentation/triggers/settings-ui-sync/settings-ui-trigger.ts 的 triggerAutomaticUpdateIfNeeded_ACU 中提取
+     *
+     * 只负责「遍历表格检查更新条件 + 构建 tablesToUpdate 列表 + 分组」，不涉及 UI（toast/status）。
+     */
+    /**
+     * 构建自动更新计划：遍历所有表格，检查每个表的独立更新条件，返回需要更新的表列表和分组
+     *
+     * @param liveChat - 当前聊天记录数组
+     * @param tableData - 当前表格数据（currentJsonTableData_ACU）
+     * @param settings - 当前设置
+     * @param isolationKey - 当前隔离标签键名
+     * @returns AutoUpdatePlan 包含 tablesToUpdate 和 updateGroups
+     */
+    function buildAutoUpdatePlan_ACU(liveChat, tableData, settings, isolationKey) {
+        const tablesToUpdate = [];
+        const sheetKeys = getSortedSheetKeys_ACU(tableData);
+        // 预计算所有 AI 消息索引
+        const allAiMessageIndices = liveChat
+            .map((msg, index) => !msg.is_user ? index : -1)
+            .filter((index) => index !== -1);
+        const totalAiMessages = allAiMessageIndices.length;
+        // 统一的全局默认参数
+        const globalFrequency = settings.autoUpdateFrequency || 1;
+        const globalSkip = settings.skipUpdateFloors || 0;
+        for (const sheetKey of sheetKeys) {
+            const table = tableData[sheetKey];
+            if (!table)
+                continue;
+            const tableConfig = table.updateConfig || {};
+            const isSummary = isSummaryOrOutlineTable_ACU(table.name);
+            // 获取该表的更新配置 (优先使用表内配置，否则使用全局默认)
+            const rawDepth = Number.isFinite(tableConfig.contextDepth) ? tableConfig.contextDepth : -1;
+            const rawFreq = Number.isFinite(tableConfig.updateFrequency) ? tableConfig.updateFrequency : -1;
+            const rawSkip = Number.isFinite(tableConfig.skipFloors) ? tableConfig.skipFloors : -1;
+            const rawBatch = Number.isFinite(tableConfig.batchSize) ? tableConfig.batchSize : -1;
+            const rawGroupId = Number.isFinite(tableConfig.groupId) ? Math.trunc(tableConfig.groupId) : -1;
+            const threshold = (rawDepth === -1 || rawDepth === 0) ? (settings.autoUpdateThreshold || 3) : Math.max(0, rawDepth);
+            const frequency = (rawFreq === -1) ? globalFrequency : rawFreq;
+            const skipFloors = Math.max(0, (rawSkip === -1) ? globalSkip : rawSkip);
+            const groupId = rawGroupId;
+            const history = resolveTableHistoryStateFromChat_ACU(liveChat, {
+                sheetKey,
+                isSummaryTable: isSummary,
+                isolationKey,
+                settings,
+            });
+            const lastUpdatedAiFloor = history.lastTrackedUpdateAiFloor;
+            // 计算未记录楼层数
+            const effectiveUnrecordedFloors = Math.max(0, (totalAiMessages - skipFloors) - lastUpdatedAiFloor);
+            logDebug_ACU(`[Trigger Check] Table: ${table.name}, TotalAI: ${totalAiMessages}, Skip: ${skipFloors}, LastUpdated: ${lastUpdatedAiFloor}, Unrecorded: ${effectiveUnrecordedFloors}, Freq: ${frequency}`);
+            // updateFrequency=0：该表不参与自动更新
+            if (frequency > 0 && effectiveUnrecordedFloors >= frequency && threshold > 0) {
+                const effectiveAiIndices = skipFloors > 0
+                    ? allAiMessageIndices.slice(0, -skipFloors)
+                    : allAiMessageIndices;
+                const startIndexInAiArray = lastUpdatedAiFloor;
+                logDebug_ACU(`[Trigger Check] EffIndicesLen: ${effectiveAiIndices.length}, StartIndex: ${startIndexInAiArray}`);
+                if (startIndexInAiArray < effectiveAiIndices.length) {
+                    const unupdatedAiIndices = effectiveAiIndices.slice(startIndexInAiArray);
+                    const contextScopeIndices = effectiveAiIndices.slice(-threshold);
+                    const contextScopeSet = new Set(contextScopeIndices);
+                    logDebug_ACU(`[Trigger Check] Unupdated: ${unupdatedAiIndices.length}, ContextScope: ${contextScopeIndices.length}`);
+                    const indicesToUpdate = unupdatedAiIndices.filter((idx) => contextScopeSet.has(idx));
+                    if (indicesToUpdate.length > 0) {
+                        tablesToUpdate.push({
+                            sheetKey,
+                            sheetName: table.name,
+                            indices: indicesToUpdate,
+                            groupId,
+                            batchSize: (rawBatch === -1) ? (settings.updateBatchSize || 3) : ((rawBatch > 0) ? rawBatch : (settings.updateBatchSize || 3)),
+                            scheduleSignature: [groupId, threshold, frequency, skipFloors, rawBatch].join('|'),
+                        });
+                    }
+                }
+            }
+        }
+        // 分组：将待更新的表按 (groupId + indices + batchSize) 进行分组
+        const updateGroups = {};
+        tablesToUpdate.forEach(item => {
+            const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize;
+            if (!updateGroups[key]) {
+                updateGroups[key] = {
+                    indices: item.indices,
+                    batchSize: item.batchSize,
+                    groupId: item.groupId,
+                    scheduleSignature: item.scheduleSignature,
+                    sheetKeys: [],
+                    sheetNames: []
+                };
+            }
+            updateGroups[key].sheetKeys.push(item.sheetKey);
+            updateGroups[key].sheetNames.push(item.sheetName);
+        });
+        return { tablesToUpdate, updateGroups };
+    }
+    // ============================================================
+    // 前置检查
+    // ============================================================
+    /**
+     * 检查自动更新的前置条件
+     * 纯业务逻辑：不涉及 UI
+     */
+    function checkAutoUpdatePreConditions_ACU(settings, coreApisAreReady, isAutoUpdatingCard, currentJsonTableData, allChatMessagesLength) {
+        if (!settings.autoUpdateEnabled) {
+            return { canProceed: false, reason: 'Auto update is disabled via settings.' };
+        }
+        const apiIsConfigured = (settings.apiMode === 'custom' && (settings.apiConfig.useMainApi || (settings.apiConfig.url && settings.apiConfig.model))) || (settings.apiMode === 'tavern' && settings.tavernProfile);
+        if (!coreApisAreReady || isAutoUpdatingCard || !apiIsConfigured || !currentJsonTableData) {
+            return { canProceed: false, reason: 'Pre-flight checks failed.' };
+        }
+        if (allChatMessagesLength < 2) {
+            return { canProceed: false, reason: 'Chat history too short.' };
+        }
+        return { canProceed: true };
+    }
+    function isProcessUpdatesSuccess_ACU(result) {
+        if (typeof result === 'boolean')
+            return result;
+        if (result && typeof result === 'object' && typeof result.success === 'boolean') {
+            return result.success;
+        }
+        return !!result;
+    }
+    /**
+     * 执行自动更新计划：按分组串行应用 + 整轮合并写入 + 自动合并检测 + 旧数据清理
+     *
+     * 纯业务编排逻辑：决定执行顺序、整轮提交屏障、错误处理。
+     * 不驱动 UI，只返回结果。presentation 层根据返回值自行决定 UI 操作。
+     */
+    async function executeAutoUpdatePlan_ACU(plan, settings, setAutoUpdating, ops) {
+        const { tablesToUpdate, updateGroups } = plan;
+        const groupKeys = Object.keys(updateGroups);
+        if (groupKeys.length === 0)
+            return { success: true, failedGroups: 0, totalGroups: 0 };
+        const totalGroups = groupKeys.length;
+        setAutoUpdating(true);
+        const failedGroupKeys = [];
+        const allDeferredCommits = [];
+        for (let groupOrder = 0; groupOrder < groupKeys.length; groupOrder++) {
+            const key = groupKeys[groupOrder];
+            const group = updateGroups[key];
+            logDebug_ACU(`[Auto Merge] Applying group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
+            try {
+                const result = await ops.processUpdates(group.indices, 'auto_independent', {
+                    targetSheetKeys: group.sheetKeys,
+                    batchSize: group.batchSize,
+                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
+                    groupKey: key,
+                    groupOrder,
+                    deferPersistence: true,
+                });
+                if (!isProcessUpdatesSuccess_ACU(result)) {
+                    failedGroupKeys.push(key);
+                    continue;
+                }
+                if (Array.isArray(result?.deferredCommits) && result.deferredCommits.length > 0) {
+                    allDeferredCommits.push(...result.deferredCommits);
+                }
+            }
+            catch (e) {
+                failedGroupKeys.push(key);
+                logWarn_ACU(`自动分组更新异常 groupId=${group.groupId}, sheets=${group.sheetNames.join(', ')}:`, e);
+            }
+        }
+        if (failedGroupKeys.length > 0) {
+            logWarn_ACU(`自动分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。`);
+        }
+        else {
+            const commitResult = await commitMergedDeferredCommits_ACU(allDeferredCommits);
+            if (!commitResult.success) {
+                failedGroupKeys.push('__merged_commit__');
+                logWarn_ACU(`自动分组更新合并提交失败: ${commitResult.error || '未知错误'}`);
+            }
+        }
+        // 自动分组在 deferPersistence 模式下只返回提交载荷；必须先完成整轮合并写入，
+        // 再刷新聊天记录与表格快照。否则刷新到的仍是提交前状态，下一次读取只会看到残缺结果。
+        logDebug_ACU('All group updates applied. Merging deferred commits and forcing final data refresh...');
+        await ops.loadAllChatMessages();
+        await ops.refreshData();
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setAutoUpdating(false);
+        await ops.refreshData();
+        // 自动合并总结检测
+        let autoMergeTriggered = false;
+        let autoMergeSuccess = false;
+        try {
+            const { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } = await Promise.resolve().then(function () { return mergeLogic; });
+            const trigger = checkAutoMergeTrigger_ACU();
+            if (trigger.shouldTrigger) {
+                autoMergeTriggered = true;
+                const prepared = prepareAutoMergeBatches_ACU({
+                    startIndex: 0, endIndex: trigger.mergeCount, targetCount: 1,
+                    batchSize: 5, promptTemplate: '', isAutoMode: true,
+                });
+                let acc = [];
+                for (let i = 0; i < prepared.batches.length; i++) {
+                    const batchResult = await executeAutoMergeBatch_ACU(prepared, prepared.batches[i], acc);
+                    acc = batchResult.accumulatedSummary;
+                }
+                await finalizeAutoMerge_ACU(prepared, acc);
+                autoMergeSuccess = true;
+            }
+        }
+        catch (e) {
+            logWarn_ACU('自动合并总结检测失败:', e);
+        }
+        // 清理超出保留层数的旧数据
+        try {
+            await ops.purgeOldLayerData();
+        }
+        catch (e) {
+            logWarn_ACU('清理旧层数据失败:', e);
+        }
+        return {
+            success: failedGroupKeys.length === 0,
+            failedGroups: failedGroupKeys.length,
+            totalGroups,
+            autoMergeTriggered,
+            autoMergeSuccess,
+        };
+    }
+    // ============================================================
+    // 楼层增加延迟逻辑
+    // ============================================================
+    /**
+     * 处理楼层增加延迟：当 AI 消息数增加时等待一段时间再继续
+     * 纯业务逻辑
+     */
+    async function handleFloorIncreaseDelay_ACU(totalAiMessages, lastTotalAiMessages, delayMs, getChatArray, setLastTotalAiMessages) {
+        if (totalAiMessages > lastTotalAiMessages) {
+            logDebug_ACU(`ACU: AI Message count increased (${lastTotalAiMessages} -> ${totalAiMessages}). Waiting ${delayMs}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            const liveChat = getChatArray();
+            if (!liveChat || liveChat.length === 0)
+                return null;
+            const newTotal = liveChat.filter((m) => !m.is_user).length;
+            setLastTotalAiMessages(newTotal);
+            return { liveChat, totalAiMessages: newTotal };
+        }
+        else if (totalAiMessages < lastTotalAiMessages) {
+            setLastTotalAiMessages(totalAiMessages);
+        }
+        return undefined; // 不需要更新
+    }
+
+    async function triggerAutomaticUpdateIfNeeded_ACU() {
+        logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
+        // [重构] 调用 service 层前置检查
+        const preCheck = checkAutoUpdatePreConditions_ACU(settings_ACU, coreApisAreReady_ACU, isAutoUpdatingCard_ACU, currentJsonTableData_ACU, allChatMessages_ACU.length);
+        if (!preCheck.canProceed) {
+            logDebug_ACU(`ACU Auto-Trigger: ${preCheck.reason} Skipping.`);
+            return;
+        }
+        let liveChat = getChatArray_ACU();
+        if (!liveChat || liveChat.length === 0)
+            return;
+        let totalAiMessages = liveChat.filter(m => !m.is_user).length;
+        // [重构] 调用 service 层楼层增加延迟逻辑
+        const delayResult = await handleFloorIncreaseDelay_ACU(totalAiMessages, lastTotalAiMessages_ACU, AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU, getChatArray_ACU, _set_lastTotalAiMessages_ACU);
+        if (delayResult === null)
+            return; // chat 为空
+        if (delayResult) {
+            liveChat = delayResult.liveChat;
+            totalAiMessages = delayResult.totalAiMessages;
+        }
+        // [重构] 调用 service 层构建更新计划
+        const triggerIsolationKey = getCurrentIsolationKey_ACU();
+        const plan = buildAutoUpdatePlan_ACU(liveChat, currentJsonTableData_ACU, settings_ACU, triggerIsolationKey);
+        if (plan.tablesToUpdate.length === 0)
+            return;
+        // UI：显示开始 toast
+        const totalGroups = Object.keys(plan.updateGroups).length;
+        const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
+        if (totalGroups > maxConcurrentGroups) {
+            showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将分批并发处理 ${totalGroups} 组（每批最多 ${maxConcurrentGroups} 组）。`);
+        }
+        else {
+            showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
+        }
+        // 调用 service 层执行更新计划，传入纯业务操作委托（不含 UI 操作）
+        const result = await executeAutoUpdatePlan_ACU(plan, settings_ACU, _set_isAutoUpdatingCard_ACU, {
+            processUpdates: (indices, mode, options) => processUpdates_ACU(indices, mode, options),
+            refreshData: () => refreshMergedDataAndNotifyWithUI_ACU(),
+            loadAllChatMessages: () => loadAllChatMessages_ACU(),
+            purgeOldLayerData: () => purgeOldLayerData_ACU(),
+        });
+        // UI：根据返回值显示结果
+        if (result.failedGroups > 0) {
+            showToastr_ACU('warning', `并发分组更新有 ${result.failedGroups} 组失败，请查看日志。`);
+        }
+        if (result.autoMergeTriggered && result.autoMergeSuccess) {
+            showToastr_ACU('success', '自动合并纪要完成！');
+            try {
+                topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate();
+            }
+            catch (_) { }
+        }
+        if (typeof updateCardUpdateStatusDisplay_ACU === 'function')
+            updateCardUpdateStatusDisplay_ACU();
+    }
+    function collectManualExtraHint_ACU() {
+        _set_manualExtraHint_ACU$1('');
+        if (!$manualExtraHintCheckbox_ACU || !$manualExtraHintCheckbox_ACU.length)
+            return;
+        if (!$manualExtraHintCheckbox_ACU.is(':checked'))
+            return;
+        const userInput = prompt('请输入本次手动填表的额外提示词（可留空）：', '');
+        const trimmed = (userInput || '').trim();
+        if (!trimmed)
+            return;
+        _set_manualExtraHint_ACU$1(`以下为用户的额外填表要求，请严格遵守：${trimmed}`);
+    }
+    // [新增] 获取当前选中的手动更新表格列表（无效或为空则回退为全部表）
+    function getSelectedManualSheetKeys_ACU() {
+        if (!currentJsonTableData_ACU)
+            return [];
+        const availableKeys = getSortedSheetKeys_ACU(currentJsonTableData_ACU);
+        const saved = Array.isArray(settings_ACU.manualSelectedTables) ? settings_ACU.manualSelectedTables : [];
+        // 未曾手动选择过：默认全选
+        if (!settings_ACU.hasManualSelection)
+            return availableKeys;
+        const validSaved = saved.filter((k) => availableKeys.includes(k));
+        // 已手动选择过：严格按保存的交集，不再自动补全新表，防止回退全选
+        return validSaved;
+    }
+
+    /**
+     * service/host/host-state-service.ts — 宿主运行时状态服务
+     *
+     * 中转 data/gateways/host-state-gateway 的所有方法。
+     * presentation 层通过本模块访问宿主运行时状态，不再直接调用 gateway。
+     * 后续可在此层统一添加日志、埋点、状态缓存等增值逻辑。
+     */
+
+    /**
+     * service/runtime/message-handler.ts — 新消息处理核心逻辑
+     * 从 presentation/triggers/settings-ui-sync/settings-ui-connect.ts 的 handleNewMessageDebounced_ACU 中提取
+     *
+     * 只负责「验证新消息是否应该触发更新 + 决定执行模式」，不涉及 UI（toast/防抖定时器）。
+     */
+    /**
+     * 评估新消息事件，决定应该执行什么操作
+     *
+     * @param liveChat - 当前聊天记录数组
+     * @param isAutoUpdating - 是否正在自动更新
+     * @param coreApisReady - 核心 API 是否就绪
+     * @param wasStoppedByUser - 是否被用户终止
+     * @param contentOptimizationSettings - 正文优化设置
+     * @returns MessageActionResult 包含 action 和 reason
+     */
+    function evaluateNewMessageAction_ACU(liveChat, isAutoUpdating, coreApisReady, wasStoppedByUser, contentOptimizationSettings) {
+        if (wasStoppedByUser) {
+            return { action: 'skip', reason: 'Skipping update check after user abort' };
+        }
+        if (isAutoUpdating) {
+            return { action: 'skip', reason: 'Auto-update already in progress' };
+        }
+        if (!coreApisReady) {
+            return { action: 'skip', reason: 'Core APIs not ready' };
+        }
+        if (!liveChat || liveChat.length === 0) {
+            return { action: 'skip', reason: 'No chat data available' };
+        }
+        const lastMessage = liveChat[liveChat.length - 1];
+        const lastMessageIndex = liveChat.length - 1;
+        // 如果最新消息不是AI回复，跳过
+        if (!lastMessage || lastMessage.is_user) {
+            return { action: 'skip', reason: 'Last message is not an AI reply' };
+        }
+        // 检查是否来自当前角色
+        const activeChar = getCurrentCharacterFallback_ACU();
+        const activeCharName = activeChar?.name;
+        if (activeCharName && lastMessage.name && lastMessage.name !== activeCharName) {
+            return { action: 'skip', reason: `AI reply from different character (${lastMessage.name} != ${activeCharName})` };
+        }
+        // 决定执行模式
+        const config = contentOptimizationSettings || {};
+        if (config.enabled) {
+            if (config.parallelMode) {
+                return { action: 'optimize_parallel', reason: 'Parallel mode enabled', lastMessageIndex };
+            }
+            else if (!config.autoApply && !config.seamlessMode) {
+                return { action: 'optimize_manual', reason: 'Manual confirmation mode', lastMessageIndex };
+            }
+            else {
+                return { action: 'optimize_then_update', reason: 'Sequential mode', lastMessageIndex };
+            }
+        }
+        return { action: 'update_only', reason: 'No content optimization configured', lastMessageIndex };
+    }
+
+    async function fetchModelsAndConnect_ACU() {
+        if (!$popupInstance_ACU ||
+            !$customApiUrlInput_ACU ||
+            !$customApiKeyInput_ACU ||
+            !$customApiModelSelect_ACU ||
+            !$apiStatusDisplay_ACU) {
+            logError_ACU('加载模型列表失败：UI元素未初始化。');
+            showToastr_ACU('error', 'UI未就绪。');
+            return;
+        }
+        const apiUrl = String($customApiUrlInput_ACU.val() || '').trim();
+        const apiKey = String($customApiKeyInput_ACU.val() || '');
+        if (!apiUrl) {
+            showToastr_ACU('warning', '请输入API基础URL。');
+            $apiStatusDisplay_ACU.text('状态:请输入API基础URL').css('color', 'orange');
+            return;
+        }
+        $apiStatusDisplay_ACU.text('状态: 正在检查API端点状态...').css('color', '#61afef');
+        showToastr_ACU('info', '正在检查自定义API端点状态...');
+        try {
+            // [重构] 调用 service 层获取模型列表
+            const result = await fetchAvailableModels_ACU(apiUrl, apiKey);
+            if (!result.success) {
+                throw new Error(result.error || '未知错误');
+            }
+            const models = result.models;
+            const currentSelectedModel = settings_ACU.apiConfig.model || '';
+            // UI 操作：填充模型下拉列表
+            $customApiModelSelect_ACU.empty().append('<option value="">-- 请选择模型 --</option>');
+            models.forEach((modelName) => {
+                const selected = modelName === currentSelectedModel ? ' selected' : '';
+                $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(modelName)}"${selected}>${escapeHtml_ACU$1(modelName)}</option>`);
+            });
+            // 如果之前保存的模型不在列表中，也添加进去
+            if (currentSelectedModel && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU$1(currentSelectedModel)}"]`).length === 0) {
+                $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(currentSelectedModel)}" selected>${escapeHtml_ACU$1(currentSelectedModel)} (已保存)</option>`);
+            }
+            showToastr_ACU('success', `模型列表加载成功！共加载 ${models.length} 个模型。`);
+        }
+        catch (error) {
+            logError_ACU('加载模型列表时出错:', error);
+            showToastr_ACU('error', `加载模型列表失败: ${error.message}`);
+            $apiStatusDisplay_ACU.text(`状态: 加载模型失败 - ${error.message}`).css('color', '#ff6b6b');
+        }
+        updateApiStatusDisplay_ACU();
+    }
+    function updateApiStatusDisplay_ACU() {
+        if (!$popupInstance_ACU || !$apiStatusDisplay_ACU)
+            return;
+        if (settings_ACU.apiConfig.url && settings_ACU.apiConfig.model)
+            $apiStatusDisplay_ACU.html(`当前URL: <span style="color:lightgreen;word-break:break-all;">${escapeHtml_ACU$1(settings_ACU.apiConfig.url)}</span><br>已选模型: <span style="color:lightgreen;">${escapeHtml_ACU$1(settings_ACU.apiConfig.model)}</span>`);
+        else if (settings_ACU.apiConfig.url)
+            $apiStatusDisplay_ACU.html(`当前URL: ${escapeHtml_ACU$1(settings_ACU.apiConfig.url)} - <span style="color:orange;">请加载并选择模型</span>`);
+        else
+            $apiStatusDisplay_ACU.html(`<span style="color:#ffcc80;">未配置自定义API。数据库更新功能可能不可用。</span>`);
+    }
+    function attemptToLoadCoreApis_ACU() {
+        // 根据运行模式选择宿主窗口
+        const hostWin = getHostWindow();
+        const mode = isExtensionMode() ? '插件' : '油猴脚本';
+        logDebug_ACU(`[CoreAPI] 运行模式: ${mode}, hostWin === window: ${hostWin === window}`);
+        // ═══════════════════════════════════════════════════════════════
+        // 插件模式特殊处理：主窗口的 window.SillyTavern 只有 {libs, getContext}
+        // 所有真正的 API（chatId/eventSource/eventTypes/chat/saveChat 等）必须通过
+        // SillyTavern.getContext() 才能拿到，而且 getContext() 返回的是"当前快照"，
+        // 属性值会随酒馆状态变化。所以用 Proxy 包装：每次属性读取都重新调用 getContext()
+        // 取最新快照，这样既不用改所有消费者代码，又保证读到最新值。
+        //
+        // 油猴脚本模式下，iframe 的 window.SillyTavern 本身就是扁平化的 API 对象
+        // （由酒馆助手封装），保持原样直接赋值。
+        // ═══════════════════════════════════════════════════════════════
+        let stApi;
+        if (isExtensionMode()) {
+            const rawST = hostWin.SillyTavern || window.SillyTavern;
+            if (rawST && typeof rawST.getContext === 'function') {
+                // Proxy：每次属性读取都通过 getContext() 拿当前快照
+                stApi = new Proxy({}, {
+                    get(_target, prop) {
+                        try {
+                            const ctx = rawST.getContext();
+                            if (!ctx)
+                                return undefined;
+                            return ctx[prop];
+                        }
+                        catch (e) {
+                            // getContext 抛异常时静默返回 undefined，让调用方的空值检查生效
+                            return undefined;
+                        }
+                    },
+                    has(_target, prop) {
+                        try {
+                            const ctx = rawST.getContext();
+                            return !!ctx && prop in ctx;
+                        }
+                        catch (e) {
+                            return false;
+                        }
+                    },
+                });
+                logDebug_ACU('[CoreAPI] 插件模式：已用 Proxy 包装 SillyTavern API（每次读取都走 getContext()）');
+            }
+            else {
+                // getContext 不存在，降级为直接使用 rawST（避免整个系统崩溃）
+                stApi = rawST;
+                logWarn_ACU('[CoreAPI] 插件模式：SillyTavern.getContext 不可用，降级为直接访问 SillyTavern 对象');
+            }
+        }
+        else {
+            // ═══════════════════════════════════════════════════════════════
+            // 油猴脚本模式：运行在酒馆助手创建的 iframe 中。
+            //
+            // 关键事实：iframe 自身的 window.SillyTavern 是酒馆助手注入的
+            // 扁平化 API 对象（包含 chatId/eventSource/eventTypes 等），
+            // 而 window.parent（hostWin）上的 SillyTavern 只有
+            // {libs, getContext} 骨架，不含业务字段。
+            //
+            // 因此必须优先使用 iframe 自身的对象，把 parent 作为 fallback。
+            // 这与旧版 userscript 的行为一致：
+            //   SillyTavern_API_ACU = typeof SillyTavern !== 'undefined'
+            //     ? SillyTavern : parentWin.SillyTavern;
+            // ═══════════════════════════════════════════════════════════════
+            const iframeST = typeof window.SillyTavern !== 'undefined' ? window.SillyTavern : undefined;
+            const parentST = typeof hostWin.SillyTavern !== 'undefined' ? hostWin.SillyTavern : undefined;
+            // 优先使用 iframe 自身的扁平化 API（含 chatId 等业务字段），
+            // fallback 到 parent 的骨架对象
+            stApi = iframeST || parentST;
+            if (iframeST) {
+                logDebug_ACU('[CoreAPI] 油猴脚本模式：使用 iframe 自身的 SillyTavern 扁平 API');
+            }
+            else if (parentST) {
+                logWarn_ACU('[CoreAPI] 油猴脚本模式：iframe 自身无 SillyTavern，降级使用 parent 的骨架对象（可能缺少 chatId 等字段）');
+            }
+        }
+        _set_SillyTavern_API_ACU(stApi);
+        // TavernHelper/jQuery/toastr 同理：优先 iframe 自身，fallback 到 parent
+        const iframeTH = typeof window.TavernHelper !== 'undefined' ? window.TavernHelper : undefined;
+        const parentTH = typeof hostWin.TavernHelper !== 'undefined' ? hostWin.TavernHelper : undefined;
+        _set_TavernHelper_API_ACU(iframeTH || parentTH);
+        const iframe$ = typeof window.$ !== 'undefined' ? window.$ : undefined;
+        const parent$ = typeof hostWin.$ !== 'undefined' ? hostWin.$ : undefined;
+        _set_jQuery_API_ACU(iframe$ || parent$);
+        _set_toastr_API_ACU((typeof window.toastr !== 'undefined' ? window.toastr : null) || hostWin.toastr || null);
+        _set_coreApisAreReady_ACU(!!(SillyTavern_API_ACU &&
+            TavernHelper_API_ACU &&
+            jQuery_API_ACU &&
+            TavernHelper_API_ACU.getChatMessages &&
+            TavernHelper_API_ACU.getLastMessageId &&
+            TavernHelper_API_ACU.getCurrentCharPrimaryLorebook &&
+            TavernHelper_API_ACU.getLorebookEntries &&
+            typeof TavernHelper_API_ACU.triggerSlash === 'function'));
+        if (!toastr_API_ACU)
+            logWarn_ACU('toastr_API_ACU is MISSING.');
+        if (coreApisAreReady_ACU)
+            logDebug_ACU('Core APIs successfully loaded/verified for AutoCardUpdater.');
+        else
+            logError_ACU('Failed to load one or more critical APIs for AutoCardUpdater.');
+        return coreApisAreReady_ACU;
+    }
+    async function handleNewMessageDebounced_ACU(eventType = 'unknown_acu') {
+        logDebug_ACU(`New message event (${eventType}) detected for ACU, debouncing for ${NEW_MESSAGE_DEBOUNCE_DELAY_ACU}ms...`);
+        clearTimeout(newMessageDebounceTimer_ACU);
+        _set_newMessageDebounceTimer_ACU(setTimeout(async () => {
+            // [健全性] 如果用户已经开始对话，则解除"开场白阶段世界书注入抑制"
+            try {
+                maybeLiftWorldbookSuppression_ACU();
+            }
+            catch (e) { }
+            await loadAllChatMessages_ACU();
+            const liveChat = getChatArray_ACU();
+            // [重构] 调用 service 层的 evaluateNewMessageAction_ACU 进行决策
+            const result = evaluateNewMessageAction_ACU(liveChat, isAutoUpdatingCard_ACU, coreApisAreReady_ACU, wasStoppedByUser_ACU, settings_ACU.contentOptimizationSettings);
+            logDebug_ACU(`[NewMessage] Evaluation result: action=${result.action}, reason=${result.reason}`);
+            if (result.action === 'skip') {
+                logDebug_ACU(`ACU: ${result.reason}. Skipping.`);
+                return;
+            }
+            switch (result.action) {
+                case 'optimize_parallel':
+                    logDebug_ACU('[正文优化] 并行模式已启用，正文优化与填表将同时进行...');
+                    await Promise.all([
+                        executeContentOptimization_ACU(result.lastMessageIndex),
+                        triggerAutomaticUpdateIfNeeded_ACU()
+                    ]);
+                    break;
+                case 'optimize_manual':
+                    logDebug_ACU('[正文优化] 手动确认模式：等待用户确认后再填表...');
+                    await executeContentOptimization_ACU(result.lastMessageIndex);
+                    break;
+                case 'optimize_then_update':
+                    await executeContentOptimization_ACU(result.lastMessageIndex);
+                    await triggerAutomaticUpdateIfNeeded_ACU();
+                    break;
+                case 'update_only':
+                    await triggerAutomaticUpdateIfNeeded_ACU();
+                    break;
+            }
+        }, NEW_MESSAGE_DEBOUNCE_DELAY_ACU));
+    }
+    // [重构] 核心触发逻辑：基于独立表格参数的触发检查
+
+    /**
+     * presentation/triggers/settings-ui-sync/index.ts
+     */
+
+    function showOptimizationDiffDialogForLoop_ACU(messageIndex, result, callback) {
+        const isLastLoop = result.currentLoop >= result.totalLoops;
+        const applyButtonText = isLastLoop ? '应用并完成' : '应用并继续';
+        const originalContent = getOriginalContent_ACU(messageIndex) || result.optimizedContent;
+        const dialogHtml = `
+      <div class="acu-optimization-dialog acu-dialog-classic" style="
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--acu-bg-0, #24221f);
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+        border: 1px solid var(--acu-border, #36332e);
+        border-radius: 2px;
+        padding: 20px;
+        max-width: 800px;
+        width: calc(100% - 20px);
+        max-height: calc(90vh - 20px);
+        overflow-y: auto;
+        z-index: 100000;
+        color: var(--acu-text, #c1b9ad);
+        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
+        box-sizing: border-box;
+      ">
+        <h3 style="margin: 0 0 8px 0; color: var(--acu-accent, #7d4940); font-size: 1.1em; letter-spacing: 1px;">正文替换建议</h3>
+        <p style="margin: 0 0 12px 0; color: var(--acu-text-dim, #8a8075);">${result.summary}</p>
+        ${result.totalLoops > 1 ? `<p style="margin: 0 0 12px 0; color: var(--acu-text-mute, #6a6055); font-size: 12px;">进度: 第 ${result.currentLoop}/${result.totalLoops} 轮</p>` : ''}
+        <div class="optimization-list" style="margin-bottom: 16px; max-height: 400px; overflow-y: auto;">
+          ${result.optimizations.map((opt, i) => `
+            <div class="optimization-item" style="
+              background: rgba(0, 0, 0, 0.2);
+              border-radius: 1px;
+              padding: 12px;
+              margin-bottom: 8px;
+              border-left: 2px solid var(--acu-border, #36332e);
+            ">
+              <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
+                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
+              </div>
+              <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
+                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
+              </div>
+              <div style="color: #6a8a6a;">
+                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding-bottom: 10px;">
+          <button id="acu-opt-cancel" style="
+            padding: 8px 16px;
+            border: 1px solid var(--acu-border, #36332e);
+            background: transparent;
+            color: var(--acu-text-dim, #8a8075);
+            border-radius: 1px;
+            cursor: pointer;
+            min-width: 80px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">取消优化</button>
+          ${!isLastLoop ? `
+          <button id="acu-opt-skip" style="
+            padding: 8px 16px;
+            border: 1px solid var(--acu-border, #36332e);
+            background: transparent;
+            color: var(--acu-text-dim, #8a8075);
+            border-radius: 1px;
+            cursor: pointer;
+            min-width: 80px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">跳过本轮</button>
+          ` : ''}
+          <button id="acu-opt-reoptimize" style="
+            padding: 8px 16px;
+            border: 1px solid var(--acu-accent, #7d4940);
+            background: transparent;
+            color: var(--acu-accent, #7d4940);
+            border-radius: 1px;
+            cursor: pointer;
+            min-width: 100px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">🔄 重新优化</button>
+          <button id="acu-opt-apply" style="
+            padding: 8px 16px;
+            border: none;
+            background: var(--acu-accent, #7d4940);
+            color: var(--acu-bg-0, #24221f);
+            border-radius: 1px;
+            cursor: pointer;
+            font-weight: 600;
+            min-width: 100px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">${applyButtonText}</button>
+        </div>
+      </div>
+      <div id="acu-opt-backdrop" style="
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 99999;
+      "></div>
+    `;
+        jQuery_API_ACU('body').append(dialogHtml);
+        // 绑定取消事件
+        jQuery_API_ACU('#acu-opt-cancel, #acu-opt-backdrop').on('click', function () {
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+            callback('cancel');
+        });
+        // 绑定跳过事件（仅非最后一轮显示）
+        jQuery_API_ACU('#acu-opt-skip').on('click', function () {
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+            callback('skip');
+        });
+        // 绑定重新优化事件
+        jQuery_API_ACU('#acu-opt-reoptimize').on('click', async function () {
+            jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
+            // 关闭当前对话框
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+            // 获取原始内容并重新优化
+            const originalContent = getOriginalContent_ACU(messageIndex) || result.optimizedContent;
+            logDebug_ACU(`[正文优化] 用户点击重新优化，messageIndex=${messageIndex}`);
+            // 重新优化
+            await reoptimizeMessage_ACU(messageIndex);
+            // 触发回调，结束当前优化流程
+            callback('cancel');
+        });
+        // 绑定应用事件
+        jQuery_API_ACU('#acu-opt-apply').on('click', async function () {
+            jQuery_API_ACU(this).prop('disabled', true).text('处理中...');
+            logDebug_ACU(`[正文优化] 用户点击应用，isLastLoop=${isLastLoop}, messageIndex=${messageIndex}`);
+            logDebug_ACU(`[正文优化] optimizedContent长度: ${result.optimizedContent?.length || 0}`);
+            // 如果是最后一轮，先应用优化
+            if (isLastLoop) {
+                logDebug_ACU(`[正文优化] 准备调用 replaceChatMessage_ACU...`);
+                const success = await replaceChatMessage_ACU(messageIndex, result.optimizedContent, { originalContent: getOriginalContent_ACU(messageIndex) || originalContent });
+                logDebug_ACU(`[正文优化] replaceChatMessage_ACU 返回: ${success}`);
+                if (!success) {
+                    jQuery_API_ACU(this).prop('disabled', false).text(applyButtonText);
+                    showToastr_ACU('error', '应用失败');
+                    return;
+                }
+            }
+            else {
+                logDebug_ACU(`[正文优化] 非最后一轮，跳过应用，直接回调`);
+            }
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+            callback('apply');
+        });
+    }
+    /**
+     * 显示优化对比对话框
+     */
+    function showOptimizationDiffDialog_ACU(messageIndex, result) {
+        const originalContent = getOriginalContent_ACU(messageIndex) || result.optimizedContent;
+        const dialogHtml = `
+      <div class="acu-optimization-dialog acu-dialog-classic" style="
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--acu-bg-0, #24221f);
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+        border: 1px solid var(--acu-border, #36332e);
+        border-radius: 2px;
+        padding: 20px;
+        max-width: 800px;
+        width: calc(100% - 20px);
+        max-height: calc(90vh - 20px);
+        overflow-y: auto;
+        z-index: 100000;
+        color: var(--acu-text, #c1b9ad);
+        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
+        box-sizing: border-box;
+      ">
+        <h3 style="margin: 0 0 16px 0; color: var(--acu-accent, #7d4940); font-size: 1.1em; letter-spacing: 1px;">正文替换建议</h3>
+        <p style="margin: 0 0 12px 0; color: var(--acu-text-dim, #8a8075);">${result.summary || `共 ${result.optimizations.length} 处替换建议`}</p>
+        <div class="optimization-list" style="margin-bottom: 16px;">
+          ${result.optimizations.map((opt, i) => `
+            <div class="optimization-item" style="
+              background: rgba(0, 0, 0, 0.2);
+              border-radius: 1px;
+              padding: 12px;
+              margin-bottom: 8px;
+              border-left: 2px solid var(--acu-border, #36332e);
+            ">
+              <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
+                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
+              </div>
+              <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
+                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
+              </div>
+              <div style="color: #6a8a6a;">
+                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding-bottom: 10px;">
+          <button id="acu-opt-cancel" style="
+            padding: 8px 16px;
+            border: 1px solid var(--acu-border, #36332e);
+            background: transparent;
+            color: var(--acu-text-dim, #8a8075);
+            border-radius: 1px;
+            cursor: pointer;
+            min-width: 80px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">取消</button>
+          <button id="acu-opt-reoptimize" style="
+            padding: 8px 16px;
+            border: 1px solid var(--acu-accent, #7d4940);
+            background: transparent;
+            color: var(--acu-accent, #7d4940);
+            border-radius: 1px;
+            cursor: pointer;
+            min-width: 100px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">🔄 重新优化</button>
+          <button id="acu-opt-apply" style="
+            padding: 8px 16px;
+            border: none;
+            background: var(--acu-accent, #7d4940);
+            color: var(--acu-bg-0, #24221f);
+            border-radius: 1px;
+            cursor: pointer;
+            font-weight: 600;
+            min-width: 100px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">应用优化</button>
+        </div>
+      </div>
+      <div id="acu-opt-backdrop" style="
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 99999;
+      "></div>
+    `;
+        jQuery_API_ACU('body').append(dialogHtml);
+        // 绑定事件
+        jQuery_API_ACU('#acu-opt-cancel, #acu-opt-backdrop').on('click', function () {
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+        });
+        // 绑定重新优化事件
+        jQuery_API_ACU('#acu-opt-reoptimize').on('click', async function () {
+            jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
+            // 关闭当前对话框
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+            logDebug_ACU(`[正文优化] 用户点击重新优化，messageIndex=${messageIndex}`);
+            // 重新优化
+            await reoptimizeMessage_ACU(messageIndex);
+        });
+        jQuery_API_ACU('#acu-opt-apply').on('click', async function () {
+            jQuery_API_ACU(this).prop('disabled', true).text('应用中...');
+            const success = await replaceChatMessage_ACU(messageIndex, result.optimizedContent, { originalContent: getOriginalContent_ACU(messageIndex) || originalContent });
+            if (success) {
+                jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+                showToastr_ACU('success', '优化已应用');
+                // [新增] 手动确认模式下，应用优化后触发填表
+                logDebug_ACU('[正文优化] 手动确认模式：应用优化后触发填表...');
+                await triggerAutomaticUpdateIfNeeded_ACU();
+            }
+            else {
+                jQuery_API_ACU(this).prop('disabled', false).text('应用优化');
+                showToastr_ACU('error', '应用失败');
+            }
+        });
+        // [新增] 取消时也触发填表（使用原文）
+        jQuery_API_ACU('#acu-opt-cancel').on('click', async function () {
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+            logDebug_ACU('[正文优化] 手动确认模式：用户取消优化，触发填表...');
+            await triggerAutomaticUpdateIfNeeded_ACU();
+        });
+    }
+    /**
+     * 显示优化结果摘要
+     */
+    function showOptimizationDiff_ACU(messageIndex, result) {
+        const message = `正文替换完成，共 ${result.optimizations.length} 处改进`;
+        const reoptButtonHtml = renderReoptButton_ACU();
+        const html = result.summary
+            ? `<div>${message}${reoptButtonHtml}<br><small style="opacity:0.7">${result.summary}</small></div>`
+            : `<div>${message}${reoptButtonHtml}</div>`;
+        const toast = showToastr_ACU('success', html, {
+            timeOut: 10000,
+            extendedTimeOut: 3000,
+            tapToDismiss: false,
+            onShown: function () {
+                jQuery_API_ACU('#acu-opt-toast-reoptimize').off('click.acu_reopt').on('click.acu_reopt', async function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
+                    if (toast && toastr_API_ACU)
+                        toastr_API_ACU.clear(toast);
+                    await reoptimizeMessage_ACU(messageIndex);
+                });
+            }
+        });
+    }
+    /**
+     * HTML转义
+     */
+    // === 以下为 presentation 层独有的 UI 函数（DOM 操作/渲染）===
+
+    // replaceChatMessage_ACU 和 getOriginalContent_ACU 已搬迁到 service/chat/chat-service.ts
+    // 通过文件顶部的 re-export 保持外部调用方兼容
+    /**
+     * 重新优化消息
+     * @param {number} messageIndex - 消息索引
+     * @returns {Promise<boolean>} 是否成功
+     */
+    async function reoptimizeMessage_ACU(messageIndex) {
+        const config = settings_ACU.contentOptimizationSettings || {};
+        _set_contentOptimizationAbortRequested_ACU(false);
+        // 检查是否启用
+        if (!config.enabled) {
+            showToastr_ACU('warning', '正文优化功能未启用');
+            return false;
+        }
+        const chat = getChatArray_ACU();
+        if (!chat || !chat[messageIndex]) {
+            showToastr_ACU('error', '消息不存在');
+            return false;
+        }
+        const message = chat[messageIndex];
+        // 跳过用户消息
+        if (message.is_user) {
+            showToastr_ACU('warning', '无法优化用户消息');
+            return false;
+        }
+        // 获取原始内容
+        const originalContent = getOriginalContent_ACU(messageIndex) || message.mes;
+        if (!originalContent) {
+            showToastr_ACU('error', '无法获取消息内容');
+            return false;
+        }
+        logDebug_ACU(`[重新优化] 开始重新优化消息 ${messageIndex}，内容长度: ${originalContent.length}`);
+        if (config.seamlessMode) {
+            showOptimizationOverlay_ACU('正在重新优化正文...');
+        }
+        else {
+            showOptimizationProgressToast_ACU('正在进行正文优化（重新优化）...');
+        }
+        try {
+            ensureOptimizationNotCancelled_ACU();
+            const result = await performContentOptimization_ACU(originalContent, {
+                currentLoop: 1,
+                userMessage: ''
+            });
+            hideOptimizationOverlay_ACU();
+            hideOptimizationProgressToast_ACU();
+            if (contentOptimizationAbortRequested_ACU) {
+                return false;
+            }
+            if (!result.success) {
+                showToastr_ACU('error', `重新优化失败: ${result.error || '未知错误'}`);
+                return false;
+            }
+            if (!result.optimizations || result.optimizations.length === 0) {
+                showToastr_ACU('info', '原文已足够好，无需优化');
+                return true;
+            }
+            showReoptimizationDialog_ACU(messageIndex, result, originalContent);
+            return true;
+        }
+        catch (error) {
+            hideOptimizationOverlay_ACU();
+            hideOptimizationProgressToast_ACU();
+            if (contentOptimizationAbortRequested_ACU || error?.message === '用户终止正文优化') {
+                logDebug_ACU('[重新优化] 用户已取消正文优化');
+                return false;
+            }
+            logError_ACU('[重新优化] 执行出错:', error);
+            showToastr_ACU('error', `重新优化失败: ${error.message}`);
+            return false;
+        }
+        finally {
+            hideOptimizationOverlay_ACU();
+            hideOptimizationProgressToast_ACU();
+            _set_contentOptimizationAbortRequested_ACU(false);
+        }
+    }
+    /**
+     * 显示重新优化对话框
+     * @param {number} messageIndex - 消息索引
+     * @param {object} result - 优化结果
+     * @param {string} originalContent - 原始内容
+     */
+    function showReoptimizationDialog_ACU(messageIndex, result, originalContent) {
+        const dialogHtml = `
+      <div class="acu-optimization-dialog acu-dialog-classic" style="
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--acu-bg-0, #24221f);
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+        border: 1px solid var(--acu-border, #36332e);
+        border-radius: 2px;
+        padding: 20px;
+        max-width: 800px;
+        width: calc(100% - 20px);
+        max-height: calc(90vh - 20px);
+        overflow-y: auto;
+        z-index: 100000;
+        color: var(--acu-text, #c1b9ad);
+        font-family: "Noto Serif SC", "Source Han Serif CN", "Songti SC", "STSong", "SimSun", serif;
+        box-sizing: border-box;
+      ">
+        <h3 style="margin: 0 0 8px 0; color: var(--acu-accent, #7d4940); font-size: 1.1em; letter-spacing: 1px;">🔄 重新优化结果</h3>
+        <p style="margin: 0 0 12px 0; color: var(--acu-text-dim, #8a8075);">${result.summary}</p>
+        <div class="optimization-list" style="margin-bottom: 16px; max-height: 400px; overflow-y: auto;">
+          ${result.optimizations.map((opt, i) => `
+            <div class="optimization-item" style="
+              background: rgba(0, 0, 0, 0.2);
+              border-radius: 1px;
+              padding: 12px;
+              margin-bottom: 8px;
+              border-left: 2px solid var(--acu-border, #36332e);
+            ">
+              <div style="color: var(--acu-text-dim, #8a8075); margin-bottom: 8px; text-decoration: line-through; opacity: 0.7;">
+                <strong>原文：</strong>${escapeHtml_ACU$1(opt.original.substring(0, 200))}${opt.original.length > 200 ? '...' : ''}
+              </div>
+              <div style="color: var(--acu-text, #c1b9ad); font-size: 12px; margin-bottom: 8px; padding: 8px; background: rgba(125, 73, 64, 0.1); border-radius: 1px; border-left: 2px solid var(--acu-accent, #7d4940);">
+                <strong>修改方案：</strong>${escapeHtml_ACU$1(opt.plan || opt.reason || '未说明')}
+              </div>
+              <div style="color: #6a8a6a;">
+                <strong>优化：</strong>${escapeHtml_ACU$1(opt.optimized.substring(0, 200))}${opt.optimized.length > 200 ? '...' : ''}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding-bottom: 10px;">
+          <button id="acu-opt-cancel" style="
+            padding: 8px 16px;
+            border: 1px solid var(--acu-border, #36332e);
+            background: transparent;
+            color: var(--acu-text-dim, #8a8075);
+            border-radius: 1px;
+            cursor: pointer;
+            min-width: 80px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">取消</button>
+          <button id="acu-opt-reoptimize" style="
+            padding: 8px 16px;
+            border: 1px solid var(--acu-accent, #7d4940);
+            background: transparent;
+            color: var(--acu-accent, #7d4940);
+            border-radius: 1px;
+            cursor: pointer;
+            min-width: 100px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">🔄 再次优化</button>
+          <button id="acu-opt-apply" style="
+            padding: 8px 16px;
+            border: none;
+            background: var(--acu-accent, #7d4940);
+            color: var(--acu-bg-0, #24221f);
+            border-radius: 1px;
+            cursor: pointer;
+            font-weight: 600;
+            min-width: 100px;
+            flex-shrink: 0;
+            font-family: inherit;
+          ">应用优化</button>
+        </div>
+      </div>
+      <div id="acu-opt-backdrop" style="
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 99999;
+      "></div>
+    `;
+        jQuery_API_ACU('body').append(dialogHtml);
+        // 绑定取消事件
+        jQuery_API_ACU('#acu-opt-cancel, #acu-opt-backdrop').on('click', function () {
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+        });
+        // 绑定再次优化事件
+        jQuery_API_ACU('#acu-opt-reoptimize').on('click', async function () {
+            jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
+            // 关闭当前对话框
+            jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+            // 重新优化（使用原始内容）
+            await reoptimizeMessage_ACU(messageIndex);
+        });
+        // 绑定应用事件
+        jQuery_API_ACU('#acu-opt-apply').on('click', async function () {
+            jQuery_API_ACU(this).prop('disabled', true).text('应用中...');
+            const success = await replaceChatMessage_ACU(messageIndex, result.optimizedContent, { originalContent: getOriginalContent_ACU(messageIndex) || originalContent });
+            if (success) {
+                jQuery_API_ACU('.acu-optimization-dialog, #acu-opt-backdrop').remove();
+                showToastr_ACU('success', '优化已应用');
+            }
+            else {
+                jQuery_API_ACU(this).prop('disabled', false).text('应用优化');
+                showToastr_ACU('error', '应用失败');
+            }
+        });
+    }
+    /**
+     * 执行正文优化流程（在GENERATION_ENDED后调用）
+     * @param {number} messageIndex - AI消息索引
+     * @returns {Promise<boolean>} 是否成功
+     */
+    async function executeContentOptimization_ACU(messageIndex) {
+        const config = settings_ACU.contentOptimizationSettings || {};
+        _set_contentOptimizationAbortRequested_ACU(false);
+        // 检查是否启用
+        if (!config.enabled) {
+            return false;
+        }
+        const chat = getChatArray_ACU();
+        if (!chat || !chat[messageIndex]) {
+            return false;
+        }
+        const message = chat[messageIndex];
+        // 跳过用户消息
+        if (message.is_user) {
+            return false;
+        }
+        let content = message.mes || '';
+        setLastOptimizationBase_ACU({
+            messageIndex,
+            messageId: message.message_id,
+            baseContent: content
+        });
+        // [新增] 获取用户消息（用于$8占位符）
+        let userMessage = '';
+        for (let i = messageIndex - 1; i >= 0; i--) {
+            if (chat[i] && chat[i].is_user) {
+                userMessage = chat[i].mes || '';
+                break;
+            }
+        }
+        const extractTags = (config.extractTags || '').trim();
+        const extractRules = config.extractRules || [];
+        const excludeTags = (config.excludeTags || '').trim();
+        const excludeRules = config.excludeRules || [];
+        let processedContent = applyContextTagFilters_ACU(content, {
+            extractTags,
+            extractRules,
+            excludeTags,
+            excludeRules
+        });
+        const minLength = config.minLength || 100;
+        if (processedContent.length < minLength) {
+            logDebug_ACU(`[正文优化] 处理后正文长度 ${processedContent.length} 小于最小阈值 ${minLength}，跳过优化`);
+            return false;
+        }
+        const loopCount = config.loopCount || 1;
+        logDebug_ACU(`[正文优化] 开始优化消息 ${messageIndex}，原始长度 ${content.length}，处理后长度 ${processedContent.length}，循环次数: ${loopCount}`);
+        if (config.seamlessMode) {
+            showOptimizationOverlay_ACU(loopCount > 1 ? `正在优化正文 (1/${loopCount})...` : '正在优化正文...');
+        }
+        else {
+            showOptimizationProgressToast_ACU(loopCount > 1 ? `正在进行正文优化 (1/${loopCount})...` : '正在进行正文优化...');
+        }
+        try {
+            ensureOptimizationNotCancelled_ACU();
+            if (config.autoApply || config.seamlessMode) {
+                let currentContent = content;
+                let totalOptimizations = [];
+                let finalOptimizedContent = content;
+                for (let loop = 1; loop <= loopCount; loop++) {
+                    ensureOptimizationNotCancelled_ACU();
+                    logDebug_ACU(`[正文优化] 执行第 ${loop}/${loopCount} 轮优化`);
+                    if (config.seamlessMode && loopCount > 1) {
+                        showOptimizationOverlay_ACU(`正在优化正文 (${loop}/${loopCount})...`);
+                    }
+                    else if (!config.seamlessMode) {
+                        showOptimizationProgressToast_ACU(`正在进行正文优化 (${loop}/${loopCount})...`);
+                    }
+                    const result = await performContentOptimization_ACU(currentContent, {
+                        currentLoop: loop,
+                        userMessage: userMessage
+                    });
+                    ensureOptimizationNotCancelled_ACU();
+                    if (!result.success) {
+                        logDebug_ACU(`[正文优化] 第 ${loop} 轮优化失败:`, result.error);
+                        if (loop === 1) {
+                            if (config.seamlessMode) {
+                                hideOptimizationOverlay_ACU();
+                            }
+                            else {
+                                hideOptimizationProgressToast_ACU();
+                            }
+                            return false;
+                        }
+                        break;
+                    }
+                    if (!result.optimizations || result.optimizations.length === 0) {
+                        logDebug_ACU(`[正文优化] 第 ${loop} 轮无需优化，原文已足够好`);
+                        if (loop === 1) {
+                            if (config.seamlessMode) {
+                                hideOptimizationOverlay_ACU();
+                            }
+                            else {
+                                hideOptimizationProgressToast_ACU();
+                            }
+                            return true;
+                        }
+                        break;
+                    }
+                    totalOptimizations = totalOptimizations.concat(result.optimizations);
+                    finalOptimizedContent = result.optimizedContent;
+                    currentContent = result.optimizedContent;
+                    logDebug_ACU(`[正文优化] 第 ${loop} 轮完成，本轮 ${result.optimizations.length} 个优化项，累计 ${totalOptimizations.length} 个`);
+                }
+                if (totalOptimizations.length === 0) {
+                    logDebug_ACU('[正文优化] 所有轮次均无需优化');
+                    if (config.seamlessMode) {
+                        hideOptimizationOverlay_ACU();
+                    }
+                    else {
+                        hideOptimizationProgressToast_ACU();
+                    }
+                    return true;
+                }
+                await replaceChatMessage_ACU(messageIndex, finalOptimizedContent);
+                if (config.seamlessMode) {
+                    hideOptimizationOverlay_ACU();
+                }
+                else {
+                    hideOptimizationProgressToast_ACU();
+                }
+                if (config.showDiff && !config.seamlessMode) {
+                    showOptimizationDiff_ACU(messageIndex, {
+                        optimizations: totalOptimizations,
+                        summary: `共 ${loopCount} 轮优化，累计 ${totalOptimizations.length} 处改进`,
+                        optimizedContent: finalOptimizedContent
+                    });
+                }
+                else {
+                    showToastr_ACU('success', `正文优化完成，共 ${loopCount} 轮优化，累计 ${totalOptimizations.length} 处改进`);
+                }
+                return true;
+            }
+            else {
+                hideOptimizationProgressToast_ACU();
+                return await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, loopCount);
+            }
+        }
+        catch (error) {
+            if (contentOptimizationAbortRequested_ACU || error?.message === '用户终止正文优化') {
+                logDebug_ACU('[正文优化] 用户已取消正文优化');
+                return false;
+            }
+            logError_ACU('[正文优化] 执行出错:', error);
+            if (config.seamlessMode) {
+                hideOptimizationOverlay_ACU();
+            }
+            else {
+                hideOptimizationProgressToast_ACU();
+            }
+            return false;
+        }
+        finally {
+            hideOptimizationOverlay_ACU();
+            hideOptimizationProgressToast_ACU();
+            _set_contentOptimizationAbortRequested_ACU(false);
+        }
+    }
+    /**
+     * 执行正文优化（手动确认模式，逐轮确认）
+     * @param {number} messageIndex - 消息索引
+     * @param {string} content - 原始内容
+     * @param {string} userMessage - 用户消息
+     * @param {number} totalLoops - 总循环次数
+     * @param {number} currentLoop - 当前循环次数（内部使用）
+     * @param {string} currentContent - 当前内容（内部使用）
+     * @param {Array} totalOptimizations - 累计优化项（内部使用）
+     * @returns {Promise<boolean>} 是否成功
+     */
+    async function executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop = 1, currentContent = null, totalOptimizations = []) {
+        // 使用传入的当前内容，或者原始内容
+        let workingContent = currentContent !== null ? currentContent : content;
+        logDebug_ACU(`[正文优化-手动确认] 执行第 ${currentLoop}/${totalLoops} 轮优化`);
+        // 执行优化
+        const result = await performContentOptimization_ACU(workingContent, {
+            currentLoop: currentLoop,
+            userMessage: userMessage
+        });
+        if (!result.success) {
+            logDebug_ACU(`[正文优化-手动确认] 第 ${currentLoop} 轮优化失败:`, result.error);
+            // 如果是第一轮就失败，显示错误
+            if (currentLoop === 1) {
+                showToastr_ACU('error', `正文优化失败: ${result.error}`);
+                return false;
+            }
+            // 如果是后续轮次失败，使用之前的结果触发填表
+            await triggerAutomaticUpdateIfNeeded_ACU();
+            return true;
+        }
+        // 检查是否有实际优化
+        if (!result.optimizations || result.optimizations.length === 0) {
+            logDebug_ACU(`[正文优化-手动确认] 第 ${currentLoop} 轮无需优化，原文已足够好`);
+            // 如果没有优化项，检查是否还有下一轮
+            if (currentLoop < totalLoops) {
+                // 继续下一轮（使用当前内容）
+                return await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop + 1, workingContent, totalOptimizations);
+            }
+            else {
+                // 所有轮次完成，触发填表
+                if (totalOptimizations.length > 0) {
+                    showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${totalOptimizations.length} 处改进`);
+                }
+                else {
+                    showToastr_ACU('info', '正文无需优化');
+                }
+                await triggerAutomaticUpdateIfNeeded_ACU();
+                return true;
+            }
+        }
+        // 累积优化项
+        const newTotalOptimizations = totalOptimizations.concat(result.optimizations);
+        // 显示对比对话框
+        return new Promise((resolve) => {
+            showOptimizationDiffDialogForLoop_ACU(messageIndex, {
+                optimizations: result.optimizations,
+                summary: `第 ${currentLoop}/${totalLoops} 轮优化，本轮 ${result.optimizations.length} 处改进`,
+                optimizedContent: result.optimizedContent,
+                currentLoop: currentLoop,
+                totalLoops: totalLoops,
+                totalOptimizations: newTotalOptimizations
+            }, async (action) => {
+                if (action === 'apply') {
+                    // 用户确认应用
+                    if (currentLoop < totalLoops) {
+                        // 还有下一轮，继续优化
+                        const nextResult = await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop + 1, result.optimizedContent, newTotalOptimizations);
+                        resolve(nextResult);
+                    }
+                    else {
+                        // 所有轮次完成，应用最终结果并触发填表
+                        await replaceChatMessage_ACU(messageIndex, result.optimizedContent);
+                        showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${newTotalOptimizations.length} 处改进`);
+                        await triggerAutomaticUpdateIfNeeded_ACU();
+                        resolve(true);
+                    }
+                }
+                else if (action === 'skip') {
+                    // 用户跳过本轮，但继续下一轮
+                    if (currentLoop < totalLoops) {
+                        const nextResult = await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop + 1, workingContent, // 使用未优化的内容
+                        totalOptimizations // 不累积本轮优化项
+                        );
+                        resolve(nextResult);
+                    }
+                    else {
+                        // 最后一轮跳过
+                        if (totalOptimizations.length > 0) {
+                            // 如果有之前的优化，应用之前的结果
+                            // 注意：这里需要应用之前累积的优化内容
+                            await triggerAutomaticUpdateIfNeeded_ACU();
+                            showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${totalOptimizations.length} 处改进`);
+                        }
+                        else {
+                            showToastr_ACU('info', '正文优化已跳过');
+                        }
+                        await triggerAutomaticUpdateIfNeeded_ACU();
+                        resolve(true);
+                    }
+                }
+                else {
+                    // 用户取消，结束优化流程
+                    await triggerAutomaticUpdateIfNeeded_ACU();
+                    resolve(true);
+                }
+            });
+        });
+    }
+    /**
+     * 显示优化对比对话框（支持循环优化）
+     */
+
+    function schedulePlotSettingsUiRefresh_ACU(plotSettingsOverride = null) {
+        if (!$popupInstance_ACU || !$popupInstance_ACU.length)
+            return;
+        const refreshTarget = plotSettingsOverride || getActivePlotEditorSettings_ACU();
+        const $targetPopup = $popupInstance_ACU;
+        const runRefresh = () => {
+            if (!$popupInstance_ACU || !$popupInstance_ACU.length)
+                return;
+            if (!$targetPopup || !$targetPopup.length)
+                return;
+            $targetPopup.triggerHandler('acu_plot_settings_refresh', [refreshTarget]);
+        };
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(() => window.requestAnimationFrame(runRefresh));
+            return;
+        }
+        setTimeout(runRefresh, 0);
+    }
+    function renderExcludeRuleRows_ACU(containerSelector, rules, { startPlaceholder = '开始词', endPlaceholder = '结束词', fallbackRules = [] } = {}) {
+        if (!$popupInstance_ACU)
+            return;
+        const $container = $popupInstance_ACU.find(containerSelector);
+        if (!$container.length)
+            return;
+        let normalized = normalizeExcludeRules_ACU(rules, '');
+        if (normalized.length === 0 && Array.isArray(fallbackRules) && fallbackRules.length > 0) {
+            normalized = normalizeExcludeRules_ACU(fallbackRules, '');
+        }
+        $container.empty();
+        const appendRow = (rule = {}) => {
+            const rowHtml = `
+        <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
+          <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU$1(startPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU$1(rule.start || '')}">
+          <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU$1(endPlaceholder)}" style="flex:1;" value="${escapeHtml_ACU$1(rule.end || '')}">
+          <button type="button" class="button acu-exclude-rule-delete" title="删除规则" style="padding:4px 8px;">删除</button>
+        </div>
+      `;
+            $container.append(rowHtml);
+        };
+        const rows = normalized.length > 0 ? normalized : [{ start: '', end: '' }];
+        rows.forEach(rule => appendRow(rule));
+    }
+    function appendExcludeRuleRow_ACU(containerSelector, { startPlaceholder = '开始词', endPlaceholder = '结束词' } = {}) {
+        if (!$popupInstance_ACU)
+            return;
+        const $container = $popupInstance_ACU.find(containerSelector);
+        if (!$container.length)
+            return;
+        const rowHtml = `
+      <div class="acu-exclude-rule-row" style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
+        <input type="text" class="text_pole acu-exclude-rule-start" placeholder="${escapeHtml_ACU$1(startPlaceholder)}" style="flex:1;" value="">
+        <input type="text" class="text_pole acu-exclude-rule-end" placeholder="${escapeHtml_ACU$1(endPlaceholder)}" style="flex:1;" value="">
+        <button type="button" class="button acu-exclude-rule-delete" title="删除规则" style="padding:4px 8px;">删除</button>
+      </div>
+    `;
+        $container.append(rowHtml);
+    }
+    function readExcludeRulesFromRows_ACU(containerSelector) {
+        if (!$popupInstance_ACU)
+            return [];
+        const $container = $popupInstance_ACU.find(containerSelector);
+        if (!$container.length)
+            return [];
+        const collected = [];
+        $container.find('.acu-exclude-rule-row').each(function () {
+            const start = String(jQuery_API_ACU(this).find('.acu-exclude-rule-start').val() || '').trim();
+            const end = String(jQuery_API_ACU(this).find('.acu-exclude-rule-end').val() || '').trim();
+            if (start && end)
+                collected.push({ start, end });
+        });
+        return normalizeExcludeRules_ACU(collected, '');
+    }
+    function getPlotPromptContentById_ACU(promptId) {
+        return getPlotPromptContentByIdFromSettings_ACU(settings_ACU?.plotSettings, promptId);
+    }
+    function setPlotPromptContentById_ACU(promptId, content) {
+        setPlotPromptContentByIdForSettings_ACU(settings_ACU?.plotSettings, promptId, content);
+    }
+    // --- [剧情推进] 循环提示词列表渲染和管理 ---
+    function renderLoopPromptsList_ACU(plotSettingsOverride = null) {
+        const $container = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-prompts-container`);
+        if (!$container.length)
+            return;
+        const plotSettings = plotSettingsOverride || getActivePlotEditorSettings_ACU();
+        if (!plotSettings)
+            return;
+        ensureLoopPromptsArray_ACU(plotSettings);
+        const prompts = plotSettings.loopSettings.quickReplyContent || [];
+        $container.empty();
+        if (prompts.length === 0) {
+            $container.html('<div style="padding: 20px; text-align: center; color: var(--text_secondary); border: 1px dashed var(--border_color_light); border-radius: 6px;">暂无提示词，点击上方"添加提示词"按钮添加</div>');
+            return;
+        }
+        prompts.forEach((prompt, index) => {
+            const $item = jQuery_API_ACU('<div>', {
+                class: 'loop-prompt-item',
+                style: 'display: flex; gap: 8px; align-items: flex-start; padding: 10px; background: var(--background_light); border: 1px solid var(--border_color_light); border-radius: 6px;'
+            });
+            const $content = jQuery_API_ACU('<div>', {
+                style: 'flex: 1; display: flex; flex-direction: column; gap: 6px;'
+            });
+            $content.append(jQuery_API_ACU('<div>', {
+                style: 'display: flex; align-items: center; gap: 8px;'
+            }).append(jQuery_API_ACU('<span>', {
+                style: 'font-size: 0.85em; color: var(--text_secondary); font-weight: 500;',
+                text: `提示词 #${index + 1}`
+            })));
+            const $textarea = jQuery_API_ACU('<textarea>', {
+                class: 'loop-prompt-textarea text_pole',
+                'data-index': index,
+                rows: 2,
+                placeholder: '输入循环提示词内容...',
+                style: 'resize: vertical; width: 100%;',
+                text: prompt || ''
+            });
+            $content.append($textarea);
+            const $deleteBtn = jQuery_API_ACU('<button>', {
+                type: 'button',
+                class: 'loop-prompt-delete-btn button',
+                'data-index': index,
+                style: 'padding: 6px 10px; color: var(--danger); background: transparent; border: 1px solid var(--danger); border-radius: 4px; cursor: pointer; flex-shrink: 0;',
+                title: '删除此提示词',
+                html: '<i class="fa-solid fa-trash"></i>'
+            });
+            $item.append($content).append($deleteBtn);
+            $container.append($item);
+        });
+    }
+    function saveLoopPromptsFromUI_ACU() {
+        const plotSettings = getActivePlotEditorSettings_ACU();
+        if (!plotSettings)
+            return;
+        ensureLoopPromptsArray_ACU(plotSettings);
+        const prompts = [];
+        $popupInstance_ACU.find('.loop-prompt-textarea').each(function () {
+            const content = String(jQuery_API_ACU(this).val() || '').trim();
+            if (content) {
+                prompts.push(content);
+            }
+        });
+        plotSettings.loopSettings.quickReplyContent = prompts;
+        plotSettings.loopSettings.currentPromptIndex = 0; // 重置索引
+        saveSettingsAndNotify_ACU();
+    }
+    // --- [剧情推进] 临时替换"AI指令预设"(settings_ACU.charCardPrompt)，并在生成结束后恢复 ---
+    let plotPromptOverrideActive_ACU = false;
+    let plotPromptOverrideBackup_ACU = null;
+    // [剧情推进] 去重锁：避免同一次发送被 TavernHelper.generate 钩子 + GENERATION_AFTER_COMMANDS 双重处理导致重复 toast/误报失败
+    function buildPlotModifiedCharCardPrompt_ACU(original) {
+        const originalArr = Array.isArray(original)
+            ? original
+            : (typeof original === 'string' ? [{ role: 'USER', content: original }] : []);
+        const cloned = JSON.parse(JSON.stringify(originalArr));
+        const plotMain = (getPlotPromptContentById_ACU('mainPrompt') || '').trim();
+        const plotTask = (getPlotPromptContentById_ACU('systemPrompt') || '').trim();
+        if (!plotMain && !plotTask)
+            return cloned;
+        const getMainSlot = (seg) => {
+            if (!seg)
+                return '';
+            const slot = String(seg.mainSlot || '').toUpperCase();
+            if (slot === 'A' || slot === 'B')
+                return slot;
+            if (seg.isMain)
+                return 'A'; // 兼容旧字段
+            if (seg.isMain2)
+                return 'B'; // 兼容旧字段（若存在）
+            return '';
+        };
+        // 简化逻辑：只替换内容，不插入、不改role、不改结构
+        // 1) 定位主提示词A/B：优先 mainSlot，其次旧 isMain/isMain2
+        let mainAIdx = cloned.findIndex((p) => getMainSlot(p) === 'A');
+        let mainBIdx = cloned.findIndex((p) => getMainSlot(p) === 'B');
+        if (plotMain && mainAIdx !== -1 && cloned[mainAIdx]) {
+            cloned[mainAIdx].content = plotMain;
+        }
+        if (plotTask && mainBIdx !== -1 && cloned[mainBIdx]) {
+            cloned[mainBIdx].content = plotTask;
+        }
+        return cloned;
+    }
+    function applyPlotPromptOverride_ACU() {
+        if (plotPromptOverrideActive_ACU)
+            return;
+        if (!settings_ACU?.plotSettings?.enabled)
+            return;
+        const plotMain = (getPlotPromptContentById_ACU('mainPrompt') || '').trim();
+        const plotTask = (getPlotPromptContentById_ACU('systemPrompt') || '').trim();
+        if (!plotMain && !plotTask)
+            return;
+        plotPromptOverrideBackup_ACU = settings_ACU.charCardPrompt;
+        settings_ACU.charCardPrompt = buildPlotModifiedCharCardPrompt_ACU(plotPromptOverrideBackup_ACU);
+        plotPromptOverrideActive_ACU = true;
+        logDebug_ACU('[剧情推进] 已临时替换AI指令预设（charCardPrompt）。');
+    }
+    function restorePlotPromptOverride_ACU() {
+        if (!plotPromptOverrideActive_ACU)
+            return;
+        settings_ACU.charCardPrompt = plotPromptOverrideBackup_ACU;
+        plotPromptOverrideBackup_ACU = null;
+        plotPromptOverrideActive_ACU = false;
+        logDebug_ACU('[剧情推进] 已恢复AI指令预设（charCardPrompt）。');
+    }
+
+    /**
+     * presentation/components/optimization-ui/index.ts — 统一 re-export
+     */
+
+    // status-display.ts — 对应源文件有跨文件依赖，保留在原位
+    // [T172] 可视化编辑器刷新通知（从 service/worldbook/pipeline.ts 提取）
+    function notifyVisualizerRefresh_ACU() {
+        try {
+            jQuery_API_ACU(document).trigger('acu-visualizer-refresh-data');
+        }
+        catch (e) { }
+    }
+    // [T173] 填表状态消息更新
+    function updateTableFillStatus_ACU(text) {
+        if (!$statusMessageSpan_ACU && $popupInstance_ACU)
+            _assignUIPlaceholders_ACU({ $statusMessageSpan_ACU: $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-status-message`) });
+        if ($statusMessageSpan_ACU)
+            $statusMessageSpan_ACU.text(text);
+    }
+    const MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU = 'acu-manual-update-vector-soft-disabled';
+    function isVectorMemoryManualUpdateBlocked_ACU() {
+        try {
+            return getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true;
+        }
+        catch (e) {
+            return false;
+        }
+    }
+    function shouldShowVectorMemoryManualUpdateWarning_ACU() {
+        return isVectorMemoryManualUpdateBlocked_ACU();
+    }
+    function syncManualUpdateButtonAvailability_ACU() {
+        if (!$manualUpdateCardButton_ACU)
+            return;
+        if (shouldShowVectorMemoryManualUpdateWarning_ACU()) {
+            $manualUpdateCardButton_ACU
+                .prop('disabled', false)
+                .addClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
+                .text('交火索引已启用')
+                .attr('title', '交火模式纪要索引启用时不建议手动更新表格；特殊场景下仍可点击执行。');
+            return;
+        }
+        $manualUpdateCardButton_ACU
+            .prop('disabled', false)
+            .removeClass(MANUAL_UPDATE_VECTOR_SOFT_DISABLED_CLASS_ACU)
+            .text('立即手动更新')
+            .removeAttr('title');
+    }
+    // [T173] 填表停止按钮绑定
+    function bindTableFillStopButton_ACU(buttonId, onStop) {
+        const $stopButton = jQuery_API_ACU(`#${buttonId}`);
+        if ($stopButton.length) {
+            $stopButton.off('click.acu_stop').on('click.acu_stop', function (e) {
+                e.stopPropagation();
+                e.preventDefault();
+                syncManualUpdateButtonAvailability_ACU();
+                jQuery_API_ACU(this).closest('.toast').remove();
+                if (typeof onStop === 'function')
+                    onStop();
+            });
+        }
+    }
+    // [T173] 重置手动更新按钮状态
+    function resetManualUpdateButton_ACU() {
+        syncManualUpdateButtonAvailability_ACU();
+    }
+    // [T174] 更新聊天标题显示
+    function updateChatTitleDisplay_ACU(chatIdentifier) {
+        if (!$popupInstance_ACU)
+            return;
+        const $titleElement = $popupInstance_ACU.find('h2#updater-main-title-acu');
+        if ($titleElement.length)
+            $titleElement.html(`当前聊天：${escapeHtml_ACU$1(chatIdentifier || '未知')}`);
+    }
+    // [T175] 检查弹窗是否打开（供 service 层用布尔判断，不暴露 DOM 引用）
+    function isPopupOpen_ACU() {
+        return !!$popupInstance_ACU;
+    }
+    // [T177] 读取酒馆发送输入框的值
+    function getSendTextareaValue_ACU() {
+        try {
+            return jQuery_API_ACU('#send_textarea').val() || '';
+        }
+        catch (e) {
+            return '';
+        }
+    }
+    // [T177] 设置酒馆发送输入框的值并触发 input 事件
+    function setSendTextareaValue_ACU(text) {
+        try {
+            jQuery_API_ACU('#send_textarea').val(text);
+            jQuery_API_ACU('#send_textarea').trigger('input');
+        }
+        catch (e) { }
+    }
+    // [T178] 将删除设置同步到 UI。合并总结 UI 已停用，不再同步 merge/auto-merge 控件。
+    function syncMergeSettingsToUI_ACU(s) {
+        if (!$popupInstance_ACU)
+            return;
+        const find = (id) => $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-${id}`);
+        const setVal = (id, v) => { const $el = find(id); if ($el.length)
+            $el.val(v); };
+        setVal('delete-start-floor', s.deleteStartFloor || 1);
+        setVal('delete-end-floor', s.deleteEndFloor || '');
+    }
+    // [T179] 将全部设置同步到 UI（从 service/settings/settings-service.ts 提取）
+    function syncAllSettingsToUI_ACU(s) {
+        if (!$popupInstance_ACU)
+            return;
+        if ($customApiUrlInput_ACU)
+            $customApiUrlInput_ACU.val(s.apiConfig.url);
+        if ($customApiKeyInput_ACU)
+            $customApiKeyInput_ACU.val(s.apiConfig.apiKey);
+        if ($maxTokensInput_ACU)
+            $maxTokensInput_ACU.val(s.apiConfig.max_tokens);
+        if ($temperatureInput_ACU)
+            $temperatureInput_ACU.val(s.apiConfig.temperature);
+        if ($customApiModelInput_ACU)
+            $customApiModelInput_ACU.val(s.apiConfig.model || '');
+        if ($customApiModelSelect_ACU) {
+            $customApiModelSelect_ACU.empty().append('<option value="">-- 请先加载模型列表 --</option>');
+            if (s.apiConfig.model) {
+                $customApiModelSelect_ACU.append(`<option value="${escapeHtml_ACU$1(s.apiConfig.model)}">${escapeHtml_ACU$1(s.apiConfig.model)}</option>`);
+            }
+        }
+        if (typeof updateApiStatusDisplay_ACU === 'function')
+            updateApiStatusDisplay_ACU();
+        if ($charCardPromptSegmentsContainer_ACU)
+            renderPromptSegments_ACU(s.charCardPrompt);
+        if ($autoUpdateThresholdInput_ACU)
+            $autoUpdateThresholdInput_ACU.val(s.autoUpdateThreshold);
+        if ($autoUpdateFrequencyInput_ACU)
+            $autoUpdateFrequencyInput_ACU.val(s.autoUpdateFrequency);
+        if ($autoUpdateTokenThresholdInput_ACU)
+            $autoUpdateTokenThresholdInput_ACU.val(s.autoUpdateTokenThreshold);
+        if ($updateBatchSizeInput_ACU)
+            $updateBatchSizeInput_ACU.val(s.updateBatchSize);
+        if ($maxConcurrentGroupsInput_ACU)
+            $maxConcurrentGroupsInput_ACU.val(s.maxConcurrentGroups || 1);
+        if ($skipUpdateFloorsInput_ACU)
+            $skipUpdateFloorsInput_ACU.val(s.skipUpdateFloors || 0);
+        if ($retainRecentLayersInput_ACU)
+            $retainRecentLayersInput_ACU.val(s.retainRecentLayers || '');
+        if (typeof renderExcludeRuleRows_ACU === 'function') {
+            renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-extract-rules`, normalizeExtractRules_ACU(s.tableContextExtractRules, s.tableContextExtractTags || ''), { startPlaceholder: '开始词（例如：<think）', endPlaceholder: '结束词（例如：</think>）' });
+            renderExcludeRuleRows_ACU(`#${SCRIPT_ID_PREFIX_ACU}-table-context-exclude-rules`, normalizeExcludeRules_ACU(s.tableContextExcludeRules, s.tableContextExcludeTags || ''), { startPlaceholder: '开始词（例如：<thinking）', endPlaceholder: '结束词（例如：</thinking>）' });
+        }
+        const find = (id) => $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-${id}`);
+        const setVal = (id, v) => { const $el = find(id); if ($el.length)
+            $el.val(v); };
+        const setChecked = (id, v) => { const $el = find(id); if ($el.length)
+            $el.prop('checked', !!v); };
+        setVal('api-extra-body-params', s.apiConfig.extraBodyParams || '');
+        setVal('api-excluded-body-params', s.apiConfig.excludedBodyParams || '');
+        setVal('api-extra-headers', s.apiConfig.extraHeaders || '');
+        setChecked('api-thinking-enabled', s.apiConfig.thinkingEnabled === true);
+        setVal('api-thinking-effort', s.apiConfig.thinkingEffort || 'none');
+        setVal('import-split-size', s.importSplitSize);
+        setChecked('import-prompt-exclude-imported-worldbook-entries', s.importPromptExcludeImportedWorldbookEntries !== false);
+        if ($autoUpdateEnabledCheckbox_ACU)
+            $autoUpdateEnabledCheckbox_ACU.prop('checked', s.autoUpdateEnabled);
+        if ($standardizedTableFillEnabledCheckbox_ACU)
+            $standardizedTableFillEnabledCheckbox_ACU.prop('checked', s.standardizedTableFillEnabled !== false);
+        if ($toastMuteEnabledCheckbox_ACU)
+            $toastMuteEnabledCheckbox_ACU.prop('checked', !!s.toastMuteEnabled);
+        if ($promptTemplateEnabledCheckbox_ACU)
+            $promptTemplateEnabledCheckbox_ACU.prop('checked', s.promptTemplateSettings?.enabled !== false);
+        if ($tableEditLastPairOnlyCheckbox_ACU)
+            $tableEditLastPairOnlyCheckbox_ACU.prop('checked', s.tableEditLastPairOnly !== false);
+        if ($tableMaxRetriesInput_ACU)
+            $tableMaxRetriesInput_ACU.val(s.tableMaxRetries || 3);
+        syncMergeSettingsToUI_ACU(s);
+        const worldbookConfig = getCurrentWorldbookConfig_ACU();
+        const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
+        const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
+        $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source"]`).filter(`[value="${worldbookConfig.source}"]`).prop('checked', true);
+        if (typeof updateWorldbookSourceView_ACU === 'function')
+            updateWorldbookSourceView_ACU();
+        if (typeof populateInjectionTargetSelector_ACU === 'function')
+            populateInjectionTargetSelector_ACU();
+        setChecked('worldbook-vector-memory-enabled', summaryVectorIndexEnabled);
+        setVal('worldbook-vector-memory-threshold', vectorMemoryConfig.threshold);
+        setVal('worldbook-vector-memory-archive-trigger-count', vectorMemoryConfig.archiveTriggerCount || vectorMemoryConfig.archiveBatchSize);
+        setVal('worldbook-vector-memory-archive-batch-size', vectorMemoryConfig.archiveBatchSize);
+        setVal('worldbook-vector-memory-archive-max-concurrency', vectorMemoryConfig.summaryIndexArchiveMaxConcurrency || vectorMemoryConfig.archiveMaxConcurrency || 30);
+        setVal('worldbook-vector-memory-summary-index-keyword-min-rows', vectorMemoryConfig.summaryIndexKeywordMinRows || 100);
+        setVal('worldbook-vector-memory-topk', vectorMemoryConfig.topK);
+        setVal('worldbook-vector-memory-min-score', vectorMemoryConfig.minScore);
+        setVal('worldbook-vector-memory-namespace', vectorMemoryConfig.vectorNamespace);
+        setVal('worldbook-vector-memory-embedding-endpoint', vectorMemoryConfig.embeddingEndpoint);
+        setVal('worldbook-vector-memory-embedding-model', vectorMemoryConfig.embeddingModel);
+        setVal('worldbook-vector-memory-embedding-api-key', vectorMemoryConfig.embeddingApiKey);
+        setVal('worldbook-vector-memory-rerank-endpoint', vectorMemoryConfig.rerankEndpoint || '');
+        setVal('worldbook-vector-memory-rerank-model', vectorMemoryConfig.rerankModel || '');
+        setVal('worldbook-vector-memory-rerank-api-key', vectorMemoryConfig.rerankApiKey || '');
+        setVal('worldbook-vector-memory-rerank-instruction', vectorMemoryConfig.rerankInstruction || '');
+        setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
+        setChecked('worldbook-vector-memory-archive-without-summary', vectorMemoryConfig.archiveWithoutSummary === true);
+        setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);
+        setVal('worldbook-vector-memory-recent-fixed-inject-count', vectorMemoryConfig.recentFixedInjectCount || 50);
+        setVal('worldbook-vector-memory-entry-comment', vectorMemoryConfig.entryComment);
+        setVal('worldbook-vector-memory-entry-key', vectorMemoryConfig.entryKey);
+        setVal('worldbook-vector-memory-keyword-api-preset', vectorMemoryConfig.keywordApiPreset);
+        setVal('worldbook-vector-memory-keyword-context-pair-count', vectorMemoryConfig.keywordContextPairCount || 1);
+        setVal('worldbook-vector-memory-keyword-generation-max-attempts', vectorMemoryConfig.keywordGenerationMaxAttempts || 3);
+        renderKeywordPromptGroupToUI_ACU(vectorMemoryConfig.keywordPromptGroup || []);
+        renderSummaryPromptGroupToUI_ACU(vectorMemoryConfig.summaryPromptGroup || []);
+        const $vectorMemoryBlock = find('worldbook-vector-memory-config-block');
+        if ($vectorMemoryBlock.length)
+            $vectorMemoryBlock.toggle(summaryVectorIndexEnabled);
+        syncManualUpdateButtonAvailability_ACU();
+        const $outlineToggle = find('worldbook-outline-entry-enabled');
+        if ($outlineToggle.length) {
+            let mode = worldbookConfig.zeroTkOccupyMode;
+            if (typeof mode === 'undefined' && typeof worldbookConfig.outlineEntryEnabled !== 'undefined')
+                mode = (worldbookConfig.outlineEntryEnabled === false);
+            $outlineToggle.prop('checked', mode === true);
+        }
+        setChecked('worldbook-summary-vector-index-mode-enabled', summaryVectorIndexEnabled);
+        setChecked('vector-index-mode-enabled', summaryVectorIndexEnabled);
+        const $summaryVectorIndexHint = find('summary-vector-index-archive-hint');
+        if ($summaryVectorIndexHint.length) {
+            const activeSummaryVectorIndexSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
+            const activeSummaryVectorIndexState = activeSummaryVectorIndexSnapshot?.summaryVectorIndexState || null;
+            const summaryVectorIndexRowCount = activeSummaryVectorIndexState?.rowCount || (Array.isArray(activeSummaryVectorIndexState?.rows) ? activeSummaryVectorIndexState.rows.length : 0);
+            const summaryVectorIndexChunkCount = activeSummaryVectorIndexState?.chunkCount || (Array.isArray(activeSummaryVectorIndexState?.chunks) ? activeSummaryVectorIndexState.chunks.length : 0);
+            const hasSummaryVectorIndexArchive = !!activeSummaryVectorIndexState;
+            const summaryIndexKeywordMinRows = Number(vectorMemoryConfig.summaryIndexKeywordMinRows || 100);
+            $summaryVectorIndexHint.text(summaryVectorIndexEnabled
+                ? hasSummaryVectorIndexArchive
+                    ? summaryVectorIndexRowCount >= summaryIndexKeywordMinRows
+                        ? `交火模式纪要索引已启用；当前可用索引：${summaryVectorIndexRowCount} 条纪要，${summaryVectorIndexChunkCount} 个概要列 chunks，已达到 ${summaryIndexKeywordMinRows} 条门槛。发送前会生成关键词、召回概要列 chunks、执行可选 Rerank，并按纪要表原顺序覆盖原概要索引条目。`
+                        : `交火模式纪要索引已启用；当前可用索引：${summaryVectorIndexRowCount}/${summaryIndexKeywordMinRows} 条纪要，${summaryVectorIndexChunkCount} 个概要列 chunks。未达到门槛前，发送时不会触发交火召回，填表保存后仍会立即归档并继续累积外置索引。`
+                    : `交火模式纪要索引已启用，但当前聊天尚无外置纪要向量索引；完成一次纪要表填写后会自动归档，也可点击“立即构建交火纪要索引”手动构建。`
+                : '使用前请先配置好 Embedding 模型以及可选 Rerank 模型；开启后会在纪要表填写完成时立即归档外置概要列向量索引，达到门槛后发送前覆盖原概要索引条目。');
+        }
+        if ($useMainApiCheckbox_ACU) {
+            $useMainApiCheckbox_ACU.prop('checked', s.apiConfig.useMainApi);
+            if (typeof updateCustomApiInputsState_ACU === 'function')
+                updateCustomApiInputsState_ACU();
+        }
+        if ($streamingEnabledCheckbox_ACU)
+            $streamingEnabledCheckbox_ACU.prop('checked', s.streamingEnabled || false);
+        if ($manualTableSelector_ACU && typeof renderManualTableSelector_ACU === 'function')
+            renderManualTableSelector_ACU();
+        if ($importTableSelector_ACU && typeof renderImportTableSelector_ACU === 'function')
+            renderImportTableSelector_ACU();
+        $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-api-mode"][value="${s.apiMode}"]`).prop('checked', true);
+        if (typeof updateApiModeView_ACU === 'function')
+            updateApiModeView_ACU(s.apiMode);
+    }
+    // [T180] 模拟点击酒馆发送按钮
+    function clickSendButton_ACU() {
+        try {
+            jQuery_API_ACU('#send_but').click();
+        }
+        catch (e) { }
+    }
+
+    /**
+     * presentation/components/settings-ui-helpers.ts
+     * 从 settings-service.ts 搬出的 UI 相关便捷函数
+     */
+    /**
+     * 加载设置后刷新 UI（presentation 层便捷函数）
+     */
+    function loadSettingsAndRefreshUI_ACU() {
+        loadSettings_ACU();
+        if (typeof syncAllSettingsToUI_ACU === 'function')
+            syncAllSettingsToUI_ACU(settings_ACU);
+    }
+    /**
+     * 保存设置并根据返回值弹 toast 通知（presentation 层便捷函数）
+     * service 层 saveSettings_ACU 只返回结果，UI 通知由此函数处理。
+     *
+     * 后台自动流程可能在设置加载门闸尚未放行时触发保存。那类保护性拒绝必须保留，
+     * 但不能把正常填表/世界书同步流程刷成连续 toast；用户主动保存仍然保留提示。
+     */
+    function saveSettingsAndNotify_ACU(options = {}) {
+        const result = saveSettings_ACU();
+        if (result.error) {
+            showToastr_ACU('error', result.error);
+        }
+        else if (result.warning) {
+            if (options.silentWarnings)
+                return result;
+            if (options.suppressLoadingWarning !== false && result.code === 'settings_loading')
+                return result;
+            const toastType = result.storageType === 'memory' ? 'warning' : 'info';
+            const timeOut = result.storageType === 'memory' ? 8000 : 6000;
+            showToastr_ACU(toastType, result.warning, { timeOut });
+        }
+        return result;
+    }
+
+    /**
+     * presentation/components/table-selector.ts — 表格选择器组件
+     *
+     * 使用 TableSelectorComponent 类消除 manual/import 两个选择器的重复代码。
+     * 原有导出函数保留作为兼容层，内部委托给组件实例。
+     */
+    // ─── TableSelectorComponent 类 ─────────────────────────
+    class TableSelectorComponent {
+        constructor(config) {
+            this._$container = null;
+            this._mounted = false;
+            this._config = config;
+        }
+        /** 生成选择器 HTML（纯函数） */
+        render() {
+            const dataSource = this._config.getDataSource();
+            if (!dataSource)
+                return `<div class="notes">${escapeHtml_ACU$1(this._config.emptyDataText)}</div>`;
+            const availableKeys = getSortedSheetKeys_ACU(dataSource);
+            if (availableKeys.length === 0)
+                return `<div class="notes">${escapeHtml_ACU$1(this._config.emptyKeysText)}</div>`;
+            const selectedKeys = this._config.getSelectedKeys();
+            const selectedSet = new Set(selectedKeys);
+            let html = '<div class="acu-table-selector" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;max-height:240px;overflow:auto;padding:8px;border:1px solid var(--border-normal);border-radius:8px;background:var(--bg-secondary);">';
+            availableKeys.forEach(key => {
+                const name = dataSource[key]?.name || key;
+                const checked = selectedSet.has(key) ? 'checked' : '';
+                html += `<label style="display:flex;align-items:center;gap:8px;padding:10px;border:1px solid var(--border-normal);border-radius:6px;background:var(--bg-primary);">
+              <input type="checkbox" data-key="${key}" ${checked} style="margin:0;width:14px;height:14px;flex-shrink:0;">
+              <span style="flex:1;word-break:break-all;font-weight:600;">${escapeHtml_ACU$1(name)}</span>
+          </label>`;
+            });
+            html += '</div>';
+            return html;
+        }
+        /** 挂载到容器：插入 HTML + 绑定事件 */
+        mount($container) {
+            if (this._mounted)
+                this.unmount();
+            this._$container = $container;
+            this._$container.html(this.render());
+            this._bindEvents();
+            this._mounted = true;
+        }
+        /** 卸载：清理事件 + 清空内容 */
+        unmount() {
+            if (this._$container) {
+                this._$container.off('change', 'input[type="checkbox"]');
+                this._$container.empty();
+            }
+            this._mounted = false;
+        }
+        /** 用新数据重新渲染（保持挂载状态） */
+        update() {
+            if (!this._$container || !this._$container.length)
+                return;
+            this._$container.off('change', 'input[type="checkbox"]');
+            this._$container.html(this.render());
+            this._bindEvents();
+        }
+        /** 从 UI 读取当前勾选的 keys */
+        getSelectionFromUI() {
+            if (!this._$container || !this._$container.length)
+                return [];
+            const keys = [];
+            this._$container.find('input[type="checkbox"]:checked').each(function () {
+                const k = jQuery_API_ACU(this).data('key');
+                if (k)
+                    keys.push(k);
+            });
+            return keys;
+        }
+        /** 全选 */
+        selectAll() {
+            const dataSource = this._config.getDataSource();
+            if (!dataSource)
+                return;
+            const keys = getSortedSheetKeys_ACU(dataSource);
+            this._config.saveSelection(keys);
+            this.update();
+        }
+        /** 全不选 */
+        selectNone() {
+            this._config.saveSelection([]);
+            this.update();
+        }
+        _bindEvents() {
+            if (!this._$container)
+                return;
+            const config = this._config;
+            this._$container.off('change', 'input[type="checkbox"]').on('change', 'input[type="checkbox"]', function () {
+                const checkedKeys = [];
+                config.getContainer()?.find('input[type="checkbox"]:checked').each(function () {
+                    const key = jQuery_API_ACU(this).data('key');
+                    if (key)
+                        checkedKeys.push(key);
+                });
+                config.saveSelection(checkedKeys);
+            });
+        }
+    }
+    // ─── 组件实例 ──────────────────────────────────────────
+    const manualSelector = new TableSelectorComponent({
+        getDataSource: () => currentJsonTableData_ACU || null,
+        getSelectedKeys: () => {
+            const resolved = getSelectedManualSheetKeys_ACU();
+            // 同步到 settings（保持原有行为）
+            if (!Array.isArray(settings_ACU.manualSelectedTables) || JSON.stringify(settings_ACU.manualSelectedTables) !== JSON.stringify(resolved)) {
+                settings_ACU.manualSelectedTables = resolved;
+                saveSettingsAndNotify_ACU();
+            }
+            return resolved;
+        },
+        getContainer: () => $manualTableSelector_ACU,
+        saveSelection: (keys) => {
+            settings_ACU.manualSelectedTables = keys;
+            settings_ACU.hasManualSelection = true;
+            saveSettingsAndNotify_ACU();
+        },
+        emptyDataText: '暂无表格可选。',
+        emptyKeysText: '暂无表格可选。',
+    });
+    const importSelector = new TableSelectorComponent({
+        getDataSource: () => getImportBaseTableData_ACU(),
+        getSelectedKeys: () => {
+            const resolved = getSelectedImportSheetKeys_ACU();
+            if (!Array.isArray(settings_ACU.importSelectedTables) || JSON.stringify(settings_ACU.importSelectedTables) !== JSON.stringify(resolved)) {
+                settings_ACU.importSelectedTables = resolved;
+                saveSettingsAndNotify_ACU();
+            }
+            return resolved;
+        },
+        getContainer: () => $importTableSelector_ACU,
+        saveSelection: (keys) => {
+            settings_ACU.importSelectedTables = keys;
+            settings_ACU.hasImportTableSelection = true;
+            saveSettingsAndNotify_ACU();
+        },
+        emptyDataText: '尚未加载表格结构。',
+        emptyKeysText: '暂无表格可选。',
+    });
+    // ─── 兼容层：保留原有导出函数签名 ─────────────────────
+    function renderManualTableSelector_ACU() {
+        const $container = $manualTableSelector_ACU;
+        if (!$container || !$container.length || !currentJsonTableData_ACU)
+            return;
+        manualSelector.mount($container);
+    }
+    function getManualSelectionFromUI_ACU() {
+        const keys = manualSelector.getSelectionFromUI();
+        if (keys.length > 0 || settings_ACU.hasManualSelection) {
+            settings_ACU.manualSelectedTables = keys;
+            settings_ACU.hasManualSelection = true;
+            saveSettingsAndNotify_ACU();
+            return keys;
+        }
+        return getSelectedManualSheetKeys_ACU();
+    }
+    // ─── 外部导入表格选择器 ────────────────────────────────
+    function getImportBaseTableData_ACU() {
+        try {
+            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true });
+            if (templateData)
+                return templateData;
+        }
+        catch (e) {
+            // ignore
+        }
+        return currentJsonTableData_ACU || null;
+    }
+    function getSelectedImportSheetKeys_ACU() {
+        const base = getImportBaseTableData_ACU();
+        if (!base)
+            return [];
+        const availableKeys = getSortedSheetKeys_ACU(base);
+        const saved = Array.isArray(settings_ACU.importSelectedTables) ? settings_ACU.importSelectedTables : [];
+        if (!settings_ACU.hasImportTableSelection)
+            return availableKeys;
+        const validSaved = saved.filter((k) => availableKeys.includes(k));
+        return validSaved;
+    }
+    function renderImportTableSelector_ACU() {
+        const $container = $importTableSelector_ACU;
+        if (!$container || !$container.length)
+            return;
+        importSelector.mount($container);
+    }
+    function getImportSelectionFromUI_ACU() {
+        const keys = importSelector.getSelectionFromUI();
+        if (keys.length > 0 || settings_ACU.hasImportTableSelection) {
+            settings_ACU.importSelectedTables = keys;
+            settings_ACU.hasImportTableSelection = true;
+            saveSettingsAndNotify_ACU();
+            return keys;
+        }
+        return getSelectedImportSheetKeys_ACU();
+    }
+    function handleImportSelectAll_ACU() {
+        importSelector.selectAll();
+    }
+    function handleImportSelectNone_ACU() {
+        importSelector.selectNone();
+    }
+    function handleManualSelectAll_ACU() {
+        manualSelector.selectAll();
+    }
+    function handleManualSelectNone_ACU() {
+        manualSelector.selectNone();
+    }
+
+    /**
+     * presentation/theme/custom-confirm.ts
+     *
+     * 与插件 UI 风格一致的自定义确认框，替代原生 confirm()。
+     * 返回 Promise<boolean>，调用方在 async 函数中使用 await 即可。
+     *
+     * 样式复用窗口系统的 CSS 变量（--acu-panel-bg 等）和遮罩层（.acu-window-overlay），
+     * 自动兼容双主题（墨色/素纱）。
+     *
+     * 重要：DOM 挂载到 topLevelWindow_ACU.document（酒馆主窗口），
+     * 而非当前 iframe 的 document，与窗口系统（window-system.ts）保持一致。
+     */
+    /**
+     * 获取目标 document（酒馆主窗口），与窗口系统保持一致。
+     */
+    function getTargetDoc() {
+        return (topLevelWindow_ACU || window).document;
+    }
+    /**
+     * 弹出自定义确认框，返回 Promise<boolean>。
+     * - 用户点击确认按钮 → resolve(true)
+     * - 用户点击取消按钮或点击遮罩层 → resolve(false)
+     *
+     * @param title 标题
+     * @param message 正文（支持换行 \n）
+     * @param options 可选配置
+     */
+    function showCustomConfirm_ACU(title, message, options = {}) {
+        const { confirmLabel = '确定', cancelLabel = '取消', } = options;
+        const targetDoc = getTargetDoc();
+        const targetWindow = targetDoc.defaultView || topLevelWindow_ACU || window;
+        const viewportWidth = Number(targetWindow?.innerWidth || window.innerWidth || 0);
+        const isNarrowScreen = viewportWidth > 0 && viewportWidth <= 899;
+        // 移除可能残留的旧确认框（防止重复）
+        removeExistingConfirm();
+        const confirmId = `${SCRIPT_ID_PREFIX_ACU}-custom-confirm`;
+        // 将 \n 转为 <br>，HTML 转义防止 XSS
+        const safeMessage = escapeHtml_ACU(message).replace(/\n/g, '<br>');
+        const html = `
+    <div class="acu-window-overlay" id="${confirmId}-overlay" style="z-index: 100000;">
+      <div id="${confirmId}" style="
+        position: fixed;
+        top: ${isNarrowScreen ? 'max(calc(env(safe-area-inset-top, 0px) + 72px), 12svh)' : '50%'};
+        left: 50%;
+        transform: translate(-50%, ${isNarrowScreen ? '0' : '-50%'});
+        min-width: ${isNarrowScreen ? 'min(280px, calc(100vw - 24px))' : '320px'};
+        width: min(420px, calc(100vw - ${isNarrowScreen ? '24px' : '40px'}));
+        max-width: min(420px, calc(100vw - ${isNarrowScreen ? '24px' : '40px'}));
+        max-height: calc(${isNarrowScreen ? '100dvh' : '100vh'} - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - ${isNarrowScreen ? '88px' : '40px'});
+        background-color: var(--acu-confirm-bg, var(--acu-bg-1, #ffffff));
+        border: 1px solid var(--acu-confirm-border, var(--acu-border, #e0e4ea));
+        border-radius: 10px;
+        box-shadow: var(--acu-shadow, 0 24px 60px rgba(0, 0, 0, 0.18));
+        animation: acuWindowSlideIn 0.25s ease-out;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: var(--acu-confirm-title, var(--acu-text-1, #1a2332));
+        padding: 0;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      ">
+        <div style="
+          padding: 16px 20px 12px 20px;
+          font-size: 14px;
+          font-weight: 600;
+          letter-spacing: 0.3px;
+          color: var(--acu-confirm-title, var(--acu-text-1, #1a2332));
+          border-bottom: 1px solid var(--acu-confirm-border, var(--acu-border, #e0e4ea));
+        ">${escapeHtml_ACU(title)}</div>
+        <div style="
+          padding: 16px 20px;
+          font-size: 13px;
+          line-height: 1.7;
+          color: var(--acu-confirm-text, var(--acu-text-2, #4a5568));
+          overflow-y: auto;
+          max-height: ${isNarrowScreen ? 'min(50dvh, calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 180px))' : 'none'};
+        ">${safeMessage}</div>
+        <div style="
+          padding: 12px 20px calc(16px + env(safe-area-inset-bottom, 0px)) 20px;
+          display: flex;
+          justify-content: ${isNarrowScreen ? 'stretch' : 'flex-end'};
+          flex-direction: ${isNarrowScreen ? 'column-reverse' : 'row'};
+          gap: 10px;
+        ">
+          <button id="${confirmId}-cancel" style="
+            padding: 10px 18px;
+            border: 1px solid var(--acu-confirm-cancel-border, var(--acu-border-2, #c8cdd5)) !important;
+            border-radius: 6px;
+            background: var(--acu-confirm-cancel-bg, transparent) !important;
+            color: var(--acu-confirm-cancel-text, var(--acu-text-2, #4a5568)) !important;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 500;
+            letter-spacing: 0.3px;
+            transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+            box-shadow: none !important;
+            width: ${isNarrowScreen ? '100%' : 'auto'};
+          ">${escapeHtml_ACU(cancelLabel)}</button>
+          <button id="${confirmId}-ok" style="
+            padding: 10px 18px;
+            border: 1px solid var(--acu-confirm-ok-border, rgba(37, 99, 235, 0.30)) !important;
+            border-radius: 6px;
+            background: var(--acu-confirm-ok-bg, rgba(37, 99, 235, 0.08)) !important;
+            color: var(--acu-confirm-ok-text, var(--acu-accent, #2563eb)) !important;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+            transition: background 0.15s ease, border-color 0.15s ease;
+            box-shadow: none !important;
+            width: ${isNarrowScreen ? '100%' : 'auto'};
+          ">${escapeHtml_ACU(confirmLabel)}</button>
+        </div>
+      </div>
+    </div>
+  `;
+        // 挂载到主窗口（与窗口系统一致），而非当前 iframe
+        targetDoc.body.insertAdjacentHTML('beforeend', html);
+        // 在主窗口 document 中查找元素
+        const $ok = targetDoc.getElementById(`${confirmId}-ok`);
+        const $cancel = targetDoc.getElementById(`${confirmId}-cancel`);
+        const $overlay = targetDoc.getElementById(`${confirmId}-overlay`);
+        // 给按钮加 hover 效果（用 JS 而非 CSS 类，避免污染全局样式）
+        if ($ok) {
+            $ok.addEventListener('mouseenter', () => {
+                $ok.style.background = 'var(--acu-confirm-ok-hover-bg, rgba(37, 99, 235, 0.14))';
+                $ok.style.borderColor = 'var(--acu-confirm-ok-hover-border, rgba(37, 99, 235, 0.45))';
+            });
+            $ok.addEventListener('mouseleave', () => {
+                $ok.style.background = 'var(--acu-confirm-ok-bg, rgba(37, 99, 235, 0.08))';
+                $ok.style.borderColor = 'var(--acu-confirm-ok-border, rgba(37, 99, 235, 0.30))';
+            });
+        }
+        if ($cancel) {
+            $cancel.addEventListener('mouseenter', () => {
+                $cancel.style.background = 'var(--acu-confirm-cancel-hover-bg, var(--acu-bg-2, rgba(0, 0, 0, 0.03)))';
+                $cancel.style.borderColor = 'var(--acu-confirm-cancel-hover-border, var(--acu-border, #e0e4ea))';
+                $cancel.style.color = 'var(--acu-confirm-cancel-hover-text, var(--acu-text-1, #1a2332))';
+            });
+            $cancel.addEventListener('mouseleave', () => {
+                $cancel.style.background = 'var(--acu-confirm-cancel-bg, transparent)';
+                $cancel.style.borderColor = 'var(--acu-confirm-cancel-border, var(--acu-border-2, #c8cdd5))';
+                $cancel.style.color = 'var(--acu-confirm-cancel-text, var(--acu-text-2, #4a5568))';
+            });
+        }
+        return new Promise((resolve) => {
+            const cleanup = (result) => {
+                removeExistingConfirm();
+                resolve(result);
+            };
+            $ok?.addEventListener('click', () => cleanup(true));
+            $cancel?.addEventListener('click', () => cleanup(false));
+            $overlay?.addEventListener('click', (e) => {
+                if (e.target === $overlay)
+                    cleanup(false);
+            });
+        });
+    }
+    /** 移除已有的自定义确认框 DOM（从主窗口中查找并移除） */
+    function removeExistingConfirm() {
+        const confirmId = `${SCRIPT_ID_PREFIX_ACU}-custom-confirm`;
+        const targetDoc = getTargetDoc();
+        const existing = targetDoc.getElementById(`${confirmId}-overlay`);
+        if (existing)
+            existing.remove();
+    }
+    /** 简易 HTML 转义（使用主窗口 document 创建元素） */
+    function escapeHtml_ACU(text) {
+        const targetDoc = getTargetDoc();
+        const div = targetDoc.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
 
     // update-process.ts — 表格更新 UI 壳（presentation 层：负责 UI 交互）

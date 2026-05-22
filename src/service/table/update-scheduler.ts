@@ -8,6 +8,7 @@
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { resolveTableHistoryStateFromChat_ACU } from './table-history';
+import { commitMergedDeferredCommits_ACU, type DeferredCommitPayload_ACU } from './update-orchestrator';
 
 export interface TableUpdateItem {
     sheetKey: string;
@@ -215,9 +216,9 @@ function isProcessUpdatesSuccess_ACU(result: any): boolean {
 }
 
 /**
- * 执行自动更新计划：按分组串行执行 + 每组快照刷新屏障 + 自动合并检测 + 旧数据清理
+ * 执行自动更新计划：按分组串行应用 + 整轮合并写入 + 自动合并检测 + 旧数据清理
  * 
- * 纯业务编排逻辑：决定执行顺序、快照刷新屏障、错误处理。
+ * 纯业务编排逻辑：决定执行顺序、整轮提交屏障、错误处理。
  * 不驱动 UI，只返回结果。presentation 层根据返回值自行决定 UI 操作。
  */
 export async function executeAutoUpdatePlan_ACU(
@@ -235,37 +236,50 @@ export async function executeAutoUpdatePlan_ACU(
     setAutoUpdating(true);
 
     const failedGroupKeys: string[] = [];
-    for (const key of groupKeys) {
+    const allDeferredCommits: DeferredCommitPayload_ACU[] = [];
+
+    for (let groupOrder = 0; groupOrder < groupKeys.length; groupOrder++) {
+        const key = groupKeys[groupOrder];
         const group = updateGroups[key];
-        logDebug_ACU(`[Sequential] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
+        logDebug_ACU(`[Auto Merge] Applying group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
 
         try {
             const result = await ops.processUpdates(group.indices, 'auto_independent', {
                 targetSheetKeys: group.sheetKeys,
                 batchSize: group.batchSize,
-                requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
+                requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
+                groupKey: key,
+                groupOrder,
+                deferPersistence: true,
             });
 
             if (!isProcessUpdatesSuccess_ACU(result)) {
                 failedGroupKeys.push(key);
+                continue;
+            }
+
+            if (Array.isArray(result?.deferredCommits) && result.deferredCommits.length > 0) {
+                allDeferredCommits.push(...result.deferredCommits);
             }
         } catch (e) {
             failedGroupKeys.push(key);
             logWarn_ACU(`自动分组更新异常 groupId=${group.groupId}, sheets=${group.sheetNames.join(', ')}:`, e);
         }
-
-        // 自动更新会读写共享 runtime 表数据与聊天楼层 delta；每个分组完成后立即刷新，
-        // 让下一分组基于已落盘快照继续，避免并发应用时 before/after 快照互相污染。
-        await ops.loadAllChatMessages();
-        await ops.refreshData();
     }
 
     if (failedGroupKeys.length > 0) {
         logWarn_ACU(`自动分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。`);
+    } else {
+        const commitResult = await commitMergedDeferredCommits_ACU(allDeferredCommits);
+        if (!commitResult.success) {
+            failedGroupKeys.push('__merged_commit__');
+            logWarn_ACU(`自动分组更新合并提交失败: ${commitResult.error || '未知错误'}`);
+        }
     }
 
-    // 所有分组更新完成后再做一次最终刷新，确保 UI 与后续自动合并读取的是最新快照。
-    logDebug_ACU('All group updates completed sequentially. Forcing final data refresh...');
+    // 自动分组在 deferPersistence 模式下只返回提交载荷；必须先完成整轮合并写入，
+    // 再刷新聊天记录与表格快照。否则刷新到的仍是提交前状态，下一次读取只会看到残缺结果。
+    logDebug_ACU('All group updates applied. Merging deferred commits and forcing final data refresh...');
     await ops.loadAllChatMessages();
     await ops.refreshData();
     await new Promise(resolve => setTimeout(resolve, 500));

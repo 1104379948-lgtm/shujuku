@@ -1164,7 +1164,7 @@ function buildMergedAfterDataFromDeferredCommits_ACU(
     return { afterData: mergedAfterData };
 }
 
-async function commitMergedDeferredCommits_ACU(
+export async function commitMergedDeferredCommits_ACU(
     commits: DeferredCommitPayload_ACU[],
 ): Promise<{ success: boolean; error?: string }> {
     if (!Array.isArray(commits) || commits.length === 0) {

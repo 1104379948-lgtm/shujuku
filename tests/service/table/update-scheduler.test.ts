@@ -24,6 +24,11 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
   getSortedSheetKeys_ACU: vi.fn((data: any) => data ? Object.keys(data).filter((k: string) => k.startsWith('sheet_')) : []),
 }));
 
+const mockCommitMergedDeferredCommits_ACU = vi.hoisted(() => vi.fn());
+vi.mock('../../../src/service/table/update-orchestrator', () => ({
+  commitMergedDeferredCommits_ACU: mockCommitMergedDeferredCommits_ACU,
+}));
+
 import {
   buildAutoUpdatePlan_ACU,
   checkAutoUpdatePreConditions_ACU,
@@ -511,6 +516,7 @@ describe('executeAutoUpdatePlan_ACU', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCommitMergedDeferredCommits_ACU.mockResolvedValue({ success: true });
   });
 
   it('空计划返回 success', async () => {
@@ -528,18 +534,25 @@ describe('executeAutoUpdatePlan_ACU', () => {
         '0|1|2': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] },
       },
     };
-    const ops = makeOps();
+    const ops = makeOps({
+      processUpdates: vi.fn().mockResolvedValue({
+        success: true,
+        deferredCommits: [{ targetMessageIndex: 1, targetSheetKeys: ['sheet_0'] }],
+      }),
+    });
     const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
     expect(result.success).toBe(true);
     expect(result.totalGroups).toBe(1);
     expect(result.failedGroups).toBe(0);
     expect(ops.processUpdates).toHaveBeenCalledTimes(1);
+    expect(ops.processUpdates).toHaveBeenCalledWith([1], 'auto_independent', expect.objectContaining({ deferPersistence: true }));
+    expect(mockCommitMergedDeferredCommits_ACU).toHaveBeenCalledTimes(1);
     expect(ops.loadAllChatMessages).toHaveBeenCalled();
     expect(ops.refreshData).toHaveBeenCalled();
     expect(ops.purgeOldLayerData).toHaveBeenCalled();
   });
 
-  it('多组部分失败：按分组串行执行，并在每组完成后刷新快照', async () => {
+  it('多组部分失败：按分组串行应用，但不提交半截 deferred commits', async () => {
     const plan = {
       tablesToUpdate: [],
       updateGroups: {
@@ -551,11 +564,11 @@ describe('executeAutoUpdatePlan_ACU', () => {
     const mockProcess = vi.fn()
       .mockImplementationOnce(async () => {
         events.push('process:a');
-        return true;
+        return { success: true, deferredCommits: [{ targetMessageIndex: 1, targetSheetKeys: ['sheet_0'] }] };
       })
       .mockImplementationOnce(async () => {
         events.push('process:b');
-        return false;
+        return { success: false, error: 'group b failed' };
       });
 
     const ops = makeOps({
@@ -567,10 +580,11 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.failedGroups).toBe(1);
     expect(result.totalGroups).toBe(2);
-    expect(events.slice(0, 6)).toEqual(['process:a', 'load', 'refresh', 'process:b', 'load', 'refresh']);
+    expect(events.slice(0, 4)).toEqual(['process:a', 'process:b', 'load', 'refresh']);
+    expect(mockCommitMergedDeferredCommits_ACU).not.toHaveBeenCalled();
   });
 
-  it('多组自动更新忽略 maxConcurrentGroups 并发配置，按组串行执行并刷新快照', async () => {
+  it('多组自动更新忽略 maxConcurrentGroups 并发配置，按组串行应用后整轮合并提交', async () => {
     const plan = {
       tablesToUpdate: [],
       updateGroups: {
@@ -589,7 +603,16 @@ describe('executeAutoUpdatePlan_ACU', () => {
         await Promise.resolve();
         events.push(`process:end:${options.targetSheetKeys[0]}`);
         activeProcessCount -= 1;
-        return true;
+        return {
+          success: true,
+          deferredCommits: [{
+            targetMessageIndex: 3,
+            targetSheetKeys: options.targetSheetKeys,
+            trackingSheetKeys: options.targetSheetKeys,
+            attemptedUpdateKeys: options.targetSheetKeys,
+            marker: options.targetSheetKeys[0],
+          }],
+        };
       }),
       loadAllChatMessages: vi.fn(async () => { events.push('load'); }),
       refreshData: vi.fn(async () => { events.push('refresh'); }),
@@ -599,20 +622,35 @@ describe('executeAutoUpdatePlan_ACU', () => {
 
     expect(result.success).toBe(true);
     expect(maxActiveProcessCount).toBe(1);
-    expect(events.slice(0, 8)).toEqual([
+    expect(events.slice(0, 6)).toEqual([
       'process:start:sheet_0',
       'process:end:sheet_0',
-      'load',
-      'refresh',
       'process:start:sheet_1',
       'process:end:sheet_1',
       'load',
       'refresh',
     ]);
-    expect(events.indexOf('process:start:sheet_1')).toBeGreaterThan(events.indexOf('refresh'));
+    expect(events.indexOf('process:start:sheet_1')).toBeGreaterThan(events.indexOf('process:end:sheet_0'));
     expect(ops.processUpdates).toHaveBeenCalledTimes(2);
-    expect(ops.loadAllChatMessages).toHaveBeenCalledTimes(3);
-    expect(ops.refreshData).toHaveBeenCalledTimes(4);
+    expect(ops.processUpdates).toHaveBeenNthCalledWith(1, [1], 'auto_independent', expect.objectContaining({
+      targetSheetKeys: ['sheet_0'],
+      deferPersistence: true,
+      groupKey: 'group_a',
+      groupOrder: 0,
+    }));
+    expect(ops.processUpdates).toHaveBeenNthCalledWith(2, [3], 'auto_independent', expect.objectContaining({
+      targetSheetKeys: ['sheet_1'],
+      deferPersistence: true,
+      groupKey: 'group_b',
+      groupOrder: 1,
+    }));
+    expect(mockCommitMergedDeferredCommits_ACU).toHaveBeenCalledTimes(1);
+    expect(mockCommitMergedDeferredCommits_ACU).toHaveBeenCalledWith([
+      expect.objectContaining({ marker: 'sheet_0' }),
+      expect.objectContaining({ marker: 'sheet_1' }),
+    ]);
+    expect(ops.loadAllChatMessages).toHaveBeenCalledTimes(1);
+    expect(ops.refreshData).toHaveBeenCalledTimes(2);
   });
 
   it('processUpdates 抛异常时计为失败', async () => {
@@ -627,6 +665,7 @@ describe('executeAutoUpdatePlan_ACU', () => {
     const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
     expect(result.success).toBe(false);
     expect(result.failedGroups).toBe(1);
+    expect(mockCommitMergedDeferredCommits_ACU).not.toHaveBeenCalled();
   });
 
   it('setAutoUpdating 被正确调用', async () => {
