@@ -145,6 +145,7 @@ export interface DeferredCommitPayload_ACU {
     groupKey?: string;
     groupOrder?: number;
     targetSheetKeys: string[];
+    allowClearingTargetSheets?: boolean;
     updateGroupKeys: string[] | null;
     trackingSheetKeys: string[];
     attemptedUpdateKeys: string[];
@@ -172,6 +173,10 @@ export interface ExecuteCardUpdateOptions_ACU {
      * Previously generated response used by the serial replay/apply phase.
      */
     deferredAiResponse?: DeferredAiResponse_ACU | null;
+    /**
+     * Explicitly permits persisting target sheets as empty/header-only sheets after a user-confirmed clear.
+     */
+    allowClearingTargetSheets?: boolean;
 }
 
 /** executeCardUpdateCore 的返回值 */
@@ -679,6 +684,7 @@ export async function executeCardUpdateCore_ACU(
                                 groupKey: deferredAiResponse?.groupKey,
                                 groupOrder: deferredAiResponse?.groupOrder,
                                 targetSheetKeys: keysToActuallySave,
+                                allowClearingTargetSheets: !!executionOptions.allowClearingTargetSheets,
                                 updateGroupKeys: Array.isArray(updateGroupKeysToUse) ? updateGroupKeysToUse : null,
                                 trackingSheetKeys: keysToTrackAsUpdated,
                                 attemptedUpdateKeys,
@@ -719,6 +725,7 @@ export async function executeCardUpdateCore_ACU(
                                     groupKey: deferredAiResponse?.groupKey,
                                     groupOrder: deferredAiResponse?.groupOrder,
                                     targetSheetKeys: [],
+                                    allowClearingTargetSheets: !!executionOptions.allowClearingTargetSheets,
                                     updateGroupKeys: null,
                                     trackingSheetKeys: [],
                                     attemptedUpdateKeys,
@@ -1199,6 +1206,7 @@ export async function commitMergedDeferredCommits_ACU(
         const trackingSheetKeys = unionStrings_ACU(...targetCommits.map(commit => commit.trackingSheetKeys));
         const updateGroupKeys = unionStrings_ACU(...targetCommits.map(commit => commit.updateGroupKeys || []));
         const attemptedUpdateKeys = unionStrings_ACU(...targetCommits.map(commit => commit.attemptedUpdateKeys || []));
+        const allowClearingTargetSheets = targetCommits.some(commit => commit.allowClearingTargetSheets === true);
 
         if (targetSheetKeys.length === 0 && trackingSheetKeys.length === 0 && attemptedUpdateKeys.length === 0) {
             logDebug_ACU(`[Manual Two-Phase] No changed sheets for target ${targetMessageIndex}; skipping merged commit.`);
@@ -1215,6 +1223,7 @@ export async function commitMergedDeferredCommits_ACU(
             beforeData,
             afterData,
             attemptedUpdateKeys,
+            allowClearingTargetSheets,
         });
         if (!saveResult.saved) {
             return { success: false, error: `无法将目标楼层 ${targetMessageIndex} 的合并数据库保存到聊天记录。` };
@@ -1445,6 +1454,7 @@ export async function orchestrateManualUpdate_ACU(
                         groupOrder: groupExecution.groupOrder,
                         prepareAiCallOnly: true,
                         deferApply: true,
+                        allowClearingTargetSheets: !!options.clearBeforeUpdate,
                         deferPersistence: true,
                     });
                     if (!prepareResult.success) {
@@ -1506,6 +1516,7 @@ export async function orchestrateManualUpdate_ACU(
                         groupKey: groupExecution.key,
                         groupOrder: groupExecution.groupOrder,
                         deferPersistence: true,
+                        allowClearingTargetSheets: !!options.clearBeforeUpdate,
                         deferredResponses: groupDeferredResponses,
                     });
                     if (!applyResult.success) {

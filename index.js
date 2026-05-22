@@ -22434,13 +22434,17 @@ $CONTENT
             const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
                 ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
                 : purgeAllTableDeltaFromMessage_ACU(msg, isolationKey, isolationConfig);
+            let clearDeltaSaved = false;
+            if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0) {
+                clearDeltaSaved = await persistTargetSheetClearDelta_ACU(chat, idx, targetSheetKeys, isolationKey, isolationConfig);
+            }
             if (clearsSummaryOrOutline) {
                 const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
                 if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
                     logDebug_ACU(`[清空楼层] 已删除消息索引 ${idx} 上的交火向量索引外置文件引用。`);
                 }
             }
-            if (changed) {
+            if (changed || clearDeltaSaved) {
                 clearedCount++;
                 logDebug_ACU(`[清空楼层] 已清空消息索引 ${idx} 上的表格数据 (标签: ${isolationKey || '无'})`);
             }
@@ -22450,6 +22454,64 @@ $CONTENT
             logDebug_ACU(`[清空楼层] 共清空 ${clearedCount} 条消息的表格数据，聊天已保存。`);
         }
         return clearedCount;
+    }
+    function cloneChatTableData_ACU(data) {
+        return data ? JSON.parse(JSON.stringify(data)) : null;
+    }
+    function buildHeaderOnlySheetForClear_ACU(sheet, sheetKey) {
+        if (!sheet || typeof sheet !== 'object')
+            return null;
+        const clonedSheet = JSON.parse(JSON.stringify(sheet));
+        const header = Array.isArray(clonedSheet.content?.[0]) ? clonedSheet.content[0] : ['row_id'];
+        clonedSheet.uid = clonedSheet.uid || sheetKey;
+        clonedSheet.content = [header];
+        return clonedSheet;
+    }
+    function buildClearedAfterData_ACU(beforeData, targetSheetKeys) {
+        const afterData = cloneChatTableData_ACU(beforeData);
+        if (!afterData || typeof afterData !== 'object')
+            return afterData;
+        for (const sheetKey of targetSheetKeys) {
+            const headerOnlySheet = buildHeaderOnlySheetForClear_ACU(afterData[sheetKey] || currentJsonTableData_ACU?.[sheetKey], sheetKey);
+            if (headerOnlySheet) {
+                afterData[sheetKey] = headerOnlySheet;
+            }
+            else if (afterData[sheetKey] !== undefined) {
+                delete afterData[sheetKey];
+            }
+        }
+        return afterData;
+    }
+    async function persistTargetSheetClearDelta_ACU(chat, targetMessageIndex, targetSheetKeys, isolationKey, isolationConfig) {
+        const normalizedTargetSheetKeys = Array.from(new Set(targetSheetKeys.filter(key => typeof key === 'string' && key.startsWith('sheet_'))));
+        if (normalizedTargetSheetKeys.length === 0)
+            return false;
+        const beforeData = reconstructTablesFromChatDeltas_ACU(chat, {
+            isolationKey,
+            isolationConfig,
+        }, {
+            targetMessageIndexExclusive: targetMessageIndex,
+            allowLegacyMigration: false,
+            saveChatAfterMigration: false,
+        }).data;
+        const afterData = buildClearedAfterData_ACU(beforeData, normalizedTargetSheetKeys);
+        if (!beforeData || !afterData)
+            return false;
+        const saveResult = await persistTablesToChatMessage_ACU({
+            targetMessageIndex,
+            targetSheetKeys: normalizedTargetSheetKeys,
+            updateGroupKeys: null,
+            trackingSheetKeys: [],
+            trackAsUpdate: false,
+            beforeData,
+            afterData,
+            allowClearingTargetSheets: true,
+        });
+        if (!saveResult.saved) {
+            logWarn_ACU(`[清空楼层] 写入目标表清空 delta 失败: index=${targetMessageIndex}, sheets=${normalizedTargetSheetKeys.join(', ')}, error=${saveResult.error || 'unknown'}`);
+            return false;
+        }
+        return true;
     }
     function purgeAllTableDeltaFromMessage_ACU(msg, isolationKey, isolationConfig) {
         if (!msg || typeof msg !== 'object')
@@ -32590,6 +32652,7 @@ $CONTENT
                                     groupKey: deferredAiResponse?.groupKey,
                                     groupOrder: deferredAiResponse?.groupOrder,
                                     targetSheetKeys: keysToActuallySave,
+                                    allowClearingTargetSheets: !!executionOptions.allowClearingTargetSheets,
                                     updateGroupKeys: Array.isArray(updateGroupKeysToUse) ? updateGroupKeysToUse : null,
                                     trackingSheetKeys: keysToTrackAsUpdated,
                                     attemptedUpdateKeys,
@@ -32632,6 +32695,7 @@ $CONTENT
                                         groupKey: deferredAiResponse?.groupKey,
                                         groupOrder: deferredAiResponse?.groupOrder,
                                         targetSheetKeys: [],
+                                        allowClearingTargetSheets: !!executionOptions.allowClearingTargetSheets,
                                         updateGroupKeys: null,
                                         trackingSheetKeys: [],
                                         attemptedUpdateKeys,
@@ -33032,6 +33096,7 @@ $CONTENT
             const trackingSheetKeys = unionStrings_ACU(...targetCommits.map(commit => commit.trackingSheetKeys));
             const updateGroupKeys = unionStrings_ACU(...targetCommits.map(commit => commit.updateGroupKeys || []));
             const attemptedUpdateKeys = unionStrings_ACU(...targetCommits.map(commit => commit.attemptedUpdateKeys || []));
+            const allowClearingTargetSheets = targetCommits.some(commit => commit.allowClearingTargetSheets === true);
             if (targetSheetKeys.length === 0 && trackingSheetKeys.length === 0 && attemptedUpdateKeys.length === 0) {
                 logDebug_ACU(`[Manual Two-Phase] No changed sheets for target ${targetMessageIndex}; skipping merged commit.`);
                 continue;
@@ -33046,6 +33111,7 @@ $CONTENT
                 beforeData,
                 afterData,
                 attemptedUpdateKeys,
+                allowClearingTargetSheets,
             });
             if (!saveResult.saved) {
                 return { success: false, error: `无法将目标楼层 ${targetMessageIndex} 的合并数据库保存到聊天记录。` };
@@ -33240,6 +33306,7 @@ $CONTENT
                             groupOrder: groupExecution.groupOrder,
                             prepareAiCallOnly: true,
                             deferApply: true,
+                            allowClearingTargetSheets: !!options.clearBeforeUpdate,
                             deferPersistence: true,
                         });
                         if (!prepareResult.success) {
@@ -33298,6 +33365,7 @@ $CONTENT
                             groupKey: groupExecution.key,
                             groupOrder: groupExecution.groupOrder,
                             deferPersistence: true,
+                            allowClearingTargetSheets: !!options.clearBeforeUpdate,
                             deferredResponses: groupDeferredResponses,
                         });
                         if (!applyResult.success) {

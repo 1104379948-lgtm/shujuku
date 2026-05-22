@@ -24,10 +24,12 @@ import { settings_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } fr
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
 import { persistTablesToChatMessage_ACU } from '../table/table-service';
 import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../table/table-history';
+import { reconstructTablesFromChatDeltas_ACU } from '../table/table-delta-reconstruct';
 import { rollupCheckpointBeforePurge_ACU } from '../table/table-delta-retention';
 import { deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
 import { assignSummaryVectorIndexStateToTagData_ACU } from '../vector/summary-vector-index-state-service';
 import { pruneTablePersistenceLayerSheetKeysV2_ACU } from '../../shared/models/table-persistence-v2-utils';
+import type { TableDataObject_ACU } from '../../shared/models/table-data';
 
 // ─── 业务逻辑函数（从 presentation 层搬迁） ───
 
@@ -225,7 +227,7 @@ export async function saveCurrentDataForTable_ACU(sheetKey: string) {
 /**
  * 清理超出保留层数的旧本地数据（表格数据 + 剧情推进数据）
  * 从 presentation/triggers/settings-ui-sync/settings-ui-config.ts 搬迁
- * 
+ *
  * 按消息计数，仅保留最近N层的数据，更早楼层的 TavernDB_ACU_* 和 qrf_plot 字段将被删除。
  * 不会删除聊天第一层的"空白指导表"（TavernDB_ACU_InternalSheetGuide）。
  */
@@ -315,7 +317,7 @@ export async function purgeOldLayerData_ACU() {
 /**
  * 删除聊天记录中的本地数据（核心业务逻辑）
  * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
- * 
+ *
  * 只负责数据操作（遍历 chat 删除字段 + saveChatToHost），不涉及 UI（toast/status display）。
  * @returns 删除的消息数量
  */
@@ -428,7 +430,7 @@ export async function deleteLocalDataInChatCore_ACU(
 /**
  * 使用模板覆盖最新层的表格数据（核心业务逻辑）
  * 从 presentation/triggers/data-admin-ui.ts 的 overrideLatestLayerWithTemplate_ACU 中提取
- * 
+ *
  * 只负责数据操作（遍历 chat 用模板覆盖 + saveChatToHost），不涉及 UI（confirm/toast）。
  * @param templateData 解析后的模板数据
  * @returns 覆盖的表格数量，0 表示没有修改
@@ -541,13 +543,19 @@ export async function clearTableDataAtFloors_ACU(targetMessageIndices: number[],
         const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
             ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
             : purgeAllTableDeltaFromMessage_ACU(msg, isolationKey, isolationConfig);
+
+        let clearDeltaSaved = false;
+        if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0) {
+            clearDeltaSaved = await persistTargetSheetClearDelta_ACU(chat, idx, targetSheetKeys, isolationKey, isolationConfig);
+        }
+
         if (clearsSummaryOrOutline) {
             const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
             if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
                 logDebug_ACU(`[清空楼层] 已删除消息索引 ${idx} 上的交火向量索引外置文件引用。`);
             }
         }
-        if (changed) {
+        if (changed || clearDeltaSaved) {
             clearedCount++;
             logDebug_ACU(`[清空楼层] 已清空消息索引 ${idx} 上的表格数据 (标签: ${isolationKey || '无'})`);
         }
@@ -559,6 +567,76 @@ export async function clearTableDataAtFloors_ACU(targetMessageIndices: number[],
     }
 
     return clearedCount;
+}
+
+function cloneChatTableData_ACU(data: TableDataObject_ACU | null | undefined): TableDataObject_ACU | null {
+    return data ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : null;
+}
+
+function buildHeaderOnlySheetForClear_ACU(sheet: any, sheetKey: string): any | null {
+    if (!sheet || typeof sheet !== 'object') return null;
+    const clonedSheet = JSON.parse(JSON.stringify(sheet));
+    const header = Array.isArray(clonedSheet.content?.[0]) ? clonedSheet.content[0] : ['row_id'];
+    clonedSheet.uid = clonedSheet.uid || sheetKey;
+    clonedSheet.content = [header];
+    return clonedSheet;
+}
+
+function buildClearedAfterData_ACU(beforeData: TableDataObject_ACU | null, targetSheetKeys: string[]): TableDataObject_ACU | null {
+    const afterData = cloneChatTableData_ACU(beforeData);
+    if (!afterData || typeof afterData !== 'object') return afterData;
+
+    for (const sheetKey of targetSheetKeys) {
+        const headerOnlySheet = buildHeaderOnlySheetForClear_ACU((afterData as any)[sheetKey] || (currentJsonTableData_ACU as any)?.[sheetKey], sheetKey);
+        if (headerOnlySheet) {
+            (afterData as any)[sheetKey] = headerOnlySheet;
+        } else if ((afterData as any)[sheetKey] !== undefined) {
+            delete (afterData as any)[sheetKey];
+        }
+    }
+
+    return afterData;
+}
+
+async function persistTargetSheetClearDelta_ACU(
+    chat: any[],
+    targetMessageIndex: number,
+    targetSheetKeys: string[],
+    isolationKey: string,
+    isolationConfig: { enabled: boolean; code: string },
+): Promise<boolean> {
+    const normalizedTargetSheetKeys = Array.from(new Set(targetSheetKeys.filter(key => typeof key === 'string' && key.startsWith('sheet_'))));
+    if (normalizedTargetSheetKeys.length === 0) return false;
+
+    const beforeData = reconstructTablesFromChatDeltas_ACU(chat, {
+        isolationKey,
+        isolationConfig,
+    }, {
+        targetMessageIndexExclusive: targetMessageIndex,
+        allowLegacyMigration: false,
+        saveChatAfterMigration: false,
+    }).data;
+
+    const afterData = buildClearedAfterData_ACU(beforeData, normalizedTargetSheetKeys);
+    if (!beforeData || !afterData) return false;
+
+    const saveResult = await persistTablesToChatMessage_ACU({
+        targetMessageIndex,
+        targetSheetKeys: normalizedTargetSheetKeys,
+        updateGroupKeys: null,
+        trackingSheetKeys: [],
+        trackAsUpdate: false,
+        beforeData,
+        afterData,
+        allowClearingTargetSheets: true,
+    });
+
+    if (!saveResult.saved) {
+        logWarn_ACU(`[清空楼层] 写入目标表清空 delta 失败: index=${targetMessageIndex}, sheets=${normalizedTargetSheetKeys.join(', ')}, error=${saveResult.error || 'unknown'}`);
+        return false;
+    }
+
+    return true;
 }
 
 function purgeAllTableDeltaFromMessage_ACU(msg: any, isolationKey: string, isolationConfig: { enabled: boolean; code: string }): boolean {

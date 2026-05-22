@@ -509,6 +509,54 @@ describe('clearTableDataAtFloors_ACU', () => {
     expect(mockSaveChatToHost).toHaveBeenCalled();
   });
 
+  it('指定目标表且前序楼层存在 checkpoint 时，写入合法清空 delta 覆盖旧数据，避免读取时复活', async () => {
+    const previousMsg: any = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          tablePersistenceV2: {
+            version: 2,
+            checkpoint: {
+              kind: 'checkpoint',
+              version: 2,
+              checkpointId: 'checkpoint-before-clear',
+              createdAt: '2026-05-08T00:00:00.000Z',
+              source: 'legacy-migration',
+              isolationKey: '',
+              data: {
+                mate: { type: 'chatSheets' },
+                sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['old', '旧剑']] },
+                sheet_1: { name: '纪要表', content: [['row_id', '事件'], ['keep', '保留事件']] },
+              },
+            },
+          },
+        },
+      },
+    };
+    const targetMsg = makeV2Message();
+    mockGetChatArray.mockReturnValue([previousMsg, targetMsg]);
+
+    const count = await clearTableDataAtFloors_ACU([1], ['sheet_0']);
+
+    expect(count).toBe(1);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageIndex: 1,
+      targetSheetKeys: ['sheet_0'],
+      trackingSheetKeys: [],
+      trackAsUpdate: false,
+      allowClearingTargetSheets: true,
+      beforeData: expect.objectContaining({
+        sheet_0: expect.objectContaining({ content: [['row_id', '物品名'], ['old', '旧剑']] }),
+        sheet_1: expect.objectContaining({ content: [['row_id', '事件'], ['keep', '保留事件']] }),
+      }),
+      afterData: expect.objectContaining({
+        sheet_0: expect.objectContaining({ content: [['row_id', '物品名']] }),
+        sheet_1: expect.objectContaining({ content: [['row_id', '事件'], ['keep', '保留事件']] }),
+      }),
+    }));
+  });
+
+
   it('未指定目标表时只删除当前楼层 delta，不删除 checkpoint', async () => {
     const msg = makeV2Message();
     mockGetChatArray.mockReturnValue([msg]);

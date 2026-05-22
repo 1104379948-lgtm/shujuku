@@ -1490,6 +1490,80 @@ describe('orchestrateManualUpdate_ACU', () => {
         sheet_1: expect.objectContaining({ content: [['row_id']] }),
       }),
     }));
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      allowClearingTargetSheets: false,
+    }));
+  });
+
+  it('手动预清空后合并提交允许保存 header-only 目标表，避免旧行被空快照保护恢复', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户1' },
+      { is_user: false, mes: 'AI回复1' },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '分组表A', updateConfig: { groupId: 0 } },
+    });
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '分组表A', content: [['row_id'], ['old']] },
+    };
+    mockSettings.updateBatchSize = 1;
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>clear</tableEdit>');
+
+    mockProcessBatch.mockImplementation(async (indices: number[], _mode: string, options: any) => {
+      if (options.prepareAiCallOnly) {
+        return {
+          success: true,
+          preparedAiCalls: [{
+            preparedCallId: `${options.groupKey}:${indices[0]}:1`,
+            targetMessageIndex: 1,
+            batchNumber: 1,
+            updateMode: 'manual_independent',
+            targetSheetKeys: options.targetSheetKeys,
+            requestOptions: options.requestOptions,
+            dynamicContent: { tableDataText: 'prepared' },
+          }],
+        };
+      }
+
+      return {
+        success: true,
+        deferredCommits: [{
+          targetMessageIndex: 1,
+          preparedCallId: options.deferredResponses[0].preparedCallId,
+          batchNumber: 1,
+          groupKey: options.groupKey,
+          groupOrder: options.groupOrder,
+          targetSheetKeys: ['sheet_0'],
+          allowClearingTargetSheets: options.allowClearingTargetSheets,
+          updateGroupKeys: ['sheet_0'],
+          trackingSheetKeys: ['sheet_0'],
+          attemptedUpdateKeys: ['sheet_0'],
+          beforeData: { sheet_0: { name: '分组表A', content: [['row_id'], ['old']] } },
+          afterData: { sheet_0: { name: '分组表A', content: [['row_id']] } },
+          modifiedKeys: ['sheet_0'],
+        }],
+      };
+    });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], mockProcessBatch, mockRefreshData, { clearBeforeUpdate: true });
+
+    expect(result.success).toBe(true);
+    expect(mockProcessBatch.mock.calls[0][2]).toEqual(expect.objectContaining({ allowClearingTargetSheets: true }));
+    expect(mockProcessBatch.mock.calls[1][2]).toEqual(expect.objectContaining({ allowClearingTargetSheets: true }));
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageIndex: 1,
+      targetSheetKeys: ['sheet_0'],
+      allowClearingTargetSheets: true,
+      afterData: expect.objectContaining({
+        sheet_0: expect.objectContaining({ content: [['row_id']] }),
+      }),
+    }));
+
   });
 
 
