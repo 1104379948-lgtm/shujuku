@@ -1,6 +1,10 @@
 import { logWarn_ACU } from '../../shared/utils';
 
-export const API_THINKING_EFFORT_VALUES_ACU = ['none', 'high', 'max'] as const;
+export const API_THINKING_EFFORT_VALUES_ACU = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+
+const LEGACY_API_THINKING_EFFORT_ALIASES_ACU: Record<string, ApiThinkingEffort_ACU> = {
+    max: 'xhigh',
+};
 
 export type ApiThinkingEffort_ACU = typeof API_THINKING_EFFORT_VALUES_ACU[number];
 
@@ -35,8 +39,9 @@ function normalizeText_ACU(value: any): string {
 
 function normalizeThinkingEffort_ACU(value: any): ApiThinkingEffort_ACU {
     const normalized = normalizeText_ACU(value);
-    return API_THINKING_EFFORT_VALUES_ACU.includes(normalized as ApiThinkingEffort_ACU)
-        ? normalized as ApiThinkingEffort_ACU
+    const mapped = LEGACY_API_THINKING_EFFORT_ALIASES_ACU[normalized] || normalized;
+    return API_THINKING_EFFORT_VALUES_ACU.includes(mapped as ApiThinkingEffort_ACU)
+        ? mapped as ApiThinkingEffort_ACU
         : DEFAULT_API_REQUEST_OPTIONS_ACU.thinkingEffort;
 }
 

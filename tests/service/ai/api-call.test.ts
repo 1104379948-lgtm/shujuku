@@ -201,7 +201,7 @@ describe('callAIWithPreset_ACU', () => {
         excludedBodyParams: 'include_reasoning',
         extraHeaders: 'CustomHeader: 自定义值',
         thinkingEnabled: true,
-        thinkingEffort: 'max',
+        thinkingEffort: 'xhigh',
       },
     }];
     mockFetch.mockResolvedValue({ ok: true });
@@ -213,7 +213,7 @@ describe('callAIWithPreset_ACU', () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.top_k).toBe(20);
     expect(body.thinking).toEqual({ type: 'enabled' });
-    expect(body.reasoning_effort).toBe('max');
+    expect(body.reasoning_effort).toBe('xhigh');
     expect(body).not.toHaveProperty('include_reasoning');
     expect(body.custom_include_headers).toBe('Authorization: Bearer sk-test\nCustomHeader: 自定义值');
   });

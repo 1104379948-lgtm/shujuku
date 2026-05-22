@@ -84,11 +84,14 @@ export function generateApiTabHTML(): string {
                                     <div>
                                         <label for="${SCRIPT_ID_PREFIX_ACU}-api-thinking-effort">思维强度</label>
                                         <select id="${SCRIPT_ID_PREFIX_ACU}-api-thinking-effort" class="text_pole">
-                                            <option value="none">不启用</option>
-                                            <option value="high">high</option>
-                                            <option value="max">max</option>
+                                            <option value="none">none: 不使用</option>
+                                            <option value="minimal">minimal: 极少</option>
+                                            <option value="low">low: 较少</option>
+                                            <option value="medium">medium: 中等</option>
+                                            <option value="high">high: 较多</option>
+                                            <option value="xhigh">xhigh: 最高</option>
                                         </select>
-                                        <small class="notes">默认不启用；选择 high/max 并开启思维模式时写入 <code>reasoning_effort</code>。兼容规则：low/medium 可用 high 替代，xhigh 可用 max 替代。</small>
+                                        <small class="notes">默认不使用；选择 minimal/low/medium/high/xhigh 并开启思维模式时写入 <code>reasoning_effort</code>。</small>
                                     </div>
                                 </div>
 

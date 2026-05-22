@@ -375,7 +375,7 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
         excludedBodyParams: 'enable_web_search',
         extraHeaders: 'CustomHeader: 自定义值',
         thinkingEnabled: true,
-        thinkingEffort: 'max',
+        thinkingEffort: 'xhigh',
       },
       tavernProfile: '',
     });
@@ -391,7 +391,7 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.top_k).toBe(30);
     expect(body.thinking).toEqual({ type: 'enabled' });
-    expect(body.reasoning_effort).toBe('max');
+    expect(body.reasoning_effort).toBe('xhigh');
     expect(body).not.toHaveProperty('enable_web_search');
     expect(body.custom_include_headers).toBe('Authorization: Bearer sk-test\nCustomHeader: 自定义值');
   });

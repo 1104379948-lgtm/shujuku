@@ -3146,7 +3146,10 @@ $CONTENT
         return out.length > 80 ? out.slice(0, 80).trim() : out;
     }
 
-    const API_THINKING_EFFORT_VALUES_ACU = ['none', 'high', 'max'];
+    const API_THINKING_EFFORT_VALUES_ACU = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+    const LEGACY_API_THINKING_EFFORT_ALIASES_ACU = {
+        max: 'xhigh',
+    };
     const DEFAULT_API_REQUEST_OPTIONS_ACU = {
         extraBodyParams: '',
         excludedBodyParams: '',
@@ -3167,8 +3170,9 @@ $CONTENT
     }
     function normalizeThinkingEffort_ACU(value) {
         const normalized = normalizeText_ACU$2(value);
-        return API_THINKING_EFFORT_VALUES_ACU.includes(normalized)
-            ? normalized
+        const mapped = LEGACY_API_THINKING_EFFORT_ALIASES_ACU[normalized] || normalized;
+        return API_THINKING_EFFORT_VALUES_ACU.includes(mapped)
+            ? mapped
             : DEFAULT_API_REQUEST_OPTIONS_ACU.thinkingEffort;
     }
     function normalizeApiRequestOptions_ACU(apiConfig) {
@@ -46393,11 +46397,14 @@ $CONTENT
                                     <div>
                                         <label for="${SCRIPT_ID_PREFIX_ACU}-api-thinking-effort">思维强度</label>
                                         <select id="${SCRIPT_ID_PREFIX_ACU}-api-thinking-effort" class="text_pole">
-                                            <option value="none">不启用</option>
-                                            <option value="high">high</option>
-                                            <option value="max">max</option>
+                                            <option value="none">none: 不使用</option>
+                                            <option value="minimal">minimal: 极少</option>
+                                            <option value="low">low: 较少</option>
+                                            <option value="medium">medium: 中等</option>
+                                            <option value="high">high: 较多</option>
+                                            <option value="xhigh">xhigh: 最高</option>
                                         </select>
-                                        <small class="notes">默认不启用；选择 high/max 并开启思维模式时写入 <code>reasoning_effort</code>。兼容规则：low/medium 可用 high 替代，xhigh 可用 max 替代。</small>
+                                        <small class="notes">默认不使用；选择 minimal/low/medium/high/xhigh 并开启思维模式时写入 <code>reasoning_effort</code>。</small>
                                     </div>
                                 </div>
 

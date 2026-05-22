@@ -6,6 +6,7 @@ vi.mock('../../../src/shared/utils', () => ({
 
 import {
   applyApiRequestOptionsToBody_ACU,
+  API_THINKING_EFFORT_VALUES_ACU,
   mergeCustomIncludeHeaders_ACU,
   normalizeApiRequestOptions_ACU,
   parseApiExcludedBodyParams_ACU,
@@ -20,6 +21,27 @@ describe('api-request-options', () => {
       excludedBodyParams: '',
       extraHeaders: '',
       thinkingEnabled: false,
+      thinkingEffort: 'none',
+    });
+  });
+
+  it('思维强度支持 none/minimal/low/medium/high/xhigh，并兼容旧 max 为 xhigh', () => {
+    expect(API_THINKING_EFFORT_VALUES_ACU).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+
+    for (const effort of API_THINKING_EFFORT_VALUES_ACU) {
+      expect(normalizeApiRequestOptions_ACU({ thinkingEnabled: true, thinkingEffort: effort })).toMatchObject({
+        thinkingEnabled: true,
+        thinkingEffort: effort,
+      });
+    }
+
+    expect(normalizeApiRequestOptions_ACU({ thinkingEnabled: true, thinkingEffort: 'max' })).toMatchObject({
+      thinkingEnabled: true,
+      thinkingEffort: 'xhigh',
+    });
+
+    expect(normalizeApiRequestOptions_ACU({ thinkingEnabled: true, thinkingEffort: 'unknown' })).toMatchObject({
+      thinkingEnabled: true,
       thinkingEffort: 'none',
     });
   });
@@ -55,14 +77,19 @@ describe('api-request-options', () => {
     expect(body).not.toHaveProperty('reasoning_effort');
   });
 
-  it('思维链开启时注入 thinking 和 reasoning_effort，关闭时不注入 thinking', () => {
-    expect(applyApiRequestOptionsToBody_ACU({}, { thinkingEnabled: true, thinkingEffort: 'max' })).toEqual({
+  it('思维链开启且强度非 none 时注入 thinking 和 reasoning_effort，none 或关闭时不注入 thinking', () => {
+    expect(applyApiRequestOptionsToBody_ACU({}, { thinkingEnabled: true, thinkingEffort: 'xhigh' })).toEqual({
       thinking: { type: 'enabled' },
-      reasoning_effort: 'max',
+      reasoning_effort: 'xhigh',
     });
 
     expect(applyApiRequestOptionsToBody_ACU({}, { thinkingEnabled: true, thinkingEffort: 'none' })).toEqual({});
 
-    expect(applyApiRequestOptionsToBody_ACU({}, { thinkingEnabled: false, thinkingEffort: 'max' })).toEqual({});
+    expect(applyApiRequestOptionsToBody_ACU({}, { thinkingEnabled: false, thinkingEffort: 'xhigh' })).toEqual({});
+
+    expect(applyApiRequestOptionsToBody_ACU({}, { thinkingEnabled: true, thinkingEffort: 'max' })).toEqual({
+      thinking: { type: 'enabled' },
+      reasoning_effort: 'xhigh',
+    });
   });
 });
