@@ -54,7 +54,10 @@ mockBuildDefaultGlobalInjectionConfig, mockBuildUsedOrderSet,
     mockGetCurrentWorldbookConfig: vi.fn(() => ({
       source: 'character',
       injectionTarget: 'character',
-      manualSelection: [],
+      manualSelection: ['test-lorebook'],
+      readableDataTable: true,
+      customTableExportConfigs: {},
+      tableExportConfigs: {},
       enabledEntries: {},
       zeroTkOccupyMode: false,
     })),
@@ -114,6 +117,7 @@ mockBuildDefaultGlobalInjectionConfig, mockBuildUsedOrderSet,
     mockReloadStorageProvider: vi.fn(async () => {}),
     mockGetStorageProvider: vi.fn(() => ({
       getCurrentData: vi.fn(() => mockCurrentJsonTableData.value),
+      replaceCurrentData: vi.fn(async (data: any) => { mockCurrentJsonTableData.value = data; }),
     })),
     mockAllocConsecutiveOrderBlock: vi.fn(() => 100),
     mockApplyPlacementToEntry: vi.fn((entry: any, placement: any) => ({ ...entry, ...placement })),
@@ -284,6 +288,7 @@ beforeEach(() => {
   mockGetCharLorebooks.mockResolvedValue({ primary: null, additional: [] });
   mockGetImportStablePrefix.mockReturnValue('外部导入-');
   mockGetImportBatchPrefix.mockReturnValue('外部导入-');
+  mockMergeAllIndependentTables.mockResolvedValue(null);
 });
 
 // ═══════════════════════════════════════════════════
@@ -740,6 +745,7 @@ describe('updateReadableLorebookEntry_ACU', () => {
     const mergedData = {
       sheet_0: { name: '测试', content: [['', '列1'], ['', '值1']] },
     };
+    mockCurrentJsonTableData.value = null;
     mockMergeAllIndependentTables.mockResolvedValue(mergedData);
     mockFormatJsonToReadable.mockReturnValue({
       readableText: '测试可读文本',
@@ -759,6 +765,7 @@ describe('updateReadableLorebookEntry_ACU', () => {
     const mergedData = {
       sheet_0: { name: '主角技能表', content: [['技能名称'], ['格斗']] },
     };
+    mockCurrentJsonTableData.value = null;
     mockMergeAllIndependentTables.mockResolvedValue(mergedData);
     mockFormatJsonToReadable.mockReturnValue({
       readableText: '# 主角技能表\n\n| 技能名称 |\n|---|\n| 格斗 |\n',
@@ -779,6 +786,7 @@ describe('updateReadableLorebookEntry_ACU', () => {
     const mergedData = {
       sheet_0: { name: '空壳表', content: [['row_id'], ['1']] },
     };
+    mockCurrentJsonTableData.value = null;
     mockMergeAllIndependentTables.mockResolvedValue(mergedData);
     mockFormatJsonToReadable.mockReturnValue({
       readableText: '',

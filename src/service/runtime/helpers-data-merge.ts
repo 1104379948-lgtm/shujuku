@@ -15,6 +15,7 @@ import { upsertTemplatePreset_ACU } from '../template/template-preset-service';
 import { initIsolatedTagSlot_ACU } from '../../data/repositories/chat-message-data-repo';
 import { reconstructTablesFromChatDeltas_ACU } from '../table/table-delta-reconstruct';
 import { clearCurrentIsolationLegacyTableSnapshots_ACU, writeTablePersistenceLayerV2_ACU } from '../table/table-delta-repository';
+import { ensureChatOpenCheckpoint_ACU } from '../table/table-checkpoint-bootstrap';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import type { TablePersistenceLayerV2_ACU } from '../table/table-delta-types';
 
@@ -88,15 +89,26 @@ import type { TablePersistenceLayerV2_ACU } from '../table/table-delta-types';
       logDebug_ACU(`[Merge] Template/Guide filter: ${templateSheetKeys.length} tables allowed (${hasSheetGuide ? 'guide' : 'template'})`);
 
       const isolationConfig = { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
+      const bootstrapResult = await ensureChatOpenCheckpoint_ACU({
+          chat,
+          isolationKey: currentIsolationKey,
+          isolationConfig,
+          templateSheetKeys,
+          retainRecentLayers: settings_ACU.retainRecentLayers,
+          save: false,
+      });
+
       const reconstructResult = reconstructTablesFromChatDeltas_ACU(chat, {
           isolationKey: currentIsolationKey,
           isolationConfig,
           templateSheetKeys,
       }, {
-          allowLegacyMigration: true,
-          saveChatAfterMigration: true,
+          allowLegacyMigration: false,
+          saveChatAfterMigration: false,
           retainRecentLayers: settings_ACU.retainRecentLayers,
       });
+      const changed = bootstrapResult.changed || reconstructResult.changed;
+      const usedLegacyMigration = reconstructResult.usedLegacyMigration || bootstrapResult.source === 'legacy-migration' || bootstrapResult.source === 'legacy-orphan-delta-repair';
 
       let mergedData: Record<string, any> = reconstructResult.data ? JSON.parse(JSON.stringify(reconstructResult.data)) : {};
       Object.keys(mergedData).forEach(k => {
@@ -104,9 +116,9 @@ import type { TablePersistenceLayerV2_ACU } from '../table/table-delta-types';
       });
 
       const foundCount = Object.keys(mergedData).filter(k => k.startsWith('sheet_')).length;
-      logDebug_ACU(`[Merge] Found ${foundCount} tables for tag [${currentIsolationKey || '无标签'}] from chat history (${reconstructResult.usedLegacyMigration ? 'legacy-migrated' : 'v2'}).`);
+      logDebug_ACU(`[Merge] Found ${foundCount} tables for tag [${currentIsolationKey || '无标签'}] from chat history (${usedLegacyMigration ? 'legacy-migrated' : 'v2'}).`);
 
-      if (reconstructResult.changed) {
+      if (changed) {
           try {
               await saveChatToHost_ACU();
           } catch (error) {
@@ -132,16 +144,16 @@ import type { TablePersistenceLayerV2_ACU } from '../table/table-delta-types';
               const data = migrateContentNullToRowId(reorderDataBySheetKeys_ACU(base, orderedKeys));
               return {
                   data,
-                  usedLegacyMigration: reconstructResult.usedLegacyMigration,
-                  changed: reconstructResult.changed,
+                  usedLegacyMigration,
+                  changed,
                   checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
                   foundSheetCount: 0,
               };
           }
           return {
               data: null,
-              usedLegacyMigration: reconstructResult.usedLegacyMigration,
-              changed: reconstructResult.changed,
+              usedLegacyMigration,
+              changed,
               checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
               foundSheetCount: 0,
           };
@@ -214,8 +226,8 @@ import type { TablePersistenceLayerV2_ACU } from '../table/table-delta-types';
       const data = migrateContentNullToRowId(mergedData);
       return {
           data,
-          usedLegacyMigration: reconstructResult.usedLegacyMigration,
-          changed: reconstructResult.changed,
+          usedLegacyMigration,
+          changed,
           checkpointMessageIndex: reconstructResult.checkpointMessageIndex,
           foundSheetCount: foundCount,
       };

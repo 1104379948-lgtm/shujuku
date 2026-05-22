@@ -61,6 +61,8 @@ import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers
 import { reconstructTablesFromChatDeltas_ACU } from './table-delta-reconstruct';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { normalizeTableDataRowIdentity_ACU } from './table-row-identity';
+import { ensureChatOpenCheckpoint_ACU } from './table-checkpoint-bootstrap';
+import { finalizeTablePersistenceAfterUpdate_ACU } from './table-persistence-finalizer';
 
 // ============================================================
 // 类型定义：返回值 + 进度事件（service 层不驱动 UI）
@@ -214,6 +216,30 @@ export interface ManualUpdateResult {
 function cloneTableDataForDelta_ACU(data: any): TableDataObject_ACU | null {
     if (!data || typeof data !== 'object') return null;
     return JSON.parse(JSON.stringify(data)) as TableDataObject_ACU;
+}
+
+async function syncFinalizedTableProjection_ACU(
+    reconstructedData: TableDataObject_ACU | null,
+    label: string,
+): Promise<void> {
+    await replaceRuntimeTableDataForDeferredApply_ACU(reconstructedData, label);
+}
+
+async function finalizeTablePersistenceForCurrentChat_ACU(
+    chat: any[],
+): Promise<TableDataObject_ACU | null> {
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const finalizerResult = await finalizeTablePersistenceAfterUpdate_ACU({
+        chat,
+        isolationKey,
+        isolationConfig: {
+            enabled: settings_ACU.dataIsolationEnabled,
+            code: settings_ACU.dataIsolationCode,
+        },
+        retainRecentLayers: settings_ACU.retainRecentLayers,
+        save: true,
+    });
+    return finalizerResult.reconstructedData;
 }
 
 async function replaceRuntimeTableDataForDeferredApply_ACU(data: TableDataObject_ACU | null, label: string): Promise<void> {
@@ -399,6 +425,7 @@ export function loadBatchBaseData_ACU(
         templateSheetKeys: batchSheetKeys,
     }, {
         targetMessageIndexExclusive: firstMessageIndexOfBatch,
+        allowLegacyMigration: false,
         saveChatAfterMigration: false,
         retainRecentLayers: settings_ACU.retainRecentLayers,
     });
@@ -753,6 +780,13 @@ export async function executeCardUpdateCore_ACU(
                 }
 
                 if (!executionOptions.deferPersistence) {
+                    const chatAfterSave = getChatArray_ACU();
+                    if (chatAfterSave && chatAfterSave.length > 0) {
+                        const finalizedData = await finalizeTablePersistenceForCurrentChat_ACU(chatAfterSave);
+                        if (finalizedData) {
+                            await syncFinalizedTableProjection_ACU(finalizedData, `[Finalize][Immediate ${saveTargetIndex}]`);
+                        }
+                    }
                     await updateReadableLorebookEntry_ACU(true);
                 }
 
@@ -851,6 +885,7 @@ export async function processUpdatesBatch_ACU(
         const chatHistory = getChatArray_ACU();
         const isAutoUpdateMode = mode && mode.startsWith('auto');
         const isSilentMode = !!(options?.silent === true || (isAutoUpdateMode && settings_ACU.toastMuteEnabled));
+        const currentIsolationKey = getCurrentIsolationKey_ACU();
 
         for (let i = 0; i < batches.length; i++) {
             const batchIndices = batches[i];
@@ -867,7 +902,19 @@ export async function processUpdatesBatch_ACU(
             const mergedBatchData = baseResult.data;
 
             const batchSheetKeys = getSortedSheetKeys_ACU(mergedBatchData);
-            const batchIsolationKey = getCurrentIsolationKey_ACU();
+            const batchIsolationKey = currentIsolationKey;
+
+            const prefixChat = chatHistory.slice(0, firstMessageIndexOfBatch);
+            if (prefixChat.length > 0) {
+                await ensureChatOpenCheckpoint_ACU({
+                    chat: prefixChat,
+                    isolationKey: batchIsolationKey,
+                    isolationConfig: { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode },
+                    templateSheetKeys: batchSheetKeys,
+                    retainRecentLayers: settings_ACU.retainRecentLayers,
+                    save: false,
+                });
+            }
 
             // 加载历史数据
             const loadResult = loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData);
@@ -1234,6 +1281,11 @@ export async function commitMergedDeferredCommits_ACU(
             return { success: false, error: `无法将目标楼层 ${targetMessageIndex} 的合并数据库保存到聊天记录。` };
         }
 
+        const chatAfterSave = getChatArray_ACU();
+        const finalizedData = chatAfterSave && chatAfterSave.length > 0
+            ? await finalizeTablePersistenceForCurrentChat_ACU(chatAfterSave)
+            : afterData;
+        await syncFinalizedTableProjection_ACU(finalizedData || afterData, `[Finalize][Manual Two-Phase ${targetMessageIndex}]`);
         await updateReadableLorebookEntry_ACU(true);
 
         if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {

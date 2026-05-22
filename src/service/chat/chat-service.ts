@@ -28,6 +28,7 @@ import { reconstructTablesFromChatDeltas_ACU } from '../table/table-delta-recons
 import { rollupCheckpointBeforePurge_ACU } from '../table/table-delta-retention';
 import { deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
 import { assignSummaryVectorIndexStateToTagData_ACU } from '../vector/summary-vector-index-state-service';
+import { ensureChatOpenCheckpoint_ACU } from '../table/table-checkpoint-bootstrap';
 import { pruneTablePersistenceLayerSheetKeysV2_ACU } from '../../shared/models/table-persistence-v2-utils';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 
@@ -533,12 +534,27 @@ export async function clearTableDataAtFloors_ACU(targetMessageIndices: number[],
         : true;
 
     let clearedCount = 0;
+    let changedByBootstrap = false;
 
     for (const idx of targetMessageIndices) {
         if (idx < 0 || idx >= chat.length) continue;
         const msg = chat[idx];
         // 只处理 AI 消息（跳过用户消息）
         if (!msg || msg.is_user) continue;
+
+        if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0 && idx > 0) {
+            const bootstrapResult = await ensureChatOpenCheckpoint_ACU({
+                chat: chat.slice(0, idx),
+                isolationKey,
+                isolationConfig,
+                templateSheetKeys: targetSheetKeys,
+                retainRecentLayers: settings_ACU.retainRecentLayers,
+                save: false,
+            });
+            if (bootstrapResult.changed) {
+                changedByBootstrap = true;
+            }
+        }
 
         const changed = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
             ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
@@ -561,7 +577,7 @@ export async function clearTableDataAtFloors_ACU(targetMessageIndices: number[],
         }
     }
 
-    if (clearedCount > 0) {
+    if (clearedCount > 0 || changedByBootstrap) {
         await saveChatToHost_ACU();
         logDebug_ACU(`[清空楼层] 共清空 ${clearedCount} 条消息的表格数据，聊天已保存。`);
     }

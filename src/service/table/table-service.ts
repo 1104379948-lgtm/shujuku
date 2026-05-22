@@ -252,6 +252,7 @@ export async function persistTablesToChatMessage_ACU(
       isolationConfig,
     }, {
       targetMessageIndexExclusive: finalIndex,
+      allowLegacyMigration: false,
       saveChatAfterMigration: false,
     }).data;
   const resolvedBeforeData = normalizeTableDataRowIdentity_ACU(resolvedBeforeDataRaw, { sourceLabel: 'persistTablesToChatMessage.beforeData' });

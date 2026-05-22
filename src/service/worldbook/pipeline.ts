@@ -3,6 +3,7 @@ import { allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_AC
 import { getLorebookEntries_ACU as gwGetLorebookEntries_ACU, setLorebookEntries_ACU as gwSetLorebookEntries_ACU, createLorebookEntries_ACU as gwCreateLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU } from '../../data/gateways/worldbook-gateway';
 import { getCharLorebooks_ACU, getChatMessages_ACU } from '../../data/gateways/character-gateway';
 import { getChatLength_ACU } from '../../data/gateways/chat-gateway';
+import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { saveSettings_ACU } from '../settings/settings-service';
 import { getChatSheetGuideDataForIsolationKey_ACU, getSortedSheetKeys_ACU, materializeDataFromSheetGuide_ACU, reorderDataBySheetKeys_ACU } from '../template/chat-scope';
 import { getImportBatchPrefix_ACU, getImportStablePrefix_ACU } from '../../shared/constants';
@@ -14,6 +15,31 @@ import { reloadStorageProvider, getStorageProvider } from '../table/table-storag
 import { allocConsecutiveOrderBlock_ACU, applyPlacementToEntry_ACU, buildDefaultGlobalInjectionConfig_ACU, buildUsedOrderSet_ACU, ensureExportConfigDefaults_ACU, ensureGlobalInjectionConfigDefaults_ACU, getEntryOrderNumber_ACU, getFixedPlacementDefaultsForTable_ACU, getInjectionTargetLorebook_ACU, getIsolationPrefix_ACU, isEntryPlacementMatched_ACU, normalizeLorebookPosition_ACU, normalizePlacementConfig_ACU, updateCustomTableExports_ACU, updateImportantPersonsRelatedEntries_ACU, updateOutlineTableEntry_ACU, updateSummaryTableEntries_ACU } from './injection-engine';
 // pipeline.ts
 // 从 05_core_tail.js 迁入
+async function syncStorageProviderProjection_ACU(data: TableDataObject_ACU | null, label: string): Promise<TableDataObject_ACU | null> {
+    if (!data || !isSqliteMode()) return data;
+    try {
+        await getStorageProvider().replaceCurrentData(data);
+        const providerData = getStorageProvider().getCurrentData();
+        if (providerData) {
+            _set_currentJsonTableData_ACU(providerData);
+            return providerData as TableDataObject_ACU;
+        }
+    } catch (e: any) {
+        logWarn_ACU(`[${label}] SQLite provider projection sync failed: ${e?.message || String(e)}`);
+    }
+    return data;
+}
+
+async function rebuildCurrentTableProjectionFromCheckpoint_ACU(label: string): Promise<TableDataObject_ACU | null> {
+    await loadAllChatMessages_ACU();
+    const mergedFromHistory = await mergeAllIndependentTables_ACU() as TableDataObject_ACU | null;
+    if (!mergedFromHistory) return null;
+    _set_currentJsonTableData_ACU(mergedFromHistory);
+    const syncedProjection = await syncStorageProviderProjection_ACU(mergedFromHistory, label);
+    return syncedProjection || mergedFromHistory;
+}
+
+
 
 export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, isImport = false, targetLorebookOverride: string | null = null) { // [外部导入] 添加 targetLorebookOverride 参数，避免临时修改 worldbookConfig 被兜底补齐逻辑覆盖
     // [健全性] 新对话开场白阶段：禁止自动创建/更新世界书条目
@@ -42,26 +68,8 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
         // 外部导入时，直接使用 currentJsonTableData_ACU
         mergedData = currentJsonTableData_ACU;
     } else {
-        // 正常更新时，SQL 模式必须从 provider 取当前数据，避免世界书刷新反向覆盖 SQLite 视图。
-        await loadAllChatMessages_ACU();
-        if (isSqliteMode()) {
-            try {
-                mergedData = getStorageProvider().getCurrentData();
-            } catch (e: any) {
-                logWarn_ACU(`[Worldbook] SQLite provider getCurrentData failed, fallback to current JSON view: ${e?.message}`);
-                mergedData = currentJsonTableData_ACU;
-            }
-        } else {
-            const mergedFromHistory = await mergeAllIndependentTables_ACU();
-            if (mergedFromHistory) {
-                mergedData = mergedFromHistory;
-                // 同步内存中的全局数据，确保后续调用保持一致
-                _set_currentJsonTableData_ACU(mergedFromHistory);
-            } else {
-                // 如果合并失败，退回到当前内存数据避免中断
-                mergedData = currentJsonTableData_ACU;
-            }
-        }
+        const projection = await rebuildCurrentTableProjectionFromCheckpoint_ACU('Worldbook');
+        mergedData = projection || currentJsonTableData_ACU;
     }
 
     if (!mergedData) {
@@ -544,19 +552,10 @@ export   async function refreshMergedDataAndNotify_ACU() {
       // 重新加载聊天记录
     await loadAllChatMessages_ACU();
 
-    // SQL 模式必须以 Storage Provider 为当前数据源。
-    // 直接 merge 后写 currentJsonTableData_ACU 会绕过 SQLite 内存库，导致提示词看到的 JSON
-    // 与后续 SQL applyEdits 操作的数据库不是同一份状态。
+    // 刷新必须以 checkpoint + delta 重建投影为唯一快照来源；provider 只作为同步目标，不再作为读取源。
     if (isSqliteMode()) {
         try {
             await reloadStorageProvider();
-            const providerData = getStorageProvider().getCurrentData();
-            if (providerData) {
-                logDebug_ACU('[Refresh] SQLite provider data loaded and synchronized to JSON view.');
-                await updateReadableLorebookEntry_ACU(true);
-                logDebug_ACU('Updated worldbook entries with SQLite provider data.');
-                return { mergedData: currentJsonTableData_ACU, integrityFixed: false };
-            }
         } catch (e: any) {
             logError_ACU(`[Refresh] SQLite provider refresh failed: ${e?.message}`);
         }
@@ -587,6 +586,7 @@ export   async function refreshMergedDataAndNotify_ACU() {
                 logWarn_ACU('[回溯空数据] 模板解析失败，currentJsonTableData_ACU 设为最小空结构。');
             }
         }
+        await syncStorageProviderProjection_ACU(currentJsonTableData_ACU, 'RefreshFallback');
         // UI 选择器刷新由 presentation 层调用方负责
     } else {
         // 更新内存中的数据
@@ -613,6 +613,7 @@ export   async function refreshMergedDataAndNotify_ACU() {
         // [修复] 强制稳定顺序（用户手动顺序优先，否则模板顺序）
         const stableKeys = getSortedSheetKeys_ACU(mergedData);
         _set_currentJsonTableData_ACU(reorderDataBySheetKeys_ACU(mergedData, stableKeys));
+        await syncStorageProviderProjection_ACU(currentJsonTableData_ACU, 'Refresh');
         logDebug_ACU('Updated currentJsonTableData_ACU with independently merged data.');
         // UI 选择器刷新由 presentation 层调用方负责
     }

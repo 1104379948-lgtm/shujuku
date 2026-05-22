@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockDeleteSummaryVectorIndexExternal } = vi.hoisted(() => ({
+const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockDeleteSummaryVectorIndexExternal, mockEnsureChatOpenCheckpoint } = vi.hoisted(() => ({
   mockSettings: {
     retainRecentLayers: 3,
     dataIsolationEnabled: false,
@@ -24,6 +24,7 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockSanitizeSheet: vi.fn((sheet: any) => sheet),
   mockPersistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true }),
   mockDeleteSummaryVectorIndexExternal: vi.fn().mockResolvedValue(true),
+  mockEnsureChatOpenCheckpoint: vi.fn().mockResolvedValue({ changed: false, source: 'existing-checkpoint' }),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -67,6 +68,10 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   getCurrentIsolationKey_ACU: mockGetCurrentIsolationKey,
 }));
 
+vi.mock('../../../src/service/table/table-checkpoint-bootstrap', () => ({
+  ensureChatOpenCheckpoint_ACU: (...args: any[]) => mockEnsureChatOpenCheckpoint(...args),
+}));
+
 vi.mock('../../../src/service/template/chat-scope', () => ({
   sanitizeSheetForStorage_ACU: mockSanitizeSheet,
 }));
@@ -88,6 +93,7 @@ beforeEach(() => {
   mockSettings.dataIsolationCode = '';
   mockGetCurrentIsolationKey.mockReturnValue('');
   mockSaveChatToHost.mockResolvedValue(undefined);
+  mockEnsureChatOpenCheckpoint.mockResolvedValue({ changed: false, source: 'existing-checkpoint' });
 });
 
 // ═══ replaceChatMessage_ACU ═══
@@ -554,6 +560,29 @@ describe('clearTableDataAtFloors_ACU', () => {
         sheet_1: expect.objectContaining({ content: [['row_id', '事件'], ['keep', '保留事件']] }),
       }),
     }));
+  });
+
+  it('指定目标表清空前会在目标楼层前缀执行 checkpoint bootstrap，避免 legacy-only 清空静默失败', async () => {
+    const previousMsg: any = {
+      is_user: false,
+      TavernDB_ACU_IndependentData: {
+        sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['old', '旧剑']] },
+      },
+    };
+    const targetMsg = makeV2Message();
+    mockGetChatArray.mockReturnValue([previousMsg, targetMsg]);
+    mockEnsureChatOpenCheckpoint.mockResolvedValue({ changed: true, source: 'legacy-migration' });
+
+    const count = await clearTableDataAtFloors_ACU([1], ['sheet_0']);
+
+    expect(count).toBe(1);
+    expect(mockEnsureChatOpenCheckpoint).toHaveBeenCalledWith(expect.objectContaining({
+      chat: [previousMsg],
+      isolationKey: '',
+      templateSheetKeys: ['sheet_0'],
+      save: false,
+    }));
+    expect(mockSaveChatToHost).toHaveBeenCalled();
   });
 
 

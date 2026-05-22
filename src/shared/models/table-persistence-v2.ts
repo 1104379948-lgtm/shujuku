@@ -4,6 +4,8 @@ export type TableCheckpointSourceV2_ACU =
   | 'legacy-migration'
   | 'retention-rollup'
   | 'template-seed'
+  | 'legacy-orphan-delta-repair'
+  | 'template-orphan-delta-repair'
   | 'manual-rebase';
 
 export interface TableCheckpointV2_ACU {
