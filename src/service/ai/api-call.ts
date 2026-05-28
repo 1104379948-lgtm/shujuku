@@ -7,6 +7,98 @@ import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerReque
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 
 /**
+ * 解析简单 key: value 多行文本为对象。
+ * 每行格式: key: value（冒号后可有空格）。空行和无冒号行跳过。
+ */
+function parseKeyValueLines(text: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!text) return result;
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const colonIdx = trimmed.indexOf(':');
+    if (colonIdx <= 0) continue;
+    const key = trimmed.slice(0, colonIdx).trim();
+    const value = trimmed.slice(colonIdx + 1).trim();
+    if (key) result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * 构建自定义 API 请求体，合并附加参数。
+ * - bodyParams: 追加到请求体的 key:value
+ * - excludeBodyParams: 从请求体中删除的 key 列表（逗号或换行分隔）
+ * - requestHeaders: 追加到 custom_include_headers 的额外头
+ */
+function buildCustomApiRequestBody_ACU(
+  messages: any[],
+  effectiveApiConfig: any,
+  overrides?: { maxTokens?: number; temperature?: number; topP?: number; stripModelPrefix?: boolean }
+): Record<string, any> {
+  const opts = overrides || {};
+  const model = opts.stripModelPrefix !== false
+    ? (effectiveApiConfig.model || '').replace(/^models\//, '')
+    : (effectiveApiConfig.model || '');
+  const maxTokens = opts.maxTokens || effectiveApiConfig.max_tokens || effectiveApiConfig.maxTokens || 20000;
+  const temperature = opts.temperature ?? effectiveApiConfig.temperature ?? 1.0;
+  const topP = opts.topP ?? effectiveApiConfig.top_p ?? effectiveApiConfig.topP ?? 0.95;
+
+  // 基础 Authorization 头
+  let headers = effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '';
+  // 追加 requestHeaders
+  if (effectiveApiConfig.requestHeaders) {
+    const extra = effectiveApiConfig.requestHeaders.trim();
+    if (extra) {
+      headers = headers ? `${headers}\n${extra}` : extra;
+    }
+  }
+
+  const body: Record<string, any> = {
+    messages,
+    model,
+    max_tokens: maxTokens,
+    temperature,
+    top_p: topP,
+    stream: settings_ACU.streamingEnabled || false,
+    chat_completion_source: 'custom',
+    group_names: [],
+    include_reasoning: false,
+    reasoning_effort: 'medium',
+    enable_web_search: false,
+    request_images: false,
+    custom_prompt_post_processing: 'strict',
+    reverse_proxy: effectiveApiConfig.url,
+    proxy_password: '',
+    custom_url: effectiveApiConfig.url,
+    custom_include_headers: headers,
+  };
+
+  // 合并 bodyParams
+  if (effectiveApiConfig.bodyParams) {
+    const extra = parseKeyValueLines(effectiveApiConfig.bodyParams);
+    for (const [k, v] of Object.entries(extra)) {
+      // 尝试解析为数字/布尔
+      if (v === 'true') body[k] = true;
+      else if (v === 'false') body[k] = false;
+      else if (v !== '' && !isNaN(Number(v))) body[k] = Number(v);
+      else body[k] = v;
+    }
+  }
+
+  // 删除 excludeBodyParams 指定的字段
+  if (effectiveApiConfig.excludeBodyParams) {
+    const keys = effectiveApiConfig.excludeBodyParams.split(/[,\n]/).map((s: string) => s.trim()).filter(Boolean);
+    for (const k of keys) {
+      delete body[k];
+    }
+  }
+
+  return body;
+}
+
+
+/**
  * 剧情推进任务级 API 调用 — 接受显式预设名称
  * 调用优先级：presetName 参数 > 全局 plotApiPreset > 当前 API 配置
  */
@@ -36,25 +128,7 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName: str
         throw new Error('自定义API的URL或模型未配置。');
       }
 
-      const requestBody = {
-        messages: messages,
-        model: effectiveApiConfig.model.replace(/^models\//, ''),
-        max_tokens: effectiveApiConfig.maxTokens || effectiveApiConfig.max_tokens || 20000,
-        temperature: effectiveApiConfig.temperature || 0.7,
-        top_p: effectiveApiConfig.topP || effectiveApiConfig.top_p || 0.95,
-        stream: settings_ACU.streamingEnabled || false,
-        chat_completion_source: 'custom',
-        group_names: [] as string[],
-        include_reasoning: false,
-        reasoning_effort: 'medium',
-        enable_web_search: false,
-        request_images: false,
-        custom_prompt_post_processing: 'strict',
-        reverse_proxy: effectiveApiConfig.url,
-        proxy_password: '',
-        custom_url: effectiveApiConfig.url,
-        custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
-      };
+      const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { temperature: 0.7, topP: 0.95 });
 
       const response = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
@@ -105,25 +179,7 @@ export   async function callApi_ACU(messages: any[], apiSettings: any, abortSign
         throw new Error('自定义API的URL或模型未配置。');
       }
 
-      const requestBody = {
-        messages: messages,
-        model: effectiveApiConfig.model.replace(/^models\//, ''),
-        max_tokens: effectiveApiConfig.maxTokens || effectiveApiConfig.max_tokens || 20000,
-        temperature: effectiveApiConfig.temperature || 0.7,
-        top_p: effectiveApiConfig.topP || effectiveApiConfig.top_p || 0.95,
-        stream: settings_ACU.streamingEnabled || false,
-        chat_completion_source: 'custom',
-        group_names: [] as string[],
-        include_reasoning: false,
-        reasoning_effort: 'medium',
-        enable_web_search: false,
-        request_images: false,
-        custom_prompt_post_processing: 'strict',
-        reverse_proxy: effectiveApiConfig.url,
-        proxy_password: '',
-        custom_url: effectiveApiConfig.url,
-        custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
-      };
+      const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { temperature: 0.7, topP: 0.95 });
 
       const response = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
@@ -291,25 +347,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
         throw new Error('自定义API的URL或模型未配置。');
     }
 
-    const body = JSON.stringify({
-        messages,
-        model: effectiveApiConfig.model,
-        temperature: effectiveApiConfig.temperature || 1.0,
-        top_p: effectiveApiConfig.top_p || 0.9,
-        max_tokens: maxTokens,
-        stream: settings_ACU.streamingEnabled || false,
-        chat_completion_source: 'custom',
-        group_names: [],
-        include_reasoning: false,
-        reasoning_effort: 'medium',
-        enable_web_search: false,
-        request_images: false,
-        custom_prompt_post_processing: 'strict',
-        reverse_proxy: effectiveApiConfig.url,
-        proxy_password: '',
-        custom_url: effectiveApiConfig.url,
-        custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
-    });
+    const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { maxTokens, temperature: effectiveApiConfig.temperature || 1.0, topP: effectiveApiConfig.top_p || 0.9, stripModelPrefix: false }));
 
     const res = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',

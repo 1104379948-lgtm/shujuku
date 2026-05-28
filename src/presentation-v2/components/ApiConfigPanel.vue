@@ -131,6 +131,33 @@
         </AcuFormRow>
       </div>
 
+      <div
+        v-if="activeConnectionMode === 'custom'"
+        class="acu-api-config-panel__editor-section"
+      >
+        <AcuFormRow label="附加主体参数" hint="每行一个 key: value，会合并到请求体中。">
+          <AcuTextarea
+            v-model="activeDraft.bodyParams"
+            :rows="3"
+            placeholder="top_k: 50&#10;frequency_penalty: 0.5"
+          />
+        </AcuFormRow>
+        <AcuFormRow label="排除主体参数" hint="逗号或换行分隔，从请求体中删除指定字段。">
+          <AcuTextarea
+            v-model="activeDraft.excludeBodyParams"
+            :rows="2"
+            placeholder="top_p, reasoning_effort"
+          />
+        </AcuFormRow>
+        <AcuFormRow label="附加请求标头" hint="每行一个 Header: Value，追加到请求头中。">
+          <AcuTextarea
+            v-model="activeDraft.requestHeaders"
+            :rows="2"
+            placeholder="X-Custom-Header: value"
+          />
+        </AcuFormRow>
+      </div>
+
       <AcuMessage v-if="activeDraftError" kind="error">{{
         activeDraftError
       }}</AcuMessage>
@@ -179,6 +206,7 @@ import AcuIconButton from "./_lib/AcuIconButton.vue";
 import AcuInput from "./_lib/AcuInput.vue";
 import AcuMessage from "./_lib/AcuMessage.vue";
 import AcuPanel from "./_lib/AcuPanel.vue";
+import AcuTextarea from "./_lib/AcuTextarea.vue";
 import type { PresetDropdownItem } from "./_lib/AcuPresetDropdown.vue";
 import AcuPresetDropdown from "./_lib/AcuPresetDropdown.vue";
 import type { AcuSegmentedOption } from "./_lib/AcuSegmentedControl.vue";

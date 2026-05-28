@@ -3764,7 +3764,7 @@ let currentChatFileIdentifier_ACU = 'unknown_chat_init';
 let currentJsonTableData_ACU = null;
 let independentTableStates_ACU = {};
 let settings_ACU = {
-    apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
+    apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, bodyParams: '', excludeBodyParams: '', requestHeaders: '' },
     apiMode: 'custom',
     streamingEnabled: false,
     tavernProfile: '',
@@ -17418,6 +17418,94 @@ async function handleApiResponse_ACU(response, signal = null) {
 // service/ai/api-call.ts — AI 调用编排（剧情推进用）
 // 从 04_shared_helpers.js 迁入
 /**
+ * 解析简单 key: value 多行文本为对象。
+ * 每行格式: key: value（冒号后可有空格）。空行和无冒号行跳过。
+ */
+function parseKeyValueLines(text) {
+    const result = {};
+    if (!text)
+        return result;
+    for (const line of text.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed)
+            continue;
+        const colonIdx = trimmed.indexOf(':');
+        if (colonIdx <= 0)
+            continue;
+        const key = trimmed.slice(0, colonIdx).trim();
+        const value = trimmed.slice(colonIdx + 1).trim();
+        if (key)
+            result[key] = value;
+    }
+    return result;
+}
+/**
+ * 构建自定义 API 请求体，合并附加参数。
+ * - bodyParams: 追加到请求体的 key:value
+ * - excludeBodyParams: 从请求体中删除的 key 列表（逗号或换行分隔）
+ * - requestHeaders: 追加到 custom_include_headers 的额外头
+ */
+function buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, overrides) {
+    const opts = overrides || {};
+    const model = opts.stripModelPrefix !== false
+        ? (effectiveApiConfig.model || '').replace(/^models\//, '')
+        : (effectiveApiConfig.model || '');
+    const maxTokens = opts.maxTokens || effectiveApiConfig.max_tokens || effectiveApiConfig.maxTokens || 20000;
+    const temperature = opts.temperature ?? effectiveApiConfig.temperature ?? 1.0;
+    const topP = opts.topP ?? effectiveApiConfig.top_p ?? effectiveApiConfig.topP ?? 0.95;
+    // 基础 Authorization 头
+    let headers = effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '';
+    // 追加 requestHeaders
+    if (effectiveApiConfig.requestHeaders) {
+        const extra = effectiveApiConfig.requestHeaders.trim();
+        if (extra) {
+            headers = headers ? `${headers}\n${extra}` : extra;
+        }
+    }
+    const body = {
+        messages,
+        model,
+        max_tokens: maxTokens,
+        temperature,
+        top_p: topP,
+        stream: settings_ACU.streamingEnabled || false,
+        chat_completion_source: 'custom',
+        group_names: [],
+        include_reasoning: false,
+        reasoning_effort: 'medium',
+        enable_web_search: false,
+        request_images: false,
+        custom_prompt_post_processing: 'strict',
+        reverse_proxy: effectiveApiConfig.url,
+        proxy_password: '',
+        custom_url: effectiveApiConfig.url,
+        custom_include_headers: headers,
+    };
+    // 合并 bodyParams
+    if (effectiveApiConfig.bodyParams) {
+        const extra = parseKeyValueLines(effectiveApiConfig.bodyParams);
+        for (const [k, v] of Object.entries(extra)) {
+            // 尝试解析为数字/布尔
+            if (v === 'true')
+                body[k] = true;
+            else if (v === 'false')
+                body[k] = false;
+            else if (v !== '' && !isNaN(Number(v)))
+                body[k] = Number(v);
+            else
+                body[k] = v;
+        }
+    }
+    // 删除 excludeBodyParams 指定的字段
+    if (effectiveApiConfig.excludeBodyParams) {
+        const keys = effectiveApiConfig.excludeBodyParams.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+        for (const k of keys) {
+            delete body[k];
+        }
+    }
+    return body;
+}
+/**
  * 剧情推进任务级 API 调用 — 接受显式预设名称
  * 调用优先级：presetName 参数 > 全局 plotApiPreset > 当前 API 配置
  */
@@ -17445,25 +17533,7 @@ async function callApiWithPlotPreset_ACU(messages, presetName, abortSignal = nul
         if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
             throw new Error('自定义API的URL或模型未配置。');
         }
-        const requestBody = {
-            messages: messages,
-            model: effectiveApiConfig.model.replace(/^models\//, ''),
-            max_tokens: effectiveApiConfig.maxTokens || effectiveApiConfig.max_tokens || 20000,
-            temperature: effectiveApiConfig.temperature || 0.7,
-            top_p: effectiveApiConfig.topP || effectiveApiConfig.top_p || 0.95,
-            stream: settings_ACU.streamingEnabled || false,
-            chat_completion_source: 'custom',
-            group_names: [],
-            include_reasoning: false,
-            reasoning_effort: 'medium',
-            enable_web_search: false,
-            request_images: false,
-            custom_prompt_post_processing: 'strict',
-            reverse_proxy: effectiveApiConfig.url,
-            proxy_password: '',
-            custom_url: effectiveApiConfig.url,
-            custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
-        };
+        const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { temperature: 0.7, topP: 0.95 });
         const response = await fetch('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
@@ -17507,25 +17577,7 @@ async function callApi_ACU(messages, apiSettings, abortSignal = null) {
         if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
             throw new Error('自定义API的URL或模型未配置。');
         }
-        const requestBody = {
-            messages: messages,
-            model: effectiveApiConfig.model.replace(/^models\//, ''),
-            max_tokens: effectiveApiConfig.maxTokens || effectiveApiConfig.max_tokens || 20000,
-            temperature: effectiveApiConfig.temperature || 0.7,
-            top_p: effectiveApiConfig.topP || effectiveApiConfig.top_p || 0.95,
-            stream: settings_ACU.streamingEnabled || false,
-            chat_completion_source: 'custom',
-            group_names: [],
-            include_reasoning: false,
-            reasoning_effort: 'medium',
-            enable_web_search: false,
-            request_images: false,
-            custom_prompt_post_processing: 'strict',
-            reverse_proxy: effectiveApiConfig.url,
-            proxy_password: '',
-            custom_url: effectiveApiConfig.url,
-            custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
-        };
+        const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { temperature: 0.7, topP: 0.95 });
         const response = await fetch('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
@@ -17676,25 +17728,7 @@ async function callAIWithPreset_ACU(messages, presetName = '') {
     if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
         throw new Error('自定义API的URL或模型未配置。');
     }
-    const body = JSON.stringify({
-        messages,
-        model: effectiveApiConfig.model,
-        temperature: effectiveApiConfig.temperature || 1.0,
-        top_p: effectiveApiConfig.top_p || 0.9,
-        max_tokens: maxTokens,
-        stream: settings_ACU.streamingEnabled || false,
-        chat_completion_source: 'custom',
-        group_names: [],
-        include_reasoning: false,
-        reasoning_effort: 'medium',
-        enable_web_search: false,
-        request_images: false,
-        custom_prompt_post_processing: 'strict',
-        reverse_proxy: effectiveApiConfig.url,
-        proxy_password: '',
-        custom_url: effectiveApiConfig.url,
-        custom_include_headers: effectiveApiConfig.apiKey ? `Authorization: Bearer ${effectiveApiConfig.apiKey}` : '',
-    });
+    const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { maxTokens, temperature: effectiveApiConfig.temperature || 1.0, topP: effectiveApiConfig.top_p || 0.9, stripModelPrefix: false }));
     const res = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
@@ -72236,6 +72270,9 @@ function createEmptyApiPresetDraft() {
         max_tokens: 60000,
         temperature: 1,
         tavernProfile: '',
+        bodyParams: '',
+        excludeBodyParams: '',
+        requestHeaders: '',
     };
 }
 function apiPresetDraftFromPreset(preset) {
@@ -72249,6 +72286,9 @@ function apiPresetDraftFromPreset(preset) {
         max_tokens: Number(preset.apiConfig.max_tokens || 60000),
         temperature: Number(preset.apiConfig.temperature ?? 1),
         tavernProfile: preset.tavernProfile || '',
+        bodyParams: preset.apiConfig.bodyParams || '',
+        excludeBodyParams: preset.apiConfig.excludeBodyParams || '',
+        requestHeaders: preset.apiConfig.requestHeaders || '',
     };
 }
 function apiPresetFromDraft(draft) {
@@ -72263,6 +72303,9 @@ function apiPresetFromDraft(draft) {
             useMainApi: draft.useMainApi,
             max_tokens: Math.max(1, Math.floor(Number(draft.max_tokens) || 60000)),
             temperature: Number.isFinite(Number(draft.temperature)) ? Number(draft.temperature) : 1,
+            bodyParams: draft.bodyParams || '',
+            excludeBodyParams: draft.excludeBodyParams || '',
+            requestHeaders: draft.requestHeaders || '',
         },
     };
 }
@@ -72322,6 +72365,9 @@ function normalizeApiConfig(value) {
         useMainApi: source.useMainApi !== false,
         max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : 60000,
         temperature: Number.isFinite(temperature) ? temperature : 1,
+        bodyParams: typeof source.bodyParams === 'string' ? source.bodyParams : '',
+        excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
+        requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
     };
 }
 function normalizePreset(value) {
@@ -72396,7 +72442,10 @@ function findPresetMatchingCurrentConfig(presets) {
             preset.apiConfig.apiKey === current.apiConfig.apiKey &&
             preset.apiConfig.model === current.apiConfig.model &&
             preset.apiConfig.max_tokens === current.apiConfig.max_tokens &&
-            preset.apiConfig.temperature === current.apiConfig.temperature);
+            preset.apiConfig.temperature === current.apiConfig.temperature &&
+            preset.apiConfig.bodyParams === current.apiConfig.bodyParams &&
+            preset.apiConfig.excludeBodyParams === current.apiConfig.excludeBodyParams &&
+            preset.apiConfig.requestHeaders === current.apiConfig.requestHeaders);
     }) ?? null;
 }
 function resolveCurrentConfigStatus() {
@@ -73119,6 +73168,161 @@ function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
 var AcuPanel = /* @__PURE__ */ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-22f45947"]]);
 
 var _sfc_main$U = /*@__PURE__*/ defineComponent({
+    __name: 'AcuTextarea',
+    props: {
+        modelValue: {},
+        placeholder: { default: undefined },
+        rows: { default: 4 },
+        maxRows: { default: undefined },
+        autoResize: { type: Boolean, default: false },
+        disabled: { type: Boolean, default: false }
+    },
+    emits: ["update:modelValue"],
+    setup(__props, { expose: __expose, emit: __emit }) {
+        __expose();
+        const props = __props;
+        const emit = __emit;
+        const textareaRef = ref(null);
+        let resizeObserver = null;
+        let resizeFrame = null;
+        let resizeTimer = null;
+        function normalizeRows(value, fallback) {
+            const rows = Math.trunc(Number(value));
+            return Number.isFinite(rows) && rows > 0 ? rows : fallback;
+        }
+        function parsePixel(value) {
+            const parsed = Number.parseFloat(value);
+            return Number.isFinite(parsed) ? parsed : 0;
+        }
+        function getLineHeight(style) {
+            const explicit = parsePixel(style.lineHeight);
+            if (explicit > 0)
+                return explicit;
+            const fontSize = parsePixel(style.fontSize);
+            return fontSize > 0 ? fontSize * 1.45 : 18;
+        }
+        function getRowsHeight(el, rows) {
+            const style = window.getComputedStyle(el);
+            const verticalInset = parsePixel(style.paddingTop)
+                + parsePixel(style.paddingBottom)
+                + parsePixel(style.borderTopWidth)
+                + parsePixel(style.borderBottomWidth);
+            return Math.ceil(getLineHeight(style) * rows + verticalInset);
+        }
+        function resizeTextarea(el = textareaRef.value) {
+            if (!el)
+                return;
+            if (!props.autoResize) {
+                el.style.height = '';
+                el.style.overflowY = '';
+                return;
+            }
+            const minRows = normalizeRows(props.rows, 1);
+            const maxRows = props.maxRows === undefined
+                ? null
+                : Math.max(minRows, normalizeRows(props.maxRows, minRows));
+            const minHeight = getRowsHeight(el, minRows);
+            const maxHeight = maxRows === null ? Number.POSITIVE_INFINITY : getRowsHeight(el, maxRows);
+            el.style.height = 'auto';
+            const contentHeight = Math.max(el.scrollHeight, minHeight);
+            const nextHeight = Math.min(contentHeight, maxHeight);
+            el.style.height = `${nextHeight}px`;
+            el.style.overflowY = maxRows === null || contentHeight > maxHeight ? 'auto' : 'hidden';
+        }
+        function clearScheduledResize() {
+            if (resizeFrame !== null) {
+                window.cancelAnimationFrame(resizeFrame);
+                resizeFrame = null;
+            }
+            if (resizeTimer !== null) {
+                window.clearTimeout(resizeTimer);
+                resizeTimer = null;
+            }
+        }
+        function scheduleTextareaResize() {
+            if (!props.autoResize)
+                return;
+            clearScheduledResize();
+            resizeFrame = window.requestAnimationFrame(() => {
+                resizeFrame = null;
+                resizeTextarea();
+            });
+            resizeTimer = window.setTimeout(() => {
+                resizeTimer = null;
+                resizeTextarea();
+            }, 60);
+        }
+        function stopWatchingSize() {
+            resizeObserver?.disconnect();
+            resizeObserver = null;
+        }
+        function watchSizeForAutoResize() {
+            stopWatchingSize();
+            const el = textareaRef.value;
+            if (!props.autoResize || !el || typeof ResizeObserver === 'undefined')
+                return;
+            resizeObserver = new ResizeObserver(() => resizeTextarea(el));
+            resizeObserver.observe(el);
+        }
+        function onInput(ev) {
+            const el = ev.target;
+            if (props.autoResize)
+                resizeTextarea(el);
+            emit('update:modelValue', el?.value ?? '');
+        }
+        function onFocus() {
+            resizeTextarea();
+            scheduleTextareaResize();
+        }
+        onMounted(() => {
+            void nextTick(() => {
+                resizeTextarea();
+                scheduleTextareaResize();
+                watchSizeForAutoResize();
+                void document.fonts?.ready.then(() => scheduleTextareaResize());
+            });
+        });
+        onBeforeUnmount(() => {
+            clearScheduledResize();
+            stopWatchingSize();
+        });
+        watch(() => [props.modelValue, props.rows, props.maxRows, props.autoResize], () => {
+            void nextTick(() => {
+                resizeTextarea();
+                scheduleTextareaResize();
+                watchSizeForAutoResize();
+            });
+        });
+        const __returned__ = { props, emit, textareaRef, get resizeObserver() { return resizeObserver; }, set resizeObserver(v) { resizeObserver = v; }, get resizeFrame() { return resizeFrame; }, set resizeFrame(v) { resizeFrame = v; }, get resizeTimer() { return resizeTimer; }, set resizeTimer(v) { resizeTimer = v; }, normalizeRows, parsePixel, getLineHeight, getRowsHeight, resizeTextarea, clearScheduledResize, scheduleTextareaResize, stopWatchingSize, watchSizeForAutoResize, onInput, onFocus };
+        Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+        return __returned__;
+    }
+});
+
+injectSfcStyle("\n.acu-textarea[data-v-9d058dfa] {\r\n  width: 100%;\r\n  box-sizing: border-box;\r\n  padding: 8px 10px;\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.45;\r\n  resize: none !important;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-textarea--auto-resize[data-v-9d058dfa] {\r\n  overflow-x: hidden;\r\n  overflow-y: auto;\n}\n.acu-textarea[data-v-9d058dfa]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-textarea[data-v-9d058dfa]:focus {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-textarea[data-v-9d058dfa]:disabled {\r\n  opacity: 0.5; cursor: not-allowed;\n}\r\n", "src/presentation-v2/components/_lib/AcuTextarea.vue#style-0-9d058dfa");
+var AcuTextarea_vue_vue_type_style_index_0_scoped_9d058dfa_lang = null;
+
+const _hoisted_1$R = [
+	"value",
+	"placeholder",
+	"rows",
+	"disabled"
+];
+function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("textarea", {
+		ref: "textareaRef",
+		class: normalizeClass(["acu-textarea", { "acu-textarea--auto-resize": $props.autoResize }]),
+		value: $props.modelValue,
+		placeholder: $props.placeholder,
+		rows: $props.rows,
+		disabled: $props.disabled,
+		onInput: $setup.onInput,
+		onFocus: $setup.onFocus
+	}, null, 42, _hoisted_1$R);
+}
+var AcuTextarea = /* @__PURE__ */ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-9d058dfa"]]);
+
+var _sfc_main$T = /*@__PURE__*/ defineComponent({
     __name: 'AcuPresetDropdown',
     props: {
         items: {},
@@ -73179,7 +73383,7 @@ var _sfc_main$U = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-preset-dd[data-v-34d59d39] { position: relative; flex: 1; min-width: 0;\n}\n.acu-preset-dd__trigger[data-v-34d59d39] {\r\n  display: flex; align-items: center; gap: 8px; width: 100%;\r\n  min-height: 32px; padding: 6px 9px;\r\n  background: var(--acu-bg-2); border: 0;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-preset-dd__trigger[data-v-34d59d39]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-preset-dd__trigger[data-v-34d59d39]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-preset-dd__trigger[data-v-34d59d39]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-preset-dd--disabled[data-v-34d59d39] { pointer-events: none; opacity: 0.5;\n}\n.acu-preset-dd__label[data-v-34d59d39] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-preset-dd__caret[data-v-34d59d39] { font-size: var(--acu-font-size-micro, 10px); color: var(--acu-text-3); transition: transform 0.15s ease;\n}\n.acu-preset-dd__caret--open[data-v-34d59d39] { transform: rotate(180deg);\n}\n.acu-preset-dd__menu[data-v-34d59d39] {\r\n  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: 4px 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  max-height: 240px; overflow-y: auto;\n}\n.acu-preset-dd__item[data-v-34d59d39] {\r\n  display: flex; align-items: center; gap: 8px;\r\n  padding: 8px 12px; cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\n}\n.acu-preset-dd__item[data-v-34d59d39]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active[data-v-34d59d39] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-preset-dd__item-name[data-v-34d59d39] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500;\n}\n.acu-preset-dd__item-meta[data-v-34d59d39] { font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); white-space: nowrap;\n}\n.acu-preset-dd__star[data-v-34d59d39] {\r\n  width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;\r\n  border: 0; background: transparent; color: var(--acu-text-3); cursor: pointer;\r\n  border-radius: var(--acu-radius-sm); font-size: var(--acu-font-size-body, 12px); transition: color 0.15s ease;\n}\n.acu-preset-dd__star[data-v-34d59d39]:hover { color: var(--acu-text-1); background: var(--acu-hover-overlay);\n}\n.acu-preset-dd__star--active[data-v-34d59d39] { color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active .acu-preset-dd__item-meta[data-v-34d59d39],\r\n.acu-preset-dd__item--active .acu-preset-dd__star[data-v-34d59d39],\r\n.acu-preset-dd__item--active .acu-preset-dd__check[data-v-34d59d39] { color: var(--acu-on-accent);\n}\n.acu-preset-dd__check[data-v-34d59d39] { font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-1);\n}\n.acu-preset-dd__empty[data-v-34d59d39] { padding: 12px; text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/_lib/AcuPresetDropdown.vue#style-0-34d59d39");
 var AcuPresetDropdown_vue_vue_type_style_index_0_scoped_34d59d39_lang = null;
 
-const _hoisted_1$R = ["disabled"];
+const _hoisted_1$Q = ["disabled"];
 const _hoisted_2$J = { class: "acu-preset-dd__label" };
 const _hoisted_3$z = {
 	key: 0,
@@ -73196,11 +73400,11 @@ const _hoisted_8$g = {
 	key: 2,
 	class: "fa-solid fa-check acu-preset-dd__check"
 };
-const _hoisted_9$c = {
+const _hoisted_9$d = {
 	key: 0,
 	class: "acu-preset-dd__empty"
 };
-function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -73224,7 +73428,7 @@ function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$R), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$z, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$Q), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$z, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.items, (item) => {
@@ -73267,7 +73471,7 @@ function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
 			/* KEYED_FRAGMENT */
 		)), !$props.items.length ? (openBlock(), createElementBlock(
 			"li",
-			_hoisted_9$c,
+			_hoisted_9$d,
 			toDisplayString($props.emptyText),
 			1
 			/* TEXT */
@@ -73276,9 +73480,9 @@ function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
 		/* CLASS */
 	);
 }
-var AcuPresetDropdown = /* @__PURE__ */ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-34d59d39"]]);
+var AcuPresetDropdown = /* @__PURE__ */ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-34d59d39"]]);
 
-var _sfc_main$T = /*@__PURE__*/ defineComponent({
+var _sfc_main$S = /*@__PURE__*/ defineComponent({
     __name: 'AcuSegmentedControl',
     props: {
         options: {},
@@ -73326,14 +73530,14 @@ var _sfc_main$T = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-segmented[data-v-dc13b21d] {\r\n  position: relative;\r\n  display: grid;\r\n  grid-auto-flow: column;\r\n  grid-auto-columns: minmax(0, 1fr);\r\n  min-width: 0;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  padding: 3px;\r\n  overflow: hidden;\n}\n.acu-segmented--disabled[data-v-dc13b21d] {\r\n  opacity: 0.55;\n}\n.acu-segmented__thumb[data-v-dc13b21d] {\r\n  position: absolute;\r\n  inset: 3px auto 3px 3px;\r\n  width: calc((100% - 6px) / var(--acu-segment-count));\r\n  border-radius: calc(var(--acu-radius-sm) - 2px);\r\n  background: var(--acu-accent);\r\n  transform: translateX(calc(var(--acu-segment-index) * 100%));\r\n  transition: transform 0.16s ease, background 0.16s ease;\r\n  pointer-events: none;\n}\n.acu-segmented__item[data-v-dc13b21d] {\r\n  position: relative;\r\n  min-width: 0;\r\n  margin: 0;\r\n  border: 0;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  cursor: pointer;\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: 6px;\r\n  transition: background 0.15s ease, color 0.15s ease;\r\n  z-index: 1;\n}\n.acu-segmented__item[data-v-dc13b21d]:not(.acu-segmented__item--active):hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-segmented__item[data-v-dc13b21d]:disabled {\r\n  cursor: not-allowed;\r\n  color: var(--acu-text-3);\n}\n.acu-segmented__item--active[data-v-dc13b21d] {\r\n  color: var(--acu-on-accent);\n}\n.acu-segmented__item[data-v-dc13b21d]:focus-visible {\r\n  outline: none;\n}\n.acu-segmented__item[data-v-dc13b21d]:focus-visible::before {\r\n  content: '';\r\n  position: absolute;\r\n  inset: 2px;\r\n  border-radius: var(--acu-radius-sm);\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\r\n  pointer-events: none;\r\n  z-index: 2;\n}\n.acu-segmented--md .acu-segmented__item[data-v-dc13b21d] {\r\n  min-height: 30px;\r\n  padding: 0 8px;\r\n  border-radius: calc(var(--acu-radius-sm) - 2px);\n}\n.acu-segmented--sm .acu-segmented__item[data-v-dc13b21d] {\r\n  min-height: 24px;\r\n  padding: 0 7px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  border-radius: calc(var(--acu-radius-sm) - 2px);\n}\n.acu-segmented__label[data-v-dc13b21d] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\r\n", "src/presentation-v2/components/_lib/AcuSegmentedControl.vue#style-0-dc13b21d");
 var AcuSegmentedControl_vue_vue_type_style_index_0_scoped_dc13b21d_lang = null;
 
-const _hoisted_1$Q = ["aria-label"];
+const _hoisted_1$P = ["aria-label"];
 const _hoisted_2$I = [
 	"aria-checked",
 	"disabled",
 	"onClick"
 ];
 const _hoisted_3$y = { class: "acu-segmented__label" };
-function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", {
 		class: normalizeClass(["acu-segmented", [`acu-segmented--${$props.size}`, { "acu-segmented--disabled": $props.disabled }]]),
 		role: "radiogroup",
@@ -73376,11 +73580,11 @@ function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
 		}),
 		128
 		/* KEYED_FRAGMENT */
-	))], 14, _hoisted_1$Q);
+	))], 14, _hoisted_1$P);
 }
-var AcuSegmentedControl = /* @__PURE__ */ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-dc13b21d"]]);
+var AcuSegmentedControl = /* @__PURE__ */ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-dc13b21d"]]);
 
-var _sfc_main$S = /*@__PURE__*/ defineComponent({
+var _sfc_main$R = /*@__PURE__*/ defineComponent({
     __name: 'AcuSelect',
     props: {
         options: {},
@@ -73431,7 +73635,7 @@ var _sfc_main$S = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-select[data-v-0c1b4576] {\r\n  position: relative;\r\n  display: block;\r\n  width: 100%;\r\n  min-width: 0;\r\n  margin: 0 !important;\r\n  padding: 0 !important;\r\n  border: 0 !important;\r\n  outline: 0 !important;\r\n  background: transparent !important;\r\n  box-shadow: none !important;\n}\n.acu-select__trigger[data-v-0c1b4576] {\r\n  display: flex; align-items: center; gap: 8px; width: 100%;\r\n  min-height: 32px; padding: 6px 9px;\r\n  margin: 0 !important;\r\n  background: var(--acu-bg-2) !important; border: 0 !important;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\r\n  box-shadow: none;\n}\n.acu-select__trigger[data-v-0c1b4576]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-select__trigger[data-v-0c1b4576]:focus { outline: none !important;\n}\n.acu-select__trigger[data-v-0c1b4576]:focus:not(:focus-visible) { box-shadow: none !important;\n}\n.acu-select__trigger[data-v-0c1b4576]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-select__trigger[data-v-0c1b4576]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-select__label[data-v-0c1b4576] {\r\n  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-select__label--placeholder[data-v-0c1b4576] { color: var(--acu-text-3);\n}\n.acu-select__caret[data-v-0c1b4576] { font-size: var(--acu-font-size-micro, 10px); color: var(--acu-text-3); transition: transform 0.15s ease; flex-shrink: 0;\n}\n.acu-select__caret--open[data-v-0c1b4576] { transform: rotate(180deg);\n}\n.acu-select__menu[data-v-0c1b4576] {\r\n  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: 4px 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  max-height: 240px; overflow-y: auto;\n}\n.acu-select__item[data-v-0c1b4576] {\r\n  padding: 8px 12px; cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\r\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-select__item[data-v-0c1b4576]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-select__item--active[data-v-0c1b4576] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-select__empty[data-v-0c1b4576] { padding: 12px; text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* ── sm variant ── */\n.acu-select--sm .acu-select__trigger[data-v-0c1b4576] { min-height: 26px; padding: 3px 7px; font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-select--sm .acu-select__item[data-v-0c1b4576] { padding: 6px 10px; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-select--disabled[data-v-0c1b4576] { pointer-events: none; opacity: 0.5;\n}\r\n", "src/presentation-v2/components/_lib/AcuSelect.vue#style-0-0c1b4576");
 var AcuSelect_vue_vue_type_style_index_0_scoped_0c1b4576_lang = null;
 
-const _hoisted_1$P = ["disabled"];
+const _hoisted_1$O = ["disabled"];
 const _hoisted_2$H = {
 	key: 0,
 	class: "acu-select__menu"
@@ -73441,7 +73645,7 @@ const _hoisted_4$r = {
 	key: 0,
 	class: "acu-select__empty"
 };
-function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -73465,7 +73669,7 @@ function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$P), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$H, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$O), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$H, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.options, (opt) => {
@@ -73482,9 +73686,9 @@ function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
 		/* CLASS */
 	);
 }
-var AcuSelect = /* @__PURE__ */ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-0c1b4576"]]);
+var AcuSelect = /* @__PURE__ */ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-0c1b4576"]]);
 
-var _sfc_main$R = /*@__PURE__*/ defineComponent({
+var _sfc_main$Q = /*@__PURE__*/ defineComponent({
     __name: 'ApiConfigPanel',
     setup(__props, { expose: __expose }) {
         __expose();
@@ -73618,16 +73822,16 @@ var _sfc_main$R = /*@__PURE__*/ defineComponent({
             });
         }
         watch(() => store.activePresetName, () => syncActiveDraft(), { flush: "sync" });
-        const __returned__ = { store, toast, formMode, activeDraft, activeDraftOriginalName, activeDraftSnapshot, activeDraftError, activeDraftSavedAt, activeConnectionMode, activeDraftDirty, connectionModeOptions, modelSelectOptions, tavernProfileOptions, presetDropdownItems, refreshAll, syncActiveDraft, startCreateDraft, selectPreset, deletePreset, presetMeta, validateActiveDraft, saveActiveDraft, setActiveConnectionMode, loadModelsForActive, get apiCopy() { return apiCopy; }, AcuButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPresetDropdown, AcuSegmentedControl, AcuSelect };
+        const __returned__ = { store, toast, formMode, activeDraft, activeDraftOriginalName, activeDraftSnapshot, activeDraftError, activeDraftSavedAt, activeConnectionMode, activeDraftDirty, connectionModeOptions, modelSelectOptions, tavernProfileOptions, presetDropdownItems, refreshAll, syncActiveDraft, startCreateDraft, selectPreset, deletePreset, presetMeta, validateActiveDraft, saveActiveDraft, setActiveConnectionMode, loadModelsForActive, get apiCopy() { return apiCopy; }, AcuButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuTextarea, AcuPresetDropdown, AcuSegmentedControl, AcuSelect };
         Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
         return __returned__;
     }
 });
 
-injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-ebaa2503] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\r\n  gap: 6px;\r\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-ebaa2503] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-ebaa2503] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-ebaa2503] {\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-ebaa2503] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-ebaa2503] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-ebaa2503] {\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-ebaa2503] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\n}\r\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-ebaa2503");
-var ApiConfigPanel_vue_vue_type_style_index_0_scoped_ebaa2503_lang = null;
+injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-58dfca36] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\n  gap: 6px;\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-58dfca36] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-58dfca36] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-58dfca36] {\n  display: flex;\n  align-items: center;\n  flex-wrap: wrap;\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-58dfca36] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-58dfca36] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-58dfca36] {\n  color: var(--acu-danger);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-58dfca36] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n}\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-58dfca36");
+var ApiConfigPanel_vue_vue_type_style_index_0_scoped_58dfca36_lang = null;
 
-const _hoisted_1$O = { class: "acu-api-config-panel__select-row" };
+const _hoisted_1$N = { class: "acu-api-config-panel__select-row" };
 const _hoisted_2$G = { class: "acu-api-config-panel__editor-section" };
 const _hoisted_3$w = { class: "acu-api-config-panel__inline-action" };
 const _hoisted_4$q = {
@@ -73643,8 +73847,12 @@ const _hoisted_7$i = {
 	key: 0,
 	class: "acu-api-config-panel__two-col"
 };
-const _hoisted_8$f = { class: "acu-api-config-panel__actions" };
-function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
+const _hoisted_8$f = {
+	key: 1,
+	class: "acu-api-config-panel__editor-section"
+};
+const _hoisted_9$c = { class: "acu-api-config-panel__actions" };
+function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.apiCopy.panels.preset.title,
 		description: $setup.apiCopy.panels.preset.description
@@ -73654,7 +73862,7 @@ function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 				key: 0,
 				kind: "warning"
 			}, {
-				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
+				default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
 					" 暂无可用 API 预设，请新建并设为当前或全局默认。 ",
 					-1
 					/* CACHED */
@@ -73665,7 +73873,7 @@ function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 				label: "当前 API 预设",
 				hint: "星标表示新聊天默认使用的预设。"
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_1$O, [
+				default: withCtx(() => [createBaseVNode("div", _hoisted_1$N, [
 					createVNode($setup["AcuPresetDropdown"], {
 						items: $setup.presetDropdownItems,
 						"model-value": $setup.store.activePresetName,
@@ -73753,7 +73961,7 @@ function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 									_: 1
 								}),
 								createBaseVNode("div", _hoisted_3$w, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
-									default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
+									default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 										"加载模型",
 										-1
 										/* CACHED */
@@ -73794,7 +74002,7 @@ function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 								}, null, 8, ["options", "model-value"])]),
 								_: 1
 							}), createBaseVNode("div", _hoisted_6$j, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
-								default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
+								default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
 									"刷新列表",
 									-1
 									/* CACHED */
@@ -73825,8 +74033,46 @@ function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					})])) : createCommentVNode("v-if", true),
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$f, [
+						createVNode($setup["AcuFormRow"], {
+							label: "附加主体参数",
+							hint: "每行一个 key: value，会合并到请求体中。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuTextarea"], {
+								modelValue: $setup.activeDraft.bodyParams,
+								"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.activeDraft.bodyParams = $event),
+								rows: 3,
+								placeholder: "top_k: 50\nfrequency_penalty: 0.5"
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], {
+							label: "排除主体参数",
+							hint: "逗号或换行分隔，从请求体中删除指定字段。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuTextarea"], {
+								modelValue: $setup.activeDraft.excludeBodyParams,
+								"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.activeDraft.excludeBodyParams = $event),
+								rows: 2,
+								placeholder: "top_p, reasoning_effort"
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						}),
+						createVNode($setup["AcuFormRow"], {
+							label: "附加请求标头",
+							hint: "每行一个 Header: Value，追加到请求头中。"
+						}, {
+							default: withCtx(() => [createVNode($setup["AcuTextarea"], {
+								modelValue: $setup.activeDraft.requestHeaders,
+								"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.activeDraft.requestHeaders = $event),
+								rows: 2,
+								placeholder: "X-Custom-Header: value"
+							}, null, 8, ["modelValue"])]),
+							_: 1
+						})
+					])) : createCommentVNode("v-if", true),
 					$setup.activeDraftError ? (openBlock(), createBlock($setup["AcuMessage"], {
-						key: 1,
+						key: 2,
 						kind: "error"
 					}, {
 						default: withCtx(() => [createTextVNode(
@@ -73836,11 +74082,11 @@ function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_8$f, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_9$c, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.activeDraftDirty,
 						onClick: $setup.syncActiveDraft
 					}, {
-						default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
+						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
 							"放弃修改",
 							-1
 							/* CACHED */
@@ -73865,7 +74111,7 @@ function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 				key: 2,
 				kind: "warning"
 			}, {
-				default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
+				default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
 					" 暂无可用 API 预设，请新建并设为当前或全局默认。 ",
 					-1
 					/* CACHED */
@@ -73876,7 +74122,7 @@ function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
 		_: 1
 	}, 8, ["title", "description"]);
 }
-var ApiConfigPanel = /* @__PURE__ */ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-ebaa2503"]]);
+var ApiConfigPanel = /* @__PURE__ */ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-58dfca36"]]);
 
 /**
  * plot-preset-store — 剧情推进页状态边界（D23）
@@ -74932,7 +75178,7 @@ const formFillCopy = {
     },
 };
 
-var _sfc_main$Q = /*@__PURE__*/ defineComponent({
+var _sfc_main$P = /*@__PURE__*/ defineComponent({
     __name: 'AcuDisclosureGroup',
     props: {
         label: { default: '' },
@@ -74999,13 +75245,13 @@ var _sfc_main$Q = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-disclosure-group[data-v-31578948] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 0;\r\n  overflow: hidden;\r\n  border-radius: var(--acu-radius-md);\r\n  background: transparent;\n}\n.acu-disclosure-group__header[data-v-31578948] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  width: 100%;\r\n  min-height: 34px;\r\n  appearance: none;\r\n  border: 0;\r\n  border-radius: 0;\r\n  padding: 7px 10px;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.35;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  user-select: none;\r\n  transition: background-color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-disclosure-group__header[data-v-31578948]:hover {\r\n  background: var(--acu-hover-overlay);\n}\n.acu-disclosure-group__header[data-v-31578948]:focus-visible {\r\n  outline: none;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-disclosure-group__chevron[data-v-31578948] {\r\n  flex: 0 0 10px;\r\n  width: 10px;\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  color: var(--acu-text-3);\r\n  transition: transform 0.15s ease;\n}\n.acu-disclosure-group__chevron--open[data-v-31578948] {\r\n  transform: rotate(90deg);\n}\n.acu-disclosure-group__label[data-v-31578948] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-weight: 500;\r\n  color: var(--acu-text-2);\n}\n.acu-disclosure-group__meta[data-v-31578948] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  font-variant-numeric: tabular-nums;\r\n  white-space: nowrap;\n}\n.acu-disclosure-group__body[data-v-31578948] {\r\n  box-sizing: border-box;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  padding: 8px;\r\n  opacity: 1;\r\n  transform: translateY(0);\r\n  overflow-x: hidden;\n}\r\n", "src/presentation-v2/components/_lib/AcuDisclosureGroup.vue#style-0-31578948");
 var AcuDisclosureGroup_vue_vue_type_style_index_0_scoped_31578948_lang = null;
 
-const _hoisted_1$N = ["aria-expanded", "aria-controls"];
+const _hoisted_1$M = ["aria-expanded", "aria-controls"];
 const _hoisted_2$F = [
 	"id",
 	"aria-hidden",
 	"inert"
 ];
-function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{ class: normalizeClass(["acu-disclosure-group", [$props.rootClass, { "acu-disclosure-group--expanded": $props.expanded }]]) },
@@ -75054,7 +75300,7 @@ function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
 				2
 				/* CLASS */
 			)) : createCommentVNode("v-if", true)
-		], 10, _hoisted_1$N), createVNode(Transition, {
+		], 10, _hoisted_1$M), createVNode(Transition, {
 			css: false,
 			onBeforeEnter: $setup.beforeEnter,
 			onEnter: $setup.enter,
@@ -75079,9 +75325,9 @@ function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
 		/* CLASS */
 	);
 }
-var AcuDisclosureGroup = /* @__PURE__ */ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-31578948"]]);
+var AcuDisclosureGroup = /* @__PURE__ */ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-31578948"]]);
 
-var _sfc_main$P = /*@__PURE__*/ defineComponent({
+var _sfc_main$O = /*@__PURE__*/ defineComponent({
     ...{ inheritAttrs: false },
     __name: 'AcuToggle',
     props: {
@@ -75108,12 +75354,12 @@ var _sfc_main$P = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-toggle[data-v-34bd50ed] {\r\n  display: inline-flex; align-items: center; gap: 8px;\r\n  flex: 0 0 auto;\r\n  padding: 0; border: 0; background: transparent;\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-2);\r\n  cursor: pointer; user-select: none;\n}\n.acu-toggle--disabled[data-v-34bd50ed] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-toggle__track[data-v-34bd50ed] {\r\n  position: relative; flex-shrink: 0;\r\n  width: 36px; height: 20px;\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  border-radius: 10px;\r\n  transition: background 0.2s ease, box-shadow 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__track[data-v-34bd50ed] {\r\n  background: var(--acu-accent);\n}\n.acu-toggle__thumb[data-v-34bd50ed] {\r\n  position: absolute; top: 2px; left: 2px;\r\n  width: 16px; height: 16px;\r\n  background: #fff;\r\n  border-radius: 50%;\r\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);\r\n  transition: transform 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__thumb[data-v-34bd50ed] {\r\n  transform: translateX(16px);\n}\n.acu-toggle__label[data-v-34bd50ed] { white-space: nowrap;\n}\n.acu-toggle:hover:not(.acu-toggle--disabled) .acu-toggle__track[data-v-34bd50ed] {\r\n  box-shadow: inset 0 0 0 1px var(--acu-border-2);\n}\n.acu-toggle:focus-visible .acu-toggle__track[data-v-34bd50ed] {\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuToggle.vue#style-0-34bd50ed");
 var AcuToggle_vue_vue_type_style_index_0_scoped_34bd50ed_lang = null;
 
-const _hoisted_1$M = ["aria-checked", "disabled"];
+const _hoisted_1$L = ["aria-checked", "disabled"];
 const _hoisted_2$E = {
 	key: 0,
 	class: "acu-toggle__label"
 };
-function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", mergeProps({
 		type: "button",
 		class: ["acu-toggle", {
@@ -75138,11 +75384,11 @@ function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
 		toDisplayString($props.label),
 		1
 		/* TEXT */
-	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$M);
+	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$L);
 }
-var AcuToggle = /* @__PURE__ */ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-34bd50ed"]]);
+var AcuToggle = /* @__PURE__ */ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-34bd50ed"]]);
 
-var _sfc_main$O = /*@__PURE__*/ defineComponent({
+var _sfc_main$N = /*@__PURE__*/ defineComponent({
     __name: 'FormFillUpdateSettingsPanel',
     props: {
         showAdvanced: { type: Boolean, default: true }
@@ -75227,15 +75473,15 @@ var _sfc_main$O = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-form-fill-update-settings-panel__settings-groups[data-v-eaa556c7] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-form-fill-update-settings-panel__setting-group\r\n  + .acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border-2);\n}\n.acu-form-fill-update-settings-panel__advanced[data-v-eaa556c7] {\r\n  border: 0;\r\n  background: transparent;\n}\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n@media (max-width: 560px) {\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/FormFillUpdateSettingsPanel.vue#style-0-eaa556c7");
 var FormFillUpdateSettingsPanel_vue_vue_type_style_index_0_scoped_eaa556c7_lang = null;
 
-const _hoisted_1$L = { class: "acu-form-fill-update-settings-panel__settings-groups" };
+const _hoisted_1$K = { class: "acu-form-fill-update-settings-panel__settings-groups" };
 const _hoisted_2$D = { class: "acu-form-fill-update-settings-panel__setting-group" };
 const _hoisted_3$v = { class: "acu-form-fill-update-settings-panel__number-grid" };
-function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.formFillCopy.panels.update.title,
 		description: $setup.formFillCopy.panels.update.description
 	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$L, [createBaseVNode("section", _hoisted_2$D, [
+		default: withCtx(() => [createBaseVNode("div", _hoisted_1$K, [createBaseVNode("section", _hoisted_2$D, [
 			createVNode($setup["AcuFormRow"], {
 				label: "填表 API 预设",
 				hint: "默认使用当前 API，选择后仅影响填表功能。"
@@ -75316,7 +75562,7 @@ function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
 		_: 1
 	}, 8, ["title", "description"]);
 }
-var FormFillUpdateSettingsPanel = /* @__PURE__ */ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-eaa556c7"]]);
+var FormFillUpdateSettingsPanel = /* @__PURE__ */ _export_sfc(_sfc_main$N, [["render", _sfc_render$N], ["__scopeId", "data-v-eaa556c7"]]);
 
 /**
  * persistence — 新 UI 自己的 localStorage 持久化层（D14 / P0-4）
@@ -76024,7 +76270,7 @@ const plotCopy = {
     },
 };
 
-var _sfc_main$N = /*@__PURE__*/ defineComponent({
+var _sfc_main$M = /*@__PURE__*/ defineComponent({
     __name: 'AcuBadge',
     props: {
         variant: { default: 'neutral' }
@@ -76042,7 +76288,7 @@ var _sfc_main$N = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-badge[data-v-d7f0600f] {\r\n  display: inline-flex; align-items: center;\r\n  padding: 2px 8px; border-radius: var(--acu-radius-sm);\r\n  font-size: var(--acu-font-size-caption, 11px); font-weight: 500;\r\n  white-space: nowrap; line-height: 1.6;\n}\n.acu-badge--neutral[data-v-d7f0600f] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  color: var(--acu-text-2);\n}\n.acu-badge--accent[data-v-d7f0600f] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\n}\n.acu-badge--success[data-v-d7f0600f],\r\n.acu-badge--warning[data-v-d7f0600f],\r\n.acu-badge--danger[data-v-d7f0600f] {\r\n  font-weight: 600;\n}\n.acu-badge--success[data-v-d7f0600f] {\r\n  background: color-mix(in srgb, var(--acu-success) 16%, transparent);\r\n  color: var(--acu-success);\n}\n.acu-badge--warning[data-v-d7f0600f] {\r\n  background: color-mix(in srgb, var(--acu-warning) 16%, transparent);\r\n  color: var(--acu-warning);\n}\n.acu-badge--danger[data-v-d7f0600f] {\r\n  background: color-mix(in srgb, var(--acu-danger) 16%, transparent);\r\n  color: var(--acu-danger);\n}\r\n", "src/presentation-v2/components/_lib/AcuBadge.vue#style-0-d7f0600f");
 var AcuBadge_vue_vue_type_style_index_0_scoped_d7f0600f_lang = null;
 
-function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-badge", $setup.variantClass]) },
@@ -76051,9 +76297,9 @@ function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
 		/* CLASS */
 	);
 }
-var AcuBadge = /* @__PURE__ */ _export_sfc(_sfc_main$N, [["render", _sfc_render$N], ["__scopeId", "data-v-d7f0600f"]]);
+var AcuBadge = /* @__PURE__ */ _export_sfc(_sfc_main$M, [["render", _sfc_render$M], ["__scopeId", "data-v-d7f0600f"]]);
 
-var _sfc_main$M = /*@__PURE__*/ defineComponent({
+var _sfc_main$L = /*@__PURE__*/ defineComponent({
     __name: 'AcuText',
     props: {
         as: { default: 'p' },
@@ -76069,16 +76315,16 @@ var _sfc_main$M = /*@__PURE__*/ defineComponent({
     }
 });
 
-function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock(resolveDynamicComponent($props.as), { class: normalizeClass(["acu-text", $setup.variantClass]) }, {
 		default: withCtx(() => [renderSlot(_ctx.$slots, "default")]),
 		_: 3
 	}, 8, ["class"]);
 }
-var AcuText = /* @__PURE__ */ _export_sfc(_sfc_main$M, [["render", _sfc_render$M]]);
+var AcuText = /* @__PURE__ */ _export_sfc(_sfc_main$L, [["render", _sfc_render$L]]);
 
 const DRAWER_LEAVE_MS = 150;
-var _sfc_main$L = /*@__PURE__*/ defineComponent({
+var _sfc_main$K = /*@__PURE__*/ defineComponent({
     __name: 'AcuDrawer',
     props: {
         isOpen: { type: Boolean },
@@ -76152,10 +76398,10 @@ var _sfc_main$L = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-v2-drawer-layer[data-v-3e6dd00b] {\r\n  position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 9200;\r\n  width: 100%; width: 100vw; width: 100dvw;\r\n  height: 100%; height: 100vh; height: 100dvh;\r\n  display: flex; justify-content: flex-end;\r\n  background: rgba(0, 0, 0, 0.38);\r\n  overflow: hidden;\r\n  animation: acu-drawer-layer-in-3e6dd00b 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing[data-v-3e6dd00b] {\r\n  pointer-events: none;\r\n  animation: acu-drawer-layer-out-3e6dd00b 0.15s ease-in both;\n}\n.acu-v2-drawer[data-v-3e6dd00b] {\r\n  max-width: 100vw;\r\n  height: 100%; max-height: 100vh;\r\n  display: flex; flex-direction: column;\r\n  background: var(--acu-bg-1);\r\n  border-left: 0;\r\n  box-shadow: var(--acu-shadow);\r\n  min-width: 0; min-height: 0;\r\n  overflow: hidden;\r\n  animation: acu-drawer-panel-in-3e6dd00b 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing .acu-v2-drawer[data-v-3e6dd00b] {\r\n  animation: acu-drawer-panel-out-3e6dd00b 0.15s ease-in both;\n}\n@supports (max-height: 100dvh) {\n.acu-v2-drawer[data-v-3e6dd00b] { max-height: 100dvh;\n}\n}\n.acu-v2-drawer__header[data-v-3e6dd00b] {\r\n  flex: 0 0 auto;\r\n  display: flex; align-items: center; justify-content: space-between;\r\n  gap: 12px; padding: 14px 16px;\r\n  border-bottom: 0;\n}\n.acu-v2-drawer__header-left[data-v-3e6dd00b] { display: flex; align-items: center; gap: 10px;\n}\n.acu-v2-drawer__header h3[data-v-3e6dd00b] { margin: 0; font-size: var(--acu-font-size-panel-title, 15px);\n}\n.acu-v2-drawer__body[data-v-3e6dd00b] {\r\n  flex: 1; min-height: 0;\r\n  overflow-y: auto; padding: 16px;\r\n  display: flex; flex-direction: column; gap: 14px;\n}\n@keyframes acu-drawer-layer-in-3e6dd00b {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-drawer-panel-in-3e6dd00b {\nfrom { transform: translateX(100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes acu-drawer-layer-out-3e6dd00b {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-drawer-panel-out-3e6dd00b {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(100%);\n}\n}\n@media (max-width: 860px) {\n.acu-v2-drawer[data-v-3e6dd00b] { width: 100vw !important; width: 100dvw !important; border-left: 0;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDrawer.vue#style-0-3e6dd00b");
 var AcuDrawer_vue_vue_type_style_index_0_scoped_3e6dd00b_lang = null;
 
-const _hoisted_1$K = { class: "acu-v2-drawer__header" };
+const _hoisted_1$J = { class: "acu-v2-drawer__header" };
 const _hoisted_2$C = { class: "acu-v2-drawer__header-left" };
 const _hoisted_3$u = { class: "acu-v2-drawer__body" };
-function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.isRendered ? (openBlock(), createElementBlock(
 		"div",
 		{
@@ -76174,7 +76420,7 @@ function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
 				role: "dialog",
 				onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
 			},
-			[createBaseVNode("header", _hoisted_1$K, [createBaseVNode("div", _hoisted_2$C, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
+			[createBaseVNode("header", _hoisted_1$J, [createBaseVNode("div", _hoisted_2$C, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
 				key: 0,
 				icon: "fa-solid fa-arrow-left",
 				title: "返回",
@@ -76198,9 +76444,9 @@ function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
 		/* CLASS, NEED_HYDRATION */
 	)) : createCommentVNode("v-if", true);
 }
-var AcuDrawer = /* @__PURE__ */ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-3e6dd00b"]]);
+var AcuDrawer = /* @__PURE__ */ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-3e6dd00b"]]);
 
-var _sfc_main$K = /*@__PURE__*/ defineComponent({
+var _sfc_main$J = /*@__PURE__*/ defineComponent({
     __name: 'AcuRulePairList',
     props: {
         modelValue: {},
@@ -76251,7 +76497,7 @@ var _sfc_main$K = /*@__PURE__*/ defineComponent({
 injectSfcStyle("\n.acu-rule-pair-list--standalone[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list__body[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list--standalone .acu-rule-pair-list__body[data-v-c9426b22] {\r\n  /* 老接口：未提供 label 时直接展示，无外层 padding */\r\n  border-top: 0;\r\n  padding: 0;\n}\n.acu-rule-pair-list__row[data-v-c9426b22] {\r\n  display: flex; align-items: center; gap: 6px;\n}\n.acu-rule-pair-list__field[data-v-c9426b22] { flex: 1; min-width: 0;\n}\n.acu-rule-pair-list__sep[data-v-c9426b22] {\r\n  flex-shrink: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-rule-pair-list__empty[data-v-c9426b22] {\r\n  padding: 8px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-rule-pair-list__add[data-v-c9426b22] {\r\n  align-self: flex-start;\n}\r\n", "src/presentation-v2/components/_lib/AcuRulePairList.vue#style-0-c9426b22");
 var AcuRulePairList_vue_vue_type_style_index_0_scoped_c9426b22_lang = null;
 
-const _hoisted_1$J = {
+const _hoisted_1$I = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
 };
@@ -76264,7 +76510,7 @@ const _hoisted_4$p = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
 };
-function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
+function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
 	return $props.label ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
 		key: 0,
 		"root-class": "acu-rule-pair-list",
@@ -76330,7 +76576,7 @@ function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$J, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$I, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
 			createVNode($setup["AcuButton"], {
 				size: "sm",
 				class: "acu-rule-pair-list__add",
@@ -76426,162 +76672,7 @@ function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
 		})
 	])]));
 }
-var AcuRulePairList = /* @__PURE__ */ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-c9426b22"]]);
-
-var _sfc_main$J = /*@__PURE__*/ defineComponent({
-    __name: 'AcuTextarea',
-    props: {
-        modelValue: {},
-        placeholder: { default: undefined },
-        rows: { default: 4 },
-        maxRows: { default: undefined },
-        autoResize: { type: Boolean, default: false },
-        disabled: { type: Boolean, default: false }
-    },
-    emits: ["update:modelValue"],
-    setup(__props, { expose: __expose, emit: __emit }) {
-        __expose();
-        const props = __props;
-        const emit = __emit;
-        const textareaRef = ref(null);
-        let resizeObserver = null;
-        let resizeFrame = null;
-        let resizeTimer = null;
-        function normalizeRows(value, fallback) {
-            const rows = Math.trunc(Number(value));
-            return Number.isFinite(rows) && rows > 0 ? rows : fallback;
-        }
-        function parsePixel(value) {
-            const parsed = Number.parseFloat(value);
-            return Number.isFinite(parsed) ? parsed : 0;
-        }
-        function getLineHeight(style) {
-            const explicit = parsePixel(style.lineHeight);
-            if (explicit > 0)
-                return explicit;
-            const fontSize = parsePixel(style.fontSize);
-            return fontSize > 0 ? fontSize * 1.45 : 18;
-        }
-        function getRowsHeight(el, rows) {
-            const style = window.getComputedStyle(el);
-            const verticalInset = parsePixel(style.paddingTop)
-                + parsePixel(style.paddingBottom)
-                + parsePixel(style.borderTopWidth)
-                + parsePixel(style.borderBottomWidth);
-            return Math.ceil(getLineHeight(style) * rows + verticalInset);
-        }
-        function resizeTextarea(el = textareaRef.value) {
-            if (!el)
-                return;
-            if (!props.autoResize) {
-                el.style.height = '';
-                el.style.overflowY = '';
-                return;
-            }
-            const minRows = normalizeRows(props.rows, 1);
-            const maxRows = props.maxRows === undefined
-                ? null
-                : Math.max(minRows, normalizeRows(props.maxRows, minRows));
-            const minHeight = getRowsHeight(el, minRows);
-            const maxHeight = maxRows === null ? Number.POSITIVE_INFINITY : getRowsHeight(el, maxRows);
-            el.style.height = 'auto';
-            const contentHeight = Math.max(el.scrollHeight, minHeight);
-            const nextHeight = Math.min(contentHeight, maxHeight);
-            el.style.height = `${nextHeight}px`;
-            el.style.overflowY = maxRows === null || contentHeight > maxHeight ? 'auto' : 'hidden';
-        }
-        function clearScheduledResize() {
-            if (resizeFrame !== null) {
-                window.cancelAnimationFrame(resizeFrame);
-                resizeFrame = null;
-            }
-            if (resizeTimer !== null) {
-                window.clearTimeout(resizeTimer);
-                resizeTimer = null;
-            }
-        }
-        function scheduleTextareaResize() {
-            if (!props.autoResize)
-                return;
-            clearScheduledResize();
-            resizeFrame = window.requestAnimationFrame(() => {
-                resizeFrame = null;
-                resizeTextarea();
-            });
-            resizeTimer = window.setTimeout(() => {
-                resizeTimer = null;
-                resizeTextarea();
-            }, 60);
-        }
-        function stopWatchingSize() {
-            resizeObserver?.disconnect();
-            resizeObserver = null;
-        }
-        function watchSizeForAutoResize() {
-            stopWatchingSize();
-            const el = textareaRef.value;
-            if (!props.autoResize || !el || typeof ResizeObserver === 'undefined')
-                return;
-            resizeObserver = new ResizeObserver(() => resizeTextarea(el));
-            resizeObserver.observe(el);
-        }
-        function onInput(ev) {
-            const el = ev.target;
-            if (props.autoResize)
-                resizeTextarea(el);
-            emit('update:modelValue', el?.value ?? '');
-        }
-        function onFocus() {
-            resizeTextarea();
-            scheduleTextareaResize();
-        }
-        onMounted(() => {
-            void nextTick(() => {
-                resizeTextarea();
-                scheduleTextareaResize();
-                watchSizeForAutoResize();
-                void document.fonts?.ready.then(() => scheduleTextareaResize());
-            });
-        });
-        onBeforeUnmount(() => {
-            clearScheduledResize();
-            stopWatchingSize();
-        });
-        watch(() => [props.modelValue, props.rows, props.maxRows, props.autoResize], () => {
-            void nextTick(() => {
-                resizeTextarea();
-                scheduleTextareaResize();
-                watchSizeForAutoResize();
-            });
-        });
-        const __returned__ = { props, emit, textareaRef, get resizeObserver() { return resizeObserver; }, set resizeObserver(v) { resizeObserver = v; }, get resizeFrame() { return resizeFrame; }, set resizeFrame(v) { resizeFrame = v; }, get resizeTimer() { return resizeTimer; }, set resizeTimer(v) { resizeTimer = v; }, normalizeRows, parsePixel, getLineHeight, getRowsHeight, resizeTextarea, clearScheduledResize, scheduleTextareaResize, stopWatchingSize, watchSizeForAutoResize, onInput, onFocus };
-        Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-        return __returned__;
-    }
-});
-
-injectSfcStyle("\n.acu-textarea[data-v-9d058dfa] {\r\n  width: 100%;\r\n  box-sizing: border-box;\r\n  padding: 8px 10px;\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.45;\r\n  resize: none !important;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-textarea--auto-resize[data-v-9d058dfa] {\r\n  overflow-x: hidden;\r\n  overflow-y: auto;\n}\n.acu-textarea[data-v-9d058dfa]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-textarea[data-v-9d058dfa]:focus {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-textarea[data-v-9d058dfa]:disabled {\r\n  opacity: 0.5; cursor: not-allowed;\n}\r\n", "src/presentation-v2/components/_lib/AcuTextarea.vue#style-0-9d058dfa");
-var AcuTextarea_vue_vue_type_style_index_0_scoped_9d058dfa_lang = null;
-
-const _hoisted_1$I = [
-	"value",
-	"placeholder",
-	"rows",
-	"disabled"
-];
-function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("textarea", {
-		ref: "textareaRef",
-		class: normalizeClass(["acu-textarea", { "acu-textarea--auto-resize": $props.autoResize }]),
-		value: $props.modelValue,
-		placeholder: $props.placeholder,
-		rows: $props.rows,
-		disabled: $props.disabled,
-		onInput: $setup.onInput,
-		onFocus: $setup.onFocus
-	}, null, 42, _hoisted_1$I);
-}
-var AcuTextarea = /* @__PURE__ */ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-9d058dfa"]]);
+var AcuRulePairList = /* @__PURE__ */ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-c9426b22"]]);
 
 var _sfc_main$I = /*@__PURE__*/ defineComponent({
     __name: 'PlotMatchReplaceFields',

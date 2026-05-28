@@ -74,4 +74,52 @@ describe('api preset draft helpers', () => {
     expect(preset.apiConfig.max_tokens).toBe(128);
     expect(preset.apiConfig.temperature).toBe(1);
   });
+
+  it('三个附加参数字段在 draft 转换中保留', () => {
+    const draft = apiPresetDraftFromPreset({
+      name: 'extra',
+      apiMode: 'custom',
+      apiConfig: {
+        url: 'https://x.test',
+        apiKey: 'k',
+        model: 'm',
+        useMainApi: false,
+        max_tokens: 1000,
+        temperature: 1,
+        bodyParams: 'top_k: 50',
+        excludeBodyParams: 'top_p',
+        requestHeaders: 'X-Custom: val',
+      },
+      tavernProfile: '',
+    });
+
+    expect(draft.bodyParams).toBe('top_k: 50');
+    expect(draft.excludeBodyParams).toBe('top_p');
+    expect(draft.requestHeaders).toBe('X-Custom: val');
+
+    const preset = apiPresetFromDraft(draft);
+    expect(preset.apiConfig.bodyParams).toBe('top_k: 50');
+    expect(preset.apiConfig.excludeBodyParams).toBe('top_p');
+    expect(preset.apiConfig.requestHeaders).toBe('X-Custom: val');
+  });
+
+  it('旧预设缺失附加参数字段时归一为空字符串', () => {
+    const draft = apiPresetDraftFromPreset({
+      name: 'old',
+      apiMode: 'custom',
+      apiConfig: {
+        url: 'https://old.test',
+        apiKey: '',
+        model: 'old-model',
+        useMainApi: false,
+        max_tokens: 2000,
+        temperature: 0.5,
+      } as any,
+      tavernProfile: '',
+    });
+
+    expect(draft.bodyParams).toBe('');
+    expect(draft.excludeBodyParams).toBe('');
+    expect(draft.requestHeaders).toBe('');
+  });
 });
