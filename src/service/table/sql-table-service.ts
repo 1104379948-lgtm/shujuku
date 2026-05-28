@@ -537,51 +537,62 @@ export class SqlTableService implements ITableStorageProvider {
   private _ensureTablesFromTemplate(): void {
     const existingTables = new Set(this.engine.getTableNames());
 
+    // [修复] 优先从当前聊天模板预设获取模板，而不是依赖全局变量 TABLE_TEMPLATE_ACU
+    // 这样确保建表时只使用当前聊天模板预设的内容，不会混入全局模板的表
+    const templateData = this._resolveCurrentChatTemplate();
+    // [修复] 模板解析失败时，如果有旧快照或 live 数据，允许以快照为主建表；
+    // 只有完全没有模板、没有快照、没有已有表时才抛错。
     const historicalSnapshot = this._historicalSnapshotForSqlBootstrap;
     const useHistorical = this._loadedFromHistoricalSnapshot && !!historicalSnapshot;
-
-    // [兼容] 历史快照存在时，允许在模板解析失败的情况下继续按历史快照建表
-    const templateData = this._resolveCurrentChatTemplate();
-    if (!useHistorical && !templateData) {
-      if (existingTables.size > 0) return;
-      throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
+    if (!templateData && !useHistorical && !currentJsonTableData_ACU) {
+      if (existingTables.size > 0) return; // 已有表，无需建表
+      throw new Error('[SqlTableService] 模板解析失败且无可用快照，无法建表。请检查模板格式。');
     }
 
-    const templateSheetKeys = templateData ? Object.keys(templateData).filter(k => k.startsWith('sheet_')) : [];
-    const templateSheetKeySet = new Set(templateSheetKeys);
+    const templateSheetKeys = templateData
+      ? Object.keys(templateData).filter(k => k.startsWith('sheet_'))
+      : [];
     const primarySheetKeys = useHistorical
       ? Object.keys(historicalSnapshot!).filter(k => k.startsWith('sheet_'))
       : templateSheetKeys;
     const missingSheets: Record<string, any> = {};
+    // [修复] 防止同轮多个 sheet 指向同一 SQL tableName 导致重复建表
+    const plannedTableNames = new Set<string>();
 
     for (const key of primarySheetKeys) {
       const sheet = useHistorical
         ? (historicalSnapshot as any)[key]
-        : ((currentJsonTableData_ACU as any)?.[key] || templateData[key] as any);
+        : ((currentJsonTableData_ACU as any)?.[key] || (templateData as any)?.[key] as any);
       if (!sheet) continue;
-      if (useHistorical && !sheet.sourceData?.ddl) {
+      // [修复] 对所有非纯模板来源的 sheet 统一做无 DDL 表头校验。
+      // useHistorical 时 sheet 来自 historicalSnapshot；非 historical 时如果 sheet 来自
+      // currentJsonTableData_ACU（而非 templateData），同样需要校验。
+      const isFromLiveData = useHistorical || (!!(currentJsonTableData_ACU as any)?.[key]);
+      if (isFromLiveData && !sheet.sourceData?.ddl) {
         const headers = sheet.content?.[0];
         if (!Array.isArray(headers) || headers.length === 0 || headers.every((v: any) => !v || String(v).trim() === '')) {
-          logWarn_ACU(`[SqlTableService] 历史 sheet ${key} (${sheet.name || 'unknown'}) 无 DDL 且无有效表头，跳过建表`);
+          logWarn_ACU(`[SqlTableService] sheet ${key} (${sheet.name || 'unknown'}) 无 DDL 且无有效表头，跳过建表`);
           continue;
         }
       }
       const ddl = generateDDL(sheet);
       const tableName = parseDDLTableName(ddl);
-      if (tableName && !existingTables.has(tableName)) {
+      if (tableName && !existingTables.has(tableName) && !plannedTableNames.has(tableName)) {
+        plannedTableNames.add(tableName);
         missingSheets[key] = sheet;
       }
     }
 
-    if (useHistorical && templateData) {
+    if (useHistorical) {
       for (const key of templateSheetKeys) {
         if (missingSheets[key]) continue;
         const liveSheet = (currentJsonTableData_ACU as any)?.[key];
-        const sheet = liveSheet || templateData[key] as any;
+        const sheet = liveSheet || (templateData as any)?.[key] as any;
         if (!sheet) continue;
         const ddl = generateDDL(sheet);
         const tableName = parseDDLTableName(ddl);
-        if (tableName && !existingTables.has(tableName)) {
+        if (tableName && !existingTables.has(tableName) && !plannedTableNames.has(tableName)) {
+          plannedTableNames.add(tableName);
           missingSheets[key] = sheet;
         }
       }
@@ -589,11 +600,36 @@ export class SqlTableService implements ITableStorageProvider {
       const liveSheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
       for (const key of liveSheetKeys) {
         if (missingSheets[key]) continue;
-        if (!templateSheetKeySet.has(key)) continue;
         const sheet = (currentJsonTableData_ACU as any)[key];
-        if (!sheet?.sourceData?.ddl) continue;
-        const tableName = parseDDLTableName(sheet.sourceData.ddl);
-        if (tableName && !existingTables.has(tableName)) missingSheets[key] = sheet;
+        if (!sheet) continue;
+        // [修复] 以快照数据为准建表，不受当前模板 sheetKey 集合裁剪。
+        // 无 DDL 时从表头生成 fallback DDL（与 useHistorical 分支对称）。
+        if (!sheet.sourceData?.ddl) {
+          const headers = sheet.content?.[0];
+          if (!Array.isArray(headers) || headers.length === 0 || headers.every((v: any) => !v || String(v).trim() === '')) {
+            logWarn_ACU(`[SqlTableService] live sheet ${key} (${sheet.name || 'unknown'}) 无 DDL 且无有效表头，跳过建表`);
+            continue;
+          }
+        }
+        const ddl = generateDDL(sheet);
+        const tableName = parseDDLTableName(ddl);
+        if (tableName && !existingTables.has(tableName) && !plannedTableNames.has(tableName)) {
+          plannedTableNames.add(tableName);
+          missingSheets[key] = sheet;
+        }
+      }
+      // [修复] 补充模板中存在但快照中没有的新表（与 useHistorical 分支的第二循环对称）
+      for (const key of templateSheetKeys) {
+        if (missingSheets[key]) continue;
+        if (liveSheetKeys.includes(key)) continue;
+        const sheet = (templateData as any)?.[key] as any;
+        if (!sheet) continue;
+        const ddl = generateDDL(sheet);
+        const tableName = parseDDLTableName(ddl);
+        if (tableName && !existingTables.has(tableName) && !plannedTableNames.has(tableName)) {
+          plannedTableNames.add(tableName);
+          missingSheets[key] = sheet;
+        }
       }
     }
 
@@ -603,15 +639,14 @@ export class SqlTableService implements ITableStorageProvider {
     logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
 
     // 构造只包含缺失表的数据子集，交给 syncBridge 建表
-    const partialData: TableDataObject_ACU = {
-      mate: (useHistorical ? (historicalSnapshot as any)?.mate : null)
-        || (templateData as any)?.mate
-        || this._getCurrentMate(),
-    };
+    const mateFallback = templateData?.mate || (currentJsonTableData_ACU as any)?.mate || { type: 'chatSheets', version: 1 };
+    const partialData: TableDataObject_ACU = { mate: mateFallback };
     for (const [key, sheet] of Object.entries(missingSheets)) {
       const sheetCopy = JSON.parse(JSON.stringify(sheet));
 
-      if (!this._loadedFromHistoricalSnapshot && Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
+      // [修复] seedRows 仅在新开卡路径注入（无历史快照且无旧 JSON 数据）。
+      // 有 currentJsonTableData_ACU 时说明存在旧表格数据，不应用模板 seedRows 覆盖。
+      if (!this._loadedFromHistoricalSnapshot && !currentJsonTableData_ACU && Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
         const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
         if (Array.isArray(seedRows) && seedRows.length > 0) {
           sheetCopy.content = [sheetCopy.content[0] || [], ...seedRows];
@@ -633,7 +668,7 @@ export class SqlTableService implements ITableStorageProvider {
     } else {
       _set_currentJsonTableData_ACU(partialData);
     }
-    this._buildNameMapper((currentJsonTableData_ACU as any) || partialData || (templateData as any));
+    this._buildNameMapper(currentJsonTableData_ACU || templateData || partialData);
 
     logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
   }

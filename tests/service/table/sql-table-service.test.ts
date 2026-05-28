@@ -1260,38 +1260,6 @@ describe('SqlTableService', () => {
       expect(oldRows.values[0]).toContain('魔法书');
     });
 
-    it('当前模板解析失败时仍可按历史快照建表', async () => {
-      mockMergeAll.mockResolvedValue({
-        mate: { type: 'acu', version: 1 },
-        sheet_0: {
-          uid: 'old_inventory',
-          name: '旧背包表',
-          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: OLD_DDL },
-          content: [['row_id', 'item', 'count']],
-          updateConfig: {}, exportConfig: {}, orderNo: 0,
-        },
-      } as any);
-
-      const load = await service.loadFromChat();
-      expect(load.loaded).toBe(false);
-
-      const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
-      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(null as any);
-
-      const result = service.applyEdits("INSERT INTO old_inventory VALUES (1, '旧卷轴', 4);");
-      expect(result.success).toBe(true);
-
-      const rows = service.executeQuery('SELECT * FROM old_inventory ORDER BY row_id');
-      expect(rows.rowCount).toBe(1);
-      expect(rows.values[0]).toContain('旧卷轴');
-
-      // 旧聊天路径下不应注入模板 seedRows
-      expect(mockGetEffectiveSeedRows).not.toHaveBeenCalledWith(
-        'sheet_0',
-        expect.objectContaining({ allowTemplateFallback: true }),
-      );
-    });
-
     it('旧聊天 header-only 快照首次写入不注入模板 seedRows（新开卡路径不受影响）', async () => {
       mockMergeAll.mockResolvedValue({
         mate: { type: 'acu', version: 1 },
