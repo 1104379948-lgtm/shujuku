@@ -1208,4 +1208,128 @@ describe('SqlTableService', () => {
       expect(() => service.dispose()).not.toThrow();
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════
+  // 旧聊天历史快照回归测试（P6/P7）
+  // ═══════════════════════════════════════════════════════════════
+  describe('legacy snapshot bootstrap', () => {
+    const OLD_DDL = `CREATE TABLE old_inventory (
+      row_id INTEGER PRIMARY KEY,
+      item TEXT NOT NULL,
+      count INTEGER DEFAULT 0
+    );`;
+
+    const NEW_DDL = `CREATE TABLE new_inventory (
+      row_id INTEGER PRIMARY KEY,
+      product TEXT NOT NULL,
+      stock INTEGER DEFAULT 0
+    );`;
+
+    it('旧聊天 header-only 快照在首次写入时按历史快照建 old_inventory（不受当前模板 sheetKey 裁剪）', async () => {
+      mockMergeAll.mockResolvedValue({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'old_inventory',
+          name: '旧背包表',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: OLD_DDL },
+          content: [['row_id', 'item', 'count']],
+          updateConfig: {}, exportConfig: {}, orderNo: 0,
+        },
+      } as any);
+
+      const load = await service.loadFromChat();
+      expect(load.loaded).toBe(false);
+
+      const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+        mate: { type: 'acu', version: 1 },
+        sheet_9: {
+          uid: 'new_inventory',
+          name: '新物品表',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: NEW_DDL },
+          content: [['row_id', 'product', 'stock']],
+          updateConfig: {}, exportConfig: {}, orderNo: 0,
+        },
+      } as any);
+
+      const result = service.applyEdits("INSERT INTO old_inventory VALUES (1, '魔法书', 2);");
+      expect(result.success).toBe(true);
+
+      const oldRows = service.executeQuery('SELECT * FROM old_inventory ORDER BY row_id');
+      expect(oldRows.rowCount).toBe(1);
+      expect(oldRows.values[0]).toContain('魔法书');
+    });
+
+    it('当前模板解析失败时仍可按历史快照建表', async () => {
+      mockMergeAll.mockResolvedValue({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'old_inventory',
+          name: '旧背包表',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: OLD_DDL },
+          content: [['row_id', 'item', 'count']],
+          updateConfig: {}, exportConfig: {}, orderNo: 0,
+        },
+      } as any);
+
+      const load = await service.loadFromChat();
+      expect(load.loaded).toBe(false);
+
+      const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(null as any);
+
+      const result = service.applyEdits("INSERT INTO old_inventory VALUES (1, '旧卷轴', 4);");
+      expect(result.success).toBe(true);
+
+      const rows = service.executeQuery('SELECT * FROM old_inventory ORDER BY row_id');
+      expect(rows.rowCount).toBe(1);
+      expect(rows.values[0]).toContain('旧卷轴');
+
+      // 旧聊天路径下不应注入模板 seedRows
+      expect(mockGetEffectiveSeedRows).not.toHaveBeenCalledWith(
+        'sheet_0',
+        expect.objectContaining({ allowTemplateFallback: true }),
+      );
+    });
+
+    it('旧聊天 header-only 快照首次写入不注入模板 seedRows（新开卡路径不受影响）', async () => {
+      mockMergeAll.mockResolvedValue({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'inventory',
+          name: '背包物品表',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
+          content: [['row_id', 'item_name', 'quantity']],
+          updateConfig: {}, exportConfig: {}, orderNo: 0,
+        },
+      } as any);
+
+      await service.loadFromChat();
+
+      const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'inventory',
+          name: '背包物品表',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
+          content: [['row_id', 'item_name', 'quantity']],
+          updateConfig: {}, exportConfig: {}, orderNo: 0,
+        },
+      } as any);
+
+      mockGetEffectiveSeedRows.mockReturnValue([
+        ['1', '铁剑', '3'],
+        ['2', '治疗药水', '5'],
+      ]);
+
+      const result = service.applyEdits("INSERT INTO inventory VALUES (3, '魔法书', 1);");
+      expect(result.success).toBe(true);
+
+      const q = service.executeQuery('SELECT * FROM inventory ORDER BY row_id');
+      expect(q.rowCount).toBe(1);
+      expect(q.values[0]).toContain('魔法书');
+    });
+  });
+
 });

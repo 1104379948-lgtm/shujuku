@@ -42,6 +42,8 @@ export class SqlTableService implements ITableStorageProvider {
   private _initialized = false;
   private committedSnapshot: TableDataObject_ACU | null = null;
   private pendingBeforeSnapshot: TableDataObject_ACU | null = null;
+  private _historicalSnapshotForSqlBootstrap: TableDataObject_ACU | null = null;
+  private _loadedFromHistoricalSnapshot = false;
 
   constructor() {
     this.engine = new SqliteEngine();
@@ -90,6 +92,7 @@ export class SqlTableService implements ITableStorageProvider {
       const shouldSkipSqlLoadForLegacyMigration = !!mergeResult.usedLegacyMigration;
 
       if (!mergedData || !hasRealDataRows || shouldSkipSqlLoadForLegacyMigration) {
+        this._cacheHistoricalSnapshot(mergedData);
         // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
         // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
         // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
@@ -108,6 +111,7 @@ export class SqlTableService implements ITableStorageProvider {
         return { loaded: false, source: 'empty' };
       }
 
+      this._cacheHistoricalSnapshot(mergedData);
       // 将 JSON 数据加载到 SQLite
       // [防御] 修复 content 表头为空的 sheet——从 DDL 推导列名和中文注释
       // 这处理了历史数据被污染（content=[[]] 或 content[0] 为空数组）的场景
@@ -223,6 +227,8 @@ export class SqlTableService implements ITableStorageProvider {
   async replaceCurrentData(data: TableDataObject_ACU | null): Promise<void> {
     this.engine.dispose();
     disposeGlobalNameMapper();
+    this._historicalSnapshotForSqlBootstrap = null;
+    this._loadedFromHistoricalSnapshot = false;
     this.engine = new SqliteEngine();
     this.syncBridge = new SyncBridge(this.engine);
     await this.engine.init();
@@ -373,6 +379,25 @@ export class SqlTableService implements ITableStorageProvider {
     this.pendingBeforeSnapshot = null;
   }
 
+  private _cacheHistoricalSnapshot(mergedData: Record<string, any> | null): void {
+    if (!mergedData) {
+      this._historicalSnapshotForSqlBootstrap = null;
+      this._loadedFromHistoricalSnapshot = false;
+      return;
+    }
+    const clone: Record<string, any> = {};
+    let hasValidSheet = false;
+    for (const key of Object.keys(mergedData)) {
+      if (key.startsWith('sheet_') && (mergedData as any)[key]?._acu_from_base_state) {
+        continue;
+      }
+      clone[key] = JSON.parse(JSON.stringify((mergedData as any)[key]));
+      if (key.startsWith('sheet_')) hasValidSheet = true;
+    }
+    this._historicalSnapshotForSqlBootstrap = hasValidSheet ? clone as TableDataObject_ACU : null;
+    this._loadedFromHistoricalSnapshot = hasValidSheet;
+  }
+
   private _markMutationStarted(): void {
     if (!this.pendingBeforeSnapshot) {
       this.pendingBeforeSnapshot = this._cloneTableData(this.committedSnapshot);
@@ -512,25 +537,35 @@ export class SqlTableService implements ITableStorageProvider {
   private _ensureTablesFromTemplate(): void {
     const existingTables = new Set(this.engine.getTableNames());
 
-    // [修复] 优先从当前聊天模板预设获取模板，而不是依赖全局变量 TABLE_TEMPLATE_ACU
-    // 这样确保建表时只使用当前聊天模板预设的内容，不会混入全局模板的表
+    const historicalSnapshot = this._historicalSnapshotForSqlBootstrap;
+    const useHistorical = this._loadedFromHistoricalSnapshot && !!historicalSnapshot;
+
+    // [兼容] 历史快照存在时，允许在模板解析失败的情况下继续按历史快照建表
     const templateData = this._resolveCurrentChatTemplate();
-    if (!templateData) {
+    if (!useHistorical && !templateData) {
       if (existingTables.size > 0) return;
       throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
     }
 
-    // 收集当前聊天模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
-    const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
-    const templateSheetKeySet = new Set(sheetKeys);
+    const templateSheetKeys = templateData ? Object.keys(templateData).filter(k => k.startsWith('sheet_')) : [];
+    const templateSheetKeySet = new Set(templateSheetKeys);
+    const primarySheetKeys = useHistorical
+      ? Object.keys(historicalSnapshot!).filter(k => k.startsWith('sheet_'))
+      : templateSheetKeys;
     const missingSheets: Record<string, any> = {};
 
-    for (const key of sheetKeys) {
-      // 优先从 currentJsonTableData_ACU 获取 sheet 数据（可能包含指导表中用户修改过的 DDL），
-      // fallback 到当前聊天模板。这样用户在可视化编辑器中修改 DDL 后，建表时用的是新 DDL。
-      const liveSheet = (currentJsonTableData_ACU as any)?.[key];
-      const sheet = liveSheet || templateData[key] as any;
+    for (const key of primarySheetKeys) {
+      const sheet = useHistorical
+        ? (historicalSnapshot as any)[key]
+        : ((currentJsonTableData_ACU as any)?.[key] || templateData[key] as any);
       if (!sheet) continue;
+      if (useHistorical && !sheet.sourceData?.ddl) {
+        const headers = sheet.content?.[0];
+        if (!Array.isArray(headers) || headers.length === 0 || headers.every((v: any) => !v || String(v).trim() === '')) {
+          logWarn_ACU(`[SqlTableService] 历史 sheet ${key} (${sheet.name || 'unknown'}) 无 DDL 且无有效表头，跳过建表`);
+          continue;
+        }
+      }
       const ddl = generateDDL(sheet);
       const tableName = parseDDLTableName(ddl);
       if (tableName && !existingTables.has(tableName)) {
@@ -538,19 +573,27 @@ export class SqlTableService implements ITableStorageProvider {
       }
     }
 
-    // [修复] 检查 currentJsonTableData_ACU 中是否有当前聊天模板中存在但上面未处理的表
-    // 注意：只允许建当前聊天模板中存在的表，不建其他来源的表
-    if (currentJsonTableData_ACU) {
-      const liveSheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
-      for (const key of liveSheetKeys) {
-        if (missingSheets[key]) continue; // 已在上面处理过
-        if (!templateSheetKeySet.has(key)) continue; // 不在当前聊天模板中，跳过
-        const sheet = (currentJsonTableData_ACU as any)[key];
-        if (!sheet?.sourceData?.ddl) continue;
-        const tableName = parseDDLTableName(sheet.sourceData.ddl);
+    if (useHistorical && templateData) {
+      for (const key of templateSheetKeys) {
+        if (missingSheets[key]) continue;
+        const liveSheet = (currentJsonTableData_ACU as any)?.[key];
+        const sheet = liveSheet || templateData[key] as any;
+        if (!sheet) continue;
+        const ddl = generateDDL(sheet);
+        const tableName = parseDDLTableName(ddl);
         if (tableName && !existingTables.has(tableName)) {
           missingSheets[key] = sheet;
         }
+      }
+    } else if (currentJsonTableData_ACU) {
+      const liveSheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
+      for (const key of liveSheetKeys) {
+        if (missingSheets[key]) continue;
+        if (!templateSheetKeySet.has(key)) continue;
+        const sheet = (currentJsonTableData_ACU as any)[key];
+        if (!sheet?.sourceData?.ddl) continue;
+        const tableName = parseDDLTableName(sheet.sourceData.ddl);
+        if (tableName && !existingTables.has(tableName)) missingSheets[key] = sheet;
       }
     }
 
@@ -560,17 +603,17 @@ export class SqlTableService implements ITableStorageProvider {
     logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
 
     // 构造只包含缺失表的数据子集，交给 syncBridge 建表
-    // [修复] 同时为缺失表注入 seedRows（初始数据），使建表后 SQLite 中包含初版快照
-    // 设计文档 Q9 确认：seedRows 是初版快照，应写入 SQLite 作为真实数据
-    const partialData: TableDataObject_ACU = { mate: templateData.mate };
+    const partialData: TableDataObject_ACU = {
+      mate: (useHistorical ? (historicalSnapshot as any)?.mate : null)
+        || (templateData as any)?.mate
+        || this._getCurrentMate(),
+    };
     for (const [key, sheet] of Object.entries(missingSheets)) {
       const sheetCopy = JSON.parse(JSON.stringify(sheet));
 
-      // 如果 sheet 的 content 只有表头（stripSeedRows 后的空壳），尝试注入 seedRows
-      if (Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
+      if (!this._loadedFromHistoricalSnapshot && Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
         const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
         if (Array.isArray(seedRows) && seedRows.length > 0) {
-          // seedRows 是不含表头的纯数据行，拼接到表头后面
           sheetCopy.content = [sheetCopy.content[0] || [], ...seedRows];
           logDebug_ACU(`[SqlTableService] 表 ${key} (${sheetCopy.name}) 注入 ${seedRows.length} 行 seedRows 作为初版快照`);
         }
@@ -582,13 +625,15 @@ export class SqlTableService implements ITableStorageProvider {
 
     // 合并新建的表到当前 JSON 视图
     if (currentJsonTableData_ACU) {
-      for (const [key, sheet] of Object.entries(missingSheets)) {
-        (currentJsonTableData_ACU as any)[key] = sheet;
+      for (const key of Object.keys(missingSheets)) {
+        if ((partialData as any)[key]) {
+          (currentJsonTableData_ACU as any)[key] = JSON.parse(JSON.stringify((partialData as any)[key]));
+        }
       }
     } else {
-      _set_currentJsonTableData_ACU(templateData);
+      _set_currentJsonTableData_ACU(partialData);
     }
-    this._buildNameMapper(currentJsonTableData_ACU || templateData);
+    this._buildNameMapper((currentJsonTableData_ACU as any) || partialData || (templateData as any));
 
     logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
   }
