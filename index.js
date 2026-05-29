@@ -28795,6 +28795,9 @@ $CONTENT
         bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key`, 'input change', ($input) => {
             updateVectorMemoryField_ACU('rerankApiKey', String($input.val() ?? '').trim());
         });
+        bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction`, 'input change', ($input) => {
+            updateVectorMemoryField_ACU('rerankInstruction', String($input.val() ?? ''));
+        });
         bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-overview-sentence-limit`, 'input change', ($input) => {
             const defaults = getDefaultVectorMemoryConfig_ACU();
             updateVectorMemoryField_ACU('summaryChunkSentenceCount', parseIntegerField_ACU($input.val(), defaults.summaryChunkSentenceCount));
@@ -29376,6 +29379,9 @@ $CONTENT
             model,
             max_tokens: isNaN(max_tokens) ? 120000 : max_tokens,
             temperature: isNaN(temperature) ? 0.9 : temperature,
+            bodyParams: String($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-body-params`).val() ?? ''),
+            excludeBodyParams: String($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-exclude-body-params`).val() ?? ''),
+            requestHeaders: String($popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-api-request-headers`).val() ?? ''),
         });
         // 将新保存的模型添加到select中（如果不存在）
         if ($customApiModelSelect_ACU && $customApiModelSelect_ACU.find(`option[value="${escapeHtml_ACU$1(model)}"]`).length === 0) {
@@ -35647,6 +35653,9 @@ $CONTENT
         const setChecked = (id, v) => { const $el = find(id); if ($el.length)
             $el.prop('checked', !!v); };
         setVal('import-split-size', s.importSplitSize);
+        setVal('api-body-params', s.apiConfig.bodyParams ?? '');
+        setVal('api-exclude-body-params', s.apiConfig.excludeBodyParams ?? '');
+        setVal('api-request-headers', s.apiConfig.requestHeaders ?? '');
         setChecked('import-prompt-exclude-imported-worldbook-entries', s.importPromptExcludeImportedWorldbookEntries !== false);
         if ($autoUpdateEnabledCheckbox_ACU)
             $autoUpdateEnabledCheckbox_ACU.prop('checked', s.autoUpdateEnabled);
@@ -35684,6 +35693,7 @@ $CONTENT
         setVal('worldbook-vector-memory-rerank-endpoint', vectorMemoryConfig.rerankEndpoint || '');
         setVal('worldbook-vector-memory-rerank-model', vectorMemoryConfig.rerankModel || '');
         setVal('worldbook-vector-memory-rerank-api-key', vectorMemoryConfig.rerankApiKey || '');
+        setVal('worldbook-vector-memory-rerank-instruction', vectorMemoryConfig.rerankInstruction ?? '');
         setVal('worldbook-vector-memory-overview-sentence-limit', vectorMemoryConfig.summaryChunkSentenceCount);
         setChecked('worldbook-vector-memory-archive-without-summary', vectorMemoryConfig.archiveWithoutSummary === true);
         setVal('worldbook-vector-memory-recall-candidate-limit', vectorMemoryConfig.recallCandidateLimit);
@@ -46875,6 +46885,22 @@ $CONTENT
                                 <select id="${SCRIPT_ID_PREFIX_ACU}-api-model-select" class="text_pole">
                                     <option value="">-- 请先加载模型列表 --</option>
                                 </select>
+                                <div style="margin-top: 12px;">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-api-body-params">附加 Body 参数 (JSON):</label>
+                                    <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-body-params" rows="3" placeholder='{"top_p": 0.9, "frequency_penalty": 0.5}' style="width: 100%; resize: vertical; font-family: monospace;"></textarea>
+                                    <small class="notes">JSON 格式，会合并到请求 body 中（覆盖同名字段）。留空不附加。</small>
+                                </div>
+                                <div style="margin-top: 8px;">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-api-exclude-body-params">排除 Body 参数:</label>
+                                    <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-exclude-body-params" rows="2" placeholder='["stream", "top_p"]' style="width: 100%; resize: vertical; font-family: monospace;"></textarea>
+                                    <small class="notes">JSON 数组格式，列出的字段会从请求 body 中移除。留空不排除。</small>
+                                </div>
+                                <div style="margin-top: 8px;">
+                                    <label for="${SCRIPT_ID_PREFIX_ACU}-api-request-headers">附加请求头 (JSON):</label>
+                                    <textarea id="${SCRIPT_ID_PREFIX_ACU}-api-request-headers" rows="2" placeholder='{"X-Custom-Header": "value"}' style="width: 100%; resize: vertical; font-family: monospace;"></textarea>
+                                    <small class="notes">JSON 格式，会合并到请求 headers 中。留空不附加。</small>
+                                </div>
+
                             </div>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-api-status" class="notes" style="margin-top:12px;">状态: 未配置</div>
                             <div class="button-group">
@@ -47121,6 +47147,12 @@ $CONTENT
                                             <input type="password" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-api-key" placeholder="留空表示不附带 Authorization">
                                             <small class="notes">可与 Embedding 使用不同鉴权；若服务不需要鉴权可留空。</small>
                                         </div>
+                                        <div class="acu-col-sm" style="grid-column: 1 / -1;">
+                                            <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction">Rerank Instruction（重排指令）</label>
+                                            <textarea id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rerank-instruction" rows="3" placeholder="可选：传递给 Rerank API 的 instruction / query 参数，用于引导重排方向。留空则不附带。" style="width: 100%; resize: vertical;"></textarea>
+                                            <small class="notes">部分 Rerank 模型支持 instruction 参数（如 bge-reranker-v2-m3）；填写后会作为 query/instruction 字段发送。</small>
+                                        </div>
+
                                     </div>
                                     <small class="notes" style="display: block; margin-top: 8px;">启用真实 Rerank 后，Embedding 仍负责召回预筛，TopK 仍控制最终注入数量；这三者不是互相替代关系。</small>
                                 </div>
