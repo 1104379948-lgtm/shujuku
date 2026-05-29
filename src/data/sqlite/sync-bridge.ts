@@ -124,14 +124,28 @@ export class SyncBridge {
   /** 加载单张 sheet 到 SQLite */
   private _loadSheet(sheetKey: string, sheet: Sheet_ACU): void {
     // 生成 DDL
-    const ddl = generateDDL(sheet);
+    let ddl = generateDDL(sheet);
+
+    // [spv6.9] 检测 DDL 缺少 row_id 列时自动补充。
+    // 部分用户自定义表的 sourceData.ddl 中未定义 row_id 列，但 content[0] 表头有"行号"列，
+    // 导致 DDL 列数 < 表头列数，generateInserts 列映射错位。
+    const headers = sheet.content?.[0];
+    if (headers && Array.isArray(headers)) {
+      const firstHeader = String(headers[0] ?? '').trim();
+      if ((firstHeader === 'row_id' || firstHeader === '行号') && sheet.sourceData?.ddl) {
+        const ddlCols = parseDDLColumnNames(ddl);
+        if (!ddlCols.some(c => c.toLowerCase() === 'row_id')) {
+          // 在 CREATE TABLE xxx ( 之后插入 row_id 列定义
+          ddl = ddl.replace(/\(\s*\n?/, '(\n  row_id INTEGER PRIMARY KEY, -- 行号\n');
+        }
+      }
+    }
     const tableName = parseDDLTableName(ddl);
     if (!tableName) {
       throw new Error(`无法从 DDL 中解析表名: ${ddl.substring(0, 100)}`);
     }
 
     // [6.7.1] DDL 与 content 表头校验
-    const headers = sheet.content?.[0];
     if (headers && Array.isArray(headers) && sheet.sourceData?.ddl) {
       const validation = validateDDLAgainstHeaders(sheet.sourceData.ddl, headers);
       if (!validation.valid) {
