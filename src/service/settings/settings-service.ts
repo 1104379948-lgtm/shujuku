@@ -665,8 +665,11 @@ export   function buildDefaultSettings_ACU() {
 
 export   function applyTemplateScopeForCurrentChat_ACU({ isolationKey = getCurrentIsolationKey_ACU() } = {}) {
       const normalizedKey = normalizeTemplateScopeIsolationKey_ACU(isolationKey);
-      const migratedScopeState = migrateLegacyTemplateScopeForCurrentChat_ACU({ isolationKey: normalizedKey });
-      const scopeState = getCurrentChatTemplateScopeState_ACU({ isolationKey: normalizedKey }) || migratedScopeState;
+      // [修复] 先检查是否已有新格式状态，再决定是否需要迁移。
+      // migrated 语义：仅当本次调用真正执行了从旧格式到新格式的迁移时为 true。
+      const existingState = getCurrentChatTemplateScopeState_ACU({ isolationKey: normalizedKey });
+      const migratedScopeState = existingState ? null : migrateLegacyTemplateScopeForCurrentChat_ACU({ isolationKey: normalizedKey });
+      const scopeState = existingState || migratedScopeState;
       const selectedPresetName = normalizeTemplatePresetSelectionValue_ACU(scopeState?.presetName || '');
       let targetSnapshot = null;
 
