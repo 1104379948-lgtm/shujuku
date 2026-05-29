@@ -139,26 +139,27 @@ export function normalizeSqlStructure(sql: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// CHECK 约束剥离（加载历史数据时使用）
+// 列级约束剥离（加载历史数据时使用）
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * 从 CREATE TABLE DDL 中移除所有 CHECK 约束。
+ * 从 CREATE TABLE DDL 中移除所有会阻止 INSERT 的列级/表级约束。
  *
- * 用途：加载历史数据到 SQLite 时，DDL 中的 CHECK 约束不应阻止 INSERT。
- * CHECK 约束在本项目中的语义是"给 AI 看的格式提示"，不是 SQLite 层面的硬约束。
+ * 用途：加载历史数据到 SQLite 时，DDL 中的约束不应阻止 INSERT。
+ * 约束在本项目中的语义是"给 AI 看的格式提示"，不是 SQLite 层面的硬约束。
  * sourceData.ddl 原文保持不变（AI 仍能看到 CHECK 约束作为格式提示）。
  *
- * 处理两种形式：
- * 1. 列级 CHECK：`column_name TYPE CHECK(...) -- comment` → `column_name TYPE -- comment`
- * 2. 表级 CHECK：独立的 `CHECK(...)` 行（含前导逗号）→ 移除整行
+ * 移除的约束类型：
+ * 1. CHECK(...)：列级和表级
+ * 2. NOT NULL：列级
+ * 3. UNIQUE：列级关键字和表级 UNIQUE(...) 约束
  *
- * 正确处理嵌套括号（如 CHECK(LENGTH(summary) <= 40)）。
- * 不修改注释和字符串字面量中的 CHECK 文本。
+ * 保留：PRIMARY KEY、列类型、DEFAULT。
+ * 正确处理嵌套括号，不修改注释和字符串字面量中的文本。
  */
-export function stripCheckConstraints(ddl: string): string {
+export function stripInsertBlockingConstraints(ddl: string): string {
   if (!ddl || typeof ddl !== 'string') return ddl;
-  if (!/\bCHECK\b/i.test(ddl)) return ddl;
+  if (!/\b(?:CHECK|NOT\s+NULL|UNIQUE)\b/i.test(ddl)) return ddl;
 
   const lines = ddl.split('\n');
   const result: string[] = [];
@@ -171,7 +172,7 @@ export function stripCheckConstraints(ddl: string): string {
       continue;
     }
 
-    const processed = _stripCheckFromLine(line);
+    const processed = _stripConstraintsFromLine(line);
     const afterStrip = processed.replace(/--.*$/, '').trim();
     if (afterStrip === '' || afterStrip === ',') {
       continue;
@@ -185,8 +186,8 @@ export function stripCheckConstraints(ddl: string): string {
   return joined;
 }
 
-/** 从单行中移除 CHECK(...) 子句，正确处理嵌套括号 */
-function _stripCheckFromLine(line: string): string {
+/** 从单行中移除 CHECK(...)、NOT NULL、UNIQUE 约束，正确处理嵌套括号和字符串 */
+function _stripConstraintsFromLine(line: string): string {
   let i = 0;
   let inString = false;
   while (i < line.length) {
@@ -209,6 +210,7 @@ function _stripCheckFromLine(line: string): string {
     if (ch === '-' && i + 1 < line.length && line[i + 1] === '-') {
       break;
     }
+    // CHECK(...) — 带括号的约束
     if (/^CHECK\b/i.test(line.substring(i))) {
       const parenStart = line.indexOf('(', i + 5);
       if (parenStart === -1) {
@@ -231,6 +233,39 @@ function _stripCheckFromLine(line: string): string {
       const before = line.substring(0, i).replace(/\s+$/, '');
       const after = line.substring(j + 1);
       line = before + after;
+      continue;
+    }
+    // NOT NULL — 两个关键字，中间可能有多个空格
+    if (/^NOT\s+NULL\b/i.test(line.substring(i))) {
+      const match = line.substring(i).match(/^NOT\s+NULL\b/i)!;
+      const before = line.substring(0, i).replace(/\s+$/, '');
+      const after = line.substring(i + match[0].length);
+      line = before + after;
+      continue;
+    }
+    // UNIQUE — 列级关键字（不带括号的）或表级 UNIQUE(...)
+    if (/^UNIQUE\b/i.test(line.substring(i))) {
+      const rest = line.substring(i + 6);
+      const parenMatch = rest.match(/^\s*\(/);
+      if (parenMatch) {
+        // 表级 UNIQUE(col1, col2) — 找到匹配的右括号
+        const parenStart = i + 6 + parenMatch[0].length - 1;
+        let depth = 0;
+        let j = parenStart;
+        for (; j < line.length; j++) {
+          if (line[j] === '(') depth++;
+          else if (line[j] === ')') { depth--; if (depth === 0) break; }
+        }
+        if (depth !== 0) { i++; continue; }
+        const before = line.substring(0, i).replace(/\s+$/, '');
+        const after = line.substring(j + 1);
+        line = before + after;
+      } else {
+        // 列级 UNIQUE（无括号）
+        const before = line.substring(0, i).replace(/\s+$/, '');
+        const after = line.substring(i + 6);
+        line = before + after;
+      }
       continue;
     }
     i++;
