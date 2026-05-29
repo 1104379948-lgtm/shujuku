@@ -27,6 +27,7 @@ export {
 import {
   parseDDLTableName,
   parseDDLColumnNames,
+  parseDDLColumnComments,
   validateDDLTextAgainstHeaders_ACU,
 } from '../../shared/ddl-utils';
 
@@ -136,10 +137,38 @@ export function generateInserts(sheet: Sheet_ACU, tableName?: string): string[] 
 
   // 确定列名（从 DDL 解析，或从表头生成）
   const ddlColumns = sheet.sourceData?.ddl ? parseDDLColumnNames(sheet.sourceData.ddl) : null;
-  const columnNames = ddlColumns || headers.map((h, i) => {
+  const columnNames: string[] = ddlColumns || headers.map((h, i) => {
     if (h === 'row_id') return 'row_id';
     return h ? chineseToIdentifier(h) : `col_${i}`;
   });
+
+  // 当有 DDL 时，建立 DDL 列 → content 位置的映射（通过中文注释对齐表头）
+  // 解决 DDL 列序与 content 列序不一致时值错位的问题
+  let columnIndexMap: number[] | null = null;
+  if (ddlColumns && sheet.sourceData?.ddl) {
+    const comments = parseDDLColumnComments(sheet.sourceData.ddl);
+    const headerIndexMap = new Map<string, number>();
+    for (let i = 0; i < headers.length; i++) {
+      const h = headers[i];
+      if (h != null && !headerIndexMap.has(String(h))) {
+        headerIndexMap.set(String(h), i);
+      }
+    }
+    const mapped = ddlColumns.map(colName => {
+      if (colName === 'row_id') return headerIndexMap.get('row_id') ?? -1;
+      const chineseName = comments.get(colName);
+      if (chineseName && headerIndexMap.has(chineseName)) return headerIndexMap.get(chineseName)!; // 中文注释匹配
+      // fallback: DDL 列名本身就在表头中（英文表头场景）
+      if (headerIndexMap.has(colName)) return headerIndexMap.get(colName)!;
+      return -1; // 无法映射的列
+    });
+    // 只有当映射与位置索引不完全一致时才启用（避免无谓开销）
+    const needsRemap = mapped.some((idx, c) => idx !== c);
+    if (needsRemap) {
+      columnIndexMap = mapped;
+      logDebug_ACU(`[Schema] generateInserts: 检测到 DDL 列序与表头不一致，启用列对齐映射`);
+    }
+  }
 
   const statements: string[] = [];
 
@@ -149,7 +178,8 @@ export function generateInserts(sheet: Sheet_ACU, tableName?: string): string[] 
 
     const values: string[] = [];
     for (let c = 0; c < columnNames.length; c++) {
-      const val = c < row.length ? row[c] : null;
+      const srcIdx = columnIndexMap ? columnIndexMap[c] : c;
+      const val = (srcIdx >= 0 && srcIdx < row.length) ? row[srcIdx] : null;
       // 对白名单约束字段做值规范化（如 code_index 的大小写/全角数字）
       const normalizedVal = normalizeConstrainedValue(columnNames[c], val);
       values.push(escapeValue(normalizedVal));

@@ -276,6 +276,34 @@ describe('generateInserts', () => {
     const sheet = makeSheet({ content: [['row_id', 'name']] });
     expect(generateInserts(sheet, 'test_table')).toEqual([]);
   });
+
+  it('DDL 列序与 content 列序不一致时按中文注释对齐取值', () => {
+    // DDL 列序: row_id, name, is_absent, brief_intro
+    // content 列序: row_id, 姓名, 简介, 是否缺席
+    // DDL 注释: name--姓名, is_absent--是否缺席, brief_intro--简介
+    const sheet = makeSheet({
+      sourceData: {
+        note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+        ddl: `CREATE TABLE test_chars (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  name TEXT, -- 姓名
+  is_absent TEXT CHECK(is_absent IN ('是', '否')), -- 是否缺席
+  brief_intro TEXT -- 简介
+);`,
+      },
+      content: [
+        ['row_id', '姓名', '简介', '是否缺席'],
+        ['1', '陆清鸢', '练气八层修士', '否'],
+      ],
+    });
+    const inserts = generateInserts(sheet, 'test_chars');
+    expect(inserts).toHaveLength(1);
+    // is_absent 列应该取到 '否'（content 第3列），而非 '练气八层修士'（content 第2列）
+    expect(inserts[0]).toContain("'否'");
+    expect(inserts[0]).not.toContain("'练气八层修士', '否'");
+    // brief_intro 列应该取到 '练气八层修士'
+    expect(inserts[0]).toContain("'练气八层修士'");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════
