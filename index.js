@@ -9757,6 +9757,36 @@ function generateInserts(sheet, tableName) {
             return 'row_id';
         return h ? chineseToIdentifier(h) : `col_${i}`;
     });
+    // 当有 DDL 时，建立 DDL 列 → content 位置的映射（通过中文注释对齐表头）
+    // 解决 DDL 列序与 content 列序不一致时值错位的问题
+    let columnIndexMap = null;
+    if (ddlColumns && sheet.sourceData?.ddl) {
+        const comments = parseDDLColumnComments(sheet.sourceData.ddl);
+        const headerIndexMap = new Map();
+        for (let i = 0; i < headers.length; i++) {
+            const h = headers[i];
+            if (h != null && !headerIndexMap.has(String(h))) {
+                headerIndexMap.set(String(h), i);
+            }
+        }
+        const mapped = ddlColumns.map(colName => {
+            if (colName === 'row_id')
+                return headerIndexMap.get('row_id') ?? -1;
+            const chineseName = comments.get(colName);
+            if (chineseName && headerIndexMap.has(chineseName))
+                return headerIndexMap.get(chineseName); // 中文注释匹配
+            // fallback: DDL 列名本身就在表头中（英文表头场景）
+            if (headerIndexMap.has(colName))
+                return headerIndexMap.get(colName);
+            return -1; // 无法映射的列
+        });
+        // 只有当映射与位置索引不完全一致时才启用（避免无谓开销）
+        const needsRemap = mapped.some((idx, c) => idx !== c);
+        if (needsRemap) {
+            columnIndexMap = mapped;
+            logDebug_ACU(`[Schema] generateInserts: 检测到 DDL 列序与表头不一致，启用列对齐映射`);
+        }
+    }
     const statements = [];
     for (let r = 1; r < content.length; r++) {
         const row = content[r];
@@ -9764,7 +9794,8 @@ function generateInserts(sheet, tableName) {
             continue;
         const values = [];
         for (let c = 0; c < columnNames.length; c++) {
-            const val = c < row.length ? row[c] : null;
+            const srcIdx = columnIndexMap ? columnIndexMap[c] : c;
+            const val = (srcIdx >= 0 && srcIdx < row.length) ? row[srcIdx] : null;
             // 对白名单约束字段做值规范化（如 code_index 的大小写/全角数字）
             const normalizedVal = normalizeConstrainedValue(columnNames[c], val);
             values.push(escapeValue(normalizedVal));
@@ -11349,6 +11380,8 @@ class SqlTableService {
         this._initialized = false;
         this.committedSnapshot = null;
         this.pendingBeforeSnapshot = null;
+        this._historicalSnapshotForSqlBootstrap = null;
+        this._loadedFromHistoricalSnapshot = false;
         this.engine = new SqliteEngine();
         this.syncBridge = new SyncBridge(this.engine);
     }
@@ -11389,6 +11422,7 @@ class SqlTableService {
             // 不应在 loadFromChat 阶段触发 SQLite 建表；建表延迟到首次真实写操作。
             const shouldSkipSqlLoadForLegacyMigration = !!mergeResult.usedLegacyMigration;
             if (!mergedData || !hasRealDataRows || shouldSkipSqlLoadForLegacyMigration) {
+                this._cacheHistoricalSnapshot(mergedData);
                 // 新开卡场景（mergedData=null）或空壳结构（只有表头）：
                 // 只初始化引擎，不建表——建表延迟到第一次写操作（applyEdits/executeMutation）时
                 // 这样用户在新开卡后还能修改表结构（DDL），直到真正填数据时才锁定表结构
@@ -11407,6 +11441,7 @@ class SqlTableService {
                 this._initialized = true;
                 return { loaded: false, source: 'empty' };
             }
+            this._cacheHistoricalSnapshot(mergedData);
             // 将 JSON 数据加载到 SQLite
             // [防御] 修复 content 表头为空的 sheet——从 DDL 推导列名和中文注释
             // 这处理了历史数据被污染（content=[[]] 或 content[0] 为空数组）的场景
@@ -11500,6 +11535,8 @@ class SqlTableService {
     async replaceCurrentData(data) {
         this.engine.dispose();
         disposeGlobalNameMapper();
+        this._historicalSnapshotForSqlBootstrap = null;
+        this._loadedFromHistoricalSnapshot = false;
         this.engine = new SqliteEngine();
         this.syncBridge = new SyncBridge(this.engine);
         await this.engine.init();
@@ -11634,6 +11671,25 @@ class SqlTableService {
         this.committedSnapshot = this._cloneTableData(data);
         this.pendingBeforeSnapshot = null;
     }
+    _cacheHistoricalSnapshot(mergedData) {
+        if (!mergedData) {
+            this._historicalSnapshotForSqlBootstrap = null;
+            this._loadedFromHistoricalSnapshot = false;
+            return;
+        }
+        const clone = {};
+        let hasValidSheet = false;
+        for (const key of Object.keys(mergedData)) {
+            if (key.startsWith('sheet_') && mergedData[key]?._acu_from_base_state) {
+                continue;
+            }
+            clone[key] = JSON.parse(JSON.stringify(mergedData[key]));
+            if (key.startsWith('sheet_'))
+                hasValidSheet = true;
+        }
+        this._historicalSnapshotForSqlBootstrap = hasValidSheet ? clone : null;
+        this._loadedFromHistoricalSnapshot = hasValidSheet;
+    }
     _markMutationStarted() {
         if (!this.pendingBeforeSnapshot) {
             this.pendingBeforeSnapshot = this._cloneTableData(this.committedSnapshot);
@@ -11765,42 +11821,101 @@ class SqlTableService {
         // [修复] 优先从当前聊天模板预设获取模板，而不是依赖全局变量 TABLE_TEMPLATE_ACU
         // 这样确保建表时只使用当前聊天模板预设的内容，不会混入全局模板的表
         const templateData = this._resolveCurrentChatTemplate();
-        if (!templateData) {
+        // [修复] 模板解析失败时，如果有旧快照或 live 数据，允许以快照为主建表；
+        // 只有完全没有模板、没有快照、没有已有表时才抛错。
+        const historicalSnapshot = this._historicalSnapshotForSqlBootstrap;
+        const useHistorical = this._loadedFromHistoricalSnapshot && !!historicalSnapshot;
+        if (!templateData && !useHistorical && !currentJsonTableData_ACU) {
             if (existingTables.size > 0)
-                return;
-            throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
+                return; // 已有表，无需建表
+            throw new Error('[SqlTableService] 模板解析失败且无可用快照，无法建表。请检查模板格式。');
         }
-        // 收集当前聊天模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
-        const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
-        const templateSheetKeySet = new Set(sheetKeys);
+        const templateSheetKeys = templateData
+            ? Object.keys(templateData).filter(k => k.startsWith('sheet_'))
+            : [];
+        const primarySheetKeys = useHistorical
+            ? Object.keys(historicalSnapshot).filter(k => k.startsWith('sheet_'))
+            : templateSheetKeys;
         const missingSheets = {};
-        for (const key of sheetKeys) {
-            // 优先从 currentJsonTableData_ACU 获取 sheet 数据（可能包含指导表中用户修改过的 DDL），
-            // fallback 到当前聊天模板。这样用户在可视化编辑器中修改 DDL 后，建表时用的是新 DDL。
-            const liveSheet = currentJsonTableData_ACU?.[key];
-            const sheet = liveSheet || templateData[key];
+        // [修复] 防止同轮多个 sheet 指向同一 SQL tableName 导致重复建表
+        const plannedTableNames = new Set();
+        for (const key of primarySheetKeys) {
+            const sheet = useHistorical
+                ? historicalSnapshot[key]
+                : (currentJsonTableData_ACU?.[key] || templateData?.[key]);
             if (!sheet)
                 continue;
+            // [修复] 对所有非纯模板来源的 sheet 统一做无 DDL 表头校验。
+            // useHistorical 时 sheet 来自 historicalSnapshot；非 historical 时如果 sheet 来自
+            // currentJsonTableData_ACU（而非 templateData），同样需要校验。
+            const isFromLiveData = useHistorical || (!!currentJsonTableData_ACU?.[key]);
+            if (isFromLiveData && !sheet.sourceData?.ddl) {
+                const headers = sheet.content?.[0];
+                if (!Array.isArray(headers) || headers.length === 0 || headers.every((v) => !v || String(v).trim() === '')) {
+                    logWarn_ACU(`[SqlTableService] sheet ${key} (${sheet.name || 'unknown'}) 无 DDL 且无有效表头，跳过建表`);
+                    continue;
+                }
+            }
             const ddl = generateDDL(sheet);
             const tableName = parseDDLTableName(ddl);
-            if (tableName && !existingTables.has(tableName)) {
+            if (tableName && !existingTables.has(tableName) && !plannedTableNames.has(tableName)) {
+                plannedTableNames.add(tableName);
                 missingSheets[key] = sheet;
             }
         }
-        // [修复] 检查 currentJsonTableData_ACU 中是否有当前聊天模板中存在但上面未处理的表
-        // 注意：只允许建当前聊天模板中存在的表，不建其他来源的表
-        if (currentJsonTableData_ACU) {
+        if (useHistorical) {
+            for (const key of templateSheetKeys) {
+                if (missingSheets[key])
+                    continue;
+                const liveSheet = currentJsonTableData_ACU?.[key];
+                const sheet = liveSheet || templateData?.[key];
+                if (!sheet)
+                    continue;
+                const ddl = generateDDL(sheet);
+                const tableName = parseDDLTableName(ddl);
+                if (tableName && !existingTables.has(tableName) && !plannedTableNames.has(tableName)) {
+                    plannedTableNames.add(tableName);
+                    missingSheets[key] = sheet;
+                }
+            }
+        }
+        else if (currentJsonTableData_ACU) {
             const liveSheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
             for (const key of liveSheetKeys) {
                 if (missingSheets[key])
-                    continue; // 已在上面处理过
-                if (!templateSheetKeySet.has(key))
-                    continue; // 不在当前聊天模板中，跳过
-                const sheet = currentJsonTableData_ACU[key];
-                if (!sheet?.sourceData?.ddl)
                     continue;
-                const tableName = parseDDLTableName(sheet.sourceData.ddl);
-                if (tableName && !existingTables.has(tableName)) {
+                const sheet = currentJsonTableData_ACU[key];
+                if (!sheet)
+                    continue;
+                // [修复] 以快照数据为准建表，不受当前模板 sheetKey 集合裁剪。
+                // 无 DDL 时从表头生成 fallback DDL（与 useHistorical 分支对称）。
+                if (!sheet.sourceData?.ddl) {
+                    const headers = sheet.content?.[0];
+                    if (!Array.isArray(headers) || headers.length === 0 || headers.every((v) => !v || String(v).trim() === '')) {
+                        logWarn_ACU(`[SqlTableService] live sheet ${key} (${sheet.name || 'unknown'}) 无 DDL 且无有效表头，跳过建表`);
+                        continue;
+                    }
+                }
+                const ddl = generateDDL(sheet);
+                const tableName = parseDDLTableName(ddl);
+                if (tableName && !existingTables.has(tableName) && !plannedTableNames.has(tableName)) {
+                    plannedTableNames.add(tableName);
+                    missingSheets[key] = sheet;
+                }
+            }
+            // [修复] 补充模板中存在但快照中没有的新表（与 useHistorical 分支的第二循环对称）
+            for (const key of templateSheetKeys) {
+                if (missingSheets[key])
+                    continue;
+                if (liveSheetKeys.includes(key))
+                    continue;
+                const sheet = templateData?.[key];
+                if (!sheet)
+                    continue;
+                const ddl = generateDDL(sheet);
+                const tableName = parseDDLTableName(ddl);
+                if (tableName && !existingTables.has(tableName) && !plannedTableNames.has(tableName)) {
+                    plannedTableNames.add(tableName);
                     missingSheets[key] = sheet;
                 }
             }
@@ -11810,16 +11925,15 @@ class SqlTableService {
             return;
         logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
         // 构造只包含缺失表的数据子集，交给 syncBridge 建表
-        // [修复] 同时为缺失表注入 seedRows（初始数据），使建表后 SQLite 中包含初版快照
-        // 设计文档 Q9 确认：seedRows 是初版快照，应写入 SQLite 作为真实数据
-        const partialData = { mate: templateData.mate };
+        const mateFallback = templateData?.mate || currentJsonTableData_ACU?.mate || { type: 'chatSheets', version: 1 };
+        const partialData = { mate: mateFallback };
         for (const [key, sheet] of Object.entries(missingSheets)) {
             const sheetCopy = JSON.parse(JSON.stringify(sheet));
-            // 如果 sheet 的 content 只有表头（stripSeedRows 后的空壳），尝试注入 seedRows
-            if (Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
+            // [修复] seedRows 仅在新开卡路径注入（无历史快照且无旧 JSON 数据）。
+            // 有 currentJsonTableData_ACU 时说明存在旧表格数据，不应用模板 seedRows 覆盖。
+            if (!this._loadedFromHistoricalSnapshot && !currentJsonTableData_ACU && Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
                 const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
                 if (Array.isArray(seedRows) && seedRows.length > 0) {
-                    // seedRows 是不含表头的纯数据行，拼接到表头后面
                     sheetCopy.content = [sheetCopy.content[0] || [], ...seedRows];
                     logDebug_ACU(`[SqlTableService] 表 ${key} (${sheetCopy.name}) 注入 ${seedRows.length} 行 seedRows 作为初版快照`);
                 }
@@ -11829,14 +11943,16 @@ class SqlTableService {
         this.syncBridge.loadFromTableData(partialData);
         // 合并新建的表到当前 JSON 视图
         if (currentJsonTableData_ACU) {
-            for (const [key, sheet] of Object.entries(missingSheets)) {
-                currentJsonTableData_ACU[key] = sheet;
+            for (const key of Object.keys(missingSheets)) {
+                if (partialData[key]) {
+                    currentJsonTableData_ACU[key] = JSON.parse(JSON.stringify(partialData[key]));
+                }
             }
         }
         else {
-            _set_currentJsonTableData_ACU(templateData);
+            _set_currentJsonTableData_ACU(partialData);
         }
-        this._buildNameMapper(currentJsonTableData_ACU || templateData);
+        this._buildNameMapper(currentJsonTableData_ACU || templateData || partialData);
         logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
     }
     /**
@@ -17797,7 +17913,12 @@ async function resetScriptStateForNewChat_ACU(chatFileName) {
     generationGate_ACU.lastGeneration = null;
     logDebug_ACU(`ACU: currentChatFileIdentifier FINAL set to: "${currentChatFileIdentifier_ACU}" (Source: CHAT_CHANGED event)`);
     await loadAllChatMessages_ACU();
-    applyTemplateScopeForCurrentChat_ACU();
+    const templateScopeResult = applyTemplateScopeForCurrentChat_ACU();
+    // [修复] 如果迁移函数成功将旧聊天数据冻结为 chat_override，持久化到磁盘。
+    // 否则每次打开都要重新迁移，且迁移结果可能因数据源变化而不稳定。
+    if (templateScopeResult?.migrated) {
+        await saveChatToHost_ACU();
+    }
     // updateCardUpdateStatusDisplay 由 presentation 层的 init.ts CHAT_CHANGED 回调执行
     await loadOrCreateJsonTableFromChatHistory_ACU();
     // [核心修复] 切换聊天时，强制刷新可视化编辑器数据
@@ -23838,7 +23959,9 @@ function getHistoricalTemplateGuideDataForIsolationKey_ACU({ chat = getChatArray
             appendTables(tagData?.independentData);
         }
         // ── 兼容旧 native：仅当该消息没有有效 V2 sheet 数据时，回退读取旧格式 ──
-        if (!hasV2IndependentTables && isLegacyMatchForIsolation_ACU(message, isolationConfig)) {
+        // [修复] 模板冻结场景下不受隔离配置限制——只要消息中有表数据就读取。
+        // 隔离功能已废弃，不应阻止旧聊天的模板恢复。
+        if (!hasV2IndependentTables) {
             const legacyIndependent = readLegacyIndependentData_ACU(message);
             appendTables(legacyIndependent, { summaryOnly: false });
             const legacyStandard = readLegacyStandardData_ACU(message);
@@ -26248,8 +26371,11 @@ function buildDefaultSettings_ACU() {
 }
 function applyTemplateScopeForCurrentChat_ACU({ isolationKey = getCurrentIsolationKey_ACU() } = {}) {
     const normalizedKey = normalizeTemplateScopeIsolationKey_ACU(isolationKey);
-    const migratedScopeState = migrateLegacyTemplateScopeForCurrentChat_ACU({ isolationKey: normalizedKey });
-    const scopeState = getCurrentChatTemplateScopeState_ACU({ isolationKey: normalizedKey }) || migratedScopeState;
+    // [修复] 先检查是否已有新格式状态，再决定是否需要迁移。
+    // migrated 语义：仅当本次调用真正执行了从旧格式到新格式的迁移时为 true。
+    const existingState = getCurrentChatTemplateScopeState_ACU({ isolationKey: normalizedKey });
+    const migratedScopeState = existingState ? null : migrateLegacyTemplateScopeForCurrentChat_ACU({ isolationKey: normalizedKey });
+    const scopeState = existingState || migratedScopeState;
     const selectedPresetName = normalizeTemplatePresetSelectionValue_ACU(scopeState?.presetName || '');
     let targetSnapshot = null;
     if (scopeState?.mode === 'chat_override' && scopeState?.templateStr) {
@@ -26275,6 +26401,7 @@ function applyTemplateScopeForCurrentChat_ACU({ isolationKey = getCurrentIsolati
             mode: 'chat_override',
             isolationKey: normalizedKey,
             presetName: scopeState.presetName || '',
+            migrated: !!migratedScopeState,
         };
     }
     if (scopeState?.mode === 'preset_link') {
@@ -32125,15 +32252,38 @@ function resolveTableApiPresetOverride_ACU(tableName) {
 /**
  * 从单个 AI 响应中提取编辑内容（去掉 <tableEdit> 标签和注释标记）。
  * 返回原始编辑文本，不执行。
- * 注意：默认 useLastPairOnly=true，只提取最后一个 <tableEdit> 块。
+ * 策略：
+ * - 优先提取所有成对 <tableEdit>...</tableEdit> 块（大小写不敏感）
+ * - 仅做边界清洗（注释标记 + 首尾 wrapper），不改写块内部业务字符串
+ * - 无成对块时回退 extractTableEditInner_ACU，保持旧兼容
  */
 function extractEditsFromAiResponse_ACU(aiResponse) {
     if (!aiResponse || typeof aiResponse !== 'string')
         return null;
-    const extracted = extractTableEditInner_ACU(aiResponse, { allowNoTableEditTags: true, useLastPairOnly: true });
+    const normalizeEntityTags = (text) => text.replace(/&lt;\s*(\/?)\s*(tableEdit|content)\b([^&]*)&gt;/gi, '<$1$2$3>');
+    const stripBoundaryWrappers = (text) => {
+        let out = text.replace(/<!--|-->/g, '').trim();
+        out = out.replace(/^\s*<content\b[^>]*>/i, '').replace(/<\/content>\s*$/i, '').trim();
+        out = out.replace(/^\s*<tableEdit\b[^>]*>/i, '').replace(/<\/tableEdit>\s*$/i, '').trim();
+        return out;
+    };
+    const normalizedResponse = normalizeEntityTags(aiResponse);
+    const allBlocks = [];
+    const fullRe = /<tableEdit\b[^>]*>([\s\S]*?)<\/tableEdit>/gi;
+    let m;
+    while ((m = fullRe.exec(normalizedResponse)) !== null) {
+        const block = stripBoundaryWrappers(m[1] || '');
+        if (block)
+            allBlocks.push(block);
+    }
+    if (allBlocks.length > 0) {
+        return allBlocks.join('\n\n');
+    }
+    const extracted = extractTableEditInner_ACU(normalizedResponse, { allowNoTableEditTags: true, useLastPairOnly: true });
     if (!extracted?.inner)
         return null;
-    return extracted.inner.replace(/<!--|-->/g, '').trim();
+    const fallback = stripBoundaryWrappers(normalizeEntityTags(extracted.inner));
+    return fallback || null;
 }
 /**
  * 合并多个 AI 响应的编辑内容为一个统一文本。
@@ -32615,7 +32765,7 @@ async function executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImpor
                 if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
                     throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
                 }
-                if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+                if (!extractEditsFromAiResponse_ACU(aiResponse)) {
                     throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
                 }
                 if (executionOptions.deferApply) {
@@ -32979,7 +33129,7 @@ async function generateDeferredResponsesForPreparedCalls_ACU(preparedCalls, onPr
         if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
             throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
         }
-        if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+        if (!extractEditsFromAiResponse_ACU(aiResponse)) {
             throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
         }
         return {
@@ -33026,7 +33176,7 @@ function unionStrings_ACU(...groups) {
  * 将 round 内多 group 的修改按各自 saveTargetIndex 分桶。
  *
  * round 内 AI 响应仍然合并 apply 一次，但持久化必须回到每个 group 对应的楼层。
- * 这里只记录实际修改过的 sheet，避免 updateGroupKeys 把未修改表误判为已更新。
+ * targetSheetKeys 只保存实际修改的表数据；updateGroupKeys/trackingSheetKeys 保留整组表以确保同组未改动表也被推进楼层记录。
  */
 function buildRoundPersistenceTargets_ACU(roundItems, modifiedKeys) {
     if (!Array.isArray(roundItems) || roundItems.length === 0 || !Array.isArray(modifiedKeys) || modifiedKeys.length === 0) {
@@ -33049,8 +33199,8 @@ function buildRoundPersistenceTargets_ACU(roundItems, modifiedKeys) {
             trackingSheetKeys: [],
         };
         existing.targetSheetKeys = unionStrings_ACU(existing.targetSheetKeys, changedSheetKeys);
-        existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, changedSheetKeys);
-        existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, changedSheetKeys);
+        existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, groupSheetKeys);
+        existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, groupSheetKeys);
         targetsByIndex.set(targetMessageIndex, existing);
     }
     return Array.from(targetsByIndex.values()).sort((a, b) => a.targetMessageIndex - b.targetMessageIndex);
@@ -50377,7 +50527,7 @@ function mainInitialize_ACU() {
                         logDebug_ACU(`ACU: Skip delayed chat refresh because active chat already changed to "${currentChatFileIdentifier_ACU || '未知'}".`);
                         return;
                     }
-                    applyTemplateScopeForCurrentChat_ACU();
+                    // 模板作用域已在 resetScriptStateForNewChat_ACU 主链完成应用，这里禁止二次 apply，避免覆盖聊天快照。
                     // [6.7.3] SQLite 模式下，切换聊天后需要重建内存数据库（初始化 SQLite 引擎）
                     if (isSqliteMode()) {
                         logDebug_ACU('[SQLite] CHAT_CHANGED: 重建内存数据库...');
