@@ -9771,6 +9771,36 @@ $CONTENT
                 return 'row_id';
             return h ? chineseToIdentifier(h) : `col_${i}`;
         });
+        // 当有 DDL 时，建立 DDL 列 → content 位置的映射（通过中文注释对齐表头）
+        // 解决 DDL 列序与 content 列序不一致时值错位的问题
+        let columnIndexMap = null;
+        if (ddlColumns && sheet.sourceData?.ddl) {
+            const comments = parseDDLColumnComments(sheet.sourceData.ddl);
+            const headerIndexMap = new Map();
+            for (let i = 0; i < headers.length; i++) {
+                const h = headers[i];
+                if (h != null && !headerIndexMap.has(String(h))) {
+                    headerIndexMap.set(String(h), i);
+                }
+            }
+            const mapped = ddlColumns.map(colName => {
+                if (colName === 'row_id')
+                    return headerIndexMap.get('row_id') ?? -1;
+                const chineseName = comments.get(colName);
+                if (chineseName && headerIndexMap.has(chineseName))
+                    return headerIndexMap.get(chineseName); // 中文注释匹配
+                // fallback: DDL 列名本身就在表头中（英文表头场景）
+                if (headerIndexMap.has(colName))
+                    return headerIndexMap.get(colName);
+                return -1; // 无法映射的列
+            });
+            // 只有当映射与位置索引不完全一致时才启用（避免无谓开销）
+            const needsRemap = mapped.some((idx, c) => idx !== c);
+            if (needsRemap) {
+                columnIndexMap = mapped;
+                logDebug_ACU(`[Schema] generateInserts: 检测到 DDL 列序与表头不一致，启用列对齐映射`);
+            }
+        }
         const statements = [];
         for (let r = 1; r < content.length; r++) {
             const row = content[r];
@@ -9778,7 +9808,8 @@ $CONTENT
                 continue;
             const values = [];
             for (let c = 0; c < columnNames.length; c++) {
-                const val = c < row.length ? row[c] : null;
+                const srcIdx = columnIndexMap ? columnIndexMap[c] : c;
+                const val = (srcIdx >= 0 && srcIdx < row.length) ? row[srcIdx] : null;
                 // 对白名单约束字段做值规范化（如 code_index 的大小写/全角数字）
                 const normalizedVal = normalizeConstrainedValue(columnNames[c], val);
                 values.push(escapeValue(normalizedVal));
@@ -26354,8 +26385,11 @@ $CONTENT
     }
     function applyTemplateScopeForCurrentChat_ACU({ isolationKey = getCurrentIsolationKey_ACU() } = {}) {
         const normalizedKey = normalizeTemplateScopeIsolationKey_ACU(isolationKey);
-        const migratedScopeState = migrateLegacyTemplateScopeForCurrentChat_ACU({ isolationKey: normalizedKey });
-        const scopeState = getCurrentChatTemplateScopeState_ACU({ isolationKey: normalizedKey }) || migratedScopeState;
+        // [修复] 先检查是否已有新格式状态，再决定是否需要迁移。
+        // migrated 语义：仅当本次调用真正执行了从旧格式到新格式的迁移时为 true。
+        const existingState = getCurrentChatTemplateScopeState_ACU({ isolationKey: normalizedKey });
+        const migratedScopeState = existingState ? null : migrateLegacyTemplateScopeForCurrentChat_ACU({ isolationKey: normalizedKey });
+        const scopeState = existingState || migratedScopeState;
         const selectedPresetName = normalizeTemplatePresetSelectionValue_ACU(scopeState?.presetName || '');
         let targetSnapshot = null;
         if (scopeState?.mode === 'chat_override' && scopeState?.templateStr) {
@@ -32232,15 +32266,38 @@ $CONTENT
     /**
      * 从单个 AI 响应中提取编辑内容（去掉 <tableEdit> 标签和注释标记）。
      * 返回原始编辑文本，不执行。
-     * 注意：默认 useLastPairOnly=true，只提取最后一个 <tableEdit> 块。
+     * 策略：
+     * - 优先提取所有成对 <tableEdit>...</tableEdit> 块（大小写不敏感）
+     * - 仅做边界清洗（注释标记 + 首尾 wrapper），不改写块内部业务字符串
+     * - 无成对块时回退 extractTableEditInner_ACU，保持旧兼容
      */
     function extractEditsFromAiResponse_ACU(aiResponse) {
         if (!aiResponse || typeof aiResponse !== 'string')
             return null;
-        const extracted = extractTableEditInner_ACU(aiResponse, { allowNoTableEditTags: true, useLastPairOnly: true });
+        const normalizeEntityTags = (text) => text.replace(/&lt;\s*(\/?)\s*(tableEdit|content)\b([^&]*)&gt;/gi, '<$1$2$3>');
+        const stripBoundaryWrappers = (text) => {
+            let out = text.replace(/<!--|-->/g, '').trim();
+            out = out.replace(/^\s*<content\b[^>]*>/i, '').replace(/<\/content>\s*$/i, '').trim();
+            out = out.replace(/^\s*<tableEdit\b[^>]*>/i, '').replace(/<\/tableEdit>\s*$/i, '').trim();
+            return out;
+        };
+        const normalizedResponse = normalizeEntityTags(aiResponse);
+        const allBlocks = [];
+        const fullRe = /<tableEdit\b[^>]*>([\s\S]*?)<\/tableEdit>/gi;
+        let m;
+        while ((m = fullRe.exec(normalizedResponse)) !== null) {
+            const block = stripBoundaryWrappers(m[1] || '');
+            if (block)
+                allBlocks.push(block);
+        }
+        if (allBlocks.length > 0) {
+            return allBlocks.join('\n\n');
+        }
+        const extracted = extractTableEditInner_ACU(normalizedResponse, { allowNoTableEditTags: true, useLastPairOnly: true });
         if (!extracted?.inner)
             return null;
-        return extracted.inner.replace(/<!--|-->/g, '').trim();
+        const fallback = stripBoundaryWrappers(normalizeEntityTags(extracted.inner));
+        return fallback || null;
     }
     /**
      * 合并多个 AI 响应的编辑内容为一个统一文本。
@@ -32722,7 +32779,7 @@ $CONTENT
                     if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
                         throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
                     }
-                    if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+                    if (!extractEditsFromAiResponse_ACU(aiResponse)) {
                         throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
                     }
                     if (executionOptions.deferApply) {
@@ -33086,7 +33143,7 @@ $CONTENT
             if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
                 throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
             }
-            if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+            if (!extractEditsFromAiResponse_ACU(aiResponse)) {
                 throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
             }
             return {
@@ -50484,7 +50541,7 @@ $CONTENT
                             logDebug_ACU(`ACU: Skip delayed chat refresh because active chat already changed to "${currentChatFileIdentifier_ACU || '未知'}".`);
                             return;
                         }
-                        applyTemplateScopeForCurrentChat_ACU();
+                        // 模板作用域已在 resetScriptStateForNewChat_ACU 主链完成应用，这里禁止二次 apply，避免覆盖聊天快照。
                         // [6.7.3] SQLite 模式下，切换聊天后需要重建内存数据库（初始化 SQLite 引擎）
                         if (isSqliteMode()) {
                             logDebug_ACU('[SQLite] CHAT_CHANGED: 重建内存数据库...');
