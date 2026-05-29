@@ -366,6 +366,58 @@ describe('buildRoundPersistenceTargets_ACU', () => {
       },
     ]);
   });
+
+  it('同组部分表修改时 updateGroupKeys/trackingSheetKeys 包含整组表而 targetSheetKeys 只含修改表', () => {
+    const result = buildRoundPersistenceTargets_ACU([
+      {
+        groupKey: 'group_a',
+        group: { sheetKeys: ['sheet_0', 'sheet_1', 'sheet_2'] },
+        batchIndices: [2],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 2,
+        groupOrder: 0,
+      },
+    ] as any, ['sheet_1']);
+
+    expect(result).toEqual([
+      {
+        targetMessageIndex: 2,
+        targetSheetKeys: ['sheet_1'],
+        updateGroupKeys: ['sheet_0', 'sheet_1', 'sheet_2'],
+        trackingSheetKeys: ['sheet_0', 'sheet_1', 'sheet_2'],
+      },
+    ]);
+  });
+
+  it('多组合并同一楼层时 updateGroupKeys/trackingSheetKeys 包含所有组的完整表集合', () => {
+    const result = buildRoundPersistenceTargets_ACU([
+      {
+        groupKey: 'group_a',
+        group: { sheetKeys: ['sheet_0', 'sheet_1'] },
+        batchIndices: [4],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 4,
+        groupOrder: 0,
+      },
+      {
+        groupKey: 'group_b',
+        group: { sheetKeys: ['sheet_2', 'sheet_3'] },
+        batchIndices: [4],
+        batchNumberInGroup: 1,
+        saveTargetIndex: 4,
+        groupOrder: 1,
+      },
+    ] as any, ['sheet_0', 'sheet_2']);
+
+    expect(result).toEqual([
+      {
+        targetMessageIndex: 4,
+        targetSheetKeys: ['sheet_0', 'sheet_2'],
+        updateGroupKeys: ['sheet_0', 'sheet_1', 'sheet_2', 'sheet_3'],
+        trackingSheetKeys: ['sheet_0', 'sheet_1', 'sheet_2', 'sheet_3'],
+      },
+    ]);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════

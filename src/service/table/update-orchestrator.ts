@@ -1231,7 +1231,7 @@ export interface RoundPersistenceTarget_ACU {
  * 将 round 内多 group 的修改按各自 saveTargetIndex 分桶。
  *
  * round 内 AI 响应仍然合并 apply 一次，但持久化必须回到每个 group 对应的楼层。
- * 这里只记录实际修改过的 sheet，避免 updateGroupKeys 把未修改表误判为已更新。
+ * targetSheetKeys 只保存实际修改的表数据；updateGroupKeys/trackingSheetKeys 保留整组表以确保同组未改动表也被推进楼层记录。
  */
 export function buildRoundPersistenceTargets_ACU(
     roundItems: FillRoundItem_ACU[],
@@ -1261,8 +1261,8 @@ export function buildRoundPersistenceTargets_ACU(
             trackingSheetKeys: [],
         };
         existing.targetSheetKeys = unionStrings_ACU(existing.targetSheetKeys, changedSheetKeys);
-        existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, changedSheetKeys);
-        existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, changedSheetKeys);
+        existing.updateGroupKeys = unionStrings_ACU(existing.updateGroupKeys, groupSheetKeys);
+        existing.trackingSheetKeys = unionStrings_ACU(existing.trackingSheetKeys, groupSheetKeys);
         targetsByIndex.set(targetMessageIndex, existing);
     }
 
