@@ -481,6 +481,40 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     expect(chat[0].TavernDB_ACU_Data?.sheet_0).toBeDefined();
   });
 
+  it('模板 key 只匹配部分 legacy 标准表时仍保留全部历史表，避免部分旧 SQL 被裁剪', () => {
+    const chat: any[] = [
+      {
+        is_user: false,
+        TavernDB_ACU_Data: {
+          mate: { type: 'chatSheets', version: 1 },
+          sheet_0: makeSheet([['row_id', '名称'], ['1', '当前模板命中表']]),
+          sheet_old_sql: makeSheet(
+            [['row_id', '旧字段'], ['1', '旧 SQL 历史行']],
+            { uid: 'sheet_old_sql', name: '旧 SQL 表', orderNo: 1 },
+          ),
+        },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0', 'sheet_old_sql'],
+        TavernDB_ACU_UpdateGroupKeys: ['sheet_0', 'sheet_old_sql'],
+      },
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, {
+      ...context,
+      templateSheetKeys: ['sheet_0'],
+    }, { saveChatAfterMigration: true });
+
+    expect(result.usedLegacyMigration).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.checkpointMessageIndex).toBe(0);
+    expect((result.data?.sheet_0 as Sheet_ACU).content[1]).toEqual(['1', '当前模板命中表']);
+    expect((result.data?.sheet_old_sql as Sheet_ACU).content).toEqual([
+      ['row_id', '旧字段'],
+      ['1', '旧 SQL 历史行'],
+    ]);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint.data.sheet_old_sql.content[1]).toEqual(['1', '旧 SQL 历史行']);
+    expect(chat[0].TavernDB_ACU_Data?.sheet_old_sql).toBeDefined();
+  });
+
   it('只有根 chat_metadata.sheets 且无消息级数据时，fallback 只生成表头 checkpoint', () => {
     const chat: any[] = [
       {

@@ -206,6 +206,14 @@ import type { TablePersistenceLayerV2_ACU } from '../table/table-delta-types';
                   if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
               }
           });
+          const guideKeySet = new Set(guideKeys);
+          Object.keys(mergedData).forEach(k => {
+              if (!k.startsWith('sheet_')) return;
+              if (guideKeySet.has(k) || guided[k]) return;
+              const historicalSheet = mergedData[k];
+              if (!historicalSheet || typeof historicalSheet !== 'object') return;
+              guided[k] = JSON.parse(JSON.stringify(historicalSheet));
+          });
           mergedData = guided;
       }
 

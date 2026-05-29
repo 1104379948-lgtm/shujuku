@@ -7148,7 +7148,6 @@ $CONTENT
         const legacyResult = buildLegacyCheckpointFromChat_ACU(chat, {
             isolationKey: context.isolationKey,
             isolationConfig: context.isolationConfig,
-            templateSheetKeys: context.templateSheetKeys,
             targetBoundaryMessageIndex: legacyBoundaryIndex,
         });
         if (!legacyResult.checkpoint || legacyResult.checkpointMessageIndex === undefined) {
@@ -10794,6 +10793,17 @@ $CONTENT
                     if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU]))
                         guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
                 }
+            });
+            const guideKeySet = new Set(guideKeys);
+            Object.keys(mergedData).forEach(k => {
+                if (!k.startsWith('sheet_'))
+                    return;
+                if (guideKeySet.has(k) || guided[k])
+                    return;
+                const historicalSheet = mergedData[k];
+                if (!historicalSheet || typeof historicalSheet !== 'object')
+                    return;
+                guided[k] = JSON.parse(JSON.stringify(historicalSheet));
             });
             mergedData = guided;
         }

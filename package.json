@@ -5,8 +5,8 @@
   "type": "module",
   "description": "SP·数据库 III (AutoCardUpdater) - SillyTavern 数据库自动更新脚本",
   "scripts": {
-    "build": "rollup -c && node scripts/check-arch.mjs",
-    "build:nocheck": "rollup -c",
+    "build": "rollup -c && node scripts/check-arch.mjs && node scripts/copy-to-index.mjs",
+    "build:nocheck": "rollup -c && node scripts/copy-to-index.mjs",
     "build:concat": "node scripts/run-rollup.mjs concat",
     "build:extension": "node scripts/run-rollup.mjs extension",
     "build:all": "node scripts/run-rollup.mjs all",

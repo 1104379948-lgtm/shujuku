@@ -139,7 +139,6 @@ export function reconstructTablesFromChatDeltas_ACU(
   const legacyResult = buildLegacyCheckpointFromChat_ACU(chat, {
     isolationKey: context.isolationKey,
     isolationConfig: context.isolationConfig,
-    templateSheetKeys: context.templateSheetKeys,
     targetBoundaryMessageIndex: legacyBoundaryIndex,
   });
 

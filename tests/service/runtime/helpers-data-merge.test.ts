@@ -376,7 +376,7 @@ describe('mergeAllIndependentTables_ACU', () => {
   });
 
   // ═══ 模板过滤 ═══
-  it('不在当前模板中的表格被过滤', async () => {
+  it('legacy migration 保留不在当前模板中的历史表格', async () => {
     vi.mocked(getTemplateSheetKeys_ACU).mockReturnValue(['sheet_0']); // 只有 sheet_0 在模板中
     const mockChat = [
       { is_user: false, mes: 'AI回复' },
@@ -394,7 +394,49 @@ describe('mergeAllIndependentTables_ACU', () => {
     const result = await mergeAllIndependentTables_ACU();
     expect(result).not.toBeNull();
     expect(result!.sheet_0).toBeDefined();
-    expect(result!.sheet_1).toBeUndefined(); // sheet_1 被过滤
+    expect(result!.sheet_1).toBeDefined();
+    expect(result!.sheet_1.content[1][1]).toBe('旧数据');
+  });
+
+  it('legacy migration 在存在指导表时仍保留指导表外的历史表格', async () => {
+    const guideData = {
+      sheet_0: {
+        name: '指导背包表',
+        content: [['row_id', '指导物品名称']],
+        sourceData: { note: 'guide source' },
+        updateConfig: { uiSentinel: -1 },
+        exportConfig: { enabled: false },
+      },
+    };
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(guideData);
+    vi.mocked(materializeDataFromSheetGuide_ACU).mockReturnValue({
+      sheet_0: {
+        name: '指导背包表',
+        content: [['row_id', '指导物品名称']],
+        sourceData: { note: 'guide source' },
+        updateConfig: { uiSentinel: -1 },
+        exportConfig: { enabled: false },
+      },
+    });
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: false, mes: 'AI回复' },
+    ]);
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue({
+      independentData: {
+        sheet_0: { name: '历史背包表', content: [['row_id', '历史物品名称'], ['1', '铁剑']] },
+        sheet_old_sql: { name: '旧 SQL 表', content: [['row_id', '旧字段'], ['1', '旧数据']] },
+      },
+      modifiedKeys: ['sheet_0', 'sheet_old_sql'],
+      updateGroupKeys: ['sheet_0', 'sheet_old_sql'],
+    });
+
+    const result = await mergeAllIndependentTables_ACU();
+
+    expect(result).not.toBeNull();
+    expect(result!.sheet_0.name).toBe('指导背包表');
+    expect(result!.sheet_0.content).toEqual([['row_id', '指导物品名称'], ['1', '铁剑']]);
+    expect(result!.sheet_old_sql).toBeDefined();
+    expect(result!.sheet_old_sql.content[1][1]).toBe('旧数据');
   });
 
   // ═══ 最新数据优先（从后往前遍历） ═══
