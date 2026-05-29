@@ -139,6 +139,106 @@ export function normalizeSqlStructure(sql: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// CHECK 约束剥离（加载历史数据时使用）
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * 从 CREATE TABLE DDL 中移除所有 CHECK 约束。
+ *
+ * 用途：加载历史数据到 SQLite 时，DDL 中的 CHECK 约束不应阻止 INSERT。
+ * CHECK 约束在本项目中的语义是"给 AI 看的格式提示"，不是 SQLite 层面的硬约束。
+ * sourceData.ddl 原文保持不变（AI 仍能看到 CHECK 约束作为格式提示）。
+ *
+ * 处理两种形式：
+ * 1. 列级 CHECK：`column_name TYPE CHECK(...) -- comment` → `column_name TYPE -- comment`
+ * 2. 表级 CHECK：独立的 `CHECK(...)` 行（含前导逗号）→ 移除整行
+ *
+ * 正确处理嵌套括号（如 CHECK(LENGTH(summary) <= 40)）。
+ * 不修改注释和字符串字面量中的 CHECK 文本。
+ */
+export function stripCheckConstraints(ddl: string): string {
+  if (!ddl || typeof ddl !== 'string') return ddl;
+  if (!/\bCHECK\b/i.test(ddl)) return ddl;
+
+  const lines = ddl.split('\n');
+  const result: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith('--')) {
+      result.push(line);
+      continue;
+    }
+
+    const processed = _stripCheckFromLine(line);
+    const afterStrip = processed.replace(/--.*$/, '').trim();
+    if (afterStrip === '' || afterStrip === ',') {
+      continue;
+    }
+    result.push(processed);
+  }
+
+  let joined = result.join('\n');
+  // 修复尾部逗号：最后一个列定义行以逗号结尾但紧接 ); 时，去掉逗号
+  joined = joined.replace(/,\s*\n(\s*\);)/, '\n$1');
+  return joined;
+}
+
+/** 从单行中移除 CHECK(...) 子句，正确处理嵌套括号 */
+function _stripCheckFromLine(line: string): string {
+  let i = 0;
+  let inString = false;
+  while (i < line.length) {
+    const ch = line[i];
+    if (ch === "'" && !inString) {
+      inString = true;
+      i++;
+      continue;
+    }
+    if (ch === "'" && inString) {
+      if (i + 1 < line.length && line[i + 1] === "'") {
+        i += 2;
+        continue;
+      }
+      inString = false;
+      i++;
+      continue;
+    }
+    if (inString) { i++; continue; }
+    if (ch === '-' && i + 1 < line.length && line[i + 1] === '-') {
+      break;
+    }
+    if (/^CHECK\b/i.test(line.substring(i))) {
+      const parenStart = line.indexOf('(', i + 5);
+      if (parenStart === -1) {
+        i++;
+        continue;
+      }
+      let depth = 0;
+      let j = parenStart;
+      for (; j < line.length; j++) {
+        if (line[j] === '(') depth++;
+        else if (line[j] === ')') {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      if (depth !== 0) {
+        i++;
+        continue;
+      }
+      const before = line.substring(0, i).replace(/\s+$/, '');
+      const after = line.substring(j + 1);
+      line = before + after;
+      continue;
+    }
+    i++;
+  }
+  return line;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 受约束字段值规范化
 // ═══════════════════════════════════════════════════════════════
 

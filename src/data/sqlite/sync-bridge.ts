@@ -10,6 +10,7 @@
 
 import { SqliteEngine } from './sqlite-engine';
 import { generateDDL, generateInserts, resultToContent, parseDDLTableName, parseDDLColumnNames, buildColumnNameMap, validateDDLAgainstHeaders } from './schema-mapper';
+import { stripCheckConstraints } from './sql-normalizer';
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/models/table-data';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 
@@ -148,7 +149,8 @@ export class SyncBridge {
     this._dropExistingUserTable(tableName);
 
     // 建表
-    this.engine.run(ddl);
+    // CHECK 约束是给 AI 看的格式提示，不是 SQLite 硬约束；加载历史数据时不应阻止 INSERT
+    this.engine.run(stripCheckConstraints(ddl));
 
     // 灌入数据
     const inserts = generateInserts(sheet, tableName);
