@@ -7122,7 +7122,41 @@ $CONTENT
             }
         }
         if (sawV2Checkpoint) {
-            if (hasAnySheet_ACU$1(data))
+            if (hasAnySheet_ACU$1(data)) {
+                // 如果 checkpoint 来自 legacy-migration，可能在旧版本中被 templateSheetKeys 裁剪过，
+                // 需要重新扫描 legacy 源数据，将缺失的历史 sheet 补充回来。
+                if (checkpoint && checkpoint.source === 'legacy-migration' && options.allowLegacyMigration !== false) {
+                    const legacyScanBoundary = checkpointMessageIndex !== undefined
+                        ? checkpointMessageIndex
+                        : endExclusive - 1;
+                    const supplementResult = buildLegacyCheckpointFromChat_ACU(chat, {
+                        isolationKey: context.isolationKey,
+                        isolationConfig: context.isolationConfig,
+                        targetBoundaryMessageIndex: legacyScanBoundary,
+                    });
+                    if (supplementResult.checkpoint && supplementResult.checkpoint.data) {
+                        const legacyData = supplementResult.checkpoint.data;
+                        let supplemented = false;
+                        for (const key of Object.keys(legacyData)) {
+                            if (!key.startsWith('sheet_'))
+                                continue;
+                            if (data[key])
+                                continue;
+                            data[key] = cloneJson_ACU$4(legacyData[key]);
+                            supplemented = true;
+                        }
+                        if (supplemented && checkpoint && checkpointMessageIndex !== undefined) {
+                            // 更新 checkpoint data 并写回聊天，防止下次打开再次扫描
+                            checkpoint = { ...checkpoint, data: cloneJson_ACU$4(data) };
+                            const anchorMsg = chat[checkpointMessageIndex];
+                            if (anchorMsg && !anchorMsg.is_user) {
+                                const updatedLayer = { version: 2, checkpoint };
+                                writeTablePersistenceLayerV2_ACU(anchorMsg, context.isolationKey, updatedLayer);
+                            }
+                            return { data, checkpoint, checkpointMessageIndex, usedLegacyMigration: false, changed: true };
+                        }
+                    }
+                }
                 return {
                     data: hasAnySheet_ACU$1(data) ? data : null,
                     checkpoint,
@@ -7130,6 +7164,7 @@ $CONTENT
                     usedLegacyMigration: false,
                     changed: false,
                 };
+            }
             // 空/错误 V2 checkpoint 不能永久遮蔽后续有效 legacy；继续进入 legacy fallback。
         }
         if (options.allowLegacyMigration === false) {

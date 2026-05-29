@@ -515,6 +515,119 @@ describe('reconstructTablesFromChatDeltas_ACU', () => {
     expect(chat[0].TavernDB_ACU_Data?.sheet_old_sql).toBeDefined();
   });
 
+  it('已被裁剪的 legacy-migration checkpoint 重新打开时从 legacy 源数据补充缺失 sheet', () => {
+    // 模拟场景：旧版本 legacy migration 生成了被裁剪的 checkpoint（只有 sheet_0），
+    // 但聊天消息中仍保留完整的 legacy 源数据（sheet_0 + sheet_old_sql）。
+    // 修复后再次打开应从 legacy 源数据补充 sheet_old_sql。
+    const chat: any[] = [
+      {
+        is_user: false,
+        // legacy 源数据（完整，包含 sheet_0 和 sheet_old_sql）
+        TavernDB_ACU_Data: {
+          mate: { type: 'chatSheets', version: 1 },
+          sheet_0: makeSheet([['row_id', '名称'], ['1', '保留表']]),
+          sheet_old_sql: makeSheet(
+            [['row_id', '旧字段'], ['1', '旧历史行']],
+            { uid: 'sheet_old_sql', name: '旧 SQL 表', orderNo: 1 },
+          ),
+        },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0', 'sheet_old_sql'],
+        TavernDB_ACU_UpdateGroupKeys: ['sheet_0', 'sheet_old_sql'],
+        // 已被裁剪的 V2 checkpoint（只有 sheet_0，缺少 sheet_old_sql）
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            tablePersistenceV2: {
+              version: 2,
+              checkpoint: {
+                kind: 'checkpoint',
+                version: 2,
+                checkpointId: 'legacy-migration-truncated',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                source: 'legacy-migration',
+                isolationKey: '',
+                data: {
+                  mate: { type: 'chatSheets', version: 1 },
+                  sheet_0: makeSheet([['row_id', '名称'], ['1', '保留表']]),
+                },
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, context, {
+      allowLegacyMigration: true,
+      saveChatAfterMigration: true,
+    });
+
+    // 应补充缺失的 sheet_old_sql
+    expect(result.data).not.toBeNull();
+    expect((result.data as any).sheet_0).toBeDefined();
+    expect((result.data as any).sheet_old_sql).toBeDefined();
+    expect((result.data as any).sheet_old_sql.content).toEqual([
+      ['row_id', '旧字段'],
+      ['1', '旧历史行'],
+    ]);
+    // checkpoint 已有的 sheet_0 数据不应被覆盖
+    expect((result.data as any).sheet_0.content).toEqual([
+      ['row_id', '名称'],
+      ['1', '保留表'],
+    ]);
+    // changed 应为 true（补充了缺失 sheet 并更新了 checkpoint）
+    expect(result.changed).toBe(true);
+    expect(result.usedLegacyMigration).toBe(false);
+    // checkpoint 应已更新包含 sheet_old_sql
+    const updatedCheckpoint = chat[0].TavernDB_ACU_IsolatedData[''].tablePersistenceV2.checkpoint;
+    expect(updatedCheckpoint.data.sheet_old_sql).toBeDefined();
+    expect(updatedCheckpoint.data.sheet_old_sql.content[1]).toEqual(['1', '旧历史行']);
+  });
+
+  it('非 legacy-migration source 的 V2 checkpoint 不触发补充逻辑', () => {
+    const chat: any[] = [
+      {
+        is_user: false,
+        TavernDB_ACU_Data: {
+          mate: { type: 'chatSheets', version: 1 },
+          sheet_0: makeSheet([['row_id', '名称'], ['1', '数据']]),
+          sheet_extra: makeSheet([['row_id', '额外'], ['1', '额外数据']]),
+        },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0', 'sheet_extra'],
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            tablePersistenceV2: {
+              version: 2,
+              checkpoint: {
+                kind: 'checkpoint',
+               version: 2,
+                checkpointId: 'retention-rollup-123',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                source: 'retention-rollup',
+                isolationKey: '',
+                data: {
+                  mate: { type: 'chatSheets', version: 1 },
+                  sheet_0: makeSheet([['row_id', '名称'], ['1', '数据']]),
+                },
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    const result = reconstructTablesFromChatDeltas_ACU(chat, context, {
+      allowLegacyMigration: true,
+    });
+
+    // retention-rollup source 不应触发补充
+    expect(result.data).not.toBeNull();
+    expect((result.data as any).sheet_0).toBeDefined();
+    expect((result.data as any).sheet_extra).toBeUndefined();
+    expect(result.changed).toBe(false);
+    expect(result.usedLegacyMigration).toBe(false);
+  });
+
+
   it('只有根 chat_metadata.sheets 且无消息级数据时，fallback 只生成表头 checkpoint', () => {
     const chat: any[] = [
       {
