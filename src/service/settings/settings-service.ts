@@ -692,6 +692,7 @@ export   function applyTemplateScopeForCurrentChat_ACU({ isolationKey = getCurre
               mode: 'chat_override',
               isolationKey: normalizedKey,
               presetName: scopeState.presetName || '',
+              migrated: !!migratedScopeState,
           };
       }
       if (scopeState?.mode === 'preset_link') {

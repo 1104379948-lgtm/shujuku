@@ -136,7 +136,9 @@ import { getSortedSheetKeys_ACU } from './chat-scope-sheet';
           }
 
           // ── 兼容旧 native：仅当该消息没有有效 V2 sheet 数据时，回退读取旧格式 ──
-          if (!hasV2IndependentTables && isLegacyMatchForIsolation_ACU(message, isolationConfig)) {
+          // [修复] 模板冻结场景下不受隔离配置限制——只要消息中有表数据就读取。
+          // 隔离功能已废弃，不应阻止旧聊天的模板恢复。
+          if (!hasV2IndependentTables) {
               const legacyIndependent = readLegacyIndependentData_ACU(message);
               appendTables(legacyIndependent, { summaryOnly: false });
 

@@ -76,8 +76,13 @@ import { purgeSheetKeysFromMessage_ACU } from '../../data/repositories/chat-mess
     );
 
     await loadAllChatMessages_ACU();
-    applyTemplateScopeForCurrentChat_ACU();
-    
+    const templateScopeResult = applyTemplateScopeForCurrentChat_ACU();
+    // [修复] 如果迁移函数成功将旧聊天数据冻结为 chat_override，持久化到磁盘。
+    // 否则每次打开都要重新迁移，且迁移结果可能因数据源变化而不稳定。
+    if (templateScopeResult?.migrated) {
+        await saveChatToHost_ACU();
+    }
+
     // updateCardUpdateStatusDisplay 由 presentation 层的 init.ts CHAT_CHANGED 回调执行
 
     await loadOrCreateJsonTableFromChatHistory_ACU();
