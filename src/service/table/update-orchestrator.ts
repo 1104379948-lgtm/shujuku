@@ -45,13 +45,42 @@ import { extractTableEditInner_ACU } from '../ai/prompt-builder/table-edit-parse
 /**
  * 从单个 AI 响应中提取编辑内容（去掉 <tableEdit> 标签和注释标记）。
  * 返回原始编辑文本，不执行。
- * 注意：默认 useLastPairOnly=true，只提取最后一个 <tableEdit> 块。
+ * 策略：
+ * - 优先提取所有成对 <tableEdit>...</tableEdit> 块（大小写不敏感）
+ * - 仅做边界清洗（注释标记 + 首尾 wrapper），不改写块内部业务字符串
+ * - 无成对块时回退 extractTableEditInner_ACU，保持旧兼容
  */
 export function extractEditsFromAiResponse_ACU(aiResponse: string): string | null {
     if (!aiResponse || typeof aiResponse !== 'string') return null;
-    const extracted = extractTableEditInner_ACU(aiResponse, { allowNoTableEditTags: true, useLastPairOnly: true });
+
+    const normalizeEntityTags = (text: string) => text.replace(
+        /&lt;\s*(\/?)\s*(tableEdit|content)\b([^&]*)&gt;/gi,
+        '<$1$2$3>'
+    );
+
+    const stripBoundaryWrappers = (text: string) => {
+        let out = text.replace(/<!--|-->/g, '').trim();
+        out = out.replace(/^\s*<content\b[^>]*>/i, '').replace(/<\/content>\s*$/i, '').trim();
+        out = out.replace(/^\s*<tableEdit\b[^>]*>/i, '').replace(/<\/tableEdit>\s*$/i, '').trim();
+        return out;
+    };
+
+    const normalizedResponse = normalizeEntityTags(aiResponse);
+    const allBlocks: string[] = [];
+    const fullRe = /<tableEdit\b[^>]*>([\s\S]*?)<\/tableEdit>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = fullRe.exec(normalizedResponse)) !== null) {
+        const block = stripBoundaryWrappers(m[1] || '');
+        if (block) allBlocks.push(block);
+    }
+    if (allBlocks.length > 0) {
+        return allBlocks.join('\n\n');
+    }
+
+    const extracted = extractTableEditInner_ACU(normalizedResponse, { allowNoTableEditTags: true, useLastPairOnly: true });
     if (!extracted?.inner) return null;
-    return extracted.inner.replace(/<!--|-->/g, '').trim();
+    const fallback = stripBoundaryWrappers(normalizeEntityTags(extracted.inner));
+    return fallback || null;
 }
 
 /**
@@ -743,7 +772,7 @@ export async function executeCardUpdateCore_ACU(
                     throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
                 }
 
-                if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+                if (!extractEditsFromAiResponse_ACU(aiResponse)) {
                     throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
                 }
 
@@ -1174,7 +1203,7 @@ export async function generateDeferredResponsesForPreparedCalls_ACU(
         if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
             throw new Error(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
         }
-        if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+        if (!extractEditsFromAiResponse_ACU(aiResponse)) {
             throw new Error('AI响应中未找到完整有效的 <tableEdit> 标签');
         }
 

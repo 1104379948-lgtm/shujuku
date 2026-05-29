@@ -143,6 +143,8 @@ import {
   processUpdatesBatch_ACU,
   executeCardUpdateCore_ACU,
   buildRoundPersistenceTargets_ACU,
+  extractEditsFromAiResponse_ACU,
+  mergeAiEditContents_ACU,
   orchestrateManualUpdate_ACU,
   type CardUpdateResult,
   type CardUpdateProgressEvent,
@@ -218,6 +220,43 @@ function mutateSheet0ForSuccessfulSave(rowId: string): { success: true; modified
 // ═══════════════════════════════════════════════════════════════
 // resolveUpdateMode_ACU
 // ═══════════════════════════════════════════════════════════════
+describe('extractEditsFromAiResponse_ACU / mergeAiEditContents_ACU', () => {
+  it('只提取 content 包裹的 tableEdit 内部内容', () => {
+    const result = extractEditsFromAiResponse_ACU('<content><tableEdit>INSERT INTO t VALUES (1);</tableEdit></content>');
+    expect(result).toBe('INSERT INTO t VALUES (1);');
+    expect(result).not.toContain('<content>');
+    expect(result).not.toContain('<tableEdit>');
+  });
+
+  it('同一 AI 响应内多个 tableEdit 块全部提取并合并', () => {
+    const result = extractEditsFromAiResponse_ACU([
+      '<content><tableEdit>INSERT INTO t VALUES (1);</tableEdit></content>',
+      '说明文字，不应进入编辑内容',
+      '<tableEdit>UPDATE t SET a = 2 WHERE row_id = 1;</tableEdit>',
+    ].join('\n'));
+    expect(result).toBe('INSERT INTO t VALUES (1);\n\nUPDATE t SET a = 2 WHERE row_id = 1;');
+    expect(result).not.toContain('说明文字');
+  });
+
+  it('tableEdit 大小写混用时仍可提取', () => {
+    const result = extractEditsFromAiResponse_ACU('<CONTENT><TABLEEDIT>DELETE FROM t WHERE row_id = 1;</TABLEEDIT></CONTENT>');
+    expect(result).toBe('DELETE FROM t WHERE row_id = 1;');
+  });
+
+  it('HTML 实体标签可提取', () => {
+    const result = extractEditsFromAiResponse_ACU('&lt;content&gt;&lt;tableEdit&gt;INSERT INTO t VALUES (2);&lt;/tableEdit&gt;&lt;/content&gt;');
+    expect(result).toBe('INSERT INTO t VALUES (2);');
+  });
+
+  it('合并后不残留 wrapper 标签', () => {
+    const blockA = extractEditsFromAiResponse_ACU('<content><tableEdit>INSERT INTO a VALUES (1);</tableEdit></content>');
+    const blockB = extractEditsFromAiResponse_ACU('<tableEdit>INSERT INTO b VALUES (2);</tableEdit>');
+    const merged = mergeAiEditContents_ACU([blockA, blockB].filter(Boolean) as string[]);
+    expect(merged).toBe('INSERT INTO a VALUES (1);\n\nINSERT INTO b VALUES (2);');
+    expect(merged).not.toMatch(/<\/?(?:content|tableEdit)\b/i);
+  });
+});
+
 describe('resolveUpdateMode_ACU', () => {
   it('auto_unified 直接返回', () => {
     expect(resolveUpdateMode_ACU('auto_unified')).toBe('auto_unified');
@@ -926,6 +965,28 @@ describe('executeCardUpdateCore_ACU', () => {
     expect(phases).toContain('parsing');
     expect(phases).toContain('saving');
     expect(phases).toContain('complete');
+  });
+
+  it('真实入口支持大写 TABLEEDIT 标签', async () => {
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<CONTENT><TABLEEDIT>有效内容</TABLEEDIT></CONTENT>');
+    mockParseAndApplyTableEdits.mockImplementation(() => mutateSheet0ForSuccessfulSave('2'));
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true });
+
+    const result = await executeCardUpdateCore_ACU([], 0, false, 'auto_standard', false, ['sheet_0'], null, new AbortController());
+    expect(result.success).toBe(true);
+  });
+
+  it('真实入口支持 HTML 实体 tableEdit 标签', async () => {
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('&lt;content&gt;&lt;tableEdit&gt;有效内容&lt;/tableEdit&gt;&lt;/content&gt;');
+    mockParseAndApplyTableEdits.mockImplementation(() => mutateSheet0ForSuccessfulSave('2'));
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true });
+
+    const result = await executeCardUpdateCore_ACU([], 0, false, 'auto_standard', false, ['sheet_0'], null, new AbortController());
+    expect(result.success).toBe(true);
   });
 
   it('prepareAIInput 返回 null 时返回错误', async () => {
