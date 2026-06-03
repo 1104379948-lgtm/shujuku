@@ -193,7 +193,7 @@ describe('ContentReplacePage', () => {
     expect(document.querySelector('.acu-v2-content-replace-page .acu-prompt-segs')).toBeNull();
 
     const importButtonIcon = document.querySelector<HTMLElement>('.acu-v2-content-replace-page [title="导入预设 JSON"] i');
-    expect(importButtonIcon?.className || '').toContain('fa-download');
+    expect(importButtonIcon?.className || '').toContain('fa-file-import');
 
     const trigger = document.querySelector<HTMLButtonElement>('.acu-v2-content-replace-page .acu-preset-dd__trigger');
     expect(trigger).not.toBeNull();

@@ -26,10 +26,7 @@ function createSettings() {
   } as any;
 }
 
-async function mountImportPage(
-  settings = createSettings(),
-  staging: { entries?: Array<{ content: string }>; status?: Record<string, unknown> } = {},
-) {
+async function mountImportPage(settings = createSettings()) {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
@@ -63,15 +60,7 @@ async function mountImportPage(
     getCurrentCharPrimaryLorebook_ACU: vi.fn(async () => 'CharBook'),
   }));
   vi.doMock('../../../src/shared/idb-import-temp', () => ({
-    importTempGet_ACU: vi.fn(async (key: string) => {
-      if (key.endsWith('importedTxtEntries') && staging.entries) {
-        return JSON.stringify(staging.entries);
-      }
-      if (key.endsWith('importedTxtStatus') && staging.status) {
-        return JSON.stringify(staging.status);
-      }
-      return null;
-    }),
+    importTempGet_ACU: vi.fn(async () => null),
     importTempRemove_ACU: vi.fn(),
     importTempSet_ACU: vi.fn(),
   }));
@@ -141,8 +130,6 @@ describe('ImportPage', () => {
 
     const clearButton = buttons.find(button => button.textContent?.includes('清空缓存'))!;
     const deleteButton = buttons.find(button => button.textContent?.includes('删除条目'))!;
-    const splitButton = buttons.find(button => button.textContent?.includes('选择并拆分'))!;
-    expect(splitButton.classList.contains('acu-btn--block')).toBe(true);
     expect(clearButton.classList.contains('acu-btn--default')).toBe(true);
     expect(deleteButton.classList.contains('acu-btn--danger')).toBe(true);
 
@@ -173,21 +160,6 @@ describe('ImportPage', () => {
     const inject = buttons.find(b => b.textContent?.includes('写入')) as HTMLButtonElement | undefined;
     expect(inject).not.toBeUndefined();
     expect(inject!.disabled).toBe(true);
-
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('终止在首个分块前保存的 0 断点会显示继续写入', async () => {
-    const { mount } = await mountImportPage(createSettings(), {
-      entries: [{ content: '第一段' }, { content: '第二段' }],
-      status: { total: 2, currentIndex: 0, selectionSig: JSON.stringify(['sheetA']) },
-    });
-
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const inject = buttons.find(b => b.textContent?.includes('继续写入')) as HTMLButtonElement | undefined;
-    expect(inject).not.toBeUndefined();
-    expect(inject!.disabled).toBe(false);
-    expect(document.body.textContent || '').toContain('状态：已暂停，完成 0/2。');
 
     mount.__resetAcuV2MountForTests();
   });

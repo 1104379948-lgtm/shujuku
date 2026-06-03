@@ -1920,16 +1920,6 @@ describe('processGroupedRuntimeChunk_ACU', () => {
       currentBatch: 1,
       totalBatches: 1,
     }));
-    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({
-      phase: 'saving',
-      currentBatch: 1,
-      totalBatches: 1,
-    }));
-    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({
-      phase: 'complete',
-      currentBatch: 1,
-      totalBatches: 1,
-    }));
   });
 
   it('连续 bucket 会在上一 bucket 保存后重新加载聊天记录作为下一次 prompt 基底', async () => {

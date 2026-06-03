@@ -132,11 +132,7 @@ watch(
   width: 100dvw;
   height: 100vh;
   height: 100dvh;
-  padding:
-    calc(18px + var(--acu-safe-top, 0px))
-    calc(18px + var(--acu-safe-right, 0px))
-    calc(18px + var(--acu-safe-bottom, 0px))
-    calc(18px + var(--acu-safe-left, 0px));
+  padding: 18px;
   background: rgba(0, 0, 0, 0.52);
   pointer-events: auto;
   animation: acu-dialog-layer-in 0.16s ease-out both;
@@ -149,8 +145,8 @@ watch(
 
 .acu-dialog {
   width: min(440px, 100%);
-  max-height: min(560px, calc(100vh - 36px - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));
-  max-height: min(560px, calc(100dvh - 36px - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));
+  max-height: min(560px, calc(100vh - 36px));
+  max-height: min(560px, calc(100dvh - 36px));
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -248,17 +244,13 @@ watch(
 @media (max-width: 520px) {
   .acu-dialog-layer {
     align-items: flex-end;
-    padding:
-      calc(12px + var(--acu-safe-top, 0px))
-      calc(12px + var(--acu-safe-right, 0px))
-      calc(12px + var(--acu-safe-bottom, 0px))
-      calc(12px + var(--acu-safe-left, 0px));
+    padding: 12px;
   }
 
   .acu-dialog {
     width: 100%;
-    max-height: calc(100vh - 24px - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));
-    max-height: calc(100dvh - 24px - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
   }
 
   .acu-dialog__actions,

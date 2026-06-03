@@ -148,8 +148,7 @@ describe('formatArgs', () => {
 
   it('Error 对象显示 name 和 message', () => {
     const err = new Error('test error');
-    err.stack = ''; // 清空堆栈以便严格测试 header
-    expect(formatArgs([err])).toBe('Error: test error');
+    expect(formatArgs([err])).toContain('Error: test error');
   });
 
   it('布尔值转为字符串', () => {

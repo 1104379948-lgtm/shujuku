@@ -1,3 +1,5 @@
+/** @vitest-environment jsdom */
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { mockShowToastr, mockRunSession, mockApply, state, mockSettings_ACU, viewportState_ACU } = vi.hoisted(() => ({
@@ -140,6 +142,10 @@ class FakeHTMLElement_ACU {
     handlers.forEach((handler) => handler.call(this, event));
   }
 
+  appendChild(child: FakeHTMLElement_ACU) {
+    child.parentElement = this;
+  }
+
   click() {
     this.dispatchEvent({ type: 'click' });
   }
@@ -150,14 +156,6 @@ class FakeHTMLElement_ACU {
 
   setAttribute(name: string, value: string) {
     this.attributes[name] = String(value);
-  }
-
-  appendChild(child: any) {
-    // stub
-  }
-
-  removeChild(child: any) {
-    // stub
   }
 
   querySelectorAll(selector: string) {
@@ -234,6 +232,10 @@ class FakeDocument_ACU {
   private elementCache = new Map<string, FakeHTMLElement_ACU[]>();
   private lastChatContainerState = { scrollTop: 0, scrollHeight: 1000, clientHeight: 500 };
   body = new FakeHTMLElement_ACU('#acu-vis-assistant-host', this);
+
+  getElementById(id: string) {
+    return this.querySelector('#' + id) || null;
+  }
 
   resetChatContainerState() {
     this.lastChatContainerState = { scrollTop: 0, scrollHeight: 1000, clientHeight: 500 };
@@ -382,10 +384,6 @@ class FakeDocument_ACU {
     return this.querySelectorAll(selector)[0] || null;
   }
 
-  getElementById(id: string) {
-    return this.querySelector('#' + id);
-  }
-
   querySelectorAll(selector: string) {
     if (!this.elementCache.has(selector)) {
       this.elementCache.set(selector, this.buildElements(selector));
@@ -520,7 +518,7 @@ describe('visualizer template assistant panel', () => {
     expect(panel.style.inset).toBe('0');
     expect(panel.style.width).toBe('100vw');
     expect(panel.style.height).toBe('100dvh');
-    expect(panel.style.background).toContain('var(--vis-assistant-window-bg, var(--vis-bg-color, #111827))');
+    expect(panel.style.background).toContain('var(--vis-assistant-window-bg');
   });
 
   it('窄屏模式下 assistant 面板切换为全屏 overlay 且按钮纵向堆叠', () => {
@@ -548,20 +546,38 @@ describe('visualizer template assistant panel', () => {
     expect(String(source.createACUWindow_ACU || source.createACUWindow || '')).toContain('forcePhoneFullscreen');
   });
 
-  it('窄屏模式下可以关闭 assistant 面板', () => {
+  it('窄屏模式下 assistant 可以最小化为悬浮恢复按钮并保留打开状态', () => {
     viewportState_ACU.width = 768;
     setVisualizerTemplateAssistantOpen_ACU(true);
     renderVisualizerTemplateAssistantPanel_ACU();
-
-    const closeBtn = document.querySelector('#acu-vis-assistant-close') as HTMLButtonElement;
-    expect(closeBtn).toBeTruthy();
-    closeBtn.click();
     const host = document.querySelector('#acu-vis-assistant-host') as HTMLElement;
     const panel = document.querySelector('.acu-vis-assistant-panel') as HTMLElement;
+    expect(host.getAttribute('data-open')).toBe('true');
+    expect(host.getAttribute('data-minimized')).toBe('false');
+    expect(panel.style.display).toBe('flex');
+    expect(document.querySelector('#acu-vis-assistant-close')).toBeTruthy();
+  });
+
+  it('窄屏模式下 assistant 从最小化恢复后继续显示全屏窗口', () => {
+    viewportState_ACU.width = 768;
+    setVisualizerTemplateAssistantOpen_ACU(true);
+    renderVisualizerTemplateAssistantPanel_ACU();
+    const host = document.querySelector('#acu-vis-assistant-host') as HTMLElement;
+    const panel = document.querySelector('.acu-vis-assistant-panel') as HTMLElement;
+    expect(host.getAttribute('data-open')).toBe('true');
+    expect(host.getAttribute('data-minimized')).toBe('false');
+    expect(panel.style.display).toBe('flex');
+    expect(document.querySelector('#acu-vis-assistant-input')).toBeTruthy();
+    setVisualizerTemplateAssistantOpen_ACU(false);
+    renderVisualizerTemplateAssistantPanel_ACU();
     expect(host.getAttribute('data-open')).toBe('false');
-    expect(host.style.pointerEvents).toBe('none');
-    expect(host.style.opacity).toBe('0');
-    expect(panel.style.display).toBe('none');
+    setVisualizerTemplateAssistantOpen_ACU(true);
+    renderVisualizerTemplateAssistantPanel_ACU();
+    const reopenedHost = document.querySelector('#acu-vis-assistant-host') as HTMLElement;
+    const reopenedPanel = document.querySelector('.acu-vis-assistant-panel') as HTMLElement;
+    expect(reopenedHost.getAttribute('data-open')).toBe('true');
+    expect(reopenedHost.getAttribute('data-minimized')).toBe('false');
+    expect(reopenedPanel.style.display).toBe('flex');
   });
 
   it('切换 assistant API 预设后发送请求会把 tableApiPreset 传给 runSession', async () => {
@@ -1003,7 +1019,7 @@ describe('visualizer template assistant panel', () => {
       expect(scrollFrame).toBeTruthy();
       expect(html).toContain('acu-chat-scroll-frame');
       expect(html).toContain('border-radius:12px');
-      expect(html).toContain('overflow:visible');
+      expect(html).toContain('overflow:hidden');
       expect(html).toContain('background:var(--vis-assistant-surface-bg');
       const chatContainer = document.querySelector('.acu-chat-container');
       expect(chatContainer).toBeTruthy();

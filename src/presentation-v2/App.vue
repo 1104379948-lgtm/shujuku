@@ -53,7 +53,7 @@
                     </span>
                     <span class="acu-v2-app__theme-tools" @click.stop>
                       <AcuIconButton
-                        icon="fa-solid fa-upload"
+                        icon="fa-solid fa-download"
                         size="sm"
                         :title="'导出主题：' + t.name"
                         @click="exportTheme(t.id)"
@@ -70,7 +70,7 @@
                   </li>
                   <li class="acu-v2-app__theme-menu-footer">
                     <AcuFileButton size="sm" accept="application/json,.json" @file="importThemeFile">
-                      <i class="fa-solid fa-download"></i>
+                      <i class="fa-solid fa-file-import"></i>
                       导入主题
                     </AcuFileButton>
                   </li>
@@ -341,10 +341,6 @@ function clearMobileNavCloseTimer(): void {
 
 <style scoped>
 :global(#acu-app-v2) {
-  --acu-safe-top: max(env(safe-area-inset-top, 0px), var(--acu-native-safe-top, 0px));
-  --acu-safe-right: max(env(safe-area-inset-right, 0px), var(--acu-native-safe-right, 0px));
-  --acu-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--acu-native-safe-bottom, 0px));
-  --acu-safe-left: max(env(safe-area-inset-left, 0px), var(--acu-native-safe-left, 0px));
   --acu-font-size-micro: 10px;
   --acu-font-size-caption: 11px;
   --acu-font-size-body: 12px;
@@ -402,7 +398,6 @@ function clearMobileNavCloseTimer(): void {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);
   overflow: hidden;
   background: var(--acu-bg-0);
   color: var(--acu-text-1);
@@ -511,7 +506,6 @@ function clearMobileNavCloseTimer(): void {
   display: none;
   align-items: stretch;
   justify-content: flex-start;
-  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);
   overflow: hidden;
   background: rgba(0, 0, 0, 0.58);
   pointer-events: auto;
@@ -526,9 +520,9 @@ function clearMobileNavCloseTimer(): void {
 
 .acu-v2-app__mobile-nav {
   width: 280px;
-  max-width: calc(100vw - 72px - var(--acu-safe-left) - var(--acu-safe-right));
+  max-width: calc(100vw - 72px);
   height: 100%;
-  max-height: 100%;
+  max-height: 100vh;
   min-width: 0;
   min-height: 0;
   align-self: stretch;
@@ -549,21 +543,21 @@ function clearMobileNavCloseTimer(): void {
 
 @supports (width: min(280px, calc(100vw - 72px))) {
   .acu-v2-app__mobile-nav {
-    width: min(280px, calc(100vw - 72px - var(--acu-safe-left) - var(--acu-safe-right)));
-    flex: 0 0 min(280px, calc(100vw - 72px - var(--acu-safe-left) - var(--acu-safe-right)));
+    width: min(280px, calc(100vw - 72px));
+    flex: 0 0 min(280px, calc(100vw - 72px));
   }
 }
 
 @supports (width: 100dvw) {
   .acu-v2-app__mobile-nav {
-    max-width: calc(100dvw - 72px - var(--acu-safe-left) - var(--acu-safe-right));
+    max-width: calc(100dvw - 72px);
   }
 }
 
 @supports (height: 100dvh) {
   .acu-v2-app__mobile-nav {
-    height: 100%;
-    max-height: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
   }
 }
 

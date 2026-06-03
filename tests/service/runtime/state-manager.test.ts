@@ -1,3 +1,5 @@
+/** @vitest-environment jsdom */
+
 /**
  * tests/service/runtime/state-manager.test.ts
  * 运行时状态管理器 单元测试

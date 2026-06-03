@@ -51,7 +51,7 @@
         accept="application/json,.json"
         @file="onImportFile"
       >
-        <i class="fa-solid fa-download"></i>
+        <i class="fa-solid fa-file-import"></i>
       </AcuFileButton>
       <AcuIconButton
         icon="fa-solid fa-gear"

@@ -9,7 +9,8 @@ import type { ITableStorageProvider, StorageMode } from '../../shared/table-stor
 import { getCurrentStorageMode } from './storage-mode';
 import { NativeTableServiceAdapter } from './native-table-service-adapter';
 import { SqlTableService } from './sql-table-service';
-import { logDebug_ACU, logError_ACU } from '../../shared/utils';
+import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { currentJsonTableData_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 
 /** 当前活跃的 Provider 实例 */
 let currentProvider: ITableStorageProvider | null = null;
@@ -86,6 +87,19 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
 
   logDebug_ACU(`[StorageStrategy] 切换模式: ${currentMode || 'none'} → ${mode}`);
 
+  // 如果当前是 sqlite 且有数据，先导出最新 JSON 视图，确保切换后能在 native 中保存为 checkpoint
+  if (currentProvider && currentProvider.mode === 'sqlite') {
+    try {
+      currentProvider.getCurrentData(); // 此调用会从 SQLite 导出并更新 currentJsonTableData_ACU
+      logDebug_ACU('[StorageStrategy] 切换前已同步 SQLite 最新数据到 JSON 视图');
+    } catch (e: any) {
+      logError_ACU(`[StorageStrategy] 切换前同步 SQLite 数据失败: ${e?.message}`);
+      // 继续切换，不阻断
+    }
+  }
+
+  const previousJsonData = currentJsonTableData_ACU ? JSON.parse(JSON.stringify(currentJsonTableData_ACU)) : null;
+
   // 销毁旧实例
   if (currentProvider) {
     currentProvider.dispose();
@@ -107,6 +121,12 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
       await currentProvider.loadFromChat();
       throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
     }
+
+    // 原生模式加载失败但有历史快照时恢复
+    if (mode === 'native' && !result.loaded && result.error && previousJsonData) {
+      logWarn_ACU(`[StorageStrategy] 原生模式加载返回错误，恢复切换前的 JSON 视图数据: ${result.error}`);
+      _set_currentJsonTableData_ACU(previousJsonData);
+    }
   } catch (e: any) {
     // 如果是我们自己抛出的 fallback 错误，重新抛出
     if (e.message?.includes('已自动回退')) throw e;
@@ -117,6 +137,9 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
       currentProvider?.dispose();
       currentProvider = createProvider('native');
       await currentProvider.loadFromChat();
+      if (previousJsonData) {
+        _set_currentJsonTableData_ACU(previousJsonData);
+      }
     }
     throw e;
   }

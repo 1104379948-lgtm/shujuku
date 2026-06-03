@@ -1,4 +1,5 @@
 /**
+ * @vitest-environment jsdom
  * tests/service/table/table-storage-strategy.test.ts
  * 表格存储策略选择器单元测试
  *

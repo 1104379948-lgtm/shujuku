@@ -451,33 +451,19 @@ describe('PlotPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('世界书来源选择器支持角色卡来源与手动多选', async () => {
-    const { mount, settings } = await mountPlotPage();
+  it('世界书选择器列出宿主世界书名 + character sentinel', async () => {
+    const { mount } = await mountPlotPage();
 
-    const picker = document.querySelector('.acu-v2-wb-source-picker') as HTMLElement | null;
-    expect(picker).not.toBeNull();
-    expect(picker!.textContent).not.toContain('当前角色卡所有世界书 · 主册 CharBook');
-    expect(document.querySelector('.acu-v2-wb-entry-picker__hint')?.textContent)
-      .toContain('目前已选: 角色卡所有世界书 · 主册 CharBook');
-
-    const manualButton = Array.from(picker!.querySelectorAll<HTMLButtonElement>('.acu-segmented__item'))
-      .find(button => button.textContent?.trim() === '手动选择')!;
-    manualButton.click();
-    await Promise.resolve();
-
-    const checkboxes = Array.from(picker!.querySelectorAll<HTMLButtonElement>('button[role="checkbox"]'));
-    const worldA = checkboxes.find(button => button.textContent?.trim() === 'world-A')!;
-    const worldB = checkboxes.find(button => button.textContent?.trim() === 'world-B')!;
-    worldA.click();
-    worldB.click();
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(settings.plotSettings.plotWorldbookConfig.source).toBe('manual');
-    expect(settings.plotSettings.plotWorldbookConfig.manualSelection).toEqual(['world-A', 'world-B']);
-    expect(document.querySelector('.acu-v2-wb-entry-picker__hint')?.textContent).toContain('目前已选: world-A、world-B');
-    expect(worldA.getAttribute('aria-checked')).toBe('true');
-    expect(worldB.getAttribute('aria-checked')).toBe('true');
+    const acuSelect = document.querySelector('.acu-v2-wb-selector .acu-select') as HTMLElement | null;
+    expect(acuSelect).not.toBeNull();
+    const trigger = acuSelect!.querySelector('.acu-select__trigger') as HTMLButtonElement;
+    trigger.click();
+    await new Promise(r => setTimeout(r, 0));
+    const items = Array.from(acuSelect!.querySelectorAll('.acu-select__item'));
+    const labels = items.map(li => li.textContent?.trim() || '');
+    expect(labels.some(l => l.includes('CharBook'))).toBe(true);
+    expect(labels).toContain('world-A');
+    expect(labels).toContain('world-B');
 
     mount.__resetAcuV2MountForTests();
   });

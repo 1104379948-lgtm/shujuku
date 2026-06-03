@@ -37,8 +37,9 @@ export class SyncBridge {
    *
    * @param data 完整的表格数据对象（通常来自 mergeAllIndependentTables_ACU 的结果）
    */
-  loadFromTableData(data: TableDataObject_ACU): void {
-    if (!data || typeof data !== 'object') return;
+  loadFromTableData(data: TableDataObject_ACU): { loadedSheets: string[]; failedSheets: string[]; warnings: string[] } {
+    const result = { loadedSheets: [] as string[], failedSheets: [] as string[], warnings: [] as string[] };
+    if (!data || typeof data !== 'object') return result;
     if (!this.engine.isReady) {
       throw new Error('SyncBridge: SqliteEngine 未初始化');
     }
@@ -54,12 +55,18 @@ export class SyncBridge {
       if (!sheet || !Array.isArray(sheet.content)) continue;
 
       try {
-        this._loadSheet(key, sheet);
+        const warnings = this._loadSheet(key, sheet);
+        if (warnings && warnings.length > 0) {
+          result.warnings.push(...warnings);
+        }
+        result.loadedSheets.push(key);
       } catch (e: any) {
         // 单张表加载失败不影响其他表
         logError_ACU(`[SyncBridge] 加载表 ${key} (${sheet.name}) 失败:`, e?.message || e);
+        result.failedSheets.push(key);
       }
     }
+    return result;
   }
 
   /**
@@ -115,7 +122,8 @@ export class SyncBridge {
   // ═══════════════════════════════════════════════════════════════
 
   /** 加载单张 sheet 到 SQLite */
-  private _loadSheet(sheetKey: string, sheet: Sheet_ACU): void {
+  private _loadSheet(sheetKey: string, sheet: Sheet_ACU): string[] {
+    const warnings: string[] = [];
     // 生成 DDL
     const ddl = generateDDL(sheet);
     const tableName = parseDDLTableName(ddl);
@@ -128,11 +136,11 @@ export class SyncBridge {
     if (headers && Array.isArray(headers) && sheet.sourceData?.ddl) {
       const validation = validateDDLAgainstHeaders(sheet.sourceData.ddl, headers);
       if (!validation.valid) {
-        logWarn_ACU(
-          `[SyncBridge] 表 "${sheet.name}" (${sheetKey}) DDL 与表头不匹配:\n` +
+        const warnMsg = `[SyncBridge] 表 "${sheet.name}" (${sheetKey}) DDL 与表头不匹配:\n` +
           validation.mismatches.map(m => `  - ${m}`).join('\n') +
-          `\n将按位置映射继续加载，多余列数据可能丢失。`
-        );
+          `\n将按位置映射继续加载，多余列数据可能丢失。`;
+        logWarn_ACU(warnMsg);
+        warnings.push(warnMsg);
       }
     }
 
@@ -158,6 +166,8 @@ export class SyncBridge {
         JSON.stringify(sheet.exportConfig || {}),
       ]
     );
+
+    return warnings;
   }
 
   /** 从 SQLite 导出单张表为 Sheet_ACU */

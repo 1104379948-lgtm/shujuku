@@ -167,10 +167,6 @@ describe('useImportFlowStore', () => {
 
     expect(store.statusText).toMatch(/尚未加载文件/);
 
-    store.staging = { hasChunks: true, chunkCount: 5, totalChars: 100, processedIndex: 0, selectionSig: null };
-    expect(store.statusText).toMatch(/已暂停/);
-    expect(store.statusText).toMatch(/0\/5/);
-
     store.staging = { hasChunks: true, chunkCount: 5, totalChars: 100, processedIndex: 2, selectionSig: null };
     expect(store.statusText).toMatch(/已暂停/);
 

@@ -1,3 +1,5 @@
+/** @vitest-environment jsdom */
+
 /**
  * tests/service/optimization/content-optimization.test.ts
  * 正文优化服务 单元测试

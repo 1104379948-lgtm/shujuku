@@ -66,14 +66,12 @@
         <div class="acu-v2-import-page__action-grid">
           <AcuFileButton
             variant="primary"
-            block
             accept=".txt"
             :disabled="store.busy"
             @file="onFileSelected"
             >选择并拆分</AcuFileButton
           >
           <AcuButton
-            block
             :disabled="!store.canInject"
             :loading="store.busy"
             @click="inject"
@@ -81,10 +79,10 @@
             {{ injectLabel }}
             <template #loading-text>写入中...</template>
           </AcuButton>
-          <AcuButton block :disabled="store.busy" @click="onClearStaging"
+          <AcuButton :disabled="store.busy" @click="onClearStaging"
             >清空缓存</AcuButton
           >
-          <AcuButton block variant="danger" :disabled="store.busy" @click="onDelete"
+          <AcuButton variant="danger" :disabled="store.busy" @click="onDelete"
             >删除条目</AcuButton
           >
         </div>
@@ -129,7 +127,7 @@ const statusKind = computed(() => {
     return "warning";
   if (
     store.staging.processedIndex != null &&
-    store.staging.processedIndex >= 0 &&
+    store.staging.processedIndex > 0 &&
     store.staging.processedIndex < store.staging.chunkCount
   )
     return "warning";
@@ -139,7 +137,7 @@ const statusKind = computed(() => {
 const injectLabel = computed(() => {
   if (
     store.staging.processedIndex != null &&
-    store.staging.processedIndex >= 0 &&
+    store.staging.processedIndex > 0 &&
     store.staging.processedIndex < store.staging.chunkCount
   ) {
     return "继续写入";

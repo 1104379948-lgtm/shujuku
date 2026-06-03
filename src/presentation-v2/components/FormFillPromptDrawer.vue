@@ -12,10 +12,10 @@
 
     <div class="acu-form-fill-prompt-drawer__toolbar">
       <AcuFileButton size="sm" accept="application/json,.json" @file="$emit('import-file', $event)">
-        <i class="fa-solid fa-download"></i> 导入 JSON
+        <i class="fa-solid fa-file-import"></i> 导入 JSON
       </AcuFileButton>
       <AcuButton size="sm" @click="$emit('export')">
-        <i class="fa-solid fa-upload"></i> 导出 JSON
+        <i class="fa-solid fa-file-export"></i> 导出 JSON
       </AcuButton>
       <AcuButton size="sm" @click="$emit('reset')">载入默认提示词</AcuButton>
     </div>

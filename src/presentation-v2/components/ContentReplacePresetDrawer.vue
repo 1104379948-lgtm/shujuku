@@ -23,7 +23,7 @@
           <AcuText as="span" variant="caption" class="acu-v2-manage-item__meta">{{ preset.promptGroup.length }} 段提示词</AcuText>
         </div>
         <div class="acu-v2-manage-item__actions">
-          <AcuIconButton icon="fa-solid fa-upload" title="导出 JSON" @click="$emit('export', preset.name)" />
+          <AcuIconButton icon="fa-solid fa-file-export" title="导出 JSON" @click="$emit('export', preset.name)" />
           <AcuIconButton icon="fa-solid fa-i-cursor" title="重命名" @click="$emit('rename', preset.name)" />
           <AcuIconButton icon="fa-solid fa-pen" title="编辑提示词" @click="$emit('edit', preset.name)" />
           <AcuIconButton icon="fa-solid fa-trash-can" variant="danger" title="删除" @click="$emit('delete', preset.name)" />

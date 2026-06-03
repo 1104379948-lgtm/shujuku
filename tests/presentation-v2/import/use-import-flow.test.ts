@@ -32,8 +32,6 @@ async function setup({
   const finalizeImportAndCleanup = vi.fn(async () => ({ success: true, cleanedCount: 0 }));
   const executeCardUpdateCore = vi.fn(async () => ({ success: true, modifiedKeys: ['sheetA'] }));
   const getCharPrimary = vi.fn(async () => charPrimary);
-  const abortAllActiveRequests = vi.fn();
-  const setWasStoppedByUser = vi.fn();
   const settings: any = {
     importWorldbookTarget: 'world-A',
     importSplitSize: 100,
@@ -45,8 +43,6 @@ async function setup({
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     settings_ACU: settings,
     currentJsonTableData_ACU: { sheetA: { name: 'A' } },
-    abortAllActiveRequests_ACU: abortAllActiveRequests,
-    _set_wasStoppedByUser_ACU: setWasStoppedByUser,
   }));
   vi.doMock('../../../src/service/settings/settings-service', () => ({ saveSettings_ACU: vi.fn() }));
   vi.doMock('../../../src/shared/idb-import-temp', () => ({
@@ -101,8 +97,6 @@ async function setup({
     finalizeImportAndCleanup,
     executeCardUpdateCore,
     getCharPrimary,
-    abortAllActiveRequests,
-    setWasStoppedByUser,
     settings,
   };
 }
@@ -229,51 +223,5 @@ describe('useImportFlow', () => {
 
     expect(observedValues).toEqual([true]);
     expect(settings.importPromptExcludeImportedWorldbookEntries).toBe(false);
-  });
-
-  it('injectChunks 支持通过运行中 toast 终止并保存当前分块断点', async () => {
-    const {
-      flow,
-      store,
-      toast,
-      importTempGet,
-      importTempSet,
-      saveChunkProgress,
-      finalizeImportAndCleanup,
-      executeCardUpdateCore,
-      abortAllActiveRequests,
-      setWasStoppedByUser,
-    } = await setup();
-    importTempGet.mockImplementation(async (key: string) => {
-      if (key.endsWith('importedTxtEntries')) {
-        return JSON.stringify([{ content: '第一段' }, { content: '第二段' }]);
-      }
-      return null;
-    });
-    executeCardUpdateCore.mockImplementation(async (...args: any[]) => {
-      const abortController = args[7] as AbortController;
-      const onProgress = args[9] as (event: any) => void;
-      onProgress({ phase: 'calling_ai', attempt: 1, maxRetries: 3 });
-      expect(toast.items[0]?.action?.label).toBe('终止');
-      await toast.items[0]?.action?.onClick();
-      expect(abortController.signal.aborted).toBe(true);
-      return { success: false, modifiedKeys: [], aborted: true };
-    });
-
-    await flow.injectChunks();
-
-    expect(abortAllActiveRequests).toHaveBeenCalledTimes(1);
-    expect(setWasStoppedByUser).toHaveBeenCalledWith(true);
-    expect(setWasStoppedByUser).toHaveBeenLastCalledWith(false);
-    expect(executeCardUpdateCore).toHaveBeenCalledTimes(1);
-    expect(saveChunkProgress).not.toHaveBeenCalled();
-    expect(finalizeImportAndCleanup).not.toHaveBeenCalled();
-    expect(importTempSet).toHaveBeenCalledWith(
-      expect.stringContaining('importedTxtStatus'),
-      expect.stringContaining('"currentIndex":0'),
-    );
-    expect(store.busy).toBe(false);
-    expect(toast.items[0]).toMatchObject({ kind: 'warning' });
-    expect(toast.items[0]?.text).toMatch(/已保存断点/);
   });
 });

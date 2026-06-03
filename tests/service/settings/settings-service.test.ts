@@ -130,22 +130,11 @@ vi.mock('../../../src/shared/defaults', () => ({
   DEFAULT_AUTO_UPDATE_FREQUENCY_ACU: 1,
   DEFAULT_AUTO_UPDATE_THRESHOLD_ACU: 3,
   DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 500,
-  VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
-  defaultVectorMemoryConfig_ACU: { 
-    enabled: false,
-    archiveTriggerCount: 9,
-    archiveBatchSize: 3,
-    archiveMaxConcurrency: 3,
-    summaryIndexArchiveMaxConcurrency: 30,
-    topK: 200,
-    minScore: 0.45,
-    recallCandidateLimit: 100,
-    summaryIndexKeywordMinRows: 200,
-    recentFixedInjectCount: 50,
-    summaryPromptGroup: []
-  },
   buildDefaultPlotWorldbookConfig_ACU: () => ({ source: 'character', manualSelection: [] }),
   buildDefaultContentOptimizationPromptGroup_ACU: () => [],
+  VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
+  defaultVectorMemoryConfig_ACU: { test: 1 },
+  defaultSettings_ACU: { test: 1 },
 }));
 
 vi.mock('../../../src/data/repositories/isolation-repo', () => ({
@@ -234,6 +223,7 @@ vi.mock('../../../src/shared/utils', () => ({
 }));
 
 import {
+  _set_settingsStorageReadyForSave_ACU,
   saveSettings_ACU,
   loadSettings_ACU,
   buildDefaultSettings_ACU,
@@ -241,11 +231,11 @@ import {
   persistCurrentTemplatePresetName_ACU,
   setZeroTkOccupyMode_ACU,
   applyCombinedSettingsImport_ACU,
-  _set_settingsStorageReadyForSave_ACU,
 } from '../../../src/service/settings/settings-service';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  _set_settingsStorageReadyForSave_ACU(true);
   mockSettings.dataIsolationCode = '';
   mockSettings.dataIsolationEnabled = false;
   mockSettings.charCardPrompt = [];
@@ -260,7 +250,6 @@ beforeEach(() => {
   mockGlobalMeta.isolationCodeList = [];
   mockGlobalMeta.migratedLegacySingleStore = true;
   mockGlobalMeta.zeroTkOccupyModeGlobal = false;
-  _set_settingsStorageReadyForSave_ACU(true);
 });
 
 // ═══ saveSettings_ACU ═══

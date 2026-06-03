@@ -30,7 +30,7 @@
             :disabled="busy"
             @click="$emit('set-default', meta.name)"
           />
-          <AcuIconButton icon="fa-solid fa-upload" title="导出 JSON" :disabled="busy" @click="$emit('export', meta.name)" />
+          <AcuIconButton icon="fa-solid fa-file-export" title="导出 JSON" :disabled="busy" @click="$emit('export', meta.name)" />
           <AcuIconButton icon="fa-solid fa-i-cursor" title="重命名" :disabled="busy" @click="$emit('rename', meta.name)" />
           <AcuIconButton icon="fa-solid fa-pen" title="编辑（打开可视化表格编辑器）" :disabled="busy" @click="$emit('edit', meta.name)" />
           <AcuIconButton icon="fa-solid fa-trash-can" variant="danger" title="删除" :disabled="busy" @click="$emit('delete', meta.name)" />

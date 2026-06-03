@@ -170,7 +170,7 @@
               暂停
             </AcuButton>
             <AcuButton :disabled="!logFlow.totalCount.value" @click="logFlow.exportFiltered">
-              <i class="fa-solid fa-upload"></i>
+              <i class="fa-solid fa-download"></i>
               导出
             </AcuButton>
             <AcuButton variant="danger" :disabled="!logFlow.totalCount.value" @click="logFlow.clearAll">

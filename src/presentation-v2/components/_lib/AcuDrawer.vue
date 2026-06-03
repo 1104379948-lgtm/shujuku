@@ -126,7 +126,6 @@ function clearCloseTimer(): void {
   width: 100%; width: 100vw; width: 100dvw;
   height: 100%; height: 100vh; height: 100dvh;
   display: flex; justify-content: flex-end;
-  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);
   background: rgba(0, 0, 0, 0.38);
   overflow: hidden;
   animation: acu-drawer-layer-in 0.18s ease-out both;
@@ -138,8 +137,8 @@ function clearCloseTimer(): void {
 }
 
 .acu-v2-drawer {
-  max-width: 100%;
-  height: 100%; max-height: 100%;
+  max-width: 100vw;
+  height: 100%; max-height: 100vh;
   display: flex; flex-direction: column;
   background: var(--acu-bg-1);
   border-left: 0;
@@ -154,7 +153,7 @@ function clearCloseTimer(): void {
 }
 
 @supports (max-height: 100dvh) {
-  .acu-v2-drawer { max-height: 100%; }
+  .acu-v2-drawer { max-height: 100dvh; }
 }
 
 .acu-v2-drawer__header {
@@ -194,6 +193,6 @@ function clearCloseTimer(): void {
 }
 
 @media (max-width: 860px) {
-  .acu-v2-drawer { width: 100% !important; border-left: 0; }
+  .acu-v2-drawer { width: 100vw !important; width: 100dvw !important; border-left: 0; }
 }
 </style>

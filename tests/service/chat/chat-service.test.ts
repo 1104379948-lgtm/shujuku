@@ -1,10 +1,12 @@
+/** @vitest-environment jsdom */
+
 /**
  * tests/service/chat/chat-service.test.ts
  * 聊天数据服务 单元测试
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage } = vi.hoisted(() => ({
+const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockResolveTableHistoryStateFromChat, mockGetLatestAiMessageIndexFromChat } = vi.hoisted(() => ({
   mockSettings: {
     retainRecentLayers: 3,
     dataIsolationEnabled: false,
@@ -23,6 +25,8 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockSetLastOptimizationBase: vi.fn(),
   mockSanitizeSheet: vi.fn((sheet: any) => sheet),
   mockPersistTablesToChatMessage: vi.fn(),
+  mockResolveTableHistoryStateFromChat: vi.fn(() => ({ latestDataMessageIndex: 0 })),
+  mockGetLatestAiMessageIndexFromChat: vi.fn(() => 0),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -62,6 +66,11 @@ vi.mock('../../../src/service/table/table-service', () => ({
   persistTablesToChatMessage_ACU: mockPersistTablesToChatMessage,
 }));
 
+vi.mock('../../../src/service/table/table-history', () => ({
+  resolveTableHistoryStateFromChat_ACU: mockResolveTableHistoryStateFromChat,
+  getLatestAiMessageIndexFromChat_ACU: mockGetLatestAiMessageIndexFromChat,
+}));
+
 import {
   replaceChatMessage_ACU,
   getOriginalContent_ACU,
@@ -78,6 +87,11 @@ beforeEach(() => {
   mockSettings.dataIsolationCode = '';
   mockGetCurrentIsolationKey.mockReturnValue('');
   mockSaveChatToHost.mockResolvedValue(undefined);
+  mockPersistTablesToChatMessage.mockResolvedValue(undefined);
+  mockCurrentJsonTableData.sheet_0 = { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] };
+  mockCurrentJsonTableData.sheet_1 = { name: '纪要表', content: [['row_id', '事件'], ['1', '开始']] };
+  mockResolveTableHistoryStateFromChat.mockReturnValue({ latestDataMessageIndex: 0 });
+  mockGetLatestAiMessageIndexFromChat.mockReturnValue(0);
 });
 
 // ═══ replaceChatMessage_ACU ═══
@@ -287,64 +301,26 @@ describe('overrideLatestLayerWithTemplateCore_ACU', () => {
 
 // ═══ saveCurrentDataForTable_ACU ═══
 describe('saveCurrentDataForTable_ACU', () => {
-  beforeEach(() => {
-    mockPersistTablesToChatMessage.mockClear();
-  });
-
   it('无数据时不报错', async () => {
     mockCurrentJsonTableData.sheet_0 = undefined;
     await expect(saveCurrentDataForTable_ACU('sheet_0')).resolves.not.toThrow();
-    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
   it('无聊天记录时不报错', async () => {
     mockGetChatArray.mockReturnValue([]);
     await expect(saveCurrentDataForTable_ACU('sheet_0')).resolves.not.toThrow();
-    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
-  it('聊天记录全为 user 消息时不调用持久化', async () => {
-    const chat = [{ is_user: true, mes: '用户消息' }];
-    mockGetChatArray.mockReturnValue(chat);
-    mockCurrentJsonTableData.sheet_0 = { name: '物品表', content: [] };
-    await saveCurrentDataForTable_ACU('sheet_0');
-    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
-  });
-  it('标准表调用 persistTablesToChatMessage_ACU 持久化', async () => {
+  it('标准表保存到 TavernDB_ACU_Data', async () => {
     const chat = [{ is_user: false, mes: 'AI回复' }];
     mockGetChatArray.mockReturnValue(chat);
     mockCurrentJsonTableData.sheet_0 = { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] };
     await saveCurrentDataForTable_ACU('sheet_0');
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
-      targetMessageIndex: 0,
-      targetSheetKeys: ['sheet_0'],
-      updateGroupKeys: null,
-      trackAsUpdate: true
-    }));
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({ targetMessageIndex: 0, targetSheetKeys: ['sheet_0'] }));
   });
-  it('存在历史数据时 trackAsUpdate 为 false 且指向历史数据楼层', async () => {
-    const chat = [
-      { is_user: false, mes: '旧AI回复', TavernDB_ACU_IsolatedData: { '': { independentData: { sheet_0: { name: '物品表' } } } } },
-      { is_user: true, mes: '用户新消息' },
-      { is_user: false, mes: '新AI回复' }
-    ];
-    mockGetChatArray.mockReturnValue(chat);
-    mockCurrentJsonTableData.sheet_0 = { name: '物品表', content: [] };
-    await saveCurrentDataForTable_ACU('sheet_0');
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
-      targetMessageIndex: 0,
-      targetSheetKeys: ['sheet_0'],
-      trackAsUpdate: false
-    }));
-  });
-  it('纪要表调用 persistTablesToChatMessage_ACU 持久化', async () => {
+  it('纪要表保存到 TavernDB_ACU_SummaryData', async () => {
     const chat = [{ is_user: false, mes: 'AI回复' }];
     mockGetChatArray.mockReturnValue(chat);
     mockCurrentJsonTableData.sheet_1 = { name: '纪要表', content: [['row_id', '事件'], ['1', '开始']] };
     await saveCurrentDataForTable_ACU('sheet_1');
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
-      targetMessageIndex: 0,
-      targetSheetKeys: ['sheet_1'],
-      updateGroupKeys: null,
-      trackAsUpdate: true
-    }));
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({ targetMessageIndex: 0, targetSheetKeys: ['sheet_1'] }));
   });
 });

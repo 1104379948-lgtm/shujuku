@@ -7,13 +7,14 @@ import { TABLE_ORDER_FIELD_ACU } from '../../shared/constants';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, independentTableStates_ACU, settings_ACU, suppressWorldbookInjectionInGreeting_ACU, _set_suppressWorldbookInjectionInGreeting_ACU, _set_currentJsonTableData_ACU } from './state-manager';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
 import { applyTemplateScopeForCurrentChat_ACU, saveSettings_ACU } from '../settings/settings-service';
-import { buildChatSheetGuideDataFromTemplateObj_ACU, getChatSheetGuideDataForIsolationKey_ACU, getSortedSheetKeys_ACU, materializeDataFromSheetGuide_ACU, reorderDataBySheetKeys_ACU, sanitizeTemplateSnapshotForChat_ACU, setChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
+import { buildChatSheetGuideDataFromTemplateObj_ACU, getChatSheetGuideDataForIsolationKey_ACU, getSortedSheetKeys_ACU, materializeDataFromSheetGuide_ACU, reorderDataBySheetKeys_ACU, sanitizeTemplateSnapshotForChat_ACU, setChatSheetGuideDataForIsolationKey_ACU, ensureStableRowIdsForSheetContent_ACU } from '../template/chat-scope';
 import { deleteAllGeneratedEntries_ACU } from '../worldbook/pipeline';
 import { ensureSheetOrderNumbers_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { getTemplateSheetKeys_ACU } from '../template/chat-scope';
 import { upsertTemplatePreset_ACU } from '../template/template-preset-service';
 import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU, readModifiedKeys_ACU, readUpdateGroupKeys_ACU, readMessageIdentity_ACU, isLegacyMatchForIsolation_ACU, initIsolatedTagSlot_ACU, writeLegacyCompatData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { applyTableDelta_ACU, isDeltaTagData_ACU, isCheckpointTagData_ACU } from '../table/table-delta';
+import { normalizeTableTagStorageMetadata_ACU } from '../../shared/table-storage-metadata';
 
   /**
    * 旧数据兼容层：将 content 数组中的 null 占位列迁移为行号 row_id
@@ -100,6 +101,11 @@ import { applyTableDelta_ACU, isDeltaTagData_ACU, isCheckpointTagData_ACU } from
           if (tagData) {
               // delta 楼层：收集增量数据，稍后正序叠加
               if (isDeltaTagData_ACU(tagData)) {
+                  const metadata = normalizeTableTagStorageMetadata_ACU(tagData as any, 'delta');
+                  if (!metadata.supported) {
+                      logWarn_ACU(`[Merge] delta 楼层 #${i} 存储版本 (${metadata.version}) 高于当前系统支持版本，跳过该楼层的增量`);
+                      continue;
+                  }
                   if (tagData.incrementalData && Object.keys(tagData.incrementalData).length > 0) {
                       pendingDeltas.push({ index: i, tagData });
                   }
@@ -236,6 +242,8 @@ import { applyTableDelta_ACU, isDeltaTagData_ACU, isCheckpointTagData_ACU } from
 
           for (const { index: deltaIndex, tagData: deltaTagData } of pendingDeltas) {
               const incrementalData = deltaTagData.incrementalData || {};
+              const metadata = normalizeTableTagStorageMetadata_ACU(deltaTagData as any, 'delta');
+              if (!metadata.supported) continue; // 双保险：即使收集时已过滤，叠加前再保底一次
               for (const [sheetKey, delta] of Object.entries(incrementalData)) {
                   if (!templateSheetKeySet.has(sheetKey)) continue;
                   if (!mergedData[sheetKey]) {
@@ -244,6 +252,9 @@ import { applyTableDelta_ACU, isDeltaTagData_ACU, isCheckpointTagData_ACU } from
                   }
                   try {
                       mergedData[sheetKey] = applyTableDelta_ACU(mergedData[sheetKey], delta as any, sheetKey);
+                      if (Array.isArray(mergedData[sheetKey]?.content)) {
+                          mergedData[sheetKey].content = ensureStableRowIdsForSheetContent_ACU(mergedData[sheetKey].content);
+                      }
                       // 更新 lastUpdatedAiFloor 为 delta 楼层（最新变更来源）
                       if (!independentTableStates_ACU[sheetKey]) {
                           independentTableStates_ACU[sheetKey] = {};

@@ -161,7 +161,7 @@
             :disabled="!!store.busyAction"
             @file="store.importPresets"
           >
-            <i class="fa-solid fa-download"></i>
+            <i class="fa-solid fa-file-import"></i>
           </AcuFileButton>
           <AcuIconButton
             icon="fa-solid fa-gear"

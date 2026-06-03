@@ -15,6 +15,7 @@ import { enqueueSummaryVectorIndexFlush_ACU } from '../vector/summary-vector-ind
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
+import { normalizeTableTagStorageMetadata_ACU } from '../../shared/table-storage-metadata';
 
 import { applyTableDelta_ACU, isDeltaTagData_ACU } from './table-delta';
 /**
@@ -227,6 +228,11 @@ export function loadBatchBaseData_ACU(
 
             // delta 楼层：收集增量，不做整表覆盖
             if (isDeltaTagData_ACU(tagData)) {
+                const metadata = normalizeTableTagStorageMetadata_ACU(tagData as any, 'delta');
+                if (!metadata.supported) {
+                    logWarn_ACU(`[表格重建] delta 楼层 #${j} 存储版本 (${metadata.version}) 不被支持，跳过该层增量数据`);
+                    continue;
+                }
                 if (tagData.incrementalData) {
                     pendingDeltas.push({ msgIndex: j, incrementalData: tagData.incrementalData });
                 }
@@ -297,6 +303,7 @@ export function loadBatchBaseData_ACU(
     if (pendingDeltas.length > 0) {
         pendingDeltas.reverse(); // 逆序收集 → 正序叠加
         for (const { incrementalData } of pendingDeltas) {
+            // [修复] 此处 pendingDeltas 已经在收集时经过版本校验，这里为了绝对安全也可以加一层，由于结构未保存 tagData 故省略
             for (const sheetKey of Object.keys(incrementalData)) {
                 if (!mergedBatchData[sheetKey] || batchFoundSheets[sheetKey] === undefined) continue;
                 try {
@@ -589,9 +596,16 @@ export async function applyUnifiedGroupFillResponses_ACU(
         }
     }
 
+    const normalizedBaseSnapshot = JSON.parse(JSON.stringify(baseSnapshot));
+    for (const key of Object.keys(normalizedBaseSnapshot)) {
+        if (key.startsWith('sheet_') && Array.isArray(normalizedBaseSnapshot[key]?.content)) {
+            normalizedBaseSnapshot[key].content = ensureStableRowIdsForSheetContent_ACU(normalizedBaseSnapshot[key].content);
+        }
+    }
+
     const sqlInitialization = isSqliteMode()
-        ? buildSqlInitializationBase_ACU(baseSnapshot, [...allTargetSheetKeySet])
-        : { workingTableData: JSON.parse(JSON.stringify(baseSnapshot)), initializedSheetKeys: new Set<string>() };
+        ? buildSqlInitializationBase_ACU(normalizedBaseSnapshot, [...allTargetSheetKeySet])
+        : { workingTableData: normalizedBaseSnapshot, initializedSheetKeys: new Set<string>() };
 
     let workingTableData = sqlInitialization.workingTableData;
     const initializedSheetKeys = sqlInitialization.initializedSheetKeys;
@@ -852,14 +866,12 @@ export async function processGroupedRuntimeChunk_ACU(
                 break;
             }
 
-            emitBucketProgress(bucketIndex, { phase: 'saving' });
             const applyResult = await applyUnifiedGroupFillResponses_ACU(responses, baseSnapshot, {
                 saveTargetIndex: bucket.saveTargetIndex,
                 updateMode: bucket.updateMode,
                 isImportMode: options.isImportMode === true,
             });
             if (applyResult.success) {
-                emitBucketProgress(bucketIndex, { phase: 'complete' });
                 bucketSucceeded = true;
                 break;
             }

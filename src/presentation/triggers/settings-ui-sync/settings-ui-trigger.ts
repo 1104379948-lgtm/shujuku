@@ -3,7 +3,6 @@
  */
 import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../../shared/defaults-json.js';
 import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
-import { bindTableFillStopButton_ACU } from '../../components/status-display';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
 import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, newMessageDebounceTimer_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU , _set_isAutoUpdatingCard_ACU, _set_newMessageDebounceTimer_ACU} from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
@@ -13,7 +12,7 @@ import { jQuery_API_ACU } from '../../dom-utils';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
 import { getConnectionManagerProfiles_ACU } from '../../../service/ai/ai-service';
 import { getCurrentCharacterFallback_ACU } from '../../../service/host/host-state-service';
-import { NEW_MESSAGE_DEBOUNCE_DELAY_ACU, abortAllActiveRequests_ACU, allChatMessages_ACU, coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU} from '../../../service/runtime/state-manager';
+import { NEW_MESSAGE_DEBOUNCE_DELAY_ACU, allChatMessages_ACU, coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU, _set_manualExtraHint_ACU} from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $apiStatusDisplay_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { saveSettingsAndNotify_ACU, loadSettingsAndRefreshUI_ACU } from '../../components/settings-ui-helpers';
 import { processUpdates_ACU } from '../update-process';
@@ -21,73 +20,15 @@ import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
 import { loadAllChatMessages_ACU } from '../../../service/worldbook/pipeline';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import { SCRIPT_ID_PREFIX_ACU } from '../../../shared/constants';
-import { escapeHtml_ACU, renderStopButton_ACU } from '../../../shared/html-helpers';
+import { escapeHtml_ACU } from '../../../shared/html-helpers';
 import { topLevelWindow_ACU } from '../../../shared/env';
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../shared/utils';
 import { executeContentOptimization_ACU } from '../../components/optimization-ui';
 import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
 import { purgeOldLayerData_ACU } from './settings-ui-config';
 import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU, handleFloorIncreaseDelay_ACU } from '../../../service/table/update-scheduler';
-import { processGroupedRuntimeChunk_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
+import { processGroupedRuntimeChunk_ACU } from '../../../service/table/update-orchestrator';
 import { isSqliteMode } from '../../../service/table/storage-mode';
-
-function buildAutoUpdateProgressLabel_ACU(event: Partial<CardUpdateProgressEvent>): string {
-    if (Number.isFinite(event.currentBatch) && Number.isFinite(event.totalBatches)) {
-        return `第 ${event.currentBatch}/${event.totalBatches} 批`;
-    }
-    return '当前批次';
-}
-
-function buildAutoUpdateProgressMessage_ACU(event: CardUpdateProgressEvent): string {
-    const batchLabel = buildAutoUpdateProgressLabel_ACU(event);
-    switch (event.phase) {
-        case 'preparing':
-            return `${batchLabel}：准备AI输入...`;
-        case 'calling_ai':
-            return `${batchLabel}：第 ${event.attempt || 1}/${event.maxRetries || 1} 次调用AI进行增量更新...`;
-        case 'parsing':
-            return `${batchLabel}：解析并应用AI返回的更新...`;
-        case 'saving':
-            return `${batchLabel}：正在将更新后的数据库保存到聊天记录...`;
-        case 'chunk_done':
-            return `${batchLabel}：分块处理成功...`;
-        case 'complete':
-            return `${batchLabel}：数据库增量更新成功！`;
-        case 'retry':
-            return `${batchLabel}：第 ${event.attempt || 1}/${event.maxRetries || 1} 次尝试失败，5秒后重试...${event.message ? ` (${event.message})` : ''}`;
-        case 'error':
-            return `${batchLabel}：错误：更新失败。`;
-        default:
-            return `${batchLabel}：正在处理...`;
-    }
-}
-
-function updateAutoUpdateToastMessage_ACU(loadingToast: any, message: string) {
-    if (!loadingToast || !toastr_API_ACU) return;
-    loadingToast.find('.acu-toast-progress-message').text(message);
-}
-
-function clearAutoUpdateToast_ACU(loadingToast: any) {
-    if (loadingToast && toastr_API_ACU) {
-        toastr_API_ACU.clear(loadingToast);
-    }
-}
-
-function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, loadingToast?: any) {
-    const message = buildAutoUpdateProgressMessage_ACU(event);
-    updateAutoUpdateToastMessage_ACU(loadingToast, message);
-
-    switch (event.phase) {
-        case 'complete':
-            if (typeof updateCardUpdateStatusDisplay_ACU === 'function') updateCardUpdateStatusDisplay_ACU();
-            break;
-        case 'retry':
-            showToastr_ACU('warning', message, { timeOut: 5000 });
-            break;
-        default:
-            break;
-    }
-}
 
   export async function triggerAutomaticUpdateIfNeeded_ACU() {
     logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
@@ -132,72 +73,29 @@ function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, load
     // UI：显示开始 toast
     const totalGroups = Object.keys(plan.updateGroups).length;
     const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
-    const useGroupedAutoUpdates = !isSqliteMode();
     if (totalGroups > maxConcurrentGroups) {
         showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将分批并发处理 ${totalGroups} 组（每批最多 ${maxConcurrentGroups} 组）。`);
     } else {
         showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
     }
 
-    const autoGroupedAbortController = new AbortController();
-    let autoProgressToast: any = null;
-    if (useGroupedAutoUpdates && !settings_ACU.toastMuteEnabled) {
-        const stopButtonId = `acu-stop-auto-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
-        const initialMessage = '自动填表正在准备，请稍候...';
-        const toastMessage = `<div><span class="acu-toast-progress-message">${initialMessage}</span>${stopButtonHtml}</div>`;
-        autoProgressToast = showToastr_ACU('info', toastMessage, {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            tapToDismiss: false,
-            acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
-            onShown: function () {
-                if (typeof bindTableFillStopButton_ACU === 'function') {
-                    bindTableFillStopButton_ACU(stopButtonId, () => {
-                        _set_wasStoppedByUser_ACU(true);
-                        autoGroupedAbortController.abort();
-                        abortAllActiveRequests_ACU();
-                        _set_isAutoUpdatingCard_ACU(false);
-                        updateAutoUpdateToastMessage_ACU(autoProgressToast, '填表任务已终止，正在停止当前任务与后续批次...');
-                        showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
-                    });
-                }
-            }
-        });
-    }
-
     // 调用 service 层执行更新计划，传入纯业务操作委托（不含 UI 操作）
-    let result: Awaited<ReturnType<typeof executeAutoUpdatePlan_ACU>>;
-    try {
-        result = await executeAutoUpdatePlan_ACU(
-            plan,
-            settings_ACU,
-            _set_isAutoUpdatingCard_ACU,
-            {
-                processUpdates: (indices, mode, options) => processUpdates_ACU(indices, mode, options),
-                ...(useGroupedAutoUpdates
-                    ? {
-                        processGroupedUpdates: (groups, mode, options) => {
-                            const upstreamProgress = options?.onProgress;
-                            return processGroupedRuntimeChunk_ACU(groups, mode, {
-                                ...options,
-                                abortController: autoGroupedAbortController,
-                                onProgress: event => {
-                                    upstreamProgress?.(event);
-                                    handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
-                                },
-                            });
-                        },
-                    }
-                    : {}),
-                refreshData: () => refreshMergedDataAndNotifyWithUI_ACU(),
-                loadAllChatMessages: () => loadAllChatMessages_ACU(),
-                purgeOldLayerData: () => purgeOldLayerData_ACU(),
-            }
-        );
-    } finally {
-        clearAutoUpdateToast_ACU(autoProgressToast);
-    }
+    const result = await executeAutoUpdatePlan_ACU(
+        plan,
+        settings_ACU,
+        _set_isAutoUpdatingCard_ACU,
+        {
+            processUpdates: (indices, mode, options) => processUpdates_ACU(indices, mode, options),
+            ...(isSqliteMode()
+                ? {}
+                : {
+                    processGroupedUpdates: (groups, mode, options) => processGroupedRuntimeChunk_ACU(groups, mode, options),
+                }),
+            refreshData: () => refreshMergedDataAndNotifyWithUI_ACU(),
+            loadAllChatMessages: () => loadAllChatMessages_ACU(),
+            purgeOldLayerData: () => purgeOldLayerData_ACU(),
+        }
+    );
 
     // UI：根据返回值显示结果
     if (result.failedGroups > 0) {

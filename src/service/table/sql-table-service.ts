@@ -134,7 +134,13 @@ export class SqlTableService implements ITableStorageProvider {
       }
 
       // 将 JSON 数据加载到 SQLite
-      this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU);
+      const loadResult = this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU);
+      if (loadResult.warnings.length > 0) {
+        logWarn_ACU(`[SqlTableService] SQLite 加载过程中产生警告:\n${loadResult.warnings.join('\n')}`);
+      }
+      if (loadResult.failedSheets.length > 0) {
+        logError_ACU(`[SqlTableService] 以下表未能成功加载到 SQLite: ${loadResult.failedSheets.join(', ')}`);
+      }
 
       // 更新全局 JSON 视图
       _set_currentJsonTableData_ACU(mergedData as TableDataObject_ACU);
@@ -460,7 +466,13 @@ export class SqlTableService implements ITableStorageProvider {
 
       (partialData as any)[key] = sheetCopy;
     }
-    this.syncBridge.loadFromTableData(partialData);
+    const loadResult = this.syncBridge.loadFromTableData(partialData);
+    if (loadResult.warnings.length > 0) {
+      logWarn_ACU(`[SqlTableService] SQLite 按需建表产生警告:\n${loadResult.warnings.join('\n')}`);
+    }
+    if (loadResult.failedSheets.length > 0) {
+      logError_ACU(`[SqlTableService] SQLite 按需建表部分失败: ${loadResult.failedSheets.join(', ')}`);
+    }
 
     // 合并新建的表到当前 JSON 视图
     if (currentJsonTableData_ACU) {
@@ -544,6 +556,11 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
 
     const statements = rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt)));
     const snapshotCopy = JSON.parse(JSON.stringify(tableData || {})) as TableDataObject_ACU;
+    for (const key of Object.keys(snapshotCopy)) {
+      if (key.startsWith('sheet_') && Array.isArray((snapshotCopy as any)[key]?.content)) {
+        (snapshotCopy as any)[key].content = ensureStableRowIdsForSheetContent_ACU((snapshotCopy as any)[key].content);
+      }
+    }
     await engine.init();
     syncBridge.loadFromTableData(snapshotCopy);
     engine.runBatch(statements);

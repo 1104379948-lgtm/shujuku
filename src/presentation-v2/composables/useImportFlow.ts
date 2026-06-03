@@ -27,12 +27,8 @@ import {
   executeCardUpdateCore_ACU,
   type CardUpdateProgressEvent,
 } from '../../service/table/update-orchestrator';
-import {
-  abortAllActiveRequests_ACU,
-  settings_ACU,
-  _set_wasStoppedByUser_ACU,
-} from '../../service/runtime/state-manager';
-import { useToastStore, type ToastOptions } from '../stores/toast-store';
+import { settings_ACU } from '../../service/runtime/state-manager';
+import { useToastStore } from '../stores/toast-store';
 
 export type ImportMessageKind = 'info' | 'success' | 'warning' | 'error';
 
@@ -100,10 +96,8 @@ export function useImportFlow(): UseImportFlow {
   const store = useImportFlowStore();
   const toast = useToastStore();
   let progressToastId: string | null = null;
-  let abortRequested = false;
-  let currentAbortController: AbortController | null = null;
 
-  function notify(kind: ImportMessageKind, text: string, options: ToastOptions = {}): void {
+  function notify(kind: ImportMessageKind, text: string, options: { durationMs?: number; muteable?: boolean } = {}): void {
     if (progressToastId) {
       if (toast.update(progressToastId, kind, text, options)) {
         if (options.durationMs !== 0) progressToastId = null;
@@ -114,60 +108,11 @@ export function useImportFlow(): UseImportFlow {
     toast[kind](text, options);
   }
 
-  function progressToastOptions(): ToastOptions {
-    return {
-      durationMs: 0,
-      muteable: false,
-      dismissible: false,
-      action: abortRequested
-        ? undefined
-        : {
-            label: '终止',
-            variant: 'danger',
-            dismissOnClick: false,
-            onClick: requestAbort,
-          },
-    };
-  }
-
   function notifyProgress(text: string): void {
-    if (progressToastId && toast.update(progressToastId, 'info', text, progressToastOptions())) {
+    if (progressToastId && toast.update(progressToastId, 'info', text, { durationMs: 0, muteable: false })) {
       return;
     }
-    progressToastId = toast.info(text, progressToastOptions());
-  }
-
-  function requestAbort(): void {
-    if (abortRequested) return;
-    abortRequested = true;
-    _set_wasStoppedByUser_ACU(true);
-    currentAbortController?.abort();
-    abortAllActiveRequests_ACU();
-    const text = '外部导入已请求终止，正在停止当前分块并保存断点...';
-    if (progressToastId) {
-      toast.update(progressToastId, 'warning', text, {
-        durationMs: 0,
-        muteable: false,
-        dismissible: false,
-      });
-    } else {
-      toast.warning(text, {
-        durationMs: 0,
-        muteable: false,
-        dismissible: false,
-      });
-    }
-  }
-
-  async function saveAbortCheckpoint(status: { currentIndex: number }, index: number, total: number): Promise<void> {
-    status.currentIndex = index;
-    await importTempSet_ACU(STORAGE_KEY_IMPORTED_STATUS_ACU, JSON.stringify(status));
-    await store.refreshStaging();
-    notify(
-      'warning',
-      `外部导入已终止，已保存断点：完成 ${index}/${total}。稍后可点击"继续写入"恢复。`,
-      { muteable: false },
-    );
+    progressToastId = toast.info(text, { durationMs: 0, muteable: false });
   }
 
   async function splitFile(file: File): Promise<void> {
@@ -328,9 +273,6 @@ export function useImportFlow(): UseImportFlow {
 
     store.setBusy(true);
     progressToastId = null;
-    abortRequested = false;
-    currentAbortController = null;
-    _set_wasStoppedByUser_ACU(false);
     try {
       const selectionSig = JSON.stringify(selectedSheetKeys);
       const initResult = await initImportDatabase_ACU(target, selectedSheetKeys, allChunks, selectionSig);
@@ -344,10 +286,6 @@ export function useImportFlow(): UseImportFlow {
       const updateMode = 'manual_unified';
 
       for (let i = status.currentIndex; i < allChunks.length; i++) {
-        if (abortRequested) {
-          await saveAbortCheckpoint(status, i, allChunks.length);
-          return;
-        }
         const chunk = allChunks[i] || {};
         const mockMessage = { is_user: false, mes: String(chunk.content || ''), name: '导入文本' };
         let success = false;
@@ -355,12 +293,6 @@ export function useImportFlow(): UseImportFlow {
         const maxOuterRetries = 3;
 
         for (let attempt = 1; attempt <= maxOuterRetries && !success; attempt++) {
-          if (abortRequested) {
-            await saveAbortCheckpoint(status, i, allChunks.length);
-            return;
-          }
-          const abortController = new AbortController();
-          currentAbortController = abortController;
           notifyProgress(`正在处理分块 ${i + 1}/${allChunks.length}（尝试 ${attempt}/${maxOuterRetries}）...`);
           const result = await withImportPromptFilterForced(() => executeCardUpdateCore_ACU(
             [mockMessage],
@@ -370,17 +302,12 @@ export function useImportFlow(): UseImportFlow {
             true,
             selectedSheetKeys,
             null,
-            abortController,
+            new AbortController(),
             { currentBatch: i + 1, totalBatches: allChunks.length },
             event => {
               notifyProgress(progressLabel(event));
             },
           ));
-          currentAbortController = null;
-          if (abortRequested || result.aborted) {
-            await saveAbortCheckpoint(status, i, allChunks.length);
-            return;
-          }
           success = result.success;
           lastError = result.error || (result.aborted ? '任务已终止。' : '');
           if (!success && attempt < maxOuterRetries) {
@@ -423,8 +350,6 @@ export function useImportFlow(): UseImportFlow {
       logError_ACU('[ACU-V2] injectChunks failed', e);
       notify('error', `外部导入失败：${e?.message || '未知错误'}`, { muteable: false });
     } finally {
-      currentAbortController = null;
-      _set_wasStoppedByUser_ACU(false);
       await store.refreshStaging();
       store.setBusy(false);
     }

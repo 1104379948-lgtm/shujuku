@@ -33,8 +33,10 @@ export type SaveSettingsResult_ACU = {
 };
 
 let settingsStorageReadyForSave_ACU = false;
-export const _set_settingsStorageReadyForSave_ACU = (val: boolean) => { settingsStorageReadyForSave_ACU = val; };
 let settingsReloadAfterIdbScheduled_ACU = false;
+export function _set_settingsStorageReadyForSave_ACU(v: boolean) {
+  settingsStorageReadyForSave_ACU = v;
+}
 
 function scheduleSettingsReloadAfterIdbReady_ACU(reason: string): void {
   if (settingsReloadAfterIdbScheduled_ACU) return;
@@ -343,7 +345,7 @@ export   function loadSettings_ACU() {
       if (globalMeta_ACU.vectorMemoryConfigGlobal && typeof globalMeta_ACU.vectorMemoryConfigGlobal === 'object' && !Array.isArray(globalMeta_ACU.vectorMemoryConfigGlobal)) {
           const vectorConfig = globalMeta_ACU.vectorMemoryConfigGlobal as any;
           if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
-              const cloneDefaultValue_ACU = (value: any) => JSON.parse(JSON.stringify(value));
+              const cloneDefaultValue_ACU = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
               const fillMissing_ACU = (key: string, value: any) => {
                   if (typeof vectorConfig[key] === 'undefined' || vectorConfig[key] === null || vectorConfig[key] === '') {
                       vectorConfig[key] = cloneDefaultValue_ACU(value);

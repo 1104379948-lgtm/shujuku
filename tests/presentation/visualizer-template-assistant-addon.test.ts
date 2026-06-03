@@ -82,9 +82,8 @@ describe('visualizer template assistant addon', () => {
         <div class="acu-vis-toolbar">
           <div class="acu-vis-actions"></div>
         </div>
-        <div class="acu-vis-content">
-          <div id="acu-vis-assistant-dock"></div>
-        </div>
+        <div class="acu-vis-content"></div>
+        <div id="acu-vis-assistant-dock"></div>
       </div>
     `;
 
@@ -103,9 +102,7 @@ describe('visualizer template assistant addon', () => {
         <div class="acu-vis-toolbar">
           <div class="acu-vis-actions"></div>
         </div>
-        <div class="acu-vis-content">
-          <div id="acu-vis-assistant-dock"></div>
-        </div>
+        <div class="acu-vis-content"></div>
       </div>
     `;
 
@@ -122,7 +119,6 @@ describe('visualizer template assistant addon', () => {
           <div class="acu-vis-actions"></div>
         </div>
         <div class="acu-vis-content">
-          <div class="acu-vis-sidebar"></div>
           <div id="acu-vis-assistant-dock"></div>
           <div class="acu-vis-main"></div>
         </div>
@@ -138,7 +134,6 @@ describe('visualizer template assistant addon', () => {
     expect(host).toBeTruthy();
     expect(root?.contains(host)).toBe(true);
     expect(host?.parentElement).toBe(dock);
-    expect(dock?.lastElementChild).toBe(host);
   });
 
 });

@@ -4,7 +4,7 @@
  * 操作 worldbookConfig.source / worldbookConfig.manualSelection。
  * 决定填表 AI 提示词附带的条目从哪本书来。
  *   - source='character'：跟随角色卡的所有世界书（primary + additional）
- *   - source='manual'：手动指定多本世界书（manualSelection）
+ *   - source='manual'：手动指定一本世界书（manualSelection[0]）
  *
  * 与 useFormFillInjectionTarget（写入侧）相互独立。
  */
@@ -15,59 +15,53 @@ import { getCharLorebooks_ACU } from '../../service/worldbook/worldbook-service'
 
 export type FormFillWorldbookSource = 'character' | 'manual';
 
-function normalizeSelection(names: unknown): string[] {
-  if (!Array.isArray(names)) return [];
-  const result: string[] = [];
-  for (const name of names) {
-    const trimmed = String(name || '').trim();
-    if (trimmed && !result.includes(trimmed)) result.push(trimmed);
-  }
-  return result;
-}
-
 export function useFormFillWorldbookConfig() {
   const source = ref<FormFillWorldbookSource>('character');
-  const manualSelection = ref<string[]>([]);
-  const manualBook = computed<string>(() => manualSelection.value[0] || '');
+  const manualBook = ref<string>('');
 
   function refreshFromSettings(): void {
     const cfg = getCurrentWorldbookConfig_ACU();
     source.value = cfg.source === 'manual' ? 'manual' : 'character';
-    cfg.manualSelection = normalizeSelection(cfg.manualSelection);
-    manualSelection.value = [...cfg.manualSelection];
+    const list: string[] = Array.isArray(cfg.manualSelection) ? cfg.manualSelection : [];
+    manualBook.value = list[0] || '';
   }
 
   function setSource(next: FormFillWorldbookSource): void {
     const cfg = getCurrentWorldbookConfig_ACU();
     cfg.source = next;
     source.value = next;
+    if (next === 'character') {
+      cfg.manualSelection = [];
+      manualBook.value = '';
+    }
     saveSettings_ACU();
   }
 
-  function setManualSelection(names: string[]): void {
+  function setManualBook(name: string): void {
     const cfg = getCurrentWorldbookConfig_ACU();
-    const next = normalizeSelection(names);
+    const trimmed = String(name || '').trim();
     cfg.source = 'manual';
-    cfg.manualSelection = next;
+    cfg.manualSelection = trimmed ? [trimmed] : [];
     source.value = 'manual';
-    manualSelection.value = [...next];
+    manualBook.value = trimmed;
     saveSettings_ACU();
   }
 
-  function toggleManualBook(name: string, checked: boolean): void {
-    const trimmed = String(name || '').trim();
-    if (!trimmed) return;
-    const current = normalizeSelection(manualSelection.value);
-    const next = checked
-      ? (current.includes(trimmed) ? current : [...current, trimmed])
-      : current.filter(item => item !== trimmed);
-    setManualSelection(next);
+  const selectorValue = computed<string>(() => {
+    if (source.value === 'character') return 'character';
+    return manualBook.value || '';
+  });
+
+  function onSelectorChange(value: string): void {
+    if (value === 'character') setSource('character');
+    else setManualBook(value);
   }
 
   async function resolveBookNames(): Promise<string[]> {
     const cfg = getCurrentWorldbookConfig_ACU();
     if (cfg.source === 'manual') {
-      return normalizeSelection(cfg.manualSelection);
+      const list: string[] = Array.isArray(cfg.manualSelection) ? cfg.manualSelection : [];
+      return [...new Set(list.filter(Boolean))];
     }
     const names: string[] = [];
     try {
@@ -80,12 +74,10 @@ export function useFormFillWorldbookConfig() {
 
   return {
     source,
-    manualSelection,
     manualBook,
+    selectorValue,
     refreshFromSettings,
-    setSource,
-    setManualSelection,
-    toggleManualBook,
+    onSelectorChange,
     resolveBookNames,
   };
 }

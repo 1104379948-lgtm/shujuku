@@ -17,7 +17,7 @@ async function mountFileButton(props: Record<string, any> = {}) {
     },
     template: `
       <AcuFileButton v-bind="props" @file="onFile">
-        <i class="fa-solid fa-download"></i>
+        <i class="fa-solid fa-file-import"></i>
         <span v-if="!props.iconOnly">导入 JSON</span>
       </AcuFileButton>
     `,
@@ -50,19 +50,6 @@ describe('AcuFileButton', () => {
     expect(button).not.toBeNull();
     expect(button!.classList.contains('acu-btn--default')).toBe(true);
     expect(button!.classList.contains('acu-file-button__button--icon-only-default')).toBe(false);
-
-    app.unmount();
-  });
-
-  it('block 文件按钮让外层和内层按钮都占满容器', async () => {
-    const { app } = await mountFileButton({ block: true });
-
-    const root = document.querySelector('.acu-file-button') as HTMLElement | null;
-    const button = document.querySelector('button') as HTMLButtonElement | null;
-    expect(root).not.toBeNull();
-    expect(button).not.toBeNull();
-    expect(root!.classList.contains('acu-file-button--block')).toBe(true);
-    expect(button!.classList.contains('acu-btn--block')).toBe(true);
 
     app.unmount();
   });

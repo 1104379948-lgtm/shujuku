@@ -26,7 +26,6 @@ const {
   mockGetChatSheetGuideData,
   mockSaveCurrentProfileTemplate,
   mockSetTableTemplate,
-  mockStripPlotTaskRuntimeApiPresetFields,
 } = vi.hoisted(() => ({
   mockSettings: { dataIsolationEnabled: false, dataIsolationCode: '' } as any,
   mockGetCurrentIsolationKey: vi.fn(() => ''),
@@ -49,7 +48,6 @@ const {
   mockGetChatSheetGuideData: vi.fn(() => null),
   mockSaveCurrentProfileTemplate: vi.fn(),
   mockSetTableTemplate: vi.fn(),
-  mockStripPlotTaskRuntimeApiPresetFields: vi.fn((tasks: any[]) => tasks || []),
 }));
 
 // ═══ Mocks ═══
@@ -148,13 +146,13 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
 }));
 
 vi.mock('../../../src/service/plot/plot-logic', () => ({
+  stripPlotTaskRuntimeApiPresetFields_ACU: vi.fn((v) => v),
   ensurePlotPromptsArray_ACU: mockEnsurePlotPromptsArray,
   ensureLoopPromptsArray_ACU: mockEnsureLoopPromptsArray,
   ensurePlotTasksCompat_ACU: mockEnsurePlotTasksCompat,
   getPlotFinalDirectiveFromSource_ACU: mockGetPlotFinalDirectiveFromSource,
   normalizePlotPresetSelectionValue_ACU: mockNormalizePlotPresetSelectionValue,
   setPlotPromptContentByIdForSettings_ACU: mockSetPlotPromptContentById,
-  stripPlotTaskRuntimeApiPresetFields_ACU: mockStripPlotTaskRuntimeApiPresetFields,
 }));
 
 // mock chat-scope 内部跨文件依赖

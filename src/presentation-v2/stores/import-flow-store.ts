@@ -122,7 +122,7 @@ export const useImportFlowStore = defineStore('acuV2ImportFlow', {
       }
       const total = state.staging.chunkCount;
       const idx = state.staging.processedIndex;
-      if (idx != null && idx >= 0 && idx < total) {
+      if (idx != null && idx > 0 && idx < total) {
         return `状态：已暂停，完成 ${idx}/${total}。`;
       }
       return `状态：已准备好 ${total} 个条目可供注入。`;
