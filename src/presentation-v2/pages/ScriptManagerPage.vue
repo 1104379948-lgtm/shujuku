@@ -142,13 +142,21 @@
             </div>
             <div v-if="!draft.bindings.length" class="acu-v2-script-page__empty">未绑定挂载点；仍可通过变量或手动运行执行。</div>
             <div v-for="(binding, index) in draft.bindings" :key="index" class="acu-v2-script-page__binding">
-              <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--hook">
-                <span>触发时机</span>
-                <select v-model="binding.hook" @change="handleBindingHookChange(index)">
-                  <option v-for="hook in hookOptions" :key="hook" :value="hook">{{ hook }}</option>
-                </select>
-              </label>
+              <div class="acu-v2-script-page__binding-head">
+                <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--hook">
+                  <span>触发时机</span>
+                  <select v-model="binding.hook" @change="handleBindingHookChange(index)">
+                    <option v-for="hook in hookOptions" :key="hook" :value="hook">{{ hook }}</option>
+                  </select>
+                </label>
+                <label class="acu-v2-script-page__binding-switch">
+                  <input v-model="binding.enabled" type="checkbox" />
+                  <span>{{ binding.enabled ? '已启用' : '已禁用' }}</span>
+                </label>
+                <AcuButton size="sm" variant="danger" @click="removeBinding(index)">移除</AcuButton>
+              </div>
               <div v-if="isPlotBindingHook(binding.hook)" class="acu-v2-script-page__binding-target">
+                <div class="acu-v2-script-page__binding-subtitle">固定挂载点目标</div>
                 <label class="acu-v2-script-page__binding-field">
                   <span>剧情预设</span>
                   <select :value="binding.target?.presetName || ''" @change="setBindingTargetField(index, 'presetName', ($event.target as HTMLSelectElement).value)">
@@ -175,38 +183,36 @@
                   <span v-if="isPlotTaskBindingHook(binding.hook) && !getBindingTaskOptions(binding).length">当前预设和 stage 下没有可选任务；请先确认剧情预设里存在任务，或先保留已导入脚本里的 taskId。</span>
                 </p>
               </div>
-              <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--enabled">
-                <span>启用</span>
-                <input v-model="binding.enabled" type="checkbox" />
-              </label>
-              <label class="acu-v2-script-page__binding-field">
-                <span>顺序</span>
-                <input v-model.number="binding.order" type="number" />
-              </label>
-              <label class="acu-v2-script-page__binding-field">
-                <span>输出键</span>
-                <input v-model="binding.outputKey" type="text" placeholder="可留空" />
-              </label>
-              <label class="acu-v2-script-page__binding-field">
-                <span>输出保留</span>
-                <select v-model="binding.outputTtl">
-                  <option value="request">本次请求</option>
-                  <option value="chat">当前聊天</option>
-                  <option value="session">当前会话</option>
-                </select>
-              </label>
-              <label class="acu-v2-script-page__binding-field">
-                <span>失败策略</span>
-                <select v-model="binding.failurePolicy">
-                  <option value="continue">记录错误后继续</option>
-                  <option value="block">阻断当前流程</option>
-                </select>
-              </label>
+              <div class="acu-v2-script-page__binding-settings">
+                <div class="acu-v2-script-page__binding-subtitle">运行与输出</div>
+                <label class="acu-v2-script-page__binding-field">
+                  <span>顺序</span>
+                  <input v-model.number="binding.order" type="number" />
+                </label>
+                <label class="acu-v2-script-page__binding-field">
+                  <span>输出键</span>
+                  <input v-model="binding.outputKey" type="text" placeholder="可留空" />
+                </label>
+                <label class="acu-v2-script-page__binding-field">
+                  <span>输出保留</span>
+                  <select v-model="binding.outputTtl">
+                    <option value="request">本次请求</option>
+                    <option value="chat">当前聊天</option>
+                    <option value="session">当前会话</option>
+                  </select>
+                </label>
+                <label class="acu-v2-script-page__binding-field">
+                  <span>失败策略</span>
+                  <select v-model="binding.failurePolicy">
+                    <option value="continue">记录错误后继续</option>
+                    <option value="block">阻断当前流程</option>
+                  </select>
+                </label>
+              </div>
               <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json">
                 <span>绑定配置 JSON（可选，传给 ctx.config）</span>
                 <textarea v-model="bindingJsonTexts[index].config" rows="2" placeholder="可留空；例如 {&quot;limit&quot;:5}"></textarea>
               </label>
-              <AcuButton size="sm" variant="danger" @click="removeBinding(index)">移除</AcuButton>
             </div>
           </section>
 
@@ -937,13 +943,16 @@ onMounted(refresh);
 .acu-v2-script-page__checkbox, .acu-v2-script-page__radio { display: inline-flex; gap: 6px; align-items: center; color: var(--acu-text-2); }
 .acu-v2-script-page__checkbox input, .acu-v2-script-page__radio input { width: auto; }
 .acu-v2-script-page__source { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.acu-v2-script-page__binding { display: grid; grid-template-columns: minmax(260px, 1fr) 72px 90px minmax(160px, 1fr) 140px 170px auto; gap: 12px; align-items: end; padding: 14px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); }
+.acu-v2-script-page__binding { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-md); background: color-mix(in srgb, var(--acu-bg-1) 92%, transparent); }
+.acu-v2-script-page__binding-head { display: grid; grid-template-columns: minmax(320px, 1fr) auto auto; gap: 12px; align-items: end; }
 .acu-v2-script-page__binding-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--acu-text-2); font-size: 12px; }
 .acu-v2-script-page__binding-field span { color: var(--acu-text-3); font-size: 11px; }
-.acu-v2-script-page__binding-field--enabled { align-items: center; }
-.acu-v2-script-page__binding-field--enabled input { width: auto; min-width: auto; }
-.acu-v2-script-page__binding-field--json { grid-column: 1 / span 4; }
-.acu-v2-script-page__binding-target { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(260px, 1fr) minmax(160px, 1fr) minmax(320px, 1fr); gap: 12px; align-items: end; padding: 12px; border: 1px dashed var(--acu-border-2); border-radius: var(--acu-radius-sm); background: color-mix(in srgb, var(--acu-bg-2) 86%, transparent); }
+.acu-v2-script-page__binding-switch { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 0 12px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-2); font-size: 12px; white-space: nowrap; }
+.acu-v2-script-page__binding-switch input { width: auto; min-width: auto; }
+.acu-v2-script-page__binding-field--json { max-width: 720px; }
+.acu-v2-script-page__binding-subtitle { grid-column: 1 / -1; color: var(--acu-text-3); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.acu-v2-script-page__binding-target, .acu-v2-script-page__binding-settings { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 12px; align-items: end; padding: 12px; border: 1px dashed var(--acu-border-2); border-radius: var(--acu-radius-sm); background: color-mix(in srgb, var(--acu-bg-2) 86%, transparent); }
+.acu-v2-script-page__binding-settings { grid-template-columns: 100px minmax(220px, 1fr) minmax(160px, 220px) minmax(170px, 240px); }
 .acu-v2-script-page__binding-target-hint { grid-column: 1 / -1; margin: 0; line-height: 1.5; }
 .acu-v2-script-page__binding-target-hint span { display: block; color: var(--acu-warning); }
 .acu-v2-script-page__import-preview { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); }
@@ -961,5 +970,5 @@ onMounted(refresh);
 .acu-v2-script-page__log-group { border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); overflow: hidden; background: var(--acu-bg-1); }
 .acu-v2-script-page__log-group + .acu-v2-script-page__log-group { margin-top: 8px; }
 .acu-v2-script-page__log-group-head { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 170px 80px minmax(0, 1fr); gap: 8px; padding: 8px; background: var(--acu-bg-2); color: var(--acu-text-2); }
-@media (max-width: 980px) { .acu-v2-script-page__layout { grid-template-columns: 1fr; } .acu-v2-script-page__grid { grid-template-columns: 1fr 1fr; } .acu-v2-script-page__binding, .acu-v2-script-page__binding-target { grid-template-columns: 1fr; } .acu-v2-script-page__binding-field--json, .acu-v2-script-page__binding-target, .acu-v2-script-page__binding-target-hint { grid-column: auto; } }
+@media (max-width: 980px) { .acu-v2-script-page__layout { grid-template-columns: 1fr; } .acu-v2-script-page__grid { grid-template-columns: 1fr 1fr; } .acu-v2-script-page__binding-head, .acu-v2-script-page__binding-target, .acu-v2-script-page__binding-settings { grid-template-columns: 1fr; } .acu-v2-script-page__binding-field--json, .acu-v2-script-page__binding-target-hint, .acu-v2-script-page__binding-subtitle { grid-column: auto; max-width: none; } }
 </style>
