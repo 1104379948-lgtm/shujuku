@@ -74,6 +74,44 @@ function assertStringField_ACU(value: unknown, field: string, options: { require
   if (typeof value !== 'string') throw new Error(`脚本导入字段无效: ${field}`);
 }
 
+function normalizeBindingTarget_ACU(target: any) {
+  if (!target || typeof target !== 'object' || Array.isArray(target)) return undefined;
+  const normalized: { presetName?: string; stage?: number; taskId?: string } = {};
+  if (typeof target.presetName !== 'undefined') normalized.presetName = String(target.presetName || '').trim();
+  if (typeof target.stage !== 'undefined') {
+    const stage = Number(target.stage);
+    normalized.stage = Number.isFinite(stage) && stage > 0 ? Math.trunc(stage) : NaN;
+  }
+  if (typeof target.taskId !== 'undefined') normalized.taskId = String(target.taskId || '').trim();
+  return normalized;
+}
+
+function validateBindingTarget_ACU(binding: any, prefix: string, hook: string): void {
+  const target = binding.target;
+  const isPlotTaskHook = hook === 'plot.before_task_request' || hook === 'plot.after_task_response';
+  const isPlotStageHook = hook === 'plot.after_stage';
+  if (!isPlotTaskHook && !isPlotStageHook) {
+    if (typeof target !== 'undefined') {
+      if (!isPlainObject_ACU(target)) throw new Error(`脚本导入字段无效: ${prefix}.target`);
+      const allowedKeys = new Set(['presetName', 'stage', 'taskId']);
+      for (const key of Object.keys(target as Record<string, unknown>)) {
+        if (!allowedKeys.has(key)) throw new Error(`脚本导入字段无效: ${prefix}.target.${key}`);
+      }
+    }
+    return;
+  }
+
+  if (!isPlainObject_ACU(target)) throw new Error(`脚本导入缺少字段: ${prefix}.target`);
+  const allowedKeys = new Set(['presetName', 'stage', 'taskId']);
+  for (const key of Object.keys(target as Record<string, unknown>)) {
+    if (!allowedKeys.has(key)) throw new Error(`脚本导入字段无效: ${prefix}.target.${key}`);
+  }
+  const normalized = normalizeBindingTarget_ACU(target);
+  if (!normalized?.presetName) throw new Error(`脚本导入缺少字段: ${prefix}.target.presetName`);
+  if (!Number.isFinite(normalized.stage) || Number(normalized.stage) <= 0) throw new Error(`脚本导入字段无效: ${prefix}.target.stage`);
+  if (isPlotTaskHook && !normalized.taskId) throw new Error(`脚本导入缺少字段: ${prefix}.target.taskId`);
+}
+
 function assertSaveResult_ACU(result: unknown): void {
   if (result && typeof result === 'object' && (result as any).saved === false) {
     throw new Error(`脚本配置保存失败: ${(result as any).code || (result as any).reason || 'unknown'}`);
@@ -102,15 +140,19 @@ function validateImportScope_ACU(scope: unknown, index: number): void {
 function validateImportBinding_ACU(binding: unknown, scriptIndex: number, bindingIndex: number): void {
   const prefix = `scripts[${scriptIndex}].bindings[${bindingIndex}]`;
   if (!isPlainObject_ACU(binding)) throw new Error(`脚本导入字段无效: ${prefix}`);
+  const allowedKeys = new Set(['hook', 'enabled', 'target', 'order', 'config', 'outputKey', 'outputTtl', 'failurePolicy']);
+  for (const key of Object.keys(binding as Record<string, unknown>)) {
+    if (!allowedKeys.has(key)) throw new Error(`脚本导入字段无效: ${prefix}.${key}`);
+  }
   const hook = String((binding as any).hook || '').trim();
   if (!VALID_SCRIPT_HOOKS_ACU.has(hook as ScriptHookName_ACU)) throw new Error(`脚本导入字段无效: ${prefix}.hook`);
+  validateBindingTarget_ACU(binding, prefix, hook);
   assertBooleanField_ACU((binding as any).enabled, `${prefix}.enabled`, { required: true });
   assertFiniteNumberField_ACU((binding as any).order, `${prefix}.order`);
   assertStringField_ACU((binding as any).outputKey, `${prefix}.outputKey`);
   if (typeof (binding as any).outputTtl !== 'undefined' && !VALID_OUTPUT_TTLS_ACU.has((binding as any).outputTtl)) {
     throw new Error(`脚本导入字段无效: ${prefix}.outputTtl`);
   }
-  if (typeof (binding as any).filter !== 'undefined' && !isPlainObject_ACU((binding as any).filter)) throw new Error(`脚本导入字段无效: ${prefix}.filter`);
   if (typeof (binding as any).failurePolicy !== 'undefined' && !['continue', 'block'].includes((binding as any).failurePolicy)) {
     throw new Error(`脚本导入字段无效: ${prefix}.failurePolicy`);
   }
@@ -152,6 +194,16 @@ function createStoredUserScript_ACU(script: Partial<UserScriptDefinition_ACU>, o
   const scope = script.scope?.type === 'character'
     ? { type: 'character' as const, characterNames: [...(script.scope.characterNames || [])] }
     : { type: 'global' as const };
+  const bindings = (script.bindings || []).map(binding => ({
+    hook: binding.hook,
+    enabled: binding.enabled,
+    target: cloneScriptJson_ACU(normalizeBindingTarget_ACU((binding as any).target)),
+    order: binding.order,
+    config: cloneScriptJson_ACU(binding.config),
+    outputKey: binding.outputKey,
+    outputTtl: binding.outputTtl,
+    failurePolicy: binding.failurePolicy,
+  }));
   return {
     id: options.preserveIds && script.id ? String(script.id) : createScriptId_ACU(),
     name: String(script.name || '').trim(),
@@ -160,7 +212,7 @@ function createStoredUserScript_ACU(script: Partial<UserScriptDefinition_ACU>, o
     version: Number.isFinite(script.version) ? Number(script.version) : 1,
     language: 'javascript',
     source: String(script.source || ''),
-    bindings: cloneScriptJson_ACU(script.bindings || []),
+    bindings: cloneScriptJson_ACU(bindings),
     scope: cloneScriptJson_ACU(scope),
     order: Number(script.order),
     timeoutSeconds: Number(script.timeoutSeconds),

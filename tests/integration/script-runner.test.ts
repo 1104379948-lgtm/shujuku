@@ -307,29 +307,6 @@ describe('ScriptRunner 阶段二能力', () => {
     expect(committedStages).toEqual([2]);
   });
 
-  it('binding filter 不匹配时不运行脚本，匹配时才运行', async () => {
-    mocks.topWindow.AutoCardUpdaterAPI.order = [];
-    addScript({
-      id: 'script_filter_miss',
-      name: 'filter-miss',
-      source: 'ctx.api.order.push("miss");',
-      bindings: [{ hook: 'table_fill.after_commit', enabled: true, filter: { updateMode: 'manual' } }],
-    });
-    addScript({
-      id: 'script_filter_hit',
-      name: 'filter-hit',
-      source: 'ctx.api.order.push("hit");',
-      bindings: [{ hook: 'table_fill.after_commit', enabled: true, filter: { changedSheets: 'sheet_a' } }],
-    });
-
-    const results = await runScriptHook_ACU('table_fill.after_commit', {
-      eventPayload: { updateMode: 'auto', changedSheets: ['sheet_a'] },
-    });
-
-    expect(results.map(result => result.scriptId)).toEqual(['script_filter_hit']);
-    expect(mocks.topWindow.AutoCardUpdaterAPI.order).toEqual(['hit']);
-  });
-
   it('同 binding order 时继续按 script order 排序', async () => {
     mocks.topWindow.AutoCardUpdaterAPI.order = [];
     addScript({

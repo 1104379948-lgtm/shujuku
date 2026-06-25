@@ -844,7 +844,6 @@ interface ScriptBinding {
   config?: unknown;
   outputKey?: string;
   outputTtl?: 'request' | 'chat' | 'session';
-  filter?: ScriptHookFilter;
   failurePolicy?: 'continue' | 'block';
 }
 
@@ -1606,7 +1605,7 @@ async function replaceScriptVariables(text: string, sourceContext: Record<string
 - 基础信息：名称、说明、启用状态。
 - 作用域：全局或绑定角色卡。
 - 变量调用：脚本 ID、变量调用示例、默认输入 JSON。
-- 事件绑定：挂载点、排序、输入 JSON、输出 key、输出生命周期、过滤条件。
+- 事件绑定：挂载点、排序、输入 JSON、输出 key、输出生命周期。
 - 代码编辑：脚本源码。
 - 运行测试：必须先保存当前脚本配置和源码，再运行已保存版本；可选择挂载点和输入 JSON，查看输出与日志。
 
@@ -2053,7 +2052,7 @@ try {
 - [x] 编辑页支持读取当前角色卡名称并一键绑定当前角色。
 - [x] 编辑页支持函数体源码编辑，不要求用户写固定外壳。
 - [x] 编辑页展示变量调用示例。
-- [x] 编辑页支持绑定挂载点、排序、配置 JSON、输出 key、输出生命周期、过滤条件。
+- [x] 编辑页支持绑定挂载点、排序、配置 JSON、输出 key、输出生命周期。
 - [x] 手动运行前必须先保存脚本配置和源码。
 - [x] 手动运行执行已保存版本，不执行未保存草稿。
 - [x] 手动运行允许真实写库。
@@ -2367,7 +2366,7 @@ npm run typecheck
 
 ### 21.2 高优先级问题
 
-- [x] `src/service/scripts/script-runner.ts`、`src/service/scripts/script-store.ts`、`src/presentation-v2/pages/ScriptManagerPage.vue`：`ScriptBinding.filter` 在类型、存储、导入导出和 UI 中都存在，但运行器完全忽略。问题类型：实现了外壳但未实现核心语义。用户配置过滤条件后，以为脚本只在指定表、任务或事件上运行，实际同 hook 每次都会运行，写库脚本可能误执行。验收：定义 `filter` 匹配语义，例如字段等值、数组包含或 hook-specific 字段匹配；`runScriptHook_ACU()` 排序执行前过滤不匹配 binding；无效 filter 保存或导入时拒绝；新增测试覆盖匹配和不匹配场景。
+- [x] `src/service/scripts/script-runner.ts`、`src/service/scripts/script-store.ts`、`src/presentation-v2/pages/ScriptManagerPage.vue`：移除绑定级条件 JSON，挂载点保持为业务时间线上的固定点，不再用绑定条件拆分语义。
 - [x] `src/service/scripts/script-store.ts`：普通保存路径仍大量使用 normalize 静默兜底，非法 hook 会被丢弃、非法 scope 会变成 global、非法 timeout 会变成 1 秒。问题类型：实现不准确或靠猜测兜底。用户或公共 API 保存拼错 hook 的脚本时，系统显示保存成功但绑定消失；scope 写错可能扩大为全局脚本。脚本功能尚未上线，不存在旧配置兼容需求。验收：用户保存或 API upsert 时非法 hook、scope、timeout、outputTtl、failurePolicy 必须报错，不得静默改写；运行时只读取已验证配置快照，不在读取时 normalize 并写回。
 - [x] `src/service/scripts/script-output-context.ts`：`chat/session` 输出作用域匹配过宽，保存端缺少 `chatId` 或 `characterId` 时会被读取端放行。问题类型：靠猜测兜底。某些路径拿不到 scope 时写出的 `chat` / `session` 输出会变成事实上的跨聊天或跨角色可读输出，造成摘要、缓存状态或上轮结果串号。设计要求 `chat/session` 输出按保存时聊天和角色隔离。验收：读取方有 `chatId` 时，保存输出缺 `chatId` 应视为不匹配；读取方有 `characterId` 时，保存输出缺 `characterId` 应视为不匹配；如需全局 session 输出，应设计显式字段而不是缺 scope 默认全局；新增缺 scope 隔离测试。
 - [x] `src/service/table/update-orchestrator.ts`：`table_fill.before_request` 把完整 `dynamicContent` 作为 `ctx.input` 传给脚本。问题类型：未按设计要求实现。`dynamicContent` 可能包含表格文本、聊天上下文、世界书内容、手动提示等大对象，脚本会依赖未设计稳定字段，也增加性能和隐私风险。设计要求事件载荷只传最小元信息，非数据库大文本通过 `ctx.tavern` 等封装接口显式读取。验收：`table_fill.before_request` 的 `ctx.event` 只包含 `hook/timestamp/requestId/targetSheetKeys/updateMode` 等最小字段；`ctx.input` 不默认携带完整 prompt 草稿或世界书正文；若需读取填表草稿，应提供 `ctx.tavern.getPromptDraft({ kind: 'table_fill' })` 或等价受控接口。

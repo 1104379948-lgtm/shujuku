@@ -296,6 +296,22 @@ describe('ScriptStore 阶段一能力', () => {
     }, false)).toThrow('scripts[0].bindings[0].hook');
   });
 
+  it('导入时拒绝绑定里的非 schema 字段', () => {
+    expect(() => importUserScripts_ACU({
+      format: USER_SCRIPT_EXPORT_FORMAT_ACU,
+      scripts: [{
+        name: '非法绑定字段',
+        enabled: true,
+        language: 'javascript',
+        source: 'return 1;',
+        bindings: [{ hook: 'table_fill.after_commit', enabled: true, extra: true }],
+        scope: { type: 'global' },
+        order: 100,
+        timeoutSeconds: 1,
+      }],
+    }, false)).toThrow('scripts[0].bindings[0].extra');
+  });
+
   it('导入时拒绝非法 scope 和 timeout，不靠默认值兜底', () => {
     expect(() => importUserScripts_ACU({
       format: USER_SCRIPT_EXPORT_FORMAT_ACU,

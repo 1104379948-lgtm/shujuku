@@ -38,24 +38,43 @@ function sortHookEntries_ACU(entries: Array<{ script: UserScriptDefinition_ACU; 
   });
 }
 
-function matchesFilterValue_ACU(actual: unknown, expected: unknown): boolean {
-  if (Array.isArray(expected)) {
-    if (Array.isArray(actual)) return expected.some(item => actual.includes(item));
-    return expected.includes(actual);
-  }
-  if (Array.isArray(actual)) return actual.includes(expected);
-  if (expected && typeof expected === 'object') {
-    if (!actual || typeof actual !== 'object') return false;
-    return Object.entries(expected as Record<string, unknown>).every(([key, value]) => matchesFilterValue_ACU((actual as any)[key], value));
-  }
-  return actual === expected;
+function normalizeTextMatchValue_ACU(value: unknown): string {
+  return String(value ?? '').trim();
 }
 
-function matchesBindingFilter_ACU(binding: ScriptBinding_ACU, eventPayload: unknown): boolean {
-  const filter = binding.filter;
-  if (!filter || typeof filter !== 'object' || Array.isArray(filter)) return true;
-  const event = eventPayload && typeof eventPayload === 'object' ? eventPayload as Record<string, unknown> : {};
-  return Object.entries(filter).every(([key, expected]) => matchesFilterValue_ACU(event[key], expected));
+function normalizeStageMatchValue_ACU(value: unknown): number | null {
+  const stage = Number(value);
+  if (!Number.isFinite(stage) || stage <= 0) return null;
+  return Math.trunc(stage);
+}
+
+function getEventPayloadObject_ACU(eventPayload: unknown): Record<string, any> {
+  return eventPayload && typeof eventPayload === 'object' && !Array.isArray(eventPayload)
+    ? eventPayload as Record<string, any>
+    : {};
+}
+
+function isPlotInstanceHook_ACU(hook: ScriptHookName_ACU): boolean {
+  return hook === 'plot.before_task_request' || hook === 'plot.after_task_response' || hook === 'plot.after_stage';
+}
+
+function doesBindingTargetMatchEvent_ACU(binding: ScriptBinding_ACU, hook: ScriptHookName_ACU, eventPayload: unknown): boolean {
+  if (!isPlotInstanceHook_ACU(hook)) return true;
+  const target = binding.target;
+  if (!target || typeof target !== 'object') return false;
+  const event = getEventPayloadObject_ACU(eventPayload);
+  const targetPresetName = normalizeTextMatchValue_ACU(target.presetName);
+  const eventPresetName = normalizeTextMatchValue_ACU(event.presetName);
+  if (!targetPresetName || targetPresetName !== eventPresetName) return false;
+  const targetStage = normalizeStageMatchValue_ACU(target.stage);
+  const eventStage = normalizeStageMatchValue_ACU(event.stage);
+  if (targetStage === null || eventStage === null || targetStage !== eventStage) return false;
+  if (hook === 'plot.before_task_request' || hook === 'plot.after_task_response') {
+    const targetTaskId = normalizeTextMatchValue_ACU(target.taskId);
+    const eventTaskId = normalizeTextMatchValue_ACU(event.taskId);
+    if (!targetTaskId || targetTaskId !== eventTaskId) return false;
+  }
+  return true;
 }
 
 function getRunRequestId_ACU(options: { eventPayload?: unknown; sourceContext?: Record<string, unknown>; requestContext?: ScriptRequestContext_ACU }): string {
@@ -179,7 +198,7 @@ export async function runScriptHook_ACU(hook: ScriptHookName_ACU, options: { eve
   const entries = sortHookEntries_ACU(getUserScriptsForRuntime_ACU()
     .filter(script => script.enabled !== false && isScriptInCurrentScope_ACU(script))
     .flatMap(script => (script.bindings || [])
-      .filter(binding => binding.enabled !== false && binding.hook === hook && matchesBindingFilter_ACU(binding, options.eventPayload))
+      .filter(binding => binding.enabled !== false && binding.hook === hook && doesBindingTargetMatchEvent_ACU(binding, hook, options.eventPayload))
       .map(binding => ({ script, binding }))));
   const results: ScriptRunResult_ACU[] = [];
   for (const entry of entries) {

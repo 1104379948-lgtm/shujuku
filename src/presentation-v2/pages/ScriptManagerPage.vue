@@ -139,10 +139,36 @@
             <div v-for="(binding, index) in draft.bindings" :key="index" class="acu-v2-script-page__binding">
               <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--hook">
                 <span>触发时机</span>
-                <select v-model="binding.hook">
+                <select v-model="binding.hook" @change="handleBindingHookChange(index)">
                   <option v-for="hook in hookOptions" :key="hook" :value="hook">{{ hook }}</option>
                 </select>
               </label>
+              <div v-if="isPlotBindingHook(binding.hook)" class="acu-v2-script-page__binding-target">
+                <label class="acu-v2-script-page__binding-field">
+                  <span>剧情预设</span>
+                  <select :value="binding.target?.presetName || ''" @change="setBindingTargetField(index, 'presetName', ($event.target as HTMLSelectElement).value)">
+                    <option value="">请选择预设</option>
+                    <option v-for="preset in getBindingPresetOptions(binding)" :key="preset.name" :value="preset.name">{{ preset.label }}</option>
+                  </select>
+                </label>
+                <label class="acu-v2-script-page__binding-field">
+                  <span>Stage</span>
+                  <select :value="binding.target?.stage || ''" @change="setBindingTargetField(index, 'stage', ($event.target as HTMLSelectElement).value)">
+                    <option value="">请选择 stage</option>
+                    <option v-for="stage in getBindingStageOptions(binding)" :key="stage" :value="stage">Stage {{ stage }}</option>
+                  </select>
+                </label>
+                <label v-if="isPlotTaskBindingHook(binding.hook)" class="acu-v2-script-page__binding-field">
+                  <span>任务</span>
+                  <select :value="binding.target?.taskId || ''" @change="setBindingTargetField(index, 'taskId', ($event.target as HTMLSelectElement).value)">
+                    <option value="">请选择任务</option>
+                    <option v-for="task in getBindingTaskOptions(binding)" :key="task.id" :value="task.id">{{ task.label }}</option>
+                  </select>
+                </label>
+                <p class="acu-v2-script-page__hint acu-v2-script-page__binding-target-hint">
+                  该绑定只会在选中的预设 / stage{{ isPlotTaskBindingHook(binding.hook) ? ' / 任务' : '' }} 的固定挂载点执行。
+                </p>
+              </div>
               <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--enabled">
                 <span>启用</span>
                 <input v-model="binding.enabled" type="checkbox" />
@@ -170,37 +196,9 @@
                   <option value="block">阻断当前流程</option>
                 </select>
               </label>
-              <div v-if="isPlotBinding(binding)" class="acu-v2-script-page__plot-filter">
-                <label>
-                  <span>剧情预设名 presetName</span>
-                  <select :value="plotFilterValue(binding, 'presetName')" @change="setPlotFilterValue(binding, 'presetName', ($event.target as HTMLSelectElement).value)">
-                    <option value="">不限制预设</option>
-                    <option v-for="option in presetOptionsForBinding(binding)" :key="option" :value="option">{{ option }}</option>
-                  </select>
-                </label>
-                <label v-if="binding.hook === 'plot.before_task_request' || binding.hook === 'plot.after_task_response'">
-                  <span>任务 ID taskId</span>
-                  <select :value="plotFilterValue(binding, 'taskId')" @change="setPlotFilterValue(binding, 'taskId', ($event.target as HTMLSelectElement).value)">
-                    <option value="">不限制任务</option>
-                    <option v-for="task in taskOptionsForBinding(binding)" :key="task.id" :value="task.id">{{ task.label }}</option>
-                  </select>
-                </label>
-                <label v-if="binding.hook === 'plot.after_stage'">
-                  <span>阶段 stage</span>
-                  <select :value="plotFilterValue(binding, 'stage')" @change="setPlotFilterValue(binding, 'stage', ($event.target as HTMLSelectElement).value)">
-                    <option value="">不限制阶段</option>
-                    <option v-for="stage in stageOptionsForBinding(binding)" :key="stage" :value="String(stage)">stage {{ stage }}</option>
-                  </select>
-                </label>
-                <p class="acu-v2-script-page__hint">预设和全部脚本可以分别导出导入；这里会写入 filter，运行时按 presetName + taskId/stage 匹配。</p>
-              </div>
               <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json">
                 <span>配置</span>
                 <textarea v-model="bindingJsonTexts[index].config" rows="2" placeholder="例如 {&quot;limit&quot;:5}"></textarea>
-              </label>
-              <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json">
-                <span>过滤</span>
-                <textarea v-model="bindingJsonTexts[index].filter" rows="2" placeholder="例如 {&quot;presetName&quot;:&quot;日常&quot;}"></textarea>
               </label>
               <AcuButton size="sm" variant="danger" @click="removeBinding(index)">移除</AcuButton>
             </div>
@@ -282,14 +280,15 @@ import {
   upsertUserScript_ACU,
   USER_SCRIPT_EXPORT_FORMAT_ACU,
   validateUserScriptImportItem_ACU,
-  type ScriptBinding_ACU,
   type ScriptHookName_ACU,
+  type ScriptBinding_ACU,
   type ScriptLogEntry_ACU,
   type UserScriptExportPackage_ACU,
   type UserScriptDefinition_ACU,
 } from '../../service/scripts'; // arch-ok: script manager is a tool page for editing persisted user scripts
+import { settings_ACU } from '../../service/runtime/state-manager'; // arch-ok: script manager reads preset metadata to bind fixed plot hook instances
+import { normalizePlotTasks_ACU } from '../../service/plot/plot-logic'; // arch-ok: script manager presents normalized plot task targets for bindings
 import { topLevelWindow_ACU } from '../../shared/env';
-import { usePlotPresetStore } from '../stores/plot-preset-store';
 
 const hookOptions: ScriptHookName_ACU[] = [
   'chat.loaded',
@@ -311,7 +310,7 @@ const logs = ref<ScriptLogEntry_ACU[]>([]);
 const selectedId = ref('');
 const draft = ref<UserScriptDefinition_ACU | null>(null);
 const defaultVariableInputText = ref('');
-const bindingJsonTexts = ref<Array<{ config: string; filter: string }>>([]);
+const bindingJsonTexts = ref<Array<{ config: string }>>([]);
 const manualInputText = ref('');
 const manualBindingIndex = ref<number | ''>('');
 const jsonError = ref('');
@@ -320,7 +319,6 @@ const manualRunning = ref(false);
 const importFileInput = ref<HTMLInputElement | null>(null);
 const importPreview = ref<UserScriptExportPackage_ACU | null>(null);
 const currentCharacterName = ref('');
-const plotPresetStore = usePlotPresetStore();
 
 const selectedLogs = computed(() => logs.value.filter(log => log.scriptId === selectedId.value).slice().reverse());
 const selectedLogGroups = computed(() => {
@@ -392,13 +390,126 @@ const importPreviewItems = computed(() => {
   });
 });
 const importPreviewHasErrors = computed(() => importPreviewItems.value.some(item => !item.valid));
+const plotPresetOptions = computed(() => {
+  const presets = Array.isArray(settings_ACU.plotSettings?.promptPresets) ? settings_ACU.plotSettings.promptPresets : [];
+  return presets
+    .map((preset: any) => {
+      const name = String(preset?.name || '').trim();
+      const tasks = normalizePlotTasks_ACU(preset || {})
+        .filter((task: any) => task && task.enabled !== false)
+        .map((task: any, index: number) => ({
+          id: String(task.id || '').trim(),
+          name: String(task.name || '').trim(),
+          stage: normalizeStageValue_ACU(task.stage),
+          order: Number.isFinite(Number(task.order)) ? Number(task.order) : index,
+        }))
+        .filter((task: any) => task.id);
+      return { name, tasks };
+    })
+    .filter((preset: any) => preset.name);
+});
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizeStageValue_ACU(value: unknown): number {
+  const stage = Number(value);
+  return Number.isFinite(stage) && stage > 0 ? Math.trunc(stage) : 1;
+}
+
+function isPlotTaskBindingHook(hook: unknown): boolean {
+  return hook === 'plot.before_task_request' || hook === 'plot.after_task_response';
+}
+
+function isPlotStageBindingHook(hook: unknown): boolean {
+  return hook === 'plot.after_stage';
+}
+
+function isPlotBindingHook(hook: unknown): boolean {
+  return isPlotTaskBindingHook(hook) || isPlotStageBindingHook(hook);
+}
+
+function getPresetBindingMeta_ACU(presetName: unknown) {
+  const name = String(presetName || '').trim();
+  return plotPresetOptions.value.find(preset => preset.name === name) || null;
+}
+
+function getBindingPresetOptions(binding: ScriptBinding_ACU): Array<{ name: string; label: string }> {
+  const currentName = String(binding.target?.presetName || '').trim();
+  const options = plotPresetOptions.value.map(preset => ({ name: preset.name, label: preset.name }));
+  if (currentName && !options.some(option => option.name === currentName)) {
+    options.unshift({ name: currentName, label: `${currentName}（当前未导入）` });
+  }
+  return options;
+}
+
+function ensureBindingTarget_ACU(binding: ScriptBinding_ACU): NonNullable<ScriptBinding_ACU['target']> {
+  if (!binding.target || typeof binding.target !== 'object') binding.target = {};
+  return binding.target;
+}
+
+function getBindingStageOptions(binding: ScriptBinding_ACU): number[] {
+  const preset = getPresetBindingMeta_ACU(binding.target?.presetName);
+  const stages = preset ? preset.tasks.map(task => normalizeStageValue_ACU(task.stage)) : [];
+  const currentStage = binding.target?.stage === undefined ? null : normalizeStageValue_ACU(binding.target.stage);
+  if (currentStage !== null && !stages.includes(currentStage)) stages.unshift(currentStage);
+  return Array.from(new Set(stages)).sort((a, b) => a - b);
+}
+
+function getBindingTaskOptions(binding: ScriptBinding_ACU): Array<{ id: string; label: string }> {
+  const preset = getPresetBindingMeta_ACU(binding.target?.presetName);
+  const stage = normalizeStageValue_ACU(binding.target?.stage);
+  if (!preset || !Number.isFinite(stage)) return [];
+  const options = preset.tasks
+    .filter(task => normalizeStageValue_ACU(task.stage) === stage)
+    .slice()
+    .sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+    .map(task => ({ id: task.id, label: `Stage ${task.stage} · ${task.name || task.id}` }));
+  const currentTaskId = String(binding.target?.taskId || '').trim();
+  if (currentTaskId && !options.some(option => option.id === currentTaskId)) {
+    options.unshift({ id: currentTaskId, label: `${currentTaskId}（当前预设/stage 下未找到）` });
+  }
+  return options;
+}
+
+function normalizeBindingTargetForHook_ACU(binding: ScriptBinding_ACU): void {
+  if (!isPlotBindingHook(binding.hook)) {
+    delete binding.target;
+    return;
+  }
+  const target = ensureBindingTarget_ACU(binding);
+  target.presetName = String(target.presetName || '').trim();
+  if (target.stage !== undefined && target.stage !== null && target.stage !== '') target.stage = normalizeStageValue_ACU(target.stage);
+  else delete target.stage;
+  if (isPlotTaskBindingHook(binding.hook)) target.taskId = String(target.taskId || '').trim();
+  else delete target.taskId;
+}
+
+function handleBindingHookChange(index: number): void {
+  const binding = draft.value?.bindings[index];
+  if (!binding) return;
+  normalizeBindingTargetForHook_ACU(binding);
+}
+
+function setBindingTargetField(index: number, field: 'presetName' | 'stage' | 'taskId', value: string): void {
+  const binding = draft.value?.bindings[index];
+  if (!binding) return;
+  const target = ensureBindingTarget_ACU(binding);
+  if (field === 'stage') {
+    target.stage = value ? normalizeStageValue_ACU(value) : undefined;
+    if (isPlotTaskBindingHook(binding.hook)) target.taskId = '';
+  } else if (field === 'presetName') {
+    target.presetName = String(value || '').trim();
+    target.stage = undefined;
+    target.taskId = '';
+  } else {
+    target.taskId = String(value || '').trim();
+  }
+  normalizeBindingTargetForHook_ACU(binding);
+}
+
 function refresh(): void {
-  plotPresetStore.refreshFromSettings();
   scripts.value = getUserScripts_ACU().slice().sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   logs.value = getScriptLogs_ACU();
   currentCharacterName.value = resolveCurrentCharacterName_ACU();
@@ -536,7 +647,7 @@ function addBinding(): void {
     outputTtl: 'request',
     failurePolicy: 'continue',
   });
-  bindingJsonTexts.value.push({ config: '', filter: '' });
+  bindingJsonTexts.value.push({ config: '' });
 }
 
 function removeBinding(index: number): void {
@@ -563,113 +674,6 @@ function bindCurrentCharacter(): void {
   jsonError.value = '';
 }
 
-function isPlotBinding(binding: ScriptBinding_ACU): boolean {
-  return binding.hook === 'plot.before_task_request' || binding.hook === 'plot.after_task_response' || binding.hook === 'plot.after_stage';
-}
-
-function ensureBindingFilterObject(binding: ScriptBinding_ACU): Record<string, unknown> {
-  if (!binding.filter || typeof binding.filter !== 'object' || Array.isArray(binding.filter)) {
-    binding.filter = {};
-  }
-  return binding.filter as Record<string, unknown>;
-}
-
-function findBindingIndex(binding: ScriptBinding_ACU): number {
-  return draft.value?.bindings.indexOf(binding) ?? -1;
-}
-
-function syncBindingFilterText(binding: ScriptBinding_ACU): void {
-  const index = findBindingIndex(binding);
-  if (index < 0) return;
-  if (!bindingJsonTexts.value[index]) bindingJsonTexts.value[index] = { config: '', filter: '' };
-  bindingJsonTexts.value[index].filter = jsonText(binding.filter);
-}
-
-function plotFilterValue(binding: ScriptBinding_ACU, key: 'presetName' | 'taskId' | 'stage'): string {
-  const filter = binding.filter && typeof binding.filter === 'object' && !Array.isArray(binding.filter)
-    ? binding.filter as Record<string, unknown>
-    : {};
-  const value = filter[key];
-  return value === undefined || value === null ? '' : String(value);
-}
-
-function presetOptionsForBinding(binding: ScriptBinding_ACU): string[] {
-  const current = plotFilterValue(binding, 'presetName');
-  const names = plotPresetStore.presets.map(preset => preset.name).filter(Boolean);
-  if (current && !names.includes(current)) names.unshift(current);
-  return names;
-}
-
-function selectedPlotPresetForBinding(binding: ScriptBinding_ACU) {
-  const presetName = plotFilterValue(binding, 'presetName');
-  if (!presetName) return null;
-  return plotPresetStore.presets.find(preset => preset.name === presetName) || null;
-}
-
-function taskOptionsForBinding(binding: ScriptBinding_ACU): Array<{ id: string; label: string }> {
-  const preset = selectedPlotPresetForBinding(binding);
-  const tasks = Array.isArray(preset?.raw?.plotTasks) ? preset.raw.plotTasks : [];
-  const options = tasks
-    .map((task: any) => {
-      const id = String(task?.id || '').trim();
-      if (!id) return null;
-      const name = String(task?.name || '').trim();
-      const stage = Number.isFinite(Number(task?.stage)) ? `stage ${Number(task.stage)}` : 'stage ?';
-      return { id, label: `${name || id} · ${id} · ${stage}` };
-    })
-    .filter(Boolean) as Array<{ id: string; label: string }>;
-  const current = plotFilterValue(binding, 'taskId');
-  if (current && !options.some(option => option.id === current)) options.unshift({ id: current, label: `${current}（当前脚本中保存，当前预设未找到）` });
-  return options;
-}
-
-function stageOptionsForBinding(binding: ScriptBinding_ACU): number[] {
-  const preset = selectedPlotPresetForBinding(binding);
-  const tasks = Array.isArray(preset?.raw?.plotTasks) ? preset.raw.plotTasks : [];
-  const stages = Array.from(new Set(tasks
-    .map((task: any) => Number(task?.stage))
-    .filter(stage => Number.isFinite(stage) && stage > 0)
-    .map(stage => Math.trunc(stage))))
-    .sort((a, b) => a - b);
-  const current = Number(plotFilterValue(binding, 'stage'));
-  if (Number.isFinite(current) && current > 0 && !stages.includes(Math.trunc(current))) stages.unshift(Math.trunc(current));
-  return stages;
-}
-
-function setPlotFilterValue(binding: ScriptBinding_ACU, key: 'presetName' | 'taskId' | 'stage', rawValue: string): void {
-  const filter = ensureBindingFilterObject(binding);
-  const text = String(rawValue || '').trim();
-  if (!text) {
-    delete filter[key];
-  } else if (key === 'stage') {
-    const stage = Number(text);
-    if (Number.isFinite(stage) && stage > 0) filter[key] = Math.trunc(stage);
-  } else {
-    filter[key] = text;
-    if (key === 'presetName') {
-      delete filter.taskId;
-      delete filter.stage;
-    }
-  }
-  if (Object.keys(filter).length === 0) binding.filter = undefined;
-  syncBindingFilterText(binding);
-}
-
-function normalizeBindingFilterForHook(binding: ScriptBinding_ACU): void {
-  if (!binding.filter || typeof binding.filter !== 'object' || Array.isArray(binding.filter)) return;
-  const filter = binding.filter as Record<string, unknown>;
-  if (binding.hook === 'plot.after_stage') {
-    delete filter.taskId;
-  } else if (binding.hook === 'plot.before_task_request' || binding.hook === 'plot.after_task_response') {
-    delete filter.stage;
-  } else {
-    delete filter.presetName;
-    delete filter.taskId;
-    delete filter.stage;
-  }
-  if (Object.keys(filter).length === 0) binding.filter = undefined;
-}
-
 function parseJsonOrNull(value: string): unknown {
   const text = String(value || '').trim();
   if (!text) return undefined;
@@ -694,7 +698,6 @@ function syncJsonTextFromDraft(): void {
   defaultVariableInputText.value = jsonText(draft.value?.defaultVariableInput);
   bindingJsonTexts.value = (draft.value?.bindings || []).map(binding => ({
     config: jsonText(binding.config),
-    filter: jsonText(binding.filter),
   }));
 }
 
@@ -705,14 +708,25 @@ function applyJsonTextToDraft(): boolean {
   draft.value.defaultVariableInput = defaultInput.value;
   for (let index = 0; index < draft.value.bindings.length; index++) {
     const binding = draft.value.bindings[index];
-    const raw = bindingJsonTexts.value[index] || { config: '', filter: '' };
+    const raw = bindingJsonTexts.value[index] || { config: '' };
     const config = parseJsonWithFeedback(raw.config, `第 ${index + 1} 个绑定配置`);
     if (!config.ok) return false;
-    const filter = parseJsonWithFeedback(raw.filter, `第 ${index + 1} 个过滤条件`);
-    if (!filter.ok) return false;
     binding.config = config.value;
-    binding.filter = filter.value as Record<string, unknown> | undefined;
-    normalizeBindingFilterForHook(binding);
+    normalizeBindingTargetForHook_ACU(binding);
+    if (isPlotBindingHook(binding.hook)) {
+      if (!binding.target?.presetName) {
+        jsonError.value = `第 ${index + 1} 个剧情推进绑定缺少剧情预设。`;
+        return false;
+      }
+      if (!binding.target?.stage) {
+        jsonError.value = `第 ${index + 1} 个剧情推进绑定缺少 stage。`;
+        return false;
+      }
+      if (isPlotTaskBindingHook(binding.hook) && !binding.target?.taskId) {
+        jsonError.value = `第 ${index + 1} 个剧情推进任务绑定缺少任务。`;
+        return false;
+      }
+    }
   }
   jsonError.value = '';
   return true;
@@ -908,9 +922,6 @@ onMounted(refresh);
 .acu-v2-script-page__binding-field--enabled { align-items: center; }
 .acu-v2-script-page__binding-field--enabled input { width: auto; min-width: auto; }
 .acu-v2-script-page__binding-field--json { grid-column: span 3; }
-.acu-v2-script-page__plot-filter { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px; border: 1px dashed var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); }
-.acu-v2-script-page__plot-filter label { display: flex; flex-direction: column; gap: 4px; color: var(--acu-text-2); font-size: 12px; }
-.acu-v2-script-page__plot-filter .acu-v2-script-page__hint { grid-column: 1 / -1; margin: 0; }
 .acu-v2-script-page__import-preview { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); }
 .acu-v2-script-page__import-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .acu-v2-script-page__import-head p { margin: 4px 0 0; }

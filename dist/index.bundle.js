@@ -15987,6 +15987,51 @@ $CONTENT
         if (typeof value !== 'string')
             throw new Error(`脚本导入字段无效: ${field}`);
     }
+    function normalizeBindingTarget_ACU(target) {
+        if (!target || typeof target !== 'object' || Array.isArray(target))
+            return undefined;
+        const normalized = {};
+        if (typeof target.presetName !== 'undefined')
+            normalized.presetName = String(target.presetName || '').trim();
+        if (typeof target.stage !== 'undefined') {
+            const stage = Number(target.stage);
+            normalized.stage = Number.isFinite(stage) && stage > 0 ? Math.trunc(stage) : NaN;
+        }
+        if (typeof target.taskId !== 'undefined')
+            normalized.taskId = String(target.taskId || '').trim();
+        return normalized;
+    }
+    function validateBindingTarget_ACU(binding, prefix, hook) {
+        const target = binding.target;
+        const isPlotTaskHook = hook === 'plot.before_task_request' || hook === 'plot.after_task_response';
+        const isPlotStageHook = hook === 'plot.after_stage';
+        if (!isPlotTaskHook && !isPlotStageHook) {
+            if (typeof target !== 'undefined') {
+                if (!isPlainObject_ACU(target))
+                    throw new Error(`脚本导入字段无效: ${prefix}.target`);
+                const allowedKeys = new Set(['presetName', 'stage', 'taskId']);
+                for (const key of Object.keys(target)) {
+                    if (!allowedKeys.has(key))
+                        throw new Error(`脚本导入字段无效: ${prefix}.target.${key}`);
+                }
+            }
+            return;
+        }
+        if (!isPlainObject_ACU(target))
+            throw new Error(`脚本导入缺少字段: ${prefix}.target`);
+        const allowedKeys = new Set(['presetName', 'stage', 'taskId']);
+        for (const key of Object.keys(target)) {
+            if (!allowedKeys.has(key))
+                throw new Error(`脚本导入字段无效: ${prefix}.target.${key}`);
+        }
+        const normalized = normalizeBindingTarget_ACU(target);
+        if (!normalized?.presetName)
+            throw new Error(`脚本导入缺少字段: ${prefix}.target.presetName`);
+        if (!Number.isFinite(normalized.stage) || Number(normalized.stage) <= 0)
+            throw new Error(`脚本导入字段无效: ${prefix}.target.stage`);
+        if (isPlotTaskHook && !normalized.taskId)
+            throw new Error(`脚本导入缺少字段: ${prefix}.target.taskId`);
+    }
     function assertSaveResult_ACU(result) {
         if (result && typeof result === 'object' && result.saved === false) {
             throw new Error(`脚本配置保存失败: ${result.code || result.reason || 'unknown'}`);
@@ -16021,17 +16066,21 @@ $CONTENT
         const prefix = `scripts[${scriptIndex}].bindings[${bindingIndex}]`;
         if (!isPlainObject_ACU(binding))
             throw new Error(`脚本导入字段无效: ${prefix}`);
+        const allowedKeys = new Set(['hook', 'enabled', 'target', 'order', 'config', 'outputKey', 'outputTtl', 'failurePolicy']);
+        for (const key of Object.keys(binding)) {
+            if (!allowedKeys.has(key))
+                throw new Error(`脚本导入字段无效: ${prefix}.${key}`);
+        }
         const hook = String(binding.hook || '').trim();
         if (!VALID_SCRIPT_HOOKS_ACU.has(hook))
             throw new Error(`脚本导入字段无效: ${prefix}.hook`);
+        validateBindingTarget_ACU(binding, prefix, hook);
         assertBooleanField_ACU(binding.enabled, `${prefix}.enabled`, { required: true });
         assertFiniteNumberField_ACU(binding.order, `${prefix}.order`);
         assertStringField_ACU(binding.outputKey, `${prefix}.outputKey`);
         if (typeof binding.outputTtl !== 'undefined' && !VALID_OUTPUT_TTLS_ACU.has(binding.outputTtl)) {
             throw new Error(`脚本导入字段无效: ${prefix}.outputTtl`);
         }
-        if (typeof binding.filter !== 'undefined' && !isPlainObject_ACU(binding.filter))
-            throw new Error(`脚本导入字段无效: ${prefix}.filter`);
         if (typeof binding.failurePolicy !== 'undefined' && !['continue', 'block'].includes(binding.failurePolicy)) {
             throw new Error(`脚本导入字段无效: ${prefix}.failurePolicy`);
         }
@@ -16076,6 +16125,16 @@ $CONTENT
         const scope = script.scope?.type === 'character'
             ? { type: 'character', characterNames: [...(script.scope.characterNames || [])] }
             : { type: 'global' };
+        const bindings = (script.bindings || []).map(binding => ({
+            hook: binding.hook,
+            enabled: binding.enabled,
+            target: cloneScriptJson_ACU(normalizeBindingTarget_ACU(binding.target)),
+            order: binding.order,
+            config: cloneScriptJson_ACU(binding.config),
+            outputKey: binding.outputKey,
+            outputTtl: binding.outputTtl,
+            failurePolicy: binding.failurePolicy,
+        }));
         return {
             id: options.preserveIds && script.id ? String(script.id) : createScriptId_ACU(),
             name: String(script.name || '').trim(),
@@ -16084,7 +16143,7 @@ $CONTENT
             version: Number.isFinite(script.version) ? Number(script.version) : 1,
             language: 'javascript',
             source: String(script.source || ''),
-            bindings: cloneScriptJson_ACU(script.bindings || []),
+            bindings: cloneScriptJson_ACU(bindings),
             scope: cloneScriptJson_ACU(scope),
             order: Number(script.order),
             timeoutSeconds: Number(script.timeoutSeconds),
@@ -16480,27 +16539,45 @@ $CONTENT
             return nameDelta || String(a.script.id).localeCompare(String(b.script.id));
         });
     }
-    function matchesFilterValue_ACU(actual, expected) {
-        if (Array.isArray(expected)) {
-            if (Array.isArray(actual))
-                return expected.some(item => actual.includes(item));
-            return expected.includes(actual);
-        }
-        if (Array.isArray(actual))
-            return actual.includes(expected);
-        if (expected && typeof expected === 'object') {
-            if (!actual || typeof actual !== 'object')
-                return false;
-            return Object.entries(expected).every(([key, value]) => matchesFilterValue_ACU(actual[key], value));
-        }
-        return actual === expected;
+    function normalizeTextMatchValue_ACU(value) {
+        return String(value ?? '').trim();
     }
-    function matchesBindingFilter_ACU(binding, eventPayload) {
-        const filter = binding.filter;
-        if (!filter || typeof filter !== 'object' || Array.isArray(filter))
+    function normalizeStageMatchValue_ACU(value) {
+        const stage = Number(value);
+        if (!Number.isFinite(stage) || stage <= 0)
+            return null;
+        return Math.trunc(stage);
+    }
+    function getEventPayloadObject_ACU(eventPayload) {
+        return eventPayload && typeof eventPayload === 'object' && !Array.isArray(eventPayload)
+            ? eventPayload
+            : {};
+    }
+    function isPlotInstanceHook_ACU(hook) {
+        return hook === 'plot.before_task_request' || hook === 'plot.after_task_response' || hook === 'plot.after_stage';
+    }
+    function doesBindingTargetMatchEvent_ACU(binding, hook, eventPayload) {
+        if (!isPlotInstanceHook_ACU(hook))
             return true;
-        const event = eventPayload && typeof eventPayload === 'object' ? eventPayload : {};
-        return Object.entries(filter).every(([key, expected]) => matchesFilterValue_ACU(event[key], expected));
+        const target = binding.target;
+        if (!target || typeof target !== 'object')
+            return false;
+        const event = getEventPayloadObject_ACU(eventPayload);
+        const targetPresetName = normalizeTextMatchValue_ACU(target.presetName);
+        const eventPresetName = normalizeTextMatchValue_ACU(event.presetName);
+        if (!targetPresetName || targetPresetName !== eventPresetName)
+            return false;
+        const targetStage = normalizeStageMatchValue_ACU(target.stage);
+        const eventStage = normalizeStageMatchValue_ACU(event.stage);
+        if (targetStage === null || eventStage === null || targetStage !== eventStage)
+            return false;
+        if (hook === 'plot.before_task_request' || hook === 'plot.after_task_response') {
+            const targetTaskId = normalizeTextMatchValue_ACU(target.taskId);
+            const eventTaskId = normalizeTextMatchValue_ACU(event.taskId);
+            if (!targetTaskId || targetTaskId !== eventTaskId)
+                return false;
+        }
+        return true;
     }
     function getRunRequestId_ACU(options) {
         return resolveScriptRequestIdFromInputs_ACU(options);
@@ -16621,7 +16698,7 @@ $CONTENT
         const entries = sortHookEntries_ACU(getUserScriptsForRuntime_ACU()
             .filter(script => script.enabled !== false && isScriptInCurrentScope_ACU(script))
             .flatMap(script => (script.bindings || [])
-            .filter(binding => binding.enabled !== false && binding.hook === hook && matchesBindingFilter_ACU(binding, options.eventPayload))
+            .filter(binding => binding.enabled !== false && binding.hook === hook && doesBindingTargetMatchEvent_ACU(binding, hook, options.eventPayload))
             .map(binding => ({ script, binding }))));
         const results = [];
         for (const entry of entries) {
@@ -19333,6 +19410,7 @@ $CONTENT
                 timestamp: Date.now(),
                 requestId: payload.requestId,
                 presetName: payload.presetName || '',
+                stage: payload.stage,
                 taskId: payload.taskId,
                 ...(hook === 'plot.before_task_request'
                     ? { phase: payload.phase || 'before_request' }
@@ -19343,6 +19421,7 @@ $CONTENT
                 promptType: 'plot',
                 sourceType: hook,
                 presetName: payload.presetName || '',
+                stage: payload.stage,
                 taskId: payload.taskId,
             },
             requestContext: payload.requestContext,
@@ -19780,6 +19859,7 @@ $CONTENT
             await runPlotTaskHook_ACU('plot.before_task_request', {
                 requestId: scriptRequestId,
                 presetName,
+                stage: taskStage,
                 taskId: normalizedTask.id,
                 phase: 'before_request',
                 requestContext: scriptRequestContext,
@@ -19858,6 +19938,7 @@ $CONTENT
             await runPlotTaskHook_ACU('plot.after_task_response', {
                 requestId: scriptRequestId,
                 presetName,
+                stage: taskStage,
                 taskId: normalizedTask.id,
                 success: true,
                 requestContext: scriptRequestContext,
@@ -97157,7 +97238,6 @@ Expected function or array of functions, received type ${typeof value}.`
             const importFileInput = ref(null);
             const importPreview = ref(null);
             const currentCharacterName = ref('');
-            const plotPresetStore = usePlotPresetStore();
             const selectedLogs = computed(() => logs.value.filter(log => log.scriptId === selectedId.value).slice().reverse());
             const selectedLogGroups = computed(() => {
                 const groups = new Map();
@@ -97230,11 +97310,124 @@ Expected function or array of functions, received type ${typeof value}.`
                 });
             });
             const importPreviewHasErrors = computed(() => importPreviewItems.value.some(item => !item.valid));
+            const plotPresetOptions = computed(() => {
+                const presets = Array.isArray(settings_ACU.plotSettings?.promptPresets) ? settings_ACU.plotSettings.promptPresets : [];
+                return presets
+                    .map((preset) => {
+                    const name = String(preset?.name || '').trim();
+                    const tasks = normalizePlotTasks_ACU(preset || {})
+                        .filter((task) => task && task.enabled !== false)
+                        .map((task, index) => ({
+                        id: String(task.id || '').trim(),
+                        name: String(task.name || '').trim(),
+                        stage: normalizeStageValue_ACU(task.stage),
+                        order: Number.isFinite(Number(task.order)) ? Number(task.order) : index,
+                    }))
+                        .filter((task) => task.id);
+                    return { name, tasks };
+                })
+                    .filter((preset) => preset.name);
+            });
             function clone(value) {
                 return JSON.parse(JSON.stringify(value));
             }
+            function normalizeStageValue_ACU(value) {
+                const stage = Number(value);
+                return Number.isFinite(stage) && stage > 0 ? Math.trunc(stage) : 1;
+            }
+            function isPlotTaskBindingHook(hook) {
+                return hook === 'plot.before_task_request' || hook === 'plot.after_task_response';
+            }
+            function isPlotStageBindingHook(hook) {
+                return hook === 'plot.after_stage';
+            }
+            function isPlotBindingHook(hook) {
+                return isPlotTaskBindingHook(hook) || isPlotStageBindingHook(hook);
+            }
+            function getPresetBindingMeta_ACU(presetName) {
+                const name = String(presetName || '').trim();
+                return plotPresetOptions.value.find(preset => preset.name === name) || null;
+            }
+            function getBindingPresetOptions(binding) {
+                const currentName = String(binding.target?.presetName || '').trim();
+                const options = plotPresetOptions.value.map(preset => ({ name: preset.name, label: preset.name }));
+                if (currentName && !options.some(option => option.name === currentName)) {
+                    options.unshift({ name: currentName, label: `${currentName}（当前未导入）` });
+                }
+                return options;
+            }
+            function ensureBindingTarget_ACU(binding) {
+                if (!binding.target || typeof binding.target !== 'object')
+                    binding.target = {};
+                return binding.target;
+            }
+            function getBindingStageOptions(binding) {
+                const preset = getPresetBindingMeta_ACU(binding.target?.presetName);
+                const stages = preset ? preset.tasks.map(task => normalizeStageValue_ACU(task.stage)) : [];
+                const currentStage = binding.target?.stage === undefined ? null : normalizeStageValue_ACU(binding.target.stage);
+                if (currentStage !== null && !stages.includes(currentStage))
+                    stages.unshift(currentStage);
+                return Array.from(new Set(stages)).sort((a, b) => a - b);
+            }
+            function getBindingTaskOptions(binding) {
+                const preset = getPresetBindingMeta_ACU(binding.target?.presetName);
+                const stage = normalizeStageValue_ACU(binding.target?.stage);
+                if (!preset || !Number.isFinite(stage))
+                    return [];
+                const options = preset.tasks
+                    .filter(task => normalizeStageValue_ACU(task.stage) === stage)
+                    .slice()
+                    .sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+                    .map(task => ({ id: task.id, label: `Stage ${task.stage} · ${task.name || task.id}` }));
+                const currentTaskId = String(binding.target?.taskId || '').trim();
+                if (currentTaskId && !options.some(option => option.id === currentTaskId)) {
+                    options.unshift({ id: currentTaskId, label: `${currentTaskId}（当前预设/stage 下未找到）` });
+                }
+                return options;
+            }
+            function normalizeBindingTargetForHook_ACU(binding) {
+                if (!isPlotBindingHook(binding.hook)) {
+                    delete binding.target;
+                    return;
+                }
+                const target = ensureBindingTarget_ACU(binding);
+                target.presetName = String(target.presetName || '').trim();
+                if (target.stage !== undefined && target.stage !== null && target.stage !== '')
+                    target.stage = normalizeStageValue_ACU(target.stage);
+                else
+                    delete target.stage;
+                if (isPlotTaskBindingHook(binding.hook))
+                    target.taskId = String(target.taskId || '').trim();
+                else
+                    delete target.taskId;
+            }
+            function handleBindingHookChange(index) {
+                const binding = draft.value?.bindings[index];
+                if (!binding)
+                    return;
+                normalizeBindingTargetForHook_ACU(binding);
+            }
+            function setBindingTargetField(index, field, value) {
+                const binding = draft.value?.bindings[index];
+                if (!binding)
+                    return;
+                const target = ensureBindingTarget_ACU(binding);
+                if (field === 'stage') {
+                    target.stage = value ? normalizeStageValue_ACU(value) : undefined;
+                    if (isPlotTaskBindingHook(binding.hook))
+                        target.taskId = '';
+                }
+                else if (field === 'presetName') {
+                    target.presetName = String(value || '').trim();
+                    target.stage = undefined;
+                    target.taskId = '';
+                }
+                else {
+                    target.taskId = String(value || '').trim();
+                }
+                normalizeBindingTargetForHook_ACU(binding);
+            }
             function refresh() {
-                plotPresetStore.refreshFromSettings();
                 scripts.value = getUserScripts_ACU().slice().sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
                 logs.value = getScriptLogs_ACU();
                 currentCharacterName.value = resolveCurrentCharacterName_ACU();
@@ -97380,7 +97573,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     outputTtl: 'request',
                     failurePolicy: 'continue',
                 });
-                bindingJsonTexts.value.push({ config: '', filter: '' });
+                bindingJsonTexts.value.push({ config: '' });
             }
             function removeBinding(index) {
                 draft.value?.bindings.splice(index, 1);
@@ -97406,117 +97599,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 draft.value.scope.characterNames = Array.from(names);
                 jsonError.value = '';
             }
-            function isPlotBinding(binding) {
-                return binding.hook === 'plot.before_task_request' || binding.hook === 'plot.after_task_response' || binding.hook === 'plot.after_stage';
-            }
-            function ensureBindingFilterObject(binding) {
-                if (!binding.filter || typeof binding.filter !== 'object' || Array.isArray(binding.filter)) {
-                    binding.filter = {};
-                }
-                return binding.filter;
-            }
-            function findBindingIndex(binding) {
-                return draft.value?.bindings.indexOf(binding) ?? -1;
-            }
-            function syncBindingFilterText(binding) {
-                const index = findBindingIndex(binding);
-                if (index < 0)
-                    return;
-                if (!bindingJsonTexts.value[index])
-                    bindingJsonTexts.value[index] = { config: '', filter: '' };
-                bindingJsonTexts.value[index].filter = jsonText(binding.filter);
-            }
-            function plotFilterValue(binding, key) {
-                const filter = binding.filter && typeof binding.filter === 'object' && !Array.isArray(binding.filter)
-                    ? binding.filter
-                    : {};
-                const value = filter[key];
-                return value === undefined || value === null ? '' : String(value);
-            }
-            function presetOptionsForBinding(binding) {
-                const current = plotFilterValue(binding, 'presetName');
-                const names = plotPresetStore.presets.map(preset => preset.name).filter(Boolean);
-                if (current && !names.includes(current))
-                    names.unshift(current);
-                return names;
-            }
-            function selectedPlotPresetForBinding(binding) {
-                const presetName = plotFilterValue(binding, 'presetName');
-                if (!presetName)
-                    return null;
-                return plotPresetStore.presets.find(preset => preset.name === presetName) || null;
-            }
-            function taskOptionsForBinding(binding) {
-                const preset = selectedPlotPresetForBinding(binding);
-                const tasks = Array.isArray(preset?.raw?.plotTasks) ? preset.raw.plotTasks : [];
-                const options = tasks
-                    .map((task) => {
-                    const id = String(task?.id || '').trim();
-                    if (!id)
-                        return null;
-                    const name = String(task?.name || '').trim();
-                    const stage = Number.isFinite(Number(task?.stage)) ? `stage ${Number(task.stage)}` : 'stage ?';
-                    return { id, label: `${name || id} · ${id} · ${stage}` };
-                })
-                    .filter(Boolean);
-                const current = plotFilterValue(binding, 'taskId');
-                if (current && !options.some(option => option.id === current))
-                    options.unshift({ id: current, label: `${current}（当前脚本中保存，当前预设未找到）` });
-                return options;
-            }
-            function stageOptionsForBinding(binding) {
-                const preset = selectedPlotPresetForBinding(binding);
-                const tasks = Array.isArray(preset?.raw?.plotTasks) ? preset.raw.plotTasks : [];
-                const stages = Array.from(new Set(tasks
-                    .map((task) => Number(task?.stage))
-                    .filter(stage => Number.isFinite(stage) && stage > 0)
-                    .map(stage => Math.trunc(stage))))
-                    .sort((a, b) => a - b);
-                const current = Number(plotFilterValue(binding, 'stage'));
-                if (Number.isFinite(current) && current > 0 && !stages.includes(Math.trunc(current)))
-                    stages.unshift(Math.trunc(current));
-                return stages;
-            }
-            function setPlotFilterValue(binding, key, rawValue) {
-                const filter = ensureBindingFilterObject(binding);
-                const text = String(rawValue || '').trim();
-                if (!text) {
-                    delete filter[key];
-                }
-                else if (key === 'stage') {
-                    const stage = Number(text);
-                    if (Number.isFinite(stage) && stage > 0)
-                        filter[key] = Math.trunc(stage);
-                }
-                else {
-                    filter[key] = text;
-                    if (key === 'presetName') {
-                        delete filter.taskId;
-                        delete filter.stage;
-                    }
-                }
-                if (Object.keys(filter).length === 0)
-                    binding.filter = undefined;
-                syncBindingFilterText(binding);
-            }
-            function normalizeBindingFilterForHook(binding) {
-                if (!binding.filter || typeof binding.filter !== 'object' || Array.isArray(binding.filter))
-                    return;
-                const filter = binding.filter;
-                if (binding.hook === 'plot.after_stage') {
-                    delete filter.taskId;
-                }
-                else if (binding.hook === 'plot.before_task_request' || binding.hook === 'plot.after_task_response') {
-                    delete filter.stage;
-                }
-                else {
-                    delete filter.presetName;
-                    delete filter.taskId;
-                    delete filter.stage;
-                }
-                if (Object.keys(filter).length === 0)
-                    binding.filter = undefined;
-            }
             function parseJsonOrNull(value) {
                 const text = String(value || '').trim();
                 if (!text)
@@ -97540,7 +97622,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 defaultVariableInputText.value = jsonText(draft.value?.defaultVariableInput);
                 bindingJsonTexts.value = (draft.value?.bindings || []).map(binding => ({
                     config: jsonText(binding.config),
-                    filter: jsonText(binding.filter),
                 }));
             }
             function applyJsonTextToDraft() {
@@ -97552,16 +97633,26 @@ Expected function or array of functions, received type ${typeof value}.`
                 draft.value.defaultVariableInput = defaultInput.value;
                 for (let index = 0; index < draft.value.bindings.length; index++) {
                     const binding = draft.value.bindings[index];
-                    const raw = bindingJsonTexts.value[index] || { config: '', filter: '' };
+                    const raw = bindingJsonTexts.value[index] || { config: '' };
                     const config = parseJsonWithFeedback(raw.config, `第 ${index + 1} 个绑定配置`);
                     if (!config.ok)
                         return false;
-                    const filter = parseJsonWithFeedback(raw.filter, `第 ${index + 1} 个过滤条件`);
-                    if (!filter.ok)
-                        return false;
                     binding.config = config.value;
-                    binding.filter = filter.value;
-                    normalizeBindingFilterForHook(binding);
+                    normalizeBindingTargetForHook_ACU(binding);
+                    if (isPlotBindingHook(binding.hook)) {
+                        if (!binding.target?.presetName) {
+                            jsonError.value = `第 ${index + 1} 个剧情推进绑定缺少剧情预设。`;
+                            return false;
+                        }
+                        if (!binding.target?.stage) {
+                            jsonError.value = `第 ${index + 1} 个剧情推进绑定缺少 stage。`;
+                            return false;
+                        }
+                        if (isPlotTaskBindingHook(binding.hook) && !binding.target?.taskId) {
+                            jsonError.value = `第 ${index + 1} 个剧情推进任务绑定缺少任务。`;
+                            return false;
+                        }
+                    }
                 }
                 jsonError.value = '';
                 return true;
@@ -97728,14 +97819,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 return parts.join(' · ');
             }
             onMounted(refresh);
-            const __returned__ = { hookOptions, scripts, logs, selectedId, draft, defaultVariableInputText, bindingJsonTexts, manualInputText, manualBindingIndex, jsonError, manualResult, manualRunning, importFileInput, importPreview, currentCharacterName, plotPresetStore, selectedLogs, selectedLogGroups, characterNamesText, firstOutputKey, scriptGroups, importPreviewItems, importPreviewHasErrors, clone, refresh, resolveCurrentCharacterName_ACU, showScriptManagerError_ACU, createDefaultScript, createScript, selectScript, saveDraft, deleteDraft, duplicateDraft, moveDraft, addBinding, removeBinding, setCharacterNames, bindCurrentCharacter, isPlotBinding, ensureBindingFilterObject, findBindingIndex, syncBindingFilterText, plotFilterValue, presetOptionsForBinding, selectedPlotPresetForBinding, taskOptionsForBinding, stageOptionsForBinding, setPlotFilterValue, normalizeBindingFilterForHook, parseJsonOrNull, parseJsonWithFeedback, jsonText, syncJsonTextFromDraft, applyJsonTextToDraft, downloadJson, safeFilenamePart, createPreviewUniqueName, exportSelectedScript, exportAllScripts, triggerImport, validateImportPreview, handleImportFile, clearImportPreview, confirmImport, runManual, bindingSummary, outputKeySummary, scopeLabel, formatTime, logCallLabel, AcuButton, AcuPanel };
+            const __returned__ = { hookOptions, scripts, logs, selectedId, draft, defaultVariableInputText, bindingJsonTexts, manualInputText, manualBindingIndex, jsonError, manualResult, manualRunning, importFileInput, importPreview, currentCharacterName, selectedLogs, selectedLogGroups, characterNamesText, firstOutputKey, scriptGroups, importPreviewItems, importPreviewHasErrors, plotPresetOptions, clone, normalizeStageValue_ACU, isPlotTaskBindingHook, isPlotStageBindingHook, isPlotBindingHook, getPresetBindingMeta_ACU, getBindingPresetOptions, ensureBindingTarget_ACU, getBindingStageOptions, getBindingTaskOptions, normalizeBindingTargetForHook_ACU, handleBindingHookChange, setBindingTargetField, refresh, resolveCurrentCharacterName_ACU, showScriptManagerError_ACU, createDefaultScript, createScript, selectScript, saveDraft, deleteDraft, duplicateDraft, moveDraft, addBinding, removeBinding, setCharacterNames, bindCurrentCharacter, parseJsonOrNull, parseJsonWithFeedback, jsonText, syncJsonTextFromDraft, applyJsonTextToDraft, downloadJson, safeFilenamePart, createPreviewUniqueName, exportSelectedScript, exportAllScripts, triggerImport, validateImportPreview, handleImportFile, clearImportPreview, confirmImport, runManual, bindingSummary, outputKeySummary, scopeLabel, formatTime, logCallLabel, AcuButton, AcuPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-script-page[data-v-4270379a] { min-height: 100%; padding: 20px;\n}\n.acu-v2-script-page__file-input[data-v-4270379a] { display: none;\n}\n.acu-v2-script-page__layout[data-v-4270379a] { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; min-height: 640px;\n}\n.acu-v2-script-page__list[data-v-4270379a] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-script-page__script-group[data-v-4270379a] { display: flex; flex-direction: column; gap: 8px;\n}\n.acu-v2-script-page__script-group-title[data-v-4270379a] { margin: 8px 0 0; color: var(--acu-text-3); font-size: 12px; font-weight: 700;\n}\n.acu-v2-script-page__script-card[data-v-4270379a] { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); text-align: left; cursor: pointer;\n}\n.acu-v2-script-page__script-card--active[data-v-4270379a] { border-color: var(--acu-accent); box-shadow: 0 0 0 1px var(--acu-accent);\n}\n.acu-v2-script-page__script-title[data-v-4270379a] { font-weight: 700;\n}\n.acu-v2-script-page__script-meta[data-v-4270379a] { color: var(--acu-text-3); font-size: 12px; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__script-error[data-v-4270379a] { color: var(--acu-danger); font-size: 12px; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__error[data-v-4270379a] { color: var(--acu-danger); font-size: 12px; margin: 0; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__editor[data-v-4270379a] { display: flex; flex-direction: column; gap: 14px; min-width: 0;\n}\n.acu-v2-script-page__toolbar[data-v-4270379a], .acu-v2-script-page__inline[data-v-4270379a], .acu-v2-script-page__binding-actions[data-v-4270379a] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;\n}\n.acu-v2-script-page__grid[data-v-4270379a] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;\n}\n.acu-v2-script-page__field[data-v-4270379a], .acu-v2-script-page__section[data-v-4270379a] { display: flex; flex-direction: column; gap: 6px;\n}\n.acu-v2-script-page__field span[data-v-4270379a], .acu-v2-script-page__section h3[data-v-4270379a] { color: var(--acu-text-2); font-size: 13px; margin: 0;\n}\n.acu-v2-script-page input[data-v-4270379a], .acu-v2-script-page select[data-v-4270379a], .acu-v2-script-page textarea[data-v-4270379a] { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); padding: 8px; font: inherit;\n}\n.acu-v2-script-page__checkbox[data-v-4270379a], .acu-v2-script-page__radio[data-v-4270379a] { display: inline-flex; gap: 6px; align-items: center; color: var(--acu-text-2);\n}\n.acu-v2-script-page__checkbox input[data-v-4270379a], .acu-v2-script-page__radio input[data-v-4270379a] { width: auto;\n}\n.acu-v2-script-page__source[data-v-4270379a] { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n}\n.acu-v2-script-page__binding[data-v-4270379a] { display: grid; grid-template-columns: minmax(220px, 1fr) 72px 90px minmax(140px, 1fr) 120px 150px auto; gap: 10px; align-items: end; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm);\n}\n.acu-v2-script-page__binding-field[data-v-4270379a] { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--acu-text-2); font-size: 12px;\n}\n.acu-v2-script-page__binding-field span[data-v-4270379a] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-script-page__binding-field--enabled[data-v-4270379a] { align-items: center;\n}\n.acu-v2-script-page__binding-field--enabled input[data-v-4270379a] { width: auto; min-width: auto;\n}\n.acu-v2-script-page__binding-field--json[data-v-4270379a] { grid-column: span 3;\n}\n.acu-v2-script-page__plot-filter[data-v-4270379a] { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px; border: 1px dashed var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-v2-script-page__plot-filter label[data-v-4270379a] { display: flex; flex-direction: column; gap: 4px; color: var(--acu-text-2); font-size: 12px;\n}\n.acu-v2-script-page__plot-filter .acu-v2-script-page__hint[data-v-4270379a] { grid-column: 1 / -1; margin: 0;\n}\n.acu-v2-script-page__import-preview[data-v-4270379a] { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1);\n}\n.acu-v2-script-page__import-head[data-v-4270379a] { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start;\n}\n.acu-v2-script-page__import-head p[data-v-4270379a] { margin: 4px 0 0;\n}\n.acu-v2-script-page__import-item[data-v-4270379a] { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); color: var(--acu-text-2);\n}\n.acu-v2-script-page__import-item pre[data-v-4270379a] { max-height: 140px; margin: 0; padding: 8px; overflow: auto; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-script-page__example-list[data-v-4270379a] { display: grid; gap: 10px;\n}\n.acu-v2-script-page__example-item[data-v-4270379a] { display: grid; gap: 5px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1);\n}\n.acu-v2-script-page__example-item p[data-v-4270379a] { margin: 0;\n}\n.acu-v2-script-page__section code[data-v-4270379a], .acu-v2-script-page__result[data-v-4270379a] { display: block; padding: 8px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1); overflow: auto;\n}\n.acu-v2-script-page__hint[data-v-4270379a], .acu-v2-script-page__empty[data-v-4270379a] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-script-page__log-row[data-v-4270379a] { display: grid; grid-template-columns: 170px 70px minmax(180px, 1fr) minmax(0, 1fr); gap: 8px; padding: 8px; border-bottom: 1px solid var(--acu-border-2); color: var(--acu-text-2);\n}\n.acu-v2-script-page__log-row code[data-v-4270379a] { overflow-wrap: anywhere;\n}\n.acu-v2-script-page__log-group[data-v-4270379a] { border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); overflow: hidden; background: var(--acu-bg-1);\n}\n.acu-v2-script-page__log-group + .acu-v2-script-page__log-group[data-v-4270379a] { margin-top: 8px;\n}\n.acu-v2-script-page__log-group-head[data-v-4270379a] { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 170px 80px minmax(0, 1fr); gap: 8px; padding: 8px; background: var(--acu-bg-2); color: var(--acu-text-2);\n}\n@media (max-width: 980px) {\n.acu-v2-script-page__layout[data-v-4270379a] { grid-template-columns: 1fr;\n}\n.acu-v2-script-page__grid[data-v-4270379a] { grid-template-columns: 1fr 1fr;\n}\n.acu-v2-script-page__binding[data-v-4270379a] { grid-template-columns: 1fr;\n}\n.acu-v2-script-page__binding-field--json[data-v-4270379a] { grid-column: auto;\n}\n}\n", "src/presentation-v2/pages/ScriptManagerPage.vue#style-0-4270379a");
-    var ScriptManagerPage_vue_vue_type_style_index_0_scoped_4270379a_lang = null;
+    injectSfcStyle("\n.acu-v2-script-page[data-v-3eb994c1] { min-height: 100%; padding: 20px;\n}\n.acu-v2-script-page__file-input[data-v-3eb994c1] { display: none;\n}\n.acu-v2-script-page__layout[data-v-3eb994c1] { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; min-height: 640px;\n}\n.acu-v2-script-page__list[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-script-page__script-group[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 8px;\n}\n.acu-v2-script-page__script-group-title[data-v-3eb994c1] { margin: 8px 0 0; color: var(--acu-text-3); font-size: 12px; font-weight: 700;\n}\n.acu-v2-script-page__script-card[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); text-align: left; cursor: pointer;\n}\n.acu-v2-script-page__script-card--active[data-v-3eb994c1] { border-color: var(--acu-accent); box-shadow: 0 0 0 1px var(--acu-accent);\n}\n.acu-v2-script-page__script-title[data-v-3eb994c1] { font-weight: 700;\n}\n.acu-v2-script-page__script-meta[data-v-3eb994c1] { color: var(--acu-text-3); font-size: 12px; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__script-error[data-v-3eb994c1] { color: var(--acu-danger); font-size: 12px; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__error[data-v-3eb994c1] { color: var(--acu-danger); font-size: 12px; margin: 0; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__editor[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 14px; min-width: 0;\n}\n.acu-v2-script-page__toolbar[data-v-3eb994c1], .acu-v2-script-page__inline[data-v-3eb994c1], .acu-v2-script-page__binding-actions[data-v-3eb994c1] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;\n}\n.acu-v2-script-page__grid[data-v-3eb994c1] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;\n}\n.acu-v2-script-page__field[data-v-3eb994c1], .acu-v2-script-page__section[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 6px;\n}\n.acu-v2-script-page__field span[data-v-3eb994c1], .acu-v2-script-page__section h3[data-v-3eb994c1] { color: var(--acu-text-2); font-size: 13px; margin: 0;\n}\n.acu-v2-script-page input[data-v-3eb994c1], .acu-v2-script-page select[data-v-3eb994c1], .acu-v2-script-page textarea[data-v-3eb994c1] { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); padding: 8px; font: inherit;\n}\n.acu-v2-script-page__checkbox[data-v-3eb994c1], .acu-v2-script-page__radio[data-v-3eb994c1] { display: inline-flex; gap: 6px; align-items: center; color: var(--acu-text-2);\n}\n.acu-v2-script-page__checkbox input[data-v-3eb994c1], .acu-v2-script-page__radio input[data-v-3eb994c1] { width: auto;\n}\n.acu-v2-script-page__source[data-v-3eb994c1] { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n}\n.acu-v2-script-page__binding[data-v-3eb994c1] { display: grid; grid-template-columns: minmax(220px, 1fr) 72px 90px minmax(140px, 1fr) 120px 150px auto; gap: 10px; align-items: end; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm);\n}\n.acu-v2-script-page__binding-field[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--acu-text-2); font-size: 12px;\n}\n.acu-v2-script-page__binding-field span[data-v-3eb994c1] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-script-page__binding-field--enabled[data-v-3eb994c1] { align-items: center;\n}\n.acu-v2-script-page__binding-field--enabled input[data-v-3eb994c1] { width: auto; min-width: auto;\n}\n.acu-v2-script-page__binding-field--json[data-v-3eb994c1] { grid-column: span 3;\n}\n.acu-v2-script-page__import-preview[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1);\n}\n.acu-v2-script-page__import-head[data-v-3eb994c1] { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start;\n}\n.acu-v2-script-page__import-head p[data-v-3eb994c1] { margin: 4px 0 0;\n}\n.acu-v2-script-page__import-item[data-v-3eb994c1] { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); color: var(--acu-text-2);\n}\n.acu-v2-script-page__import-item pre[data-v-3eb994c1] { max-height: 140px; margin: 0; padding: 8px; overflow: auto; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-script-page__example-list[data-v-3eb994c1] { display: grid; gap: 10px;\n}\n.acu-v2-script-page__example-item[data-v-3eb994c1] { display: grid; gap: 5px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1);\n}\n.acu-v2-script-page__example-item p[data-v-3eb994c1] { margin: 0;\n}\n.acu-v2-script-page__section code[data-v-3eb994c1], .acu-v2-script-page__result[data-v-3eb994c1] { display: block; padding: 8px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1); overflow: auto;\n}\n.acu-v2-script-page__hint[data-v-3eb994c1], .acu-v2-script-page__empty[data-v-3eb994c1] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-script-page__log-row[data-v-3eb994c1] { display: grid; grid-template-columns: 170px 70px minmax(180px, 1fr) minmax(0, 1fr); gap: 8px; padding: 8px; border-bottom: 1px solid var(--acu-border-2); color: var(--acu-text-2);\n}\n.acu-v2-script-page__log-row code[data-v-3eb994c1] { overflow-wrap: anywhere;\n}\n.acu-v2-script-page__log-group[data-v-3eb994c1] { border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); overflow: hidden; background: var(--acu-bg-1);\n}\n.acu-v2-script-page__log-group + .acu-v2-script-page__log-group[data-v-3eb994c1] { margin-top: 8px;\n}\n.acu-v2-script-page__log-group-head[data-v-3eb994c1] { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 170px 80px minmax(0, 1fr); gap: 8px; padding: 8px; background: var(--acu-bg-2); color: var(--acu-text-2);\n}\n@media (max-width: 980px) {\n.acu-v2-script-page__layout[data-v-3eb994c1] { grid-template-columns: 1fr;\n}\n.acu-v2-script-page__grid[data-v-3eb994c1] { grid-template-columns: 1fr 1fr;\n}\n.acu-v2-script-page__binding[data-v-3eb994c1] { grid-template-columns: 1fr;\n}\n.acu-v2-script-page__binding-field--json[data-v-3eb994c1] { grid-column: auto;\n}\n}\n", "src/presentation-v2/pages/ScriptManagerPage.vue#style-0-3eb994c1");
+    var ScriptManagerPage_vue_vue_type_style_index_0_scoped_3eb994c1_lang = null;
 
     const _hoisted_1$b = { class: "acu-v2-script-page" };
     const _hoisted_2$a = {
@@ -97809,31 +97900,34 @@ Expected function or array of functions, received type ${typeof value}.`
     	class: "acu-v2-script-page__empty"
     };
     const _hoisted_40 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--hook" };
-    const _hoisted_41 = ["onUpdate:modelValue"];
+    const _hoisted_41 = ["onUpdate:modelValue", "onChange"];
     const _hoisted_42 = ["value"];
-    const _hoisted_43 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--enabled" };
-    const _hoisted_44 = ["onUpdate:modelValue"];
-    const _hoisted_45 = { class: "acu-v2-script-page__binding-field" };
-    const _hoisted_46 = ["onUpdate:modelValue"];
-    const _hoisted_47 = { class: "acu-v2-script-page__binding-field" };
-    const _hoisted_48 = ["onUpdate:modelValue"];
-    const _hoisted_49 = { class: "acu-v2-script-page__binding-field" };
-    const _hoisted_50 = ["onUpdate:modelValue"];
-    const _hoisted_51 = { class: "acu-v2-script-page__binding-field" };
-    const _hoisted_52 = ["onUpdate:modelValue"];
-    const _hoisted_53 = {
+    const _hoisted_43 = {
     	key: 0,
-    	class: "acu-v2-script-page__plot-filter"
+    	class: "acu-v2-script-page__binding-target"
     };
-    const _hoisted_54 = ["value", "onChange"];
-    const _hoisted_55 = ["value"];
-    const _hoisted_56 = { key: 0 };
-    const _hoisted_57 = ["value", "onChange"];
-    const _hoisted_58 = ["value"];
-    const _hoisted_59 = { key: 1 };
-    const _hoisted_60 = ["value", "onChange"];
-    const _hoisted_61 = ["value"];
-    const _hoisted_62 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json" };
+    const _hoisted_44 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_45 = ["value", "onChange"];
+    const _hoisted_46 = ["value"];
+    const _hoisted_47 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_48 = ["value", "onChange"];
+    const _hoisted_49 = ["value"];
+    const _hoisted_50 = {
+    	key: 0,
+    	class: "acu-v2-script-page__binding-field"
+    };
+    const _hoisted_51 = ["value", "onChange"];
+    const _hoisted_52 = ["value"];
+    const _hoisted_53 = { class: "acu-v2-script-page__hint acu-v2-script-page__binding-target-hint" };
+    const _hoisted_54 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--enabled" };
+    const _hoisted_55 = ["onUpdate:modelValue"];
+    const _hoisted_56 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_57 = ["onUpdate:modelValue"];
+    const _hoisted_58 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_59 = ["onUpdate:modelValue"];
+    const _hoisted_60 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_61 = ["onUpdate:modelValue"];
+    const _hoisted_62 = { class: "acu-v2-script-page__binding-field" };
     const _hoisted_63 = ["onUpdate:modelValue"];
     const _hoisted_64 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json" };
     const _hoisted_65 = ["onUpdate:modelValue"];
@@ -98391,7 +98485,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					), [[vModelText, $setup.defaultVariableInputText]])
     				]),
     				createBaseVNode("section", _hoisted_37, [
-    					_cache[59] || (_cache[59] = createBaseVNode(
+    					_cache[57] || (_cache[57] = createBaseVNode(
     						"h3",
     						null,
     						"绑定挂载点",
@@ -98424,7 +98518,10 @@ Expected function or array of functions, received type ${typeof value}.`
     									"触发时机",
     									-1
     									/* CACHED */
-    								)), withDirectives(createBaseVNode("select", { "onUpdate:modelValue": ($event) => binding.hook = $event }, [(openBlock(), createElementBlock(
+    								)), withDirectives(createBaseVNode("select", {
+    									"onUpdate:modelValue": ($event) => binding.hook = $event,
+    									onChange: ($event) => $setup.handleBindingHookChange(index)
+    								}, [(openBlock(), createElementBlock(
     									Fragment,
     									null,
     									renderList($setup.hookOptions, (hook) => {
@@ -98435,8 +98532,98 @@ Expected function or array of functions, received type ${typeof value}.`
     									}),
     									64
     									/* STABLE_FRAGMENT */
-    								))], 8, _hoisted_41), [[vModelSelect, binding.hook]])]),
-    								createBaseVNode("label", _hoisted_43, [_cache[42] || (_cache[42] = createBaseVNode(
+    								))], 40, _hoisted_41), [[vModelSelect, binding.hook]])]),
+    								$setup.isPlotBindingHook(binding.hook) ? (openBlock(), createElementBlock("div", _hoisted_43, [
+    									createBaseVNode("label", _hoisted_44, [_cache[43] || (_cache[43] = createBaseVNode(
+    										"span",
+    										null,
+    										"剧情预设",
+    										-1
+    										/* CACHED */
+    									)), createBaseVNode("select", {
+    										value: binding.target?.presetName || "",
+    										onChange: ($event) => $setup.setBindingTargetField(index, "presetName", $event.target.value)
+    									}, [_cache[42] || (_cache[42] = createBaseVNode(
+    										"option",
+    										{ value: "" },
+    										"请选择预设",
+    										-1
+    										/* CACHED */
+    									)), (openBlock(true), createElementBlock(
+    										Fragment,
+    										null,
+    										renderList($setup.getBindingPresetOptions(binding), (preset) => {
+    											return openBlock(), createElementBlock("option", {
+    												key: preset.name,
+    												value: preset.name
+    											}, toDisplayString(preset.label), 9, _hoisted_46);
+    										}),
+    										128
+    										/* KEYED_FRAGMENT */
+    									))], 40, _hoisted_45)]),
+    									createBaseVNode("label", _hoisted_47, [_cache[45] || (_cache[45] = createBaseVNode(
+    										"span",
+    										null,
+    										"Stage",
+    										-1
+    										/* CACHED */
+    									)), createBaseVNode("select", {
+    										value: binding.target?.stage || "",
+    										onChange: ($event) => $setup.setBindingTargetField(index, "stage", $event.target.value)
+    									}, [_cache[44] || (_cache[44] = createBaseVNode(
+    										"option",
+    										{ value: "" },
+    										"请选择 stage",
+    										-1
+    										/* CACHED */
+    									)), (openBlock(true), createElementBlock(
+    										Fragment,
+    										null,
+    										renderList($setup.getBindingStageOptions(binding), (stage) => {
+    											return openBlock(), createElementBlock("option", {
+    												key: stage,
+    												value: stage
+    											}, "Stage " + toDisplayString(stage), 9, _hoisted_49);
+    										}),
+    										128
+    										/* KEYED_FRAGMENT */
+    									))], 40, _hoisted_48)]),
+    									$setup.isPlotTaskBindingHook(binding.hook) ? (openBlock(), createElementBlock("label", _hoisted_50, [_cache[47] || (_cache[47] = createBaseVNode(
+    										"span",
+    										null,
+    										"任务",
+    										-1
+    										/* CACHED */
+    									)), createBaseVNode("select", {
+    										value: binding.target?.taskId || "",
+    										onChange: ($event) => $setup.setBindingTargetField(index, "taskId", $event.target.value)
+    									}, [_cache[46] || (_cache[46] = createBaseVNode(
+    										"option",
+    										{ value: "" },
+    										"请选择任务",
+    										-1
+    										/* CACHED */
+    									)), (openBlock(true), createElementBlock(
+    										Fragment,
+    										null,
+    										renderList($setup.getBindingTaskOptions(binding), (task) => {
+    											return openBlock(), createElementBlock("option", {
+    												key: task.id,
+    												value: task.id
+    											}, toDisplayString(task.label), 9, _hoisted_52);
+    										}),
+    										128
+    										/* KEYED_FRAGMENT */
+    									))], 40, _hoisted_51)])) : createCommentVNode("v-if", true),
+    									createBaseVNode(
+    										"p",
+    										_hoisted_53,
+    										" 该绑定只会在选中的预设 / stage" + toDisplayString($setup.isPlotTaskBindingHook(binding.hook) ? " / 任务" : "") + " 的固定挂载点执行。 ",
+    										1
+    										/* TEXT */
+    									)
+    								])) : createCommentVNode("v-if", true),
+    								createBaseVNode("label", _hoisted_54, [_cache[48] || (_cache[48] = createBaseVNode(
     									"span",
     									null,
     									"启用",
@@ -98445,8 +98632,8 @@ Expected function or array of functions, received type ${typeof value}.`
     								)), withDirectives(createBaseVNode("input", {
     									"onUpdate:modelValue": ($event) => binding.enabled = $event,
     									type: "checkbox"
-    								}, null, 8, _hoisted_44), [[vModelCheckbox, binding.enabled]])]),
-    								createBaseVNode("label", _hoisted_45, [_cache[43] || (_cache[43] = createBaseVNode(
+    								}, null, 8, _hoisted_55), [[vModelCheckbox, binding.enabled]])]),
+    								createBaseVNode("label", _hoisted_56, [_cache[49] || (_cache[49] = createBaseVNode(
     									"span",
     									null,
     									"顺序",
@@ -98455,13 +98642,13 @@ Expected function or array of functions, received type ${typeof value}.`
     								)), withDirectives(createBaseVNode("input", {
     									"onUpdate:modelValue": ($event) => binding.order = $event,
     									type: "number"
-    								}, null, 8, _hoisted_46), [[
+    								}, null, 8, _hoisted_57), [[
     									vModelText,
     									binding.order,
     									void 0,
     									{ number: true }
     								]])]),
-    								createBaseVNode("label", _hoisted_47, [_cache[44] || (_cache[44] = createBaseVNode(
+    								createBaseVNode("label", _hoisted_58, [_cache[50] || (_cache[50] = createBaseVNode(
     									"span",
     									null,
     									"输出键",
@@ -98471,14 +98658,14 @@ Expected function or array of functions, received type ${typeof value}.`
     									"onUpdate:modelValue": ($event) => binding.outputKey = $event,
     									type: "text",
     									placeholder: "可留空"
-    								}, null, 8, _hoisted_48), [[vModelText, binding.outputKey]])]),
-    								createBaseVNode("label", _hoisted_49, [_cache[46] || (_cache[46] = createBaseVNode(
+    								}, null, 8, _hoisted_59), [[vModelText, binding.outputKey]])]),
+    								createBaseVNode("label", _hoisted_60, [_cache[52] || (_cache[52] = createBaseVNode(
     									"span",
     									null,
     									"输出保留",
     									-1
     									/* CACHED */
-    								)), withDirectives(createBaseVNode("select", { "onUpdate:modelValue": ($event) => binding.outputTtl = $event }, [..._cache[45] || (_cache[45] = [
+    								)), withDirectives(createBaseVNode("select", { "onUpdate:modelValue": ($event) => binding.outputTtl = $event }, [..._cache[51] || (_cache[51] = [
     									createBaseVNode(
     										"option",
     										{ value: "request" },
@@ -98500,14 +98687,14 @@ Expected function or array of functions, received type ${typeof value}.`
     										-1
     										/* CACHED */
     									)
-    								])], 8, _hoisted_50), [[vModelSelect, binding.outputTtl]])]),
-    								createBaseVNode("label", _hoisted_51, [_cache[48] || (_cache[48] = createBaseVNode(
+    								])], 8, _hoisted_61), [[vModelSelect, binding.outputTtl]])]),
+    								createBaseVNode("label", _hoisted_62, [_cache[54] || (_cache[54] = createBaseVNode(
     									"span",
     									null,
     									"失败策略",
     									-1
     									/* CACHED */
-    								)), withDirectives(createBaseVNode("select", { "onUpdate:modelValue": ($event) => binding.failurePolicy = $event }, [..._cache[47] || (_cache[47] = [createBaseVNode(
+    								)), withDirectives(createBaseVNode("select", { "onUpdate:modelValue": ($event) => binding.failurePolicy = $event }, [..._cache[53] || (_cache[53] = [createBaseVNode(
     									"option",
     									{ value: "continue" },
     									"记录错误后继续",
@@ -98519,98 +98706,8 @@ Expected function or array of functions, received type ${typeof value}.`
     									"阻断当前流程",
     									-1
     									/* CACHED */
-    								)])], 8, _hoisted_52), [[vModelSelect, binding.failurePolicy]])]),
-    								$setup.isPlotBinding(binding) ? (openBlock(), createElementBlock("div", _hoisted_53, [
-    									createBaseVNode("label", null, [_cache[50] || (_cache[50] = createBaseVNode(
-    										"span",
-    										null,
-    										"剧情预设名 presetName",
-    										-1
-    										/* CACHED */
-    									)), createBaseVNode("select", {
-    										value: $setup.plotFilterValue(binding, "presetName"),
-    										onChange: ($event) => $setup.setPlotFilterValue(binding, "presetName", $event.target.value)
-    									}, [_cache[49] || (_cache[49] = createBaseVNode(
-    										"option",
-    										{ value: "" },
-    										"不限制预设",
-    										-1
-    										/* CACHED */
-    									)), (openBlock(true), createElementBlock(
-    										Fragment,
-    										null,
-    										renderList($setup.presetOptionsForBinding(binding), (option) => {
-    											return openBlock(), createElementBlock("option", {
-    												key: option,
-    												value: option
-    											}, toDisplayString(option), 9, _hoisted_55);
-    										}),
-    										128
-    										/* KEYED_FRAGMENT */
-    									))], 40, _hoisted_54)]),
-    									binding.hook === "plot.before_task_request" || binding.hook === "plot.after_task_response" ? (openBlock(), createElementBlock("label", _hoisted_56, [_cache[52] || (_cache[52] = createBaseVNode(
-    										"span",
-    										null,
-    										"任务 ID taskId",
-    										-1
-    										/* CACHED */
-    									)), createBaseVNode("select", {
-    										value: $setup.plotFilterValue(binding, "taskId"),
-    										onChange: ($event) => $setup.setPlotFilterValue(binding, "taskId", $event.target.value)
-    									}, [_cache[51] || (_cache[51] = createBaseVNode(
-    										"option",
-    										{ value: "" },
-    										"不限制任务",
-    										-1
-    										/* CACHED */
-    									)), (openBlock(true), createElementBlock(
-    										Fragment,
-    										null,
-    										renderList($setup.taskOptionsForBinding(binding), (task) => {
-    											return openBlock(), createElementBlock("option", {
-    												key: task.id,
-    												value: task.id
-    											}, toDisplayString(task.label), 9, _hoisted_58);
-    										}),
-    										128
-    										/* KEYED_FRAGMENT */
-    									))], 40, _hoisted_57)])) : createCommentVNode("v-if", true),
-    									binding.hook === "plot.after_stage" ? (openBlock(), createElementBlock("label", _hoisted_59, [_cache[54] || (_cache[54] = createBaseVNode(
-    										"span",
-    										null,
-    										"阶段 stage",
-    										-1
-    										/* CACHED */
-    									)), createBaseVNode("select", {
-    										value: $setup.plotFilterValue(binding, "stage"),
-    										onChange: ($event) => $setup.setPlotFilterValue(binding, "stage", $event.target.value)
-    									}, [_cache[53] || (_cache[53] = createBaseVNode(
-    										"option",
-    										{ value: "" },
-    										"不限制阶段",
-    										-1
-    										/* CACHED */
-    									)), (openBlock(true), createElementBlock(
-    										Fragment,
-    										null,
-    										renderList($setup.stageOptionsForBinding(binding), (stage) => {
-    											return openBlock(), createElementBlock("option", {
-    												key: stage,
-    												value: String(stage)
-    											}, "stage " + toDisplayString(stage), 9, _hoisted_61);
-    										}),
-    										128
-    										/* KEYED_FRAGMENT */
-    									))], 40, _hoisted_60)])) : createCommentVNode("v-if", true),
-    									_cache[55] || (_cache[55] = createBaseVNode(
-    										"p",
-    										{ class: "acu-v2-script-page__hint" },
-    										"预设和全部脚本可以分别导出导入；这里会写入 filter，运行时按 presetName + taskId/stage 匹配。",
-    										-1
-    										/* CACHED */
-    									))
-    								])) : createCommentVNode("v-if", true),
-    								createBaseVNode("label", _hoisted_62, [_cache[56] || (_cache[56] = createBaseVNode(
+    								)])], 8, _hoisted_63), [[vModelSelect, binding.failurePolicy]])]),
+    								createBaseVNode("label", _hoisted_64, [_cache[55] || (_cache[55] = createBaseVNode(
     									"span",
     									null,
     									"配置",
@@ -98620,24 +98717,13 @@ Expected function or array of functions, received type ${typeof value}.`
     									"onUpdate:modelValue": ($event) => $setup.bindingJsonTexts[index].config = $event,
     									rows: "2",
     									placeholder: "例如 {\"limit\":5}"
-    								}, null, 8, _hoisted_63), [[vModelText, $setup.bindingJsonTexts[index].config]])]),
-    								createBaseVNode("label", _hoisted_64, [_cache[57] || (_cache[57] = createBaseVNode(
-    									"span",
-    									null,
-    									"过滤",
-    									-1
-    									/* CACHED */
-    								)), withDirectives(createBaseVNode("textarea", {
-    									"onUpdate:modelValue": ($event) => $setup.bindingJsonTexts[index].filter = $event,
-    									rows: "2",
-    									placeholder: "例如 {\"presetName\":\"日常\"}"
-    								}, null, 8, _hoisted_65), [[vModelText, $setup.bindingJsonTexts[index].filter]])]),
+    								}, null, 8, _hoisted_65), [[vModelText, $setup.bindingJsonTexts[index].config]])]),
     								createVNode($setup["AcuButton"], {
     									size: "sm",
     									variant: "danger",
     									onClick: ($event) => $setup.removeBinding(index)
     								}, {
-    									default: withCtx(() => [..._cache[58] || (_cache[58] = [createTextVNode(
+    									default: withCtx(() => [..._cache[56] || (_cache[56] = [createTextVNode(
     										"移除",
     										-1
     										/* CACHED */
@@ -98650,14 +98736,14 @@ Expected function or array of functions, received type ${typeof value}.`
     						/* KEYED_FRAGMENT */
     					))
     				]),
-    				createBaseVNode("section", _hoisted_66, [_cache[63] || (_cache[63] = createBaseVNode(
+    				createBaseVNode("section", _hoisted_66, [_cache[61] || (_cache[61] = createBaseVNode(
     					"h3",
     					null,
     					"怎么在提示词里用",
     					-1
     					/* CACHED */
     				)), createBaseVNode("div", _hoisted_67, [
-    					createBaseVNode("div", _hoisted_68, [_cache[60] || (_cache[60] = createBaseVNode(
+    					createBaseVNode("div", _hoisted_68, [_cache[58] || (_cache[58] = createBaseVNode(
     						"strong",
     						null,
     						"主动运行这个脚本",
@@ -98670,7 +98756,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						1
     						/* TEXT */
     					)]),
-    					createBaseVNode("div", _hoisted_69, [_cache[61] || (_cache[61] = createBaseVNode(
+    					createBaseVNode("div", _hoisted_69, [_cache[59] || (_cache[59] = createBaseVNode(
     						"strong",
     						null,
     						"主动运行并传入 input",
@@ -98683,7 +98769,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						1
     						/* TEXT */
     					)]),
-    					$setup.firstOutputKey ? (openBlock(), createElementBlock("div", _hoisted_70, [_cache[62] || (_cache[62] = createBaseVNode(
+    					$setup.firstOutputKey ? (openBlock(), createElementBlock("div", _hoisted_70, [_cache[60] || (_cache[60] = createBaseVNode(
     						"strong",
     						null,
     						"读取挂载点输出",
@@ -98698,14 +98784,14 @@ Expected function or array of functions, received type ${typeof value}.`
     					)])) : createCommentVNode("v-if", true)
     				])]),
     				createBaseVNode("section", _hoisted_71, [
-    					_cache[67] || (_cache[67] = createBaseVNode(
+    					_cache[65] || (_cache[65] = createBaseVNode(
     						"h3",
     						null,
     						"手动运行",
     						-1
     						/* CACHED */
     					)),
-    					createBaseVNode("label", _hoisted_72, [_cache[65] || (_cache[65] = createBaseVNode(
+    					createBaseVNode("label", _hoisted_72, [_cache[63] || (_cache[63] = createBaseVNode(
     						"span",
     						null,
     						"测试挂载点",
@@ -98714,7 +98800,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					)), withDirectives(createBaseVNode(
     						"select",
     						{ "onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.manualBindingIndex = $event) },
-    						[_cache[64] || (_cache[64] = createBaseVNode(
+    						[_cache[62] || (_cache[62] = createBaseVNode(
     							"option",
     							{ value: "" },
     							"不指定挂载点",
@@ -98758,7 +98844,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						loading: $setup.manualRunning,
     						onClick: $setup.runManual
     					}, {
-    						default: withCtx(() => [..._cache[66] || (_cache[66] = [createTextVNode(
+    						default: withCtx(() => [..._cache[64] || (_cache[64] = [createTextVNode(
     							"保存并手动运行",
     							-1
     							/* CACHED */
@@ -98774,7 +98860,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					)) : createCommentVNode("v-if", true)
     				]),
     				createBaseVNode("section", _hoisted_77, [
-    					_cache[68] || (_cache[68] = createBaseVNode(
+    					_cache[66] || (_cache[66] = createBaseVNode(
     						"h3",
     						null,
     						"执行日志",
@@ -98876,7 +98962,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		_: 1
     	})]);
     }
-    var ScriptManagerPage = /* @__PURE__ */ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-4270379a"]]);
+    var ScriptManagerPage = /* @__PURE__ */ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-3eb994c1"]]);
 
     const developerCopy = {
         panels: {

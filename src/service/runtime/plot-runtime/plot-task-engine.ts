@@ -28,6 +28,7 @@ import { replaceScriptVariables_ACU } from '../../scripts/script-variable-resolv
   async function runPlotTaskHook_ACU(hook: 'plot.before_task_request' | 'plot.after_task_response', payload: {
     requestId: string;
     presetName?: string;
+    stage: number;
     taskId: string;
     phase?: string;
     success?: boolean;
@@ -39,6 +40,7 @@ import { replaceScriptVariables_ACU } from '../../scripts/script-variable-resolv
         timestamp: Date.now(),
         requestId: payload.requestId,
         presetName: payload.presetName || '',
+        stage: payload.stage,
         taskId: payload.taskId,
         ...(hook === 'plot.before_task_request'
           ? { phase: payload.phase || 'before_request' }
@@ -49,6 +51,7 @@ import { replaceScriptVariables_ACU } from '../../scripts/script-variable-resolv
         promptType: 'plot',
         sourceType: hook,
         presetName: payload.presetName || '',
+        stage: payload.stage,
         taskId: payload.taskId,
       },
       requestContext: payload.requestContext,
@@ -531,6 +534,7 @@ import { replaceScriptVariables_ACU } from '../../scripts/script-variable-resolv
       await runPlotTaskHook_ACU('plot.before_task_request', {
         requestId: scriptRequestId,
         presetName,
+        stage: taskStage,
         taskId: normalizedTask.id,
         phase: 'before_request',
         requestContext: scriptRequestContext,
@@ -619,6 +623,7 @@ import { replaceScriptVariables_ACU } from '../../scripts/script-variable-resolv
       await runPlotTaskHook_ACU('plot.after_task_response', {
         requestId: scriptRequestId,
         presetName,
+        stage: taskStage,
         taskId: normalizedTask.id,
         success: true,
         requestContext: scriptRequestContext,

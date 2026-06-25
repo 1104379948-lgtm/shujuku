@@ -15,11 +15,15 @@ export type ScriptHookName_ACU =
 export interface ScriptBinding_ACU {
   hook: ScriptHookName_ACU;
   enabled: boolean;
+  target?: {
+    presetName?: string;
+    stage?: number;
+    taskId?: string;
+  };
   order?: number;
   config?: unknown;
   outputKey?: string;
   outputTtl?: 'request' | 'chat' | 'session';
-  filter?: Record<string, unknown>;
   failurePolicy?: 'continue' | 'block';
 }
 

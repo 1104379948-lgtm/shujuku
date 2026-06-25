@@ -169,7 +169,6 @@ return `limit=${limit}, format=${format}`;
 - 当前作用域匹配。
 - 绑定的挂载点已启用。
 - 当前流程触发了这个挂载点。
-- 过滤条件匹配。
 
 禁用脚本后：
 
@@ -1328,45 +1327,6 @@ const targetSheet = ctx.config.targetSheet;
 return `目标表 ${targetSheet}，最低分 ${minScore}`;
 ```
 
-### `filter JSON`
-
-过滤条件。
-
-用于限制这个绑定只在特定事件条件下运行。
-
-具体可用字段取决于挂载点事件。常见字段包括：
-
-- `presetName`
-- `stage`
-- `taskId`
-- `targetSheetKeys`
-- `updateMode`
-- `hook`
-
-如果不确定，先不填 filter，通过日志观察 `ctx.event` 后再配置。
-
-剧情推进脚本推荐用 `presetName` 绑定到具体推进预设。
-
-示例：只在名为“路线分支推进”的预设完成 stage 1 后执行：
-
-```json
-{"presetName":"路线分支推进","stage":1}
-```
-
-示例：只在名为“路线分支推进”的预设中，任务 `route_check` 请求前执行：
-
-```json
-{"presetName":"路线分支推进","taskId":"route_check"}
-```
-
-导入导出说明：
-
-- 剧情推进预设仍然导出为推进预设 JSON。
-- 脚本仍然导出为全部脚本 JSON。
-- 不需要把预设和脚本打成一个包。
-- 只要预设 JSON 中的 `name` 与脚本绑定 filter 里的 `presetName` 一致，导入后会自动匹配。
-- 任务级绑定还要求预设里的任务 `id` 与 filter 里的 `taskId` 一致。
-
 ## 脚本变量
 
 脚本变量可以放在支持变量替换的文本中，例如提示词、世界书、剧情任务 prompt、填表提示词等插件可控文本。
@@ -1486,6 +1446,48 @@ const roleCache = ctx.outputs.get('roleCache', { ttl: 'session' });
 - 函数体源码
 
 不要导入不可信来源的脚本包。
+
+### 剧情推进固定挂载点绑定
+
+剧情推进任务和阶段挂载点不是泛化到所有预设、所有 stage 后再让脚本自行判断。绑定必须指向固定挂载点实例。
+
+任务级挂载点绑定目标：
+
+```json
+{
+  "hook": "plot.before_task_request",
+  "enabled": true,
+  "target": {
+    "presetName": "剧情预设A",
+    "stage": 1,
+    "taskId": "task_001"
+  },
+  "outputKey": "task001Hint",
+  "outputTtl": "request"
+}
+```
+
+阶段级挂载点绑定目标：
+
+```json
+{
+  "hook": "plot.after_stage",
+  "enabled": true,
+  "target": {
+    "presetName": "剧情预设A",
+    "stage": 1
+  },
+  "outputKey": "stage1Gate",
+  "outputTtl": "request"
+}
+```
+
+匹配规则：
+
+- `plot.before_task_request` 和 `plot.after_task_response` 必须同时匹配 `target.presetName`、`target.stage`、`target.taskId`。
+- `plot.after_stage` 必须同时匹配 `target.presetName`、`target.stage`。
+- 不匹配的绑定不会执行，不需要在脚本里写 `if (ctx.event.stage !== 2) return` 这类过滤。
+- 缺少 `target` 或目标字段无效的剧情推进绑定会被导入/保存校验拒绝。
 
 ## 执行日志
 
@@ -1618,7 +1620,6 @@ return '目标表检查通过';
 - 绑定是否启用。
 - 作用域是否匹配当前角色。
 - 是否真的触发了对应挂载点。
-- filter JSON 是否把事件过滤掉了。
 - 脚本是否保存成功。
 - 执行日志里是否有错误。
 

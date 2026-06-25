@@ -45,7 +45,7 @@
     },
     {
       "name": "测试挂载点 plot.before_task_request",
-      "description": "验证 plot.before_task_request 挂载点是否触发。默认不限制预设和任务。",
+      "description": "验证 plot.before_task_request 挂载点是否触发。",
       "enabled": true,
       "language": "javascript",
       "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
@@ -66,7 +66,7 @@
     },
     {
       "name": "测试挂载点 plot.after_task_response",
-      "description": "验证 plot.after_task_response 挂载点是否触发。默认不限制预设和任务。",
+      "description": "验证 plot.after_task_response 挂载点是否触发。",
       "enabled": true,
       "language": "javascript",
       "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
@@ -87,7 +87,7 @@
     },
     {
       "name": "测试挂载点 plot.after_stage",
-      "description": "验证 plot.after_stage 挂载点是否触发。默认不限制预设和阶段。",
+      "description": "验证 plot.after_stage 挂载点是否触发。",
       "enabled": true,
       "language": "javascript",
       "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
