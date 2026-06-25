@@ -47,25 +47,30 @@
         <aside class="acu-v2-script-page__list" aria-label="脚本列表">
           <div v-if="!scripts.length" class="acu-v2-script-page__empty">暂无脚本，点击“新增脚本”开始。</div>
           <section v-for="group in scriptGroups" :key="group.key" class="acu-v2-script-page__script-group">
-            <h3 class="acu-v2-script-page__script-group-title">{{ group.title }}</h3>
-            <button
-              v-for="script in group.scripts"
-              :key="script.id"
-              type="button"
-              class="acu-v2-script-page__script-card"
-              :class="{ 'acu-v2-script-page__script-card--active': script.id === selectedId }"
-              @click="selectScript(script.id)"
-            >
-              <span class="acu-v2-script-page__script-title">{{ script.name }}</span>
-              <span class="acu-v2-script-page__script-meta">
-                {{ script.enabled ? '启用' : '禁用' }} · {{ scopeLabel(script) }} · order {{ script.order }}
-              </span>
-              <span class="acu-v2-script-page__script-meta">{{ bindingSummary(script) }}</span>
-              <span class="acu-v2-script-page__script-meta">输出 key：{{ outputKeySummary(script) }}</span>
-              <span class="acu-v2-script-page__script-meta">ID: {{ script.id }}</span>
-              <span v-if="script.lastRunAt" class="acu-v2-script-page__script-meta">最近运行 {{ formatTime(script.lastRunAt) }}</span>
-              <span v-if="script.lastError" class="acu-v2-script-page__script-error">{{ script.lastError }}</span>
+            <button type="button" class="acu-v2-script-page__script-group-toggle" @click="toggleScriptGroup(group.key)">
+              <span>{{ isScriptGroupCollapsed(group.key) ? '▶' : '▼' }} {{ group.title }}</span>
+              <small>{{ group.scripts.length }} 个</small>
             </button>
+            <template v-if="!isScriptGroupCollapsed(group.key)">
+              <button
+                v-for="script in group.scripts"
+                :key="script.id"
+                type="button"
+                class="acu-v2-script-page__script-card"
+                :class="{ 'acu-v2-script-page__script-card--active': script.id === selectedId }"
+                @click="selectScript(script.id)"
+              >
+                <span class="acu-v2-script-page__script-title">{{ script.name }}</span>
+                <span class="acu-v2-script-page__script-meta">
+                  {{ script.enabled ? '启用' : '禁用' }} · {{ scopeLabel(script) }} · order {{ script.order }}
+                </span>
+                <span class="acu-v2-script-page__script-meta">{{ bindingSummary(script) }}</span>
+                <span class="acu-v2-script-page__script-meta">输出 key：{{ outputKeySummary(script) }}</span>
+                <span class="acu-v2-script-page__script-meta">ID: {{ script.id }}</span>
+                <span v-if="script.lastRunAt" class="acu-v2-script-page__script-meta">最近运行 {{ formatTime(script.lastRunAt) }}</span>
+                <span v-if="script.lastError" class="acu-v2-script-page__script-error">{{ script.lastError }}</span>
+              </button>
+            </template>
           </section>
         </aside>
 
@@ -320,6 +325,7 @@ const manualRunning = ref(false);
 const importFileInput = ref<HTMLInputElement | null>(null);
 const importPreview = ref<UserScriptExportPackage_ACU | null>(null);
 const currentCharacterName = ref('');
+const collapsedScriptGroups = ref<Record<string, boolean>>({});
 
 const selectedLogs = computed(() => logs.value.filter(log => log.scriptId === selectedId.value).slice().reverse());
 const selectedLogGroups = computed(() => {
@@ -412,6 +418,17 @@ const plotPresetOptions = computed(() => {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
+}
+
+function isScriptGroupCollapsed(key: string): boolean {
+  return collapsedScriptGroups.value[key] === true;
+}
+
+function toggleScriptGroup(key: string): void {
+  collapsedScriptGroups.value = {
+    ...collapsedScriptGroups.value,
+    [key]: !isScriptGroupCollapsed(key),
+  };
 }
 
 function normalizeStageValue_ACU(value: unknown): number {
@@ -903,7 +920,8 @@ onMounted(refresh);
 .acu-v2-script-page__layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; min-height: 640px; }
 .acu-v2-script-page__list { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .acu-v2-script-page__script-group { display: flex; flex-direction: column; gap: 8px; }
-.acu-v2-script-page__script-group-title { margin: 8px 0 0; color: var(--acu-text-3); font-size: 12px; font-weight: 700; }
+.acu-v2-script-page__script-group-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 9px 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-2); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; text-align: left; }
+.acu-v2-script-page__script-group-toggle small { color: var(--acu-text-3); font-weight: 500; white-space: nowrap; }
 .acu-v2-script-page__script-card { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); text-align: left; cursor: pointer; }
 .acu-v2-script-page__script-card--active { border-color: var(--acu-accent); box-shadow: 0 0 0 1px var(--acu-accent); }
 .acu-v2-script-page__script-title { font-weight: 700; }
