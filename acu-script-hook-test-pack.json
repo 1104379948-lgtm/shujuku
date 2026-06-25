@@ -1,0 +1,257 @@
+{
+  "format": "acu_user_script_v1",
+  "scripts": [
+    {
+      "name": "测试挂载点 chat.loaded",
+      "description": "验证 chat.loaded 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "chat.loaded",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_chat_loaded",
+          "outputTtl": "chat",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 100,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 db.loaded",
+      "description": "验证 db.loaded 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "db.loaded",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_db_loaded",
+          "outputTtl": "chat",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 110,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 plot.before_task_request",
+      "description": "验证 plot.before_task_request 挂载点是否触发。默认不限制预设和任务。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "plot.before_task_request",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_plot_before_task_request",
+          "outputTtl": "request",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 120,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 plot.after_task_response",
+      "description": "验证 plot.after_task_response 挂载点是否触发。默认不限制预设和任务。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "plot.after_task_response",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_plot_after_task_response",
+          "outputTtl": "request",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 130,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 plot.after_stage",
+      "description": "验证 plot.after_stage 挂载点是否触发。默认不限制预设和阶段。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "plot.after_stage",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_plot_after_stage",
+          "outputTtl": "request",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 140,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 main_reply.before_generation",
+      "description": "验证 main_reply.before_generation 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "main_reply.before_generation",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_main_reply_before_generation",
+          "outputTtl": "request",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 150,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 main_reply.after_response",
+      "description": "验证 main_reply.after_response 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "main_reply.after_response",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_main_reply_after_response",
+          "outputTtl": "chat",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 160,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 table_fill.before_request",
+      "description": "验证 table_fill.before_request 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "table_fill.before_request",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_table_fill_before_request",
+          "outputTtl": "request",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 170,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 table_fill.after_commit",
+      "description": "验证 table_fill.after_commit 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "table_fill.after_commit",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_table_fill_after_commit",
+          "outputTtl": "chat",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 180,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 plot_worldbook.before_render",
+      "description": "验证 plot_worldbook.before_render 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "plot_worldbook.before_render",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_plot_worldbook_before_render",
+          "outputTtl": "request",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 190,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 table_fill_worldbook.before_render",
+      "description": "验证 table_fill_worldbook.before_render 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "table_fill_worldbook.before_render",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_table_fill_worldbook_before_render",
+          "outputTtl": "request",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 200,
+      "timeoutSeconds": 2
+    },
+    {
+      "name": "测试挂载点 manual_table_save.after_commit",
+      "description": "验证 manual_table_save.after_commit 挂载点是否触发。",
+      "enabled": true,
+      "language": "javascript",
+      "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
+      "scope": { "type": "global" },
+      "bindings": [
+        {
+          "hook": "manual_table_save.after_commit",
+          "enabled": true,
+          "order": 100,
+          "outputKey": "test_hook_manual_table_save_after_commit",
+          "outputTtl": "chat",
+          "failurePolicy": "continue"
+        }
+      ],
+      "defaultVariableInput": {},
+      "order": 210,
+      "timeoutSeconds": 2
+    }
+  ]
+}

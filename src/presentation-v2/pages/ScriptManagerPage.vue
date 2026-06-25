@@ -2,7 +2,7 @@
   <section class="acu-v2-script-page">
     <AcuPanel
       title="脚本管理"
-      description="管理用户脚本、挂载点、变量调用和执行日志。脚本源码只填写函数体，运行器会自动包裹 run(ctx)。"
+      description="管理脚本、触发时机和执行日志。"
     >
       <template #actions>
         <AcuButton size="sm" @click="triggerImport">
@@ -21,16 +21,11 @@
 
       <input ref="importFileInput" class="acu-v2-script-page__file-input" type="file" accept=".json,application/json" @change="handleImportFile" />
 
-      <section class="acu-v2-script-page__security-note" aria-label="脚本执行安全提示">
-        <strong>非沙箱执行</strong>
-        <p>用户脚本在当前页面主线程中运行，拥有页面 JavaScript 权限。请只导入和启用可信脚本；系统推荐通过 <code>ctx.api</code> 和 <code>ctx.tavern</code> 访问能力，但当前版本不能技术性阻止脚本访问 <code>window</code> 或宿主全局对象。</p>
-      </section>
-
       <section v-if="importPreview" class="acu-v2-script-page__import-preview" aria-label="脚本导入预览">
         <div class="acu-v2-script-page__import-head">
           <div>
             <strong>导入预览</strong>
-            <p class="acu-v2-script-page__hint">格式 {{ importPreview.format }}，共 {{ importPreview.scripts.length }} 个脚本。确认导入只会保存配置，不会执行脚本；启用只表示后续可被挂载点、脚本变量或手动运行触发，执行时拥有页面 JavaScript 权限。</p>
+            <p class="acu-v2-script-page__hint">格式 {{ importPreview.format }}，共 {{ importPreview.scripts.length }} 个脚本。</p>
           </div>
           <div class="acu-v2-script-page__toolbar">
             <AcuButton size="sm" variant="primary" :disabled="importPreviewHasErrors" @click="confirmImport">确认导入</AcuButton>
@@ -126,7 +121,6 @@
 
           <section class="acu-v2-script-page__section">
             <h3>函数体源码</h3>
-            <p class="acu-v2-script-page__hint">当前执行模型不是沙箱。源码应只使用受支持的 <code>ctx.api</code>、<code>ctx.tavern</code>、<code>ctx.log</code>；不要依赖 <code>window</code> 或宿主全局对象，否则属于不受支持脚本行为。</p>
             <textarea v-model="draft.source" class="acu-v2-script-page__source" spellcheck="false" placeholder="ctx.log.info('hello');&#10;return 'hello';"></textarea>
           </section>
 
@@ -143,21 +137,39 @@
             </div>
             <div v-if="!draft.bindings.length" class="acu-v2-script-page__empty">未绑定挂载点；仍可通过变量或手动运行执行。</div>
             <div v-for="(binding, index) in draft.bindings" :key="index" class="acu-v2-script-page__binding">
-              <select v-model="binding.hook">
-                <option v-for="hook in hookOptions" :key="hook" :value="hook">{{ hook }}</option>
-              </select>
-              <label><input v-model="binding.enabled" type="checkbox" /> 启用</label>
-              <input v-model.number="binding.order" type="number" placeholder="binding order" />
-              <input v-model="binding.outputKey" type="text" placeholder="outputKey" />
-              <select v-model="binding.outputTtl">
-                <option value="request">request</option>
-                <option value="chat">chat</option>
-                <option value="session">session</option>
-              </select>
-              <select v-model="binding.failurePolicy">
-                <option value="continue">continue</option>
-                <option value="block">block</option>
-              </select>
+              <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--hook">
+                <span>触发时机</span>
+                <select v-model="binding.hook">
+                  <option v-for="hook in hookOptions" :key="hook" :value="hook">{{ hook }}</option>
+                </select>
+              </label>
+              <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--enabled">
+                <span>启用</span>
+                <input v-model="binding.enabled" type="checkbox" />
+              </label>
+              <label class="acu-v2-script-page__binding-field">
+                <span>顺序</span>
+                <input v-model.number="binding.order" type="number" />
+              </label>
+              <label class="acu-v2-script-page__binding-field">
+                <span>输出键</span>
+                <input v-model="binding.outputKey" type="text" placeholder="可留空" />
+              </label>
+              <label class="acu-v2-script-page__binding-field">
+                <span>输出保留</span>
+                <select v-model="binding.outputTtl">
+                  <option value="request">本次请求</option>
+                  <option value="chat">当前聊天</option>
+                  <option value="session">当前会话</option>
+                </select>
+              </label>
+              <label class="acu-v2-script-page__binding-field">
+                <span>失败策略</span>
+                <select v-model="binding.failurePolicy">
+                  <option value="continue">记录错误后继续</option>
+                  <option value="block">阻断当前流程</option>
+                </select>
+              </label>
               <div v-if="isPlotBinding(binding)" class="acu-v2-script-page__plot-filter">
                 <label>
                   <span>剧情预设名 presetName</span>
@@ -182,22 +194,38 @@
                 </label>
                 <p class="acu-v2-script-page__hint">预设和全部脚本可以分别导出导入；这里会写入 filter，运行时按 presetName + taskId/stage 匹配。</p>
               </div>
-              <textarea v-model="bindingJsonTexts[index].config" rows="2" placeholder="config JSON"></textarea>
-              <textarea v-model="bindingJsonTexts[index].filter" rows="2" placeholder="filter JSON"></textarea>
+              <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json">
+                <span>配置</span>
+                <textarea v-model="bindingJsonTexts[index].config" rows="2" placeholder="例如 {&quot;limit&quot;:5}"></textarea>
+              </label>
+              <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json">
+                <span>过滤</span>
+                <textarea v-model="bindingJsonTexts[index].filter" rows="2" placeholder="例如 {&quot;presetName&quot;:&quot;日常&quot;}"></textarea>
+              </label>
               <AcuButton size="sm" variant="danger" @click="removeBinding(index)">移除</AcuButton>
             </div>
           </section>
 
           <section class="acu-v2-script-page__section">
-            <h3>变量调用示例</h3>
-            <code>{[script "{{ draft.name }}"]}</code>
-            <code>{[script id="{{ draft.id }}" input={"limit":5}]}</code>
-            <code v-if="firstOutputKey">{[script_output "{{ firstOutputKey }}"]}</code>
+            <h3>怎么在提示词里用</h3>
+            <div class="acu-v2-script-page__example-list">
+              <div class="acu-v2-script-page__example-item">
+                <strong>主动运行这个脚本</strong>
+                <code>{[script "{{ draft.name }}"]}</code>
+              </div>
+              <div class="acu-v2-script-page__example-item">
+                <strong>主动运行并传入 input</strong>
+                <code>{[script id="{{ draft.id }}" input={"limit":5}]}</code>
+              </div>
+              <div v-if="firstOutputKey" class="acu-v2-script-page__example-item">
+                <strong>读取挂载点输出</strong>
+                <code>{[script_output "{{ firstOutputKey }}"]}</code>
+              </div>
+            </div>
           </section>
 
           <section class="acu-v2-script-page__section">
             <h3>手动运行</h3>
-            <p class="acu-v2-script-page__hint">手动运行会先保存当前脚本，再执行已保存版本；允许真实写库，并会以页面 JavaScript 权限运行。只运行可信脚本。</p>
             <label class="acu-v2-script-page__field">
               <span>测试挂载点</span>
               <select v-model="manualBindingIndex">
@@ -874,7 +902,12 @@ onMounted(refresh);
 .acu-v2-script-page__checkbox, .acu-v2-script-page__radio { display: inline-flex; gap: 6px; align-items: center; color: var(--acu-text-2); }
 .acu-v2-script-page__checkbox input, .acu-v2-script-page__radio input { width: auto; }
 .acu-v2-script-page__source { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.acu-v2-script-page__binding { display: grid; grid-template-columns: minmax(180px, 1fr) 80px 90px 120px 100px 100px minmax(120px, 1fr) minmax(120px, 1fr) auto; gap: 8px; align-items: start; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); }
+.acu-v2-script-page__binding { display: grid; grid-template-columns: minmax(220px, 1fr) 72px 90px minmax(140px, 1fr) 120px 150px auto; gap: 10px; align-items: end; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); }
+.acu-v2-script-page__binding-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--acu-text-2); font-size: 12px; }
+.acu-v2-script-page__binding-field span { color: var(--acu-text-3); font-size: 11px; }
+.acu-v2-script-page__binding-field--enabled { align-items: center; }
+.acu-v2-script-page__binding-field--enabled input { width: auto; min-width: auto; }
+.acu-v2-script-page__binding-field--json { grid-column: span 3; }
 .acu-v2-script-page__plot-filter { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px; border: 1px dashed var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); }
 .acu-v2-script-page__plot-filter label { display: flex; flex-direction: column; gap: 4px; color: var(--acu-text-2); font-size: 12px; }
 .acu-v2-script-page__plot-filter .acu-v2-script-page__hint { grid-column: 1 / -1; margin: 0; }
@@ -883,6 +916,9 @@ onMounted(refresh);
 .acu-v2-script-page__import-head p { margin: 4px 0 0; }
 .acu-v2-script-page__import-item { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); color: var(--acu-text-2); }
 .acu-v2-script-page__import-item pre { max-height: 140px; margin: 0; padding: 8px; overflow: auto; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1); }
+.acu-v2-script-page__example-list { display: grid; gap: 10px; }
+.acu-v2-script-page__example-item { display: grid; gap: 5px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); }
+.acu-v2-script-page__example-item p { margin: 0; }
 .acu-v2-script-page__section code, .acu-v2-script-page__result { display: block; padding: 8px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1); overflow: auto; }
 .acu-v2-script-page__hint, .acu-v2-script-page__empty { color: var(--acu-text-3); font-size: 12px; }
 .acu-v2-script-page__log-row { display: grid; grid-template-columns: 170px 70px minmax(180px, 1fr) minmax(0, 1fr); gap: 8px; padding: 8px; border-bottom: 1px solid var(--acu-border-2); color: var(--acu-text-2); }
@@ -890,5 +926,5 @@ onMounted(refresh);
 .acu-v2-script-page__log-group { border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); overflow: hidden; background: var(--acu-bg-1); }
 .acu-v2-script-page__log-group + .acu-v2-script-page__log-group { margin-top: 8px; }
 .acu-v2-script-page__log-group-head { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 170px 80px minmax(0, 1fr); gap: 8px; padding: 8px; background: var(--acu-bg-2); color: var(--acu-text-2); }
-@media (max-width: 980px) { .acu-v2-script-page__layout { grid-template-columns: 1fr; } .acu-v2-script-page__grid { grid-template-columns: 1fr 1fr; } .acu-v2-script-page__binding { grid-template-columns: 1fr; } }
+@media (max-width: 980px) { .acu-v2-script-page__layout { grid-template-columns: 1fr; } .acu-v2-script-page__grid { grid-template-columns: 1fr 1fr; } .acu-v2-script-page__binding { grid-template-columns: 1fr; } .acu-v2-script-page__binding-field--json { grid-column: auto; } }
 </style>
