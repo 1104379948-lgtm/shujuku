@@ -42,11 +42,11 @@ afterEach(() => {
 });
 
 describe('router-store · pageRegistry 基线', () => {
-  it('注册表恰好 13 项，分布于 5 分组', async () => {
+  it('注册表恰好 14 项，分布于 5 分组', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.pageRegistry.length).toBe(13);
+    expect(r.pageRegistry.length).toBe(14);
     const byGroup = r.pageRegistry.reduce<Record<string, number>>((acc, p) => {
       acc[p.group] = (acc[p.group] || 0) + 1;
       return acc;
@@ -55,7 +55,7 @@ describe('router-store · pageRegistry 基线', () => {
       overview: 2,
       config: 4,
       feature: 4,
-      tool: 2,
+      tool: 3,
       developer: 1,
     });
   });
@@ -77,6 +77,7 @@ describe('router-store · pageRegistry 基线', () => {
       ['vector-index', '交火模式', 'feature'],
       ['content-replace', '正文替换', 'feature'],
       ['data-mgmt', '数据管理', 'tool'],
+      ['script-manager', '脚本管理', 'tool'],
       ['advanced-tools', '高级工具', 'tool'],
       ['developer', '开发者选项', 'developer'],
     ]);
@@ -249,7 +250,7 @@ describe('router-store · 高手模式可见性', () => {
     expect(r.visiblePagesByGroup.overview.length).toBe(1);
     expect(r.visiblePagesByGroup.config.length).toBe(4);
     expect(r.visiblePagesByGroup.feature.length).toBe(2);
-    expect(r.visiblePagesByGroup.tool.length).toBe(2); // 数据管理 + 高级工具
+    expect(r.visiblePagesByGroup.tool.length).toBe(3); // 数据管理 + 脚本管理 + 高级工具
     expect(r.visiblePagesByGroup.developer.length).toBe(0); // 默认 developerOptionsEnabled=false
   });
 

@@ -20,6 +20,7 @@ import VectorIndexPage from '../pages/VectorIndexPage.vue';
 import DataMgmtPage from '../pages/DataMgmtPage.vue';
 import ContentReplacePage from '../pages/ContentReplacePage.vue';
 import AdvancedToolsPage from '../pages/AdvancedToolsPage.vue';
+import ScriptManagerPage from '../pages/ScriptManagerPage.vue';
 import DeveloperPage from '../pages/DeveloperPage.vue';
 import { dashboardCopy } from '../copy/dashboard-copy';
 import { useDevOptionsStore } from '../stores/dev-options-store';
@@ -61,6 +62,7 @@ export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
 
   // 工具
   { id: 'data-mgmt', title: '数据管理', group: 'tool', component: markRaw(DataMgmtPage) },
+  { id: 'script-manager', title: '脚本管理', group: 'tool', component: markRaw(ScriptManagerPage) },
   { id: 'advanced-tools', title: '高级工具', group: 'tool', component: markRaw(AdvancedToolsPage) },
 
   // 开发者（plan §D24：仪表盘"启用开发者选项"总开关 gate）

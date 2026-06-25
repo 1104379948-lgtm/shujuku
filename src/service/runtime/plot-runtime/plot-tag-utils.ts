@@ -5,7 +5,8 @@
  */
 import { logWarn_ACU } from '../../../shared/utils';
 import { normalizePositiveInteger_ACU } from '../../../shared/utils';
-import { getTemplateVariableStores_ACU, setTemplateVariableStores_ACU, parseRandomTags_ACU, replaceRandomVariables_ACU, parseCalcTags_ACU, parseMaxTags_ACU, parseMinTags_ACU, replaceCalcVariables_ACU, replaceMaxVariables_ACU, replaceMinVariables_ACU, parseIfBlockRecursive_ACU, replaceDbSqlVariables } from '../template-vars';
+import { getTemplateVariableStores_ACU, setTemplateVariableStores_ACU } from '../template-vars';
+import { replaceAcuTemplateVariables_ACU } from '../template-vars/acu-template-vars';
 
   export function getNormalizedPlotMessageRole_ACU(role: string | null) {
     const ru = String(role || '').toUpperCase();
@@ -62,17 +63,17 @@ import { getTemplateVariableStores_ACU, setTemplateVariableStores_ACU, parseRand
     });
   }
 
-  function runWithIsolatedPlotTemplateVariables_ACU(callback: () => any) {
+  async function runWithIsolatedPlotTemplateVariables_ACU(callback: () => any) {
     const previousSnapshot = capturePlotTemplateVariables_ACU();
     restorePlotTemplateVariables_ACU(null);
     try {
-      return callback();
+      return await callback();
     } finally {
       restorePlotTemplateVariables_ACU(previousSnapshot);
     }
   }
 
-  export function renderPlotTaskContentWithIsolatedVariables_ACU(content: string, sharedContext: Record<string, any>) {
+  export async function renderPlotTaskContentWithIsolatedVariables_ACU(content: string, sharedContext: Record<string, any>) {
     const contextForCalc = { allTablesJson: sharedContext.allTablesJson };
     const contextForIf = {
       seedContent: sharedContext.seedContentForConditional,
@@ -80,20 +81,18 @@ import { getTemplateVariableStores_ACU, setTemplateVariableStores_ACU, parseRand
       plotContent: sharedContext.taskPlotContent || sharedContext.lastPlotContent || '',
     };
 
-    return runWithIsolatedPlotTemplateVariables_ACU(() => {
-      let renderedContent = content;
-      renderedContent = parseRandomTags_ACU(renderedContent);
-      renderedContent = replaceRandomVariables_ACU(renderedContent);
-      renderedContent = parseCalcTags_ACU(renderedContent, contextForCalc);
-      renderedContent = parseMaxTags_ACU(renderedContent, contextForCalc);
-      renderedContent = parseMinTags_ACU(renderedContent, contextForCalc);
-      renderedContent = replaceCalcVariables_ACU(renderedContent);
-      renderedContent = replaceMaxVariables_ACU(renderedContent);
-      renderedContent = replaceMinVariables_ACU(renderedContent);
-      // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
-      renderedContent = replaceDbSqlVariables(renderedContent);
-      return parseIfBlockRecursive_ACU(renderedContent, contextForIf, 0);
-    });
+    return runWithIsolatedPlotTemplateVariables_ACU(() => replaceAcuTemplateVariables_ACU(content, {
+      contextForCalc,
+      contextForIf,
+      ifMode: 'recursive',
+      sourceContext: {
+        promptType: 'plot',
+        sourceType: 'plot_task_prompt',
+        taskId: sharedContext.taskId,
+        requestId: sharedContext.scriptRequestId,
+      },
+      requestContext: sharedContext.scriptRequestContext,
+    }));
   }
 
   // ═══ XML 标签提取与占位符 ═══

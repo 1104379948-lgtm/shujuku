@@ -133,9 +133,12 @@ import {
   callCustomOpenAI_ACU,
   handleApiResponse_ACU,
 } from '../../../src/service/ai/prompt-builder/prompt-api-call';
+import { clearAllScriptOutputs_ACU, setScriptOutput_ACU } from '../../../src/service/scripts/script-output-context';
+import { beginScriptRequestCycle_ACU } from '../../../src/service/scripts/script-request-context';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearAllScriptOutputs_ACU();
   mockCurrentAbortControllerRef.value = null;
   mockSettings.tableApiPreset = '';
   mockSettings.charCardPrompt = [
@@ -291,6 +294,34 @@ describe('callCustomOpenAI_ACU — prompt 组装', () => {
 
     const content = mockGenerateRaw.mock.calls[0][0].ordered_prompts[0].content;
     expect(content).toBe('用户:');
+  });
+
+  it('填表 prompt 可读取同一 requestContext 下 before_request outputKey', async () => {
+    mockSettings.charCardPrompt = [{ role: 'USER', content: '提示:{[script_output "fillHint"]} 表格:$0' }];
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { useMainApi: true },
+      tavernProfile: '',
+    });
+    mockGenerateRaw.mockResolvedValue('AI回复');
+    const requestContext = {
+      requestId: beginScriptRequestCycle_ACU('table_fill_prompt_output_request'),
+      source: { promptType: 'table_fill', sourceType: 'table_fill_request' },
+    };
+    setScriptOutput_ACU('request', {
+      key: 'fillHint',
+      value: '填表动态提示',
+      scope: {},
+    }, { requestId: requestContext.requestId });
+
+    await callCustomOpenAI_ACU({ tableDataText: '表格数据' }, null, {
+      scriptRequestId: requestContext.requestId,
+      scriptRequestContext: requestContext,
+    });
+
+    const content = mockGenerateRaw.mock.calls[0][0].ordered_prompts[0].content;
+    expect(content).toContain('提示:填表动态提示');
+    expect(content).toContain('表格:表格数据');
   });
 });
 

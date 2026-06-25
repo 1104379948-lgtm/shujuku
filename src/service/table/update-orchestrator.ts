@@ -52,6 +52,8 @@ import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transa
 import { runTableUpdateCommit_ACU } from './table-update-commit';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
+import { runScriptHook_ACU } from '../scripts';
+import { getCurrentScriptRequestContext_ACU, type ScriptRequestContext_ACU } from '../scripts/script-request-context';
 
 // ============================================================
 // 类型定义：返回值 + 进度事件（service 层不驱动 UI）
@@ -128,6 +130,7 @@ export interface GroupFillResponse_ACU {
     success: boolean;
     attempt: number;
     job: GroupFillJob_ACU;
+    requestId?: string;
     aiResponse?: string;
     tableEditText?: string;
     error?: string;
@@ -169,6 +172,40 @@ interface PlannedGroupedRuntimeJob_ACU {
 
 const SQL_ERROR_MARKER_ACU = '\n\n<!-- SQL_ERROR_FEEDBACK -->\n';
 const UNIFIED_GROUP_ERROR_MARKER_ACU = '\n\n<!-- UNIFIED_GROUP_ERROR_FEEDBACK -->\n';
+
+export async function runTableFillAfterCommitHook_ACU(payload: {
+    changedSheets: string[];
+    modifiedSheets?: string[];
+    persistedSheets?: string[];
+    appliedEdits?: number | null;
+}): Promise<void> {
+    const requestContext = getCurrentScriptRequestContext_ACU();
+    const eventPayload = {
+        hook: 'table_fill.after_commit' as const,
+        timestamp: Date.now(),
+        requestId: requestContext.requestId,
+        changedSheets: Array.isArray(payload.changedSheets) ? payload.changedSheets : [],
+        modifiedSheets: Array.isArray(payload.modifiedSheets) ? payload.modifiedSheets : [],
+        persistedSheets: Array.isArray(payload.persistedSheets) ? payload.persistedSheets : [],
+        appliedEdits: Number.isFinite(payload.appliedEdits) ? payload.appliedEdits : null,
+        success: true,
+    };
+    await runScriptHook_ACU('table_fill.after_commit', {
+        eventPayload,
+        sourceContext: {
+            requestId: requestContext.requestId,
+            promptType: 'table_fill',
+            sourceType: 'table_fill_after_commit',
+        },
+        requestContext,
+    });
+}
+
+function getTableDataAfterAfterCommitHook_ACU(fallbackData: Record<string, any> | null | undefined): Record<string, any> | null | undefined {
+    return hasUsableRuntimeTableData_ACU(currentJsonTableData_ACU as any)
+        ? currentJsonTableData_ACU as any
+        : fallbackData;
+}
 
 // ============================================================
 // 核心业务函数
@@ -636,26 +673,49 @@ export async function collectGroupFillResponse_ACU(
 ): Promise<GroupFillResponse_ACU> {
     options.onProgress?.({ phase: 'preparing' });
 
+    const scriptRequestContext: ScriptRequestContext_ACU = {
+        ...getCurrentScriptRequestContext_ACU(),
+        source: { promptType: 'table_fill', sourceType: 'table_fill_request' },
+    };
+    const requestId = scriptRequestContext.requestId;
+    await runScriptHook_ACU('table_fill.before_request', {
+        eventPayload: {
+            hook: 'table_fill.before_request',
+            timestamp: Date.now(),
+            requestId,
+            targetSheetKeys: job.targetSheetKeys,
+            updateMode: job.updateMode,
+        },
+        input: {},
+        sourceContext: {
+            requestId,
+            promptType: 'table_fill',
+            sourceType: 'table_fill_before_request',
+        },
+        requestContext: scriptRequestContext,
+    });
+
     const dynamicContent = await prepareAIInput_ACU(job.messagesForContext, job.updateMode, job.targetSheetKeys, {
         tableData: job.baseSnapshot,
         excludeImportTaggedWorldbookEntries: job.isImportMode === true && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
+        scriptRequestContext,
     });
     if (!dynamicContent) {
         return {
             job,
             success: false,
             attempt: 0,
+            requestId,
             error: '无法准备AI输入，数据库未加载。',
             rawError: '无法准备AI输入，数据库未加载。',
         };
     }
-
     const maxRetries = options.maxRetriesOverride || settings_ACU.tableMaxRetries || 3;
     let lastErrorMessage = 'AI响应中未找到完整有效的 <tableEdit> 标签';
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         if (wasStoppedByUser_ACU) {
-            return { job, success: false, attempt, aborted: true };
+            return { job, success: false, attempt, requestId, aborted: true };
         }
 
         options.onProgress?.({ phase: 'calling_ai', attempt, maxRetries });
@@ -680,9 +740,11 @@ export async function collectGroupFillResponse_ACU(
                 ...(job.requestOptions || {}),
                 tableData: job.baseSnapshot,
                 targetSheetKeys: job.targetSheetKeys,
+                scriptRequestId: requestId,
+                scriptRequestContext,
             });
             if (abortController.signal.aborted || wasStoppedByUser_ACU) {
-                return { job, success: false, attempt, aborted: true };
+                return { job, success: false, attempt, requestId, aborted: true };
             }
 
             const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
@@ -709,12 +771,12 @@ export async function collectGroupFillResponse_ACU(
                 tableEditText = (aiResponse.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/i)?.[1] || '').trim();
             }
 
-            return { job, success: true, attempt, aiResponse: normalizedAiResponse, tableEditText };
+            return { job, success: true, attempt, requestId, aiResponse: normalizedAiResponse, tableEditText };
         } catch (error: any) {
             lastErrorMessage = error?.message || '未知错误';
             logWarn_ACU(`第 ${attempt} 次尝试失败: ${lastErrorMessage}`);
             if (error?.name === 'AbortError' || String(lastErrorMessage).toLowerCase().includes('aborted') || wasStoppedByUser_ACU) {
-                return { job, success: false, attempt, aborted: true };
+                return { job, success: false, attempt, requestId, aborted: true };
             }
             if (attempt < maxRetries) {
                 options.onProgress?.({ phase: 'retry', attempt, maxRetries, message: String(lastErrorMessage).substring(0, 50) });
@@ -723,7 +785,7 @@ export async function collectGroupFillResponse_ACU(
         }
     }
 
-    return { job, success: false, attempt: maxRetries, error: `填表在 ${maxRetries} 次尝试后仍失败: ${lastErrorMessage}`, rawError: lastErrorMessage };
+    return { job, success: false, attempt: maxRetries, requestId, error: `填表在 ${maxRetries} 次尝试后仍失败: ${lastErrorMessage}`, rawError: lastErrorMessage };
 }
 
 function buildSqlInitializationBase_ACU(baseSnapshot: Record<string, any>, targetSheetKeys: string[]) {
@@ -1009,7 +1071,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
             operations.push(...buildSqlBatchOperationsFromText_ACU(sqlText));
         }
 
-        const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
+        const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[]; changedSheets: string[] }>({
             source: 'group_fill',
             reason: 'applyUnifiedGroupFillResponses:runtime_sql',
             isolationKey: getCurrentIsolationKey_ACU(),
@@ -1067,7 +1129,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
 
             return {
                 success: true,
-                value: { modifiedKeys },
+                value: { modifiedKeys, changedSheets: keysToSave },
                 tableData: runtimeData as any,
                 mutationResult: { changes: parseResult.appliedEdits || 0, errors: [] },
                 persist: {
@@ -1085,8 +1147,9 @@ export async function applyUnifiedGroupFillResponses_ACU(
             _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(baseSnapshot || {})) as any);
             return { success: false, modifiedKeys: [], error: commitResult.error || '统一提交失败。' };
         }
-        if (!options.isImportMode && commitResult.tableData) {
-            await updateReadableLorebookEntry_ACU(true, false, null, commitResult.tableData);
+        const tableDataForRefresh = getTableDataAfterAfterCommitHook_ACU(commitResult.tableData as any);
+        if (!options.isImportMode && tableDataForRefresh) {
+            await updateReadableLorebookEntry_ACU(true, false, null, tableDataForRefresh);
         }
         return { success: true, modifiedKeys: commitResult.value.modifiedKeys, tableData: commitResult.tableData as any };
     }
@@ -1099,6 +1162,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
     const initializedSheetKeys = sqlInitialization.initializedSheetKeys;
     const modifiedKeySet = new Set<string>();
     const operations: TableMutationOperationV2_ACU[] = [];
+    let totalAppliedEdits = 0;
 
     for (const response of sortedResponses) {
         let parseResult: any;
@@ -1124,6 +1188,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
         const appliedEdits = parseResultObject && typeof parseResultObject.appliedEdits === 'number'
             ? parseResultObject.appliedEdits
             : (Array.isArray(parsedKeys) ? parsedKeys.length : 0);
+        totalAppliedEdits += appliedEdits;
         const parseError = parseResultObject && typeof parseResultObject.error === 'string'
             ? parseResultObject.error.trim()
             : '';
@@ -1156,6 +1221,8 @@ export async function applyUnifiedGroupFillResponses_ACU(
     if (options.deferPersist) {
         return { success: true, modifiedKeys, tableData: workingTableData as any };
     }
+    let didCommit = false;
+    let committedChangedSheets: string[] = [];
     if (!options.isImportMode) {
         const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
         const allUnifiedSheetKeys = getSortedSheetKeys_ACU(workingTableData);
@@ -1168,7 +1235,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
             .filter(sheetKey => Boolean((workingTableData as any)?.[sheetKey]))
             .sort();
         const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
-        const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
+        const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[]; changedSheets: string[] }>({
             source: 'group_fill',
             reason: 'applyUnifiedGroupFillResponses:snapshot',
             isolationKey: getCurrentIsolationKey_ACU(),
@@ -1184,19 +1251,24 @@ export async function applyUnifiedGroupFillResponses_ACU(
             operations,
         }, () => ({
             success: true,
-            value: { modifiedKeys },
+            value: { modifiedKeys, changedSheets: keysToSave },
             tableData: workingTableData as any,
         }));
         if (!commitResult.success) {
             return { success: false, modifiedKeys, error: commitResult.error || '统一提交失败：保存聊天记录失败。' };
         }
+        didCommit = true;
+        committedChangedSheets = commitResult.value?.changedSheets || keysToSave;
 
-        await updateReadableLorebookEntry_ACU(true, false, null, workingTableData);
+    }
+
+    if (didCommit) {
+        const tableDataForRefresh = getTableDataAfterAfterCommitHook_ACU(workingTableData as any);
+        await updateReadableLorebookEntry_ACU(true, false, null, tableDataForRefresh);
         if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
             await enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.saveTargetIndex, mode: 'sync', reason: 'unified_group_fill_complete' });
         }
     }
-
     return { success: true, modifiedKeys, tableData: workingTableData as any };
 }
 
@@ -1448,13 +1520,15 @@ export async function processGroupedRuntimeChunk_ACU(
                 });
             if (applyResult.success) {
                 if (options.deferPersist && applyResult.tableData) {
-                    deferredWorkingData = JSON.parse(JSON.stringify(applyResult.tableData));
-                    deferredCheckpointData = deferredCheckpointData || JSON.parse(JSON.stringify(deferredWorkingData));
-                    const checkpointSheetKeys = bucketSheetKeys.filter(sheetKey => Boolean((deferredWorkingData as any)?.[sheetKey]));
+                    const nextWorkingData = JSON.parse(JSON.stringify(applyResult.tableData));
+                    const nextCheckpointData = deferredCheckpointData
+                        ? JSON.parse(JSON.stringify(deferredCheckpointData))
+                        : JSON.parse(JSON.stringify(nextWorkingData));
+                    const checkpointSheetKeys = bucketSheetKeys.filter(sheetKey => Boolean((nextWorkingData as any)?.[sheetKey]));
                     for (const sheetKey of checkpointSheetKeys) {
-                        (deferredCheckpointData as any)[sheetKey] = JSON.parse(JSON.stringify((deferredWorkingData as any)[sheetKey]));
+                        (nextCheckpointData as any)[sheetKey] = JSON.parse(JSON.stringify((nextWorkingData as any)[sheetKey]));
                     }
-                    _set_currentJsonTableData_ACU(deferredCheckpointData);
+                    _set_currentJsonTableData_ACU(nextCheckpointData);
                     const checkpointTargetIndex = Number.isInteger(options.checkpointTargetIndex) ? options.checkpointTargetIndex as number : bucket.saveTargetIndex;
                     const revisionWriteSet = checkpointSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
                     const maxPlannedMessageIndex = Math.max(...jobs.map(job => job.saveTargetIndex));
@@ -1484,21 +1558,21 @@ export async function processGroupedRuntimeChunk_ACU(
                         source: 'group_fill',
                         reason: 'manual_refill_progress_checkpoint',
                         isolationKey: getCurrentIsolationKey_ACU(),
-                        writeSet: buildWriteSetForSheetKeys_ACU(checkpointSheetKeys, deferredCheckpointData),
+                        writeSet: buildWriteSetForSheetKeys_ACU(checkpointSheetKeys, nextCheckpointData),
                         revisionWriteSet,
-                        initialData: deferredCheckpointData as any,
+                        initialData: nextCheckpointData as any,
                         targetMessageIndex: checkpointTargetIndex,
-                        targetSheetKeys: getSortedSheetKeys_ACU(deferredCheckpointData),
+                        targetSheetKeys: getSortedSheetKeys_ACU(nextCheckpointData),
                         updateGroupKeys: checkpointSheetKeys,
                         trackingSheetKeys: checkpointSheetKeys,
                         trackAsUpdate: true,
                     }, () => ({
                         success: true,
                         value: { modifiedKeys: checkpointSheetKeys },
-                        tableData: deferredCheckpointData as any,
+                        tableData: nextCheckpointData as any,
                         persist: {
                             targetMessageIndex: checkpointTargetIndex,
-                            targetSheetKeys: getSortedSheetKeys_ACU(deferredCheckpointData),
+                            targetSheetKeys: getSortedSheetKeys_ACU(nextCheckpointData),
                             updateGroupKeys: checkpointSheetKeys,
                             trackingSheetKeys: checkpointSheetKeys,
                             trackAsUpdate: true,
@@ -1509,10 +1583,32 @@ export async function processGroupedRuntimeChunk_ACU(
                         },
                     }));
                     if (!checkpointCommit.success) {
-                        jobs.forEach(job => failedGroups.add(job.groupKey));
-                        firstError = firstError || checkpointCommit.error || '手动重填进度 checkpoint 保存失败。';
-                        break;
+                        retryUnifiedError = checkpointCommit.error || '手动重填进度 checkpoint 保存失败。';
+                        if (useDeferredSqliteRuntime) {
+                            const rollbackResult = await resetSqliteRuntimeFromSnapshot_ACU(deferredWorkingData, 'manual_refill_checkpoint_commit_failed');
+                            if (rollbackResult.success && rollbackResult.data) {
+                                deferredWorkingData = JSON.parse(JSON.stringify(rollbackResult.data));
+                                _set_currentJsonTableData_ACU(deferredWorkingData);
+                            } else {
+                                jobs.forEach(job => failedGroups.add(job.groupKey));
+                                firstError = firstError || `${retryUnifiedError}; SQLite runtime 回滚失败: ${rollbackResult.error || 'unknown error'}`;
+                                break;
+                            }
+                        }
+                        if (bucketAttempt >= maxBucketRetries) {
+                            jobs.forEach(job => failedGroups.add(job.groupKey));
+                            firstError = firstError || `统一提交在 ${maxBucketRetries} 次尝试后仍失败: ${retryUnifiedError}`;
+                        } else {
+                            emitBucketProgress(bucketIndex, {
+                                phase: 'retry',
+                                attempt: bucketAttempt,
+                                maxRetries: maxBucketRetries,
+                                message: retryUnifiedError.substring(0, 50),
+                            });
+                        }
+                        continue;
                     }
+                    deferredWorkingData = nextWorkingData;
                     if (checkpointCommit.tableData) {
                         deferredCheckpointData = JSON.parse(JSON.stringify(checkpointCommit.tableData));
                         _set_currentJsonTableData_ACU(deferredCheckpointData);
@@ -1553,9 +1649,10 @@ export async function processGroupedRuntimeChunk_ACU(
         }
     }
 
-    return failedGroups.size > 0
-        ? { success: false, failedGroups: [...failedGroups], error: firstError || '统一提交失败。', tableData: deferredWorkingData || undefined, checkpointData: deferredCheckpointData || undefined }
-        : { success: true, failedGroups: [], tableData: deferredWorkingData || undefined, checkpointData: deferredCheckpointData || undefined };
+    if (failedGroups.size > 0) {
+        return { success: false, failedGroups: [...failedGroups], error: firstError || '统一提交失败。', tableData: deferredWorkingData || undefined, checkpointData: deferredCheckpointData || undefined };
+    }
+    return { success: true, failedGroups: [], tableData: deferredWorkingData || undefined, checkpointData: deferredCheckpointData || undefined };
 }
 
 /**
@@ -1638,7 +1735,7 @@ export async function executeCardUpdateCore_ACU(
                     const writeSet = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
                         ? targetSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }))
                         : [{ kind: 'all' as const }];
-                    const commitResult = await runTableUpdateCommit_ACU<CardUpdateResult>({
+                const commitResult = await runTableUpdateCommit_ACU<CardUpdateResult & { changedSheets?: string[] }>({
                         source: 'group_fill',
                         reason: 'executeCardUpdateCore',
                         isolationKey: getCurrentIsolationKey_ACU(),
@@ -1673,7 +1770,7 @@ export async function executeCardUpdateCore_ACU(
                             logDebug_ACU('Import mode: skipping save to chat history for this chunk.');
                             return {
                                 success: true,
-                                value: { success: true, modifiedKeys: parsedKeys },
+                                value: { success: true, modifiedKeys: parsedKeys, changedSheets: [] },
                                 tableData: runtimeData as any,
                                 mutationResult: { changes: parseResult.appliedEdits || 0, errors: [] },
                                 persist: { revisionWriteSet: parsedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey })) },
@@ -1723,7 +1820,7 @@ export async function executeCardUpdateCore_ACU(
 
                         return {
                             success: true,
-                            value: { success: true, modifiedKeys: parsedKeys },
+                            value: { success: true, modifiedKeys: parsedKeys, changedSheets: keysToActuallySave },
                             tableData: runtimeData as any,
                             mutationResult: { changes: parseResult.appliedEdits || 0, errors: [] },
                             persist: {
@@ -1741,8 +1838,9 @@ export async function executeCardUpdateCore_ACU(
                         throw new Error(commitResult.error || '解析或应用AI更新时出错');
                     }
                     modifiedKeys = commitResult.value.modifiedKeys;
-                    if (!isImportMode && commitResult.tableData) {
-                        await updateReadableLorebookEntry_ACU(true, false, null, commitResult.tableData);
+                    const tableDataForRefresh = getTableDataAfterAfterCommitHook_ACU(commitResult.tableData as any);
+                    if (!isImportMode && tableDataForRefresh) {
+                        await updateReadableLorebookEntry_ACU(true, false, null, tableDataForRefresh);
                     }
                     success = true;
                     break;
@@ -1751,7 +1849,7 @@ export async function executeCardUpdateCore_ACU(
                 const writeSet = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
                     ? targetSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }))
                     : [{ kind: 'all' as const }];
-                const updateOutcome = await runTableUpdateCommit_ACU<CardUpdateResult>({
+                const updateOutcome = await runTableUpdateCommit_ACU<CardUpdateResult & { changedSheets?: string[] }>({
                     source: 'group_fill',
                     reason: 'executeCardUpdateCore:snapshot',
                     isolationKey: getCurrentIsolationKey_ACU(),
@@ -1794,8 +1892,9 @@ export async function executeCardUpdateCore_ACU(
                         logDebug_ACU("Import mode: skipping save to chat history for this chunk.");
                         return {
                             success: true,
-                            value: { success: true, modifiedKeys: parsedKeys },
+                            value: { success: true, modifiedKeys: parsedKeys, changedSheets: [] },
                             tableData: workingTableData as any,
+                            mutationResult: { changes: typeof parseResult?.appliedEdits === 'number' ? parseResult.appliedEdits : null, errors: [] },
                             persist: { revisionWriteSet },
                         };
                     }
@@ -1833,11 +1932,12 @@ export async function executeCardUpdateCore_ACU(
                     if (keysToPersist.length === 0 && !isFirstTimeInit && !hasTargetSheetTracking) {
                         logDebug_ACU("No tables were modified by AI and no target sheets are known; committing runtime view without chat persistence.");
                         return {
-                            success: true,
-                            value: { success: true, modifiedKeys: parsedKeys },
-                            tableData: workingTableData as any,
-                            persist: { targetSheetKeys: [], updateGroupKeys: [], trackingSheetKeys: [], trackAsUpdate: false, operations, revisionWriteSet },
-                        };
+                        success: true,
+                        value: { success: true, modifiedKeys: parsedKeys, changedSheets: [] },
+                        tableData: workingTableData as any,
+                        mutationResult: { changes: typeof parseResult?.appliedEdits === 'number' ? parseResult.appliedEdits : null, errors: [] },
+                        persist: { targetSheetKeys: [], updateGroupKeys: [], trackingSheetKeys: [], trackAsUpdate: false, operations, revisionWriteSet },
+                    };
                     }
 
                     const keysToTrackAsUpdated = hasTargetSheetTracking
@@ -1856,8 +1956,9 @@ export async function executeCardUpdateCore_ACU(
 
                     return {
                         success: true,
-                        value: { success: true, modifiedKeys: parsedKeys },
+                        value: { success: true, modifiedKeys: parsedKeys, changedSheets: keysToActuallySave },
                         tableData: workingTableData as any,
+                        mutationResult: { changes: typeof parseResult?.appliedEdits === 'number' ? parseResult.appliedEdits : null, errors: [] },
                         persist: {
                             targetSheetKeys: keysToActuallySave,
                             updateGroupKeys: updateGroupKeysToUse,
@@ -1873,8 +1974,9 @@ export async function executeCardUpdateCore_ACU(
                     return { success: false, modifiedKeys: [], error: updateOutcome.error || '无法将更新后的数据库保存到聊天记录。' };
                 }
                 modifiedKeys = updateOutcome.value.modifiedKeys;
-                if (!isImportMode && updateOutcome.tableData) {
-                    await updateReadableLorebookEntry_ACU(true, false, null, updateOutcome.tableData);
+                const tableDataForRefresh = getTableDataAfterAfterCommitHook_ACU(updateOutcome.tableData as any);
+                if (!isImportMode && tableDataForRefresh) {
+                    await updateReadableLorebookEntry_ACU(true, false, null, tableDataForRefresh);
                 }
 
                 success = true;
@@ -1991,6 +2093,7 @@ export async function processUpdatesBatch_ACU(
         const chatHistory = getChatArray_ACU();
         const isAutoUpdateMode = mode && mode.startsWith('auto');
         const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled);
+        let didCommitAnyBatch = false;
 
         for (let i = 0; i < batches.length; i++) {
             const batchIndices = batches[i];
@@ -2065,8 +2168,18 @@ export async function processUpdatesBatch_ACU(
             if (!result.success) {
                 return { success: false, failedBatch: batchNumber, error: result.error || `批处理在第 ${batchNumber} 批时失败或被终止。` };
             }
+            didCommitAnyBatch = true;
         }
 
+        if (didCommitAnyBatch) {
+            const sheetKeys = Array.isArray(targetSheetKeys) ? targetSheetKeys : [];
+            await runTableFillAfterCommitHook_ACU({
+                changedSheets: sheetKeys,
+                modifiedSheets: sheetKeys,
+                persistedSheets: sheetKeys,
+                appliedEdits: null,
+            });
+        }
         return { success: true };
     } finally {
         _set_isAutoUpdatingCard_ACU(false);
@@ -2313,6 +2426,13 @@ export async function orchestrateManualUpdate_ACU(
             const firstFailure = failedGroups[0];
             return { success: false, error: firstFailure.error || '手动更新失败或被终止。' };
         }
+
+        await runTableFillAfterCommitHook_ACU({
+            changedSheets: targetKeys,
+            modifiedSheets: targetKeys,
+            persistedSheets: targetKeys,
+            appliedEdits: null,
+        });
 
         // 手动更新完成后检测自动合并总结
         let autoMergeTriggered = false;

@@ -8,5 +8,8 @@ node_modules/
 # 构建产物
 dist/
 
+# 本地参考源码
+reference/
+
 # macOS
 .DS_Store

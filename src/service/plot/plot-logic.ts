@@ -429,6 +429,7 @@ export function applyPlotPresetToSettings_ACU(plotSettings: Record<string, any>,
     ensurePlotPromptsArray_ACU(plotSettings);
     ensureLoopPromptsArray_ACU(plotSettings);
     plotSettings.enabled = preservedEnabled;
+    plotSettings.name = String(normalizedPreset.name || '').trim();
     plotSettings.plotTasks = normalizePlotTasks_ACU(normalizedPreset);
     plotSettings.promptGroup = JSON.parse(JSON.stringify(getPlotPromptGroupFromSource_ACU(normalizedPreset)));
     plotSettings.finalSystemDirective = finalDirective || '';

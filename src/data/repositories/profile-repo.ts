@@ -31,6 +31,8 @@ export function buildDefaultGlobalMeta_ACU(): any {
         summaryVectorIndexModeGlobal: false,
         plotEnabledGlobal: true,
         vectorMemoryConfigGlobal: null,
+        userScriptsGlobal: [],
+        scriptLogsGlobal: [],
     };
 }
 
@@ -101,5 +103,16 @@ export function sanitizeSettingsForProfileSave_ACU(settingsObj: any): any {
     // 交火/向量模型 API 配置是全局配置，权威副本存放在 globalMeta.vectorMemoryConfigGlobal。
     // profile payload 中继续保存会导致切换隔离标识后旧值反向污染全局配置。
     delete cloned.vectorMemoryConfig;
+    delete cloned.userScripts;
+    delete cloned.scriptLogs;
     return cloned;
+}
+
+export function ensureGlobalScriptSettings_ACU(): { userScripts: any[]; scriptLogs: any[] } {
+    if (!Array.isArray(globalMeta_ACU.userScriptsGlobal)) globalMeta_ACU.userScriptsGlobal = [];
+    if (!Array.isArray(globalMeta_ACU.scriptLogsGlobal)) globalMeta_ACU.scriptLogsGlobal = [];
+    return {
+        userScripts: globalMeta_ACU.userScriptsGlobal,
+        scriptLogs: globalMeta_ACU.scriptLogsGlobal,
+    };
 }

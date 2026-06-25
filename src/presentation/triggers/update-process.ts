@@ -227,7 +227,6 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
     if (!result.success && result.error) {
         showToastr_ACU('error', result.error);
     }
-
     return result;
 }
 

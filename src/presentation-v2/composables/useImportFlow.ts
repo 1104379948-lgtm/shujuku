@@ -25,6 +25,7 @@ import { getCurrentCharPrimaryLorebook_ACU } from '../../service/worldbook/world
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 import {
   executeCardUpdateCore_ACU,
+  runTableFillAfterCommitHook_ACU,
   type CardUpdateProgressEvent,
 } from '../../service/table/update-orchestrator';
 import {
@@ -410,6 +411,13 @@ export function useImportFlow(): UseImportFlow {
         notify('error', finalResult.error || '最终注入失败。', { muteable: false });
         return;
       }
+
+      await runTableFillAfterCommitHook_ACU({
+        changedSheets: selectedSheetKeys,
+        modifiedSheets: selectedSheetKeys,
+        persistedSheets: selectedSheetKeys,
+        appliedEdits: null,
+      });
 
       store.setWorldbookTarget('');
       notify(

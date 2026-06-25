@@ -31,6 +31,7 @@ async function setup({
   });
   const finalizeImportAndCleanup = vi.fn(async () => ({ success: true, cleanedCount: 0 }));
   const executeCardUpdateCore = vi.fn(async () => ({ success: true, modifiedKeys: ['sheetA'] }));
+  const runTableFillAfterCommitHook = vi.fn(async () => undefined);
   const getCharPrimary = vi.fn(async () => charPrimary);
   const abortAllActiveRequests = vi.fn();
   const setWasStoppedByUser = vi.fn();
@@ -63,6 +64,7 @@ async function setup({
   }));
   vi.doMock('../../../src/service/table/update-orchestrator', () => ({
     executeCardUpdateCore_ACU: executeCardUpdateCore,
+    runTableFillAfterCommitHook_ACU: runTableFillAfterCommitHook,
   }));
   vi.doMock('../../../src/service/worldbook/worldbook-service', () => ({
     getCurrentCharPrimaryLorebook_ACU: getCharPrimary,
@@ -100,6 +102,7 @@ async function setup({
     saveChunkProgress,
     finalizeImportAndCleanup,
     executeCardUpdateCore,
+    runTableFillAfterCommitHook,
     getCharPrimary,
     abortAllActiveRequests,
     setWasStoppedByUser,

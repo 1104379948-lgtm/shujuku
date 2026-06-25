@@ -12,13 +12,139 @@ import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data
 import { buildCombinedWorldbookContentByStrategy_ACU } from '../../worldbook/pipeline';
 import { escapeRegExp_ACU, hashUserInput_ACU, isEntryBlocked_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../../shared/utils';
 import { ensurePlotTasksCompat_ACU, getPlotPromptContentByIdFromSettings_ACU, normalizePlotTask_ACU, normalizePlotTasks_ACU } from '../../plot/plot-logic';
-import { parseRandomTags_ACU, replaceRandomVariables_ACU, getLatestAIMessageContent_ACU, replaceDbSqlVariables } from '../template-vars';
+import { getLatestAIMessageContent_ACU } from '../template-vars';
+import { replaceAcuTemplateVariables_ACU } from '../template-vars/acu-template-vars';
 import { applyContextTagFilters_ACU, applyExcludeRulesToText_ACU } from '../helpers-context-tags';
 import { mergeAllIndependentTables_ACU } from '../helpers-data-merge';
 import { formatTableDataForLLM_ACU, formatOutlineTableForPlot_ACU, formatSummaryIndexForPlot_ACU, getSummaryIndexContentForPlot_ACU } from './plot-data-format';
 import { getNormalizedPlotMessageRole_ACU, tryRenderPlotTemplateWithEjs_ACU, renderPlotTaskContentWithIsolatedVariables_ACU, extractPlotTagsFromResponse_ACU, getPlotPlaceholderTagNames_ACU, buildPlotTagMapFromText_ACU, replacePlotTagPlaceholders_ACU, buildTaskWorldbookTriggerText_ACU, sortPlotTaskResults_ACU, aggregatePlotTaskTags_ACU, buildPlotSaveContentFromTaskResults_ACU, buildFinalPlotInjectionMessage_ACU } from './plot-tag-utils';
 import { getPlotFromHistory_ACU, savePlotToLatestMessage_ACU } from './plot-history-preset';
 import { abortableDelay } from '../../../shared/abortable-delay';
+import { runScriptHook_ACU } from '../../scripts';
+import { getCurrentScriptRequestContext_ACU, type ScriptRequestContext_ACU } from '../../scripts/script-request-context';
+import { clearScriptPlotTaskRuntimeResults_ACU, setScriptPlotTaskRuntimeResult_ACU, setScriptPromptDraft_ACU } from '../../scripts/script-tavern-facade';
+import { replaceScriptVariables_ACU } from '../../scripts/script-variable-resolver';
+
+  async function runPlotTaskHook_ACU(hook: 'plot.before_task_request' | 'plot.after_task_response', payload: {
+    requestId: string;
+    presetName?: string;
+    taskId: string;
+    phase?: string;
+    success?: boolean;
+    requestContext?: ScriptRequestContext_ACU;
+  }) {
+    await runScriptHook_ACU(hook, {
+      eventPayload: {
+        hook,
+        timestamp: Date.now(),
+        requestId: payload.requestId,
+        presetName: payload.presetName || '',
+        taskId: payload.taskId,
+        ...(hook === 'plot.before_task_request'
+          ? { phase: payload.phase || 'before_request' }
+          : { success: payload.success === true }),
+      },
+      sourceContext: {
+        requestId: payload.requestId,
+        promptType: 'plot',
+        sourceType: hook,
+        presetName: payload.presetName || '',
+        taskId: payload.taskId,
+      },
+      requestContext: payload.requestContext,
+    });
+  }
+
+  interface PlotStageControlState_ACU {
+    stopRequested: boolean;
+    stopReason: string;
+    skippedStages: Set<number>;
+  }
+
+  function normalizeStageNumberForControl_ACU(stage: unknown): number | null {
+    const value = Number(stage);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return Math.trunc(value);
+  }
+
+  async function runPlotAfterStageHook_ACU(payload: {
+    requestId: string;
+    presetName: string;
+    stage: number;
+    nextStage: number | null;
+    isLastStage: boolean;
+    taskIds: string[];
+    successfulTaskIds: string[];
+    remainingStages: number[];
+    allStages: number[];
+    controlState: PlotStageControlState_ACU;
+    requestContext: ScriptRequestContext_ACU;
+  }): Promise<void> {
+    await runScriptHook_ACU('plot.after_stage', {
+      eventPayload: {
+        hook: 'plot.after_stage',
+        timestamp: Date.now(),
+        requestId: payload.requestId,
+        presetName: payload.presetName,
+        stage: payload.stage,
+        nextStage: payload.nextStage,
+        isLastStage: payload.isLastStage,
+        taskIds: payload.taskIds,
+        successfulTaskIds: payload.successfulTaskIds,
+        remainingStages: payload.remainingStages,
+        allStages: payload.allStages,
+        success: true,
+      },
+      sourceContext: {
+        requestId: payload.requestId,
+        promptType: 'plot',
+        sourceType: 'plot.after_stage',
+        presetName: payload.presetName,
+        stage: payload.stage,
+      },
+      requestContext: payload.requestContext,
+      createController: () => {
+        const skippedStages = new Set<number>();
+        let stopRequested = false;
+        let stopReason = '';
+        const controller = {
+          skipStage(stage: unknown, reason?: string) {
+            const normalized = normalizeStageNumberForControl_ACU(stage);
+            if (normalized !== null) skippedStages.add(normalized);
+          },
+          skipStages(stages: unknown, reason?: string) {
+            const list = Array.isArray(stages) ? stages : [stages];
+            list.forEach(stage => {
+              const normalized = normalizeStageNumberForControl_ACU(stage);
+              if (normalized !== null) skippedStages.add(normalized);
+            });
+          },
+          stop(reason?: string) {
+            stopRequested = true;
+            stopReason = String(reason || '').trim();
+          },
+        };
+        return {
+          controller,
+          commit: () => {
+            skippedStages.forEach(stage => payload.controlState.skippedStages.add(stage));
+            if (stopRequested) {
+              payload.controlState.stopRequested = true;
+              payload.controlState.stopReason = stopReason;
+            }
+          },
+        };
+      },
+    });
+  }
+
+  async function renderPlotWorldbookScriptVariables_ACU(content: string, requestContext?: ScriptRequestContext_ACU): Promise<string> {
+    return replaceScriptVariables_ACU(content, {
+      promptType: 'plot',
+      sourceType: 'plot_worldbook',
+      requestId: requestContext?.requestId,
+    }, requestContext);
+  }
 
   function checkPlotAbortRequested_ACU() {
     if (abortController_ACU && abortController_ACU.signal.aborted) {
@@ -262,10 +388,11 @@ import { abortableDelay } from '../../../shared/abortable-delay';
       || '';
     rawFinal = await tryRenderPlotTemplateWithEjs_ACU(rawFinal);
     const plotFinalDirective = performReplacements(rawFinal);
-    let finalWithRandom = parseRandomTags_ACU(plotFinalDirective);
-    finalWithRandom = replaceRandomVariables_ACU(finalWithRandom);
-    // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下）
-    finalWithRandom = replaceDbSqlVariables(finalWithRandom);
+    let finalWithRandom = await replaceAcuTemplateVariables_ACU(plotFinalDirective, {
+      enableCalc: false,
+      enableIf: false,
+      sourceContext: { promptType: 'plot', sourceType: 'plot_final_directive' },
+    });
     if (finalWithRandom && finalWithRandom.trim()) {
       finalSystemDirectiveContent = finalWithRandom.trim();
     }
@@ -289,7 +416,7 @@ import { abortableDelay } from '../../../shared/abortable-delay';
     };
   }
 
-  async function renderPlotTaskMessages_ACU(task: Record<string, any>, sharedContext: Record<string, any>, runtimeOptions: any = {}) {
+  async function preparePlotTaskPromptDraft_ACU(task: Record<string, any>, sharedContext: Record<string, any>, runtimeOptions: any = {}) {
     const promptGroup = JSON.parse(JSON.stringify(task?.promptGroup || []));
     const messagesToUse = Array.isArray(promptGroup) ? promptGroup : [];
     const historyTagMap = runtimeOptions.historyTagMap instanceof Map
@@ -309,9 +436,27 @@ import { abortableDelay } from '../../../shared/abortable-delay';
       c = await tryRenderPlotTemplateWithEjs_ACU(c);
       c = sharedContext.performReplacements(c, replacementOverrides);
       c = replacePlotTagPlaceholders_ACU(c, relayTagMap, historyTagMap);
-      c = renderPlotTaskContentWithIsolatedVariables_ACU(c, sharedContext);
-      seg.__renderedContent = c;
+      seg.__draftContent = c;
     }
+
+    setScriptPromptDraft_ACU('plot_task', messagesToUse
+      .filter(seg => seg && typeof seg.__draftContent === 'string' && seg.__draftContent.trim().length > 0)
+      .map(seg => seg.__draftContent)
+      .join('\n\n'), String(task?.id || ''));
+
+    return messagesToUse;
+  }
+
+  async function finalizePlotTaskMessages_ACU(task: Record<string, any>, sharedContext: Record<string, any>, messagesToUse: any[]) {
+    for (const seg of messagesToUse) {
+      if (!seg || typeof seg.__draftContent !== 'string') continue;
+      seg.__renderedContent = await renderPlotTaskContentWithIsolatedVariables_ACU(seg.__draftContent, sharedContext);
+    }
+
+    setScriptPromptDraft_ACU('plot_task', messagesToUse
+      .filter(seg => seg && typeof seg.__renderedContent === 'string' && seg.__renderedContent.trim().length > 0)
+      .map(seg => seg.__renderedContent)
+      .join('\n\n'), String(task?.id || ''));
 
     return messagesToUse
       .filter(seg => seg && typeof seg.__renderedContent === 'string' && seg.__renderedContent.trim().length > 0)
@@ -322,11 +467,17 @@ import { abortableDelay } from '../../../shared/abortable-delay';
     const normalizedTask = normalizePlotTask_ACU(task, { index: task?.order ?? 0, fallbackTask: task || null });
     const taskLabel = normalizedTask.name || normalizedTask.id || '未命名任务';
     const taskStage = normalizePositiveInteger_ACU(normalizedTask.stage, 1);
+    const presetName = String(sharedContext?.presetName || sharedContext?.plotSettings?.name || '').trim();
     const maxRetries = normalizePositiveInteger_ACU(
       normalizedTask.maxRetries,
       sharedContext?.plotSettings?.loopSettings?.maxRetries ?? DEFAULT_PLOT_SETTINGS_ACU.loopSettings?.maxRetries ?? 3,
     );
     const minLength = normalizeNonNegativeInteger_ACU(normalizedTask.minLength, 0);
+    const scriptRequestContext: ScriptRequestContext_ACU = {
+      ...getCurrentScriptRequestContext_ACU(),
+      source: { promptType: 'plot', sourceType: 'plot_task', presetName, taskId: normalizedTask.id },
+    };
+    const scriptRequestId = scriptRequestContext.requestId;
 
     // 任务级世界书计算：基于当前任务实际使用的 {{tag}} 注入内容 + 本轮上下文触发，
     // 而不是固定使用整段上一轮剧情内容。
@@ -346,13 +497,16 @@ import { abortableDelay } from '../../../shared/abortable-delay';
       } else {
         logDebug_ACU(`[剧情推进] [任务:${taskLabel}] 无 {{tag}} 注入内容，世界书仅基于本轮上下文触发`);
       }
-      taskWorldbookContent = await getWorldbookContentForPlot_ACU(sharedContext.plotSettings, sharedContext.userMessage, worldbookTriggerText);
+      taskWorldbookContent = await getWorldbookContentForPlot_ACU(sharedContext.plotSettings, sharedContext.userMessage, worldbookTriggerText, { requestContext: scriptRequestContext });
       if (taskWorldbookContent) {
         // 对任务级世界书内容执行与共享管线相同的后处理
         taskWorldbookContent = await tryRenderPlotTemplateWithEjs_ACU(taskWorldbookContent);
-        taskWorldbookContent = parseRandomTags_ACU(taskWorldbookContent);
-        taskWorldbookContent = replaceRandomVariables_ACU(taskWorldbookContent);
-        taskWorldbookContent = replaceDbSqlVariables(taskWorldbookContent);
+        taskWorldbookContent = await replaceAcuTemplateVariables_ACU(taskWorldbookContent, {
+          enableCalc: false,
+          enableIf: false,
+          sourceContext: { promptType: 'plot', sourceType: 'plot_task_worldbook', presetName, taskId: normalizedTask.id, requestId: scriptRequestId },
+          requestContext: scriptRequestContext,
+        });
         logDebug_ACU(`[剧情推进] [任务:${taskLabel}] 任务级世界书内容长度: ${taskWorldbookContent.length}`);
       }
     } catch (wbError) {
@@ -363,12 +517,27 @@ import { abortableDelay } from '../../../shared/abortable-delay';
     // 构建任务级共享上下文：覆盖 $1 替换值，使 performReplacements 使用任务级世界书内容
     const taskSharedContext = {
       ...sharedContext,
+      taskId: normalizedTask.id,
+      scriptRequestId,
+      scriptRequestContext,
       taskWorldbookContent,
     };
 
     try {
       checkPlotAbortRequested_ACU();
-      const messages = await renderPlotTaskMessages_ACU(normalizedTask, taskSharedContext, runtimeOptions);
+      const promptDraftMessages = await preparePlotTaskPromptDraft_ACU(normalizedTask, taskSharedContext, runtimeOptions);
+      checkPlotAbortRequested_ACU();
+
+      await runPlotTaskHook_ACU('plot.before_task_request', {
+        requestId: scriptRequestId,
+        presetName,
+        taskId: normalizedTask.id,
+        phase: 'before_request',
+        requestContext: scriptRequestContext,
+      });
+      checkPlotAbortRequested_ACU();
+
+      const messages = await finalizePlotTaskMessages_ACU(normalizedTask, taskSharedContext, promptDraftMessages);
       checkPlotAbortRequested_ACU();
 
       if (!messages.length) {
@@ -446,6 +615,14 @@ import { abortableDelay } from '../../../shared/abortable-delay';
       if (tagNames.length > 0 && Object.keys(extractedTags).length > 0) {
         logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 成功摘取标签: ${Object.keys(extractedTags).join(', ')}`);
       }
+      setScriptPlotTaskRuntimeResult_ACU(normalizedTask.id, { rawResponse, extractedTags });
+      await runPlotTaskHook_ACU('plot.after_task_response', {
+        requestId: scriptRequestId,
+        presetName,
+        taskId: normalizedTask.id,
+        success: true,
+        requestContext: scriptRequestContext,
+      });
 
       return {
         taskId: normalizedTask.id,
@@ -483,7 +660,9 @@ import { abortableDelay } from '../../../shared/abortable-delay';
   export async function runPlotTasksRuntime_ACU(plotSettings: Record<string, any>, userMessage: string, runtimeOptions: any = {}) {
     const { inputForHash = userMessage, hasExistingUserMessage = false } = runtimeOptions;
 
+    clearScriptPlotTaskRuntimeResults_ACU();
     ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
+    const presetName = String(plotSettings?.name || '').trim();
 
     const enabledTasks = getEnabledPlotTasks_ACU(plotSettings);
     if (!enabledTasks.length) {
@@ -498,10 +677,11 @@ import { abortableDelay } from '../../../shared/abortable-delay';
     }
 
     const stageGroups = groupPlotTasksByStage_ACU(enabledTasks);
-    const sharedContext = await buildPlotSharedContext_ACU(plotSettings, userMessage, {
+    const baseSharedContext = await buildPlotSharedContext_ACU(plotSettings, userMessage, {
       inputForHash,
       hasExistingUserMessage,
     });
+    const sharedContext = { ...baseSharedContext, presetName };
     checkPlotAbortRequested_ACU();
     const historyTagMap = buildPlotTagMapFromText_ACU(sharedContext.lastPlotContent || '', null);
 
@@ -519,9 +699,20 @@ import { abortableDelay } from '../../../shared/abortable-delay';
     let aggregatedTags = new Map();
     let completedSuccessfulResults: any[] = [];
     let aggregatedInjectOnlyTagNames = new Set<string>();
+    const stageControlState: PlotStageControlState_ACU = {
+      stopRequested: false,
+      stopReason: '',
+      skippedStages: new Set<number>(),
+    };
+    const allStages = stageGroups.map(group => group.stage);
 
     for (let stageIndex = 0; stageIndex < stageGroups.length; stageIndex++) {
       const stageGroup = stageGroups[stageIndex];
+      if (stageControlState.stopRequested) break;
+      if (stageControlState.skippedStages.has(stageGroup.stage)) {
+        logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 已被脚本控制器跳过。`);
+        continue;
+      }
 
       let stageEffectivePreset = String(settings_ACU.plotApiPreset || '').trim();
       for (const stageTask of stageGroup.tasks) {
@@ -579,6 +770,26 @@ import { abortableDelay } from '../../../shared/abortable-delay';
       aggregatedTags = stageAggregated;
       stageInjectOnly.forEach((name: string) => aggregatedInjectOnlyTagNames.add(name));
       logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 已完成，成功任务数: ${stageSuccessfulResults.length}`);
+      const remainingStages = stageGroups
+        .slice(stageIndex + 1)
+        .map(group => group.stage)
+        .filter(stage => !stageControlState.skippedStages.has(stage));
+      await runPlotAfterStageHook_ACU({
+        requestId: getCurrentScriptRequestContext_ACU().requestId,
+        presetName,
+        stage: stageGroup.stage,
+        nextStage: remainingStages[0] ?? null,
+        isLastStage: remainingStages.length === 0,
+        taskIds: stageGroup.tasks.map((task: any) => String(task?.id || '')).filter(Boolean),
+        successfulTaskIds: stageSuccessfulResults.map((result: any) => String(result?.taskId || '')).filter(Boolean),
+        remainingStages,
+        allStages,
+        controlState: stageControlState,
+        requestContext: {
+          ...getCurrentScriptRequestContext_ACU(),
+          source: { promptType: 'plot', sourceType: 'plot.after_stage', presetName, stage: stageGroup.stage },
+        },
+      });
     }
 
     if (!successfulResults.length) {
@@ -622,7 +833,7 @@ import { abortableDelay } from '../../../shared/abortable-delay';
   // ═══ 世界书内容获取 ═══
 
   /** 获取剧情推进功能的世界书内容（默认开启，无需检查 worldbookEnabled） */
-  export async function getWorldbookContentForPlot_ACU(apiSettings: Record<string, any>, userMessage: string, extraBaseText: string = '') {
+  export async function getWorldbookContentForPlot_ACU(apiSettings: Record<string, any>, userMessage: string, extraBaseText: string = '', options: { runScriptHook?: boolean; requestContext?: ScriptRequestContext_ACU } = {}) {
     if (!apiSettings) {
       logWarn_ACU('[剧情推进] apiSettings 为空，无法获取世界书');
       return '';
@@ -669,7 +880,7 @@ import { abortableDelay } from '../../../shared/abortable-delay';
       const enabledMap = plotCfg?.enabledEntries;
       const hasAnySelection = enabledMap && typeof enabledMap === 'object' && Object.keys(enabledMap).length > 0;
 
-      return await buildCombinedWorldbookContentByStrategy_ACU({
+      const combinedContent = await buildCombinedWorldbookContentByStrategy_ACU({
         logPrefix: '[剧情推进]',
         bookNames,
         baseScanText: [historyAndUserText, extraBaseText || ''].filter(Boolean).join('\n'),
@@ -714,6 +925,21 @@ import { abortableDelay } from '../../../shared/abortable-delay';
           logDebug_ACU('[剧情推进] SillyTavern中启用的条目数量:', entries.length);
         },
       });
+      if (options.runScriptHook === false) return combinedContent;
+      const requestContext = options.requestContext || {
+        ...getCurrentScriptRequestContext_ACU(),
+        source: { promptType: 'plot', sourceType: 'plot_worldbook' },
+      };
+      await runScriptHook_ACU('plot_worldbook.before_render', {
+        eventPayload: {
+          hook: 'plot_worldbook.before_render',
+          timestamp: Date.now(),
+          requestId: requestContext.requestId,
+        },
+        sourceContext: { promptType: 'plot', sourceType: 'plot_worldbook', requestId: requestContext.requestId },
+        requestContext,
+      });
+      return await renderPlotWorldbookScriptVariables_ACU(combinedContent, requestContext);
     } catch (error) {
       logError_ACU('[剧情推进] 处理世界书内容时发生错误:', error);
       return '';

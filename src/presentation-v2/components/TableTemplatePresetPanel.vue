@@ -24,7 +24,7 @@
         :items="templates.chatPresetItems.value"
         :model-value="templates.selectedChatPreset.value"
         :default-name="templates.selectedGlobalPresetValue.value"
-        :disabled="templates.busy.value || management.busy.value"
+        :disabled="templateBusy || managementBusy"
         placeholder="默认预设"
         @update:model-value="templates.selectChatPreset($event)"
         @set-default="templates.selectGlobalPreset($event)"
@@ -33,7 +33,7 @@
         icon-only
         title="导入模板 JSON"
         accept="application/json,.json"
-        :disabled="templates.busy.value || management.busy.value"
+        :disabled="templateBusy || managementBusy"
         @file="templates.importPresetForCurrentChat($event)"
       >
         <i class="fa-solid fa-download"></i>
@@ -41,13 +41,13 @@
       <AcuIconButton
         icon="fa-solid fa-clock-rotate-left"
         title="恢复历史模板归档"
-        :disabled="templates.busy.value || management.busy.value || templates.chatArchiveItems.value.length === 0"
+        :disabled="templateBusy || managementBusy || chatArchiveCount === 0"
         @click="templates.restoreArchivedChatTemplate"
       />
       <AcuIconButton
         icon="fa-solid fa-gear"
         title="管理表格模板预设"
-        :disabled="management.busy.value"
+        :disabled="managementBusy"
         @click="management.openManage"
       />
     </div>
@@ -57,7 +57,7 @@
         variant="primary"
         class="acu-table-template-panel__visualizer-button"
         title="打开可视化表格编辑器"
-        :disabled="templates.busy.value || management.busy.value"
+        :disabled="templateBusy || managementBusy"
         @click="management.openVisualizer"
       >
         <i class="fa-solid fa-table-columns"></i>
@@ -68,7 +68,7 @@
     <TablePresetDrawer
       :is-open="management.isDrawerOpen.value"
       :title="management.title.value"
-      :busy="management.busy.value"
+      :busy="managementBusy"
       :message="management.message.value"
       :preset-meta="management.presetMeta.value"
       :default-preset-name="management.defaultPresetName.value"
@@ -84,7 +84,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch } from 'vue';
+import { computed, onMounted, watch } from 'vue';
 import AcuBadge from './_lib/AcuBadge.vue';
 import AcuButton from './_lib/AcuButton.vue';
 import AcuFileButton from './_lib/AcuFileButton.vue';
@@ -101,6 +101,9 @@ import { tableCopy } from '../copy/table-copy';
 
 const templates = useTableTemplatePresets();
 const management = useTablePresetManagement();
+const templateBusy = computed(() => templates.busy?.value === true);
+const managementBusy = computed(() => management.busy?.value === true);
+const chatArchiveCount = computed(() => templates.chatArchiveItems?.value?.length || 0);
 
 function refreshAll(): void {
   templates.refresh();

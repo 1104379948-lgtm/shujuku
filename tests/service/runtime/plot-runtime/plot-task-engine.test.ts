@@ -39,6 +39,8 @@ const {
   mockBuildFinalPlotInjectionMessage,
   mockGetPlotFromHistory,
   mockSavePlotToLatestMessage,
+  mockRunScriptHook,
+  mockLogError,
   mockHashUserInput,
   mockIsEntryBlocked,
 } = vi.hoisted(() => {
@@ -105,6 +107,8 @@ const {
     mockBuildFinalPlotInjectionMessage: vi.fn(),
     mockGetPlotFromHistory: vi.fn(),
     mockSavePlotToLatestMessage: vi.fn(),
+    mockRunScriptHook: vi.fn(async () => []),
+    mockLogError: vi.fn(),
     mockHashUserInput: vi.fn((text: string) => `hash_${text}`),
     mockIsEntryBlocked: vi.fn((entry: any) => !!entry?.blocked),
   };
@@ -157,7 +161,7 @@ vi.mock('../../../../src/shared/utils', () => ({
   hashUserInput_ACU: mockHashUserInput,
   isEntryBlocked_ACU: mockIsEntryBlocked,
   logDebug_ACU: vi.fn(),
-  logError_ACU: vi.fn(),
+  logError_ACU: mockLogError,
   logWarn_ACU: vi.fn(),
   normalizeNonNegativeInteger_ACU: (value: any, fallback = 0) => {
     const num = Number(value);
@@ -220,11 +224,18 @@ vi.mock('../../../../src/service/runtime/plot-runtime/plot-history-preset', () =
   savePlotToLatestMessage_ACU: mockSavePlotToLatestMessage,
 }));
 
+vi.mock('../../../../src/service/scripts', () => ({
+  runScriptHook_ACU: mockRunScriptHook,
+  stringifyScriptValue_ACU: (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value),
+}));
+
 import {
   willPlotUseMainApiGenerateRaw_ACU,
   runPlotTasksRuntime_ACU,
   getWorldbookContentForPlot_ACU,
 } from '../../../../src/service/runtime/plot-runtime/plot-task-engine';
+import { clearScriptRequestOutputs_ACU, getScriptOutput_ACU, setScriptOutput_ACU } from '../../../../src/service/scripts/script-output-context';
+import { replaceScriptVariables_ACU } from '../../../../src/service/scripts/script-variable-resolver';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -297,7 +308,9 @@ beforeEach(() => {
   mockBuildFinalPlotInjectionMessage.mockReturnValue('最终注入消息');
   mockGetPlotFromHistory.mockReturnValue('上一轮剧情');
   mockSavePlotToLatestMessage.mockResolvedValue(undefined);
+  mockRunScriptHook.mockResolvedValue([]);
   mockCallApiWithPlotPreset.mockResolvedValue('任务输出');
+  clearScriptRequestOutputs_ACU();
 });
 
 describe('willPlotUseMainApiGenerateRaw_ACU', () => {
@@ -393,6 +406,47 @@ describe('getWorldbookContentForPlot_ACU', () => {
     expect(result).toBe('世界书内容');
     expect(mockGetCharLorebooks).toHaveBeenCalledWith({ type: 'all' });
     expect(mockBuildCombinedWorldbookContentByStrategy.mock.calls[0][0].bookNames).toEqual(['主书', '副书']);
+  });
+
+  it('变量替换前运行 plot_worldbook.before_render hook 并传递 requestContext', async () => {
+    mockGetCharLorebooks.mockResolvedValue({ primary: '主书', additional: [] });
+
+    await getWorldbookContentForPlot_ACU(
+      { plotWorldbookConfig: { source: 'character' } },
+      '继续推进',
+      '',
+      { requestContext: { requestId: 'plot_worldbook_request', source: { promptType: 'plot', sourceType: 'plot_worldbook' } } },
+    );
+
+    expect(mockRunScriptHook).toHaveBeenCalledWith('plot_worldbook.before_render', expect.objectContaining({
+      eventPayload: expect.objectContaining({ requestId: 'plot_worldbook_request' }),
+      sourceContext: expect.objectContaining({ requestId: 'plot_worldbook_request', sourceType: 'plot_worldbook' }),
+      requestContext: expect.objectContaining({ requestId: 'plot_worldbook_request' }),
+    }));
+  });
+
+  it('plot_worldbook.before_render 写入的 outputKey 可被同一剧情世界书文本读取', async () => {
+    mockGetCharLorebooks.mockResolvedValue({ primary: '主书', additional: [] });
+    mockBuildCombinedWorldbookContentByStrategy.mockResolvedValue('剧情世界书 {[script_output "plotWbHint"]}');
+    mockRunScriptHook.mockImplementationOnce(async (_hook: any, options: any) => {
+      setScriptOutput_ACU('request', {
+        key: 'plotWbHint',
+        value: '动态剧情世界书提示',
+        scope: {},
+      }, { requestId: options.requestContext.requestId });
+      expect(getScriptOutput_ACU('plotWbHint', 'request', { requestId: options.requestContext.requestId })?.value).toBe('动态剧情世界书提示');
+      return [];
+    });
+
+    const result = await getWorldbookContentForPlot_ACU(
+      { plotWorldbookConfig: { source: 'character' } },
+      '继续推进',
+      '',
+      { requestContext: { requestId: 'plot_worldbook_output_request', source: { promptType: 'plot', sourceType: 'plot_worldbook' } } },
+    );
+    expect(getScriptOutput_ACU('plotWbHint', 'request', { requestId: 'plot_worldbook_output_request' })?.value).toBe('动态剧情世界书提示');
+    expect(await replaceScriptVariables_ACU('剧情世界书 {[script_output "plotWbHint"]}', {}, { requestId: 'plot_worldbook_output_request' })).toBe('剧情世界书 动态剧情世界书提示');
+    expect(result).toBe('剧情世界书 动态剧情世界书提示');
   });
 
   it('角色世界书读取失败时返回空字符串', async () => {
@@ -497,6 +551,112 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(mockSavePlotToLatestMessage).toHaveBeenCalledWith(true);
   });
 
+  it('plot.before_task_request 在最终脚本变量渲染前触发，并共享同一 requestContext', async () => {
+    const order: string[] = [];
+    const hookRequestIds: string[] = [];
+    mockRunScriptHook.mockImplementation(async (hook: string, options: any) => {
+      if (hook === 'plot.before_task_request') {
+        order.push('before_hook');
+        hookRequestIds.push(options.requestContext.requestId);
+      }
+      return [];
+    });
+    mockRenderPlotTaskContentWithIsolatedVariables.mockImplementation((text: string, context: any) => {
+      order.push('render_prompt');
+      expect(context.scriptRequestContext.requestId).toBe(hookRequestIds[0]);
+      return text;
+    });
+
+    const plotSettings = {
+      name: '路线分支推进',
+      tasks: [{
+        id: 'task-before',
+        name: '前置任务',
+        stage: 1,
+        order: 1,
+        maxRetries: 1,
+        promptGroup: [{ role: 'user', content: 'prompt' }],
+      }],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(order.slice(0, 2)).toEqual(['before_hook', 'render_prompt']);
+    expect(mockRenderPlotTaskContentWithIsolatedVariables).toHaveBeenCalledWith('prompt', expect.objectContaining({
+      scriptRequestId: expect.any(String),
+      scriptRequestContext: expect.objectContaining({ requestId: expect.any(String) }),
+    }));
+    expect(mockRunScriptHook).toHaveBeenCalledWith('plot.before_task_request', expect.objectContaining({
+      eventPayload: expect.objectContaining({ phase: 'before_request', presetName: '路线分支推进', taskId: 'task-before' }),
+      sourceContext: expect.objectContaining({ presetName: '路线分支推进', taskId: 'task-before' }),
+      requestContext: expect.objectContaining({ requestId: expect.any(String) }),
+    }));
+  });
+
+  it('plot.after_stage 可通过 controller 跳过后续 stage', async () => {
+    mockRunScriptHook.mockImplementation(async (hook: string, options: any) => {
+      if (hook === 'plot.after_stage' && options.eventPayload.stage === 1) {
+        const runtime = options.createController({ script: { id: 'gate-script', name: '门控脚本' }, binding: {} });
+        runtime.controller.skipStage(2, '跳过第二阶段');
+        runtime.commit();
+      }
+      return [];
+    });
+    const plotSettings = {
+      name: '路线分支推进',
+      tasks: [
+        { id: 'stage-1', name: '阶段1', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-1' }] },
+        { id: 'stage-2', name: '阶段2', stage: 2, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-2' }] },
+        { id: 'stage-3', name: '阶段3', stage: 3, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-3' }] },
+      ],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockCallApiWithPlotPreset.mock.calls.map((call: any[]) => call[0][0].content)).toEqual(['stage-1', 'stage-3']);
+    expect(mockRunScriptHook).toHaveBeenCalledWith('plot.after_stage', expect.objectContaining({
+      eventPayload: expect.objectContaining({ presetName: '路线分支推进', stage: 1, remainingStages: [2, 3] }),
+      sourceContext: expect.objectContaining({ presetName: '路线分支推进', stage: 1 }),
+    }));
+  });
+
+  it('plot.before_task_request 写入的 outputKey 可被同一任务 prompt 读取', async () => {
+    mockRunScriptHook.mockImplementation(async (hook: string, options: any) => {
+      if (hook === 'plot.before_task_request') {
+        setScriptOutput_ACU('request', {
+          key: 'plotHint',
+          value: '动态任务提示',
+          scope: {},
+        }, { requestId: options.requestContext.requestId });
+        expect(getScriptOutput_ACU('plotHint', 'request', { requestId: options.requestContext.requestId })?.value).toBe('动态任务提示');
+      }
+      return [];
+    });
+    mockRenderPlotTaskContentWithIsolatedVariables.mockImplementation(async (text: string, context: any) => {
+      return replaceScriptVariables_ACU(text, {
+        promptType: 'plot',
+        sourceType: 'plot_task',
+        taskId: context.taskId,
+        requestId: context.scriptRequestId,
+      }, context.scriptRequestContext);
+    });
+
+    const plotSettings = {
+      tasks: [{
+        id: 'task-output',
+        name: '输出任务',
+        stage: 1,
+        order: 1,
+        maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '任务提示 {[script_output "plotHint"]}' }],
+      }],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toBe('任务提示 动态任务提示');
+  });
+
   it('某个 stage 失败时会阻断后续 stage', async () => {
     const plotSettings = {
       tasks: [
@@ -543,6 +703,10 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(result.errorMessage).toContain('失败任务');
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
     expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-never')).toBe(false);
+    const afterTaskResponseCalls = mockRunScriptHook.mock.calls.filter((call: any[]) => call[0] === 'plot.after_task_response');
+    expect(afterTaskResponseCalls).toHaveLength(1);
+    expect(afterTaskResponseCalls[0][1].eventPayload).toMatchObject({ taskId: 'task-ok', success: true });
+    expect(afterTaskResponseCalls.some((call: any[]) => call[1].eventPayload.taskId === 'task-fail')).toBe(false);
   });
 
   it('用户中止时抛出 TaskAbortedByUser', async () => {

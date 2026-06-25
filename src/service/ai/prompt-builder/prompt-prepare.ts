@@ -14,6 +14,37 @@ import { isSqliteMode } from '../../table/storage-mode';
 import { ensureStorageProviderReady_ACU } from '../../table/table-storage-strategy';
 import { parseDDLColumnNames } from '../../../shared/ddl-utils';
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
+import { runScriptHook_ACU } from '../../scripts/script-runner';
+import { replaceScriptVariables_ACU } from '../../scripts/script-variable-resolver';
+import type { ScriptRequestContext_ACU } from '../../scripts/script-request-context';
+
+async function renderTableFillWorldbookForPrompt_ACU(content: string, requestContext?: ScriptRequestContext_ACU): Promise<string> {
+    if (!content) return '';
+    if (!requestContext?.requestId) {
+        return replaceScriptVariables_ACU(content, {
+            promptType: 'table_fill',
+            sourceType: 'table_fill_worldbook',
+        });
+    }
+    await runScriptHook_ACU('table_fill_worldbook.before_render', {
+        eventPayload: {
+            hook: 'table_fill_worldbook.before_render',
+            timestamp: Date.now(),
+            requestId: requestContext.requestId,
+        },
+        sourceContext: {
+            requestId: requestContext.requestId,
+            promptType: 'table_fill',
+            sourceType: 'table_fill_worldbook',
+        },
+        requestContext,
+    });
+    return replaceScriptVariables_ACU(content, {
+        promptType: 'table_fill',
+        sourceType: 'table_fill_worldbook',
+        requestId: requestContext.requestId,
+    }, requestContext);
+}
 
   async function resolvePromptSourceTableData_ACU(options: any, sqlMode: boolean) {
     if (!sqlMode) {
@@ -207,9 +238,10 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
 
     const worldbookScanText = messagesText;
     const excludeImportTaggedWorldbookEntries = options?.excludeImportTaggedWorldbookEntries === true;
-    const worldbookContent = await getCombinedWorldbookContent_ACU(worldbookScanText, {
+    const rawWorldbookContent = await getCombinedWorldbookContent_ACU(worldbookScanText, {
         excludeImportTaggedEntries: excludeImportTaggedWorldbookEntries,
     });
+    const worldbookContent = await renderTableFillWorldbookForPrompt_ACU(rawWorldbookContent, options?.scriptRequestContext);
     const manualExtraHintText = manualExtraHint_ACU || '';
 
     // SQLite 模式下追加 SQL 编辑格式兜底说明（Q17 确认：$0 自带格式说明）

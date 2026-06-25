@@ -46,3 +46,9 @@ export {
     disposeGlobalNameMapper,
     NameMapper,
 } from './name-mapper';
+
+// 通用异步变量替换入口
+export {
+    replaceAcuTemplateVariables_ACU,
+    type AcuTemplateVariableOptions_ACU,
+} from './acu-template-vars';

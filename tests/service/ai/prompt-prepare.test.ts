@@ -14,6 +14,9 @@ const mockGetEffectiveSeedRows = vi.fn(() => []);
 const mockEnsureChatSheetGuideSeeded = vi.fn().mockResolvedValue(null);
 const mockAttachSeedRows = vi.fn();
 const mockReplaceDbSqlVariables = vi.fn((content: string) => content);
+const mockGetCombinedWorldbookContent = vi.fn().mockResolvedValue('');
+const mockRunScriptHook = vi.fn(async () => []);
+const mockRequestOutputs = new Map<string, Map<string, string>>();
 let mockCurrentJsonTableData: any = null;
 let mockSettings: any = {};
 
@@ -44,7 +47,19 @@ vi.mock('../../../src/data/gateways/host-state-gateway', () => ({
 }));
 
 vi.mock('../../../src/service/worldbook/pipeline', () => ({
-  getCombinedWorldbookContent_ACU: vi.fn().mockResolvedValue(''),
+  getCombinedWorldbookContent_ACU: (...args: any[]) => mockGetCombinedWorldbookContent(...args),
+}));
+
+vi.mock('../../../src/service/scripts/script-runner', () => ({
+  runScriptHook_ACU: (...args: any[]) => mockRunScriptHook(...args),
+}));
+
+vi.mock('../../../src/service/scripts/script-variable-resolver', () => ({
+  replaceScriptVariables_ACU: vi.fn(async (content: string, _sourceContext: any, requestContext: any) => {
+    return String(content || '').replace(/\{\[script_output "([^"]+)"\]\}/g, (_match, key) => {
+      return mockRequestOutputs.get(requestContext?.requestId)?.get(key) || '';
+    });
+  }),
 }));
 
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
@@ -77,6 +92,11 @@ describe('formatTableForSqliteMode', () => {
     mockGetEffectiveSeedRows.mockReturnValue([]);
     mockEnsureChatSheetGuideSeeded.mockResolvedValue(null);
     mockAttachSeedRows.mockReset();
+    mockGetCombinedWorldbookContent.mockReset();
+    mockGetCombinedWorldbookContent.mockResolvedValue('');
+    mockRunScriptHook.mockReset();
+    mockRunScriptHook.mockResolvedValue([]);
+    mockRequestOutputs.clear();
     mockReplaceDbSqlVariables.mockImplementation((content: string) => content);
     mockRuntimeProvider.mode = 'sqlite';
     mockRuntimeProvider.getCurrentData.mockImplementation(() => mockCurrentJsonTableData);
@@ -324,6 +344,11 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
     mockGetEffectiveSeedRows.mockReturnValue([]);
     mockEnsureChatSheetGuideSeeded.mockResolvedValue(null);
     mockAttachSeedRows.mockReset();
+    mockGetCombinedWorldbookContent.mockReset();
+    mockGetCombinedWorldbookContent.mockResolvedValue('');
+    mockRunScriptHook.mockReset();
+    mockRunScriptHook.mockResolvedValue([]);
+    mockRequestOutputs.clear();
     mockRuntimeProvider.mode = 'sqlite';
     mockRuntimeProvider.getCurrentData.mockImplementation(() => mockCurrentJsonTableData);
     mockIsSqliteMode = false;
@@ -385,5 +410,39 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
     expect(mockAttachSeedRows).not.toHaveBeenCalled();
     expect(explicitTableData.sheet_0.seedRows).toBeUndefined();
     expect(mockCurrentJsonTableData.sheet_0.seedRows).toBeUndefined();
+  });
+
+  it('正式填表 prompt 组装时运行 table_fill_worldbook.before_render 并替换同一 request 输出', async () => {
+    const explicitTableData = {
+      sheet_0: {
+        uid: 'sheet_0',
+        name: '显式表',
+        content: [['row_id', 'name'], ['1', '显式值']],
+        updateConfig: {},
+      },
+    };
+    const requestContext = {
+      requestId: 'table_fill_worldbook_prompt_request',
+      source: { promptType: 'table_fill', sourceType: 'table_fill_request' },
+    };
+    mockGetCombinedWorldbookContent.mockResolvedValue('世界书 {[script_output "wbHint"]}');
+    mockRunScriptHook.mockImplementationOnce(async (_hook: string, options: any) => {
+      const bucket = mockRequestOutputs.get(options.requestContext.requestId) || new Map<string, string>();
+      bucket.set('wbHint', '正式挂载点输出');
+      mockRequestOutputs.set(options.requestContext.requestId, bucket);
+      return [];
+    });
+
+    const result = await prepareAIInput_ACU([], 'standard', null, {
+      tableData: explicitTableData,
+      scriptRequestContext: requestContext,
+    });
+
+    expect(mockRunScriptHook).toHaveBeenCalledWith('table_fill_worldbook.before_render', expect.objectContaining({
+      eventPayload: expect.objectContaining({ requestId: requestContext.requestId }),
+      sourceContext: expect.objectContaining({ requestId: requestContext.requestId, sourceType: 'table_fill_worldbook' }),
+      requestContext,
+    }));
+    expect(result?.worldbookContent).toBe('世界书 正式挂载点输出');
   });
 });

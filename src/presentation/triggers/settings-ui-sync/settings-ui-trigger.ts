@@ -28,7 +28,7 @@ import { executeContentOptimization_ACU } from '../../components/optimization-ui
 import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
 import { purgeOldLayerData_ACU } from './settings-ui-config';
 import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU, handleFloorIncreaseDelay_ACU } from '../../../service/table/update-scheduler';
-import { processGroupedRuntimeChunk_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
+import { processGroupedRuntimeChunk_ACU, runTableFillAfterCommitHook_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 
 function buildAutoUpdateProgressLabel_ACU(event: Partial<CardUpdateProgressEvent>): string {
@@ -223,6 +223,13 @@ let autoUpdateTriggerInFlight_ACU = false;
         showToastr_ACU('warning', firstError
             ? `并发分组更新有 ${result.failedGroups} 组失败：${firstError}`
             : `并发分组更新有 ${result.failedGroups} 组失败，请查看日志。`);
+    } else {
+        await runTableFillAfterCommitHook_ACU({
+            changedSheets: [],
+            modifiedSheets: [],
+            persistedSheets: [],
+            appliedEdits: null,
+        });
     }
     if (result.autoMergeTriggered && result.autoMergeSuccess) {
         showToastr_ACU('success', '自动合并纪要完成！');
@@ -260,4 +267,3 @@ let autoUpdateTriggerInFlight_ACU = false;
       // 已手动选择过：严格按保存的交集，不再自动补全新表，防止回退全选
       return validSaved;
   }
-

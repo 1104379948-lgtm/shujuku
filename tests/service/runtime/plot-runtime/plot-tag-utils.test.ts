@@ -292,16 +292,16 @@ describe('tryRenderPlotTemplateWithEjs_ACU', () => {
 
 // ═══ renderPlotTaskContentWithIsolatedVariables_ACU ═══
 describe('renderPlotTaskContentWithIsolatedVariables_ACU', () => {
-  it('渲染并返回内容', () => {
-    const result = renderPlotTaskContentWithIsolatedVariables_ACU('测试内容', {
+  it('渲染并返回内容', async () => {
+    const result = await renderPlotTaskContentWithIsolatedVariables_ACU('测试内容', {
       allTablesJson: '{}',
       seedContentForConditional: '',
       lastPlotContent: '',
     });
     expect(result).toBe('测试内容');
   });
-  it('空内容返回空', () => {
-    const result = renderPlotTaskContentWithIsolatedVariables_ACU('', {
+  it('空内容返回空', async () => {
+    const result = await renderPlotTaskContentWithIsolatedVariables_ACU('', {
       allTablesJson: '{}',
       seedContentForConditional: '',
       lastPlotContent: '',

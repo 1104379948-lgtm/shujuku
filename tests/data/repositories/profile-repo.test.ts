@@ -55,6 +55,7 @@ import {
   writeProfileTemplateToStorage_ACU,
   saveCurrentProfileTemplate_ACU,
   sanitizeSettingsForProfileSave_ACU,
+  ensureGlobalScriptSettings_ACU,
 } from '../../../src/data/repositories/profile-repo';
 
 beforeEach(() => {
@@ -71,12 +72,36 @@ describe('buildDefaultGlobalMeta_ACU', () => {
     expect(meta.isolationCodeList).toEqual([]);
     expect(meta.migratedLegacySingleStore).toBe(false);
     expect(meta.zeroTkOccupyModeGlobal).toBe(false);
+    expect(meta.userScriptsGlobal).toEqual([]);
+    expect(meta.scriptLogsGlobal).toEqual([]);
   });
 
   it('每次调用返回新对象', () => {
     const a = buildDefaultGlobalMeta_ACU();
     const b = buildDefaultGlobalMeta_ACU();
     expect(a).not.toBe(b);
+  });
+});
+
+describe('global script settings', () => {
+  it('profile 保存会剥离脚本配置和日志', () => {
+    const sanitized = sanitizeSettingsForProfileSave_ACU({
+      theme: 'dark',
+      userScripts: [{ id: 'script_a' }],
+      scriptLogs: [{ id: 'log_a' }],
+    });
+    expect(sanitized.theme).toBe('dark');
+    expect(sanitized.userScripts).toBeUndefined();
+    expect(sanitized.scriptLogs).toBeUndefined();
+  });
+
+  it('脚本配置只从 globalMeta 提供，不读取 profile 旧结构', () => {
+    const meta = loadGlobalMeta_ACU();
+    meta.userScriptsGlobal = [{ id: 'script_global' }];
+    meta.scriptLogsGlobal = [{ id: 'log_global' }];
+
+    expect(ensureGlobalScriptSettings_ACU().userScripts).toEqual([{ id: 'script_global' }]);
+    expect(ensureGlobalScriptSettings_ACU().scriptLogs).toEqual([{ id: 'log_global' }]);
   });
 });
 

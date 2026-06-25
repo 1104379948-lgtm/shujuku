@@ -270,7 +270,7 @@ function buildNativeInsertCells_ACU(state: any, sheetKey: string, clientRowId: s
 async function applyNativeVisualizerPendingDataOps_ACU(
     state: any,
     pending: PendingVisualizerDataOps_ACU,
-): Promise<{ success: boolean; changed: boolean; error?: string }> {
+): Promise<{ success: boolean; changed: boolean; error?: string; changedSheetKeys?: string[] }> {
     const writeSet = buildNativeWriteSet_ACU(pending);
     if (writeSet.length === 0) return { success: true, changed: false };
 
@@ -352,10 +352,10 @@ async function applyNativeVisualizerPendingDataOps_ACU(
     }
 
     resetVisualizerPendingDataOps_ACU(state);
-    return { success: true, changed: true };
+    return { success: true, changed: true, changedSheetKeys: targetSheetKeys };
 }
 
-export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ success: boolean; changed: boolean; error?: string }> {
+export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ success: boolean; changed: boolean; error?: string; changedSheetKeys?: string[] }> {
     const pending = ensurePendingOps_ACU(state);
     if (!hasVisualizerPendingDataOps_ACU(state)) return { success: true, changed: false };
     if (!isSqliteMode()) return applyNativeVisualizerPendingDataOps_ACU(state, pending);
@@ -424,5 +424,5 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
     }
 
     resetVisualizerPendingDataOps_ACU(state);
-    return { success: true, changed: true };
+    return { success: true, changed: true, changedSheetKeys: targetSheetKeys };
 }

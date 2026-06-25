@@ -32,6 +32,7 @@ import { enqueueSummaryVectorIndexFlush_ACU } from '../../service/vector/summary
 import { applyVisualizerPendingDataOps_ACU, hasVisualizerPendingDataOps_ACU } from './visualizer-data-ops';
 import { validateSqliteTemplateDataStrict_ACU } from '../../service/table/sqlite-template-validation';
 import { validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
+import { runManualTableSaveAfterCommitHook_ACU } from '../../service/scripts/script-lifecycle-events';
 
 function cloneData_ACU<T>(value: T): T {
     return JSON.parse(JSON.stringify(value || {}));
@@ -258,6 +259,7 @@ export async function saveVisualizerDataChanges_ACU(): Promise<void> {
     const isolationKey = getCurrentIsolationKey_ACU();
     const latestAiIndex = getLatestAiMessageIndexFromChat_ACU(chat);
     const appendTargetIndex = getLatestTableAppendMessageIndexFromChat_ACU(chat, isolationKey, settings_ACU);
+    await runManualTableSaveAfterCommitHook_ACU(result.changedSheetKeys || []);
     await runPostSaveRefresh_ACU('visualizer_save_data', appendTargetIndex !== -1 ? appendTargetIndex : (latestAiIndex !== -1 ? latestAiIndex : undefined));
     showToastr_ACU('success', '数据增量已通过批量 SQL 保存到当前消息。');
     closeACUWindow(`${SCRIPT_ID_PREFIX_ACU}-visualizer-window`);

@@ -116,6 +116,7 @@ import {
   DEFAULT_PRESET_OPTION_VALUE_ACU,
   ensurePlotPresetBindingsStore_ACU,
   getPlotPresetBindingForChat_ACU,
+  setPlotPresetBindingForChat_ACU,
   clearPlotPresetBindingForChat_ACU,
   findPlotPresetByName_ACU,
   resolveActivePlotPresetName_ACU,
@@ -862,10 +863,11 @@ describe('persistPlotPresetSelectionState_ACU', () => {
     const result = persistPlotPresetSelectionState_ACU('  预设B  ');
     expect(result).toBe('预设B');
   });
-  it('persistChatScope 时创建 chatScope', () => {
+  it('persistChatScope 时创建当前聊天预设绑定', () => {
     vi.mocked(buildChatPlotScopeStateFromSettings_ACU).mockReturnValueOnce({ presetName: 'A' } as any);
     persistPlotPresetSelectionState_ACU('预设A', { updateGlobal: false, persistChatScope: true });
-    expect(setCurrentChatPlotScopeState_ACU).toHaveBeenCalled();
+    expect(mockSettings.plotPresetBindings['test-chat']).toEqual(expect.objectContaining({ presetName: '预设A', isExplicit: true }));
+    expect(setCurrentChatPlotScopeState_ACU).not.toHaveBeenCalled();
   });
 });
 

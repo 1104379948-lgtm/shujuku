@@ -7,6 +7,7 @@ import { DEFAULT_PLOT_SETTINGS_ACU } from '../../../shared/defaults-json.js';
 import { abortController_ACU, loopState_ACU, planningGuard_ACU, settings_ACU, _set_abortController_ACU } from '../state-manager';
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import { runPlotTasksRuntime_ACU } from './plot-task-engine';
+import { setScriptCurrentUserInput_ACU } from '../../scripts/script-tavern-facade';
 
   /**
    * 核心优化逻辑（纯 service 层：读数据→业务决策→写数据→构造返回值）。
@@ -14,6 +15,7 @@ import { runPlotTasksRuntime_ACU } from './plot-task-engine';
   export async function runOptimizationLogic_ACU(userMessage: any, options: any = {}) {
     const { originalUserInput, hasExistingUserMessage = false } = options;
     const inputForHash = originalUserInput || userMessage;
+    setScriptCurrentUserInput_ACU('original', String(inputForHash || ''));
 
     if (loopState_ACU.isRetrying) {
         logDebug_ACU('[剧情推进] 当前处于重试流程，跳过剧情规划逻辑。');
@@ -88,6 +90,8 @@ import { runPlotTasksRuntime_ACU } from './plot-task-engine';
       if (aggregatedTagNames.length > 0) {
         logDebug_ACU(`[剧情推进] 成功聚合标签: ${aggregatedTagNames.join(', ')}`);
       }
+      setScriptCurrentUserInput_ACU('plot_effective', String(runtimeResult.finalMessage || ''));
+      setScriptCurrentUserInput_ACU('effective', String(runtimeResult.finalMessage || ''));
 
       return {
         success: true,

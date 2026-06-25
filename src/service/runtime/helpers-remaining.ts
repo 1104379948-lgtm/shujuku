@@ -12,8 +12,10 @@
  */
 import { currentJsonTableData_ACU, settings_ACU } from './state-manager';
 import { logDebug_ACU } from '../../shared/utils';
-import { parseRandomTags_ACU, replaceRandomVariables_ACU, parseCalcTags_ACU, parseMaxTags_ACU, parseMinTags_ACU, replaceCalcVariables_ACU, replaceMaxVariables_ACU, replaceMinVariables_ACU, parseIfBlockRecursive_ACU, getLatestAIMessageContent_ACU, replaceDbSqlVariables } from './template-vars';
+import { getLatestAIMessageContent_ACU } from './template-vars';
+import { replaceAcuTemplateVariables_ACU } from './template-vars/acu-template-vars';
 import { getPlotFromHistory_ACU } from './plot-runtime';
+import { getScriptCurrentMainReplyRequestId_ACU } from '../scripts/script-tavern-facade';
 
 // ═══ 上下文标签提取/过滤 ═══
 export {
@@ -90,12 +92,12 @@ export {
   export async function handleChatCompletionReady_ACU(data: any) {
     logDebug_ACU('[提示词模板] handleChatCompletionReady_ACU 被调用');
     logDebug_ACU('[提示词模板] settings_ACU?.promptTemplateSettings:', settings_ACU?.promptTemplateSettings);
-    if (!settings_ACU?.promptTemplateSettings?.enabled) {
-      logDebug_ACU('[提示词模板] 功能未启用，跳过处理');
-      return;
-    }
     if (!data || !data.messages || !Array.isArray(data.messages)) {
       return;
+    }
+    const templateEnabled = settings_ACU?.promptTemplateSettings?.enabled !== false;
+    if (!templateEnabled) {
+      logDebug_ACU('[提示词模板] 功能未启用，仅处理脚本变量');
     }
     const startTime = Date.now();
     logDebug_ACU('[提示词模板] 开始处理酒馆提示词...');
@@ -106,36 +108,37 @@ export {
       allTablesJson: getTableDataForPrompt_ACU(),
       plotContent: lastPlotContent
     };
-    const processPromptTemplateContent_ACU = (content: any) => {
+    const processPromptTemplateContent_ACU = async (content: any) => {
       if (typeof content !== 'string' || !content) {
         return typeof content === 'string' ? content : '';
       }
-      let processedContent = content;
-      processedContent = parseRandomTags_ACU(processedContent);
-      processedContent = replaceRandomVariables_ACU(processedContent);
-      const contextForCalc = { allTablesJson: context.allTablesJson };
-      processedContent = parseCalcTags_ACU(processedContent, contextForCalc);
-      processedContent = parseMaxTags_ACU(processedContent, contextForCalc);
-      processedContent = parseMinTags_ACU(processedContent, contextForCalc);
-      processedContent = replaceCalcVariables_ACU(processedContent);
-      processedContent = replaceMaxVariables_ACU(processedContent);
-      processedContent = replaceMinVariables_ACU(processedContent);
-      // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
-      processedContent = replaceDbSqlVariables(processedContent);
-      processedContent = parseIfBlockRecursive_ACU(processedContent, context, 0);
-      return processedContent;
+      const requestId = getScriptCurrentMainReplyRequestId_ACU();
+      const requestContext = requestId
+        ? { requestId, source: { promptType: 'main_reply', sourceType: 'tavern_prompt_template' } }
+        : undefined;
+      return replaceAcuTemplateVariables_ACU(content, {
+        enableCalc: templateEnabled,
+        enableDbSql: templateEnabled,
+        enableIf: templateEnabled,
+        enableRandom: templateEnabled,
+        contextForCalc: { allTablesJson: context.allTablesJson },
+        contextForIf: context,
+        ifMode: 'recursive',
+        sourceContext: { requestId: requestId || undefined, promptType: 'main_reply', sourceType: 'tavern_prompt_template' },
+        requestContext,
+      });
     };
     let processedCount = 0;
     for (const message of data.messages) {
       if (typeof message.content === 'string') {
         const originalContent = message.content;
-        message.content = processPromptTemplateContent_ACU(message.content);
+        message.content = await processPromptTemplateContent_ACU(message.content);
         if (message.content !== originalContent) processedCount++;
       } else if (Array.isArray(message.content)) {
         for (const part of message.content) {
           if (part.type === 'text' && part.text) {
             const originalText = part.text;
-            part.text = processPromptTemplateContent_ACU(part.text);
+            part.text = await processPromptTemplateContent_ACU(part.text);
             if (part.text !== originalText) processedCount++;
           }
         }

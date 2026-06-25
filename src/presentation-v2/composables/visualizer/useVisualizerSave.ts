@@ -28,6 +28,7 @@ import {
 } from '../../../service/runtime/helpers-remaining';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
 import { runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
+import { runManualTableSaveAfterCommitHook_ACU } from '../../../service/scripts/script-lifecycle-events';
 import {
   getLatestAiMessageIndexFromChat_ACU,
   resolveTableHistoryStateFromChat_ACU,
@@ -267,6 +268,7 @@ async function saveCurrentDataToChat(
     bucketByIndex[latestAiIndex] = [...allSheetKeys];
   }
   if (Object.keys(bucketByIndex).length === 0) return 'memory-only';
+  const committedSheetKeys = new Set<string>();
 
   for (const [indexStr, keys] of Object.entries(bucketByIndex)) {
     const idx = Number.parseInt(indexStr, 10);
@@ -295,6 +297,8 @@ async function saveCurrentDataToChat(
     }));
     if (!commitResult.success) {
       logWarn_ACU('[ACU-V2 Visualizer] save commit failed:', commitResult.error);
+    } else {
+      keys.forEach(key => committedSheetKeys.add(key));
     }
   }
 
@@ -309,6 +313,9 @@ async function saveCurrentDataToChat(
     }
   }
 
+  if (committedSheetKeys.size > 0) {
+    await runManualTableSaveAfterCommitHook_ACU([...committedSheetKeys]);
+  }
   await refreshMergedDataAndNotify_ACU();
 
   const shouldSyncSummaryVectorIndex = allSheetKeys.some(sheetKey => {

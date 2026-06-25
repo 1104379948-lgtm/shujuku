@@ -34,6 +34,7 @@ const {
   mockNormalizePlacementConfig,
   mockUpdateCustomTableExports, mockUpdateImportantPersonsRelatedEntries,
   mockUpdateOutlineTableEntry, mockUpdateSummaryTableEntries,
+  mockRunScriptHook,
 } = vi.hoisted(() => {
   const mockSettings: any = {
     dataIsolationEnabled: false,
@@ -121,6 +122,7 @@ const {
     mockUpdateImportantPersonsRelatedEntries: vi.fn(async () => {}),
     mockUpdateOutlineTableEntry: vi.fn(async () => {}),
     mockUpdateSummaryTableEntries: vi.fn(async () => {}),
+    mockRunScriptHook: vi.fn(async () => []),
   };
 });
 
@@ -171,6 +173,7 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
 }));
 
 vi.mock('../../../src/shared/constants', () => ({
+  SCRIPT_ID_PREFIX_ACU: 'TavernDB-ACU',
   getImportBatchPrefix_ACU: mockGetImportBatchPrefix,
   getImportStablePrefix_ACU: mockGetImportStablePrefix,
 }));
@@ -210,6 +213,11 @@ vi.mock('../../../src/service/worldbook/injection-engine', () => ({
   updateSummaryTableEntries_ACU: mockUpdateSummaryTableEntries,
 }));
 
+vi.mock('../../../src/service/scripts/script-runner', () => ({
+  runScriptHook_ACU: mockRunScriptHook,
+  stringifyScriptValue_ACU: (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value),
+}));
+
 import {
   isImportTaggedLorebookEntry_ACU,
   getWorldbookCommentInfo_ACU,
@@ -226,6 +234,7 @@ import {
   getCombinedWorldbookContent_ACU,
   updateReadableLorebookEntry_ACU,
 } from '../../../src/service/worldbook/pipeline';
+import { clearScriptRequestOutputs_ACU } from '../../../src/service/scripts/script-output-context';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -245,6 +254,8 @@ beforeEach(() => {
   mockGetCharLorebooks.mockResolvedValue({ primary: null, additional: [] });
   mockGetImportStablePrefix.mockReturnValue('外部导入-');
   mockGetImportBatchPrefix.mockReturnValue('外部导入-');
+  mockRunScriptHook.mockResolvedValue([]);
+  clearScriptRequestOutputs_ACU();
 });
 
 // ═══════════════════════════════════════════════════
@@ -841,6 +852,40 @@ describe('getCombinedWorldbookContent_ACU', () => {
     ]);
     const result = await getCombinedWorldbookContent_ACU();
     expect(result).not.toContain('内部');
+  });
+
+  it('通用世界书收集不运行 table_fill_worldbook.before_render hook', async () => {
+    mockGetCurrentWorldbookConfig.mockReturnValue({
+      source: 'manual',
+      manualSelection: ['书A'],
+      enabledEntries: {},
+    });
+    mockGwGetLorebookEntries.mockResolvedValue([
+      { uid: 1, comment: '用户条目', content: '用户内容', enabled: true, type: 'constant', key: [], keys: [] },
+    ]);
+
+    await getCombinedWorldbookContent_ACU('扫描文本', {
+      requestContext: { requestId: 'table_worldbook_request', source: { promptType: 'table_fill', sourceType: 'table_fill_worldbook' } },
+    });
+
+    expect(mockRunScriptHook).not.toHaveBeenCalledWith('table_fill_worldbook.before_render', expect.anything());
+  });
+
+  it('通用世界书收集不替换 table_fill_worldbook 脚本变量', async () => {
+    mockGetCurrentWorldbookConfig.mockReturnValue({
+      source: 'manual',
+      manualSelection: ['书A'],
+      enabledEntries: {},
+    });
+    mockGwGetLorebookEntries.mockResolvedValue([
+      { uid: 1, comment: '用户条目', content: '前缀 {[script_output "wbHint"]} 后缀', enabled: true, type: 'constant', key: [], keys: [] },
+    ]);
+
+    const result = await getCombinedWorldbookContent_ACU('扫描文本', {
+      requestContext: { requestId: 'table_worldbook_output_request', source: { promptType: 'table_fill', sourceType: 'table_fill_worldbook' } },
+    });
+
+    expect(result).toContain('前缀 {[script_output "wbHint"]} 后缀');
   });
 
   it('异常时返回空字符串', async () => {

@@ -938,7 +938,7 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
 
         const enabledEntriesMap = worldbookConfig?.enabledEntries;
         const hasAnySelection = enabledEntriesMap && typeof enabledEntriesMap === 'object' && Object.keys(enabledEntriesMap).length > 0;
-        return await buildCombinedWorldbookContentByStrategy_ACU({
+        const combinedContent = await buildCombinedWorldbookContentByStrategy_ACU({
             logPrefix: '[Worldbook]',
             bookNames,
             baseScanText: (typeof initialScanTextOverride === 'string' && initialScanTextOverride.trim()) ? initialScanTextOverride : '',
@@ -965,6 +965,7 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
                 }
             },
         });
+        return combinedContent;
 
     } catch (error) {
         logError_ACU(`[ACU] An error occurred while processing worldbook logic:`, error);

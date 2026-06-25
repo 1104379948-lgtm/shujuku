@@ -9,8 +9,8 @@ import { currentJsonTableData_ACU, settings_ACU } from '../../runtime/state-mana
 import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data/gateways/host-state-gateway';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, triggerSlash_ACU, getConnectionManagerProfiles_ACU, getHostRequestHeaders_ACU } from '../../../data/gateways/ai-gateway';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU } from '../../../shared/utils';
-import { applyExcludeRulesToText_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, parseIfBlocksInContent_ACU, parseRandomTags_ACU, replaceRandomVariables_ACU } from '../../runtime/helpers-remaining';
-import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
+import { applyExcludeRulesToText_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU } from '../../runtime/helpers-remaining';
+import { replaceAcuTemplateVariables_ACU } from '../../runtime/template-vars/acu-template-vars';
 import { DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU } from '../../../shared/defaults-json.js';
 import { isSqliteMode } from '../../table/storage-mode';
 import { cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
@@ -125,20 +125,19 @@ import { cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
           }
         }
 
-        finalContent = parseRandomTags_ACU(finalContent);
-        finalContent = replaceRandomVariables_ACU(finalContent);
-
-        // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
-        finalContent = replaceDbSqlVariables(finalContent);
-
-        if (settings_ACU.promptTemplateSettings?.enabled !== false) {
-          const templateContext = {
-            seedContent: getLatestAIMessageContent_ACU(),
-            allTablesJson: currentJsonTableData_ACU,
-            plotContent: lastPlotContent || ''
-          };
-          finalContent = parseIfBlocksInContent_ACU(finalContent, templateContext, 0);
-        }
+        const templateContext = {
+          seedContent: getLatestAIMessageContent_ACU(),
+          allTablesJson: currentJsonTableData_ACU,
+          plotContent: lastPlotContent || ''
+        };
+        finalContent = await replaceAcuTemplateVariables_ACU(finalContent, {
+          contextForCalc: { allTablesJson: currentJsonTableData_ACU },
+          contextForIf: templateContext,
+          ifMode: 'content',
+          enableIf: settings_ACU.promptTemplateSettings?.enabled !== false,
+          sourceContext: { promptType: 'table_fill', sourceType: 'table_fill_prompt', requestId: options?.scriptRequestId },
+          requestContext: options?.scriptRequestContext,
+        });
         
         messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
     }

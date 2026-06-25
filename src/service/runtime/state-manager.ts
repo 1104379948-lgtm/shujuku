@@ -157,6 +157,8 @@ export let settings_ACU: any = {
     tableApiPreset: '',
     plotApiPreset: '',
     strictJsonTableFillEnabled: false,
+    userScripts: [],
+    scriptLogs: [],
     // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
     // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。
     plotTaskApiPresetOverridesById: {} as Record<string, string>,

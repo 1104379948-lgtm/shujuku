@@ -27,6 +27,10 @@ import { processSummaryVectorIndexBeforeGenerationWithUI_ACU } from '../componen
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
 import { topLevelWindow_ACU } from '../../shared/env';
+import { clearScriptChatOutputs_ACU } from '../../service/scripts/script-output-context';
+import { runChatLoadedScriptHook_ACU, runDbLoadedScriptHook_ACU, runScriptHook_ACU } from '../../service/scripts';
+import { beginScriptRequestCycle_ACU, endScriptRequestCycle_ACU, type ScriptRequestContext_ACU } from '../../service/scripts/script-request-context';
+import { clearScriptTavernRuntimeState_ACU, setScriptCurrentMainReplyAiResponse_ACU, setScriptCurrentMainReplyRequestId_ACU, setScriptCurrentUserInput_ACU, setScriptPromptDraft_ACU } from '../../service/scripts/script-tavern-facade';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
@@ -77,6 +81,239 @@ function clearRuntimeForNoActiveChat_ACU(chatFileName: unknown): void {
   logDebug_ACU(`ACU: No active chat after CHAT_CHANGED (${String(chatFileName)}), runtime table state cleared.`);
 }
 
+function createMainReplyRequestId_ACU(source: string): string {
+  const normalizedSource = String(source || 'generation').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `main_reply_${normalizedSource}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const completedMainReplyAfterResponse_ACU = new Set<string>();
+let pendingMainReplyRequestId_ACU: string | null = null;
+type MainReplyCycle_ACU = {
+  requestId: string;
+  source: string;
+  beforeGenerationRan: boolean;
+};
+const activeMainReplyCycles_ACU = new Map<string, MainReplyCycle_ACU>();
+const completedChatLoadedHookChats_ACU = new Set<string>();
+const completedDbLoadedHookChats_ACU = new Set<string>();
+
+type LoadedHookRuntime_ACU = {
+  reason: string;
+  chatId: string;
+  dbRuntimeReady: boolean;
+};
+
+async function runMainReplyHook_ACU(hook: 'main_reply.before_generation' | 'main_reply.after_response', payload: {
+  requestId: string;
+  phase?: string;
+  source: string;
+  aiResponse?: string | null;
+  responseSource?: string;
+  messageId?: string | number | null;
+}) {
+  setScriptCurrentMainReplyRequestId_ACU(payload.requestId);
+  const requestContext: ScriptRequestContext_ACU = {
+    requestId: payload.requestId,
+    source: { promptType: 'main_reply', sourceType: payload.source },
+  };
+  if (hook === 'main_reply.after_response') {
+    if (completedMainReplyAfterResponse_ACU.has(payload.requestId)) {
+      logDebug_ACU(`[脚本] 跳过重复 main_reply.after_response: ${payload.requestId}`);
+      return [];
+    }
+    completedMainReplyAfterResponse_ACU.add(payload.requestId);
+  }
+  try {
+    return await runScriptHook_ACU(hook, {
+      eventPayload: {
+        hook,
+        timestamp: Date.now(),
+        requestId: payload.requestId,
+        phase: payload.phase || (hook === 'main_reply.before_generation' ? 'before_generation' : 'after_response'),
+        source: payload.source,
+        ...(hook === 'main_reply.after_response' ? { aiResponse: payload.aiResponse ?? null } : {}),
+        ...(hook === 'main_reply.after_response' && payload.responseSource ? { responseSource: payload.responseSource } : {}),
+        ...(hook === 'main_reply.after_response' && payload.messageId !== undefined && payload.messageId !== null ? { messageId: String(payload.messageId) } : {}),
+      },
+      sourceContext: {
+        requestId: payload.requestId,
+        promptType: 'main_reply',
+        sourceType: payload.source,
+        ...(hook === 'main_reply.after_response' ? { aiResponse: payload.aiResponse ?? null } : {}),
+        ...(hook === 'main_reply.after_response' && payload.responseSource ? { responseSource: payload.responseSource } : {}),
+        ...(hook === 'main_reply.after_response' && payload.messageId !== undefined && payload.messageId !== null ? { messageId: String(payload.messageId) } : {}),
+      },
+      requestContext,
+    });
+  } finally {
+    if (hook === 'main_reply.after_response') endScriptRequestCycle_ACU(payload.requestId);
+  }
+}
+
+function beginMainReplyCycle_ACU(source: string, params?: any): MainReplyCycle_ACU {
+  const requestId = createMainReplyRequestId_ACU(source);
+  const cycle: MainReplyCycle_ACU = { requestId, source, beforeGenerationRan: false };
+  activeMainReplyCycles_ACU.set(requestId, cycle);
+  pendingMainReplyRequestId_ACU = requestId;
+  try { if (params) params._acu_main_reply_request_id = requestId; } catch (e) {}
+  setScriptCurrentMainReplyRequestId_ACU(requestId);
+  setScriptCurrentMainReplyAiResponse_ACU(null);
+  beginScriptRequestCycle_ACU(requestId, { source: { promptType: 'main_reply', sourceType: source } });
+  return cycle;
+}
+
+async function runMainReplyBeforeGeneration_ACU(cycle: MainReplyCycle_ACU, source = cycle.source): Promise<void> {
+  if (cycle.beforeGenerationRan) return;
+  cycle.beforeGenerationRan = true;
+  cycle.source = source;
+  await runMainReplyHook_ACU('main_reply.before_generation', {
+    requestId: cycle.requestId,
+    phase: 'before_generation',
+    source,
+  });
+}
+
+async function finishMainReplyCycleWithResponse_ACU(cycle: MainReplyCycle_ACU, payload: {
+  source: string;
+  aiResponse: string | null;
+  responseSource: string;
+  messageId?: string | number | null;
+}): Promise<void> {
+  try {
+    await runMainReplyHook_ACU('main_reply.after_response', {
+      requestId: cycle.requestId,
+      phase: 'after_response',
+      source: payload.source,
+      aiResponse: payload.aiResponse,
+      responseSource: payload.responseSource,
+      messageId: payload.messageId,
+    });
+  } finally {
+    activeMainReplyCycles_ACU.delete(cycle.requestId);
+    if (pendingMainReplyRequestId_ACU === cycle.requestId) pendingMainReplyRequestId_ACU = null;
+  }
+}
+
+function abandonMainReplyCycle_ACU(cycle: MainReplyCycle_ACU): void {
+  activeMainReplyCycles_ACU.delete(cycle.requestId);
+  if (pendingMainReplyRequestId_ACU === cycle.requestId) pendingMainReplyRequestId_ACU = null;
+  endScriptRequestCycle_ACU(cycle.requestId);
+}
+
+function resolveActiveMainReplyCycle_ACU(requestId?: string): MainReplyCycle_ACU | null {
+  const normalized = String(requestId || '').trim();
+  if (normalized && activeMainReplyCycles_ACU.has(normalized)) return activeMainReplyCycles_ACU.get(normalized)!;
+  if (pendingMainReplyRequestId_ACU && activeMainReplyCycles_ACU.has(pendingMainReplyRequestId_ACU)) return activeMainReplyCycles_ACU.get(pendingMainReplyRequestId_ACU)!;
+  return null;
+}
+
+function getMainReplyMessageTextById_ACU(messageId: any): { text: string | null; source: string; messageId: string | null } {
+  try {
+    const chat = SillyTavern_API_ACU.chat;
+    if (!Array.isArray(chat) || chat.length === 0) return { text: null, source: 'chat_unavailable', messageId: messageId == null ? null : String(messageId) };
+    const idText = messageId == null ? '' : String(messageId);
+    const numericIndex = Number(messageId);
+    const normalizedIndex = Number.isInteger(numericIndex)
+      ? (numericIndex === chat.length ? chat.length - 1 : numericIndex)
+      : -1;
+    const byIndex = normalizedIndex >= 0 && normalizedIndex < chat.length ? chat[normalizedIndex] : null;
+    const byMessageId = idText
+      ? chat.find((message: any) => String(message?.message_id ?? message?.id ?? '') === idText)
+      : null;
+    const latestAssistant = [...chat].reverse().find((message: any) => message && !message.is_user && !message.is_system);
+    const message = byIndex || byMessageId || latestAssistant || null;
+    const text = typeof message?.mes === 'string' && message.mes.trim() ? message.mes : null;
+    const resolvedMessageId = String(((message as any)?.message_id ?? (message as any)?.id ?? idText) || '');
+    const source = byIndex
+      ? (Number.isInteger(numericIndex) && numericIndex === chat.length ? 'chat_length_normalized' : 'chat_message')
+      : (byMessageId ? 'chat_message_id' : (latestAssistant ? 'latest_assistant_fallback' : 'message_not_found'));
+    return {
+      text,
+      source,
+      messageId: message ? resolvedMessageId || null : (idText || null),
+    };
+  } catch (_) {
+    return { text: null, source: 'chat_read_error', messageId: messageId == null ? null : String(messageId) };
+  }
+}
+
+function getCurrentMainReplyPromptText_ACU(params: any): string {
+  try {
+    if (typeof params?.prompt === 'string' && params.prompt) return params.prompt;
+  } catch (_) {}
+  try {
+    const chat = SillyTavern_API_ACU.chat;
+    const lastIndex = Array.isArray(chat) ? chat.length - 1 : -1;
+    const lastMessage = lastIndex >= 0 ? chat[lastIndex] : null;
+    if (lastMessage?.is_user) return String(lastMessage.mes || '');
+  } catch (_) {}
+  return String(getSendTextareaValue_ACU() || '');
+}
+
+function syncMainReplyEffectiveInput_ACU(params: any, source: string): void {
+  const effectiveInput = getCurrentMainReplyPromptText_ACU(params);
+  setScriptCurrentUserInput_ACU(source === 'plot_rewritten' ? 'plot_effective' : 'effective', effectiveInput);
+  setScriptCurrentUserInput_ACU('effective', effectiveInput);
+  setScriptPromptDraft_ACU('main_reply', effectiveInput, undefined);
+}
+
+function resolveLoadedHookChatId_ACU(chatId?: string): string {
+  return cleanChatName_ACU(chatId || currentChatFileIdentifier_ACU || (SillyTavern_API_ACU as any)?.chat_metadata?.file_name || '');
+}
+
+export async function prepareInitialLoadedHookRuntime_ACU(reason: string): Promise<LoadedHookRuntime_ACU | null> {
+  if (!hasActiveChatMessages_ACU()) return null;
+  const chatId = resolveLoadedHookChatId_ACU();
+  if (!chatId) return null;
+
+  let dbRuntimeReady = true;
+
+  await loadAllChatMessages_ACU();
+  applyTemplateScopeForCurrentChat_ACU();
+
+  if (isSqliteMode()) {
+    try {
+      await reloadStorageProvider();
+    } catch (error: any) {
+      dbRuntimeReady = false;
+      logError_ACU(`[SQLite] ${reason}: 数据库重建失败: ${error?.message}`);
+    }
+  }
+
+  await refreshMergedDataAndNotifyWithUI_ACU();
+
+  return { reason, chatId, dbRuntimeReady };
+}
+
+export async function dispatchLoadedScriptHooks_ACU(runtime: LoadedHookRuntime_ACU): Promise<void> {
+  const { reason, chatId, dbRuntimeReady } = runtime;
+  if (!chatId) return;
+  const shouldRunChatLoaded = !completedChatLoadedHookChats_ACU.has(chatId);
+  let chatLoadedCompletedThisRun = false;
+  try {
+    if (shouldRunChatLoaded) {
+      await runChatLoadedScriptHook_ACU();
+      completedChatLoadedHookChats_ACU.add(chatId);
+      chatLoadedCompletedThisRun = true;
+    } else {
+      logDebug_ACU(`[脚本] 跳过重复 chat.loaded: chat=${chatId}, reason=${reason}`);
+    }
+    if (dbRuntimeReady) {
+      if (!completedDbLoadedHookChats_ACU.has(chatId)) {
+        await runDbLoadedScriptHook_ACU();
+        completedDbLoadedHookChats_ACU.add(chatId);
+      } else {
+        logDebug_ACU(`[脚本] 跳过重复 db.loaded: chat=${chatId}, reason=${reason}`);
+      }
+    } else {
+      logWarn_ACU(`[脚本] ${reason} 跳过 db.loaded：当前数据库未成功重建，尚不可查询。`);
+    }
+  } catch (error) {
+    if (shouldRunChatLoaded && !chatLoadedCompletedThisRun) completedChatLoadedHookChats_ACU.delete(chatId);
+    logWarn_ACU(`[脚本] ${reason} chat.loaded/db.loaded 执行失败:`, error);
+  }
+}
+
 function installSendIntentCaptureHooks_ACU() {
   try {
     const parentDoc = (window.parent || window).document;
@@ -119,6 +356,71 @@ function installSendIntentCaptureHooks_ACU() {
   }
 }
 
+async function handleChatReady_ACU(chatFileName: string, reason: 'initial_load' | 'chat_changed'): Promise<void> {
+  const scheduledChatIdentifier_ACU = cleanChatName_ACU(chatFileName);
+  if (!scheduledChatIdentifier_ACU) return;
+
+  if (currentChatFileIdentifier_ACU !== scheduledChatIdentifier_ACU) {
+    logDebug_ACU(`ACU: Skip ${reason} chat ready because active chat is "${currentChatFileIdentifier_ACU || '未知'}", expected "${scheduledChatIdentifier_ACU}".`);
+    return;
+  }
+
+  if (!hasActiveChatMessages_ACU()) {
+    clearRuntimeForNoActiveChat_ACU(chatFileName);
+    return;
+  }
+
+  await loadAllChatMessages_ACU();
+  applyTemplateScopeForCurrentChat_ACU();
+
+  let dbRuntimeReady = true;
+  if (isSqliteMode()) {
+    logDebug_ACU(`[SQLite] ${reason}: 重建内存数据库...`);
+    try {
+      await reloadStorageProvider();
+      logDebug_ACU(`[SQLite] ${reason}: 内存数据库重建完成`);
+    } catch (e: any) {
+      dbRuntimeReady = false;
+      logError_ACU(`[SQLite] ${reason}: 数据库重建失败: ${e?.message}`);
+    }
+  }
+
+  await refreshMergedDataAndNotifyWithUI_ACU();
+
+  await dispatchLoadedScriptHooks_ACU({
+    reason,
+    chatId: scheduledChatIdentifier_ACU,
+    dbRuntimeReady,
+  });
+
+  try {
+    const vectorCacheResult = await preloadSummaryVectorIndexCacheForCurrentChat_ACU();
+    logDebug_ACU(`[交火向量索引] ${reason} 缓存预热结果：success=${vectorCacheResult?.success === true}, skipped=${vectorCacheResult?.skipped === true}, reason=${vectorCacheResult?.reason || 'none'}, chunks=${vectorCacheResult?.chunkCount ?? 0}, indexId=${vectorCacheResult?.indexId || 'none'}`);
+    const restoredFlushCount = await restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU();
+    if (restoredFlushCount > 0) {
+      logDebug_ACU(`[交火向量索引] ${reason} 已恢复防抖归档队列：count=${restoredFlushCount}`);
+    }
+  } catch (restoreFlushError) {
+    logWarn_ACU(`[交火向量索引] ${reason} 后续缓存任务失败:`, restoreFlushError);
+  }
+
+  if (typeof updateCardUpdateStatusDisplay_ACU === 'function') updateCardUpdateStatusDisplay_ACU();
+  logDebug_ACU(`ACU: Chat runtime ready for ${scheduledChatIdentifier_ACU} (${reason}).`);
+}
+
+async function initializeCurrentChatFromHost_ACU(): Promise<void> {
+  const chatId = cleanChatName_ACU(String((SillyTavern_API_ACU as any)?.chatId || (SillyTavern_API_ACU as any)?.chat_metadata?.file_name || currentChatFileIdentifier_ACU || ''));
+  if (!isValidChatFileName_ACU(chatId)) {
+    if (!hasActiveChatMessages_ACU()) clearRuntimeForNoActiveChat_ACU(chatId);
+    else logWarn_ACU('ACU: Initial active chat id is not available. Waiting for CHAT_CHANGED event.');
+    return;
+  }
+  logDebug_ACU(`ACU: Initializing current chat from host: ${chatId}`);
+  await resetScriptStateForNewChat_ACU(chatId);
+  await loadPresetAndCleanCharacterData_ACU();
+  await handleChatReady_ACU(chatId, 'initial_load');
+}
+
 export   function mainInitialize_ACU() {
 
     console.log('ACU_INIT_DEBUG: mainInitialize_ACU called.');
@@ -158,6 +460,10 @@ export   function mainInitialize_ACU() {
         
         SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName: string) => {
           logDebug_ACU(`ACU CHAT_CHANGED event: ${chatFileName}`);
+          clearScriptChatOutputs_ACU();
+          clearScriptTavernRuntimeState_ACU();
+          completedChatLoadedHookChats_ACU.clear();
+          completedDbLoadedHookChats_ACU.clear();
 
           const hasValidChatFileName_ACU = isValidChatFileName_ACU(chatFileName);
           if (!hasValidChatFileName_ACU && !hasActiveChatMessages_ACU()) {
@@ -229,6 +535,9 @@ export   function mainInitialize_ACU() {
                       } else {
                         options.user_input = result.writeBack.value;
                       }
+                      setScriptCurrentUserInput_ACU('plot_effective', String(result.writeBack.value || ''));
+                      setScriptCurrentUserInput_ACU('effective', String(result.writeBack.value || ''));
+                      setScriptPromptDraft_ACU('main_reply', String(result.writeBack.value || ''), undefined);
                     }
                     options._qrf_processed_by_hook = true;
                     break;
@@ -236,67 +545,30 @@ export   function mainInitialize_ACU() {
                   // 'passthrough', 'skipped', 'aborted' — 不做额外操作，直接透传
                 }
 
-                return await (window as any).original_TavernHelper_generate_ACU.apply(this, args);
+                const mainReplyCycle = beginMainReplyCycle_ACU('tavernhelper_generate', options);
+                const originalInput = String(options.user_input || options.prompt || getSendTextareaValue_ACU() || '');
+                setScriptCurrentUserInput_ACU('original', originalInput);
+                syncMainReplyEffectiveInput_ACU(options, result.action === 'planned' ? 'plot_rewritten' : 'tavernhelper_generate');
+                let cycleFinished = false;
+                try {
+                  await runMainReplyBeforeGeneration_ACU(mainReplyCycle, result.action === 'planned' ? 'plot_rewritten' : 'tavernhelper_generate');
+                  const response = await (window as any).original_TavernHelper_generate_ACU.apply(this, args);
+                  setScriptCurrentMainReplyAiResponse_ACU(typeof response === 'string' ? response : null);
+                  cycleFinished = true;
+                  await finishMainReplyCycleWithResponse_ACU(mainReplyCycle, {
+                    source: 'tavernhelper_generate',
+                    aiResponse: typeof response === 'string' ? response : null,
+                    responseSource: typeof response === 'string' ? 'tavernhelper_return' : 'message_not_found',
+                  });
+                  return response;
+                } finally {
+                  if (!cycleFinished) abandonMainReplyCycle_ACU(mainReplyCycle);
+                }
               };
               logDebug_ACU('[剧情推进] TavernHelper.generate hook registered.');
             }
           }
-          
-          // [新增] 切换角色卡（聊天）时，强制从新聊天记录的本地数据读取最新的表格并刷新UI
-          logDebug_ACU('ACU: Chat changed, forcing reload of table data from new chat history.');
-          const scheduledChatIdentifier_ACU = cleanChatName_ACU(chatFileName);
-
-          // 稍作延迟以确保SillyTavern已完全加载新聊天的消息列表
-          setTimeout(async () => {
-             if (scheduledChatIdentifier_ACU && currentChatFileIdentifier_ACU !== scheduledChatIdentifier_ACU) {
-                 logDebug_ACU(`ACU: Skip delayed chat refresh because active chat already changed to "${currentChatFileIdentifier_ACU || '未知'}".`);
-                 return;
-             }
-
-             if (!hasActiveChatMessages_ACU()) {
-                 clearRuntimeForNoActiveChat_ACU(chatFileName);
-                 return;
-             }
-
-             // 先重新读取当前聊天持久化消息，再应用 chat_metadata 中的聊天模板快照。
-             // 此处是“持久化 → 派生缓存”的唯一重建入口，不能依赖切换前遗留的 TABLE_TEMPLATE/currentJsonTableData。
-             await loadAllChatMessages_ACU();
-             applyTemplateScopeForCurrentChat_ACU();
-
-            // [6.7.3] SQLite 模式下，切换聊天后需要重建内存数据库（初始化 SQLite 引擎）
-            if (isSqliteMode()) {
-                logDebug_ACU('[SQLite] CHAT_CHANGED: 重建内存数据库...');
-                try {
-                    await reloadStorageProvider();
-                    logDebug_ACU('[SQLite] CHAT_CHANGED: 内存数据库重建完成');
-                } catch (e: any) {
-                    logError_ACU(`[SQLite] CHAT_CHANGED: 数据库重建失败: ${e?.message}`);
-                }
-            }
-
-            // 3. 刷新数据（UI 刷新由 presentation 层负责）
-            await refreshMergedDataAndNotifyWithUI_ACU();
-
-            // [交火向量索引] 聊天数据刷新完成后，预热当前聊天对应的外置分片缓存。
-            // 注意：必须放在 refreshMergedDataAndNotifyWithUI_ACU 之后，否则可能读取到旧聊天的 manifest。
-            const vectorCacheResult = await preloadSummaryVectorIndexCacheForCurrentChat_ACU();
-            logDebug_ACU(`[交火向量索引] CHAT_CHANGED 缓存预热结果：success=${vectorCacheResult.success}, skipped=${vectorCacheResult.skipped === true}, reason=${vectorCacheResult.reason || 'none'}, chunks=${vectorCacheResult.chunkCount}, indexId=${vectorCacheResult.indexId || 'none'}`);
-            try {
-                const restoredFlushCount = await restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU();
-                if (restoredFlushCount > 0) {
-                    logDebug_ACU(`[交火向量索引] CHAT_CHANGED 已恢复防抖归档队列：count=${restoredFlushCount}`);
-                }
-            } catch (restoreFlushError) {
-                logWarn_ACU('[交火向量索引] CHAT_CHANGED 恢复防抖归档队列失败:', restoreFlushError);
-            }
-            
-            // [新增] 再次强制刷新状态显示，确保UI同步
-            if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
-                updateCardUpdateStatusDisplay_ACU();
-            }
-            
-            logDebug_ACU('ACU: Chat data reload and UI refresh triggered after chat change (Delayed).');
-         }, 1200); // 增加延迟到1200ms，给SillyTavern更多的DOM渲染和上下文切换时间
+          await handleChatReady_ACU(chatFileName, 'chat_changed');
         });
 
         // [触发门控] 记录“用户真实发送”的消息ID，用于剧情推进触发判定
@@ -311,6 +583,8 @@ export   function mainInitialize_ACU() {
         // [触发门控] 捕捉“用户发送意图”：使用 capture 钩子，确保先于酒馆自身发送逻辑执行
         installSendIntentCaptureHooks_ACU();
 
+        void initializeCurrentChatFromHost_ACU();
+
         // [触发门控] 记录最近一次生成的上下文（用于过滤 quiet/后台生成导致的误触发）
         if (SillyTavern_API_ACU.eventTypes.GENERATION_STARTED) {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STARTED, (type: any, params: any, dryRun: any) => {
@@ -320,8 +594,26 @@ export   function mainInitialize_ACU() {
           });
         }
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
-            SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, (message_id: any) => {
+            SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, async (message_id: any) => {
                 logDebug_ACU(`ACU GENERATION_ENDED event for message_id: ${message_id}`);
+                try {
+                  const cycle = resolveActiveMainReplyCycle_ACU(generationGate_ACU.lastGeneration?.params?._acu_main_reply_request_id);
+                  if (!cycle) {
+                    logWarn_ACU('[脚本] 跳过 main_reply.after_response：找不到对应的 main reply request。');
+                  } else {
+                    const response = getMainReplyMessageTextById_ACU(message_id);
+                    setScriptCurrentMainReplyRequestId_ACU(cycle.requestId);
+                    setScriptCurrentMainReplyAiResponse_ACU(response.text);
+                    await finishMainReplyCycleWithResponse_ACU(cycle, {
+                      source: 'generation_ended',
+                      aiResponse: response.text,
+                      responseSource: response.source,
+                      messageId: response.messageId || message_id,
+                    });
+                  }
+                } catch (error) {
+                  logWarn_ACU('[脚本] main_reply.after_response 执行失败:', error);
+                }
                 if (shouldProcessAutoTableUpdateForGenerationEnded_ACU()) {
                   handleNewMessageDebounced_ACU('GENERATION_ENDED');
                 } else {
@@ -339,6 +631,27 @@ export   function mainInitialize_ACU() {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS, async (type: any, params: any, dryRun: any) => {
             // 前置过滤（纯 UI/宿主层判断）
             if (params?._qrf_processed_by_hook) return;
+            let mainReplyBeforeHookRan = false;
+            let mainReplyBeforeHookSource = 'generation_after_commands';
+            let mainReplyCycle: MainReplyCycle_ACU | null = null;
+            if (!dryRun && !isQuietLikeGeneration_ACU(type, params) && !params?.automatic_trigger) {
+              mainReplyCycle = beginMainReplyCycle_ACU('generation_after_commands', params);
+              const originalInput = String(getSendTextareaValue_ACU() || params?.prompt || '');
+              setScriptCurrentUserInput_ACU('original', originalInput);
+            }
+            const runMainReplyBeforeHookOnce = async (source = mainReplyBeforeHookSource) => {
+              if (!mainReplyCycle || mainReplyBeforeHookRan) return;
+              mainReplyBeforeHookRan = true;
+              mainReplyBeforeHookSource = source;
+              syncMainReplyEffectiveInput_ACU(params, source);
+              await runMainReplyBeforeGeneration_ACU(mainReplyCycle, source);
+            };
+            const abandonMainReplyCycleIfPending = () => {
+              if (mainReplyCycle) {
+                abandonMainReplyCycle_ACU(mainReplyCycle);
+                mainReplyCycle = null;
+              }
+            };
             const shouldProcessSummaryVectorIndex = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
             const shouldProcessPlot = shouldProcessPlotForGeneration_ACU(type, params, dryRun);
             const shouldEnsureInitialSeed = !dryRun
@@ -349,7 +662,10 @@ export   function mainInitialize_ACU() {
             if (shouldEnsureInitialSeed) {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
             }
-            if (!shouldProcessSummaryVectorIndex && !shouldProcessPlot) return;
+            if (!shouldProcessSummaryVectorIndex && !shouldProcessPlot) {
+              await runMainReplyBeforeHookOnce();
+              return;
+            }
             if (shouldProcessSummaryVectorIndex) {
               try {
                 const chatForSummaryIndex = SillyTavern_API_ACU.chat;
@@ -362,8 +678,14 @@ export   function mainInitialize_ACU() {
                 logWarn_ACU('[交火模式纪要索引] 发送前注入失败，继续原始生成:', error);
               }
             }
-            if (!shouldProcessPlot) return;
-            if (type === 'regenerate' || isProcessing_Plot_ACU) return;
+            if (!shouldProcessPlot) {
+              await runMainReplyBeforeHookOnce();
+              return;
+            }
+            if (type === 'regenerate' || isProcessing_Plot_ACU) {
+              await runMainReplyBeforeHookOnce();
+              return;
+            }
 
             // [去重] 若同一文本刚被 TavernHelper.generate 钩子处理过，跳过
             try {
@@ -373,12 +695,16 @@ export   function mainInitialize_ACU() {
               const boxText = String(getSendTextareaValue_ACU() || '');
               if (shouldSkipPlotIntercept_ACU(String(lastMsgText)) || shouldSkipPlotIntercept_ACU(boxText)) {
                 logDebug_ACU('[剧情推进] Skip GENERATION_AFTER_COMMANDS due to recent TavernHelper.generate interception.');
+                await runMainReplyBeforeHookOnce();
                 return;
               }
             } catch (e) {}
 
             const chat = SillyTavern_API_ACU.chat;
-            if (!chat || chat.length === 0) return;
+            if (!chat || chat.length === 0) {
+              await runMainReplyBeforeHookOnce();
+              return;
+            }
 
             // ── 策略1：已有用户消息 ──
             const lastMessageIndex = chat.length - 1;
@@ -409,6 +735,8 @@ export   function mainInitialize_ACU() {
                     // 恢复输入框
                     try { setSendTextareaValue_ACU(s1.restoreText || ''); } catch (e) {}
                   }
+                  abandonMainReplyCycleIfPending();
+                  return;
                   break;
 
                 case 'planned':
@@ -417,16 +745,19 @@ export   function mainInitialize_ACU() {
                   lastMessage.mes = s1.finalMessage;
                   SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, lastMessageIndex);
                   if (getSendTextareaValue_ACU() === s1.originalMessage) setSendTextareaValue_ACU('');
+                  mainReplyBeforeHookSource = 'plot_rewritten';
                   break;
 
                 case 'loop_retry': {
                   const loopSettings = settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings;
                   loopState_ACU.awaitingReply = false;
                   await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
-                  break;
+                  abandonMainReplyCycleIfPending();
+                  return;
                 }
                 // 'skipped' — 不做额外操作
               }
+              await runMainReplyBeforeHookOnce(mainReplyBeforeHookSource);
               return; // 策略1匹配，不再执行策略2
             }
 
@@ -448,16 +779,19 @@ export   function mainInitialize_ACU() {
                     else if ((window as any).SillyTavern?.stopGeneration) (window as any).SillyTavern.stopGeneration();
                   } catch (e) {}
                 }
-                break;
+                abandonMainReplyCycleIfPending();
+                return;
 
               case 'planned':
                 setSendTextareaValue_ACU(s2.finalMessage!);
                 try { params.prompt = s2.finalMessage; } catch (e) {}
+                mainReplyBeforeHookSource = 'plot_rewritten';
                 break;
             }
 
             // 消费掉本次发送意图
             generationGate_ACU.lastUserSendIntentAt = 0;
+            await runMainReplyBeforeHookOnce(mainReplyBeforeHookSource);
           });
         }        const chatModificationEvents = ['MESSAGE_DELETED', 'MESSAGE_SWIPED'] as const;
         chatModificationEvents.forEach(evName => {
@@ -495,62 +829,6 @@ export   function mainInitialize_ACU() {
       // } else {
       //     logWarn_ACU("ACU: Global eventOnButton function is not available.");
       // }
-      // 修复：移除启动时的状态重置调用。现在完全依赖于SillyTavern加载后触发的第一个CHAT_CHANGED事件来初始化，避免了竞态条件。
-      // [新增修复]：为了解决作为角色脚本加载时可能错过初始CHAT_CHANGED事件的问题，
-      // 我们在初始化时主动获取一次当前聊天信息并进行设置。
-      // 这确保了无论脚本何时加载，都能正确初始化。
-      // [修复] 添加轮询重试机制：如果 chatId 暂时不可用，持续轮询直到可用
-      const initWithChatId = async (chatId: string) => {
-          logDebug_ACU(`ACU: Initializing with current chat on load: ${chatId}`);
-          await resetScriptStateForNewChat_ACU(chatId);
-          await loadPresetAndCleanCharacterData_ACU();
-          
-          // 再次强制刷新数据和UI，确保初始加载时表格显示正确
-          await loadAllChatMessages_ACU();
-
-          // [修复] SQLite 模式下，启动时初始化内存数据库
-          // 老卡（有聊天历史数据）会从聊天记录合并数据建表
-          // 新卡（无数据）只初始化引擎，建表延迟到第一次填表时
-          if (isSqliteMode()) {
-              logDebug_ACU('[SQLite] initWithChatId: 初始化内存数据库...');
-              try {
-                  await reloadStorageProvider();
-                  logDebug_ACU('[SQLite] initWithChatId: 内存数据库初始化完成');
-              } catch (e: any) {
-                  logError_ACU(`[SQLite] initWithChatId: 数据库初始化失败: ${e?.message}`);
-              }
-          }
-
-          await refreshMergedDataAndNotifyWithUI_ACU();
-          
-          if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
-             updateCardUpdateStatusDisplay_ACU();
-          }
-      };
-
-      if (SillyTavern_API_ACU && SillyTavern_API_ACU.chatId) {
-          // chatId 已可用，延迟初始化
-          setTimeout(async () => {
-              await initWithChatId(SillyTavern_API_ACU!.chatId);
-          }, 1000);
-      } else {
-          // chatId 暂时不可用，启动轮询重试（每200ms检查一次，最多等15秒）
-          logWarn_ACU('ACU: chatId not available on initial load. Starting polling...');
-          let pollCount = 0;
-          const maxPolls = 75; // 200ms × 75 = 15秒
-          const pollTimer = setInterval(async () => {
-              pollCount++;
-              const chatId = SillyTavern_API_ACU?.chatId;
-              if (chatId) {
-                  clearInterval(pollTimer);
-                  logDebug_ACU(`ACU: chatId became available after ${pollCount * 200}ms polling: ${chatId}`);
-                  await initWithChatId(chatId);
-              } else if (pollCount >= maxPolls) {
-                  clearInterval(pollTimer);
-                  logWarn_ACU(`ACU: chatId still not available after ${maxPolls * 200}ms polling. Waiting for CHAT_CHANGED event.`);
-              }
-          }, 200);
-      }
     } else {
       logError_ACU('ACU: Failed to initialize. Core APIs not available on DOM ready.');
       console.error('数据库自动更新脚本初始化失败：核心API加载失败。');

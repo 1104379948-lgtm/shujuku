@@ -10,7 +10,7 @@ import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normaliz
 import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU} from '../../shared/defaults-json.js';
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, DEFAULT_CHECKPOINT_CUMULATIVE_OPERATION_RATIO_PERCENT_ACU, DEFAULT_CHECKPOINT_MAX_ENTRIES_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_MAX_OPERATION_COUNT_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_MAX_OPERATION_KB_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_SINGLE_OPERATION_RATIO_PERCENT_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
-import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
+import { ensureGlobalScriptSettings_ACU, globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
 import { getCurrentVectorMemoryConfig_ACU } from '../vector/vector-memory-config';
@@ -247,7 +247,6 @@ export   function loadSettings_ACU() {
       try {
           const savedSettings = readProfileSettingsFromStorage_ACU(activeCode);
           if (savedSettings) {
-
               // [迁移逻辑] 检查旧的顶层 worldbookConfig
               if (savedSettings.worldbookConfig) {
                   logDebug_ACU('Migrating legacy worldbookConfig to character-specific settings.');
@@ -358,6 +357,10 @@ export   function loadSettings_ACU() {
           settings_ACU.dataIsolationCode = activeCode;
           settings_ACU.dataIsolationEnabled = (activeCode !== '');
       }
+
+      const globalScripts = ensureGlobalScriptSettings_ACU();
+      settings_ACU.userScripts = globalScripts.userScripts;
+      settings_ACU.scriptLogs = globalScripts.scriptLogs;
 
       // [兼容] 旧标签排除字段自动迁移为新规则组结构
       ensureTagRulesCompat_ACU(settings_ACU);
@@ -628,6 +631,8 @@ export   function buildDefaultSettings_ACU() {
           tableApiPreset: '',
           plotApiPreset: '',
           strictJsonTableFillEnabled: false,
+          userScripts: [] as any[],
+          scriptLogs: [] as any[],
           // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
           // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。
           plotTaskApiPresetOverridesById: {} as Record<string, string>,

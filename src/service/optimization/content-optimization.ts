@@ -6,9 +6,9 @@ import { callAIWithPreset_ACU } from '../ai/api-call';
 import { applyOptimizations_ACU } from '../../shared/text-optimization';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { saveOptimizationBaseToCache_ACU, loadOptimizationBaseFromCache_ACU } from '../../data/storage/optimization-cache-storage';
-import { formatOutlineTableForPlot_ACU, formatSummaryIndexForPlot_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, getWorldbookContentForPlot_ACU, parseCalcTags_ACU, parseIfBlockRecursive_ACU, parseMaxTags_ACU, parseMinTags_ACU, parseRandomTags_ACU, replaceCalcVariables_ACU, replaceMaxVariables_ACU, replaceMinVariables_ACU, replaceRandomVariables_ACU } from '../runtime/helpers-remaining';
+import { formatOutlineTableForPlot_ACU, formatSummaryIndexForPlot_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, getWorldbookContentForPlot_ACU } from '../runtime/helpers-remaining';
 import { getSummaryIndexContentForPlot_ACU } from '../runtime/plot-runtime/plot-data-format';
-import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
+import { replaceAcuTemplateVariables_ACU } from '../runtime/template-vars/acu-template-vars';
 /**
  * service/optimization/content-optimization.ts — 正文优化服务逻辑
  * 从 src/core/02_storage_and_profile.js:630~1325 迁移而来。
@@ -38,12 +38,13 @@ import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
 
     try {
       // $1: 世界书内容（使用剧情推进的世界书读取逻辑）
-      placeholders.$1 = await getWorldbookContentForPlot_ACU(plotSettings, userMessage, '');
-      // [新增] 对世界书内容进行随机数处理
-      placeholders.$1 = parseRandomTags_ACU(placeholders.$1);
-      placeholders.$1 = replaceRandomVariables_ACU(placeholders.$1);
-      // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下）
-      placeholders.$1 = replaceDbSqlVariables(placeholders.$1);
+      placeholders.$1 = await getWorldbookContentForPlot_ACU(plotSettings, userMessage, '', { runScriptHook: false });
+      placeholders.$1 = await replaceAcuTemplateVariables_ACU(placeholders.$1, {
+        enableCalc: false,
+        enableIf: false,
+        enableScript: false,
+        sourceContext: { promptType: 'content_optimization', sourceType: 'optimization_worldbook' },
+      });
       logDebug_ACU('[正文优化] $1 世界书内容:', placeholders.$1 ? `长度=${placeholders.$1.length}` : '(空)');
     } catch (e) {
       logWarn_ACU('[正文优化] 获取世界书内容失败:', e);
@@ -136,8 +137,8 @@ import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
       
      // 替换占位符并转换role为小写（某些API如豆包只接受小写role）
      const messages = JSON.parse(JSON.stringify(promptGroup));
-     messages.forEach((item: any) => {
-       if (item.content && typeof item.content === 'string') {
+      for (const item of messages) {
+        if (item.content && typeof item.content === 'string') {
          // 替换 $CONTENT 占位符
          item.content = item.content.replace(/\$CONTENT/g, content);
          // 替换剧情推进占位符
@@ -148,41 +149,26 @@ import { replaceDbSqlVariables } from '../runtime/template-vars/sql-query-var';
            }
          }
          
-         // [新增] 条件模板支持：随机数、计算变量、条件判断
-         // 1. 解析随机数标签
-         item.content = parseRandomTags_ACU(item.content);
-         // 2. 替换随机数变量引用
-         item.content = replaceRandomVariables_ACU(item.content);
-         // 3. 解析计算变量标签
-         const contextForCalc = { allTablesJson: currentJsonTableData_ACU };
-         item.content = parseCalcTags_ACU(item.content, contextForCalc);
-         // 4. 解析最大值变量标签
-         item.content = parseMaxTags_ACU(item.content, contextForCalc);
-         // 5. 解析最小值变量标签
-         item.content = parseMinTags_ACU(item.content, contextForCalc);
-         // 6. 替换计算变量引用
-         item.content = replaceCalcVariables_ACU(item.content);
-         // 7. 替换最大值变量引用
-         item.content = replaceMaxVariables_ACU(item.content);
-         // 8. 替换最小值变量引用
-         item.content = replaceMinVariables_ACU(item.content);
-         // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
-         item.content = replaceDbSqlVariables(item.content);
-         // 9. 解析条件模板
-         const latestAiContentForConditional = getLatestAIMessageContent_ACU();
-         const latestPlotContentForConditional = getPlotFromHistory_ACU();
-         const contextForIf = {
-           seedContent: latestAiContentForConditional,
-           allTablesJson: currentJsonTableData_ACU,
-           plotContent: latestPlotContentForConditional
-         };
-         item.content = parseIfBlockRecursive_ACU(item.content, contextForIf, 0);
-       }
+          const latestAiContentForConditional = getLatestAIMessageContent_ACU();
+          const latestPlotContentForConditional = getPlotFromHistory_ACU();
+          const contextForIf = {
+            seedContent: latestAiContentForConditional,
+            allTablesJson: currentJsonTableData_ACU,
+            plotContent: latestPlotContentForConditional
+          };
+           item.content = await replaceAcuTemplateVariables_ACU(item.content, {
+             contextForCalc: { allTablesJson: currentJsonTableData_ACU },
+             contextForIf,
+             ifMode: 'recursive',
+             enableScript: false,
+             sourceContext: { promptType: 'content_optimization', sourceType: 'optimization_prompt' },
+           });
+        }
        // 转换role为小写
        if (item.role && typeof item.role === 'string') {
          item.role = item.role.toLowerCase();
        }
-     });
+      }
      
      // 3. 调用AI API（带自动重试）
      const apiPreset = config.apiPreset || '';
