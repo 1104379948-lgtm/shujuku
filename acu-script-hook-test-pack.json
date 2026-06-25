@@ -45,7 +45,7 @@
     },
     {
       "name": "测试挂载点 plot.before_task_request",
-      "description": "验证 plot.before_task_request 挂载点是否触发。",
+      "description": "验证 plot.before_task_request 固定挂载点是否触发。依赖剧情预设：脚本挂载点测试预设 / stage 1 / task hook_test_task_1。",
       "enabled": true,
       "language": "javascript",
       "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
@@ -54,6 +54,11 @@
         {
           "hook": "plot.before_task_request",
           "enabled": true,
+          "target": {
+            "presetName": "脚本挂载点测试预设",
+            "stage": 1,
+            "taskId": "hook_test_task_1"
+          },
           "order": 100,
           "outputKey": "test_hook_plot_before_task_request",
           "outputTtl": "request",
@@ -66,7 +71,7 @@
     },
     {
       "name": "测试挂载点 plot.after_task_response",
-      "description": "验证 plot.after_task_response 挂载点是否触发。",
+      "description": "验证 plot.after_task_response 固定挂载点是否触发。依赖剧情预设：脚本挂载点测试预设 / stage 1 / task hook_test_task_1。",
       "enabled": true,
       "language": "javascript",
       "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
@@ -75,6 +80,11 @@
         {
           "hook": "plot.after_task_response",
           "enabled": true,
+          "target": {
+            "presetName": "脚本挂载点测试预设",
+            "stage": 1,
+            "taskId": "hook_test_task_1"
+          },
           "order": 100,
           "outputKey": "test_hook_plot_after_task_response",
           "outputTtl": "request",
@@ -87,7 +97,7 @@
     },
     {
       "name": "测试挂载点 plot.after_stage",
-      "description": "验证 plot.after_stage 挂载点是否触发。",
+      "description": "验证 plot.after_stage 固定挂载点是否触发。依赖剧情预设：脚本挂载点测试预设 / stage 1。",
       "enabled": true,
       "language": "javascript",
       "source": "ctx.log.info('hook fired', ctx.hook, JSON.stringify(ctx.event));\nreturn { hook: ctx.hook, event: ctx.event, scope: ctx.scope, time: Date.now() };",
@@ -96,6 +106,10 @@
         {
           "hook": "plot.after_stage",
           "enabled": true,
+          "target": {
+            "presetName": "脚本挂载点测试预设",
+            "stage": 1
+          },
           "order": 100,
           "outputKey": "test_hook_plot_after_stage",
           "outputTtl": "request",

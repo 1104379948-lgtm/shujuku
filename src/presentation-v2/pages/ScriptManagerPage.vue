@@ -167,6 +167,7 @@
                 </label>
                 <p class="acu-v2-script-page__hint acu-v2-script-page__binding-target-hint">
                   该绑定只会在选中的预设 / stage{{ isPlotTaskBindingHook(binding.hook) ? ' / 任务' : '' }} 的固定挂载点执行。
+                  <span v-if="isPlotTaskBindingHook(binding.hook) && !getBindingTaskOptions(binding).length">当前预设和 stage 下没有可选任务；请先确认剧情预设里存在任务，或先保留已导入脚本里的 taskId。</span>
                 </p>
               </div>
               <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--enabled">
@@ -197,8 +198,8 @@
                 </select>
               </label>
               <label class="acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json">
-                <span>配置</span>
-                <textarea v-model="bindingJsonTexts[index].config" rows="2" placeholder="例如 {&quot;limit&quot;:5}"></textarea>
+                <span>绑定配置 JSON（可选，传给 ctx.config）</span>
+                <textarea v-model="bindingJsonTexts[index].config" rows="2" placeholder="可留空；例如 {&quot;limit&quot;:5}"></textarea>
               </label>
               <AcuButton size="sm" variant="danger" @click="removeBinding(index)">移除</AcuButton>
             </div>
@@ -460,13 +461,15 @@ function getBindingStageOptions(binding: ScriptBinding_ACU): number[] {
 function getBindingTaskOptions(binding: ScriptBinding_ACU): Array<{ id: string; label: string }> {
   const preset = getPresetBindingMeta_ACU(binding.target?.presetName);
   const stage = normalizeStageValue_ACU(binding.target?.stage);
-  if (!preset || !Number.isFinite(stage)) return [];
+  const currentTaskId = String(binding.target?.taskId || '').trim();
+  if (!preset || !Number.isFinite(stage)) {
+    return currentTaskId ? [{ id: currentTaskId, label: `${currentTaskId}（当前预设未导入或未选择 stage）` }] : [];
+  }
   const options = preset.tasks
     .filter(task => normalizeStageValue_ACU(task.stage) === stage)
     .slice()
     .sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
     .map(task => ({ id: task.id, label: `Stage ${task.stage} · ${task.name || task.id}` }));
-  const currentTaskId = String(binding.target?.taskId || '').trim();
   if (currentTaskId && !options.some(option => option.id === currentTaskId)) {
     options.unshift({ id: currentTaskId, label: `${currentTaskId}（当前预设/stage 下未找到）` });
   }
@@ -916,12 +919,15 @@ onMounted(refresh);
 .acu-v2-script-page__checkbox, .acu-v2-script-page__radio { display: inline-flex; gap: 6px; align-items: center; color: var(--acu-text-2); }
 .acu-v2-script-page__checkbox input, .acu-v2-script-page__radio input { width: auto; }
 .acu-v2-script-page__source { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.acu-v2-script-page__binding { display: grid; grid-template-columns: minmax(220px, 1fr) 72px 90px minmax(140px, 1fr) 120px 150px auto; gap: 10px; align-items: end; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); }
+.acu-v2-script-page__binding { display: grid; grid-template-columns: minmax(260px, 1fr) 72px 90px minmax(160px, 1fr) 140px 170px auto; gap: 12px; align-items: end; padding: 14px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); }
 .acu-v2-script-page__binding-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--acu-text-2); font-size: 12px; }
 .acu-v2-script-page__binding-field span { color: var(--acu-text-3); font-size: 11px; }
 .acu-v2-script-page__binding-field--enabled { align-items: center; }
 .acu-v2-script-page__binding-field--enabled input { width: auto; min-width: auto; }
-.acu-v2-script-page__binding-field--json { grid-column: span 3; }
+.acu-v2-script-page__binding-field--json { grid-column: 1 / span 4; }
+.acu-v2-script-page__binding-target { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(260px, 1fr) minmax(160px, 1fr) minmax(320px, 1fr); gap: 12px; align-items: end; padding: 12px; border: 1px dashed var(--acu-border-2); border-radius: var(--acu-radius-sm); background: color-mix(in srgb, var(--acu-bg-2) 86%, transparent); }
+.acu-v2-script-page__binding-target-hint { grid-column: 1 / -1; margin: 0; line-height: 1.5; }
+.acu-v2-script-page__binding-target-hint span { display: block; color: var(--acu-warning); }
 .acu-v2-script-page__import-preview { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); }
 .acu-v2-script-page__import-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .acu-v2-script-page__import-head p { margin: 4px 0 0; }
@@ -937,5 +943,5 @@ onMounted(refresh);
 .acu-v2-script-page__log-group { border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); overflow: hidden; background: var(--acu-bg-1); }
 .acu-v2-script-page__log-group + .acu-v2-script-page__log-group { margin-top: 8px; }
 .acu-v2-script-page__log-group-head { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 170px 80px minmax(0, 1fr); gap: 8px; padding: 8px; background: var(--acu-bg-2); color: var(--acu-text-2); }
-@media (max-width: 980px) { .acu-v2-script-page__layout { grid-template-columns: 1fr; } .acu-v2-script-page__grid { grid-template-columns: 1fr 1fr; } .acu-v2-script-page__binding { grid-template-columns: 1fr; } .acu-v2-script-page__binding-field--json { grid-column: auto; } }
+@media (max-width: 980px) { .acu-v2-script-page__layout { grid-template-columns: 1fr; } .acu-v2-script-page__grid { grid-template-columns: 1fr 1fr; } .acu-v2-script-page__binding, .acu-v2-script-page__binding-target { grid-template-columns: 1fr; } .acu-v2-script-page__binding-field--json, .acu-v2-script-page__binding-target, .acu-v2-script-page__binding-target-hint { grid-column: auto; } }
 </style>

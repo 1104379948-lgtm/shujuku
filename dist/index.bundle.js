@@ -97372,14 +97372,15 @@ Expected function or array of functions, received type ${typeof value}.`
             function getBindingTaskOptions(binding) {
                 const preset = getPresetBindingMeta_ACU(binding.target?.presetName);
                 const stage = normalizeStageValue_ACU(binding.target?.stage);
-                if (!preset || !Number.isFinite(stage))
-                    return [];
+                const currentTaskId = String(binding.target?.taskId || '').trim();
+                if (!preset || !Number.isFinite(stage)) {
+                    return currentTaskId ? [{ id: currentTaskId, label: `${currentTaskId}（当前预设未导入或未选择 stage）` }] : [];
+                }
                 const options = preset.tasks
                     .filter(task => normalizeStageValue_ACU(task.stage) === stage)
                     .slice()
                     .sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
                     .map(task => ({ id: task.id, label: `Stage ${task.stage} · ${task.name || task.id}` }));
-                const currentTaskId = String(binding.target?.taskId || '').trim();
                 if (currentTaskId && !options.some(option => option.id === currentTaskId)) {
                     options.unshift({ id: currentTaskId, label: `${currentTaskId}（当前预设/stage 下未找到）` });
                 }
@@ -97825,8 +97826,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-script-page[data-v-3eb994c1] { min-height: 100%; padding: 20px;\n}\n.acu-v2-script-page__file-input[data-v-3eb994c1] { display: none;\n}\n.acu-v2-script-page__layout[data-v-3eb994c1] { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; min-height: 640px;\n}\n.acu-v2-script-page__list[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-script-page__script-group[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 8px;\n}\n.acu-v2-script-page__script-group-title[data-v-3eb994c1] { margin: 8px 0 0; color: var(--acu-text-3); font-size: 12px; font-weight: 700;\n}\n.acu-v2-script-page__script-card[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); text-align: left; cursor: pointer;\n}\n.acu-v2-script-page__script-card--active[data-v-3eb994c1] { border-color: var(--acu-accent); box-shadow: 0 0 0 1px var(--acu-accent);\n}\n.acu-v2-script-page__script-title[data-v-3eb994c1] { font-weight: 700;\n}\n.acu-v2-script-page__script-meta[data-v-3eb994c1] { color: var(--acu-text-3); font-size: 12px; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__script-error[data-v-3eb994c1] { color: var(--acu-danger); font-size: 12px; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__error[data-v-3eb994c1] { color: var(--acu-danger); font-size: 12px; margin: 0; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__editor[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 14px; min-width: 0;\n}\n.acu-v2-script-page__toolbar[data-v-3eb994c1], .acu-v2-script-page__inline[data-v-3eb994c1], .acu-v2-script-page__binding-actions[data-v-3eb994c1] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;\n}\n.acu-v2-script-page__grid[data-v-3eb994c1] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;\n}\n.acu-v2-script-page__field[data-v-3eb994c1], .acu-v2-script-page__section[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 6px;\n}\n.acu-v2-script-page__field span[data-v-3eb994c1], .acu-v2-script-page__section h3[data-v-3eb994c1] { color: var(--acu-text-2); font-size: 13px; margin: 0;\n}\n.acu-v2-script-page input[data-v-3eb994c1], .acu-v2-script-page select[data-v-3eb994c1], .acu-v2-script-page textarea[data-v-3eb994c1] { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); padding: 8px; font: inherit;\n}\n.acu-v2-script-page__checkbox[data-v-3eb994c1], .acu-v2-script-page__radio[data-v-3eb994c1] { display: inline-flex; gap: 6px; align-items: center; color: var(--acu-text-2);\n}\n.acu-v2-script-page__checkbox input[data-v-3eb994c1], .acu-v2-script-page__radio input[data-v-3eb994c1] { width: auto;\n}\n.acu-v2-script-page__source[data-v-3eb994c1] { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n}\n.acu-v2-script-page__binding[data-v-3eb994c1] { display: grid; grid-template-columns: minmax(220px, 1fr) 72px 90px minmax(140px, 1fr) 120px 150px auto; gap: 10px; align-items: end; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm);\n}\n.acu-v2-script-page__binding-field[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--acu-text-2); font-size: 12px;\n}\n.acu-v2-script-page__binding-field span[data-v-3eb994c1] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-script-page__binding-field--enabled[data-v-3eb994c1] { align-items: center;\n}\n.acu-v2-script-page__binding-field--enabled input[data-v-3eb994c1] { width: auto; min-width: auto;\n}\n.acu-v2-script-page__binding-field--json[data-v-3eb994c1] { grid-column: span 3;\n}\n.acu-v2-script-page__import-preview[data-v-3eb994c1] { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1);\n}\n.acu-v2-script-page__import-head[data-v-3eb994c1] { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start;\n}\n.acu-v2-script-page__import-head p[data-v-3eb994c1] { margin: 4px 0 0;\n}\n.acu-v2-script-page__import-item[data-v-3eb994c1] { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); color: var(--acu-text-2);\n}\n.acu-v2-script-page__import-item pre[data-v-3eb994c1] { max-height: 140px; margin: 0; padding: 8px; overflow: auto; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-script-page__example-list[data-v-3eb994c1] { display: grid; gap: 10px;\n}\n.acu-v2-script-page__example-item[data-v-3eb994c1] { display: grid; gap: 5px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1);\n}\n.acu-v2-script-page__example-item p[data-v-3eb994c1] { margin: 0;\n}\n.acu-v2-script-page__section code[data-v-3eb994c1], .acu-v2-script-page__result[data-v-3eb994c1] { display: block; padding: 8px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1); overflow: auto;\n}\n.acu-v2-script-page__hint[data-v-3eb994c1], .acu-v2-script-page__empty[data-v-3eb994c1] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-script-page__log-row[data-v-3eb994c1] { display: grid; grid-template-columns: 170px 70px minmax(180px, 1fr) minmax(0, 1fr); gap: 8px; padding: 8px; border-bottom: 1px solid var(--acu-border-2); color: var(--acu-text-2);\n}\n.acu-v2-script-page__log-row code[data-v-3eb994c1] { overflow-wrap: anywhere;\n}\n.acu-v2-script-page__log-group[data-v-3eb994c1] { border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); overflow: hidden; background: var(--acu-bg-1);\n}\n.acu-v2-script-page__log-group + .acu-v2-script-page__log-group[data-v-3eb994c1] { margin-top: 8px;\n}\n.acu-v2-script-page__log-group-head[data-v-3eb994c1] { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 170px 80px minmax(0, 1fr); gap: 8px; padding: 8px; background: var(--acu-bg-2); color: var(--acu-text-2);\n}\n@media (max-width: 980px) {\n.acu-v2-script-page__layout[data-v-3eb994c1] { grid-template-columns: 1fr;\n}\n.acu-v2-script-page__grid[data-v-3eb994c1] { grid-template-columns: 1fr 1fr;\n}\n.acu-v2-script-page__binding[data-v-3eb994c1] { grid-template-columns: 1fr;\n}\n.acu-v2-script-page__binding-field--json[data-v-3eb994c1] { grid-column: auto;\n}\n}\n", "src/presentation-v2/pages/ScriptManagerPage.vue#style-0-3eb994c1");
-    var ScriptManagerPage_vue_vue_type_style_index_0_scoped_3eb994c1_lang = null;
+    injectSfcStyle("\n.acu-v2-script-page[data-v-9451f216] { min-height: 100%; padding: 20px;\n}\n.acu-v2-script-page__file-input[data-v-9451f216] { display: none;\n}\n.acu-v2-script-page__layout[data-v-9451f216] { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; min-height: 640px;\n}\n.acu-v2-script-page__list[data-v-9451f216] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-script-page__script-group[data-v-9451f216] { display: flex; flex-direction: column; gap: 8px;\n}\n.acu-v2-script-page__script-group-title[data-v-9451f216] { margin: 8px 0 0; color: var(--acu-text-3); font-size: 12px; font-weight: 700;\n}\n.acu-v2-script-page__script-card[data-v-9451f216] { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); text-align: left; cursor: pointer;\n}\n.acu-v2-script-page__script-card--active[data-v-9451f216] { border-color: var(--acu-accent); box-shadow: 0 0 0 1px var(--acu-accent);\n}\n.acu-v2-script-page__script-title[data-v-9451f216] { font-weight: 700;\n}\n.acu-v2-script-page__script-meta[data-v-9451f216] { color: var(--acu-text-3); font-size: 12px; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__script-error[data-v-9451f216] { color: var(--acu-danger); font-size: 12px; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__error[data-v-9451f216] { color: var(--acu-danger); font-size: 12px; margin: 0; overflow-wrap: anywhere;\n}\n.acu-v2-script-page__editor[data-v-9451f216] { display: flex; flex-direction: column; gap: 14px; min-width: 0;\n}\n.acu-v2-script-page__toolbar[data-v-9451f216], .acu-v2-script-page__inline[data-v-9451f216], .acu-v2-script-page__binding-actions[data-v-9451f216] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;\n}\n.acu-v2-script-page__grid[data-v-9451f216] { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;\n}\n.acu-v2-script-page__field[data-v-9451f216], .acu-v2-script-page__section[data-v-9451f216] { display: flex; flex-direction: column; gap: 6px;\n}\n.acu-v2-script-page__field span[data-v-9451f216], .acu-v2-script-page__section h3[data-v-9451f216] { color: var(--acu-text-2); font-size: 13px; margin: 0;\n}\n.acu-v2-script-page input[data-v-9451f216], .acu-v2-script-page select[data-v-9451f216], .acu-v2-script-page textarea[data-v-9451f216] { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1); color: var(--acu-text-1); padding: 8px; font: inherit;\n}\n.acu-v2-script-page__checkbox[data-v-9451f216], .acu-v2-script-page__radio[data-v-9451f216] { display: inline-flex; gap: 6px; align-items: center; color: var(--acu-text-2);\n}\n.acu-v2-script-page__checkbox input[data-v-9451f216], .acu-v2-script-page__radio input[data-v-9451f216] { width: auto;\n}\n.acu-v2-script-page__source[data-v-9451f216] { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n}\n.acu-v2-script-page__binding[data-v-9451f216] { display: grid; grid-template-columns: minmax(260px, 1fr) 72px 90px minmax(160px, 1fr) 140px 170px auto; gap: 12px; align-items: end; padding: 14px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm);\n}\n.acu-v2-script-page__binding-field[data-v-9451f216] { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--acu-text-2); font-size: 12px;\n}\n.acu-v2-script-page__binding-field span[data-v-9451f216] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-script-page__binding-field--enabled[data-v-9451f216] { align-items: center;\n}\n.acu-v2-script-page__binding-field--enabled input[data-v-9451f216] { width: auto; min-width: auto;\n}\n.acu-v2-script-page__binding-field--json[data-v-9451f216] { grid-column: 1 / span 4;\n}\n.acu-v2-script-page__binding-target[data-v-9451f216] { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(260px, 1fr) minmax(160px, 1fr) minmax(320px, 1fr); gap: 12px; align-items: end; padding: 12px; border: 1px dashed var(--acu-border-2); border-radius: var(--acu-radius-sm); background: color-mix(in srgb, var(--acu-bg-2) 86%, transparent);\n}\n.acu-v2-script-page__binding-target-hint[data-v-9451f216] { grid-column: 1 / -1; margin: 0; line-height: 1.5;\n}\n.acu-v2-script-page__binding-target-hint span[data-v-9451f216] { display: block; color: var(--acu-warning);\n}\n.acu-v2-script-page__import-preview[data-v-9451f216] { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1);\n}\n.acu-v2-script-page__import-head[data-v-9451f216] { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start;\n}\n.acu-v2-script-page__import-head p[data-v-9451f216] { margin: 4px 0 0;\n}\n.acu-v2-script-page__import-item[data-v-9451f216] { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); color: var(--acu-text-2);\n}\n.acu-v2-script-page__import-item pre[data-v-9451f216] { max-height: 140px; margin: 0; padding: 8px; overflow: auto; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-script-page__example-list[data-v-9451f216] { display: grid; gap: 10px;\n}\n.acu-v2-script-page__example-item[data-v-9451f216] { display: grid; gap: 5px; padding: 10px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); background: var(--acu-bg-1);\n}\n.acu-v2-script-page__example-item p[data-v-9451f216] { margin: 0;\n}\n.acu-v2-script-page__section code[data-v-9451f216], .acu-v2-script-page__result[data-v-9451f216] { display: block; padding: 8px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2); color: var(--acu-text-1); overflow: auto;\n}\n.acu-v2-script-page__hint[data-v-9451f216], .acu-v2-script-page__empty[data-v-9451f216] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-script-page__log-row[data-v-9451f216] { display: grid; grid-template-columns: 170px 70px minmax(180px, 1fr) minmax(0, 1fr); gap: 8px; padding: 8px; border-bottom: 1px solid var(--acu-border-2); color: var(--acu-text-2);\n}\n.acu-v2-script-page__log-row code[data-v-9451f216] { overflow-wrap: anywhere;\n}\n.acu-v2-script-page__log-group[data-v-9451f216] { border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); overflow: hidden; background: var(--acu-bg-1);\n}\n.acu-v2-script-page__log-group + .acu-v2-script-page__log-group[data-v-9451f216] { margin-top: 8px;\n}\n.acu-v2-script-page__log-group-head[data-v-9451f216] { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) 170px 80px minmax(0, 1fr); gap: 8px; padding: 8px; background: var(--acu-bg-2); color: var(--acu-text-2);\n}\n@media (max-width: 980px) {\n.acu-v2-script-page__layout[data-v-9451f216] { grid-template-columns: 1fr;\n}\n.acu-v2-script-page__grid[data-v-9451f216] { grid-template-columns: 1fr 1fr;\n}\n.acu-v2-script-page__binding[data-v-9451f216], .acu-v2-script-page__binding-target[data-v-9451f216] { grid-template-columns: 1fr;\n}\n.acu-v2-script-page__binding-field--json[data-v-9451f216], .acu-v2-script-page__binding-target[data-v-9451f216], .acu-v2-script-page__binding-target-hint[data-v-9451f216] { grid-column: auto;\n}\n}\n", "src/presentation-v2/pages/ScriptManagerPage.vue#style-0-9451f216");
+    var ScriptManagerPage_vue_vue_type_style_index_0_scoped_9451f216_lang = null;
 
     const _hoisted_1$b = { class: "acu-v2-script-page" };
     const _hoisted_2$a = {
@@ -97919,46 +97920,47 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_51 = ["value", "onChange"];
     const _hoisted_52 = ["value"];
     const _hoisted_53 = { class: "acu-v2-script-page__hint acu-v2-script-page__binding-target-hint" };
-    const _hoisted_54 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--enabled" };
-    const _hoisted_55 = ["onUpdate:modelValue"];
-    const _hoisted_56 = { class: "acu-v2-script-page__binding-field" };
-    const _hoisted_57 = ["onUpdate:modelValue"];
-    const _hoisted_58 = { class: "acu-v2-script-page__binding-field" };
-    const _hoisted_59 = ["onUpdate:modelValue"];
-    const _hoisted_60 = { class: "acu-v2-script-page__binding-field" };
-    const _hoisted_61 = ["onUpdate:modelValue"];
-    const _hoisted_62 = { class: "acu-v2-script-page__binding-field" };
-    const _hoisted_63 = ["onUpdate:modelValue"];
-    const _hoisted_64 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json" };
-    const _hoisted_65 = ["onUpdate:modelValue"];
-    const _hoisted_66 = { class: "acu-v2-script-page__section" };
-    const _hoisted_67 = { class: "acu-v2-script-page__example-list" };
-    const _hoisted_68 = { class: "acu-v2-script-page__example-item" };
+    const _hoisted_54 = { key: 0 };
+    const _hoisted_55 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--enabled" };
+    const _hoisted_56 = ["onUpdate:modelValue"];
+    const _hoisted_57 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_58 = ["onUpdate:modelValue"];
+    const _hoisted_59 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_60 = ["onUpdate:modelValue"];
+    const _hoisted_61 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_62 = ["onUpdate:modelValue"];
+    const _hoisted_63 = { class: "acu-v2-script-page__binding-field" };
+    const _hoisted_64 = ["onUpdate:modelValue"];
+    const _hoisted_65 = { class: "acu-v2-script-page__binding-field acu-v2-script-page__binding-field--json" };
+    const _hoisted_66 = ["onUpdate:modelValue"];
+    const _hoisted_67 = { class: "acu-v2-script-page__section" };
+    const _hoisted_68 = { class: "acu-v2-script-page__example-list" };
     const _hoisted_69 = { class: "acu-v2-script-page__example-item" };
-    const _hoisted_70 = {
+    const _hoisted_70 = { class: "acu-v2-script-page__example-item" };
+    const _hoisted_71 = {
     	key: 0,
     	class: "acu-v2-script-page__example-item"
     };
-    const _hoisted_71 = { class: "acu-v2-script-page__section" };
-    const _hoisted_72 = { class: "acu-v2-script-page__field" };
-    const _hoisted_73 = ["value"];
-    const _hoisted_74 = {
+    const _hoisted_72 = { class: "acu-v2-script-page__section" };
+    const _hoisted_73 = { class: "acu-v2-script-page__field" };
+    const _hoisted_74 = ["value"];
+    const _hoisted_75 = {
     	key: 0,
     	class: "acu-v2-script-page__error"
     };
-    const _hoisted_75 = { class: "acu-v2-script-page__toolbar" };
-    const _hoisted_76 = {
+    const _hoisted_76 = { class: "acu-v2-script-page__toolbar" };
+    const _hoisted_77 = {
     	key: 1,
     	class: "acu-v2-script-page__result"
     };
-    const _hoisted_77 = { class: "acu-v2-script-page__section" };
-    const _hoisted_78 = {
+    const _hoisted_78 = { class: "acu-v2-script-page__section" };
+    const _hoisted_79 = {
     	key: 0,
     	class: "acu-v2-script-page__empty"
     };
-    const _hoisted_79 = { class: "acu-v2-script-page__log-group-head" };
-    const _hoisted_80 = { key: 0 };
-    const _hoisted_81 = {
+    const _hoisted_80 = { class: "acu-v2-script-page__log-group-head" };
+    const _hoisted_81 = { key: 0 };
+    const _hoisted_82 = {
     	key: 1,
     	class: "acu-v2-script-page__error"
     };
@@ -98615,15 +98617,13 @@ Expected function or array of functions, received type ${typeof value}.`
     										128
     										/* KEYED_FRAGMENT */
     									))], 40, _hoisted_51)])) : createCommentVNode("v-if", true),
-    									createBaseVNode(
-    										"p",
-    										_hoisted_53,
+    									createBaseVNode("p", _hoisted_53, [createTextVNode(
     										" 该绑定只会在选中的预设 / stage" + toDisplayString($setup.isPlotTaskBindingHook(binding.hook) ? " / 任务" : "") + " 的固定挂载点执行。 ",
     										1
     										/* TEXT */
-    									)
+    									), $setup.isPlotTaskBindingHook(binding.hook) && !$setup.getBindingTaskOptions(binding).length ? (openBlock(), createElementBlock("span", _hoisted_54, "当前预设和 stage 下没有可选任务；请先确认剧情预设里存在任务，或先保留已导入脚本里的 taskId。")) : createCommentVNode("v-if", true)])
     								])) : createCommentVNode("v-if", true),
-    								createBaseVNode("label", _hoisted_54, [_cache[48] || (_cache[48] = createBaseVNode(
+    								createBaseVNode("label", _hoisted_55, [_cache[48] || (_cache[48] = createBaseVNode(
     									"span",
     									null,
     									"启用",
@@ -98632,8 +98632,8 @@ Expected function or array of functions, received type ${typeof value}.`
     								)), withDirectives(createBaseVNode("input", {
     									"onUpdate:modelValue": ($event) => binding.enabled = $event,
     									type: "checkbox"
-    								}, null, 8, _hoisted_55), [[vModelCheckbox, binding.enabled]])]),
-    								createBaseVNode("label", _hoisted_56, [_cache[49] || (_cache[49] = createBaseVNode(
+    								}, null, 8, _hoisted_56), [[vModelCheckbox, binding.enabled]])]),
+    								createBaseVNode("label", _hoisted_57, [_cache[49] || (_cache[49] = createBaseVNode(
     									"span",
     									null,
     									"顺序",
@@ -98642,13 +98642,13 @@ Expected function or array of functions, received type ${typeof value}.`
     								)), withDirectives(createBaseVNode("input", {
     									"onUpdate:modelValue": ($event) => binding.order = $event,
     									type: "number"
-    								}, null, 8, _hoisted_57), [[
+    								}, null, 8, _hoisted_58), [[
     									vModelText,
     									binding.order,
     									void 0,
     									{ number: true }
     								]])]),
-    								createBaseVNode("label", _hoisted_58, [_cache[50] || (_cache[50] = createBaseVNode(
+    								createBaseVNode("label", _hoisted_59, [_cache[50] || (_cache[50] = createBaseVNode(
     									"span",
     									null,
     									"输出键",
@@ -98658,8 +98658,8 @@ Expected function or array of functions, received type ${typeof value}.`
     									"onUpdate:modelValue": ($event) => binding.outputKey = $event,
     									type: "text",
     									placeholder: "可留空"
-    								}, null, 8, _hoisted_59), [[vModelText, binding.outputKey]])]),
-    								createBaseVNode("label", _hoisted_60, [_cache[52] || (_cache[52] = createBaseVNode(
+    								}, null, 8, _hoisted_60), [[vModelText, binding.outputKey]])]),
+    								createBaseVNode("label", _hoisted_61, [_cache[52] || (_cache[52] = createBaseVNode(
     									"span",
     									null,
     									"输出保留",
@@ -98687,8 +98687,8 @@ Expected function or array of functions, received type ${typeof value}.`
     										-1
     										/* CACHED */
     									)
-    								])], 8, _hoisted_61), [[vModelSelect, binding.outputTtl]])]),
-    								createBaseVNode("label", _hoisted_62, [_cache[54] || (_cache[54] = createBaseVNode(
+    								])], 8, _hoisted_62), [[vModelSelect, binding.outputTtl]])]),
+    								createBaseVNode("label", _hoisted_63, [_cache[54] || (_cache[54] = createBaseVNode(
     									"span",
     									null,
     									"失败策略",
@@ -98706,18 +98706,18 @@ Expected function or array of functions, received type ${typeof value}.`
     									"阻断当前流程",
     									-1
     									/* CACHED */
-    								)])], 8, _hoisted_63), [[vModelSelect, binding.failurePolicy]])]),
-    								createBaseVNode("label", _hoisted_64, [_cache[55] || (_cache[55] = createBaseVNode(
+    								)])], 8, _hoisted_64), [[vModelSelect, binding.failurePolicy]])]),
+    								createBaseVNode("label", _hoisted_65, [_cache[55] || (_cache[55] = createBaseVNode(
     									"span",
     									null,
-    									"配置",
+    									"绑定配置 JSON（可选，传给 ctx.config）",
     									-1
     									/* CACHED */
     								)), withDirectives(createBaseVNode("textarea", {
     									"onUpdate:modelValue": ($event) => $setup.bindingJsonTexts[index].config = $event,
     									rows: "2",
-    									placeholder: "例如 {\"limit\":5}"
-    								}, null, 8, _hoisted_65), [[vModelText, $setup.bindingJsonTexts[index].config]])]),
+    									placeholder: "可留空；例如 {\"limit\":5}"
+    								}, null, 8, _hoisted_66), [[vModelText, $setup.bindingJsonTexts[index].config]])]),
     								createVNode($setup["AcuButton"], {
     									size: "sm",
     									variant: "danger",
@@ -98736,14 +98736,14 @@ Expected function or array of functions, received type ${typeof value}.`
     						/* KEYED_FRAGMENT */
     					))
     				]),
-    				createBaseVNode("section", _hoisted_66, [_cache[61] || (_cache[61] = createBaseVNode(
+    				createBaseVNode("section", _hoisted_67, [_cache[61] || (_cache[61] = createBaseVNode(
     					"h3",
     					null,
     					"怎么在提示词里用",
     					-1
     					/* CACHED */
-    				)), createBaseVNode("div", _hoisted_67, [
-    					createBaseVNode("div", _hoisted_68, [_cache[58] || (_cache[58] = createBaseVNode(
+    				)), createBaseVNode("div", _hoisted_68, [
+    					createBaseVNode("div", _hoisted_69, [_cache[58] || (_cache[58] = createBaseVNode(
     						"strong",
     						null,
     						"主动运行这个脚本",
@@ -98756,7 +98756,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						1
     						/* TEXT */
     					)]),
-    					createBaseVNode("div", _hoisted_69, [_cache[59] || (_cache[59] = createBaseVNode(
+    					createBaseVNode("div", _hoisted_70, [_cache[59] || (_cache[59] = createBaseVNode(
     						"strong",
     						null,
     						"主动运行并传入 input",
@@ -98769,7 +98769,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						1
     						/* TEXT */
     					)]),
-    					$setup.firstOutputKey ? (openBlock(), createElementBlock("div", _hoisted_70, [_cache[60] || (_cache[60] = createBaseVNode(
+    					$setup.firstOutputKey ? (openBlock(), createElementBlock("div", _hoisted_71, [_cache[60] || (_cache[60] = createBaseVNode(
     						"strong",
     						null,
     						"读取挂载点输出",
@@ -98783,7 +98783,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						/* TEXT */
     					)])) : createCommentVNode("v-if", true)
     				])]),
-    				createBaseVNode("section", _hoisted_71, [
+    				createBaseVNode("section", _hoisted_72, [
     					_cache[65] || (_cache[65] = createBaseVNode(
     						"h3",
     						null,
@@ -98791,7 +98791,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						-1
     						/* CACHED */
     					)),
-    					createBaseVNode("label", _hoisted_72, [_cache[63] || (_cache[63] = createBaseVNode(
+    					createBaseVNode("label", _hoisted_73, [_cache[63] || (_cache[63] = createBaseVNode(
     						"span",
     						null,
     						"测试挂载点",
@@ -98813,7 +98813,7 @@ Expected function or array of functions, received type ${typeof value}.`
     								return openBlock(), createElementBlock("option", {
     									key: `${binding.hook}-${index}`,
     									value: String(index)
-    								}, toDisplayString(index + 1) + ". " + toDisplayString(binding.hook), 9, _hoisted_73);
+    								}, toDisplayString(index + 1) + ". " + toDisplayString(binding.hook), 9, _hoisted_74);
     							}),
     							128
     							/* KEYED_FRAGMENT */
@@ -98834,12 +98834,12 @@ Expected function or array of functions, received type ${typeof value}.`
     					), [[vModelText, $setup.manualInputText]]),
     					$setup.jsonError ? (openBlock(), createElementBlock(
     						"p",
-    						_hoisted_74,
+    						_hoisted_75,
     						toDisplayString($setup.jsonError),
     						1
     						/* TEXT */
     					)) : createCommentVNode("v-if", true),
-    					createBaseVNode("div", _hoisted_75, [createVNode($setup["AcuButton"], {
+    					createBaseVNode("div", _hoisted_76, [createVNode($setup["AcuButton"], {
     						variant: "primary",
     						loading: $setup.manualRunning,
     						onClick: $setup.runManual
@@ -98853,13 +98853,13 @@ Expected function or array of functions, received type ${typeof value}.`
     					}, 8, ["loading"])]),
     					$setup.manualResult ? (openBlock(), createElementBlock(
     						"pre",
-    						_hoisted_76,
+    						_hoisted_77,
     						toDisplayString($setup.manualResult),
     						1
     						/* TEXT */
     					)) : createCommentVNode("v-if", true)
     				]),
-    				createBaseVNode("section", _hoisted_77, [
+    				createBaseVNode("section", _hoisted_78, [
     					_cache[66] || (_cache[66] = createBaseVNode(
     						"h3",
     						null,
@@ -98867,7 +98867,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						-1
     						/* CACHED */
     					)),
-    					!$setup.selectedLogGroups.length ? (openBlock(), createElementBlock("div", _hoisted_78, "暂无日志")) : createCommentVNode("v-if", true),
+    					!$setup.selectedLogGroups.length ? (openBlock(), createElementBlock("div", _hoisted_79, "暂无日志")) : createCommentVNode("v-if", true),
     					(openBlock(true), createElementBlock(
     						Fragment,
     						null,
@@ -98875,7 +98875,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							return openBlock(), createElementBlock("div", {
     								key: group.runId,
     								class: "acu-v2-script-page__log-group"
-    							}, [createBaseVNode("div", _hoisted_79, [
+    							}, [createBaseVNode("div", _hoisted_80, [
     								createBaseVNode(
     									"strong",
     									null,
@@ -98899,14 +98899,14 @@ Expected function or array of functions, received type ${typeof value}.`
     								),
     								group.durationMs !== undefined ? (openBlock(), createElementBlock(
     									"span",
-    									_hoisted_80,
+    									_hoisted_81,
     									toDisplayString(group.durationMs) + "ms",
     									1
     									/* TEXT */
     								)) : createCommentVNode("v-if", true),
     								group.error ? (openBlock(), createElementBlock(
     									"span",
-    									_hoisted_81,
+    									_hoisted_82,
     									toDisplayString(group.error),
     									1
     									/* TEXT */
@@ -98962,7 +98962,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		_: 1
     	})]);
     }
-    var ScriptManagerPage = /* @__PURE__ */ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-3eb994c1"]]);
+    var ScriptManagerPage = /* @__PURE__ */ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-9451f216"]]);
 
     const developerCopy = {
         panels: {
