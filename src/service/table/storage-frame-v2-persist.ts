@@ -4,7 +4,7 @@ import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { DEFAULT_CHECKPOINT_CUMULATIVE_OPERATION_RATIO_PERCENT_ACU, DEFAULT_CHECKPOINT_MAX_ENTRIES_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_MAX_OPERATION_COUNT_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_MAX_OPERATION_KB_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_SINGLE_OPERATION_RATIO_PERCENT_ACU } from '../../shared/defaults';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
-import type { ManualRefillProgressV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU } from './storage-frame-v2-types';
+import type { ManualRefillChainV2_ACU, ManualRefillProgressV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU } from './storage-frame-v2-replay';
 import type { TableWriteTransactionContext_ACU } from './table-write-transaction';
@@ -45,6 +45,7 @@ export interface PersistTableMutationV2Options_ACU {
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
   manualRefillProgress?: ManualRefillProgressV2_ACU;
+  manualRefillChain?: ManualRefillChainV2_ACU;
   isolationKey?: string;
   baseRevision?: string | null;
   parentRevision?: string | null;
@@ -368,6 +369,7 @@ async function persistTableMutationLogV2Core_ACU(
       scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
       event: checkpointEvent,
       ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU(options.manualRefillProgress) } : {}),
+      ...(options.manualRefillChain ? { manualRefillChain: deepClone_ACU(options.manualRefillChain) } : {}),
     };
     frame.headRevision = checkpointRevision;
     frame.logEntries = [];

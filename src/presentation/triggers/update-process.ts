@@ -44,6 +44,10 @@ function notifyTableUpdate() {
     try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate(); } catch (_) {}
 }
 
+function notifyTableFillComplete(context?: Record<string, any>) {
+    try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableFillComplete?.(context); } catch (_) {}
+}
+
 function updateStatusDisplay() {
     if (typeof updateCardUpdateStatusDisplay_ACU === 'function') updateCardUpdateStatusDisplay_ACU();
 }
@@ -228,6 +232,10 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
         showToastr_ACU('error', result.error);
     }
 
+    if (result.success) {
+        notifyTableFillComplete({ source: 'batch', mode, result });
+    }
+
     return result;
 }
 
@@ -323,6 +331,7 @@ export async function handleManualUpdate_ACU() {
             showToastr_ACU('success', '手动更新完成！');
             updateStatusDisplay();
             notifyTableUpdate();
+            notifyTableFillComplete({ source: 'manual', mode: 'manual_independent', result });
 
             if (result.autoMergeTriggered && result.autoMergeSuccess) {
                 showToastr_ACU('success', '自动合并纪要完成！');

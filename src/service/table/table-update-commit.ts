@@ -5,7 +5,7 @@ import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonT
 import { ensureLegacyStorageMigratedBeforeWrite_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
-import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
+import type { ManualRefillChainV2_ACU, ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 
 export interface TableUpdateCommitApplyContext_ACU {
   transactionContext: TableWriteTransactionContext_ACU;
@@ -23,6 +23,7 @@ export interface TableUpdateCommitPersistOverride_ACU {
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
   manualRefillProgress?: ManualRefillProgressV2_ACU;
+  manualRefillChain?: ManualRefillChainV2_ACU;
 }
 
 export interface TableUpdateCommitApplyResult_ACU<T> {
@@ -118,6 +119,7 @@ export async function runTableUpdateCommit_ACU<T>(
             forceCheckpoint: persistOptions.forceCheckpoint,
             checkpointReason: persistOptions.checkpointReason,
             manualRefillProgress: persistOptions.manualRefillProgress,
+            manualRefillChain: persistOptions.manualRefillChain,
             assumeCommitLock: true,
             transactionContext,
           });

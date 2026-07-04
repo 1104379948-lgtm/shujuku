@@ -24,7 +24,7 @@ import { applyTableDelta_ACU, buildTableDelta_ACU, isDeltaTagData_ACU } from './
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 import { persistTableMutationLogV2_ACU } from './storage-frame-v2-persist';
 import { migrateLegacyStorageToV2OnLoad_ACU } from './storage-v2-migration';
-import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
+import type { ManualRefillChainV2_ACU, ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 import type { TableWriteTransactionContext_ACU } from './table-write-transaction';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 
@@ -49,6 +49,7 @@ export interface TableChatPersistOptions_ACU {
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
   manualRefillProgress?: ManualRefillProgressV2_ACU;
+  manualRefillChain?: ManualRefillChainV2_ACU;
   /** 调用方已处于 transactionContext.runCommit 临界区内时使用，避免嵌套 commit 锁。 */
   assumeCommitLock?: boolean;
   transactionContext?: TableWriteTransactionContext_ACU;
@@ -126,6 +127,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
     forceCheckpoint,
     checkpointReason,
     manualRefillProgress,
+    manualRefillChain,
     assumeCommitLock,
     transactionContext,
   } = options;
@@ -214,6 +216,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
         forceCheckpoint: forceCheckpoint === true || strategy.mode === 'empty',
         checkpointReason: checkpointReason || (strategy.mode === 'empty' ? 'init' : undefined),
         manualRefillProgress,
+        manualRefillChain,
         isolationKey: currentIsolationKey,
         revisionWriteSet,
         assumeCommitLock,

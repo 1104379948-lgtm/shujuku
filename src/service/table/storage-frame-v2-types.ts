@@ -39,6 +39,56 @@ export interface ManualRefillProgressV2_ACU {
   updatedAt: number;
 }
 
+export interface ManualRefillChainV2_ACU {
+  kind: 'manual_refill_chain';
+  version: 1;
+  status: 'in_progress' | 'complete';
+  selectedSheetKeys: string[];
+  contextMessageIndices: number[];
+  originalStartMessageIndex: number;
+  targetMessageIndex: number;
+  batchSize: number;
+  baseCheckpoint: TableDataObject_ACU;
+  chunks: ManualRefillChainChunkV2_ACU[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ManualRefillChainChunkV2_ACU {
+  chunkIndex: number;
+  groupKeys: string[];
+  buckets: ManualRefillChainBucketV2_ACU[];
+}
+
+export interface ManualRefillChainBucketV2_ACU {
+  bucketIndex: number;
+  saveTargetIndex: number;
+  batchNumber: number;
+  updateMode: string;
+  jobGroupKeys: string[];
+  messageIndices: number[];
+  sheetKeys: string[];
+  operations: TableMutationOperationV2_ACU[];
+  filledSheetKeys: string[];
+  changedSheetKeys: string[];
+  groupKeys: string[];
+}
+
+export type ManualRefillChainFailureCode_ACU =
+  | 'missing_chain'
+  | 'selected_sheets_mismatch'
+  | 'target_mismatch'
+  | 'range_not_covered'
+  | 'bucket_replay_failed'
+  | 'operation_replay_failed'
+  | 'schema_incompatible';
+
+export interface ManualRefillChainFailure_ACU {
+  code: ManualRefillChainFailureCode_ACU;
+  message: string;
+  detail?: Record<string, unknown>;
+}
+
 export interface TableCheckpointV2_ACU {
   kind: 'full';
   createdAt: number;
@@ -47,6 +97,7 @@ export interface TableCheckpointV2_ACU {
   scheduleSummary?: Record<string, TableCheckpointScheduleSummaryV2_ACU>;
   event?: TableMutationEventV2_ACU;
   manualRefillProgress?: ManualRefillProgressV2_ACU;
+  manualRefillChain?: ManualRefillChainV2_ACU;
 }
 
 export type TableMutationOperationV2_ACU =

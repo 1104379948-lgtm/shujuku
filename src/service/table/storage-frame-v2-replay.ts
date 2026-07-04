@@ -418,6 +418,27 @@ export async function applyTableOperationV2_ACU(
   }
 }
 
+export async function replayTableOperationsV2_ACU(
+  state: TableDataObject_ACU,
+  operations: TableMutationOperationV2_ACU[],
+): Promise<void> {
+  const runtime: SqlReplayRuntime_ACU = {
+    engine: new SqliteEngine(),
+    syncBridge: null as unknown as SyncBridge,
+    loaded: false,
+  };
+  runtime.syncBridge = new SyncBridge(runtime.engine);
+
+  try {
+    for (const operation of operations || []) {
+      await applyTableOperationV2_ACU(state, operation, runtime);
+    }
+    if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
+  } finally {
+    runtime.engine.dispose();
+  }
+}
+
 export function collectScheduleSummaryFromFramesV2_ACU(
   chatArg: any[] | null | undefined,
   isolationKey: string,

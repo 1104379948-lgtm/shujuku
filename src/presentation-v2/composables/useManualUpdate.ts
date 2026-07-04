@@ -185,6 +185,33 @@ function normalizeManualProgressMessage(message: string): string {
     .split('AI 响应').join('手动填表结果');
 }
 
+function formatManualUpdateResultMessage_ACU(result: Awaited<ReturnType<typeof orchestrateManualUpdate_ACU>>): string {
+  if (!result.success) return result.error || '手动填表失败。';
+  const parts = [result.autoMergeTriggered
+    ? `手动填表完成;自动合并总结${result.autoMergeSuccess ? '已完成' : '未完成'}。`
+    : '手动填表完成。'];
+  if (
+    Number.isFinite(Number(result.requestedStartMessageIndex))
+    && Number.isFinite(Number(result.effectiveStartMessageIndex))
+    && result.effectiveStartMessageIndex !== result.requestedStartMessageIndex
+  ) {
+    parts.push(`实际从${formatAiFloorForMessageIndex_ACU(result.effectiveStartMessageIndex)}开始重填。`);
+  }
+  return parts.join('');
+}
+
+function formatAiFloorForMessageIndex_ACU(messageIndex: number | undefined): string {
+  const numericIndex = Number(messageIndex);
+  if (!Number.isFinite(numericIndex)) return '对应批次起点';
+  const chat = getChatArray_ACU();
+  if (!Array.isArray(chat) || numericIndex < 0 || numericIndex >= chat.length) return `消息索引 ${numericIndex}`;
+  let aiFloor = 0;
+  for (let i = 0; i <= numericIndex; i += 1) {
+    if (chat[i] && !chat[i].is_user) aiFloor += 1;
+  }
+  return aiFloor > 0 ? `AI 第 ${aiFloor} 层` : `消息索引 ${numericIndex}`;
+}
+
 export function useManualUpdate(): ManualUpdateState {
   const dialogStore = useDialogStore();
   const toast = useToastStore();
@@ -361,7 +388,7 @@ export function useManualUpdate(): ManualUpdateState {
 
     const confirmed = await dialogStore.confirm({
       title: '执行手动填表',
-      message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n\n系统会在内存中按当前上下文和批处理设置重填当前选中的表，全部成功后才写入新的完整 checkpoint。\n如果重填起点之前找不到可回放的 checkpoint，选中表的本次内存重建基底会从表头空基底开始；未选中的表会保持当前最新数据。\n\n失败、终止或从中断处继续时，都不会清空聊天记录中的旧表格数据。`,
+      message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n\n系统会在内存中按当前上下文和批处理设置重填当前选中的表，并在最新 checkpoint 中保存本次重填的批次操作链。\n后续如果从该范围中间重填，系统会优先从操作链恢复到目标批次前；如果目标楼层落在某个批次内部，会从该批次起点开始重填。\n如果重填起点前既没有可回放 checkpoint，也没有兼容的手动重填操作链，本次局部重填会被阻止，不会静默从空基底开始。\n\n失败、终止或从中断处继续时，都不会清空聊天记录中的旧表格数据。`,
       dangerMessage: checkpointRiskMessage.value || undefined,
       confirmLabel: '确认并继续',
       cancelLabel: '取消',
@@ -423,12 +450,17 @@ export function useManualUpdate(): ManualUpdateState {
       }
       finishToast(
         result.success ? 'success' : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'),
-        result.success
-          ? (result.autoMergeTriggered
-              ? `手动填表完成;自动合并总结${result.autoMergeSuccess ? '已完成' : '未完成'}。`
-              : '手动填表完成。')
-          : (abortRequested ? '手动填表任务已由用户终止。' : (result.error || '手动填表失败。')),
+        abortRequested ? '手动填表任务已由用户终止。' : formatManualUpdateResultMessage_ACU(result),
       );
+      if (result.success) {
+        try {
+          (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableFillComplete?.({
+            source: 'manual',
+            mode: 'manual_independent',
+            result,
+          });
+        } catch (_) {}
+      }
     } catch (error: any) {
       finishToast('error', error?.message || '手动填表执行异常。');
     } finally {

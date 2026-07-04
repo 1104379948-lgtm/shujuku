@@ -1,6 +1,6 @@
 /**
  * presentation/bootstrap/api-groups/callback-api.ts
- * 回调管理 API — 表格更新和填表开始的回调注册/注销/通知
+ * 回调管理 API — 表格更新、填表开始和填表完成的回调注册/注销/通知
  */
 
 import { currentJsonTableData_ACU } from '../../../service/runtime/state-manager';
@@ -11,6 +11,8 @@ export interface ApiGroupContext {
     tableUpdateCallbacks: Function[];
     /** 填表开始回调列表 */
     tableFillStartCallbacks: Function[];
+    /** 填表完成回调列表 */
+    tableFillCompleteCallbacks: Function[];
     /** 获取完整 API 对象的引用（解决 this 引用） */
     getApi: () => any;
 }
@@ -100,6 +102,49 @@ export function createCallbackApi(ctx: ApiGroupContext): Record<string, Function
                     callback();
                 } catch (e) {
                     logError_ACU('[回调管理] Error executing a table fill start callback:', {
+                        callbackIndex,
+                        callbackName: callback?.name || 'anonymous',
+                        callbackCount,
+                        error: e,
+                    });
+                }
+            });
+        },
+        // 注册"填表完成"回调
+        // 回调签名：callback(currentTableData, context)
+        // context 可包含 source/mode/result 等调用方上下文。
+        registerTableFillCompleteCallback: function(callback: Function) {
+            if (typeof callback === 'function' && !ctx.tableFillCompleteCallbacks.includes(callback)) {
+                ctx.tableFillCompleteCallbacks.push(callback);
+                logDebug_ACU('A new table fill complete callback has been registered.');
+            }
+        },
+        // 注销"填表完成"回调
+        unregisterTableFillCompleteCallback: function(callback: Function) {
+            const index = ctx.tableFillCompleteCallbacks.indexOf(callback);
+            if (index > -1) {
+                ctx.tableFillCompleteCallbacks.splice(index, 1);
+                logDebug_ACU('A table fill complete callback has been unregistered.');
+            }
+        },
+        // 内部使用：通知"填表完成"
+        _notifyTableFillComplete: function(context?: Record<string, any>) {
+            const callbacksSnapshot = [...ctx.tableFillCompleteCallbacks];
+            const callbackCount = callbacksSnapshot.length;
+            logDebug_ACU(`Notifying ${callbackCount} callbacks about table fill complete.`);
+
+            if (callbackCount === 0) return;
+
+            const dataToSend = currentJsonTableData_ACU || {};
+            const contextToSend = {
+                ...(context || {}),
+                completedAt: Date.now(),
+            };
+            callbacksSnapshot.forEach((callback, callbackIndex) => {
+                try {
+                    callback(dataToSend, contextToSend);
+                } catch (e) {
+                    logError_ACU('[回调管理] Error executing a table fill complete callback:', {
                         callbackIndex,
                         callbackName: callback?.name || 'anonymous',
                         callbackCount,

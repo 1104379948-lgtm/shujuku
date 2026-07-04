@@ -20,12 +20,14 @@ import { createSqlApi } from './api-groups/sql-api';
 // --- 共享状态（回调数组） ---
 const tableUpdateCallbacks: Function[] = [];
 const tableFillStartCallbacks: Function[] = [];
+const tableFillCompleteCallbacks: Function[] = [];
 
 // --- 共享上下文（延迟引用，解决 this 互调） ---
 let apiRef: any = null;
 const ctx: ApiGroupContext = {
     tableUpdateCallbacks,
     tableFillStartCallbacks,
+    tableFillCompleteCallbacks,
     getApi: () => apiRef,
 };
 
