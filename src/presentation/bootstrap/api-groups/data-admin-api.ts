@@ -11,6 +11,7 @@ import { clearImportLocalStorage_ACU, clearImportedEntries_ACU, deleteImportedEn
 import { handleTxtImportAndSplit_ACU, handleInjectSplitEntriesFull_ACU, handleInjectSplitEntriesStandard_ACU, handleInjectSplitEntriesSummary_ACU } from '../../components/import-status-ui';
 import { openNewVisualizer_ACU } from '../../pages/visualizer';
 import type { ApiGroupContext } from './callback-api';
+import { importTxtTextAndSplitCore_ACU, injectImportedSelectedCore_ACU, type ImportTxtTextAndSplitOptions_ACU, type InjectImportedSelectedOptions_ACU } from '../../../service/import/import-executor';
 
 export function createDataAdminApi(_ctx: ApiGroupContext): Record<string, Function> {
     return {
@@ -28,7 +29,8 @@ export function createDataAdminApi(_ctx: ApiGroupContext): Record<string, Functi
 
         // 导入TXT链路
         importTxtAndSplit: async function() { try { return await handleTxtImportAndSplit_ACU(); } catch (e) { logError_ACU('importTxtAndSplit failed:', e); return false; } },
-        injectImportedSelected: async function() { try { return await handleInjectImportedTxtSelected_ACU(); } catch (e) { logError_ACU('injectImportedSelected failed:', e); return false; } },
+        importTxtTextAndSplit: async function(text: string, options: ImportTxtTextAndSplitOptions_ACU = {}) { try { return await importTxtTextAndSplitCore_ACU(text, options); } catch (e: any) { logError_ACU('importTxtTextAndSplit failed:', e); return { success: false, error: e?.message || '导入 TXT 文本失败。' }; } },
+        injectImportedSelected: async function(options?: InjectImportedSelectedOptions_ACU) { try { return options?.targetWorldbook ? await injectImportedSelectedCore_ACU(options) : await handleInjectImportedTxtSelected_ACU(options || {}); } catch (e: any) { logError_ACU('injectImportedSelected failed:', e); return { success: false, error: e?.message || '注入导入文本失败。' }; } },
         injectImportedStandard: async function() { try { return await handleInjectSplitEntriesStandard_ACU(); } catch (e) { logError_ACU('injectImportedStandard failed:', e); return false; } },
         injectImportedSummary: async function() { try { return await handleInjectSplitEntriesSummary_ACU(); } catch (e) { logError_ACU('injectImportedSummary failed:', e); return false; } },
         injectImportedFull: async function() { try { return await handleInjectSplitEntriesFull_ACU(); } catch (e) { logError_ACU('injectImportedFull failed:', e); return false; } },

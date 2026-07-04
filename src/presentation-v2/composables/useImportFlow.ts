@@ -19,6 +19,7 @@ import {
   deleteImportedEntriesCore_ACU,
   finalizeImportAndCleanup_ACU,
   initImportDatabase_ACU,
+  importTxtTextAndSplitCore_ACU,
   saveChunkProgress_ACU,
 } from '../../service/import/import-executor';
 import { getCurrentCharPrimaryLorebook_ACU } from '../../service/worldbook/worldbook-service';
@@ -187,21 +188,13 @@ export function useImportFlow(): UseImportFlow {
         return;
       }
 
-      // wipe stale resume statuses
-      await Promise.all([
-        importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_ACU),
-        importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_STANDARD_ACU),
-        importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_SUMMARY_ACU),
-        importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_FULL_ACU),
-      ]);
-
-      const chunks: Array<{ content: string }> = [];
-      for (let i = 0; i < content.length; i += splitSize) {
-        chunks.push({ content: content.substring(i, i + splitSize) });
+      const result = await importTxtTextAndSplitCore_ACU(content, { splitSize, clearPrevious: true });
+      if (!result.success) {
+        notify('error', result.error || '拆分并暂存导入文本时出错。');
+        return;
       }
-      await importTempSet_ACU(STORAGE_KEY_IMPORTED_ENTRIES_ACU, JSON.stringify(chunks));
-      logDebug_ACU(`[ACU-V2 import] saved ${chunks.length} chunks (split=${splitSize})`);
-      notify('success', `文件已成功拆分成 ${chunks.length} 个部分。`);
+      logDebug_ACU(`[ACU-V2 import] saved ${result.chunksCount || 0} chunks (split=${splitSize})`);
+      notify('success', `文件已成功拆分成 ${result.chunksCount || 0} 个部分。`);
     } catch (e: any) {
       logError_ACU('[ACU-V2] splitFile failed', e);
       notify('error', e?.message || '读取文件时出错。');

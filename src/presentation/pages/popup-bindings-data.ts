@@ -579,7 +579,7 @@ export async function bindDataEvents_ACU(): Promise<void> {
       // [新增] 外部导入注入按钮（自选表格）在下方统一绑定（使用 $injectImportedTxtButton）
       
       if ($injectImportedTxtButton && $injectImportedTxtButton.length) {
-          $injectImportedTxtButton.on('click', handleInjectImportedTxtSelected_ACU);
+          $injectImportedTxtButton.on('click', () => { void handleInjectImportedTxtSelected_ACU(); });
       }
 
       // 导入表选择：全选 / 全不选

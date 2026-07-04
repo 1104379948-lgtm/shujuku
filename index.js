@@ -43930,6 +43930,142 @@ $CONTENT
      *
      * 只负责「初始化/恢复导入数据库」和「最终注入+清理」，不涉及 UI（toast/按钮状态）。
      */
+    async function clearImportResumeStatus_ACU() {
+        await importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_ACU);
+        await importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_STANDARD_ACU);
+        await importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_SUMMARY_ACU);
+        await importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_FULL_ACU);
+    }
+    async function resolveImportTargetWorldbook_ACU(targetWorldbook) {
+        const target = String(targetWorldbook || '').trim();
+        if (!target)
+            return null;
+        if (target === 'character') {
+            try {
+                const primary = await getCurrentCharPrimaryLorebook_ACU();
+                return typeof primary === 'string' && primary ? primary : null;
+            }
+            catch (e) {
+                logError_ACU('[外部导入] Failed to resolve current character primary lorebook.', e);
+                return null;
+            }
+        }
+        return target;
+    }
+    async function withImportPromptFilterForced_ACU(task) {
+        const previousValue = settings_ACU.importPromptExcludeImportedWorldbookEntries;
+        settings_ACU.importPromptExcludeImportedWorldbookEntries = true;
+        try {
+            return await task();
+        }
+        finally {
+            settings_ACU.importPromptExcludeImportedWorldbookEntries = previousValue;
+        }
+    }
+    /**
+     * 将外部传入的 TXT 文本按字符数拆分并写入导入暂存。
+     * 无 UI/DOM 依赖，供公开 API 和新 UI 复用。
+     */
+    async function importTxtTextAndSplitCore_ACU(text, options = {}) {
+        try {
+            if (typeof text !== 'string') {
+                return { success: false, error: '导入内容必须是字符串。' };
+            }
+            if (!text) {
+                return { success: false, error: '导入文本为空。' };
+            }
+            const configuredSplitSize = Number(options.splitSize ?? settings_ACU.importSplitSize ?? 10000);
+            const splitSize = Number.isFinite(configuredSplitSize) && configuredSplitSize > 0
+                ? Math.floor(configuredSplitSize)
+                : 10000;
+            const clearPrevious = options.clearPrevious !== false;
+            if (clearPrevious) {
+                await clearImportResumeStatus_ACU();
+            }
+            const chunks = [];
+            for (let i = 0; i < text.length; i += splitSize) {
+                chunks.push({ content: text.substring(i, i + splitSize) });
+            }
+            await importTempSet_ACU(STORAGE_KEY_IMPORTED_ENTRIES_ACU, JSON.stringify(chunks));
+            logDebug_ACU(`[外部导入] Saved ${chunks.length} text chunks to temp storage (split=${splitSize}).`);
+            return { success: true, chunksCount: chunks.length };
+        }
+        catch (e) {
+            const message = e?.message || '拆分并暂存导入文本时出错。';
+            logError_ACU('[外部导入] importTxtTextAndSplitCore failed:', e);
+            return { success: false, error: message };
+        }
+    }
+    /**
+     * 无 UI 的导入暂存注入核心流程。
+     * 调用方必须传入目标世界书；selectedSheetKeys 为空/未传表示沿用全表注入逻辑。
+     */
+    async function injectImportedSelectedCore_ACU(options = {}) {
+        try {
+            const savedEntriesJson = await importTempGet_ACU(STORAGE_KEY_IMPORTED_ENTRIES_ACU);
+            if (!savedEntriesJson) {
+                return { success: false, error: '尚未加载 TXT 文本，未找到导入暂存 chunks。' };
+            }
+            let allChunks = [];
+            try {
+                const parsed = JSON.parse(savedEntriesJson);
+                allChunks = Array.isArray(parsed) ? parsed : [];
+            }
+            catch (e) {
+                logError_ACU('[外部导入] Could not parse imported entries from storage.', e);
+                await importTempRemove_ACU(STORAGE_KEY_IMPORTED_ENTRIES_ACU);
+                await importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_ACU);
+                return { success: false, error: '导入暂存数据已损坏，已清空。请重新导入 TXT 文本。' };
+            }
+            if (allChunks.length === 0) {
+                return { success: false, error: '没有可注入的文本分块。' };
+            }
+            const importTarget = await resolveImportTargetWorldbook_ACU(options.targetWorldbook || '');
+            if (!importTarget) {
+                return { success: false, error: '无法注入：未设置或未找到实际导入目标世界书。' };
+            }
+            const selectedSheetKeys = Array.isArray(options.selectedSheetKeys) && options.selectedSheetKeys.length > 0
+                ? options.selectedSheetKeys.slice()
+                : null;
+            const selectionSig = JSON.stringify(selectedSheetKeys || []);
+            const initResult = await initImportDatabase_ACU(importTarget, selectedSheetKeys, allChunks, selectionSig);
+            if (!initResult.success || !initResult.status || !initResult.modeSuffix) {
+                return { success: false, error: initResult.error || '导入初始化失败。' };
+            }
+            const status = initResult.status;
+            const modeSuffix = initResult.modeSuffix;
+            const updateMode = 'manual_unified';
+            let processedChunks = status.currentIndex || 0;
+            for (let i = status.currentIndex; i < allChunks.length; i++) {
+                const chunk = allChunks[i] || {};
+                const mockMessage = { is_user: false, mes: String(chunk.content || ''), name: '导入文本' };
+                const abortController = new AbortController();
+                const result = await withImportPromptFilterForced_ACU(() => executeCardUpdateCore_ACU([mockMessage], -1, true, updateMode, true, selectedSheetKeys, null, abortController, { currentBatch: i + 1, totalBatches: allChunks.length }, options.onProgress));
+                if (!result.success || result.aborted) {
+                    status.currentIndex = i;
+                    await importTempSet_ACU(STORAGE_KEY_IMPORTED_STATUS_ACU, JSON.stringify(status));
+                    const error = result.error || (result.aborted ? '导入任务已终止。' : '分块处理失败。');
+                    logError_ACU(`[外部导入] Chunk ${i + 1}/${allChunks.length} failed:`, error);
+                    return { success: false, processedChunks, error: `分块 ${i + 1}/${allChunks.length} 处理失败：${error}` };
+                }
+                const saved = await saveChunkProgress_ACU(importTarget, modeSuffix, status, i);
+                if (!saved) {
+                    return { success: false, processedChunks, error: `第 ${i + 1} 个分块已处理，但无法保存临时数据库条目。` };
+                }
+                processedChunks = i + 1;
+            }
+            const finalResult = await finalizeImportAndCleanup_ACU(importTarget, selectedSheetKeys, modeSuffix, allChunks.length);
+            if (!finalResult.success) {
+                return { success: false, processedChunks, error: finalResult.error || '最终注入失败。' };
+            }
+            return { success: true, processedChunks: allChunks.length };
+        }
+        catch (e) {
+            const message = e?.message || '外部导入注入失败。';
+            logError_ACU('[外部导入] injectImportedSelectedCore failed:', e);
+            return { success: false, error: message };
+        }
+    }
     /**
      * 初始化或恢复导入数据库
      *
@@ -44195,7 +44331,7 @@ $CONTENT
     }
 
     // import-process.ts — 导入编排逻辑（presentation 层：涉及 UI 读取和状态更新）
-    async function processImportedTxtAsUpdates_ACU() {
+    async function processImportedTxtAsUpdates_ACU(options = {}) {
         // 外部导入：按"自选表格"处理与注入（与手动填表一致的表选择体验）
         const $injectButton = null; // 旧闭包变量，现在通过 UI 层控制
         const savedEntriesJson = await importTempGet_ACU(STORAGE_KEY_IMPORTED_ENTRIES_ACU);
@@ -44216,7 +44352,7 @@ $CONTENT
         if (!Array.isArray(allChunks) || allChunks.length === 0)
             return;
         // 先获取导入目标世界书
-        const importTargetLorebook = await getImportWorldbookTarget_ACU();
+        const importTargetLorebook = options.targetWorldbook || await getImportWorldbookTarget_ACU();
         if (!importTargetLorebook) {
             showToastr_ACU('error', '无法注入：未设置导入数据注入目标世界书。');
             return;
@@ -44229,8 +44365,10 @@ $CONTENT
             return;
         }
         // 读取当前表选择（空且曾选择过 => 不允许执行）
-        const selectedSheetKeys = getImportSelectionFromUI_ACU();
-        if (settings_ACU.hasImportTableSelection && (!selectedSheetKeys || selectedSheetKeys.length === 0)) {
+        const selectedSheetKeys = Array.isArray(options.selectedSheetKeys) && options.selectedSheetKeys.length > 0
+            ? options.selectedSheetKeys.slice()
+            : getImportSelectionFromUI_ACU();
+        if (!options.selectedSheetKeys && settings_ACU.hasImportTableSelection && (!selectedSheetKeys || selectedSheetKeys.length === 0)) {
             showToastr_ACU('error', '未选择任何表格，无法注入。请先在"注入表选择"中勾选至少一个表。');
             return;
         }
@@ -44299,9 +44437,9 @@ $CONTENT
             setImportInjectButtonEnabled_ACU(true);
     }
     // [T176] handleTxtImportAndSplit_ACU 已移到 presentation/components/import-status-ui.ts
-    async function handleInjectImportedTxtSelected_ACU() {
+    async function handleInjectImportedTxtSelected_ACU(options = {}) {
         showToastr_ACU('info', '开始处理导入文件（自选表格注入）...', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
-        await processImportedTxtAsUpdates_ACU();
+        await processImportedTxtAsUpdates_ACU(options);
     }
     async function clearImportLocalStorage_ACU(notify = true) {
         try {
@@ -51111,7 +51249,7 @@ $CONTENT
         }
         // [新增] 外部导入注入按钮（自选表格）在下方统一绑定（使用 $injectImportedTxtButton）
         if ($injectImportedTxtButton && $injectImportedTxtButton.length) {
-            $injectImportedTxtButton.on('click', handleInjectImportedTxtSelected_ACU);
+            $injectImportedTxtButton.on('click', () => { void handleInjectImportedTxtSelected_ACU(); });
         }
         // 导入表选择：全选 / 全不选
         if ($importTableSelectAll_ACU && $importTableSelectAll_ACU.length) {
@@ -61464,12 +61602,19 @@ $CONTENT
                 logError_ACU('importTxtAndSplit failed:', e);
                 return false;
             } },
-            injectImportedSelected: async function () { try {
-                return await handleInjectImportedTxtSelected_ACU();
+            importTxtTextAndSplit: async function (text, options = {}) { try {
+                return await importTxtTextAndSplitCore_ACU(text, options);
+            }
+            catch (e) {
+                logError_ACU('importTxtTextAndSplit failed:', e);
+                return { success: false, error: e?.message || '导入 TXT 文本失败。' };
+            } },
+            injectImportedSelected: async function (options) { try {
+                return options?.targetWorldbook ? await injectImportedSelectedCore_ACU(options) : await handleInjectImportedTxtSelected_ACU(options || {});
             }
             catch (e) {
                 logError_ACU('injectImportedSelected failed:', e);
-                return false;
+                return { success: false, error: e?.message || '注入导入文本失败。' };
             } },
             injectImportedStandard: async function () { try {
                 return await handleInjectSplitEntriesStandard_ACU();
@@ -96266,20 +96411,13 @@ Expected function or array of functions, received type ${typeof value}.`
                     await store.refreshStaging();
                     return;
                 }
-                // wipe stale resume statuses
-                await Promise.all([
-                    importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_ACU),
-                    importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_STANDARD_ACU),
-                    importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_SUMMARY_ACU),
-                    importTempRemove_ACU(STORAGE_KEY_IMPORTED_STATUS_FULL_ACU),
-                ]);
-                const chunks = [];
-                for (let i = 0; i < content.length; i += splitSize) {
-                    chunks.push({ content: content.substring(i, i + splitSize) });
+                const result = await importTxtTextAndSplitCore_ACU(content, { splitSize, clearPrevious: true });
+                if (!result.success) {
+                    notify('error', result.error || '拆分并暂存导入文本时出错。');
+                    return;
                 }
-                await importTempSet_ACU(STORAGE_KEY_IMPORTED_ENTRIES_ACU, JSON.stringify(chunks));
-                logDebug_ACU(`[ACU-V2 import] saved ${chunks.length} chunks (split=${splitSize})`);
-                notify('success', `文件已成功拆分成 ${chunks.length} 个部分。`);
+                logDebug_ACU(`[ACU-V2 import] saved ${result.chunksCount || 0} chunks (split=${splitSize})`);
+                notify('success', `文件已成功拆分成 ${result.chunksCount || 0} 个部分。`);
             }
             catch (e) {
                 logError_ACU('[ACU-V2] splitFile failed', e);

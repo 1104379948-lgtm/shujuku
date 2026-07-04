@@ -19,9 +19,9 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } f
 import { setImportInjectButtonEnabled_ACU } from '../components/import-status-ui';
 import { getSortedSheetKeys_ACU } from '../../service/template/chat-scope';
 import { getInjectionTargetLorebook_ACU } from '../../service/worldbook/injection-engine';
-import { initImportDatabase_ACU, saveChunkProgress_ACU, finalizeImportAndCleanup_ACU, clearImportedEntriesCore_ACU, deleteImportedEntriesCore_ACU } from '../../service/import/import-executor';
+import { initImportDatabase_ACU, saveChunkProgress_ACU, finalizeImportAndCleanup_ACU, clearImportedEntriesCore_ACU, deleteImportedEntriesCore_ACU, type InjectImportedSelectedOptions_ACU } from '../../service/import/import-executor';
 
-export   async function processImportedTxtAsUpdates_ACU() {
+export   async function processImportedTxtAsUpdates_ACU(options: InjectImportedSelectedOptions_ACU = {}) {
       // 外部导入：按"自选表格"处理与注入（与手动填表一致的表选择体验）
       const $injectButton: any = null; // 旧闭包变量，现在通过 UI 层控制
 
@@ -44,7 +44,7 @@ export   async function processImportedTxtAsUpdates_ACU() {
       if (!Array.isArray(allChunks) || allChunks.length === 0) return;
 
       // 先获取导入目标世界书
-      const importTargetLorebook = await getImportWorldbookTarget_ACU();
+      const importTargetLorebook = options.targetWorldbook || await getImportWorldbookTarget_ACU();
       if (!importTargetLorebook) {
           showToastr_ACU('error', '无法注入：未设置导入数据注入目标世界书。');
           return;
@@ -58,8 +58,10 @@ export   async function processImportedTxtAsUpdates_ACU() {
       }
 
       // 读取当前表选择（空且曾选择过 => 不允许执行）
-      const selectedSheetKeys = getImportSelectionFromUI_ACU();
-      if (settings_ACU.hasImportTableSelection && (!selectedSheetKeys || selectedSheetKeys.length === 0)) {
+      const selectedSheetKeys = Array.isArray(options.selectedSheetKeys) && options.selectedSheetKeys.length > 0
+          ? options.selectedSheetKeys.slice()
+          : getImportSelectionFromUI_ACU();
+      if (!options.selectedSheetKeys && settings_ACU.hasImportTableSelection && (!selectedSheetKeys || selectedSheetKeys.length === 0)) {
           showToastr_ACU('error', '未选择任何表格，无法注入。请先在"注入表选择"中勾选至少一个表。');
           return;
       }
@@ -138,9 +140,9 @@ export   async function processImportedTxtAsUpdates_ACU() {
   // [T176] handleTxtImportAndSplit_ACU 已移到 presentation/components/import-status-ui.ts
 
 
-export   async function handleInjectImportedTxtSelected_ACU() {
+export   async function handleInjectImportedTxtSelected_ACU(options: InjectImportedSelectedOptions_ACU = {}) {
       showToastr_ACU('info', '开始处理导入文件（自选表格注入）...', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
-      await processImportedTxtAsUpdates_ACU();
+      await processImportedTxtAsUpdates_ACU(options);
   }
 
 
