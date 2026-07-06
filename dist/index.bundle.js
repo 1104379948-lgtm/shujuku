@@ -7148,9 +7148,9 @@ $CONTENT
           } catch {}
     			if (isInstance) {
             return Reflect.construct(f, arguments, this.constructor);
-    			}
+			}
     			return f.apply(this, arguments);
-    		};
+		};
     		a.prototype = f.prototype;
       } else a = {};
       Object.defineProperty(a, '__esModule', {value: true});
@@ -7160,9 +7160,9 @@ $CONTENT
     			enumerable: true,
     			get: function () {
     				return n[k];
-    			}
-    		});
-    	});
+			}
+		});
+	});
     	return a;
     }
 
@@ -7392,13 +7392,13 @@ $CONTENT
     		    module.exports = initSqlJs;
     		    // This will allow the module to be used in ES6 or CommonJS
     		    module.exports.default = initSqlJs;
-    		}
+		}
     		else if (typeof undefined === 'function' && undefined['amd']) {
     		    undefined([], function() { return initSqlJs; });
-    		}
+		}
     		else if ('object' === 'object'){
     		    exports$1["Module"] = initSqlJs;
-    		} 
+		}
     	} (sqlAsmMemoryGrowth$1, sqlAsmMemoryGrowth$1.exports));
     	return sqlAsmMemoryGrowth$1.exports;
     }
@@ -43399,7 +43399,7 @@ $CONTENT
      * 批处理更新：presentation 层调用 service 层，根据返回值显示 toast
      */
     async function processUpdates_ACU(indicesToUpdate, mode = 'auto', options = {}) {
-        const result = await processUpdatesBatch_ACU(indicesToUpdate, mode, options, 
+        const result = await processUpdatesBatch_ACU(indicesToUpdate, mode, options,
         // executeUpdate 回调：创建 AbortController 并调用 presentation 层的 proceedWithCardUpdate
         async (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => {
             return proceedWithCardUpdate_ACU(messagesToUse, '', saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext);
@@ -43468,7 +43468,7 @@ $CONTENT
                     }
                 },
             });
-            const result = await orchestrateManualUpdate_ACU(targetKeys, 
+            const result = await orchestrateManualUpdate_ACU(targetKeys,
             // processBatch 回调保留给兼容路径；当前手动填表主路径由 service grouped helper 执行。
             async (indices, batchMode, batchOptions) => {
                 return processUpdates_ACU(indices, batchMode, batchOptions);
@@ -80068,7 +80068,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 patchActionForGrouping(store, Object.keys(newStore._hmrPayload.actions), !!store._isOptionsAPI);
             };
         }
-        addStoreToDevtools(app, 
+        addStoreToDevtools(app,
         // FIXME: is there a way to allow the assignment from Store<Id, S, G, A> to StoreGeneric?
         store);
     }
@@ -99076,7 +99076,7 @@ Expected function or array of functions, received type ${typeof value}.`
     			toDisplayString($setup.flow.message.value.text),
     			1
     			/* TEXT */
-    		)]),
+		)]),
     		_: 1
     	}, 8, ["kind"])) : createCommentVNode("v-if", true), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-data-mgmt-page__layout" }, {
     		default: withCtx(() => [createBaseVNode("div", _hoisted_2$e, [createVNode($setup["AcuPanel"], {
@@ -99141,8 +99141,8 @@ Expected function or array of functions, received type ${typeof value}.`
     							"aria-label",
     							"disabled",
     							"onClick"
-    						])]);
-    					}),
+						])]);
+					}),
     					128
     					/* KEYED_FRAGMENT */
     				))])) : (openBlock(), createElementBlock("p", _hoisted_7$6, " 暂无历史标识。 "))]),
@@ -99155,7 +99155,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					" 删除当前标识注入条目 ",
     					-1
     					/* CACHED */
-    				)])]),
+				)])]),
     				_: 1
     			}, 8, ["loading"]), createVNode($setup["AcuButton"], {
     				variant: "primary",
@@ -99166,7 +99166,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					" 保存并应用 ",
     					-1
     					/* CACHED */
-    				)])]),
+				)])]),
     				_: 1
     			}, 8, ["loading"])])]),
     			_: 1
@@ -99192,7 +99192,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						" 合并导入（模板+指令） ",
     						-1
     						/* CACHED */
-    					)])]),
+					)])]),
     					_: 1
     				}, 8, ["disabled", "onFile"]),
     				createVNode($setup["AcuButton"], {
@@ -99210,7 +99210,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						" 合并导出（模板+指令） ",
     						-1
     						/* CACHED */
-    					)])]),
+					)])]),
     					_: 1
     				}, 8, ["disabled", "onClick"]),
     				createVNode($setup["AcuButton"], {
@@ -99228,7 +99228,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						" 特殊导出 ",
     						-1
     						/* CACHED */
-    					)])]),
+					)])]),
     					_: 1
     				}, 8, ["disabled", "onClick"]),
     				createVNode($setup["AcuButton"], {
@@ -99240,10 +99240,10 @@ Expected function or array of functions, received type ${typeof value}.`
     						" 模板覆盖最新层数据 ",
     						-1
     						/* CACHED */
-    					)])]),
+					)])]),
     					_: 1
     				}, 8, ["loading"])
-    			])]),
+			])]),
     			_: 1
     		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_10$6, [createVNode($setup["AcuPanel"], {
     			title: $setup.dataMgmtCopy.panels.cleanup.title,
@@ -99255,7 +99255,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					{
     						id: "acu-cleanup-auto-title",
     						class: "acu-v2-data-mgmt-page__section-title"
-    					},
+					},
     					" 自动清理 ",
     					-1
     					/* CACHED */
@@ -99271,25 +99271,25 @@ Expected function or array of functions, received type ${typeof value}.`
     						onChange: _cache[2] || (_cache[2] = ($event) => $setup.flow.setRetainRecentLayers($event))
     					}, null, 8, ["model-value"])]),
     					_: 1
-    				})])]),
+				})])]),
     				createBaseVNode("section", _hoisted_13$5, [
     					_cache[14] || (_cache[14] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-cleanup-manual-title",
     							class: "acu-v2-data-mgmt-page__section-title"
-    						},
+						},
     						" 手动删除 ",
     						-1
     						/* CACHED */
-    					)),
+					)),
     					createBaseVNode(
     						"p",
     						_hoisted_14$5,
     						" 当前聊天 " + toDisplayString($setup.flow.aiMessageCount.value) + " 个 AI 楼层 · 将处理：" + toDisplayString($setup.flow.rangeLabel.value),
     						1
     						/* TEXT */
-    					),
+					),
     					createBaseVNode("div", _hoisted_15$5, [createVNode($setup["AcuFormRow"], {
     						label: "起始楼层",
     						hint: "从第N个楼层 AI 回复开始，留空为第 1 层。"
@@ -99315,8 +99315,8 @@ Expected function or array of functions, received type ${typeof value}.`
     							"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.flow.deleteRange.endFloor = $event)
     						}, null, 8, ["model-value"])]),
     						_: 1
-    					})])
-    				]),
+					})])
+				]),
     				createBaseVNode("div", _hoisted_16$5, [
     					createVNode($setup["AcuButton"], {
     						block: "",
@@ -99327,7 +99327,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							" 删除当前标识本地数据 ",
     							-1
     							/* CACHED */
-    						)])]),
+						)])]),
     						_: 1
     					}, 8, ["loading"]),
     					createVNode($setup["AcuButton"], {
@@ -99340,7 +99340,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							" 删除所有本地数据 ",
     							-1
     							/* CACHED */
-    						)])]),
+						)])]),
     						_: 1
     					}, 8, ["loading"]),
     					createVNode($setup["AcuButton"], {
@@ -99352,15 +99352,15 @@ Expected function or array of functions, received type ${typeof value}.`
     							" 恢复默认配置 ",
     							-1
     							/* CACHED */
-    						)])]),
+						)])]),
     						_: 1
     					}, 8, ["loading"])
-    				])
-    			]),
+				])
+			]),
     			_: 1
     		}, 8, ["title", "description"])])]),
     		_: 1
-    	})]);
+	})]);
     }
     var DataMgmtPage = /* @__PURE__ */ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-eb72c354"]]);
 
@@ -99406,7 +99406,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					toDisplayString($props.message.text),
     					1
     					/* TEXT */
-    				)]),
+				)]),
     				_: 1
     			}, 8, ["kind"])) : createCommentVNode("v-if", true),
     			createBaseVNode("div", _hoisted_1$e, [createVNode($setup["AcuButton"], {
@@ -99424,9 +99424,9 @@ Expected function or array of functions, received type ${typeof value}.`
     					" 从默认新建 ",
     					-1
     					/* CACHED */
-    				)])]),
+				)])]),
     				_: 1
-    			})]),
+			})]),
     			$props.presets.length ? (openBlock(), createElementBlock("ul", _hoisted_2$d, [(openBlock(true), createElementBlock(
     				Fragment,
     				null,
@@ -99440,15 +99440,15 @@ Expected function or array of functions, received type ${typeof value}.`
     							as: "span",
     							variant: "list-title",
     							class: "acu-v2-manage-item__name"
-    						},
+						},
     						{
     							default: withCtx(() => [createTextVNode(
     								toDisplayString(preset.name),
     								1
     								/* TEXT */
-    							)]),
+							)]),
     							_: 2
-    						},
+						},
     						1024
     						/* DYNAMIC_SLOTS */
     					), createVNode(
@@ -99457,15 +99457,15 @@ Expected function or array of functions, received type ${typeof value}.`
     							as: "span",
     							variant: "caption",
     							class: "acu-v2-manage-item__meta"
-    						},
+						},
     						{
     							default: withCtx(() => [createTextVNode(
     								toDisplayString(preset.promptGroup.length) + " 段提示词",
     								1
     								/* TEXT */
-    							)]),
+							)]),
     							_: 2
-    						},
+						},
     						1024
     						/* DYNAMIC_SLOTS */
     					)]), createBaseVNode("div", _hoisted_4$9, [
@@ -99490,8 +99490,8 @@ Expected function or array of functions, received type ${typeof value}.`
     							title: "删除",
     							onClick: ($event) => _ctx.$emit("delete", preset.name)
     						}, null, 8, ["onClick"])
-    					])]);
-    				}),
+					])]);
+				}),
     				128
     				/* KEYED_FRAGMENT */
     			))])) : (openBlock(), createBlock($setup["AcuText"], {
@@ -107043,18 +107043,18 @@ Expected function or array of functions, received type ${typeof value}.`
     					class: normalizeClass(["acu-v2-app__theme-menu", { "is-closing": $setup.isThemeMenuClosing }]),
     					role: "dialog",
     					"aria-label": "外观设置"
-    				},
+				},
     				[createBaseVNode("section", _hoisted_10, [
     					_cache[3] || (_cache[3] = createBaseVNode(
     						"div",
     						{
     							id: "acu-v2-theme-section-title",
     							class: "acu-v2-app__appearance-section-title"
-    						},
+						},
     						"主题",
     						-1
     						/* CACHED */
-    					)),
+					)),
     					createBaseVNode("ul", _hoisted_11, [(openBlock(true), createElementBlock(
     						Fragment,
     						null,
@@ -107073,19 +107073,19 @@ Expected function or array of functions, received type ${typeof value}.`
     										style: normalizeStyle({
     											"--acu-theme-swatch-bg": t.tokens.bg0,
     											"--acu-theme-swatch-accent": t.tokens.accent
-    										})
-    									},
+										})
+									},
     									null,
     									4
     									/* STYLE */
-    								),
+								),
     								createBaseVNode(
     									"span",
     									_hoisted_14,
     									toDisplayString(t.name),
     									1
     									/* TEXT */
-    								),
+								),
     								$setup.isCustomThemeId(t.id) ? (openBlock(), createElementBlock("span", _hoisted_15, "自定义")) : createCommentVNode("v-if", true)
     							]), createBaseVNode("span", {
     								class: "acu-v2-app__theme-tools",
@@ -107103,10 +107103,10 @@ Expected function or array of functions, received type ${typeof value}.`
     								title: "删除自定义主题：" + t.name,
     								onClick: ($event) => $setup.deleteTheme(t.id)
     							}, null, 8, ["title", "onClick"])) : createCommentVNode("v-if", true)])], 10, _hoisted_12);
-    						}),
+						}),
     						128
     						/* KEYED_FRAGMENT */
-    					))]),
+					))]),
     					createBaseVNode("div", _hoisted_16, [createVNode($setup["AcuFileButton"], {
     						size: "sm",
     						accept: "application/json,.json",
@@ -107122,15 +107122,15 @@ Expected function or array of functions, received type ${typeof value}.`
     							" 导入主题 ",
     							-1
     							/* CACHED */
-    						)])]),
+						)])]),
     						_: 1
-    					})])
+					})])
     				]), createBaseVNode("section", _hoisted_17, [createBaseVNode("div", _hoisted_18, [_cache[4] || (_cache[4] = createBaseVNode(
     					"span",
     					{
     						id: "acu-v2-scale-section-title",
     						class: "acu-v2-app__appearance-section-title"
-    					},
+					},
     					"界面缩放",
     					-1
     					/* CACHED */
@@ -107166,7 +107166,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					key: 0,
     					class: normalizeClass(["acu-v2-app__mobile-nav-layer", { "is-closing": $setup.isMobileNavClosing }]),
     					onClick: withModifiers($setup.closeMobileNav, ["self"])
-    				},
+				},
     				[createBaseVNode("aside", {
     					class: "acu-v2-app__mobile-nav",
     					style: $setup.mobileNavDrawerStyle,
@@ -107178,13 +107178,13 @@ Expected function or array of functions, received type ${typeof value}.`
     				}, [createVNode($setup["Sidebar"], {
     					variant: "drawer",
     					onNavigate: $setup.closeMobileNav
-    				})])],
+				})])],
     				2
     				/* CLASS */
     			)) : createCommentVNode("v-if", true),
     			createVNode($setup["AcuDialogHost"]),
     			createVNode($setup["AcuToastViewport"])
-    		],
+		],
     		512
     		/* NEED_PATCH */
     	), [[vShow, $setup.rootShell.isOpen]])]);

@@ -245,7 +245,7 @@ export async function handleManualUpdate_ACU() {
                 acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
             });
         }
- 
+
         // UI：收集手动额外提示
         collectManualExtraHint_ACU();
 
