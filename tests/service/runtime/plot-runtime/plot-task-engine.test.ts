@@ -1,0 +1,989 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const {
+  mockSettings,
+  mockAbortControllerRef,
+  mockCurrentJsonTableDataRef,
+  mockPlanningGuard,
+  mockSetTempPlotToSave,
+  mockSetCurrentJsonTableData,
+  mockGetApiConfigByPreset,
+  mockCallApi,
+  mockCallApiWithPlotPreset,
+  mockGetCharLorebooks,
+  mockGetChatArray,
+  mockGetPersonaDescription,
+  mockGetCharDescription,
+  mockBuildCombinedWorldbookContentByStrategy,
+  mockEnsurePlotTasksCompat,
+  mockGetPlotPromptContentById,
+  mockNormalizePlotTask,
+  mockNormalizePlotTasks,
+  mockParseRandomTags,
+  mockReplaceRandomVariables,
+  mockGetLatestAIMessageContent,
+  mockApplyContextTagFilters,
+  mockApplyExcludeRulesToText,
+  mockMergeAllIndependentTables,
+  mockFormatSummaryIndexForPlot,
+  mockFormatOutlineTableForPlot,
+  mockGetNormalizedPlotMessageRole,
+  mockTryRenderPlotTemplateWithEjs,
+  mockRenderPlotTaskContentWithIsolatedVariables,
+  mockExtractPlotTagsFromResponse,
+  mockGetPlotPlaceholderTagNames,
+  mockBuildPlotTagMapFromText,
+  mockReplacePlotTagPlaceholders,
+  mockAggregatePlotTaskTags,
+  mockBuildPlotSaveContentFromTaskResults,
+  mockBuildFinalPlotInjectionMessage,
+  mockGetPlotFromHistory,
+  mockSavePlotToLatestMessage,
+  mockRunScriptHook,
+  mockLogError,
+  mockHashUserInput,
+  mockIsEntryBlocked,
+} = vi.hoisted(() => {
+  const mockAbortControllerRef = { value: null as any };
+  const mockCurrentJsonTableDataRef = {
+    value: {
+      sheet_0: {
+        name: '纪要表',
+        content: [['row_id', '内容'], ['1', '初始纪要']],
+      },
+    } as any,
+  };
+
+  return {
+    mockSettings: {
+      plotApiPreset: '',
+      apiMode: 'custom',
+      apiConfig: { useMainApi: true },
+      plotSettings: {
+        contextTurnCount: 2,
+        contextExtractTags: '',
+        contextExtractRules: [],
+        contextExcludeTags: '',
+        contextExcludeRules: [],
+        loopSettings: { maxRetries: 3 },
+      },
+    } as any,
+    mockAbortControllerRef,
+    mockCurrentJsonTableDataRef,
+    mockPlanningGuard: { ignoreNextGenerationEndedCount: 0 } as any,
+    mockSetTempPlotToSave: vi.fn(),
+    mockSetCurrentJsonTableData: vi.fn((value: any) => {
+      mockCurrentJsonTableDataRef.value = value;
+    }),
+    mockGetApiConfigByPreset: vi.fn(),
+    mockCallApi: vi.fn(),
+    mockCallApiWithPlotPreset: vi.fn(),
+    mockGetCharLorebooks: vi.fn(),
+    mockGetChatArray: vi.fn(),
+    mockGetPersonaDescription: vi.fn(),
+    mockGetCharDescription: vi.fn(),
+    mockBuildCombinedWorldbookContentByStrategy: vi.fn(),
+    mockEnsurePlotTasksCompat: vi.fn(),
+    mockGetPlotPromptContentById: vi.fn(),
+    mockNormalizePlotTask: vi.fn(),
+    mockNormalizePlotTasks: vi.fn(),
+    mockParseRandomTags: vi.fn(),
+    mockReplaceRandomVariables: vi.fn(),
+    mockGetLatestAIMessageContent: vi.fn(),
+    mockApplyContextTagFilters: vi.fn(),
+    mockApplyExcludeRulesToText: vi.fn(),
+    mockMergeAllIndependentTables: vi.fn(),
+    mockFormatSummaryIndexForPlot: vi.fn(),
+    mockFormatOutlineTableForPlot: vi.fn(),
+    mockGetNormalizedPlotMessageRole: vi.fn(),
+    mockTryRenderPlotTemplateWithEjs: vi.fn(),
+    mockRenderPlotTaskContentWithIsolatedVariables: vi.fn(),
+    mockExtractPlotTagsFromResponse: vi.fn(),
+    mockGetPlotPlaceholderTagNames: vi.fn(),
+    mockBuildPlotTagMapFromText: vi.fn(),
+    mockReplacePlotTagPlaceholders: vi.fn(),
+    mockAggregatePlotTaskTags: vi.fn(),
+    mockBuildPlotSaveContentFromTaskResults: vi.fn(),
+    mockBuildFinalPlotInjectionMessage: vi.fn(),
+    mockGetPlotFromHistory: vi.fn(),
+    mockSavePlotToLatestMessage: vi.fn(),
+    mockRunScriptHook: vi.fn(async () => []),
+    mockLogError: vi.fn(),
+    mockHashUserInput: vi.fn((text: string) => `hash_${text}`),
+    mockIsEntryBlocked: vi.fn((entry: any) => !!entry?.blocked),
+  };
+});
+
+vi.mock('../../../../src/shared/defaults-json.js', () => ({
+  DEFAULT_PLOT_SETTINGS_ACU: {
+    loopSettings: { maxRetries: 3 },
+  },
+}));
+
+vi.mock('../../../../src/service/ai/api-call', () => ({
+  callApi_ACU: mockCallApi,
+  callApiWithPlotPreset_ACU: mockCallApiWithPlotPreset,
+  getApiConfigByPreset_ACU: mockGetApiConfigByPreset,
+}));
+
+vi.mock('../../../../src/service/runtime/state-manager', () => ({
+  settings_ACU: mockSettings,
+  planningGuard_ACU: mockPlanningGuard,
+  _set_tempPlotToSave_ACU: mockSetTempPlotToSave,
+  _set_currentJsonTableData_ACU: mockSetCurrentJsonTableData,
+  get currentJsonTableData_ACU() {
+    return mockCurrentJsonTableDataRef.value;
+  },
+  get abortController_ACU() {
+    return mockAbortControllerRef.value;
+  },
+}));
+
+vi.mock('../../../../src/data/gateways/character-gateway', () => ({
+  getCharLorebooks_ACU: mockGetCharLorebooks,
+}));
+
+vi.mock('../../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: mockGetChatArray,
+}));
+
+vi.mock('../../../../src/data/gateways/host-state-gateway', () => ({
+  getPersonaDescription_ACU: mockGetPersonaDescription,
+  getCharDescription_ACU: mockGetCharDescription,
+}));
+
+vi.mock('../../../../src/service/worldbook/pipeline', () => ({
+  buildCombinedWorldbookContentByStrategy_ACU: mockBuildCombinedWorldbookContentByStrategy,
+}));
+
+vi.mock('../../../../src/shared/utils', () => ({
+  escapeRegExp_ACU: (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+  hashUserInput_ACU: mockHashUserInput,
+  isEntryBlocked_ACU: mockIsEntryBlocked,
+  logDebug_ACU: vi.fn(),
+  logError_ACU: mockLogError,
+  logWarn_ACU: vi.fn(),
+  normalizeNonNegativeInteger_ACU: (value: any, fallback = 0) => {
+    const num = Number(value);
+    return Number.isFinite(num) && num >= 0 ? num : fallback;
+  },
+  normalizePositiveInteger_ACU: (value: any, fallback = 1) => {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? num : fallback;
+  },
+  normalizeExcludeRules_ACU: (rules: any) => Array.isArray(rules) ? rules : [],
+  normalizeExtractRules_ACU: (rules: any) => Array.isArray(rules) ? rules : [],
+}));
+
+vi.mock('../../../../src/service/plot/plot-logic', () => ({
+  ensurePlotTasksCompat_ACU: mockEnsurePlotTasksCompat,
+  getPlotPromptContentByIdFromSettings_ACU: mockGetPlotPromptContentById,
+  normalizePlotTask_ACU: mockNormalizePlotTask,
+  normalizePlotTasks_ACU: mockNormalizePlotTasks,
+}));
+
+vi.mock('../../../../src/service/runtime/template-vars', () => ({
+  parseRandomTags_ACU: mockParseRandomTags,
+  replaceRandomVariables_ACU: mockReplaceRandomVariables,
+  getLatestAIMessageContent_ACU: mockGetLatestAIMessageContent,
+  replaceDbSqlVariables: vi.fn((s: string) => s),
+}));
+
+vi.mock('../../../../src/service/runtime/helpers-context-tags', () => ({
+  applyContextTagFilters_ACU: mockApplyContextTagFilters,
+  applyExcludeRulesToText_ACU: mockApplyExcludeRulesToText,
+}));
+
+vi.mock('../../../../src/service/runtime/helpers-data-merge', () => ({
+  mergeAllIndependentTables_ACU: mockMergeAllIndependentTables,
+}));
+
+vi.mock('../../../../src/service/runtime/plot-runtime/plot-data-format', () => ({
+  formatTableDataForLLM_ACU: vi.fn(),
+  formatOutlineTableForPlot_ACU: mockFormatOutlineTableForPlot,
+  formatSummaryIndexForPlot_ACU: mockFormatSummaryIndexForPlot,
+  getSummaryIndexContentForPlot_ACU: vi.fn(),
+}));
+
+vi.mock('../../../../src/service/runtime/plot-runtime/plot-tag-utils', () => ({
+  getNormalizedPlotMessageRole_ACU: mockGetNormalizedPlotMessageRole,
+  tryRenderPlotTemplateWithEjs_ACU: mockTryRenderPlotTemplateWithEjs,
+  renderPlotTaskContentWithIsolatedVariables_ACU: mockRenderPlotTaskContentWithIsolatedVariables,
+  extractPlotTagsFromResponse_ACU: mockExtractPlotTagsFromResponse,
+  getPlotPlaceholderTagNames_ACU: mockGetPlotPlaceholderTagNames,
+  buildPlotTagMapFromText_ACU: mockBuildPlotTagMapFromText,
+  replacePlotTagPlaceholders_ACU: mockReplacePlotTagPlaceholders,
+  sortPlotTaskResults_ACU: vi.fn(),
+  aggregatePlotTaskTags_ACU: mockAggregatePlotTaskTags,
+  buildPlotSaveContentFromTaskResults_ACU: mockBuildPlotSaveContentFromTaskResults,
+  buildFinalPlotInjectionMessage_ACU: mockBuildFinalPlotInjectionMessage,
+}));
+
+vi.mock('../../../../src/service/runtime/plot-runtime/plot-history-preset', () => ({
+  getPlotFromHistory_ACU: mockGetPlotFromHistory,
+  savePlotToLatestMessage_ACU: mockSavePlotToLatestMessage,
+}));
+
+vi.mock('../../../../src/service/scripts', () => ({
+  runScriptHook_ACU: mockRunScriptHook,
+  stringifyScriptValue_ACU: (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value),
+}));
+
+import {
+  willPlotUseMainApiGenerateRaw_ACU,
+  runPlotTasksRuntime_ACU,
+  getWorldbookContentForPlot_ACU,
+} from '../../../../src/service/runtime/plot-runtime/plot-task-engine';
+import { clearScriptRequestOutputs_ACU, getScriptOutput_ACU, setScriptOutput_ACU } from '../../../../src/service/scripts/script-output-context';
+import { replaceScriptVariables_ACU } from '../../../../src/service/scripts/script-variable-resolver';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+
+  mockSettings.plotApiPreset = '';
+  mockSettings.apiMode = 'custom';
+  mockSettings.apiConfig = { useMainApi: true };
+  mockSettings.plotSettings = {
+    contextTurnCount: 2,
+    contextExtractTags: '',
+    contextExtractRules: [],
+    contextExcludeTags: '',
+    contextExcludeRules: [],
+    loopSettings: { maxRetries: 3 },
+  };
+
+  mockAbortControllerRef.value = null;
+  mockCurrentJsonTableDataRef.value = {
+    sheet_0: {
+      name: '纪要表',
+      content: [['row_id', '内容'], ['1', '初始纪要']],
+    },
+  };
+  mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+
+  mockGetApiConfigByPreset.mockReturnValue({
+    apiMode: 'custom',
+    apiConfig: { useMainApi: true },
+  });
+  mockGetChatArray.mockReturnValue([
+    { is_user: false, mes: '前文AI-1' },
+    { is_user: false, mes: '前文AI-2' },
+    { is_user: true, mes: '本轮输入' },
+  ]);
+  mockGetPersonaDescription.mockReturnValue('用户设定');
+  mockGetCharDescription.mockReturnValue('角色设定');
+  mockBuildCombinedWorldbookContentByStrategy.mockResolvedValue('世界书内容');
+
+  mockEnsurePlotTasksCompat.mockImplementation(() => undefined);
+  mockGetPlotPromptContentById.mockReturnValue('');
+  mockNormalizePlotTasks.mockImplementation((plotSettings: any) => Array.isArray(plotSettings?.tasks) ? plotSettings.tasks : []);
+  mockNormalizePlotTask.mockImplementation((task: any) => ({
+    enabled: true,
+    stage: 1,
+    order: 0,
+    maxRetries: 1,
+    minLength: 0,
+    extractTags: '',
+    promptGroup: [],
+    ...task,
+  }));
+
+  mockParseRandomTags.mockImplementation((text: string) => text);
+  mockReplaceRandomVariables.mockImplementation((text: string) => text);
+  mockGetLatestAIMessageContent.mockReturnValue('最近一条AI内容');
+  mockApplyContextTagFilters.mockImplementation((text: string) => text);
+  mockApplyExcludeRulesToText.mockImplementation((text: string) => String(text ?? ''));
+  mockMergeAllIndependentTables.mockResolvedValue(null);
+  mockFormatSummaryIndexForPlot.mockReturnValue({ success: true, content: '纪要索引' });
+  mockFormatOutlineTableForPlot.mockReturnValue('总体大纲');
+  mockGetNormalizedPlotMessageRole.mockImplementation((role: any) => String(role || 'user').toLowerCase());
+  mockTryRenderPlotTemplateWithEjs.mockImplementation(async (text: string) => text);
+  mockRenderPlotTaskContentWithIsolatedVariables.mockImplementation((text: string) => text);
+  mockExtractPlotTagsFromResponse.mockImplementation(() => ({ tagNames: [], extractedTags: {}, injectedFragments: [], injectOnlyTags: {}, injectOnlyFragments: [], injectOnlyTagNames: [] }));
+  mockGetPlotPlaceholderTagNames.mockReturnValue([]);
+  mockBuildPlotTagMapFromText.mockReturnValue(new Map());
+  mockReplacePlotTagPlaceholders.mockImplementation((text: string) => text);
+  mockAggregatePlotTaskTags.mockImplementation((results: any[]) => ({ aggregated: new Map(results.map((result: any) => [result.taskId, result.taskName])), injectOnlyTagNames: new Set<string>() }));
+  mockBuildPlotSaveContentFromTaskResults.mockReturnValue('保存的剧情内容');
+  mockBuildFinalPlotInjectionMessage.mockReturnValue('最终注入消息');
+  mockGetPlotFromHistory.mockReturnValue('上一轮剧情');
+  mockSavePlotToLatestMessage.mockResolvedValue(undefined);
+  mockRunScriptHook.mockResolvedValue([]);
+  mockCallApiWithPlotPreset.mockResolvedValue('任务输出');
+  clearScriptRequestOutputs_ACU();
+});
+
+describe('willPlotUseMainApiGenerateRaw_ACU', () => {
+  it('预设为非 tavern 且 useMainApi=true 时返回 true', () => {
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { useMainApi: true },
+    });
+
+    expect(willPlotUseMainApiGenerateRaw_ACU()).toBe(true);
+  });
+
+  it('预设为 tavern 模式时返回 false', () => {
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'tavern',
+      apiConfig: { useMainApi: true },
+    });
+
+    expect(willPlotUseMainApiGenerateRaw_ACU()).toBe(false);
+  });
+
+  it('读取预设失败时回退到全局设置', () => {
+    mockSettings.apiMode = 'custom';
+    (mockSettings as any).useMainApi = true;
+    mockGetApiConfigByPreset.mockImplementation(() => {
+      throw new Error('preset broken');
+    });
+
+    expect(willPlotUseMainApiGenerateRaw_ACU()).toBe(true);
+  });
+});
+
+describe('getWorldbookContentForPlot_ACU', () => {
+  it('apiSettings 为空时返回空字符串', async () => {
+    await expect(getWorldbookContentForPlot_ACU(null as any, '用户输入')).resolves.toBe('');
+    expect(mockBuildCombinedWorldbookContentByStrategy).not.toHaveBeenCalled();
+  });
+
+  it('手动模式会去重书名，并把过滤/选择回调正确传给聚合器', async () => {
+    mockGetChatArray.mockReturnValue([
+      { mes: '旧消息1' },
+      { mes: '旧消息2' },
+      { mes: '旧消息3' },
+    ]);
+
+    const result = await getWorldbookContentForPlot_ACU(
+      {
+        contextTurnCount: 2,
+        plotWorldbookConfig: {
+          source: 'manual',
+          manualSelection: ['书A', '书A', '书B'],
+          enabledEntries: {
+            书A: [1],
+          },
+        },
+      },
+      '当前输入',
+      '附加剧情',
+    );
+
+    expect(result).toBe('世界书内容');
+    expect(mockBuildCombinedWorldbookContentByStrategy).toHaveBeenCalledTimes(1);
+
+    const options = mockBuildCombinedWorldbookContentByStrategy.mock.calls[0][0];
+    expect(options.bookNames).toEqual(['书A', '书B']);
+    expect(options.baseScanText).toContain('旧消息2');
+    expect(options.baseScanText).toContain('旧消息3');
+    expect(options.baseScanText).toContain('当前输入');
+    expect(options.baseScanText).toContain('附加剧情');
+
+    expect(options.includeEntry({ normalizedComment: 'TavernDB-ACU-OutlineTable-1' })).toBe(false);
+    expect(options.includeEntry({ normalizedComment: 'TavernDB-ACU-CustomExport-纪要索引-1' })).toBe(false);
+    expect(options.includeEntry({ normalizedComment: '普通条目', blocked: true, rawComment: '普通条目' })).toBe(false);
+    expect(options.includeEntry({ normalizedComment: 'TavernDB-ACU-自动生成条目', blocked: true })).toBe(true);
+
+    expect(options.isSelected({ bookName: '书A', uid: 1, normalizedComment: '普通条目' })).toBe(true);
+    expect(options.isSelected({ bookName: '书A', uid: 2, normalizedComment: '普通条目' })).toBe(false);
+    expect(options.isSelected({ bookName: '书B', uid: 9, normalizedComment: '普通条目' })).toBe(true);
+    expect(options.isSelected({ bookName: '书A', uid: 999, normalizedComment: 'TavernDB-ACU-自动生成条目' })).toBe(true);
+  });
+
+  it('角色模式会合并 primary 和 additional 世界书并去重', async () => {
+    mockGetCharLorebooks.mockResolvedValue({
+      primary: '主书',
+      additional: ['副书', '主书'],
+    });
+
+    const result = await getWorldbookContentForPlot_ACU(
+      { plotWorldbookConfig: { source: 'character' } },
+      '继续推进',
+    );
+
+    expect(result).toBe('世界书内容');
+    expect(mockGetCharLorebooks).toHaveBeenCalledWith({ type: 'all' });
+    expect(mockBuildCombinedWorldbookContentByStrategy.mock.calls[0][0].bookNames).toEqual(['主书', '副书']);
+  });
+
+  it('变量替换前运行 plot_worldbook.before_render hook 并传递 requestContext', async () => {
+    mockGetCharLorebooks.mockResolvedValue({ primary: '主书', additional: [] });
+
+    await getWorldbookContentForPlot_ACU(
+      { plotWorldbookConfig: { source: 'character' } },
+      '继续推进',
+      '',
+      { requestContext: { requestId: 'plot_worldbook_request', source: { promptType: 'plot', sourceType: 'plot_worldbook' } } },
+    );
+
+    expect(mockRunScriptHook).toHaveBeenCalledWith('plot_worldbook.before_render', expect.objectContaining({
+      eventPayload: expect.objectContaining({ requestId: 'plot_worldbook_request' }),
+      sourceContext: expect.objectContaining({ requestId: 'plot_worldbook_request', sourceType: 'plot_worldbook' }),
+      requestContext: expect.objectContaining({ requestId: 'plot_worldbook_request' }),
+    }));
+  });
+
+  it('plot_worldbook.before_render 写入的 outputKey 可被同一剧情世界书文本读取', async () => {
+    mockGetCharLorebooks.mockResolvedValue({ primary: '主书', additional: [] });
+    mockBuildCombinedWorldbookContentByStrategy.mockResolvedValue('剧情世界书 {[script_output "plotWbHint"]}');
+    mockRunScriptHook.mockImplementationOnce(async (_hook: any, options: any) => {
+      setScriptOutput_ACU('request', {
+        key: 'plotWbHint',
+        value: '动态剧情世界书提示',
+        scope: {},
+      }, { requestId: options.requestContext.requestId });
+      expect(getScriptOutput_ACU('plotWbHint', 'request', { requestId: options.requestContext.requestId })?.value).toBe('动态剧情世界书提示');
+      return [];
+    });
+
+    const result = await getWorldbookContentForPlot_ACU(
+      { plotWorldbookConfig: { source: 'character' } },
+      '继续推进',
+      '',
+      { requestContext: { requestId: 'plot_worldbook_output_request', source: { promptType: 'plot', sourceType: 'plot_worldbook' } } },
+    );
+    expect(getScriptOutput_ACU('plotWbHint', 'request', { requestId: 'plot_worldbook_output_request' })?.value).toBe('动态剧情世界书提示');
+    expect(await replaceScriptVariables_ACU('剧情世界书 {[script_output "plotWbHint"]}', {}, { requestId: 'plot_worldbook_output_request' })).toBe('剧情世界书 动态剧情世界书提示');
+    expect(result).toBe('剧情世界书 动态剧情世界书提示');
+  });
+
+  it('角色世界书读取失败时返回空字符串', async () => {
+    mockGetCharLorebooks.mockRejectedValue(new Error('读取失败'));
+
+    await expect(
+      getWorldbookContentForPlot_ACU({ plotWorldbookConfig: { source: 'character' } }, '继续推进'),
+    ).resolves.toBe('');
+  });
+
+  it('没有任何可用世界书时直接返回空字符串', async () => {
+    const result = await getWorldbookContentForPlot_ACU(
+      {
+        plotWorldbookConfig: {
+          source: 'manual',
+          manualSelection: [],
+        },
+      },
+      '继续推进',
+    );
+
+    expect(result).toBe('');
+    expect(mockBuildCombinedWorldbookContentByStrategy).not.toHaveBeenCalled();
+  });
+});
+
+describe('runPlotTasksRuntime_ACU', () => {
+  it('没有启用任务时返回空结果，并确保兼容处理被调用', async () => {
+    const plotSettings = {
+      tasks: [],
+    };
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockEnsurePlotTasksCompat).toHaveBeenCalledWith(plotSettings, { syncLegacy: true });
+    expect(result).toEqual({
+      finalMessage: null,
+      successfulResults: [],
+      failedResults: [],
+      aggregatedTags: new Map(),
+      enabledTaskCount: 0,
+    });
+    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+  });
+
+  it('成功执行时会按 stage 与 order 排序、暂存剧情并保存到最新消息', async () => {
+    const plotSettings = {
+      tasks: [
+        {
+          id: 'task-c',
+          name: '任务C',
+          stage: 2,
+          order: 1,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-2-task-c' }],
+        },
+        {
+          id: 'task-b',
+          name: '任务B',
+          stage: 1,
+          order: 2,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-1-task-b' }],
+        },
+        {
+          id: 'task-a',
+          name: '任务A',
+          stage: 1,
+          order: 1,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-1-task-a' }],
+        },
+      ],
+    };
+
+    mockCallApiWithPlotPreset
+      .mockResolvedValueOnce('结果A')
+      .mockResolvedValueOnce('结果B')
+      .mockResolvedValueOnce('结果C');
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(result.finalMessage).toBe('最终注入消息');
+    expect(result.successfulResults).toHaveLength(3);
+    expect(result.failedResults).toHaveLength(0);
+    expect(result.enabledTaskCount).toBe(3);
+
+    expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toBe('stage-1-task-a');
+    expect(mockCallApiWithPlotPreset.mock.calls[1][0][0].content).toBe('stage-1-task-b');
+    expect(mockCallApiWithPlotPreset.mock.calls[2][0][0].content).toBe('stage-2-task-c');
+
+    expect(mockSetTempPlotToSave).toHaveBeenCalledWith(expect.objectContaining({
+      content: '保存的剧情内容',
+      userInputHash: 'hash_当前输入',
+      userInputText: '当前输入',
+      taskResults: expect.arrayContaining([
+        expect.objectContaining({ taskId: 'task-a', success: true, rawResponse: '结果A' }),
+        expect.objectContaining({ taskId: 'task-b', success: true, rawResponse: '结果B' }),
+        expect.objectContaining({ taskId: 'task-c', success: true, rawResponse: '结果C' }),
+      ]),
+    }));
+    expect(mockSavePlotToLatestMessage).toHaveBeenCalledWith(true);
+  });
+
+  it('plot.before_task_request 在最终脚本变量渲染前触发，并共享同一 requestContext', async () => {
+    const order: string[] = [];
+    const hookRequestIds: string[] = [];
+    mockRunScriptHook.mockImplementation(async (hook: string, options: any) => {
+      if (hook === 'plot.before_task_request') {
+        order.push('before_hook');
+        hookRequestIds.push(options.requestContext.requestId);
+      }
+      return [];
+    });
+    mockRenderPlotTaskContentWithIsolatedVariables.mockImplementation((text: string, context: any) => {
+      order.push('render_prompt');
+      expect(context.scriptRequestContext.requestId).toBe(hookRequestIds[0]);
+      return text;
+    });
+
+    const plotSettings = {
+      name: '路线分支推进',
+      tasks: [{
+        id: 'task-before',
+        name: '前置任务',
+        stage: 1,
+        order: 1,
+        maxRetries: 1,
+        promptGroup: [{ role: 'user', content: 'prompt' }],
+      }],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(order.slice(0, 2)).toEqual(['before_hook', 'render_prompt']);
+    expect(mockRenderPlotTaskContentWithIsolatedVariables).toHaveBeenCalledWith('prompt', expect.objectContaining({
+      scriptRequestId: expect.any(String),
+      scriptRequestContext: expect.objectContaining({ requestId: expect.any(String) }),
+    }));
+    expect(mockRunScriptHook).toHaveBeenCalledWith('plot.before_task_request', expect.objectContaining({
+      eventPayload: expect.objectContaining({ phase: 'before_request', presetName: '路线分支推进', taskId: 'task-before' }),
+      sourceContext: expect.objectContaining({ presetName: '路线分支推进', taskId: 'task-before' }),
+      requestContext: expect.objectContaining({ requestId: expect.any(String) }),
+    }));
+  });
+
+  it('plot.after_stage 可通过 controller 跳过后续 stage', async () => {
+    mockRunScriptHook.mockImplementation(async (hook: string, options: any) => {
+      if (hook === 'plot.after_stage' && options.eventPayload.stage === 1) {
+        const runtime = options.createController({ script: { id: 'gate-script', name: '门控脚本' }, binding: {} });
+        runtime.controller.skipStage(2, '跳过第二阶段');
+        runtime.commit();
+      }
+      return [];
+    });
+    const plotSettings = {
+      name: '路线分支推进',
+      tasks: [
+        { id: 'stage-1', name: '阶段1', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-1' }] },
+        { id: 'stage-2', name: '阶段2', stage: 2, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-2' }] },
+        { id: 'stage-3', name: '阶段3', stage: 3, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-3' }] },
+      ],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockCallApiWithPlotPreset.mock.calls.map((call: any[]) => call[0][0].content)).toEqual(['stage-1', 'stage-3']);
+    expect(mockRunScriptHook).toHaveBeenCalledWith('plot.after_stage', expect.objectContaining({
+      eventPayload: expect.objectContaining({ presetName: '路线分支推进', stage: 1, remainingStages: [2, 3] }),
+      sourceContext: expect.objectContaining({ presetName: '路线分支推进', stage: 1 }),
+    }));
+  });
+
+  it('plot.before_task_request 写入的 outputKey 可被同一任务 prompt 读取', async () => {
+    mockRunScriptHook.mockImplementation(async (hook: string, options: any) => {
+      if (hook === 'plot.before_task_request') {
+        setScriptOutput_ACU('request', {
+          key: 'plotHint',
+          value: '动态任务提示',
+          scope: {},
+        }, { requestId: options.requestContext.requestId });
+        expect(getScriptOutput_ACU('plotHint', 'request', { requestId: options.requestContext.requestId })?.value).toBe('动态任务提示');
+      }
+      return [];
+    });
+    mockRenderPlotTaskContentWithIsolatedVariables.mockImplementation(async (text: string, context: any) => {
+      return replaceScriptVariables_ACU(text, {
+        promptType: 'plot',
+        sourceType: 'plot_task',
+        taskId: context.taskId,
+        requestId: context.scriptRequestId,
+      }, context.scriptRequestContext);
+    });
+
+    const plotSettings = {
+      tasks: [{
+        id: 'task-output',
+        name: '输出任务',
+        stage: 1,
+        order: 1,
+        maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '任务提示 {[script_output "plotHint"]}' }],
+      }],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toBe('任务提示 动态任务提示');
+  });
+
+  it('某个 stage 失败时会阻断后续 stage', async () => {
+    const plotSettings = {
+      tasks: [
+        {
+          id: 'task-ok',
+          name: '成功任务',
+          stage: 1,
+          order: 1,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-1-ok' }],
+        },
+        {
+          id: 'task-fail',
+          name: '失败任务',
+          stage: 1,
+          order: 2,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-1-fail' }],
+        },
+        {
+          id: 'task-never',
+          name: '不应执行的任务',
+          stage: 2,
+          order: 1,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-2-never' }],
+        },
+      ],
+    };
+
+    mockCallApiWithPlotPreset.mockImplementation(async (messages: any[]) => {
+      const content = messages[0]?.content;
+      if (content === 'stage-1-fail') {
+        throw new Error('接口失败');
+      }
+      return '成功结果';
+    });
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(result.finalMessage).toBeNull();
+    expect(result.abortedByStageFailure).toBe(true);
+    expect(result.failedStage).toBe(1);
+    expect(result.errorMessage).toContain('失败任务');
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
+    expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-never')).toBe(false);
+    const afterTaskResponseCalls = mockRunScriptHook.mock.calls.filter((call: any[]) => call[0] === 'plot.after_task_response');
+    expect(afterTaskResponseCalls).toHaveLength(1);
+    expect(afterTaskResponseCalls[0][1].eventPayload).toMatchObject({ taskId: 'task-ok', success: true });
+    expect(afterTaskResponseCalls.some((call: any[]) => call[1].eventPayload.taskId === 'task-fail')).toBe(false);
+  });
+
+  it('用户中止时抛出 TaskAbortedByUser', async () => {
+    mockAbortControllerRef.value = { signal: { aborted: true } };
+    const plotSettings = {
+      tasks: [
+        {
+          id: 'task-a',
+          name: '任务A',
+          stage: 1,
+          order: 1,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-1-task-a' }],
+        },
+      ],
+    };
+
+    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入')).rejects.toThrow('TaskAbortedByUser');
+    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+  });
+
+  it('内存表格为空时会尝试合并独立表并写回运行时状态', async () => {
+    mockCurrentJsonTableDataRef.value = null;
+    mockMergeAllIndependentTables.mockResolvedValue({
+      sheet_merged: {
+        name: '合并表',
+        content: [['row_id', '字段'], ['1', '合并值']],
+      },
+    });
+
+    const plotSettings = {
+      tasks: [
+        {
+          id: 'task-a',
+          name: '任务A',
+          stage: 1,
+          order: 1,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-1-task-a' }],
+        },
+      ],
+    };
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(result.finalMessage).toBe('最终注入消息');
+    expect(mockMergeAllIndependentTables).toHaveBeenCalledTimes(1);
+    expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith({
+      sheet_merged: {
+        name: '合并表',
+        content: [['row_id', '字段'], ['1', '合并值']],
+      },
+    });
+  });
+
+  it('使用主 API 时会为每次任务执行递增 ignoreNextGenerationEndedCount', async () => {
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { useMainApi: true },
+    });
+
+    const plotSettings = {
+      tasks: [
+        {
+          id: 'task-a',
+          name: '任务A',
+          stage: 1,
+          order: 1,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'task-a' }],
+        },
+        {
+          id: 'task-b',
+          name: '任务B',
+          stage: 1,
+          order: 2,
+          maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'task-b' }],
+        },
+      ],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockPlanningGuard.ignoreNextGenerationEndedCount).toBe(2);
+  });
+
+  it('标签来源按阶段切换：阶段1用历史，阶段1产出后阶段2用本轮', async () => {
+    const plotSettings = {
+      tasks: [
+        { id: 't1', name: '任务1', stage: 1, order: 1, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T1 {{recall}}' }] },
+        { id: 't2', name: '任务2', stage: 1, order: 2, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T2 {{recall}}' }] },
+        { id: 't3', name: '任务3', stage: 1, order: 3, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T3 {{recall}}' }] },
+        { id: 't4', name: '任务4', stage: 2, order: 4, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T4 {{recall}}' }] },
+        { id: 't5', name: '任务5', stage: 2, order: 5, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T5 {{recall}}' }] },
+      ],
+    };
+
+    const historyTagMap = new Map<string, any>([['recall', ['上一轮标签']]]);
+    mockBuildPlotTagMapFromText.mockReturnValue(historyTagMap);
+
+    mockAggregatePlotTaskTags.mockImplementation((results: any[]) => {
+      const aggregated = new Map<string, any>();
+      for (const result of results) {
+        if (!result?.success || !result?.extractedTags) continue;
+        for (const [tagName, tagContent] of Object.entries(result.extractedTags)) {
+          if (!aggregated.has(tagName)) aggregated.set(tagName, []);
+          aggregated.get(tagName).push(tagContent);
+        }
+      }
+      return { aggregated, injectOnlyTagNames: new Set<string>() };
+    });
+
+    mockReplacePlotTagPlaceholders.mockImplementation((text: string) => text);
+    mockCallApiWithPlotPreset
+      .mockResolvedValueOnce('R1')
+      .mockResolvedValueOnce('R2')
+      .mockResolvedValueOnce('<recall>本轮新标签</recall>')
+      .mockResolvedValueOnce('R4')
+      .mockResolvedValueOnce('R5');
+
+    mockExtractPlotTagsFromResponse.mockImplementation((rawText: string) => {
+      if (String(rawText).includes('<recall>')) {
+        return {
+          tagNames: ['recall'],
+          extractedTags: { recall: '本轮新标签' },
+          injectedFragments: ['<recall>本轮新标签</recall>'],
+          injectOnlyTags: {},
+          injectOnlyFragments: [],
+          injectOnlyTagNames: [],
+        };
+      }
+      return {
+        tagNames: [],
+        extractedTags: {},
+        injectedFragments: [],
+        injectOnlyTags: {},
+        injectOnlyFragments: [],
+        injectOnlyTagNames: [],
+      };
+    });
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockReplacePlotTagPlaceholders).toHaveBeenCalledTimes(5);
+    const calls = mockReplacePlotTagPlaceholders.mock.calls;
+
+    // 每个任务都应拿到历史 map（第3参）
+    expect(calls[0][2]).toBe(historyTagMap);
+    expect(calls[1][2]).toBe(historyTagMap);
+    expect(calls[2][2]).toBe(historyTagMap);
+    expect(calls[3][2]).toBe(historyTagMap);
+    expect(calls[4][2]).toBe(historyTagMap);
+
+    // 阶段1的 T1/T2/T3 渲染时本轮无 recall；阶段2的 T4/T5 渲染时本轮已含 recall
+    expect(calls[0][1] instanceof Map ? calls[0][1].has('recall') : false).toBe(false);
+    expect(calls[1][1] instanceof Map ? calls[1][1].has('recall') : false).toBe(false);
+    expect(calls[2][1] instanceof Map ? calls[2][1].has('recall') : false).toBe(false);
+    expect(calls[3][1] instanceof Map ? calls[3][1].has('recall') : false).toBe(true);
+    expect(calls[4][1] instanceof Map ? calls[4][1].has('recall') : false).toBe(true);
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // stage 级统一 effective preset
+  // ═══════════════════════════════════════════════════════════════
+  it('同 stage 多任务并发执行，并统一使用第一个有显式 taskApiPreset 的任务的预设', async () => {
+    let activeCalls = 0;
+    let maxActiveCalls = 0;
+    mockCallApiWithPlotPreset.mockImplementation(async () => {
+      activeCalls += 1;
+      maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+      await Promise.resolve();
+      activeCalls -= 1;
+      return 'AI回复内容';
+    });
+    mockExtractPlotTagsFromResponse.mockReturnValue({
+      tagNames: ['tag1'],
+      extractedTags: { tag1: '内容' },
+      injectedFragments: [],
+      injectOnlyTags: {},
+      injectOnlyFragments: [],
+      injectOnlyTagNames: [],
+    });
+
+    const plotSettings = {
+      enabled: true,
+      contextTurnCount: 1,
+      contextExtractTags: '',
+      contextExtractRules: [],
+      contextExcludeTags: '',
+      contextExcludeRules: [],
+      loopSettings: { maxRetries: 1 },
+      tasks: [
+        { id: 't1', name: '任务1', enabled: true, stage: 1, order: 0, promptGroup: [{ role: 'USER', content: '提示词1' }], extractTags: 'tag1', taskApiPreset: 'preset-A' },
+        { id: 't2', name: '任务2', enabled: true, stage: 1, order: 1, promptGroup: [{ role: 'USER', content: '提示词2' }], extractTags: 'tag1', taskApiPreset: '' },
+      ],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    // 两个任务应使用相同的 effective preset
+    const allCalls = mockCallApiWithPlotPreset.mock.calls;
+    expect(allCalls.length).toBeGreaterThanOrEqual(2);
+    // 第一个任务的 effectivePreset 应为 'preset-A'
+    expect(allCalls[0][1]).toBe('preset-A');
+    // 第二个任务也应使用 stage 级统一后的 'preset-A'
+    expect(allCalls[1][1]).toBe('preset-A');
+    expect(maxActiveCalls).toBeGreaterThan(1);
+  });
+
+  it('同 stage 无任务有显式 taskApiPreset 时，统一回退到全局 plotApiPreset', async () => {
+    mockCallApiWithPlotPreset.mockResolvedValue('AI回复内容');
+    mockExtractPlotTagsFromResponse.mockReturnValue({
+      tagNames: ['tag1'],
+      extractedTags: { tag1: '内容' },
+      injectedFragments: [],
+      injectOnlyTags: {},
+      injectOnlyFragments: [],
+      injectOnlyTagNames: [],
+    });
+    mockSettings.plotApiPreset = 'global-plot-preset';
+
+    const plotSettings = {
+      enabled: true,
+      contextTurnCount: 1,
+      contextExtractTags: '',
+      contextExtractRules: [],
+      contextExcludeTags: '',
+      contextExcludeRules: [],
+      loopSettings: { maxRetries: 1 },
+      tasks: [
+        { id: 't1', name: '任务1', enabled: true, stage: 1, order: 0, promptGroup: [{ role: 'USER', content: '提示词1' }], extractTags: 'tag1', taskApiPreset: '' },
+        { id: 't2', name: '任务2', enabled: true, stage: 1, order: 1, promptGroup: [{ role: 'USER', content: '提示词2' }], extractTags: 'tag1', taskApiPreset: '' },
+      ],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    const allCalls = mockCallApiWithPlotPreset.mock.calls;
+    expect(allCalls.length).toBeGreaterThanOrEqual(2);
+    expect(allCalls[0][1]).toBe('global-plot-preset');
+    expect(allCalls[1][1]).toBe('global-plot-preset');
+  });
+
+  it('不同 stage 的任务使用各自的 stageEffectivePreset', async () => {
+    mockCallApiWithPlotPreset.mockResolvedValue('AI回复内容');
+    mockExtractPlotTagsFromResponse.mockReturnValue({
+      tagNames: ['tag1'],
+      extractedTags: { tag1: '内容' },
+      injectedFragments: [],
+      injectOnlyTags: {},
+      injectOnlyFragments: [],
+      injectOnlyTagNames: [],
+    });
+    mockSettings.plotApiPreset = 'global-default';
+
+    const plotSettings = {
+      enabled: true,
+      contextTurnCount: 1,
+      contextExtractTags: '',
+      contextExtractRules: [],
+      contextExcludeTags: '',
+      contextExcludeRules: [],
+      loopSettings: { maxRetries: 1 },
+      tasks: [
+        { id: 't1', name: '任务1', enabled: true, stage: 1, order: 0, promptGroup: [{ role: 'USER', content: '提示词1' }], extractTags: 'tag1', taskApiPreset: 'stage1-preset' },
+        { id: 't2', name: '任务2', enabled: true, stage: 2, order: 0, promptGroup: [{ role: 'USER', content: '提示词2' }], extractTags: 'tag1', taskApiPreset: '' },
+      ],
+    };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    const allCalls = mockCallApiWithPlotPreset.mock.calls;
+    expect(allCalls.length).toBeGreaterThanOrEqual(2);
+    // stage 1 任务使用 stage1-preset
+    expect(allCalls[0][1]).toBe('stage1-preset');
+    // stage 2 任务无显式 preset，回退到全局
+    expect(allCalls[1][1]).toBe('global-default');
+  });
+});

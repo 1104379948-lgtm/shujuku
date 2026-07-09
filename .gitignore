@@ -1,0 +1,43 @@
+# spec-kit 本地工具链（不上传 git）
+.codebuddy/
+.specify/
+.limcode/
+.kiro/
+.kilo/
+
+# Codex / agent local notes
+.agents/
+.codex/
+.skill-output*.md
+
+# Node.js
+node_modules/
+
+# 构建产物
+dist/
+*.tsbuildinfo
+
+# 本地参考源码
+reference/
+backups/
+
+# 本地分析归档与运行状态
+.analysis-archive/
+temp_*.txt
+*_log.txt
+vitest-out.txt
+coverage/
+
+# 本地环境与密钥
+.env
+.env.*
+*.local
+*.pem
+*.key
+*.p12
+*.sqlite
+*.sqlite3
+*.db
+
+# macOS
+.DS_Store
