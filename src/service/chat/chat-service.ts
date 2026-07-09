@@ -1440,7 +1440,6 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
     const chat = getChatArray_ACU();
     if (!chat || chat.length === 0) return 0;
 
-    const isolationKey = getCurrentIsolationKey_ACU();
     const clearsSummaryOrOutline = tableListContainsSummaryOrOutline_ACU(targetSheetKeys);
     let clearedCount = 0;
 
@@ -1449,19 +1448,21 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
         const msg = chat[idx];
         if (!msg || msg.is_user) continue;
 
-        const changed = purgeSheetKeysFromMessageForIsolation_ACU(msg, isolationKey, targetSheetKeys);
+        // 手动重填只限制“消息范围”，不限制到当前 isolation tag：这里刻意复用
+        // 可视化删表的单消息硬删除仓储逻辑，避免旁路标签槽或 legacy 字段里的目标表残留污染重填基底。
+        const dataChanged = purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys);
+        let manifestChanged = false;
         if (clearsSummaryOrOutline) {
-            const isolatedData = msg?.TavernDB_ACU_IsolatedData;
-            const tagData = isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)
-                ? isolatedData[isolationKey]
-                : null;
-            if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
-                logDebug_ACU(`[手动重填预清理] 已删除消息索引 ${idx} 上的交火向量索引外置文件引用。`);
+            const deletedManifestCount = await deleteVectorIndexManifestsFromMessage_ACU(msg);
+            if (deletedManifestCount > 0) {
+                manifestChanged = true;
+                logDebug_ACU(`[手动重填预清理] 已删除消息索引 ${idx} 上 ${deletedManifestCount} 个交火向量索引外置文件引用。`);
             }
         }
+        const changed = dataChanged || manifestChanged;
         if (changed) {
             clearedCount++;
-            logDebug_ACU(`[手动重填预清理] 已清理消息索引 ${idx} 上选中表的范围内旧数据 (标签: ${isolationKey || '无'})`);
+            logDebug_ACU(`[手动重填预清理] 已清理消息索引 ${idx} 上选中表的范围内旧数据（新版/旧版/所有标签槽）`);
         }
     }
 

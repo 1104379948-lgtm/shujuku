@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockCollectScheduleSummaryFromFramesV2 } = vi.hoisted(() => ({
+const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal } = vi.hoisted(() => ({
   mockSettings: {
     retainRecentLayers: 3,
     dataIsolationEnabled: false,
@@ -28,6 +28,7 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockRunTableWriteTransaction: vi.fn(),
   mockLoadTableStateFromFramesV2: vi.fn(),
   mockCollectScheduleSummaryFromFramesV2: vi.fn(() => null),
+  mockDeleteSummaryVectorIndexExternal: vi.fn(),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -81,6 +82,10 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
   collectScheduleSummaryFromFramesV2_ACU: mockCollectScheduleSummaryFromFramesV2,
 }));
 
+vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
+  deleteSummaryVectorIndexExternal_ACU: mockDeleteSummaryVectorIndexExternal,
+}));
+
 import {
   replaceChatMessage_ACU,
   getOriginalContent_ACU,
@@ -89,6 +94,7 @@ import {
   shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU,
   ensureManualRefillInitialBaseline_ACU,
   clearManualRefillIncrementalDataInRange_ACU,
+  clearManualRefillSheetDataInRange_ACU,
   clearTableDataAtFloors_ACU,
   deleteLocalDataInChatCore_ACU,
   overrideLatestLayerWithTemplateCore_ACU,
@@ -114,6 +120,7 @@ beforeEach(() => {
     };
   });
   mockRunTableWriteTransaction.mockImplementation(async (_options: any, task: any) => task());
+  mockDeleteSummaryVectorIndexExternal.mockResolvedValue(undefined);
   mockLoadTableStateFromFramesV2.mockResolvedValue({
     sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] },
   });
@@ -1553,6 +1560,218 @@ describe('clearManualRefillIncrementalDataInRange_ACU', () => {
     await expect(clearManualRefillIncrementalDataInRange_ACU([1], [])).rejects.toThrow('手动重填增量清理必须指定目标表');
     await expect(clearManualRefillIncrementalDataInRange_ACU([1], null)).rejects.toThrow('手动重填增量清理必须指定目标表');
     await expect(clearManualRefillIncrementalDataInRange_ACU([1], undefined as unknown as string[])).rejects.toThrow('手动重填增量清理必须指定目标表');
+    expect(mockRunTableWriteTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('clearManualRefillSheetDataInRange_ACU', () => {
+  const runtimeRevision = (sheets: Record<string, any>) => `runtime-v1:${JSON.stringify({ sheets })}`;
+
+  it('范围硬删除清空所有标签槽、V2 frame 与旧版字段中的目标表，同时保留非目标表', async () => {
+    const chat = [
+      {
+        is_user: false,
+        mes: 'AI目标层',
+        TavernDB_ACU_IsolatedData: {
+          'tag-a': {
+            _acu_storage_version: 2,
+            independentData: {
+              sheet_target: { name: '标签A目标表' },
+              sheet_keep: { name: '标签A保留表' },
+            },
+            modifiedKeys: ['sheet_target', 'sheet_keep'],
+            updateGroupKeys: ['sheet_target', 'sheet_keep'],
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full',
+                reason: 'manual',
+                data: {
+                  sheet_target: { name: 'checkpoint目标表A' },
+                  sheet_keep: { name: 'checkpoint保留表A' },
+                },
+                scheduleSummary: {
+                  sheet_target: { lastFilledAiFloor: 3 },
+                  sheet_keep: { lastFilledAiFloor: 2 },
+                },
+                event: { changedSheetKeys: ['sheet_target', 'sheet_keep'] },
+                manualRefillProgress: { selectedSheetKeys: ['sheet_target', 'sheet_keep'], completedSheetMessageIndexByKey: { sheet_target: 3, sheet_keep: 2 } },
+              },
+              event: { changedSheetKeys: ['sheet_target', 'sheet_keep'] },
+              manualRefillProgress: { selectedSheetKeys: ['sheet_target', 'sheet_keep'], completedSheetMessageIndexByKey: { sheet_target: 3, sheet_keep: 2 } },
+              logEntries: [
+                {
+                  seq: 1,
+                  changedSheetKeys: ['sheet_target', 'sheet_keep'],
+                  baseRevision: runtimeRevision({
+                    sheet_target: { name: '旧目标表A' },
+                    sheet_keep: { name: '旧保留表A' },
+                  }),
+                  parentRevision: runtimeRevision({
+                    sheet_target: { name: '父目标表A' },
+                    sheet_keep: { name: '父保留表A' },
+                  }),
+                  filledSheetKeys: ['sheet_target', 'sheet_keep'],
+                  writeSet: [{ kind: 'sheet', sheetKey: 'sheet_target' }, { kind: 'sheet', sheetKey: 'sheet_keep' }],
+                  operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_target' }, { kind: 'sheet_replace', sheetKey: 'sheet_keep' }],
+                  patches: [{ kind: 'sheet_replace', sheetKey: 'sheet_target' }, { kind: 'sheet_replace', sheetKey: 'sheet_keep' }],
+                  manualRefillProgress: { selectedSheetKeys: ['sheet_target', 'sheet_keep'], completedSheetMessageIndexByKey: { sheet_target: 3, sheet_keep: 2 } },
+                },
+              ],
+            },
+          },
+          'tag-b': {
+            _acu_storage_version: 2,
+            independentData: {
+              sheet_target: { name: '标签B目标表' },
+              sheet_keep: { name: '标签B保留表' },
+            },
+            modifiedKeys: ['sheet_target', 'sheet_keep'],
+            updateGroupKeys: ['sheet_target', 'sheet_keep'],
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full',
+                reason: 'manual',
+                data: {
+                  sheet_target: { name: 'checkpoint目标表B' },
+                  sheet_keep: { name: 'checkpoint保留表B' },
+                },
+              },
+              logEntries: [
+                {
+                  seq: 1,
+                  baseRevision: runtimeRevision({
+                    sheet_target: { name: '旧目标表B' },
+                    sheet_keep: { name: '旧保留表B' },
+                  }),
+                  filledSheetKeys: ['sheet_target', 'sheet_keep'],
+                  writeSet: [{ kind: 'sheet', sheetKey: 'sheet_target' }, { kind: 'sheet', sheetKey: 'sheet_keep' }],
+                },
+              ],
+            },
+          },
+        },
+        TavernDB_ACU_IndependentData: {
+          sheet_target: { name: '旧版独立目标表' },
+          sheet_keep: { name: '旧版独立保留表' },
+        },
+        TavernDB_ACU_ModifiedKeys: ['sheet_target', 'sheet_keep'],
+        TavernDB_ACU_UpdateGroupKeys: ['sheet_target', 'sheet_keep'],
+        TavernDB_ACU_Data: {
+          sheet_target: { name: '旧版标准目标表' },
+          sheet_keep: { name: '旧版标准保留表' },
+        },
+        TavernDB_ACU_SummaryData: {
+          sheet_target: { name: '旧版摘要目标表' },
+          sheet_keep: { name: '旧版摘要保留表' },
+        },
+      },
+    ];
+    mockGetCurrentIsolationKey.mockReturnValue('tag-a');
+    mockGetChatArray.mockReturnValue(chat);
+
+    const count = await clearManualRefillSheetDataInRange_ACU([0], ['sheet_target']);
+
+    expect(count).toBe(1);
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(chat[0])).not.toContain('sheet_target');
+    expect(JSON.stringify(chat[0])).not.toContain('目标表');
+
+    const tagA = chat[0].TavernDB_ACU_IsolatedData['tag-a'];
+    expect(tagA.independentData).toEqual({ sheet_keep: { name: '标签A保留表' } });
+    expect(tagA.modifiedKeys).toEqual(['sheet_keep']);
+    expect(tagA.updateGroupKeys).toEqual(['sheet_keep']);
+    expect(tagA.storageFrame.checkpoint.data).toEqual({ sheet_keep: { name: 'checkpoint保留表A' } });
+    expect(tagA.storageFrame.checkpoint.scheduleSummary).toEqual({ sheet_keep: { lastFilledAiFloor: 2 } });
+    expect(tagA.storageFrame.logEntries[0].filledSheetKeys).toEqual(['sheet_keep']);
+    expect(tagA.storageFrame.logEntries[0].writeSet).toEqual([{ kind: 'sheet', sheetKey: 'sheet_keep' }]);
+    expect(JSON.parse(tagA.storageFrame.logEntries[0].baseRevision.slice('runtime-v1:'.length)).sheets).toEqual({
+      sheet_keep: { name: '旧保留表A' },
+    });
+
+    const tagB = chat[0].TavernDB_ACU_IsolatedData['tag-b'];
+    expect(tagB.independentData).toEqual({ sheet_keep: { name: '标签B保留表' } });
+    expect(tagB.modifiedKeys).toEqual(['sheet_keep']);
+    expect(tagB.updateGroupKeys).toEqual(['sheet_keep']);
+    expect(tagB.storageFrame.checkpoint.data).toEqual({ sheet_keep: { name: 'checkpoint保留表B' } });
+    expect(JSON.parse(tagB.storageFrame.logEntries[0].baseRevision.slice('runtime-v1:'.length)).sheets).toEqual({
+      sheet_keep: { name: '旧保留表B' },
+    });
+
+    expect(chat[0].TavernDB_ACU_IndependentData).toEqual({ sheet_keep: { name: '旧版独立保留表' } });
+    expect(chat[0].TavernDB_ACU_ModifiedKeys).toEqual(['sheet_keep']);
+    expect(chat[0].TavernDB_ACU_UpdateGroupKeys).toEqual(['sheet_keep']);
+    expect(chat[0].TavernDB_ACU_Data).toEqual({ sheet_keep: { name: '旧版标准保留表' } });
+    expect(chat[0].TavernDB_ACU_SummaryData).toEqual({ sheet_keep: { name: '旧版摘要保留表' } });
+  });
+
+  it('范围硬删除不处理范围外消息与用户消息，只清理范围内 AI 消息', async () => {
+    const chat = [
+      {
+        is_user: false,
+        mes: '范围外AI',
+        TavernDB_ACU_Data: { sheet_target: { name: '范围外目标表' }, sheet_keep: { name: '范围外保留表' } },
+      },
+      {
+        is_user: true,
+        mes: '范围内用户',
+        TavernDB_ACU_Data: { sheet_target: { name: '用户目标表' }, sheet_keep: { name: '用户保留表' } },
+      },
+      {
+        is_user: false,
+        mes: '范围内AI',
+        TavernDB_ACU_Data: { sheet_target: { name: '范围内目标表' }, sheet_keep: { name: '范围内保留表' } },
+      },
+    ];
+    const outsideBefore = JSON.parse(JSON.stringify(chat[0]));
+    const userBefore = JSON.parse(JSON.stringify(chat[1]));
+    mockGetChatArray.mockReturnValue(chat);
+
+    const count = await clearManualRefillSheetDataInRange_ACU([1, 2], ['sheet_target']);
+
+    expect(count).toBe(1);
+    expect(chat[0]).toEqual(outsideBefore);
+    expect(chat[1]).toEqual(userBefore);
+    expect(chat[2].TavernDB_ACU_Data).toEqual({ sheet_keep: { name: '范围内保留表' } });
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+  });
+
+  it('summary/outline 目标表只有 manifest 状态变化时仍保存聊天', async () => {
+    const chat = [
+      {
+        is_user: false,
+        mes: 'AI目标层',
+        TavernDB_ACU_IsolatedData: {
+          'tag-a': {
+            _acu_storage_version: 2,
+            summaryVectorIndexManifest: { version: 1, files: [{ path: 'summary-a.vec' }] },
+            summaryVectorIndexState: { manifest: { version: 1, files: [{ path: 'summary-a-state.vec' }] } },
+          },
+          'tag-b': {
+            _acu_storage_version: 2,
+            summaryVectorIndexState: { manifest: { version: 1, files: [{ path: 'summary-b-state.vec' }] } },
+          },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const count = await clearManualRefillSheetDataInRange_ACU([0], ['sheet_1']);
+
+    expect(count).toBe(1);
+    expect(chat[0].TavernDB_ACU_IsolatedData['tag-a'].summaryVectorIndexManifest).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData['tag-a'].summaryVectorIndexState).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData['tag-b'].summaryVectorIndexManifest).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData['tag-b'].summaryVectorIndexState).toBeUndefined();
+    expect(mockDeleteSummaryVectorIndexExternal).toHaveBeenCalledTimes(2);
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+  });
+
+  it('未指定目标表时拒绝执行，避免把范围硬删除退化成全量清理', async () => {
+    await expect(clearManualRefillSheetDataInRange_ACU([0], [])).rejects.toThrow('手动重填范围清理必须指定目标表');
+    await expect(clearManualRefillSheetDataInRange_ACU([0], null)).rejects.toThrow('手动重填范围清理必须指定目标表');
+    await expect(clearManualRefillSheetDataInRange_ACU([0], undefined as unknown as string[])).rejects.toThrow('手动重填范围清理必须指定目标表');
     expect(mockRunTableWriteTransaction).not.toHaveBeenCalled();
   });
 });
