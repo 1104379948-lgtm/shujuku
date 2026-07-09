@@ -22,11 +22,12 @@ import { mergeAllIndependentTables_ACU, mergeAllIndependentTablesLegacyV1_ACU } 
 import { cloneIsolatedData_ACU, writeIsolatedTagData_ACU, writeMessageIdentity_ACU, readIsolatedTagData_ACU, readLegacyIndependentData_ACU, isLegacyMatchForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
 import { applyTableDelta_ACU, buildTableDelta_ACU, isDeltaTagData_ACU } from './table-delta';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
-import { persistTableMutationLogV2_ACU } from './storage-frame-v2-persist';
+import { persistTableMutationLogEntriesV2_ACU, persistTableMutationLogV2_ACU } from './storage-frame-v2-persist';
 import { migrateLegacyStorageToV2OnLoad_ACU } from './storage-v2-migration';
-import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
+import type { TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 import type { TableWriteTransactionContext_ACU } from './table-write-transaction';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
+import type { SingleTableOperationEntryDraftV2_ACU } from './storage-frame-v2-log-utils';
 
 export interface TableChatPersistOptions_ACU {
   targetMessageIndex?: number;
@@ -44,11 +45,12 @@ export interface TableChatPersistOptions_ACU {
   requestId?: string;
   batchId?: string;
   operations?: TableMutationOperationV2_ACU[];
+  entries?: SingleTableOperationEntryDraftV2_ACU[];
   baseRevision?: string | null;
   revisionWriteSet?: TableWriteConflictUnitV2_ACU[];
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
-  manualRefillProgress?: ManualRefillProgressV2_ACU;
+  deferChatSave?: boolean;
   /** 调用方已处于 transactionContext.runCommit 临界区内时使用，避免嵌套 commit 锁。 */
   assumeCommitLock?: boolean;
   transactionContext?: TableWriteTransactionContext_ACU;
@@ -122,10 +124,11 @@ async function persistTablesToChatMessageWithLockOption_ACU(
     requestId,
     batchId,
     operations,
+    entries,
     revisionWriteSet,
     forceCheckpoint,
     checkpointReason,
-    manualRefillProgress,
+    deferChatSave,
     assumeCommitLock,
     transactionContext,
   } = options;
@@ -201,11 +204,10 @@ async function persistTablesToChatMessageWithLockOption_ACU(
     }
 
     const persistV2InTransaction = async (transactionContext: TableWriteTransactionContext_ACU) => {
-      const result = await persistTableMutationLogV2_ACU({
+      const commonOptions = {
         targetMessageIndex,
         source: source || (metadataOnlyUpdateGroupKeys.length > 0 ? 'group_fill' : 'system'),
         afterData: effectiveTableData,
-        operations,
         filledSheetKeys: trackAsUpdate ? metadataOnlyUpdateGroupKeys : [],
         candidateChangedSheetKeys: [...trackingKeySet],
         groupKeys: metadataOnlyUpdateGroupKeys,
@@ -213,12 +215,15 @@ async function persistTablesToChatMessageWithLockOption_ACU(
         batchId,
         forceCheckpoint: forceCheckpoint === true || strategy.mode === 'empty',
         checkpointReason: checkpointReason || (strategy.mode === 'empty' ? 'init' : undefined),
-        manualRefillProgress,
         isolationKey: currentIsolationKey,
         revisionWriteSet,
         assumeCommitLock,
         transactionContext,
-      });
+        deferChatSave,
+      };
+      const result = Array.isArray(entries) && entries.length > 0
+        ? await persistTableMutationLogEntriesV2_ACU({ ...commonOptions, entries })
+        : await persistTableMutationLogV2_ACU({ ...commonOptions, operations });
 
       return { saved: result.saved, messageIndex: result.messageIndex, error: result.error };
     };

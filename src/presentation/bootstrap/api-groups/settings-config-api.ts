@@ -6,10 +6,8 @@
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import { settings_ACU, currentJsonTableData_ACU } from '../../../service/runtime/state-manager';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
-import { openAutoCardPopup_ACU } from '../../pages/main-popup';
-import { openNewVisualizer_ACU } from '../../pages/visualizer';
+import { openAcuV2App, openVisualizerSurface_ACU } from '../../../presentation-v2/bootstrap';
 import { showToastr_ACU } from '../../theme/toast';
-import { handleManualUpdate_ACU } from '../../triggers/update-process';
 import { deleteApiPreset_ACU, loadApiPreset_ACU } from '../../triggers/settings-ui-sync';
 import { saveSettingsAndNotify_ACU } from '../../components/settings-ui-helpers';
 import type { ApiGroupContext } from './callback-api';
@@ -18,18 +16,14 @@ export function createSettingsConfigApi(_ctx: ApiGroupContext): Record<string, F
     return {
         // 打开可视化编辑器
         openVisualizer: function() {
-            if (typeof openNewVisualizer_ACU === 'function') {
-                openNewVisualizer_ACU();
-            } else {
-                console.error('[ACU] openNewVisualizer_ACU is not defined inside closure.');
-                showToastr_ACU('error', '可视化编辑器加载失败。');
-            }
+            void openVisualizerSurface_ACU();
         },
 
         // 打开设置面板
         openSettings: async function() {
             try {
-                return await openAutoCardPopup_ACU();
+                await openAcuV2App('dashboard');
+                return true;
             } catch (e) {
                 logError_ACU('openSettings failed:', e);
                 return false;
@@ -39,7 +33,9 @@ export function createSettingsConfigApi(_ctx: ApiGroupContext): Record<string, F
         // 立即手动更新
         manualUpdate: async function() {
             try {
-                return await handleManualUpdate_ACU();
+                await openAcuV2App('form-fill');
+                showToastr_ACU('info', '旧手动更新入口已迁移到新 UI，请在“填表工作台”执行手动填表。');
+                return true;
             } catch (e) {
                 logError_ACU('manualUpdate failed:', e);
                 return false;

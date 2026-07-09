@@ -4,6 +4,7 @@ import { getNameMapper } from '../runtime/template-vars/name-mapper';
 import { getLatestTableAppendMessageIndexFromChat_ACU } from '../table/table-history';
 import { getStorageProvider } from '../table/table-storage-strategy';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
+import { groupSqlBatchOperationsBySheet_ACU } from '../table/storage-frame-v2-log-utils';
 import { isSqliteMode } from '../table/storage-mode';
 import type { TableMutationOperationV2_ACU, TableWriteConflictUnitV2_ACU } from '../table/storage-frame-v2-types';
 import { parseDDLTableName } from '../../shared/ddl-utils';
@@ -391,6 +392,10 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
     }
 
     const targetSheetKeys = [...new Set(writeSet.flatMap(unit => 'sheetKey' in unit ? [unit.sheetKey] : []))];
+    const groupedOperations = groupSqlBatchOperationsBySheet_ACU([{ kind: 'sql_batch', statements, params: paramsList }], currentJsonTableData_ACU as any);
+    if (groupedOperations.ok === false) {
+        return { success: false, changed: false, error: `可视化编辑器 SQL 保存无法按单表归属：${groupedOperations.error}` };
+    }
     const commitResult = await runTableUpdateCommit_ACU<{ appliedEdits: number; changes: number }>({
         source: 'manual_crud',
         reason: 'visualizer_save_sql_batch',
@@ -403,7 +408,7 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
         updateGroupKeys: null,
         trackingSheetKeys: [],
         trackAsUpdate: false,
-        operations: [{ kind: 'sql_batch', statements, params: paramsList }],
+        entries: groupedOperations.entries,
     }, () => {
         const batchResult = provider.applyEditsBatch!(statements, 'visualizer_save', paramsList);
         if (!batchResult.success) {

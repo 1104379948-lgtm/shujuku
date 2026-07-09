@@ -2,7 +2,6 @@
 // 从 05_core_tail.js 迁入
 
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
-import { addAutoCardMenuItem_ACU } from './startup';
 import { newMessageDebounceTimer_ACU, _set_newMessageDebounceTimer_ACU} from '../../service/runtime/state-manager';
 import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync';
@@ -428,7 +427,6 @@ export   function mainInitialize_ACU() {
       logDebug_ACU('AutoCardUpdater Initialization successful! Core APIs loaded.');
       showToastr_ACU('success', '数据库自动更新脚本已加载！', '脚本启动');
 
-      addAutoCardMenuItem_ACU();
       loadSettings_ACU();
       if (
         SillyTavern_API_ACU &&

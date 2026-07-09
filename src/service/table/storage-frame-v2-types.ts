@@ -39,6 +39,32 @@ export interface ManualRefillProgressV2_ACU {
   updatedAt: number;
 }
 
+export type ManualRefillSessionStatusV2_ACU =
+  | 'cleaning'
+  | 'cleaned'
+  | 'filling'
+  | 'complete'
+  | 'failed'
+  | 'abandoned';
+
+export interface ManualRefillSessionMarkerV2_ACU {
+  kind: 'manual_refill_session';
+  sessionId: string;
+  status: ManualRefillSessionStatusV2_ACU;
+  configHash: string;
+  selectedSheetKeys: string[];
+  startMessageIndex: number;
+  endMessageIndex: number;
+  batchSize: number;
+  plannedSaveTargetIndices: number[];
+  completedSaveTargetIndices: number[];
+  dirtyCheckpointIndices: number[];
+  rebuiltCheckpointIndices: number[];
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface TableCheckpointV2_ACU {
   kind: 'full';
   createdAt: number;
@@ -62,6 +88,7 @@ export type TableSqlBindValueV2_ACU = string | number | null;
 
 export interface TableSqlBatchOperationV2_ACU {
   kind: 'sql_batch';
+  /** SQL 回放内容；真实表归属由所在的单表 log entry 表达，不在 sql_batch 上新增 sheetKey。 */
   statements: string[];
   /** 与 statements 同索引的参数绑定；无参数语句可省略对应项或传空数组。 */
   params?: TableSqlBindValueV2_ACU[][];
@@ -149,4 +176,5 @@ export interface TableStorageFrameV2_ACU {
   headRevision?: string | null;
   checkpoint?: TableCheckpointV2_ACU;
   logEntries: TableMutationLogEntryV2_ACU[];
+  manualRefillSession?: ManualRefillSessionMarkerV2_ACU;
 }

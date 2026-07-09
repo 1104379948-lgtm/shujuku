@@ -1,7 +1,7 @@
 // update-process.ts — 表格更新 UI 壳（presentation 层：负责 UI 交互）
 // service 层只返回结果，presentation 层根据返回值自行决定 UI 操作。
 
-import { _set_isAutoUpdatingCard_ACU, _set_wasStoppedByUser_ACU } from '../../service/runtime/state-manager';
+import { _set_isAutoUpdatingCard_ACU, _set_wasStoppedByUser_ACU, getCurrentIsolationKey_ACU } from '../../service/runtime/state-manager';
 import { getManualSelectionFromUI_ACU } from '../components/table-selector';
 import { showToastr_ACU } from '../theme/toast';
 import { showCustomConfirm_ACU } from '../theme/custom-confirm';
@@ -9,6 +9,7 @@ import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 // re-export 从 service 层搬迁的业务逻辑函数，保持外部调用方兼容
 export { saveCurrentDataForTable_ACU } from '../../service/chat/chat-service';
+import { getChatArray_ACU } from '../../service/chat/chat-service';
 import { toastr_API_ACU } from '../../shared/host-api';
 import { $statusMessageSpan_ACU } from '../state/ui-refs';
 import { topLevelWindow_ACU } from '../../shared/env';
@@ -18,6 +19,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-d
 import { collectManualExtraHint_ACU } from './settings-ui-sync';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
 import { abortAllActiveRequests_ACU } from '../../service/runtime/state-manager';
+import { loadActiveManualRefillSession_ACU } from '../../service/table/manual-refill-session';
 import {
     processUpdatesBatch_ACU,
     executeCardUpdateCore_ACU,
@@ -46,6 +48,28 @@ function notifyTableUpdate() {
 
 function updateStatusDisplay() {
     if (typeof updateCardUpdateStatusDisplay_ACU === 'function') updateCardUpdateStatusDisplay_ACU();
+}
+
+function formatActiveManualRefillSessionPrompt_ACU(): string | null {
+    try {
+        const session = loadActiveManualRefillSession_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU());
+        if (!session) return null;
+        const completed = session.completedSaveTargetIndices?.length || 0;
+        const planned = session.plannedSaveTargetIndices?.length || 0;
+        return [
+            '检测到上一次未完成的手动重填 session。',
+            '',
+            `状态：${session.status}`,
+            `范围：messageIndex ${session.startMessageIndex}..${session.endMessageIndex}`,
+            `表：${session.selectedSheetKeys.join(', ') || '无'}`,
+            `批次：${completed}/${planned} 已完成`,
+            session.error ? `错误：${session.error}` : '',
+            '',
+            '继续后将按当前配置恢复同一 session；如果当前范围、批大小或选中表变化，旧 session 会被标记为 abandoned，并创建新 session。是否继续？',
+        ].filter(Boolean).join('\n');
+    } catch {
+        return null;
+    }
 }
 
 function buildBatchProgressLabel(event: Partial<CardUpdateProgressEvent>): string {
@@ -258,13 +282,27 @@ export async function handleManualUpdate_ACU() {
             return;
         }
 
+        const activeSessionPrompt = formatActiveManualRefillSessionPrompt_ACU();
+        if (activeSessionPrompt) {
+            const continueSession = await showCustomConfirm_ACU(
+                '继续未完成的手动重填？',
+                activeSessionPrompt,
+                { confirmLabel: '继续', cancelLabel: '取消' }
+            );
+            if (!continueSession) {
+                logDebug_ACU('[更新流程] 用户取消了未完成手动重填 session 继续确认');
+                showToastr_ACU('info', '已取消手动填表。');
+                return;
+            }
+        }
+
         // 弹出确认框：手动填表将使用事务式重填，失败不会改动聊天记录中的旧数据
         const confirmed = await showCustomConfirm_ACU(
             '手动填表确认',
             '即将执行手动填表。\n\n' +
-            '系统会在内存中按当前上下文和批处理设置重填当前选中的表，全部成功后才写入新的完整 checkpoint。\n' +
-            '如果重填起点之前找不到可回放的 checkpoint，选中表的本次内存重建基底会从表头空基底开始；未选中的表会保持当前最新数据。\n\n' +
-            '失败、终止或从中断处继续时，都不会清空聊天记录中的旧表格数据。',
+            '系统会在重填范围内清理选中表旧操作记录，并按本次批次写入新的单表增量记录。\n' +
+            '无数据或无可用 V2 基底时先生成第一个完整 full checkpoint，后续批次写普通增量；已有可用 V2 数据时先删旧记录，再按自动填表同一套 V2 历史规则写新。\n' +
+            '不会在最新楼写完整 checkpoint 兜底；失败、终止或从中断处继续时都会中止，不保存部分结果。',
             { confirmLabel: '确认并继续', cancelLabel: '取消' }
         );
 

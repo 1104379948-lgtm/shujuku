@@ -13,6 +13,7 @@ import { logDebug_ACU } from '../../shared/utils';
 import { setSfcStyleHost } from '../build/sfc-style-runtime';
 import App from '../App.vue';
 import { useRootShellStore } from '../stores/root-shell-store';
+import { useRouterStore } from '../stores/router-store';
 import { useThemeStore } from '../stores/theme-store';
 import { applyTheme } from '../theme/theme-injector';
 import { __resetUiCloseGuardsForTests } from '../composables/useUiCloseGuard';
@@ -82,10 +83,11 @@ function ensureMounted(): MountedState {
 }
 
 /** 打开新 UI：首次调用执行 mount，后续只切 display + 标记 isOpen。 */
-export async function openAcuV2App(): Promise<void> {
+export async function openAcuV2App(pageId?: string): Promise<void> {
   const wasMounted = state !== null;
   const s = ensureMounted();
   s.root.style.display = '';
+  if (pageId) useRouterStore(s.pinia).setActivePage(pageId);
   const store = useRootShellStore(s.pinia);
   const wasOpen = store.isOpen;
   store.setOpen(true);

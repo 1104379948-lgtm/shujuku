@@ -16,6 +16,7 @@ import type {
 } from '../../shared/table-storage-provider';
 import type { TableDataObject_ACU, Mate_ACU } from '../../shared/models/table-data';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
+import { groupSqlBatchOperationsBySheet_ACU } from './storage-frame-v2-log-utils';
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../data/sqlite/sync-bridge';
 import {
@@ -292,7 +293,7 @@ export class SqlTableService implements ITableStorageProvider {
       const result = this.engine.runBatch(statements, statementParams);
       this._syncToJson();
 
-      const modifiedTables = extractTableNamesFromStatements(statements);
+      const modifiedTables = extractTableNamesFromStatements(userStatements);
       const modifiedKeys = this._tableNamesToSheetKeys(modifiedTables);
 
       logDebug_ACU(`[SqlTableService] SQL 批量执行成功: ${statements.length} 条语句, ${result.totalChanges} 行受影响`);
@@ -703,6 +704,12 @@ export async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(
     const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy));
     const modifiedTableNames = extractTableNamesFromStatements([normalizedSql]);
     const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
+    const grouped = groupSqlBatchOperationsBySheet_ACU([{
+      kind: 'sql_batch',
+      statements: [normalizedSql],
+      ...(Array.isArray(params) && params.length > 0 ? { params: [params.map(value => value ?? null)] } : {}),
+    }], workingData);
+    if (grouped.ok === false) return { success: false, modifiedKeys: [], appliedEdits: 0, changes: 0, error: grouped.error };
 
     logDebug_ACU(`[SqlTableService] 参数化快照 SQL 执行成功: changes=${result.changes}, modifiedKeys=${modifiedKeys.join(',')}`);
     return {
@@ -711,11 +718,7 @@ export async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(
       appliedEdits: 1,
       changes: result.changes,
       workingData,
-      operations: [{
-        kind: 'sql_batch',
-        statements: [normalizedSql],
-        ...(Array.isArray(params) && params.length > 0 ? { params: [params.map(value => value ?? null)] } : {}),
-      }],
+      operations: grouped.entries.flatMap(entry => entry.operations),
     };
   } catch (e: any) {
     const errMsg = e?.message || String(e);
@@ -753,6 +756,8 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
     const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy));
     const modifiedTableNames = extractTableNamesFromStatements(statements);
     const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
+    const grouped = groupSqlBatchOperationsBySheet_ACU([{ kind: 'sql_batch', statements }], workingData);
+    if (grouped.ok === false) return { success: false, modifiedKeys: [], appliedEdits: 0, error: grouped.error };
 
     logDebug_ACU(`[SqlTableService] 快照 SQL 执行成功: ${statements.length} 条语句, modifiedKeys=${modifiedKeys.join(',')}`);
     return {
@@ -760,7 +765,7 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
       modifiedKeys,
       appliedEdits: statements.length,
       workingData,
-      operations: [{ kind: 'sql_batch', statements }],
+      operations: grouped.entries.flatMap(entry => entry.operations),
     };
   } catch (e: any) {
     const errMsg = e?.message || String(e);

@@ -5,7 +5,8 @@ import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonT
 import { ensureLegacyStorageMigratedBeforeWrite_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
-import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
+import type { TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
+import type { SingleTableOperationEntryDraftV2_ACU } from './storage-frame-v2-log-utils';
 
 export interface TableUpdateCommitApplyContext_ACU {
   transactionContext: TableWriteTransactionContext_ACU;
@@ -19,10 +20,12 @@ export interface TableUpdateCommitPersistOverride_ACU {
   trackingSheetKeys?: string[] | null;
   trackAsUpdate?: boolean;
   operations?: TableMutationOperationV2_ACU[];
+  entries?: SingleTableOperationEntryDraftV2_ACU[];
   revisionWriteSet?: TableWriteConflictUnitV2_ACU[];
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
-  manualRefillProgress?: ManualRefillProgressV2_ACU;
+  deferChatSave?: boolean;
+  batchId?: string;
 }
 
 export interface TableUpdateCommitApplyResult_ACU<T> {
@@ -48,6 +51,9 @@ export interface RunTableUpdateCommitOptions_ACU {
   trackingSheetKeys?: string[] | null;
   trackAsUpdate?: boolean;
   operations?: TableMutationOperationV2_ACU[];
+  entries?: SingleTableOperationEntryDraftV2_ACU[];
+  deferChatSave?: boolean;
+  batchId?: string;
   skipChatSave?: boolean;
 }
 
@@ -103,6 +109,7 @@ export async function runTableUpdateCommit_ACU<T>(
         const revisionWriteSet = persistOptions.revisionWriteSet ?? options.revisionWriteSet;
         const targetSheetKeys = persistOptions.targetSheetKeys !== undefined ? persistOptions.targetSheetKeys : options.targetSheetKeys;
         const operations = persistOptions.operations ?? options.operations;
+        const entries = persistOptions.entries ?? options.entries;
         commitRevisionWriteSet = revisionWriteSet;
         if (!options.skipChatSave) {
           const saveResult = await persistTablesToChatMessage_ACU({
@@ -113,11 +120,13 @@ export async function runTableUpdateCommit_ACU<T>(
             tableData: applied.tableData,
             trackAsUpdate: persistOptions.trackAsUpdate ?? options.trackAsUpdate ?? false,
             source: options.source,
+            batchId: persistOptions.batchId,
             operations,
+            entries,
             revisionWriteSet,
             forceCheckpoint: persistOptions.forceCheckpoint,
             checkpointReason: persistOptions.checkpointReason,
-            manualRefillProgress: persistOptions.manualRefillProgress,
+            deferChatSave: persistOptions.deferChatSave ?? options.deferChatSave,
             assumeCommitLock: true,
             transactionContext,
           });

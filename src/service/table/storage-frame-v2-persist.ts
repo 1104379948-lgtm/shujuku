@@ -4,10 +4,11 @@ import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { DEFAULT_CHECKPOINT_CUMULATIVE_OPERATION_RATIO_PERCENT_ACU, DEFAULT_CHECKPOINT_MAX_ENTRIES_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_MAX_OPERATION_COUNT_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_MAX_OPERATION_KB_AFTER_CHECKPOINT_ACU, DEFAULT_CHECKPOINT_SINGLE_OPERATION_RATIO_PERCENT_ACU } from '../../shared/defaults';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
-import type { ManualRefillProgressV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU } from './storage-frame-v2-types';
+import type { TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU } from './storage-frame-v2-replay';
 import type { TableWriteTransactionContext_ACU } from './table-write-transaction';
+import { validateSingleTableLogEntryDraft_ACU, type SingleTableOperationEntryDraftV2_ACU } from './storage-frame-v2-log-utils';
 
 export interface TableCheckpointGenerationConfig_ACU {
   maxEntriesAfterCheckpoint: number;
@@ -36,6 +37,7 @@ export interface PersistTableMutationV2Options_ACU {
   source: TableMutationSourceV2_ACU;
   afterData: TableDataObject_ACU;
   operations?: TableMutationOperationV2_ACU[];
+  entries?: SingleTableOperationEntryDraftV2_ACU[];
   filledSheetKeys?: string[];
   candidateChangedSheetKeys?: string[] | null;
   groupKeys?: string[];
@@ -44,15 +46,19 @@ export interface PersistTableMutationV2Options_ACU {
   error?: string;
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
-  manualRefillProgress?: ManualRefillProgressV2_ACU;
   isolationKey?: string;
   baseRevision?: string | null;
   parentRevision?: string | null;
   writeSet?: TableMutationWriteSetV2_ACU;
   revisionWriteSet?: TableMutationWriteSetV2_ACU;
+  deferChatSave?: boolean;
   /** 调用方已处于 transactionContext.runCommit 临界区内时使用，避免嵌套 commit 锁。 */
   assumeCommitLock?: boolean;
   transactionContext?: Pick<TableWriteTransactionContext_ACU, 'runCommit' | 'baseRevision' | 'writeSet' | 'assertFresh'>;
+}
+
+export interface PersistTableMutationEntriesV2Options_ACU extends Omit<PersistTableMutationV2Options_ACU, 'operations' | 'entries'> {
+  entries: SingleTableOperationEntryDraftV2_ACU[];
 }
 
 function safeJsonByteLength_ACU(value: unknown): number {
@@ -305,7 +311,7 @@ function getOrInitV2Frame_ACU(isolatedData: Record<string, any>, isolationKey: s
 
 async function persistTableMutationLogV2Core_ACU(
   options: PersistTableMutationV2Options_ACU,
-): Promise<{ saved: boolean; messageIndex?: number; entry?: TableMutationLogEntryV2_ACU; error?: string }> {
+): Promise<{ saved: boolean; messageIndex?: number; entry?: TableMutationLogEntryV2_ACU; entries?: TableMutationLogEntryV2_ACU[]; error?: string }> {
   const chat = getChatArray_ACU();
   if (!chat || chat.length === 0) {
     return { saved: false, error: 'chat history is empty' };
@@ -327,6 +333,9 @@ async function persistTableMutationLogV2Core_ACU(
   const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
   const operations = normalizeOperations_ACU(options.operations, afterData, options.source);
   const effectiveChangedSheetKeys = candidateChangedSheetKeys;
+  const entryDrafts = Array.isArray(options.entries) && options.entries.length > 0
+    ? deepClone_ACU(options.entries)
+    : [];
 
   const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
   const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
@@ -339,16 +348,37 @@ async function persistTableMutationLogV2Core_ACU(
   const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey);
   const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey);
   const hasMetadataOnlyFillEvent = filledSheetKeys.length > 0 || (Array.isArray(options.groupKeys) && options.groupKeys.length > 0);
-  if (operations.length === 0 && !hasMetadataOnlyFillEvent && options.source !== 'import' && hasExistingCheckpoint) {
+  if (operations.length === 0 && entryDrafts.length === 0 && !hasMetadataOnlyFillEvent && options.source !== 'import' && hasExistingCheckpoint) {
     return { saved: false, error: `V2 operation log requires explicit operations for source=${options.source}; snapshot diff fallback is not allowed.` };
+  }
+  if (operations.length > 0 && entryDrafts.length > 0) {
+    return { saved: false, error: 'V2 persist cannot mix single operations entry and batch entries in one call.' };
+  }
+
+  if (!options.forceCheckpoint && operations.length > 0) {
+    const validation = validateSingleTableLogEntryDraft_ACU({
+      operations,
+      changedSheetKeys: candidateChangedSheetKeys,
+      filledSheetKeys,
+      groupKeys: options.groupKeys || [],
+      writeSet: currentWriteSet,
+    }, afterData);
+    if (validation.ok === false) return { saved: false, error: `V2 operation log entry must be single-table: ${validation.error}` };
+  }
+  if (!options.forceCheckpoint && entryDrafts.length > 0) {
+    for (const draft of entryDrafts) {
+      const validation = validateSingleTableLogEntryDraft_ACU(draft, afterData);
+      if (validation.ok === false) return { saved: false, error: `V2 batch operation log entry must be single-table: ${validation.error}` };
+    }
   }
 
   const shouldCheckpoint = options.forceCheckpoint
     || !hasExistingCheckpoint
-    || shouldCreatePeriodicCheckpoint_ACU(chat, isolationKey, operations, afterData);
+    || shouldCreatePeriodicCheckpoint_ACU(chat, isolationKey, entryDrafts.length > 0 ? entryDrafts.flatMap(item => item.operations || []) : operations, afterData);
   const now = Date.now();
   const aiFloor = countAiFloor_ACU(chat, target.index);
   let entry: TableMutationLogEntryV2_ACU | undefined;
+  const entries: TableMutationLogEntryV2_ACU[] = [];
 
   if (shouldCheckpoint) {
     const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
@@ -367,38 +397,46 @@ async function persistTableMutationLogV2Core_ACU(
       data: afterData,
       scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
       event: checkpointEvent,
-      ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU(options.manualRefillProgress) } : {}),
     };
     frame.headRevision = checkpointRevision;
     frame.logEntries = [];
     logDebug_ACU(`[V2 Persist] 写入 full checkpoint: messageIndex=${target.index}, revision=${checkpointRevision}, sheets=${Object.keys(afterData).filter(k => k.startsWith('sheet_')).length}`);
   } else {
-    const nextSeq = Math.max(0, ...frame.logEntries.map(item => Number(item.seq) || 0)) + 1;
-    const entryId = generateEntryId_ACU();
-    const parentRevision = options.parentRevision !== undefined ? options.parentRevision : (frame.headRevision ?? null);
-    const commitRevision = buildCommitRevision_ACU(nextSeq, entryId);
-    entry = {
-      seq: nextSeq,
-      entryId,
-      createdAt: now,
-      source: options.source,
-      targetMessageIndex: target.index,
-      aiFloor,
-      filledSheetKeys,
-      changedSheetKeys: effectiveChangedSheetKeys,
-      groupKeys: options.groupKeys || [],
-      requestId: options.requestId,
-      batchId: options.batchId,
-      error: options.error,
-      operations,
-      baseRevision: requestedBaseRevision ?? parentRevision,
-      parentRevision,
-      commitRevision,
-      writeSet: currentWriteSet,
-    };
-    frame.logEntries.push(entry);
-    frame.headRevision = commitRevision;
-    logDebug_ACU(`[V2 Persist] 追加 operation log entry: messageIndex=${target.index}, seq=${entry.seq}, revision=${commitRevision}, operations=${operations.length}`);
+    const drafts: SingleTableOperationEntryDraftV2_ACU[] = entryDrafts.length > 0
+      ? entryDrafts
+      : [{ operations, filledSheetKeys, changedSheetKeys: effectiveChangedSheetKeys, groupKeys: options.groupKeys || [], writeSet: currentWriteSet }];
+    let nextSeq = Math.max(0, ...frame.logEntries.map(item => Number(item.seq) || 0)) + 1;
+    for (const draft of drafts) {
+      const validation = validateSingleTableLogEntryDraft_ACU(draft, afterData);
+      if (validation.ok === false) return { saved: false, error: `V2 operation log entry must be single-table: ${validation.error}` };
+      const entryId = generateEntryId_ACU();
+      const parentRevision = frame.headRevision ?? options.parentRevision ?? null;
+      const commitRevision = buildCommitRevision_ACU(nextSeq, entryId);
+      entry = {
+        seq: nextSeq,
+        entryId,
+        createdAt: now,
+        source: options.source,
+        targetMessageIndex: target.index,
+        aiFloor,
+        filledSheetKeys: validation.filledSheetKeys,
+        changedSheetKeys: validation.changedSheetKeys,
+        groupKeys: validation.groupKeys,
+        requestId: options.requestId,
+        batchId: options.batchId,
+        error: options.error,
+        operations: deepClone_ACU(draft.operations || []),
+        baseRevision: requestedBaseRevision ?? parentRevision,
+        parentRevision,
+        commitRevision,
+        writeSet: draft.writeSet ?? currentWriteSet,
+      };
+      frame.logEntries.push(entry);
+      entries.push(entry);
+      frame.headRevision = commitRevision;
+      nextSeq += 1;
+    }
+    logDebug_ACU(`[V2 Persist] 追加 operation log entries: messageIndex=${target.index}, count=${entries.length}, headRevision=${frame.headRevision}`);
   }
 
   target.message.TavernDB_ACU_IsolatedData = isolatedData;
@@ -407,17 +445,19 @@ async function persistTableMutationLogV2Core_ACU(
     code: settings_ACU.dataIsolationCode,
   });
 
-  if (operations.length === 0 && filledSheetKeys.length === 0 && !shouldCheckpoint) {
+  if (operations.length === 0 && entryDrafts.length === 0 && filledSheetKeys.length === 0 && !shouldCheckpoint) {
     logWarn_ACU(`[V2 Persist] 无 operation 且无 filled 事件，仍保存空日志事件: messageIndex=${target.index}`);
   }
 
-  await saveChatToHost_ACU();
-  return { saved: true, messageIndex: target.index, entry };
+  if (options.deferChatSave !== true) {
+    await saveChatToHost_ACU();
+  }
+  return { saved: true, messageIndex: target.index, entry, entries };
 }
 
 export async function persistTableMutationLogV2_ACU(
   options: PersistTableMutationV2Options_ACU,
-): Promise<{ saved: boolean; messageIndex?: number; entry?: TableMutationLogEntryV2_ACU; error?: string }> {
+): Promise<{ saved: boolean; messageIndex?: number; entry?: TableMutationLogEntryV2_ACU; entries?: TableMutationLogEntryV2_ACU[]; error?: string }> {
   if (!options.transactionContext) {
     return { saved: false, error: 'V2 operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
   }
@@ -425,4 +465,22 @@ export async function persistTableMutationLogV2_ACU(
     return persistTableMutationLogV2Core_ACU(options);
   }
   return options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(options), options.revisionWriteSet);
+}
+
+export async function persistTableMutationLogEntriesV2_ACU(
+  options: PersistTableMutationEntriesV2Options_ACU,
+): Promise<{ saved: boolean; messageIndex?: number; entries?: TableMutationLogEntryV2_ACU[]; error?: string }> {
+  if (!options.transactionContext) {
+    return { saved: false, error: 'V2 operation log batch write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
+  }
+  if (!Array.isArray(options.entries) || options.entries.length === 0) {
+    return { saved: false, error: 'V2 operation log batch write requires at least one entry.' };
+  }
+  const run = () => persistTableMutationLogV2Core_ACU({ ...options, entries: options.entries });
+  if (options.assumeCommitLock) {
+    const result = await run();
+    return { saved: result.saved, messageIndex: result.messageIndex, entries: result.entries, error: result.error };
+  }
+  const result = await options.transactionContext.runCommit(run, options.revisionWriteSet);
+  return { saved: result.saved, messageIndex: result.messageIndex, entries: result.entries, error: result.error };
 }

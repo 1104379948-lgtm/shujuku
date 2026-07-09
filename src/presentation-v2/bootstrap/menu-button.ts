@@ -1,8 +1,7 @@
 /**
  * menu-button — 在 host document 的 #extensionsMenu 中挂 UI v2 按钮（D15）
  *
- * 与旧菜单按钮（startup.ts 中的 SP·数据库 V 旧UI）共存，互不影响。
- * 依赖 host document 解析（D15.1），因此也只在 host document 上注册按钮。
+ * 依赖 host document 解析（D15.1），因此只在 host document 上注册按钮。
  */
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 import { getAcuHostDocument, getAcuHostWindow, getAcuHostSource } from './host-document';

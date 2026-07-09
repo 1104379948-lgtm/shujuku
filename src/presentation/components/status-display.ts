@@ -4,7 +4,6 @@ import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-r
 import { getCurrentVectorMemoryConfig_ACU } from '../../service/vector/vector-memory-config';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../../service/vector/summary-vector-index-state-service';
 import { renderPromptSegments_ACU } from './plot-editors';
-import { renderKeywordPromptGroupToUI_ACU, renderSummaryPromptGroupToUI_ACU } from '../pages/popup-bindings-worldbook';
 import { renderImportTableSelector_ACU, renderManualTableSelector_ACU } from './table-selector';
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { escapeHtml_ACU } from '../../shared/html-helpers';
@@ -15,6 +14,9 @@ import { updateApiModeView_ACU, updateApiStatusDisplay_ACU, updateCustomApiInput
 import { jQuery_API_ACU } from '../dom-utils';
 import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $autoUpdateTokenThresholdInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $autoUpdateEnabledCheckbox_ACU, $standardizedTableFillEnabledCheckbox_ACU, $toastMuteEnabledCheckbox_ACU, $promptTemplateEnabledCheckbox_ACU, $tableEditLastPairOnlyCheckbox_ACU, $tableMaxRetriesInput_ACU, $useMainApiCheckbox_ACU, $streamingEnabledCheckbox_ACU, $manualTableSelector_ACU, $importTableSelector_ACU, _assignUIPlaceholders_ACU } from '../state/ui-refs';
 // status-display.ts — 对应源文件有跨文件依赖，保留在原位
+
+  function renderKeywordPromptGroupToUI_ACU(_group: any[]) {}
+  function renderSummaryPromptGroupToUI_ACU(_group: any[]) {}
 
   // [T172] 可视化编辑器刷新通知（从 service/worldbook/pipeline.ts 提取）
   function notifyVisualizerRefresh_ACU() {

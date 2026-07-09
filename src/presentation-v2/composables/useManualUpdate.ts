@@ -13,6 +13,8 @@ import { saveSettings_ACU } from '../../service/settings/settings-service';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
 import { getSortedSheetKeys_ACU } from '../../service/template/chat-scope';
 import { collectV2CheckpointFloorsFromChat_ACU } from '../../service/table/table-history';
+import { computeManualRefillConfigHash_ACU, loadActiveManualRefillSession_ACU } from '../../service/table/manual-refill-session';
+import type { ManualRefillSessionMarkerV2_ACU, ManualRefillSessionStatusV2_ACU } from '../../service/table/storage-frame-v2-types';
 import {
   executeCardUpdateCore_ACU,
   orchestrateManualUpdate_ACU,
@@ -37,6 +39,10 @@ export interface ManualUpdateState {
   sheetNames: ComputedRef<Record<string, string>>;
   checkpointFloorsLabel: ComputedRef<string>;
   manualRefillRangeLabel: ComputedRef<string>;
+  activeManualRefillSession: Ref<ManualRefillSessionMarkerV2_ACU | null>;
+  activeManualRefillSessionLabel: ComputedRef<string>;
+  activeManualRefillSessionDetail: ComputedRef<string>;
+  activeManualRefillSessionMatchesCurrentConfig: ComputedRef<boolean>;
   checkpointRiskMessage: ComputedRef<string>;
   vectorIndexWarning: ComputedRef<boolean>;
   refresh: () => void;
@@ -45,6 +51,7 @@ export interface ManualUpdateState {
   setManualSelectedKeys: (keys: string[]) => void;
   selectAllManualTables: () => void;
   selectNoManualTables: () => void;
+  showManualRefillSessionStatus: () => Promise<void>;
   runManualUpdate: () => Promise<void>;
 }
 
@@ -159,6 +166,27 @@ function formatAiFloorRange_ACU(startAiFloor: number, endAiFloor: number): strin
     : `AI 第 ${startAiFloor}~${endAiFloor} 层`;
 }
 
+function manualRefillStatusLabel_ACU(status: ManualRefillSessionStatusV2_ACU): string {
+  switch (status) {
+    case 'cleaning': return '清旧中';
+    case 'cleaned': return '等待填表';
+    case 'filling': return '填表中断';
+    case 'failed': return '失败待恢复';
+    case 'complete': return '已完成';
+    case 'abandoned': return '已放弃';
+    default: return status;
+  }
+}
+
+function formatManualSessionTime_ACU(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '未知';
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return String(value);
+  }
+}
+
 function progressLabel(event: CardUpdateProgressEvent): string {
   const prefix = event.currentBatch && event.totalBatches
     ? `批次 ${event.currentBatch}/${event.totalBatches} · `
@@ -193,6 +221,7 @@ export function useManualUpdate(): ManualUpdateState {
   const manualBatchSize = ref(resolveManualBatchSize());
   const manualExtraHint = ref('');
   const manualUpdateBusy = ref(false);
+  const activeManualRefillSession = ref<ManualRefillSessionMarkerV2_ACU | null>(null);
   const refreshTick = ref(0);
   let progressToastId: string | null = null;
   let abortRequested = false;
@@ -297,6 +326,63 @@ export function useManualUpdate(): ManualUpdateState {
       : '暂无可重填 AI 楼层';
   });
 
+  function plannedSaveTargetIndicesForCurrentSettings(): number[] {
+    const range = manualRefillRange.value;
+    if (!range) return [];
+    const batchSize = Math.max(1, manualBatchSize.value || 1);
+    const targets = new Set<number>();
+    for (let i = 0; i < range.indices.length; i += batchSize) {
+      const batch = range.indices.slice(i, i + batchSize);
+      const target = batch[batch.length - 1];
+      if (Number.isInteger(target)) targets.add(target);
+    }
+    return [...targets].sort((a, b) => a - b);
+  }
+
+  const currentManualRefillConfigHash = computed<string>(() => {
+    const range = manualRefillRange.value;
+    if (!range) return '';
+    return computeManualRefillConfigHash_ACU({
+      selectedSheetKeys: selectedManualTableKeys.value,
+      startMessageIndex: range.indices[0],
+      endMessageIndex: range.indices[range.indices.length - 1],
+      batchSize: manualBatchSize.value,
+      plannedSaveTargetIndices: plannedSaveTargetIndicesForCurrentSettings(),
+    });
+  });
+
+  const activeManualRefillSessionMatchesCurrentConfig = computed<boolean>(() => {
+    const session = activeManualRefillSession.value;
+    return Boolean(session && currentManualRefillConfigHash.value && session.configHash === currentManualRefillConfigHash.value);
+  });
+
+  const activeManualRefillSessionLabel = computed<string>(() => {
+    const session = activeManualRefillSession.value;
+    if (!session) return '';
+    const completed = session.completedSaveTargetIndices?.length || 0;
+    const planned = session.plannedSaveTargetIndices?.length || 0;
+    return `${manualRefillStatusLabel_ACU(session.status)} · ${completed}/${planned}`;
+  });
+
+  const activeManualRefillSessionDetail = computed<string>(() => {
+    const session = activeManualRefillSession.value;
+    if (!session) return '当前没有未完成的手动重填 session。';
+    return [
+      `Session: ${session.sessionId}`,
+      `状态: ${manualRefillStatusLabel_ACU(session.status)} (${session.status})`,
+      `范围: messageIndex ${session.startMessageIndex}..${session.endMessageIndex}`,
+      `表: ${session.selectedSheetKeys.join(', ') || '无'}`,
+      `批次: ${session.completedSaveTargetIndices.length}/${session.plannedSaveTargetIndices.length} 已完成`,
+      `dirty checkpoint: ${session.dirtyCheckpointIndices.length}；已重建: ${session.rebuiltCheckpointIndices.length}`,
+      `创建: ${formatManualSessionTime_ACU(session.createdAt)}`,
+      `更新: ${formatManualSessionTime_ACU(session.updatedAt)}`,
+      session.error ? `错误: ${session.error}` : '',
+      activeManualRefillSessionMatchesCurrentConfig.value
+        ? '当前表格选择/范围/批大小与该 session 一致，继续将恢复该 session。'
+        : '当前表格选择/范围/批大小与该 session 不一致，继续执行会替换旧 session。',
+    ].filter(Boolean).join('\n');
+  });
+
   const checkpointRiskMessage = computed<string>(() => {
     const checkpoints = checkpointFloors.value;
     const range = manualRefillRange.value;
@@ -321,6 +407,11 @@ export function useManualUpdate(): ManualUpdateState {
     selectedManualTableKeys.value = resolveManualSelection(currentSheetKeys());
     manualContextDepth.value = resolveManualContextDepth();
     manualBatchSize.value = resolveManualBatchSize();
+    try {
+      activeManualRefillSession.value = loadActiveManualRefillSession_ACU(getChatArray_ACU(), getCurrentIsolationKey_ACU());
+    } catch {
+      activeManualRefillSession.value = null;
+    }
     refreshTick.value++;
   }
 
@@ -352,6 +443,20 @@ export function useManualUpdate(): ManualUpdateState {
     setManualSelectedKeys([]);
   }
 
+  async function showManualRefillSessionStatus(): Promise<void> {
+    refresh();
+    if (!activeManualRefillSession.value) {
+      toast.info('当前没有未完成的手动重填 session。', { muteable: false });
+      return;
+    }
+    await dialogStore.confirm({
+      title: '未完成的手动重填 session',
+      message: activeManualRefillSessionDetail.value,
+      confirmLabel: activeManualRefillSessionMatchesCurrentConfig.value ? '知道了，继续时恢复' : '知道了',
+      cancelLabel: '关闭',
+    });
+  }
+
   async function runManualUpdate(): Promise<void> {
     if (manualUpdateBusy.value) return;
     if (!selectedManualTableKeys.value.length) {
@@ -359,9 +464,24 @@ export function useManualUpdate(): ManualUpdateState {
       return;
     }
 
+    refresh();
+    if (activeManualRefillSession.value) {
+      const continueConfirmed = await dialogStore.confirm({
+        title: activeManualRefillSessionMatchesCurrentConfig.value ? '继续未完成的手动重填？' : '替换未完成的手动重填？',
+        message: activeManualRefillSessionDetail.value,
+        dangerMessage: activeManualRefillSessionMatchesCurrentConfig.value
+          ? undefined
+          : '当前配置与未完成 session 不一致。确认后旧 session 会被标记为 abandoned，并创建新的重填 session。',
+        confirmLabel: activeManualRefillSessionMatchesCurrentConfig.value ? '继续恢复' : '放弃旧 session 并新建',
+        cancelLabel: '取消',
+        confirmVariant: activeManualRefillSessionMatchesCurrentConfig.value ? 'primary' : 'danger',
+      });
+      if (!continueConfirmed) return;
+    }
+
     const confirmed = await dialogStore.confirm({
       title: '执行手动填表',
-      message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n\n系统会在内存中按当前上下文和批处理设置重填当前选中的表，全部成功后才写入新的完整 checkpoint。\n如果重填起点之前找不到可回放的 checkpoint，选中表的本次内存重建基底会从表头空基底开始；未选中的表会保持当前最新数据。\n\n失败、终止或从中断处继续时，都不会清空聊天记录中的旧表格数据。`,
+      message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n\n系统会在重填范围内清理选中表旧操作记录，并按本次批次落点写入新的单表增量记录。\n无数据或无可用 V2 基底时会先生成第一个完整 full checkpoint，后续批次写普通增量；已有可用 V2 数据时会先删旧记录，再按自动填表同一套 V2 历史规则写新，范围内原有 checkpoint 会按改写后历史重建。\n不会在最新楼写完整 checkpoint 兜底。\n\n失败、终止或从中断处继续时都会中止，不保存部分结果。`,
       dangerMessage: checkpointRiskMessage.value || undefined,
       confirmLabel: '确认并继续',
       cancelLabel: '取消',
@@ -447,6 +567,10 @@ export function useManualUpdate(): ManualUpdateState {
     sheetNames,
     checkpointFloorsLabel,
     manualRefillRangeLabel,
+    activeManualRefillSession,
+    activeManualRefillSessionLabel,
+    activeManualRefillSessionDetail,
+    activeManualRefillSessionMatchesCurrentConfig,
     checkpointRiskMessage,
     vectorIndexWarning,
     refresh,
@@ -455,6 +579,7 @@ export function useManualUpdate(): ManualUpdateState {
     setManualSelectedKeys,
     selectAllManualTables,
     selectNoManualTables,
+    showManualRefillSessionStatus,
     runManualUpdate,
   };
 }

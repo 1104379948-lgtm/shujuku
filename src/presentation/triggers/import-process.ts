@@ -20,6 +20,7 @@ import { setImportInjectButtonEnabled_ACU } from '../components/import-status-ui
 import { getSortedSheetKeys_ACU } from '../../service/template/chat-scope';
 import { getInjectionTargetLorebook_ACU } from '../../service/worldbook/injection-engine';
 import { initImportDatabase_ACU, saveChunkProgress_ACU, finalizeImportAndCleanup_ACU, clearImportedEntriesCore_ACU, deleteImportedEntriesCore_ACU } from '../../service/import/import-executor';
+import { repairCurrentChatV2OperationLogToSingleTableRecords_ACU } from '../../service/table/storage-frame-v2-repair';
 
 export   async function processImportedTxtAsUpdates_ACU() {
       // 外部导入：按"自选表格"处理与注入（与手动填表一致的表选择体验）
@@ -122,6 +123,12 @@ export   async function processImportedTxtAsUpdates_ACU() {
       const finalResult = await finalizeImportAndCleanup_ACU(importTarget, selectedSheetKeys, modeSuffix!, allChunks.length);
 
       if (finalResult.success) {
+          const normalizeResult = await repairCurrentChatV2OperationLogToSingleTableRecords_ACU('on_import');
+          if (!normalizeResult.success) {
+              showToastr_ACU('error', `外部导入完成后 V2 操作记录归一化失败：${normalizeResult.errors.join('; ')}`);
+              if (typeof setImportInjectButtonEnabled_ACU === 'function') setImportInjectButtonEnabled_ACU(true);
+              return;
+          }
           if (finalResult.cleanedCount && finalResult.cleanedCount > 0) {
               showToastr_ACU('info', `外部导入完成：已清理 ${finalResult.cleanedCount} 个旧数据库条目。`);
           }

@@ -6,13 +6,10 @@
  * 供模板预设 / 剧情推进预设的手工切换与 API 切换复用。
  */
 import { refreshMergedDataAndNotify_ACU } from '../../service/worldbook/pipeline';
-import { $manualTableSelector_ACU, $importTableSelector_ACU } from '../state/ui-refs';
-import { renderManualTableSelector_ACU, renderImportTableSelector_ACU } from './table-selector';
 import { updateCardUpdateStatusDisplay_ACU } from './update-status-display';
 import { topLevelWindow_ACU } from '../../shared/env';
 import { logDebug_ACU } from '../../shared/utils';
 import { loadTemplatePresetSelect_ACU } from './template-preset-ui';
-import { loadPlotSettingsToUI_ACU } from '../pages/popup-helpers';
 
 /**
  * 刷新合并数据后自动通知前端 + 刷新可视化编辑器 + 刷新 UI 选择器和状态面板
@@ -43,13 +40,7 @@ export async function refreshMergedDataAndNotifyWithUI_ACU(
         } catch (_) {}
     }, 200);
 
-    // 3. UI 选择器刷新
-    if ($manualTableSelector_ACU) {
-        try { renderManualTableSelector_ACU(); } catch (_) {}
-    }
-    if ($importTableSelector_ACU) {
-        try { renderImportTableSelector_ACU(); } catch (_) {}
-    }
+    // 3. 兼容旧通知：新 UI 通过事件回调/Pinia 刷新，不再刷新旧 popup DOM。
     if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
         updateCardUpdateStatusDisplay_ACU();
     }
@@ -88,22 +79,14 @@ export function refreshPresetUIAfterSwitch_ACU(
         logDebug_ACU('[refreshPresetUI] 模板预设 UI 刷新失败:', e);
     }
 
-    // 2. 剧情推进编辑区全量重载（任务列表 + 参数 + 提示词 + 速率 + 循环 + 排除规则 + 预设选择器）
-    //    loadPlotSettingsToUI_ACU 内部会调用 loadPlotPresetSelect_ACU，无需再单独调
-    try {
-        loadPlotSettingsToUI_ACU();
-    } catch (e) {
-        logDebug_ACU('[refreshPresetUI] 剧情推进编辑区刷新失败:', e);
-    }
-
-    // 3. 数据库状态卡片（含"当前生效模板预设"显示）
+    // 2. 数据库状态卡片（含"当前生效模板预设"显示）
     try {
         updateCardUpdateStatusDisplay_ACU();
     } catch (e) {
         logDebug_ACU('[refreshPresetUI] 数据库状态卡片刷新失败:', e);
     }
 
-    // 4. 独立数据库编辑器窗口：顶部模板标识
+    // 3. 独立数据库编辑器窗口：顶部模板标识
     try {
         if (typeof (window as any).ACU_Visualizer_Refresh === 'function') {
             (window as any).ACU_Visualizer_Refresh();

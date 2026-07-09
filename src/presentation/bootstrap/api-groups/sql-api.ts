@@ -9,6 +9,7 @@ import { getStorageProvider } from '../../../service/table/table-storage-strateg
 import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
+import { groupSqlBatchOperationsBySheet_ACU } from '../../../service/table/storage-frame-v2-log-utils';
 import { extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
 import type { TableWriteConflictUnitV2_ACU } from '../../../service/table/storage-frame-v2-types';
 import type { SqlMutationResult, SqlQueryResult } from '../../../shared/table-storage-provider';
@@ -458,6 +459,12 @@ function buildRawSqlBatchOperations_ACU(sql: string) {
     return statements.length > 0 ? [{ kind: 'sql_batch' as const, statements }] : [];
 }
 
+function buildRawSqlBatchEntries_ACU(sql: string) {
+    const grouped = groupSqlBatchOperationsBySheet_ACU(buildRawSqlBatchOperations_ACU(sql), currentJsonTableData_ACU as any);
+    if (grouped.ok === false) throw new Error(grouped.error);
+    return grouped.entries;
+}
+
 export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
     return {
         executeSqlQuery: function(sqlOrOptions: any, params?: any, options?: any): PublicSqlQueryResult_ACU | null {
@@ -568,7 +575,7 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     updateGroupKeys: args.updateGroupKeys,
                     trackingSheetKeys: args.trackingSheetKeys === undefined ? [] : args.trackingSheetKeys,
                     trackAsUpdate: false,
-                    operations: buildRawSqlBatchOperations_ACU(args.sql),
+                    entries: buildRawSqlBatchEntries_ACU(args.sql),
                     skipChatSave: args.skipChatSave,
                 }, () => {
                     const batchResult = getStorageProvider().applyEdits(args.sql, 'raw_sql_api');

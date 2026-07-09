@@ -128,6 +128,7 @@
 
         <AcuMessage kind="info">
           当前 full checkpoint：{{ manualUpdate.checkpointFloorsLabel.value }}；按当前设置预计处理范围：{{ manualUpdate.manualRefillRangeLabel.value }}。
+          手动重填会在范围内清理选中表旧记录，并按本次批次写入新的单表增量记录；失败时不会保存部分结果。
         </AcuMessage>
 
         <TableSelector
@@ -172,8 +173,18 @@
                 ? "填表中..."
                 : manualUpdate.vectorIndexWarning.value
                   ? "交火索引已启用"
-                  : "执行手动填表"
+              : "执行手动填表"
             }}
+          </AcuButton>
+          <AcuButton
+            v-if="manualUpdate.activeManualRefillSession.value"
+            variant="default"
+            size="sm"
+            :disabled="manualUpdate.manualUpdateBusy.value"
+            :title="manualUpdate.activeManualRefillSessionDetail.value"
+            @click="manualUpdate.showManualRefillSessionStatus"
+          >
+            Session: {{ manualUpdate.activeManualRefillSessionLabel.value }}
           </AcuButton>
         </div>
       </AcuPanel>
