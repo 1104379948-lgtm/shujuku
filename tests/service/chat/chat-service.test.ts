@@ -1816,6 +1816,96 @@ describe('clearManualRefillSheetDataInRange_ACU', () => {
     expect(mockLoadAllChatMessages).toHaveBeenCalledTimes(1);
   });
 
+
+  it('范围硬删除按键存在删除 falsy 目标表占位，避免把空值误判为未命中', async () => {
+    const chat = [
+      {
+        is_user: false,
+        mes: 'AI目标层',
+        TavernDB_ACU_IsolatedData: {
+          'tag-a': {
+            independentData: {
+              sheet_null: null,
+              sheet_false: false,
+              sheet_empty: '',
+              sheet_keep: { name: '保留表' },
+            },
+          },
+        },
+        TavernDB_ACU_IndependentData: {
+          sheet_null: null,
+          sheet_keep: { name: '旧版独立保留表' },
+        },
+        TavernDB_ACU_Data: {
+          sheet_false: false,
+          sheet_keep: { name: '旧版标准保留表' },
+        },
+        TavernDB_ACU_SummaryData: {
+          sheet_zero: 0,
+          sheet_keep: { name: '旧版摘要保留表' },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const count = await clearManualRefillSheetDataInRange_ACU([0], ['sheet_null', 'sheet_false', 'sheet_empty', 'sheet_zero']);
+
+    expect(count).toBe(1);
+    expect(chat[0].TavernDB_ACU_IsolatedData['tag-a'].independentData).toEqual({ sheet_keep: { name: '保留表' } });
+    expect(chat[0].TavernDB_ACU_IndependentData).toEqual({ sheet_keep: { name: '旧版独立保留表' } });
+    expect(chat[0].TavernDB_ACU_Data).toEqual({ sheet_keep: { name: '旧版标准保留表' } });
+    expect(chat[0].TavernDB_ACU_SummaryData).toEqual({ sheet_keep: { name: '旧版摘要保留表' } });
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(mockLoadAllChatMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('范围内只有隔离标签槽但没有目标 sheetKey 时，warning 说明标签槽命中不等于目标表命中', async () => {
+    const chat = [
+      {
+        is_user: false,
+        mes: 'AI目标层A',
+        TavernDB_ACU_IsolatedData: {
+          'tag-a': {
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full',
+                data: { sheet_keep: { name: '保留表' } },
+              },
+            },
+          },
+        },
+      },
+      {
+        is_user: false,
+        mes: 'AI目标层B',
+        TavernDB_ACU_IsolatedData: {
+          'tag-a': {
+            independentData: { sheet_keep: { name: '保留表' } },
+          },
+        },
+      },
+    ];
+    mockGetCurrentIsolationKey.mockReturnValue('tag-a');
+    mockGetChatArray.mockReturnValue(chat);
+
+    const count = await clearManualRefillSheetDataInRange_ACU([0, 1], ['sheet_missing']);
+
+    expect(count).toBe(0);
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(mockLoadAllChatMessages).not.toHaveBeenCalled();
+    expect(mockLogWarn).toHaveBeenCalledWith('[手动重填预清理] 本次没有删除任何范围内本地数据；请检查 targetKeys 是否匹配 sheetKey、contextScopeIndices 是否覆盖残留楼层。', expect.objectContaining({
+      normalizedTargetKeys: ['sheet_missing'],
+      isolationKeyMatchedMessagesNote: 'isolationKeyMatchedMessages 只表示当前隔离标签槽存在，不表示目标 sheetKey 命中。',
+      beforeResidue: expect.objectContaining({ isolationKeyMatchedMessages: 2, exactHits: 0 }),
+      afterResidue: expect.objectContaining({ isolationKeyMatchedMessages: 2, exactHits: 0 }),
+      missedMessages: expect.arrayContaining([
+        expect.objectContaining({ index: 0, presence: expect.objectContaining({ hasIsolatedData: true, storageFrameTagCount: 1 }) }),
+        expect.objectContaining({ index: 1, presence: expect.objectContaining({ hasIsolatedData: true, isolatedTagCount: 1 }) }),
+      ]),
+    }));
+  });
+
   it('未指定目标表时拒绝执行，避免把范围硬删除退化成全量清理', async () => {
     await expect(clearManualRefillSheetDataInRange_ACU([0], [])).rejects.toThrow('手动重填范围清理没有有效 sheetKey');
     await expect(clearManualRefillSheetDataInRange_ACU([0], null)).rejects.toThrow('手动重填范围清理没有有效 sheetKey');

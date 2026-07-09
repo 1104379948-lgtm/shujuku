@@ -1694,7 +1694,10 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
         logWarn_ACU('[手动重填预清理] 本次没有删除任何范围内本地数据；请检查 targetKeys 是否匹配 sheetKey、contextScopeIndices 是否覆盖残留楼层。', {
             normalizedTargetKeys: normalizedTargetSheetKeys,
             messageRange: { count: targetMessageIndices.length, first: targetMessageIndices[0], last: targetMessageIndices[targetMessageIndices.length - 1] },
+            isolationKeyMatchedMessagesNote: 'isolationKeyMatchedMessages 只表示当前隔离标签槽存在，不表示目标 sheetKey 命中。',
+            beforeResidue,
             afterResidue,
+            missedMessages,
         });
     }
 

@@ -722,7 +722,7 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
             // 删除 independentData 中的指定 sheetKey
             if (tagData.independentData && typeof tagData.independentData === 'object') {
                 sheetKeys.forEach(k => {
-                    if (tagData.independentData[k]) {
+                    if (Object.prototype.hasOwnProperty.call(tagData.independentData, k)) {
                         delete tagData.independentData[k];
                         msgChanged = true;
                     }
@@ -765,7 +765,7 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
         const next = safeClone(msg.TavernDB_ACU_IndependentData);
         let indepChanged = false;
         sheetKeys.forEach(k => {
-            if (next[k]) {
+            if (Object.prototype.hasOwnProperty.call(next, k)) {
                 delete next[k];
                 indepChanged = true;
             }
@@ -810,7 +810,10 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
         const next = safeClone(msg.TavernDB_ACU_Data);
         let dataChanged = false;
         sheetKeys.forEach(k => {
-            if (next[k]) { delete next[k]; dataChanged = true; }
+            if (Object.prototype.hasOwnProperty.call(next, k)) {
+                delete next[k];
+                dataChanged = true;
+            }
         });
         if (dataChanged) {
             msgChanged = true;
@@ -832,7 +835,10 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
         const next = safeClone(msg.TavernDB_ACU_SummaryData);
         let summaryChanged = false;
         sheetKeys.forEach(k => {
-            if (next[k]) { delete next[k]; summaryChanged = true; }
+            if (Object.prototype.hasOwnProperty.call(next, k)) {
+                delete next[k];
+                summaryChanged = true;
+            }
         });
         if (summaryChanged) {
             msgChanged = true;

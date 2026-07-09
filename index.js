@@ -6860,7 +6860,7 @@ $CONTENT
                 // 删除 independentData 中的指定 sheetKey
                 if (tagData.independentData && typeof tagData.independentData === 'object') {
                     sheetKeys.forEach(k => {
-                        if (tagData.independentData[k]) {
+                        if (Object.prototype.hasOwnProperty.call(tagData.independentData, k)) {
                             delete tagData.independentData[k];
                             msgChanged = true;
                         }
@@ -6899,7 +6899,7 @@ $CONTENT
             const next = safeClone(msg.TavernDB_ACU_IndependentData);
             let indepChanged = false;
             sheetKeys.forEach(k => {
-                if (next[k]) {
+                if (Object.prototype.hasOwnProperty.call(next, k)) {
                     delete next[k];
                     indepChanged = true;
                 }
@@ -6956,7 +6956,7 @@ $CONTENT
             const next = safeClone(msg.TavernDB_ACU_Data);
             let dataChanged = false;
             sheetKeys.forEach(k => {
-                if (next[k]) {
+                if (Object.prototype.hasOwnProperty.call(next, k)) {
                     delete next[k];
                     dataChanged = true;
                 }
@@ -6982,7 +6982,7 @@ $CONTENT
             const next = safeClone(msg.TavernDB_ACU_SummaryData);
             let summaryChanged = false;
             sheetKeys.forEach(k => {
-                if (next[k]) {
+                if (Object.prototype.hasOwnProperty.call(next, k)) {
                     delete next[k];
                     summaryChanged = true;
                 }
@@ -29658,7 +29658,10 @@ $CONTENT
             logWarn_ACU('[手动重填预清理] 本次没有删除任何范围内本地数据；请检查 targetKeys 是否匹配 sheetKey、contextScopeIndices 是否覆盖残留楼层。', {
                 normalizedTargetKeys: normalizedTargetSheetKeys,
                 messageRange: { count: targetMessageIndices.length, first: targetMessageIndices[0], last: targetMessageIndices[targetMessageIndices.length - 1] },
+                isolationKeyMatchedMessagesNote: 'isolationKeyMatchedMessages 只表示当前隔离标签槽存在，不表示目标 sheetKey 命中。',
+                beforeResidue,
                 afterResidue,
+                missedMessages,
             });
         }
         return clearedCount;
