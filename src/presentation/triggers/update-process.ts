@@ -320,15 +320,16 @@ export async function handleManualUpdate_ACU() {
         const selectedSheetSummary = buildLegacySelectedSheetSummary_ACU(targetKeys);
         const checkpointFloorsLabel = buildLegacyCheckpointFloorsLabel_ACU();
         const manualRefillRangeLabel = buildLegacyManualRefillRangeLabel_ACU();
-        // 弹出确认框：手动填表将使用事务式重填，失败不会改动聊天记录中的旧数据
+        // 弹出确认框：手动填表将使用事务式重填，预清理范围与 service 层保持一致。
         const confirmed = await showCustomConfirm_ACU(
             '手动填表确认',
             `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel}\n本次重填范围：${manualRefillRangeLabel}\n选中表：${selectedSheetSummary}\n\n` +
             '系统会在内存中按当前上下文和批处理设置重填当前选中的表，全部成功后才写入手动重填进度记录。\n' +
-            '执行前会先清理选中表在本次重填范围内的 V2 增量日志与 revision 指纹；不会默认删除 checkpoint 基底。若清理后诊断日志仍提示 checkpoint 风险，旧表可能来自 checkpoint 基底。\n' +
+            '执行前会先删除选中表在本次重填范围内的旧表格数据，包括范围内 V2 增量日志、revision 指纹以及范围内 checkpoint 中的选中表基底；范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除。\n' +
+            '清理后会重新生成运行时快照；当重填范围位于当前有效 AI 尾部时，会直接使用清理后的最新运行时快照作为填表基底。若范围后仍有跳过的 AI 楼层，则会按重填起点前的边界回放生成基底，避免未来楼层污染 prompt。\n' +
             '保留边界 checkpoint 会按 AI 回复楼层计数，在达到保留窗口和 20 个 AI 楼层缓冲后自动滚动建立。\n' +
             '如果重填起点之前找不到可回放的 checkpoint，选中表的本次内存重建基底会从表头空基底开始；未选中的表会保持当前最新数据。\n\n' +
-            '失败、终止或从中断处继续时，都不会清空聊天记录中的旧表格数据。',
+            '失败、终止或从中断处继续时，不会清理本次重填范围之外的聊天记录表格数据。',
             { confirmLabel: '确认并继续', cancelLabel: '取消' }
         );
 

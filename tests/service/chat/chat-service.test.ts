@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal } = vi.hoisted(() => ({
+const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockLogWarn, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal, mockLoadAllChatMessages } = vi.hoisted(() => ({
   mockSettings: {
     retainRecentLayers: 3,
     dataIsolationEnabled: false,
@@ -19,6 +19,7 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockSetChatMessages: vi.fn(),
   mockEmitMessageUpdated: vi.fn(),
   mockLogDebug: vi.fn(),
+  mockLogWarn: vi.fn(),
   mockGetCurrentIsolationKey: vi.fn(() => ''),
   mockGetLastOptimizationBase: vi.fn(() => null),
   mockSetLastOptimizationBase: vi.fn(),
@@ -29,6 +30,7 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockLoadTableStateFromFramesV2: vi.fn(),
   mockCollectScheduleSummaryFromFramesV2: vi.fn(() => null),
   mockDeleteSummaryVectorIndexExternal: vi.fn(),
+  mockLoadAllChatMessages: vi.fn(),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -45,7 +47,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
 vi.mock('../../../src/shared/utils', () => ({
   logDebug_ACU: mockLogDebug,
   logError_ACU: vi.fn(),
-  logWarn_ACU: vi.fn(),
+  logWarn_ACU: mockLogWarn,
   isSummaryOrOutlineTable_ACU: vi.fn((name: string) => name.includes('纪要') || name.includes('总结')),
 }));
 
@@ -86,6 +88,10 @@ vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () =
   deleteSummaryVectorIndexExternal_ACU: mockDeleteSummaryVectorIndexExternal,
 }));
 
+vi.mock('../../../src/service/worldbook/pipeline', () => ({
+  loadAllChatMessages_ACU: mockLoadAllChatMessages,
+}));
+
 import {
   replaceChatMessage_ACU,
   getOriginalContent_ACU,
@@ -121,6 +127,7 @@ beforeEach(() => {
   });
   mockRunTableWriteTransaction.mockImplementation(async (_options: any, task: any) => task());
   mockDeleteSummaryVectorIndexExternal.mockResolvedValue(undefined);
+  mockLoadAllChatMessages.mockResolvedValue(undefined);
   mockLoadTableStateFromFramesV2.mockResolvedValue({
     sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] },
   });
@@ -1675,6 +1682,20 @@ describe('clearManualRefillSheetDataInRange_ACU', () => {
 
     expect(count).toBe(1);
     expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(mockLoadAllChatMessages).toHaveBeenCalledTimes(1);
+    expect(mockLogDebug).toHaveBeenCalledWith('[手动重填预清理] 消息本地数据删除明细', expect.objectContaining({
+      messageIndex: 0,
+      normalizedTargetKeys: ['sheet_target'],
+      deletedTargetCount: expect.any(Number),
+      remainingTargetCount: 0,
+      deletedTargets: expect.arrayContaining([
+        expect.objectContaining({ sheetKey: 'sheet_target', path: 'TavernDB_ACU_Data.sheet_target', kind: 'objectKey' }),
+        expect.objectContaining({ sheetKey: 'sheet_target', path: 'TavernDB_ACU_SummaryData.sheet_target', kind: 'objectKey' }),
+        expect.objectContaining({ sheetKey: 'sheet_target', path: 'TavernDB_ACU_IsolatedData.tag-a.independentData.sheet_target', kind: 'objectKey' }),
+        expect.objectContaining({ sheetKey: 'sheet_target', path: 'TavernDB_ACU_IsolatedData.tag-a.modifiedKeys[0]', kind: 'arrayValue' }),
+      ]),
+    }));
+    expect(mockLogDebug).toHaveBeenCalledWith('[手动重填预清理] 开始刷新 worldbook 消息缓存，确保后续快照不读取清理前缓存。');
     expect(JSON.stringify(chat[0])).not.toContain('sheet_target');
     expect(JSON.stringify(chat[0])).not.toContain('目标表');
 
@@ -1735,6 +1756,7 @@ describe('clearManualRefillSheetDataInRange_ACU', () => {
     expect(chat[1]).toEqual(userBefore);
     expect(chat[2].TavernDB_ACU_Data).toEqual({ sheet_keep: { name: '范围内保留表' } });
     expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(mockLoadAllChatMessages).toHaveBeenCalledTimes(1);
   });
 
   it('summary/outline 目标表只有 manifest 状态变化时仍保存聊天', async () => {
@@ -1766,13 +1788,43 @@ describe('clearManualRefillSheetDataInRange_ACU', () => {
     expect(chat[0].TavernDB_ACU_IsolatedData['tag-b'].summaryVectorIndexState).toBeUndefined();
     expect(mockDeleteSummaryVectorIndexExternal).toHaveBeenCalledTimes(2);
     expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(mockLoadAllChatMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('归一化 targetKeys 后只清有效 sheetKey 并使用归一化 writeSet', async () => {
+    const chat = [
+      {
+        is_user: false,
+        mes: 'AI目标层',
+        TavernDB_ACU_Data: {
+          sheet_0: { name: '目标表' },
+          sheet_keep: { name: '保留表' },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const count = await clearManualRefillSheetDataInRange_ACU([0], [' sheet_0 ', 'sheet_0', '表名', '', null as unknown as string]);
+
+    expect(count).toBe(1);
+    expect(mockRunTableWriteTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'clearManualRefillSheetDataInRange',
+      writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+    }), expect.any(Function));
+    expect(chat[0].TavernDB_ACU_Data).toEqual({ sheet_keep: { name: '保留表' } });
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(mockLoadAllChatMessages).toHaveBeenCalledTimes(1);
   });
 
   it('未指定目标表时拒绝执行，避免把范围硬删除退化成全量清理', async () => {
-    await expect(clearManualRefillSheetDataInRange_ACU([0], [])).rejects.toThrow('手动重填范围清理必须指定目标表');
-    await expect(clearManualRefillSheetDataInRange_ACU([0], null)).rejects.toThrow('手动重填范围清理必须指定目标表');
-    await expect(clearManualRefillSheetDataInRange_ACU([0], undefined as unknown as string[])).rejects.toThrow('手动重填范围清理必须指定目标表');
+    await expect(clearManualRefillSheetDataInRange_ACU([0], [])).rejects.toThrow('手动重填范围清理没有有效 sheetKey');
+    await expect(clearManualRefillSheetDataInRange_ACU([0], null)).rejects.toThrow('手动重填范围清理没有有效 sheetKey');
+    await expect(clearManualRefillSheetDataInRange_ACU([0], undefined as unknown as string[])).rejects.toThrow('手动重填范围清理没有有效 sheetKey');
+    await expect(clearManualRefillSheetDataInRange_ACU([0], ['表名', ''])).rejects.toThrow('手动重填范围清理没有有效 sheetKey');
     expect(mockRunTableWriteTransaction).not.toHaveBeenCalled();
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(mockLoadAllChatMessages).not.toHaveBeenCalled();
+    expect(mockLogWarn).toHaveBeenCalledWith('[手动重填预清理] 中止：targetKeys 中没有有效 sheetKey，无法删除本地数据。', expect.any(Object));
   });
 });
 

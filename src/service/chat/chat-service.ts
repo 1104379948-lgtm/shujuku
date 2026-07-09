@@ -22,8 +22,9 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } 
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
 import { settings_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
-import { clearTableFieldsForIsolation_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
+import { clearTableFieldsForIsolation_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
+import { loadAllChatMessages_ACU } from '../worldbook/pipeline';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../table/table-history';
 import { deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
@@ -142,6 +143,150 @@ function tableListContainsSummaryOrOutline_ACU(targetSheetKeys: string[]): boole
         const table = currentJsonTableData_ACU?.[sheetKey];
         return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
     });
+}
+
+function normalizeManualRefillTargetSheetKeys_ACU(targetSheetKeys: unknown): string[] {
+    if (!Array.isArray(targetSheetKeys)) return [];
+    const normalized: string[] = [];
+    const seen = new Set<string>();
+    targetSheetKeys.forEach((value) => {
+        if (typeof value !== 'string') return;
+        const key = value.trim();
+        if (!key || !key.startsWith('sheet_') || seen.has(key)) return;
+        seen.add(key);
+        normalized.push(key);
+    });
+    return normalized;
+}
+
+type ManualRefillDeletionTargetKind_ACU = 'objectKey' | 'arrayValue' | 'stringReference';
+
+interface ManualRefillDeletionTarget_ACU {
+    sheetKey: string;
+    path: string;
+    kind: ManualRefillDeletionTargetKind_ACU;
+}
+
+const MAX_MANUAL_REFILL_DELETION_LOG_TARGETS_ACU = 80;
+
+function collectManualRefillTargetKeyPaths_ACU(value: unknown, path: string, sheetKeySet: Set<string>, targets: ManualRefillDeletionTarget_ACU[], depth = 0): void {
+    if (targets.length >= MAX_MANUAL_REFILL_DELETION_LOG_TARGETS_ACU || depth > 12) return;
+    if (typeof value === 'string') {
+        for (const sheetKey of sheetKeySet) {
+            if (value.includes(sheetKey)) {
+                targets.push({ sheetKey, path, kind: 'stringReference' });
+                if (targets.length >= MAX_MANUAL_REFILL_DELETION_LOG_TARGETS_ACU) return;
+            }
+        }
+        return;
+    }
+    if (Array.isArray(value)) {
+        value.forEach((item, index) => {
+            if (targets.length >= MAX_MANUAL_REFILL_DELETION_LOG_TARGETS_ACU) return;
+            if (typeof item === 'string' && sheetKeySet.has(item)) {
+                targets.push({ sheetKey: item, path: `${path}[${index}]`, kind: 'arrayValue' });
+                return;
+            }
+            collectManualRefillTargetKeyPaths_ACU(item, `${path}[${index}]`, sheetKeySet, targets, depth + 1);
+        });
+        return;
+    }
+    if (!value || typeof value !== 'object') return;
+    Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
+        if (targets.length >= MAX_MANUAL_REFILL_DELETION_LOG_TARGETS_ACU) return;
+        const childPath = path ? `${path}.${key}` : key;
+        if (sheetKeySet.has(key)) {
+            targets.push({ sheetKey: key, path: childPath, kind: 'objectKey' });
+        }
+        collectManualRefillTargetKeyPaths_ACU(child, childPath, sheetKeySet, targets, depth + 1);
+    });
+}
+
+function summarizeManualRefillDeletionTargets_ACU(msg: any, targetSheetKeys: string[]): ManualRefillDeletionTarget_ACU[] {
+    const targets: ManualRefillDeletionTarget_ACU[] = [];
+    const sheetKeySet = new Set(targetSheetKeys);
+    collectManualRefillTargetKeyPaths_ACU(msg?.TavernDB_ACU_IsolatedData, 'TavernDB_ACU_IsolatedData', sheetKeySet, targets);
+    collectManualRefillTargetKeyPaths_ACU(msg?.TavernDB_ACU_IndependentData, 'TavernDB_ACU_IndependentData', sheetKeySet, targets);
+    collectManualRefillTargetKeyPaths_ACU(msg?.TavernDB_ACU_ModifiedKeys, 'TavernDB_ACU_ModifiedKeys', sheetKeySet, targets);
+    collectManualRefillTargetKeyPaths_ACU(msg?.TavernDB_ACU_UpdateGroupKeys, 'TavernDB_ACU_UpdateGroupKeys', sheetKeySet, targets);
+    collectManualRefillTargetKeyPaths_ACU(msg?.TavernDB_ACU_Data, 'TavernDB_ACU_Data', sheetKeySet, targets);
+    collectManualRefillTargetKeyPaths_ACU(msg?.TavernDB_ACU_SummaryData, 'TavernDB_ACU_SummaryData', sheetKeySet, targets);
+    return targets;
+}
+
+function summarizeManualRefillMessageStoragePresence_ACU(msg: any) {
+    const isolatedData = msg?.TavernDB_ACU_IsolatedData;
+    const isolatedTagKeys = isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)
+        ? Object.keys(isolatedData)
+        : [];
+    let storageFrameTagCount = 0;
+    isolatedTagKeys.forEach((tagKey) => {
+        const tagData = isolatedData?.[tagKey];
+        if (tagData && typeof tagData === 'object' && !Array.isArray(tagData) && tagData.storageFrame) {
+            storageFrameTagCount++;
+        }
+    });
+    return {
+        hasIsolatedData: isolatedTagKeys.length > 0,
+        isolatedTagCount: isolatedTagKeys.length,
+        storageFrameTagCount,
+        hasLegacyIndependentData: !!msg?.TavernDB_ACU_IndependentData,
+        hasLegacyData: !!msg?.TavernDB_ACU_Data,
+        hasLegacySummaryData: !!msg?.TavernDB_ACU_SummaryData,
+        hasLegacyModifiedKeys: Array.isArray(msg?.TavernDB_ACU_ModifiedKeys),
+        hasLegacyUpdateGroupKeys: Array.isArray(msg?.TavernDB_ACU_UpdateGroupKeys),
+    };
+}
+
+function createManualRefillResidueSummary_ACU() {
+    return {
+        scannedMessages: 0,
+        isolationKeyMatchedMessages: 0,
+        exactHits: 0,
+        runtimeV1Hits: 0,
+        substringOnlyPathCount: 0,
+        checkpointDataRiskCount: 0,
+        scheduleSummaryRiskCount: 0,
+        checkpointDataRiskDetailCount: 0,
+        matchingMessageIndices: [] as number[],
+        substringOnlyPaths: [] as string[],
+        checkpointDataRiskDetails: [] as Array<{
+            messageIndex: number;
+            tagKey: string;
+            targetKey: string;
+            reason?: string;
+            createdAt?: number;
+        }>,
+    };
+}
+
+function scanManualRefillRangeResidueSummary_ACU(chat: any[], targetMessageIndices: number[], isolationKey: string, targetSheetKeys: string[]) {
+    const summary = createManualRefillResidueSummary_ACU();
+    for (const idx of targetMessageIndices) {
+        if (idx < 0 || idx >= chat.length) continue;
+        const msg = chat[idx];
+        if (!msg || msg.is_user) continue;
+        summary.scannedMessages++;
+        const report = scanTargetKeysResidue_ACU(msg, isolationKey, targetSheetKeys, idx);
+        if (report.isolationKeyMatched) summary.isolationKeyMatchedMessages++;
+        const messageHasResidue = report.exactHits > 0 || report.runtimeV1Hits > 0 || report.substringOnlyPaths.length > 0 || report.checkpointDataRisk || report.scheduleSummaryRisk;
+        if (messageHasResidue) summary.matchingMessageIndices.push(idx);
+        summary.exactHits += report.exactHits;
+        summary.runtimeV1Hits += report.runtimeV1Hits;
+        summary.substringOnlyPathCount += report.substringOnlyPaths.length;
+        summary.checkpointDataRiskCount += report.checkpointDataRisk ? 1 : 0;
+        summary.scheduleSummaryRiskCount += report.scheduleSummaryRisk ? 1 : 0;
+        summary.checkpointDataRiskDetailCount += report.checkpointDataRisks.length;
+        const remainingSubstringSlots = Math.max(0, MAX_CHECKPOINT_RISK_DETAILS_ACU - summary.substringOnlyPaths.length);
+        if (remainingSubstringSlots > 0) {
+            summary.substringOnlyPaths.push(...report.substringOnlyPaths.slice(0, remainingSubstringSlots).map(path => `${idx}:${path}`));
+        }
+        const remainingRiskSlots = Math.max(0, MAX_CHECKPOINT_RISK_DETAILS_ACU - summary.checkpointDataRiskDetails.length);
+        if (remainingRiskSlots > 0) {
+            summary.checkpointDataRiskDetails.push(...report.checkpointDataRisks.slice(0, remainingRiskSlots));
+        }
+    }
+    return summary;
 }
 
 function collectIsolationKeysWithV2Frames_ACU(chat: any[], options: { maxMessageIndex?: number } = {}): string[] {
@@ -1432,25 +1577,60 @@ export async function clearManualRefillIncrementalDataInRange_ACU(targetMessageI
 }
 
 async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: number[], targetSheetKeys: string[] | null = null): Promise<number> {
-    if (!targetMessageIndices || targetMessageIndices.length === 0) return 0;
-    if (!Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0) {
-        throw new Error('手动重填范围清理必须指定目标表。');
+    if (!targetMessageIndices || targetMessageIndices.length === 0) {
+        logWarn_ACU('[手动重填预清理] 未执行本地数据删除：本次重填没有可清理的消息范围。', { rawTargetKeys: targetSheetKeys });
+        return 0;
+    }
+    const normalizedTargetSheetKeys = normalizeManualRefillTargetSheetKeys_ACU(targetSheetKeys);
+    if (normalizedTargetSheetKeys.length === 0) {
+        logWarn_ACU('[手动重填预清理] 未执行本地数据删除：targetKeys 中没有有效 sheetKey。', { rawTargetKeys: targetSheetKeys });
+        throw new Error('手动重填范围清理没有有效 sheetKey。');
     }
 
     const chat = getChatArray_ACU();
-    if (!chat || chat.length === 0) return 0;
+    if (!chat || chat.length === 0) {
+        logWarn_ACU('[手动重填预清理] 未执行本地数据删除：当前聊天记录为空或不可读取。', { normalizedTargetKeys: normalizedTargetSheetKeys });
+        return 0;
+    }
 
-    const clearsSummaryOrOutline = tableListContainsSummaryOrOutline_ACU(targetSheetKeys);
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const clearsSummaryOrOutline = tableListContainsSummaryOrOutline_ACU(normalizedTargetSheetKeys);
+    const beforeResidue = scanManualRefillRangeResidueSummary_ACU(chat, targetMessageIndices, isolationKey, normalizedTargetSheetKeys);
+    const missedMessages: Array<{ index: number; presence: ReturnType<typeof summarizeManualRefillMessageStoragePresence_ACU> }> = [];
+    const changedMessageIndices: number[] = [];
     let clearedCount = 0;
 
+    logDebug_ACU('[手动重填预清理] 开始范围硬清理诊断', {
+        rawTargetKeys: targetSheetKeys,
+        normalizedTargetKeys: normalizedTargetSheetKeys,
+        messageRange: {
+            count: targetMessageIndices.length,
+            first: targetMessageIndices[0],
+            last: targetMessageIndices[targetMessageIndices.length - 1],
+        },
+        isolationKey: isolationKey || '',
+        beforeResidue,
+    });
+
     for (const idx of targetMessageIndices) {
-        if (idx < 0 || idx >= chat.length) continue;
+        if (idx < 0 || idx >= chat.length) {
+            logWarn_ACU('[手动重填预清理] 跳过越界消息索引，本地数据删除未执行。', { messageIndex: idx, chatLength: chat.length });
+            continue;
+        }
         const msg = chat[idx];
-        if (!msg || msg.is_user) continue;
+        if (!msg || msg.is_user) {
+            logDebug_ACU('[手动重填预清理] 跳过非 AI 消息，本地数据删除未执行。', { messageIndex: idx, isUser: !!msg?.is_user });
+            continue;
+        }
+
+        const beforeDeletionTargets = summarizeManualRefillDeletionTargets_ACU(msg, normalizedTargetSheetKeys);
 
         // 手动重填只限制“消息范围”，不限制到当前 isolation tag：这里刻意复用
         // 可视化删表的单消息硬删除仓储逻辑，避免旁路标签槽或 legacy 字段里的目标表残留污染重填基底。
-        const dataChanged = purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys);
+        const dataChanged = purgeTargetSheetKeysFromMessage_ACU(msg, normalizedTargetSheetKeys);
+        const afterDeletionTargets = summarizeManualRefillDeletionTargets_ACU(msg, normalizedTargetSheetKeys);
+        const remainingTargetKeys = new Set(afterDeletionTargets.map(target => `${target.sheetKey}|${target.kind}|${target.path}`));
+        const deletedTargets = beforeDeletionTargets.filter(target => !remainingTargetKeys.has(`${target.sheetKey}|${target.kind}|${target.path}`));
         let manifestChanged = false;
         if (clearsSummaryOrOutline) {
             const deletedManifestCount = await deleteVectorIndexManifestsFromMessage_ACU(msg);
@@ -1462,30 +1642,79 @@ async function clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices: n
         const changed = dataChanged || manifestChanged;
         if (changed) {
             clearedCount++;
+            changedMessageIndices.push(idx);
             logDebug_ACU(`[手动重填预清理] 已清理消息索引 ${idx} 上选中表的范围内旧数据（新版/旧版/所有标签槽）`);
+            logDebug_ACU('[手动重填预清理] 消息本地数据删除明细', {
+                messageIndex: idx,
+                normalizedTargetKeys: normalizedTargetSheetKeys,
+                deletedTargets,
+                remainingTargets: afterDeletionTargets,
+                manifestChanged,
+                beforeTargetCount: beforeDeletionTargets.length,
+                deletedTargetCount: deletedTargets.length,
+                remainingTargetCount: afterDeletionTargets.length,
+                truncated: beforeDeletionTargets.length >= MAX_MANUAL_REFILL_DELETION_LOG_TARGETS_ACU || afterDeletionTargets.length >= MAX_MANUAL_REFILL_DELETION_LOG_TARGETS_ACU,
+            });
+        } else if (missedMessages.length < MAX_CHECKPOINT_RISK_DETAILS_ACU) {
+            missedMessages.push({
+                index: idx,
+                presence: summarizeManualRefillMessageStoragePresence_ACU(msg),
+            });
+            logDebug_ACU('[手动重填预清理] 消息未命中目标表，本地数据未删除', {
+                messageIndex: idx,
+                normalizedTargetKeys: normalizedTargetSheetKeys,
+                beforeDeletionTargets,
+                presence: summarizeManualRefillMessageStoragePresence_ACU(msg),
+            });
         }
     }
 
+    const afterResidue = scanManualRefillRangeResidueSummary_ACU(chat, targetMessageIndices, isolationKey, normalizedTargetSheetKeys);
+    logDebug_ACU('[手动重填预清理] 范围硬清理结果诊断', {
+        normalizedTargetKeys: normalizedTargetSheetKeys,
+        clearedCount,
+        changedMessageIndices,
+        missedMessages,
+        beforeResidue,
+        afterResidue,
+    });
+
     if (clearedCount > 0) {
+        logDebug_ACU('[手动重填预清理] 开始保存本地聊天记录，准备持久化删除结果。', { clearedCount, changedMessageIndices });
         await saveChatToHost_ACU();
         logDebug_ACU(`[手动重填预清理] 共清理 ${clearedCount} 条消息的选中表范围内旧数据，聊天已保存。`);
+        try {
+            logDebug_ACU('[手动重填预清理] 开始刷新 worldbook 消息缓存，确保后续快照不读取清理前缓存。');
+            await loadAllChatMessages_ACU();
+            logDebug_ACU('[手动重填预清理] 聊天保存后已刷新 worldbook 消息缓存。');
+        } catch (error) {
+            logWarn_ACU('[手动重填预清理] 聊天保存后刷新 worldbook 消息缓存失败，将继续依赖后续 runtime reload:', error);
+        }
+    } else {
+        logWarn_ACU('[手动重填预清理] 本次没有删除任何范围内本地数据；请检查 targetKeys 是否匹配 sheetKey、contextScopeIndices 是否覆盖残留楼层。', {
+            normalizedTargetKeys: normalizedTargetSheetKeys,
+            messageRange: { count: targetMessageIndices.length, first: targetMessageIndices[0], last: targetMessageIndices[targetMessageIndices.length - 1] },
+            afterResidue,
+        });
     }
 
     return clearedCount;
 }
 
 export async function clearManualRefillSheetDataInRange_ACU(targetMessageIndices: number[], targetSheetKeys: string[] | null = null): Promise<number> {
-    if (!Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0) {
-        throw new Error('手动重填范围清理必须指定目标表。');
+    const normalizedTargetSheetKeys = normalizeManualRefillTargetSheetKeys_ACU(targetSheetKeys);
+    if (normalizedTargetSheetKeys.length === 0) {
+        logWarn_ACU('[手动重填预清理] 中止：targetKeys 中没有有效 sheetKey，无法删除本地数据。', { rawTargetKeys: targetSheetKeys });
+        throw new Error('手动重填范围清理没有有效 sheetKey。');
     }
-    const writeSet = targetSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
+    const writeSet = normalizedTargetSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
     return runTableWriteTransaction_ACU({
         source: 'system_cleanup',
         reason: 'clearManualRefillSheetDataInRange',
         isolationKey: getCurrentIsolationKey_ACU(),
         writeSet,
         maintenanceMode: 'exclusive',
-    }, () => clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices, targetSheetKeys));
+    }, () => clearManualRefillSheetDataInRangeCore_ACU(targetMessageIndices, normalizedTargetSheetKeys));
 }
 
 function purgeTargetSheetKeysFromMessage_ACU(msg: any, targetSheetKeys: string[]): boolean {

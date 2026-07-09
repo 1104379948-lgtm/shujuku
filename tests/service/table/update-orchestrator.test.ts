@@ -1294,6 +1294,7 @@ describe('orchestrateManualUpdate_ACU', () => {
   it('事务式手动重填清理后刷新 SQLite 运行时快照，再进入 AI prompt 准备', async () => {
     const { getChatArray_ACU, clearManualRefillSheetDataInRange_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { logDebug_ACU } = await import('../../../src/shared/utils');
     vi.mocked(isSqliteMode).mockReturnValue(true);
     vi.mocked(getChatArray_ACU).mockReturnValue([
       { is_user: true },
@@ -1313,6 +1314,23 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockReloadStorageProvider).toHaveBeenCalledTimes(1);
     expect(mockPrepareAIInput).toHaveBeenCalled();
     expect(mockReloadStorageProvider.mock.invocationCallOrder[0]).toBeLessThan(mockPrepareAIInput.mock.invocationCallOrder[0]);
+    const logMock = vi.mocked(logDebug_ACU).mock;
+    const findLogOrder = (keyword: string): number | undefined => {
+      const index = logMock.calls.findIndex(call => String(call[0]).includes(keyword));
+      return index >= 0 ? logMock.invocationCallOrder[index] : undefined;
+    };
+    const deleteStartCallOrder = findLogOrder('开始执行启动前本地数据删除');
+    const snapshotStartCallOrder = findLogOrder('开始生成清理后的运行时快照');
+    const snapshotDoneCallOrder = findLogOrder('清理后的运行时快照已生成');
+    const fillStartCallOrder = findLogOrder('现在开始手动填表');
+    expect(deleteStartCallOrder).toEqual(expect.any(Number));
+    expect(snapshotStartCallOrder).toEqual(expect.any(Number));
+    expect(snapshotDoneCallOrder).toEqual(expect.any(Number));
+    expect(fillStartCallOrder).toEqual(expect.any(Number));
+    expect(deleteStartCallOrder as number).toBeLessThan(snapshotStartCallOrder as number);
+    expect(snapshotStartCallOrder as number).toBeLessThan(snapshotDoneCallOrder as number);
+    expect(snapshotDoneCallOrder as number).toBeLessThan(fillStartCallOrder as number);
+    expect(fillStartCallOrder as number).toBeLessThan(mockPrepareAIInput.mock.invocationCallOrder[0]);
   });
 
   it('事务式手动重填启动前清理选中表失败时中止，避免继续使用污染基底', async () => {
@@ -1340,6 +1358,7 @@ describe('orchestrateManualUpdate_ACU', () => {
 
   it('事务式手动重填清理后刷新运行时快照失败时中止，避免继续使用污染基底', async () => {
     const { getChatArray_ACU, clearManualRefillSheetDataInRange_ACU } = await import('../../../src/service/chat/chat-service');
+    const { logDebug_ACU } = await import('../../../src/shared/utils');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       { is_user: true },
       { is_user: false, mes: 'AI回复1' },
@@ -1358,6 +1377,9 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(clearManualRefillSheetDataInRange_ACU).toHaveBeenCalledWith([1, 3], ['sheet_0']);
     expect(mockPrepareAIInput).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(vi.mocked(logDebug_ACU).mock.calls.some(call => String(call[0]).includes('开始生成清理后的运行时快照'))).toBe(true);
+    expect(vi.mocked(logDebug_ACU).mock.calls.some(call => String(call[0]).includes('清理后的运行时快照已生成'))).toBe(false);
+    expect(vi.mocked(logDebug_ACU).mock.calls.some(call => String(call[0]).includes('现在开始手动填表'))).toBe(false);
   });
 
   it('事务式手动重填启动前不清理范围外历史基底，保护 V2 replay 初始数据', async () => {

@@ -1996,25 +1996,49 @@ export async function orchestrateManualUpdate_ACU(
         if (manualRefillEnabled) {
             const replayBoundaryCheck = await ensureManualRefillV2ReplayBoundary_ACU(liveChat, getCurrentIsolationKey_ACU(), contextScopeIndices[0]);
             if (replayBoundaryCheck.success === false) {
+                logError_ACU('[Manual Refill] 启动前 replay 边界检查失败，本次不会删除本地数据，也不会开始填表:', replayBoundaryCheck.error);
                 return { success: false, error: replayBoundaryCheck.error };
             }
 
+            logDebug_ACU('[Manual Refill] 开始执行启动前本地数据删除。', {
+                targetKeys,
+                contextScopeIndices,
+                range: {
+                    count: contextScopeIndices.length,
+                    first: contextScopeIndices[0],
+                    last: contextScopeIndices[contextScopeIndices.length - 1],
+                },
+                uiThreshold,
+                uiSkip,
+            });
             try {
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 启动前清理选中表范围内旧数据失败:', error);
                 return { success: false, error: error?.message || '手动重填启动前清理选中表范围内旧数据失败。' };
             }
+            logDebug_ACU('[Manual Refill] 启动前本地数据删除阶段完成，准备生成清理后的运行时快照。', {
+                targetKeys,
+                range: { first: contextScopeIndices[0], last: contextScopeIndices[contextScopeIndices.length - 1] },
+            });
 
             try {
                 // 清理历史 V2 数据后必须刷新 SQLite/runtime 快照，
                 // 否则 AI prompt 基底会继续读到清理前的旧 chronicle 行（test6.8 类事故）。
+                logDebug_ACU('[Manual Refill] 开始生成清理后的运行时快照。');
                 await reloadStorageProvider();
+                logDebug_ACU('[Manual Refill] 清理后的运行时快照已生成。');
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
                 return { success: false, error: error?.message || '手动重填清理后刷新运行时快照失败。' };
             }
             logDebug_ACU(`[Manual Refill] 已清理选中表范围内旧数据并刷新运行时快照，将按普通手动填写路径重写 ${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}。`);
+            logDebug_ACU('[Manual Refill] 启动前本地数据删除与快照刷新均已完成，现在开始手动填表。', {
+                targetKeys,
+                groupCount: groupKeys.length,
+                useLatestRuntimeMergeBase: manualRefillUsesLatestRuntimeBase,
+                mergeBaseMaxMessageIndex: manualRefillMergeBaseMaxMessageIndex,
+            });
             if (!manualRefillUsesLatestRuntimeBase) {
                 logDebug_ACU(`[Manual Refill] 当前重填范围不是有效 AI 尾部，将使用 <=${manualRefillMergeBaseMaxMessageIndex} 的 bounded replay 基底，避免未来楼层污染 prompt。`);
             }
