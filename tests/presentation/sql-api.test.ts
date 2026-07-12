@@ -14,6 +14,13 @@ const mocks = vi.hoisted(() => ({
   getCurrentData: vi.fn(() => ({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } })),
   runTableUpdateApplyWithScopeLock: vi.fn(async (_scopeKey: string, task: () => Promise<unknown>) => task()),
   reloadStorageProvider: vi.fn().mockResolvedValue(undefined),
+  ensureStorageProviderReady: vi.fn().mockResolvedValue({
+    executeQuery: vi.fn(() => ({ columns: ['id'], values: [[1]], rowCount: 1 })),
+    executeMutation: vi.fn(() => ({ changes: 1, errors: [] })),
+    applyEdits: vi.fn(() => ({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 2 })),
+    saveToChat: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
+    getCurrentData: vi.fn(() => ({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } })),
+  }),
   getChatArray: vi.fn(() => []),
   getLatestHeadRevision: vi.fn(() => 'rev-head'),
   captureTableRuntimeRevision: vi.fn(() => 'runtime-rev-head'),
@@ -47,6 +54,7 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
     getCurrentData: mocks.getCurrentData,
   })),
   reloadStorageProvider: mocks.reloadStorageProvider,
+  ensureStorageProviderReady_ACU: mocks.ensureStorageProviderReady,
 }));
 
 vi.mock('../../src/service/chat/chat-service', () => ({
@@ -122,6 +130,13 @@ describe('createSqlApi', () => {
     mocks.saveToChat.mockResolvedValue({ saved: true, messageIndex: 3 });
     mocks.persistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 3 });
     mocks.getCurrentData.mockReturnValue({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } });
+    mocks.ensureStorageProviderReady.mockResolvedValue({
+      executeQuery: mocks.executeQuery,
+      executeMutation: mocks.executeMutation,
+      applyEdits: mocks.applyEdits,
+      saveToChat: mocks.saveToChat,
+      getCurrentData: mocks.getCurrentData,
+    });
     mocks.reloadStorageProvider.mockResolvedValue(undefined);
     mocks.getChatArray.mockReturnValue([]);
     mocks.getLatestHeadRevision.mockReturnValue('rev-head');
@@ -214,6 +229,16 @@ describe('createSqlApi', () => {
     expect(result).toEqual({ changes: 0, errors: ['SQL error'] });
     expect(mocks.persistTablesToChatMessage).not.toHaveBeenCalled();
     expect(mocks.refreshMergedDataAndNotifyWithUI).not.toHaveBeenCalled();
+  });
+
+  it('executeSqlMutation 运行时未就绪时拒绝写入', async () => {
+    mocks.ensureStorageProviderReady.mockRejectedValueOnce(new Error('[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'));
+
+    const result = await api.executeSqlMutation('UPDATE inventory SET name = ?', ['钢剑']);
+
+    expect(result).toEqual({ changes: 0, errors: ['[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'] });
+    expect(mocks.executeMutation).not.toHaveBeenCalled();
+    expect(mocks.persistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
   it('executeSqlMutation 支持跳过保存和通知', async () => {
@@ -319,6 +344,16 @@ describe('createSqlApi', () => {
 
     expect(result.success).toBe(false);
     expect(result.errors).toEqual(['rollback']);
+    expect(mocks.persistTablesToChatMessage).not.toHaveBeenCalled();
+  });
+
+  it('executeSqlBatch 运行时未就绪时拒绝写入', async () => {
+    mocks.ensureStorageProviderReady.mockRejectedValueOnce(new Error('[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'));
+
+    const result = await api.executeSqlBatch('UPDATE inventory SET name = \'钢剑\';');
+
+    expect(result).toEqual({ success: false, modifiedKeys: [], appliedEdits: 0, changes: 0, errors: ['[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'] });
+    expect(mocks.applyEdits).not.toHaveBeenCalled();
     expect(mocks.persistTablesToChatMessage).not.toHaveBeenCalled();
   });
 

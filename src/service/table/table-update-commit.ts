@@ -3,7 +3,7 @@ import type { SqlMutationResult } from '../../shared/table-storage-provider';
 import { logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { ensureLegacyStorageMigratedBeforeWrite_ACU, persistTablesToChatMessage_ACU } from './table-service';
-import { getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
+import { ensureStorageProviderReady_ACU, reloadStorageProvider } from './table-storage-strategy';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 
@@ -163,8 +163,8 @@ export async function runSqliteRuntimeMutationCommit_ACU<T>(
     statements: [options.sql],
     ...(normalizeSqlBindParams_ACU(options.params) ? { params: normalizeSqlBindParams_ACU(options.params) } : {}),
   }];
-  return runTableUpdateCommit_ACU({ ...options, operations }, () => {
-    const provider = getStorageProvider();
+  return runTableUpdateCommit_ACU({ ...options, operations }, async () => {
+    const provider = await ensureStorageProviderReady_ACU();
     const mutationResult = provider.executeMutation(options.sql, options.params);
     if (mutationResult.errors?.length) {
       return { success: false, error: mutationResult.errors.join(', '), mutationResult };

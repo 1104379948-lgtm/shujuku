@@ -618,6 +618,8 @@ export async function loadOrCreateJsonTableFromChatHistory_ACU(): Promise<{
   loaded: boolean;
   source: 'merged' | 'initialized' | 'empty';
   error?: string;
+  /** 本轮当前聊天回放得到的 canonical 快照，供 SQLite hydrate 显式使用。 */
+  data?: TableDataObject_ACU | null;
 }> {
   _set_currentJsonTableData_ACU(null);
   logDebug_ACU('Attempting to load database from chat history...');
@@ -627,18 +629,29 @@ export async function loadOrCreateJsonTableFromChatHistory_ACU(): Promise<{
   if (!chat || chat.length === 0) {
     logDebug_ACU('Chat history is empty. Initializing new database.');
     const initResult = await initializeJsonTableInChatHistory_ACU();
-    return { loaded: initResult.initialized, source: 'initialized', error: initResult.error };
+    return {
+      loaded: initResult.initialized,
+      source: 'initialized',
+      error: initResult.error,
+      data: currentJsonTableData_ACU as TableDataObject_ACU | null,
+    };
   }
 
   const mergedData = await mergeAllIndependentTables_ACU();
 
   if (mergedData) {
-    _set_currentJsonTableData_ACU(mergedData);
+    const canonicalData = JSON.parse(JSON.stringify(mergedData)) as TableDataObject_ACU;
+    _set_currentJsonTableData_ACU(canonicalData);
     logDebug_ACU('Database content successfully merged (tag-aware) and loaded into memory.');
-    return { loaded: true, source: 'merged' };
+    return { loaded: true, source: 'merged', data: canonicalData };
   }
 
   logDebug_ACU('No database found for current tag in chat history. Initializing a new one.');
   const initResult = await initializeJsonTableInChatHistory_ACU();
-  return { loaded: initResult.initialized, source: 'initialized', error: initResult.error };
+  return {
+    loaded: initResult.initialized,
+    source: 'initialized',
+    error: initResult.error,
+    data: currentJsonTableData_ACU as TableDataObject_ACU | null,
+  };
 }

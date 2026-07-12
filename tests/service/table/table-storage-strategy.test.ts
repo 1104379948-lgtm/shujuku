@@ -23,6 +23,15 @@ vi.mock('../../../src/service/table/storage-mode', () => ({
   getCurrentStorageMode: vi.fn(() => mockStorageMode),
 }));
 
+const mockLoadOrCreateJsonTableFromChatHistory = vi.fn().mockResolvedValue({
+  loaded: true,
+  source: 'merged',
+  data: { mate: {} },
+});
+vi.mock('../../../src/service/table/table-service', () => ({
+  loadOrCreateJsonTableFromChatHistory_ACU: (...args: any[]) => mockLoadOrCreateJsonTableFromChatHistory(...args),
+}));
+
 // ═══════════════════════════════════════════════════════════════
 // 可变控制变量：控制 SQLite provider 的 loadFromChat 行为
 // ═══════════════════════════════════════════════════════════════
@@ -36,6 +45,15 @@ function createMockProvider(mode: 'native' | 'sqlite') {
   const provider = {
     mode,
     loadFromChat: vi.fn(async () => {
+      if (mode === 'sqlite' && sqliteLoadShouldThrow) {
+        throw sqliteLoadShouldThrow;
+      }
+      if (mode === 'sqlite') {
+        return { ...sqliteLoadResult };
+      }
+      return { loaded: true, source: 'merged' as const };
+    }),
+    loadFromData: vi.fn(async () => {
       if (mode === 'sqlite' && sqliteLoadShouldThrow) {
         throw sqliteLoadShouldThrow;
       }
@@ -67,7 +85,9 @@ vi.mock('../../../src/service/table/native-table-service-adapter', () => ({
 
 import {
   getStorageProvider,
+  getActiveStorageProvider,
   initStorageProvider,
+  ensureStorageProviderReady_ACU,
   switchStorageMode,
   reloadStorageProvider,
   disposeStorageProvider,
@@ -81,6 +101,7 @@ describe('table-storage-strategy', () => {
     sqliteLoadResult = { loaded: true, source: 'merged' };
     sqliteLoadShouldThrow = null;
     allCreatedProviders = [];
+    mockLoadOrCreateJsonTableFromChatHistory.mockResolvedValue({ loaded: true, source: 'merged', data: { mate: {} } });
     // 重置模块内部状态
     await initStorageProvider();
     // 清空记录，让后续测试从干净状态开始
@@ -104,6 +125,32 @@ describe('table-storage-strategy', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
+  // getActiveStorageProvider
+  // ═══════════════════════════════════════════════════════════════
+  describe('getActiveStorageProvider', () => {
+    it('返回已初始化实例，且设置变化不会触发重建', () => {
+      const provider = getActiveStorageProvider();
+      const createdCount = allCreatedProviders.length;
+
+      mockStorageMode = 'sqlite';
+
+      expect(getActiveStorageProvider()).toBe(provider);
+      expect(provider?.mode).toBe('native');
+      expect(allCreatedProviders).toHaveLength(createdCount);
+    });
+
+    it('dispose 后返回 null，不执行惰性初始化', async () => {
+      await initStorageProvider();
+      const provider = getActiveStorageProvider();
+
+      disposeStorageProvider();
+
+      expect(provider?.dispose).toHaveBeenCalledOnce();
+      expect(getActiveStorageProvider()).toBeNull();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
   // initStorageProvider
   // ═══════════════════════════════════════════════════════════════
   describe('initStorageProvider', () => {
@@ -117,6 +164,20 @@ describe('table-storage-strategy', () => {
       mockStorageMode = 'sqlite';
       await initStorageProvider();
       expect(getCurrentProviderMode()).toBe('sqlite');
+    });
+
+    it('sqlite 初始化使用本轮 canonical 回放快照，而非 provider 自行回放聊天', async () => {
+      mockStorageMode = 'sqlite';
+      const canonicalData = { mate: {}, sheet_0: { content: [['row_id'], ['1']] } };
+      mockLoadOrCreateJsonTableFromChatHistory.mockResolvedValue({ loaded: true, source: 'merged', data: canonicalData });
+
+      await initStorageProvider();
+
+      const provider = getActiveStorageProvider()!;
+      expect(provider.mode).toBe('sqlite');
+      expect(provider.loadFromData).toHaveBeenCalledWith(canonicalData);
+      expect(provider.loadFromChat).not.toHaveBeenCalled();
+      expect(mockLoadOrCreateJsonTableFromChatHistory).toHaveBeenCalledOnce();
     });
 
     it('初始化时调用 loadFromChat', async () => {
@@ -151,6 +212,41 @@ describe('table-storage-strategy', () => {
       await initStorageProvider();
       // 旧 provider 应该被 dispose
       expect(oldProvider.dispose).toHaveBeenCalled();
+    });
+  });
+
+  describe('ensureStorageProviderReady_ACU', () => {
+    it('SQLite fallback 后不创建裸 SQLite，并明确阻止 SQL 写入', async () => {
+      mockStorageMode = 'sqlite';
+      sqliteLoadResult = { loaded: false, source: 'empty', error: '旧数据 hydrate 失败' };
+
+      await initStorageProvider();
+      const fallbackProvider = getActiveStorageProvider()!;
+      const createdCount = allCreatedProviders.length;
+
+      await expect(ensureStorageProviderReady_ACU()).rejects.toThrow('sqlite 存储运行时未就绪');
+
+      const activeProvider = getActiveStorageProvider()!;
+      expect(activeProvider).not.toBe(fallbackProvider);
+      expect(activeProvider.mode).toBe('native');
+      expect(activeProvider.isReady()).toBe(true);
+      expect(allCreatedProviders).toHaveLength(createdCount + 2);
+      expect(allCreatedProviders.at(-1)?.mode).toBe('native');
+      expect(allCreatedProviders.at(-2)?.mode).toBe('sqlite');
+      const attemptedSqliteProvider = allCreatedProviders.at(-2)!;
+      expect(attemptedSqliteProvider.loadFromData).toHaveBeenCalledOnce();
+    });
+
+    it('已 ready 的 SQLite 直接返回原实例，不再次回放或 hydrate', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      const provider = getActiveStorageProvider()!;
+      const createdCount = allCreatedProviders.length;
+
+      await expect(ensureStorageProviderReady_ACU()).resolves.toBe(provider);
+
+      expect(allCreatedProviders).toHaveLength(createdCount);
+      expect(mockLoadOrCreateJsonTableFromChatHistory).toHaveBeenCalledOnce();
     });
   });
 

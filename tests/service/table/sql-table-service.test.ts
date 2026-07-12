@@ -509,6 +509,34 @@ describe('SqlTableService', () => {
       expect(result.source).toBe('merged');
     });
 
+    it('从显式 canonical 快照 hydrate 时不再次回放聊天，且 SQL 基底与快照一致', async () => {
+      const canonicalData = JSON.parse(JSON.stringify(testTableData));
+      mockMergeAll.mockResolvedValue(null);
+
+      const result = await service.loadFromData(canonicalData);
+
+      expect(result).toEqual({ loaded: true, source: 'merged' });
+      expect(mockMergeAll).not.toHaveBeenCalled();
+      expect(service.isReady()).toBe(true);
+      expect(service.executeQuery('SELECT * FROM inventory ORDER BY row_id').rowCount).toBe(2);
+      service.applyEdits("UPDATE inventory SET quantity = 9 WHERE row_id = 1;");
+      expect(service.executeQuery('SELECT quantity FROM inventory WHERE row_id = 1').values).toEqual([[9]]);
+      expect(canonicalData.sheet_0.content[1]).toEqual(['1', '铁剑', '3']);
+    });
+
+    it('strict hydrate 失败时清理部分 runtime，且不修改调用方快照', async () => {
+      const invalidData = JSON.parse(JSON.stringify(testTableData));
+      invalidData.sheet_0.sourceData.ddl = 'CREATE TABLE broken (';
+
+      const result = await service.loadFromData(invalidData);
+
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('sqlite_hydrate_failed');
+      expect(service.isReady()).toBe(false);
+      expect(() => service.executeQuery('SELECT 1')).toThrow('SQLite 引擎未初始化');
+      expect(invalidData.sheet_0.sourceData.ddl).toBe('CREATE TABLE broken (');
+    });
+
     it('加载后可以执行查询', async () => {
       mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
       await service.loadFromChat();

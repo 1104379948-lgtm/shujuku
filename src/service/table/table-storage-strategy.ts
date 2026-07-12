@@ -10,6 +10,7 @@ import { getCurrentStorageMode } from './storage-mode';
 import { NativeTableServiceAdapter } from './native-table-service-adapter';
 import { SqlTableService } from './sql-table-service';
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
+import { loadOrCreateJsonTableFromChatHistory_ACU } from './table-service';
 import { invalidateTableRuntimeRevision_ACU } from './table-write-transaction';
 
 /** 当前活跃的 Provider 实例 */
@@ -33,12 +34,24 @@ export function getStorageProvider(): ITableStorageProvider {
   return currentProvider;
 }
 
+/**
+ * 获取当前已激活的 Provider，不会按设置懒初始化或重建实例。
+ * 用于需要观察 SQLite fallback 后实际运行时状态的恢复与诊断流程。
+ */
+export function getActiveStorageProvider(): ITableStorageProvider | null {
+  return currentProvider;
+}
+
 export async function ensureStorageProviderReady_ACU(): Promise<ITableStorageProvider> {
   const expectedMode = getCurrentStorageMode();
-  const provider = getStorageProvider();
-  if (provider.mode === expectedMode && provider.isReady()) return provider;
+  const activeProvider = getActiveStorageProvider();
+  if (activeProvider?.mode === expectedMode && activeProvider.isReady()) return activeProvider;
   await initStorageProvider();
-  return getStorageProvider();
+  const initializedProvider = getActiveStorageProvider();
+  if (!initializedProvider || initializedProvider.mode !== expectedMode || !initializedProvider.isReady()) {
+    throw new Error(`[StorageStrategy] ${expectedMode} 存储运行时未就绪，已阻止 SQL 写入。`);
+  }
+  return initializedProvider;
 }
 
 /**
@@ -47,38 +60,28 @@ export async function ensureStorageProviderReady_ACU(): Promise<ITableStoragePro
  */
 export async function initStorageProvider(): Promise<void> {
   const mode = getCurrentStorageMode();
-
-  // 销毁旧实例
-  if (currentProvider) {
-    currentProvider.dispose();
-    currentProvider = null;
-  }
-
-  // 创建新实例
-  currentProvider = createProvider(mode);
   logDebug_ACU(`[StorageStrategy] 初始化 Provider: ${mode}`);
 
-  // 加载数据
   try {
-    const result = await currentProvider.loadFromChat();
+    const nextProvider = createProvider(mode);
+    const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
     logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
 
-    // SQLite 模式加载失败时自动 fallback 到原生模式
     if (mode === 'sqlite' && !result.loaded && result.error) {
       logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${result.error}`);
-      currentProvider.dispose();
-      currentProvider = createProvider('native');
-      await currentProvider.loadFromChat();
+      nextProvider.dispose();
+      replaceActiveProvider_ACU(createProvider('native'));
+      return;
     }
+    replaceActiveProvider_ACU(nextProvider);
   } catch (e: any) {
     logError_ACU(`[StorageStrategy] 初始化失败: ${e?.message}`);
-    // 确保至少有一个可用的 Provider
     if (mode === 'sqlite') {
       logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
-      if (currentProvider) currentProvider.dispose();
-      currentProvider = createProvider('native');
-      await currentProvider.loadFromChat();
+      replaceActiveProvider_ACU(createProvider('native'));
+      return;
     }
+    throw e;
   }
 }
 
@@ -99,37 +102,24 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
 
   logDebug_ACU(`[StorageStrategy] 切换模式: ${currentMode || 'none'} → ${mode}`);
 
-  // 销毁旧实例
-  if (currentProvider) {
-    currentProvider.dispose();
-    currentProvider = null;
-  }
-
-  // 创建新实例并加载数据
-  currentProvider = createProvider(mode);
-
   try {
-    const result = await currentProvider.loadFromChat();
+    const nextProvider = createProvider(mode);
+    const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
     logDebug_ACU(`[StorageStrategy] 切换完成: loaded=${result.loaded}, source=${result.source}`);
 
-    // SQLite 模式加载失败时 fallback
     if (mode === 'sqlite' && !result.loaded && result.error) {
       logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${result.error}`);
-      currentProvider.dispose();
-      currentProvider = createProvider('native');
-      await currentProvider.loadFromChat();
+      nextProvider.dispose();
+      replaceActiveProvider_ACU(createProvider('native'));
       throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
     }
+    replaceActiveProvider_ACU(nextProvider);
   } catch (e: any) {
-    // 如果是我们自己抛出的 fallback 错误，重新抛出
     if (e.message?.includes('已自动回退')) throw e;
 
     logError_ACU(`[StorageStrategy] 切换异常: ${e?.message}`);
-    // 确保有可用的 Provider
-    if (!currentProvider || !currentProvider.getCurrentData()) {
-      currentProvider?.dispose();
-      currentProvider = createProvider('native');
-      await currentProvider.loadFromChat();
+    if (mode === 'sqlite') {
+      replaceActiveProvider_ACU(createProvider('native'));
     }
     throw e;
   }
@@ -157,34 +147,9 @@ export function disposeStorageProvider(): void {
  */
 export async function reloadStorageProvider(): Promise<void> {
   invalidateTableRuntimeRevision_ACU({ reason: 'reloadStorageProvider' });
-  if (!currentProvider) {
-    await initStorageProvider();
-    return;
-  }
-
-  const mode = currentProvider.mode;
+  const mode = getCurrentStorageMode();
   logDebug_ACU(`[StorageStrategy] 重新加载数据: ${mode}`);
-
-  // SQLite 模式需要重建数据库
-  if (mode === 'sqlite') {
-    currentProvider.dispose();
-    currentProvider = createProvider('sqlite');
-  }
-
-  try {
-    const result = await currentProvider.loadFromChat();
-    if (mode === 'sqlite' && !result.loaded && result.error) {
-      throw new Error(result.error);
-    }
-  } catch (e: any) {
-    logError_ACU(`[StorageStrategy] 重新加载失败: ${e?.message}`);
-    // SQLite 失败时 fallback
-    if (mode === 'sqlite') {
-      currentProvider.dispose();
-      currentProvider = createProvider('native');
-      await currentProvider.loadFromChat();
-    }
-  }
+  await initStorageProvider();
 }
 
 /**
@@ -208,4 +173,23 @@ function createProvider(mode: StorageMode): ITableStorageProvider {
     default:
       return new NativeTableServiceAdapter();
   }
+}
+
+async function loadProviderForCurrentChat_ACU(
+  provider: ITableStorageProvider,
+  mode: StorageMode,
+): Promise<{ loaded: boolean; source: 'merged' | 'initialized' | 'empty'; error?: string }> {
+  if (mode !== 'sqlite') return provider.loadFromChat();
+
+  const replay = await loadOrCreateJsonTableFromChatHistory_ACU();
+  if (typeof provider.loadFromData !== 'function') {
+    throw new Error('[StorageStrategy] SQLite provider 未实现 canonical snapshot hydrate。');
+  }
+  return provider.loadFromData(replay.data || null);
+}
+
+function replaceActiveProvider_ACU(nextProvider: ITableStorageProvider): void {
+  const previousProvider = currentProvider;
+  currentProvider = nextProvider;
+  previousProvider?.dispose();
 }

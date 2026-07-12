@@ -5,7 +5,7 @@
 
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../../../service/runtime/state-manager';
-import { getStorageProvider } from '../../../service/table/table-storage-strategy';
+import { ensureStorageProviderReady_ACU, getStorageProvider } from '../../../service/table/table-storage-strategy';
 import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
@@ -570,12 +570,13 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     trackAsUpdate: false,
                     operations: buildRawSqlBatchOperations_ACU(args.sql),
                     skipChatSave: args.skipChatSave,
-                }, () => {
-                    const batchResult = getStorageProvider().applyEdits(args.sql, 'raw_sql_api');
+                }, async () => {
+                    const provider = await ensureStorageProviderReady_ACU();
+                    const batchResult = provider.applyEdits(args.sql, 'raw_sql_api');
                     if (!batchResult.success) {
                         return { success: false, error: batchResult.error || 'executeSqlBatch failed' };
                     }
-                    const tableData = getStorageProvider().getCurrentData();
+                    const tableData = provider.getCurrentData();
                     if (!tableData) {
                         return { success: false, error: 'SQLite runtime data export failed' };
                     }

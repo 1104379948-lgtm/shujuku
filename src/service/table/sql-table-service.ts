@@ -225,7 +225,7 @@ export class SqlTableService implements ITableStorageProvider {
   }
 
   async restoreRuntimeSnapshot(snapshot: unknown): Promise<void> {
-    if (!(snapshot instanceof Uint8Array)) return;
+    if (!(snapshot instanceof Uint8Array)) throw new Error('SQLite 运行时快照无效，无法恢复。');
     await this.engine.loadFromBinary(snapshot);
     this._initialized = true;
     this._existingTableSet = undefined;
@@ -237,10 +237,8 @@ export class SqlTableService implements ITableStorageProvider {
 
   /**
    * 从聊天消息加载表格数据到 SQLite
-   * 1. mergeAllIndependentTables_ACU() 获取 JSON 快照
-   * 2. engine.init() 创建内存数据库
-   * 3. syncBridge.loadFromTableData() 建表 + 灌数据
-   * 4. 更新 currentJsonTableData_ACU
+   * 仅保留兼容入口：回放后委托 loadFromData() 初始化 runtime，
+   * 防止聊天回放和 SQLite hydrate 拥有两套不同逻辑。
    */
   async loadFromChat(): Promise<{
     loaded: boolean;
@@ -248,32 +246,50 @@ export class SqlTableService implements ITableStorageProvider {
     error?: string;
   }> {
     try {
-      // 初始化 SQLite 引擎
-      await this.engine.init();
-
-      // 从聊天消息合并出最新 JSON 快照
       const mergedData = await mergeAllIndependentTables_ACU();
+      return await this.loadFromData(mergedData as TableDataObject_ACU | null);
+    } catch (e: any) {
+      const errMsg = e?.message || String(e);
+      logError_ACU(`[SqlTableService] 回放聊天数据失败: ${errMsg}`);
+      return { loaded: false, source: 'empty', error: `replay_failed: ${errMsg}` };
+    }
+  }
 
-      // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，
-      // 还是仅仅是从模板/指导表 fallback 生成的空壳结构（只有表头没有数据行）。
-      // 空壳结构不应触发建表——用户可能还要改表结构。
-      // [修复] 同时排除来自基底状态消息的数据（seedGreeting 写入的模板初始数据），
-      // 这些数据虽然 content.length > 1（包含 seedRows），但不是 AI 真正填写的数据，
-      // 不应触发建表——建表延迟到第一次写操作时由 _ensureTablesFromTemplate 完成。
+  /**
+   * 从调用方刚刚恢复的当前聊天 JSON 快照初始化 SQLite runtime。
+   * 调用方必须保证 data 与当前聊天/isolationKey 属于同一次回放；本方法绝不自行回放聊天，
+   * 从而避免 legacy→V2 迁移与 SQLite 初始化重复产生副作用。
+   */
+  async loadFromData(data: TableDataObject_ACU | null): Promise<{
+    loaded: boolean;
+    source: 'merged' | 'initialized' | 'empty';
+    error?: string;
+  }> {
+    const mergedData = data ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : null;
+    this._resetRuntimeForLoad_ACU();
+
+    try {
+      await this.engine.init();
+    } catch (e: any) {
+      const errMsg = e?.message || String(e);
+      this._resetRuntimeForLoad_ACU();
+      logError_ACU(`[SqlTableService] SQLite 引擎初始化失败: ${errMsg}`);
+      return { loaded: false, source: 'empty', error: `sqlite_engine_init_failed: ${errMsg}` };
+    }
+
+    try {
+      // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，还是仅有模板空壳。
       const hasRealDataRows = mergedData && Object.keys(mergedData)
         .filter(k => k.startsWith('sheet_'))
         .some(k => {
           const sheet = (mergedData as any)[k];
           if (!sheet?.content || !Array.isArray(sheet.content) || sheet.content.length <= 1) return false;
-          // 来自基底状态的数据（seedGreeting 写入）不算真实数据行
           if (sheet._acu_from_base_state) return false;
           return true;
         });
 
       if (!mergedData || !hasRealDataRows) {
-        // 首个用户消息后、首个真实 AI 回复前，把 seedRows 作为本轮初始上下文物化进运行时 SQLite。
-        // 这一步只更新运行时视图；第一个持久化 checkpoint 由第一次填表保存链路写入。
-        const runtimeSeedSource = (mergedData as TableDataObject_ACU | null) || currentJsonTableData_ACU || null;
+        const runtimeSeedSource = mergedData;
         const runtimeSeedData = this._buildInitialRuntimeTableData_ACU(runtimeSeedSource);
         if (runtimeSeedData) {
           this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true });
@@ -294,23 +310,18 @@ export class SqlTableService implements ITableStorageProvider {
         return { loaded: false, source: 'empty' };
       }
 
-      // 将 JSON 数据加载到 SQLite
       this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU, { strict: true });
-
-      // 更新全局 JSON 视图
       _set_currentJsonTableData_ACU(mergedData as TableDataObject_ACU);
-
-      // 从所有表的 DDL 构建中英文名称映射器
       this._buildNameMapper(mergedData as TableDataObject_ACU);
-
       this._initialized = true;
       this._existingTableSet = undefined;
       logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
       return { loaded: true, source: 'merged' };
     } catch (e: any) {
       const errMsg = e?.message || String(e);
-      logError_ACU(`[SqlTableService] 加载失败: ${errMsg}`);
-      return { loaded: false, source: 'empty', error: errMsg };
+      this._resetRuntimeForLoad_ACU();
+      logError_ACU(`[SqlTableService] SQLite 快照加载失败: ${errMsg}`);
+      return { loaded: false, source: 'empty', error: `sqlite_hydrate_failed: ${errMsg}` };
     }
   }
 
@@ -491,6 +502,15 @@ export class SqlTableService implements ITableStorageProvider {
   // ═══════════════════════════════════════════════════════════════
   // 内部方法
   // ═══════════════════════════════════════════════════════════════
+
+  /** 重置本实例的 SQLite runtime；不触碰调用方持有的 canonical JSON 快照。 */
+  private _resetRuntimeForLoad_ACU(): void {
+    this.engine.dispose();
+    this.engine = new SqliteEngine();
+    this.syncBridge = new SyncBridge(this.engine);
+    this._initialized = false;
+    this._existingTableSet = undefined;
+  }
 
   private _buildInitialRuntimeTableData_ACU(sourceData: TableDataObject_ACU | null): TableDataObject_ACU | null {
     const shouldIncludeSeedRows = shouldUseInitialSeedRows_ACU();

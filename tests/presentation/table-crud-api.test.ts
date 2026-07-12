@@ -47,6 +47,7 @@ const {
   mockGetRuntimeData,
   mockCreateRuntimeSnapshot,
   mockRestoreRuntimeSnapshot,
+  mockEnsureStorageProviderReady,
   mockReloadStorageProvider,
   mockRunTableWriteTransaction,
 } = vi.hoisted(() => ({
@@ -56,6 +57,12 @@ const {
   mockGetRuntimeData: vi.fn(),
   mockCreateRuntimeSnapshot: vi.fn(() => new Uint8Array([1, 2, 3])),
   mockRestoreRuntimeSnapshot: vi.fn().mockResolvedValue(undefined),
+  mockEnsureStorageProviderReady: vi.fn().mockImplementation(async () => ({
+    executeMutation: mockExecuteRuntimeMutation,
+    getCurrentData: mockGetRuntimeData,
+    createRuntimeSnapshot: mockCreateRuntimeSnapshot,
+    restoreRuntimeSnapshot: mockRestoreRuntimeSnapshot,
+  })),
   mockReloadStorageProvider: vi.fn().mockResolvedValue(undefined),
   mockRunTableWriteTransaction: vi.fn(async (options: any, task: any) => task({
     transactionId: 'tx-crud-test',
@@ -74,6 +81,7 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
     createRuntimeSnapshot: mockCreateRuntimeSnapshot,
     restoreRuntimeSnapshot: mockRestoreRuntimeSnapshot,
   })),
+  ensureStorageProviderReady_ACU: mockEnsureStorageProviderReady,
   reloadStorageProvider: mockReloadStorageProvider,
 }));
 
@@ -255,6 +263,12 @@ describe('createTableCrudApi — SQLite 模式', () => {
     });
     mockCreateRuntimeSnapshot.mockReturnValue(new Uint8Array([1, 2, 3]));
     mockRestoreRuntimeSnapshot.mockResolvedValue(undefined);
+    mockEnsureStorageProviderReady.mockResolvedValue({
+      executeMutation: mockExecuteRuntimeMutation,
+      getCurrentData: mockGetRuntimeData,
+      createRuntimeSnapshot: mockCreateRuntimeSnapshot,
+      restoreRuntimeSnapshot: mockRestoreRuntimeSnapshot,
+    });
     mockReloadStorageProvider.mockResolvedValue(undefined);
     mockRunTableWriteTransaction.mockImplementation(async (options: any, task: any) => task({
       transactionId: 'tx-crud-test',
@@ -332,6 +346,17 @@ describe('createTableCrudApi — SQLite 模式', () => {
       expect(result).toBe(false);
     });
 
+    it('运行时未就绪时拒绝写入且不持久化', async () => {
+      mockEnsureStorageProviderReady.mockRejectedValueOnce(new Error('[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'));
+
+      const result = await api.updateCell('背包物品表', 1, '数量', '10');
+
+      expect(result).toBe(false);
+      expect(mockEnsureStorageProviderReady).toHaveBeenCalledOnce();
+      expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    });
+
     it('currentJsonTableData 为 null 返回 false', async () => {
       mockCurrentJsonTableData = null;
       const result = await api.updateCell('背包物品表', 1, '数量', '10');
@@ -394,6 +419,17 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('rowIndex < 1 返回 false', async () => {
       const result = await api.updateRow('背包物品表', 0, { '物品名': '钢剑' });
       expect(result).toBe(false);
+    });
+
+    it('运行时未就绪时拒绝写入且不持久化', async () => {
+      mockEnsureStorageProviderReady.mockRejectedValueOnce(new Error('[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'));
+
+      const result = await api.updateRow('背包物品表', 1, { '物品名': '钢剑' });
+
+      expect(result).toBe(false);
+      expect(mockEnsureStorageProviderReady).toHaveBeenCalledOnce();
+      expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     });
 
     it('row_id 不存在返回 false', async () => {
@@ -463,6 +499,17 @@ describe('createTableCrudApi — SQLite 模式', () => {
       expect(mockReloadStorageProvider).not.toHaveBeenCalled();
     });
 
+    it('运行时未就绪时拒绝写入且不持久化', async () => {
+      mockEnsureStorageProviderReady.mockRejectedValueOnce(new Error('[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'));
+
+      const result = await api.insertRow('背包物品表', { '物品名': '盾牌' });
+
+      expect(result).toBe(-1);
+      expect(mockEnsureStorageProviderReady).toHaveBeenCalledOnce();
+      expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    });
+
     it('持久化失败时在同一公共提交模型内 reload 运行时', async () => {
       mockPersistTablesToChatMessage.mockResolvedValue({ saved: false, error: 'save failed' });
 
@@ -509,6 +556,17 @@ describe('createTableCrudApi — SQLite 模式', () => {
       mockExecuteRuntimeMutation.mockReturnValue({ errors: ['SQL 错误'], changes: 0 });
       const result = await api.deleteRow('背包物品表', 1);
       expect(result).toBe(false);
+    });
+
+    it('运行时未就绪时拒绝写入且不持久化', async () => {
+      mockEnsureStorageProviderReady.mockRejectedValueOnce(new Error('[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'));
+
+      const result = await api.deleteRow('背包物品表', 1);
+
+      expect(result).toBe(false);
+      expect(mockEnsureStorageProviderReady).toHaveBeenCalledOnce();
+      expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     });
 
     it('表不存在返回 false', async () => {

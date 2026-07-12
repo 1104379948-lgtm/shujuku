@@ -67,6 +67,18 @@ export interface ITableStorageProvider {
     error?: string;
   }>;
 
+  /**
+   * 从调用方已恢复的当前聊天快照初始化运行时。
+   *
+   * SQLite 实现用它避免重复回放/迁移同一聊天；native 无需实现，
+   * 因为它直接使用全局 JSON 运行时视图。
+   */
+  loadFromData?(data: TableDataObject_ACU | null): Promise<{
+    loaded: boolean;
+    source: 'merged' | 'initialized' | 'empty';
+    error?: string;
+  }>;
+
   /** 当前运行时是否已经可用。native 恒为 true；sqlite 需引擎已初始化。 */
   isReady(): boolean;
 
