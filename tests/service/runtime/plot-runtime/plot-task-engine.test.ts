@@ -363,6 +363,7 @@ beforeEach(() => {
     entriesByBook: {},
     invalidBookNames: [],
     failedBookNames: [],
+    staleBookNames: [],
   });
   mockIsDatabaseGeneratedLorebookEntry.mockImplementation((entry: any) => {
     const comment = String(entry?.comment || entry?.name || '');
@@ -1015,6 +1016,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       entriesByBook: {},
       invalidBookNames: [],
       failedBookNames: ['剧情书'],
+      staleBookNames: [],
     });
 
     const result = await runPlotTasksRuntime_ACU({
@@ -1043,6 +1045,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       entriesByBook: {},
       invalidBookNames: ['残留配置书'],
       failedBookNames: [],
+      staleBookNames: [],
     });
 
     const result = await runPlotTasksRuntime_ACU({
@@ -1092,6 +1095,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       entriesByBook: {},
       invalidBookNames: [],
       failedBookNames: ['剧情书'],
+      staleBookNames: [],
     });
 
     const result = await runPlotTasksRuntime_ACU({
@@ -1682,7 +1686,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toBe('重复 \n<worldbook_context>\n外部导入内容\n</worldbook_context>\n / \n<worldbook_context>\n外部导入内容\n</worldbook_context>\n');
   });
 
-  it('在 EJS 前解析唯一 {{表格名}}，只放行精确 scope，并保留未知 token', async () => {
+  it('在 EJS 前解析唯一 {{表格名}}，隔离幽灵书后仍只放行精确 scope，并保留未知 token', async () => {
     mockCurrentJsonTableDataRef.value = {
       relation_sheet: { name: '关系档案', exportConfig: { entryName: '关系档案' } },
     };
@@ -1693,6 +1697,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       },
       invalidBookNames: [],
       failedBookNames: [],
+      staleBookNames: ['幽灵书'],
     });
     const renderOrder: string[] = [];
     mockTryRenderPlotTemplateWithEjs.mockImplementation(async (text: string) => {
@@ -1732,6 +1737,98 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(scopeOptions.entryScope({ bookName: '剧情书', uid: 8 })).toBe(false);
     expect(renderOrder.some(text => text.includes('<worldbook_context>\n关系档案世界书\n</worldbook_context>'))).toBe(true);
     expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toContain('{{未知表}}');
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      '[剧情推进][世界书] 表名索引已隔离宿主列表中的不存在世界书。',
+      expect.objectContaining({
+        phase: 'table_worldbook_index',
+        source: 'plot_table_index',
+        category: 'lorebook_not_found',
+        isolatedCount: 1,
+        staleBookNames: ['幽灵书'],
+      }),
+    );
+  });
+
+  it('表名索引仍使用未被手动选择的真实世界书条目', async () => {
+    mockCurrentJsonTableDataRef.value = {
+      relation_sheet: { name: '关系档案', exportConfig: { entryName: '关系档案' } },
+    };
+    mockGetLorebookEntriesStrict.mockResolvedValue({
+      status: 'success',
+      entriesByBook: {
+        未绑定真实书: [{ uid: 17, comment: 'TavernDB-ACU-CustomExport-关系档案' }],
+      },
+      invalidBookNames: [],
+      failedBookNames: [],
+      staleBookNames: ['幽灵书'],
+    });
+    mockResolveGeneratedEntriesForTable.mockImplementation((entries: any[], tableName: string) => (
+      tableName === '关系档案' ? entries.filter((entry: any) => entry.bookName === '未绑定真实书') : []
+    ));
+    mockBuildCombinedWorldbookContentByStrategy.mockImplementation(async (options: any) => (
+      typeof options.entryScope === 'function' ? '未绑定真实书内容' : '手动书内容'
+    ));
+
+    await runPlotTasksRuntime_ACU({
+      plotWorldbookConfig: { source: 'manual', manualSelection: ['手动书'] },
+      tasks: [{
+        id: 'unbound-table-book', name: '未绑定表名索引', stage: 1, order: 1, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '表={{关系档案}}' }],
+      }],
+    }, '当前输入');
+
+    const scopeOptions = mockBuildCombinedWorldbookContentByStrategy.mock.calls
+      .map((call: any[]) => call[0])
+      .find((options: any) => typeof options.entryScope === 'function');
+    expect(scopeOptions.entryScope({ bookName: '未绑定真实书', uid: 17 })).toBe(true);
+    expect(scopeOptions.entryScope({ bookName: '手动书', uid: 17 })).toBe(false);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toContain('未绑定真实书内容');
+  });
+
+  it('finalSystemDirective 中的唯一表名也可在隔离幽灵书后完成解析', async () => {
+    mockCurrentJsonTableDataRef.value = {
+      relation_sheet: { name: '关系档案', exportConfig: { entryName: '关系档案' } },
+    };
+    mockGetPlotPromptContentById.mockImplementation((_settings: any, promptId: string) => (
+      promptId === 'finalSystemDirective' ? '最终指令={{关系档案}}' : ''
+    ));
+    mockGetLorebookEntriesStrict.mockResolvedValue({
+      status: 'success',
+      entriesByBook: {
+        未绑定真实书: [{ uid: 18, comment: 'TavernDB-ACU-CustomExport-关系档案' }],
+      },
+      invalidBookNames: [],
+      failedBookNames: [],
+      staleBookNames: ['幽灵书'],
+    });
+    mockResolveGeneratedEntriesForTable.mockImplementation((entries: any[], tableName: string) => (
+      tableName === '关系档案' ? entries : []
+    ));
+    mockBuildCombinedWorldbookContentByStrategy.mockImplementation(async (options: any) => (
+      typeof options.entryScope === 'function' ? '最终指令世界书内容' : '普通世界书内容'
+    ));
+
+    await runPlotTasksRuntime_ACU({
+      plotWorldbookConfig: { source: 'manual', manualSelection: ['手动书'] },
+      tasks: [{
+        id: 'final-directive-table-book', name: '最终指令表名解析', stage: 1, order: 1, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '任务正文不含表名' }],
+      }],
+    }, '当前输入');
+
+    expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith([], expect.objectContaining({
+      source: 'plot_table_index',
+      validationPolicy: 'enumerate_all',
+    }));
+    expect(mockBuildFinalPlotInjectionMessage).toHaveBeenCalledWith(
+      expect.stringContaining('最终指令世界书内容'),
+      expect.any(Array),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(mockLogWarn).toHaveBeenCalledTimes(1);
   });
 
   it('同一运行内跨任务复用表名索引与每表 scope，不为 prompt segment 重复建立它们', async () => {
@@ -1749,6 +1846,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       },
       invalidBookNames: [],
       failedBookNames: [],
+      staleBookNames: [],
     });
     mockResolveGeneratedEntriesForTable.mockImplementation((entries: any[], tableName: string) => (
       entries.filter((entry: any) => (
@@ -1793,6 +1891,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       entriesByBook: {},
       invalidBookNames: [],
       failedBookNames: [],
+      staleBookNames: [],
     });
 
     await runPlotTasksRuntime_ACU({

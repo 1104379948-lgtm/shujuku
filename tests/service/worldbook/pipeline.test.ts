@@ -627,6 +627,120 @@ describe('getLorebookEntriesStrict_ACU', () => {
     expect(second.entriesByBook['书A'][0].content).toBe('书A正文');
   });
 
+  it('plot_table_index 会隔离列表中的明确 not-found 幽灵书，并保留有效书索引', async () => {
+    mockListLorebooks.mockResolvedValue(['有效书', '幽灵书']);
+    mockGwGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      if (bookName === '幽灵书') throw new Error("Lorebook '幽灵书' not found");
+      return [{ uid: 1, content: '有效正文' }];
+    });
+
+    const result = await getLorebookEntriesStrict_ACU([], {
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-ghost',
+    });
+
+    expect(result.status).toBe('success');
+    expect(result.entriesByBook).toEqual({ 有效书: [{ uid: 1, content: '有效正文', book: '有效书' }] });
+    expect(result.staleBookNames).toEqual(['幽灵书']);
+    expect(result.failedBookNames).toEqual([]);
+    expect(mockGwGetLorebookEntries).toHaveBeenCalledTimes(2);
+  });
+
+  it('plot_table_index 会隔离中文明确不存在的幽灵书', async () => {
+    mockListLorebooks.mockResolvedValue(['有效书', '幽灵书']);
+    mockGwGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      if (bookName === '幽灵书') throw new Error("世界书 '幽灵书' 不存在");
+      return [{ uid: 1, content: '有效正文' }];
+    });
+
+    const result = await getLorebookEntriesStrict_ACU([], {
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-chinese-ghost',
+    });
+
+    expect(result.status).toBe('success');
+    expect(result.entriesByBook).toEqual({ 有效书: [{ uid: 1, content: '有效正文', book: '有效书' }] });
+    expect(result.staleBookNames).toEqual(['幽灵书']);
+    expect(result.failedBookNames).toEqual([]);
+  });
+
+  it('plot_table_index 在全部枚举项均为明确 not-found 时返回空索引', async () => {
+    mockListLorebooks.mockResolvedValue(['幽灵书A', '幽灵书B']);
+    mockGwGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      throw new Error(`Lorebook '${bookName}' does not exist`);
+    });
+
+    const result = await getLorebookEntriesStrict_ACU([], {
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-all-ghosts',
+    });
+
+    expect(result.status).toBe('success');
+    expect(result.entriesByBook).toEqual({});
+    expect(result.staleBookNames).toEqual(['幽灵书A', '幽灵书B']);
+    expect(result.failedBookNames).toEqual([]);
+  });
+
+  it.each([
+    ['权限错误', new Error('Lorebook permission denied')],
+    ['凭据缺失', new Error('Lorebook credentials missing')],
+    ['权限范围缺失', new Error('Lorebook permission scope missing')],
+    ['响应字段缺失', new Error('Lorebook response missing required field')],
+    ['凭据 not-found', new Error('Lorebook credentials not found')],
+    ['权限范围 not-found', new Error('Lorebook permission scope not found')],
+    ['响应字段 not-found', new Error('Lorebook response field not found')],
+    ['前置权限缺失', new Error('Missing permission for Lorebook')],
+    ['网络错误', new Error('Lorebook network request failed')],
+    ['类型错误', new TypeError('Lorebook response malformed')],
+    ['非 Error 拒绝值', { reason: 'Lorebook unavailable' }],
+    ['空拒绝值', undefined],
+  ])('plot_table_index 不会将%s误隔离为幽灵书', async (_label, error) => {
+    mockListLorebooks.mockResolvedValue(['故障书']);
+    mockGwGetLorebookEntries.mockRejectedValue(error);
+
+    const result = await getLorebookEntriesStrict_ACU([], {
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-non-ghost-failure',
+    });
+
+    expect(result.status).toBe('read_failed');
+    expect(result.entriesByBook).toEqual({});
+    expect(result.staleBookNames).toEqual([]);
+    expect(result.failedBookNames).toEqual(['故障书']);
+  });
+
+  it('plot_table_index 遇到未知条目读取失败时仍严格失败', async () => {
+    mockListLorebooks.mockResolvedValue(['有效书', '故障书']);
+    mockGwGetLorebookEntries.mockImplementation(async (bookName: string) => {
+      if (bookName === '故障书') throw new TypeError('host response malformed');
+      return [{ uid: 1, content: '有效正文' }];
+    });
+
+    const result = await getLorebookEntriesStrict_ACU([], {
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-unknown-failure',
+    });
+
+    expect(result.status).toBe('read_failed');
+    expect(result.entriesByBook).toEqual({ 有效书: [{ uid: 1, content: '有效正文', book: '有效书' }] });
+    expect(result.staleBookNames).toEqual([]);
+    expect(result.failedBookNames).toEqual(['故障书']);
+  });
+
+  it('character 与 manual 路径不会隔离列表内的明确 not-found 幽灵书', async () => {
+    mockListLorebooks.mockResolvedValue(['幽灵书']);
+    mockGwGetLorebookEntries.mockRejectedValue(new Error("世界书 '幽灵书' 不存在"));
+
+    const [characterResult, manualResult] = await Promise.all([
+      getLorebookEntriesStrict_ACU(['幽灵书'], {
+        source: 'plot_runtime', validationPolicy: 'trusted_direct', runId: 'run-character-ghost',
+      }),
+      getLorebookEntriesStrict_ACU(['幽灵书'], {
+        source: 'manual_validation', validationPolicy: 'validate_list', runId: 'run-manual-ghost',
+      }),
+    ]);
+
+    expect(characterResult.status).toBe('read_failed');
+    expect(characterResult.staleBookNames).toEqual([]);
+    expect(manualResult.status).toBe('read_failed');
+    expect(manualResult.staleBookNames).toEqual([]);
+  });
+
   it('不同 context 的 enumerate_all 不复用上一轮列表或条目 Promise', async () => {
     mockListLorebooks.mockResolvedValue(['书A']);
     mockGwGetLorebookEntries.mockResolvedValue([{ uid: 1, content: '正文' }]);
@@ -655,13 +769,14 @@ describe('getLorebookEntriesStrict_ACU', () => {
 
   it('宿主读取 reject 后优先报告 aborted 而不是 read_failed', async () => {
     let aborted = false;
+    mockListLorebooks.mockResolvedValue(['幽灵书']);
     mockGwGetLorebookEntries.mockImplementation(async () => {
       aborted = true;
-      throw new Error('host read failed');
+      throw new Error("Lorebook '幽灵书' not found");
     });
 
-    const result = await getLorebookEntriesStrict_ACU(['剧情书'], {
-      source: 'plot_runtime', validationPolicy: 'trusted_direct', runId: 'run-abort',
+    const result = await getLorebookEntriesStrict_ACU([], {
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-abort',
       context: { bookEntriesPromises: new Map<string, Promise<any>>(), runId: 'run-abort', isAborted: () => aborted },
     });
 
@@ -671,17 +786,66 @@ describe('getLorebookEntriesStrict_ACU', () => {
 
   it('宿主读取 reject 后在作用域变化时报告 scope_changed 而不是 read_failed', async () => {
     let active = true;
+    mockListLorebooks.mockResolvedValue(['幽灵书']);
     mockGwGetLorebookEntries.mockImplementation(async () => {
       active = false;
-      throw new Error('host read failed');
+      throw new Error("Lorebook '幽灵书' not found");
     });
 
-    const result = await getLorebookEntriesStrict_ACU(['剧情书'], {
-      source: 'plot_runtime', validationPolicy: 'trusted_direct', runId: 'run-scope',
+    const result = await getLorebookEntriesStrict_ACU([], {
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-scope',
       context: { bookEntriesPromises: new Map<string, Promise<any>>(), runId: 'run-scope', isActive: () => active },
     });
 
     expect(result.status).toBe('scope_changed');
+    expect(result.failedBookNames).toEqual([]);
+  });
+
+  it('并发读取中 Abort 覆盖先完成的 scope_changed', async () => {
+    let active = true;
+    let aborted = false;
+    let releaseFirstRead: (() => void) | undefined;
+    let releaseSecondRead: (() => void) | undefined;
+    let startedReads = 0;
+    let markBothReadsStarted: (() => void) | undefined;
+    const bothReadsStarted = new Promise<void>(resolve => {
+      markBothReadsStarted = resolve;
+    });
+    mockListLorebooks.mockResolvedValue(['先完成书', '后完成书']);
+    mockGwGetLorebookEntries.mockImplementation((bookName: string) => new Promise((_resolve, reject) => {
+      startedReads += 1;
+      if (startedReads === 2) markBothReadsStarted?.();
+      if (bookName === '先完成书') {
+        releaseFirstRead = () => {
+          active = false;
+          reject(new Error("Lorebook '先完成书' not found"));
+        };
+        return;
+      }
+      releaseSecondRead = () => {
+        aborted = true;
+        reject(new Error("Lorebook '后完成书' not found"));
+      };
+    }));
+
+    const resultPromise = getLorebookEntriesStrict_ACU([], {
+      source: 'plot_table_index', validationPolicy: 'enumerate_all', runId: 'run-concurrent-priority',
+      context: {
+        bookEntriesPromises: new Map<string, Promise<any>>(),
+        runId: 'run-concurrent-priority',
+        isActive: () => active,
+        isAborted: () => aborted,
+      },
+    });
+    await bothReadsStarted;
+    releaseFirstRead?.();
+    await Promise.resolve();
+    releaseSecondRead?.();
+
+    const result = await resultPromise;
+    expect(result.status).toBe('aborted');
+    expect(result.entriesByBook).toEqual({});
+    expect(result.staleBookNames).toEqual([]);
     expect(result.failedBookNames).toEqual([]);
   });
 

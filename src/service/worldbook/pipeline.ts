@@ -716,11 +716,13 @@ export   async function getWorldbookNames_ACU() {
 export type LorebookReadSource_ACU = 'plot_runtime' | 'plot_table_index' | 'agent_runtime' | 'ui' | 'global_enumeration' | 'manual_validation';
 export type LorebookValidationPolicy_ACU = 'trusted_direct' | 'validate_list' | 'enumerate_all';
 export type StrictLorebookReadStatus_ACU = 'success' | 'invalid_selection' | 'read_failed' | 'scope_changed' | 'aborted';
+export type StrictLorebookReadErrorCategory_ACU = 'lorebook_not_found' | 'unknown';
 
 export interface StrictLorebookBookReadResult_ACU {
   bookName: string;
   status: Extract<StrictLorebookReadStatus_ACU, 'success' | 'read_failed' | 'scope_changed' | 'aborted'>;
   entries: any[];
+  errorCategory?: StrictLorebookReadErrorCategory_ACU;
 }
 
 export interface StrictLorebookReadContext_ACU {
@@ -746,6 +748,7 @@ export interface StrictLorebookReadResult_ACU {
   entriesByBook: Record<string, any[]>;
   invalidBookNames: string[];
   failedBookNames: string[];
+  staleBookNames: string[];
 }
 
 function normalizeRequestedLorebookNames_ACU(bookNames: unknown): string[] {
@@ -776,6 +779,17 @@ function getStrictLorebookContextStatus_ACU(context: StrictLorebookReadContext_A
   return null;
 }
 
+function classifyStrictLorebookReadError_ACU(error: any): StrictLorebookReadErrorCategory_ACU {
+  const message = String(error?.message || error || '');
+  const namesExplicitlyMissingLorebook = /\b(?:worldbook|lorebook)\b(?:\s+['"`][^'"`\r\n]+['"`])?\s+(?:not found|does not exist)\b/i.test(message)
+    || /\b(?:could not find|cannot find|can't find)\s+(?:the\s+)?(?:worldbook|lorebook)\b/i.test(message)
+    || /世界书\s*(?:[“"'`][^”"'`\r\n]+[”"'`])?\s*(?:未能找到|找不到|不存在)/.test(message)
+    || /(?:未能找到|找不到)\s*世界书/.test(message);
+  return namesExplicitlyMissingLorebook
+    ? 'lorebook_not_found'
+    : 'unknown';
+}
+
 async function readStrictLorebookBook_ACU(bookName: string, context?: StrictLorebookReadContext_ACU): Promise<StrictLorebookBookReadResult_ACU> {
   const beforeStatus = getStrictLorebookContextStatus_ACU(context);
   if (beforeStatus) return { bookName, status: beforeStatus, entries: [] };
@@ -784,10 +798,10 @@ async function readStrictLorebookBook_ACU(bookName: string, context?: StrictLore
     const afterStatus = getStrictLorebookContextStatus_ACU(context);
     if (afterStatus) return { bookName, status: afterStatus, entries: [] };
     return { bookName, status: 'success', entries: cloneLorebookEntriesForRead_ACU(entries, bookName) };
-  } catch {
+  } catch (error) {
     const failureStatus = getStrictLorebookContextStatus_ACU(context);
     if (failureStatus) return { bookName, status: failureStatus, entries: [] };
-    return { bookName, status: 'read_failed', entries: [] };
+    return { bookName, status: 'read_failed', entries: [], errorCategory: classifyStrictLorebookReadError_ACU(error) };
   }
 }
 
@@ -814,6 +828,7 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
     entriesByBook: {} as Record<string, any[]>,
     invalidBookNames: [] as string[],
     failedBookNames: [] as string[],
+    staleBookNames: [] as string[],
   };
   const initialStatus = getStrictLorebookContextStatus_ACU(options.context);
   if (initialStatus) return { ...baseResult, status: initialStatus };
@@ -838,12 +853,23 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
   }
 
   const reads = await Promise.all(requestedBookNames.map(name => getStrictLorebookBookRead_ACU(name, options.context)));
+  const finalStatus = getStrictLorebookContextStatus_ACU(options.context);
+  if (finalStatus === 'aborted' || reads.some(read => read.status === 'aborted')) {
+    return { ...baseResult, status: 'aborted' };
+  }
+  if (finalStatus === 'scope_changed' || reads.some(read => read.status === 'scope_changed')) {
+    return { ...baseResult, status: 'scope_changed' };
+  }
+  const canIsolateStaleTableIndexBook = options.source === 'plot_table_index' && options.validationPolicy === 'enumerate_all';
   for (const read of reads) {
     if (read.status === 'success') {
       baseResult.entriesByBook[read.bookName] = cloneLorebookEntriesForRead_ACU(read.entries, read.bookName);
       continue;
     }
-    if (read.status === 'scope_changed' || read.status === 'aborted') return { ...baseResult, status: read.status };
+    if (canIsolateStaleTableIndexBook && read.errorCategory === 'lorebook_not_found') {
+      baseResult.staleBookNames.push(read.bookName);
+      continue;
+    }
     baseResult.failedBookNames.push(read.bookName);
   }
   return baseResult.failedBookNames.length > 0

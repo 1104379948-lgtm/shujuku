@@ -2,6 +2,7 @@ import { getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from
 import { listLorebooks_ACU } from '../../../data/gateways/worldbook-gateway';
 import { resolveGeneratedEntriesForTable_ACU } from '../../worldbook/worldbook-placeholder-classification';
 import { capturePlotRuntimeScope_ACU, isSamePlotRuntimeScope_ACU, type PlotRuntimeScope_ACU } from './plot-runtime-scope';
+import { logWarn_ACU } from '../../../shared/utils';
 
 export interface PlotTableWorldbookIndex_ACU {
   entriesByBook: Record<string, any[]>;
@@ -49,6 +50,16 @@ export function createPlotWorldbookReadContext_ACU(
           context,
         }).then(result => {
           if (result.status !== 'success') throw new Error(`StrictLorebookRead:${result.status}`);
+          if (result.staleBookNames.length > 0) {
+            logWarn_ACU('[剧情推进][世界书] 表名索引已隔离宿主列表中的不存在世界书。', {
+              phase: 'table_worldbook_index',
+              runId: context.runId,
+              source: 'plot_table_index',
+              category: 'lorebook_not_found',
+              isolatedCount: result.staleBookNames.length,
+              staleBookNames: result.staleBookNames,
+            });
+          }
           const entries = Object.entries(result.entriesByBook).flatMap(([bookName, bookEntries]) => (
             (Array.isArray(bookEntries) ? bookEntries : []).map((entry: any) => ({ ...entry, bookName }))
           ));
