@@ -5,6 +5,11 @@ const {
   mockCreated,
   mockDeleted,
   mockGetEntries,
+  mockGetCharLorebooks,
+  mockGetCurrentCharacterWorldbookBinding,
+  mockCreateStrictLorebookReadError,
+  mockGetLorebookEntriesStrict,
+  mockIsLorebookNotFoundError,
   mockSaveSettings,
   mockSetEntries,
   mockSettings,
@@ -13,6 +18,16 @@ const {
   mockCreated: vi.fn(),
   mockDeleted: vi.fn(),
   mockGetEntries: vi.fn(async (bookName: string) => mockEntriesByBook.get(bookName) || []),
+  mockGetCharLorebooks: vi.fn(async () => ({ primary: '主世界书', additional: [] })),
+  mockGetCurrentCharacterWorldbookBinding: vi.fn(async () => ({
+    primary: '主世界书',
+    additional: [],
+    orderedNames: ['主世界书'],
+    apiSource: 'getCharWorldbookNames',
+  })),
+  mockCreateStrictLorebookReadError: vi.fn((result: any) => new Error(`strict lorebook read failed: ${JSON.stringify(result)}`)),
+  mockGetLorebookEntriesStrict: vi.fn(),
+  mockIsLorebookNotFoundError: vi.fn((error: any) => String(error?.message || error).includes('Worldbook not found')),
   mockSaveSettings: vi.fn(),
   mockSetEntries: vi.fn(async (bookName: string, patches: any[]) => {
     const patchByUid = new Map((patches || []).map(patch => [String(patch.uid), patch]));
@@ -22,8 +37,9 @@ const {
 }));
 
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
-  getCurrentCharPrimaryLorebook_ACU: vi.fn(async () => '主世界书'),
-  getCharLorebooks_ACU: vi.fn(async () => ({ primary: '主世界书', additional: [] })),
+  getCurrentCharacterWorldbookBinding_ACU: mockGetCurrentCharacterWorldbookBinding,
+  getCharLorebooks_ACU: mockGetCharLorebooks,
+  isLorebookNotFoundError_ACU: mockIsLorebookNotFoundError,
   getLorebookEntries_ACU: mockGetEntries,
   createLorebookEntries_ACU: vi.fn(async (bookName: string, entries: any[]) => {
     mockCreated(bookName, entries);
@@ -37,20 +53,27 @@ vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
   }),
 }));
 
+vi.mock('../../../src/service/worldbook/pipeline', () => ({
+  createStrictLorebookReadError_ACU: mockCreateStrictLorebookReadError,
+  getLorebookEntriesStrict_ACU: mockGetLorebookEntriesStrict,
+}));
+
 vi.mock('../../../src/service/runtime/state-manager', () => ({ settings_ACU: mockSettings }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ saveSettings_ACU: mockSaveSettings }));
 
-import { getCharLorebooks_ACU } from '../../../src/data/gateways/worldbook-gateway';
+import { getCharLorebooks_ACU, getCurrentCharacterWorldbookBinding_ACU } from '../../../src/data/gateways/worldbook-gateway';
 import { buildAgentWorldbookSelectionSignature_ACU } from '../../../src/service/agent/agent-worldbook-snapshot-restore';
 import {
   AGENT_WORLDBOOK_CONFIG_COMMENT_ACU,
   deleteAgentWorldbookStateEntry_ACU,
   getAgentPromptTemplateDefaults_ACU,
   readAgentWorldbookStateFromWorldbooks_ACU,
+  resolveAgentWorldbookScopeBookNames_ACU,
   setAgentPromptTemplateDefaults_ACU,
   writeAgentWorldbookControlToWorldbook_ACU,
   writeAgentWorldbookStateToWorldbook_ACU,
 } from '../../../src/service/agent/agent-worldbook-config-meta';
+import { resolveAgentWorldbookFilterAvailability_ACU } from '../../../src/service/agent/agent-worldbook-skill-meta';
 
 function configEntry(content: unknown, uid: any = 'cfg', comment = AGENT_WORLDBOOK_CONFIG_COMMENT_ACU): any {
   return { uid, comment, enabled: false, keys: [], content: JSON.stringify(content) };
@@ -75,6 +98,21 @@ describe('agent worldbook config/state meta', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockEntriesByBook.clear();
+    mockGetCharLorebooks.mockResolvedValue({ primary: '主世界书', additional: [] });
+    mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+      primary: '主世界书',
+      additional: [],
+      orderedNames: ['主世界书'],
+      apiSource: 'getCharWorldbookNames',
+    });
+    mockIsLorebookNotFoundError.mockImplementation((error: any) => String(error?.message || error).includes('Worldbook not found'));
+    mockCreateStrictLorebookReadError.mockImplementation((result: any) => new Error(`strict lorebook read failed: ${JSON.stringify(result)}`));
+    mockGetLorebookEntriesStrict.mockImplementation(async (bookNames: string[]) => ({
+      status: 'success',
+      entriesByBook: Object.fromEntries(bookNames.map(bookName => [bookName, mockEntriesByBook.get(bookName) || []])),
+      invalidBookNames: [],
+      failedBookNames: [],
+    }));
     mockGetEntries.mockImplementation(async (bookName: string) => mockEntriesByBook.get(bookName) || []);
     mockSetEntries.mockImplementation(async (bookName: string, patches: any[]) => {
       const patchByUid = new Map((patches || []).map(patch => [String(patch.uid), patch]));
@@ -101,6 +139,157 @@ describe('agent worldbook config/state meta', () => {
     expect(result.control.agentApiPreset).toBe('preset-a');
     expect(result.control.agentDecisionConcurrency).toBe(1);
     expect(result.snapshot).toEqual({ active: false, selectionSignature: '', createdAt: 0, books: {} });
+  });
+
+  it('跳过已删除的候选世界书并继续从有效书读取 Agent 配置', async () => {
+    mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+      primary: '幽灵书',
+      additional: ['有效书'],
+      orderedNames: ['幽灵书', '有效书'],
+      apiSource: 'getCharWorldbookNames',
+    });
+    mockGetEntries.mockImplementation(async (bookName: string) => {
+      if (bookName === '幽灵书') throw new Error('Worldbook not found');
+      return mockEntriesByBook.get(bookName) || [];
+    });
+    mockEntriesByBook.set('有效书', [configEntry({
+      version: 2,
+      kind: 'agent_worldbook_state',
+      updatedAt: 1,
+      control: { mode: 'agent', agentApiPreset: 'valid-book' },
+      snapshot: {},
+    })]);
+
+    const result = await readAgentWorldbookStateFromWorldbooks_ACU();
+
+    expect(result.source).toBe('worldbook');
+    expect(result.bookName).toBe('有效书');
+    expect(result.control.agentApiPreset).toBe('valid-book');
+  });
+
+  it.each([
+    Object.assign(new Error('Worldbook not found'), { name: 'AbortError' }),
+    new Error('TaskAbortedByUser'),
+    new Error('permission denied'),
+  ])('候选世界书读取的取消和非 not-found 错误继续传播', async error => {
+    mockGetEntries.mockRejectedValue(error);
+    mockIsLorebookNotFoundError.mockReturnValue(false);
+
+    await expect(readAgentWorldbookStateFromWorldbooks_ACU()).rejects.toBe(error);
+  });
+
+  it('角色 scope 只使用统一 binding，忽略旧 API 中的幽灵书', async () => {
+    vi.mocked(getCurrentCharacterWorldbookBinding_ACU).mockResolvedValue({
+      primary: '主世界书',
+      additional: ['有效附加书'],
+      orderedNames: ['主世界书', '有效附加书'],
+      apiSource: 'getCharWorldbookNames',
+    });
+    vi.mocked(getCharLorebooks_ACU).mockResolvedValue({ primary: '旧主书', additional: ['幽灵书'] } as any);
+
+    await expect(resolveAgentWorldbookScopeBookNames_ACU({
+      source: 'character',
+      manualSelection: [],
+    })).resolves.toEqual(['主世界书', '有效附加书']);
+    expect(getCharLorebooks_ACU).not.toHaveBeenCalled();
+  });
+
+  it('Agent availability 严格读取链只消费统一 binding，不请求旧 API 的幽灵书', async () => {
+    mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+      primary: '主世界书',
+      additional: ['有效附加书'],
+      orderedNames: ['主世界书', '有效附加书'],
+      apiSource: 'getCharWorldbookNames',
+    });
+    mockGetCharLorebooks.mockResolvedValue({ primary: '旧主书', additional: ['幽灵书'] });
+    mockEntriesByBook.set('主世界书', [configEntry({
+      version: 2,
+      kind: 'agent_worldbook_state',
+      updatedAt: 1,
+      control: { mode: 'agent', worldbookScope: { source: 'character', manualSelection: [] } },
+      snapshot: { active: false, selectionSignature: '', createdAt: 0, books: {} },
+    })]);
+    mockEntriesByBook.set('有效附加书', [
+      { uid: 'entry-1', comment: '没有 Skill 元数据的普通条目', enabled: true, keys: ['有效钥匙'] },
+    ]);
+    mockGetLorebookEntriesStrict.mockImplementation(async (bookNames: string[]) => {
+      if (bookNames.includes('幽灵书') || bookNames.includes('旧主书')) {
+        throw new Error('lorebook_not_found');
+      }
+      return {
+        status: 'success',
+        entriesByBook: Object.fromEntries(bookNames.map(bookName => [bookName, mockEntriesByBook.get(bookName) || []])),
+        invalidBookNames: [],
+        failedBookNames: [],
+      };
+    });
+    const readContext = { runId: 'ghost-worldbook-regression', bookEntriesPromises: new Map() };
+
+    const result = await resolveAgentWorldbookFilterAvailability_ACU(readContext);
+
+    expect(result).toMatchObject({
+      available: true,
+      reason: 'available',
+      bookNames: ['主世界书', '有效附加书'],
+    });
+    expect(mockGetLorebookEntriesStrict).toHaveBeenCalledTimes(2);
+    expect(mockGetLorebookEntriesStrict.mock.calls.map(call => call[0])).toEqual([
+      ['主世界书'],
+      ['有效附加书'],
+    ]);
+    expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith(['主世界书'], expect.objectContaining({
+      source: 'agent_runtime', validationPolicy: 'trusted_direct', runId: 'ghost-worldbook-regression', context: readContext,
+    }));
+    expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith(['有效附加书'], expect.any(Object));
+    expect(mockGetCharLorebooks).not.toHaveBeenCalled();
+  });
+
+  it('Agent availability 保留 trusted_direct 严格读取失败，不降级为不可用结果', async () => {
+    mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+      primary: '主世界书',
+      additional: ['失效附加书'],
+      orderedNames: ['主世界书', '失效附加书'],
+      apiSource: 'getCharWorldbookNames',
+    });
+    mockEntriesByBook.set('主世界书', [configEntry({
+      version: 2,
+      kind: 'agent_worldbook_state',
+      updatedAt: 1,
+      control: { mode: 'agent', worldbookScope: { source: 'character', manualSelection: [] } },
+      snapshot: { active: false, selectionSignature: '', createdAt: 0, books: {} },
+    })]);
+    const strictFailure = {
+      status: 'read_failed',
+      source: 'agent_runtime',
+      validationPolicy: 'trusted_direct',
+      requestedBookNames: ['失效附加书'],
+      resolvedBookNames: [],
+      entriesByBook: {},
+      invalidBookNames: [],
+      failedBookNames: ['失效附加书'],
+      error: new Error('Worldbook not found: 失效附加书'),
+    };
+    const strictError = new Error('strict agent runtime lorebook read failed');
+    mockCreateStrictLorebookReadError.mockReturnValue(strictError);
+    mockGetLorebookEntriesStrict.mockImplementation(async (bookNames: string[]) => {
+      if (bookNames[0] === '失效附加书') return strictFailure;
+      return {
+        status: 'success',
+        entriesByBook: { 主世界书: [] },
+        invalidBookNames: [],
+        failedBookNames: [],
+      };
+    });
+    const readContext = { runId: 'strict-failure-regression', bookEntriesPromises: new Map() };
+
+    await expect(resolveAgentWorldbookFilterAvailability_ACU(readContext)).rejects.toBe(strictError);
+
+    expect(mockGetLorebookEntriesStrict.mock.calls.map(call => call[0])).toEqual([
+      ['主世界书'],
+      ['失效附加书'],
+    ]);
+    expect(mockCreateStrictLorebookReadError).toHaveBeenCalledTimes(1);
+    expect(mockCreateStrictLorebookReadError).toHaveBeenCalledWith(strictFailure);
   });
 
   it('clamps persisted Agent decision concurrency independently from Skillify concurrency', async () => {
@@ -592,7 +781,12 @@ describe('agent worldbook config/state meta', () => {
     mockEntriesByBook.set('附加书', [
       { uid: 'additional-entry', comment: additionalTakeoverComment, enabled: false, keys: [], type: 'constant' },
     ]);
-    vi.mocked(getCharLorebooks_ACU).mockResolvedValue({ primary: '主世界书', additional: ['附加书'] } as any);
+    vi.mocked(getCurrentCharacterWorldbookBinding_ACU).mockResolvedValue({
+      primary: '主世界书',
+      additional: ['附加书'],
+      orderedNames: ['主世界书', '附加书'],
+      apiSource: 'getCharWorldbookNames',
+    });
     mockSetEntries.mockImplementation(async (bookName: string, patches: any[]) => {
       if (bookName === '附加书') throw new Error('additional restore failed');
       const patchByUid = new Map((patches || []).map(patch => [String(patch.uid), patch]));

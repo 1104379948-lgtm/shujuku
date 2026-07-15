@@ -21,6 +21,7 @@ vi.mock('../../../src/shared/utils', () => ({
 
 import {
   isWorldbookApiAvailable_ACU,
+  isLorebookNotFoundError_ACU,
   getLorebookEntries_ACU,
   setLorebookEntries_ACU,
   createLorebookEntries_ACU,
@@ -45,6 +46,26 @@ describe('isWorldbookApiAvailable_ACU', () => {
   it('API 可用返回 true', () => {
     mockTavernHelper.getLorebookEntries = vi.fn();
     expect(isWorldbookApiAvailable_ACU()).toBe(true);
+  });
+});
+
+describe('isLorebookNotFoundError_ACU', () => {
+  it.each([
+    new Error('Worldbook "ghost" not found'),
+    new Error('Could not find the lorebook'),
+    new Error('世界书“旧书”不存在'),
+    new Error('未能找到世界书'),
+  ])('识别明确的世界书不存在错误', error => {
+    expect(isLorebookNotFoundError_ACU(error)).toBe(true);
+  });
+
+  it.each([
+    Object.assign(new Error('Worldbook "ghost" not found'), { name: 'AbortError' }),
+    new Error('TaskAbortedByUser'),
+    new Error('permission denied'),
+    new Error('network unavailable'),
+  ])('不把取消或其它读取故障归类为世界书不存在', error => {
+    expect(isLorebookNotFoundError_ACU(error)).toBe(false);
   });
 });
 

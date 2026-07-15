@@ -42,6 +42,17 @@ export async function getLorebookEntries_ACU(bookName: string): Promise<any[]> {
     return await TavernHelper_API_ACU.getLorebookEntries(bookName);
 }
 
+export function isLorebookNotFoundError_ACU(error: unknown): boolean {
+    if (!error || (error as any)?.name === 'AbortError' || (error as any)?.message === 'TaskAbortedByUser') {
+        return false;
+    }
+    const message = String((error as any)?.message || error || '');
+    return /\b(?:worldbook|lorebook)\b(?:\s+['"`][^'"`\r\n]+['"`])?\s+(?:not found|does not exist)\b/i.test(message)
+        || /\b(?:could not find|cannot find|can't find)\s+(?:the\s+)?(?:worldbook|lorebook)\b/i.test(message)
+        || /世界书\s*(?:[“"'`][^”"'`\r\n]+[”"'`])?\s*(?:未能找到|找不到|不存在)/.test(message)
+        || /(?:未能找到|找不到)\s*世界书/.test(message);
+}
+
 /**
  * 更新指定世界书中的条目
  * @param bookName 世界书名称

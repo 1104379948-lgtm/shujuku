@@ -14,7 +14,8 @@ import {
   createLorebookEntries_ACU,
   deleteLorebookEntries_ACU,
   getCharLorebooks_ACU,
-  getCurrentCharPrimaryLorebook_ACU,
+  getCurrentCharacterWorldbookBinding_ACU,
+  isLorebookNotFoundError_ACU,
   getLorebookEntries_ACU,
   setLorebookEntries_ACU,
 } from '../../data/gateways/worldbook-gateway';
@@ -488,15 +489,6 @@ async function confirmAgentWorldbookScopeWrite_ACU(
 }
 
 
-async function resolveCurrentCharPrimaryBookName_ACU(): Promise<string> {
-  try {
-    const primary = await getCurrentCharPrimaryLorebook_ACU();
-    return String(primary || '').trim();
-  } catch {
-    return '';
-  }
-}
-
 function getPlotWorldbookConfig_ACU(): Record<string, any> {
   const plotSettings = settings_ACU.plotSettings && typeof settings_ACU.plotSettings === 'object'
     ? settings_ACU.plotSettings as Record<string, any>
@@ -513,17 +505,8 @@ function getManualPlotWorldbookNames_ACU(): string[] {
 async function resolveAgentWorldbookScopeBookNamesFromScope_ACU(scope: AgentWorldbookScope_ACU): Promise<string[]> {
   if (scope.source === 'manual') return normalizeBookNameList_ACU(scope.manualSelection);
 
-  const names: string[] = [];
-  try {
-    const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-    const primary = String(charLorebooks?.primary || '').trim();
-    if (primary) names.push(primary);
-    names.push(...normalizeBookNameList_ACU(charLorebooks?.additional));
-  } catch {
-    const primary = await resolveCurrentCharPrimaryBookName_ACU();
-    if (primary) names.push(primary);
-  }
-  return normalizeBookNameList_ACU(names);
+  const binding = await getCurrentCharacterWorldbookBinding_ACU();
+  return binding.orderedNames.slice();
 }
 
 export async function resolveAgentWorldbookScopeBookNames_ACU(scope?: AgentWorldbookScope_ACU): Promise<string[]> {
@@ -532,23 +515,16 @@ export async function resolveAgentWorldbookScopeBookNames_ACU(scope?: AgentWorld
 }
 
 async function resolveAgentWorldbookBootstrapBookNames_ACU(): Promise<string[]> {
-  const names: string[] = [
-    await resolveCurrentCharPrimaryBookName_ACU(),
+  const binding = await getCurrentCharacterWorldbookBinding_ACU();
+  return normalizeBookNameList_ACU([
+    ...binding.orderedNames,
     ...getManualPlotWorldbookNames_ACU(),
-  ];
-  try {
-    const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-    names.push(String(charLorebooks?.primary || '').trim());
-    names.push(...normalizeBookNameList_ACU(charLorebooks?.additional));
-  } catch {
-    // 当前角色主书和 legacy 剧情手动范围已足够构成兼容扫描边界。
-  }
-  return normalizeBookNameList_ACU(names);
+  ]);
 }
 
 async function resolveAgentWorldbookHostBookForScope_ACU(scope: AgentWorldbookScope_ACU): Promise<string> {
-  const primary = await resolveCurrentCharPrimaryBookName_ACU();
-  if (primary) return primary;
+  const binding = await getCurrentCharacterWorldbookBinding_ACU();
+  if (binding.primary) return binding.primary;
   if (scope.source === 'manual') return scope.manualSelection[0] || '';
   return '';
 }
@@ -592,7 +568,13 @@ export async function readAgentWorldbookStateFromWorldbooks_ACU(): Promise<Agent
   const writableBookName = await resolveAgentWorldbookHostBookForScope_ACU(defaultScope);
 
   for (const bookName of scanBookNames) {
-    const result = await readWorldbookConfigEntry_ACU(bookName);
+    let result: Awaited<ReturnType<typeof readWorldbookConfigEntry_ACU>>;
+    try {
+      result = await readWorldbookConfigEntry_ACU(bookName);
+    } catch (error) {
+      if (isLorebookNotFoundError_ACU(error)) continue;
+      throw error;
+    }
     if (!result.control) continue;
     return {
       control: result.control,

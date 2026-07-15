@@ -10,7 +10,7 @@ const {
   mockGenerationGate, mockSetCurrentChatFileIdentifier, mockSetAllChatMessages,
   mockSetCurrentJsonTableData, mockSetIndependentTableStates, mockSetLastTotalAiMessages,
   mockGetCurrentWorldbookConfig,
-  mockGetLorebookEntries, mockDeleteLorebookEntries, mockGwGetCurrentCharPrimaryLorebook,
+  mockGetLorebookEntries, mockDeleteLorebookEntries, mockGwGetCurrentCharPrimaryLorebook, mockGetCurrentCharacterWorldbookBinding,
   mockGetChatArray, mockSaveChatToHost,
   mockApplyTemplateScopeForCurrentChat, mockLoadSettings, mockSaveSettings,
   mockGetSortedSheetKeys,
@@ -47,6 +47,12 @@ const {
   mockGetLorebookEntries: vi.fn(async () => []),
   mockDeleteLorebookEntries: vi.fn(async () => {}),
   mockGwGetCurrentCharPrimaryLorebook: vi.fn(async () => 'primary-lorebook'),
+  mockGetCurrentCharacterWorldbookBinding: vi.fn(async () => ({
+    primary: '角色世界书',
+    additional: [],
+    orderedNames: ['角色世界书'],
+    apiSource: 'getCharWorldbookNames',
+  })),
   mockListLorebooks: vi.fn(async () => ['角色世界书', '自定义世界书']),
   mockGetChatArray: vi.fn(() => []),
   mockSaveChatToHost: vi.fn(async () => {}),
@@ -99,6 +105,7 @@ vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
   getLorebookEntries_ACU: mockGetLorebookEntries,
   deleteLorebookEntries_ACU: mockDeleteLorebookEntries,
   getCurrentCharPrimaryLorebook_ACU: mockGwGetCurrentCharPrimaryLorebook,
+  getCurrentCharacterWorldbookBinding_ACU: mockGetCurrentCharacterWorldbookBinding,
   listLorebooks_ACU: mockListLorebooks,
 }));
 
@@ -150,6 +157,15 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockGetCurrentWorldbookConfig.mockReturnValue({ injectionTarget: 'character' });
+  mockGwGetCurrentCharPrimaryLorebook.mockResolvedValue('primary-lorebook');
+  mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+    primary: '角色世界书',
+    additional: [],
+    orderedNames: ['角色世界书'],
+    apiSource: 'getCharWorldbookNames',
+  });
+  mockListLorebooks.mockResolvedValue(['角色世界书', '自定义世界书']);
   mockSettings.dataIsolationEnabled = false;
   mockSettings.dataIsolationCode = '';
   mockSettings.knownCustomEntryNames = [];
@@ -195,11 +211,13 @@ describe('getIsolationPrefix_ACU', () => {
 
 // ═══ getInjectionTargetLorebook_ACU ═══
 describe('getInjectionTargetLorebook_ACU', () => {
-  it('target 为 character 时获取角色主世界书', async () => {
+  it('target 为 character 时使用统一 binding resolver 的 primary', async () => {
     mockGetCurrentWorldbookConfig.mockReturnValue({ injectionTarget: 'character' });
-    mockGwGetCurrentCharPrimaryLorebook.mockResolvedValue('角色世界书');
+    mockGwGetCurrentCharPrimaryLorebook.mockResolvedValue('旧接口世界书');
     const result = await getInjectionTargetLorebook_ACU();
     expect(result).toBe('角色世界书');
+    expect(mockGetCurrentCharacterWorldbookBinding).toHaveBeenCalledTimes(1);
+    expect(mockGwGetCurrentCharPrimaryLorebook).not.toHaveBeenCalled();
   });
 
   it('target 为具体名称时直接返回', async () => {
@@ -210,9 +228,15 @@ describe('getInjectionTargetLorebook_ACU', () => {
 
   it('角色无主世界书时返回 null', async () => {
     mockGetCurrentWorldbookConfig.mockReturnValue({ injectionTarget: 'character' });
-    mockGwGetCurrentCharPrimaryLorebook.mockResolvedValue(null);
+    mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+      primary: null,
+      additional: ['副书'],
+      orderedNames: ['副书'],
+      apiSource: 'getCharWorldbookNames',
+    });
     const result = await getInjectionTargetLorebook_ACU();
     expect(result).toBeNull();
+    expect(mockListLorebooks).not.toHaveBeenCalled();
   });
 });
 
