@@ -21,6 +21,7 @@ import { normalizeChatScopedConfigSource_ACU, normalizeGuideData_ACU } from './c
 // 循环 import — 运行时安全
 import { normalizeTemplateScopeMode_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeTemplateSnapshotForChat_ACU, getCurrentChatTemplateScopeState_ACU, setCurrentChatTemplateScopeState_ACU, buildChatTemplateScopeStateFromCurrent_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, normalizeChatTemplateScopeState_ACU } from './chat-scope-template';
 import { getSortedSheetKeys_ACU } from './chat-scope-sheet';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
 
 function cloneTableRows_ACU(rows: any[] | null | undefined) {
     return Array.isArray(rows) ? JSON.parse(JSON.stringify(rows)) : [];
@@ -31,27 +32,13 @@ function normalizeSeedRow_ACU(row: any) {
 }
 
 function assignMissingStableRowIds_ACU(rows: any[][]) {
-    const reservedIds = new Set<string>();
-    const missingIndexes: number[] = [];
+    const reservedIds = createStableRowIdReservation_ACU(rows);
 
-    rows.forEach((row, index) => {
+    rows.forEach(row => {
         const rowId = row[0];
         const normalizedId = rowId == null ? '' : String(rowId).trim();
-        if (!normalizedId || reservedIds.has(normalizedId)) {
-            missingIndexes.push(index);
-            return;
-        }
-        reservedIds.add(normalizedId);
-        row[0] = normalizedId;
-    });
-
-    let nextId = 1;
-    missingIndexes.forEach(index => {
-        while (reservedIds.has(String(nextId))) nextId += 1;
-        const assignedId = String(nextId);
-        reservedIds.add(assignedId);
-        rows[index][0] = assignedId;
-        nextId += 1;
+        if (!normalizedId) row[0] = allocateStableRowId_ACU(reservedIds);
+        else row[0] = normalizedId;
     });
 
     return rows;

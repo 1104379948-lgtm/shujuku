@@ -21,6 +21,7 @@ import { persistTableMutationLogV2_ACU } from '../table/storage-frame-v2-persist
 import { migrateLegacyStorageToV2OnLoad_ACU } from '../table/storage-v2-migration';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 
 /**
  * Legacy entry point retained for callers that need in-place normalization.
@@ -738,6 +739,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
             const originalSheet = newJsonData[sheetKey];
             const originalHeaderRow = originalSheet.content[0];
             const newContent = [originalHeaderRow]; // Start with the original header row.
+            const reservedRowIds = createStableRowIdReservation_ACU(originalSheet.content.slice(1));
 
             // Find all valid markdown table row lines, skipping the format line.
             const dataLines = lines.filter(line => line.trim().startsWith('|') && !line.includes('---'));
@@ -748,8 +750,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                 // Split by '|', remove the first and last empty elements, and trim whitespace.
                 const columns = line.split('|').slice(1, -1).map(c => c.trim());
                 
-                // Start row with row_id (行号，从1开始)
-                const newRow = [String(newContent.length), ...columns];
+                const newRow = [allocateStableRowId_ACU(reservedRowIds), ...columns];
                 
                 // Pad or truncate the row to match the header's column count for consistency.
                 if (newRow.length < originalHeaderRow.length) {

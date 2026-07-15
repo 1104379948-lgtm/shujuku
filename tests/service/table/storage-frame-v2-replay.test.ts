@@ -1,5 +1,15 @@
-import { describe, expect, it } from 'vitest';
-import { applyTableOperationV2_ACU, collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { mockLogWarn } = vi.hoisted(() => ({
+  mockLogWarn: vi.fn(),
+}));
+
+vi.mock('../../../src/shared/utils', async () => {
+  const actual = await vi.importActual<any>('../../../src/shared/utils');
+  return { ...actual, logWarn_ACU: mockLogWarn };
+});
+
+import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU } from '../../../src/service/table/table-schema-migration';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
 
@@ -48,6 +58,10 @@ function makeDslCheckpointData() {
 }
 
 describe('loadTableStateFromFramesV2_ACU', () => {
+  beforeEach(() => {
+    mockLogWarn.mockClear();
+  });
+
   it('从最后 checkpoint 开始，在同一个恢复 runtime 上顺序回放 sql_batch', async () => {
     const chat = [
       {
@@ -413,7 +427,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     ]);
   });
 
-  it('row_upsert 的空 row_id 删除目标行，重复 row_id 拒绝回放', async () => {
+  it('row_upsert 的空 row_id 删除目标行，身份不一致的 row_upsert 拒绝回放', async () => {
     const makeChat = (cells: any[]) => [{
       is_user: false,
       TavernDB_ACU_IsolatedData: {
@@ -442,9 +456,83 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     const removed = await loadTableStateFromFramesV2_ACU(makeChat([' ', '不会保留']), '');
     expect(removed?.sheet_0.content).toEqual([['row_id', 'name']]);
 
-    await expect(loadTableStateFromFramesV2_ACU(makeChat(['2', '冲突身份']), '')).resolves.toMatchObject({
-      sheet_0: expect.objectContaining({ content: [['row_id', 'name'], ['2', '冲突身份']] }),
-    });
+    await expect(loadTableStateFromFramesV2_ACU(makeChat(['2', '冲突身份']), '')).rejects.toThrow(/row_id|身份|rowId/i);
+  });
+
+  it('row_upsert 在身份、行宽或既有重复身份无效时不修改 state', () => {
+    const cases = [
+      { rowId: '1', cells: ['2', '身份漂移'] },
+      { rowId: '1', cells: ['1'] },
+    ];
+
+    for (const patch of cases) {
+      const state = makeCheckpointData();
+      const before = JSON.parse(JSON.stringify(state));
+      expect(() => applyTablePatchV2_ACU(state, { kind: 'row_upsert', sheetKey: 'sheet_0', ...patch } as any)).toThrow(/身份|行宽/i);
+      expect(state).toEqual(before);
+    }
+
+    const duplicateState = makeCheckpointData();
+    duplicateState.sheet_0.content.push([' 1 ', '重复行']);
+    const duplicateBefore = JSON.parse(JSON.stringify(duplicateState));
+    expect(() => applyTablePatchV2_ACU(duplicateState, {
+      kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', '新值'],
+    } as any)).toThrow(/重复 row_id/i);
+    expect(duplicateState).toEqual(duplicateBefore);
+  });
+
+  it('legacy 空身份 row_upsert 删除在目标缺失、坏表头或重复目标时 fail closed', () => {
+    const cases = [
+      { mutate: (state: any) => { state.sheet_0.content[0][0] = 'id'; }, error: /row_id 表头/i },
+      { mutate: (state: any) => { state.sheet_0.content.push([' 1 ', '重复']); }, error: /重复 row_id/i },
+    ];
+    for (const { mutate, error } of cases) {
+      const state = makeCheckpointData();
+      mutate(state);
+      const before = JSON.parse(JSON.stringify(state));
+      expect(() => applyTablePatchV2_ACU(state, {
+        kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: [null, '旧兼容删除'],
+      } as any)).toThrow(error);
+      expect(state).toEqual(before);
+    }
+
+    const missingTargetState = makeCheckpointData();
+    const missingTargetBefore = JSON.parse(JSON.stringify(missingTargetState));
+    expect(() => applyTablePatchV2_ACU(missingTargetState, {
+      kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '404', cells: [null, '旧兼容删除'],
+    } as any)).toThrow(/目标 row_id 不存在/i);
+    expect(missingTargetState).toEqual(missingTargetBefore);
+
+    const missingSheetState = makeCheckpointData();
+    delete missingSheetState.sheet_0;
+    const missingSheetBefore = JSON.parse(JSON.stringify(missingSheetState));
+    expect(() => applyTablePatchV2_ACU(missingSheetState, {
+      kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: [null, '旧兼容删除'],
+    } as any)).toThrow(/删除目标 Sheet 缺失或 content 非法/i);
+    expect(missingSheetState).toEqual(missingSheetBefore);
+
+    const invalidContentState = makeCheckpointData();
+    invalidContentState.sheet_0.content = null;
+    const invalidContentBefore = JSON.parse(JSON.stringify(invalidContentState));
+    expect(() => applyTablePatchV2_ACU(invalidContentState, {
+      kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: [null, '旧兼容删除'],
+    } as any)).toThrow(/删除目标 Sheet 缺失或 content 非法/i);
+    expect(invalidContentState).toEqual(invalidContentBefore);
+
+    const missingIdState = makeCheckpointData();
+    const missingIdBefore = JSON.parse(JSON.stringify(missingIdState));
+    expect(() => applyTablePatchV2_ACU(missingIdState, {
+      kind: 'row_upsert', sheetKey: 'sheet_0', rowId: ' ', cells: [null, '旧兼容删除'],
+    } as any)).toThrow(/缺少 row_id/i);
+    expect(missingIdState).toEqual(missingIdBefore);
+  });
+
+  it('row_upsert 使用 canonical 身份更新现有行', () => {
+    const state = makeCheckpointData();
+
+    applyTablePatchV2_ACU(state, { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: ' 1 ', cells: ['1', '钢剑'] } as any);
+
+    expect(state.sheet_0.content).toEqual([['row_id', 'name'], ['1', '钢剑']]);
   });
 
   it('旧 patches 与 DSL 生成的非法 canonical 行在 replay 边界被清理或拒绝', async () => {
@@ -506,6 +594,37 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     });
   });
 
+  it('DSL 删除中间行后插入使用最小未占用 row_id，且保留 0 和 false', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.content = [
+      ['row_id', 'name', 'enabled'],
+      ['1', '铁剑', true],
+      ['2', '药水', true],
+      ['3', '盾牌', true],
+    ];
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [{
+              seq: 1, entryId: 'dsl-stable-row-id', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{ kind: 'table_edit_dsl', text: 'deleteRow(0, 1) insertRow(0, {"0":0,"1":false})' }],
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toMatchObject({
+      sheet_0: expect.objectContaining({ content: [['row_id', 'name', 'enabled'], ['1', '铁剑', true], ['3', '盾牌', true], ['2', 0, false]] }),
+    });
+  });
+
   it('无 full checkpoint 时拒绝从 data_replace/log-only 恢复不完整数据', async () => {
     const chat = [
       {
@@ -536,6 +655,130 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     const result = await loadTableStateFromFramesV2_ACU(chat, '');
 
     expect(result).toBeNull();
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('无锚点 V2 replay artifacts'));
+  });
+
+  it('bounded replay 范围早于首个 V2 frame 时返回空基底但不误报无锚点历史', async () => {
+    const chat = [
+      { is_user: false, mes: '早期普通 AI 消息' },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 2, reason: 'init', data: makeCheckpointData() },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    ];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { maxMessageIndex: 0 })).resolves.toBeNull();
+    expect(mockLogWarn).not.toHaveBeenCalled();
+  });
+
+  it('只有空 V2 frame 且没有 full checkpoint 时返回空基底但不声称存在 log-only 数据', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toBeNull();
+    expect(mockLogWarn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['perSheetCheckpoints', { perSheetCheckpoints: { sheet_0: { kind: 'sheet_full' } } }],
+    ['manualRefillProgress', { manualRefillProgress: { kind: 'manual_refill' } }],
+    ['headRevision', { headRevision: 'orphan-revision' }],
+    ['畸形 null perSheetCheckpoints', { perSheetCheckpoints: null }],
+    ['畸形数组 perSheetCheckpoints', { perSheetCheckpoints: [] }],
+    ['畸形数字 perSheetCheckpoints', { perSheetCheckpoints: 7 }],
+    ['畸形 headRevision', { headRevision: 7 }],
+  ])('无 full checkpoint 且仅存在 %s 时保守告警并返回空基底', async (_label, artifact) => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [],
+            ...artifact,
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toBeNull();
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('无锚点 V2 replay artifacts'));
+  });
+
+  it('空 perSheetCheckpoints 与空 headRevision 不构成无锚点 replay artifact', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [], perSheetCheckpoints: {}, headRevision: '' } },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toBeNull();
+    expect(mockLogWarn).not.toHaveBeenCalled();
+  });
+
+  it('bounded replay 在 anchor 前只有 checkpoint_fallback、full 位于 anchor 后时拒绝越界恢复', async () => {
+    const fallbackData = makeCheckpointData();
+    fallbackData.sheet_0.content[1][1] = '降级快照';
+    const laterFullData = makeCheckpointData();
+    laterFullData.sheet_0.content[1][1] = '后方 full';
+    const chat = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              logEntries: [{
+                seq: 1, entryId: 'checkpoint-fallback-before-anchor', createdAt: 1, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'data_replace', data: fallbackData, reason: 'checkpoint_fallback' }],
+              }],
+            },
+          },
+        },
+      },
+      { is_user: true },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 3, reason: 'compaction', data: laterFullData },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    ];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { maxMessageIndex: 1 })).resolves.toBeNull();
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toMatchObject({
+      sheet_0: expect.objectContaining({ content: [['row_id', 'name'], ['1', '后方 full']] }),
+    });
   });
 
   it('按日志顺序混合回放旧 data_replace、新 sheet_replace 与 row_upsert', async () => {

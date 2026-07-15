@@ -12,6 +12,7 @@ import { sanitizeJsonPipeline_ACU, coerceLooseRowObject_ACU } from './json-sanit
 import { isSqliteMode } from '../../table/storage-mode';
 import { extractStrictJsonTableFillResponse_ACU } from './strict-json-table-fill';
 import { stripJsonCommentsPreservingStrings_ACU } from '../../../shared/json-helpers';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
 
   function normalizeAiResponseForTableEditParsing_ACU(text: string) {
     if (typeof text !== 'string') return '';
@@ -353,13 +354,14 @@ import { stripJsonCommentsPreservingStrings_ACU } from '../../../shared/json-hel
                         break;
                     }
                     if (table && table.content && typeof data === 'object') {
-                        const newRow: any[] = [String(table.content.length)]; // 行号 = 当前 content 长度（表头占 [0]）
+                        const reservedRowIds = createStableRowIdReservation_ACU(table.content.slice(1));
+                        const newRow: any[] = [allocateStableRowId_ACU(reservedRowIds)];
                         const headers = table.content[0].slice(1);
                         const specialIndexCol = (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey))
                             ? getSummaryIndexColumnIndex_ACU(table)
                             : -1;
                         headers.forEach((_: any, colIndex: number) => {
-                            let nextVal = data[colIndex] || (data[String(colIndex)] || "");
+                            let nextVal = data[colIndex] ?? data[String(colIndex)] ?? "";
                             if (colIndex === specialIndexCol) {
                                 nextVal = formatSummaryIndexCode_ACU(table.content.length);
                             }

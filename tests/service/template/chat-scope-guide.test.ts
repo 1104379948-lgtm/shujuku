@@ -268,7 +268,7 @@ describe('materializeDataFromSheetGuide_ACU', () => {
     expect(result.sheet_0.content).toEqual([['row_id', '物品名'], ['1', '铁剑'], ['2', '盾牌']]);
   });
 
-  it('includeSeedRows=true 时会稳定化缺失与重复 row_id', () => {
+  it('includeSeedRows=true 时只补空 row_id，不重编号重复非空身份', () => {
     const guide = {
       sheet_0: {
         name: '表',
@@ -279,8 +279,8 @@ describe('materializeDataFromSheetGuide_ACU', () => {
 
     const result = materializeDataFromSheetGuide_ACU(guide, { includeSeedRows: true });
 
-    expect(result.sheet_0.content).toEqual([['row_id', '名称'], ['2', '第一行'], ['1', '第二行'], ['3', '第三行']]);
-    expect(result.sheet_0._seedRows).toEqual([['2', '第一行'], ['1', '第二行'], ['3', '第三行']]);
+    expect(result.sheet_0.content).toEqual([['row_id', '名称'], ['2', '第一行'], ['1', '第二行'], ['1', '第三行']]);
+    expect(result.sheet_0._seedRows).toEqual([['2', '第一行'], ['1', '第二行'], ['1', '第三行']]);
   });
 
   it('includeSeedRows=false 时只包含表头', () => {
@@ -477,7 +477,7 @@ describe('getEffectiveSeedRowsForSheet_ACU', () => {
     expect(result).not.toBe(mockCurrentJsonTableData.sheet_0._seedRows);
   });
 
-  it('回退到 guide 时只修正后续重复 row_id，保留首个稳定值', () => {
+  it('回退到 guide 时保留重复非空 row_id，避免静默改变历史身份', () => {
     mockCurrentJsonTableData.sheet_0 = {};
     mockGetCurrentChatTemplateScopeState.mockReturnValue({
       mode: 'chat_override',
@@ -486,7 +486,7 @@ describe('getEffectiveSeedRowsForSheet_ACU', () => {
 
     const result = getEffectiveSeedRowsForSheet_ACU('sheet_0');
 
-    expect(result).toEqual([['alpha', '首个'], ['1', '重复']]);
+    expect(result).toEqual([['alpha', '首个'], ['alpha', '重复']]);
   });
 
   it('allowTemplateFallback=false 时不回退到模板', () => {
@@ -689,12 +689,12 @@ describe('migrateLegacyTemplateScopeForCurrentChat_ACU', () => {
 });
 
 describe('row_id 稳定化 helpers', () => {
-  it('ensureStableRowIdsForSeedRows_ACU 只补缺失和后续重复，不改首个稳定值', () => {
+  it('ensureStableRowIdsForSeedRows_ACU 只补空身份，不重编号重复非空身份', () => {
     const input = [['', '第一行'], ['1', '第二行'], ['1', '第三行'], ['r1', '第四行']];
 
     const result = ensureStableRowIdsForSeedRows_ACU(input as any);
 
-    expect(result).toEqual([['2', '第一行'], ['1', '第二行'], ['3', '第三行'], ['r1', '第四行']]);
+    expect(result).toEqual([['2', '第一行'], ['1', '第二行'], ['1', '第三行'], ['r1', '第四行']]);
     expect(result).not.toBe(input);
     expect(input[0][0]).toBe('');
   });

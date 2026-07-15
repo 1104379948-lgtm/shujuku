@@ -510,6 +510,26 @@ describe('createTableCrudApi — SQLite 模式', () => {
       expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     });
 
+    it('非 SQLite insertRow 使用最小未占用 row_id，并使 operation 身份与 cells 一致', async () => {
+      mockIsSqliteMode = false;
+      mockCurrentJsonTableData.sheet_0.content = [
+        ['row_id', '物品名', '数量'],
+        ['1', '铁剑', '3'],
+        ['3', '盾牌', '1'],
+      ];
+
+      const result = await api.insertRow('背包物品表', { '物品名': '药水', '数量': '0' });
+
+      expect(result).toBe(3);
+      expect(mockCurrentJsonTableData.sheet_0.content[3]).toEqual(['2', '药水', '0']);
+      expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+        source: 'manual_crud',
+        tableData: expect.objectContaining({
+          sheet_0: expect.objectContaining({ content: expect.arrayContaining([['2', '药水', '0']]) }),
+        }),
+      }));
+    });
+
     it('持久化失败时在同一公共提交模型内 reload 运行时', async () => {
       mockPersistTablesToChatMessage.mockResolvedValue({ saved: false, error: 'save failed' });
 

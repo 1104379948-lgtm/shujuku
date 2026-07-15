@@ -7,6 +7,7 @@ import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { isSqliteMode } from '../table/storage-mode';
 import type { TableMutationOperationV2_ACU, TableWriteConflictUnitV2_ACU } from '../table/storage-frame-v2-types';
 import { parseDDLTableName } from '../../shared/ddl-utils';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 
 const TEMP_ROW_ID_PREFIX_ACU = '__acu_vis_tmp_row_';
 
@@ -260,10 +261,7 @@ function buildNativeInsertCells_ACU(state: any, sheetKey: string, clientRowId: s
 
     const headers = Array.isArray(runtimeSheet?.content?.[0]) ? runtimeSheet.content[0] : [];
     const cells = headers.map((_: any, index: number) => tempRow[index] ?? '');
-    let nextRowId = String(Array.isArray(runtimeSheet?.content) ? runtimeSheet.content.length : 1);
-    const usedIds = new Set((runtimeSheet?.content || []).slice(1).map((row: any[]) => String(row?.[0] ?? '')));
-    while (usedIds.has(nextRowId)) nextRowId = String(Number(nextRowId) + 1);
-    cells[0] = nextRowId;
+    cells[0] = allocateStableRowId_ACU(createStableRowIdReservation_ACU(runtimeSheet?.content?.slice(1)));
     return cells;
 }
 

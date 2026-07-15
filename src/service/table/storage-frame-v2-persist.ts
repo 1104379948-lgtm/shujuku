@@ -13,6 +13,7 @@ import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } f
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU } from '../../data/sqlite/schema-mapper';
 import { hydrateTableDataStrict_ACU } from './sqlite-template-validation';
+import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from './canonical-checkpoint-builder';
 
 export interface TableCheckpointGenerationConfig_ACU {
   maxEntriesAfterCheckpoint: number;
@@ -314,15 +315,15 @@ function countAiFloor_ACU(chat: any[], messageIndex: number): number {
   return count;
 }
 
-function hasAnyV2Checkpoint_ACU(chat: any[], isolationKey: string): boolean {
-  return chat.some(message => {
+function hasAnyV2Checkpoint_ACU(chat: any[], isolationKey: string, maxMessageIndex = chat.length - 1): boolean {
+  return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
     const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
     return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
   });
 }
 
-function hasAnyV2Frame_ACU(chat: any[], isolationKey: string): boolean {
-  return chat.some(message => {
+function hasAnyV2Frame_ACU(chat: any[], isolationKey: string, maxMessageIndex = chat.length - 1): boolean {
+  return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
     const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
     return isV2TagData_ACU(tagData);
   });
@@ -405,11 +406,12 @@ function normalizeOperations_ACU(
   operations: TableMutationOperationV2_ACU[] | null | undefined,
   afterData: TableDataObject_ACU,
   source: TableMutationSourceV2_ACU,
+  allowImportDataReplaceFallback: boolean,
 ): TableMutationOperationV2_ACU[] {
   if (Array.isArray(operations) && operations.length > 0) {
     return deepClone_ACU(operations);
   }
-  if (source === 'import') {
+  if (source === 'import' && allowImportDataReplaceFallback) {
     return [{
       kind: 'data_replace',
       data: deepClone_ACU(afterData),
@@ -417,6 +419,66 @@ function normalizeOperations_ACU(
     }];
   }
   return [];
+}
+
+function getOperationReplayScope_ACU(operations: TableMutationOperationV2_ACU[]): { wholeState: boolean; sheetKeys: string[] } {
+  const sheetKeys = new Set<string>();
+  for (const operation of operations) {
+    if (operation.kind === 'data_replace' || operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl') {
+      return { wholeState: true, sheetKeys: [] };
+    }
+    if ('sheetKey' in operation && typeof operation.sheetKey === 'string' && operation.sheetKey.startsWith('sheet_')) {
+      sheetKeys.add(operation.sheetKey);
+      continue;
+    }
+    throw new Error(`V2 operation log 无法确定 operation 影响范围：kind=${(operation as any).kind}。`);
+  }
+  return { wholeState: false, sheetKeys: [...sheetKeys] };
+}
+
+async function getOperationReplayPostconditionError_ACU(
+  chat: any[],
+  isolationKey: string,
+  targetMessageIndex: number,
+  operations: TableMutationOperationV2_ACU[],
+  afterData: TableDataObject_ACU,
+  candidateChangedSheetKeys: string[],
+): Promise<string | null> {
+  if (operations.length === 0) return null;
+  try {
+    const replayBase = await loadTableStateFromFramesV2_ACU(chat, isolationKey, {
+      maxMessageIndex: targetMessageIndex,
+      updateRuntimeState: false,
+    });
+    if (!replayBase) {
+      return 'V2 operation log 回放缺少现有 full checkpoint base，拒绝写入。';
+    }
+    const replayScope = getOperationReplayScope_ACU(operations);
+    const replayCandidate = deepClone_ACU(replayBase);
+    for (const operation of operations) await applyTableOperationV2_ACU(replayCandidate, operation);
+
+    if (replayScope.wholeState) {
+      if (canonicalJson_ACU(replayCandidate) !== canonicalJson_ACU(afterData)) {
+        return 'V2 operation log 回放结果与 afterData 快照不一致。';
+      }
+      return null;
+    }
+
+    const affectedSheetKeys = [...new Set([...candidateChangedSheetKeys, ...replayScope.sheetKeys])];
+    if (affectedSheetKeys.length === 0) {
+      return 'V2 operation log 缺少可验证的受影响 Sheet，拒绝写入。';
+    }
+    for (const sheetKey of affectedSheetKeys) {
+      const replayedSheet = replayCandidate[sheetKey] as Sheet_ACU | undefined;
+      const expectedSheet = afterData[sheetKey] as Sheet_ACU | undefined;
+      if (!replayedSheet || !expectedSheet || canonicalJson_ACU(templateSheetPersistentProjection_ACU(replayedSheet)) !== canonicalJson_ACU(templateSheetPersistentProjection_ACU(expectedSheet))) {
+        return `V2 operation log 回放结果与 afterData Sheet 不一致：${sheetKey}。`;
+      }
+    }
+    return null;
+  } catch (error: any) {
+    return `V2 operation log 回放失败：${error?.message || String(error)}`;
+  }
 }
 
 function getOrInitV2Frame_ACU(isolatedData: Record<string, any>, isolationKey: string): TableStorageFrameV2_ACU {
@@ -885,12 +947,15 @@ async function persistTableMutationLogV2Core_ACU(
   if (normalization.errors.length > 0) {
     return { saved: false, error: `V2 operation log snapshot 行标识不合法：${formatCanonicalRowIssues_ACU(normalization.errors)}` };
   }
+  if (normalization.removedRows.length > 0) {
+    return { saved: false, error: `V2 operation log snapshot 包含空 row_id 行，拒绝静默删除：${formatCanonicalRowIssues_ACU(normalization.removedRows)}` };
+  }
   const filledSheetKeys = normalizeKeys_ACU(options.filledSheetKeys, afterData);
   const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
-  const operations = normalizeOperations_ACU(options.operations, afterData, options.source);
+  const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index);
+  const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey, target.index);
+  const operations = normalizeOperations_ACU(options.operations, afterData, options.source, hasExistingCheckpoint);
   const effectiveChangedSheetKeys = candidateChangedSheetKeys;
-  const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey);
-  const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey);
   const hasMetadataOnlyFillEvent = filledSheetKeys.length > 0 || (Array.isArray(options.groupKeys) && options.groupKeys.length > 0);
   const hasManualRefillProgress = !!options.manualRefillProgress;
   const isManualRefillProgressOnly = operations.length === 0 && !hasMetadataOnlyFillEvent && hasManualRefillProgress;
@@ -902,6 +967,25 @@ async function persistTableMutationLogV2Core_ACU(
       saved: false,
       error: 'V2 manualRefillProgress-only write requires an existing full checkpoint anchor.',
     };
+  }
+  const initialCheckpointReason: TableCheckpointV2_ACU['reason'] = options.checkpointReason
+    || (hasExistingV2Frame ? 'migration' : 'init');
+  const shouldCheckpoint = !hasExistingCheckpoint
+    && !isManualRefillProgressOnly
+    && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
+  if (shouldCheckpoint && operations.length > 0) {
+    return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
+  }
+  if (!shouldCheckpoint && operations.length > 0) {
+    const replayPostconditionError = await getOperationReplayPostconditionError_ACU(
+      chat,
+      isolationKey,
+      target.index,
+      operations,
+      afterData,
+      effectiveChangedSheetKeys,
+    );
+    if (replayPostconditionError) return { saved: false, error: replayPostconditionError };
   }
 
   const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
@@ -939,12 +1023,6 @@ async function persistTableMutationLogV2Core_ACU(
     return { saved: false, error: `V2 operation log requires explicit operations for source=${options.source}; snapshot diff fallback is not allowed.` };
   }
 
-  const initialCheckpointReason: TableCheckpointV2_ACU['reason'] = options.checkpointReason
-    || (hasExistingV2Frame ? 'migration' : 'init');
-  const shouldCheckpoint = !hasExistingCheckpoint
-    && !isManualRefillProgressOnly
-    && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
-
   if (options.forceCheckpoint && !shouldCheckpoint) {
     logWarn_ACU(`[V2 Persist] 单一保留边界 checkpoint 策略已忽略非初次 forceCheckpoint：reason=${options.checkpointReason || 'unspecified'}, source=${options.source}`);
   }
@@ -967,14 +1045,18 @@ async function persistTableMutationLogV2Core_ACU(
       batchId: options.batchId,
       error: options.error,
     };
-    frame.checkpoint = {
-      kind: 'full',
+    const checkpointResult = buildCanonicalFullCheckpoint_ACU({
       createdAt: now,
       reason: initialCheckpointReason,
       data: afterData,
       scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
       event: checkpointEvent,
-    };
+      context: { messageIndex: target.index, aiFloor, isolationKey },
+    });
+    if (!checkpointResult.checkpoint) {
+      return { saved: false, error: checkpointResult.error };
+    }
+    frame.checkpoint = checkpointResult.checkpoint;
     frame.headRevision = checkpointRevision;
     frame.logEntries = [];
     logDebug_ACU(`[V2 Persist] 写入 full checkpoint: messageIndex=${target.index}, revision=${checkpointRevision}, sheets=${Object.keys(afterData).filter(k => k.startsWith('sheet_')).length}`);
@@ -1063,6 +1145,9 @@ async function persistTableSheetCheckpointV2Core_ACU(
   if (normalization.errors.length > 0) {
     return { saved: false, error: `V2 sheet checkpoint 行标识不合法：${formatCanonicalRowIssues_ACU(normalization.errors)}` };
   }
+  if (normalization.removedRows.length > 0) {
+    return { saved: false, error: `V2 sheet checkpoint 包含空 row_id 行，拒绝静默删除：${formatCanonicalRowIssues_ACU(normalization.removedRows)}` };
+  }
 
   const chat = getChatArray_ACU();
   if (!chat || chat.length === 0) {
@@ -1106,19 +1191,19 @@ async function persistTableSheetCheckpointV2Core_ACU(
   }
 
   const scheduleSummary = collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index })[options.sheetKey];
-  const checkpoint: TableSheetCheckpointV2_ACU = {
-    kind: 'sheet_full',
+  const checkpointResult = buildCanonicalSheetCheckpoint_ACU({
     createdAt: validation.createdAt,
     reason: validation.reason,
     sheetKey: options.sheetKey,
     data: normalizedSheetData,
-    ...(scheduleSummary ? { scheduleSummary: deepClone_ACU(scheduleSummary) } : {}),
-    ...(options.event ? { event: deepClone_ACU(options.event) } : {}),
-    ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU(options.manualRefillProgress) } : {}),
-    ...(options.baseRevision !== undefined || options.transactionContext?.baseRevision !== undefined
-      ? { baseRevision: options.baseRevision !== undefined ? options.baseRevision : options.transactionContext?.baseRevision }
-      : {}),
-  };
+    ...(scheduleSummary ? { scheduleSummary } : {}),
+    ...(options.event ? { event: options.event } : {}),
+    ...(options.manualRefillProgress ? { manualRefillProgress: options.manualRefillProgress } : {}),
+    baseRevision: options.baseRevision !== undefined ? options.baseRevision : options.transactionContext?.baseRevision,
+    context: { messageIndex: target.index, isolationKey },
+  });
+  if (!checkpointResult.checkpoint) return { saved: false, error: checkpointResult.error };
+  const checkpoint = checkpointResult.checkpoint;
 
   const hadIsolatedData = Object.prototype.hasOwnProperty.call(target.message, 'TavernDB_ACU_IsolatedData');
   const previousIsolatedData = target.message.TavernDB_ACU_IsolatedData;

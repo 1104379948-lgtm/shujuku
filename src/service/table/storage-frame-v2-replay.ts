@@ -8,8 +8,9 @@ import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqli
 import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TablePatchV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
-import { getSortedSheetKeys_ACU } from '../template/chat-scope';
+import { getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
 
 interface V2FrameRef_ACU {
@@ -40,6 +41,27 @@ function getV2FrameRefs_ACU(chat: any[], isolationKey: string): V2FrameRef_ACU[]
   }
 
   return refs;
+}
+
+function hasUnanchoredReplayArtifacts_ACU(frameRefs: V2FrameRef_ACU[]): boolean {
+  return frameRefs.some(({ frame }) => {
+    const persistedFrame = frame as unknown as Record<string, unknown>;
+    const perSheetCheckpoints = persistedFrame.perSheetCheckpoints;
+    const hasPerSheetCheckpointArtifact = perSheetCheckpoints !== undefined
+      && (perSheetCheckpoints === null
+        || typeof perSheetCheckpoints !== 'object'
+        || Array.isArray(perSheetCheckpoints)
+        || Object.keys(perSheetCheckpoints).length > 0);
+    const headRevision = persistedFrame.headRevision;
+    const hasHeadRevisionArtifact = headRevision !== undefined
+      && headRevision !== null
+      && (typeof headRevision !== 'string' || headRevision.length > 0);
+
+    return frame.logEntries.length > 0
+      || hasPerSheetCheckpointArtifact
+      || persistedFrame.manualRefillProgress !== undefined
+      || hasHeadRevisionArtifact;
+  });
 }
 
 function applyEventToScheduleSummary_ACU(
@@ -278,22 +300,66 @@ export function applyTablePatchV2_ACU(state: TableDataObject_ACU, patch: TablePa
 
   const sheet = state[patch.sheetKey] as Sheet_ACU | undefined;
   if (!sheet || !Array.isArray(sheet.content)) {
+    const isLegacyRowUpsertDelete = patch.kind === 'row_upsert'
+      && Array.isArray(patch.cells)
+      && isEmptyCanonicalRowId_ACU(patch.cells[0]);
+    if (isLegacyRowUpsertDelete) {
+      throw new Error(
+        `[V2 Replay] legacy row_upsert 删除目标 Sheet 缺失或 content 非法：sheetKey=${patch.sheetKey}。`,
+      );
+    }
     logWarn_ACU(`[V2 Replay] 跳过 patch，缺少表或 content: ${patch.sheetKey}`);
     return;
   }
 
   if (patch.kind === 'row_upsert') {
-    const rowIndex = sheet.content.findIndex(row => Array.isArray(row) && row[0] === patch.rowId);
+    if (!Array.isArray(patch.cells)) {
+      throw new Error(`[V2 Replay] row_upsert cells 必须是数组：sheetKey=${patch.sheetKey}。`);
+    }
     const nextCells = deepClone_ACU(patch.cells);
+    const header = sheet.content[0];
     if (isEmptyCanonicalRowId_ACU(nextCells[0])) {
-      sheet.content = sheet.content.filter(row => !(Array.isArray(row) && row[0] === patch.rowId));
+      const targetRowId = String(patch.rowId ?? '').trim();
+      if (!targetRowId) {
+        throw new Error(`[V2 Replay] legacy row_upsert 删除缺少 row_id：sheetKey=${patch.sheetKey}。`);
+      }
+      if (!Array.isArray(header) || header[0] !== 'row_id') {
+        throw new Error(`[V2 Replay] legacy row_upsert 删除要求 row_id 表头：sheetKey=${patch.sheetKey}。`);
+      }
+      const matchingIndexes = sheet.content.reduce<number[]>((indexes, row, index) => {
+        if (index > 0 && Array.isArray(row) && String(row[0] ?? '').trim() === targetRowId) indexes.push(index);
+        return indexes;
+      }, []);
+      if (matchingIndexes.length === 0) {
+        throw new Error(`[V2 Replay] legacy row_upsert 删除目标 row_id 不存在：sheetKey=${patch.sheetKey}。`);
+      }
+      if (matchingIndexes.length > 1) {
+        throw new Error(`[V2 Replay] legacy row_upsert 删除遇到重复 row_id：sheetKey=${patch.sheetKey}。`);
+      }
+      sheet.content.splice(matchingIndexes[0], 1);
       return;
     }
-    if (rowIndex >= 0) {
-      sheet.content[rowIndex] = nextCells;
-    } else {
-      sheet.content.push(nextCells);
+    const rowId = String(patch.rowId ?? '').trim();
+    const cellsRowId = String(nextCells[0]).trim();
+    if (!rowId || rowId !== cellsRowId) {
+      throw new Error(`[V2 Replay] row_upsert 身份不一致：sheetKey=${patch.sheetKey}。`);
     }
+    if (!Array.isArray(header) || header[0] !== 'row_id') {
+      throw new Error(`[V2 Replay] row_upsert 要求 row_id 表头：sheetKey=${patch.sheetKey}。`);
+    }
+    if (nextCells.length !== header.length) {
+      throw new Error(`[V2 Replay] row_upsert 行宽不匹配：sheetKey=${patch.sheetKey}。`);
+    }
+    const matchingIndexes = sheet.content.reduce<number[]>((indexes, row, index) => {
+      if (index > 0 && Array.isArray(row) && String(row[0] ?? '').trim() === rowId) indexes.push(index);
+      return indexes;
+    }, []);
+    if (matchingIndexes.length > 1) {
+      throw new Error(`[V2 Replay] row_upsert 遇到重复 row_id：sheetKey=${patch.sheetKey}。`);
+    }
+    nextCells[0] = rowId;
+    if (matchingIndexes.length === 1) sheet.content[matchingIndexes[0]] = nextCells;
+    else sheet.content.push(nextCells);
     return;
   }
 
@@ -394,6 +460,21 @@ function resolveDslReplaySheetKeys_ACU(state: TableDataObject_ACU): string[] {
   return Object.keys(state).filter(k => k.startsWith('sheet_'));
 }
 
+function materializeSeedRowsForDslReplay_ACU(sheet: Sheet_ACU): void {
+  if (!Array.isArray(sheet.content) || sheet.content.length !== 1) return;
+  let seedRows = Array.isArray(sheet.seedRows) && sheet.seedRows.length > 0 ? sheet.seedRows : null;
+  if (!seedRows && sheet.uid && String(sheet.uid).startsWith('sheet_')) {
+    seedRows = getEffectiveSeedRowsForSheet_ACU(String(sheet.uid), {
+      guideData: null,
+      allowTemplateFallback: true,
+    });
+    if (Array.isArray(seedRows) && seedRows.length > 0) sheet.seedRows = deepClone_ACU(seedRows);
+  }
+  if (!Array.isArray(seedRows) || seedRows.length === 0) return;
+  const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU(sheet.content[0]) : ['row_id'];
+  sheet.content = [headerRow, ...deepClone_ACU(seedRows)];
+}
+
 function applyTableEditDslOperationV2_ACU(state: TableDataObject_ACU, text: string): void {
   const sheetKeys = resolveDslReplaySheetKeys_ACU(state);
   const commands = extractTableEditDslCommands_ACU(text);
@@ -409,10 +490,12 @@ function applyTableEditDslOperationV2_ACU(state: TableDataObject_ACU, text: stri
     const sheet = sheetKey ? state[sheetKey] as Sheet_ACU : null;
     if (!sheet || !Array.isArray(sheet.content)) continue;
 
+    materializeSeedRowsForDslReplay_ACU(sheet);
+
     if (command === 'insertRow') {
       const data = args[1] || {};
       const headers = Array.isArray(sheet.content[0]) ? sheet.content[0].slice(1) : [];
-      const row = [String(sheet.content.length)];
+      const row = [allocateStableRowId_ACU(createStableRowIdReservation_ACU(sheet.content.slice(1)))];
       headers.forEach((_, colIndex) => row.push(data[colIndex] ?? data[String(colIndex)] ?? ''));
       sheet.content.push(row);
     } else if (command === 'deleteRow') {
@@ -457,6 +540,7 @@ export async function applyTableOperationV2_ACU(
     if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
       if (!effectiveRuntime) throw new Error(`${operation.kind} replay requires runtime`);
       await applySqlBatchOperationV2_ACU(state, operation, effectiveRuntime);
+      if (ownedRuntime) exportSqlReplayRuntime_ACU(ownedRuntime, state);
       return;
     }
     if (operation.kind === 'sheet_schema_migrate') {
@@ -567,7 +651,9 @@ export async function loadTableStateFromFramesV2_ACU(
   const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
 
   if (!checkpointRef?.frame.checkpoint) {
-    logWarn_ACU('[V2 Replay] 未找到 full checkpoint，拒绝从 log-only/data_replace 恢复不完整 V2 表格数据。');
+    if (hasUnanchoredReplayArtifacts_ACU(frameRefs)) {
+      logWarn_ACU('[V2 Replay] 未找到 full checkpoint，检测到无锚点 V2 replay artifacts，拒绝恢复不完整 V2 表格数据。');
+    }
     return null;
   }
 

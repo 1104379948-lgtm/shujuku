@@ -5,6 +5,7 @@ import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { logDebug_ACU } from '../../shared/utils';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 import type { TableCheckpointScheduleSummaryV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
+import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder';
 
 export interface LegacyToV2MigrationOptions_ACU {
   data: Record<string, any> | null;
@@ -233,17 +234,25 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
     options.data,
     { maxMessageIndex: target.index },
   );
+  const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+    createdAt: Date.now(),
+    reason: 'migration',
+    data: options.data as TableDataObject_ACU,
+    scheduleSummary,
+    context: {
+      messageIndex: target.index,
+      aiFloor: countAiFloor_ACU(chat, target.index),
+      isolationKey: options.isolationKey,
+    },
+  });
+  if (!checkpointResult.checkpoint) {
+    return { migrated: false, error: checkpointResult.error };
+  }
   const revision = buildMigrationRevision_ACU();
   const frame: TableStorageFrameV2_ACU = {
     version: 2,
     headRevision: revision,
-    checkpoint: {
-      kind: 'full',
-      createdAt: Date.now(),
-      reason: 'migration',
-      data: deepClone_ACU(options.data as TableDataObject_ACU),
-      scheduleSummary,
-    },
+    checkpoint: checkpointResult.checkpoint,
     logEntries: [],
   };
 

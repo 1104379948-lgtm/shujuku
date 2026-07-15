@@ -198,4 +198,31 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     expect(mockSaveChatToHost).not.toHaveBeenCalled();
     expect(mockChatRef.value[0].TavernDB_ACU_IndependentData.sheet_0.name).toBe('背包');
   });
+
+  it('legacy 数据含 canonical 后重复 row_id 时拒绝迁移，且不写入、不保存、不删除旧字段', async () => {
+    const data = {
+      sheet_0: sheet('背包', [['row_id', '名称'], ['1', '铁剑'], [' 1 ', '冒名副本']]),
+    } as any;
+    mockChatRef.value = [
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0'],
+      },
+      { is_user: true },
+      { is_user: false, mes: 'latest ai' },
+    ];
+    const before = JSON.parse(JSON.stringify(mockChatRef.value));
+
+    const result = await migrateLegacyStorageToV2OnLoad_ACU({
+      data,
+      isolationKey: '',
+      isolationConfig: { enabled: false, code: '' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ migrated: false }));
+    expect(result.error).toMatch(/duplicate_row_id|重复.*row_id|row_id.*重复/i);
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(mockChatRef.value).toEqual(before);
+  });
 });

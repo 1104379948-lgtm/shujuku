@@ -215,12 +215,13 @@ async function persistTablesToChatMessageWithLockOption_ACU(
       logWarn_ACU('[SheetGuide] Failed to create sheet guide on first fill:', e);
     }
 
+    const persistedOperations = strategy.mode === 'empty' ? [] : operations;
     const persistV2InTransaction = async (transactionContext: TableWriteTransactionContext_ACU) => {
       const result = await persistTableMutationLogV2_ACU({
         targetMessageIndex,
         source: source || (metadataOnlyUpdateGroupKeys.length > 0 ? 'group_fill' : 'system'),
         afterData: effectiveTableData,
-        operations,
+        operations: persistedOperations,
         filledSheetKeys,
         candidateChangedSheetKeys: [...trackingKeySet],
         groupKeys: metadataOnlyUpdateGroupKeys,

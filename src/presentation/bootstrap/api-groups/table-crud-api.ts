@@ -20,6 +20,7 @@ import { getLatestTableAppendMessageIndexFromChat_ACU } from '../../../service/t
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
 
 /**
  * 从 sheet 解析英文物理表名
@@ -808,12 +809,10 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             }
                         }
 
+                        newRow[0] = allocateStableRowId_ACU(createStableRowIdReservation_ACU(workingSheet.content.slice(1)));
+                        const rowId = newRow[0];
                         workingSheet.content.push(newRow);
                         const newIndex = workingSheet.content.length - 1;
-                        if (newRow[0] === undefined || newRow[0] === null || newRow[0] === '') {
-                            newRow[0] = String(newIndex);
-                        }
-                        const rowId = String(newRow[0]);
 
                         logDebug_ACU(`insertRow: Inserted row at index ${newIndex} in [${tableName}]`);
                         return {

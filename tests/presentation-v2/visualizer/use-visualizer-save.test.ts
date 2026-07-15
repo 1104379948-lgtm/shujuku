@@ -198,6 +198,31 @@ describe('useVisualizerSave', () => {
     expect(store.lastSavedTarget).toBe('data');
   });
 
+  it('新增行保存时分配最小未占用 row_id，并生成可重放的 row_upsert', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const initialData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: {
+        ...sheet(),
+        content: [['row_id', '姓名', '状态'], ['1', 'A', '平静'], ['3', 'B', '紧张']],
+      },
+    };
+    store.loadSnapshot(initialData, ['sheet_test_vz2']);
+    runtimeMock._set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(initialData)));
+    runtimeMock._set_currentJsonTableData_ACU.mockClear();
+    store.addRow();
+    store.currentSheet.content[3][1] = 'C';
+    store.currentSheet.content[3][2] = '就绪';
+
+    await expect(useVisualizerSave().saveToChat()).resolves.toBe(true);
+
+    expect(runtimeMock.getCurrentData().sheet_test_vz2.content).toEqual([
+      ['row_id', '姓名', '状态'], ['1', 'A', '平静'], ['3', 'B', '紧张'], ['2', 'C', '就绪'],
+    ]);
+  });
+
   it('保存到全局模板被取消时不写入聊天、不清理 dirty', async () => {
     const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
     const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');

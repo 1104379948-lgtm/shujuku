@@ -728,6 +728,7 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
         },
       },
     }));
+    const before = JSON.parse(JSON.stringify(chat));
     mockGetChatArray.mockReturnValue(chat);
 
     const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
@@ -735,16 +736,7 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(result).toEqual(expect.objectContaining({ success: false, changed: false, anchorIndex: 23 }));
     expect(mockLoadTableStateFromFramesV2).toHaveBeenNthCalledWith(1, chat, 'tag_A', { maxMessageIndex: 23 });
     expect(mockLoadTableStateFromFramesV2).toHaveBeenNthCalledWith(2, chat, 'tag_B', { maxMessageIndex: 23 });
-    expect(chat[23].TavernDB_ACU_IsolatedData.tag_A.storageFrame.checkpoint).toEqual(expect.objectContaining({
-      kind: 'full',
-      reason: 'compaction',
-    }));
-    expect(chat[23].TavernDB_ACU_IsolatedData.tag_B.storageFrame.checkpoint).toBeUndefined();
-    expect(chat[24].TavernDB_ACU_IsolatedData.tag_B.storageFrame.checkpoint).toEqual(expect.objectContaining({
-      kind: 'full',
-      reason: 'manual',
-    }));
-    expect(chat[24].TavernDB_ACU_IsolatedData.tag_B.storageFrame.logEntries).toEqual([]);
+    expect(chat).toEqual(before);
     expect(mockSaveChatToHost).not.toHaveBeenCalled();
   });
 

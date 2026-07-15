@@ -358,6 +358,28 @@ describe('parseAndApplyTableEdits_ACU — DSL 分支', () => {
     expect(content.length).toBe(4); // 表头 + 原2行 + 新1行
   });
 
+  it('删除中间行后插入使用最小未占用 row_id，并保留 0 和 false 单元格', () => {
+    mockCurrentJsonTableData.sheet_0.content = [
+      ['row_id', 'item_name', 'quantity'],
+      ['1', '铁剑', '3'],
+      ['2', '药水', '5'],
+      ['3', '盾牌', '1'],
+    ];
+
+    const result = parseAndApplyTableEdits_ACU(
+      '<tableEdit>deleteRow(0, 1)\ninsertRow(0, {"0": 0, "1": false})</tableEdit>',
+      'standard',
+    );
+
+    expect(result).toHaveProperty('success');
+    expect(mockCurrentJsonTableData.sheet_0.content).toEqual([
+      ['row_id', 'item_name', 'quantity'],
+      ['1', '铁剑', '3'],
+      ['3', '盾牌', '1'],
+      ['2', 0, false],
+    ]);
+  });
+
   it('insertRow 指令中的 URL 不会被行尾注释逻辑截断', () => {
     const aiResponse = '<tableEdit>insertRow(0, {"0": "https://example.com/a//b?x=1#hash", "1": "1"})</tableEdit>';
     const result = parseAndApplyTableEdits_ACU(aiResponse, 'standard');
@@ -454,5 +476,62 @@ describe('parseAndApplyTableEditsToData_ACU', () => {
     expect(explicitTableData.sheet_0.content[2][1]).toBe('显式药水');
     expect(mockCurrentJsonTableData.sheet_0.content).toHaveLength(2);
     expect(mockCurrentJsonTableData.sheet_0.content[1][1]).toBe('全局铁剑');
+  });
+
+  it('与 V2 replay DSL 对同一删除和连续插入序列产生完全一致的 content', async () => {
+    const parserData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '显式表', updateConfig: {}, exportConfig: {}, sourceData: {}, orderNo: 0,
+        content: [['row_id', 'item_name', 'enabled'], ['1', '铁剑', true], ['3', '药水', true], ['alpha', '护符', true]],
+      },
+    } as any;
+    const replayData = JSON.parse(JSON.stringify(parserData));
+    const text = '<tableEdit>deleteRow(0, 1)\ninsertRow(0, {"0": 0, "1": false})\ninsertRow(0, {"0": "卷轴", "1": true})</tableEdit>';
+    const { applyTableOperationV2_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+
+    const parserResult = parseAndApplyTableEditsToData_ACU(text, parserData, 'standard');
+    await applyTableOperationV2_ACU(replayData, {
+      kind: 'table_edit_dsl',
+      text: 'deleteRow(0, 1)\ninsertRow(0, {"0": 0, "1": false})\ninsertRow(0, {"0": "卷轴", "1": true})',
+    } as any);
+
+    expect(parserResult).toHaveProperty('success');
+    expect(parserData.sheet_0.content).toEqual([
+      ['row_id', 'item_name', 'enabled'],
+      ['1', '铁剑', true],
+      ['alpha', '护符', true],
+      ['2', 0, false],
+      ['3', '卷轴', true],
+    ]);
+    expect(replayData.sheet_0.content).toEqual(parserData.sheet_0.content);
+  });
+
+  it('与 V2 replay DSL 对 header-only seedRows 的删除、更新和插入产生完全一致的 content', async () => {
+    const parserData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'sheet_0', name: '带预置行的表', updateConfig: {}, exportConfig: {}, sourceData: {}, orderNo: 0,
+        content: [['row_id', 'item_name', 'enabled']],
+        seedRows: [['1', '铁剑', true], ['3', '药水', true]],
+      },
+    } as any;
+    const replayData = JSON.parse(JSON.stringify(parserData));
+    const text = '<tableEdit>deleteRow(0, 1)\nupdateRow(0, 0, {"0": "钢剑", "1": false})\ninsertRow(0, {"0": "卷轴", "1": true})</tableEdit>';
+    const { applyTableOperationV2_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+
+    const parserResult = parseAndApplyTableEditsToData_ACU(text, parserData, 'standard');
+    await applyTableOperationV2_ACU(replayData, {
+      kind: 'table_edit_dsl',
+      text: 'deleteRow(0, 1)\nupdateRow(0, 0, {"0": "钢剑", "1": false})\ninsertRow(0, {"0": "卷轴", "1": true})',
+    } as any);
+
+    expect(parserResult).toHaveProperty('success');
+    expect(parserData.sheet_0.content).toEqual([
+      ['row_id', 'item_name', 'enabled'],
+      ['1', '钢剑', false],
+      ['2', '卷轴', true],
+    ]);
+    expect(replayData.sheet_0.content).toEqual(parserData.sheet_0.content);
   });
 });

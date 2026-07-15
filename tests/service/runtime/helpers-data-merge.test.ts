@@ -1346,8 +1346,8 @@ describe('parseReadableToJson_ACU', () => {
 
     expect(result).not.toBeNull();
     expect(result!.sheet_0.content[0]).toEqual(['row_id', '物品名称', '数量']); // 表头保留原始
-    expect(result!.sheet_0.content[1]).toEqual(['1', '魔法杖', '1']); // 第一行数据
-    expect(result!.sheet_0.content[2]).toEqual(['2', '药水', '5']); // 第二行数据
+    expect(result!.sheet_0.content[1]).toEqual(['2', '魔法杖', '1']); // 新行不复用旧身份
+    expect(result!.sheet_0.content[2]).toEqual(['3', '药水', '5']); // 第一行分配后立即保留
     expect(result!.sheet_0.content.length).toBe(3); // 表头 + 2行数据
 
     // 恢复
@@ -1380,6 +1380,30 @@ describe('parseReadableToJson_ACU', () => {
     });
   });
 
+  it('重建 Markdown 表格时使用稳定 allocator，不按新数组长度复用已占用身份', () => {
+    Object.defineProperty(stateManager, 'currentJsonTableData_ACU', {
+      value: {
+        sheet_0: {
+          name: '背包物品表',
+          content: [['row_id', '物品名称'], ['1', '铁剑'], ['3', '盾牌'], ['alpha', '标记']],
+        },
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    const result = parseReadableToJson_ACU('# 背包物品表\n| 物品名称 |\n|---|\n| 魔法杖 |\n| 药水 |');
+
+    expect(result?.sheet_0.content).toEqual([
+      ['row_id', '物品名称'],
+      ['2', '魔法杖'],
+      ['4', '药水'],
+    ]);
+    Object.defineProperty(stateManager, 'currentJsonTableData_ACU', {
+      value: null, writable: true, configurable: true,
+    });
+  });
+
   it('列数少于表头时自动补空字符串（pad）', () => {
     Object.defineProperty(stateManager, 'currentJsonTableData_ACU', {
       value: {
@@ -1399,7 +1423,7 @@ describe('parseReadableToJson_ACU', () => {
     expect(result).not.toBeNull();
     // row_id + 值1 = 2列，需要 pad 到 4 列
     expect(result!.sheet_0.content[1].length).toBe(4);
-    expect(result!.sheet_0.content[1][0]).toBe('1'); // row_id
+    expect(result!.sheet_0.content[1][0]).toBe('2'); // 不复用原有 row_id
     expect(result!.sheet_0.content[1][1]).toBe('值1');
     expect(result!.sheet_0.content[1][2]).toBe(''); // padded
     expect(result!.sheet_0.content[1][3]).toBe(''); // padded
@@ -1428,7 +1452,7 @@ describe('parseReadableToJson_ACU', () => {
     expect(result).not.toBeNull();
     // row_id + 值1 + 值2 + 值3 = 4列，需要 truncate 到 2 列
     expect(result!.sheet_0.content[1].length).toBe(2);
-    expect(result!.sheet_0.content[1][0]).toBe('1'); // row_id
+    expect(result!.sheet_0.content[1][0]).toBe('2'); // 不复用原有 row_id
     expect(result!.sheet_0.content[1][1]).toBe('值1'); // 只保留第一列
 
     Object.defineProperty(stateManager, 'currentJsonTableData_ACU', {

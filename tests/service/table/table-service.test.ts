@@ -247,6 +247,7 @@ describe('direct persistence guards', () => {
       afterData: mockCurrentJsonTableDataRef.value,
       forceCheckpoint: true,
       checkpointReason: 'init',
+      operations: [],
       transactionContext,
     }));
   });
