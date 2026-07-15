@@ -49,9 +49,9 @@ function attemptInsert(retry: number): void {
     `<div class="extension_container interactable" id="${MENU_CONTAINER_ID}" tabindex="0"></div>`;
   const itemHtml =
     `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID}" ` +
-    `title="打开 SP·数据库 VII">` +
+    `title="打开 SP·数据库 VIII">` +
     `<div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div>` +
-    `<span>SP·数据库 VII</span>` +
+    `<span>SP·数据库 VIII</span>` +
     `</div>`;
   const $container = $(containerHtml);
   const $item = $(itemHtml);

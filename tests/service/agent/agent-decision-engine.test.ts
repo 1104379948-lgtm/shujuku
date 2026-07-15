@@ -464,7 +464,7 @@ describe('runAgentDecisionForPlot_ACU', () => {
     expect(result.effectiveTasks[0].id).toBe('task_id');
   });
 
-  it('shards takeover candidates concurrently, splits only the min tk budget, and merges local greenlights deterministically', async () => {
+  it('shards takeover candidates concurrently, splits min and max tk budgets, and merges local greenlights deterministically', async () => {
     mockRefreshPlotAgentWorldbookSnapshot.mockResolvedValueOnce({
       active: true,
       selectionSignature: 'scope',
@@ -515,14 +515,152 @@ describe('runAgentDecisionForPlot_ACU', () => {
     expect(prompts[0]).toContain('"uid": 2');
     expect(prompts[0]).not.toContain('"uid": 3');
     expect(prompts[0]).toContain('"min": 51');
-    expect(prompts[0]).toContain('"max": 999');
+    expect(prompts[0]).toContain('"max": 500');
     expect(prompts[1]).toContain('"uid": 3');
     expect(prompts[1]).not.toContain('"uid": 4');
     expect(prompts[1]).toContain('"min": 50');
-    expect(prompts[1]).toContain('"max": 999');
+    expect(prompts[1]).toContain('"max": 499');
     expect(result.effectiveTasks).toEqual([]);
     expect(result.plotGreenlights.task_id.map(ref => ref.uid)).toEqual([1, 2, 3]);
     expect(result.finalGenerationGreenlights.map(ref => ref.uid)).toEqual([1, 3]);
+  });
+
+  it('splits max tk budget by actual non-empty shard count without sending empty requests', async () => {
+    mockRefreshPlotAgentWorldbookSnapshot.mockResolvedValueOnce({
+      active: true,
+      selectionSignature: 'scope',
+      createdAt: 1,
+      books: { '剧情书': [{ uid: 1 }, { uid: 2 }] },
+    });
+    const skillMetaBlock = (description: string) => `<!-- ACU_SKILL_META_START\n${JSON.stringify({ version: 1, description, triggerWhen: '预算触发', updatedAt: 1, updatedBy: 'agent-skillify' })}\nACU_SKILL_META_END -->`;
+    mockGetLorebookEntries.mockResolvedValueOnce([1, 2].map(uid => ({
+      uid,
+      comment: `条目${uid}\n\n${skillMetaBlock(`Skill${uid}`)}`,
+      keys: [`关键词${uid}`],
+      content: `内容${uid}`,
+      enabled: true,
+    })));
+    mockCallAIWithPreset.mockResolvedValue(JSON.stringify({
+      taskPlan: [{ taskId: 'task_id', run: true, effectiveStage: 1, effectiveOrder: 0 }],
+      plotGreenlights: {},
+      finalGenerationGreenlights: [],
+      fallbackMode: false,
+    }));
+
+    await runAgentDecisionForPlot_ACU({
+      plotSettings: {
+        agentWorldbookControl: {
+          enabled: true,
+          mode: 'agent',
+          agentDecisionConcurrency: 5,
+          contextSettings: { greenlightMinTkBudget: 3, greenlightMaxTkBudget: 11 },
+          agentDecisionPromptSegments: [{ role: 'user', deletable: true, content: 'W={{agent.worldbookEntriesJson}}\nB={{agent.greenlightTkBudgetJson}}\nS={{agent.shard.index}}/{{agent.shard.count}}' }],
+        },
+      },
+      userMessage: '继续',
+      sharedContext: {},
+      enabledTasks: [{ id: 'task id', name: '默认任务', description: '需要判断', enabled: true, promptGroup: { messages: [] } }],
+    });
+
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(2);
+    const prompts = mockCallAIWithPreset.mock.calls.map(([messages]) => messages[0].content);
+    expect(prompts[0]).toContain('S=1/2');
+    expect(prompts[0]).toContain('"min": 2');
+    expect(prompts[0]).toContain('"max": 6');
+    expect(prompts[1]).toContain('S=2/2');
+    expect(prompts[1]).toContain('"min": 1');
+    expect(prompts[1]).toContain('"max": 5');
+  });
+
+  it('keeps the full min and max tk budgets when configured concurrency collapses to one non-empty shard', async () => {
+    mockRefreshPlotAgentWorldbookSnapshot.mockResolvedValueOnce({
+      active: true,
+      selectionSignature: 'scope',
+      createdAt: 1,
+      books: { '剧情书': [{ uid: 1 }] },
+    });
+    const skillMetaBlock = `<!-- ACU_SKILL_META_START\n${JSON.stringify({ version: 1, description: '单片 Skill', triggerWhen: '单片触发', updatedAt: 1, updatedBy: 'agent-skillify' })}\nACU_SKILL_META_END -->`;
+    mockGetLorebookEntries.mockResolvedValueOnce([{
+      uid: 1,
+      comment: `单片条目\n\n${skillMetaBlock}`,
+      keys: ['单片'],
+      content: '单片内容',
+      enabled: true,
+    }]);
+    mockCallAIWithPreset.mockResolvedValueOnce(JSON.stringify({
+      taskPlan: [{ taskId: 'task_id', run: true, effectiveStage: 1, effectiveOrder: 0 }],
+      plotGreenlights: {},
+      finalGenerationGreenlights: [],
+      fallbackMode: false,
+    }));
+
+    await runAgentDecisionForPlot_ACU({
+      plotSettings: {
+        agentWorldbookControl: {
+          enabled: true,
+          mode: 'agent',
+          agentDecisionConcurrency: 5,
+          contextSettings: { greenlightMinTkBudget: 101, greenlightMaxTkBudget: 999 },
+          agentDecisionPromptSegments: [{ role: 'user', deletable: true, content: 'B={{agent.greenlightTkBudgetJson}}\nS={{agent.shard.index}}/{{agent.shard.count}}' }],
+        },
+      },
+      userMessage: '继续',
+      sharedContext: {},
+      enabledTasks: [{ id: 'task id', name: '默认任务', description: '需要判断', enabled: true, promptGroup: { messages: [] } }],
+    });
+
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
+    const prompt = mockCallAIWithPreset.mock.calls[0][0][0].content;
+    expect(prompt).toContain('S=1/1');
+    expect(prompt).toContain('"min": 101');
+    expect(prompt).toContain('"max": 999');
+  });
+
+  it('preserves zero max tk budgets when the global max is smaller than the actual shard count', async () => {
+    mockRefreshPlotAgentWorldbookSnapshot.mockResolvedValueOnce({
+      active: true,
+      selectionSignature: 'scope',
+      createdAt: 1,
+      books: { '剧情书': [{ uid: 1 }, { uid: 2 }, { uid: 3 }] },
+    });
+    const skillMetaBlock = (description: string) => `<!-- ACU_SKILL_META_START\n${JSON.stringify({ version: 1, description, triggerWhen: '零预算触发', updatedAt: 1, updatedBy: 'agent-skillify' })}\nACU_SKILL_META_END -->`;
+    mockGetLorebookEntries.mockResolvedValueOnce([1, 2, 3].map(uid => ({
+      uid,
+      comment: `条目${uid}\n\n${skillMetaBlock(`Skill${uid}`)}`,
+      keys: [`关键词${uid}`],
+      content: `内容${uid}`,
+      enabled: true,
+    })));
+    mockCallAIWithPreset.mockResolvedValue(JSON.stringify({
+      taskPlan: [{ taskId: 'task_id', run: true, effectiveStage: 1, effectiveOrder: 0 }],
+      plotGreenlights: {},
+      finalGenerationGreenlights: [],
+      fallbackMode: false,
+    }));
+
+    await runAgentDecisionForPlot_ACU({
+      plotSettings: {
+        agentWorldbookControl: {
+          enabled: true,
+          mode: 'agent',
+          agentDecisionConcurrency: 3,
+          contextSettings: { greenlightMinTkBudget: 0, greenlightMaxTkBudget: 1 },
+          agentDecisionPromptSegments: [{ role: 'user', deletable: true, content: 'B={{agent.greenlightTkBudgetJson}}\nS={{agent.shard.index}}/{{agent.shard.count}}' }],
+        },
+      },
+      userMessage: '继续',
+      sharedContext: {},
+      enabledTasks: [{ id: 'task id', name: '默认任务', description: '需要判断', enabled: true, promptGroup: { messages: [] } }],
+    });
+
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(3);
+    const prompts = mockCallAIWithPreset.mock.calls.map(([messages]) => messages[0].content);
+    expect(prompts[0]).toContain('S=1/3');
+    expect(prompts[0]).toContain('"max": 1');
+    expect(prompts[1]).toContain('S=2/3');
+    expect(prompts[1]).toContain('"max": 0');
+    expect(prompts[2]).toContain('S=3/3');
+    expect(prompts[2]).toContain('"max": 0');
   });
 
   it('keeps successful shard greenlights when the task-plan authority shard fails', async () => {

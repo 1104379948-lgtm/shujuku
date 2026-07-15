@@ -494,6 +494,7 @@ interface AgentDecisionShard_ACU {
   summaries: AgentWorldbookSummary_ACU[];
   allowedKeys: Set<string>;
   minTkBudget: number;
+  maxTkBudget: number;
 }
 
 interface AgentDecisionShardResult_ACU {
@@ -507,6 +508,7 @@ function createAgentDecisionShards_ACU(
   candidateLimit: number,
   configuredConcurrency: unknown,
   minTkBudget: number,
+  maxTkBudget: number,
 ): AgentDecisionShard_ACU[] {
   const candidates = summaries.slice(0, normalizePositiveInteger_ACU(candidateLimit, summaries.length || 1));
   if (candidates.length === 0) return [];
@@ -516,6 +518,9 @@ function createAgentDecisionShards_ACU(
   const totalMinBudget = normalizeTkBudgetNumber_ACU(minTkBudget, 0);
   const budgetPerShard = Math.floor(totalMinBudget / shardCount);
   const budgetRemainder = totalMinBudget % shardCount;
+  const totalMaxBudget = normalizeTkBudgetNumber_ACU(maxTkBudget, 0);
+  const maxBudgetPerShard = Math.floor(totalMaxBudget / shardCount);
+  const maxBudgetRemainder = totalMaxBudget % shardCount;
   const shards: AgentDecisionShard_ACU[] = [];
   let offset = 0;
   for (let index = 0; index < shardCount; index++) {
@@ -527,6 +532,7 @@ function createAgentDecisionShards_ACU(
       summaries: shardSummaries,
       allowedKeys: new Set(shardSummaries.map(summary => refKey_ACU(summary.bookName, summary.uid))),
       minTkBudget: budgetPerShard + (index < budgetRemainder ? 1 : 0),
+      maxTkBudget: maxBudgetPerShard + (index < maxBudgetRemainder ? 1 : 0),
     });
   }
   return shards;
@@ -554,6 +560,7 @@ function buildAgentDecisionPrompt_ACU(params: {
   worldbookSummaries: AgentWorldbookSummary_ACU[];
   contextSettings: ReturnType<typeof normalizeAgentContextSettings_ACU>;
   minTkBudget?: number;
+  maxTkBudget?: number;
   shardIndex?: number;
   shardCount?: number;
 }): Array<{ role: string; content: string }> {
@@ -586,7 +593,7 @@ function buildAgentDecisionPrompt_ACU(params: {
     'agent.greenlightTkBudgetJson': {
       unit: 'Token',
       min: params.minTkBudget ?? params.contextSettings.greenlightMinTkBudget,
-      max: params.contextSettings.greenlightMaxTkBudget,
+      max: params.maxTkBudget ?? params.contextSettings.greenlightMaxTkBudget,
       selectionRule: '每个通道和每个任务必须优先选择相关条目；相关条目足够时尽可能超过 min；相关条目总 Token 不足 min 时全选相关条目；任何情况下不得超过 max；不得为凑 min 选择无关条目。',
     },
     'agent.shard.index': (params.shardIndex ?? 0) + 1,
@@ -653,6 +660,7 @@ async function runAgentDecisionShard_ACU(params: {
     worldbookSummaries: params.shard.summaries,
     contextSettings: params.contextSettings,
     minTkBudget: params.shard.minTkBudget,
+    maxTkBudget: params.shard.maxTkBudget,
     shardIndex: params.shard.index,
     shardCount: params.shardCount,
   });
@@ -700,6 +708,7 @@ export async function runAgentDecisionForPlot_ACU(params: {
       contextSettings.decisionWorldbookCandidateLimit,
       control.agentDecisionConcurrency,
       contextSettings.greenlightMinTkBudget,
+      contextSettings.greenlightMaxTkBudget,
     );
     if (shards.length === 0) return emptyDecision_ACU(originalTasks, 'empty_worldbook_scope');
     const agentDecidableTasks = originalTasks.filter(task => shouldSendPlotTaskToAgent_ACU(normalizePlotTask_ACU(task, { fallbackTask: task })));
