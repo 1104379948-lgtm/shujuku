@@ -9,7 +9,7 @@
 import { computed, ref } from 'vue';
 import { settings_ACU } from '../../service/runtime/state-manager';
 import { saveSettings_ACU } from '../../service/settings/settings-service';
-import { getCharLorebooks_ACU } from '../../service/worldbook/worldbook-service';
+import { getCurrentCharacterWorldbookBinding_ACU } from '../../service/worldbook/worldbook-service';
 
 export type PlotWorldbookSource = 'character' | 'manual';
 
@@ -89,13 +89,8 @@ export function usePlotWorldbookConfig() {
     if (cfg.source === 'manual') {
       return normalizeSelection(cfg.manualSelection);
     }
-    const names: string[] = [];
-    try {
-      const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-      if (charLorebooks.primary) names.push(charLorebooks.primary);
-      if (charLorebooks.additional?.length) names.push(...charLorebooks.additional);
-    } catch { /* empty */ }
-    return [...new Set(names.filter(Boolean))];
+    const binding = await getCurrentCharacterWorldbookBinding_ACU();
+    return binding.orderedNames;
   }
 
   return {

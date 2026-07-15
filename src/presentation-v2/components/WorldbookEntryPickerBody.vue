@@ -26,6 +26,8 @@
       :groups="groups"
       :filter="filter"
       :loading="loading"
+      :status="entryStatus"
+      :error="entryError"
       :empty-text="emptyText"
       :show-skillify-controls="false"
       :show-agent-takeover-state="false"
@@ -42,6 +44,7 @@ import WorldbookSourcePicker from './WorldbookSourcePicker.vue';
 import WorldbookEntryList from './WorldbookEntryList.vue';
 import WorldbookEntryToolbar from './WorldbookEntryToolbar.vue';
 import type { WorldbookLoadStatus } from '../composables/useWorldbookSelector';
+import type { EntryLoadStatus } from '../composables/usePlotWorldbookEntries';
 import type { WorldbookEntryDisplayGroup_ACU } from '../composables/worldbook-entry-display';
 
 type WorldbookSource = 'character' | 'manual';
@@ -56,11 +59,15 @@ withDefaults(defineProps<{
   filter: string;
   groups: WorldbookEntryDisplayGroup_ACU[];
   loading: boolean;
+  entryStatus?: EntryLoadStatus;
+  entryError?: string;
   emptyText?: string;
   filterable?: boolean;
 }>(), {
   filterable: true,
   emptyText: '所选世界书中无可显示的条目。',
+  entryStatus: 'success',
+  entryError: '',
 });
 
 defineEmits<{

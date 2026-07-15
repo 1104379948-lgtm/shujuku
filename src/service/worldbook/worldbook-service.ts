@@ -15,6 +15,7 @@ export {
     listLorebooks_ACU,
     getWorldBooks_ACU,
     getCurrentCharPrimaryLorebook_ACU,
+    getCurrentCharacterWorldbookBinding_ACU,
     getCharLorebooks_ACU,
 } from '../../data/gateways/worldbook-gateway';
 

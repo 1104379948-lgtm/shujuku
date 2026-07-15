@@ -39,7 +39,11 @@ function createSettings() {
   } as any;
 }
 
-async function mountPlotPage(opts: { devOptions?: { plotAdvanced?: boolean }, settings?: any } = {}) {
+async function mountPlotPage(opts: {
+  devOptions?: { plotAdvanced?: boolean };
+  settings?: any;
+  resolveCharacterBinding?: () => Promise<any>;
+} = {}) {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
@@ -48,6 +52,14 @@ async function mountPlotPage(opts: { devOptions?: { plotAdvanced?: boolean }, se
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 
   const settings = opts.settings ?? createSettings();
+  const mockGetCurrentCharacterWorldbookBinding = vi.fn(
+    opts.resolveCharacterBinding ?? (async () => ({
+      primary: 'CharBook',
+      additional: [],
+      orderedNames: ['CharBook'],
+      apiSource: 'getCharWorldbookNames',
+    })),
+  );
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     settings_ACU: settings,
@@ -76,13 +88,14 @@ async function mountPlotPage(opts: { devOptions?: { plotAdvanced?: boolean }, se
   }));
   vi.doMock('../../../src/service/worldbook/worldbook-service', () => ({
     getCurrentCharPrimaryLorebook_ACU: vi.fn(async () => 'CharBook'),
+    getCurrentCharacterWorldbookBinding_ACU: mockGetCurrentCharacterWorldbookBinding,
     getCharLorebooks_ACU: vi.fn(async () => ({ primary: 'CharBook', additional: [] })),
   }));
 
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();
   await new Promise(r => setTimeout(r, 0));
-  return { mount, settings };
+  return { mount, settings, mockGetCurrentCharacterWorldbookBinding };
 }
 
 beforeEach(() => {
@@ -516,6 +529,24 @@ describe('PlotPage', () => {
     expect(document.querySelector('.acu-v2-wb-entry-picker__hint')?.textContent).toContain('目前已选: world-A、world-B');
     expect(worldA.getAttribute('aria-checked')).toBe('true');
     expect(worldB.getAttribute('aria-checked')).toBe('true');
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('角色世界书 binding 读取失败时显示明确错误且不将失败持久化为空选择', async () => {
+    const settings = createSettings();
+    const bindingError = new Error('host binding read failed');
+    const { mount, mockGetCurrentCharacterWorldbookBinding } = await mountPlotPage({
+      settings,
+      resolveCharacterBinding: async () => { throw bindingError; },
+    });
+    await new Promise(r => setTimeout(r, 50));
+
+    const error = document.querySelector('.acu-v2-wb-entries [role="alert"]');
+    expect(error?.textContent).toContain('加载角色世界书失败');
+    expect(error?.textContent).not.toContain(bindingError.message);
+    expect(settings.plotSettings.plotWorldbookConfig.enabledEntries).toEqual({});
+    expect(mockGetCurrentCharacterWorldbookBinding).toHaveBeenCalledTimes(1);
 
     mount.__resetAcuV2MountForTests();
   });

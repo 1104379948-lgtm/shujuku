@@ -6,7 +6,7 @@ import { showToastr_ACU } from '../theme/toast';
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../shared/utils';
 import { jQuery_API_ACU } from '../dom-utils';
-import { getCharLorebooks_ACU, getLorebookEntries_ACU } from '../../service/worldbook/worldbook-service';
+import { getCurrentCharacterWorldbookBinding_ACU, getLorebookEntries_ACU } from '../../service/worldbook/worldbook-service';
 import { settings_ACU, currentChatFileIdentifier_ACU } from '../../service/runtime/state-manager';
 import { setGlobalPlotEnabled_ACU } from '../../service/settings/settings-service';
 import { $popupInstance_ACU, $plotPromptSegmentsContainer_ACU, $plotTaskListContainer_ACU, _assignUIPlaceholders_ACU } from '../state/ui-refs';
@@ -727,13 +727,7 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         const $plotSelectNoneLegacy = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-worldbook-select-none`);
         const resolvePlotBookNames_ACU = async () => {
           if ((cfg.source || 'character') === 'manual') return Array.isArray(cfg.manualSelection) ? cfg.manualSelection : [];
-          const names = [];
-          try {
-                const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-            if (charLorebooks.primary) names.push(charLorebooks.primary);
-            if (charLorebooks.additional?.length) names.push(...charLorebooks.additional);
-          } catch (e) {}
-          return names;
+          return (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
         };
         const isPlotEntryAllowed_ACU = (entry: any) => {
           if (!entry) return false;
@@ -753,45 +747,83 @@ export async function bindPlotEvents_ACU(): Promise<void> {
           if (!entry.enabled) return false;
           return true;
         };
+        const reportPlotWorldbookActionFailure_ACU = (phase: string) => {
+          logError_ACU('[剧情推进] Plot worldbook action failed:', {
+            phase,
+            error: { category: 'unknown' },
+          });
+          showToastr_ACU('error', '剧情世界书操作失败，请重试。');
+        };
         const setPlotEntriesSelection_ACU = async (mode: string) => {
           // mode: 'all' | 'none'
-          const bookNames = await resolvePlotBookNames_ACU();
-          if (!cfg.enabledEntries) cfg.enabledEntries = {};
+          let bookNames: string[];
+          try {
+            bookNames = await resolvePlotBookNames_ACU();
+          } catch {
+            reportPlotWorldbookActionFailure_ACU('plot_character_binding');
+            return;
+          }
 
-          const allBooks = await getWorldBooks_ACU();
+          let allBooks: any[];
+          try {
+            allBooks = await getWorldBooks_ACU();
+          } catch {
+            reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection_catalog');
+            return;
+          }
+
+          const nextEnabledEntries = { ...(cfg.enabledEntries || {}) };
           for (const bookName of bookNames) {
-            let entries = [];
+            let entries: any[];
             const bookData = allBooks.find(b => b.name === bookName);
             if (bookData?.entries?.length) {
               entries = bookData.entries;
             } else {
-              try { entries = await getLorebookEntries_ACU(bookName); } catch (e) { entries = []; }
+              try {
+                entries = await getLorebookEntries_ACU(bookName);
+              } catch {
+                reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection_entries');
+                return;
+              }
             }
 
             if (mode === 'none') {
-              cfg.enabledEntries[bookName] = [];
+              nextEnabledEntries[bookName] = [];
             } else {
-              cfg.enabledEntries[bookName] = (entries || []).filter(isPlotEntryAllowed_ACU).map(e => e.uid);
+              nextEnabledEntries[bookName] = entries.filter(isPlotEntryAllowed_ACU).map(e => e.uid);
             }
           }
 
+          cfg.enabledEntries = nextEnabledEntries;
           saveSettingsAndNotify_ACU();
           await populatePlotWorldbookEntryList_ACU(); // 立即刷新UI，显示勾选/取消
         };
 
         if ($plotSelectAll.length) {
           $plotSelectAll.off('click.acu_plot_wb').on('click.acu_plot_wb', async function(this: HTMLElement) {
-            await setPlotEntriesSelection_ACU('all');
+            try {
+              await setPlotEntriesSelection_ACU('all');
+            } catch {
+              reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection');
+            }
           });
         }
         if ($plotDeselectAll.length) {
           $plotDeselectAll.off('click.acu_plot_wb').on('click.acu_plot_wb', async function(this: HTMLElement) {
-            await setPlotEntriesSelection_ACU('none');
+            try {
+              await setPlotEntriesSelection_ACU('none');
+            } catch {
+              reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection');
+            }
           });
         }
         if ($plotSelectNoneLegacy.length) {
           $plotSelectNoneLegacy.off('click.acu_plot_wb').on('click.acu_plot_wb', async function(this: HTMLElement) {
-            await setPlotEntriesSelection_ACU('none');
+            try {
+              await setPlotEntriesSelection_ACU('none');
+            } catch {
+              reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection');
+            }
           });
         }
 
@@ -836,8 +868,11 @@ export async function bindPlotEvents_ACU(): Promise<void> {
         }
 
         await updatePlotWorldbookSourceView_ACU();
-      } catch (e) {
-        logWarn_ACU('[剧情推进] Plot worldbook UI bind failed:', e);
+      } catch {
+        logWarn_ACU('[剧情推进] Plot worldbook UI bind failed:', {
+          phase: 'plot_worldbook_ui_bind',
+          error: { category: 'unknown' },
+        });
       }
 
 

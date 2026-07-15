@@ -1,6 +1,9 @@
 <template>
   <div class="acu-v2-wb-entries">
     <div v-if="loading" class="acu-v2-wb-entries__status">正在加载条目...</div>
+    <div v-else-if="status === 'error'" class="acu-v2-wb-entries__status acu-v2-wb-entries__status--error" role="alert">
+      {{ error || '加载条目失败' }}
+    </div>
     <div v-else-if="groups.length === 0" class="acu-v2-wb-entries__status">
       {{ emptyText }}
     </div>
@@ -97,6 +100,8 @@ const props = withDefaults(defineProps<{
   groups: WorldbookEntryDisplayGroup_ACU[];
   filter: string;
   loading: boolean;
+  status?: 'idle' | 'loading' | 'success' | 'error';
+  error?: string;
   emptyText?: string;
   showEntryToggle?: boolean;
   showSkillifyControls?: boolean;
@@ -108,6 +113,8 @@ const props = withDefaults(defineProps<{
   showSkillifyControls: true,
   showAgentTakeoverState: true,
   showSkillEditor: true,
+  status: 'success',
+  error: '',
 });
 
 const emit = defineEmits<{
@@ -212,6 +219,7 @@ function saveSkill(entry: WorldbookEntryDisplayItem_ACU): void {
   color: var(--acu-text-3);
   font-size: var(--acu-font-size-body, 12px);
 }
+.acu-v2-wb-entries__status--error { color: var(--acu-danger); }
 
 .acu-v2-wb-entry-item {
   display: grid;

@@ -19,6 +19,8 @@
           v-model:filter="entryFilter"
           :groups="wbEntries.groups.value"
           :loading="wbEntries.status.value === 'loading'"
+          :entry-status="wbEntries.status.value"
+          :entry-error="wbEntries.error.value"
           :empty-text="entryEmptyText"
           @update:source="onWorldbookSourceChange($event)"
           @toggle-book="onManualWorldbookToggle"
@@ -53,7 +55,13 @@ const entryFilter = ref('');
 const entryEmptyText = ref(plotCopy.worldbook.emptyDefault);
 
 async function refreshWorldbookEntries(): Promise<void> {
-  const names = await plotWorldbook.resolveBookNames();
+  let names: string[];
+  try {
+    names = await plotWorldbook.resolveBookNames();
+  } catch {
+    wbEntries.reportLoadFailure();
+    return;
+  }
   entryEmptyText.value = resolveEntryEmptyText(names);
   await wbEntries.loadEntries(names);
 }
@@ -92,7 +100,7 @@ const currentWorldbookLabel = computed<string>(() => {
 async function refreshAll(): Promise<void> {
   plotWorldbook.refreshFromSettings();
   await worldbook.refresh();
-  void refreshWorldbookEntries();
+  await refreshWorldbookEntries();
 }
 
 onMounted(() => { void refreshAll(); });

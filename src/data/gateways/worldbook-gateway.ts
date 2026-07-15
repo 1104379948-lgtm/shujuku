@@ -8,7 +8,7 @@
  */
 
 import { TavernHelper_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
-import { getCharLorebooks_ACU } from './character-gateway';
+import { getCharLorebooks_ACU, getCurrentCharacterWorldbookBinding_ACU } from './character-gateway';
 import { logWarn_ACU } from '../../shared/utils';
 
 // ═══ 可用性检查 ═══
@@ -134,4 +134,4 @@ export async function getCurrentCharPrimaryLorebook_ACU(): Promise<string | null
  * @param options 查询选项（如 { type: 'all' }）
  * @returns 角色世界书结构，不可用时返回空结构
  */
-export { getCharLorebooks_ACU };
+export { getCharLorebooks_ACU, getCurrentCharacterWorldbookBinding_ACU };

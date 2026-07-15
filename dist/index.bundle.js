@@ -5448,6 +5448,43 @@ $CONTENT
         }
         return TavernHelper_API_ACU.getCharData(target);
     }
+    class CharacterWorldbookBindingError_ACU extends Error {
+        constructor(name) {
+            super(name);
+            this.name = name;
+        }
+    }
+    function normalizeCharacterWorldbookBinding_ACU(raw, apiSource) {
+        if (!raw || typeof raw !== 'object') {
+            throw new CharacterWorldbookBindingError_ACU('CharacterWorldbookBindingContractError_ACU');
+        }
+        const { primary, additional } = raw;
+        if (primary !== null && primary !== undefined && typeof primary !== 'string') {
+            throw new CharacterWorldbookBindingError_ACU('CharacterWorldbookBindingContractError_ACU');
+        }
+        if (!Array.isArray(additional) || additional.some(name => typeof name !== 'string')) {
+            throw new CharacterWorldbookBindingError_ACU('CharacterWorldbookBindingContractError_ACU');
+        }
+        const normalizedPrimary = typeof primary === 'string' && primary.trim() ? primary.trim() : null;
+        const normalizedAdditional = additional
+            .map(name => name.trim())
+            .filter(Boolean);
+        const orderedNames = [...new Set([normalizedPrimary, ...normalizedAdditional].filter((name) => !!name))];
+        return { primary: normalizedPrimary, additional: [...new Set(normalizedAdditional)], orderedNames, apiSource };
+    }
+    /**
+     * 返回当前角色的规范化绑定集合。新 API 优先，旧 API 仅作为不存在新 API 的兼容分支。
+     */
+    async function getCurrentCharacterWorldbookBinding_ACU() {
+        if (TavernHelper_API_ACU && typeof TavernHelper_API_ACU.getCharWorldbookNames === 'function') {
+            return normalizeCharacterWorldbookBinding_ACU(await TavernHelper_API_ACU.getCharWorldbookNames('current'), 'getCharWorldbookNames');
+        }
+        if (TavernHelper_API_ACU && typeof TavernHelper_API_ACU.getCharLorebooks === 'function') {
+            return normalizeCharacterWorldbookBinding_ACU(await TavernHelper_API_ACU.getCharLorebooks({ type: 'all' }), 'getCharLorebooks');
+        }
+        logWarn_ACU('[CharacterGateway] 当前角色世界书 API 不可用。', { phase: 'character_worldbook_binding' });
+        throw new CharacterWorldbookBindingError_ACU('CharacterWorldbookApiUnavailableError_ACU');
+    }
     /**
      * 获取当前角色绑定的所有世界书列表
      * @param options 查询选项，默认 { type: 'all' }
@@ -21437,7 +21474,7 @@ $CONTENT
             context: readContext,
         });
         if (result.status !== 'success')
-            throw new Error(`StrictLorebookRead:${result.status}`);
+            throw createStrictLorebookReadError_ACU(result);
         return result.entriesByBook[bookName] || [];
     }
     async function listWorldbookSkillMetas_ACU(bookNames = [], readContext) {
@@ -23591,7 +23628,7 @@ $CONTENT
                         context,
                     }).then(result => {
                         if (result.status !== 'success')
-                            throw new Error(`StrictLorebookRead:${result.status}`);
+                            throw createStrictLorebookReadError_ACU(result);
                         if (result.staleBookNames.length > 0) {
                             logWarn_ACU('[剧情推进][世界书] 表名索引已隔离宿主列表中的不存在世界书。', {
                                 phase: 'table_worldbook_index',
@@ -24423,7 +24460,7 @@ $CONTENT
             context: readContext,
         });
         if (result.status !== 'success')
-            throw new Error(`StrictLorebookRead:${result.status}`);
+            throw createStrictLorebookReadError_ACU(result);
         return result.entriesByBook[bookName] || [];
     }
     async function collectWorldbookSummariesFromSnapshot_ACU(contextSettings, readContext) {
@@ -24908,6 +24945,12 @@ $CONTENT
      * 从 helpers-plot-runtime.ts 拆出（L532-L1023 + L1513-L1618）
      */
     const CHARACTER_LOREBOOK_RETRY_DELAY_MS_ACU = 300;
+    class CharacterLorebookScopeChangedError_ACU extends Error {
+        constructor() {
+            super('CharacterLorebookScopeChanged');
+            this.name = 'CharacterLorebookScopeChangedError_ACU';
+        }
+    }
     function hasPlotTaskAgentSkill_ACU(task) {
         return !!String(task?.description || '').trim() || !!String(task?.triggerWhen || '').trim();
     }
@@ -25385,10 +25428,13 @@ $CONTENT
             resolveTaskTableWorldbookTokens = (text) => sharedContext.resolveTableWorldbookTokens(text, worldbookTriggerText, taskWorldbookOptions);
         }
         catch (wbError) {
+            if (wbError?.message === 'TaskAbortedByUser' || wbError?.name === 'AbortError' || String(wbError?.message || '').toLowerCase().includes('aborted')) {
+                throw wbError;
+            }
             logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 严格世界书读取失败，已阻断 AI 调用。`, {
                 phase: 'strict_worldbook_read',
                 runId: sharedContext.worldbookReadContext?.runId || '',
-                error: summarizePlotRuntimeError_ACU(wbError),
+                error: summarizeStrictLorebookReadError_ACU(wbError) || summarizePlotRuntimeError_ACU(wbError),
             });
             return {
                 taskId: normalizedTask.id,
@@ -25499,11 +25545,11 @@ $CONTENT
             if (error?.message === 'TaskAbortedByUser' || error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
                 throw error;
             }
-            if (String(error?.message || '').startsWith('StrictLorebookRead:')) {
+            if (isStrictLorebookReadError_ACU(error) || String(error?.message || '').startsWith('StrictLorebookRead:')) {
                 logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 严格世界书读取失败，已阻断 AI 调用。`, {
                     phase: 'strict_worldbook_read',
                     runId: sharedContext.worldbookReadContext?.runId || '',
-                    error: summarizePlotRuntimeError_ACU(error),
+                    error: summarizeStrictLorebookReadError_ACU(error) || summarizePlotRuntimeError_ACU(error),
                 });
                 return {
                     taskId: normalizedTask.id, taskName: taskLabel, success: false, rawResponse: '',
@@ -25730,9 +25776,9 @@ $CONTENT
                     initialScope: summarizePlotRuntimeScope_ACU(initialScope),
                     currentScope: summarizePlotRuntimeScope_ACU(beforeScope),
                 });
-                return null;
+                throw new CharacterLorebookScopeChangedError_ACU();
             }
-            const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
+            const charLorebooks = await getCurrentCharacterWorldbookBinding_ACU();
             const afterScope = capturePlotRuntimeScope_ACU();
             if (initialScope.reliable && !isSamePlotRuntimeScope_ACU(initialScope, afterScope)) {
                 logWarn_ACU('[剧情推进][世界书] 角色绑定解析取消：读取后作用域已变化。', {
@@ -25741,13 +25787,13 @@ $CONTENT
                     initialScope: summarizePlotRuntimeScope_ACU(initialScope),
                     currentScope: summarizePlotRuntimeScope_ACU(afterScope),
                 });
-                return null;
+                throw new CharacterLorebookScopeChangedError_ACU();
             }
-            return normalizeLorebookNames_ACU(charLorebooks);
+            return charLorebooks.orderedNames;
         };
         try {
             const names = await readOnce(1);
-            return names || [];
+            return names;
         }
         catch (error) {
             if (!isTransientLorebookNotFoundError_ACU(error))
@@ -25771,12 +25817,12 @@ $CONTENT
                     initialScope: summarizePlotRuntimeScope_ACU(initialScope),
                     currentScope: summarizePlotRuntimeScope_ACU(retryScope),
                 });
-                return [];
+                throw new CharacterLorebookScopeChangedError_ACU();
             }
             try {
                 const names = await readOnce(2);
                 logDebug_ACU('[剧情推进][世界书] 角色绑定世界书在第 2 次读取后恢复。');
-                return names || [];
+                return names;
             }
             catch (retryError) {
                 logWarn_ACU('[剧情推进][世界书] 角色绑定世界书读取失败，已达到重试上限。', {
@@ -25808,21 +25854,34 @@ $CONTENT
             }
             else {
                 logDebug_ACU('[剧情推进] 使用角色绑定的世界书模式');
-                if (worldbookOptions.readContext) {
-                    bookNames = await worldbookOptions.readContext.characterLorebookNamesPromise;
-                }
-                else {
-                    try {
+                try {
+                    if (worldbookOptions.readContext) {
+                        bookNames = await worldbookOptions.readContext.characterLorebookNamesPromise;
+                    }
+                    else {
                         bookNames = await resolveCharacterLorebookNamesStable_ACU();
                     }
-                    catch (error) {
-                        logError_ACU('[剧情推进] 获取角色世界书失败:', {
-                            phase: 'resolve_character',
-                            scope: summarizePlotRuntimeScope_ACU(capturePlotRuntimeScope_ACU()),
-                            error: summarizePlotRuntimeError_ACU(error),
-                        });
-                        return '';
+                }
+                catch (error) {
+                    if (error?.message === 'TaskAbortedByUser' || error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
+                        throw error;
                     }
+                    logError_ACU('[剧情推进] 获取角色世界书失败:', {
+                        phase: 'resolve_character',
+                        scope: summarizePlotRuntimeScope_ACU(capturePlotRuntimeScope_ACU()),
+                        error: summarizePlotRuntimeError_ACU(error),
+                    });
+                    throw createStrictLorebookReadError_ACU({
+                        status: error instanceof CharacterLorebookScopeChangedError_ACU ? 'scope_changed' : 'read_failed',
+                        source: 'plot_runtime',
+                        validationPolicy: 'trusted_direct',
+                        runId: worldbookOptions.readContext?.runId || '',
+                        entriesByBook: {},
+                        invalidBookNames: [],
+                        failedBookNames: [],
+                        failedBooks: [],
+                        staleBookNames: [],
+                    });
                 }
             }
             bookNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).filter(Boolean))];
@@ -25856,7 +25915,7 @@ $CONTENT
                     context: worldbookOptions.readContext,
                 });
                 if (strictRead.status !== 'success')
-                    throw new Error(`StrictLorebookRead:${strictRead.status}`);
+                    throw createStrictLorebookReadError_ACU(strictRead);
                 entriesByBook = strictRead.entriesByBook;
             }
             const agentGreenlightKeySet = new Set(worldbookOptions.agentGreenlights
@@ -25949,6 +26008,9 @@ $CONTENT
             });
         }
         catch (error) {
+            if (error?.message === 'TaskAbortedByUser' || error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
+                throw error;
+            }
             if (String(error?.message || '').startsWith('StrictLorebookRead:'))
                 throw error;
             logError_ACU('[剧情推进] 处理世界书内容时发生错误:', {
@@ -27419,6 +27481,55 @@ $CONTENT
         const bookNames = await listLorebooks_ACU();
         return normalizeWorldbookListNames_ACU(bookNames);
     }
+    class StrictLorebookReadError_ACU extends Error {
+        constructor(result) {
+            super(`StrictLorebookRead:${result.status}`);
+            this.name = 'StrictLorebookReadError_ACU';
+            this.status = result.status;
+            this.source = result.source;
+            this.validationPolicy = result.validationPolicy;
+            this.runId = result.runId;
+            this.failedBooks = result.failedBooks.map(failure => ({ ...failure }));
+            this.invalidBookNames = [...result.invalidBookNames];
+            this.staleBookNames = [...result.staleBookNames];
+        }
+    }
+    function createStrictLorebookReadError_ACU(result) {
+        return new StrictLorebookReadError_ACU(result);
+    }
+    function isStrictLorebookReadError_ACU(error) {
+        if (error instanceof StrictLorebookReadError_ACU)
+            return true;
+        if (!(error instanceof Error) || error.name !== 'StrictLorebookReadError_ACU')
+            return false;
+        const candidate = error;
+        return typeof candidate.status === 'string'
+            && typeof candidate.source === 'string'
+            && typeof candidate.validationPolicy === 'string'
+            && typeof candidate.runId === 'string'
+            && Array.isArray(candidate.failedBooks)
+            && Array.isArray(candidate.invalidBookNames)
+            && Array.isArray(candidate.staleBookNames);
+    }
+    function summarizeStrictLorebookReadError_ACU(error) {
+        if (!isStrictLorebookReadError_ACU(error))
+            return null;
+        const failedBooks = error.failedBooks
+            .filter(failure => failure && typeof failure.bookName === 'string' && typeof failure.errorCategory === 'string')
+            .map(failure => ({ bookName: failure.bookName, errorCategory: failure.errorCategory }));
+        return {
+            category: 'strict_lorebook_read',
+            status: error.status,
+            source: error.source,
+            validationPolicy: error.validationPolicy,
+            runId: error.runId,
+            failedCount: failedBooks.length,
+            failedBookNames: failedBooks.map(failure => failure.bookName),
+            errorCategories: failedBooks.map(failure => failure.errorCategory),
+            invalidCount: error.invalidBookNames.length,
+            staleCount: error.staleBookNames.length,
+        };
+    }
     function normalizeRequestedLorebookNames_ACU(bookNames) {
         return [...new Set((Array.isArray(bookNames) ? bookNames : [])
                 .map(name => String(name || '').trim())
@@ -27500,6 +27611,7 @@ $CONTENT
             entriesByBook: {},
             invalidBookNames: [],
             failedBookNames: [],
+            failedBooks: [],
             staleBookNames: [],
         };
         const initialStatus = getStrictLorebookContextStatus_ACU(options.context);
@@ -27546,6 +27658,7 @@ $CONTENT
                 continue;
             }
             baseResult.failedBookNames.push(read.bookName);
+            baseResult.failedBooks.push({ bookName: read.bookName, errorCategory: read.errorCategory || 'unknown' });
         }
         return baseResult.failedBookNames.length > 0
             ? { ...baseResult, status: 'read_failed' }
@@ -40287,7 +40400,7 @@ $CONTENT
             catch (e) { }
         }
         catch (error) {
-            logError_ACU('[剧情推进] Failed to populate plot worldbook list:', error);
+            logError_ACU('[剧情推进] 加载手动世界书列表失败:', { phase: 'plot_worldbook_list', error: { category: 'unknown' } });
             $listContainer.html('<em>加载失败</em>');
         }
     }
@@ -40301,15 +40414,18 @@ $CONTENT
         const cfg = getPlotWorldbookConfig_ACU();
         const source = cfg.source;
         let bookNames = [];
-        if (source === 'character') {
-            const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-            if (charLorebooks.primary)
-                bookNames.push(charLorebooks.primary);
-            if (charLorebooks.additional?.length)
-                bookNames.push(...charLorebooks.additional);
+        try {
+            if (source === 'character') {
+                bookNames = (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
+            }
+            else if (source === 'manual') {
+                bookNames = cfg.manualSelection || [];
+            }
         }
-        else if (source === 'manual') {
-            bookNames = cfg.manualSelection || [];
+        catch (error) {
+            logError_ACU('[剧情推进] 读取角色绑定世界书失败:', { phase: 'plot_character_binding', error: { category: 'unknown' } });
+            $list.html('<em>加载条目失败。</em>');
+            return;
         }
         bookNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).filter(Boolean))];
         if (bookNames.length === 0) {
@@ -40398,7 +40514,7 @@ $CONTENT
             catch (e) { }
         }
         catch (error) {
-            logError_ACU('[剧情推进] Failed to populate plot worldbook entry list:', error);
+            logError_ACU('[剧情推进] 加载剧情世界书条目失败:', { phase: 'plot_worldbook_entries', error: { category: 'unknown' } });
             $list.html('<em>加载条目失败。</em>');
         }
     }
@@ -59057,16 +59173,7 @@ $CONTENT
             const resolvePlotBookNames_ACU = async () => {
                 if ((cfg.source || 'character') === 'manual')
                     return Array.isArray(cfg.manualSelection) ? cfg.manualSelection : [];
-                const names = [];
-                try {
-                    const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-                    if (charLorebooks.primary)
-                        names.push(charLorebooks.primary);
-                    if (charLorebooks.additional?.length)
-                        names.push(...charLorebooks.additional);
-                }
-                catch (e) { }
-                return names;
+                return (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
             };
             const isPlotEntryAllowed_ACU = (entry) => {
                 if (!entry)
@@ -59090,14 +59197,34 @@ $CONTENT
                     return false;
                 return true;
             };
+            const reportPlotWorldbookActionFailure_ACU = (phase) => {
+                logError_ACU('[剧情推进] Plot worldbook action failed:', {
+                    phase,
+                    error: { category: 'unknown' },
+                });
+                showToastr_ACU('error', '剧情世界书操作失败，请重试。');
+            };
             const setPlotEntriesSelection_ACU = async (mode) => {
                 // mode: 'all' | 'none'
-                const bookNames = await resolvePlotBookNames_ACU();
-                if (!cfg.enabledEntries)
-                    cfg.enabledEntries = {};
-                const allBooks = await getWorldBooks_ACU();
+                let bookNames;
+                try {
+                    bookNames = await resolvePlotBookNames_ACU();
+                }
+                catch {
+                    reportPlotWorldbookActionFailure_ACU('plot_character_binding');
+                    return;
+                }
+                let allBooks;
+                try {
+                    allBooks = await getWorldBooks_ACU();
+                }
+                catch {
+                    reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection_catalog');
+                    return;
+                }
+                const nextEnabledEntries = { ...(cfg.enabledEntries || {}) };
                 for (const bookName of bookNames) {
-                    let entries = [];
+                    let entries;
                     const bookData = allBooks.find(b => b.name === bookName);
                     if (bookData?.entries?.length) {
                         entries = bookData.entries;
@@ -59106,33 +59233,50 @@ $CONTENT
                         try {
                             entries = await getLorebookEntries_ACU(bookName);
                         }
-                        catch (e) {
-                            entries = [];
+                        catch {
+                            reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection_entries');
+                            return;
                         }
                     }
                     if (mode === 'none') {
-                        cfg.enabledEntries[bookName] = [];
+                        nextEnabledEntries[bookName] = [];
                     }
                     else {
-                        cfg.enabledEntries[bookName] = (entries || []).filter(isPlotEntryAllowed_ACU).map(e => e.uid);
+                        nextEnabledEntries[bookName] = entries.filter(isPlotEntryAllowed_ACU).map(e => e.uid);
                     }
                 }
+                cfg.enabledEntries = nextEnabledEntries;
                 saveSettingsAndNotify_ACU();
                 await populatePlotWorldbookEntryList_ACU(); // 立即刷新UI，显示勾选/取消
             };
             if ($plotSelectAll.length) {
                 $plotSelectAll.off('click.acu_plot_wb').on('click.acu_plot_wb', async function () {
-                    await setPlotEntriesSelection_ACU('all');
+                    try {
+                        await setPlotEntriesSelection_ACU('all');
+                    }
+                    catch {
+                        reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection');
+                    }
                 });
             }
             if ($plotDeselectAll.length) {
                 $plotDeselectAll.off('click.acu_plot_wb').on('click.acu_plot_wb', async function () {
-                    await setPlotEntriesSelection_ACU('none');
+                    try {
+                        await setPlotEntriesSelection_ACU('none');
+                    }
+                    catch {
+                        reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection');
+                    }
                 });
             }
             if ($plotSelectNoneLegacy.length) {
                 $plotSelectNoneLegacy.off('click.acu_plot_wb').on('click.acu_plot_wb', async function () {
-                    await setPlotEntriesSelection_ACU('none');
+                    try {
+                        await setPlotEntriesSelection_ACU('none');
+                    }
+                    catch {
+                        reportPlotWorldbookActionFailure_ACU('plot_worldbook_selection');
+                    }
                 });
             }
             const $plotRefreshWorldbooks = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-plot-refresh-worldbooks`);
@@ -59182,8 +59326,11 @@ $CONTENT
             }
             await updatePlotWorldbookSourceView_ACU();
         }
-        catch (e) {
-            logWarn_ACU('[剧情推进] Plot worldbook UI bind failed:', e);
+        catch {
+            logWarn_ACU('[剧情推进] Plot worldbook UI bind failed:', {
+                phase: 'plot_worldbook_ui_bind',
+                error: { category: 'unknown' },
+            });
         }
     }
 
@@ -94270,7 +94417,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$h = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_9$f = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_10$e = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_11$c = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_11$d = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_12$8 = {
 	key: 1,
 	class: "acu-v2-plot-task-editor__empty"
@@ -94501,7 +94648,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, null, 8, ["options", "model-value"])]),
 			_: 1
 		})]),
-		createBaseVNode("fieldset", _hoisted_11$c, [_cache[27] || (_cache[27] = createBaseVNode(
+		createBaseVNode("fieldset", _hoisted_11$d, [_cache[27] || (_cache[27] = createBaseVNode(
 			"legend",
 			null,
 			"提示词段（promptGroup）",
@@ -97283,7 +97430,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$e = { class: "acu-dashboard-storage-mode__card-head" };
     const _hoisted_9$d = { class: "acu-dashboard-storage-mode__name" };
     const _hoisted_10$d = { class: "acu-dashboard-storage-mode__badge" };
-    const _hoisted_11$b = { class: "acu-dashboard-storage-mode__desc" };
+    const _hoisted_11$c = { class: "acu-dashboard-storage-mode__desc" };
     function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", {
 		class: "acu-dashboard-storage-mode",
@@ -97344,7 +97491,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* TEXT */
 					)]), createBaseVNode(
 						"span",
-						_hoisted_11$b,
+						_hoisted_11$c,
 						toDisplayString(option.description),
 						1
 						/* TEXT */
@@ -99161,7 +99308,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$d = { key: 1 };
     const _hoisted_9$c = { class: "acu-v2-form-fill-page__manual-number-grid" };
     const _hoisted_10$c = { class: "acu-v2-form-fill-page__manual-extra" };
-    const _hoisted_11$a = { class: "acu-v2-form-fill-page__actions" };
+    const _hoisted_11$b = { class: "acu-v2-form-fill-page__actions" };
     function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$x, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
 		default: withCtx(() => [
@@ -99415,7 +99562,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_11$a, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_11$b, [createVNode($setup["AcuButton"], {
 						variant: "secondary",
 						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
 						onClick: $setup.manualUpdate.runManualCatchUp
@@ -99821,6 +99968,8 @@ Expected function or array of functions, received type ${typeof value}.`
             groups: {},
             filter: {},
             loading: { type: Boolean },
+            status: { default: 'success' },
+            error: { default: '' },
             emptyText: { default: '所选世界书中无可显示的条目。' },
             showEntryToggle: { type: Boolean, default: true },
             showSkillifyControls: { type: Boolean, default: true },
@@ -99916,8 +100065,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-wb-entries[data-v-46d32aa9] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-46d32aa9] {\n  padding: 8px 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entry-item[data-v-46d32aa9] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 6px 8px;\n  align-items: center;\n  padding: 3px 10px;\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-46d32aa9]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-46d32aa9] {\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-46d32aa9] {\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-46d32aa9] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-46d32aa9] {\n  border-radius: 999px;\n  padding: 1px 6px;\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-46d32aa9] {\n  border-radius: 999px;\n  padding: 1px 6px;\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\n  color: var(--acu-warning);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-46d32aa9] {\n  grid-column: 1 / -1;\n  display: grid;\n  gap: 8px;\n  margin: 4px 0 6px 24px;\n  padding: 8px;\n  border: 1px solid var(--acu-border-1);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-46d32aa9] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-46d32aa9] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-46d32aa9] {\n    justify-content: flex-start;\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-46d32aa9] {\n    margin-left: 0;\n}\n}\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-46d32aa9");
-    var WorldbookEntryList_vue_vue_type_style_index_0_scoped_46d32aa9_lang = null;
+    injectSfcStyle("\n.acu-v2-wb-entries[data-v-5abe6ac2] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-5abe6ac2] {\n  padding: 8px 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entries__status--error[data-v-5abe6ac2] { color: var(--acu-danger);\n}\n.acu-v2-wb-entry-item[data-v-5abe6ac2] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 6px 8px;\n  align-items: center;\n  padding: 3px 10px;\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-5abe6ac2]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-5abe6ac2] {\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-5abe6ac2] {\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-5abe6ac2] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-5abe6ac2] {\n  border-radius: 999px;\n  padding: 1px 6px;\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-5abe6ac2] {\n  border-radius: 999px;\n  padding: 1px 6px;\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\n  color: var(--acu-warning);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-5abe6ac2] {\n  grid-column: 1 / -1;\n  display: grid;\n  gap: 8px;\n  margin: 4px 0 6px 24px;\n  padding: 8px;\n  border: 1px solid var(--acu-border-1);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-5abe6ac2] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-5abe6ac2] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-5abe6ac2] {\n    justify-content: flex-start;\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-5abe6ac2] {\n    margin-left: 0;\n}\n}\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-5abe6ac2");
+    var WorldbookEntryList_vue_vue_type_style_index_0_scoped_5abe6ac2_lang = null;
 
     const _hoisted_1$t = { class: "acu-v2-wb-entries" };
     const _hoisted_2$o = {
@@ -99926,43 +100075,54 @@ Expected function or array of functions, received type ${typeof value}.`
     };
     const _hoisted_3$i = {
 	key: 1,
-	class: "acu-v2-wb-entries__status"
+	class: "acu-v2-wb-entries__status acu-v2-wb-entries__status--error",
+	role: "alert"
     };
     const _hoisted_4$g = {
+	key: 2,
+	class: "acu-v2-wb-entries__status"
+    };
+    const _hoisted_5$f = {
 	key: 1,
 	class: "acu-v2-wb-entry-item__label"
     };
-    const _hoisted_5$f = {
+    const _hoisted_6$e = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__actions"
     };
-    const _hoisted_6$e = {
+    const _hoisted_7$c = {
 	key: 0,
 	class: "acu-v2-wb-entry-item__skill-badge"
     };
-    const _hoisted_7$c = {
+    const _hoisted_8$c = {
 	key: 1,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_8$c = {
+    const _hoisted_9$b = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_9$b = {
+    const _hoisted_10$b = {
 	key: 3,
 	class: "acu-v2-wb-entry-skill"
     };
-    const _hoisted_10$b = { class: "acu-v2-wb-entry-skill__actions" };
+    const _hoisted_11$a = { class: "acu-v2-wb-entry-skill__actions" };
     function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$t, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$o, "正在加载条目...")) : $props.groups.length === 0 ? (openBlock(), createElementBlock(
+	return openBlock(), createElementBlock("div", _hoisted_1$t, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$o, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
 		"div",
 		_hoisted_3$i,
+		toDisplayString($props.error || "加载条目失败"),
+		1
+		/* TEXT */
+	)) : $props.groups.length === 0 ? (openBlock(), createElementBlock(
+		"div",
+		_hoisted_4$g,
 		toDisplayString($props.emptyText),
 		1
 		/* TEXT */
 	)) : (openBlock(true), createElementBlock(
 		Fragment,
-		{ key: 2 },
+		{ key: 3 },
 		renderList($setup.filteredGroups, (group, index) => {
 			return openBlock(), createBlock($setup["AcuDisclosureGroup"], {
 				key: group.bookName,
@@ -100004,17 +100164,17 @@ Expected function or array of functions, received type ${typeof value}.`
 									"onUpdate:modelValue"
 								])) : (openBlock(), createElementBlock(
 									"div",
-									_hoisted_4$g,
+									_hoisted_5$f,
 									toDisplayString(entry.label),
 									1
 									/* TEXT */
 								)),
-								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_5$f, [
-									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_6$e, "Skill")) : createCommentVNode("v-if", true),
-									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_7$c, "常量")) : createCommentVNode("v-if", true),
+								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$e, [
+									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$c, "Skill")) : createCommentVNode("v-if", true),
+									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$c, "常量")) : createCommentVNode("v-if", true),
 									$props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_8$c,
+										_hoisted_9$b,
 										toDisplayString($setup.formatAgentTakeoverState(entry)),
 										1
 										/* TEXT */
@@ -100043,7 +100203,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										_: 2
 									}, 1032, ["onClick"])) : createCommentVNode("v-if", true)
 								])) : createCommentVNode("v-if", true),
-								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_9$b, [
+								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$b, [
 									createVNode($setup["AcuTextarea"], {
 										"model-value": $setup.getSkillDraft(entry).description,
 										label: "Skill 描述",
@@ -100062,7 +100222,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										"auto-resize": "",
 										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { triggerWhen: String($event) })
 									}, null, 8, ["model-value", "onUpdate:modelValue"]),
-									createBaseVNode("div", _hoisted_10$b, [createVNode($setup["AcuButton"], {
+									createBaseVNode("div", _hoisted_11$a, [createVNode($setup["AcuButton"], {
 										size: "sm",
 										variant: "primary",
 										onClick: ($event) => $setup.saveSkill(entry)
@@ -100107,7 +100267,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* KEYED_FRAGMENT */
 	))]);
     }
-    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-46d32aa9"]]);
+    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-5abe6ac2"]]);
 
     var _sfc_main$s = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryToolbar',
@@ -100212,6 +100372,8 @@ Expected function or array of functions, received type ${typeof value}.`
             filter: {},
             groups: {},
             loading: { type: Boolean },
+            entryStatus: { default: 'success' },
+            entryError: { default: '' },
             emptyText: { default: '所选世界书中无可显示的条目。' },
             filterable: { type: Boolean, default: true }
         },
@@ -100224,8 +100386,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-0560603a] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-0560603a] {\n  margin: 0;\n  font-size: var(--acu-font-size-caption, 11px);\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-0560603a] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n\n\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-0560603a");
-    var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_0560603a_lang = null;
+    injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-7e58b801] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-7e58b801] {\n  margin: 0;\n  font-size: var(--acu-font-size-caption, 11px);\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-7e58b801] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n\n\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-7e58b801");
+    var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_7e58b801_lang = null;
 
     const _hoisted_1$r = { class: "acu-v2-wb-entry-picker" };
     const _hoisted_2$n = { class: "acu-v2-wb-entry-picker__hint" };
@@ -100270,6 +100432,8 @@ Expected function or array of functions, received type ${typeof value}.`
 			groups: $props.groups,
 			filter: $props.filter,
 			loading: $props.loading,
+			status: $props.entryStatus,
+			error: $props.entryError,
 			"empty-text": $props.emptyText,
 			"show-skillify-controls": false,
 			"show-agent-takeover-state": false,
@@ -100280,11 +100444,13 @@ Expected function or array of functions, received type ${typeof value}.`
 			"groups",
 			"filter",
 			"loading",
+			"status",
+			"error",
 			"empty-text"
 		])
 	]);
     }
-    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-0560603a"]]);
+    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-7e58b801"]]);
 
     /**
      * useFormFillInjectionTarget — 填表"注入目标世界书"（Component A，§4.2）
@@ -101153,16 +101319,8 @@ Expected function or array of functions, received type ${typeof value}.`
             if (cfg.source === 'manual') {
                 return normalizeSelection(cfg.manualSelection);
             }
-            const names = [];
-            try {
-                const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-                if (charLorebooks.primary)
-                    names.push(charLorebooks.primary);
-                if (charLorebooks.additional?.length)
-                    names.push(...charLorebooks.additional);
-            }
-            catch { /* empty */ }
-            return [...new Set(names.filter(Boolean))];
+            const binding = await getCurrentCharacterWorldbookBinding_ACU();
+            return binding.orderedNames;
         }
         return {
             source,
@@ -101278,6 +101436,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 status.value = 'error';
             }
         }
+        function reportLoadFailure() {
+            error.value = '加载角色世界书失败';
+            status.value = 'error';
+        }
         function toggleEntry(bookName, uid, checked) {
             const cfg = ensurePlotWorldbookConfig();
             if (!Array.isArray(cfg.enabledEntries[bookName])) {
@@ -101335,6 +101497,7 @@ Expected function or array of functions, received type ${typeof value}.`
             status,
             error,
             loadEntries,
+            reportLoadFailure,
             toggleEntry,
             selectAll,
             deselectAll,
@@ -101352,7 +101515,14 @@ Expected function or array of functions, received type ${typeof value}.`
             const entryFilter = ref('');
             const entryEmptyText = ref(plotCopy.worldbook.emptyDefault);
             async function refreshWorldbookEntries() {
-                const names = await plotWorldbook.resolveBookNames();
+                let names;
+                try {
+                    names = await plotWorldbook.resolveBookNames();
+                }
+                catch {
+                    wbEntries.reportLoadFailure();
+                    return;
+                }
                 entryEmptyText.value = resolveEntryEmptyText(names);
                 await wbEntries.loadEntries(names);
             }
@@ -101385,7 +101555,7 @@ Expected function or array of functions, received type ${typeof value}.`
             async function refreshAll() {
                 plotWorldbook.refreshFromSettings();
                 await worldbook.refresh();
-                void refreshWorldbookEntries();
+                await refreshWorldbookEntries();
             }
             onMounted(() => { void refreshAll(); });
             watch(useChatChangedTick(), () => { void refreshAll(); });
@@ -101395,8 +101565,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-plot-page[data-v-03918404] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-plot-page[data-v-03918404] { padding: 14px;\n}\n}\n", "src/presentation-v2/pages/PlotPage.vue#style-0-03918404");
-    var PlotPage_vue_vue_type_style_index_0_scoped_03918404_lang = null;
+    injectSfcStyle("\n.acu-v2-plot-page[data-v-9d523010] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-plot-page[data-v-9d523010] { padding: 14px;\n}\n}\n", "src/presentation-v2/pages/PlotPage.vue#style-0-9d523010");
+    var PlotPage_vue_vue_type_style_index_0_scoped_9d523010_lang = null;
 
     const _hoisted_1$o = { class: "acu-v2-plot-page" };
     function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
@@ -101419,6 +101589,8 @@ Expected function or array of functions, received type ${typeof value}.`
 					"onUpdate:filter": _cache[0] || (_cache[0] = ($event) => $setup.entryFilter = $event),
 					groups: $setup.wbEntries.groups.value,
 					loading: $setup.wbEntries.status.value === "loading",
+					"entry-status": $setup.wbEntries.status.value,
+					"entry-error": $setup.wbEntries.error.value,
 					"empty-text": $setup.entryEmptyText,
 					"onUpdate:source": _cache[1] || (_cache[1] = ($event) => $setup.onWorldbookSourceChange($event)),
 					onToggleBook: $setup.onManualWorldbookToggle,
@@ -101436,6 +101608,8 @@ Expected function or array of functions, received type ${typeof value}.`
 					"filter",
 					"groups",
 					"loading",
+					"entry-status",
+					"entry-error",
 					"empty-text"
 				])]),
 				_: 1
@@ -101444,7 +101618,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-03918404"]]);
+    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-9d523010"]]);
 
     var _sfc_main$n = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentAdvancedPanel',

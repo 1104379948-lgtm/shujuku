@@ -2,7 +2,7 @@ import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { buildDefaultPlotWorldbookConfig_ACU } from '../../shared/defaults';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
 import { jQuery_API_ACU } from '../dom-utils';
-import { getCharLorebooks_ACU } from '../../service/worldbook/worldbook-service';
+import { getCharLorebooks_ACU, getCurrentCharacterWorldbookBinding_ACU } from '../../service/worldbook/worldbook-service';
 import { settings_ACU } from '../../service/runtime/state-manager';
 import { saveSettingsAndNotify_ACU } from './settings-ui-helpers';
 import { getLorebookEntriesByNames_ACU, getWorldbookNames_ACU } from '../../service/worldbook/pipeline';
@@ -81,7 +81,7 @@ import { $popupInstance_ACU } from '../state/ui-refs';
               if ($filter.length) applyWorldbookListFilter_ACU($listContainer, $filter.val());
           } catch (e) {}
       } catch (error) {
-          logError_ACU('[剧情推进] Failed to populate plot worldbook list:', error);
+          logError_ACU('[剧情推进] 加载手动世界书列表失败:', { phase: 'plot_worldbook_list', error: { category: 'unknown' } });
           $listContainer.html('<em>加载失败</em>');
       }
   }
@@ -96,12 +96,16 @@ import { $popupInstance_ACU } from '../state/ui-refs';
       const source = cfg.source;
               let bookNames: string[] = [];
 
-      if (source === 'character') {
-        const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-          if (charLorebooks.primary) bookNames.push(charLorebooks.primary);
-          if (charLorebooks.additional?.length) bookNames.push(...charLorebooks.additional);
-      } else if (source === 'manual') {
-          bookNames = cfg.manualSelection || [];
+      try {
+          if (source === 'character') {
+              bookNames = (await getCurrentCharacterWorldbookBinding_ACU()).orderedNames;
+          } else if (source === 'manual') {
+              bookNames = cfg.manualSelection || [];
+          }
+      } catch (error) {
+          logError_ACU('[剧情推进] 读取角色绑定世界书失败:', { phase: 'plot_character_binding', error: { category: 'unknown' } });
+          $list.html('<em>加载条目失败。</em>');
+          return;
       }
 
       bookNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).filter(Boolean))];
@@ -193,7 +197,7 @@ import { $popupInstance_ACU } from '../state/ui-refs';
               if ($filter.length) applyWorldbookEntryFilter_ACU($list, $filter.val());
           } catch (e) {}
       } catch (error) {
-          logError_ACU('[剧情推进] Failed to populate plot worldbook entry list:', error);
+          logError_ACU('[剧情推进] 加载剧情世界书条目失败:', { phase: 'plot_worldbook_entries', error: { category: 'unknown' } });
           $list.html('<em>加载条目失败。</em>');
       }
   }

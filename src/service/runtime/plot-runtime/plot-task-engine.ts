@@ -6,11 +6,11 @@
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../../shared/defaults-json.js';
 import { callApi_ACU, callApiWithPlotPreset_ACU, getApiConfigByPreset_ACU } from '../../ai/api-call';
 import { abortController_ACU, currentJsonTableData_ACU, planningGuard_ACU, settings_ACU, _set_tempPlotToSave_ACU, _set_currentJsonTableData_ACU, _set_pendingFinalGenerationGreenlights_ACU } from '../state-manager';
-import { getCharLorebooks_ACU } from '../../../data/gateways/character-gateway';
+import { getCurrentCharacterWorldbookBinding_ACU } from '../../../data/gateways/character-gateway';
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data/gateways/host-state-gateway';
-import { capturePlotRuntimeScope_ACU, isSamePlotRuntimeScope_ACU, isTransientLorebookNotFoundError_ACU, normalizeLorebookNames_ACU, summarizePlotRuntimeError_ACU, summarizePlotRuntimeScope_ACU } from './plot-runtime-scope';
-import { buildCombinedWorldbookContentByStrategy_ACU, collectCombinedWorldbookEntriesByStrategy_ACU, formatCombinedWorldbookEntries_ACU, getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../../worldbook/pipeline';
+import { capturePlotRuntimeScope_ACU, isSamePlotRuntimeScope_ACU, isTransientLorebookNotFoundError_ACU, summarizePlotRuntimeError_ACU, summarizePlotRuntimeScope_ACU } from './plot-runtime-scope';
+import { buildCombinedWorldbookContentByStrategy_ACU, collectCombinedWorldbookEntriesByStrategy_ACU, createStrictLorebookReadError_ACU, formatCombinedWorldbookEntries_ACU, getLorebookEntriesStrict_ACU, isStrictLorebookReadError_ACU, summarizeStrictLorebookReadError_ACU, type StrictLorebookReadContext_ACU } from '../../worldbook/pipeline';
 import { createPlotWorldbookReadContext_ACU, type PlotWorldbookReadContext_ACU } from './plot-worldbook-read-context';
 import { isDatabaseGeneratedLorebookEntry_ACU, resolveGeneratedEntriesForTable_ACU } from '../../worldbook/worldbook-placeholder-classification';
 import { escapeRegExp_ACU, hashUserInput_ACU, isEntryBlocked_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../../shared/utils';
@@ -31,6 +31,13 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
   type PlotWorldbookAgentMode_ACU = 'normal' | 'agent-controlled';
 
   const CHARACTER_LOREBOOK_RETRY_DELAY_MS_ACU = 300;
+
+  class CharacterLorebookScopeChangedError_ACU extends Error {
+    constructor() {
+      super('CharacterLorebookScopeChanged');
+      this.name = 'CharacterLorebookScopeChangedError_ACU';
+    }
+  }
 
   type PlotWorldbookContentOptions_ACU = AgentWorldbookRef_ACU[] | {
     agentGreenlights?: AgentWorldbookRef_ACU[];
@@ -551,10 +558,13 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         taskWorldbookOptions,
       );
     } catch (wbError) {
+      if (wbError?.message === 'TaskAbortedByUser' || wbError?.name === 'AbortError' || String(wbError?.message || '').toLowerCase().includes('aborted')) {
+        throw wbError;
+      }
       logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 严格世界书读取失败，已阻断 AI 调用。`, {
         phase: 'strict_worldbook_read',
         runId: sharedContext.worldbookReadContext?.runId || '',
-        error: summarizePlotRuntimeError_ACU(wbError),
+        error: summarizeStrictLorebookReadError_ACU(wbError) || summarizePlotRuntimeError_ACU(wbError),
       });
       return {
         taskId: normalizedTask.id,
@@ -676,11 +686,11 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       if (error?.message === 'TaskAbortedByUser' || error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
         throw error;
       }
-      if (String((error as any)?.message || '').startsWith('StrictLorebookRead:')) {
+      if (isStrictLorebookReadError_ACU(error) || String((error as any)?.message || '').startsWith('StrictLorebookRead:')) {
         logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 严格世界书读取失败，已阻断 AI 调用。`, {
           phase: 'strict_worldbook_read',
           runId: sharedContext.worldbookReadContext?.runId || '',
-          error: summarizePlotRuntimeError_ACU(error),
+          error: summarizeStrictLorebookReadError_ACU(error) || summarizePlotRuntimeError_ACU(error),
         });
         return {
           taskId: normalizedTask.id, taskName: taskLabel, success: false, rawResponse: '',
@@ -933,7 +943,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
   export async function resolveCharacterLorebookNamesStable_ACU(): Promise<string[]> {
     const initialScope = capturePlotRuntimeScope_ACU();
 
-    const readOnce = async (attempt: number): Promise<string[] | null> => {
+    const readOnce = async (attempt: number): Promise<string[]> => {
       checkPlotAbortRequested_ACU();
       const beforeScope = capturePlotRuntimeScope_ACU();
       if (initialScope.reliable && !isSamePlotRuntimeScope_ACU(initialScope, beforeScope)) {
@@ -943,10 +953,10 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           initialScope: summarizePlotRuntimeScope_ACU(initialScope),
           currentScope: summarizePlotRuntimeScope_ACU(beforeScope),
         });
-        return null;
+        throw new CharacterLorebookScopeChangedError_ACU();
       }
 
-      const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
+      const charLorebooks = await getCurrentCharacterWorldbookBinding_ACU();
       const afterScope = capturePlotRuntimeScope_ACU();
       if (initialScope.reliable && !isSamePlotRuntimeScope_ACU(initialScope, afterScope)) {
         logWarn_ACU('[剧情推进][世界书] 角色绑定解析取消：读取后作用域已变化。', {
@@ -955,15 +965,15 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           initialScope: summarizePlotRuntimeScope_ACU(initialScope),
           currentScope: summarizePlotRuntimeScope_ACU(afterScope),
         });
-        return null;
+        throw new CharacterLorebookScopeChangedError_ACU();
       }
 
-      return normalizeLorebookNames_ACU(charLorebooks);
+      return charLorebooks.orderedNames;
     };
 
     try {
       const names = await readOnce(1);
-      return names || [];
+      return names;
     } catch (error) {
       if (!isTransientLorebookNotFoundError_ACU(error)) throw error;
       if (!initialScope.reliable) {
@@ -986,13 +996,13 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           initialScope: summarizePlotRuntimeScope_ACU(initialScope),
           currentScope: summarizePlotRuntimeScope_ACU(retryScope),
         });
-        return [];
+        throw new CharacterLorebookScopeChangedError_ACU();
       }
 
       try {
         const names = await readOnce(2);
         logDebug_ACU('[剧情推进][世界书] 角色绑定世界书在第 2 次读取后恢复。');
-        return names || [];
+        return names;
       } catch (retryError) {
         logWarn_ACU('[剧情推进][世界书] 角色绑定世界书读取失败，已达到重试上限。', {
           phase: 'resolve_character',
@@ -1027,19 +1037,32 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         logDebug_ACU('[剧情推进] 手动选择的世界书:', bookNames);
       } else {
         logDebug_ACU('[剧情推进] 使用角色绑定的世界书模式');
-        if (worldbookOptions.readContext) {
-          bookNames = await worldbookOptions.readContext.characterLorebookNamesPromise;
-        } else {
         try {
-          bookNames = await resolveCharacterLorebookNamesStable_ACU();
+          if (worldbookOptions.readContext) {
+            bookNames = await worldbookOptions.readContext.characterLorebookNamesPromise;
+          } else {
+            bookNames = await resolveCharacterLorebookNamesStable_ACU();
+          }
         } catch (error) {
+          if (error?.message === 'TaskAbortedByUser' || error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
+            throw error;
+          }
           logError_ACU('[剧情推进] 获取角色世界书失败:', {
             phase: 'resolve_character',
             scope: summarizePlotRuntimeScope_ACU(capturePlotRuntimeScope_ACU()),
             error: summarizePlotRuntimeError_ACU(error),
           });
-          return '';
-        }
+          throw createStrictLorebookReadError_ACU({
+            status: error instanceof CharacterLorebookScopeChangedError_ACU ? 'scope_changed' : 'read_failed',
+            source: 'plot_runtime',
+            validationPolicy: 'trusted_direct',
+            runId: worldbookOptions.readContext?.runId || '',
+            entriesByBook: {},
+            invalidBookNames: [],
+            failedBookNames: [],
+            failedBooks: [],
+            staleBookNames: [],
+          });
         }
       }
 
@@ -1074,7 +1097,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           runId: worldbookOptions.readContext.runId,
           context: worldbookOptions.readContext,
         });
-        if (strictRead.status !== 'success') throw new Error(`StrictLorebookRead:${strictRead.status}`);
+        if (strictRead.status !== 'success') throw createStrictLorebookReadError_ACU(strictRead);
         entriesByBook = strictRead.entriesByBook;
       }
       const agentGreenlightKeySet = new Set(worldbookOptions.agentGreenlights
@@ -1161,6 +1184,9 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         },
       });
     } catch (error) {
+      if (error?.message === 'TaskAbortedByUser' || error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
+        throw error;
+      }
       if (String(error?.message || '').startsWith('StrictLorebookRead:')) throw error;
       logError_ACU('[剧情推进] 处理世界书内容时发生错误:', {
         phase: 'process_worldbook_content',

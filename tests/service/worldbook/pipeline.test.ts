@@ -228,8 +228,10 @@ import {
   getWorldbookEntryKeywords_ACU,
   getWorldbookEntryPlaceholderSortKey_ACU,
   compareWorldbookEntriesForPlaceholder_ACU,
+  createStrictLorebookReadError_ACU,
   getWorldbookNames_ACU,
   getLorebookEntriesStrict_ACU,
+  summarizeStrictLorebookReadError_ACU,
   getLorebookEntriesByNames_ACU,
   getWorldBooks_ACU,
   loadAllChatMessages_ACU,
@@ -741,6 +743,45 @@ describe('getLorebookEntriesStrict_ACU', () => {
     expect(manualResult.staleBookNames).toEqual([]);
   });
 
+  it('严格读取失败保留逐书安全分类，并能生成不含宿主原始异常的结构化摘要', async () => {
+    const sensitiveText = '宿主原始错误、条目正文和提示词不得进入严格读取摘要';
+    mockGwGetLorebookEntries
+      .mockResolvedValueOnce([{ uid: 1, content: '有效正文' }])
+      .mockRejectedValueOnce(new Error(`Lorebook '失效附加书' not found: ${sensitiveText}`));
+
+    const result = await getLorebookEntriesStrict_ACU(['有效主书', '失效附加书'], {
+      source: 'plot_runtime', validationPolicy: 'trusted_direct', runId: 'run-character-diagnostic',
+    });
+
+    expect(result.status).toBe('read_failed');
+    expect(result.entriesByBook).toEqual({ 有效主书: [{ uid: 1, content: '有效正文', book: '有效主书' }] });
+    expect(result.failedBookNames).toEqual(['失效附加书']);
+    expect(result.failedBooks).toEqual([{ bookName: '失效附加书', errorCategory: 'lorebook_not_found' }]);
+
+    const summary = summarizeStrictLorebookReadError_ACU(createStrictLorebookReadError_ACU(result));
+    expect(summary).toEqual({
+      category: 'strict_lorebook_read',
+      status: 'read_failed',
+      source: 'plot_runtime',
+      validationPolicy: 'trusted_direct',
+      runId: 'run-character-diagnostic',
+      failedCount: 1,
+      failedBookNames: ['失效附加书'],
+      errorCategories: ['lorebook_not_found'],
+      invalidCount: 0,
+      staleCount: 0,
+    });
+    expect(JSON.stringify(summary)).not.toContain(sensitiveText);
+  });
+
+  it('同名但缺少结构化字段的错误不会被误识别或导致摘要二次失败', () => {
+    const lookalike = Object.assign(new Error('untrusted host error'), {
+      name: 'StrictLorebookReadError_ACU',
+    });
+
+    expect(summarizeStrictLorebookReadError_ACU(lookalike)).toBeNull();
+  });
+
   it('不同 context 的 enumerate_all 不复用上一轮列表或条目 Promise', async () => {
     mockListLorebooks.mockResolvedValue(['书A']);
     mockGwGetLorebookEntries.mockResolvedValue([{ uid: 1, content: '正文' }]);
@@ -782,6 +823,7 @@ describe('getLorebookEntriesStrict_ACU', () => {
 
     expect(result.status).toBe('aborted');
     expect(result.failedBookNames).toEqual([]);
+    expect(result.failedBooks).toEqual([]);
   });
 
   it('宿主读取 reject 后在作用域变化时报告 scope_changed 而不是 read_failed', async () => {
@@ -799,6 +841,7 @@ describe('getLorebookEntriesStrict_ACU', () => {
 
     expect(result.status).toBe('scope_changed');
     expect(result.failedBookNames).toEqual([]);
+    expect(result.failedBooks).toEqual([]);
   });
 
   it('并发读取中 Abort 覆盖先完成的 scope_changed', async () => {

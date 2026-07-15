@@ -1,7 +1,7 @@
 import type { AgentWorldbookControl_ACU } from '../../shared/models/agent-worldbook-model';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
-import { getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
+import { createStrictLorebookReadError_ACU, getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
 import { normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU, logWarn_ACU } from '../../shared/utils';
 import { estimateTextTk_ACU, normalizeTkBudgetNumber_ACU } from '../../shared/token-estimate';
 import { callAIWithPreset_ACU } from '../ai/api-call';
@@ -227,7 +227,7 @@ async function getAgentRuntimeLorebookEntries_ACU(
     runId: readContext.runId,
     context: readContext,
   });
-  if (result.status !== 'success') throw new Error(`StrictLorebookRead:${result.status}`);
+  if (result.status !== 'success') throw createStrictLorebookReadError_ACU(result);
   return result.entriesByBook[bookName] || [];
 }
 

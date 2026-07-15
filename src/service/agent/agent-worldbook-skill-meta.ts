@@ -5,7 +5,7 @@ import type {
   WorldbookSkillMetaUpdatedBy_ACU,
 } from '../../shared/models/agent-worldbook-model';
 import { getLorebookEntries_ACU, setLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
-import { getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
+import { createStrictLorebookReadError_ACU, getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
 export type { WorldbookSkillMeta_ACU, WorldbookSkillMetaUpdatedBy_ACU } from '../../shared/models/agent-worldbook-model';
 import {
   readAgentWorldbookControlFromWorldbooks_ACU,
@@ -228,7 +228,7 @@ async function getAgentRuntimeLorebookEntries_ACU(
     runId: readContext.runId,
     context: readContext,
   });
-  if (result.status !== 'success') throw new Error(`StrictLorebookRead:${result.status}`);
+  if (result.status !== 'success') throw createStrictLorebookReadError_ACU(result);
   return result.entriesByBook[bookName] || [];
 }
 

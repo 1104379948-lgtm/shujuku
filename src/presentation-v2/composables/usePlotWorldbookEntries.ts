@@ -143,6 +143,11 @@ export function usePlotWorldbookEntries() {
     }
   }
 
+  function reportLoadFailure(): void {
+    error.value = '加载角色世界书失败';
+    status.value = 'error';
+  }
+
   function toggleEntry(bookName: string, uid: number, checked: boolean): void {
     const cfg = ensurePlotWorldbookConfig();
     if (!Array.isArray(cfg.enabledEntries[bookName])) {
@@ -205,6 +210,7 @@ export function usePlotWorldbookEntries() {
     status,
     error,
     loadEntries,
+    reportLoadFailure,
     toggleEntry,
     selectAll,
     deselectAll,

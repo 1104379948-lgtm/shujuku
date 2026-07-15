@@ -19,7 +19,7 @@ function createSettings() {
 
 let settings: ReturnType<typeof createSettings>;
 const mockSaveSettings = vi.fn();
-const mockGetCharLorebooks = vi.fn();
+const mockGetCurrentCharacterWorldbookBinding = vi.fn();
 
 async function getComposable() {
   vi.resetModules();
@@ -32,7 +32,7 @@ async function getComposable() {
     saveSettings_ACU: mockSaveSettings,
   }));
   vi.doMock('../../../src/service/worldbook/worldbook-service', () => ({
-    getCharLorebooks_ACU: mockGetCharLorebooks,
+    getCurrentCharacterWorldbookBinding_ACU: mockGetCurrentCharacterWorldbookBinding,
   }));
 
   const mod = await import('../../../src/presentation-v2/composables/usePlotWorldbookConfig');
@@ -42,7 +42,7 @@ async function getComposable() {
 beforeEach(() => {
   vi.restoreAllMocks();
   mockSaveSettings.mockClear();
-  mockGetCharLorebooks.mockReset();
+  mockGetCurrentCharacterWorldbookBinding.mockReset();
 });
 
 describe('usePlotWorldbookConfig', () => {
@@ -57,6 +57,27 @@ describe('usePlotWorldbookConfig', () => {
     expect(c.manualSelection.value).toEqual(['Book-A', 'Book-B']);
     expect(await c.resolveBookNames()).toEqual(['Book-A', 'Book-B']);
     expect(mockSaveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('角色卡来源直接使用统一 binding resolver 的 orderedNames', async () => {
+    mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
+      primary: '主书',
+      additional: ['副书'],
+      orderedNames: ['主书', '副书'],
+      apiSource: 'getCharWorldbookNames',
+    });
+    const c = await getComposable();
+
+    await expect(c.resolveBookNames()).resolves.toEqual(['主书', '副书']);
+    expect(mockGetCurrentCharacterWorldbookBinding).toHaveBeenCalledWith();
+  });
+
+  it('角色绑定 resolver 失败时向调用方传播异常，不伪装为空绑定', async () => {
+    const error = new Error('CharacterWorldbookApiUnavailableError_ACU');
+    mockGetCurrentCharacterWorldbookBinding.mockRejectedValue(error);
+    const c = await getComposable();
+
+    await expect(c.resolveBookNames()).rejects.toBe(error);
   });
 
   it('切回角色卡来源时保留手动选择数组', async () => {

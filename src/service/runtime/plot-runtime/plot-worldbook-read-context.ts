@@ -1,4 +1,4 @@
-import { getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../../worldbook/pipeline';
+import { createStrictLorebookReadError_ACU, getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../../worldbook/pipeline';
 import { listLorebooks_ACU } from '../../../data/gateways/worldbook-gateway';
 import { resolveGeneratedEntriesForTable_ACU } from '../../worldbook/worldbook-placeholder-classification';
 import { capturePlotRuntimeScope_ACU, isSamePlotRuntimeScope_ACU, type PlotRuntimeScope_ACU } from './plot-runtime-scope';
@@ -49,7 +49,7 @@ export function createPlotWorldbookReadContext_ACU(
           runId: context.runId,
           context,
         }).then(result => {
-          if (result.status !== 'success') throw new Error(`StrictLorebookRead:${result.status}`);
+          if (result.status !== 'success') throw createStrictLorebookReadError_ACU(result);
           if (result.staleBookNames.length > 0) {
             logWarn_ACU('[剧情推进][世界书] 表名索引已隔离宿主列表中的不存在世界书。', {
               phase: 'table_worldbook_index',

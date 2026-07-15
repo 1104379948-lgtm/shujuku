@@ -718,6 +718,11 @@ export type LorebookValidationPolicy_ACU = 'trusted_direct' | 'validate_list' | 
 export type StrictLorebookReadStatus_ACU = 'success' | 'invalid_selection' | 'read_failed' | 'scope_changed' | 'aborted';
 export type StrictLorebookReadErrorCategory_ACU = 'lorebook_not_found' | 'unknown';
 
+export interface StrictLorebookFailure_ACU {
+  bookName: string;
+  errorCategory: StrictLorebookReadErrorCategory_ACU;
+}
+
 export interface StrictLorebookBookReadResult_ACU {
   bookName: string;
   status: Extract<StrictLorebookReadStatus_ACU, 'success' | 'read_failed' | 'scope_changed' | 'aborted'>;
@@ -748,7 +753,66 @@ export interface StrictLorebookReadResult_ACU {
   entriesByBook: Record<string, any[]>;
   invalidBookNames: string[];
   failedBookNames: string[];
+  failedBooks: StrictLorebookFailure_ACU[];
   staleBookNames: string[];
+}
+
+export class StrictLorebookReadError_ACU extends Error {
+  readonly status: StrictLorebookReadStatus_ACU;
+  readonly source: LorebookReadSource_ACU;
+  readonly validationPolicy: LorebookValidationPolicy_ACU;
+  readonly runId: string;
+  readonly failedBooks: StrictLorebookFailure_ACU[];
+  readonly invalidBookNames: string[];
+  readonly staleBookNames: string[];
+
+  constructor(result: StrictLorebookReadResult_ACU) {
+    super(`StrictLorebookRead:${result.status}`);
+    this.name = 'StrictLorebookReadError_ACU';
+    this.status = result.status;
+    this.source = result.source;
+    this.validationPolicy = result.validationPolicy;
+    this.runId = result.runId;
+    this.failedBooks = result.failedBooks.map(failure => ({ ...failure }));
+    this.invalidBookNames = [...result.invalidBookNames];
+    this.staleBookNames = [...result.staleBookNames];
+  }
+}
+
+export function createStrictLorebookReadError_ACU(result: StrictLorebookReadResult_ACU): StrictLorebookReadError_ACU {
+  return new StrictLorebookReadError_ACU(result);
+}
+
+export function isStrictLorebookReadError_ACU(error: unknown): error is StrictLorebookReadError_ACU {
+  if (error instanceof StrictLorebookReadError_ACU) return true;
+  if (!(error instanceof Error) || error.name !== 'StrictLorebookReadError_ACU') return false;
+  const candidate = error as Partial<StrictLorebookReadError_ACU>;
+  return typeof candidate.status === 'string'
+    && typeof candidate.source === 'string'
+    && typeof candidate.validationPolicy === 'string'
+    && typeof candidate.runId === 'string'
+    && Array.isArray(candidate.failedBooks)
+    && Array.isArray(candidate.invalidBookNames)
+    && Array.isArray(candidate.staleBookNames);
+}
+
+export function summarizeStrictLorebookReadError_ACU(error: unknown) {
+  if (!isStrictLorebookReadError_ACU(error)) return null;
+  const failedBooks = error.failedBooks
+    .filter(failure => failure && typeof failure.bookName === 'string' && typeof failure.errorCategory === 'string')
+    .map(failure => ({ bookName: failure.bookName, errorCategory: failure.errorCategory }));
+  return {
+    category: 'strict_lorebook_read',
+    status: error.status,
+    source: error.source,
+    validationPolicy: error.validationPolicy,
+    runId: error.runId,
+    failedCount: failedBooks.length,
+    failedBookNames: failedBooks.map(failure => failure.bookName),
+    errorCategories: failedBooks.map(failure => failure.errorCategory),
+    invalidCount: error.invalidBookNames.length,
+    staleCount: error.staleBookNames.length,
+  };
 }
 
 function normalizeRequestedLorebookNames_ACU(bookNames: unknown): string[] {
@@ -828,6 +892,7 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
     entriesByBook: {} as Record<string, any[]>,
     invalidBookNames: [] as string[],
     failedBookNames: [] as string[],
+    failedBooks: [] as StrictLorebookFailure_ACU[],
     staleBookNames: [] as string[],
   };
   const initialStatus = getStrictLorebookContextStatus_ACU(options.context);
@@ -871,6 +936,7 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
       continue;
     }
     baseResult.failedBookNames.push(read.bookName);
+    baseResult.failedBooks.push({ bookName: read.bookName, errorCategory: read.errorCategory || 'unknown' });
   }
   return baseResult.failedBookNames.length > 0
     ? { ...baseResult, status: 'read_failed' }
