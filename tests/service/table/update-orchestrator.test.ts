@@ -3726,7 +3726,7 @@ describe('processGroupedRuntimeChunk_ACU', () => {
   });
 
 
-  it('手动重填多 bucket 使用固定 mergeBaseMaxMessageIndex，不把前一 bucket 新写增量带入后续基底', async () => {
+  it('手动重填多 bucket 首次使用安全边界，后续 bucket 继承本轮已提交基底且隔离旧未来帧', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const chat = Array.from({ length: 31 }, (_, index) => ({ is_user: false, mes: `AI ${index}` })) as any[];
@@ -3801,8 +3801,9 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(result.success).toBe(true);
     expect(promptBaseRows).toHaveLength(2);
     expect(promptBaseRows[0]).toHaveLength(27);
-    expect(promptBaseRows[1]).toEqual(promptBaseRows[0]);
-    expect(promptBaseRows[1].some(row => row[0] === '27' || row[0] === '28' || row[0] === '29' || row[0] === '30')).toBe(false);
+    expect(promptBaseRows[1]).toHaveLength(29);
+    expect(promptBaseRows[1].some(row => row[0] === '27' || row[0] === '28')).toBe(true);
+    expect(promptBaseRows[1].some(row => row[0] === '29' || row[0] === '30')).toBe(false);
   });
 
   it('SQL 模式下不再早退，而是完成 grouped 统一提交', async () => {
@@ -3828,11 +3829,275 @@ describe('processGroupedRuntimeChunk_ACU', () => {
       { key: 'group_b', groupId: 1, indices: [1], batchSize: 2, sheetKeys: ['sheet_1'], requestOptions: null },
     ], 'manual_independent');
 
-    expect(result.success).toBe(true);
+    expect(result).toEqual(expect.objectContaining({ success: true }));
     expect(result.failedGroups).toEqual([]);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
     vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
+  it('SQL grouped 提交会在执行前以安全基底对齐 provider，未来行不会影响 row_id 或持久化快照', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { disposeStorageProvider, ensureStorageProviderReady_ACU } = await import('../../../src/service/table/table-storage-strategy');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
+      sheet_0: {
+        uid: 'inventory', name: '表A',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);', nextRowId: 2 },
+        content: [['row_id', 'value'], ['1', 'safe-history']], updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: true }, { is_user: false, mes: 'AI回复' }]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(baseSnapshot);
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    disposeStorageProvider();
+    const provider = await ensureStorageProviderReady_ACU();
+    provider.applyEdits("INSERT INTO inventory (row_id, value) VALUES (99, 'future-old');");
+    const replaceAllDataSpy = vi.spyOn(provider, 'replaceAllData');
+    const batchSpy = vi.spyOn(provider, 'applyEditsBatchWithSheetMetadata');
+    let persistedData: any = null;
+    mockPersistTablesToChatMessage.mockImplementation(async (options: any) => {
+      persistedData = JSON.parse(JSON.stringify(options.tableData));
+      return { saved: true, messageIndex: options.targetMessageIndex };
+    });
+    mockCallCustomOpenAI.mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('committed');</tableEdit>");
+
+    try {
+      const result = await processGroupedRuntimeChunk_ACU([
+        { key: 'group_a', groupId: 0, indices: [1], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+      ], 'manual_independent');
+
+      expect(result).toEqual(expect.objectContaining({ success: true, committedBucketCount: 1 }));
+      expect(replaceAllDataSpy).toHaveBeenCalledTimes(1);
+      expect(batchSpy).toHaveBeenCalledTimes(1);
+      expect(provider.executeQuery('SELECT row_id, value FROM inventory ORDER BY row_id').values).toEqual([
+        [1, 'safe-history'],
+        [2, 'committed'],
+      ]);
+      expect(provider.exportCanonicalData().sheet_0.content).toEqual([
+        ['row_id', 'value'],
+        ['1', 'safe-history'],
+        ['2', 'committed'],
+      ]);
+      expect(persistedData.sheet_0.content).toEqual([
+        ['row_id', 'value'],
+        ['1', 'safe-history'],
+        ['2', 'committed'],
+      ]);
+    } finally {
+      replaceAllDataSpy.mockRestore();
+      batchSpy.mockRestore();
+      disposeStorageProvider();
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
+  it('SQL provider 安全基底对齐失败时不执行 SQL、不落盘且不启动后续 bucket', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { disposeStorageProvider, ensureStorageProviderReady_ACU } = await import('../../../src/service/table/table-storage-strategy');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
+      sheet_0: {
+        uid: 'inventory', name: '表A',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);', nextRowId: 2 },
+        content: [['row_id', 'value'], ['1', 'safe-history']], updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true }, { is_user: false, mes: 'AI回复1' },
+      { is_user: true }, { is_user: false, mes: 'AI回复2' },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(baseSnapshot);
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    disposeStorageProvider();
+    const provider = await ensureStorageProviderReady_ACU();
+    provider.applyEdits("INSERT INTO inventory (row_id, value) VALUES (99, 'future-old');");
+    const replaceAllDataSpy = vi.spyOn(provider, 'replaceAllData').mockResolvedValue({
+      success: false, appliedEdits: 0, modifiedKeys: [], error: 'forced replacement failure',
+    });
+    const batchSpy = vi.spyOn(provider, 'applyEditsBatchWithSheetMetadata');
+    const executionState: { workingSnapshot?: Record<string, any> } = {};
+    mockCallCustomOpenAI
+      .mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('first');</tableEdit>")
+      .mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('second');</tableEdit>");
+
+    try {
+      const result = await processGroupedRuntimeChunk_ACU([
+        { key: 'first_bucket', groupId: 0, indices: [1], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+        { key: 'second_bucket', groupId: 0, indices: [3], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+      ], 'manual_independent', { executionState });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('SQLite runtime 无法对齐到当前 bucket 安全基底');
+      expect(result.failedGroups).toContain('first_bucket');
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+      expect(replaceAllDataSpy).toHaveBeenCalledTimes(1);
+      expect(batchSpy).not.toHaveBeenCalled();
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+      expect(executionState.workingSnapshot?.sheet_0.content).toEqual([
+        ['row_id', 'value'],
+        ['1', 'safe-history'],
+      ]);
+      expect(provider.executeQuery('SELECT row_id, value FROM inventory ORDER BY row_id').values).toEqual([
+        [1, 'safe-history'],
+        [99, 'future-old'],
+      ]);
+    } finally {
+      replaceAllDataSpy.mockRestore();
+      batchSpy.mockRestore();
+      disposeStorageProvider();
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
+  it('SQL provider 替换后 canonical 仍不一致时恢复运行时并停止后续 bucket', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { disposeStorageProvider, ensureStorageProviderReady_ACU } = await import('../../../src/service/table/table-storage-strategy');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
+      sheet_0: {
+        uid: 'inventory', name: '表A',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);', nextRowId: 2 },
+        content: [['row_id', 'value'], ['1', 'safe-history']], updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true }, { is_user: false, mes: 'AI回复1' },
+      { is_user: true }, { is_user: false, mes: 'AI回复2' },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(baseSnapshot);
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    disposeStorageProvider();
+    const provider = await ensureStorageProviderReady_ACU();
+    provider.applyEdits("INSERT INTO inventory (row_id, value) VALUES (99, 'future-old');");
+    const originalReplaceAllData = provider.replaceAllData.bind(provider);
+    const replaceAllDataSpy = vi.spyOn(provider, 'replaceAllData').mockImplementation(async replacement => {
+      const result = await originalReplaceAllData(replacement);
+      provider.applyEdits("INSERT INTO inventory (row_id, value) VALUES (99, 'forced-desync');");
+      return result;
+    });
+    const batchSpy = vi.spyOn(provider, 'applyEditsBatchWithSheetMetadata');
+    const executionState: { workingSnapshot?: Record<string, any> } = {};
+    mockCallCustomOpenAI
+      .mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('first');</tableEdit>")
+      .mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('second');</tableEdit>");
+
+    try {
+      const result = await processGroupedRuntimeChunk_ACU([
+        { key: 'first_bucket', groupId: 0, indices: [1], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+        { key: 'second_bucket', groupId: 0, indices: [3], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+      ], 'manual_independent', { executionState });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('严格对齐后校验失败');
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+      expect(replaceAllDataSpy).toHaveBeenCalledTimes(1);
+      expect(batchSpy).not.toHaveBeenCalled();
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+      expect(executionState.workingSnapshot?.sheet_0.content).toEqual([
+        ['row_id', 'value'],
+        ['1', 'safe-history'],
+      ]);
+      expect(provider.executeQuery('SELECT row_id, value FROM inventory ORDER BY row_id').values).toEqual([
+        [1, 'safe-history'],
+        [99, 'future-old'],
+      ]);
+    } finally {
+      replaceAllDataSpy.mockRestore();
+      batchSpy.mockRestore();
+      disposeStorageProvider();
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
+  it('SQL 已提交后的 readable lorebook 同步失败不会阻断 workingSnapshot 推进', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { disposeStorageProvider } = await import('../../../src/service/table/table-storage-strategy');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const snapshot = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
+      sheet_0: {
+        uid: 'inventory', name: '表A',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);', nextRowId: 2 },
+        content: [['row_id', 'value'], ['1', 'base-a']], updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: true }, { is_user: false, mes: 'AI回复' }]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(snapshot);
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(snapshot));
+    mockUpdateReadableLorebookEntry.mockRejectedValueOnce(new Error('readable sync unavailable'));
+    mockCallCustomOpenAI.mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('committed');</tableEdit>");
+    const executionState: { workingSnapshot?: Record<string, any> } = {};
+
+    try {
+      const result = await processGroupedRuntimeChunk_ACU([
+        { key: 'group_a', groupId: 0, indices: [1], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+      ], 'manual_independent', { executionState });
+
+      expect(result).toEqual(expect.objectContaining({ success: true, committedBucketCount: 1 }));
+      expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+      expect(mockUpdateReadableLorebookEntry).toHaveBeenCalledTimes(1);
+      expect(executionState.workingSnapshot?.sheet_0.content).toEqual([
+        ['row_id', 'value'],
+        ['1', 'base-a'],
+        ['2', 'committed'],
+      ]);
+    } finally {
+      disposeStorageProvider();
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
+  it('Native 已提交后的派生同步失败不会重试已提交 bucket，后续 bucket 继承 workingSnapshot', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true }, { is_user: false, mes: 'AI回复1' },
+      { is_user: true }, { is_user: false, mes: 'AI回复2' },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any);
+    const promptBaseRows: any[][][] = [];
+    mockPrepareAIInput.mockImplementation(async (_messages: any, _mode: string, _keys: string[] | null, options: any) => {
+      promptBaseRows.push(JSON.parse(JSON.stringify(options.tableData.sheet_0.content)));
+      return { tableDataText: '模拟数据' };
+    });
+    mockUpdateReadableLorebookEntry.mockRejectedValueOnce(new Error('readable sync unavailable'));
+    mockEnqueueSummaryVectorIndexFlush.mockRejectedValueOnce(new Error('vector sync unavailable'));
+    mockCallCustomOpenAI
+      .mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>')
+      .mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>');
+    const executionState: { workingSnapshot?: Record<string, any> } = {};
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1, 3], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent', { executionState });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, committedBucketCount: 2 }));
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(2);
+    expect(mockUpdateReadableLorebookEntry).toHaveBeenCalledTimes(2);
+    expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledTimes(2);
+    expect(promptBaseRows).toEqual([
+      [['row_id', '值'], ['1', 'base-a']],
+      [['row_id', '值'], ['1', 'base-a'], ['2', '来自A']],
+    ]);
+    expect(executionState.workingSnapshot?.sheet_0.content).toEqual([
+      ['row_id', '值'], ['1', 'base-a'], ['2', '来自A'], ['2', '来自A'],
+    ]);
   });
 
   it('SQLite 分组混合 SQL/非 SQL 时只重试非 SQL 组，成功 SQL 组不重试', async () => {
@@ -3910,10 +4175,18 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     mockSettings.tableMaxRetries = 2;
 
     const capturedTableDataTexts: string[] = [];
-    mockPrepareAIInput.mockImplementation(async () => ({ tableDataText: '模拟数据' }));
+    const promptBaseRows: any[][][] = [];
+    mockPrepareAIInput.mockImplementation(async (_messages: any, _mode: string, _keys: string[] | null, options: any) => {
+      promptBaseRows.push(JSON.parse(JSON.stringify(options.tableData.sheet_0.content)));
+      return { tableDataText: '模拟数据' };
+    });
     mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
       capturedTableDataTexts.push(dynamicContent.tableDataText);
       return '<tableEdit>sheet_0</tableEdit>';
+    });
+    mockParseAndApplyTableEditsToData.mockImplementation((_aiResponse: string, tableData: any) => {
+      tableData.sheet_0.content.push(['attempted', '未提交候选数据']);
+      return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 };
     });
 
     mockPersistTablesToChatMessage
@@ -3928,6 +4201,9 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(capturedTableDataTexts).toHaveLength(2);
     expect(capturedTableDataTexts[1]).toContain('UNIFIED_GROUP_ERROR_FEEDBACK');
     expect(capturedTableDataTexts[1]).toContain('group group_a 解析或应用失败');
+    expect(promptBaseRows).toHaveLength(2);
+    expect(promptBaseRows[0]).toEqual([['row_id', '值'], ['1', 'base-a']]);
+    expect(promptBaseRows[1]).toEqual([['row_id', '值'], ['1', 'base-a']]);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(2);
   });
 

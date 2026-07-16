@@ -16,6 +16,7 @@ export interface TableUpdateItem {
     groupId: number;
     batchSize: number;
     scheduleSignature: string;
+    requestOptions?: Record<string, any> | null;
 }
 
 export interface UpdateGroup {
@@ -25,11 +26,55 @@ export interface UpdateGroup {
     scheduleSignature: string;
     sheetKeys: string[];
     sheetNames: string[];
+    requestOptions?: Record<string, any> | null;
+}
+
+export interface ManualUpdatePlanOptions_ACU {
+    targetSheetKeys: string[];
+    contextDepth: number;
+    batchSize: number;
+    skipFloors: number;
+    resolveRequestOptions?: (sheetKey: string, table: any) => Record<string, any> | null;
+}
+
+/**
+ * 单次 logical run 的连续提交基底；只在执行器调用链内存活。
+ */
+export interface GroupedRuntimeExecutionState_ACU {
+    workingSnapshot?: Record<string, any>;
 }
 
 export interface AutoUpdatePlan {
     tablesToUpdate: TableUpdateItem[];
     updateGroups: Record<string, UpdateGroup>;
+}
+
+function groupTableUpdateItems_ACU(tablesToUpdate: TableUpdateItem[]): Record<string, UpdateGroup> {
+    const updateGroups: Record<string, UpdateGroup> = {};
+    tablesToUpdate.forEach(item => {
+        const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize + '|' + JSON.stringify(item.requestOptions || null);
+        if (!updateGroups[key]) {
+            updateGroups[key] = {
+                indices: item.indices,
+                batchSize: item.batchSize,
+                groupId: item.groupId,
+                scheduleSignature: item.scheduleSignature,
+                sheetKeys: [],
+                sheetNames: [],
+                requestOptions: item.requestOptions || null,
+            };
+        }
+        updateGroups[key].sheetKeys.push(item.sheetKey);
+        updateGroups[key].sheetNames.push(item.sheetName);
+    });
+    return updateGroups;
+}
+
+function collectEffectiveAiMessageIndices_ACU(liveChat: any[], skipFloors: number): number[] {
+    const allAiMessageIndices = liveChat
+        .map((msg: any, index: number) => !msg.is_user ? index : -1)
+        .filter((index: number) => index !== -1);
+    return skipFloors > 0 ? allAiMessageIndices.slice(0, -skipFloors) : allAiMessageIndices;
 }
 
 /**
@@ -126,26 +171,40 @@ export function buildAutoUpdatePlan_ACU(
         }
     }
 
-    // 分组：将待更新的表按 (groupId + indices + batchSize) 进行分组
-    const updateGroups: Record<string, UpdateGroup> = {};
+    return { tablesToUpdate, updateGroups: groupTableUpdateItems_ACU(tablesToUpdate) };
+}
 
-    tablesToUpdate.forEach(item => {
-        const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize;
-        if (!updateGroups[key]) {
-            updateGroups[key] = {
-                indices: item.indices,
-                batchSize: item.batchSize,
-                groupId: item.groupId,
-                scheduleSignature: item.scheduleSignature,
-                sheetKeys: [],
-                sheetNames: []
-            };
-        }
-        updateGroups[key].sheetKeys.push(item.sheetKey);
-        updateGroups[key].sheetNames.push(item.sheetName);
+/**
+ * 构建手动填表的等价执行计划。
+ * 手动路径只消费公共范围和 batch 参数；模板 updateConfig 中仅 groupId 参与归组。
+ */
+export function buildManualUpdatePlan_ACU(
+    liveChat: any[],
+    tableData: Record<string, any>,
+    options: ManualUpdatePlanOptions_ACU,
+): AutoUpdatePlan {
+    const contextDepth = Math.max(0, Math.trunc(Number(options.contextDepth) || 0));
+    const batchSize = Math.max(1, Math.trunc(Number(options.batchSize) || 1));
+    const skipFloors = Math.max(0, Math.trunc(Number(options.skipFloors) || 0));
+    const effectiveAiIndices = collectEffectiveAiMessageIndices_ACU(liveChat, skipFloors);
+    const indices = contextDepth > 0 ? effectiveAiIndices.slice(-contextDepth) : effectiveAiIndices;
+    const uniqueTargetSheetKeys = [...new Set(options.targetSheetKeys)].filter(sheetKey => Boolean(tableData?.[sheetKey]));
+    const tablesToUpdate: TableUpdateItem[] = uniqueTargetSheetKeys.map(sheetKey => {
+        const table = tableData[sheetKey];
+        const rawGroupId = Number.isFinite(table?.updateConfig?.groupId)
+            ? Math.trunc(table.updateConfig.groupId)
+            : -1;
+        return {
+            sheetKey,
+            sheetName: String(table?.name || sheetKey),
+            indices: [...indices],
+            groupId: rawGroupId,
+            batchSize,
+            scheduleSignature: ['manual', rawGroupId, contextDepth, skipFloors, batchSize].join('|'),
+            requestOptions: options.resolveRequestOptions?.(sheetKey, table) || null,
+        };
     });
-
-    return { tablesToUpdate, updateGroups };
+    return { tablesToUpdate, updateGroups: groupTableUpdateItems_ACU(tablesToUpdate) };
 }
 
 // ============================================================
@@ -236,6 +295,7 @@ export async function executeAutoUpdatePlan_ACU(
         if (!message) return;
         failedGroupErrors.push(`group ${groupKey}: ${message}`);
     };
+    const groupedExecutionState: GroupedRuntimeExecutionState_ACU = {};
     for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
         const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
         if (ops.processGroupedUpdates) {
@@ -248,14 +308,15 @@ export async function executeAutoUpdatePlan_ACU(
                     indices: group.indices,
                     batchSize: group.batchSize,
                     sheetKeys: group.sheetKeys,
-                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
+                    requestOptions: { ...(group.requestOptions || {}), skipProfileSwitch: true, forceDirectApi: true },
                 };
             });
-            const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', {});
+            const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', { executionState: groupedExecutionState });
             if (!groupedResult.success) {
                 failedGroupKeys.push(...groupedResult.failedGroups);
                 const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
                 groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
+                break;
             }
         } else {
             const groupPromises = chunkKeys.map(key => (async () => {

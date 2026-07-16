@@ -102,38 +102,6 @@ function resolveManualBatchSize(): number {
     : normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, fallback);
 }
 
-function applyManualSettingsForOrchestrator(): () => void {
-  const previousAutoUpdateThreshold = settings_ACU.autoUpdateThreshold;
-  const previousUpdateBatchSize = settings_ACU.updateBatchSize;
-
-  // orchestrateManualUpdate_ACU still reads the legacy automatic settings.
-  // Keep the temporary bridge local to this UI action so the independent
-  // manual fields do not persist back into automatic update configuration.
-  settings_ACU.autoUpdateThreshold = manualDepthForOrchestrator_ACU(
-    settings_ACU.manualUpdateContextDepth,
-    previousAutoUpdateThreshold,
-  );
-  settings_ACU.updateBatchSize = normalizePositiveInteger(
-    settings_ACU.manualUpdateBatchSize,
-    normalizePositiveInteger(previousUpdateBatchSize, 3),
-  );
-
-  return () => {
-    settings_ACU.autoUpdateThreshold = previousAutoUpdateThreshold;
-    settings_ACU.updateBatchSize = previousUpdateBatchSize;
-  };
-}
-
-function manualDepthForOrchestrator_ACU(
-  manualDepth: unknown,
-  fallbackDepth: unknown,
-): number {
-  const fallback = normalizeNonNegativeInteger(fallbackDepth, 3);
-  return manualDepth == null
-    ? fallback
-    : normalizeNonNegativeInteger(manualDepth, fallback);
-}
-
 interface ManualRefillRangeSummary {
   indices: number[];
   startAiFloor: number;
@@ -462,19 +430,12 @@ export function useManualUpdate(): ManualUpdateState {
       ));
 
     try {
-      const executeManualUpdate = async (confirmBoundaryReset: boolean) => {
-        const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
-        try {
-          return await orchestrateManualUpdate_ACU(
-            targetManualTableKeys,
-            runProcessBatch,
-            async () => { await refreshMergedDataAndNotify_ACU(); },
-            { clearBeforeUpdate, confirmBoundaryReset, onProgress: handleProgress },
-          );
-        } finally {
-          restoreAutoUpdateSettings();
-        }
-      };
+      const executeManualUpdate = (confirmBoundaryReset: boolean) => orchestrateManualUpdate_ACU(
+        targetManualTableKeys,
+        runProcessBatch,
+        async () => { await refreshMergedDataAndNotify_ACU(); },
+        { clearBeforeUpdate, confirmBoundaryReset, onProgress: handleProgress },
+      );
 
       let result: Awaited<ReturnType<typeof orchestrateManualUpdate_ACU>> = await executeManualUpdate(false);
       if (!result.success && result.requiresUserConfirmation){

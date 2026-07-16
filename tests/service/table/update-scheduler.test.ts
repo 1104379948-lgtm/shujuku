@@ -26,6 +26,7 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
 
 import {
   buildAutoUpdatePlan_ACU,
+  buildManualUpdatePlan_ACU,
   checkAutoUpdatePreConditions_ACU,
   handleFloorIncreaseDelay_ACU,
   executeAutoUpdatePlan_ACU,
@@ -339,6 +340,66 @@ describe('buildAutoUpdatePlan_ACU', () => {
       expect(plan.tablesToUpdate[0].indices.length).toBeLessThanOrEqual(1);
     }
   });
+
+  it('手动计划只使用公共参数，忽略表内自动调度覆盖但保留 groupId', () => {
+    const liveChat = [
+      { is_user: true }, { is_user: false },
+      { is_user: true }, { is_user: false },
+      { is_user: true }, { is_user: false },
+      { is_user: true }, { is_user: false },
+    ];
+    const tableData = {
+      sheet_0: {
+        name: '表A',
+        updateConfig: { contextDepth: 1, updateFrequency: 0, skipFloors: 2, batchSize: 1, groupId: 7 },
+      },
+      sheet_1: {
+        name: '表B',
+        updateConfig: { contextDepth: 99, updateFrequency: 9, skipFloors: 3, batchSize: 8, groupId: 7 },
+      },
+    };
+
+    const plan = buildManualUpdatePlan_ACU(liveChat, tableData, {
+      targetSheetKeys: ['sheet_0', 'sheet_1'],
+      contextDepth: 3,
+      batchSize: 2,
+      skipFloors: 1,
+    });
+
+    expect(plan.tablesToUpdate).toHaveLength(2);
+    expect(plan.tablesToUpdate).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sheetKey: 'sheet_0', indices: [1, 3, 5], batchSize: 2, groupId: 7 }),
+      expect.objectContaining({ sheetKey: 'sheet_1', indices: [1, 3, 5], batchSize: 2, groupId: 7 }),
+    ]));
+    expect(Object.values(plan.updateGroups)).toHaveLength(1);
+    expect(Object.values(plan.updateGroups)[0]).toEqual(expect.objectContaining({
+      sheetKeys: ['sheet_0', 'sheet_1'],
+      batchSize: 2,
+      groupId: 7,
+    }));
+  });
+
+  it('手动计划按请求路由隔离不同 API preset 的表', () => {
+    const liveChat = [{ is_user: true }, { is_user: false }];
+    const tableData = {
+      sheet_0: { name: '表A', updateConfig: { groupId: 1 } },
+      sheet_1: { name: '表B', updateConfig: { groupId: 1 } },
+    };
+
+    const plan = buildManualUpdatePlan_ACU(liveChat, tableData, {
+      targetSheetKeys: ['sheet_0', 'sheet_1'],
+      contextDepth: 1,
+      batchSize: 1,
+      skipFloors: 0,
+      resolveRequestOptions: sheetKey => ({ preset: sheetKey === 'sheet_0' ? 'alpha' : 'beta' }),
+    });
+
+    expect(Object.values(plan.updateGroups)).toHaveLength(2);
+    expect(Object.values(plan.updateGroups)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sheetKeys: ['sheet_0'], requestOptions: { preset: 'alpha' } }),
+      expect.objectContaining({ sheetKeys: ['sheet_1'], requestOptions: { preset: 'beta' } }),
+    ]));
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -511,8 +572,53 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(mockGrouped).toHaveBeenCalledWith([
       expect.objectContaining({ key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: { skipProfileSwitch: true, forceDirectApi: true } }),
       expect.objectContaining({ key: 'group_b', groupId: 1, indices: [2], batchSize: 2, sheetKeys: ['sheet_1'], requestOptions: { skipProfileSwitch: true, forceDirectApi: true } }),
-    ], 'auto_independent', {});
+    ], 'auto_independent', expect.objectContaining({ executionState: expect.any(Object) }));
     expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('自动 grouped 分块时复用同一个 executionState，并保留表级请求路由', async () => {
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: {
+        'group_a': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'], requestOptions: { tableApiPreset: 'alpha' } },
+        'group_b': { indices: [2], batchSize: 2, groupId: 1, sheetKeys: ['sheet_1'], sheetNames: ['表B'], requestOptions: { tableApiPreset: 'beta' } },
+      },
+    };
+    const mockGrouped = vi.fn().mockResolvedValue({ success: true, failedGroups: [] });
+    const ops = makeOps({ processGroupedUpdates: mockGrouped });
+
+    await executeAutoUpdatePlan_ACU(plan, { maxConcurrentGroups: 1 }, mockSetAutoUpdating, ops);
+
+    expect(mockGrouped).toHaveBeenCalledTimes(2);
+    const firstCall = mockGrouped.mock.calls[0];
+    const secondCall = mockGrouped.mock.calls[1];
+    expect(firstCall[0][0]).toEqual(expect.objectContaining({
+      key: 'group_a',
+      requestOptions: { tableApiPreset: 'alpha', skipProfileSwitch: true, forceDirectApi: true },
+    }));
+    expect(secondCall[0][0]).toEqual(expect.objectContaining({
+      key: 'group_b',
+      requestOptions: { tableApiPreset: 'beta', skipProfileSwitch: true, forceDirectApi: true },
+    }));
+    expect(firstCall[2].executionState).toBe(secondCall[2].executionState);
+  });
+
+  it('grouped chunk 失败后不调度后续 chunk', async () => {
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: {
+        'group_a': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] },
+        'group_b': { indices: [2], batchSize: 2, groupId: 1, sheetKeys: ['sheet_1'], sheetNames: ['表B'] },
+      },
+    };
+    const mockGrouped = vi.fn().mockResolvedValue({ success: false, failedGroups: ['group_a'], error: '提交失败' });
+    const ops = makeOps({ processGroupedUpdates: mockGrouped });
+
+    const result = await executeAutoUpdatePlan_ACU(plan, { maxConcurrentGroups: 1 }, mockSetAutoUpdating, ops);
+
+    expect(result).toEqual(expect.objectContaining({ success: false, failedGroups: 1 }));
+    expect(mockGrouped).toHaveBeenCalledTimes(1);
+    expect(mockGrouped.mock.calls[0][0][0]).toEqual(expect.objectContaining({ key: 'group_a' }));
   });
 
   it('grouped 委托返回 failedGroups 时按数量汇总失败组', async () => {

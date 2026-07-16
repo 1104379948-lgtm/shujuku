@@ -766,7 +766,7 @@ describe('FormFillPage · 手动填表面板', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('执行手动填表时临时把独立参数桥接给 service，结束后恢复自动更新设置', async () => {
+  it('执行手动填表时不改写自动更新设置', async () => {
     const settings = createSettings();
     settings.autoUpdateThreshold = 3;
     settings.updateBatchSize = 2;
@@ -788,7 +788,7 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认并继续');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(observedSettings).toEqual([{ threshold: 100, batchSize: 4 }]);
+    expect(observedSettings).toEqual([{ threshold: 3, batchSize: 2 }]);
     expect(settings.autoUpdateThreshold).toBe(3);
     expect(settings.updateBatchSize).toBe(2);
 

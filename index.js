@@ -44174,6 +44174,32 @@ $CONTENT
      *
      * 只负责「遍历表格检查更新条件 + 构建 tablesToUpdate 列表 + 分组」，不涉及 UI（toast/status）。
      */
+    function groupTableUpdateItems_ACU(tablesToUpdate) {
+        const updateGroups = {};
+        tablesToUpdate.forEach(item => {
+            const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize + '|' + JSON.stringify(item.requestOptions || null);
+            if (!updateGroups[key]) {
+                updateGroups[key] = {
+                    indices: item.indices,
+                    batchSize: item.batchSize,
+                    groupId: item.groupId,
+                    scheduleSignature: item.scheduleSignature,
+                    sheetKeys: [],
+                    sheetNames: [],
+                    requestOptions: item.requestOptions || null,
+                };
+            }
+            updateGroups[key].sheetKeys.push(item.sheetKey);
+            updateGroups[key].sheetNames.push(item.sheetName);
+        });
+        return updateGroups;
+    }
+    function collectEffectiveAiMessageIndices_ACU$1(liveChat, skipFloors) {
+        const allAiMessageIndices = liveChat
+            .map((msg, index) => !msg.is_user ? index : -1)
+            .filter((index) => index !== -1);
+        return skipFloors > 0 ? allAiMessageIndices.slice(0, -skipFloors) : allAiMessageIndices;
+    }
     /**
      * 构建自动更新计划：遍历所有表格，检查每个表的独立更新条件，返回需要更新的表列表和分组
      *
@@ -44246,24 +44272,35 @@ $CONTENT
                 }
             }
         }
-        // 分组：将待更新的表按 (groupId + indices + batchSize) 进行分组
-        const updateGroups = {};
-        tablesToUpdate.forEach(item => {
-            const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize;
-            if (!updateGroups[key]) {
-                updateGroups[key] = {
-                    indices: item.indices,
-                    batchSize: item.batchSize,
-                    groupId: item.groupId,
-                    scheduleSignature: item.scheduleSignature,
-                    sheetKeys: [],
-                    sheetNames: []
-                };
-            }
-            updateGroups[key].sheetKeys.push(item.sheetKey);
-            updateGroups[key].sheetNames.push(item.sheetName);
+        return { tablesToUpdate, updateGroups: groupTableUpdateItems_ACU(tablesToUpdate) };
+    }
+    /**
+     * 构建手动填表的等价执行计划。
+     * 手动路径只消费公共范围和 batch 参数；模板 updateConfig 中仅 groupId 参与归组。
+     */
+    function buildManualUpdatePlan_ACU(liveChat, tableData, options) {
+        const contextDepth = Math.max(0, Math.trunc(Number(options.contextDepth) || 0));
+        const batchSize = Math.max(1, Math.trunc(Number(options.batchSize) || 1));
+        const skipFloors = Math.max(0, Math.trunc(Number(options.skipFloors) || 0));
+        const effectiveAiIndices = collectEffectiveAiMessageIndices_ACU$1(liveChat, skipFloors);
+        const indices = contextDepth > 0 ? effectiveAiIndices.slice(-contextDepth) : effectiveAiIndices;
+        const uniqueTargetSheetKeys = [...new Set(options.targetSheetKeys)].filter(sheetKey => Boolean(tableData?.[sheetKey]));
+        const tablesToUpdate = uniqueTargetSheetKeys.map(sheetKey => {
+            const table = tableData[sheetKey];
+            const rawGroupId = Number.isFinite(table?.updateConfig?.groupId)
+                ? Math.trunc(table.updateConfig.groupId)
+                : -1;
+            return {
+                sheetKey,
+                sheetName: String(table?.name || sheetKey),
+                indices: [...indices],
+                groupId: rawGroupId,
+                batchSize,
+                scheduleSignature: ['manual', rawGroupId, contextDepth, skipFloors, batchSize].join('|'),
+                requestOptions: options.resolveRequestOptions?.(sheetKey, table) || null,
+            };
         });
-        return { tablesToUpdate, updateGroups };
+        return { tablesToUpdate, updateGroups: groupTableUpdateItems_ACU(tablesToUpdate) };
     }
     // ============================================================
     // 前置检查
@@ -44307,6 +44344,7 @@ $CONTENT
                 return;
             failedGroupErrors.push(`group ${groupKey}: ${message}`);
         };
+        const groupedExecutionState = {};
         for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
             const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
             if (ops.processGroupedUpdates) {
@@ -44319,14 +44357,15 @@ $CONTENT
                         indices: group.indices,
                         batchSize: group.batchSize,
                         sheetKeys: group.sheetKeys,
-                        requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
+                        requestOptions: { ...(group.requestOptions || {}), skipProfileSwitch: true, forceDirectApi: true },
                     };
                 });
-                const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', {});
+                const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', { executionState: groupedExecutionState });
                 if (!groupedResult.success) {
                     failedGroupKeys.push(...groupedResult.failedGroups);
                     const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
                     groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
+                    break;
                 }
             }
             else {
@@ -46124,6 +46163,27 @@ $CONTENT
             return null;
         return JSON.parse(JSON.stringify(data));
     }
+    function canonicalizeTableDataForComparison_ACU(value) {
+        if (Array.isArray(value))
+            return value.map(canonicalizeTableDataForComparison_ACU);
+        if (!value || typeof value !== 'object')
+            return value;
+        const normalized = JSON.parse(JSON.stringify(value));
+        for (const sheetKey of Object.keys(normalized).filter(key => key.startsWith('sheet_'))) {
+            const sheet = normalized[sheetKey];
+            if (Array.isArray(sheet?.content))
+                ensureStableNextRowId_ACU(sheet);
+        }
+        return Object.keys(normalized)
+            .sort()
+            .reduce((result, key) => {
+            result[key] = canonicalizeTableDataForComparison_ACU(normalized[key]);
+            return result;
+        }, {});
+    }
+    function tableDataSnapshotsMatch_ACU(left, right) {
+        return JSON.stringify(canonicalizeTableDataForComparison_ACU(left)) === JSON.stringify(canonicalizeTableDataForComparison_ACU(right));
+    }
     function hasUsableRuntimeTableData_ACU(data) {
         if (!data || typeof data !== 'object')
             return false;
@@ -46765,6 +46825,21 @@ $CONTENT
                 }
                 if (!canonicalData)
                     return { success: false, error: '统一提交失败：严格 canonical data 为空，拒绝分配永久 row_id。' };
+                if (!tableDataSnapshotsMatch_ACU(canonicalData, baseSnapshot)) {
+                    try {
+                        canonicalData = await replaceRuntimeDataStrict_ACU(provider, baseSnapshot, {
+                            validate: replacement => tableDataSnapshotsMatch_ACU(replacement, baseSnapshot)
+                                ? null
+                                : 'SQLite runtime 与当前 bucket 安全基底不一致，严格对齐后校验失败。',
+                        });
+                    }
+                    catch (error) {
+                        return {
+                            success: false,
+                            error: `统一提交失败：SQLite runtime 无法对齐到当前 bucket 安全基底。${error?.message || String(error)}`,
+                        };
+                    }
+                }
                 const allocationData = canonicalData;
                 const statements = [];
                 const paramsList = [];
@@ -46906,7 +46981,12 @@ $CONTENT
                 return { success: false, modifiedKeys: [], error: commitResult.error || '统一提交失败。' };
             }
             if (!options.isImportMode && options.syncAfterCommit !== false && commitResult.tableData) {
-                await updateReadableLorebookEntry_ACU(true, false, null, commitResult.tableData);
+                try {
+                    await updateReadableLorebookEntry_ACU(true, false, null, commitResult.tableData);
+                }
+                catch (error) {
+                    logError_ACU(`统一提交已完成，但 readable lorebook 同步失败：${error?.message || String(error)}`);
+                }
             }
             return { success: true, modifiedKeys: commitResult.value.modifiedKeys, tableData: commitResult.tableData };
         }
@@ -47006,9 +47086,19 @@ $CONTENT
                 return { success: false, modifiedKeys, error: commitResult.error || '统一提交失败：保存聊天记录失败。' };
             }
             if (options.syncAfterCommit !== false) {
-                await updateReadableLorebookEntry_ACU(true, false, null, workingTableData);
+                try {
+                    await updateReadableLorebookEntry_ACU(true, false, null, workingTableData);
+                }
+                catch (error) {
+                    logError_ACU(`统一提交已完成，但 readable lorebook 同步失败：${error?.message || String(error)}`);
+                }
                 if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
-                    await enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.saveTargetIndex, mode: 'sync', reason: 'unified_group_fill_complete' });
+                    try {
+                        await enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.saveTargetIndex, mode: 'sync', reason: 'unified_group_fill_complete' });
+                    }
+                    catch (error) {
+                        logError_ACU(`统一提交已完成，但摘要向量索引同步失败：${error?.message || String(error)}`);
+                    }
                 }
             }
         }
@@ -47025,6 +47115,7 @@ $CONTENT
         if (migration.migrated) {
             await reloadStorageProvider();
         }
+        const executionState = options.executionState || {};
         const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
         const failedGroups = new Set();
         let firstError;
@@ -47114,16 +47205,22 @@ $CONTENT
                     firstError = firstError || '同一提交批次混用了最新运行时基底与默认历史边界基底，已中止以避免重填数据污染。';
                     break;
                 }
-                const mergeBaseMaxMessageIndex = explicitMergeBaseBounds.length === 1 ? explicitMergeBaseBounds[0] : bucketFirstMessageIndex - 1;
-                const baseResult = allJobsUseLatestRuntimeBase
-                    ? await buildBatchMergeBase_ACU(bucket.batchNumber)
-                    : await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
-                if (!baseResult.data) {
-                    bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
-                    firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
-                    break;
+                let mergedBatchData = cloneTableDataSnapshot_ACU(executionState.workingSnapshot);
+                if (!mergedBatchData) {
+                    const mergeBaseMaxMessageIndex = explicitMergeBaseBounds.length === 1 ? explicitMergeBaseBounds[0] : bucketFirstMessageIndex - 1;
+                    const baseResult = allJobsUseLatestRuntimeBase
+                        ? await buildBatchMergeBase_ACU(bucket.batchNumber)
+                        : await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
+                    if (!baseResult.data) {
+                        bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
+                        firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
+                        break;
+                    }
+                    mergedBatchData = cloneTableDataSnapshot_ACU(baseResult.data);
+                    if (mergedBatchData) {
+                        executionState.workingSnapshot = cloneTableDataSnapshot_ACU(mergedBatchData) || undefined;
+                    }
                 }
-                const mergedBatchData = baseResult.data;
                 _set_currentJsonTableData_ACU(mergedBatchData);
                 const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
                 const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
@@ -47269,6 +47366,9 @@ $CONTENT
                     });
                     emitBucketProgress(bucketIndex, { phase: 'complete' });
                     bucketSucceeded = true;
+                    if (applyResult.tableData) {
+                        executionState.workingSnapshot = cloneTableDataSnapshot_ACU(applyResult.tableData) || undefined;
+                    }
                     committedBucketCount = nextCommittedBucketCount;
                     break;
                 }
@@ -47831,6 +47931,7 @@ $CONTENT
             }
         };
         _set_isAutoUpdatingCard_ACU$1(true);
+        const executionState = {};
         try {
             for (let waveIndex = 0; waveIndex < plan.waves.length; waveIndex += 1) {
                 activeWaveIndex = waveIndex;
@@ -47869,6 +47970,7 @@ $CONTENT
                         respectGlobalStop: false,
                         replaceExistingIncremental: true,
                         syncAfterCommit: false,
+                        executionState,
                         onProgress: event => options.onProgress?.({
                             ...event,
                             currentBatch: committedBucketCount + (event.currentBatch || 1),
@@ -48047,42 +48149,35 @@ $CONTENT
             if (!targetKeys.length) {
                 return { success: false, error: '未选择需要更新的表格。' };
             }
-            const uiThreshold = settings_ACU.autoUpdateThreshold || 3;
-            const uiBatchSize = settings_ACU.updateBatchSize || 3;
-            const uiSkip = settings_ACU.skipUpdateFloors || 0;
-            const effectiveAiIndices = uiSkip > 0 ? allAiMessageIndices.slice(0, -uiSkip) : allAiMessageIndices.slice();
-            const contextScopeIndices = uiThreshold > 0 ? effectiveAiIndices.slice(-uiThreshold) : effectiveAiIndices;
+            const manualContextDepth = Number.isFinite(Number(settings_ACU.manualUpdateContextDepth))
+                ? Math.max(0, Math.trunc(Number(settings_ACU.manualUpdateContextDepth)))
+                : Math.max(0, Math.trunc(Number(settings_ACU.autoUpdateThreshold) || 3));
+            const manualBatchSize = Number.isFinite(Number(settings_ACU.manualUpdateBatchSize))
+                ? Math.max(1, Math.trunc(Number(settings_ACU.manualUpdateBatchSize)))
+                : Math.max(1, Math.trunc(Number(settings_ACU.updateBatchSize) || 3));
+            const manualSkipFloors = Math.max(0, Math.trunc(Number(settings_ACU.skipUpdateFloors) || 0));
+            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
+            const manualPlan = buildManualUpdatePlan_ACU(liveChat, templateData, {
+                targetSheetKeys: targetKeys,
+                contextDepth: manualContextDepth,
+                batchSize: manualBatchSize,
+                skipFloors: manualSkipFloors,
+                resolveRequestOptions: (_sheetKey, table) => {
+                    const resolvedPreset = resolveTableApiPresetOverride_ACU(table?.name || '');
+                    return resolvedPreset ? { tableApiPreset: resolvedPreset } : null;
+                },
+            });
+            const firstManualGroup = Object.values(manualPlan.updateGroups)[0];
+            const contextScopeIndices = firstManualGroup?.indices || [];
             if (!contextScopeIndices.length) {
                 return { success: false, error: '未找到可用的上下文进行手动更新，请检查阈值或跳过楼层设置。' };
             }
-            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
-            const updateGroups = {};
-            targetKeys.forEach((sheetKey) => {
-                const tableConfig = templateData?.[sheetKey]?.updateConfig || {};
-                const tableName = templateData?.[sheetKey]?.name || currentJsonTableData_ACU?.[sheetKey]?.name || '';
-                const resolvedPreset = resolveTableApiPresetOverride_ACU(tableName);
-                const requestOptions = resolvedPreset ? { tableApiPreset: resolvedPreset } : null;
-                const tableGroupId = Number.isFinite(tableConfig?.groupId)
-                    ? Math.trunc(tableConfig.groupId)
-                    : -1;
-                // updateFrequency/contextDepth/skipFloors 属于自动更新调度参数，不进入手动路径；
-                // API preset 属于请求执行契约，不同 preset 必须拆组，禁止静默采用第一张表配置。
-                const groupKey = `${tableGroupId}|${contextScopeIndices.join(',')}|${uiBatchSize}|${JSON.stringify(requestOptions)}`;
-                if (!updateGroups[groupKey]) {
-                    updateGroups[groupKey] = {
-                        indices: contextScopeIndices,
-                        batchSize: uiBatchSize,
-                        groupId: tableGroupId,
-                        sheetKeys: [],
-                        requestOptions,
-                    };
-                }
-                updateGroups[groupKey].sheetKeys.push(sheetKey);
-            });
+            const updateGroups = manualPlan.updateGroups;
             const groupKeys = Object.keys(updateGroups);
             const manualRefillEnabled = options.clearBeforeUpdate === true;
+            const effectiveAiIndices = allAiMessageIndices.slice(0, manualSkipFloors > 0 ? -manualSkipFloors : undefined);
             const lastEffectiveAiIndex = effectiveAiIndices[effectiveAiIndices.length - 1];
-            const manualRefillUsesLatestRuntimeBase = manualRefillEnabled && uiSkip === 0 && contextScopeIndices[contextScopeIndices.length - 1] === lastEffectiveAiIndex;
+            const manualRefillUsesLatestRuntimeBase = manualRefillEnabled && manualSkipFloors === 0 && contextScopeIndices[contextScopeIndices.length - 1] === lastEffectiveAiIndex;
             const manualRefillMergeBaseMaxMessageIndex = manualRefillEnabled && !manualRefillUsesLatestRuntimeBase ? contextScopeIndices[0] - 1 : undefined;
             if (manualRefillEnabled) {
                 const currentIsolationKey = getCurrentIsolationKey_ACU();
@@ -48161,6 +48256,7 @@ $CONTENT
             const maxConcurrentGroups = Math.max(1, Number(settings_ACU.maxConcurrentGroups) || 1);
             const totalChunks = Math.max(1, Math.ceil(groupKeys.length / maxConcurrentGroups));
             const failedGroups = [];
+            const executionState = {};
             logDebug_ACU(`[Manual Update] 分组计划：选中 ${targetKeys.length} 张表，生成 ${groupKeys.length} 个组，最大并发组数 ${maxConcurrentGroups}。`);
             for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
                 const chunkIndex = Math.floor(start / maxConcurrentGroups) + 1;
@@ -48208,6 +48304,7 @@ $CONTENT
                     const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
                         onProgress: options.onProgress,
                         replaceExistingIncremental: manualRefillEnabled && !manualRefillRequiresFinalSnapshot,
+                        executionState,
                     });
                     committedBucketCount += chunkResult.committedBucketCount;
                     if (!chunkResult.success) {
@@ -100372,25 +100469,6 @@ Expected function or array of functions, received type ${typeof value}.`
             ? fallback
             : normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, fallback);
     }
-    function applyManualSettingsForOrchestrator() {
-        const previousAutoUpdateThreshold = settings_ACU.autoUpdateThreshold;
-        const previousUpdateBatchSize = settings_ACU.updateBatchSize;
-        // orchestrateManualUpdate_ACU still reads the legacy automatic settings.
-        // Keep the temporary bridge local to this UI action so the independent
-        // manual fields do not persist back into automatic update configuration.
-        settings_ACU.autoUpdateThreshold = manualDepthForOrchestrator_ACU(settings_ACU.manualUpdateContextDepth, previousAutoUpdateThreshold);
-        settings_ACU.updateBatchSize = normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, normalizePositiveInteger(previousUpdateBatchSize, 3));
-        return () => {
-            settings_ACU.autoUpdateThreshold = previousAutoUpdateThreshold;
-            settings_ACU.updateBatchSize = previousUpdateBatchSize;
-        };
-    }
-    function manualDepthForOrchestrator_ACU(manualDepth, fallbackDepth) {
-        const fallback = normalizeNonNegativeInteger(fallbackDepth, 3);
-        return manualDepth == null
-            ? fallback
-            : normalizeNonNegativeInteger(manualDepth, fallback);
-    }
     function resolveManualRefillRangeSummary_ACU(manualDepth) {
         const chat = getChatArray_ACU();
         if (!Array.isArray(chat) || chat.length === 0)
@@ -100680,15 +100758,7 @@ Expected function or array of functions, received type ${typeof value}.`
             };
             const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress));
             try {
-                const executeManualUpdate = async (confirmBoundaryReset) => {
-                    const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
-                    try {
-                        return await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, { clearBeforeUpdate, confirmBoundaryReset, onProgress: handleProgress });
-                    }
-                    finally {
-                        restoreAutoUpdateSettings();
-                    }
-                };
+                const executeManualUpdate = (confirmBoundaryReset) => orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, { clearBeforeUpdate, confirmBoundaryReset, onProgress: handleProgress });
                 let result = await executeManualUpdate(false);
                 if (!result.success && result.requiresUserConfirmation) {
                     const request = result.requiresUserConfirmation;

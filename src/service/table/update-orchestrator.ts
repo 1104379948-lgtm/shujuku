@@ -15,10 +15,11 @@ import { enqueueSummaryVectorIndexFlush_ACU } from '../vector/summary-vector-ind
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
+import { buildManualUpdatePlan_ACU, type GroupedRuntimeExecutionState_ACU } from './update-scheduler';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
-import { materializeStableSeedRowsForSheet_ACU, replaceSheetSourceDataPreservingNextRowId_ACU } from '../../shared/stable-row-id-allocator';
+import { ensureStableNextRowId_ACU, materializeStableSeedRowsForSheet_ACU, replaceSheetSourceDataPreservingNextRowId_ACU } from '../../shared/stable-row-id-allocator';
 
 import { applyTableDelta_ACU, isDeltaTagData_ACU } from './table-delta';
 /**
@@ -53,7 +54,7 @@ import { loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transaction';
-import { runTableUpdateCommit_ACU } from './table-update-commit';
+import { replaceRuntimeDataStrict_ACU, runTableUpdateCommit_ACU } from './table-update-commit';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 
 // ============================================================
@@ -362,6 +363,26 @@ export function loadBatchBaseData_ACU(
 function cloneTableDataSnapshot_ACU(data: Record<string, any> | null | undefined): Record<string, any> | null {
     if (!data || typeof data !== 'object') return null;
     return JSON.parse(JSON.stringify(data));
+}
+
+function canonicalizeTableDataForComparison_ACU(value: any): any {
+    if (Array.isArray(value)) return value.map(canonicalizeTableDataForComparison_ACU);
+    if (!value || typeof value !== 'object') return value;
+    const normalized = JSON.parse(JSON.stringify(value));
+    for (const sheetKey of Object.keys(normalized).filter(key => key.startsWith('sheet_'))) {
+        const sheet = normalized[sheetKey];
+        if (Array.isArray(sheet?.content)) ensureStableNextRowId_ACU(sheet);
+    }
+    return Object.keys(normalized)
+        .sort()
+        .reduce((result: Record<string, any>, key) => {
+            result[key] = canonicalizeTableDataForComparison_ACU(normalized[key]);
+            return result;
+        }, {});
+}
+
+function tableDataSnapshotsMatch_ACU(left: Record<string, any>, right: Record<string, any>): boolean {
+    return JSON.stringify(canonicalizeTableDataForComparison_ACU(left)) === JSON.stringify(canonicalizeTableDataForComparison_ACU(right));
 }
 
 function hasUsableRuntimeTableData_ACU(data: Record<string, any> | null): boolean {
@@ -1078,6 +1099,20 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 return { success: false, error: `统一提交失败：无法导出 SQLite canonical data，拒绝分配永久 row_id。${error?.message || String(error)}` };
             }
             if (!canonicalData) return { success: false, error: '统一提交失败：严格 canonical data 为空，拒绝分配永久 row_id。' };
+            if (!tableDataSnapshotsMatch_ACU(canonicalData, baseSnapshot)) {
+                try {
+                    canonicalData = await replaceRuntimeDataStrict_ACU(provider, baseSnapshot as any, {
+                        validate: replacement => tableDataSnapshotsMatch_ACU(replacement as any, baseSnapshot)
+                            ? null
+                            : 'SQLite runtime 与当前 bucket 安全基底不一致，严格对齐后校验失败。',
+                    });
+                } catch (error: any) {
+                    return {
+                        success: false,
+                        error: `统一提交失败：SQLite runtime 无法对齐到当前 bucket 安全基底。${error?.message || String(error)}`,
+                    };
+                }
+            }
             const allocationData = canonicalData;
 
             const statements: string[] = [];
@@ -1228,7 +1263,11 @@ export async function applyUnifiedGroupFillResponses_ACU(
             return { success: false, modifiedKeys: [], error: commitResult.error || '统一提交失败。' };
         }
         if (!options.isImportMode && options.syncAfterCommit !== false && commitResult.tableData) {
-            await updateReadableLorebookEntry_ACU(true, false, null, commitResult.tableData);
+            try {
+                await updateReadableLorebookEntry_ACU(true, false, null, commitResult.tableData);
+            } catch (error: any) {
+                logError_ACU(`统一提交已完成，但 readable lorebook 同步失败：${error?.message || String(error)}`);
+            }
         }
         return { success: true, modifiedKeys: commitResult.value.modifiedKeys, tableData: commitResult.tableData as any };
     }
@@ -1337,9 +1376,17 @@ export async function applyUnifiedGroupFillResponses_ACU(
         }
 
         if (options.syncAfterCommit !== false) {
-            await updateReadableLorebookEntry_ACU(true, false, null, workingTableData);
+            try {
+                await updateReadableLorebookEntry_ACU(true, false, null, workingTableData);
+            } catch (error: any) {
+                logError_ACU(`统一提交已完成，但 readable lorebook 同步失败：${error?.message || String(error)}`);
+            }
             if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
-                await enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.saveTargetIndex, mode: 'sync', reason: 'unified_group_fill_complete' });
+                try {
+                    await enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.saveTargetIndex, mode: 'sync', reason: 'unified_group_fill_complete' });
+                } catch (error: any) {
+                    logError_ACU(`统一提交已完成，但摘要向量索引同步失败：${error?.message || String(error)}`);
+                }
             }
         }
     }
@@ -1369,6 +1416,7 @@ export async function processGroupedRuntimeChunk_ACU(
         syncAfterCommit?: boolean;
         onProgress?: (event: CardUpdateProgressEvent) => void;
         respectGlobalStop?: boolean;
+        executionState?: GroupedRuntimeExecutionState_ACU;
     } = {}
 ): Promise<{ success: boolean; failedGroups: string[]; error?: string; aborted?: boolean; committedBucketCount: number }> {
     if (!Array.isArray(groups) || groups.length === 0) {
@@ -1382,6 +1430,7 @@ export async function processGroupedRuntimeChunk_ACU(
     if (migration.migrated) {
         await reloadStorageProvider();
     }
+    const executionState = options.executionState || {};
 
     const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
     const failedGroups = new Set<string>();
@@ -1483,17 +1532,22 @@ export async function processGroupedRuntimeChunk_ACU(
                 firstError = firstError || '同一提交批次混用了最新运行时基底与默认历史边界基底，已中止以避免重填数据污染。';
                 break;
             }
-            const mergeBaseMaxMessageIndex = explicitMergeBaseBounds.length === 1 ? explicitMergeBaseBounds[0] : bucketFirstMessageIndex - 1;
-            const baseResult: { data: Record<string, any> | null; error: string | null } = allJobsUseLatestRuntimeBase
-                ? await buildBatchMergeBase_ACU(bucket.batchNumber)
-                : await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
-            if (!baseResult.data) {
-                bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
-                firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
-                break;
+            let mergedBatchData = cloneTableDataSnapshot_ACU(executionState.workingSnapshot);
+            if (!mergedBatchData) {
+                const mergeBaseMaxMessageIndex = explicitMergeBaseBounds.length === 1 ? explicitMergeBaseBounds[0] : bucketFirstMessageIndex - 1;
+                const baseResult: { data: Record<string, any> | null; error: string | null } = allJobsUseLatestRuntimeBase
+                    ? await buildBatchMergeBase_ACU(bucket.batchNumber)
+                    : await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
+                if (!baseResult.data) {
+                    bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
+                    firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
+                    break;
+                }
+                mergedBatchData = cloneTableDataSnapshot_ACU(baseResult.data);
+                if (mergedBatchData) {
+                    executionState.workingSnapshot = cloneTableDataSnapshot_ACU(mergedBatchData) || undefined;
+                }
             }
-
-            const mergedBatchData = baseResult.data;
             _set_currentJsonTableData_ACU(mergedBatchData);
             const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
             const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
@@ -1658,6 +1712,9 @@ export async function processGroupedRuntimeChunk_ACU(
                 });
                 emitBucketProgress(bucketIndex, { phase: 'complete' });
                 bucketSucceeded = true;
+                if (applyResult.tableData) {
+                    executionState.workingSnapshot = cloneTableDataSnapshot_ACU(applyResult.tableData) || undefined;
+                }
                 committedBucketCount = nextCommittedBucketCount;
                 break;
             }
@@ -2327,6 +2384,7 @@ export async function orchestrateManualCatchUp_ACU(
         }
     };
     _set_isAutoUpdatingCard_ACU(true);
+    const executionState: GroupedRuntimeExecutionState_ACU = {};
 
     try {
         for (let waveIndex = 0; waveIndex < plan.waves.length; waveIndex += 1) {
@@ -2366,6 +2424,7 @@ export async function orchestrateManualCatchUp_ACU(
                     respectGlobalStop: false,
                     replaceExistingIncremental: true,
                     syncAfterCommit: false,
+                    executionState,
                     onProgress: event => options.onProgress?.({
                         ...event,
                         currentBatch: committedBucketCount + (event.currentBatch || 1),
@@ -2561,46 +2620,38 @@ export async function orchestrateManualUpdate_ACU(
             return { success: false, error: '未选择需要更新的表格。' };
         }
 
-        const uiThreshold = settings_ACU.autoUpdateThreshold || 3;
-        const uiBatchSize = settings_ACU.updateBatchSize || 3;
-        const uiSkip = settings_ACU.skipUpdateFloors || 0;
-
-        const effectiveAiIndices = uiSkip > 0 ? allAiMessageIndices.slice(0, -uiSkip) : allAiMessageIndices.slice();
-        const contextScopeIndices = uiThreshold > 0 ? effectiveAiIndices.slice(-uiThreshold) : effectiveAiIndices;
+        const manualContextDepth = Number.isFinite(Number(settings_ACU.manualUpdateContextDepth))
+            ? Math.max(0, Math.trunc(Number(settings_ACU.manualUpdateContextDepth)))
+            : Math.max(0, Math.trunc(Number(settings_ACU.autoUpdateThreshold) || 3));
+        const manualBatchSize = Number.isFinite(Number(settings_ACU.manualUpdateBatchSize))
+            ? Math.max(1, Math.trunc(Number(settings_ACU.manualUpdateBatchSize)))
+            : Math.max(1, Math.trunc(Number(settings_ACU.updateBatchSize) || 3));
+        const manualSkipFloors = Math.max(0, Math.trunc(Number(settings_ACU.skipUpdateFloors) || 0));
+        const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
+        const manualPlan = buildManualUpdatePlan_ACU(liveChat, templateData, {
+            targetSheetKeys: targetKeys,
+            contextDepth: manualContextDepth,
+            batchSize: manualBatchSize,
+            skipFloors: manualSkipFloors,
+            resolveRequestOptions: (_sheetKey, table) => {
+                const resolvedPreset = resolveTableApiPresetOverride_ACU(table?.name || '');
+                return resolvedPreset ? { tableApiPreset: resolvedPreset } : null;
+            },
+        });
+        const firstManualGroup = Object.values(manualPlan.updateGroups)[0];
+        const contextScopeIndices = firstManualGroup?.indices || [];
 
         if (!contextScopeIndices.length) {
             return { success: false, error: '未找到可用的上下文进行手动更新，请检查阈值或跳过楼层设置。' };
         }
 
-        const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
-        const updateGroups: Record<string, ManualRuntimeUpdateGroup_ACU> = {};
-        targetKeys.forEach((sheetKey: string) => {
-            const tableConfig = templateData?.[sheetKey]?.updateConfig || {};
-            const tableName = templateData?.[sheetKey]?.name || currentJsonTableData_ACU?.[sheetKey]?.name || '';
-            const resolvedPreset = resolveTableApiPresetOverride_ACU(tableName);
-            const requestOptions = resolvedPreset ? { tableApiPreset: resolvedPreset } : null;
-            const tableGroupId = Number.isFinite(tableConfig?.groupId)
-                ? Math.trunc(tableConfig.groupId)
-                : -1;
-            // updateFrequency/contextDepth/skipFloors 属于自动更新调度参数，不进入手动路径；
-            // API preset 属于请求执行契约，不同 preset 必须拆组，禁止静默采用第一张表配置。
-            const groupKey = `${tableGroupId}|${contextScopeIndices.join(',')}|${uiBatchSize}|${JSON.stringify(requestOptions)}`;
-            if (!updateGroups[groupKey]) {
-                updateGroups[groupKey] = {
-                    indices: contextScopeIndices,
-                    batchSize: uiBatchSize,
-                    groupId: tableGroupId,
-                    sheetKeys: [],
-                    requestOptions,
-                };
-            }
-            updateGroups[groupKey].sheetKeys.push(sheetKey);
-        });
+        const updateGroups = manualPlan.updateGroups;
         const groupKeys = Object.keys(updateGroups);
 
         const manualRefillEnabled = options.clearBeforeUpdate === true;
+        const effectiveAiIndices = allAiMessageIndices.slice(0, manualSkipFloors > 0 ? -manualSkipFloors : undefined);
         const lastEffectiveAiIndex = effectiveAiIndices[effectiveAiIndices.length - 1];
-        const manualRefillUsesLatestRuntimeBase = manualRefillEnabled && uiSkip === 0 && contextScopeIndices[contextScopeIndices.length - 1] === lastEffectiveAiIndex;
+        const manualRefillUsesLatestRuntimeBase = manualRefillEnabled && manualSkipFloors === 0 && contextScopeIndices[contextScopeIndices.length - 1] === lastEffectiveAiIndex;
         const manualRefillMergeBaseMaxMessageIndex = manualRefillEnabled && !manualRefillUsesLatestRuntimeBase ? contextScopeIndices[0] - 1 : undefined;
         if (manualRefillEnabled) {
             const currentIsolationKey = getCurrentIsolationKey_ACU();
@@ -2682,6 +2733,7 @@ export async function orchestrateManualUpdate_ACU(
         const maxConcurrentGroups = Math.max(1, Number(settings_ACU.maxConcurrentGroups) || 1);
         const totalChunks = Math.max(1, Math.ceil(groupKeys.length / maxConcurrentGroups));
         const failedGroups: Array<{ key: string; error?: string }> = [];
+        const executionState: GroupedRuntimeExecutionState_ACU = {};
 
         logDebug_ACU(`[Manual Update] 分组计划：选中 ${targetKeys.length} 张表，生成 ${groupKeys.length} 个组，最大并发组数 ${maxConcurrentGroups}。`);
 
@@ -2730,6 +2782,7 @@ export async function orchestrateManualUpdate_ACU(
                 const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
                     onProgress: options.onProgress,
                     replaceExistingIncremental: manualRefillEnabled && !manualRefillRequiresFinalSnapshot,
+                    executionState,
                 });
                 committedBucketCount += chunkResult.committedBucketCount;
                 if (!chunkResult.success) {
