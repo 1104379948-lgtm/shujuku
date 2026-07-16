@@ -8,6 +8,10 @@ const mocks = vi.hoisted(() => ({
   refreshMergedDataAndNotifyWithUI: vi.fn().mockResolvedValue(undefined),
   executeQuery: vi.fn(() => ({ columns: ['id'], values: [[1]], rowCount: 1 })),
   executeMutation: vi.fn(() => ({ changes: 1, errors: [] })),
+  applyBatchWithMetadata: vi.fn(),
+  prepareReseedPlan: vi.fn(() => ({ statements: [], paramsList: [], metadataUpdates: [] })),
+  createRuntimeSnapshot: vi.fn(() => new Uint8Array([1, 2, 3])),
+  restoreRuntimeSnapshot: vi.fn().mockResolvedValue(undefined),
   applyEdits: vi.fn(() => ({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 2 })),
   saveToChat: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
   persistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
@@ -17,6 +21,11 @@ const mocks = vi.hoisted(() => ({
   ensureStorageProviderReady: vi.fn().mockResolvedValue({
     executeQuery: vi.fn(() => ({ columns: ['id'], values: [[1]], rowCount: 1 })),
     executeMutation: vi.fn(() => ({ changes: 1, errors: [] })),
+    applyEditsBatchWithSheetMetadata: vi.fn(),
+    prepareReseedPlanForEmptyTables: vi.fn(() => ({ statements: [], paramsList: [], metadataUpdates: [] })),
+    exportCanonicalData: vi.fn(),
+    createRuntimeSnapshot: vi.fn(() => new Uint8Array([1, 2, 3])),
+    restoreRuntimeSnapshot: vi.fn().mockResolvedValue(undefined),
     applyEdits: vi.fn(() => ({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 2 })),
     saveToChat: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
     getCurrentData: vi.fn(() => ({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } })),
@@ -49,6 +58,11 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
   getStorageProvider: vi.fn(() => ({
     executeQuery: mocks.executeQuery,
     executeMutation: mocks.executeMutation,
+    applyEditsBatchWithSheetMetadata: mocks.applyBatchWithMetadata,
+    prepareReseedPlanForEmptyTables: mocks.prepareReseedPlan,
+    exportCanonicalData: mocks.getCurrentData,
+    createRuntimeSnapshot: mocks.createRuntimeSnapshot,
+    restoreRuntimeSnapshot: mocks.restoreRuntimeSnapshot,
     applyEdits: mocks.applyEdits,
     saveToChat: mocks.saveToChat,
     getCurrentData: mocks.getCurrentData,
@@ -109,6 +123,10 @@ describe('isSqlReadStatement_ACU', () => {
     expect(isSqlReadStatement_ACU('INSERT INTO t VALUES (1)')).toBe(false);
     expect(isSqlReadStatement_ACU('UPDATE t SET x = 1')).toBe(false);
     expect(isSqlReadStatement_ACU('DELETE FROM t')).toBe(false);
+    expect(isSqlReadStatement_ACU('PRAGMA user_version = 7')).toBe(false);
+    expect(isSqlReadStatement_ACU('PRAGMA foreign_keys = OFF')).toBe(false);
+    expect(isSqlReadStatement_ACU('PRAGMA application_id(123)')).toBe(false);
+    expect(isSqlReadStatement_ACU('PRAGMA journal_mode')).toBe(false);
   });
 
   it('拒绝多语句和 WITH 包裹写入，避免查询 API 绕过写事务', () => {
@@ -126,6 +144,16 @@ describe('createSqlApi', () => {
     vi.clearAllMocks();
     mocks.executeQuery.mockReturnValue({ columns: ['id'], values: [[1]], rowCount: 1 });
     mocks.executeMutation.mockReturnValue({ changes: 1, errors: [] });
+    mocks.prepareReseedPlan.mockReturnValue({ statements: [], paramsList: [], metadataUpdates: [] });
+    mocks.createRuntimeSnapshot.mockReturnValue(new Uint8Array([1, 2, 3]));
+    mocks.restoreRuntimeSnapshot.mockResolvedValue(undefined);
+    mocks.applyBatchWithMetadata.mockImplementation((statements: string[], paramsList: any[][]) => {
+      const result = mocks.executeMutation(statements[0], paramsList[0]);
+      if (result.errors.length > 0) {
+        return { success: false, modifiedKeys: [], appliedEdits: 0, error: result.errors.join(', ') };
+      }
+      return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: statements.length, changes: result.changes, statementChanges: statements.map(() => result.changes) };
+    });
     mocks.applyEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 2 });
     mocks.saveToChat.mockResolvedValue({ saved: true, messageIndex: 3 });
     mocks.persistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 3 });
@@ -133,6 +161,11 @@ describe('createSqlApi', () => {
     mocks.ensureStorageProviderReady.mockResolvedValue({
       executeQuery: mocks.executeQuery,
       executeMutation: mocks.executeMutation,
+      applyEditsBatchWithSheetMetadata: mocks.applyBatchWithMetadata,
+      prepareReseedPlanForEmptyTables: mocks.prepareReseedPlan,
+      exportCanonicalData: mocks.getCurrentData,
+      createRuntimeSnapshot: mocks.createRuntimeSnapshot,
+      restoreRuntimeSnapshot: mocks.restoreRuntimeSnapshot,
       applyEdits: mocks.applyEdits,
       saveToChat: mocks.saveToChat,
       getCurrentData: mocks.getCurrentData,
@@ -293,12 +326,18 @@ describe('createSqlApi', () => {
     expect(saveOptions.assumeCommitLock).toBe(true);
   });
 
-  it('executeSqlBatch 通过 applyEdits 执行多语句事务并保存受影响表', async () => {
+  it('executeSqlBatch 通过统一 atomic helper 执行多语句事务并保存受影响表', async () => {
     const sql = "INSERT INTO T VALUES (1, 'a'); UPDATE T SET name = 'b' WHERE row_id = 1;";
 
     const result = await api.executeSqlBatch(sql);
 
-    expect(mocks.applyEdits).toHaveBeenCalledWith(sql, 'raw_sql_api');
+    expect(mocks.applyBatchWithMetadata).toHaveBeenCalledWith(
+      ["INSERT INTO T VALUES (1, 'a')", "UPDATE T SET name = 'b' WHERE row_id = 1"],
+      [[], []],
+      [],
+      'raw_sql_batch',
+      { includeImplicitReseed: false },
+    );
     expect(mocks.runTableWriteTransaction).toHaveBeenCalledWith(expect.objectContaining({
       source: 'raw_sql_batch',
       writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
@@ -338,7 +377,7 @@ describe('createSqlApi', () => {
   });
 
   it('executeSqlBatch 失败时返回错误且不保存', async () => {
-    mocks.applyEdits.mockImplementation(() => { throw new Error('rollback'); });
+    mocks.applyBatchWithMetadata.mockImplementationOnce(() => { throw new Error('rollback'); });
 
     const result = await api.executeSqlBatch('INSERT INTO missing VALUES (1);');
 
@@ -353,7 +392,7 @@ describe('createSqlApi', () => {
     const result = await api.executeSqlBatch('UPDATE inventory SET name = \'钢剑\';');
 
     expect(result).toEqual({ success: false, modifiedKeys: [], appliedEdits: 0, changes: 0, errors: ['[StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。'] });
-    expect(mocks.applyEdits).not.toHaveBeenCalled();
+    expect(mocks.applyBatchWithMetadata).not.toHaveBeenCalled();
     expect(mocks.persistTablesToChatMessage).not.toHaveBeenCalled();
   });
 

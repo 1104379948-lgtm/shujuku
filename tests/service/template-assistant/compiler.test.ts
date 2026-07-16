@@ -95,6 +95,7 @@ describe('compileTemplateAssistantDraft_ACU', () => {
     const addedKey = result.diff.addedSheets[0].sheetKey;
     expect(result.candidateData[addedKey].content[0]).toEqual(['row_id', '物品', '品质']);
     expect(result.candidateData[addedKey].updateConfig.groupId).toBe(-1);
+    expect(result.candidateData[addedKey].sourceData.nextRowId).toBe(1);
     expect(result.candidateData[addedKey].sourceData.initNode).toContain('初始化');
     expect(result.candidateData[addedKey].sourceData.insertNode).toContain('新增');
     expect(result.focusSheetKey).toBe(addedKey);
@@ -271,8 +272,36 @@ describe('compileTemplateAssistantDraft_ACU', () => {
     expect(result.diff.patchedContentSheets[0]?.changes.join('；')).toContain('新增 1 行');
     expect(result.candidateData.sheet_a.content).toEqual([
       ['row_id', '姓名', '备注'],
-      [null, '乙', '第二行'],
+      ['2', '乙', '第二行'],
     ]);
+    expect(result.candidateData.sheet_a.sourceData.nextRowId).toBe(3);
+  });
+
+  it('patch_sheet_content 删除最大 row_id 后新增仍沿用删除前高水位', () => {
+    const tempData = buildTempData_ACU();
+    tempData.sheet_a.content = [['row_id', '姓名', '备注'], ['1', '甲', ''], ['3', '丙', '']];
+    tempData.sheet_a.sourceData.nextRowId = 4;
+    const result = compileTemplateAssistantDraft_ACU({
+      tempData,
+      sheetOrder: ['sheet_a', 'sheet_b', 'sheet_summary'],
+      currentSheetKey: 'sheet_a',
+      draft: {
+        protocolVersion: 2,
+        selectedSheetKey: 'sheet_a',
+        operations: [{
+          op: 'patch_sheet_content',
+          sheetKey: 'sheet_a',
+          patch: { deleteRows: [2], addRows: [{ 姓名: '丁', 备注: '新行' }] },
+        }],
+      },
+    });
+
+    expect(result.candidateData.sheet_a.content).toEqual([
+      ['row_id', '姓名', '备注'],
+      ['1', '甲', ''],
+      ['4', '丁', '新行'],
+    ]);
+    expect(result.candidateData.sheet_a.sourceData.nextRowId).toBe(5);
   });
 
   it('patch_sheet_schema 支持结构修改并标记高风险', () => {

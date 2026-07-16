@@ -347,7 +347,7 @@ describe('generateInserts', () => {
     const sheet = makeSheet();
     const inserts = generateInserts(sheet, 'test_table');
     expect(inserts).toHaveLength(2);
-    expect(inserts[0]).toContain('INSERT OR REPLACE INTO');
+    expect(inserts[0]).toContain('INSERT INTO');
     expect(inserts[0]).toContain('test_table');
   });
 
@@ -421,7 +421,7 @@ describe('generateInserts', () => {
     const inserts = generateInserts(sheet, 'chronicle');
 
     expect(inserts).toEqual([
-      "INSERT OR REPLACE INTO chronicle (row_id, code_index, time_span, summary, chronicle_text, key_dialogue) VALUES (1, 'AM0001', '2026-10-15 14:30 ~ 2026-10-15 15:00', '摘要', '完整纪要正文', NULL);",
+      "INSERT INTO chronicle (row_id, code_index, time_span, summary, chronicle_text, key_dialogue) VALUES (1, 'AM0001', '2026-10-15 14:30 ~ 2026-10-15 15:00', '摘要', '完整纪要正文', NULL);",
     ]);
   });
 
@@ -442,7 +442,7 @@ describe('generateInserts', () => {
     });
 
     expect(generateInserts(sheet, 'inventory')).toEqual([
-      "INSERT OR REPLACE INTO inventory (row_id, item_name) VALUES (1, '铁剑');",
+      "INSERT INTO inventory (row_id, item_name) VALUES (1, '铁剑');",
     ]);
   });
 
@@ -537,7 +537,7 @@ describe('generateInserts', () => {
     });
 
     expect(generateInserts(sheet, 'inventory')).toEqual([
-      "INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1, '铁剑', 3);",
+      "INSERT INTO inventory (row_id, item_name, quantity) VALUES (1, '铁剑', 3);",
     ]);
   });
 

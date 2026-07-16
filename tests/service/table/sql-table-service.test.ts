@@ -190,6 +190,29 @@ describe('splitSqlStatements', () => {
     const result = splitSqlStatements(sql);
     expect(result).toHaveLength(2);
   });
+
+  it('移除行注释与块注释，注释中的分号不拆分语句', () => {
+    const sql = `-- leading; comment
+      INSERT INTO inventory (item_name) VALUES ('药水'); /* trailing; comment */
+      UPDATE inventory SET item_name = '魔法书' WHERE row_id = 1;`;
+    expect(splitSqlStatements(sql)).toEqual([
+      "INSERT INTO inventory (item_name) VALUES ('药水')",
+      "UPDATE inventory SET item_name = '魔法书' WHERE row_id = 1",
+    ]);
+  });
+
+  it('保留字符串与 quoted identifier 内的注释符和分号', () => {
+    const sql = "INSERT INTO `table--name` (`value/*x*/`) VALUES ('-- text; /* value */'); SELECT [semi;--col] FROM `table--name`;";
+    expect(splitSqlStatements(sql)).toEqual([
+      "INSERT INTO `table--name` (`value/*x*/`) VALUES ('-- text; /* value */')",
+      'SELECT [semi;--col] FROM `table--name`',
+    ]);
+  });
+
+  it('未闭合块注释明确失败', () => {
+    expect(() => splitSqlStatements('SELECT 1; /* unfinished')).toThrow('SQL 块注释未闭合');
+  });
+
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -302,6 +325,146 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     expect(result.workingData?.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '9'], ['2', '治疗药水', '5']]);
     expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
     expect(mockCurrentJsonTableData).toBeNull();
+  });
+
+  it('AI SQL 省略 row_id 时按持久化高水位分配并将重写语句写入 operation', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.sourceData.nextRowId = 7;
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "INSERT INTO inventory (item_name, quantity) VALUES ('治疗药水', 5), ('魔法书(精装,新版)', 1);",
+      inputSnapshot,
+      'auto_standard',
+      {
+        targetSheetKeys: ['sheet_0'],
+        requireSheetScopedOperations: true,
+        allowSingleTargetFallback: true,
+        systemAllocateRowIds: true,
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.workingData?.sheet_0.content).toEqual([
+      ['row_id', 'item_name', 'quantity'],
+      ['1', '铁剑', '3'],
+      ['7', '治疗药水', '5'],
+      ['8', '魔法书(精装,新版)', '1'],
+    ]);
+    expect(result.workingData?.sheet_0.sourceData.nextRowId).toBe(9);
+    expect(result.operations).toEqual([{
+      kind: 'sql_sheet_batch',
+      sheetKey: 'sheet_0',
+      statements: ["INSERT INTO inventory (row_id, item_name, quantity) VALUES (7, '治疗药水', 5), (8, '魔法书(精装,新版)', 1)"],
+      tableName: 'inventory',
+      reason: 'system',
+    }]);
+    expect(inputSnapshot.sheet_0.sourceData.nextRowId).toBe(7);
+  });
+
+  it('AI SQL 显式提供 row_id 时忽略模型值并使用系统高水位', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.sourceData.nextRowId = 10;
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "INSERT INTO inventory (row_id, item_name, quantity) VALUES (1, '治疗药水', 5);",
+      inputSnapshot,
+      'auto_standard',
+      { systemAllocateRowIds: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.workingData?.sheet_0.content.at(-1)).toEqual(['10', '治疗药水', '5']);
+    expect(result.workingData?.sheet_0.sourceData.nextRowId).toBe(11);
+    expect((result.operations?.[0] as any)?.statements).toEqual([
+      "INSERT INTO inventory (row_id, item_name, quantity) VALUES (10, '治疗药水', 5)",
+    ]);
+  });
+
+  it('AI SQL 分配模式拒绝无列清单 INSERT，避免 SQLite 临时 rowid 绕过高水位', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "INSERT INTO inventory VALUES (2, '治疗药水', 5);",
+      inputSnapshot,
+      'auto_standard',
+      { systemAllocateRowIds: true },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('AI INSERT 必须使用');
+    expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
+  });
+
+  it('AI SQL 分配模式支持前置和尾随注释，字符串内注释符保持原值', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.sourceData.nextRowId = 4;
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "-- fill inventory;\n/* controlled insert */ INSERT INTO inventory (item_name, quantity) VALUES ('--药水;/*原值*/', 5); -- done",
+      inputSnapshot,
+      'auto_standard',
+      { systemAllocateRowIds: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.workingData?.sheet_0.content.at(-1)).toEqual(['4', '--药水;/*原值*/', '5']);
+    expect((result.operations?.[0] as any)?.statements).toEqual([
+      "INSERT INTO inventory (row_id, item_name, quantity) VALUES (4, '--药水;/*原值*/', 5)",
+    ]);
+  });
+
+  it.each([
+    [
+      'INSERT SELECT',
+      "INSERT INTO inventory (item_name, quantity) SELECT '药水', 5",
+    ],
+    [
+      'RETURNING',
+      "INSERT INTO inventory (item_name, quantity) VALUES ('药水', 5) RETURNING row_id",
+    ],
+    [
+      'UPSERT',
+      "INSERT INTO inventory (item_name, quantity) VALUES ('药水', 5) ON CONFLICT(row_id) DO NOTHING",
+    ],
+    [
+      'CTE INSERT',
+      "WITH payload(name, quantity) AS (VALUES ('药水', 5)) INSERT INTO inventory (item_name, quantity) SELECT name, quantity FROM payload",
+    ],
+    [
+      'schema-qualified INSERT',
+      "INSERT INTO main.inventory (item_name, quantity) VALUES ('药水', 5)",
+    ],
+    [
+      'INSERT OR IGNORE',
+      "INSERT OR IGNORE INTO inventory (item_name, quantity) VALUES ('药水', 5)",
+    ],
+  ])('AI SQL 分配模式对不受控语法 %s 明确拒绝', async (_label, sql) => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.sourceData.nextRowId = 4;
+
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      sql,
+      inputSnapshot,
+      'auto_standard',
+      { systemAllocateRowIds: true },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/AI INSERT|不支持 CTE/);
+    expect(inputSnapshot.sheet_0.sourceData.nextRowId).toBe(4);
+    expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
+  });
+
+  it('AI SQL 后续语句失败时不泄漏已预留的 nextRowId', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.sourceData.nextRowId = 6;
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "INSERT INTO inventory (item_name, quantity) VALUES ('治疗药水', 5); UPDATE inventory SET missing_col = 1 WHERE row_id = 1;",
+      inputSnapshot,
+      'auto_standard',
+      { systemAllocateRowIds: true },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('missing_col');
+    expect(inputSnapshot.sheet_0.sourceData.nextRowId).toBe(6);
+    expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
   });
 
   it('SQL 失败时返回错误且不污染输入快照与全局状态', async () => {
@@ -698,12 +861,63 @@ describe('SqlTableService', () => {
       const result = service.applyEdits("UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑';");
       expect(result.success).toBe(true);
 
-      // 验证 seedRows 已回灌且 UPDATE 生效
+      // 删除前高水位为 3；模板旧 ID 不得复用，reseed 分配 3、4 后推进到 5。
       const queryResult = service.executeQuery('SELECT * FROM inventory ORDER BY row_id');
       expect(queryResult.rowCount).toBe(2);
+      expect(queryResult.values.map((row: any) => row[0])).toEqual([3, 4]);
       expect(queryResult.values[0]).toContain('铁剑');
       expect(queryResult.values[0]).toContain(10);
       expect(queryResult.values[1]).toContain('治疗药水');
+      expect(service.getCurrentData()?.sheet_0.sourceData.nextRowId).toBe(5);
+    });
+
+    it('显式 prepare 的 reseed batch 可由调用方原样执行，且禁用 provider 隐式追加', () => {
+      service.applyEdits('DELETE FROM inventory;');
+      mockGetEffectiveSeedRows.mockReturnValue([
+        ['1', '铁剑', '3'],
+        ['2', '治疗药水', '5'],
+      ]);
+
+      const canonical = service.getCurrentData()!;
+      const plan = service.prepareReseedPlanForEmptyTables(canonical, ['sheet_0']);
+
+      expect(plan.statements).toHaveLength(2);
+      expect(plan.paramsList).toEqual([[], []]);
+      expect(plan.metadataUpdates[0].sheet.sourceData.nextRowId).toBe(5);
+      expect(service.executeQuery('SELECT COUNT(*) FROM inventory').values[0][0]).toBe(0);
+
+      const statements = [...plan.statements, "UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑'"];
+      const result = service.applyEditsBatchWithSheetMetadata(
+        statements,
+        [...plan.paramsList, []],
+        plan.metadataUpdates,
+        'auto_standard',
+        { includeImplicitReseed: false },
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.appliedEdits).toBe(3);
+      expect(service.executeQuery('SELECT row_id, item_name, quantity FROM inventory ORDER BY row_id').values).toEqual([
+        [3, '铁剑', 10],
+        [4, '治疗药水', 5],
+      ]);
+      expect(service.getCurrentData()?.sheet_0.sourceData.nextRowId).toBe(5);
+    });
+
+    it('受控 batch 关闭隐式 reseed 后不会执行未由调用方传入的 seedRows SQL', () => {
+      service.applyEdits('DELETE FROM inventory;');
+      mockGetEffectiveSeedRows.mockReturnValue([['1', '铁剑', '3']]);
+
+      const result = service.applyEditsBatchWithSheetMetadata(
+        ["UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑'"],
+        [[]],
+        [],
+        'auto_standard',
+        { includeImplicitReseed: false },
+      );
+
+      expect(result.success).toBe(true);
+      expect(service.executeQuery('SELECT COUNT(*) FROM inventory').values[0][0]).toBe(0);
     });
 
     it('非空表不触发 reseed', () => {
@@ -733,14 +947,14 @@ describe('SqlTableService', () => {
 
     it('reseed INSERT 与用户 SQL 在同一事务，失败一起回滚', () => {
       service.applyEdits('DELETE FROM inventory;');
-      // seedRows 的 row_id=1 与后续 INSERT 的 row_id=1 冲突（PRIMARY KEY）
+      // 删除前高水位为 3，因此首条 reseed 行会获得 row_id=3。
       mockGetEffectiveSeedRows.mockReturnValue([
         ['1', '铁剑', '3'],
       ]);
 
       // 用户 SQL 包含与 reseed 后 row_id 冲突的 INSERT
       expect(() => service.applyEdits(
-        "INSERT INTO inventory VALUES (1, '冲突物品', 1);"
+        "INSERT INTO inventory VALUES (3, '冲突物品', 1);"
       )).toThrow();
 
       // 验证回滚：表仍为空（reseed 被回滚）
@@ -774,6 +988,22 @@ describe('SqlTableService', () => {
       const result = service.executeQuery("SELECT * FROM inventory WHERE item_name = '不存在'");
       expect(result.rowCount).toBe(0);
       expect(result.values).toEqual([]);
+    });
+
+    it.each([
+      'DELETE FROM inventory',
+      'SELECT 1; UPDATE inventory SET quantity = 0',
+      'PRAGMA user_version = 7',
+      'EXPLAIN UPDATE inventory SET quantity = 0',
+      'WITH changed AS (DELETE FROM inventory RETURNING *) SELECT * FROM changed',
+    ])('拒绝通过 executeQuery 执行非只读 SQL: %s', sql => {
+      expect(() => service.executeQuery(sql)).toThrow('executeQuery 仅允许单条只读 SQL');
+      expect(service.executeQuery('SELECT quantity FROM inventory WHERE row_id = 1').values).toEqual([[3]]);
+    });
+
+    it('允许只读 CTE 与白名单 PRAGMA', () => {
+      expect(service.executeQuery('WITH rows AS (SELECT 1 AS value) SELECT value FROM rows').values).toEqual([[1]]);
+      expect(service.executeQuery('PRAGMA table_info(inventory)').rowCount).toBeGreaterThan(0);
     });
 
     it('已存在空表 + 有 seedRows 时 executeQuery 不触发 reseed', () => {
@@ -891,7 +1121,7 @@ describe('SqlTableService', () => {
       expect(queryResult.values[1]).toContain('治疗药水');
     });
 
-    it('seedRows 缺失 row_id 时会稳定化后写入 SQLite', async () => {
+    it('缺失表物化 seedRows 时覆盖模板 ID 并沿用既有高水位', async () => {
       mockMergeAll.mockResolvedValue(null);
       await service.loadFromChat();
 
@@ -901,7 +1131,7 @@ describe('SqlTableService', () => {
         sheet_0: {
           uid: 'inventory',
           name: '背包物品表',
-          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL_WITH_SEED },
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL_WITH_SEED, nextRowId: 10 },
           content: [['row_id', 'item_name', 'quantity']],
           updateConfig: {},
           exportConfig: {},
@@ -910,8 +1140,8 @@ describe('SqlTableService', () => {
       } as any);
 
       mockGetEffectiveSeedRows.mockReturnValue([
-        [null, '铁剑', '3'],
-        ['', '治疗药水', '5'],
+        ['1', '铁剑', '3'],
+        ['2', '治疗药水', '5'],
       ]);
 
       const result = service.applyEdits("UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑';");
@@ -919,8 +1149,10 @@ describe('SqlTableService', () => {
 
       const queryResult = service.executeQuery('SELECT row_id, item_name, quantity FROM inventory ORDER BY row_id');
       expect(queryResult.rowCount).toBe(2);
-      expect(queryResult.values[0]).toEqual([1, '铁剑', 10]);
-      expect(queryResult.values[1]).toEqual([2, '治疗药水', 5]);
+      expect(queryResult.values[0]).toEqual([10, '铁剑', 10]);
+      expect(queryResult.values[1]).toEqual([11, '治疗药水', 5]);
+      expect(mockCurrentJsonTableData.sheet_0.content.map((row: any[]) => row[0])).toEqual(['row_id', '10', '11']);
+      expect(mockCurrentJsonTableData.sheet_0.sourceData.nextRowId).toBe(12);
     });
 
     it('没有 seedRows 的表建表后仍为空表', async () => {
@@ -1073,7 +1305,7 @@ describe('SqlTableService', () => {
         sheet_0: {
           uid: 'chat_table',
           name: '旧运行时表',
-          sourceData: { ddl: oldDDL },
+          sourceData: { ddl: oldDDL, nextRowId: 10 },
           content: [['row_id', '状态']],
           updateConfig: {},
           exportConfig: {},
@@ -1087,7 +1319,7 @@ describe('SqlTableService', () => {
           sheet_0: {
             uid: 'chat_table',
             name: '聊天专属表',
-            sourceData: { ddl: newDDL },
+            sourceData: { ddl: newDDL, nextRowId: 3 },
             content: [['row_id', '状态']],
             updateConfig: {},
             exportConfig: {},
@@ -1101,6 +1333,8 @@ describe('SqlTableService', () => {
 
       expect(result.errors).toEqual([]);
       expect(service.executeQuery('SELECT status FROM chat_table').values[0][0]).toBe('new');
+      expect(mockCurrentJsonTableData.sheet_0.sourceData.ddl).toBe(newDDL);
+      expect(mockCurrentJsonTableData.sheet_0.sourceData.nextRowId).toBe(10);
     });
 
     it('inherit_global 模式下 fallback 到全局模板', async () => {
@@ -1225,7 +1459,9 @@ describe('SqlTableService', () => {
 
       const queryResult = service.executeQuery('SELECT * FROM inventory ORDER BY row_id');
       expect(queryResult.rowCount).toBe(2);
+      expect(queryResult.values.map((row: any) => row[0])).toEqual([3, 4]);
       expect(queryResult.values[0]).toContain(10);
+      expect(service.getCurrentData()?.sheet_0.sourceData.nextRowId).toBe(5);
     });
 
     it('非空表不触发 reseed', () => {
@@ -1252,8 +1488,10 @@ describe('SqlTableService', () => {
       expect(queryResult.values[0][0]).toBe(0);
     });
 
-    it('reseed 成功但用户 SQL 失败时同步 JSON 视图避免状态分裂', () => {
+    it('用户 SQL 失败时 reseed 行与高水位在同一事务回滚', () => {
       service.applyEdits('DELETE FROM inventory;');
+      const beforeFailure = service.getCurrentData();
+      expect(beforeFailure?.sheet_0.sourceData.nextRowId).toBe(3);
       mockGetEffectiveSeedRows.mockReturnValue([
         ['1', '铁剑', '3'],
       ]);
@@ -1263,16 +1501,12 @@ describe('SqlTableService', () => {
       expect(result.changes).toBe(0);
       expect(result.errors.length).toBeGreaterThan(0);
 
-      // 验证 reseed 已落库（seedRows 作为初版快照保留）
+      // 整批事务失败：reseed 业务行没有落库。
       const queryResult = service.executeQuery('SELECT * FROM inventory ORDER BY row_id');
-      expect(queryResult.rowCount).toBe(1);
-      expect(queryResult.values[0]).toContain('铁剑');
-
-      // 验证 JSON 视图已同步（直接检查全局 mockCurrentJsonTableData，绕过 getCurrentData 的二次同步）
-      const sheetContent = mockCurrentJsonTableData?.sheet_0?.content;
-      expect(Array.isArray(sheetContent)).toBe(true);
-      expect(sheetContent.length).toBeGreaterThanOrEqual(2); // 表头 + 至少 1 行 seedRows
-      expect(sheetContent[1]).toContain('铁剑');
+      expect(queryResult.rowCount).toBe(0);
+      const afterFailure = service.getCurrentData();
+      expect(afterFailure?.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
+      expect(afterFailure?.sheet_0.sourceData.nextRowId).toBe(3);
     });
   });
 

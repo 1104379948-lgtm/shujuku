@@ -263,11 +263,11 @@ export async function proceedWithCardUpdate_ACU(
  * 批处理更新：presentation 层调用 service 层，根据返回值显示 toast
  */
 export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto', options: any = {}): Promise<BatchUpdateResult> {
+    // executeUpdate 回调：创建 AbortController 并调用 presentation 层的 proceedWithCardUpdate
     const result = await processUpdatesBatch_ACU(
         indicesToUpdate,
         mode,
         options,
-        // executeUpdate 回调：创建 AbortController 并调用 presentation 层的 proceedWithCardUpdate
         async (
             messagesToUse: any[],
             saveTargetIndex: number,
@@ -303,7 +303,7 @@ export async function handleManualUpdate_ACU() {
                 acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
             });
         }
- 
+
         // UI：收集手动额外提示
         collectManualExtraHint_ACU();
 
@@ -362,17 +362,17 @@ export async function handleManualUpdate_ACU() {
             },
         });
 
+        // processBatch 回调保留给兼容路径；当前手动填表主路径由 service grouped helper 执行。
+        // refreshData 回调执行纯数据刷新和 UI 刷新。
+        // 最后一个参数传入用户确认后的预清空选项。
         let result = await orchestrateManualUpdate_ACU(
             targetKeys,
-            // processBatch 回调保留给兼容路径；当前手动填表主路径由 service grouped helper 执行。
             async (indices, batchMode, batchOptions) => {
                 return processUpdates_ACU(indices, batchMode, batchOptions);
             },
-            // refreshData 回调（纯数据刷新 + UI 刷新）
             async () => {
                 await refreshMergedDataAndNotifyWithUI_ACU();
             },
-            // [新增] 传入用户确认后的预清空选项
             {
                 clearBeforeUpdate: true,
                 onProgress: event => handleProgressEvent(event, false, manualProgressToast),

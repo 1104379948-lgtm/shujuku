@@ -46,6 +46,9 @@ export interface Settings_ACU {
     isMain?: boolean;
     isMain2?: boolean;
   }>;
+  strictJsonCharCardPrompt: Settings_ACU['charCardPrompt'];
+  strictJsonSqlCharCardPrompt: Settings_ACU['charCardPrompt'];
+  charCardPromptDefaultsRefreshVersion: string;
   tableTemplate: string;
   autoUpdateEnabled: boolean;
   autoUpdateThresholdNewMessages: number;

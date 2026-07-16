@@ -166,6 +166,7 @@ export let settings_ACU: any = {
     charCardPrompt: DEFAULT_CHAR_CARD_PROMPT_ACU,
     strictJsonCharCardPrompt: DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU,
     strictJsonSqlCharCardPrompt: DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU,
+    charCardPromptDefaultsRefreshVersion: '',
     autoUpdateThreshold: DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
     autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
     autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,

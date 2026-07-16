@@ -4,9 +4,9 @@ const mocks = vi.hoisted(() => ({
   getChatArray: vi.fn(),
   getCurrentIsolationKey: vi.fn(() => ''),
   sanitizeChatSheetsObject: vi.fn((data: any) => data),
-  replaceAllData: vi.fn().mockResolvedValue({ success: true }),
-  getCurrentData: vi.fn(),
-  runTableUpdateCommit: vi.fn(),
+  provider: { mode: 'native', getCurrentData: vi.fn() },
+  replaceRuntimeDataStrict: vi.fn(),
+  runRuntimeDataReplaceCommit: vi.fn(),
 }));
 
 vi.mock('../../../src/service/chat/chat-service', () => ({
@@ -23,14 +23,12 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
 }));
 
 vi.mock('../../../src/service/table/table-storage-strategy', () => ({
-  getStorageProvider: vi.fn(() => ({
-    replaceAllData: mocks.replaceAllData,
-    getCurrentData: mocks.getCurrentData,
-  })),
+  getStorageProvider: vi.fn(() => mocks.provider),
 }));
 
 vi.mock('../../../src/service/table/table-update-commit', () => ({
-  runTableUpdateCommit_ACU: mocks.runTableUpdateCommit,
+  replaceRuntimeDataStrict_ACU: mocks.replaceRuntimeDataStrict,
+  runRuntimeDataReplaceCommit_ACU: mocks.runRuntimeDataReplaceCommit,
 }));
 
 vi.mock('../../../src/shared/utils', () => ({
@@ -43,13 +41,11 @@ describe('importTableJsonThroughCommit_ACU', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getChatArray.mockReturnValue([{ is_user: true }, { is_user: false, mes: 'AI回复' }]);
-    mocks.getCurrentData.mockReturnValue(null);
-    mocks.runTableUpdateCommit.mockImplementation(async (options: any, apply: any) => {
-      const applied = await apply();
+    mocks.runRuntimeDataReplaceCommit.mockImplementation(async (options: any) => {
       return {
-        success: applied.success !== false,
-        value: applied.value,
-        tableData: applied.tableData,
+        success: true,
+        value: options.mapValue(options.replacementData),
+        tableData: options.replacementData,
         messageIndex: options.targetMessageIndex,
       };
     });
@@ -65,9 +61,8 @@ describe('importTableJsonThroughCommit_ACU', () => {
     const result = await importTableJsonThroughCommit_ACU(JSON.stringify(importedData));
 
     expect(result.success).toBe(true);
-    expect(mocks.replaceAllData).toHaveBeenCalledWith(importedData);
     expect(result.persisted).toBe(true);
-    expect(mocks.runTableUpdateCommit).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.runRuntimeDataReplaceCommit).toHaveBeenCalledWith(expect.objectContaining({
       source: 'import',
       reason: 'importTableAsJson',
       targetMessageIndex: 1,
@@ -75,8 +70,9 @@ describe('importTableJsonThroughCommit_ACU', () => {
       updateGroupKeys: null,
       trackingSheetKeys: [],
       trackAsUpdate: false,
-      operations: [{ kind: 'data_replace', data: importedData, reason: 'import' }],
-    }), expect.any(Function));
+      replacementData: importedData,
+      replacementReason: 'import',
+    }));
   });
 
   it('删除楼层/备份恢复模式只恢复运行时，不写新的持久化事件', async () => {
@@ -84,13 +80,14 @@ describe('importTableJsonThroughCommit_ACU', () => {
       mate: { type: 'acu', version: 1 },
       sheet_0: { name: '纪要表', content: [['row_id', '事件'], ['1', '开始']] },
     };
+    mocks.replaceRuntimeDataStrict.mockResolvedValue(importedData);
 
     const result = await importTableJsonThroughCommit_ACU(JSON.stringify(importedData), { persist: false });
 
     expect(result.success).toBe(true);
     expect(result.persisted).toBe(false);
     expect(result.tableData).toEqual(importedData);
-    expect(mocks.replaceAllData).toHaveBeenCalledWith(importedData);
-    expect(mocks.runTableUpdateCommit).not.toHaveBeenCalled();
+    expect(mocks.replaceRuntimeDataStrict).toHaveBeenCalledWith(mocks.provider, importedData);
+    expect(mocks.runRuntimeDataReplaceCommit).not.toHaveBeenCalled();
   });
 });

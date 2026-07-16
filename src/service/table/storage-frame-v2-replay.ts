@@ -4,14 +4,14 @@ import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/mode
 import { logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../data/sqlite/sync-bridge';
-import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TablePatchV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
-import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
+import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
+import { normalizeSqlStatementsForRuntimeLog_ACU } from './sql-table-service';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -175,44 +175,9 @@ function getValidatedIntroductionsForFrame_ACU(
   return introductions;
 }
 
-function splitSqlStatementsForReplay_ACU(sql: string): string[] {
-  const statements: string[] = [];
-  let current = '';
-  let inString = false;
-  let stringChar = '';
-  for (let i = 0; i < sql.length; i += 1) {
-    const char = sql[i];
-    if (inString) {
-      current += char;
-      if (char === stringChar) {
-        if (i + 1 < sql.length && sql[i + 1] === stringChar) {
-          current += sql[i + 1];
-          i += 1;
-        } else {
-          inString = false;
-        }
-      }
-    } else if (char === "'" || char === '"') {
-      inString = true;
-      stringChar = char;
-      current += char;
-    } else if (char === ';') {
-      const trimmed = current.trim();
-      if (trimmed) statements.push(trimmed);
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-  const tail = current.trim();
-  if (tail) statements.push(tail);
-  return statements;
-}
-
 function normalizeSqlStatementsForReplay_ACU(statements: string[]): string[] {
   return statements
-    .flatMap(statement => splitSqlStatementsForReplay_ACU(String(statement || '').replace(/<!--|-->/g, '').trim()))
-    .map(statement => normalizeStatementValues(normalizeSqlStructure(statement)))
+    .flatMap(statement => normalizeSqlStatementsForRuntimeLog_ACU(String(statement || '')))
     .filter(Boolean);
 }
 
@@ -491,11 +456,12 @@ function applyTableEditDslOperationV2_ACU(state: TableDataObject_ACU, text: stri
     if (!sheet || !Array.isArray(sheet.content)) continue;
 
     materializeSeedRowsForDslReplay_ACU(sheet);
+    ensureStableNextRowId_ACU(sheet);
 
     if (command === 'insertRow') {
       const data = args[1] || {};
       const headers = Array.isArray(sheet.content[0]) ? sheet.content[0].slice(1) : [];
-      const row = [allocateStableRowId_ACU(createStableRowIdReservation_ACU(sheet.content.slice(1)))];
+      const row = [allocateStableRowIdForSheet_ACU(sheet)];
       headers.forEach((_, colIndex) => row.push(data[colIndex] ?? data[String(colIndex)] ?? ''));
       sheet.content.push(row);
     } else if (command === 'deleteRow') {

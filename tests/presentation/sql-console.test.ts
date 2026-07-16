@@ -76,6 +76,14 @@ describe('isSelectQuery', () => {
     expect(isSelectQuery('PRAGMA table_info(inventory);')).toBe(true);
   });
 
+  it('writable PRAGMA 返回 false', () => {
+    expect(isSelectQuery('PRAGMA user_version = 7;')).toBe(false);
+  });
+
+  it('WITH SELECT 返回 true', () => {
+    expect(isSelectQuery('WITH cte AS (SELECT 1 AS id) SELECT id FROM cte;')).toBe(true);
+  });
+
   it('EXPLAIN 返回 true', () => {
     expect(isSelectQuery('EXPLAIN QUERY PLAN SELECT 1;')).toBe(true);
   });
@@ -163,6 +171,14 @@ describe('executeSql', () => {
     expect($execStatus.html).toHaveBeenCalledWith(expect.stringContaining('1 行'));
   });
 
+  it('WITH SELECT 调用 executeQuery', async () => {
+    const sql = 'WITH cte AS (SELECT 1 AS id) SELECT id FROM cte;';
+    mockExecuteQuery.mockReturnValue({ columns: ['id'], values: [[1]], rowCount: 1 });
+    await executeSql(sql, $resultArea, $execStatus);
+    expect(mockExecuteQuery).toHaveBeenCalledWith(sql);
+    expect(mockExecuteSqlMutation).not.toHaveBeenCalled();
+  });
+
   it('SELECT 查询无结果', async () => {
     mockExecuteQuery.mockReturnValue({ columns: ['id'], values: [], rowCount: 0 });
     await executeSql('SELECT * FROM t WHERE 1=0;', $resultArea, $execStatus);
@@ -209,6 +225,14 @@ describe('executeSql', () => {
     mockExecuteQuery.mockReturnValue({ columns: ['name'], values: [['inventory']], rowCount: 1 });
     await executeSql('PRAGMA table_info(inventory);', $resultArea, $execStatus);
     expect(mockExecuteQuery).toHaveBeenCalled();
+    expect(mockExecuteMutation).not.toHaveBeenCalled();
+  });
+
+  it('writable PRAGMA 走 SQL API 公共提交模型', async () => {
+    mockExecuteSqlMutation.mockResolvedValue({ errors: [], changes: 0 });
+    await executeSql('PRAGMA user_version = 7;', $resultArea, $execStatus);
+    expect(mockExecuteSqlMutation).toHaveBeenCalledWith({ sql: 'PRAGMA user_version = 7;', trackingSheetKeys: [] });
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
     expect(mockExecuteMutation).not.toHaveBeenCalled();
   });
 });

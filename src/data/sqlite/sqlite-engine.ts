@@ -42,6 +42,7 @@ export interface MutationResult {
 /** 批量执行结果 */
 export interface BatchResult {
   totalChanges: number;
+  statementChanges: number[];
 }
 
 export class SqliteEngine {
@@ -150,10 +151,11 @@ export class SqliteEngine {
    */
   runBatch(statements: string[], paramsList?: (SqlJsBindParams | undefined)[]): BatchResult {
     this._ensureDb();
-    if (statements.length === 0) return { totalChanges: 0 };
+    if (statements.length === 0) return { totalChanges: 0, statementChanges: [] };
     logDebug_ACU(`[SQLite引擎] runBatch: 执行 ${statements.length} 条语句`);
 
     let totalChanges = 0;
+    const statementChanges = statements.map(() => 0);
     this.db!.run('BEGIN TRANSACTION;');
     try {
       for (let i = 0; i < statements.length; i++) {
@@ -161,7 +163,9 @@ export class SqliteEngine {
         if (!stmt) continue;
         try {
           this.db!.run(stmt, paramsList?.[i]);
-          totalChanges += this.db!.getRowsModified();
+          const changes = this.db!.getRowsModified();
+          statementChanges[i] = changes;
+          totalChanges += changes;
         } catch (e: any) {
           // 回滚事务
           try { this.db!.run('ROLLBACK;'); } catch (_) { /* 忽略回滚失败 */ }
@@ -171,7 +175,7 @@ export class SqliteEngine {
       }
       this.db!.run('COMMIT;');
       logDebug_ACU(`[SQLite引擎] runBatch: 事务提交成功, 共影响 ${totalChanges} 行`);
-      return { totalChanges };
+      return { totalChanges, statementChanges };
     } catch (e: any) {
       // 如果是我们自己抛出的格式化错误，直接重新抛出
       if (e.message && e.message.startsWith('第 ')) throw e;

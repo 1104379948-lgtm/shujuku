@@ -57,6 +57,10 @@ describe('strict-json-table-fill', () => {
     expect(mainPrompt).toContain('WHERE 条件选择原则');
     expect(mainPrompt).toContain('CASE 条件更新');
     expect(mainPrompt).toContain('禁止使用 DROP TABLE / ALTER TABLE / CREATE TABLE 等结构变更语句');
+    expect(mainPrompt).toContain('INSERT 只填写业务列，不要提供 row_id');
+    expect(mainPrompt).toContain('row_id 由系统自动分配');
+    expect(mainPrompt).not.toContain('MAX(row_id)');
+    expect(mainPrompt).not.toMatch(/INSERT INTO[^\n]*\(row_id,/);
     expect(mainPrompt).toContain('"format":"table_edit_sql_v1"');
     expect(mainPrompt).toContain('"sql":""');
     expect(mainPrompt).not.toContain('<tableEdit>\nINSERT INTO');

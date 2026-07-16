@@ -5,6 +5,7 @@ import type { SchemaMigrationPreflightIntent_ACU } from '../table/schema-migrati
 import { applySummaryIndexSequenceToTable_ACU, getSummaryIndexColumnIndex_ACU, isSpecialIndexLockEnabled_ACU } from '../runtime/helpers-remaining';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { buildDefaultExportConfig_ACU, ensureGlobalInjectionConfigDefaults_ACU, ensureSheetExportConfigDefaults_ACU } from '../worldbook/injection-engine';
+import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../../shared/stable-row-id-allocator';
 
 type AnyRecord = Record<string, any>;
 
@@ -271,6 +272,7 @@ function buildNewSheet_ACU(op: any, newKey: string, orderNo: number) {
     assertHeadersUnique_ACU(headers);
 
     const sourceData = sanitizeAddSheetConfig_ACU(op?.sourceData, buildDefaultSourceData_ACU(sheetName, headers), 'sourceData');
+    sourceData.nextRowId = 1;
     const updateConfigRaw = sanitizeAddSheetConfig_ACU(op?.updateConfig, buildDefaultUpdateConfig_ACU(), 'updateConfig');
     const updateConfig = { ...updateConfigRaw, uiSentinel: -1 };
     const exportConfig = sanitizeAddSheetConfig_ACU(op?.exportConfig, buildDefaultExportConfig_ACU(sheetName), 'exportConfig');
@@ -425,6 +427,7 @@ function applySheetContentPatch_ACU(sheet: any, sheetKey: string, rawPatch: any)
     });
 
     const normalizedDeleteRows = Array.from(new Set(deleteRows.map((item: any) => Number(item)))).sort((a, b) => b - a);
+    ensureStableNextRowId_ACU(sheet);
     normalizedDeleteRows.forEach((rowNumber, index) => {
         if (!Number.isInteger(rowNumber) || rowNumber <= 0) {
             throw new Error(`patch_sheet_content.deleteRows[${index}] 必须是正整数`);
@@ -450,7 +453,7 @@ function applySheetContentPatch_ACU(sheet: any, sheetKey: string, rawPatch: any)
             }
         });
         const newRow = new Array(headerRow.length).fill('');
-        newRow[0] = null;
+        newRow[0] = allocateStableRowIdForSheet_ACU(sheet);
         headers.forEach((header, headerIndex) => {
             newRow[headerIndex + 1] = Object.prototype.hasOwnProperty.call(rowPatch, header)
                 ? clone_ACU(rowPatch[header])

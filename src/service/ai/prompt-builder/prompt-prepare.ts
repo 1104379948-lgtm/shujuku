@@ -258,9 +258,9 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
     // SQLite 模式下追加 SQL 编辑格式兜底说明（Q17 确认：$0 自带格式说明）
     if (isSqliteMode() && tableDataText) {
         if (settings_ACU.strictJsonTableFillEnabled === true) {
-            tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在响应 JSON 的 sql 字符串中使用标准 SQL 语句（INSERT INTO / UPDATE / DELETE FROM）\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- INSERT 时 row_id 值为当前表最大 row_id + 1\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
+            tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在响应 JSON 的 sql 字符串中使用标准 SQL 语句（INSERT INTO / UPDATE / DELETE FROM）\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- INSERT 仅填写业务列，不要提供 row_id；row_id 由系统自动分配\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
         } else {
-            tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在 <tableEdit> 标签内使用标准 SQL 语句（INSERT INTO / UPDATE / DELETE FROM）\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- INSERT 时 row_id 值为当前表最大 row_id + 1\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
+            tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在 <tableEdit> 标签内使用标准 SQL 语句（INSERT INTO / UPDATE / DELETE FROM）\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- INSERT 仅填写业务列，不要提供 row_id；row_id 由系统自动分配\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
         }
     }
 

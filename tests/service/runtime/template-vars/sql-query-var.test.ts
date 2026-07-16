@@ -620,6 +620,22 @@ describe('sql-query-var', () => {
     it('空 SQL 返回空字符串', () => {
       expect(evaluateRawSqlExpression('sql ""')).toBe('');
     });
+
+    it.each([
+      'DELETE FROM inventory',
+      'SELECT 1; UPDATE inventory SET quantity = 0',
+      'PRAGMA user_version = 7',
+      'WITH changed AS (DELETE FROM inventory RETURNING *) SELECT * FROM changed',
+    ])('拒绝原生模板通过查询接口执行非只读 SQL: %s', sql => {
+      expect(evaluateRawSqlExpression(`sql "${sql}"`)).toBe('');
+      expect(evaluateRawSqlExpression('sql "SELECT quantity FROM inventory WHERE row_id = 1"')).toBe('3');
+    });
+
+    it('throwOnError 模式将非只读 SQL 转换为受控查询失败', () => {
+      expect(() => evaluateRawSqlExpression('sql "DELETE FROM inventory"', { throwOnError: true }))
+        .toThrow('sql_query_execution_failed');
+      expect(evaluateRawSqlExpression('sql "SELECT COUNT(*) FROM inventory"')).toBe('3');
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -756,6 +772,15 @@ describe('sql-query-var', () => {
 
     it('SQL 执行抛错时返回 false', () => {
       expect(evaluateSqlCondition('SELECT * FROM 完全不存在的表')).toBe(false);
+    });
+
+    it.each([
+      'UPDATE inventory SET quantity = 0',
+      'SELECT 1; DELETE FROM inventory',
+      'PRAGMA user_version = 7',
+    ])('拒绝条件 SQL 执行非只读语句: %s', sql => {
+      expect(evaluateSqlCondition(sql)).toBe(false);
+      expect(evaluateSqlCondition('SELECT quantity = 3 FROM inventory WHERE row_id = 1')).toBe(true);
     });
 
     it('空表达式返回 false', () => {

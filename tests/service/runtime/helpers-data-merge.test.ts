@@ -599,7 +599,7 @@ describe('mergeAllIndependentTables_ACU', () => {
       sheet_test: {
         uid: 'sheet_test',
         name: '旧表名',
-        sourceData: { note: '旧说明' },
+        sourceData: { note: '旧说明', nextRowId: 10 },
         updateConfig: { uiSentinel: 0 },
         exportConfig: { enabled: false },
         orderNo: 9,
@@ -615,7 +615,7 @@ describe('mergeAllIndependentTables_ACU', () => {
       sheet_test: {
         uid: 'sheet_test',
         name: '新表名',
-        sourceData: { note: '新说明' },
+        sourceData: { note: '新说明', nextRowId: 3 },
         updateConfig: { uiSentinel: -1 },
         exportConfig: { enabled: true },
         orderNo: 1,
@@ -627,7 +627,7 @@ describe('mergeAllIndependentTables_ACU', () => {
       sheet_test: {
         uid: 'sheet_test',
         name: '新表名',
-        sourceData: { note: '新说明' },
+        sourceData: { note: '新说明', nextRowId: 3 },
         updateConfig: { uiSentinel: -1 },
         exportConfig: { enabled: true },
         orderNo: 1,
@@ -640,7 +640,7 @@ describe('mergeAllIndependentTables_ACU', () => {
 
     expect(result).not.toBeNull();
     expect(result!.sheet_test.name).toBe('新表名');
-    expect(result!.sheet_test.sourceData).toEqual({ note: '新说明' });
+    expect(result!.sheet_test.sourceData).toEqual({ note: '新说明', nextRowId: 10 });
     expect(result!.sheet_test.updateConfig).toEqual({ uiSentinel: -1 });
     expect(result!.sheet_test.exportConfig).toEqual({ enabled: true });
     expect(result!.sheet_test.orderNo).toBe(1);
@@ -1380,7 +1380,7 @@ describe('parseReadableToJson_ACU', () => {
     });
   });
 
-  it('重建 Markdown 表格时使用稳定 allocator，不按新数组长度复用已占用身份', () => {
+  it('重建 Markdown 表格时从历史高水位连续分配 row_id', () => {
     Object.defineProperty(stateManager, 'currentJsonTableData_ACU', {
       value: {
         sheet_0: {
@@ -1396,9 +1396,10 @@ describe('parseReadableToJson_ACU', () => {
 
     expect(result?.sheet_0.content).toEqual([
       ['row_id', '物品名称'],
-      ['2', '魔法杖'],
-      ['4', '药水'],
+      ['4', '魔法杖'],
+      ['5', '药水'],
     ]);
+    expect(result?.sheet_0.sourceData.nextRowId).toBe(6);
     Object.defineProperty(stateManager, 'currentJsonTableData_ACU', {
       value: null, writable: true, configurable: true,
     });

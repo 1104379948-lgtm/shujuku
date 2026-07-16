@@ -288,7 +288,22 @@ describe('SyncBridge', () => {
       expect(engine.getTableNames()).toContain('inventory');
     });
 
-    it('同一快照内重复 row_id 时保留最后一行且不让整表从导出结果消失', () => {
+    it('strict 模式下同一快照内重复 row_id 时 fail closed 且不留下 SQLite 残骸', () => {
+      const duplicatedRowSheet = makeSheet({
+        content: [
+          ['row_id', '物品名称', '数量', '描述'],
+          ['1', '旧种子行', '1', '模板 seedRows'],
+          ['1', '新快照行', '9', '后续消息覆盖'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_0: duplicatedRowSheet }), { strict: true }))
+        .toThrow('snapshot 行标识不合法');
+      expect(engine.getTableNames()).not.toContain('inventory');
+      expect(engine.getTableNames()).not.toContain('_acu_sheet_meta');
+    });
+
+    it('非 strict 模式下重复 row_id 的普通 INSERT 冲突会回滚用户表和 meta', () => {
       const duplicatedRowSheet = makeSheet({
         content: [
           ['row_id', '物品名称', '数量', '描述'],
@@ -298,16 +313,8 @@ describe('SyncBridge', () => {
       });
 
       expect(() => bridge.loadFromTableData(makeTableData({ sheet_0: duplicatedRowSheet }))).not.toThrow();
-      expect(engine.query('SELECT item_name, quantity, description FROM inventory ORDER BY row_id;').values).toEqual([
-        ['新快照行', 9, '后续消息覆盖'],
-      ]);
-
-      const exported = bridge.exportToTableData(makeMate());
-      expect(Object.keys(exported).filter(k => k.startsWith('sheet_'))).toEqual(['sheet_0']);
-      expect((exported.sheet_0 as Sheet_ACU).content).toEqual([
-        ['row_id', '物品名称', '数量', '描述'],
-        ['1', '新快照行', '9', '后续消息覆盖'],
-      ]);
+      expect(engine.getTableNames()).not.toContain('inventory');
+      expect(engine.query("SELECT sheet_key FROM _acu_sheet_meta WHERE sheet_key = 'sheet_0';").values).toEqual([]);
     });
   });
 
@@ -460,4 +467,60 @@ describe('SyncBridge', () => {
       expect(result.values).toHaveLength(1);
     });
   });
+
+  describe('runBatchWithSheetMetadata 错误阶段映射', () => {
+    const metadataUpdate = () => ({ sheetKey: 'sheet_0', sheet: makeSheet() });
+
+    it('将物理第 1 条失败标记为 system_ddl', () => {
+      vi.spyOn(engine, 'runBatch').mockImplementationOnce(() => {
+        throw new Error('第 1 条语句失败: CREATE TABLE _acu_sheet_meta → ddl rejected');
+      });
+
+      try {
+        bridge.runBatchWithSheetMetadata(['UPDATE inventory SET quantity = 4'], [[]], [metadataUpdate()]);
+        throw new Error('expected runBatchWithSheetMetadata to throw');
+      } catch (error: any) {
+        expect(error.batchPhase).toBe('system_ddl');
+        expect(error.preparedStatementIndex).toBeUndefined();
+      }
+    });
+
+    it('扣除 system DDL 偏移后映射 preparedStatementIndex', () => {
+      vi.spyOn(engine, 'runBatch').mockImplementationOnce(() => {
+        throw new Error('第 3 条语句失败: UPDATE inventory SET quantity = 5 → business rejected');
+      });
+
+      try {
+        bridge.runBatchWithSheetMetadata(
+          ['UPDATE inventory SET quantity = 4', 'UPDATE inventory SET quantity = 5'],
+          [[], []],
+          [metadataUpdate()],
+        );
+        throw new Error('expected runBatchWithSheetMetadata to throw');
+      } catch (error: any) {
+        expect(error.batchPhase).toBe('prepared_statement');
+        expect(error.preparedStatementIndex).toBe(1);
+      }
+    });
+
+    it('将 prepared statements 之后的失败映射到 metadata 与 sheetKey', () => {
+      vi.spyOn(engine, 'runBatch').mockImplementationOnce(() => {
+        throw new Error('第 4 条语句失败: INSERT INTO _acu_sheet_meta → metadata rejected');
+      });
+
+      try {
+        bridge.runBatchWithSheetMetadata(
+          ['UPDATE inventory SET quantity = 4', 'UPDATE inventory SET quantity = 5'],
+          [[], []],
+          [metadataUpdate()],
+        );
+        throw new Error('expected runBatchWithSheetMetadata to throw');
+      } catch (error: any) {
+        expect(error.batchPhase).toBe('metadata');
+        expect(error.metadataUpdateIndex).toBe(0);
+        expect(error.sheetKey).toBe('sheet_0');
+      }
+    });
+  });
+
 });

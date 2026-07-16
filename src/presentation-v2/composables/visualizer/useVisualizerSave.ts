@@ -110,9 +110,11 @@ function buildOrderedData(
   return orderedData;
 }
 
-function saveLockDrafts(drafts: Record<string, VisualizerLockDraft>): void {
+function saveLockDrafts(drafts: Record<string, VisualizerLockDraft>, allowedSheetKeys?: Iterable<string>): void {
+  const allowedKeys = allowedSheetKeys ? new Set(allowedSheetKeys) : null;
   Object.entries(drafts || {}).forEach(([sheetKey, draft]) => {
     if (!sheetKey) return;
+    if (allowedKeys && !allowedKeys.has(sheetKey)) return;
     saveTableLocksForSheet_ACU(sheetKey, {
       rows: new Set(draft.rows || []),
       cols: new Set(draft.cols || []),
@@ -442,18 +444,20 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         visualizer.templateBaseData,
         orderedData,
       );
-      if (changes.deletedSheetKeys.length > 0) {
-        toastStore.error('模板保存不处理删表；请使用数据保存执行现有硬删除流程。', { muteable: false });
+      const orderedSheetKeys = Object.keys(orderedData).filter(key => key.startsWith('sheet_'));
+      if (orderedSheetKeys.length === 0) {
+        toastStore.error('当前模板至少需要保留一张表，无法保存空模板。', { muteable: false });
         return false;
       }
       const changedSheetKeys = [...new Set([
+        ...changes.deletedSheetKeys,
         ...changes.addedSheetKeys,
         ...changes.schemaChangedSheetKeys,
         ...changes.metadataChangedSheetKeys,
       ])];
       if (changedSheetKeys.length === 0) {
         if (visualizer.pendingLockChanges.length > 0 || visualizer.lockDraftsDirty) {
-          saveLockDrafts(visualizer.tableLockDrafts);
+          saveLockDrafts(visualizer.tableLockDrafts, orderedSheetKeys);
           visualizer.markSaved('template-chat');
           toastStore.success('表格锁定设置已保存。', { muteable: false });
           return true;
@@ -519,10 +523,16 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       if (!guideData || !Object.keys(guideData).some(key => key.startsWith('sheet_'))) {
         throw new Error('无法为当前模板结构生成聊天指导表。');
       }
-      const preparation = prepareTemplateSheetsForCommit_ACU(orderedData, changedSheetKeys);
+      const preparation = prepareTemplateSheetsForCommit_ACU(
+        orderedData,
+        changedSheetKeys.filter(sheetKey => !changes.deletedSheetKeys.includes(sheetKey)),
+      );
       const templateScopeSource = cloneData(orderedData);
       const schemaOperationBySheetKey = new Map(schemaOperations.map(operation => [operation.sheetKey, operation]));
       const sheetChanges = changedSheetKeys.map(sheetKey => {
+        if (changes.deletedSheetKeys.includes(sheetKey)) {
+          return { kind: 'deletion' as const, sheetKey };
+        }
         if (changes.addedSheetKeys.includes(sheetKey)) {
           return { kind: 'introduction' as const, sheetKey, sheetData: orderedData[sheetKey] };
         }
@@ -575,7 +585,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       let lockSaveFailed = false;
       const hasPendingLocks = visualizer.lockDraftsDirty || visualizer.pendingLockChanges.length > 0;
       if (hasPendingLocks) try {
-        saveLockDrafts(visualizer.tableLockDrafts);
+        saveLockDrafts(visualizer.tableLockDrafts, orderedSheetKeys);
       } catch (error) {
         lockSaveFailed = true;
         logWarn_ACU('[ACU-V2 Visualizer] template commit saved but lock drafts failed:', error);
@@ -605,7 +615,11 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       }
       const removedCount = preparation.removedNullRowCount + (commitResult.removedNullRowCount || 0);
       toastStore.success(
-        removedCount > 0 ? `模板/结构已保存到当前聊天，已移除 ${removedCount} 条缺少 row_id 的数据行。` : '模板/结构已保存到当前聊天。',
+        changes.deletedSheetKeys.length > 0
+          ? `模板/结构已保存到当前聊天，已从当前模板移除 ${changes.deletedSheetKeys.length} 张表；历史数据未执行硬删除。`
+          : removedCount > 0
+            ? `模板/结构已保存到当前聊天，已移除 ${removedCount} 条缺少 row_id 的数据行。`
+            : '模板/结构已保存到当前聊天。',
         { muteable: false });
       return true;
     });

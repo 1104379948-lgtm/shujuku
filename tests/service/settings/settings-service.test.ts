@@ -49,6 +49,9 @@ const {
     dataIsolationCode: '',
     dataIsolationEnabled: false,
     charCardPrompt: [],
+    strictJsonCharCardPrompt: [],
+    strictJsonSqlCharCardPrompt: [],
+    charCardPromptDefaultsRefreshVersion: '',
     mergeSummaryPrompt: '',
     mergeTargetCount: 1,
     mergeBatchSize: 5,
@@ -143,6 +146,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   DEFAULT_AUTO_UPDATE_FREQUENCY_ACU: 1,
   DEFAULT_AUTO_UPDATE_THRESHOLD_ACU: 3,
   DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 500,
+  CHAR_CARD_PROMPT_DEFAULTS_REFRESH_VERSION_ACU: 'test-char-card-prompt-refresh',
   TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU: 'test-table-defaults-refresh',
   VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
   defaultWorldbookConfig_ACU: {
@@ -297,6 +301,9 @@ beforeEach(() => {
   mockSettings.dataIsolationCode = '';
   mockSettings.dataIsolationEnabled = false;
   mockSettings.charCardPrompt = [];
+  mockSettings.strictJsonCharCardPrompt = [];
+  mockSettings.strictJsonSqlCharCardPrompt = [];
+  mockSettings.charCardPromptDefaultsRefreshVersion = '';
   mockSettings.mergeSummaryPrompt = '';
   mockSettings.plotSettings = { plotWorldbookConfig: null };
   mockSettings.plotPresetBindings = {};
@@ -540,6 +547,7 @@ describe('loadSettings_ACU', () => {
     const calledWith = mockSetSettings.mock.calls[0][0];
     expect(calledWith.autoUpdateEnabled).toBe(true);
     expect(calledWith.maxConcurrentGroups).toBe(1);
+    expect(calledWith.charCardPromptDefaultsRefreshVersion).toBe('');
   });
 
   it('有保存设置时 deepMerge 合并', () => {
@@ -563,6 +571,102 @@ describe('loadSettings_ACU', () => {
     const calledWith = mockSetSettings.mock.calls[0][0];
     expect(calledWith.autoUpdateEnabled).toBe(true);
   });
+
+  it('char-card 提示词版本不匹配时无条件覆盖三套提示词并持久化版本', () => {
+    mockReadProfileSettings.mockReturnValue({
+      charCardPrompt: [{ role: 'USER', content: '用户自定义普通提示词' }],
+      strictJsonCharCardPrompt: [{ role: 'USER', content: '用户自定义 strict 提示词' }],
+      strictJsonSqlCharCardPrompt: [{ role: 'USER', content: '用户自定义 SQL strict 提示词' }],
+      charCardPromptDefaultsRefreshVersion: 'old-version',
+      tableTemplateDefaultsRefreshVersion: 'test-table-defaults-refresh',
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.charCardPrompt).toEqual([{ role: 'USER', content: '默认提示词' }]);
+    expect(mockSettings.strictJsonCharCardPrompt).toEqual([{ role: 'USER', content: '默认 strict json 提示词' }]);
+    expect(mockSettings.strictJsonSqlCharCardPrompt).toEqual([{ role: 'USER', content: '默认 sql strict json 提示词' }]);
+    expect(mockSettings.charCardPromptDefaultsRefreshVersion).toBe('test-char-card-prompt-refresh');
+    expect(mockPersistSettingsToStorage).toHaveBeenCalledWith(mockSettings, '');
+  });
+
+  it('char-card 提示词版本已匹配时不重复覆盖用户后续修改', () => {
+    const customPrompt = [{ role: 'USER', content: '刷新完成后的普通提示词' }];
+    const customStrictPrompt = [{ role: 'USER', content: '刷新完成后的 strict 提示词' }];
+    const customSqlStrictPrompt = [{ role: 'USER', content: '刷新完成后的 SQL strict 提示词' }];
+    mockReadProfileSettings.mockReturnValue({
+      charCardPrompt: customPrompt,
+      strictJsonCharCardPrompt: customStrictPrompt,
+      strictJsonSqlCharCardPrompt: customSqlStrictPrompt,
+      charCardPromptDefaultsRefreshVersion: 'test-char-card-prompt-refresh',
+      tableTemplateDefaultsRefreshVersion: 'test-table-defaults-refresh',
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.charCardPrompt).toEqual(customPrompt);
+    expect(mockSettings.strictJsonCharCardPrompt).toEqual(customStrictPrompt);
+    expect(mockSettings.strictJsonSqlCharCardPrompt).toEqual(customSqlStrictPrompt);
+    expect(mockSettings.charCardPromptDefaultsRefreshVersion).toBe('test-char-card-prompt-refresh');
+  });
+
+  it('char-card 提示词刷新按 profile code 隔离，A 已匹配时保留修改而 B 独立刷新并持久化', () => {
+    const profileSettings: Record<string, any> = {
+      A: {
+        charCardPrompt: [{ role: 'USER', content: 'A 自定义普通提示词' }],
+        strictJsonCharCardPrompt: [{ role: 'USER', content: 'A 自定义 strict 提示词' }],
+        strictJsonSqlCharCardPrompt: [{ role: 'USER', content: 'A 自定义 SQL strict 提示词' }],
+        charCardPromptDefaultsRefreshVersion: 'test-char-card-prompt-refresh',
+        tableTemplateDefaultsRefreshVersion: 'test-table-defaults-refresh',
+      },
+      B: {
+        charCardPrompt: [{ role: 'USER', content: 'B 旧普通提示词' }],
+        strictJsonCharCardPrompt: [{ role: 'USER', content: 'B 旧 strict 提示词' }],
+        strictJsonSqlCharCardPrompt: [{ role: 'USER', content: 'B 旧 SQL strict 提示词' }],
+        charCardPromptDefaultsRefreshVersion: 'old-version',
+        tableTemplateDefaultsRefreshVersion: 'test-table-defaults-refresh',
+      },
+    };
+    const persistedSnapshots: Array<{ code: string; settings: any }> = [];
+    mockReadProfileSettings.mockImplementation((code: string) => JSON.parse(JSON.stringify(profileSettings[code] || null)));
+    mockPersistSettingsToStorage.mockImplementation((settings: any, code: string) => {
+      const snapshot = JSON.parse(JSON.stringify(settings));
+      persistedSnapshots.push({ code, settings: snapshot });
+      profileSettings[code] = snapshot;
+    });
+
+    mockGlobalMeta.activeIsolationCode = 'A';
+    loadSettings_ACU();
+    expect(mockSettings.dataIsolationCode).toBe('A');
+    expect(mockSettings.charCardPrompt).toEqual([{ role: 'USER', content: 'A 自定义普通提示词' }]);
+    expect(mockSettings.strictJsonCharCardPrompt).toEqual([{ role: 'USER', content: 'A 自定义 strict 提示词' }]);
+    expect(mockSettings.strictJsonSqlCharCardPrompt).toEqual([{ role: 'USER', content: 'A 自定义 SQL strict 提示词' }]);
+
+    mockGlobalMeta.activeIsolationCode = 'B';
+    loadSettings_ACU();
+    expect(mockSettings.dataIsolationCode).toBe('B');
+    expect(mockSettings.charCardPrompt).toEqual([{ role: 'USER', content: '默认提示词' }]);
+    expect(mockSettings.strictJsonCharCardPrompt).toEqual([{ role: 'USER', content: '默认 strict json 提示词' }]);
+    expect(mockSettings.strictJsonSqlCharCardPrompt).toEqual([{ role: 'USER', content: '默认 sql strict json 提示词' }]);
+    expect(mockSettings.charCardPromptDefaultsRefreshVersion).toBe('test-char-card-prompt-refresh');
+    expect(persistedSnapshots).toContainEqual(expect.objectContaining({
+      code: 'B',
+      settings: expect.objectContaining({
+        charCardPromptDefaultsRefreshVersion: 'test-char-card-prompt-refresh',
+        charCardPrompt: [{ role: 'USER', content: '默认提示词' }],
+        strictJsonCharCardPrompt: [{ role: 'USER', content: '默认 strict json 提示词' }],
+        strictJsonSqlCharCardPrompt: [{ role: 'USER', content: '默认 sql strict json 提示词' }],
+      }),
+    }));
+
+    mockGlobalMeta.activeIsolationCode = 'A';
+    loadSettings_ACU();
+    expect(mockSettings.dataIsolationCode).toBe('A');
+    expect(mockSettings.charCardPrompt).toEqual([{ role: 'USER', content: 'A 自定义普通提示词' }]);
+    expect(mockSettings.strictJsonCharCardPrompt).toEqual([{ role: 'USER', content: 'A 自定义 strict 提示词' }]);
+    expect(mockSettings.strictJsonSqlCharCardPrompt).toEqual([{ role: 'USER', content: 'A 自定义 SQL strict 提示词' }]);
+  });
+
 
   it('一次性默认模板刷新会覆盖旧默认模板', () => {
     mockReadProfileTemplate.mockReturnValue(DEFAULT_TEMPLATE_STR_ACU);

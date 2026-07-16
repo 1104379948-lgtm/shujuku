@@ -116,6 +116,11 @@ type TemplatePersistOperation_ACU = Extract<TableMutationOperationV2_ACU, {
 
 export type TemplateSheetChange_ACU =
   | {
+    /** 仅从当前聊天模板 guide/scope 移除表；不修改历史数据或 V2 回放日志。 */
+    kind: 'deletion';
+    sheetKey: string;
+  }
+  | {
     kind: 'introduction';
     sheetKey: string;
     sheetData: Sheet_ACU;
@@ -973,9 +978,6 @@ async function persistTableMutationLogV2Core_ACU(
   const shouldCheckpoint = !hasExistingCheckpoint
     && !isManualRefillProgressOnly
     && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
-  if (shouldCheckpoint && operations.length > 0) {
-    return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
-  }
   if (!shouldCheckpoint && operations.length > 0) {
     const replayPostconditionError = await getOperationReplayPostconditionError_ACU(
       chat,
@@ -1486,6 +1488,13 @@ function assertValidTemplateSheetChanges_ACU(sheetChanges: TemplateSheetChange_A
     throw new Error('当前楼层模板提交不能包含重复 sheetKey。');
   }
   for (const change of sheetChanges) {
+    if (change.kind === 'deletion') {
+      const keys = Object.keys(change as Record<string, unknown>).sort();
+      if (keys.length !== 2 || keys[0] !== 'kind' || keys[1] !== 'sheetKey') {
+        throw new Error(`当前楼层模板提交 deletion action 只能包含 kind 和 sheetKey：${change.sheetKey}。`);
+      }
+      continue;
+    }
     if (change.kind === 'introduction') {
       if (!isObjectRecord_ACU(change.sheetData)) throw new Error(`当前楼层模板提交缺少可恢复 Sheet：${change.sheetKey}。`);
       continue;
@@ -1583,6 +1592,20 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     if (chat[target.index] !== target.message || target.message.is_user) {
       throw new Error('target AI message changed before template commit; abort stale table write.');
     }
+    const deletionChanges = requestedChanges.filter((change): change is Extract<TemplateSheetChange_ACU, { kind: 'deletion' }> => change.kind === 'deletion');
+    if (deletionChanges.length > 0) {
+      if (!isObjectRecord_ACU(options.templateSource)) {
+        throw new Error('当前楼层模板删表必须提供删除后的完整 templateSource。');
+      }
+      for (const change of deletionChanges) {
+        if (Object.prototype.hasOwnProperty.call(options.templateSource, change.sheetKey)) {
+          throw new Error(`当前楼层模板删表的 templateSource 仍包含 Sheet：${change.sheetKey}。`);
+        }
+        if (Object.prototype.hasOwnProperty.call(options.guideData, change.sheetKey)) {
+          throw new Error(`当前楼层模板删表的 guideData 仍包含 Sheet：${change.sheetKey}。`);
+        }
+      }
+    }
 
     if (storageState.kind === 'pristine_without_checkpoint') {
       if (!isObjectRecord_ACU(options.templateSource)) {
@@ -1591,6 +1614,12 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       const templateSnapshot = deepClone_ACU(options.templateSource);
       await assertValidInitialTemplateSnapshot_ACU(templateSnapshot, options.guideData);
       for (const change of requestedChanges) {
+        if (change.kind === 'deletion') {
+          if (Object.prototype.hasOwnProperty.call(templateSnapshot, change.sheetKey)) {
+            throw new Error(`预填表模板提交的 templateSource 仍包含删除 Sheet：${change.sheetKey}。`);
+          }
+          continue;
+        }
         const snapshotSheet: unknown = templateSnapshot[change.sheetKey];
         if (!isObjectRecord_ACU(snapshotSheet) || !Array.isArray(snapshotSheet.content)) {
           throw new Error(`预填表模板提交的 templateSource 缺少变更 Sheet：${change.sheetKey}。`);
@@ -1642,6 +1671,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     const introductionSheets = new Map<string, Sheet_ACU>();
     let removedNullRowCount = 0;
     for (const change of requestedChanges) {
+      if (change.kind === 'deletion') continue;
       const targetSheetData = deepClone_ACU(change.kind === 'introduction' ? change.sheetData : change.targetSheetData);
       if (change.kind === 'introduction' && targetSheetData.content?.length !== 1) {
         throw new Error(`V2 sheet introduction only accepts a header-only sheet: sheetKey=${change.sheetKey}.`);

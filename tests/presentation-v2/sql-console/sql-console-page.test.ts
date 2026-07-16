@@ -22,9 +22,43 @@ async function mountAdvancedToolsSqlPanel(opts: {
     rowCount: 1,
   });
   const executeMutation = vi.fn(() => opts.mutationResult ?? { changes: 1, errors: [] });
+  const canonicalData = {};
+  const exportCanonicalData = vi.fn(() => canonicalData);
+  const prepareReseedPlanForEmptyTables = vi.fn(() => ({
+    statements: [],
+    paramsList: [],
+    metadataUpdates: [],
+  }));
+  const applyEditsBatchWithSheetMetadata = vi.fn((statements: string[]) => {
+    const mutationResult = executeMutation(statements.join('\n'), undefined);
+    if (mutationResult.errors.length > 0) {
+      return {
+        success: false,
+        appliedEdits: 0,
+        changes: 0,
+        statementChanges: statements.map(() => 0),
+        modifiedKeys: [],
+        error: mutationResult.errors.join('\n'),
+      };
+    }
+    return {
+      success: true,
+      appliedEdits: mutationResult.changes,
+      changes: mutationResult.changes,
+      statementChanges: statements.map((_, index) => index === 0 ? mutationResult.changes : 0),
+      modifiedKeys: [],
+    };
+  });
+  const createRuntimeSnapshot = vi.fn(() => new Uint8Array([1]));
+  const restoreRuntimeSnapshot = vi.fn();
   const provider = {
     executeQuery,
     executeMutation,
+    exportCanonicalData,
+    prepareReseedPlanForEmptyTables,
+    applyEditsBatchWithSheetMetadata,
+    createRuntimeSnapshot,
+    restoreRuntimeSnapshot,
   };
   const getStorageProvider = vi.fn(() => provider);
   const ensureStorageProviderReady = vi.fn(async () => provider);
@@ -60,6 +94,7 @@ async function mountAdvancedToolsSqlPanel(opts: {
     mount,
     executeQuery,
     executeMutation,
+    applyEditsBatchWithSheetMetadata,
     getStorageProvider,
   };
 }
@@ -173,7 +208,7 @@ describe('AdvancedToolsPage SQL panel', () => {
   });
 
   it('执行变更失败时展示错误结果', async () => {
-    const { mount, executeMutation } = await mountAdvancedToolsSqlPanel({
+    const { mount, executeMutation, applyEditsBatchWithSheetMetadata } = await mountAdvancedToolsSqlPanel({
       mutationResult: { changes: 0, errors: ['no such table: item'] },
     });
 
@@ -187,7 +222,14 @@ describe('AdvancedToolsPage SQL panel', () => {
     executeButton!.click();
     await new Promise(r => setTimeout(r, 0));
 
-    expect(executeMutation).toHaveBeenCalledWith("UPDATE item SET name = 'x';", undefined);
+    expect(applyEditsBatchWithSheetMetadata).toHaveBeenCalledWith(
+      ["UPDATE item SET name = 'x'"],
+      [[]],
+      [],
+      'sql_console_v2_mutation',
+      { includeImplicitReseed: false },
+    );
+    expect(executeMutation).toHaveBeenCalledWith("UPDATE item SET name = 'x'", undefined);
     const text = document.querySelector('.acu-v2-advanced-tools-page')?.textContent || '';
     expect(text).toContain('no such table: item');
     expect(text).toContain('失败');

@@ -8,8 +8,9 @@ import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../../../s
 import { ensureStorageProviderReady_ACU, getStorageProvider } from '../../../service/table/table-storage-strategy';
 import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
-import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
+import { runSqliteAtomicBatchCommit_ACU, runSqliteRuntimeMutationCommit_ACU } from '../../../service/table/table-update-commit';
 import { extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
+import { isSqlReadStatement_ACU } from '../../../service/table/sql-statement-classifier';
 import type { TableWriteConflictUnitV2_ACU } from '../../../service/table/storage-frame-v2-types';
 import type { SqlMutationResult, SqlQueryResult } from '../../../shared/table-storage-provider';
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
@@ -140,148 +141,7 @@ function parseSqlArgs_ACU(sqlOrOptions: any, params?: any, options?: any, method
     };
 }
 
-function stripSqlCommentsAndStrings_ACU(sql: string): string {
-    let output = '';
-    let inString: string | null = null;
-    let inLineComment = false;
-    let inBlockComment = false;
-
-    for (let i = 0; i < sql.length; i += 1) {
-        const char = sql[i];
-        const next = sql[i + 1];
-
-        if (inLineComment) {
-            if (char === '\n') {
-                inLineComment = false;
-                output += ' ';
-            }
-            continue;
-        }
-        if (inBlockComment) {
-            if (char === '*' && next === '/') {
-                inBlockComment = false;
-                i += 1;
-                output += ' ';
-            }
-            continue;
-        }
-        if (inString) {
-            if (char === inString) {
-                if (next === inString) {
-                    i += 1;
-                } else {
-                    inString = null;
-                }
-            }
-            output += ' ';
-            continue;
-        }
-
-        if (char === '-' && next === '-') {
-            inLineComment = true;
-            i += 1;
-            output += ' ';
-            continue;
-        }
-        if (char === '/' && next === '*') {
-            inBlockComment = true;
-            i += 1;
-            output += ' ';
-            continue;
-        }
-        if (char === '\'' || char === '"' || char === '`') {
-            inString = char;
-            output += ' ';
-            continue;
-        }
-        output += char;
-    }
-    return output;
-}
-
-function splitTopLevelSqlStatements_ACU(sql: string): string[] {
-    const statements: string[] = [];
-    let current = '';
-    let inString: string | null = null;
-    let inLineComment = false;
-    let inBlockComment = false;
-
-    for (let i = 0; i < sql.length; i += 1) {
-        const char = sql[i];
-        const next = sql[i + 1];
-
-        if (inLineComment) {
-            current += char;
-            if (char === '\n') inLineComment = false;
-            continue;
-        }
-        if (inBlockComment) {
-            current += char;
-            if (char === '*' && next === '/') {
-                current += next;
-                inBlockComment = false;
-                i += 1;
-            }
-            continue;
-        }
-        if (inString) {
-            current += char;
-            if (char === inString) {
-                if (next === inString) {
-                    current += next;
-                    i += 1;
-                } else {
-                    inString = null;
-                }
-            }
-            continue;
-        }
-
-        if (char === '-' && next === '-') {
-            current += char + next;
-            inLineComment = true;
-            i += 1;
-            continue;
-        }
-        if (char === '/' && next === '*') {
-            current += char + next;
-            inBlockComment = true;
-            i += 1;
-            continue;
-        }
-        if (char === '\'' || char === '"' || char === '`') {
-            inString = char;
-            current += char;
-            continue;
-        }
-        if (char === ';') {
-            const trimmed = current.trim();
-            if (trimmed) statements.push(trimmed);
-            current = '';
-            continue;
-        }
-        current += char;
-    }
-
-    const trimmed = current.trim();
-    if (trimmed) statements.push(trimmed);
-    return statements;
-}
-
-function containsWriteKeyword_ACU(sql: string): boolean {
-    const cleaned = stripSqlCommentsAndStrings_ACU(sql);
-    return /\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|TRUNCATE|VACUUM|ATTACH|DETACH|REINDEX|ANALYZE)\b/i.test(cleaned);
-}
-
-export function isSqlReadStatement_ACU(sql: string): boolean {
-    const statements = splitTopLevelSqlStatements_ACU(sql);
-    if (statements.length !== 1) return false;
-    const statement = statements[0].trim();
-    if (!/^(SELECT|PRAGMA|EXPLAIN|WITH)\b/i.test(statement)) return false;
-    if (/^WITH\b/i.test(statement) && containsWriteKeyword_ACU(statement)) return false;
-    if (!/^WITH\b/i.test(statement) && /^(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|TRUNCATE|VACUUM|ATTACH|DETACH|REINDEX|ANALYZE)\b/i.test(statement)) return false;
-    return true;
-}
+export { isSqlReadStatement_ACU } from '../../../service/table/sql-statement-classifier';
 
 function quoteIdentifier_ACU(name: string): string {
     return `\`${String(name).replace(/`/g, '``')}\``;
@@ -555,8 +415,13 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 if (args.params && args.params.length > 0) {
                     throw new Error('executeSqlBatch: params are not supported for batch SQL. Use literal multi-statement SQL or executeSqlMutation for one parameterized statement.');
                 }
+                const statements = splitSqlStatements(String(args.sql || '').replace(/<!--|-->/g, '').trim());
+                if (statements.length === 0) {
+                    throw new Error('executeSqlBatch: SQL batch is empty.');
+                }
                 const writeSet = buildRawSqlWriteSet_ACU(args);
-                const commitResult = await runTableUpdateCommit_ACU<PublicSqlBatchResult_ACU>({
+                const operations = buildRawSqlBatchOperations_ACU(args.sql);
+                const commitResult = await runSqliteAtomicBatchCommit_ACU<PublicSqlBatchResult_ACU>({
                     source: 'raw_sql_batch',
                     reason: 'raw_sql_batch',
                     isolationKey: getCurrentIsolationKey_ACU(),
@@ -568,30 +433,20 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     updateGroupKeys: args.updateGroupKeys,
                     trackingSheetKeys: args.trackingSheetKeys === undefined ? [] : args.trackingSheetKeys,
                     trackAsUpdate: false,
-                    operations: buildRawSqlBatchOperations_ACU(args.sql),
                     skipChatSave: args.skipChatSave,
-                }, async () => {
-                    const provider = await ensureStorageProviderReady_ACU();
-                    const batchResult = provider.applyEdits(args.sql, 'raw_sql_api');
-                    if (!batchResult.success) {
-                        return { success: false, error: batchResult.error || 'executeSqlBatch failed' };
-                    }
-                    const tableData = provider.getCurrentData();
-                    if (!tableData) {
-                        return { success: false, error: 'SQLite runtime data export failed' };
-                    }
-                    return {
-                        success: true,
-                        tableData: tableData as any,
-                        mutationResult: { changes: batchResult.appliedEdits, errors: [] },
-                        value: {
+                    prepare: () => ({
+                        statements,
+                        paramsList: statements.map((): SqlParam_ACU[] => []),
+                        metadataUpdates: [],
+                        operations,
+                        mapValue: () => ({
                             success: true,
-                            modifiedKeys: batchResult.modifiedKeys,
-                            appliedEdits: batchResult.appliedEdits,
-                            changes: batchResult.appliedEdits,
+                            modifiedKeys: args.targetSheetKeys || [],
+                            appliedEdits: statements.length,
+                            changes: 0,
                             errors: [],
-                        },
-                    };
+                        }),
+                    }),
                 });
                 if (!commitResult.success || !commitResult.value) {
                     return { success: false, modifiedKeys: [], appliedEdits: 0, changes: 0, errors: [commitResult.error || 'executeSqlBatch failed'] };
@@ -600,7 +455,12 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: false });
                     logDebug_ACU('executeSqlBatch: refreshed merged data after raw SQL transaction.');
                 }
-                return { ...commitResult.value, saved: commitResult.saved, messageIndex: commitResult.messageIndex };
+                return {
+                    ...commitResult.value,
+                    changes: commitResult.mutationResult?.changes ?? commitResult.value.changes,
+                    saved: commitResult.saved,
+                    messageIndex: commitResult.messageIndex,
+                };
             } catch (error: any) {
                 const message = error?.message || String(error);
                 logError_ACU('executeSqlBatch failed:', error);

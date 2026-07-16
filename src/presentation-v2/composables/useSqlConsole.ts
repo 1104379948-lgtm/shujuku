@@ -11,6 +11,7 @@ import { ensureStorageProviderReady_ACU } from '../../service/table/table-storag
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../../service/runtime/state-manager';
 import { runSqliteRuntimeMutationCommit_ACU } from '../../service/table/table-update-commit';
+import { isSqlReadStatement_ACU } from '../../service/table/sql-statement-classifier';
 import { useToastStore } from '../stores/toast-store';
 
 export type SqlConsoleMessageKind = 'info' | 'success' | 'warning' | 'error';
@@ -42,9 +43,7 @@ export const SQL_CONSOLE_MAX_HISTORY = 50;
 
 const sqlHistory = ref<SqlHistoryItem[]>([]);
 
-export function isSqlConsoleQuery(sql: string): boolean {
-  return /^\s*(SELECT|PRAGMA|EXPLAIN)/i.test(sql);
-}
+export const isSqlConsoleQuery = isSqlReadStatement_ACU;
 
 function emptyResult(): SqlResultState {
   return {

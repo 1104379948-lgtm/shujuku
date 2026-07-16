@@ -54,6 +54,8 @@ export interface SheetSourceData_ACU {
   insertNode: string;
   /** SQLite 模式下的建表 DDL（可选，仅 sqlite 模式使用） */
   ddl?: string;
+  /** 下一次由系统分配的永久 row_id；只能向前推进，不因删除行而回退 */
+  nextRowId?: number;
 }
 
 /** 单张表格（sheet）的完整结构 */

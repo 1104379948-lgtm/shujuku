@@ -2,12 +2,11 @@ import { getChatArray_ACU } from '../chat/chat-service';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { getNameMapper } from '../runtime/template-vars/name-mapper';
 import { getLatestTableAppendMessageIndexFromChat_ACU } from '../table/table-history';
-import { getStorageProvider } from '../table/table-storage-strategy';
-import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
+import { runSqliteAtomicBatchCommit_ACU, runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { isSqliteMode } from '../table/storage-mode';
 import type { TableMutationOperationV2_ACU, TableWriteConflictUnitV2_ACU } from '../table/storage-frame-v2-types';
 import { parseDDLTableName } from '../../shared/ddl-utils';
-import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
+import { allocateStableRowIdForSheet_ACU } from '../../shared/stable-row-id-allocator';
 
 const TEMP_ROW_ID_PREFIX_ACU = '__acu_vis_tmp_row_';
 
@@ -60,10 +59,6 @@ function isTempRowId_ACU(rowId: any): boolean {
 
 function getSheetByKey_ACU(data: any, sheetKey: string): any {
     return data && typeof data === 'object' ? data[sheetKey] : null;
-}
-
-function getRuntimeSheet_ACU(sheetKey: string): any {
-    return getSheetByKey_ACU(currentJsonTableData_ACU, sheetKey);
 }
 
 function getEnglishTableName_ACU(sheet: any): string {
@@ -173,18 +168,17 @@ function addWriteSet_ACU(writeSet: TableWriteConflictUnitV2_ACU[], unit: TableWr
     if (!writeSet.some(item => JSON.stringify(item) === key)) writeSet.push(unit);
 }
 
-function pushDeleteSql_ACU(statements: string[], paramsList: (string | number | null)[][], writeSet: TableWriteConflictUnitV2_ACU[], op: PendingDeleteRow_ACU): string | null {
-    const sheet = getRuntimeSheet_ACU(op.sheetKey);
+function pushDeleteSql_ACU(data: any, statements: string[], paramsList: (string | number | null)[][], op: PendingDeleteRow_ACU): string | null {
+    const sheet = getSheetByKey_ACU(data, op.sheetKey);
     const englishTableName = getEnglishTableName_ACU(sheet);
     if (!sheet || !englishTableName) return `删除行失败：表 ${op.sheetKey} 在运行时不存在。`;
     statements.push(`DELETE FROM ${quoteIdentifier_ACU(englishTableName)} WHERE ${quoteIdentifier_ACU('row_id')} = ?;`);
     paramsList.push([toSqlValueParam_ACU(op.rowId)]);
-    addWriteSet_ACU(writeSet, { kind: 'row', sheetKey: op.sheetKey, rowId: op.rowId });
     return null;
 }
 
-function pushUpdateSql_ACU(statements: string[], paramsList: (string | number | null)[][], writeSet: TableWriteConflictUnitV2_ACU[], op: PendingUpdateRow_ACU): string | null {
-    const sheet = getRuntimeSheet_ACU(op.sheetKey);
+function pushUpdateSql_ACU(data: any, statements: string[], paramsList: (string | number | null)[][], op: PendingUpdateRow_ACU): string | null {
+    const sheet = getSheetByKey_ACU(data, op.sheetKey);
     const englishTableName = getEnglishTableName_ACU(sheet);
     const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
     if (!sheet || !englishTableName) return `更新行失败：表 ${op.sheetKey} 在运行时不存在。`;
@@ -196,7 +190,6 @@ function pushUpdateSql_ACU(statements: string[], paramsList: (string | number | 
         if (!headers.includes(chineseColName)) continue;
         setClauses.push(`${quoteIdentifier_ACU(englishColName)} = ?`);
         params.push(toSqlValueParam_ACU(op.data[colName]));
-        addWriteSet_ACU(writeSet, { kind: 'cell', sheetKey: op.sheetKey, rowId: op.rowId, columnKey: chineseColName });
     }
     if (setClauses.length === 0) return null;
 
@@ -206,15 +199,15 @@ function pushUpdateSql_ACU(statements: string[], paramsList: (string | number | 
     return null;
 }
 
-function pushInsertSql_ACU(statements: string[], paramsList: (string | number | null)[][], writeSet: TableWriteConflictUnitV2_ACU[], state: any, op: PendingInsertRow_ACU): string | null {
-    const sheet = getRuntimeSheet_ACU(op.sheetKey);
+function pushInsertSql_ACU(data: any, statements: string[], paramsList: (string | number | null)[][], state: any, op: PendingInsertRow_ACU, rowId: string): string | null {
+    const sheet = getSheetByKey_ACU(data, op.sheetKey);
     const englishTableName = getEnglishTableName_ACU(sheet);
     const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
     const rowData = buildRowDataFromTemp_ACU(state, op.sheetKey, op.clientRowId);
     if (!sheet || !englishTableName || !rowData) return `新增行失败：表 ${op.sheetKey} 在运行时不存在，或临时行已丢失。`;
 
-    const columnNames: string[] = [];
-    const params: (string | number | null)[] = [];
+    const columnNames: string[] = [quoteIdentifier_ACU('row_id')];
+    const params: (string | number | null)[] = [toSqlValueParam_ACU(rowId)];
     for (const colName in rowData) {
         const { englishColName, chineseColName } = resolveColumnForSheet_ACU(englishTableName, colName);
         if (englishColName === 'row_id' || colName === 'row_id') continue;
@@ -223,11 +216,8 @@ function pushInsertSql_ACU(statements: string[], paramsList: (string | number | 
         params.push(toSqlValueParam_ACU(rowData[colName]));
     }
 
-    statements.push(columnNames.length > 0
-        ? `INSERT INTO ${quoteIdentifier_ACU(englishTableName)} (${columnNames.join(', ')}) VALUES (${columnNames.map(() => '?').join(', ')});`
-        : `INSERT INTO ${quoteIdentifier_ACU(englishTableName)} DEFAULT VALUES;`);
+    statements.push(`INSERT INTO ${quoteIdentifier_ACU(englishTableName)} (${columnNames.join(', ')}) VALUES (${columnNames.map(() => '?').join(', ')});`);
     paramsList.push(params);
-    addWriteSet_ACU(writeSet, { kind: 'sheet', sheetKey: op.sheetKey });
     return null;
 }
 
@@ -253,7 +243,7 @@ function findRowIndexById_ACU(sheet: any, rowId: string): number {
     return -1;
 }
 
-function buildNativeInsertCells_ACU(state: any, sheetKey: string, clientRowId: string, runtimeSheet: any): any[] | null {
+function buildNativeInsertCells_ACU(state: any, sheetKey: string, clientRowId: string, runtimeSheet: any, rowId: string): any[] | null {
     const tempSheet = getSheetByKey_ACU(state?.tempData, sheetKey);
     const tempContent = Array.isArray(tempSheet?.content) ? tempSheet.content : [];
     const tempRow = tempContent.find((row: any[], index: number) => index > 0 && Array.isArray(row) && String(row[0] ?? '') === clientRowId);
@@ -261,7 +251,7 @@ function buildNativeInsertCells_ACU(state: any, sheetKey: string, clientRowId: s
 
     const headers = Array.isArray(runtimeSheet?.content?.[0]) ? runtimeSheet.content[0] : [];
     const cells = headers.map((_: any, index: number) => tempRow[index] ?? '');
-    cells[0] = allocateStableRowId_ACU(createStableRowIdReservation_ACU(runtimeSheet?.content?.slice(1)));
+    cells[0] = rowId;
     return cells;
 }
 
@@ -294,6 +284,7 @@ async function applyNativeVisualizerPendingDataOps_ACU(
     }, ({ workingData }) => {
         const data = workingData as any;
         const operations: TableMutationOperationV2_ACU[] = [];
+        const allocatedSheetKeys = new Set<string>();
         let changes = 0;
 
         for (const op of Object.values(pending.deletesByRow)) {
@@ -329,12 +320,20 @@ async function applyNativeVisualizerPendingDataOps_ACU(
         for (const op of Object.values(pending.insertsByClientRowId)) {
             const sheet = data?.[op.sheetKey];
             if (!sheet || !Array.isArray(sheet.content)) return { success: false, error: `新增行失败：表 ${op.sheetKey} 在运行时不存在。` };
-            const cells = buildNativeInsertCells_ACU(state, op.sheetKey, op.clientRowId, sheet);
+            const rowId = allocateStableRowIdForSheet_ACU(sheet);
+            const cells = buildNativeInsertCells_ACU(state, op.sheetKey, op.clientRowId, sheet, rowId);
             if (!cells) return { success: false, error: `新增行失败：表 ${op.sheetKey} 的临时行已丢失。` };
             sheet.content.push(cells);
-            operations.push({ kind: 'row_upsert', sheetKey: op.sheetKey, rowId: String(cells[0] ?? ''), cells: [...cells] });
+            operations.push({ kind: 'row_upsert', sheetKey: op.sheetKey, rowId, cells: [...cells] });
+            allocatedSheetKeys.add(op.sheetKey);
             changes += 1;
         }
+
+        allocatedSheetKeys.forEach(sheetKey => operations.push({
+            kind: 'meta_update',
+            sheetKey,
+            meta: { sourceData: { nextRowId: data[sheetKey].sourceData.nextRowId } },
+        }));
 
         return {
             success: true,
@@ -358,63 +357,78 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
     if (!hasVisualizerPendingDataOps_ACU(state)) return { success: true, changed: false };
     if (!isSqliteMode()) return applyNativeVisualizerPendingDataOps_ACU(state, pending);
 
-    const statements: string[] = [];
-    const paramsList: (string | number | null)[][] = [];
-    const writeSet: TableWriteConflictUnitV2_ACU[] = [];
-
-    for (const op of Object.values(pending.deletesByRow)) {
-        const error = pushDeleteSql_ACU(statements, paramsList, writeSet, op);
-        if (error) return { success: false, changed: false, error };
-    }
-    for (const op of Object.values(pending.updatesByRow)) {
-        const error = pushUpdateSql_ACU(statements, paramsList, writeSet, op);
-        if (error) return { success: false, changed: false, error };
-    }
-    for (const op of Object.values(pending.insertsByClientRowId)) {
-        const error = pushInsertSql_ACU(statements, paramsList, writeSet, state, op);
-        if (error) return { success: false, changed: false, error };
-    }
-
-    if (statements.length === 0) return { success: true, changed: false };
-
-    const provider = getStorageProvider();
-    if (typeof provider.applyEditsBatch !== 'function') {
-        return { success: false, changed: false, error: '当前运行时不支持批量 SQL 保存，已阻止可视化编辑器数据写入。' };
-    }
-
+    const writeSet = buildNativeWriteSet_ACU(pending);
+    if (writeSet.length === 0) return { success: true, changed: false };
     const isolationKey = getCurrentIsolationKey_ACU();
     const appendTargetIndex = getLatestTableAppendMessageIndexFromChat_ACU(getChatArray_ACU(), isolationKey, settings_ACU);
     if (appendTargetIndex === -1) {
         return { success: false, changed: false, error: '找不到可写入 V2 增量日志的 AI 楼层，已阻止保存。' };
     }
 
-    const targetSheetKeys = [...new Set(writeSet.flatMap(unit => 'sheetKey' in unit ? [unit.sheetKey] : []))];
-    const commitResult = await runTableUpdateCommit_ACU<{ appliedEdits: number; changes: number }>({
+    const targetSheetKeys = getTargetSheetKeysFromWriteSet_ACU(writeSet);
+    const commitResult = await runSqliteAtomicBatchCommit_ACU<{ appliedEdits: number; changes: number }>({
         source: 'manual_crud',
         reason: 'visualizer_save_sql_batch',
         isolationKey,
-        writeSet: writeSet.length > 0 ? writeSet : [{ kind: 'all' }],
-        revisionWriteSet: writeSet.length > 0 ? writeSet : [{ kind: 'all' }],
+        writeSet,
+        revisionWriteSet: writeSet,
         initialData: currentJsonTableData_ACU,
         targetMessageIndex: appendTargetIndex,
         targetSheetKeys,
         updateGroupKeys: null,
         trackingSheetKeys: [],
         trackAsUpdate: false,
-        operations: [{ kind: 'sql_batch', statements, params: paramsList }],
-    }, () => {
-        const batchResult = provider.applyEditsBatch!(statements, 'visualizer_save', paramsList);
-        if (!batchResult.success) {
-            return { success: false, error: batchResult.error || 'visualizer_save_sql_batch failed' };
-        }
-        const tableData = provider.getCurrentData();
-        if (!tableData) return { success: false, error: 'SQLite runtime data export failed' };
-        return {
-            success: true,
-            value: { appliedEdits: batchResult.appliedEdits, changes: batchResult.appliedEdits },
-            tableData,
-            mutationResult: { changes: batchResult.appliedEdits, errors: [] },
-        };
+        prepare: ({ workingData }) => {
+            const data = workingData as any;
+            const statements: string[] = [];
+            const paramsList: (string | number | null)[][] = [];
+            const allocatedSheetKeys = new Set<string>();
+            const allocatedRows: Array<{ sheetKey: string; rowId: string }> = [];
+
+            for (const op of Object.values(pending.deletesByRow)) {
+                const error = pushDeleteSql_ACU(data, statements, paramsList, op);
+                if (error) return { error };
+            }
+            for (const op of Object.values(pending.updatesByRow)) {
+                const error = pushUpdateSql_ACU(data, statements, paramsList, op);
+                if (error) return { error };
+            }
+            for (const op of Object.values(pending.insertsByClientRowId)) {
+                const sheet = getSheetByKey_ACU(data, op.sheetKey);
+                if (!sheet || !Array.isArray(sheet.content)) return { error: `新增行失败：表 ${op.sheetKey} 在运行时不存在。` };
+                const rowId = allocateStableRowIdForSheet_ACU(sheet);
+                const error = pushInsertSql_ACU(data, statements, paramsList, state, op, rowId);
+                if (error) return { error };
+                allocatedSheetKeys.add(op.sheetKey);
+                allocatedRows.push({ sheetKey: op.sheetKey, rowId });
+            }
+            if (statements.length === 0) return { error: '可视化编辑器没有生成可提交的 SQL 变更。' };
+
+            const metadataUpdates = [...allocatedSheetKeys].map(sheetKey => ({ sheetKey, sheet: data[sheetKey] }));
+            const operations: TableMutationOperationV2_ACU[] = [{ kind: 'sql_batch', statements, params: paramsList }];
+            allocatedSheetKeys.forEach(sheetKey => operations.push({
+                kind: 'meta_update',
+                sheetKey,
+                meta: { sourceData: { nextRowId: data[sheetKey].sourceData.nextRowId } },
+            }));
+
+            return {
+                statements,
+                paramsList,
+                metadataUpdates,
+                operations,
+                validate: tableData => {
+                    for (const { sheetKey, rowId } of allocatedRows) {
+                        const sheet = (tableData as any)?.[sheetKey];
+                        const hasRow = Array.isArray(sheet?.content) && sheet.content.some((row: any[], index: number) => index > 0 && String(row?.[0] ?? '') === rowId);
+                        if (!hasRow) return `可视化编辑器 SQLite 保存后缺少新增行 ${sheetKey}:${rowId}。`;
+                        if (sheet?.sourceData?.nextRowId !== data[sheetKey].sourceData.nextRowId) return `可视化编辑器 SQLite 保存后高水位未原子推进：${sheetKey}。`;
+                    }
+                    return null;
+                },
+                mapValue: () => ({ appliedEdits: statements.length, changes: statements.length }),
+            };
+        },
     });
 
     if (!commitResult.success) {

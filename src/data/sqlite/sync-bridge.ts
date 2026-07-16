@@ -126,6 +126,62 @@ export class SyncBridge {
     return this.exportToTableData(originalData.mate as Mate_ACU);
   }
 
+  /**
+   * 将用户 SQL 与完整 Sheet metadata 放入同一个 SQLite 事务。
+   * metadata 表属于 SyncBridge 私有实现，上层只能提交 canonical Sheet，
+   * 不能自行拼接系统表 SQL。
+   */
+  runBatchWithSheetMetadata(
+    statements: string[],
+    paramsList: (((string | number | null)[]) | undefined)[],
+    metadataUpdates: Array<{ sheetKey: string; sheet: Sheet_ACU }>,
+  ): { totalChanges: number; statementChanges: number[] } {
+    const metaSql = `INSERT INTO ${META_TABLE_NAME} (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(sheet_key) DO UPDATE SET
+        uid = excluded.uid,
+        name = excluded.name,
+        order_no = excluded.order_no,
+        source_data_json = excluded.source_data_json,
+        update_config_json = excluded.update_config_json,
+        export_config_json = excluded.export_config_json;`;
+    const metaParams = metadataUpdates.map(({ sheetKey, sheet }) => [
+      sheetKey,
+      sheet.uid || sheetKey,
+      sheet.name || sheetKey,
+      sheet.orderNo ?? 0,
+      JSON.stringify(sheet.sourceData || {}),
+      JSON.stringify(sheet.updateConfig || {}),
+      JSON.stringify(sheet.exportConfig || {}),
+    ]);
+
+    let result;
+    try {
+      result = this.engine.runBatch(
+        [META_TABLE_DDL, ...statements, ...metadataUpdates.map(() => metaSql)],
+        [undefined, ...paramsList, ...metaParams],
+      );
+    } catch (error: any) {
+      const match = String(error?.message || '').match(/^第\s*(\d+)\s*条语句失败/);
+      const physicalIndex = match ? Number.parseInt(match[1], 10) - 1 : -1;
+      if (physicalIndex === 0) {
+        error.batchPhase = 'system_ddl';
+      } else if (physicalIndex > 0 && physicalIndex <= statements.length) {
+        error.batchPhase = 'prepared_statement';
+        error.preparedStatementIndex = physicalIndex - 1;
+      } else if (physicalIndex > statements.length) {
+        error.batchPhase = 'metadata';
+        error.metadataUpdateIndex = physicalIndex - statements.length - 1;
+        error.sheetKey = metadataUpdates[error.metadataUpdateIndex]?.sheetKey;
+      }
+      throw error;
+    }
+    return {
+      totalChanges: result.totalChanges,
+      statementChanges: result.statementChanges.slice(1, 1 + statements.length),
+    };
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // 内部方法
   // ═══════════════════════════════════════════════════════════════

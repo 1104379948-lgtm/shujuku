@@ -10,6 +10,7 @@ import { jQuery_API_ACU } from '../dom-utils';
 import { showToastr_ACU } from '../theme/toast';
 import { ensureStorageProviderReady_ACU } from '../../service/table/table-storage-strategy';
 import { isSqliteMode } from '../../service/table/storage-mode';
+import { isSqlReadStatement_ACU } from '../../service/table/sql-statement-classifier';
 import { $popupInstance_ACU } from '../state/ui-refs';
 import { createSqlApi } from '../bootstrap/api-groups/sql-api';
 
@@ -138,10 +139,10 @@ export async function bindSqlConsoleEvents_ACU(): Promise<void> {
 }
 
 /**
- * 判断 SQL 是否为查询语句（SELECT/PRAGMA/EXPLAIN）
+ * 判断 SQL 是否为严格只读语句。
  */
 export function isSelectQuery(sql: string): boolean {
-    return /^\s*(SELECT|PRAGMA|EXPLAIN)/i.test(sql);
+    return isSqlReadStatement_ACU(sql);
 }
 
 /**

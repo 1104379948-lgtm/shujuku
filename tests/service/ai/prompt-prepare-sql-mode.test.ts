@@ -172,6 +172,9 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result!.tableDataText).toContain('INSERT INTO');
     expect(result!.tableDataText).toContain('UNIQUE 约束');
     expect(result!.tableDataText).toContain('表达式更新');
+    expect(result!.tableDataText).toContain('INSERT 仅填写业务列，不要提供 row_id');
+    expect(result!.tableDataText).toContain('row_id 由系统自动分配');
+    expect(result!.tableDataText).not.toContain('最大 row_id + 1');
   });
 
   it('非 SQL 模式下不追加 SQL 编辑格式说明', async () => {

@@ -827,6 +827,37 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
 
+  it('pristine 聊天删除模板 Sheet 时仅更新 guide/template scope，不创建 V2 数据', async () => {
+    const message = { is_user: false } as any;
+    mocks.chat.push(message);
+    const templateSource = { mate: { type: 'acu' }, sheet_a: sheetA };
+    const guideData = { sheet_a: { name: 'A' } };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'deletion', sheetKey: 'sheet_b' }],
+      guideData,
+      templateSource,
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: true, mode: 'template_only', messageIndex: 0, checkpoints: [] });
+    expect(mocks.loadReplayState).not.toHaveBeenCalled();
+    expect(mocks.setGuide).toHaveBeenCalledWith('', guideData, expect.objectContaining({
+      templateSource: expect.objectContaining({
+        mate: expect.objectContaining({ type: 'acu' }),
+        sheet_a: expect.objectContaining({
+          name: 'A',
+          sourceData: expect.objectContaining({ ddl: expect.any(String) }),
+        }),
+      }),
+      syncTemplateScope: true,
+    }));
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(message.TavernDB_ACU_IsolatedData).toBeUndefined();
+  });
+
   it('尚无 full checkpoint 且缺少完整 templateSource 时拒绝并保持消息不变', async () => {
     const message = { is_user: false, marker: 'unchanged' } as any;
     mocks.chat.push(message);
@@ -1223,36 +1254,39 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     ]);
     expect(mocks.saveChat).toHaveBeenCalledOnce();
 
-    const rejectedInitialMessage = { is_user: false } as any;
-    mocks.chat.splice(0, mocks.chat.length, rejectedInitialMessage);
-    const initialSnapshot = JSON.parse(JSON.stringify(rejectedInitialMessage));
-    const rejectedInitialIsolatedData = rejectedInitialMessage.TavernDB_ACU_IsolatedData;
+    const initialOperationMessage = { is_user: false } as any;
+    mocks.chat.splice(0, mocks.chat.length, initialOperationMessage);
     mocks.saveChat.mockClear();
     mocks.saveChatStrict.mockClear();
-    for (const operation of [
-      { kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['2', 'identity-mismatch'] },
-      { kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1'] },
-      { kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'unreplayed-change' } },
-    ]) {
-      const result = await persistTableMutationLogV2_ACU({
-        targetMessageIndex: 0,
-        source: 'manual_fill',
-        afterData,
-        filledSheetKeys: ['sheet_a'],
-        candidateChangedSheetKeys: ['sheet_a'],
-        operations: [operation] as any,
-        checkpointReason: 'init',
-        forceCheckpoint: true,
-        transactionContext: makeTransaction(),
-        assumeCommitLock: true,
-      });
+    mocks.loadReplayState.mockClear();
+    const initialOperationResult = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData,
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{
+        kind: 'row_upsert',
+        sheetKey: 'sheet_a',
+        rowId: '1',
+        cells: ['1', 'first-real-data'],
+      }],
+      checkpointReason: 'init',
+      forceCheckpoint: true,
+      strictSave: true,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
 
-      expect(result).toEqual({ saved: false, error: expect.stringContaining('初始 full checkpoint 不接受 operations') });
-      expect(rejectedInitialMessage).toEqual(initialSnapshot);
-      expect(rejectedInitialMessage.TavernDB_ACU_IsolatedData).toBe(rejectedInitialIsolatedData);
-      expect(mocks.saveChat).not.toHaveBeenCalled();
-      expect(mocks.saveChatStrict).not.toHaveBeenCalled();
-    }
+    expect(initialOperationResult.saved).toBe(true);
+    expect(initialOperationResult.entry).toBeUndefined();
+    expect(initialOperationMessage.TavernDB_ACU_IsolatedData[''].storageFrame).toMatchObject({
+      checkpoint: { kind: 'full', reason: 'init', data: afterData },
+      logEntries: [],
+    });
+    expect(mocks.loadReplayState).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
 
     mocks.chat.splice(0, mocks.chat.length, message);
     mocks.loadReplayState.mockResolvedValue(afterData);
@@ -1274,6 +1308,77 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     const persistedFrame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
     expect(persistedFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'init', data: afterData });
     expect(persistedFrame.logEntries).toHaveLength(1);
+  });
+
+  it('init checkpoint 吸收 operations 后 strict save 失败时不残留 frame 或 identity', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const message = { is_user: false, TavernDB_ACU_Identity: 'original-identity' } as any;
+    const afterData = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'first-real-data']] },
+      sheet_b: sheetB,
+    } as any;
+    mocks.chat.splice(0, mocks.chat.length, message);
+    mocks.saveChatStrict.mockReset().mockRejectedValueOnce(new Error('init checkpoint save failed'));
+
+    await expect(persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData,
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{
+        kind: 'row_upsert',
+        sheetKey: 'sheet_a',
+        rowId: '1',
+        cells: ['1', 'first-real-data'],
+      }],
+      checkpointReason: 'init',
+      forceCheckpoint: true,
+      strictSave: true,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    })).rejects.toThrow('init checkpoint save failed');
+
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(message).toEqual({ is_user: false, TavernDB_ACU_Identity: 'original-identity' });
+  });
+
+  it('无 checkpoint 的既有 V2 frame 创建 migration checkpoint 失败时恢复原 orphan frame', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const orphanFrame = {
+      version: 2,
+      headRevision: '7:orphan',
+      logEntries: [makeEntry({ seq: 7, entryId: 'orphan', commitRevision: '7:orphan' })],
+    };
+    const isolatedData = {
+      '': { _acu_storage_version: 2, storageFrame: orphanFrame },
+    };
+    const message = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: isolatedData,
+      TavernDB_ACU_Identity: 'legacy-identity',
+    } as any;
+    const afterData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    mocks.chat.splice(0, mocks.chat.length, message);
+    mocks.saveChatStrict.mockReset().mockRejectedValueOnce(new Error('migration checkpoint save failed'));
+
+    await expect(persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData,
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      strictSave: true,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    })).rejects.toThrow('migration checkpoint save failed');
+
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(isolatedData);
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame).toBe(orphanFrame);
+    expect(message.TavernDB_ACU_Identity).toBe('legacy-identity');
   });
 
   it('在最新 AI 楼层原子追加多个既有 Sheet operation 与 guide，并且严格保存一次', async () => {
@@ -1886,5 +1991,187 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(mocks.setGuide).not.toHaveBeenCalled();
     expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a).toBeUndefined();
+  });
+
+  it('已有 V2 数据时删除模板 Sheet 不修改 checkpoint、日志或历史数据', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const frameBefore = JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData[''].storageFrame));
+    const templateSource = { mate: { type: 'acu' }, sheet_a: sheetA };
+    const guideData = { sheet_a: { name: 'A' } };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'deletion', sheetKey: 'sheet_b' }],
+      guideData,
+      templateSource,
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit', messageIndex: 0, checkpoints: [], removedNullRowCount: 0 });
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame).toEqual(frameBefore);
+    expect(mocks.setGuide).toHaveBeenCalledWith('', guideData, expect.objectContaining({
+      templateSource,
+      syncTemplateScope: true,
+    }));
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+  });
+
+  it('已有 V2 数据时混合删除、新增与 metadata 变更，删除项不进入 checkpoint 或 mutation log', async () => {
+    const message = seedFrame({ logEntries: [] });
+    let transactionOptions: any;
+    mocks.runTransaction.mockImplementationOnce(async (options: any, task: any) => {
+      transactionOptions = options;
+      return task({
+        baseRevision: 'runtime-v1:test',
+        assertFresh: vi.fn(),
+        runCommit: async (commitTask: () => any) => commitTask(),
+      });
+    });
+    const introducedSheet = { ...sheetB, uid: 'new-sheet', name: '新增表' };
+    const updatedSheet = { ...sheetA, name: '更新表名' };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [
+        { kind: 'deletion', sheetKey: 'sheet_b' },
+        { kind: 'introduction', sheetKey: 'sheet_new', sheetData: introducedSheet },
+        {
+          kind: 'operations',
+          sheetKey: 'sheet_a',
+          targetSheetData: updatedSheet,
+          operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: '更新表名' } }],
+        },
+      ],
+      guideData: { sheet_a: { name: '更新表名' }, sheet_new: { name: '新增表' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: updatedSheet, sheet_new: introducedSheet },
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit', messageIndex: 0, removedNullRowCount: 0 });
+    expect(result.checkpoints).toEqual([
+      expect.objectContaining({ kind: 'sheet_full', sheetKey: 'sheet_new' }),
+    ]);
+    expect(transactionOptions.writeSet).toEqual(expect.arrayContaining([
+      { kind: 'schema', sheetKey: 'sheet_b' },
+      { kind: 'schema', sheetKey: 'sheet_new' },
+      { kind: 'schema', sheetKey: 'sheet_a' },
+    ]));
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.perSheetCheckpoints.sheet_new).toEqual(expect.objectContaining({ sheetKey: 'sheet_new' }));
+    expect(frame.perSheetCheckpoints.sheet_b).toEqual(expect.objectContaining({ sheetKey: 'sheet_b' }));
+    expect(frame.logEntries).toHaveLength(1);
+    expect(frame.logEntries[0].changedSheetKeys).toEqual(['sheet_a']);
+    expect(frame.logEntries[0].operations).toEqual([
+      expect.objectContaining({ kind: 'meta_update', sheetKey: 'sheet_a' }),
+    ]);
+    expect(frame.logEntries[0].operations).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ sheetKey: 'sheet_b' }),
+    ]));
+  });
+
+  it('deletion-only 严格保存失败时回滚 guide、scope、identity 与 V2 frame', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+    const originalFrame = JSON.parse(JSON.stringify(originalIsolatedData[''].storageFrame));
+    message.TavernDB_ACU_Identity = 'old-identity';
+    const originalScope = JSON.parse(JSON.stringify(mocks.scopeContainer));
+    const originalGuide = JSON.parse(JSON.stringify(mocks.guideContainer));
+    mocks.settings.dataIsolationEnabled = true;
+    mocks.settings.dataIsolationCode = 'new-identity';
+    mocks.setGuide.mockImplementation(() => {
+      mocks.scopeContainer.template[''].changed = true;
+      mocks.guideContainer.tags[''].changed = true;
+      return true;
+    });
+    mocks.saveChatStrict.mockRejectedValueOnce(new Error('deletion host save failed'));
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'deletion', sheetKey: 'sheet_b' }],
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA },
+      syncTemplateScope: true,
+    });
+
+    expect(result).toEqual({ saved: false, error: 'deletion host save failed' });
+    expect(mocks.saveChatStrict).toHaveBeenCalledTimes(2);
+    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame).toEqual(originalFrame);
+    expect(message.TavernDB_ACU_Identity).toBe('old-identity');
+    expect(mocks.scopeContainer).toEqual(originalScope);
+    expect(mocks.guideContainer).toEqual(originalGuide);
+  });
+
+  it('删除模板 Sheet 后 templateSource 仍残留该 key 时 fail closed', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'deletion', sheetKey: 'sheet_b' }],
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('templateSource 仍包含 Sheet：sheet_b') });
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+  });
+
+  it('删除模板 Sheet 后 guideData 仍残留该 key 时 fail closed', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'deletion', sheetKey: 'sheet_b' }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA },
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('guideData 仍包含 Sheet：sheet_b') });
+    expect(mocks.runTransaction).toHaveBeenCalledTimes(1);
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+  });
+
+  it.each([
+    ['非法 deletion key', [{ kind: 'deletion', sheetKey: 'invalid_key' }], '非法 sheetKey'],
+    ['重复 deletion key', [
+      { kind: 'deletion', sheetKey: 'sheet_b' },
+      { kind: 'deletion', sheetKey: 'sheet_b' },
+    ], '重复 sheetKey'],
+  ])('%s 在事务前拒绝且零写入', async (_label, sheetChanges, expectedError) => {
+    const message = seedFrame({ logEntries: [] });
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: sheetChanges as any,
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA },
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining(expectedError) });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+  });
+
+  it('deletion action 携带额外字段时在事务前拒绝', async () => {
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'deletion', sheetKey: 'sheet_b', targetSheetData: sheetB }] as any,
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA },
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('只能包含 kind 和 sheetKey') });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 });

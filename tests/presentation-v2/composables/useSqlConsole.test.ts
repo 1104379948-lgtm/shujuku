@@ -16,10 +16,41 @@ function mockSqlConsoleDeps(opts: {
     return opts.queryResult ?? { columns: ['name'], values: [['items']], rowCount: 1 };
   });
   const executeMutation = vi.fn(() => opts.mutationResult ?? { changes: 2, errors: [] });
+  const canonicalData = { mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } };
+  const exportCanonicalData = vi.fn(() => canonicalData);
+  const prepareReseedPlanForEmptyTables = vi.fn(() => ({ statements: [], paramsList: [], metadataUpdates: [] }));
+  const applyEditsBatchWithSheetMetadata = vi.fn((statements: string[]) => {
+    const mutationResult = executeMutation(statements.join('\n'), undefined);
+    if (mutationResult.errors.length > 0) {
+      return {
+        success: false,
+        appliedEdits: 0,
+        changes: 0,
+        statementChanges: statements.map(() => 0),
+        modifiedKeys: [],
+        error: mutationResult.errors.join('\n'),
+      };
+    }
+    return {
+      success: true,
+      appliedEdits: mutationResult.changes,
+      changes: mutationResult.changes,
+      statementChanges: statements.map((_, index) => index === 0 ? mutationResult.changes : 0),
+      modifiedKeys: [],
+    };
+  });
+  const createRuntimeSnapshot = vi.fn(() => new Uint8Array([1]));
+  const restoreRuntimeSnapshot = vi.fn();
   const provider = {
+    mode: 'sqlite',
     executeQuery,
     executeMutation,
-    getCurrentData: vi.fn(() => ({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } })),
+    getCurrentData: vi.fn(() => canonicalData),
+    exportCanonicalData,
+    prepareReseedPlanForEmptyTables,
+    applyEditsBatchWithSheetMetadata,
+    createRuntimeSnapshot,
+    restoreRuntimeSnapshot,
   };
   const getStorageProvider = vi.fn(() => provider);
   const ensureStorageProviderReady = vi.fn(async () => provider);
@@ -54,7 +85,7 @@ function mockSqlConsoleDeps(opts: {
     }, _options.initialData || null)),
   }));
 
-  return { executeQuery, executeMutation, getStorageProvider };
+  return { executeQuery, executeMutation, applyEditsBatchWithSheetMetadata, getStorageProvider };
 }
 
 beforeEach(() => {
@@ -105,6 +136,20 @@ describe('useSqlConsole', () => {
     expect(flow.statusKind.value).toBe('success');
   });
 
+  it('WITH SELECT 走查询路径，writable PRAGMA 不得绕过受控 mutation', async () => {
+    const deps = mockSqlConsoleDeps({});
+    const { flow } = await freshFlow();
+    flow.sqlText.value = 'WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;';
+    await flow.executeCurrent();
+    expect(deps.executeQuery).toHaveBeenCalledWith('WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;');
+
+    flow.sqlText.value = 'PRAGMA user_version = 7;';
+    await flow.executeCurrent();
+    expect(deps.applyEditsBatchWithSheetMetadata).toHaveBeenCalledWith(
+      ['PRAGMA user_version = 7'], [[]], [], 'sql_console_v2_mutation', { includeImplicitReseed: false },
+    );
+  });
+
   it('执行变更语句失败时写入错误结果和失败历史', async () => {
     const deps = mockSqlConsoleDeps({
       mutationResult: { changes: 0, errors: ['no such table: item'] },
@@ -113,7 +158,10 @@ describe('useSqlConsole', () => {
     flow.sqlText.value = "UPDATE item SET name = 'x';";
     await flow.executeCurrent();
 
-    expect(deps.executeMutation).toHaveBeenCalledWith("UPDATE item SET name = 'x';", undefined);
+    expect(deps.applyEditsBatchWithSheetMetadata).toHaveBeenCalledWith(
+      ["UPDATE item SET name = 'x'"], [[]], [], 'sql_console_v2_mutation', { includeImplicitReseed: false },
+    );
+    expect(deps.executeMutation).toHaveBeenCalledWith("UPDATE item SET name = 'x'", undefined);
     expect(flow.result.value.kind).toBe('error');
     expect(flow.result.value.error).toContain('no such table');
     expect(flow.history.value[0]).toMatchObject({ success: false });

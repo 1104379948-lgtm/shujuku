@@ -21,7 +21,7 @@ import { persistTableMutationLogV2_ACU } from '../table/storage-frame-v2-persist
 import { migrateLegacyStorageToV2OnLoad_ACU } from '../table/storage-v2-migration';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
-import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
+import { replaceSheetSourceDataPreservingNextRowId_ACU, reserveStableRowIdsForSheet_ACU } from '../../shared/stable-row-id-allocator';
 
 /**
  * Legacy entry point retained for callers that need in-place normalization.
@@ -48,7 +48,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
               const next = JSON.parse(JSON.stringify(hist));
               next.uid = k;
               if (guideSheet?.name) next.name = guideSheet.name;
-              if (guideSheet?.sourceData) next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+              if (guideSheet?.sourceData) replaceSheetSourceDataPreservingNextRowId_ACU(next, guideSheet.sourceData);
               if (guideSheet?.updateConfig) next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
               if (guideSheet?.exportConfig) next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
               const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
@@ -739,10 +739,10 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
             const originalSheet = newJsonData[sheetKey];
             const originalHeaderRow = originalSheet.content[0];
             const newContent = [originalHeaderRow]; // Start with the original header row.
-            const reservedRowIds = createStableRowIdReservation_ACU(originalSheet.content.slice(1));
 
             // Find all valid markdown table row lines, skipping the format line.
             const dataLines = lines.filter(line => line.trim().startsWith('|') && !line.includes('---'));
+            const rowIds = reserveStableRowIdsForSheet_ACU(originalSheet, Math.max(0, dataLines.length - 1));
 
             // The first markdown row is the header text, which we ignore since we use the original header.
             for (let i = 1; i < dataLines.length; i++) {
@@ -750,7 +750,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                 // Split by '|', remove the first and last empty elements, and trim whitespace.
                 const columns = line.split('|').slice(1, -1).map(c => c.trim());
                 
-                const newRow = [allocateStableRowId_ACU(reservedRowIds), ...columns];
+                const newRow = [rowIds[i - 1], ...columns];
                 
                 // Pad or truncate the row to match the header's column count for consistency.
                 if (newRow.length < originalHeaderRow.length) {

@@ -18,6 +18,7 @@ import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
+import { materializeStableSeedRowsForSheet_ACU, replaceSheetSourceDataPreservingNextRowId_ACU } from '../../shared/stable-row-id-allocator';
 
 import { applyTableDelta_ACU, isDeltaTagData_ACU } from './table-delta';
 /**
@@ -47,7 +48,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, buildSqlSheetBatchOperations_ACU, normalizeSqlStatementsForRuntimeLog_ACU, prepareSystemAllocatedRowIdSql_ACU } from './sql-table-service';
 import { loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -220,7 +221,9 @@ function restoreGuideStructure(mergedSheet: any, guideSheet: any): void {
     if (!mergedSheet || typeof mergedSheet !== 'object') return;
 
     // 恢复 sourceData（包含 DDL、note 等用户在可视化编辑器中修改的关键配置）
-    if (guideSheet.sourceData) mergedSheet.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+    if (guideSheet.sourceData) {
+        replaceSheetSourceDataPreservingNextRowId_ACU(mergedSheet, guideSheet.sourceData);
+    }
 
     // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的
     if (Array.isArray(guideSheet.content) && guideSheet.content.length > 0 &&
@@ -422,27 +425,94 @@ function buildSheetReplaceOperationsFromData_ACU(
     return operations;
 }
 
-function getTouchedSheetKeysFromSqlText_ACU(sqlText: string, tableData: Record<string, any>): string[] {
-    const statements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-    if (statements.length === 0) return [];
-    const tableNames = extractTableNamesFromStatements(statements);
-    return mapSqlTableNamesToSheetKeys_ACU(tableData as any, tableNames);
-}
+type SqlFailureSource_ACU =
+    | { kind: 'system_ddl' }
+    | { kind: 'reseed' }
+    | { kind: 'group'; groupKey: string }
+    | { kind: 'metadata'; sheetKey?: string };
 
-function findSqlFailureGroupKey_ACU(sqlTexts: string[], responses: GroupFillResponse_ACU[], errorMessage: string): string | null {
-    const match = String(errorMessage || '').match(/第\s*(\d+)\s*条语句失败/);
+type StructuredSqlBatchError_ACU = Error & { batchPhase?: string; preparedStatementIndex?: number; metadataUpdateIndex?: number; sheetKey?: string };
+
+function findSqlFailureSource_ACU(
+    sqlTexts: string[],
+    responses: GroupFillResponse_ACU[],
+    errorMessage: string,
+    reseedStatements: string[],
+): SqlFailureSource_ACU | null {
+    const normalizedError = String(errorMessage || '');
+    if (reseedStatements.some(statement => statement.length > 0 && normalizedError.includes(statement))) {
+        return { kind: 'reseed' };
+    }
+    for (let index = 0; index < sqlTexts.length; index += 1) {
+        const statements = normalizeSqlStatementsForRuntimeLog_ACU(sqlTexts[index] || '');
+        if (statements.some(statement => statement.length > 0 && normalizedError.includes(statement))) {
+            const groupKey = responses[index]?.job?.groupKey;
+            return groupKey ? { kind: 'group', groupKey } : null;
+        }
+    }
+
+    const match = normalizedError.match(/第\s*(\d+)\s*条语句失败/);
     const failedIndex = match ? Number.parseInt(match[1], 10) : NaN;
     if (!Number.isFinite(failedIndex) || failedIndex <= 0) return null;
+    if (failedIndex <= reseedStatements.length) return { kind: 'reseed' };
 
-    let cursor = 0;
+    let cursor = reseedStatements.length;
     for (let i = 0; i < sqlTexts.length; i += 1) {
         const count = normalizeSqlStatementsForRuntimeLog_ACU(sqlTexts[i]).length;
         if (failedIndex > cursor && failedIndex <= cursor + count) {
-            return responses[i]?.job?.groupKey || null;
+            const groupKey = responses[i]?.job?.groupKey;
+            return groupKey ? { kind: 'group', groupKey } : null;
         }
         cursor += count;
     }
     return null;
+}
+
+function findStructuredSqlFailureSource_ACU(
+    error: StructuredSqlBatchError_ACU,
+    sqlTexts: string[],
+    responses: GroupFillResponse_ACU[],
+    reseedStatements: string[],
+): SqlFailureSource_ACU | null {
+    if (error?.batchPhase === 'system_ddl') return { kind: 'system_ddl' };
+    if (error?.batchPhase === 'metadata') {
+        return { kind: 'metadata', ...(typeof error.sheetKey === 'string' && error.sheetKey ? { sheetKey: error.sheetKey } : {}) };
+    }
+    if (error?.batchPhase !== 'prepared_statement' || !Number.isInteger(error.preparedStatementIndex)) return null;
+    const failedIndex = Number(error.preparedStatementIndex);
+    if (failedIndex < 0) return null;
+    if (failedIndex < reseedStatements.length) return { kind: 'reseed' };
+    let cursor = reseedStatements.length;
+    for (let index = 0; index < sqlTexts.length; index += 1) {
+        const count = normalizeSqlStatementsForRuntimeLog_ACU(sqlTexts[index] || '').length;
+        if (failedIndex >= cursor && failedIndex < cursor + count) {
+            const groupKey = responses[index]?.job?.groupKey;
+            return groupKey ? { kind: 'group', groupKey } : null;
+        }
+        cursor += count;
+    }
+    return null;
+}
+
+function formatSqlBatchFailure_ACU(source: SqlFailureSource_ACU | null, rawErrorMessage: string): string {
+    if (source?.kind === 'system_ddl') return `统一提交失败：SQLite system_ddl 执行失败。${rawErrorMessage}`;
+    if (source?.kind === 'reseed') return `统一提交失败：seedRows reseed SQL 执行失败。${rawErrorMessage}`;
+    if (source?.kind === 'group') return `统一提交失败：group ${source.groupKey} SQL 执行失败。${rawErrorMessage}`;
+    if (source?.kind === 'metadata') {
+        return `统一提交失败：Sheet metadata 写入失败${source.sheetKey ? ` (${source.sheetKey})` : ''}。${rawErrorMessage}`;
+    }
+    return `统一提交失败：SQL 执行失败。${rawErrorMessage}`;
+}
+
+async function restoreSqliteRuntimeAfterPostCommitFailure_ACU(provider: any, snapshot: unknown, error: unknown): Promise<never> {
+    const failureMessage = error instanceof Error ? error.message : String(error);
+    try {
+        await provider.restoreRuntimeSnapshot(snapshot);
+    } catch (restoreError: unknown) {
+        const restoreMessage = restoreError instanceof Error ? restoreError.message : String(restoreError);
+        throw new Error(`统一提交后置校验失败：${failureMessage}；SQLite runtime snapshot 恢复失败：${restoreMessage}`);
+    }
+    throw error instanceof Error ? error : new Error(failureMessage);
 }
 
 function getRuntimeTableDataSnapshot_ACU(fallbackData: Record<string, any> | null = null): Record<string, any> | null {
@@ -863,8 +933,9 @@ function buildSqlInitializationBase_ACU(baseSnapshot: Record<string, any>, targe
                 seedRows = JSON.parse(JSON.stringify(sourceSheet.content.slice(1)));
             }
             if (Array.isArray(seedRows) && seedRows.length > 0) {
-                targetSheet.content = [targetSheet.content[0] || [], ...JSON.parse(JSON.stringify(seedRows))];
-                targetSheet.content = ensureStableRowIdsForSheetContent_ACU(targetSheet.content);
+                const headerRow = Array.isArray(targetSheet.content[0]) ? targetSheet.content[0] : ['row_id'];
+                const materializedRows = materializeStableSeedRowsForSheet_ACU(targetSheet, seedRows);
+                targetSheet.content = [headerRow, ...materializedRows];
                 sheetChanged = true;
             }
         }
@@ -964,22 +1035,11 @@ export async function applyUnifiedGroupFillResponses_ACU(
     if (allResponsesAreRuntimeSql) {
         const operations: TableMutationOperationV2_ACU[] = [];
         const sqlTexts: string[] = [];
+        const preparedSqlTexts: string[] = [];
+        let reseedStatements: string[] = [];
 
         for (const response of sortedResponses) {
-            const sqlText = response.tableEditText || '';
-            const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(sqlText, baseSnapshot);
-            if (Array.isArray(response.job.targetSheetKeys) && response.job.targetSheetKeys.length > 0) {
-                const allowedSheetKeys = new Set(response.job.targetSheetKeys);
-                const unauthorizedKeys = touchedKeys.filter((sheetKey: string) => !allowedSheetKeys.has(sheetKey));
-                if (unauthorizedKeys.length > 0) {
-                    return {
-                        success: false,
-                        modifiedKeys: [],
-                        error: `统一提交失败：group ${response.job.groupKey} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。`,
-                    };
-                }
-            }
-            sqlTexts.push(sqlText);
+            sqlTexts.push(response.tableEditText || '');
         }
 
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
@@ -999,37 +1059,133 @@ export async function applyUnifiedGroupFillResponses_ACU(
             skipChatSave: options.isImportMode,
         }, async () => {
             const provider = await ensureStorageProviderReady_ACU();
-            let parseResult: any;
-            try {
-                parseResult = typeof provider.applyEditsBatch === 'function'
-                    ? provider.applyEditsBatch(sqlTexts, options.updateMode)
-                    : provider.applyEdits(sqlTexts.join('\n'), options.updateMode);
-            } catch (error: any) {
-                const rawErrorMessage = error?.message || String(error);
-                const failedGroupKey = findSqlFailureGroupKey_ACU(sqlTexts, sortedResponses, rawErrorMessage);
-                return {
-                    success: false,
-                    error: failedGroupKey
-                        ? `统一提交失败：group ${failedGroupKey} SQL 执行失败。${rawErrorMessage}`
-                        : `统一提交失败：SQL 执行失败。${rawErrorMessage}`,
-                };
+            if (typeof provider.exportCanonicalData !== 'function') {
+                return { success: false, error: '统一提交失败：当前 SQLite 运行时不支持严格 canonical data 导出。' };
             }
-            if (!parseResult?.success) {
-                return {
-                    success: false,
-                    error: parseResult?.error ? `统一提交失败：SQL 执行失败。${parseResult.error}` : '统一提交失败：SQL 执行失败。',
-                };
+            if (typeof provider.applyEditsBatchWithSheetMetadata !== 'function') {
+                return { success: false, error: '统一提交失败：当前 SQLite 运行时不支持 SQL 与 Sheet metadata 原子提交。' };
+            }
+            if (typeof provider.prepareReseedPlanForEmptyTables !== 'function') {
+                return { success: false, error: '统一提交失败：当前 SQLite 运行时不支持显式 seedRows reseed prepare。' };
+            }
+            if (typeof provider.createRuntimeSnapshot !== 'function' || typeof provider.restoreRuntimeSnapshot !== 'function') {
+                return { success: false, error: '统一提交失败：当前 SQLite 运行时不支持 runtime snapshot 补偿。' };
+            }
+            let canonicalData: Record<string, any> | null = null;
+            try {
+                canonicalData = cloneTableDataSnapshot_ACU(provider.exportCanonicalData() as any);
+            } catch (error: any) {
+                return { success: false, error: `统一提交失败：无法导出 SQLite canonical data，拒绝分配永久 row_id。${error?.message || String(error)}` };
+            }
+            if (!canonicalData) return { success: false, error: '统一提交失败：严格 canonical data 为空，拒绝分配永久 row_id。' };
+            const allocationData = canonicalData;
+
+            const statements: string[] = [];
+            const paramsList: (string | number | null)[][] = [];
+            const metadataBySheet = new Map<string, any>();
+            operations.length = 0;
+            preparedSqlTexts.length = 0;
+            try {
+                const reseedPlan = provider.prepareReseedPlanForEmptyTables(canonicalData as any);
+                reseedStatements = [...reseedPlan.statements];
+                statements.push(...reseedPlan.statements);
+                paramsList.push(...reseedPlan.paramsList);
+                reseedPlan.metadataUpdates.forEach(update => {
+                    const clonedUpdate = JSON.parse(JSON.stringify(update));
+                    metadataBySheet.set(update.sheetKey, clonedUpdate);
+                    allocationData[update.sheetKey] = clonedUpdate.sheet;
+                });
+                const reseedOperations = buildSqlSheetBatchOperations_ACU(reseedPlan.statements, allocationData as any, {
+                    params: reseedPlan.paramsList,
+                    fallbackTargetSheetKeys: [...allTargetSheetKeySet],
+                    allowSingleTargetFallback: false,
+                    keepLegacyForUnclassified: false,
+                    reason: 'system',
+                });
+                if (reseedOperations.unknownStatements.length > 0
+                    || reseedOperations.ambiguousStatements.length > 0
+                    || reseedOperations.operations.some(operation => operation.kind === 'sql_batch')) {
+                    throw new Error('seedRows reseed SQL 无法归属到单表日志，拒绝执行。');
+                }
+                operations.push(...reseedOperations.operations);
+
+                sortedResponses.forEach((response, index) => {
+                    const prepared = prepareSystemAllocatedRowIdSql_ACU(sqlTexts[index] || '', allocationData as any);
+                    preparedSqlTexts.push(prepared.statements.join(';\n'));
+                    const operationBuild = buildSqlSheetBatchOperations_ACU(prepared.statements, allocationData as any, {
+                        fallbackTargetSheetKeys: response.job.targetSheetKeys,
+                        allowSingleTargetFallback: true,
+                        keepLegacyForUnclassified: false,
+                        reason: 'system',
+                    });
+                    if (operationBuild.unknownStatements.length > 0
+                        || operationBuild.ambiguousStatements.length > 0
+                        || operationBuild.operations.some(operation => operation.kind === 'sql_batch')) {
+                        throw new Error(`group ${response.job.groupKey} SQL 语句无法归属到单表日志，拒绝写入不可预清理的 SQL 增量。`);
+                    }
+                    const allowedSheetKeys = new Set(response.job.targetSheetKeys || []);
+                    const unauthorizedKeys = operationBuild.operations
+                        .filter((operation): operation is Extract<TableMutationOperationV2_ACU, { kind: 'sql_sheet_batch' }> => operation.kind === 'sql_sheet_batch')
+                        .map(operation => operation.sheetKey)
+                        .filter(sheetKey => allowedSheetKeys.size > 0 && !allowedSheetKeys.has(sheetKey));
+                    if (unauthorizedKeys.length > 0) {
+                        throw new Error(`group ${response.job.groupKey} 越权修改了非目标表 (${[...new Set(unauthorizedKeys)].join(', ')})。`);
+                    }
+                    statements.push(...prepared.statements);
+                    paramsList.push(...prepared.statements.map((): (string | number | null)[] => []));
+                    prepared.metadataUpdates.forEach(update => metadataBySheet.set(update.sheetKey, update));
+                    operations.push(...operationBuild.operations);
+                });
+                const authorizedSheetKeys = new Set(allTargetSheetKeySet);
+                const unauthorizedOperationKeys = operations
+                    .filter((operation): operation is Extract<TableMutationOperationV2_ACU, { kind: 'sql_sheet_batch' }> => operation.kind === 'sql_sheet_batch')
+                    .map(operation => operation.sheetKey)
+                    .filter(sheetKey => !authorizedSheetKeys.has(sheetKey));
+                if (unauthorizedOperationKeys.length > 0) {
+                    throw new Error(`完整 prepared batch 越权修改了非目标表 (${[...new Set(unauthorizedOperationKeys)].join(', ')})。`);
+                }
+                metadataBySheet.forEach(update => {
+                    const nextRowId = update.sheet?.sourceData?.nextRowId;
+                    if (Number.isSafeInteger(nextRowId) && nextRowId >= 1) {
+                        operations.push({
+                            kind: 'meta_update',
+                            sheetKey: update.sheetKey,
+                            meta: { sourceData: { nextRowId } },
+                        });
+                    }
+                });
+            } catch (error: any) {
+                return { success: false, error: `统一提交失败：${error?.message || String(error)}` };
             }
 
-            const runtimeData = provider.getCurrentData() || currentJsonTableData_ACU || baseSnapshot;
-            operations.length = 0;
-            sortedResponses.forEach((response, index) => {
-                const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
-                if (operationBuild.success === false) {
-                    throw new Error(`统一提交失败：group ${response.job.groupKey} ${operationBuild.error}`);
-                }
-                operations.push(...operationBuild.operations);
-            });
+            let parseResult: any;
+            const runtimeSnapshot = provider.createRuntimeSnapshot();
+            if (runtimeSnapshot == null) {
+                return { success: false, error: '统一提交失败：SQLite runtime snapshot 创建失败，拒绝执行不可补偿的写入。' };
+            }
+            try {
+                parseResult = provider.applyEditsBatchWithSheetMetadata(
+                    statements,
+                    paramsList,
+                    [...metadataBySheet.values()],
+                    options.updateMode,
+                    { includeImplicitReseed: false },
+                );
+            } catch (error: any) {
+                const rawErrorMessage = error?.message || String(error);
+                const failureSource = findStructuredSqlFailureSource_ACU(error, preparedSqlTexts, sortedResponses, reseedStatements)
+                    || findSqlFailureSource_ACU(preparedSqlTexts, sortedResponses, rawErrorMessage, reseedStatements);
+                return { success: false, error: formatSqlBatchFailure_ACU(failureSource, rawErrorMessage) };
+            }
+            if (!parseResult?.success) {
+                const rawErrorMessage = parseResult?.error || 'SQL 执行失败。';
+                const failureSource = findStructuredSqlFailureSource_ACU(parseResult as StructuredSqlBatchError_ACU, preparedSqlTexts, sortedResponses, reseedStatements)
+                    || findSqlFailureSource_ACU(preparedSqlTexts, sortedResponses, rawErrorMessage, reseedStatements);
+                return { success: false, error: formatSqlBatchFailure_ACU(failureSource, rawErrorMessage) };
+            }
+
+            try {
+            const runtimeData = provider.exportCanonicalData();
             const parsedModifiedKeys: string[] = Array.isArray(parseResult.modifiedKeys)
                 ? parseResult.modifiedKeys.filter((key: unknown): key is string => typeof key === 'string')
                 : [];
@@ -1062,6 +1218,9 @@ export async function applyUnifiedGroupFillResponses_ACU(
                     revisionWriteSet,
                 },
             };
+            } catch (error: unknown) {
+                await restoreSqliteRuntimeAfterPostCommitFailure_ACU(provider, runtimeSnapshot, error);
+            }
         });
 
         if (!commitResult.success || !commitResult.value) {
@@ -1094,6 +1253,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
                     targetSheetKeys: response.job.targetSheetKeys,
                     requireSheetScopedOperations: true,
                     allowSingleTargetFallback: true,
+                    systemAllocateRowIds: true,
                 },
             );
             if (parseResult?.success && parseResult.workingData) {
@@ -1611,119 +1771,28 @@ export async function executeCardUpdateCore_ACU(
                 const isSqlTableEdit = isSqliteMode() && typeof collectResult.tableEditText === 'string' && isSqlContent(collectResult.tableEditText);
 
                 if (isSqlTableEdit) {
-                    const writeSet = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0
-                        ? targetSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }))
-                        : [{ kind: 'all' as const }];
-                    const commitResult = await runTableUpdateCommit_ACU<CardUpdateResult>({
-                        source: 'group_fill',
-                        reason: 'executeCardUpdateCore',
-                        isolationKey: getCurrentIsolationKey_ACU(),
-                        writeSet,
-                        baseRevision,
-                        initialData: rawBaseSnapshot as any,
-                        targetMessageIndex: saveTargetIndex,
-                        targetSheetKeys: null,
-                        updateGroupKeys: null,
-                        trackingSheetKeys: null,
-                        trackAsUpdate: true,
-                        skipChatSave: isImportMode,
-                    }, async () => {
-                        const provider = await ensureStorageProviderReady_ACU();
-                        let parseResult: any;
-                        try {
-                            parseResult = provider.applyEdits(collectResult.tableEditText || '', updateMode);
-                        } catch (error: any) {
-                            return { success: false, error: error?.message || String(error) };
-                        }
-                        const parseSuccess = !!parseResult?.success;
-                        const parsedKeys: string[] = Array.isArray(parseResult?.modifiedKeys) ? parseResult.modifiedKeys : [];
-                        if (!parseSuccess) {
-                            return { success: false, error: parseResult?.error || '解析或应用AI更新时出错' };
-                        }
-
-                        const runtimeData = (provider.getCurrentData() || currentJsonTableData_ACU || rawBaseSnapshot) as Record<string, any>;
-                        const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(collectResult.tableEditText || '', runtimeData, targetSheetKeys);
-                        if (operationBuild.success === false) {
-                            return { success: false, error: operationBuild.error };
-                        }
-                        const operations = operationBuild.operations;
-                        applySpecialIndexSequenceToSummaryTables_ACU(runtimeData);
-
-                        if (isImportMode) {
-                            emitProgress({ phase: 'chunk_done' });
-                            logDebug_ACU('Import mode: skipping save to chat history for this chunk.');
-                            return {
-                                success: true,
-                                value: { success: true, modifiedKeys: parsedKeys },
-                                tableData: runtimeData as any,
-                                mutationResult: { changes: parseResult.appliedEdits || 0, errors: [] },
-                                persist: { revisionWriteSet: parsedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey })) },
-                            };
-                        }
-
-                        emitProgress({ phase: 'saving' });
-                        let keysToPersist = parsedKeys;
-                        if (targetSheetKeys && Array.isArray(targetSheetKeys)) {
-                            keysToPersist = keysToPersist.filter((k: string) => targetSheetKeys.includes(k));
-                        }
-
-                        const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
-                        const hasTargetSheetTracking = Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0;
-                        const allSheetKeys = getSortedSheetKeys_ACU(runtimeData);
-                        const targetTrackingKeys = hasTargetSheetTracking
-                            ? targetSheetKeys.filter((sheetKey: string) => Boolean(runtimeData?.[sheetKey]))
-                            : [];
-                        let keysToActuallySave = keysToPersist;
-                        if (isFirstTimeInit) {
-                            keysToActuallySave = allSheetKeys;
-                            const fullTemplate = parseTableTemplateJson_ACU({ stripSeedRows: false });
-                            if (fullTemplate) {
-                                allSheetKeys.forEach(sheetKey => {
-                                    if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {
-                                        runtimeData[sheetKey] = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
-                                        logDebug_ACU(`[Init] Table ${sheetKey} not modified by AI, using template data (may include seed rows).`);
-                                    }
-                                });
-                            }
-                            logDebug_ACU('[Init] First time initialization detected. Saving complete template structure with all tables.');
-                        }
-                        const keysToTrackAsUpdated = hasTargetSheetTracking
-                            ? keysToPersist.filter((sheetKey: string) => targetTrackingKeys.includes(sheetKey))
-                            : keysToPersist.filter((sheetKey: string) => keysToActuallySave.includes(sheetKey));
-                        const fillAttemptKeys = hasTargetSheetTracking
-                            ? targetTrackingKeys
-                            : keysToPersist;
-                        const updateGroupKeysToUse = Array.isArray(fillAttemptKeys)
-                            ? fillAttemptKeys.filter(sheetKey => {
-                                const table = runtimeData?.[sheetKey];
-                                if (!table || !isSummaryOrOutlineTable_ACU(table.name)) return true;
-                                return keysToTrackAsUpdated.includes(sheetKey);
-                            })
-                            : fillAttemptKeys;
-                        const revisionWriteSet = parsedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
-
-                        return {
-                            success: true,
-                            value: { success: true, modifiedKeys: parsedKeys },
-                            tableData: runtimeData as any,
-                            mutationResult: { changes: parseResult.appliedEdits || 0, errors: [] },
-                            persist: {
-                                targetSheetKeys: keysToActuallySave,
-                                updateGroupKeys: updateGroupKeysToUse,
-                                trackingSheetKeys: keysToTrackAsUpdated,
-                                trackAsUpdate: true,
-                                operations,
-                                revisionWriteSet,
-                            },
-                        };
-                    });
-
-                    if (!commitResult.success || !commitResult.value) {
-                        throw new Error(commitResult.error || '解析或应用AI更新时出错');
+                    if (!isImportMode) emitProgress({ phase: 'saving' });
+                    const unifiedResult = await applyUnifiedGroupFillResponses_ACU(
+                        [collectResult],
+                        rawBaseSnapshot,
+                        {
+                            saveTargetIndex,
+                            updateMode,
+                            isImportMode,
+                            syncAfterCommit: false,
+                            baseRevision,
+                        },
+                    );
+                    if (!unifiedResult.success) {
+                        throw new Error(unifiedResult.error || '解析或应用AI更新时出错');
                     }
-                    modifiedKeys = commitResult.value.modifiedKeys;
-                    if (!isImportMode && commitResult.tableData) {
-                        await updateReadableLorebookEntry_ACU(true, false, null, commitResult.tableData);
+                    if (isImportMode) {
+                        emitProgress({ phase: 'chunk_done' });
+                        logDebug_ACU('Import mode: skipping save to chat history for this chunk.');
+                    }
+                    modifiedKeys = unifiedResult.modifiedKeys;
+                    if (!isImportMode && unifiedResult.tableData) {
+                        await updateReadableLorebookEntry_ACU(true, false, null, unifiedResult.tableData);
                     }
                     success = true;
                     break;

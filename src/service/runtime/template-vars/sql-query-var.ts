@@ -13,6 +13,7 @@
 
 import { getStorageProvider } from '../../table/table-storage-strategy';
 import { getNameMapper } from './name-mapper';
+import { validateReadOnlySql_ACU } from './read-only-sql-validation';
 import { isSqliteMode } from '../../table/storage-mode';
 import { logDebug_ACU, logWarn_ACU, logError_ACU } from '../../../shared/utils';
 
@@ -716,8 +717,16 @@ export function evaluateRawSqlExpression(expr: string, options: RawSqlEvaluation
     }
 
     // 通过 NameMapper 翻译中文名
+    const beforeTranslation = validateReadOnlySql_ACU(trimmed);
+    if (!beforeTranslation.valid) {
+      throw new Error(beforeTranslation.reason || 'sql_not_read_only');
+    }
     const mapper = getNameMapper();
     const translatedSql = mapper.translateSql(trimmed);
+    const afterTranslation = validateReadOnlySql_ACU(translatedSql);
+    if (!afterTranslation.valid) {
+      throw new Error(afterTranslation.reason || 'translated_sql_not_read_only');
+    }
 
     // 执行查询
     const provider = getStorageProvider();
@@ -818,8 +827,13 @@ export function evaluateSqlCondition(expression: string): boolean {
     // 直接传入 SQL 表达式，不需要包引号
     // evaluateRawSqlExpression 内部会处理 "sql " 前缀和引号剥离
     // 但这里的 expression 来自 <if sql="...">，本身就是纯 SQL，直接执行即可
+    const sourceSql = expression.trim();
+    const beforeTranslation = validateReadOnlySql_ACU(sourceSql);
+    if (!beforeTranslation.valid) return false;
     const mapper = getNameMapper();
-    const translatedSql = mapper.translateSql(expression.trim());
+    const translatedSql = mapper.translateSql(sourceSql);
+    const afterTranslation = validateReadOnlySql_ACU(translatedSql);
+    if (!afterTranslation.valid) return false;
     const provider = getStorageProvider();
     const result = provider.executeQuery(translatedSql);
     if (result.values.length === 0) return false;

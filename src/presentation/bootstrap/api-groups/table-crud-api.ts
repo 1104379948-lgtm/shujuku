@@ -19,8 +19,8 @@ import { parseDDLTableName } from '../../../shared/ddl-utils';
 import { getLatestTableAppendMessageIndexFromChat_ACU } from '../../../service/table/table-history';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
-import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
-import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
+import { runSqliteAtomicBatchCommit_ACU, runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
+import { allocateStableRowIdForSheet_ACU } from '../../../shared/stable-row-id-allocator';
 
 /**
  * 从 sheet 解析英文物理表名
@@ -578,6 +578,10 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                 }
 
                 const { sheet: targetSheet, sheetKey: targetSheetKey, englishTableName } = target;
+                if (normalizedRowIndex >= targetSheet.content.length) {
+                    logError_ACU(`updateRow: Row index ${normalizedRowIndex} out of bounds in table "${tableName}".`);
+                    return false;
+                }
 
                 if (isSqliteMode()) {
                         // SQLite 模式：统一交给公共提交模型执行运行时 SQL 和持久化。
@@ -652,11 +656,6 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             return { success: false, error: `Table "${tableName}" not found.` };
                         }
                         const workingSheet = workingTarget.sheet;
-                        while (workingSheet.content.length <= normalizedRowIndex) {
-                            const newRow = new Array((workingSheet.content[0] || []).length).fill('');
-                            workingSheet.content.push(newRow);
-                        }
-
                         const headers = workingSheet.content[0] || [];
                         const row = workingSheet.content[normalizedRowIndex];
 
@@ -722,33 +721,17 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                 }
 
                 const { sheet: targetSheet, sheetKey: targetSheetKey, englishTableName } = target;
-                const headers = targetSheet.content[0] || [];
 
                 if (isSqliteMode()) {
-                        // SQLite 模式：统一交给公共提交模型执行运行时 SQL 和持久化。
-                        const beforeLength = targetSheet.content.length;
-                        const colNames: string[] = [];
-                        const params: (string | number | null)[] = [];
-                        for (const colName in normalizedData) {
-                            const { englishColName, chineseColName } = resolveColumnForSheet(englishTableName, colName);
-                            // 跳过 row_id（自增主键），同时检查英文形态和原始名，防止用户传中文"行号"等变体
-                            if (englishColName === 'row_id' || colName === 'row_id') continue;
-                            if (!headers.includes(chineseColName)) continue;
-                            colNames.push(quoteIdentifier(englishColName));
-                            params.push(toSqlValueParam_ACU(normalizedData[colName]));
-                        }
-                        const placeholders = colNames.map(() => '?').join(', ');
                         const tableLatestFloorIndex = findTableLatestFloor(targetSheetKey, targetSheet.name);
                         if (!skipChatSave && tableLatestFloorIndex === -1) return -1;
-                        const sql = colNames.length > 0
-                            ? `INSERT INTO ${quoteIdentifier(englishTableName)} (${colNames.join(', ')}) VALUES (${placeholders});`
-                            : `INSERT INTO ${quoteIdentifier(englishTableName)} DEFAULT VALUES;`;
-                        const result = await runSqliteRuntimeMutationCommit_ACU<number>({
+                        const writeSet = [{ kind: 'sheet' as const, sheetKey: targetSheetKey }];
+                        const result = await runSqliteAtomicBatchCommit_ACU<number>({
                             source: 'manual_crud',
                             reason: 'insertRow:sqlite',
                             isolationKey: getCurrentIsolationKey_ACU(),
-                            writeSet: [{ kind: 'sheet', sheetKey: targetSheetKey }],
-                            revisionWriteSet: [{ kind: 'sheet', sheetKey: targetSheetKey }],
+                            writeSet,
+                            revisionWriteSet: writeSet,
                             initialData: currentJsonTableData_ACU,
                             targetMessageIndex: tableLatestFloorIndex,
                             targetSheetKeys: [targetSheetKey],
@@ -756,19 +739,41 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             trackingSheetKeys: [],
                             trackAsUpdate: false,
                             skipChatSave,
-                            sql,
-                            params,
-                            validate: ({ mutationResult, tableData }) => {
-                                if (!assertSqlMutationChanged_ACU('insertRow', `table=${englishTableName}, cols=${colNames.length}`, mutationResult)) return 'insertRow SQLite mutation affected 0 rows';
-                                const refreshedTarget = findTargetSheetInData_ACU(tableData as any, tableName);
-                                const refreshedLength = refreshedTarget?.sheet?.content?.length ?? 0;
-                                return refreshedTarget && refreshedLength > beforeLength
-                                    ? null
-                                    : `insertRow: SQLite runtime mutation succeeded but exported JSON view did not contain a new row for [${tableName}].`;
-                            },
-                            mapValue: ({ tableData }) => {
-                                const refreshedTarget = findTargetSheetInData_ACU(tableData as any, tableName);
-                                return (refreshedTarget?.sheet?.content?.length ?? 1) - 1;
+                            prepare: ({ workingData }) => {
+                                const workingTarget = findTargetSheetInData_ACU(workingData as any, tableName);
+                                if (!workingTarget) return { error: `Table "${tableName}" not found.` };
+                                const workingSheet = workingTarget.sheet;
+                                const headers = workingSheet.content[0] || [];
+                                const rowId = allocateStableRowIdForSheet_ACU(workingSheet);
+                                const colNames = [quoteIdentifier('row_id')];
+                                const params: (string | number | null)[] = [toSqlValueParam_ACU(rowId)];
+                                for (const colName in normalizedData) {
+                                    const resolved = resolveColumnForSheet(workingTarget.englishTableName, colName);
+                                    if (resolved.englishColName === 'row_id' || colName === 'row_id') continue;
+                                    if (!headers.includes(resolved.chineseColName)) continue;
+                                    colNames.push(quoteIdentifier(resolved.englishColName));
+                                    params.push(toSqlValueParam_ACU(normalizedData[colName]));
+                                }
+                                const sql = `INSERT INTO ${quoteIdentifier(workingTarget.englishTableName)} (${colNames.join(', ')}) VALUES (${colNames.map(() => '?').join(', ')});`;
+                                const nextRowId = workingSheet.sourceData.nextRowId;
+                                return {
+                                    statements: [sql],
+                                    paramsList: [params],
+                                    metadataUpdates: [{ sheetKey: targetSheetKey, sheet: workingSheet }],
+                                    operations: [
+                                        { kind: 'sql_batch', statements: [sql], params: [params] },
+                                        { kind: 'meta_update', sheetKey: targetSheetKey, meta: { sourceData: { nextRowId } } },
+                                    ],
+                                    validate: tableData => {
+                                        const refreshedTarget = findTargetSheetInData_ACU(tableData as any, tableName);
+                                        const rowIndex = refreshedTarget?.sheet?.content?.findIndex((row: any[], index: number) => index > 0 && String(row?.[0] ?? '') === rowId) ?? -1;
+                                        if (rowIndex < 1) return `insertRow: SQLite runtime mutation succeeded but exported JSON view did not contain row_id ${rowId} for [${tableName}].`;
+                                        return refreshedTarget?.sheet?.sourceData?.nextRowId === nextRowId
+                                            ? null
+                                            : `insertRow: SQLite metadata nextRowId did not advance atomically for [${tableName}].`;
+                                    },
+                                    mapValue: tableData => findTargetSheetInData_ACU(tableData as any, tableName)?.sheet?.content?.findIndex((row: any[], index: number) => index > 0 && String(row?.[0] ?? '') === rowId) ?? -1,
+                                };
                             },
                         });
                         if (!result.success || typeof result.value !== 'number') return -1;
@@ -809,7 +814,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             }
                         }
 
-                        newRow[0] = allocateStableRowId_ACU(createStableRowIdReservation_ACU(workingSheet.content.slice(1)));
+                        newRow[0] = allocateStableRowIdForSheet_ACU(workingSheet);
                         const rowId = newRow[0];
                         workingSheet.content.push(newRow);
                         const newIndex = workingSheet.content.length - 1;
@@ -820,7 +825,10 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                             value: newIndex,
                             tableData: workingData as any,
                             persist: {
-                                operations: [{ kind: 'row_upsert', sheetKey: targetSheetKey, rowId, cells: [...newRow] }],
+                                operations: [
+                                    { kind: 'row_upsert', sheetKey: targetSheetKey, rowId, cells: [...newRow] },
+                                    { kind: 'meta_update', sheetKey: targetSheetKey, meta: { sourceData: { nextRowId: workingSheet.sourceData.nextRowId } } },
+                                ],
                             },
                         };
                     });

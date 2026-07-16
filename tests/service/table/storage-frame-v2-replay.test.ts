@@ -12,6 +12,7 @@ vi.mock('../../../src/shared/utils', async () => {
 import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU } from '../../../src/service/table/table-schema-migration';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
+import { reserveStableRowIdsForSheet_ACU } from '../../../src/shared/stable-row-id-allocator';
 
 function makeCheckpointData() {
   return {
@@ -248,6 +249,126 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       ['1', '钢剑'],
       ['2', '药水'],
     ]);
+  });
+
+  it('回放与 runtime 共用 splitter，注释和字符串内分号不产生额外 statement', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: makeCheckpointData(),
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1,
+              entryId: 'v2_shared_splitter_1',
+              createdAt: 2,
+              source: 'group_fill',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: ['sheet_0'],
+              changedSheetKeys: ['sheet_0'],
+              groupKeys: ['inventory'],
+              operations: [{
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_0',
+                tableName: 'inventory',
+                statements: [
+                  `-- leading; comment
+                   UPDATE "inventory" SET name = '钢;剑--/*保留*/' WHERE row_id = 1;
+                   /* between; statements */
+                   INSERT INTO [inventory] VALUES (2, '药;水');`,
+                ],
+                reason: 'system',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '钢;剑--/*保留*/'],
+      ['2', '药;水'],
+    ]);
+  });
+
+  it('回放系统分配 SQL 与 nextRowId 后，删除最大 ID 也不会复用历史 ID', async () => {
+    const checkpoint = makeCheckpointData();
+    checkpoint.sheet_0.sourceData.nextRowId = 2;
+    const entry = (seq: number, operations: any[]) => ({
+      seq,
+      entryId: `stable-row-id-${seq}`,
+      createdAt: seq + 1,
+      source: 'group_fill',
+      targetMessageIndex: 0,
+      aiFloor: 1,
+      filledSheetKeys: ['sheet_0'],
+      changedSheetKeys: ['sheet_0'],
+      groupKeys: ['inventory'],
+      operations,
+    });
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: checkpoint,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [
+              entry(1, [
+                {
+                  kind: 'sql_sheet_batch',
+                  sheetKey: 'sheet_0',
+                  tableName: 'inventory',
+                  statements: ["INSERT INTO inventory (row_id, name) VALUES (2, '药水')"],
+                  reason: 'system',
+                },
+                {
+                  kind: 'meta_update',
+                  sheetKey: 'sheet_0',
+                  meta: { sourceData: { nextRowId: 3 } },
+                },
+              ]),
+              entry(2, [{
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_0',
+                tableName: 'inventory',
+                statements: ['DELETE FROM inventory WHERE row_id = 2'],
+                reason: 'system',
+              }]),
+            ],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '铁剑'],
+    ]);
+    expect(result?.sheet_0.sourceData.nextRowId).toBe(3);
+    expect(reserveStableRowIdsForSheet_ACU(result!.sheet_0, 1)).toEqual(['3']);
+    expect(result?.sheet_0.sourceData.nextRowId).toBe(4);
   });
 
   it('同楼层单表 checkpoint 引入新 DDL/CHECK 后再回放 sql_batch', async () => {
@@ -594,7 +715,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     });
   });
 
-  it('DSL 删除中间行后插入使用最小未占用 row_id，且保留 0 和 false', async () => {
+  it('DSL 删除中间行后插入使用删除前高水位，且保留 0 和 false', async () => {
     const checkpointData = makeCheckpointData();
     checkpointData.sheet_0.content = [
       ['row_id', 'name', 'enabled'],
@@ -621,7 +742,10 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     }];
 
     await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toMatchObject({
-      sheet_0: expect.objectContaining({ content: [['row_id', 'name', 'enabled'], ['1', '铁剑', true], ['3', '盾牌', true], ['2', 0, false]] }),
+      sheet_0: expect.objectContaining({
+        content: [['row_id', 'name', 'enabled'], ['1', '铁剑', true], ['3', '盾牌', true], ['4', 0, false]],
+        sourceData: expect.objectContaining({ nextRowId: 5 }),
+      }),
     });
   });
 

@@ -11,6 +11,7 @@ import { isSqliteMode } from './storage-mode';
 import { getActiveStorageProvider, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { getLatestAiMessageIndexFromChat_ACU } from './table-history';
 import { persistTablesToChatMessage_ACU } from './table-service';
+import { replaceRuntimeDataStrict_ACU } from './table-update-commit';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
 const CHECKPOINT_FORMAT_ACU = 'acu-table-checkpoint' as const;
@@ -170,7 +171,13 @@ export function parseTableCheckpointFile_ACU(text: string): TableCheckpointParse
 export function buildCurrentTableCheckpoint_ACU(): TableCheckpointFileV1_ACU {
   applyTemplateScopeForCurrentChat_ACU();
   const provider = getStorageProvider();
-  const tableSnapshot = normalizeTableData_ACU(provider.getCurrentData(), '当前表格数据');
+  const currentData = provider.mode === 'sqlite'
+    ? (() => {
+        if (typeof provider.exportCanonicalData !== 'function') throw new Error('SQLite Checkpoint 导出要求严格 canonical export 能力。');
+        return provider.exportCanonicalData();
+      })()
+    : provider.getCurrentData();
+  const tableSnapshot = normalizeTableData_ACU(currentData, '当前表格数据');
   const isolationKey = getCurrentIsolationKey_ACU();
   const templateData = normalizeTableData_ACU(parseTableTemplateJson_ACU({ stripSeedRows: false }), '当前生效模板');
   const guideData = normalizeGuideData_ACU(getChatSheetGuideDataForIsolationKey_ACU(isolationKey));
@@ -233,6 +240,7 @@ async function runCheckpointDerivedRefresh_ACU(
   checked: TableCheckpointFileV1_ACU,
   isolationKey: string,
   vectorManifests: any[],
+  expectedRuntimeData: TableDataObject_ACU = checked.tableSnapshot,
 ): Promise<Pick<TableCheckpointRestoreResult_ACU, 'cleanupWarnings' | 'derivedRefreshWarnings' | 'postCondition'>> {
   const derivedRefreshWarnings: string[] = [];
   const runDerivedStep = async (label: string, task: () => void | Promise<void>): Promise<void> => {
@@ -259,8 +267,18 @@ async function runCheckpointDerivedRefresh_ACU(
   const finalProvider = getActiveStorageProvider();
   const finalScope = getCurrentChatTemplateScopeState_ACU({ isolationKey });
   const finalGuide = getChatSheetGuideDataForIsolationKey_ACU(isolationKey);
+  let finalRuntimeData: TableDataObject_ACU | null = null;
+  if (finalProvider) {
+    try {
+      finalRuntimeData = finalProvider.mode === 'sqlite'
+        ? finalProvider.exportCanonicalData?.() || null
+        : finalProvider.getCurrentData();
+    } catch (error: any) {
+      derivedRefreshWarnings.push(`恢复后的 SQLite canonical data 导出失败：${error?.message || String(error)}`);
+    }
+  }
   const postCondition: TableCheckpointRestorePostCondition_ACU = {
-    runtimeMatches: !!finalProvider && sameCheckpointData_ACU(finalProvider.getCurrentData(), checked.tableSnapshot),
+    runtimeMatches: !!finalRuntimeData && sameCheckpointData_ACU(finalRuntimeData, expectedRuntimeData),
     scopeIsChatOverride: finalScope?.mode === 'chat_override',
     templateMatches: scopeTemplateMatchesCheckpoint_ACU(finalScope, checked.templateSnapshot.data),
     guideMatches: sameCheckpointData_ACU(finalGuide, checked.guideSnapshot.data),
@@ -296,18 +314,20 @@ export async function restoreTableCheckpointToLatestAi_ACU(parsed: TableCheckpoi
     if (targetMessageIndex < 0) return { success: false, error: '当前聊天没有 AI 楼层，无法恢复 Checkpoint。' };
     isolationKey = getCurrentIsolationKey_ACU();
     provider = getStorageProvider();
-    const currentData = provider.getCurrentData();
-    const oldData = currentData === null ? null : cloneJson_ACU(currentData);
-    const runtimeSnapshot = provider.createRuntimeSnapshot?.();
-    if (runtimeSnapshot instanceof Uint8Array) {
+    const runtimeSnapshot = provider.mode === 'sqlite' ? provider.createRuntimeSnapshot?.() : undefined;
+    if (provider.mode === 'sqlite') {
+      if (!(runtimeSnapshot instanceof Uint8Array)) throw new Error('当前 SQLite 运行时无法创建二进制快照回滚。');
       if (typeof provider.restoreRuntimeSnapshot !== 'function') throw new Error('当前表格存储不支持 SQLite 运行时快照回滚。');
       rollbackStrategy = { kind: 'binary', snapshot: runtimeSnapshot };
-    } else if (oldData !== null) {
-      if (typeof provider.replaceAllData !== 'function') throw new Error('当前表格存储不支持表格数据回滚。');
-      rollbackStrategy = { kind: 'data', data: oldData };
     } else {
-      if (typeof provider.clearRuntimeData !== 'function') throw new Error('当前表格存储不支持空运行时回滚。');
-      rollbackStrategy = { kind: 'empty' };
+      const currentData = provider.getCurrentData();
+      const oldData = currentData === null ? null : cloneJson_ACU(currentData);
+      if (oldData !== null) {
+        if (typeof provider.replaceAllData !== 'function') throw new Error('当前表格存储不支持表格数据回滚。');
+        rollbackStrategy = { kind: 'data', data: oldData };
+      } else {
+        rollbackStrategy = { kind: 'empty' };
+      }
     }
     if (typeof provider.replaceAllData !== 'function') throw new Error('当前表格存储不支持 Checkpoint 数据恢复。');
     messageSnapshots = captureMessageSnapshots_ACU(chat);
@@ -322,19 +342,22 @@ export async function restoreTableCheckpointToLatestAi_ACU(parsed: TableCheckpoi
       return transactionContext.runCommit(async () => {
         const cleared = await clearAllAiTableDataForCheckpointRestore_ACU();
         vectorManifests = cleared.vectorManifestsToDeleteAfterCommit;
-        const replaced = await provider.replaceAllData(cloneJson_ACU(checked.tableSnapshot));
-        if (!replaced?.success) throw new Error(replaced?.error || 'Checkpoint 表格运行时恢复失败。');
+        const canonicalTableData = await replaceRuntimeDataStrict_ACU(provider, cloneJson_ACU(checked.tableSnapshot));
         const templateState = buildChatTemplateScopeStateFromCurrent_ACU({ isolationKey, presetName: checked.templateSnapshot.presetName, source: 'checkpoint_import', templateSource: checked.templateSnapshot.data, guideData: checked.guideSnapshot.data });
         if (!templateState || !setCurrentChatTemplateScopeState_ACU(templateState, { isolationKey, reason: 'checkpoint_import' })) throw new Error('Checkpoint 模板作用域恢复失败。');
         if (!setChatSheetGuideDataForIsolationKey_ACU(isolationKey, checked.guideSnapshot.data, { reason: 'checkpoint_import', syncTemplateScope: false })) throw new Error('Checkpoint 指导表恢复失败。');
-        const sheetKeys = Object.keys(checked.tableSnapshot).filter(key => key.startsWith('sheet_'));
-        const persisted = await persistTablesToChatMessage_ACU({ targetMessageIndex, tableData: checked.tableSnapshot, targetSheetKeys: sheetKeys, trackingSheetKeys: sheetKeys, filledSheetKeys: sheetKeys, trackAsUpdate: false, source: 'import', operations: [{ kind: 'data_replace', data: checked.tableSnapshot, reason: 'checkpoint_fallback' }], strictSave: true, assumeCommitLock: true, transactionContext });
+        const sheetKeys = Object.keys(canonicalTableData).filter(key => key.startsWith('sheet_'));
+        const persisted = await persistTablesToChatMessage_ACU({ targetMessageIndex, tableData: canonicalTableData, targetSheetKeys: sheetKeys, trackingSheetKeys: sheetKeys, filledSheetKeys: sheetKeys, trackAsUpdate: false, source: 'import', operations: [{ kind: 'data_replace', data: canonicalTableData, reason: 'checkpoint_fallback' }], strictSave: true, assumeCommitLock: true, transactionContext });
         if (!persisted.saved) throw new Error(persisted.error || 'Checkpoint 持久化失败。');
-        return { clearedCount: cleared.clearedCount, restoredMessageIndex: persisted.messageIndex ?? targetMessageIndex };
+        return {
+          clearedCount: cleared.clearedCount,
+          restoredMessageIndex: persisted.messageIndex ?? targetMessageIndex,
+          canonicalTableData,
+        };
       }, [{ kind: 'all' }]);
     });
-    const derivedRefresh = await runCheckpointDerivedRefresh_ACU(checked, isolationKey, vectorManifests);
-    return { success: true, ...result, ...derivedRefresh };
+    const derivedRefresh = await runCheckpointDerivedRefresh_ACU(checked, isolationKey, vectorManifests, result.canonicalTableData);
+    return { success: true, clearedCount: result.clearedCount, restoredMessageIndex: result.restoredMessageIndex, ...derivedRefresh };
   } catch (error: any) {
     restoreMessageSnapshots_ACU(messageSnapshots);
     setChatScopedConfigContainer_ACU(chat, oldScopeContainer);

@@ -44,6 +44,8 @@ const {
   mockApplyParameterizedSqlMutation,
   mockPersistTablesToChatMessage,
   mockExecuteRuntimeMutation,
+  mockApplyEditsBatchWithSheetMetadata,
+  mockPrepareReseedPlan,
   mockGetRuntimeData,
   mockCreateRuntimeSnapshot,
   mockRestoreRuntimeSnapshot,
@@ -54,11 +56,16 @@ const {
   mockApplyParameterizedSqlMutation: vi.fn(),
   mockPersistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true, messageIndex: 0 }),
   mockExecuteRuntimeMutation: vi.fn(() => ({ changes: 1, errors: [] })),
+  mockApplyEditsBatchWithSheetMetadata: vi.fn(() => ({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 })),
+  mockPrepareReseedPlan: vi.fn(() => ({ statements: [], paramsList: [], metadataUpdates: [] })),
   mockGetRuntimeData: vi.fn(),
   mockCreateRuntimeSnapshot: vi.fn(() => new Uint8Array([1, 2, 3])),
   mockRestoreRuntimeSnapshot: vi.fn().mockResolvedValue(undefined),
   mockEnsureStorageProviderReady: vi.fn().mockImplementation(async () => ({
     executeMutation: mockExecuteRuntimeMutation,
+    applyEditsBatchWithSheetMetadata: mockApplyEditsBatchWithSheetMetadata,
+    prepareReseedPlanForEmptyTables: mockPrepareReseedPlan,
+    exportCanonicalData: mockGetRuntimeData,
     getCurrentData: mockGetRuntimeData,
     createRuntimeSnapshot: mockCreateRuntimeSnapshot,
     restoreRuntimeSnapshot: mockRestoreRuntimeSnapshot,
@@ -77,6 +84,9 @@ const {
 vi.mock('../../src/service/table/table-storage-strategy', () => ({
   getStorageProvider: vi.fn(() => ({
     executeMutation: mockExecuteRuntimeMutation,
+    applyEditsBatchWithSheetMetadata: mockApplyEditsBatchWithSheetMetadata,
+    prepareReseedPlanForEmptyTables: mockPrepareReseedPlan,
+    exportCanonicalData: mockGetRuntimeData,
     getCurrentData: mockGetRuntimeData,
     createRuntimeSnapshot: mockCreateRuntimeSnapshot,
     restoreRuntimeSnapshot: mockRestoreRuntimeSnapshot,
@@ -85,7 +95,8 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
   reloadStorageProvider: mockReloadStorageProvider,
 }));
 
-vi.mock('../../src/service/table/sql-table-service', () => ({
+vi.mock('../../src/service/table/sql-table-service', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../src/service/table/sql-table-service')>()),
   applyParameterizedSqlMutationToTableDataSnapshot_ACU: mockApplyParameterizedSqlMutation,
 }));
 
@@ -209,6 +220,7 @@ describe('findTargetSheet', () => {
 describe('createTableCrudApi — SQLite 模式', () => {
   let api: Record<string, Function>;
   const mockCtx: any = {};
+  let mockAtomicRuntimeData: any = null;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -222,6 +234,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
           ['1', '铁剑', '3'],
           ['2', '药水', '5'],
         ],
+        sourceData: {},
       },
     };
     mockApplyParameterizedSqlMutation.mockImplementation(async (sql: string, params: any[], tableData: any) => {
@@ -245,7 +258,37 @@ describe('createTableCrudApi — SQLite 模式', () => {
     });
     mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 0 });
     mockExecuteRuntimeMutation.mockReturnValue({ changes: 1, errors: [] });
+    mockPrepareReseedPlan.mockReturnValue({ statements: [], paramsList: [], metadataUpdates: [] });
+    mockAtomicRuntimeData = null;
+    mockApplyEditsBatchWithSheetMetadata.mockImplementation((statements: string[], paramsList: any[][], metadataUpdates: any[]) => {
+      const workingData = JSON.parse(JSON.stringify(mockCurrentJsonTableData));
+      const params = paramsList[0] || [];
+      const mutationResult = mockExecuteRuntimeMutation(statements[0], params);
+      if (mutationResult.errors?.length) {
+        return { success: false, modifiedKeys: [], appliedEdits: 0, error: mutationResult.errors.join(', ') };
+      }
+      if (String(statements[0] || '').startsWith('INSERT')) {
+        workingData.sheet_0.content.push([
+          String(params[0]),
+          params.length > 1 ? params[1] : '',
+          params.length > 2 ? params[2] : '',
+        ]);
+      } else if (String(statements[0] || '').startsWith('DELETE')) {
+        workingData.sheet_0.content = workingData.sheet_0.content.filter((row: any[], index: number) => index === 0 || row[0] !== params[0]);
+      } else if (String(statements[0] || '').startsWith('UPDATE')) {
+        const row = workingData.sheet_0.content.find((item: any[], index: number) => index > 0 && item[0] === params[params.length - 1]);
+        if (row) row[1] = params[0];
+      }
+      for (const update of metadataUpdates || []) {
+        if (workingData[update.sheetKey]) {
+          workingData[update.sheetKey].sourceData = JSON.parse(JSON.stringify(update.sheet.sourceData || {}));
+        }
+      }
+      mockAtomicRuntimeData = workingData;
+      return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: statements.length, changes: mutationResult.changes, statementChanges: statements.map(() => mutationResult.changes) };
+    });
     mockGetRuntimeData.mockImplementation(() => {
+      if (mockAtomicRuntimeData) return JSON.parse(JSON.stringify(mockAtomicRuntimeData));
       const workingData = JSON.parse(JSON.stringify(mockCurrentJsonTableData));
       const sheet = workingData.sheet_0;
       const lastCall = mockExecuteRuntimeMutation.mock.calls.at(-1) || [];
@@ -265,6 +308,9 @@ describe('createTableCrudApi — SQLite 模式', () => {
     mockRestoreRuntimeSnapshot.mockResolvedValue(undefined);
     mockEnsureStorageProviderReady.mockResolvedValue({
       executeMutation: mockExecuteRuntimeMutation,
+      applyEditsBatchWithSheetMetadata: mockApplyEditsBatchWithSheetMetadata,
+      prepareReseedPlanForEmptyTables: mockPrepareReseedPlan,
+      exportCanonicalData: mockGetRuntimeData,
       getCurrentData: mockGetRuntimeData,
       createRuntimeSnapshot: mockCreateRuntimeSnapshot,
       restoreRuntimeSnapshot: mockRestoreRuntimeSnapshot,
@@ -287,7 +333,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 UPDATE SQL（列名为字符串）', async () => {
       await api.updateCell('背包物品表', 1, '数量', '10');
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        "UPDATE `背包物品表` SET `数量` = ? WHERE `row_id` = ?;",
+        "UPDATE `背包物品表` SET `数量` = ? WHERE `row_id` = ?",
         ['10', '1'],
       );
     });
@@ -304,7 +350,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 UPDATE SQL（列名为数字索引）', async () => {
       await api.updateCell('背包物品表', 1, 1, '新铁剑');
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        "UPDATE `背包物品表` SET `物品名` = ? WHERE `row_id` = ?;",
+        "UPDATE `背包物品表` SET `物品名` = ? WHERE `row_id` = ?",
         ['新铁剑', '1'],
       );
     });
@@ -312,7 +358,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('value 为 null 时生成 NULL', async () => {
       await api.updateCell('背包物品表', 1, '数量', null);
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        "UPDATE `背包物品表` SET `数量` = ? WHERE `row_id` = ?;",
+        "UPDATE `背包物品表` SET `数量` = ? WHERE `row_id` = ?",
         [null, '1'],
       );
     });
@@ -320,7 +366,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('value 包含单引号时正确转义', async () => {
       await api.updateCell('背包物品表', 1, '物品名', "铁剑'加强版");
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        "UPDATE `背包物品表` SET `物品名` = ? WHERE `row_id` = ?;",
+        "UPDATE `背包物品表` SET `物品名` = ? WHERE `row_id` = ?",
         ["铁剑'加强版", '1'],
       );
     });
@@ -391,7 +437,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 UPDATE SQL（多列）', async () => {
       await api.updateRow('背包物品表', 1, { '物品名': '钢剑', '数量': '7' });
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        "UPDATE `背包物品表` SET `物品名` = ?, `数量` = ? WHERE `row_id` = ?;",
+        "UPDATE `背包物品表` SET `物品名` = ?, `数量` = ? WHERE `row_id` = ?",
         ['钢剑', '7', '1'],
       );
     });
@@ -405,7 +451,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
       await api.updateRow('背包物品表', 1, { '不存在的列': '值', '物品名': '钢剑' });
       expect(mockExecuteRuntimeMutation.mock.calls[0][0] as string).not.toContain('不存在的列');
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        "UPDATE `背包物品表` SET `物品名` = ? WHERE `row_id` = ?;",
+        "UPDATE `背包物品表` SET `物品名` = ? WHERE `row_id` = ?",
         ['钢剑', '1'],
       );
     });
@@ -419,6 +465,13 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('rowIndex < 1 返回 false', async () => {
       const result = await api.updateRow('背包物品表', 0, { '物品名': '钢剑' });
       expect(result).toBe(false);
+    });
+
+    it('rowIndex 越界时拒绝隐式新增无 row_id 行', async () => {
+      const result = await api.updateRow('背包物品表', 3, { '物品名': '钢剑' });
+      expect(result).toBe(false);
+      expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();
+      expect(mockCurrentJsonTableData.sheet_0.content).toHaveLength(3);
     });
 
     it('运行时未就绪时拒绝写入且不持久化', async () => {
@@ -441,41 +494,52 @@ describe('createTableCrudApi — SQLite 模式', () => {
 
   // ─── insertRow ───
   describe('insertRow', () => {
-    it('生成正确的 INSERT SQL', async () => {
+    it('使用 Sheet 高水位生成显式 row_id INSERT，并原子提交 metadata', async () => {
       await api.insertRow('背包物品表', { '物品名': '盾牌', '数量': '1' });
-      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'INSERT INTO `背包物品表` (`物品名`, `数量`) VALUES (?, ?);',
-        ['盾牌', '1'],
-      );
+      const [statements, paramsList, metadataUpdates, reason, batchOptions] = mockApplyEditsBatchWithSheetMetadata.mock.calls[0];
+      expect(statements).toEqual(['INSERT INTO `背包物品表` (`row_id`, `物品名`, `数量`) VALUES (?, ?, ?);']);
+      expect(paramsList).toEqual([['3', '盾牌', '1']]);
+      expect(metadataUpdates).toHaveLength(1);
+      expect(metadataUpdates[0].sheetKey).toBe('sheet_0');
+      expect(metadataUpdates[0].sheet.sourceData.nextRowId).toBe(4);
+      expect(reason).toBe('insertRow:sqlite');
+      expect(batchOptions).toEqual({ includeImplicitReseed: false });
     });
 
-    it('跳过 row_id 列（自增）', async () => {
+    it('忽略调用方 row_id，始终使用系统高水位', async () => {
       await api.insertRow('背包物品表', { row_id: '99', '物品名': '盾牌' });
-      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'INSERT INTO `背包物品表` (`物品名`) VALUES (?);',
-        ['盾牌'],
-      );
+      const [statements, paramsList, , reason, batchOptions] = mockApplyEditsBatchWithSheetMetadata.mock.calls[0];
+      expect(statements).toEqual(['INSERT INTO `背包物品表` (`row_id`, `物品名`) VALUES (?, ?);']);
+      expect(paramsList).toEqual([['3', '盾牌']]);
+      expect(reason).toBe('insertRow:sqlite');
+      expect(batchOptions).toEqual({ includeImplicitReseed: false });
     });
 
-    it('空 data 生成 DEFAULT VALUES', async () => {
+    it('空 data 仍显式写入系统 row_id', async () => {
       await api.insertRow('背包物品表', {});
-      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith('INSERT INTO `背包物品表` DEFAULT VALUES;', []);
+      const [statements, paramsList, , reason, batchOptions] = mockApplyEditsBatchWithSheetMetadata.mock.calls[0];
+      expect(statements).toEqual(['INSERT INTO `背包物品表` (`row_id`) VALUES (?);']);
+      expect(paramsList).toEqual([['3']]);
+      expect(reason).toBe('insertRow:sqlite');
+      expect(batchOptions).toEqual({ includeImplicitReseed: false });
     });
 
     it('value 为 null 时将 null 作为参数传递', async () => {
       await api.insertRow('背包物品表', { '物品名': null, '数量': '1' });
-      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'INSERT INTO `背包物品表` (`物品名`, `数量`) VALUES (?, ?);',
-        [null, '1'],
-      );
+      const [statements, paramsList, , reason, batchOptions] = mockApplyEditsBatchWithSheetMetadata.mock.calls[0];
+      expect(statements).toEqual(['INSERT INTO `背包物品表` (`row_id`, `物品名`, `数量`) VALUES (?, ?, ?);']);
+      expect(paramsList).toEqual([['3', null, '1']]);
+      expect(reason).toBe('insertRow:sqlite');
+      expect(batchOptions).toEqual({ includeImplicitReseed: false });
     });
 
     it('value 包含单引号时传递原始值不作转义（由参数化查询处理）', async () => {
       await api.insertRow('背包物品表', { '物品名': "铁剑'加强版" });
-      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'INSERT INTO `背包物品表` (`物品名`) VALUES (?);',
-        ["铁剑'加强版"],
-      );
+      const [statements, paramsList, , reason, batchOptions] = mockApplyEditsBatchWithSheetMetadata.mock.calls[0];
+      expect(statements).toEqual(['INSERT INTO `背包物品表` (`row_id`, `物品名`) VALUES (?, ?);']);
+      expect(paramsList).toEqual([['3', "铁剑'加强版"]]);
+      expect(reason).toBe('insertRow:sqlite');
+      expect(batchOptions).toEqual({ includeImplicitReseed: false });
     });
 
     it('表不存在返回 -1', async () => {
@@ -484,13 +548,13 @@ describe('createTableCrudApi — SQLite 模式', () => {
     });
 
     it('SQL 执行失败返回 -1', async () => {
-      mockExecuteRuntimeMutation.mockReturnValue({ errors: ['SQL 错误'], changes: 0 });
+      mockApplyEditsBatchWithSheetMetadata.mockImplementationOnce(() => { throw new Error('SQL 错误'); });
       const result = await api.insertRow('背包物品表', { '物品名': '盾牌' });
       expect(result).toBe(-1);
     });
 
     it('真实运行时 DB 约束失败时不写持久层', async () => {
-      mockExecuteRuntimeMutation.mockReturnValue({ errors: ['NOT NULL constraint failed: map_elements.element_name'], changes: 0 });
+      mockApplyEditsBatchWithSheetMetadata.mockImplementationOnce(() => { throw new Error('NOT NULL constraint failed: map_elements.element_name'); });
 
       const result = await api.insertRow('背包物品表', { '物品名': null, '数量': '1' });
 
@@ -506,26 +570,35 @@ describe('createTableCrudApi — SQLite 模式', () => {
 
       expect(result).toBe(-1);
       expect(mockEnsureStorageProviderReady).toHaveBeenCalledOnce();
-      expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();
+      expect(mockApplyEditsBatchWithSheetMetadata).not.toHaveBeenCalled();
       expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     });
 
-    it('非 SQLite insertRow 使用最小未占用 row_id，并使 operation 身份与 cells 一致', async () => {
+    it('非 SQLite insertRow 使用持久高水位且 operation 同步固化 row_id 与 nextRowId', async () => {
       mockIsSqliteMode = false;
       mockCurrentJsonTableData.sheet_0.content = [
         ['row_id', '物品名', '数量'],
         ['1', '铁剑', '3'],
         ['3', '盾牌', '1'],
       ];
+      mockCurrentJsonTableData.sheet_0.sourceData = { nextRowId: 4 };
 
       const result = await api.insertRow('背包物品表', { '物品名': '药水', '数量': '0' });
 
       expect(result).toBe(3);
-      expect(mockCurrentJsonTableData.sheet_0.content[3]).toEqual(['2', '药水', '0']);
+      expect(mockCurrentJsonTableData.sheet_0.content[3]).toEqual(['4', '药水', '0']);
+      expect(mockCurrentJsonTableData.sheet_0.sourceData.nextRowId).toBe(5);
       expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
         source: 'manual_crud',
+        operations: [
+          { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '4', cells: ['4', '药水', '0'] },
+          { kind: 'meta_update', sheetKey: 'sheet_0', meta: { sourceData: { nextRowId: 5 } } },
+        ],
         tableData: expect.objectContaining({
-          sheet_0: expect.objectContaining({ content: expect.arrayContaining([['2', '药水', '0']]) }),
+          sheet_0: expect.objectContaining({
+            content: expect.arrayContaining([['4', '药水', '0']]),
+            sourceData: expect.objectContaining({ nextRowId: 5 }),
+          }),
         }),
       }));
     });
@@ -536,7 +609,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
       const result = await api.insertRow('背包物品表', { '物品名': '盾牌', '数量': '1' });
 
       expect(result).toBe(-1);
-      expect(mockExecuteRuntimeMutation).toHaveBeenCalled();
+      expect(mockApplyEditsBatchWithSheetMetadata).toHaveBeenCalled();
       expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
         source: 'manual_crud',
         tableData: expect.any(Object),
@@ -551,7 +624,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 DELETE SQL', async () => {
       await api.deleteRow('背包物品表', 1);
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'DELETE FROM `背包物品表` WHERE `row_id` = ?;',
+        'DELETE FROM `背包物品表` WHERE `row_id` = ?',
         ['1'],
       );
     });

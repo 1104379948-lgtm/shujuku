@@ -12,7 +12,7 @@ import { sanitizeJsonPipeline_ACU, coerceLooseRowObject_ACU } from './json-sanit
 import { isSqliteMode } from '../../table/storage-mode';
 import { extractStrictJsonTableFillResponse_ACU } from './strict-json-table-fill';
 import { stripJsonCommentsPreservingStrings_ACU } from '../../../shared/json-helpers';
-import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
+import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../../../shared/stable-row-id-allocator';
 
   function normalizeAiResponseForTableEditParsing_ACU(text: string) {
     if (typeof text !== 'string') return '';
@@ -354,8 +354,7 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
                         break;
                     }
                     if (table && table.content && typeof data === 'object') {
-                        const reservedRowIds = createStableRowIdReservation_ACU(table.content.slice(1));
-                        const newRow: any[] = [allocateStableRowId_ACU(reservedRowIds)];
+                        const newRow: any[] = [allocateStableRowIdForSheet_ACU(table)];
                         const headers = table.content[0].slice(1);
                         const specialIndexCol = (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey))
                             ? getSummaryIndexColumnIndex_ACU(table)
@@ -411,6 +410,7 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
                         }
                     }
                     if (table && table.content && table.content.length > rowIndex + 1) {
+                        ensureStableNextRowId_ACU(table);
                         table.content.splice(rowIndex + 1, 1);
                         logDebug_ACU(`Applied deleteRow to table ${tableIndex} (${table.name}) at index ${rowIndex}`);
                         appliedEdits++;
@@ -453,6 +453,7 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
                         }
                     }
                     if (table && table.content && table.content.length > rowIndex + 1 && typeof data === 'object') {
+                        ensureStableNextRowId_ACU(table);
                         const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey) : { rows: new Set(), cols: new Set(), cells: new Set() };
                         if (lockState.rows.has(rowIndex)) {
                             logDebug_ACU(`[锁定] 行锁定阻止 updateRow (tableIndex: ${tableIndex}, rowIndex: ${rowIndex})`);

@@ -141,9 +141,10 @@ describe('SqliteEngine', () => {
   // runBatch
   // ═══════════════════════════════════════════════════════════════
   describe('runBatch', () => {
-    it('空数组返回 totalChanges 0', () => {
+    it('空数组返回 totalChanges 0 与空逐语句结果', () => {
       const result = engine.runBatch([]);
       expect(result.totalChanges).toBe(0);
+      expect(result.statementChanges).toEqual([]);
     });
 
     it('批量执行多条语句', () => {
@@ -154,6 +155,7 @@ describe('SqliteEngine', () => {
         "INSERT INTO test VALUES (3, '王五');",
       ]);
       expect(result.totalChanges).toBe(3);
+      expect(result.statementChanges).toEqual([1, 1, 1]);
       const query = engine.query('SELECT COUNT(*) FROM test;');
       expect(query.values[0][0]).toBe(3);
     });
@@ -197,6 +199,7 @@ describe('SqliteEngine', () => {
         'INSERT INTO test VALUES (2);',
       ]);
       expect(result.totalChanges).toBe(2);
+      expect(result.statementChanges).toEqual([1, 0, 0, 1]);
     });
   });
 

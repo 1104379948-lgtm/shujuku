@@ -4,7 +4,7 @@ import { getChatArray_ACU } from '../chat/chat-service';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeChatSheetsObject_ACU } from '../template/chat-scope';
 import { getStorageProvider } from './table-storage-strategy';
-import { runTableUpdateCommit_ACU } from './table-update-commit';
+import { replaceRuntimeDataStrict_ACU, runRuntimeDataReplaceCommit_ACU } from './table-update-commit';
 
 export interface ImportTableJsonCommitResult_ACU {
   success: boolean;
@@ -43,35 +43,29 @@ export async function importTableJsonThroughCommit_ACU(
   const sheetKeys = Object.keys(importedTableData).filter(k => k.startsWith('sheet_'));
   const persist = options.persist !== false;
 
-  const provider = getStorageProvider();
-  if (typeof provider.replaceAllData !== 'function') {
-    return { success: false, error: '当前存储 provider 不支持全量替换命令。' };
-  }
-  const replaceResult = await provider.replaceAllData(importedTableData);
-  if (!replaceResult.success) {
-    return { success: false, error: replaceResult.error || '运行时全量替换失败。' };
-  }
-  const runtimeData = (provider.getCurrentData() || importedTableData) as TableDataObject_ACU;
-
   if (!persist) {
-    const hasSummaryTables = Object.keys(runtimeData)
-      .filter(k => k.startsWith('sheet_'))
-      .some(k => {
-        const table = (runtimeData as any)?.[k];
-        return Boolean(table?.name && isSummaryOrOutlineTable_ACU(table.name));
-      });
-    return {
-      success: true,
-      tableData: runtimeData,
-      sheetKeys,
-      hasSummaryTables,
-      persisted: false,
-    };
+    try {
+      const runtimeData = await replaceRuntimeDataStrict_ACU(getStorageProvider(), importedTableData);
+      const runtimeSheetKeys = Object.keys(runtimeData).filter(k => k.startsWith('sheet_'));
+      const hasSummaryTables = runtimeSheetKeys.some(k => {
+          const table = (runtimeData as any)?.[k];
+          return Boolean(table?.name && isSummaryOrOutlineTable_ACU(table.name));
+        });
+      return {
+        success: true,
+        tableData: runtimeData,
+        sheetKeys: runtimeSheetKeys,
+        hasSummaryTables,
+        persisted: false,
+      };
+    } catch (error: any) {
+      return { success: false, error: error?.message || String(error) };
+    }
   }
 
   const targetMessageIndex = resolveLatestAiMessageIndex_ACU();
 
-  const commitResult = await runTableUpdateCommit_ACU<boolean>({
+  const commitResult = await runRuntimeDataReplaceCommit_ACU<boolean>({
     source: 'import',
     reason: 'importTableAsJson',
     isolationKey: getCurrentIsolationKey_ACU(),
@@ -83,12 +77,10 @@ export async function importTableJsonThroughCommit_ACU(
     updateGroupKeys: null,
     trackingSheetKeys: [],
     trackAsUpdate: false,
-    operations: [{ kind: 'data_replace', data: importedTableData, reason: 'import' }],
-  }, async () => ({
-    success: true,
-    value: true,
-    tableData: runtimeData,
-  }));
+    replacementData: importedTableData,
+    replacementReason: 'import',
+    mapValue: () => true,
+  });
 
   if (!commitResult.success || !commitResult.tableData) {
     return { success: false, error: commitResult.error || '导入数据提交失败。' };
@@ -105,7 +97,7 @@ export async function importTableJsonThroughCommit_ACU(
     success: true,
     messageIndex: commitResult.messageIndex ?? targetMessageIndex,
     tableData: commitResult.tableData,
-    sheetKeys,
+    sheetKeys: Object.keys(commitResult.tableData).filter(k => k.startsWith('sheet_')),
     hasSummaryTables,
     persisted: true,
   };

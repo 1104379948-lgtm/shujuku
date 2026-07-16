@@ -5,7 +5,7 @@
  * 上层代码通过策略选择器获取 Provider，不直接依赖具体实现。
  */
 
-import type { TableDataObject_ACU } from './models/table-data';
+import type { Sheet_ACU, TableDataObject_ACU } from './models/table-data';
 
 /** 存储模式 */
 export type StorageMode = 'native' | 'sqlite';
@@ -41,8 +41,28 @@ export interface ApplyEditsResult {
   modifiedKeys: string[];
   /** 成功应用的编辑数量 */
   appliedEdits: number;
+  /** 实际业务 SQL 的总变更行数；provider 可在 SQLite 批处理时提供。 */
+  changes?: number;
+  /** 与调用方 prepared statements 同索引的变更行数。 */
+  statementChanges?: number[];
   /** 错误信息（失败时） */
   error?: string;
+}
+
+export interface SqlSheetMetadataUpdate_ACU {
+  sheetKey: string;
+  sheet: Sheet_ACU;
+}
+
+export interface SqlReseedPlan_ACU {
+  statements: string[];
+  paramsList: (string | number | null)[][];
+  metadataUpdates: SqlSheetMetadataUpdate_ACU[];
+}
+
+export interface ApplyEditsBatchWithSheetMetadataOptions_ACU {
+  /** 受控 prepared batch 必须关闭，避免 provider 添加未持久化的业务 SQL。 */
+  includeImplicitReseed?: boolean;
 }
 
 /**
@@ -101,6 +121,12 @@ export interface ITableStorageProvider {
   getCurrentData(): TableDataObject_ACU | null;
 
   /**
+   * 严格导出当前 runtime canonical data。SQLite 导出失败必须抛错，
+   * 不得回退到 currentJsonTableData_ACU 等缓存快照。
+   */
+  exportCanonicalData?(): TableDataObject_ACU;
+
+  /**
    * 在公共提交模型内替换完整运行时数据。
    * 注意：只负责运行时更新，不负责持久化聊天记录。
    */
@@ -122,6 +148,25 @@ export interface ITableStorageProvider {
    * sqlite 模式必须把所有 SQL 放进同一个运行时事务；native 可不实现。
    */
   applyEditsBatch?(editsList: string[], updateMode?: string, paramsList?: (string | number | null)[][]): ApplyEditsResult;
+
+  /**
+   * 基于调用方已导出的 canonical data，只读准备当前 SQLite 空表所需的
+   * seedRows reseed SQL 与 metadata。
+   * 调用方若持久化 SQL operation，必须使用此计划作为同一 prepared batch 的一部分。
+   */
+  prepareReseedPlanForEmptyTables?(
+    canonicalData: TableDataObject_ACU,
+    targetSheetKeys?: string[],
+  ): SqlReseedPlan_ACU;
+
+  /** 在一个 SQLite 事务内提交调用方已准备的 SQL 与 Sheet metadata。 */
+  applyEditsBatchWithSheetMetadata?(
+    editsList: string[],
+    paramsList: (string | number | null)[][],
+    metadataUpdates: SqlSheetMetadataUpdate_ACU[],
+    updateMode?: string,
+    options?: ApplyEditsBatchWithSheetMetadataOptions_ACU,
+  ): ApplyEditsResult;
 
   /** 创建运行时快照，用于提交失败或重试前回滚。sqlite 返回二进制 DB 快照；native 可不实现。 */
   createRuntimeSnapshot?(): unknown;

@@ -38,6 +38,27 @@ const serviceMock = vi.hoisted(() => ({
     if (applied.tableData) runtimeMock._set_currentJsonTableData_ACU(applied.tableData);
     return { success: applied.success !== false, value: applied.value, tableData: applied.tableData, saved: true };
   }),
+  runSqliteAtomicBatchCommit_ACU: vi.fn(async (options: any) => {
+    const workingData = options.initialData ? JSON.parse(JSON.stringify(options.initialData)) : runtimeMock.getCurrentData();
+    const prepared = options.prepare({ workingData });
+    if (prepared.error) return { success: false, error: prepared.error };
+    const tableData = JSON.parse(JSON.stringify(workingData));
+    prepared.statements.forEach((statement: string, index: number) => {
+      if (!String(statement).startsWith('INSERT')) return;
+      const metadata = prepared.metadataUpdates.find((item: any) => String(statement).includes(item.sheet.uid));
+      const sheetKey = metadata?.sheetKey || prepared.metadataUpdates[0]?.sheetKey;
+      const sheet = tableData[sheetKey];
+      const params = prepared.paramsList[index] || [];
+      if (sheet) sheet.content.push(params.map((value: any) => value ?? ''));
+    });
+    for (const update of prepared.metadataUpdates) {
+      if (tableData[update.sheetKey]) tableData[update.sheetKey].sourceData = JSON.parse(JSON.stringify(update.sheet.sourceData));
+    }
+    const validationError = prepared.validate?.(tableData);
+    if (validationError) return { success: false, error: validationError };
+    runtimeMock._set_currentJsonTableData_ACU(tableData);
+    return { success: true, value: prepared.mapValue(tableData), tableData, saved: true };
+  }),
   getLatestAiMessageIndexFromChat_ACU: vi.fn(() => 0),
   getLatestTableAppendMessageIndexFromChat_ACU: vi.fn(() => 0),
   resolveTableHistoryStateFromChat_ACU: vi.fn(() => ({
@@ -97,6 +118,7 @@ vi.mock('../../../src/service/table/table-service', () => ({
 }));
 vi.mock('../../../src/service/table/table-update-commit', () => ({
   runTableUpdateCommit_ACU: serviceMock.runTableUpdateCommit_ACU,
+  runSqliteAtomicBatchCommit_ACU: serviceMock.runSqliteAtomicBatchCommit_ACU,
 }));
 vi.mock('../../../src/service/table/table-history', () => ({
   getLatestAiMessageIndexFromChat_ACU: serviceMock.getLatestAiMessageIndexFromChat_ACU,
@@ -167,6 +189,8 @@ describe('useVisualizerSave', () => {
     setActivePinia(createPinia());
     runtimeMock.resetCurrentData();
     vi.clearAllMocks();
+    serviceMock.isSqliteMode.mockReturnValue(false);
+    serviceMock.runSqliteAtomicBatchCommit_ACU.mockClear();
     serviceMock.preflightSchemaMigrations_ACU.mockReset();
     serviceMock.preflightSchemaMigrations_ACU.mockResolvedValue({ changedSheetKeys: [], blockers: [], operations: [] });
   });
@@ -198,7 +222,7 @@ describe('useVisualizerSave', () => {
     expect(store.lastSavedTarget).toBe('data');
   });
 
-  it('新增行保存时分配最小未占用 row_id，并生成可重放的 row_upsert', async () => {
+  it('新增行保存时使用持久高水位，并生成可重放的 row_upsert 与 nextRowId 更新', async () => {
     const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
     const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
     const store = useVisualizerStore();
@@ -207,6 +231,7 @@ describe('useVisualizerSave', () => {
       sheet_test_vz2: {
         ...sheet(),
         content: [['row_id', '姓名', '状态'], ['1', 'A', '平静'], ['3', 'B', '紧张']],
+        sourceData: { ...sheet().sourceData, nextRowId: 4 },
       },
     };
     store.loadSnapshot(initialData, ['sheet_test_vz2']);
@@ -219,7 +244,62 @@ describe('useVisualizerSave', () => {
     await expect(useVisualizerSave().saveToChat()).resolves.toBe(true);
 
     expect(runtimeMock.getCurrentData().sheet_test_vz2.content).toEqual([
-      ['row_id', '姓名', '状态'], ['1', 'A', '平静'], ['3', 'B', '紧张'], ['2', 'C', '就绪'],
+      ['row_id', '姓名', '状态'], ['1', 'A', '平静'], ['3', 'B', '紧张'], ['4', 'C', '就绪'],
+    ]);
+    expect(runtimeMock.getCurrentData().sheet_test_vz2.sourceData.nextRowId).toBe(5);
+    const apply = serviceMock.runTableUpdateCommit_ACU.mock.calls[0][1];
+    const workingData = JSON.parse(JSON.stringify(initialData));
+    const applied = await apply({ workingData });
+    expect(applied.persist.operations).toEqual([
+      { kind: 'row_upsert', sheetKey: 'sheet_test_vz2', rowId: '4', cells: ['4', 'C', '就绪'] },
+      {
+        kind: 'meta_update',
+        sheetKey: 'sheet_test_vz2',
+        meta: { sourceData: { nextRowId: 5 } },
+      },
+    ]);
+  });
+
+  it('SQLite 批量新增显式分配连续 row_id，并原子固化单次 nextRowId 更新', async () => {
+    serviceMock.isSqliteMode.mockReturnValue(true);
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const initialData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: {
+        ...sheet(),
+        content: [['row_id', '姓名', '状态'], ['1', 'A', '平静'], ['3', 'B', '紧张']],
+        sourceData: { ...sheet().sourceData, nextRowId: 4 },
+      },
+    };
+    store.loadSnapshot(initialData, ['sheet_test_vz2']);
+    runtimeMock._set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(initialData)));
+    runtimeMock._set_currentJsonTableData_ACU.mockClear();
+    store.addRow();
+    store.currentSheet.content[3][1] = 'C';
+    store.currentSheet.content[3][2] = '就绪';
+    store.addRow();
+    store.currentSheet.content[4][1] = 'D';
+    store.currentSheet.content[4][2] = '待命';
+
+    await expect(useVisualizerSave().saveToChat()).resolves.toBe(true);
+
+    expect(runtimeMock.getCurrentData().sheet_test_vz2.content.slice(-2)).toEqual([
+      ['4', 'C', '就绪'],
+      ['5', 'D', '待命'],
+    ]);
+    expect(runtimeMock.getCurrentData().sheet_test_vz2.sourceData.nextRowId).toBe(6);
+    const prepare = serviceMock.runSqliteAtomicBatchCommit_ACU.mock.calls[0][0].prepare;
+    const prepared = prepare({ workingData: JSON.parse(JSON.stringify(initialData)) });
+    expect(prepared.paramsList).toEqual([
+      ['4', 'C', '就绪'],
+      ['5', 'D', '待命'],
+    ]);
+    expect(prepared.metadataUpdates).toHaveLength(1);
+    expect(prepared.operations).toEqual([
+      { kind: 'sql_batch', statements: prepared.statements, params: prepared.paramsList },
+      { kind: 'meta_update', sheetKey: 'sheet_test_vz2', meta: { sourceData: { nextRowId: 6 } } },
     ]);
   });
 
@@ -571,6 +651,197 @@ describe('useVisualizerSave', () => {
     expect(store.dirty).toBe(true);
     expect(store.isSaving).toBe(false);
     expect(toastMock.warning).toHaveBeenCalledWith('模板结构在 schema migration preflight 期间已变化；请重新保存。', { muteable: false });
+  });
+
+  it('删除模板 Sheet 时仅提交 deletion，并从 guide 和模板源排除该表', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const initialData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_delete: { ...sheet('删除表'), uid: 'sheet_delete' },
+    };
+    store.loadSnapshot(initialData, ['sheet_keep', 'sheet_delete']);
+    store.queueLockChanges([
+      {
+        sheetKey: 'sheet_delete',
+        rows: [{ rowIndex: 0, locked: true }],
+        columns: [],
+        cells: [],
+        specialIndexLocked: false,
+      },
+    ]);
+    store.deleteSheet('sheet_delete');
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledTimes(1);
+    const [[commitOptions]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
+    expect(commitOptions.sheetChanges).toEqual([{ kind: 'deletion', sheetKey: 'sheet_delete' }]);
+    expect(commitOptions.guideData).toEqual(expect.objectContaining({ sheet_keep: expect.any(Object) }));
+    expect(commitOptions.guideData).not.toHaveProperty('sheet_delete');
+    expect(commitOptions.templateSource).toEqual(expect.objectContaining({ sheet_keep: expect.any(Object) }));
+    expect(commitOptions.templateSource).not.toHaveProperty('sheet_delete');
+    expect(serviceMock.purgeSheetKeysFromChatHistoryHard_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.runTableUpdateCommit_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.saveTableLocksForSheet_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.setSpecialIndexLockEnabled_ACU).not.toHaveBeenCalled();
+    expect(store.deletedSheetKeys).toEqual([]);
+    expect(store.dirty).toBe(false);
+    expect(store.lastSavedTarget).toBe('template-chat');
+    expect(toastMock.success).toHaveBeenCalledWith(
+      '模板/结构已保存到当前聊天，已从当前模板移除 1 张表；历史数据未执行硬删除。',
+      { muteable: false },
+    );
+  });
+
+  it('删除、新增、metadata 与 schema 变更同批保存时保持各自的提交语义', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep', orderNo: 0 },
+      sheet_delete: { ...sheet('删除表'), uid: 'sheet_delete', orderNo: 1 },
+      sheet_schema: { ...sheet('结构表'), uid: 'sheet_schema', orderNo: 2 },
+    }, ['sheet_keep', 'sheet_delete', 'sheet_schema']);
+    store.deleteSheet('sheet_delete');
+    store.addSheet('sheet_new', { ...sheet('新增表'), uid: 'sheet_new' });
+    store.selectSheet('sheet_keep');
+    store.currentSheet.name = '重命名保留表';
+    store.selectSheet('sheet_schema');
+    store.currentSheet.content = [['row_id', '姓名', '状态', '职业'], ['1', 'A', '平静', '研究员']];
+    store.currentSheet.sourceData.ddl = `CREATE TABLE sheet_schema (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  col_1 TEXT, -- 姓名
+  col_2 TEXT, -- 状态
+  col_3 TEXT -- 职业
+);`;
+    const migration = { kind: 'sheet_schema_migrate', contractVersion: 1, sheetKey: 'sheet_schema' };
+    serviceMock.preflightSchemaMigrations_ACU.mockResolvedValueOnce({
+      changedSheetKeys: ['sheet_schema'],
+      blockers: [],
+      operations: [migration],
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    const [[preflightOptions]] = serviceMock.preflightSchemaMigrations_ACU.mock.calls;
+    expect(preflightOptions.baselineData).toEqual(expect.objectContaining({ sheet_schema: expect.any(Object) }));
+    expect(preflightOptions.candidateData).not.toHaveProperty('sheet_delete');
+    const [[commitOptions]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
+    expect(commitOptions.sheetChanges).toEqual(expect.arrayContaining([
+      { kind: 'deletion', sheetKey: 'sheet_delete' },
+      expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' }),
+      expect.objectContaining({ kind: 'operations', sheetKey: 'sheet_keep' }),
+      expect.objectContaining({ kind: 'operations', sheetKey: 'sheet_schema', operations: expect.arrayContaining([migration]) }),
+    ]));
+    expect(commitOptions.sheetChanges.map((change: any) => change.sheetKey)).toHaveLength(4);
+    expect(new Set(commitOptions.sheetChanges.map((change: any) => change.sheetKey)).size).toBe(4);
+    expect(commitOptions.guideData).not.toHaveProperty('sheet_delete');
+    expect(commitOptions.templateSource).not.toHaveProperty('sheet_delete');
+    expect(commitOptions.templateSource).toEqual(expect.objectContaining({
+      sheet_keep: expect.objectContaining({ name: '重命名保留表' }),
+      sheet_schema: expect.any(Object),
+      sheet_new: expect.any(Object),
+    }));
+  });
+
+  it('模板删除提交被拒绝时保留删除草稿、dirty 和模板基线', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const initialData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_delete: { ...sheet('删除表'), uid: 'sheet_delete' },
+    };
+    store.loadSnapshot(initialData, ['sheet_keep', 'sheet_delete']);
+    const baseDataBeforeSave = JSON.parse(JSON.stringify(store.templateBaseData));
+    const baseOrderBeforeSave = [...store.templateBaseSheetOrder];
+    store.deleteSheet('sheet_delete');
+    serviceMock.commitCurrentFloorTemplateChanges_ACU.mockResolvedValueOnce({
+      saved: false,
+      error: '模板删除被拒绝',
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      sheetChanges: [{ kind: 'deletion', sheetKey: 'sheet_delete' }],
+    }));
+    expect(serviceMock.purgeSheetKeysFromChatHistoryHard_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.runTableUpdateCommit_ACU).not.toHaveBeenCalled();
+    expect(store.deletedSheetKeys).toEqual(['sheet_delete']);
+    expect(store.templateBaseData).toEqual(baseDataBeforeSave);
+    expect(store.templateBaseSheetOrder).toEqual(baseOrderBeforeSave);
+    expect(store.dirty).toBe(true);
+    expect(store.lastSavedTarget).toBeNull();
+  });
+
+  it('模板删除提交直接抛错时保留删除草稿、基线与锁草稿', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_delete: { ...sheet('删除表'), uid: 'sheet_delete' },
+    }, ['sheet_keep', 'sheet_delete']);
+    const baseDataBeforeSave = JSON.parse(JSON.stringify(store.templateBaseData));
+    store.queueLockChanges([{
+      sheetKey: 'sheet_keep',
+      rows: [{ rowIndex: 0, locked: true }],
+      columns: [],
+      cells: [],
+      specialIndexLocked: false,
+    }]);
+    store.deleteSheet('sheet_delete');
+    serviceMock.commitCurrentFloorTemplateChanges_ACU.mockRejectedValueOnce(new Error('deletion commit exploded'));
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(store.deletedSheetKeys).toEqual(['sheet_delete']);
+    expect(store.templateBaseData).toEqual(baseDataBeforeSave);
+    expect(store.pendingLockChanges).toHaveLength(1);
+    expect(store.dirty).toBe(true);
+    expect(store.lastSavedTarget).toBeNull();
+    expect(store.isSaving).toBe(false);
+    expect(serviceMock.applyTemplateScopeForCurrentChat_ACU).not.toHaveBeenCalled();
+    expect(runtimeMock._set_currentJsonTableData_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.saveTableLocksForSheet_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.refreshMergedDataAndNotify_ACU).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith('deletion commit exploded', { muteable: false });
+  });
+
+  it('删除最后一张模板 Sheet 时在提交前明确阻断', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('唯一表'),
+    }, ['sheet_test_vz2']);
+    store.deleteSheet('sheet_test_vz2');
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(toastMock.error).toHaveBeenCalledWith(
+      '当前模板至少需要保留一张表，无法保存空模板。',
+      { muteable: false },
+    );
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.purgeSheetKeysFromChatHistoryHard_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.runTableUpdateCommit_ACU).not.toHaveBeenCalled();
+    expect(store.deletedSheetKeys).toEqual(['sheet_test_vz2']);
+    expect(store.dirty).toBe(true);
+    expect(store.lastSavedTarget).toBeNull();
   });
 
   it('当前聊天模板原子提交失败时不推进运行时、基线、scope 或锁草稿', async () => {
