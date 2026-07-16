@@ -14,8 +14,10 @@ import {
   ensureChatSheetGuideSeeded_ACU,
   getChatSheetGuideDataForIsolationKey_ACU,
   getSortedSheetKeys_ACU,
+  resolveInitialRuntimeTemplateSnapshot_ACU,
   sanitizeSheetForStorage_ACU,
   setChatSheetGuideDataForIsolationKey_ACU,
+  shouldUseInitialSeedRows_ACU,
 } from '../template/chat-scope';
 import { deleteAllGeneratedEntries_ACU } from '../worldbook/pipeline';
 import { mergeAllIndependentTables_ACU, mergeAllIndependentTablesLegacyV1_ACU } from '../runtime/helpers-remaining';
@@ -27,6 +29,7 @@ import { migrateLegacyStorageToV2OnLoad_ACU } from './storage-v2-migration';
 import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 import type { TableWriteTransactionContext_ACU } from './table-write-transaction';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
+import { ensureStableNextRowId_ACU } from '../../shared/stable-row-id-allocator';
 
 export interface TableChatPersistOptions_ACU {
   targetMessageIndex?: number;
@@ -629,22 +632,81 @@ async function initializeJsonTableInChatHistory_ACU(): Promise<{ initialized: bo
 }
 
 /**
+ * 为没有任何持久化表格快照的当前聊天构造首次 runtime canonical snapshot。
+ * 该入口只读取当前已生效模板并返回独立快照，不发布公共 JSON、不写聊天记录、
+ * 不创建 guide，也不清理世界书。Provider candidate 只能消费返回值，不能自行回退模板。
+ */
+export function buildInitialTableRuntimeSnapshot_ACU(): {
+  data: TableDataObject_ACU | null;
+  error?: string;
+} {
+  try {
+    const includeSeedRows = shouldUseInitialSeedRows_ACU();
+    const templateSnapshot = resolveInitialRuntimeTemplateSnapshot_ACU();
+    if (!templateSnapshot?.templateObj) {
+      return { data: null, error: '从当前模板构造初始化快照失败，请检查模板格式。' };
+    }
+
+    const snapshot = JSON.parse(JSON.stringify(templateSnapshot.templateObj)) as TableDataObject_ACU;
+    const sheetKeys = Object.keys(snapshot).filter(key => key.startsWith('sheet_'));
+    if (sheetKeys.length === 0) {
+      return { data: null, error: '当前模板不包含可初始化的表格。' };
+    }
+    for (const key of sheetKeys) {
+      const sheet = (snapshot as any)[key];
+      if (!sheet || typeof sheet !== 'object') {
+        return { data: null, error: `当前模板表格 ${key} 结构无效。` };
+      }
+      delete sheet._acu_from_base_state;
+      const templateRows = Array.isArray(sheet.content) && sheet.content.length > 1
+        ? JSON.parse(JSON.stringify(sheet.content.slice(1)))
+        : [];
+      if (includeSeedRows) {
+        sheet.seedRows = templateRows;
+      } else {
+        delete sheet.seedRows;
+        if (Array.isArray(sheet.content) && sheet.content.length > 1) sheet.content = [sheet.content[0]];
+      }
+      sheet.content = ensureStableRowIdsForSheetContent_ACU(
+        Array.isArray(sheet.content) && sheet.content.length > 0 ? sheet.content : [['row_id']],
+      );
+      ensureStableNextRowId_ACU(sheet);
+    }
+    return { data: snapshot };
+  } catch (error: any) {
+    return { data: null, error: error?.message || String(error) };
+  }
+}
+
+
+/**
  * 从聊天记录加载或创建表格数据到内存。
  * 返回 { loaded: boolean, source: 'merged'|'initialized'|'empty', error?: string }
  * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
+ *
+ * detached=true 仅恢复候选 SQLite runtime 所需的 canonical snapshot，绝不改写
+ * currentJsonTableData_ACU，也不触发“空聊天初始化”的 guide/世界书副作用。
  */
-export async function loadOrCreateJsonTableFromChatHistory_ACU(): Promise<{
+export async function loadOrCreateJsonTableFromChatHistory_ACU(options: { detached?: boolean } = {}): Promise<{
   loaded: boolean;
   source: 'merged' | 'initialized' | 'empty';
   error?: string;
   /** 本轮当前聊天回放得到的 canonical 快照，供 SQLite hydrate 显式使用。 */
   data?: TableDataObject_ACU | null;
 }> {
-  _set_currentJsonTableData_ACU(null);
+  const detached = options.detached === true;
+  if (!detached) {
+    _set_currentJsonTableData_ACU(null);
+  }
   logDebug_ACU('Attempting to load database from chat history...');
 
   const chat = getChatArray_ACU();
-  applyTemplateScopeForCurrentChat_ACU();
+  if (!detached) {
+    applyTemplateScopeForCurrentChat_ACU();
+  }
+  if (detached && (!chat || chat.length === 0)) {
+    return { loaded: false, source: 'empty', data: null };
+  }
   if (!chat || chat.length === 0) {
     logDebug_ACU('Chat history is empty. Initializing new database.');
     const initResult = await initializeJsonTableInChatHistory_ACU();
@@ -656,14 +718,20 @@ export async function loadOrCreateJsonTableFromChatHistory_ACU(): Promise<{
     };
   }
 
-  const mergedData = await mergeAllIndependentTables_ACU();
+  const mergedData = await mergeAllIndependentTables_ACU({
+    updateRuntimeState: !detached,
+  });
 
   if (mergedData) {
     const canonicalData = JSON.parse(JSON.stringify(mergedData)) as TableDataObject_ACU;
-    _set_currentJsonTableData_ACU(canonicalData);
+    if (!detached) {
+      _set_currentJsonTableData_ACU(canonicalData);
+    }
     logDebug_ACU('Database content successfully merged (tag-aware) and loaded into memory.');
     return { loaded: true, source: 'merged', data: canonicalData };
   }
+
+  if (detached) return { loaded: false, source: 'empty', data: null };
 
   logDebug_ACU('No database found for current tag in chat history. Initializing a new one.');
   const initResult = await initializeJsonTableInChatHistory_ACU();

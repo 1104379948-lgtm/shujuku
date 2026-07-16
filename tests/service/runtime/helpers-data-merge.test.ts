@@ -122,6 +122,7 @@ import { getChatArray_ACU } from '../../../src/data/gateways/chat-gateway';
 import { getChatSheetGuideDataForIsolationKey_ACU, materializeDataFromSheetGuide_ACU } from '../../../src/service/template/chat-scope';
 import { resolveTableStorageStrategy_ACU } from '../../../src/service/table/storage-strategy-resolver';
 import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { migrateLegacyStorageToV2OnLoad_ACU } from '../../../src/service/table/storage-v2-migration';
 
 describe('migrateContentNullToRowId', () => {
   // ═══════════════════════════════════════════════════════════════
@@ -561,6 +562,29 @@ describe('mergeAllIndependentTables_ACU', () => {
     const result = await mergeAllIndependentTables_ACU();
     expect(result).not.toBeNull();
     expect(result!.sheet_0.content[1][1]).toBe('旧版铁剑');
+  });
+
+  it('detached legacy 回放不执行持久化迁移，也不读取公共模板过滤实际表', async () => {
+    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'legacy-v1' } as any);
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
+    vi.mocked(getTemplateSheetKeys_ACU).mockReturnValue(['sheet_other']);
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue({
+      independentData: {
+        sheet_actual: {
+          name: '聊天实际表',
+          content: [['row_id', '值'], ['1', '保留']],
+        },
+      },
+      modifiedKeys: ['sheet_actual'],
+      updateGroupKeys: [],
+    } as any);
+
+    const result = await mergeAllIndependentTables_ACU({ updateRuntimeState: false });
+
+    expect(result?.sheet_actual?.content[1][1]).toBe('保留');
+    expect(getTemplateSheetKeys_ACU).not.toHaveBeenCalled();
+    expect(migrateLegacyStorageToV2OnLoad_ACU).not.toHaveBeenCalled();
   });
 
   // ═══ updateConfig 兼容迁移 ═══

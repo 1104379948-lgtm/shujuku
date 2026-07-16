@@ -18,6 +18,8 @@ import { logDebug_ACU, logWarn_ACU } from '../../../shared/utils';
 
 /** 全局 NameMapper 单例 */
 let _globalNameMapper: NameMapper | null = null;
+/** 当前全局映射器的运行时所有者；仅所有者可撤销自身发布。 */
+let _globalNameMapperOwner: unknown = null;
 
 /**
  * 获取全局 NameMapper 实例
@@ -38,14 +40,54 @@ export function getNameMapper(): NameMapper {
  */
 export function buildGlobalNameMapper(ddlMap: Map<string, string>): void {
   _globalNameMapper = NameMapper.fromDDLs(ddlMap);
+  _globalNameMapperOwner = null;
   logDebug_ACU(`[NameMapper] 全局映射器已构建: ${_globalNameMapper.tableCount} 张表`);
 }
 
+export interface GlobalNameMapperPublicationSnapshot_ACU {
+  mapper: NameMapper | null;
+  owner: unknown;
+}
+
+/** 捕获当前 NameMapper publication，用于与 JSON runtime 组成原子发布。 */
+export function captureGlobalNameMapperPublication_ACU(): GlobalNameMapperPublicationSnapshot_ACU {
+  return { mapper: _globalNameMapper, owner: _globalNameMapperOwner };
+}
+
+/** 仅恢复由 captureGlobalNameMapperPublication_ACU 产生的 publication 状态。 */
+export function restoreGlobalNameMapperPublication_ACU(snapshot: GlobalNameMapperPublicationSnapshot_ACU): void {
+  _globalNameMapper = snapshot.mapper;
+  _globalNameMapperOwner = snapshot.owner;
+}
+
 /**
- * 销毁全局 NameMapper
+ * 发布由某个 SQLite runtime 构建的映射器。
+ * owner 是身份令牌，不可由旧 runtime 伪造；后续撤销会严格匹配它。
+ */
+export function publishGlobalNameMapperForOwner_ACU(owner: object, mapper: NameMapper | null): void {
+  _globalNameMapper = mapper;
+  _globalNameMapperOwner = mapper ? owner : null;
+  logDebug_ACU(`[NameMapper] runtime 映射器已发布: tables=${mapper?.tableCount || 0}`);
+}
+
+/**
+ * 仅当 owner 仍持有当前全局映射器时撤销发布。
+ * 这阻止已过期 provider 在 dispose 时清空新 provider 的映射器。
+ */
+export function releaseGlobalNameMapperForOwner_ACU(owner: object): boolean {
+  if (_globalNameMapperOwner !== owner) return false;
+  _globalNameMapper = null;
+  _globalNameMapperOwner = null;
+  return true;
+}
+
+/**
+ * 无所有者的兼容销毁入口。运行时 Provider 不得调用它，
+ * 必须使用 releaseGlobalNameMapperForOwner_ACU()。
  */
 export function disposeGlobalNameMapper(): void {
   _globalNameMapper = null;
+  _globalNameMapperOwner = null;
 }
 
 /**

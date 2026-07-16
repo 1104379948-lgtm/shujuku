@@ -32,6 +32,8 @@ const {
   mockResolveTableStorageStrategy,
   mockPersistTableMutationLogV2,
   mockEnsureStableRowIdsForSheetContent,
+  mockResolveInitialRuntimeTemplateSnapshot,
+  mockShouldUseInitialSeedRows,
 } = vi.hoisted(() => {
   const mockCurrentJsonTableDataRef = {
     value: {
@@ -83,6 +85,8 @@ const {
         return row;
       })];
     }),
+    mockResolveInitialRuntimeTemplateSnapshot: vi.fn(() => null),
+    mockShouldUseInitialSeedRows: vi.fn(() => false),
     mockIsLegacyMatchForIsolation: vi.fn(() => false),
     mockResolveTableStorageStrategy: vi.fn(() => ({ mode: 'empty' })),
     mockPersistTableMutationLogV2: vi.fn(async () => ({ saved: true, messageIndex: 0 })),
@@ -120,8 +124,10 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
   getChatSheetGuideDataForIsolationKey_ACU: mockGetChatSheetGuideData,
   getSortedSheetKeys_ACU: mockGetSortedSheetKeys,
   ensureStableRowIdsForSheetContent_ACU: mockEnsureStableRowIdsForSheetContent,
+  resolveInitialRuntimeTemplateSnapshot_ACU: mockResolveInitialRuntimeTemplateSnapshot,
   sanitizeSheetForStorage_ACU: mockSanitizeSheetForStorage,
   setChatSheetGuideDataForIsolationKey_ACU: mockSetChatSheetGuideData,
+  shouldUseInitialSeedRows_ACU: mockShouldUseInitialSeedRows,
 }));
 
 vi.mock('../../../src/service/worldbook/pipeline', () => ({
@@ -154,6 +160,7 @@ import {
   saveIndependentTableToChatHistory_ACU,
   persistTablesToChatMessage_ACU,
   checkIfFirstTimeInit_ACU,
+  buildInitialTableRuntimeSnapshot_ACU,
   loadOrCreateJsonTableFromChatHistory_ACU,
 } from '../../../src/service/table/table-service';
 
@@ -172,6 +179,8 @@ beforeEach(() => {
   mockSaveChatToHost.mockResolvedValue(undefined);
   mockResolveTableStorageStrategy.mockReturnValue({ mode: 'empty' });
   mockPersistTableMutationLogV2.mockResolvedValue({ saved: true, messageIndex: 0 });
+  mockResolveInitialRuntimeTemplateSnapshot.mockReturnValue(null);
+  mockShouldUseInitialSeedRows.mockReturnValue(false);
 });
 
 function makeTestTransactionContext_ACU(): any {
@@ -664,6 +673,33 @@ describe('loadOrCreateJsonTableFromChatHistory_ACU', () => {
     expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith(mergedData);
   });
 
+  it('detached 回放返回 canonical 快照但不清空或发布公共 JSON', async () => {
+    const activeView = { sheet_active: { name: '已发布表', content: [['row_id'], ['1']] } };
+    const mergedData = { sheet_0: { name: '候选表', content: [['row_id'], ['2']] } };
+    mockCurrentJsonTableDataRef.value = activeView;
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: 'AI回复' }]);
+    mockMergeAllIndependentTables.mockResolvedValue(mergedData);
+
+    const result = await loadOrCreateJsonTableFromChatHistory_ACU({ detached: true });
+
+    expect(result).toEqual({ loaded: true, source: 'merged', data: mergedData });
+    expect(mockApplyTemplateScopeForCurrentChat).not.toHaveBeenCalled();
+    expect(mockMergeAllIndependentTables).toHaveBeenCalledWith({ updateRuntimeState: false });
+    expect(mockCurrentJsonTableDataRef.value).toBe(activeView);
+    expect(mockSetCurrentJsonTableData).not.toHaveBeenCalled();
+  });
+
+  it('detached 空快照不初始化模板或触发公共副作用', async () => {
+    mockGetChatArray.mockReturnValue([]);
+
+    const result = await loadOrCreateJsonTableFromChatHistory_ACU({ detached: true });
+
+    expect(result).toEqual({ loaded: false, source: 'empty', data: null });
+    expect(mockApplyTemplateScopeForCurrentChat).not.toHaveBeenCalled();
+    expect(mockSetCurrentJsonTableData).not.toHaveBeenCalled();
+    expect(mockDeleteAllGeneratedEntries).not.toHaveBeenCalled();
+  });
+
   it('无合并数据时触发初始化', async () => {
     mockGetChatArray.mockReturnValue([
       { is_user: false, mes: 'AI回复' },
@@ -687,5 +723,66 @@ describe('loadOrCreateJsonTableFromChatHistory_ACU', () => {
 
     expect(result.loaded).toBe(false);
     expect(result.error).toBeDefined();
+  });
+});
+
+describe('buildInitialTableRuntimeSnapshot_ACU', () => {
+  const templateData = {
+    mate: { type: 'chatSheets', version: 1 },
+    sheet_0: {
+      uid: 'inventory',
+      name: '背包表',
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);' },
+      content: [['row_id', 'name'], ['', '铁剑']],
+      updateConfig: {},
+      exportConfig: {},
+      orderNo: 0,
+    },
+  };
+
+  it('非首次填表阶段只生成表头 snapshot，且不修改 resolver 返回对象或公共 JSON', () => {
+    const activeView = { sheet_active: { content: [['row_id'], ['1']] } } as any;
+    const templateSnapshot = { templateObj: JSON.parse(JSON.stringify(templateData)), templateStr: JSON.stringify(templateData) };
+    mockCurrentJsonTableDataRef.value = activeView;
+    mockResolveInitialRuntimeTemplateSnapshot.mockReturnValue(templateSnapshot);
+    mockShouldUseInitialSeedRows.mockReturnValue(false);
+
+    const result = buildInitialTableRuntimeSnapshot_ACU();
+
+    expect(result.data?.sheet_0.content).toEqual([['row_id', 'name']]);
+    expect(result.data?.sheet_0.seedRows).toBeUndefined();
+    expect(templateSnapshot.templateObj.sheet_0.content).toEqual([['row_id', 'name'], ['', '铁剑']]);
+    expect(templateSnapshot.templateObj.sheet_0.seedRows).toBeUndefined();
+    expect(mockCurrentJsonTableDataRef.value).toBe(activeView);
+    expect(mockSetCurrentJsonTableData).not.toHaveBeenCalled();
+    expect(mockApplyTemplateScopeForCurrentChat).not.toHaveBeenCalled();
+    expect(mockEnsureChatSheetGuideSeeded).not.toHaveBeenCalled();
+    expect(mockDeleteAllGeneratedEntries).not.toHaveBeenCalled();
+  });
+
+  it('首次填表阶段显式保留并稳定化模板 seedRows', () => {
+    mockResolveInitialRuntimeTemplateSnapshot.mockReturnValue({
+      templateObj: JSON.parse(JSON.stringify(templateData)),
+      templateStr: JSON.stringify(templateData),
+    });
+    mockShouldUseInitialSeedRows.mockReturnValue(true);
+
+    const result = buildInitialTableRuntimeSnapshot_ACU();
+
+    expect(result.data?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑']]);
+    expect(result.data?.sheet_0.seedRows).toEqual([['', '铁剑']]);
+    expect((result.data?.sheet_0.sourceData as any).nextRowId).toBeDefined();
+  });
+
+  it('显式模板 snapshot 无有效 sheet 时返回错误，不猜测 schema', () => {
+    mockResolveInitialRuntimeTemplateSnapshot.mockReturnValue({
+      templateObj: { mate: { type: 'chatSheets', version: 1 } },
+      templateStr: '{"mate":{"type":"chatSheets","version":1}}',
+    });
+
+    const result = buildInitialTableRuntimeSnapshot_ACU();
+
+    expect(result.data).toBeNull();
+    expect(result.error).toContain('不包含可初始化的表格');
   });
 });

@@ -3,7 +3,7 @@ import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
 import { getChatArray_ACU } from '../chat/chat-service';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeChatSheetsObject_ACU } from '../template/chat-scope';
-import { getStorageProvider } from './table-storage-strategy';
+import { ensureStorageProviderReady_ACU } from './table-storage-strategy';
 import { replaceRuntimeDataStrict_ACU, runRuntimeDataReplaceCommit_ACU } from './table-update-commit';
 
 export interface ImportTableJsonCommitResult_ACU {
@@ -45,7 +45,8 @@ export async function importTableJsonThroughCommit_ACU(
 
   if (!persist) {
     try {
-      const runtimeData = await replaceRuntimeDataStrict_ACU(getStorageProvider(), importedTableData);
+      const provider = await ensureStorageProviderReady_ACU();
+      const runtimeData = await replaceRuntimeDataStrict_ACU(provider, importedTableData);
       const runtimeSheetKeys = Object.keys(runtimeData).filter(k => k.startsWith('sheet_'));
       const hasSummaryTables = runtimeSheetKeys.some(k => {
           const table = (runtimeData as any)?.[k];

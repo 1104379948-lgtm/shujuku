@@ -30,10 +30,54 @@ vi.mock('../../../src/service/ai/prompt-builder/table-edit-parser', () => ({
 }));
 
 // mock state-manager
-let mockCurrentJsonTableData: any = null;
+const nativeStateMocks = vi.hoisted(() => {
+  const state: { data: any; owner: object | null } = { data: null, owner: null };
+  return {
+    state,
+    capture: vi.fn(() => ({ data: state.data, owner: state.owner })),
+    publish: vi.fn((owner: object, value: any) => {
+      state.owner = owner;
+      state.data = value;
+    }),
+    release: vi.fn((owner: object) => {
+      if (state.owner !== owner) return false;
+      state.owner = null;
+      state.data = null;
+      return true;
+    }),
+    restore: vi.fn((snapshot: { data: any; owner: object | null }) => {
+      state.data = snapshot.data;
+      state.owner = snapshot.owner;
+    }),
+  };
+});
 vi.mock('../../../src/service/runtime/state-manager', () => ({
-  get currentJsonTableData_ACU() { return mockCurrentJsonTableData; },
-  _set_currentJsonTableData_ACU: (value: any) => { mockCurrentJsonTableData = value; },
+  get currentJsonTableData_ACU() { return nativeStateMocks.state.data; },
+  captureCurrentJsonTablePublication_ACU: nativeStateMocks.capture,
+  publishCurrentJsonTableDataForOwner_ACU: nativeStateMocks.publish,
+  releaseCurrentJsonTableDataForOwner_ACU: nativeStateMocks.release,
+  restoreCurrentJsonTablePublication_ACU: nativeStateMocks.restore,
+}));
+
+const nativeNameMapperMocks = vi.hoisted(() => {
+  const state: { mapper: any; owner: object | null } = { mapper: null, owner: null };
+  return {
+    state,
+    capture: vi.fn(() => ({ mapper: state.mapper, owner: state.owner })),
+    publish: vi.fn((owner: object, mapper: any) => {
+      state.mapper = mapper;
+      state.owner = mapper ? owner : null;
+    }),
+    restore: vi.fn((snapshot: { mapper: any; owner: object | null }) => {
+      state.mapper = snapshot.mapper;
+      state.owner = snapshot.owner;
+    }),
+  };
+});
+vi.mock('../../../src/service/runtime/template-vars/name-mapper', () => ({
+  captureGlobalNameMapperPublication_ACU: nativeNameMapperMocks.capture,
+  publishGlobalNameMapperForOwner_ACU: nativeNameMapperMocks.publish,
+  restoreGlobalNameMapperPublication_ACU: nativeNameMapperMocks.restore,
 }));
 
 import { NativeTableServiceAdapter } from '../../../src/service/table/native-table-service-adapter';
@@ -43,7 +87,10 @@ describe('NativeTableServiceAdapter', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockCurrentJsonTableData = null;
+    nativeStateMocks.state.data = null;
+    nativeStateMocks.state.owner = null;
+    nativeNameMapperMocks.state.mapper = null;
+    nativeNameMapperMocks.state.owner = null;
     adapter = new NativeTableServiceAdapter();
   });
 
@@ -82,6 +129,84 @@ describe('NativeTableServiceAdapter', () => {
     });
   });
 
+  describe('candidate publication', () => {
+    it('候选 loadFromData 只保留私有快照，activation 后才 owner publish', async () => {
+      const activeView = { sheet_active: { name: 'active' } };
+      const candidateView = { sheet_candidate: { name: 'candidate' } } as any;
+      nativeStateMocks.state.data = activeView;
+      adapter.beginRuntimeCandidate_ACU();
+
+      await adapter.loadFromData(candidateView);
+
+      expect(adapter.getCurrentData()).toEqual(candidateView);
+      expect(nativeStateMocks.state.data).toBe(activeView);
+      expect(nativeStateMocks.publish).not.toHaveBeenCalled();
+      expect(nativeNameMapperMocks.publish).not.toHaveBeenCalled();
+
+      adapter.activateRuntimeStatePublication_ACU();
+      expect(nativeStateMocks.publish).toHaveBeenCalledWith(adapter, candidateView);
+      expect(nativeNameMapperMocks.publish).toHaveBeenCalledWith(adapter, null);
+      expect(nativeStateMocks.state.data).toEqual(candidateView);
+    });
+
+    it('mapper 清理失败时恢复旧 publication，随后 candidate dispose 不破坏旧状态', async () => {
+      const oldJsonOwner = {};
+      const oldMapperOwner = {};
+      const activeView = { sheet_active: { name: 'active' } };
+      const activeMapper = { tableCount: 3 };
+      nativeStateMocks.state.data = activeView;
+      nativeStateMocks.state.owner = oldJsonOwner;
+      nativeNameMapperMocks.state.mapper = activeMapper;
+      nativeNameMapperMocks.state.owner = oldMapperOwner;
+      adapter.beginRuntimeCandidate_ACU();
+      await adapter.loadFromData({ sheet_candidate: { name: 'candidate' } } as any);
+      nativeNameMapperMocks.publish.mockImplementationOnce(() => {
+        throw new Error('mapper cleanup failed');
+      });
+
+      expect(() => adapter.activateRuntimeStatePublication_ACU()).toThrow('mapper cleanup failed');
+      expect(nativeStateMocks.state.data).toBe(activeView);
+      expect(nativeStateMocks.state.owner).toBe(oldJsonOwner);
+      expect(nativeNameMapperMocks.state.mapper).toBe(activeMapper);
+      expect(nativeNameMapperMocks.state.owner).toBe(oldMapperOwner);
+
+      adapter.dispose();
+      expect(nativeStateMocks.state.data).toBe(activeView);
+      expect(nativeStateMocks.state.owner).toBe(oldJsonOwner);
+      expect(nativeNameMapperMocks.state.mapper).toBe(activeMapper);
+      expect(nativeNameMapperMocks.state.owner).toBe(oldMapperOwner);
+    });
+
+    it('显式 initialization snapshot 保留来源语义且不修改输入', async () => {
+      const initialView = { mate: {}, sheet_0: { content: [['row_id', 'name']] } } as any;
+      const original = JSON.parse(JSON.stringify(initialView));
+      adapter.beginRuntimeCandidate_ACU();
+
+      const result = await adapter.loadFromData(initialView, { source: 'initialized' });
+
+      expect(result).toEqual({ loaded: true, source: 'initialized' });
+      expect(initialView).toEqual(original);
+      expect(adapter.getCurrentData()).toEqual(original);
+      expect(adapter.getCurrentData()).not.toBe(initialView);
+      expect(nativeNameMapperMocks.publish).not.toHaveBeenCalled();
+    });
+
+    it('候选 dispose 不清理遗留 mapper，只有 activation 显式清理', async () => {
+      adapter.beginRuntimeCandidate_ACU();
+      await adapter.loadFromData({ mate: {}, sheet_0: { content: [['row_id']] } } as any);
+      adapter.dispose();
+      expect(nativeNameMapperMocks.publish).not.toHaveBeenCalled();
+    });
+
+    it('旧实例 dispose 不清除其他 owner 的公共 JSON', async () => {
+      const otherOwner = {};
+      nativeStateMocks.state.owner = otherOwner;
+      nativeStateMocks.state.data = { sheet_new: {} };
+      adapter.dispose();
+      expect(nativeStateMocks.state.data).toEqual({ sheet_new: {} });
+    });
+  });
+
   // ═══════════════════════════════════════════════════════════════
   // saveToChat
   // ═══════════════════════════════════════════════════════════════
@@ -98,12 +223,12 @@ describe('NativeTableServiceAdapter', () => {
   // ═══════════════════════════════════════════════════════════════
   describe('getCurrentData', () => {
     it('返回 currentJsonTableData_ACU', () => {
-      mockCurrentJsonTableData = { mate: { type: 'acu' }, sheet_0: { name: '测试' } };
-      expect(adapter.getCurrentData()).toEqual(mockCurrentJsonTableData);
+      nativeStateMocks.state.data = { mate: { type: 'acu' }, sheet_0: { name: '测试' } };
+      expect(adapter.getCurrentData()).toEqual(nativeStateMocks.state.data);
     });
 
     it('数据为 null 时返回 null', () => {
-      mockCurrentJsonTableData = null;
+      nativeStateMocks.state.data = null;
       expect(adapter.getCurrentData()).toBeNull();
     });
   });
@@ -113,7 +238,7 @@ describe('NativeTableServiceAdapter', () => {
   // ═══════════════════════════════════════════════════════════════
   describe('clearRuntimeData', () => {
     it('精确清空当前 JSON 运行时数据', () => {
-      mockCurrentJsonTableData = { mate: { type: 'acu' }, sheet_0: { name: '测试' } };
+      nativeStateMocks.state.data = { mate: { type: 'acu' }, sheet_0: { name: '测试' } };
       adapter.clearRuntimeData();
       expect(adapter.getCurrentData()).toBeNull();
     });

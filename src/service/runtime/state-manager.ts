@@ -147,6 +147,7 @@ export let allChatMessages_ACU: any[] = [];
 export let lastTotalAiMessages_ACU = 0;
 export let currentChatFileIdentifier_ACU: any = 'unknown_chat_init';
 export let currentJsonTableData_ACU: any = null;
+let currentJsonTableDataOwner_ACU: object | null = null;
 export let independentTableStates_ACU: any = {};
 
 export let settings_ACU: any = {
@@ -226,7 +227,41 @@ export function getCurrentIsolationKey_ACU() {
 
 // ═══ Setter 函数 ═══
 export function _set_settings_ACU(v: any) { settings_ACU = v; }
-export function _set_currentJsonTableData_ACU(v: any) { currentJsonTableData_ACU = v; }
+/** 兼容写入入口：不归属于 runtime owner 的调用会覆盖当前视图所有权。 */
+export function _set_currentJsonTableData_ACU(v: any) {
+  currentJsonTableData_ACU = v;
+  currentJsonTableDataOwner_ACU = null;
+}
+
+export interface JsonTableRuntimePublicationSnapshot_ACU {
+  data: any;
+  owner: object | null;
+}
+
+/** 捕获当前 JSON runtime publication，用于跨状态组件发布失败时精确回滚。 */
+export function captureCurrentJsonTablePublication_ACU(): JsonTableRuntimePublicationSnapshot_ACU {
+  return { data: currentJsonTableData_ACU, owner: currentJsonTableDataOwner_ACU };
+}
+
+/** 仅恢复由 captureCurrentJsonTablePublication_ACU 产生的 publication 状态。 */
+export function restoreCurrentJsonTablePublication_ACU(snapshot: JsonTableRuntimePublicationSnapshot_ACU): void {
+  currentJsonTableData_ACU = snapshot.data;
+  currentJsonTableDataOwner_ACU = snapshot.owner;
+}
+
+/** 仅由当前 runtime owner 发布 canonical JSON 视图。 */
+export function publishCurrentJsonTableDataForOwner_ACU(owner: object, data: any): void {
+  currentJsonTableData_ACU = data;
+  currentJsonTableDataOwner_ACU = owner;
+}
+
+/** 仅当 owner 仍持有当前视图时清除，避免旧 runtime 清空新 runtime 的 JSON。 */
+export function releaseCurrentJsonTableDataForOwner_ACU(owner: object): boolean {
+  if (currentJsonTableDataOwner_ACU !== owner) return false;
+  currentJsonTableData_ACU = null;
+  currentJsonTableDataOwner_ACU = null;
+  return true;
+}
 export function _set_currentChatFileIdentifier_ACU(v: any) {
   logDebug_ACU(`[状态管理] 切换聊天标识: ${currentChatFileIdentifier_ACU} -> ${v}`);
   currentChatFileIdentifier_ACU = v;

@@ -12,17 +12,27 @@ import type {
   SqlMutationResult,
   ApplyEditsResult,
   SqlQueryExecutionOptions_ACU,
+  TableRuntimeHydrationOptions_ACU,
 } from '../../shared/table-storage-provider';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import {
   loadOrCreateJsonTableFromChatHistory_ACU,
 } from './table-service';
 import { parseAndApplyTableEdits_ACU } from '../ai/prompt-builder/table-edit-parser';
-import { currentJsonTableData_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
+import {
+  captureCurrentJsonTablePublication_ACU,
+  currentJsonTableData_ACU,
+  publishCurrentJsonTableDataForOwner_ACU,
+  releaseCurrentJsonTableDataForOwner_ACU,
+  restoreCurrentJsonTablePublication_ACU,
+} from '../runtime/state-manager';
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
+import { captureGlobalNameMapperPublication_ACU, publishGlobalNameMapperForOwner_ACU, restoreGlobalNameMapperPublication_ACU } from '../runtime/template-vars/name-mapper';
 
 export class NativeTableServiceAdapter implements ITableStorageProvider {
   readonly mode = 'native' as const;
+  private _runtimeData: TableDataObject_ACU | null = null;
+  private _isRuntimeStatePublished = true;
 
   /**
    * 从聊天消息加载表格数据
@@ -35,8 +45,49 @@ export class NativeTableServiceAdapter implements ITableStorageProvider {
   }> {
     logDebug_ACU('[原生适配器] loadFromChat: 开始加载表格数据');
     const result = await loadOrCreateJsonTableFromChatHistory_ACU();
+    this._runtimeData = result.data ? JSON.parse(JSON.stringify(result.data)) : currentJsonTableData_ACU;
     logDebug_ACU(`[原生适配器] loadFromChat: 结果=${result.source}, loaded=${result.loaded}`);
     return result;
+  }
+
+  async loadFromData(
+    data: TableDataObject_ACU | null,
+    options: TableRuntimeHydrationOptions_ACU = { source: 'merged' },
+  ): Promise<{
+    loaded: boolean;
+    source: 'merged' | 'initialized' | 'empty';
+    error?: string;
+  }> {
+    this._runtimeData = data ? JSON.parse(JSON.stringify(data)) : null;
+    this._publishRuntimeData_ACU();
+    return {
+      loaded: this._runtimeData !== null,
+      source: this._runtimeData ? options.source : 'empty',
+    };
+  }
+
+  beginRuntimeCandidate_ACU(): void {
+    this._isRuntimeStatePublished = false;
+  }
+
+  activateRuntimeStatePublication_ACU(): void {
+    const jsonPublication = captureCurrentJsonTablePublication_ACU();
+    const mapperPublication = captureGlobalNameMapperPublication_ACU();
+    this._isRuntimeStatePublished = true;
+    try {
+      this._publishRuntimeData_ACU();
+      publishGlobalNameMapperForOwner_ACU(this, null);
+    } catch (error) {
+      restoreCurrentJsonTablePublication_ACU(jsonPublication);
+      restoreGlobalNameMapperPublication_ACU(mapperPublication);
+      this._isRuntimeStatePublished = false;
+      throw error;
+    }
+  }
+
+  private _publishRuntimeData_ACU(): void {
+    if (!this._isRuntimeStatePublished) return;
+    publishCurrentJsonTableDataForOwner_ACU(this, this._runtimeData);
   }
 
   isReady(): boolean {
@@ -60,21 +111,27 @@ export class NativeTableServiceAdapter implements ITableStorageProvider {
 
   /**
    * 获取当前运行时的完整表格数据
-   * 直接返回 currentJsonTableData_ACU 全局变量
+   * 候选仅读取私有快照；已发布兼容实例可读取公共 JSON 视图。
    */
   getCurrentData(): TableDataObject_ACU | null {
+    if (this._runtimeData) return this._runtimeData;
+    if (!this._isRuntimeStatePublished) return null;
     return currentJsonTableData_ACU;
   }
 
   replaceAllData(data: TableDataObject_ACU): ApplyEditsResult {
     const cloned = JSON.parse(JSON.stringify(data || {}));
-    _set_currentJsonTableData_ACU(cloned);
+    this._runtimeData = cloned;
+    if (this._isRuntimeStatePublished) publishCurrentJsonTableDataForOwner_ACU(this, cloned);
     const modifiedKeys = Object.keys(cloned).filter(key => key.startsWith('sheet_'));
     return { success: true, modifiedKeys, appliedEdits: modifiedKeys.length };
   }
 
   clearRuntimeData(): void {
-    _set_currentJsonTableData_ACU(null);
+    this._runtimeData = null;
+    if (this._isRuntimeStatePublished) {
+      publishCurrentJsonTableDataForOwner_ACU(this, null);
+    }
   }
 
   /**
@@ -112,9 +169,9 @@ export class NativeTableServiceAdapter implements ITableStorageProvider {
   }
 
   /**
-   * 销毁/清理 — 原生模式无需清理
+   * 销毁/清理：仅释放本实例仍持有的公共 JSON 视图。
    */
   dispose(): void {
-    // 原生模式没有需要清理的资源
+    releaseCurrentJsonTableDataForOwner_ACU(this);
   }
 }

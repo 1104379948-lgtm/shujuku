@@ -10,6 +10,7 @@
 
 import type {
   ITableStorageProvider,
+  TableRuntimeHydrationOptions_ACU,
   SqlQueryResult,
   SqlMutationResult,
   ApplyEditsResult,
@@ -23,19 +24,23 @@ import type { TableMutationOperationV2_ACU, TableSqlBindValueV2_ACU } from './st
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../data/sqlite/sync-bridge';
 import {
+  captureCurrentJsonTablePublication_ACU,
   currentJsonTableData_ACU,
-  _set_currentJsonTableData_ACU,
+  publishCurrentJsonTableDataForOwner_ACU,
+  releaseCurrentJsonTableDataForOwner_ACU,
+  restoreCurrentJsonTablePublication_ACU,
 } from '../runtime/state-manager';
 import { mergeAllIndependentTables_ACU } from '../runtime/helpers-data-merge';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
-import { buildGlobalNameMapper, disposeGlobalNameMapper } from '../runtime/template-vars/name-mapper';
+import { NameMapper, captureGlobalNameMapperPublication_ACU, publishGlobalNameMapperForOwner_ACU, releaseGlobalNameMapperForOwner_ACU, restoreGlobalNameMapperPublication_ACU } from '../runtime/template-vars/name-mapper';
 import { parseDDLTableName, generateDDL, generateInserts } from '../../data/sqlite/schema-mapper';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import { isSqlReadStatement_ACU } from './sql-statement-classifier';
-import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
+import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { ensureStableNextRowId_ACU, materializeStableSeedRowsForSheet_ACU, replaceSheetSourceDataPreservingNextRowId_ACU, reserveStableRowIdsForSheet_ACU, resolveStableNextRowId_ACU } from '../../shared/stable-row-id-allocator';
+import { buildInitialTableRuntimeSnapshot_ACU } from './table-service';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
   workingData?: TableDataObject_ACU;
@@ -384,6 +389,11 @@ export class SqlTableService implements ITableStorageProvider {
   private syncBridge: SyncBridge;
   private _initialized = false;
   private _existingTableSet?: Set<string>;
+  private _nameMapper: NameMapper | null = null;
+  private _isNameMapperPublished = false;
+  private _runtimeData: TableDataObject_ACU | null = null;
+  private _hydrationSource: 'merged' | 'initialized' | 'empty' = 'empty';
+  private _isRuntimeStatePublished = true;
 
   constructor() {
     this.engine = new SqliteEngine();
@@ -405,9 +415,39 @@ export class SqlTableService implements ITableStorageProvider {
     this._initialized = true;
     this._existingTableSet = undefined;
     this._syncToJson();
-    if (currentJsonTableData_ACU) {
-      this._buildNameMapper(currentJsonTableData_ACU as TableDataObject_ACU);
+    if (this._runtimeData) {
+      this._refreshNameMapper_ACU(this._runtimeData);
     }
+  }
+
+  beginRuntimeCandidate_ACU(): void {
+    this._isRuntimeStatePublished = false;
+  }
+
+  activateRuntimeStatePublication_ACU(): void {
+    const jsonPublication = captureCurrentJsonTablePublication_ACU();
+    const mapperPublication = captureGlobalNameMapperPublication_ACU();
+    this._isRuntimeStatePublished = true;
+    try {
+      this._publishRuntimeData_ACU();
+      this.activateNameMapperPublication_ACU();
+    } catch (e) {
+      restoreCurrentJsonTablePublication_ACU(jsonPublication);
+      restoreGlobalNameMapperPublication_ACU(mapperPublication);
+      this._isRuntimeStatePublished = false;
+      this._isNameMapperPublished = false;
+      throw e;
+    }
+  }
+
+  activateNameMapperPublication_ACU(): void {
+    this._isNameMapperPublished = true;
+    publishGlobalNameMapperForOwner_ACU(this, this._nameMapper);
+  }
+
+  deactivateNameMapperPublication_ACU(): void {
+    releaseGlobalNameMapperForOwner_ACU(this);
+    this._isNameMapperPublished = false;
   }
 
   /**
@@ -422,7 +462,24 @@ export class SqlTableService implements ITableStorageProvider {
   }> {
     try {
       const mergedData = await mergeAllIndependentTables_ACU();
-      return await this.loadFromData(mergedData as TableDataObject_ACU | null);
+      if (mergedData) {
+        const hasPersistedBusinessRows = Object.keys(mergedData)
+          .filter(key => key.startsWith('sheet_'))
+          .some(key => {
+            const sheet = (mergedData as any)[key];
+            return !sheet?._acu_from_base_state
+              && Array.isArray(sheet?.content)
+              && sheet.content.length > 1;
+          });
+        return await this.loadFromData(mergedData as TableDataObject_ACU, {
+          source: hasPersistedBusinessRows ? 'merged' : 'initialized',
+        });
+      }
+      const initialSnapshot = buildInitialTableRuntimeSnapshot_ACU();
+      if (!initialSnapshot.data) {
+        return await this.loadFromData(null, { source: 'initialized' });
+      }
+      return await this.loadFromData(initialSnapshot.data, { source: 'initialized' });
     } catch (e: any) {
       const errMsg = e?.message || String(e);
       logError_ACU(`[SqlTableService] 回放聊天数据失败: ${errMsg}`);
@@ -435,7 +492,10 @@ export class SqlTableService implements ITableStorageProvider {
    * 调用方必须保证 data 与当前聊天/isolationKey 属于同一次回放；本方法绝不自行回放聊天，
    * 从而避免 legacy→V2 迁移与 SQLite 初始化重复产生副作用。
    */
-  async loadFromData(data: TableDataObject_ACU | null): Promise<{
+  async loadFromData(
+    data: TableDataObject_ACU | null,
+    options: TableRuntimeHydrationOptions_ACU = { source: 'merged' },
+  ): Promise<{
     loaded: boolean;
     source: 'merged' | 'initialized' | 'empty';
     error?: string;
@@ -453,34 +513,10 @@ export class SqlTableService implements ITableStorageProvider {
     }
 
     try {
-      // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，还是仅有模板空壳。
-      const hasRealDataRows = mergedData && Object.keys(mergedData)
-        .filter(k => k.startsWith('sheet_'))
-        .some(k => {
-          const sheet = (mergedData as any)[k];
-          if (!sheet?.content || !Array.isArray(sheet.content) || sheet.content.length <= 1) return false;
-          if (sheet._acu_from_base_state) return false;
-          return true;
-        });
-
-      if (!mergedData || !hasRealDataRows) {
-        const runtimeSeedSource = mergedData;
-        const runtimeSeedData = this._buildInitialRuntimeTableData_ACU(runtimeSeedSource);
-        if (runtimeSeedData) {
-          this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true });
-          _set_currentJsonTableData_ACU(runtimeSeedData);
-          this._buildNameMapper(runtimeSeedData);
-          this._initialized = true;
-          this._existingTableSet = undefined;
-          const hasSeedRows = Object.keys(runtimeSeedData)
-            .filter(k => k.startsWith('sheet_'))
-            .some(k => Array.isArray((runtimeSeedData as any)[k]?.content) && (runtimeSeedData as any)[k].content.length > 1);
-          logDebug_ACU(`[SqlTableService] 初始 seedRows 已写入运行时 SQLite: hasSeedRows=${hasSeedRows}`);
-          return { loaded: hasSeedRows, source: hasSeedRows ? 'initialized' : 'empty' };
-        }
-
-        logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
+      if (!mergedData) {
+        logDebug_ACU('[SqlTableService] 未提供 canonical snapshot，引擎保持空运行时');
         this._initialized = true;
+        this._hydrationSource = 'empty';
         this._existingTableSet = undefined;
         return { loaded: false, source: 'empty' };
       }
@@ -488,15 +524,19 @@ export class SqlTableService implements ITableStorageProvider {
       // 旧快照可能尚未持久化 nextRowId。必须在任何 DELETE/UPDATE 有机会
       // 消除当前最大 ID 之前，把由现有业务行推导出的安全下界写入 metadata。
       for (const key of Object.keys(mergedData).filter(k => k.startsWith('sheet_'))) {
-        ensureStableNextRowId_ACU((mergedData as any)[key] as Sheet_ACU);
+        const sheet = (mergedData as any)[key] as Sheet_ACU & { _acu_from_base_state?: boolean };
+        delete sheet._acu_from_base_state;
+        ensureStableNextRowId_ACU(sheet);
       }
       this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU, { strict: true });
-      _set_currentJsonTableData_ACU(mergedData as TableDataObject_ACU);
-      this._buildNameMapper(mergedData as TableDataObject_ACU);
+      this._runtimeData = mergedData as TableDataObject_ACU;
+      this._refreshNameMapper_ACU(mergedData as TableDataObject_ACU);
       this._initialized = true;
+      this._hydrationSource = options.source;
       this._existingTableSet = undefined;
+      this._publishRuntimeData_ACU();
       logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
-      return { loaded: true, source: 'merged' };
+      return { loaded: true, source: options.source };
     } catch (e: any) {
       const errMsg = e?.message || String(e);
       this._resetRuntimeForLoad_ACU();
@@ -531,8 +571,9 @@ export class SqlTableService implements ITableStorageProvider {
       this.syncBridge = new SyncBridge(this.engine);
       await this.engine.init();
       this.syncBridge.loadFromTableData(cloned, { strict: true });
-      _set_currentJsonTableData_ACU(cloned);
-      this._buildNameMapper(cloned);
+      this._runtimeData = cloned;
+      this._publishRuntimeData_ACU();
+      this._refreshNameMapper_ACU(cloned);
       this._initialized = true;
       this._existingTableSet = undefined;
       const modifiedKeys = Object.keys(cloned).filter(key => key.startsWith('sheet_'));
@@ -551,8 +592,10 @@ export class SqlTableService implements ITableStorageProvider {
     this.syncBridge = new SyncBridge(this.engine);
     this._initialized = false;
     this._existingTableSet = undefined;
-    _set_currentJsonTableData_ACU(null);
-    disposeGlobalNameMapper();
+    this._runtimeData = null;
+    releaseCurrentJsonTableDataForOwner_ACU(this);
+    this._nameMapper = null;
+    this.deactivateNameMapperPublication_ACU();
   }
 
   /**
@@ -561,9 +604,12 @@ export class SqlTableService implements ITableStorageProvider {
    */
   exportCanonicalData(): TableDataObject_ACU {
     this._ensureInitialized();
-    const mate = (currentJsonTableData_ACU?.mate as Mate_ACU) || DEFAULT_MATE_ACU;
-    const exportedData = this.syncBridge.exportToTableData(mate);
-    _set_currentJsonTableData_ACU(exportedData);
+    const mate = (this._runtimeData?.mate as Mate_ACU) || DEFAULT_MATE_ACU;
+    const exportedData = this._preserveCanonicalSeedRows_ACU(
+      this.syncBridge.exportToTableData(mate), this._runtimeData,
+    );
+    this._runtimeData = exportedData;
+    this._publishRuntimeData_ACU();
     return exportedData;
   }
 
@@ -573,14 +619,14 @@ export class SqlTableService implements ITableStorageProvider {
    */
   getCurrentData(): TableDataObject_ACU | null {
     if (!this._initialized || !this.engine.isReady) {
-      return currentJsonTableData_ACU;
+      return this._getRuntimeDataView_ACU();
     }
 
     try {
       return this.exportCanonicalData();
     } catch (e: any) {
       logError_ACU(`[SqlTableService] getCurrentData 失败: ${e?.message}`);
-      return currentJsonTableData_ACU;
+      return this._getRuntimeDataView_ACU();
     }
   }
 
@@ -599,7 +645,7 @@ export class SqlTableService implements ITableStorageProvider {
 
   applyEditsBatch(sqlTexts: string[], _updateMode?: string, paramsList?: (string | number | null)[][]): ApplyEditsResult {
     this._ensureInitialized();
-    this._ensureTablesFromTemplate();
+    this._ensureInitializedRuntimeTables_ACU();
 
     const userStatements: string[] = [];
     const userParams: ((string | number | null)[] | undefined)[] = [];
@@ -614,7 +660,7 @@ export class SqlTableService implements ITableStorageProvider {
       return { success: true, modifiedKeys: [], appliedEdits: 0 };
     }
 
-    const reseedPlan = this._collectReseedPlanForEmptyTables(currentJsonTableData_ACU || {});
+    const reseedPlan = this._collectReseedPlanForEmptyTables(this._runtimeData || { mate: DEFAULT_MATE_ACU });
     const statements = [...reseedPlan.statements, ...userStatements];
     const statementParams = [
       ...reseedPlan.statements.map((): undefined => undefined),
@@ -666,7 +712,7 @@ export class SqlTableService implements ITableStorageProvider {
     options: ApplyEditsBatchWithSheetMetadataOptions_ACU = {},
   ): ApplyEditsResult {
     this._ensureInitialized();
-    this._ensureTablesFromTemplate();
+    this._ensureInitializedRuntimeTables_ACU();
 
     const userStatements: string[] = [];
     const userParams: (((string | number | null)[]) | undefined)[] = [];
@@ -685,7 +731,7 @@ export class SqlTableService implements ITableStorageProvider {
 
     const reseedPlan = options.includeImplicitReseed === false
       ? { statements: [], paramsList: [], metadataUpdates: [] }
-      : this._collectReseedPlanForEmptyTables(currentJsonTableData_ACU || {}, undefined);
+      : this._collectReseedPlanForEmptyTables(this._runtimeData || { mate: DEFAULT_MATE_ACU }, undefined);
     const statements = [...reseedPlan.statements, ...userStatements];
     const statementParams = [
       ...reseedPlan.paramsList,
@@ -745,8 +791,8 @@ export class SqlTableService implements ITableStorageProvider {
    */
   executeMutation(sql: string, params?: (string | number | null)[]): SqlMutationResult {
     this._ensureInitialized();
-    this._ensureTablesFromTemplate();
-    const reseedPlan = this._collectReseedPlanForEmptyTables(currentJsonTableData_ACU || {});
+    this._ensureInitializedRuntimeTables_ACU();
+    const reseedPlan = this._collectReseedPlanForEmptyTables(this._runtimeData || { mate: DEFAULT_MATE_ACU });
     const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
     const statements = [...reseedPlan.statements, normalizedSql];
     const statementParams = [...reseedPlan.statements.map((): undefined => undefined), params];
@@ -767,8 +813,12 @@ export class SqlTableService implements ITableStorageProvider {
    */
   dispose(): void {
     this.engine.dispose();
-    disposeGlobalNameMapper();
+    this._runtimeData = null;
+    releaseCurrentJsonTableDataForOwner_ACU(this);
+    this._nameMapper = null;
+    this.deactivateNameMapperPublication_ACU();
     this._initialized = false;
+    this._hydrationSource = 'empty';
     this._existingTableSet = undefined;
     logDebug_ACU('[SqlTableService] SQLite 引擎已销毁');
   }
@@ -779,78 +829,35 @@ export class SqlTableService implements ITableStorageProvider {
 
   /** 重置本实例的 SQLite runtime；不触碰调用方持有的 canonical JSON 快照。 */
   private _resetRuntimeForLoad_ACU(): void {
+    this._runtimeData = null;
+    this._nameMapper = null;
     this.engine.dispose();
     this.engine = new SqliteEngine();
     this.syncBridge = new SyncBridge(this.engine);
     this._initialized = false;
+    this._hydrationSource = 'empty';
     this._existingTableSet = undefined;
   }
 
-  private _buildInitialRuntimeTableData_ACU(sourceData: TableDataObject_ACU | null): TableDataObject_ACU | null {
-    const shouldIncludeSeedRows = shouldUseInitialSeedRows_ACU();
-    const templateData = this._resolveCurrentChatTemplate(!shouldIncludeSeedRows);
-    const baseData = sourceData
-      ? JSON.parse(JSON.stringify(sourceData)) as TableDataObject_ACU
-      : templateData;
-    if (!baseData || typeof baseData !== 'object') return null;
-
-    if (templateData && typeof templateData === 'object') {
-      for (const key of Object.keys(templateData).filter(k => k.startsWith('sheet_'))) {
-        const templateSheet = (templateData as any)[key];
-        if (!templateSheet || typeof templateSheet !== 'object') continue;
-        const targetSheet = (baseData as any)[key];
-        if (!targetSheet || typeof targetSheet !== 'object') continue;
-        if (templateSheet.uid) targetSheet.uid = templateSheet.uid;
-        if (templateSheet.name) targetSheet.name = templateSheet.name;
-        if (templateSheet.sourceData && typeof templateSheet.sourceData === 'object') {
-          replaceSheetSourceDataPreservingNextRowId_ACU(targetSheet, templateSheet.sourceData);
-        }
-        if (templateSheet.updateConfig && typeof templateSheet.updateConfig === 'object') targetSheet.updateConfig = JSON.parse(JSON.stringify(templateSheet.updateConfig));
-        if (templateSheet.exportConfig && typeof templateSheet.exportConfig === 'object') targetSheet.exportConfig = JSON.parse(JSON.stringify(templateSheet.exportConfig));
-        if (templateSheet.orderNo !== undefined) targetSheet.orderNo = templateSheet.orderNo;
-        if (Array.isArray(templateSheet.content?.[0])) {
-          if (!Array.isArray(targetSheet.content)) targetSheet.content = [];
-          targetSheet.content[0] = JSON.parse(JSON.stringify(templateSheet.content[0]));
-        }
-      }
-    }
-
-    let hasSheet = false;
-    for (const key of Object.keys(baseData).filter(k => k.startsWith('sheet_'))) {
-      const sheet = (baseData as any)[key];
-      if (!sheet || typeof sheet !== 'object') continue;
-      hasSheet = true;
-      delete sheet._acu_from_base_state;
-
-      const headerRow = Array.isArray(sheet.content?.[0]) ? sheet.content[0] : ['row_id'];
-      const templateRowsAreInitialSeeds = !sourceData && shouldIncludeSeedRows && Array.isArray(sheet.content) && sheet.content.length > 1;
-      if (templateRowsAreInitialSeeds) {
-        const seedRows = sheet.content.slice(1);
-        sheet.content = [headerRow];
-        const materializedRows = materializeStableSeedRowsForSheet_ACU(sheet, seedRows);
-        sheet.content = [headerRow, ...materializedRows];
-      } else if (!Array.isArray(sheet.content) || sheet.content.length <= 1) {
-        const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
-        const materializedRows = materializeStableSeedRowsForSheet_ACU(sheet, seedRows);
-        sheet.content = [headerRow, ...materializedRows];
-      } else {
-        sheet.content = ensureStableRowIdsForSheetContent_ACU(sheet.content);
-      }
-      ensureStableNextRowId_ACU(sheet);
-    }
-
-    return hasSheet ? baseData : null;
+  /**
+   * 兼容空 runtime 的惰性建表；显式 hydrate 的 canonical runtime 禁止回读当前模板。
+   * merged/initialized snapshot 已由 strict hydrate 建立完整 schema，后续 mutation
+   * 必须只作用于该 snapshot，不能因当前模板变化而补表或替换结构。
+   */
+  private _ensureInitializedRuntimeTables_ACU(): void {
+    if (this._hydrationSource !== 'empty') return;
+    this._ensureTablesFromTemplate();
   }
 
   /**
-   * 收集已存在空表的 seedRows 写入计划。业务 INSERT 与推进后的 Sheet
+   * 收集 initialized canonical snapshot 中已存在空表的 seedRows 写入计划。业务 INSERT 与推进后的 Sheet
    * metadata 必须由调用方放进同一事务，禁止先写数据再补高水位。
    *
    * 触发条件（全部满足才处理）：
-   * 1. 表在 SQLite 中已存在（由 _ensureTablesFromTemplate 保证）
+   * 1. runtime 来源为 initialized，且表已由 canonical snapshot hydrate 到 SQLite
    * 2. SELECT COUNT(*) 返回 0（空表）
-   * 3. getEffectiveSeedRowsForSheet_ACU 返回非空
-   * 4. 表属于当前聊天模板/guide（有 DDL 且可解析表名）
+   * 3. canonical Sheet.seedRows 非空
+   * 4. canonical Sheet 自身携带可解析的 DDL
    *
    * 幂等：非空表跳过；无 seedRows 跳过；DDL 缺失跳过。
    *
@@ -858,6 +865,7 @@ export class SqlTableService implements ITableStorageProvider {
    */
   private _collectReseedPlanForEmptyTables(canonicalData: TableDataObject_ACU, targetSheetKeys?: string[]): SqlReseedPlan_ACU {
     const plan: SqlReseedPlan_ACU = { statements: [], paramsList: [], metadataUpdates: [] };
+    if (this._hydrationSource !== 'initialized') return plan;
     if (!canonicalData || typeof canonicalData !== 'object') return plan;
 
     const requestedKeys = Array.isArray(targetSheetKeys) ? new Set(targetSheetKeys) : null;
@@ -880,7 +888,7 @@ export class SqlTableService implements ITableStorageProvider {
       const cnt = countResult?.values?.[0]?.[0];
       if (cnt !== 0) continue;
 
-      const seedRows = getEffectiveSeedRowsForSheet_ACU(sheetKey, { allowTemplateFallback: true });
+      const seedRows = sheet.seedRows;
       if (!Array.isArray(seedRows) || seedRows.length === 0) continue;
 
       const workingSheet = JSON.parse(JSON.stringify(sheet)) as Sheet_ACU;
@@ -906,8 +914,8 @@ export class SqlTableService implements ITableStorageProvider {
   }
 
 
-  /** 从 TableDataObject 中提取所有 DDL，构建全局 NameMapper */
-  private _buildNameMapper(data: TableDataObject_ACU): void {
+  /** 从本实例已 hydrate 的 TableDataObject 构建候选 NameMapper。 */
+  private _refreshNameMapper_ACU(data: TableDataObject_ACU): void {
     try {
       const ddlMap = new Map<string, string>();
       for (const [key, value] of Object.entries(data)) {
@@ -920,30 +928,67 @@ export class SqlTableService implements ITableStorageProvider {
           ddlMap.set(tableName, ddl);
         }
       }
-      if (ddlMap.size > 0) {
-        buildGlobalNameMapper(ddlMap);
+      this._nameMapper = ddlMap.size > 0 ? NameMapper.fromDDLs(ddlMap) : null;
+      if (this._isNameMapperPublished) {
+        publishGlobalNameMapperForOwner_ACU(this, this._nameMapper);
       }
     } catch (e: any) {
-      logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${e?.message}`);
+      this._nameMapper = null;
+      if (this._isNameMapperPublished) {
+        publishGlobalNameMapperForOwner_ACU(this, null);
+      }
+      logWarn_ACU(`[SqlTableService] 构建实例 NameMapper 失败: ${e?.message}`);
     }
   }
 
   /** 同步 SQLite → JSON 视图 */
   private _syncToJson(): void {
     try {
-      const mate = (currentJsonTableData_ACU?.mate as Mate_ACU) || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
-      const exportedData = this.syncBridge.exportToTableData(mate);
-      _set_currentJsonTableData_ACU(exportedData);
+      const previousRuntimeData = this._getRuntimeDataView_ACU();
+      const mate = (previousRuntimeData?.mate as Mate_ACU) || DEFAULT_MATE_ACU;
+      const exportedData = this._preserveCanonicalSeedRows_ACU(
+        this.syncBridge.exportToTableData(mate), previousRuntimeData,
+      );
+      this._runtimeData = exportedData;
+      this._publishRuntimeData_ACU();
     } catch (e: any) {
       logError_ACU(`[SqlTableService] syncToJson 失败: ${e?.message}`);
     }
   }
 
+  /** SQLite metadata 不持久化 seedRows；initialized runtime 导出时保留 canonical 初始化基底。 */
+  private _preserveCanonicalSeedRows_ACU(
+    exportedData: TableDataObject_ACU,
+    previousRuntimeData: TableDataObject_ACU | null,
+  ): TableDataObject_ACU {
+    if (this._hydrationSource !== 'initialized' || !previousRuntimeData) return exportedData;
+    for (const key of Object.keys(exportedData).filter(sheetKey => sheetKey.startsWith('sheet_'))) {
+      const previousSeedRows = (previousRuntimeData[key] as Sheet_ACU | undefined)?.seedRows;
+      if (Array.isArray(previousSeedRows)) {
+        (exportedData[key] as Sheet_ACU).seedRows = JSON.parse(JSON.stringify(previousSeedRows));
+      }
+    }
+    return exportedData;
+  }
+
+  /** 仅已发布 runtime 可更新公共 JSON 视图；候选始终保留私有快照。 */
+  private _publishRuntimeData_ACU(): void {
+    if (!this._isRuntimeStatePublished || !this._runtimeData) return;
+    publishCurrentJsonTableDataForOwner_ACU(this, this._runtimeData);
+  }
+
+  /** 候选只读自身快照；已发布实例才允许兼容读取公共 runtime view。 */
+  private _getRuntimeDataView_ACU(): TableDataObject_ACU | null {
+    if (this._runtimeData) return this._runtimeData;
+    if (!this._isRuntimeStatePublished) return null;
+    return currentJsonTableData_ACU as TableDataObject_ACU | null;
+  }
+
   /** 将 SQL 表名映射为 sheetKey */
   private _tableNamesToSheetKeys(tableNames: string[]): string[] {
-    if (!currentJsonTableData_ACU) return [];
+    if (!this._runtimeData) return [];
     const keys: string[] = [];
-    for (const [key, value] of Object.entries(currentJsonTableData_ACU)) {
+    for (const [key, value] of Object.entries(this._runtimeData)) {
       if (!key.startsWith('sheet_')) continue;
       const sheet = value as any;
       // 从 DDL 中解析表名进行匹配
@@ -984,8 +1029,8 @@ export class SqlTableService implements ITableStorageProvider {
     * 旧版 preset_link 会在 getCurrentChatTemplateScopeState_ACU() 读取时物化为 chat_override。
    *
    * DDL 来源优先级：
-   * 1. currentJsonTableData_ACU 中的 sourceData.ddl（可能来自指导表，包含用户在可视化编辑器中的修改）
-   * 2. 当前聊天模板中的 sourceData.ddl（fallback）
+   * 1. 当前聊天模板中的 sourceData.ddl（结构权威）
+   * 2. 本实例 runtime snapshot 的行号高水位（仅补充运行时元数据）
    */
   private _ensureTablesFromTemplate(): void {
     const existingTables = new Set(this.engine.getTableNames());
@@ -1003,8 +1048,8 @@ export class SqlTableService implements ITableStorageProvider {
     const missingSheets: Record<string, any> = {};
 
     for (const key of sheetKeys) {
-      // 当前聊天模板是建表结构权威；currentJsonTableData_ACU 可能是旧运行时快照，不能让旧 DDL/CHECK 覆盖模板。
-      const liveSheet = (currentJsonTableData_ACU as any)?.[key];
+      // 当前聊天模板是建表结构权威；runtime snapshot 仅提供行号高水位，不能覆盖模板 DDL/CHECK。
+      const liveSheet = (this._getRuntimeDataView_ACU() as any)?.[key];
       const templateSheet = (templateData[key] as any);
       const sheet = JSON.parse(JSON.stringify(templateSheet || liveSheet || null));
       if (!sheet) continue;
@@ -1047,19 +1092,17 @@ export class SqlTableService implements ITableStorageProvider {
     }
     this.syncBridge.loadFromTableData(partialData, { strict: true });
 
-    // 合并实际 hydrate 的物化 Sheet，禁止把未分配高水位的模板空壳写回 JSON 视图。
-    if (currentJsonTableData_ACU) {
-      for (const [key, sheet] of Object.entries(partialData).filter(([key]) => key.startsWith('sheet_'))) {
-        (currentJsonTableData_ACU as any)[key] = sheet;
-      }
-    } else {
-      const initializedData = JSON.parse(JSON.stringify(templateData)) as TableDataObject_ACU;
-      for (const [key, sheet] of Object.entries(partialData).filter(([key]) => key.startsWith('sheet_'))) {
-        (initializedData as any)[key] = sheet;
-      }
-      _set_currentJsonTableData_ACU(initializedData);
+    // 合并实际 hydrate 的物化 Sheet，禁止把未分配高水位的模板空壳发布到 JSON 视图。
+    const runtimeDataView = this._getRuntimeDataView_ACU();
+    const updatedRuntimeData = runtimeDataView
+      ? JSON.parse(JSON.stringify(runtimeDataView)) as TableDataObject_ACU
+      : JSON.parse(JSON.stringify(templateData)) as TableDataObject_ACU;
+    for (const [key, sheet] of Object.entries(partialData).filter(([key]) => key.startsWith('sheet_'))) {
+      (updatedRuntimeData as any)[key] = sheet;
     }
-    this._buildNameMapper(currentJsonTableData_ACU || partialData);
+    this._runtimeData = updatedRuntimeData;
+    this._publishRuntimeData_ACU();
+    this._refreshNameMapper_ACU(updatedRuntimeData);
 
     logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
   }

@@ -32,6 +32,7 @@ import {
   CHAT_TEMPLATE_ARCHIVE_OPTION_PREFIX_ACU,
   MAX_CHAT_TEMPLATE_ARCHIVES_PER_TAG_ACU,
   getChatScopedConfigContainer_ACU,
+  readChatScopedConfigContainerSnapshot_ACU,
   normalizeChatScopedConfigContainer_ACU,
   getChatSheetGuideContainer_ACU,
   setChatScopedConfigContainer_ACU,
@@ -141,6 +142,30 @@ describe('getChatScopedConfigContainer_ACU', () => {
     expect((result!.template as any).other.mode).toBe('inherit_global');
     expect((result!.template as any)[''].mode).toBe('chat_override');
     expect((metadata[CHAT_SCOPED_CONFIG_FIELD_ACU].template as any)[''].mode).toBe('chat_override');
+  });
+
+  it('只读 snapshot reader 合并 legacy 槽位但不写回 chatMetadata 或 chat[0]', () => {
+    const metadataConfig = { version: 1, template: { other: { mode: 'inherit_global' } } };
+    const chatConfig = { version: 1, template: { '': { mode: 'chat_override', templateStr: '{"sheet_a":{"content":[["row_id"]]}}' } } };
+    const metadata: any = { [CHAT_SCOPED_CONFIG_FIELD_ACU]: JSON.parse(JSON.stringify(metadataConfig)) };
+    const firstMessage: any = { [CHAT_SCOPED_CONFIG_FIELD_ACU]: JSON.parse(JSON.stringify(chatConfig)) };
+    const updateChatMetadata = vi.fn();
+    _set_SillyTavern_API_ACU({
+      chatId: 'current-chat',
+      getCurrentChatId: () => 'current-chat',
+      chatMetadata: metadata,
+      updateChatMetadata,
+    } as any);
+    const metadataBefore = JSON.parse(JSON.stringify(metadata));
+    const firstBefore = JSON.parse(JSON.stringify(firstMessage));
+
+    const result = readChatScopedConfigContainerSnapshot_ACU([firstMessage]);
+
+    expect((result!.template as any).other.mode).toBe('inherit_global');
+    expect((result!.template as any)[''].mode).toBe('chat_override');
+    expect(metadata).toEqual(metadataBefore);
+    expect(firstMessage).toEqual(firstBefore);
+    expect(updateChatMetadata).not.toHaveBeenCalled();
   });
 
   it('chat[0] 被删除或无字段时回退到 chatMetadata', () => {

@@ -10,26 +10,32 @@ import { getCurrentStorageMode } from './storage-mode';
 import { NativeTableServiceAdapter } from './native-table-service-adapter';
 import { SqlTableService } from './sql-table-service';
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
-import { loadOrCreateJsonTableFromChatHistory_ACU } from './table-service';
-import { invalidateTableRuntimeRevision_ACU } from './table-write-transaction';
+import { buildInitialTableRuntimeSnapshot_ACU, loadOrCreateJsonTableFromChatHistory_ACU } from './table-service';
+import { captureTableRuntimeRevisionForWriteSet_ACU, invalidateTableRuntimeRevision_ACU } from './table-write-transaction';
+import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 
 /** 当前活跃的 Provider 实例 */
 let currentProvider: ITableStorageProvider | null = null;
+/** 每次运行时替换请求递增；过期异步候选不得发布。 */
+let providerGeneration_ACU = 0;
+
+interface ProviderRuntimeScope_ACU {
+  chatId: string;
+  isolationKey: string;
+  requestedMode: StorageMode;
+  providerMode: StorageMode;
+  configuredMode: StorageMode;
+  generation: number;
+  runtimeRevision: string | null;
+}
 
 /**
  * 获取当前存储提供者
- * 如果尚未初始化，会根据当前设置自动创建
+ * 仅返回已经激活且就绪的 runtime。同步调用方不能隐式创建需要异步 hydrate 的裸实例。
  */
 export function getStorageProvider(): ITableStorageProvider {
-  const mode = getCurrentStorageMode();
-  if (!currentProvider || currentProvider.mode !== mode) {
-    if (currentProvider) {
-      logDebug_ACU(`[StorageStrategy] Provider 模式变化，重建: ${currentProvider.mode} → ${mode}`);
-      currentProvider.dispose();
-    }
-    // 懒初始化：根据当前模式创建 Provider
-    currentProvider = createProvider(mode);
-    logDebug_ACU(`[StorageStrategy] 懒初始化 Provider: ${mode}`);
+  if (!currentProvider || !currentProvider.isReady()) {
+    throw new Error('[StorageStrategy] 表格存储运行时未就绪；请先完成异步初始化。');
   }
   return currentProvider;
 }
@@ -60,27 +66,13 @@ export async function ensureStorageProviderReady_ACU(): Promise<ITableStoragePro
  */
 export async function initStorageProvider(): Promise<void> {
   const mode = getCurrentStorageMode();
+  const generation = ++providerGeneration_ACU;
   logDebug_ACU(`[StorageStrategy] 初始化 Provider: ${mode}`);
 
   try {
-    const nextProvider = createProvider(mode);
-    const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
-    logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
-
-    if (mode === 'sqlite' && !result.loaded && result.error) {
-      logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${result.error}`);
-      nextProvider.dispose();
-      replaceActiveProvider_ACU(createProvider('native'));
-      return;
-    }
-    replaceActiveProvider_ACU(nextProvider);
+    await initializeAndPublishProvider_ACU(mode, generation);
   } catch (e: any) {
     logError_ACU(`[StorageStrategy] 初始化失败: ${e?.message}`);
-    if (mode === 'sqlite') {
-      logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
-      replaceActiveProvider_ACU(createProvider('native'));
-      return;
-    }
     throw e;
   }
 }
@@ -102,25 +94,14 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
 
   logDebug_ACU(`[StorageStrategy] 切换模式: ${currentMode || 'none'} → ${mode}`);
 
+  const generation = ++providerGeneration_ACU;
   try {
-    const nextProvider = createProvider(mode);
-    const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
-    logDebug_ACU(`[StorageStrategy] 切换完成: loaded=${result.loaded}, source=${result.source}`);
-
-    if (mode === 'sqlite' && !result.loaded && result.error) {
-      logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${result.error}`);
-      nextProvider.dispose();
-      replaceActiveProvider_ACU(createProvider('native'));
-      throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
-    }
-    replaceActiveProvider_ACU(nextProvider);
+    const fallbackError = await initializeAndPublishProvider_ACU(mode, generation);
+    if (fallbackError) throw new Error(`SQLite 模式切换失败: ${fallbackError}。已自动回退到原生模式。`);
   } catch (e: any) {
     if (e.message?.includes('已自动回退')) throw e;
 
     logError_ACU(`[StorageStrategy] 切换异常: ${e?.message}`);
-    if (mode === 'sqlite') {
-      replaceActiveProvider_ACU(createProvider('native'));
-    }
     throw e;
   }
 }
@@ -130,10 +111,10 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
  * 用于换卡/换聊天时在状态重置之前立即清理旧数据库，
  * 避免 1200ms 延迟窗口内的数据不一致问题。
  *
- * 销毁后 getStorageProvider() 会触发懒初始化创建新实例。
- * 调用方应在适当时机调用 reloadStorageProvider() 重建并加载数据。
+ * 销毁后同步 getter 会 fail-closed；调用方必须通过 init/reload/ensure 完成异步重建。
  */
 export function disposeStorageProvider(): void {
+  providerGeneration_ACU += 1;
   if (currentProvider) {
     logDebug_ACU(`[StorageStrategy] 销毁当前 Provider: ${currentProvider.mode}`);
     currentProvider.dispose();
@@ -175,21 +156,191 @@ function createProvider(mode: StorageMode): ITableStorageProvider {
   }
 }
 
-async function loadProviderForCurrentChat_ACU(
-  provider: ITableStorageProvider,
-  mode: StorageMode,
-): Promise<{ loaded: boolean; source: 'merged' | 'initialized' | 'empty'; error?: string }> {
-  if (mode !== 'sqlite') return provider.loadFromChat();
-
-  const replay = await loadOrCreateJsonTableFromChatHistory_ACU();
-  if (typeof provider.loadFromData !== 'function') {
-    throw new Error('[StorageStrategy] SQLite provider 未实现 canonical snapshot hydrate。');
-  }
-  return provider.loadFromData(replay.data || null);
+function normalizeRuntimeChatId_ACU(value: unknown): string | null {
+  const normalized = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+  return normalized && normalized !== 'unknown_chat_init' ? normalized : null;
 }
 
-function replaceActiveProvider_ACU(nextProvider: ITableStorageProvider): void {
+function captureProviderRuntimeScope_ACU(
+  requestedMode: StorageMode,
+  providerMode: StorageMode,
+  generation: number,
+  includeRevision: boolean,
+): ProviderRuntimeScope_ACU {
+  const chatId = normalizeRuntimeChatId_ACU(currentChatFileIdentifier_ACU);
+  if (!chatId) {
+    throw new Error('[StorageStrategy] 当前聊天标识不可用，拒绝初始化表格存储运行时。');
+  }
+  const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
+  return {
+    chatId,
+    isolationKey,
+    requestedMode,
+    providerMode,
+    configuredMode: getCurrentStorageMode(),
+    generation,
+    runtimeRevision: includeRevision
+      ? captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { chatKey: chatId, isolationKey })
+      : null,
+  };
+}
+
+function isProviderRuntimeScopeCurrent_ACU(scope: ProviderRuntimeScope_ACU, checkRevision: boolean): boolean {
+  if (
+    scope.generation !== providerGeneration_ACU
+    || scope.configuredMode !== getCurrentStorageMode()
+  ) return false;
+  const chatId = normalizeRuntimeChatId_ACU(currentChatFileIdentifier_ACU);
+  const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
+  if (chatId !== scope.chatId || isolationKey !== scope.isolationKey) return false;
+  if (!checkRevision || scope.runtimeRevision === null) return true;
+  return captureTableRuntimeRevisionForWriteSet_ACU(
+    [{ kind: 'all' }],
+    { chatKey: scope.chatId, isolationKey: scope.isolationKey },
+  ) === scope.runtimeRevision;
+}
+
+async function hydrateCandidateForCurrentChat_ACU(
+  provider: ITableStorageProvider,
+  scope: ProviderRuntimeScope_ACU,
+): Promise<{ loaded: boolean; source: 'merged' | 'initialized' | 'empty'; error?: string } | null> {
+  const replay = await loadOrCreateJsonTableFromChatHistory_ACU({ detached: true });
+  if (!isProviderRuntimeScopeCurrent_ACU(scope, true)) return null;
+
+  if (typeof provider.loadFromData !== 'function') {
+    throw new Error(`[StorageStrategy] ${provider.mode} provider 未实现 canonical snapshot hydrate。`);
+  }
+
+  let data = replay.data ?? null;
+  let source: 'merged' | 'initialized' = 'merged';
+  if (data === null) {
+    const initialSnapshot = buildInitialTableRuntimeSnapshot_ACU();
+    if (!isProviderRuntimeScopeCurrent_ACU(scope, true)) return null;
+    if (!initialSnapshot.data) {
+      return {
+        loaded: false,
+        source: 'empty',
+        error: initialSnapshot.error || '当前聊天没有可用的表格初始化快照。',
+      };
+    }
+    data = initialSnapshot.data;
+    source = 'initialized';
+  }
+
+  const result = await provider.loadFromData(data, { source });
+  if (!isProviderRuntimeScopeCurrent_ACU(scope, true)) return null;
+  return result;
+}
+
+async function handleSqliteCandidateFailure_ACU(message: string, generation: number): Promise<string> {
+  if (hasReadyActiveProvider_ACU()) {
+    logError_ACU(`[StorageStrategy] SQLite 候选失败，保留当前 ${currentProvider!.mode} runtime: ${message}`);
+    return message;
+  }
+  logError_ACU(`[StorageStrategy] SQLite 候选失败，自动 fallback 到原生模式: ${message}`);
+  await initializeNativeFallback_ACU(generation, 'sqlite');
+  return message;
+}
+
+async function initializeAndPublishProvider_ACU(
+  mode: StorageMode,
+  generation: number,
+): Promise<string | null> {
+  const candidate = createProvider(mode);
+  candidate.beginRuntimeCandidate_ACU?.();
+  let disposed = false;
+  const disposeCandidate = () => {
+    if (disposed) return;
+    disposed = true;
+    candidate.dispose();
+  };
+  let scope: ProviderRuntimeScope_ACU | null = null;
+  let result: { loaded: boolean; source: 'merged' | 'initialized' | 'empty'; error?: string } | null;
+  try {
+    scope = captureProviderRuntimeScope_ACU(mode, candidate.mode, generation, true);
+    result = await hydrateCandidateForCurrentChat_ACU(candidate, scope);
+  } catch (e: any) {
+    disposeCandidate();
+    if (scope && !isProviderRuntimeScopeCurrent_ACU(scope, true)) return null;
+    if (mode !== 'sqlite') throw e;
+    return handleSqliteCandidateFailure_ACU(e?.message || String(e), generation);
+  }
+
+  if (!result) {
+    disposeCandidate();
+    logDebug_ACU(`[StorageStrategy] 丢弃作用域或 revision 已变化的 Provider 候选: generation=${generation}`);
+    return null;
+  }
+  logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
+  if (!result.loaded && result.error) {
+    disposeCandidate();
+    if (!scope || !isProviderRuntimeScopeCurrent_ACU(scope, true)) return null;
+    if (mode === 'sqlite') {
+      return handleSqliteCandidateFailure_ACU(result.error, generation);
+    }
+    throw new Error(result.error);
+  }
+  if (!scope) return null;
+  if (!publishProviderIfCurrent_ACU(candidate, scope)) return null;
+  return null;
+}
+
+async function initializeNativeFallback_ACU(generation: number, requestedMode: StorageMode): Promise<void> {
+  const fallback = createProvider('native');
+  fallback.beginRuntimeCandidate_ACU?.();
+  let disposed = false;
+  const disposeFallback = () => {
+    if (disposed) return;
+    disposed = true;
+    fallback.dispose();
+  };
+  let scope: ProviderRuntimeScope_ACU | null = null;
+  try {
+    scope = captureProviderRuntimeScope_ACU(requestedMode, fallback.mode, generation, true);
+    const result = await hydrateCandidateForCurrentChat_ACU(fallback, scope);
+    if (!result) {
+      disposeFallback();
+      return;
+    }
+    if (!result.loaded && result.error) {
+      throw new Error(result.error);
+    }
+    publishProviderIfCurrent_ACU(fallback, scope);
+  } catch (e) {
+    disposeFallback();
+    throw e;
+  }
+}
+
+function hasReadyActiveProvider_ACU(): boolean {
+  return currentProvider?.isReady() === true;
+}
+
+function publishProviderIfCurrent_ACU(nextProvider: ITableStorageProvider, scope: ProviderRuntimeScope_ACU): boolean {
+  if (nextProvider.mode !== scope.providerMode) {
+    nextProvider.dispose();
+    throw new Error(`[StorageStrategy] Provider 模式与候选作用域不匹配: provider=${nextProvider.mode}, scope=${scope.providerMode}`);
+  }
+  if (!isProviderRuntimeScopeCurrent_ACU(scope, true)) {
+    nextProvider.dispose();
+    logDebug_ACU(`[StorageStrategy] 丢弃过期 Provider 候选: generation=${scope.generation}`);
+    return false;
+  }
   const previousProvider = currentProvider;
+  try {
+    nextProvider.activateRuntimeStatePublication_ACU?.();
+  } catch (e: any) {
+    nextProvider.dispose();
+    logError_ACU(`[StorageStrategy] Provider runtime 发布失败，保留当前 runtime: ${e?.message || String(e)}`);
+    return false;
+  }
   currentProvider = nextProvider;
-  previousProvider?.dispose();
+  if (previousProvider && previousProvider !== nextProvider) {
+    try {
+      previousProvider.dispose();
+    } catch (e: any) {
+      logError_ACU(`[StorageStrategy] 旧 Provider 清理失败，新 runtime 保持有效: ${e?.message || String(e)}`);
+    }
+  }
+  return true;
 }

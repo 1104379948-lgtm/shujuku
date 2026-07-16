@@ -173,6 +173,21 @@ function mergeLegacyGuideIntoMetadata_ACU(metadataContainer: Record<string, unkn
 }
 
 /**
+ * 只读获取作用域配置合并视图。chat_metadata 仍为权威源，chat[0] 仅补齐缺失槽位，
+ * 但本函数绝不执行 legacy migration、metadata writeback 或宿主更新回调。
+ */
+export function readChatScopedConfigContainerSnapshot_ACU(chat: unknown[]): Record<string, unknown> | null {
+    if (!hasActiveChatContext_ACU(chat)) return null;
+    const rawMetadataContainer = readContainer_ACU(getChatMetadata_ACU()?.[CHAT_SCOPED_CONFIG_FIELD_ACU]);
+    const first = getChatFirstLayerMessageLocal_ACU(chat);
+    const legacyContainer = first ? readContainer_ACU(first[CHAT_SCOPED_CONFIG_FIELD_ACU]) : null;
+    const metadataContainer = shouldUseChatMetadataContainer_ACU(CHAT_SCOPED_CONFIG_FIELD_ACU, rawMetadataContainer, legacyContainer)
+        ? rawMetadataContainer
+        : null;
+    return mergeLegacyScopedConfigIntoMetadata_ACU(metadataContainer, legacyContainer).container;
+}
+
+/**
  * 读取作用域配置容器；chat_metadata 为权威源，chat[0] 只补齐 metadata 缺失的旧槽位。
  * @param chat SillyTavern 聊天数组
  * @returns 解析后的配置对象，或 null

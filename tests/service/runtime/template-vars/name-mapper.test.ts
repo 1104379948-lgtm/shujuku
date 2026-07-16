@@ -11,7 +11,13 @@ vi.mock('../../../../src/shared/utils', () => ({
   logError_ACU: vi.fn(),
 }));
 
-import { NameMapper } from '../../../../src/service/runtime/template-vars/name-mapper';
+import {
+  NameMapper,
+  disposeGlobalNameMapper,
+  getNameMapper,
+  publishGlobalNameMapperForOwner_ACU,
+  releaseGlobalNameMapperForOwner_ACU,
+} from '../../../../src/service/runtime/template-vars/name-mapper';
 
 // ═══════════════════════════════════════════════════════════════
 // 测试用 DDL
@@ -41,7 +47,35 @@ describe('NameMapper', () => {
   let mapper: NameMapper;
 
   beforeEach(() => {
+    disposeGlobalNameMapper();
     mapper = buildTestMapper();
+  });
+
+  describe('全局发布所有权', () => {
+    it('旧 runtime 无权撤销新 runtime 已发布的 mapper', () => {
+      const oldOwner = {};
+      const nextOwner = {};
+      const oldMapper = NameMapper.fromDDLs(new Map([['inventory', INVENTORY_DDL]]));
+      const nextMapper = NameMapper.fromDDLs(new Map([['characters', CHARACTERS_DDL]]));
+
+      publishGlobalNameMapperForOwner_ACU(oldOwner, oldMapper);
+      publishGlobalNameMapperForOwner_ACU(nextOwner, nextMapper);
+
+      expect(releaseGlobalNameMapperForOwner_ACU(oldOwner)).toBe(false);
+      expect(getNameMapper()).toBe(nextMapper);
+      expect(getNameMapper().resolveTableName('重要人物表')).toBe('characters');
+    });
+
+    it('当前 runtime 撤销后才清空全局 mapper', () => {
+      const owner = {};
+      const published = NameMapper.fromDDLs(new Map([['inventory', INVENTORY_DDL]]));
+
+      publishGlobalNameMapperForOwner_ACU(owner, published);
+
+      expect(releaseGlobalNameMapperForOwner_ACU(owner)).toBe(true);
+      expect(getNameMapper()).not.toBe(published);
+      expect(getNameMapper().tableCount).toBe(0);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════

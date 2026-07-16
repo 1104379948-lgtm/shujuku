@@ -5,7 +5,7 @@
 import { DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU} from '../../../shared/defaults-json.js';
 import { readProfileTemplateFromStorage_ACU, saveCurrentProfileTemplate_ACU } from '../../../data/repositories/profile-repo';
 import { DEFAULT_TEMPLATE_PRESET_OPTION_VALUE_ACU, deriveTemplatePresetNameForImport_ACU, getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../../shared/template-preset-utils';
-import { CHAT_SCOPED_CONFIG_FIELD_ACU, CHAT_SHEET_GUIDE_FIELD_ACU, CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU, CHAT_SHEET_GUIDE_VERSION_ACU, CHAT_TEMPLATE_ARCHIVE_OPTION_PREFIX_ACU, LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU, MAX_CHAT_TEMPLATE_ARCHIVES_PER_TAG_ACU, getChatScopedConfigContainer_ACU, getChatSheetGuideContainer_ACU, normalizeChatScopedConfigContainer_ACU, setChatScopedConfigContainer_ACU } from '../../../data/storage/chat-history';
+import { CHAT_SCOPED_CONFIG_FIELD_ACU, CHAT_SHEET_GUIDE_FIELD_ACU, CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU, CHAT_SHEET_GUIDE_VERSION_ACU, CHAT_TEMPLATE_ARCHIVE_OPTION_PREFIX_ACU, LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU, MAX_CHAT_TEMPLATE_ARCHIVES_PER_TAG_ACU, getChatScopedConfigContainer_ACU, getChatSheetGuideContainer_ACU, normalizeChatScopedConfigContainer_ACU, readChatScopedConfigContainerSnapshot_ACU, setChatScopedConfigContainer_ACU } from '../../../data/storage/chat-history';
 import { getDefaultTemplateSnapshot_ACU, getTemplatePreset_ACU } from '../template-preset-service';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../../runtime/state-manager';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../data/gateways/chat-gateway';
@@ -450,6 +450,38 @@ import { normalizeIsolationCode_ACU } from '../../../shared/data-constants';
           return null;
       }
       return normalizedState;
+  }
+
+  /**
+   * 只读解析当前 chat/isolation 首次 runtime 初始化所需的显式模板快照。
+   * 不迁移 preset_link、不写聊天 scope，也不临时替换 TABLE_TEMPLATE_ACU。
+   */
+  export function resolveInitialRuntimeTemplateSnapshot_ACU({
+      chat = getChatArray_ACU(),
+      isolationKey = getCurrentIsolationKey_ACU(),
+  } = {}) {
+      const normalizedKey = normalizeTemplateScopeIsolationKey_ACU(isolationKey);
+      const container = readChatScopedConfigContainerSnapshot_ACU(chat);
+      const rawSlots = container?.template;
+      const rawState = rawSlots && typeof rawSlots === 'object' && !Array.isArray(rawSlots)
+          ? (rawSlots as Record<string, any>)[normalizedKey]
+          : null;
+
+      if (rawState && typeof rawState === 'object' && !Array.isArray(rawState)) {
+          const normalizedState = normalizeChatTemplateScopeState_ACU(rawState, { isolationKey: normalizedKey });
+          if (normalizedState.mode === 'chat_override') {
+              return sanitizeTemplateSnapshotForChat_ACU(normalizedState.templateStr || null);
+          }
+          if (normalizedState.mode === 'preset_link') {
+              const presetName = normalizeTemplatePresetSelectionValue_ACU(normalizedState.presetName || '');
+              if (!presetName) return null;
+              return sanitizeTemplateSnapshotForChat_ACU(getTemplatePreset_ACU(presetName)?.templateStr || null);
+          }
+      }
+
+      return sanitizeTemplateSnapshotForChat_ACU(
+          readProfileTemplateFromStorage_ACU(normalizeIsolationCode_ACU(normalizedKey)) || DEFAULT_TABLE_TEMPLATE_ACU,
+      );
   }
 
   function resolveSnapshotForPresetName_ACU(presetName: string) {

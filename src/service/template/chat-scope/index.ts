@@ -29,6 +29,7 @@ export {
     activateChatTemplatePresetSelection_ACU,
     clearCurrentChatTemplateSnapshots_ACU,
     getCurrentChatTemplateScopeState_ACU,
+    resolveInitialRuntimeTemplateSnapshot_ACU,
     buildChatTemplateScopeStateFromCurrent_ACU,
     setCurrentChatTemplateScopeState_ACU,
     getGlobalTemplateSnapshotForCurrentProfile_ACU,

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   getCurrentIsolationKey: vi.fn(() => ''),
   sanitizeChatSheetsObject: vi.fn((data: any) => data),
   provider: { mode: 'native', getCurrentData: vi.fn() },
+  ensureStorageProviderReady: vi.fn(),
   replaceRuntimeDataStrict: vi.fn(),
   runRuntimeDataReplaceCommit: vi.fn(),
 }));
@@ -23,7 +24,7 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
 }));
 
 vi.mock('../../../src/service/table/table-storage-strategy', () => ({
-  getStorageProvider: vi.fn(() => mocks.provider),
+  ensureStorageProviderReady_ACU: mocks.ensureStorageProviderReady,
 }));
 
 vi.mock('../../../src/service/table/table-update-commit', () => ({
@@ -40,6 +41,7 @@ import { importTableJsonThroughCommit_ACU } from '../../../src/service/table/tab
 describe('importTableJsonThroughCommit_ACU', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.ensureStorageProviderReady.mockResolvedValue(mocks.provider);
     mocks.getChatArray.mockReturnValue([{ is_user: true }, { is_user: false, mes: 'AI回复' }]);
     mocks.runRuntimeDataReplaceCommit.mockImplementation(async (options: any) => {
       return {
@@ -87,7 +89,22 @@ describe('importTableJsonThroughCommit_ACU', () => {
     expect(result.success).toBe(true);
     expect(result.persisted).toBe(false);
     expect(result.tableData).toEqual(importedData);
+    expect(mocks.ensureStorageProviderReady).toHaveBeenCalledOnce();
     expect(mocks.replaceRuntimeDataStrict).toHaveBeenCalledWith(mocks.provider, importedData);
+    expect(mocks.runRuntimeDataReplaceCommit).not.toHaveBeenCalled();
+  });
+
+  it('只恢复运行时时 provider 未就绪会 fail-closed，不执行 replace', async () => {
+    const importedData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { name: '纪要表', content: [['row_id', '事件']] },
+    };
+    mocks.ensureStorageProviderReady.mockRejectedValue(new Error('runtime_not_ready'));
+
+    const result = await importTableJsonThroughCommit_ACU(JSON.stringify(importedData), { persist: false });
+
+    expect(result).toEqual({ success: false, error: 'runtime_not_ready' });
+    expect(mocks.replaceRuntimeDataStrict).not.toHaveBeenCalled();
     expect(mocks.runRuntimeDataReplaceCommit).not.toHaveBeenCalled();
   });
 });

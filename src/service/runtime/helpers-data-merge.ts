@@ -81,7 +81,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       return guided;
   }
 
-  export async function mergeAllIndependentTablesLegacyV1_ACU() {
+  export async function mergeAllIndependentTablesLegacyV1_ACU(
+      options: { updateRuntimeState?: boolean; useTemplateFallback?: boolean } = {},
+  ) {
       const chat = getChatArray_ACU();
       if (!chat || chat.length === 0) {
           logDebug_ACU('Cannot merge data: Chat history is empty.');
@@ -100,16 +102,16 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       // [新增] 获取当前模板/指导表的表格键列表，用于过滤非当前模板的数据
       // 优先使用指导表（如果存在），否则使用当前模板
       // 这样可以确保：切换/导入新模板后，只读取当前模板中存在的表格数据
-      const templateSheetKeys = (() => {
+      const templateSheetKeys: string[] | null = (() => {
           if (hasSheetGuide) {
               // 存在指导表：使用指导表的表格键（指导表已在导入/切换模板时更新）
               return Object.keys(sheetGuideData).filter(k => k.startsWith('sheet_'));
           }
           // 不存在指导表：使用当前模板的表格键
-          return getTemplateSheetKeys_ACU();
+          return options.useTemplateFallback === false ? null : getTemplateSheetKeys_ACU();
       })();
-      const templateSheetKeySet = new Set(templateSheetKeys);
-      logDebug_ACU(`[Merge] Template/Guide filter: ${templateSheetKeys.length} tables allowed (${hasSheetGuide ? 'guide' : 'template'})`);
+      const templateSheetKeySet = templateSheetKeys ? new Set(templateSheetKeys) : null;
+      logDebug_ACU(`[Merge] Template/Guide filter: ${templateSheetKeys ? `${templateSheetKeys.length} tables allowed (${hasSheetGuide ? 'guide' : 'template'})` : 'disabled for detached replay'}`);
 
       // 1. [优化] 不使用模板作为基础，动态收集聊天记录中的所有实际数据
       let mergedData: Record<string, any> = {};
@@ -139,7 +141,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
               Object.keys(independentData).forEach(storedSheetKey => {
                   // [新增] 只处理当前模板/指导表中存在的表格
-                  if (!templateSheetKeySet.has(storedSheetKey)) {
+                  if (templateSheetKeySet && !templateSheetKeySet.has(storedSheetKey)) {
                       logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] - not in current template/guide`);
                       return;
                   }
@@ -164,7 +166,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                           wasUpdated = true;
                       }
 
-                      if (wasUpdated) {
+                      if (wasUpdated && options.updateRuntimeState !== false) {
                           if (!independentTableStates_ACU[storedSheetKey]) {
                               independentTableStates_ACU[storedSheetKey] = {};
                           }
@@ -190,7 +192,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
                   Object.keys(independentData).forEach(storedSheetKey => {
                       // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(storedSheetKey)) {
+                      if (templateSheetKeySet && !templateSheetKeySet.has(storedSheetKey)) {
                           logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] (legacy) - not in current template/guide`);
                           return;
                       }
@@ -207,7 +209,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                               wasUpdated = true;
                           }
 
-                          if (wasUpdated) {
+                          if (wasUpdated && options.updateRuntimeState !== false) {
                               if (!independentTableStates_ACU[storedSheetKey]) independentTableStates_ACU[storedSheetKey] = {};
                               const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
                               independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
@@ -222,15 +224,17 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                   const standardData: any = legacyStdData;
                   Object.keys(standardData).forEach(k => {
                       // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(k)) {
+                      if (templateSheetKeySet && !templateSheetKeySet.has(k)) {
                           return;
                       }
                       if (k.startsWith('sheet_') && !foundSheets[k] && standardData[k].name && !isSummaryOrOutlineTable_ACU(standardData[k].name)) {
                           mergedData[k] = JSON.parse(JSON.stringify(standardData[k]));
                           foundSheets[k] = true;
-                          if (!independentTableStates_ACU[k]) independentTableStates_ACU[k] = {};
-                          const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                          independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                          if (options.updateRuntimeState !== false) {
+                              if (!independentTableStates_ACU[k]) independentTableStates_ACU[k] = {};
+                              const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
+                              independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                          }
                       }
                   });
               }
@@ -239,15 +243,17 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                   const summaryData: any = legacySumData;
                   Object.keys(summaryData).forEach(k => {
                       // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(k)) {
+                      if (templateSheetKeySet && !templateSheetKeySet.has(k)) {
                           return;
                       }
                       if (k.startsWith('sheet_') && !foundSheets[k] && summaryData[k].name && isSummaryOrOutlineTable_ACU(summaryData[k].name)) {
                           mergedData[k] = JSON.parse(JSON.stringify(summaryData[k]));
                           foundSheets[k] = true;
-                          if (!independentTableStates_ACU[k]) independentTableStates_ACU[k] = {};
-                          const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                          independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                          if (options.updateRuntimeState !== false) {
+                              if (!independentTableStates_ACU[k]) independentTableStates_ACU[k] = {};
+                              const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
+                              independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                          }
                       }
                   });
               }
@@ -263,7 +269,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
           for (const { index: deltaIndex, tagData: deltaTagData } of pendingDeltas) {
               const incrementalData = deltaTagData.incrementalData || {};
               for (const [sheetKey, delta] of Object.entries(incrementalData)) {
-                  if (!templateSheetKeySet.has(sheetKey)) continue;
+                  if (templateSheetKeySet && !templateSheetKeySet.has(sheetKey)) continue;
                   if (!mergedData[sheetKey]) {
                       logWarn_ACU(`[表格重建] delta 楼层 #${deltaIndex} 引用了 sheetKey=${sheetKey}，但 base 中不存在该表，跳过`);
                       continue;
@@ -271,11 +277,13 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                   try {
                       mergedData[sheetKey] = applyTableDelta_ACU(mergedData[sheetKey], delta as any, sheetKey);
                       // 更新 lastUpdatedAiFloor 为 delta 楼层（最新变更来源）
-                      if (!independentTableStates_ACU[sheetKey]) {
-                          independentTableStates_ACU[sheetKey] = {};
+                      if (options.updateRuntimeState !== false) {
+                          if (!independentTableStates_ACU[sheetKey]) {
+                              independentTableStates_ACU[sheetKey] = {};
+                          }
+                          const currentAiFloor = chat.slice(0, deltaIndex + 1).filter((m: any) => !m.is_user).length;
+                          independentTableStates_ACU[sheetKey].lastUpdatedAiFloor = currentAiFloor;
                       }
-                      const currentAiFloor = chat.slice(0, deltaIndex + 1).filter((m: any) => !m.is_user).length;
-                      independentTableStates_ACU[sheetKey].lastUpdatedAiFloor = currentAiFloor;
                   } catch (e) {
                       logError_ACU(`[表格重建] 应用 delta 失败: sheetKey=${sheetKey}, 楼层=#${deltaIndex}`, e);
                   }
@@ -330,7 +338,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       return migrateContentNullToRowId(mergedData);
   }
 
-  export async function mergeAllIndependentTables_ACU() {
+  export async function mergeAllIndependentTables_ACU(
+      options: { updateRuntimeState?: boolean } = {},
+  ) {
       const chat = getChatArray_ACU();
       if (!chat || chat.length === 0) {
           logDebug_ACU('Cannot merge data: Chat history is empty.');
@@ -344,7 +354,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       });
 
       if (strategy.mode === 'v2') {
-          let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey) as Record<string, any> | null;
+          let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, {
+              updateRuntimeState: options.updateRuntimeState,
+          }) as Record<string, any> | null;
           const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
           if (mergedData && hasUsableSheetGuide_ACU(sheetGuideData)) {
               mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);
@@ -359,7 +371,11 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       }
 
       if (strategy.mode === 'legacy-v1') {
-          const mergedLegacyData = await mergeAllIndependentTablesLegacyV1_ACU();
+          const mergedLegacyData = await mergeAllIndependentTablesLegacyV1_ACU({
+              updateRuntimeState: options.updateRuntimeState,
+              useTemplateFallback: options.updateRuntimeState !== false,
+          });
+          if (options.updateRuntimeState === false) return migrateContentNullToRowId(mergedLegacyData);
           const migrationResult = await migrateLegacyStorageToV2OnLoad_ACU({
               data: mergedLegacyData,
               isolationKey: currentIsolationKey,
@@ -382,7 +398,10 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
           return migrateContentNullToRowId(mergedLegacyData);
       }
 
-      return migrateContentNullToRowId(await mergeAllIndependentTablesLegacyV1_ACU());
+      return migrateContentNullToRowId(await mergeAllIndependentTablesLegacyV1_ACU({
+          updateRuntimeState: options.updateRuntimeState,
+          useTemplateFallback: options.updateRuntimeState !== false,
+      }));
   }
 
   // [重构] 刷新合并数据并通知前端和更新世界书

@@ -27,6 +27,7 @@ const {
     mockGetChatSheetGuideData,
     mockBuildChatSheetGuideDataFromTemplateObj,
     mockSetChatSheetGuideDataForIsolationKey,
+    mockGetTemplatePreset,
   // chat-scope-sheet mocks
   mockSanitizeChatSheetsObject,
   mockSetChatScopedConfigContainer,
@@ -53,6 +54,7 @@ const {
   mockGetChatSheetGuideData: vi.fn(() => null),
   mockBuildChatSheetGuideDataFromTemplateObj: vi.fn((templateObj: any) => templateObj ? { mate: { type: 'chatSheets', version: 1 }, sheet_test: { name: '测试表', content: [['row_id']] } } : null),
   mockSetChatSheetGuideDataForIsolationKey: vi.fn(() => true),
+  mockGetTemplatePreset: vi.fn(() => null),
   mockSetChatScopedConfigContainer: vi.fn((chat: any[], container: any) => {
     const first = Array.isArray(chat) ? chat[0] : null;
     if (!first) return;
@@ -105,6 +107,7 @@ vi.mock('../../../src/data/storage/chat-history', () => ({
   LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU: '_acu_table_header_guide',
   MAX_CHAT_TEMPLATE_ARCHIVES_PER_TAG_ACU: 5,
   getChatScopedConfigContainer_ACU: mockGetChatScopedConfigContainer,
+  readChatScopedConfigContainerSnapshot_ACU: mockGetChatScopedConfigContainer,
   getChatSheetGuideContainer_ACU: mockGetChatSheetGuideContainer,
   normalizeChatScopedConfigContainer_ACU: mockNormalizeChatScopedConfigContainer,
   setChatScopedConfigContainer_ACU: mockSetChatScopedConfigContainer,
@@ -113,7 +116,7 @@ vi.mock('../../../src/data/storage/chat-history', () => ({
 
 vi.mock('../../../src/service/template/template-preset-service', () => ({
   getDefaultTemplateSnapshot_ACU: vi.fn(() => ({ templateStr: JSON.stringify({ mate: { type: 'chatSheets', version: 1 }, sheet_default: { name: '默认表', content: [['row_id']] } }), templateObj: { mate: { type: 'chatSheets', version: 1 }, sheet_default: { name: '默认表', content: [['row_id']] } } })),
-  getTemplatePreset_ACU: vi.fn(() => null),
+  getTemplatePreset_ACU: mockGetTemplatePreset,
   getTemplatePresetDisplayName_ACU: vi.fn((name: string) => name || ''),
   persistTemplateScopeSelectionState_ACU: vi.fn(),
   upsertTemplatePreset_ACU: vi.fn(),
@@ -202,6 +205,7 @@ import {
   activateChatTemplatePresetSelection_ACU,
   clearCurrentChatTemplateSnapshots_ACU,
   getCurrentChatTemplateScopeState_ACU,
+  resolveInitialRuntimeTemplateSnapshot_ACU,
   buildChatTemplateScopeStateFromCurrent_ACU,
   setCurrentChatTemplateScopeState_ACU,
   getGlobalTemplateSnapshotForCurrentProfile_ACU,
@@ -218,9 +222,19 @@ beforeEach(() => {
   mockParseTableTemplateJson.mockReturnValue({});
   mockEnsureSheetOrderNumbers.mockReturnValue(false);
   mockCloneScopedConfigData.mockImplementation((data: any) => data ? JSON.parse(JSON.stringify(data)) : null);
+  mockSanitizeChatSheetsObject.mockImplementation((obj: any, opts: any) => {
+    if (!obj || typeof obj !== 'object') return obj;
+    const out: any = {};
+    Object.keys(obj).forEach(k => { out[k] = obj[k]; });
+    if (opts?.ensureMate && !out.mate) {
+      out.mate = { type: 'chatSheets', version: 1 };
+    }
+    return out;
+  });
   mockMigrateLegacyTemplateScope.mockReturnValue(null);
   mockGetChatSheetGuideData.mockReturnValue(null);
   mockReadProfileTemplate.mockReturnValue(null);
+  mockGetTemplatePreset.mockReturnValue(null);
   Object.keys(mockCurrentJsonTableData).forEach(k => delete mockCurrentJsonTableData[k]);
 });
 
@@ -767,5 +781,93 @@ describe('getGlobalTemplateSnapshotForCurrentProfile_ACU', () => {
     const result = getGlobalTemplateSnapshotForCurrentProfile_ACU();
     // 验证不抛错
     expect(mockReadProfileTemplate).toHaveBeenCalled();
+  });
+});
+
+describe('resolveInitialRuntimeTemplateSnapshot_ACU', () => {
+  it('chat_override 只读取显式聊天快照，不触发迁移或共享模板解析', () => {
+    const chatTemplate = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_chat: { name: '聊天表', content: [['row_id']] },
+    };
+    mockGetChatScopedConfigContainer.mockReturnValue({
+      template: {
+        '': { mode: 'chat_override', templateStr: JSON.stringify(chatTemplate) },
+      },
+    });
+
+    const result = resolveInitialRuntimeTemplateSnapshot_ACU();
+
+    expect(result?.templateObj).toEqual(chatTemplate);
+    expect(mockMigrateLegacyTemplateScope).not.toHaveBeenCalled();
+    expect(mockSetTableTemplate).not.toHaveBeenCalled();
+    expect(mockParseTableTemplateJson).not.toHaveBeenCalled();
+    expect(mockReadProfileTemplate).not.toHaveBeenCalled();
+  });
+
+  it('preset_link 只读解析链接预设，不物化或写回聊天 scope', () => {
+    const presetTemplate = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_preset: { name: '预设表', content: [['row_id']] },
+    };
+    mockGetChatScopedConfigContainer.mockReturnValue({
+      template: {
+        '': { mode: 'preset_link', presetName: '战斗模板' },
+      },
+    });
+    mockGetTemplatePreset.mockReturnValue({ templateStr: JSON.stringify(presetTemplate) });
+
+    const result = resolveInitialRuntimeTemplateSnapshot_ACU();
+
+    expect(result?.templateObj).toEqual(presetTemplate);
+    expect(mockGetTemplatePreset).toHaveBeenCalledWith('战斗模板');
+    expect(mockSetChatScopedConfigContainer).not.toHaveBeenCalled();
+    expect(mockSetTableTemplate).not.toHaveBeenCalled();
+    expect(mockParseTableTemplateJson).not.toHaveBeenCalled();
+  });
+
+  it('inherit_global 直接读取当前 profile 模板，不临时替换共享模板', () => {
+    const profileTemplate = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_profile: { name: 'Profile 表', content: [['row_id']] },
+    };
+    mockGetCurrentIsolationKey.mockReturnValue(' branch-a ');
+    mockGetChatScopedConfigContainer.mockReturnValue({
+      template: { '': { mode: 'inherit_global' } },
+    });
+    mockReadProfileTemplate.mockReturnValue(JSON.stringify(profileTemplate));
+
+    const result = resolveInitialRuntimeTemplateSnapshot_ACU();
+
+    expect(result?.templateObj).toEqual(profileTemplate);
+    expect(mockReadProfileTemplate).toHaveBeenCalledWith('branch-a');
+    expect(mockSetTableTemplate).not.toHaveBeenCalled();
+    expect(mockParseTableTemplateJson).not.toHaveBeenCalled();
+  });
+
+  it('inherit_global 使用有效 isolation key，不读取禁用隔离后残留的 settings code', () => {
+    mockSettings.dataIsolationEnabled = false;
+    mockSettings.dataIsolationCode = 'stale-branch';
+    mockGetCurrentIsolationKey.mockReturnValue('');
+
+    resolveInitialRuntimeTemplateSnapshot_ACU();
+
+    expect(mockReadProfileTemplate).toHaveBeenCalledWith('');
+  });
+
+  it('显式 isolationKey 经规范化后决定 profile 来源', () => {
+    resolveInitialRuntimeTemplateSnapshot_ACU({ chat: [{}], isolationKey: ' branch-explicit ' });
+
+    expect(mockReadProfileTemplate).toHaveBeenCalledWith('branch-explicit');
+  });
+
+  it('preset_link 缺少有效预设时返回 null，不猜测全局 schema', () => {
+    mockGetChatScopedConfigContainer.mockReturnValue({
+      template: { '': { mode: 'preset_link', presetName: '不存在的模板' } },
+    });
+    mockGetTemplatePreset.mockReturnValue(null);
+
+    expect(resolveInitialRuntimeTemplateSnapshot_ACU()).toBeNull();
+    expect(mockReadProfileTemplate).not.toHaveBeenCalled();
   });
 });

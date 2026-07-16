@@ -60,6 +60,11 @@ export interface SqlReseedPlan_ACU {
   metadataUpdates: SqlSheetMetadataUpdate_ACU[];
 }
 
+export interface TableRuntimeHydrationOptions_ACU {
+  /** canonical snapshot 的来源；Provider 不得根据数据行数量自行改写该语义。 */
+  source: 'merged' | 'initialized';
+}
+
 export interface ApplyEditsBatchWithSheetMetadataOptions_ACU {
   /** 受控 prepared batch 必须关闭，避免 provider 添加未持久化的业务 SQL。 */
   includeImplicitReseed?: boolean;
@@ -88,16 +93,37 @@ export interface ITableStorageProvider {
   }>;
 
   /**
-   * 从调用方已恢复的当前聊天快照初始化运行时。
+   * 从调用方已捕获的 canonical snapshot 初始化运行时。
    *
-   * SQLite 实现用它避免重复回放/迁移同一聊天；native 无需实现，
-   * 因为它直接使用全局 JSON 运行时视图。
+   * Provider 只能精确 hydrate 输入数据，不得自行读取模板、guide、公共 JSON
+   * 或公共 NameMapper。null 明确表示没有可 hydrate 的 snapshot。
    */
-  loadFromData?(data: TableDataObject_ACU | null): Promise<{
+  loadFromData?(data: TableDataObject_ACU | null, options?: TableRuntimeHydrationOptions_ACU): Promise<{
     loaded: boolean;
     source: 'merged' | 'initialized' | 'empty';
     error?: string;
   }>;
+
+  /**
+   * 标记该 provider 的后续 hydrate 属于未发布候选；候选不得写入全局运行时视图。
+   */
+  beginRuntimeCandidate_ACU?(): void;
+
+  /**
+   * 发布已验证候选的完整运行时状态（provider、JSON 视图与名称映射）。
+   */
+  activateRuntimeStatePublication_ACU?(): void;
+
+  /**
+   * 将 SQLite 实例已构建的候选名称映射发布到当前运行时。
+   * 只能由存储策略在候选实例 hydrate 成功后调用。
+   */
+  activateNameMapperPublication_ACU?(): void;
+
+  /**
+   * 撤销该实例已发布的名称映射；实现必须保证不会撤销其他实例的映射。
+   */
+  deactivateNameMapperPublication_ACU?(): void;
 
   /** 当前运行时是否已经可用。native 恒为 true；sqlite 需引擎已初始化。 */
   isReady(): boolean;

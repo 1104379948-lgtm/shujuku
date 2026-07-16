@@ -3670,6 +3670,21 @@ $CONTENT
         return { container: merged, changed: false };
     }
     /**
+     * 只读获取作用域配置合并视图。chat_metadata 仍为权威源，chat[0] 仅补齐缺失槽位，
+     * 但本函数绝不执行 legacy migration、metadata writeback 或宿主更新回调。
+     */
+    function readChatScopedConfigContainerSnapshot_ACU(chat) {
+        if (!hasActiveChatContext_ACU(chat))
+            return null;
+        const rawMetadataContainer = readContainer_ACU(getChatMetadata_ACU()?.[CHAT_SCOPED_CONFIG_FIELD_ACU]);
+        const first = getChatFirstLayerMessageLocal_ACU(chat);
+        const legacyContainer = first ? readContainer_ACU(first[CHAT_SCOPED_CONFIG_FIELD_ACU]) : null;
+        const metadataContainer = shouldUseChatMetadataContainer_ACU(CHAT_SCOPED_CONFIG_FIELD_ACU, rawMetadataContainer, legacyContainer)
+            ? rawMetadataContainer
+            : null;
+        return mergeLegacyScopedConfigIntoMetadata_ACU(metadataContainer, legacyContainer).container;
+    }
+    /**
      * 读取作用域配置容器；chat_metadata 为权威源，chat[0] 只补齐 metadata 缺失的旧槽位。
      * @param chat SillyTavern 聊天数组
      * @returns 解析后的配置对象，或 null
@@ -4601,6 +4616,7 @@ $CONTENT
     let lastTotalAiMessages_ACU = 0;
     let currentChatFileIdentifier_ACU = 'unknown_chat_init';
     let currentJsonTableData_ACU = null;
+    let currentJsonTableDataOwner_ACU = null;
     let independentTableStates_ACU = {};
     let settings_ACU = {
         apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
@@ -4677,7 +4693,33 @@ $CONTENT
     }
     // ═══ Setter 函数 ═══
     function _set_settings_ACU(v) { settings_ACU = v; }
-    function _set_currentJsonTableData_ACU(v) { currentJsonTableData_ACU = v; }
+    /** 兼容写入入口：不归属于 runtime owner 的调用会覆盖当前视图所有权。 */
+    function _set_currentJsonTableData_ACU(v) {
+        currentJsonTableData_ACU = v;
+        currentJsonTableDataOwner_ACU = null;
+    }
+    /** 捕获当前 JSON runtime publication，用于跨状态组件发布失败时精确回滚。 */
+    function captureCurrentJsonTablePublication_ACU() {
+        return { data: currentJsonTableData_ACU, owner: currentJsonTableDataOwner_ACU };
+    }
+    /** 仅恢复由 captureCurrentJsonTablePublication_ACU 产生的 publication 状态。 */
+    function restoreCurrentJsonTablePublication_ACU(snapshot) {
+        currentJsonTableData_ACU = snapshot.data;
+        currentJsonTableDataOwner_ACU = snapshot.owner;
+    }
+    /** 仅由当前 runtime owner 发布 canonical JSON 视图。 */
+    function publishCurrentJsonTableDataForOwner_ACU(owner, data) {
+        currentJsonTableData_ACU = data;
+        currentJsonTableDataOwner_ACU = owner;
+    }
+    /** 仅当 owner 仍持有当前视图时清除，避免旧 runtime 清空新 runtime 的 JSON。 */
+    function releaseCurrentJsonTableDataForOwner_ACU(owner) {
+        if (currentJsonTableDataOwner_ACU !== owner)
+            return false;
+        currentJsonTableData_ACU = null;
+        currentJsonTableDataOwner_ACU = null;
+        return true;
+    }
     function _set_currentChatFileIdentifier_ACU(v) {
         logDebug_ACU(`[状态管理] 切换聊天标识: ${currentChatFileIdentifier_ACU} -> ${v}`);
         currentChatFileIdentifier_ACU = v;
@@ -12024,7 +12066,7 @@ $CONTENT
         });
         return guided;
     }
-    async function mergeAllIndependentTablesLegacyV1_ACU() {
+    async function mergeAllIndependentTablesLegacyV1_ACU(options = {}) {
         const chat = getChatArray_ACU();
         if (!chat || chat.length === 0) {
             logDebug_ACU('Cannot merge data: Chat history is empty.');
@@ -12046,10 +12088,10 @@ $CONTENT
                 return Object.keys(sheetGuideData).filter(k => k.startsWith('sheet_'));
             }
             // 不存在指导表：使用当前模板的表格键
-            return getTemplateSheetKeys_ACU();
+            return options.useTemplateFallback === false ? null : getTemplateSheetKeys_ACU();
         })();
-        const templateSheetKeySet = new Set(templateSheetKeys);
-        logDebug_ACU(`[Merge] Template/Guide filter: ${templateSheetKeys.length} tables allowed (${hasSheetGuide ? 'guide' : 'template'})`);
+        const templateSheetKeySet = templateSheetKeys ? new Set(templateSheetKeys) : null;
+        logDebug_ACU(`[Merge] Template/Guide filter: ${templateSheetKeys ? `${templateSheetKeys.length} tables allowed (${hasSheetGuide ? 'guide' : 'template'})` : 'disabled for detached replay'}`);
         // 1. [优化] 不使用模板作为基础，动态收集聊天记录中的所有实际数据
         let mergedData = {};
         const foundSheets = {};
@@ -12075,7 +12117,7 @@ $CONTENT
                 const updateGroupKeys = tagData.updateGroupKeys || [];
                 Object.keys(independentData).forEach(storedSheetKey => {
                     // [新增] 只处理当前模板/指导表中存在的表格
-                    if (!templateSheetKeySet.has(storedSheetKey)) {
+                    if (templateSheetKeySet && !templateSheetKeySet.has(storedSheetKey)) {
                         logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] - not in current template/guide`);
                         return;
                     }
@@ -12099,7 +12141,7 @@ $CONTENT
                         else {
                             wasUpdated = true;
                         }
-                        if (wasUpdated) {
+                        if (wasUpdated && options.updateRuntimeState !== false) {
                             if (!independentTableStates_ACU[storedSheetKey]) {
                                 independentTableStates_ACU[storedSheetKey] = {};
                             }
@@ -12122,7 +12164,7 @@ $CONTENT
                     const updateGroupKeys = readUpdateGroupKeys_ACU(message);
                     Object.keys(independentData).forEach(storedSheetKey => {
                         // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(storedSheetKey)) {
+                        if (templateSheetKeySet && !templateSheetKeySet.has(storedSheetKey)) {
                             logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] (legacy) - not in current template/guide`);
                             return;
                         }
@@ -12139,7 +12181,7 @@ $CONTENT
                             else {
                                 wasUpdated = true;
                             }
-                            if (wasUpdated) {
+                            if (wasUpdated && options.updateRuntimeState !== false) {
                                 if (!independentTableStates_ACU[storedSheetKey])
                                     independentTableStates_ACU[storedSheetKey] = {};
                                 const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
@@ -12154,16 +12196,18 @@ $CONTENT
                     const standardData = legacyStdData;
                     Object.keys(standardData).forEach(k => {
                         // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(k)) {
+                        if (templateSheetKeySet && !templateSheetKeySet.has(k)) {
                             return;
                         }
                         if (k.startsWith('sheet_') && !foundSheets[k] && standardData[k].name && !isSummaryOrOutlineTable_ACU(standardData[k].name)) {
                             mergedData[k] = JSON.parse(JSON.stringify(standardData[k]));
                             foundSheets[k] = true;
-                            if (!independentTableStates_ACU[k])
-                                independentTableStates_ACU[k] = {};
-                            const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                            independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                            if (options.updateRuntimeState !== false) {
+                                if (!independentTableStates_ACU[k])
+                                    independentTableStates_ACU[k] = {};
+                                const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
+                                independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                            }
                         }
                     });
                 }
@@ -12172,16 +12216,18 @@ $CONTENT
                     const summaryData = legacySumData;
                     Object.keys(summaryData).forEach(k => {
                         // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(k)) {
+                        if (templateSheetKeySet && !templateSheetKeySet.has(k)) {
                             return;
                         }
                         if (k.startsWith('sheet_') && !foundSheets[k] && summaryData[k].name && isSummaryOrOutlineTable_ACU(summaryData[k].name)) {
                             mergedData[k] = JSON.parse(JSON.stringify(summaryData[k]));
                             foundSheets[k] = true;
-                            if (!independentTableStates_ACU[k])
-                                independentTableStates_ACU[k] = {};
-                            const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                            independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                            if (options.updateRuntimeState !== false) {
+                                if (!independentTableStates_ACU[k])
+                                    independentTableStates_ACU[k] = {};
+                                const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
+                                independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                            }
                         }
                     });
                 }
@@ -12195,7 +12241,7 @@ $CONTENT
             for (const { index: deltaIndex, tagData: deltaTagData } of pendingDeltas) {
                 const incrementalData = deltaTagData.incrementalData || {};
                 for (const [sheetKey, delta] of Object.entries(incrementalData)) {
-                    if (!templateSheetKeySet.has(sheetKey))
+                    if (templateSheetKeySet && !templateSheetKeySet.has(sheetKey))
                         continue;
                     if (!mergedData[sheetKey]) {
                         logWarn_ACU(`[表格重建] delta 楼层 #${deltaIndex} 引用了 sheetKey=${sheetKey}，但 base 中不存在该表，跳过`);
@@ -12204,11 +12250,13 @@ $CONTENT
                     try {
                         mergedData[sheetKey] = applyTableDelta_ACU(mergedData[sheetKey], delta, sheetKey);
                         // 更新 lastUpdatedAiFloor 为 delta 楼层（最新变更来源）
-                        if (!independentTableStates_ACU[sheetKey]) {
-                            independentTableStates_ACU[sheetKey] = {};
+                        if (options.updateRuntimeState !== false) {
+                            if (!independentTableStates_ACU[sheetKey]) {
+                                independentTableStates_ACU[sheetKey] = {};
+                            }
+                            const currentAiFloor = chat.slice(0, deltaIndex + 1).filter((m) => !m.is_user).length;
+                            independentTableStates_ACU[sheetKey].lastUpdatedAiFloor = currentAiFloor;
                         }
-                        const currentAiFloor = chat.slice(0, deltaIndex + 1).filter((m) => !m.is_user).length;
-                        independentTableStates_ACU[sheetKey].lastUpdatedAiFloor = currentAiFloor;
                     }
                     catch (e) {
                         logError_ACU(`[表格重建] 应用 delta 失败: sheetKey=${sheetKey}, 楼层=#${deltaIndex}`, e);
@@ -12260,7 +12308,7 @@ $CONTENT
         mergedData = reorderDataBySheetKeys_ACU(mergedData, orderedKeys);
         return migrateContentNullToRowId(mergedData);
     }
-    async function mergeAllIndependentTables_ACU() {
+    async function mergeAllIndependentTables_ACU(options = {}) {
         const chat = getChatArray_ACU();
         if (!chat || chat.length === 0) {
             logDebug_ACU('Cannot merge data: Chat history is empty.');
@@ -12272,7 +12320,9 @@ $CONTENT
             code: settings_ACU.dataIsolationCode,
         });
         if (strategy.mode === 'v2') {
-            let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey);
+            let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, {
+                updateRuntimeState: options.updateRuntimeState,
+            });
             const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
             if (mergedData && hasUsableSheetGuide_ACU(sheetGuideData)) {
                 mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);
@@ -12285,7 +12335,12 @@ $CONTENT
             logWarn_ACU(`[TableStorage] ${strategy.warning}; reason=${strategy.reason}`);
         }
         if (strategy.mode === 'legacy-v1') {
-            const mergedLegacyData = await mergeAllIndependentTablesLegacyV1_ACU();
+            const mergedLegacyData = await mergeAllIndependentTablesLegacyV1_ACU({
+                updateRuntimeState: options.updateRuntimeState,
+                useTemplateFallback: options.updateRuntimeState !== false,
+            });
+            if (options.updateRuntimeState === false)
+                return migrateContentNullToRowId(mergedLegacyData);
             const migrationResult = await migrateLegacyStorageToV2OnLoad_ACU({
                 data: mergedLegacyData,
                 isolationKey: currentIsolationKey,
@@ -12307,7 +12362,10 @@ $CONTENT
             }
             return migrateContentNullToRowId(mergedLegacyData);
         }
-        return migrateContentNullToRowId(await mergeAllIndependentTablesLegacyV1_ACU());
+        return migrateContentNullToRowId(await mergeAllIndependentTablesLegacyV1_ACU({
+            updateRuntimeState: options.updateRuntimeState,
+            useTemplateFallback: options.updateRuntimeState !== false,
+        }));
     }
     // [重构] 刷新合并数据并通知前端和更新世界书
     function formatJsonToReadable_ACU(jsonData) {
@@ -12725,6 +12783,8 @@ $CONTENT
      */
     /** 全局 NameMapper 单例 */
     let _globalNameMapper = null;
+    /** 当前全局映射器的运行时所有者；仅所有者可撤销自身发布。 */
+    let _globalNameMapperOwner = null;
     /**
      * 获取全局 NameMapper 实例
      * 如果尚未构建，返回一个空的 NameMapper（所有名称直接透传）
@@ -12743,13 +12803,45 @@ $CONTENT
      */
     function buildGlobalNameMapper(ddlMap) {
         _globalNameMapper = NameMapper.fromDDLs(ddlMap);
+        _globalNameMapperOwner = null;
         logDebug_ACU(`[NameMapper] 全局映射器已构建: ${_globalNameMapper.tableCount} 张表`);
     }
+    /** 捕获当前 NameMapper publication，用于与 JSON runtime 组成原子发布。 */
+    function captureGlobalNameMapperPublication_ACU() {
+        return { mapper: _globalNameMapper, owner: _globalNameMapperOwner };
+    }
+    /** 仅恢复由 captureGlobalNameMapperPublication_ACU 产生的 publication 状态。 */
+    function restoreGlobalNameMapperPublication_ACU(snapshot) {
+        _globalNameMapper = snapshot.mapper;
+        _globalNameMapperOwner = snapshot.owner;
+    }
     /**
-     * 销毁全局 NameMapper
+     * 发布由某个 SQLite runtime 构建的映射器。
+     * owner 是身份令牌，不可由旧 runtime 伪造；后续撤销会严格匹配它。
+     */
+    function publishGlobalNameMapperForOwner_ACU(owner, mapper) {
+        _globalNameMapper = mapper;
+        _globalNameMapperOwner = mapper ? owner : null;
+        logDebug_ACU(`[NameMapper] runtime 映射器已发布: tables=${mapper?.tableCount || 0}`);
+    }
+    /**
+     * 仅当 owner 仍持有当前全局映射器时撤销发布。
+     * 这阻止已过期 provider 在 dispose 时清空新 provider 的映射器。
+     */
+    function releaseGlobalNameMapperForOwner_ACU(owner) {
+        if (_globalNameMapperOwner !== owner)
+            return false;
+        _globalNameMapper = null;
+        _globalNameMapperOwner = null;
+        return true;
+    }
+    /**
+     * 无所有者的兼容销毁入口。运行时 Provider 不得调用它，
+     * 必须使用 releaseGlobalNameMapperForOwner_ACU()。
      */
     function disposeGlobalNameMapper() {
         _globalNameMapper = null;
+        _globalNameMapperOwner = null;
     }
     /**
      * 中英文名称双向映射器
@@ -13365,6 +13457,11 @@ $CONTENT
         constructor() {
             this.mode = 'sqlite';
             this._initialized = false;
+            this._nameMapper = null;
+            this._isNameMapperPublished = false;
+            this._runtimeData = null;
+            this._hydrationSource = 'empty';
+            this._isRuntimeStatePublished = true;
             this.engine = new SqliteEngine();
             this.syncBridge = new SyncBridge(this.engine);
         }
@@ -13383,9 +13480,36 @@ $CONTENT
             this._initialized = true;
             this._existingTableSet = undefined;
             this._syncToJson();
-            if (currentJsonTableData_ACU) {
-                this._buildNameMapper(currentJsonTableData_ACU);
+            if (this._runtimeData) {
+                this._refreshNameMapper_ACU(this._runtimeData);
             }
+        }
+        beginRuntimeCandidate_ACU() {
+            this._isRuntimeStatePublished = false;
+        }
+        activateRuntimeStatePublication_ACU() {
+            const jsonPublication = captureCurrentJsonTablePublication_ACU();
+            const mapperPublication = captureGlobalNameMapperPublication_ACU();
+            this._isRuntimeStatePublished = true;
+            try {
+                this._publishRuntimeData_ACU();
+                this.activateNameMapperPublication_ACU();
+            }
+            catch (e) {
+                restoreCurrentJsonTablePublication_ACU(jsonPublication);
+                restoreGlobalNameMapperPublication_ACU(mapperPublication);
+                this._isRuntimeStatePublished = false;
+                this._isNameMapperPublished = false;
+                throw e;
+            }
+        }
+        activateNameMapperPublication_ACU() {
+            this._isNameMapperPublished = true;
+            publishGlobalNameMapperForOwner_ACU(this, this._nameMapper);
+        }
+        deactivateNameMapperPublication_ACU() {
+            releaseGlobalNameMapperForOwner_ACU(this);
+            this._isNameMapperPublished = false;
         }
         /**
          * 从聊天消息加载表格数据到 SQLite
@@ -13395,7 +13519,24 @@ $CONTENT
         async loadFromChat() {
             try {
                 const mergedData = await mergeAllIndependentTables_ACU();
-                return await this.loadFromData(mergedData);
+                if (mergedData) {
+                    const hasPersistedBusinessRows = Object.keys(mergedData)
+                        .filter(key => key.startsWith('sheet_'))
+                        .some(key => {
+                        const sheet = mergedData[key];
+                        return !sheet?._acu_from_base_state
+                            && Array.isArray(sheet?.content)
+                            && sheet.content.length > 1;
+                    });
+                    return await this.loadFromData(mergedData, {
+                        source: hasPersistedBusinessRows ? 'merged' : 'initialized',
+                    });
+                }
+                const initialSnapshot = buildInitialTableRuntimeSnapshot_ACU();
+                if (!initialSnapshot.data) {
+                    return await this.loadFromData(null, { source: 'initialized' });
+                }
+                return await this.loadFromData(initialSnapshot.data, { source: 'initialized' });
             }
             catch (e) {
                 const errMsg = e?.message || String(e);
@@ -13408,7 +13549,7 @@ $CONTENT
          * 调用方必须保证 data 与当前聊天/isolationKey 属于同一次回放；本方法绝不自行回放聊天，
          * 从而避免 legacy→V2 迁移与 SQLite 初始化重复产生副作用。
          */
-        async loadFromData(data) {
+        async loadFromData(data, options = { source: 'merged' }) {
             const mergedData = data ? JSON.parse(JSON.stringify(data)) : null;
             this._resetRuntimeForLoad_ACU();
             try {
@@ -13421,49 +13562,29 @@ $CONTENT
                 return { loaded: false, source: 'empty', error: `sqlite_engine_init_failed: ${errMsg}` };
             }
             try {
-                // 判断 mergedData 是否包含真正的用户/AI 写入的数据行，还是仅有模板空壳。
-                const hasRealDataRows = mergedData && Object.keys(mergedData)
-                    .filter(k => k.startsWith('sheet_'))
-                    .some(k => {
-                    const sheet = mergedData[k];
-                    if (!sheet?.content || !Array.isArray(sheet.content) || sheet.content.length <= 1)
-                        return false;
-                    if (sheet._acu_from_base_state)
-                        return false;
-                    return true;
-                });
-                if (!mergedData || !hasRealDataRows) {
-                    const runtimeSeedSource = mergedData;
-                    const runtimeSeedData = this._buildInitialRuntimeTableData_ACU(runtimeSeedSource);
-                    if (runtimeSeedData) {
-                        this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true });
-                        _set_currentJsonTableData_ACU(runtimeSeedData);
-                        this._buildNameMapper(runtimeSeedData);
-                        this._initialized = true;
-                        this._existingTableSet = undefined;
-                        const hasSeedRows = Object.keys(runtimeSeedData)
-                            .filter(k => k.startsWith('sheet_'))
-                            .some(k => Array.isArray(runtimeSeedData[k]?.content) && runtimeSeedData[k].content.length > 1);
-                        logDebug_ACU(`[SqlTableService] 初始 seedRows 已写入运行时 SQLite: hasSeedRows=${hasSeedRows}`);
-                        return { loaded: hasSeedRows, source: hasSeedRows ? 'initialized' : 'empty' };
-                    }
-                    logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
+                if (!mergedData) {
+                    logDebug_ACU('[SqlTableService] 未提供 canonical snapshot，引擎保持空运行时');
                     this._initialized = true;
+                    this._hydrationSource = 'empty';
                     this._existingTableSet = undefined;
                     return { loaded: false, source: 'empty' };
                 }
                 // 旧快照可能尚未持久化 nextRowId。必须在任何 DELETE/UPDATE 有机会
                 // 消除当前最大 ID 之前，把由现有业务行推导出的安全下界写入 metadata。
                 for (const key of Object.keys(mergedData).filter(k => k.startsWith('sheet_'))) {
-                    ensureStableNextRowId_ACU(mergedData[key]);
+                    const sheet = mergedData[key];
+                    delete sheet._acu_from_base_state;
+                    ensureStableNextRowId_ACU(sheet);
                 }
                 this.syncBridge.loadFromTableData(mergedData, { strict: true });
-                _set_currentJsonTableData_ACU(mergedData);
-                this._buildNameMapper(mergedData);
+                this._runtimeData = mergedData;
+                this._refreshNameMapper_ACU(mergedData);
                 this._initialized = true;
+                this._hydrationSource = options.source;
                 this._existingTableSet = undefined;
+                this._publishRuntimeData_ACU();
                 logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
-                return { loaded: true, source: 'merged' };
+                return { loaded: true, source: options.source };
             }
             catch (e) {
                 const errMsg = e?.message || String(e);
@@ -13492,8 +13613,9 @@ $CONTENT
                 this.syncBridge = new SyncBridge(this.engine);
                 await this.engine.init();
                 this.syncBridge.loadFromTableData(cloned, { strict: true });
-                _set_currentJsonTableData_ACU(cloned);
-                this._buildNameMapper(cloned);
+                this._runtimeData = cloned;
+                this._publishRuntimeData_ACU();
+                this._refreshNameMapper_ACU(cloned);
                 this._initialized = true;
                 this._existingTableSet = undefined;
                 const modifiedKeys = Object.keys(cloned).filter(key => key.startsWith('sheet_'));
@@ -13512,8 +13634,10 @@ $CONTENT
             this.syncBridge = new SyncBridge(this.engine);
             this._initialized = false;
             this._existingTableSet = undefined;
-            _set_currentJsonTableData_ACU(null);
-            disposeGlobalNameMapper();
+            this._runtimeData = null;
+            releaseCurrentJsonTableDataForOwner_ACU(this);
+            this._nameMapper = null;
+            this.deactivateNameMapperPublication_ACU();
         }
         /**
          * 获取当前运行时的完整表格数据
@@ -13521,9 +13645,10 @@ $CONTENT
          */
         exportCanonicalData() {
             this._ensureInitialized();
-            const mate = currentJsonTableData_ACU?.mate || DEFAULT_MATE_ACU;
-            const exportedData = this.syncBridge.exportToTableData(mate);
-            _set_currentJsonTableData_ACU(exportedData);
+            const mate = this._runtimeData?.mate || DEFAULT_MATE_ACU;
+            const exportedData = this._preserveCanonicalSeedRows_ACU(this.syncBridge.exportToTableData(mate), this._runtimeData);
+            this._runtimeData = exportedData;
+            this._publishRuntimeData_ACU();
             return exportedData;
         }
         /**
@@ -13532,14 +13657,14 @@ $CONTENT
          */
         getCurrentData() {
             if (!this._initialized || !this.engine.isReady) {
-                return currentJsonTableData_ACU;
+                return this._getRuntimeDataView_ACU();
             }
             try {
                 return this.exportCanonicalData();
             }
             catch (e) {
                 logError_ACU(`[SqlTableService] getCurrentData 失败: ${e?.message}`);
-                return currentJsonTableData_ACU;
+                return this._getRuntimeDataView_ACU();
             }
         }
         /**
@@ -13556,7 +13681,7 @@ $CONTENT
         }
         applyEditsBatch(sqlTexts, _updateMode, paramsList) {
             this._ensureInitialized();
-            this._ensureTablesFromTemplate();
+            this._ensureInitializedRuntimeTables_ACU();
             const userStatements = [];
             const userParams = [];
             (Array.isArray(sqlTexts) ? sqlTexts : []).forEach((sqlText, index) => {
@@ -13569,7 +13694,7 @@ $CONTENT
             if (userStatements.length === 0) {
                 return { success: true, modifiedKeys: [], appliedEdits: 0 };
             }
-            const reseedPlan = this._collectReseedPlanForEmptyTables(currentJsonTableData_ACU || {});
+            const reseedPlan = this._collectReseedPlanForEmptyTables(this._runtimeData || { mate: DEFAULT_MATE_ACU });
             const statements = [...reseedPlan.statements, ...userStatements];
             const statementParams = [
                 ...reseedPlan.statements.map(() => undefined),
@@ -13610,7 +13735,7 @@ $CONTENT
         }
         applyEditsBatchWithSheetMetadata(sqlTexts, paramsList, metadataUpdates, _updateMode, options = {}) {
             this._ensureInitialized();
-            this._ensureTablesFromTemplate();
+            this._ensureInitializedRuntimeTables_ACU();
             const userStatements = [];
             const userParams = [];
             (Array.isArray(sqlTexts) ? sqlTexts : []).forEach((sqlText, index) => {
@@ -13627,7 +13752,7 @@ $CONTENT
             }
             const reseedPlan = options.includeImplicitReseed === false
                 ? { statements: [], paramsList: [], metadataUpdates: [] }
-                : this._collectReseedPlanForEmptyTables(currentJsonTableData_ACU || {}, undefined);
+                : this._collectReseedPlanForEmptyTables(this._runtimeData || { mate: DEFAULT_MATE_ACU }, undefined);
             const statements = [...reseedPlan.statements, ...userStatements];
             const statementParams = [
                 ...reseedPlan.paramsList,
@@ -13680,8 +13805,8 @@ $CONTENT
          */
         executeMutation(sql, params) {
             this._ensureInitialized();
-            this._ensureTablesFromTemplate();
-            const reseedPlan = this._collectReseedPlanForEmptyTables(currentJsonTableData_ACU || {});
+            this._ensureInitializedRuntimeTables_ACU();
+            const reseedPlan = this._collectReseedPlanForEmptyTables(this._runtimeData || { mate: DEFAULT_MATE_ACU });
             const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
             const statements = [...reseedPlan.statements, normalizedSql];
             const statementParams = [...reseedPlan.statements.map(() => undefined), params];
@@ -13702,8 +13827,12 @@ $CONTENT
          */
         dispose() {
             this.engine.dispose();
-            disposeGlobalNameMapper();
+            this._runtimeData = null;
+            releaseCurrentJsonTableDataForOwner_ACU(this);
+            this._nameMapper = null;
+            this.deactivateNameMapperPublication_ACU();
             this._initialized = false;
+            this._hydrationSource = 'empty';
             this._existingTableSet = undefined;
             logDebug_ACU('[SqlTableService] SQLite 引擎已销毁');
         }
@@ -13712,84 +13841,34 @@ $CONTENT
         // ═══════════════════════════════════════════════════════════════
         /** 重置本实例的 SQLite runtime；不触碰调用方持有的 canonical JSON 快照。 */
         _resetRuntimeForLoad_ACU() {
+            this._runtimeData = null;
+            this._nameMapper = null;
             this.engine.dispose();
             this.engine = new SqliteEngine();
             this.syncBridge = new SyncBridge(this.engine);
             this._initialized = false;
+            this._hydrationSource = 'empty';
             this._existingTableSet = undefined;
         }
-        _buildInitialRuntimeTableData_ACU(sourceData) {
-            const shouldIncludeSeedRows = shouldUseInitialSeedRows_ACU();
-            const templateData = this._resolveCurrentChatTemplate(!shouldIncludeSeedRows);
-            const baseData = sourceData
-                ? JSON.parse(JSON.stringify(sourceData))
-                : templateData;
-            if (!baseData || typeof baseData !== 'object')
-                return null;
-            if (templateData && typeof templateData === 'object') {
-                for (const key of Object.keys(templateData).filter(k => k.startsWith('sheet_'))) {
-                    const templateSheet = templateData[key];
-                    if (!templateSheet || typeof templateSheet !== 'object')
-                        continue;
-                    const targetSheet = baseData[key];
-                    if (!targetSheet || typeof targetSheet !== 'object')
-                        continue;
-                    if (templateSheet.uid)
-                        targetSheet.uid = templateSheet.uid;
-                    if (templateSheet.name)
-                        targetSheet.name = templateSheet.name;
-                    if (templateSheet.sourceData && typeof templateSheet.sourceData === 'object') {
-                        replaceSheetSourceDataPreservingNextRowId_ACU(targetSheet, templateSheet.sourceData);
-                    }
-                    if (templateSheet.updateConfig && typeof templateSheet.updateConfig === 'object')
-                        targetSheet.updateConfig = JSON.parse(JSON.stringify(templateSheet.updateConfig));
-                    if (templateSheet.exportConfig && typeof templateSheet.exportConfig === 'object')
-                        targetSheet.exportConfig = JSON.parse(JSON.stringify(templateSheet.exportConfig));
-                    if (templateSheet.orderNo !== undefined)
-                        targetSheet.orderNo = templateSheet.orderNo;
-                    if (Array.isArray(templateSheet.content?.[0])) {
-                        if (!Array.isArray(targetSheet.content))
-                            targetSheet.content = [];
-                        targetSheet.content[0] = JSON.parse(JSON.stringify(templateSheet.content[0]));
-                    }
-                }
-            }
-            let hasSheet = false;
-            for (const key of Object.keys(baseData).filter(k => k.startsWith('sheet_'))) {
-                const sheet = baseData[key];
-                if (!sheet || typeof sheet !== 'object')
-                    continue;
-                hasSheet = true;
-                delete sheet._acu_from_base_state;
-                const headerRow = Array.isArray(sheet.content?.[0]) ? sheet.content[0] : ['row_id'];
-                const templateRowsAreInitialSeeds = !sourceData && shouldIncludeSeedRows && Array.isArray(sheet.content) && sheet.content.length > 1;
-                if (templateRowsAreInitialSeeds) {
-                    const seedRows = sheet.content.slice(1);
-                    sheet.content = [headerRow];
-                    const materializedRows = materializeStableSeedRowsForSheet_ACU(sheet, seedRows);
-                    sheet.content = [headerRow, ...materializedRows];
-                }
-                else if (!Array.isArray(sheet.content) || sheet.content.length <= 1) {
-                    const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
-                    const materializedRows = materializeStableSeedRowsForSheet_ACU(sheet, seedRows);
-                    sheet.content = [headerRow, ...materializedRows];
-                }
-                else {
-                    sheet.content = ensureStableRowIdsForSheetContent_ACU(sheet.content);
-                }
-                ensureStableNextRowId_ACU(sheet);
-            }
-            return hasSheet ? baseData : null;
+        /**
+         * 兼容空 runtime 的惰性建表；显式 hydrate 的 canonical runtime 禁止回读当前模板。
+         * merged/initialized snapshot 已由 strict hydrate 建立完整 schema，后续 mutation
+         * 必须只作用于该 snapshot，不能因当前模板变化而补表或替换结构。
+         */
+        _ensureInitializedRuntimeTables_ACU() {
+            if (this._hydrationSource !== 'empty')
+                return;
+            this._ensureTablesFromTemplate();
         }
         /**
-         * 收集已存在空表的 seedRows 写入计划。业务 INSERT 与推进后的 Sheet
+         * 收集 initialized canonical snapshot 中已存在空表的 seedRows 写入计划。业务 INSERT 与推进后的 Sheet
          * metadata 必须由调用方放进同一事务，禁止先写数据再补高水位。
          *
          * 触发条件（全部满足才处理）：
-         * 1. 表在 SQLite 中已存在（由 _ensureTablesFromTemplate 保证）
+         * 1. runtime 来源为 initialized，且表已由 canonical snapshot hydrate 到 SQLite
          * 2. SELECT COUNT(*) 返回 0（空表）
-         * 3. getEffectiveSeedRowsForSheet_ACU 返回非空
-         * 4. 表属于当前聊天模板/guide（有 DDL 且可解析表名）
+         * 3. canonical Sheet.seedRows 非空
+         * 4. canonical Sheet 自身携带可解析的 DDL
          *
          * 幂等：非空表跳过；无 seedRows 跳过；DDL 缺失跳过。
          *
@@ -13797,6 +13876,8 @@ $CONTENT
          */
         _collectReseedPlanForEmptyTables(canonicalData, targetSheetKeys) {
             const plan = { statements: [], paramsList: [], metadataUpdates: [] };
+            if (this._hydrationSource !== 'initialized')
+                return plan;
             if (!canonicalData || typeof canonicalData !== 'object')
                 return plan;
             const requestedKeys = Array.isArray(targetSheetKeys) ? new Set(targetSheetKeys) : null;
@@ -13817,7 +13898,7 @@ $CONTENT
                 const cnt = countResult?.values?.[0]?.[0];
                 if (cnt !== 0)
                     continue;
-                const seedRows = getEffectiveSeedRowsForSheet_ACU(sheetKey, { allowTemplateFallback: true });
+                const seedRows = sheet.seedRows;
                 if (!Array.isArray(seedRows) || seedRows.length === 0)
                     continue;
                 const workingSheet = JSON.parse(JSON.stringify(sheet));
@@ -13839,8 +13920,8 @@ $CONTENT
             }
             return plan;
         }
-        /** 从 TableDataObject 中提取所有 DDL，构建全局 NameMapper */
-        _buildNameMapper(data) {
+        /** 从本实例已 hydrate 的 TableDataObject 构建候选 NameMapper。 */
+        _refreshNameMapper_ACU(data) {
             try {
                 const ddlMap = new Map();
                 for (const [key, value] of Object.entries(data)) {
@@ -13855,31 +13936,64 @@ $CONTENT
                         ddlMap.set(tableName, ddl);
                     }
                 }
-                if (ddlMap.size > 0) {
-                    buildGlobalNameMapper(ddlMap);
+                this._nameMapper = ddlMap.size > 0 ? NameMapper.fromDDLs(ddlMap) : null;
+                if (this._isNameMapperPublished) {
+                    publishGlobalNameMapperForOwner_ACU(this, this._nameMapper);
                 }
             }
             catch (e) {
-                logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${e?.message}`);
+                this._nameMapper = null;
+                if (this._isNameMapperPublished) {
+                    publishGlobalNameMapperForOwner_ACU(this, null);
+                }
+                logWarn_ACU(`[SqlTableService] 构建实例 NameMapper 失败: ${e?.message}`);
             }
         }
         /** 同步 SQLite → JSON 视图 */
         _syncToJson() {
             try {
-                const mate = currentJsonTableData_ACU?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
-                const exportedData = this.syncBridge.exportToTableData(mate);
-                _set_currentJsonTableData_ACU(exportedData);
+                const previousRuntimeData = this._getRuntimeDataView_ACU();
+                const mate = previousRuntimeData?.mate || DEFAULT_MATE_ACU;
+                const exportedData = this._preserveCanonicalSeedRows_ACU(this.syncBridge.exportToTableData(mate), previousRuntimeData);
+                this._runtimeData = exportedData;
+                this._publishRuntimeData_ACU();
             }
             catch (e) {
                 logError_ACU(`[SqlTableService] syncToJson 失败: ${e?.message}`);
             }
         }
+        /** SQLite metadata 不持久化 seedRows；initialized runtime 导出时保留 canonical 初始化基底。 */
+        _preserveCanonicalSeedRows_ACU(exportedData, previousRuntimeData) {
+            if (this._hydrationSource !== 'initialized' || !previousRuntimeData)
+                return exportedData;
+            for (const key of Object.keys(exportedData).filter(sheetKey => sheetKey.startsWith('sheet_'))) {
+                const previousSeedRows = previousRuntimeData[key]?.seedRows;
+                if (Array.isArray(previousSeedRows)) {
+                    exportedData[key].seedRows = JSON.parse(JSON.stringify(previousSeedRows));
+                }
+            }
+            return exportedData;
+        }
+        /** 仅已发布 runtime 可更新公共 JSON 视图；候选始终保留私有快照。 */
+        _publishRuntimeData_ACU() {
+            if (!this._isRuntimeStatePublished || !this._runtimeData)
+                return;
+            publishCurrentJsonTableDataForOwner_ACU(this, this._runtimeData);
+        }
+        /** 候选只读自身快照；已发布实例才允许兼容读取公共 runtime view。 */
+        _getRuntimeDataView_ACU() {
+            if (this._runtimeData)
+                return this._runtimeData;
+            if (!this._isRuntimeStatePublished)
+                return null;
+            return currentJsonTableData_ACU;
+        }
         /** 将 SQL 表名映射为 sheetKey */
         _tableNamesToSheetKeys(tableNames) {
-            if (!currentJsonTableData_ACU)
+            if (!this._runtimeData)
                 return [];
             const keys = [];
-            for (const [key, value] of Object.entries(currentJsonTableData_ACU)) {
+            for (const [key, value] of Object.entries(this._runtimeData)) {
                 if (!key.startsWith('sheet_'))
                     continue;
                 const sheet = value;
@@ -13919,8 +14033,8 @@ $CONTENT
           * 旧版 preset_link 会在 getCurrentChatTemplateScopeState_ACU() 读取时物化为 chat_override。
          *
          * DDL 来源优先级：
-         * 1. currentJsonTableData_ACU 中的 sourceData.ddl（可能来自指导表，包含用户在可视化编辑器中的修改）
-         * 2. 当前聊天模板中的 sourceData.ddl（fallback）
+         * 1. 当前聊天模板中的 sourceData.ddl（结构权威）
+         * 2. 本实例 runtime snapshot 的行号高水位（仅补充运行时元数据）
          */
         _ensureTablesFromTemplate() {
             const existingTables = new Set(this.engine.getTableNames());
@@ -13936,8 +14050,8 @@ $CONTENT
             const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
             const missingSheets = {};
             for (const key of sheetKeys) {
-                // 当前聊天模板是建表结构权威；currentJsonTableData_ACU 可能是旧运行时快照，不能让旧 DDL/CHECK 覆盖模板。
-                const liveSheet = currentJsonTableData_ACU?.[key];
+                // 当前聊天模板是建表结构权威；runtime snapshot 仅提供行号高水位，不能覆盖模板 DDL/CHECK。
+                const liveSheet = this._getRuntimeDataView_ACU()?.[key];
                 const templateSheet = templateData[key];
                 const sheet = JSON.parse(JSON.stringify(templateSheet || liveSheet || null));
                 if (!sheet)
@@ -13976,20 +14090,17 @@ $CONTENT
                 partialData[key] = sheetCopy;
             }
             this.syncBridge.loadFromTableData(partialData, { strict: true });
-            // 合并实际 hydrate 的物化 Sheet，禁止把未分配高水位的模板空壳写回 JSON 视图。
-            if (currentJsonTableData_ACU) {
-                for (const [key, sheet] of Object.entries(partialData).filter(([key]) => key.startsWith('sheet_'))) {
-                    currentJsonTableData_ACU[key] = sheet;
-                }
+            // 合并实际 hydrate 的物化 Sheet，禁止把未分配高水位的模板空壳发布到 JSON 视图。
+            const runtimeDataView = this._getRuntimeDataView_ACU();
+            const updatedRuntimeData = runtimeDataView
+                ? JSON.parse(JSON.stringify(runtimeDataView))
+                : JSON.parse(JSON.stringify(templateData));
+            for (const [key, sheet] of Object.entries(partialData).filter(([key]) => key.startsWith('sheet_'))) {
+                updatedRuntimeData[key] = sheet;
             }
-            else {
-                const initializedData = JSON.parse(JSON.stringify(templateData));
-                for (const [key, sheet] of Object.entries(partialData).filter(([key]) => key.startsWith('sheet_'))) {
-                    initializedData[key] = sheet;
-                }
-                _set_currentJsonTableData_ACU(initializedData);
-            }
-            this._buildNameMapper(currentJsonTableData_ACU || partialData);
+            this._runtimeData = updatedRuntimeData;
+            this._publishRuntimeData_ACU();
+            this._refreshNameMapper_ACU(updatedRuntimeData);
             logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
         }
         /**
@@ -16924,15 +17035,69 @@ $CONTENT
         return { initialized: true };
     }
     /**
+     * 为没有任何持久化表格快照的当前聊天构造首次 runtime canonical snapshot。
+     * 该入口只读取当前已生效模板并返回独立快照，不发布公共 JSON、不写聊天记录、
+     * 不创建 guide，也不清理世界书。Provider candidate 只能消费返回值，不能自行回退模板。
+     */
+    function buildInitialTableRuntimeSnapshot_ACU() {
+        try {
+            const includeSeedRows = shouldUseInitialSeedRows_ACU();
+            const templateSnapshot = resolveInitialRuntimeTemplateSnapshot_ACU();
+            if (!templateSnapshot?.templateObj) {
+                return { data: null, error: '从当前模板构造初始化快照失败，请检查模板格式。' };
+            }
+            const snapshot = JSON.parse(JSON.stringify(templateSnapshot.templateObj));
+            const sheetKeys = Object.keys(snapshot).filter(key => key.startsWith('sheet_'));
+            if (sheetKeys.length === 0) {
+                return { data: null, error: '当前模板不包含可初始化的表格。' };
+            }
+            for (const key of sheetKeys) {
+                const sheet = snapshot[key];
+                if (!sheet || typeof sheet !== 'object') {
+                    return { data: null, error: `当前模板表格 ${key} 结构无效。` };
+                }
+                delete sheet._acu_from_base_state;
+                const templateRows = Array.isArray(sheet.content) && sheet.content.length > 1
+                    ? JSON.parse(JSON.stringify(sheet.content.slice(1)))
+                    : [];
+                if (includeSeedRows) {
+                    sheet.seedRows = templateRows;
+                }
+                else {
+                    delete sheet.seedRows;
+                    if (Array.isArray(sheet.content) && sheet.content.length > 1)
+                        sheet.content = [sheet.content[0]];
+                }
+                sheet.content = ensureStableRowIdsForSheetContent_ACU(Array.isArray(sheet.content) && sheet.content.length > 0 ? sheet.content : [['row_id']]);
+                ensureStableNextRowId_ACU(sheet);
+            }
+            return { data: snapshot };
+        }
+        catch (error) {
+            return { data: null, error: error?.message || String(error) };
+        }
+    }
+    /**
      * 从聊天记录加载或创建表格数据到内存。
      * 返回 { loaded: boolean, source: 'merged'|'initialized'|'empty', error?: string }
      * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
+     *
+     * detached=true 仅恢复候选 SQLite runtime 所需的 canonical snapshot，绝不改写
+     * currentJsonTableData_ACU，也不触发“空聊天初始化”的 guide/世界书副作用。
      */
-    async function loadOrCreateJsonTableFromChatHistory_ACU() {
-        _set_currentJsonTableData_ACU(null);
+    async function loadOrCreateJsonTableFromChatHistory_ACU(options = {}) {
+        const detached = options.detached === true;
+        if (!detached) {
+            _set_currentJsonTableData_ACU(null);
+        }
         logDebug_ACU('Attempting to load database from chat history...');
         const chat = getChatArray_ACU();
-        applyTemplateScopeForCurrentChat_ACU();
+        if (!detached) {
+            applyTemplateScopeForCurrentChat_ACU();
+        }
+        if (detached && (!chat || chat.length === 0)) {
+            return { loaded: false, source: 'empty', data: null };
+        }
         if (!chat || chat.length === 0) {
             logDebug_ACU('Chat history is empty. Initializing new database.');
             const initResult = await initializeJsonTableInChatHistory_ACU();
@@ -16943,13 +17108,19 @@ $CONTENT
                 data: currentJsonTableData_ACU,
             };
         }
-        const mergedData = await mergeAllIndependentTables_ACU();
+        const mergedData = await mergeAllIndependentTables_ACU({
+            updateRuntimeState: !detached,
+        });
         if (mergedData) {
             const canonicalData = JSON.parse(JSON.stringify(mergedData));
-            _set_currentJsonTableData_ACU(canonicalData);
+            if (!detached) {
+                _set_currentJsonTableData_ACU(canonicalData);
+            }
             logDebug_ACU('Database content successfully merged (tag-aware) and loaded into memory.');
             return { loaded: true, source: 'merged', data: canonicalData };
         }
+        if (detached)
+            return { loaded: false, source: 'empty', data: null };
         logDebug_ACU('No database found for current tag in chat history. Initializing a new one.');
         const initResult = await initializeJsonTableInChatHistory_ACU();
         return {
@@ -18279,6 +18450,8 @@ $CONTENT
     class NativeTableServiceAdapter {
         constructor() {
             this.mode = 'native';
+            this._runtimeData = null;
+            this._isRuntimeStatePublished = true;
         }
         /**
          * 从聊天消息加载表格数据
@@ -18287,8 +18460,40 @@ $CONTENT
         async loadFromChat() {
             logDebug_ACU('[原生适配器] loadFromChat: 开始加载表格数据');
             const result = await loadOrCreateJsonTableFromChatHistory_ACU();
+            this._runtimeData = result.data ? JSON.parse(JSON.stringify(result.data)) : currentJsonTableData_ACU;
             logDebug_ACU(`[原生适配器] loadFromChat: 结果=${result.source}, loaded=${result.loaded}`);
             return result;
+        }
+        async loadFromData(data, options = { source: 'merged' }) {
+            this._runtimeData = data ? JSON.parse(JSON.stringify(data)) : null;
+            this._publishRuntimeData_ACU();
+            return {
+                loaded: this._runtimeData !== null,
+                source: this._runtimeData ? options.source : 'empty',
+            };
+        }
+        beginRuntimeCandidate_ACU() {
+            this._isRuntimeStatePublished = false;
+        }
+        activateRuntimeStatePublication_ACU() {
+            const jsonPublication = captureCurrentJsonTablePublication_ACU();
+            const mapperPublication = captureGlobalNameMapperPublication_ACU();
+            this._isRuntimeStatePublished = true;
+            try {
+                this._publishRuntimeData_ACU();
+                publishGlobalNameMapperForOwner_ACU(this, null);
+            }
+            catch (error) {
+                restoreCurrentJsonTablePublication_ACU(jsonPublication);
+                restoreGlobalNameMapperPublication_ACU(mapperPublication);
+                this._isRuntimeStatePublished = false;
+                throw error;
+            }
+        }
+        _publishRuntimeData_ACU() {
+            if (!this._isRuntimeStatePublished)
+                return;
+            publishCurrentJsonTableDataForOwner_ACU(this, this._runtimeData);
         }
         isReady() {
             return true;
@@ -18304,19 +18509,28 @@ $CONTENT
         }
         /**
          * 获取当前运行时的完整表格数据
-         * 直接返回 currentJsonTableData_ACU 全局变量
+         * 候选仅读取私有快照；已发布兼容实例可读取公共 JSON 视图。
          */
         getCurrentData() {
+            if (this._runtimeData)
+                return this._runtimeData;
+            if (!this._isRuntimeStatePublished)
+                return null;
             return currentJsonTableData_ACU;
         }
         replaceAllData(data) {
             const cloned = JSON.parse(JSON.stringify(data || {}));
-            _set_currentJsonTableData_ACU(cloned);
+            this._runtimeData = cloned;
+            if (this._isRuntimeStatePublished)
+                publishCurrentJsonTableDataForOwner_ACU(this, cloned);
             const modifiedKeys = Object.keys(cloned).filter(key => key.startsWith('sheet_'));
             return { success: true, modifiedKeys, appliedEdits: modifiedKeys.length };
         }
         clearRuntimeData() {
-            _set_currentJsonTableData_ACU(null);
+            this._runtimeData = null;
+            if (this._isRuntimeStatePublished) {
+                publishCurrentJsonTableDataForOwner_ACU(this, null);
+            }
         }
         /**
          * 应用 AI 返回的编辑指令（DSL 格式）
@@ -18346,10 +18560,10 @@ $CONTENT
             throw new Error('SQL 变更仅在 SQLite 模式下可用。请在设置中切换到 SQLite 模式。');
         }
         /**
-         * 销毁/清理 — 原生模式无需清理
+         * 销毁/清理：仅释放本实例仍持有的公共 JSON 视图。
          */
         dispose() {
-            // 原生模式没有需要清理的资源
+            releaseCurrentJsonTableDataForOwner_ACU(this);
         }
     }
 
@@ -18361,20 +18575,15 @@ $CONTENT
      */
     /** 当前活跃的 Provider 实例 */
     let currentProvider = null;
+    /** 每次运行时替换请求递增；过期异步候选不得发布。 */
+    let providerGeneration_ACU = 0;
     /**
      * 获取当前存储提供者
-     * 如果尚未初始化，会根据当前设置自动创建
+     * 仅返回已经激活且就绪的 runtime。同步调用方不能隐式创建需要异步 hydrate 的裸实例。
      */
     function getStorageProvider() {
-        const mode = getCurrentStorageMode();
-        if (!currentProvider || currentProvider.mode !== mode) {
-            if (currentProvider) {
-                logDebug_ACU(`[StorageStrategy] Provider 模式变化，重建: ${currentProvider.mode} → ${mode}`);
-                currentProvider.dispose();
-            }
-            // 懒初始化：根据当前模式创建 Provider
-            currentProvider = createProvider(mode);
-            logDebug_ACU(`[StorageStrategy] 懒初始化 Provider: ${mode}`);
+        if (!currentProvider || !currentProvider.isReady()) {
+            throw new Error('[StorageStrategy] 表格存储运行时未就绪；请先完成异步初始化。');
         }
         return currentProvider;
     }
@@ -18403,26 +18612,13 @@ $CONTENT
      */
     async function initStorageProvider() {
         const mode = getCurrentStorageMode();
+        const generation = ++providerGeneration_ACU;
         logDebug_ACU(`[StorageStrategy] 初始化 Provider: ${mode}`);
         try {
-            const nextProvider = createProvider(mode);
-            const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
-            logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
-            if (mode === 'sqlite' && !result.loaded && result.error) {
-                logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${result.error}`);
-                nextProvider.dispose();
-                replaceActiveProvider_ACU(createProvider('native'));
-                return;
-            }
-            replaceActiveProvider_ACU(nextProvider);
+            await initializeAndPublishProvider_ACU(mode, generation);
         }
         catch (e) {
             logError_ACU(`[StorageStrategy] 初始化失败: ${e?.message}`);
-            if (mode === 'sqlite') {
-                logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
-                replaceActiveProvider_ACU(createProvider('native'));
-                return;
-            }
             throw e;
         }
     }
@@ -18441,25 +18637,16 @@ $CONTENT
             return;
         }
         logDebug_ACU(`[StorageStrategy] 切换模式: ${currentMode || 'none'} → ${mode}`);
+        const generation = ++providerGeneration_ACU;
         try {
-            const nextProvider = createProvider(mode);
-            const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
-            logDebug_ACU(`[StorageStrategy] 切换完成: loaded=${result.loaded}, source=${result.source}`);
-            if (mode === 'sqlite' && !result.loaded && result.error) {
-                logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${result.error}`);
-                nextProvider.dispose();
-                replaceActiveProvider_ACU(createProvider('native'));
-                throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
-            }
-            replaceActiveProvider_ACU(nextProvider);
+            const fallbackError = await initializeAndPublishProvider_ACU(mode, generation);
+            if (fallbackError)
+                throw new Error(`SQLite 模式切换失败: ${fallbackError}。已自动回退到原生模式。`);
         }
         catch (e) {
             if (e.message?.includes('已自动回退'))
                 throw e;
             logError_ACU(`[StorageStrategy] 切换异常: ${e?.message}`);
-            if (mode === 'sqlite') {
-                replaceActiveProvider_ACU(createProvider('native'));
-            }
             throw e;
         }
     }
@@ -18468,10 +18655,10 @@ $CONTENT
      * 用于换卡/换聊天时在状态重置之前立即清理旧数据库，
      * 避免 1200ms 延迟窗口内的数据不一致问题。
      *
-     * 销毁后 getStorageProvider() 会触发懒初始化创建新实例。
-     * 调用方应在适当时机调用 reloadStorageProvider() 重建并加载数据。
+     * 销毁后同步 getter 会 fail-closed；调用方必须通过 init/reload/ensure 完成异步重建。
      */
     function disposeStorageProvider() {
+        providerGeneration_ACU += 1;
         if (currentProvider) {
             logDebug_ACU(`[StorageStrategy] 销毁当前 Provider: ${currentProvider.mode}`);
             currentProvider.dispose();
@@ -18508,19 +18695,182 @@ $CONTENT
                 return new NativeTableServiceAdapter();
         }
     }
-    async function loadProviderForCurrentChat_ACU(provider, mode) {
-        if (mode !== 'sqlite')
-            return provider.loadFromChat();
-        const replay = await loadOrCreateJsonTableFromChatHistory_ACU();
-        if (typeof provider.loadFromData !== 'function') {
-            throw new Error('[StorageStrategy] SQLite provider 未实现 canonical snapshot hydrate。');
-        }
-        return provider.loadFromData(replay.data || null);
+    function normalizeRuntimeChatId_ACU(value) {
+        const normalized = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+        return normalized && normalized !== 'unknown_chat_init' ? normalized : null;
     }
-    function replaceActiveProvider_ACU(nextProvider) {
+    function captureProviderRuntimeScope_ACU(requestedMode, providerMode, generation, includeRevision) {
+        const chatId = normalizeRuntimeChatId_ACU(currentChatFileIdentifier_ACU);
+        if (!chatId) {
+            throw new Error('[StorageStrategy] 当前聊天标识不可用，拒绝初始化表格存储运行时。');
+        }
+        const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
+        return {
+            chatId,
+            isolationKey,
+            requestedMode,
+            providerMode,
+            configuredMode: getCurrentStorageMode(),
+            generation,
+            runtimeRevision: includeRevision
+                ? captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { chatKey: chatId, isolationKey })
+                : null,
+        };
+    }
+    function isProviderRuntimeScopeCurrent_ACU(scope, checkRevision) {
+        if (scope.generation !== providerGeneration_ACU
+            || scope.configuredMode !== getCurrentStorageMode())
+            return false;
+        const chatId = normalizeRuntimeChatId_ACU(currentChatFileIdentifier_ACU);
+        const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
+        if (chatId !== scope.chatId || isolationKey !== scope.isolationKey)
+            return false;
+        if (!checkRevision || scope.runtimeRevision === null)
+            return true;
+        return captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { chatKey: scope.chatId, isolationKey: scope.isolationKey }) === scope.runtimeRevision;
+    }
+    async function hydrateCandidateForCurrentChat_ACU(provider, scope) {
+        const replay = await loadOrCreateJsonTableFromChatHistory_ACU({ detached: true });
+        if (!isProviderRuntimeScopeCurrent_ACU(scope, true))
+            return null;
+        if (typeof provider.loadFromData !== 'function') {
+            throw new Error(`[StorageStrategy] ${provider.mode} provider 未实现 canonical snapshot hydrate。`);
+        }
+        let data = replay.data ?? null;
+        let source = 'merged';
+        if (data === null) {
+            const initialSnapshot = buildInitialTableRuntimeSnapshot_ACU();
+            if (!isProviderRuntimeScopeCurrent_ACU(scope, true))
+                return null;
+            if (!initialSnapshot.data) {
+                return {
+                    loaded: false,
+                    source: 'empty',
+                    error: initialSnapshot.error || '当前聊天没有可用的表格初始化快照。',
+                };
+            }
+            data = initialSnapshot.data;
+            source = 'initialized';
+        }
+        const result = await provider.loadFromData(data, { source });
+        if (!isProviderRuntimeScopeCurrent_ACU(scope, true))
+            return null;
+        return result;
+    }
+    async function handleSqliteCandidateFailure_ACU(message, generation) {
+        if (hasReadyActiveProvider_ACU()) {
+            logError_ACU(`[StorageStrategy] SQLite 候选失败，保留当前 ${currentProvider.mode} runtime: ${message}`);
+            return message;
+        }
+        logError_ACU(`[StorageStrategy] SQLite 候选失败，自动 fallback 到原生模式: ${message}`);
+        await initializeNativeFallback_ACU(generation, 'sqlite');
+        return message;
+    }
+    async function initializeAndPublishProvider_ACU(mode, generation) {
+        const candidate = createProvider(mode);
+        candidate.beginRuntimeCandidate_ACU?.();
+        let disposed = false;
+        const disposeCandidate = () => {
+            if (disposed)
+                return;
+            disposed = true;
+            candidate.dispose();
+        };
+        let scope = null;
+        let result;
+        try {
+            scope = captureProviderRuntimeScope_ACU(mode, candidate.mode, generation, true);
+            result = await hydrateCandidateForCurrentChat_ACU(candidate, scope);
+        }
+        catch (e) {
+            disposeCandidate();
+            if (scope && !isProviderRuntimeScopeCurrent_ACU(scope, true))
+                return null;
+            if (mode !== 'sqlite')
+                throw e;
+            return handleSqliteCandidateFailure_ACU(e?.message || String(e), generation);
+        }
+        if (!result) {
+            disposeCandidate();
+            logDebug_ACU(`[StorageStrategy] 丢弃作用域或 revision 已变化的 Provider 候选: generation=${generation}`);
+            return null;
+        }
+        logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
+        if (!result.loaded && result.error) {
+            disposeCandidate();
+            if (!scope || !isProviderRuntimeScopeCurrent_ACU(scope, true))
+                return null;
+            if (mode === 'sqlite') {
+                return handleSqliteCandidateFailure_ACU(result.error, generation);
+            }
+            throw new Error(result.error);
+        }
+        if (!scope)
+            return null;
+        if (!publishProviderIfCurrent_ACU(candidate, scope))
+            return null;
+        return null;
+    }
+    async function initializeNativeFallback_ACU(generation, requestedMode) {
+        const fallback = createProvider('native');
+        fallback.beginRuntimeCandidate_ACU?.();
+        let disposed = false;
+        const disposeFallback = () => {
+            if (disposed)
+                return;
+            disposed = true;
+            fallback.dispose();
+        };
+        let scope = null;
+        try {
+            scope = captureProviderRuntimeScope_ACU(requestedMode, fallback.mode, generation, true);
+            const result = await hydrateCandidateForCurrentChat_ACU(fallback, scope);
+            if (!result) {
+                disposeFallback();
+                return;
+            }
+            if (!result.loaded && result.error) {
+                throw new Error(result.error);
+            }
+            publishProviderIfCurrent_ACU(fallback, scope);
+        }
+        catch (e) {
+            disposeFallback();
+            throw e;
+        }
+    }
+    function hasReadyActiveProvider_ACU() {
+        return currentProvider?.isReady() === true;
+    }
+    function publishProviderIfCurrent_ACU(nextProvider, scope) {
+        if (nextProvider.mode !== scope.providerMode) {
+            nextProvider.dispose();
+            throw new Error(`[StorageStrategy] Provider 模式与候选作用域不匹配: provider=${nextProvider.mode}, scope=${scope.providerMode}`);
+        }
+        if (!isProviderRuntimeScopeCurrent_ACU(scope, true)) {
+            nextProvider.dispose();
+            logDebug_ACU(`[StorageStrategy] 丢弃过期 Provider 候选: generation=${scope.generation}`);
+            return false;
+        }
         const previousProvider = currentProvider;
+        try {
+            nextProvider.activateRuntimeStatePublication_ACU?.();
+        }
+        catch (e) {
+            nextProvider.dispose();
+            logError_ACU(`[StorageStrategy] Provider runtime 发布失败，保留当前 runtime: ${e?.message || String(e)}`);
+            return false;
+        }
         currentProvider = nextProvider;
-        previousProvider?.dispose();
+        if (previousProvider && previousProvider !== nextProvider) {
+            try {
+                previousProvider.dispose();
+            }
+            catch (e) {
+                logError_ACU(`[StorageStrategy] 旧 Provider 清理失败，新 runtime 保持有效: ${e?.message || String(e)}`);
+            }
+        }
+        return true;
     }
 
     function validateReadOnlySql_ACU(sql) {
@@ -38026,6 +38376,31 @@ $CONTENT
             return null;
         }
         return normalizedState;
+    }
+    /**
+     * 只读解析当前 chat/isolation 首次 runtime 初始化所需的显式模板快照。
+     * 不迁移 preset_link、不写聊天 scope，也不临时替换 TABLE_TEMPLATE_ACU。
+     */
+    function resolveInitialRuntimeTemplateSnapshot_ACU({ chat = getChatArray_ACU(), isolationKey = getCurrentIsolationKey_ACU(), } = {}) {
+        const normalizedKey = normalizeTemplateScopeIsolationKey_ACU(isolationKey);
+        const container = readChatScopedConfigContainerSnapshot_ACU(chat);
+        const rawSlots = container?.template;
+        const rawState = rawSlots && typeof rawSlots === 'object' && !Array.isArray(rawSlots)
+            ? rawSlots[normalizedKey]
+            : null;
+        if (rawState && typeof rawState === 'object' && !Array.isArray(rawState)) {
+            const normalizedState = normalizeChatTemplateScopeState_ACU(rawState, { isolationKey: normalizedKey });
+            if (normalizedState.mode === 'chat_override') {
+                return sanitizeTemplateSnapshotForChat_ACU(normalizedState.templateStr || null);
+            }
+            if (normalizedState.mode === 'preset_link') {
+                const presetName = normalizeTemplatePresetSelectionValue_ACU(normalizedState.presetName || '');
+                if (!presetName)
+                    return null;
+                return sanitizeTemplateSnapshotForChat_ACU(getTemplatePreset_ACU(presetName)?.templateStr || null);
+            }
+        }
+        return sanitizeTemplateSnapshotForChat_ACU(readProfileTemplateFromStorage_ACU(normalizeIsolationCode_ACU(normalizedKey)) || DEFAULT_TABLE_TEMPLATE_ACU);
     }
     function resolveSnapshotForPresetName_ACU(presetName) {
         const normalizedPresetName = normalizeTemplatePresetSelectionValue_ACU(presetName || '');
@@ -67258,7 +67633,8 @@ $CONTENT
         const persist = options.persist !== false;
         if (!persist) {
             try {
-                const runtimeData = await replaceRuntimeDataStrict_ACU(getStorageProvider(), importedTableData);
+                const provider = await ensureStorageProviderReady_ACU();
+                const runtimeData = await replaceRuntimeDataStrict_ACU(provider, importedTableData);
                 const runtimeSheetKeys = Object.keys(runtimeData).filter(k => k.startsWith('sheet_'));
                 const hasSummaryTables = runtimeSheetKeys.some(k => {
                     const table = runtimeData?.[k];

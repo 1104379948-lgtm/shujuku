@@ -14,12 +14,13 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 // ═══════════════════════════════════════════════════════════════
 
 // mock log 函数
+const mockParseTableTemplateJson = vi.hoisted(() => vi.fn(() => null as any));
 vi.mock('../../../src/shared/utils', () => ({
   logDebug_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
   logError_ACU: vi.fn(),
   isSummaryOrOutlineTable_ACU: vi.fn(() => false),
-  parseTableTemplateJson_ACU: vi.fn(() => null),
+  parseTableTemplateJson_ACU: mockParseTableTemplateJson,
   stripSeedRowsFromTemplate_ACU: vi.fn((obj: any) => {
     if (!obj || typeof obj !== 'object') return obj;
     Object.keys(obj).forEach(k => {
@@ -34,15 +35,57 @@ vi.mock('../../../src/shared/utils', () => ({
 
 // mock state-manager
 let mockCurrentJsonTableData: any = null;
+let mockCurrentJsonTableDataOwner: object | null = null;
+let currentJsonPublicationShouldThrow: Error | null = null;
+let capturedJsonPublication: { data: any; owner: object | null } | null = null;
+const stateManagerMocks = vi.hoisted(() => ({
+  publish: vi.fn(),
+  release: vi.fn(() => false),
+}));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentJsonTableData_ACU() { return mockCurrentJsonTableData; },
-  _set_currentJsonTableData_ACU: vi.fn((v: any) => { mockCurrentJsonTableData = v; }),
+  _set_currentJsonTableData_ACU: vi.fn((v: any) => {
+    mockCurrentJsonTableData = v;
+    mockCurrentJsonTableDataOwner = null;
+  }),
+  captureCurrentJsonTablePublication_ACU: () => {
+    capturedJsonPublication = { data: mockCurrentJsonTableData, owner: mockCurrentJsonTableDataOwner };
+    return capturedJsonPublication;
+  },
+  restoreCurrentJsonTablePublication_ACU: (snapshot: { data: any; owner: object | null }) => {
+    mockCurrentJsonTableData = snapshot.data;
+    mockCurrentJsonTableDataOwner = snapshot.owner;
+  },
+  publishCurrentJsonTableDataForOwner_ACU: (owner: object, data: any) => {
+    if (currentJsonPublicationShouldThrow) {
+      throw currentJsonPublicationShouldThrow;
+    }
+    mockCurrentJsonTableData = data;
+    mockCurrentJsonTableDataOwner = owner;
+    stateManagerMocks.publish(owner, data);
+  },
+  releaseCurrentJsonTableDataForOwner_ACU: (owner: object) => {
+    const released = mockCurrentJsonTableDataOwner === owner;
+    if (released) {
+      mockCurrentJsonTableData = null;
+      mockCurrentJsonTableDataOwner = null;
+    }
+    stateManagerMocks.release(owner);
+    return released;
+  },
 }));
 
 // mock table-service
 const mockSaveIndependentTable = vi.fn().mockResolvedValue({ saved: true, messageIndex: 5 });
+const mockBuildInitialTableRuntimeSnapshot = vi.fn(() => {
+  const data = mockParseTableTemplateJson({ stripSeedRows: !mockShouldUseInitialSeedRows() });
+  return data
+    ? { data: JSON.parse(JSON.stringify(data)) }
+    : { data: null, error: '没有可用初始化模板' };
+});
 vi.mock('../../../src/service/table/table-service', () => ({
   saveIndependentTableToChatHistory_ACU: (...args: any[]) => mockSaveIndependentTable(...args),
+  buildInitialTableRuntimeSnapshot_ACU: (...args: any[]) => mockBuildInitialTableRuntimeSnapshot(...args),
 }));
 
 // mock helpers-data-merge
@@ -54,9 +97,38 @@ vi.mock('../../../src/service/runtime/helpers-data-merge', () => ({
 }));
 
 // mock name-mapper
+let mockGlobalNameMapper: any = null;
+let mockGlobalNameMapperOwner: object | null = null;
+const nameMapperMocks = vi.hoisted(() => {
+  class MockNameMapper {
+    static fromDDLs = vi.fn(() => new MockNameMapper());
+    tableCount = 1;
+  }
+  return {
+    MockNameMapper,
+    publish: vi.fn(),
+    release: vi.fn(() => true),
+  };
+});
 vi.mock('../../../src/service/runtime/template-vars/name-mapper', () => ({
-  buildGlobalNameMapper: vi.fn(),
-  disposeGlobalNameMapper: vi.fn(),
+  NameMapper: nameMapperMocks.MockNameMapper,
+  captureGlobalNameMapperPublication_ACU: () => ({ mapper: mockGlobalNameMapper, owner: mockGlobalNameMapperOwner }),
+  restoreGlobalNameMapperPublication_ACU: (snapshot: { mapper: any; owner: object | null }) => {
+    mockGlobalNameMapper = snapshot.mapper;
+    mockGlobalNameMapperOwner = snapshot.owner;
+  },
+  publishGlobalNameMapperForOwner_ACU: (owner: object, mapper: any) => {
+    nameMapperMocks.publish(owner, mapper);
+    mockGlobalNameMapper = mapper;
+    mockGlobalNameMapperOwner = mapper ? owner : null;
+  },
+  releaseGlobalNameMapperForOwner_ACU: (owner: object) => {
+    nameMapperMocks.release(owner);
+    if (mockGlobalNameMapperOwner !== owner) return false;
+    mockGlobalNameMapper = null;
+    mockGlobalNameMapperOwner = null;
+    return true;
+  },
 }));
 
 // mock chat-scope（getEffectiveSeedRowsForSheet_ACU + getCurrentChatTemplateScopeState_ACU）
@@ -579,6 +651,14 @@ describe('SqlTableService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCurrentJsonTableData = null;
+    mockCurrentJsonTableDataOwner = null;
+    currentJsonPublicationShouldThrow = null;
+    capturedJsonPublication = null;
+    mockGlobalNameMapper = null;
+    mockGlobalNameMapperOwner = null;
+    stateManagerMocks.release.mockReturnValue(false);
+    nameMapperMocks.release.mockReturnValue(true);
+    nameMapperMocks.MockNameMapper.fromDDLs.mockClear();
     // 重置 mock 返回值，防止测试之间的状态泄漏
     mockGetEffectiveSeedRows.mockReturnValue([]);
     mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
@@ -685,6 +765,132 @@ describe('SqlTableService', () => {
       service.applyEdits("UPDATE inventory SET quantity = 9 WHERE row_id = 1;");
       expect(service.executeQuery('SELECT quantity FROM inventory WHERE row_id = 1').values).toEqual([[9]]);
       expect(canonicalData.sheet_0.content[1]).toEqual(['1', '铁剑', '3']);
+    });
+
+    it('明确仅表头 snapshot 原样 hydrate，不读取模板或补 seedRows', async () => {
+      const persistedEmptyData = JSON.parse(JSON.stringify(testTableData));
+      persistedEmptyData.sheet_0.name = '历史空表';
+      persistedEmptyData.sheet_0.sourceData.ddl = TEST_DDL;
+      persistedEmptyData.sheet_0.content = [['row_id', 'item_name', 'quantity']];
+      persistedEmptyData.sheet_0.seedRows = [['99', '历史元数据也不应复活', '1']];
+      mockGetEffectiveSeedRows.mockReturnValue([['99', '不应复活', '1']]);
+      mockGetCurrentChatTemplateScopeState.mockReturnValue({
+        mode: 'chat_override',
+        templateStr: JSON.stringify({
+          sheet_0: {
+            name: '当前模板表',
+            sourceData: { ddl: 'CREATE TABLE wrong_table (row_id INTEGER PRIMARY KEY);' },
+            content: [['row_id'], ['1']],
+          },
+          sheet_new: {
+            name: '当前新增模板表',
+            sourceData: { ddl: 'CREATE TABLE new_table (row_id INTEGER PRIMARY KEY);' },
+            content: [['row_id'], ['1']],
+          },
+        }),
+      });
+      mockParseTableTemplateJson.mockReturnValue({
+        sheet_0: { sourceData: { ddl: 'CREATE TABLE wrong_global (row_id INTEGER PRIMARY KEY);' } },
+      });
+
+      const result = await service.loadFromData(persistedEmptyData, { source: 'merged' });
+
+      expect(result).toEqual({ loaded: true, source: 'merged' });
+      expect(service.executeQuery('SELECT * FROM inventory').rowCount).toBe(0);
+      expect(service.getCurrentData()?.sheet_0.name).toBe('历史空表');
+      expect(service.getCurrentData()?.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity']]);
+      const mutation = service.executeMutation("INSERT INTO inventory VALUES (100, '历史后续写入', 2)");
+      expect(mutation.errors).toEqual([]);
+      expect(service.executeQuery('SELECT item_name FROM inventory ORDER BY row_id').values).toEqual([['历史后续写入']]);
+      expect(service.getCurrentData()?.sheet_new).toBeUndefined();
+      expect(mockGetEffectiveSeedRows).not.toHaveBeenCalled();
+      expect(mockGetCurrentChatTemplateScopeState).not.toHaveBeenCalled();
+      expect(mockParseTableTemplateJson).not.toHaveBeenCalled();
+    });
+
+    it('null candidate hydrate 不读取模板、guide 或发布 mapper', async () => {
+      const result = await service.loadFromData(null, { source: 'merged' });
+      expect(result).toEqual({ loaded: false, source: 'empty' });
+      expect(mockGetEffectiveSeedRows).not.toHaveBeenCalled();
+      expect(mockGetCurrentChatTemplateScopeState).not.toHaveBeenCalled();
+      expect(mockParseTableTemplateJson).not.toHaveBeenCalled();
+      expect(nameMapperMocks.publish).not.toHaveBeenCalled();
+    });
+
+    it('候选 hydrate 仅更新实例快照，激活后才以 owner 发布 JSON 视图', async () => {
+      const activeView = { mate: { type: 'acu', version: 1 }, sheet_active: { content: [['row_id'], ['1']] } };
+      mockCurrentJsonTableData = activeView;
+      const canonicalData = JSON.parse(JSON.stringify(testTableData));
+
+      service.beginRuntimeCandidate_ACU();
+      await service.loadFromData(canonicalData);
+
+      expect(mockCurrentJsonTableData).toBe(activeView);
+      expect(stateManagerMocks.publish).not.toHaveBeenCalled();
+
+      service.activateRuntimeStatePublication_ACU();
+
+      expect(mockCurrentJsonTableData).toEqual(expect.objectContaining({ sheet_0: expect.any(Object) }));
+      expect(mockCurrentJsonTableData).not.toBe(activeView);
+      expect(stateManagerMocks.publish).toHaveBeenCalledWith(service, mockCurrentJsonTableData);
+    });
+
+    it('JSON owner publish 失败时不提前发布 mapper，也不覆盖旧 JSON 视图', async () => {
+      const activeView = { mate: { type: 'acu', version: 1 }, sheet_active: { content: [['row_id'], ['1']] } };
+      mockCurrentJsonTableData = activeView;
+      service.beginRuntimeCandidate_ACU();
+      await service.loadFromData(JSON.parse(JSON.stringify(testTableData)));
+      currentJsonPublicationShouldThrow = new Error('JSON publication failed');
+
+      expect(() => service.activateRuntimeStatePublication_ACU()).toThrow('JSON publication failed');
+
+      expect(nameMapperMocks.publish).not.toHaveBeenCalled();
+      expect(mockCurrentJsonTableData).toBe(activeView);
+      expect(stateManagerMocks.publish).not.toHaveBeenCalled();
+    });
+
+    it('mapper publish 失败时恢复旧 JSON 与旧 mapper publication', async () => {
+      const oldJsonOwner = {};
+      const oldMapperOwner = {};
+      const activeView = { mate: { type: 'acu', version: 1 }, sheet_active: { content: [['row_id'], ['1']] } };
+      const activeMapper = { tableCount: 7 };
+      mockCurrentJsonTableData = activeView;
+      mockCurrentJsonTableDataOwner = oldJsonOwner;
+      mockGlobalNameMapper = activeMapper;
+      mockGlobalNameMapperOwner = oldMapperOwner;
+      service.beginRuntimeCandidate_ACU();
+      await service.loadFromData(JSON.parse(JSON.stringify(testTableData)));
+      nameMapperMocks.publish.mockImplementationOnce(() => { throw new Error('mapper publication failed'); });
+
+      expect(() => service.activateRuntimeStatePublication_ACU()).toThrow('mapper publication failed');
+
+      expect(mockCurrentJsonTableData).toBe(activeView);
+      expect(mockCurrentJsonTableDataOwner).toBe(oldJsonOwner);
+      expect(mockGlobalNameMapper).toBe(activeMapper);
+      expect(mockGlobalNameMapperOwner).toBe(oldMapperOwner);
+    });
+
+    it('候选 hydrate 不发布 mapper，只有策略层激活后才发布', async () => {
+      const canonicalData = JSON.parse(JSON.stringify(testTableData));
+
+      await service.loadFromData(canonicalData);
+
+      expect(nameMapperMocks.MockNameMapper.fromDDLs).toHaveBeenCalledOnce();
+      expect(nameMapperMocks.publish).not.toHaveBeenCalled();
+
+      service.activateRuntimeStatePublication_ACU();
+
+      expect(nameMapperMocks.publish).toHaveBeenCalledOnce();
+      expect(nameMapperMocks.publish).toHaveBeenCalledWith(service, expect.any(nameMapperMocks.MockNameMapper));
+    });
+
+    it('未发布候选 dispose 不得撤销其他实例的 mapper', async () => {
+      await service.loadFromData(JSON.parse(JSON.stringify(testTableData)));
+
+      service.dispose();
+
+      expect(nameMapperMocks.release).toHaveBeenCalledWith(service);
+      expect(nameMapperMocks.publish).not.toHaveBeenCalled();
     });
 
     it('从错序旧 chronicle snapshot hydrate 后保持 SQLite ready 与字段语义', async () => {
@@ -838,8 +1044,9 @@ describe('SqlTableService', () => {
   // ═══════════════════════════════════════════════════════════════
   describe('删除全表后 applyEdits 自动回灌 seedRows', () => {
     beforeEach(async () => {
-      mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
-      await service.loadFromChat();
+      const initializedData = JSON.parse(JSON.stringify(testTableData));
+      initializedData.sheet_0.seedRows = [['1', '铁剑', '3'], ['2', '治疗药水', '5']];
+      await service.loadFromData(initializedData, { source: 'initialized' });
     });
 
     it('DELETE 全表后 UPDATE 自动回灌 seedRows 并命中', () => {
@@ -850,12 +1057,6 @@ describe('SqlTableService', () => {
       // 验证表已空
       const emptyQuery = service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory');
       expect(emptyQuery.values[0][0]).toBe(0);
-
-      // 设置 seedRows mock
-      mockGetEffectiveSeedRows.mockReturnValue([
-        ['1', '铁剑', '3'],
-        ['2', '治疗药水', '5'],
-      ]);
 
       // 执行 UPDATE（应自动回灌 seedRows 后命中，同一事务）
       const result = service.applyEdits("UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑';");
@@ -873,10 +1074,6 @@ describe('SqlTableService', () => {
 
     it('显式 prepare 的 reseed batch 可由调用方原样执行，且禁用 provider 隐式追加', () => {
       service.applyEdits('DELETE FROM inventory;');
-      mockGetEffectiveSeedRows.mockReturnValue([
-        ['1', '铁剑', '3'],
-        ['2', '治疗药水', '5'],
-      ]);
 
       const canonical = service.getCurrentData()!;
       const plan = service.prepareReseedPlanForEmptyTables(canonical, ['sheet_0']);
@@ -906,7 +1103,6 @@ describe('SqlTableService', () => {
 
     it('受控 batch 关闭隐式 reseed 后不会执行未由调用方传入的 seedRows SQL', () => {
       service.applyEdits('DELETE FROM inventory;');
-      mockGetEffectiveSeedRows.mockReturnValue([['1', '铁剑', '3']]);
 
       const result = service.applyEditsBatchWithSheetMetadata(
         ["UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑'"],
@@ -921,10 +1117,6 @@ describe('SqlTableService', () => {
     });
 
     it('非空表不触发 reseed', () => {
-      mockGetEffectiveSeedRows.mockReturnValue([
-        ['99', '不应出现的物品', '999'],
-      ]);
-
       const result = service.applyEdits("UPDATE inventory SET quantity = 10 WHERE row_id = 1;");
       expect(result.success).toBe(true);
 
@@ -935,8 +1127,8 @@ describe('SqlTableService', () => {
     });
 
     it('无 seedRows 的表不触发 reseed', () => {
+      delete service.getCurrentData()!.sheet_0.seedRows;
       service.applyEdits('DELETE FROM inventory;');
-      mockGetEffectiveSeedRows.mockReturnValue([]);
 
       const result = service.applyEdits("UPDATE inventory SET quantity = 10 WHERE row_id = 1;");
       expect(result.success).toBe(true);
@@ -948,9 +1140,6 @@ describe('SqlTableService', () => {
     it('reseed INSERT 与用户 SQL 在同一事务，失败一起回滚', () => {
       service.applyEdits('DELETE FROM inventory;');
       // 删除前高水位为 3，因此首条 reseed 行会获得 row_id=3。
-      mockGetEffectiveSeedRows.mockReturnValue([
-        ['1', '铁剑', '3'],
-      ]);
 
       // 用户 SQL 包含与 reseed 后 row_id 冲突的 INSERT
       expect(() => service.applyEdits(
@@ -1442,16 +1631,13 @@ describe('SqlTableService', () => {
   // ═══════════════════════════════════════════════════════════════
   describe('删除全表后 executeMutation 自动回灌 seedRows', () => {
     beforeEach(async () => {
-      mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
-      await service.loadFromChat();
+      const initializedData = JSON.parse(JSON.stringify(testTableData));
+      initializedData.sheet_0.seedRows = [['1', '铁剑', '3'], ['2', '治疗药水', '5']];
+      await service.loadFromData(initializedData, { source: 'initialized' });
     });
 
     it('DELETE 全表后 executeMutation UPDATE 自动回灌 seedRows 并命中', () => {
       service.applyEdits('DELETE FROM inventory;');
-      mockGetEffectiveSeedRows.mockReturnValue([
-        ['1', '铁剑', '3'],
-        ['2', '治疗药水', '5'],
-      ]);
 
       const result = service.executeMutation("UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑'");
       expect(result.changes).toBe(1);
@@ -1465,10 +1651,6 @@ describe('SqlTableService', () => {
     });
 
     it('非空表不触发 reseed', () => {
-      mockGetEffectiveSeedRows.mockReturnValue([
-        ['99', '不应出现的物品', '999'],
-      ]);
-
       const result = service.executeMutation("UPDATE inventory SET quantity = 10 WHERE row_id = 1");
       expect(result.changes).toBe(1);
 
@@ -1478,8 +1660,8 @@ describe('SqlTableService', () => {
     });
 
     it('无 seedRows 的表不触发 reseed', () => {
+      delete service.getCurrentData()!.sheet_0.seedRows;
       service.applyEdits('DELETE FROM inventory;');
-      mockGetEffectiveSeedRows.mockReturnValue([]);
 
       const result = service.executeMutation("UPDATE inventory SET quantity = 10 WHERE row_id = 1");
       expect(result.changes).toBe(0);
@@ -1492,9 +1674,6 @@ describe('SqlTableService', () => {
       service.applyEdits('DELETE FROM inventory;');
       const beforeFailure = service.getCurrentData();
       expect(beforeFailure?.sheet_0.sourceData.nextRowId).toBe(3);
-      mockGetEffectiveSeedRows.mockReturnValue([
-        ['1', '铁剑', '3'],
-      ]);
 
       // 用户 SQL 故意写错列名使其失败
       const result = service.executeMutation("UPDATE inventory SET nonexistent_col = 1 WHERE row_id = 1");
