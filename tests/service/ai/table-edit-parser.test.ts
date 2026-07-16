@@ -539,4 +539,248 @@ describe('parseAndApplyTableEditsToData_ACU', () => {
     expect(replayData.sheet_0.content).toEqual(parserData.sheet_0.content);
     expect(replayData.sheet_0.sourceData.nextRowId).toBe(5);
   });
+
+  it('支持通过 uid、DDL 物理表名、sheetKey 和显示名定位当前快照内的表格', () => {
+    const data = {
+      mate: { type: 'acu', version: 1 },
+      sheet_inventory: {
+        uid: 'inventory', name: '背包', content: [['row_id', '物品'], ['1', '铁剑']],
+        sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+      sheet_state: {
+        uid: 'state_uid', name: '全局数据表', content: [['row_id', '地点'], ['1', '起点']],
+        sourceData: { ddl: 'CREATE TABLE global_state (row_id INTEGER PRIMARY KEY, location TEXT);' }, updateConfig: {}, exportConfig: {}, orderNo: 1,
+      },
+    } as any;
+
+    const result: any = parseAndApplyTableEditsToData_ACU(
+      '<tableEdit>insertRow("inventory", {"0":"药水"})\nupdateRow("global_state", 0, {"0":"城镇"})\nupdateRow("sheet_inventory", 0, {"0":"钢剑"})\ninsertRow("全局数据表", {"0":"终点"})</tableEdit>',
+      data,
+      'full',
+    );
+
+    expect(result).toMatchObject({ success: true, appliedEdits: 4, modifiedKeys: expect.arrayContaining(['sheet_inventory', 'sheet_state']) });
+    expect(data.sheet_inventory.content).toEqual([['row_id', '物品'], ['1', '钢剑'], ['2', '药水']]);
+    expect(data.sheet_state.content).toEqual([['row_id', '地点'], ['1', '城镇'], ['2', '终点']]);
+  });
+
+  it('未知或歧义表目标会失败且不提交同批次已应用的修改', () => {
+    const data = {
+      sheet_0: { uid: 'inventory', name: '背包', content: [['row_id', '物品'], ['1', '铁剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_1: { uid: 'inventory_2', name: '背包', content: [['row_id', '物品'], ['1', '药水']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    const before = JSON.parse(JSON.stringify(data));
+
+    const result: any = parseAndApplyTableEditsToData_ACU(
+      '<tableEdit>insertRow("inventory", {"0":"卷轴"})\nupdateRow("背包", 0, {"0":"不应写入"})\ninsertRow("index_options", {"0":"也不应写入"})</tableEdit>',
+      data,
+      'full',
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.appliedEdits).toBe(0);
+    expect(result.error).toContain('ambiguous_table_target');
+    expect(result.error).toContain('missing_table_target');
+    expect(data).toEqual(before);
+  });
+
+  it('目标行不存在时失败且不修改当前快照', () => {
+    const data = {
+      sheet_0: { uid: 'inventory', name: '背包', content: [['row_id', '物品'], ['1', '铁剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+
+    const result: any = parseAndApplyTableEditsToData_ACU('<tableEdit>updateRow("inventory", 9, {"0":"药水"})</tableEdit>', data, 'full');
+
+    expect(result).toMatchObject({ success: false, appliedEdits: 0 });
+    expect(result.error).toContain('invalid_row_target');
+    expect(data.sheet_0.content).toEqual([['row_id', '物品'], ['1', '铁剑']]);
+  });
+
+  it('字符串数字索引按 snapshot orderNo 解析且不依赖对象键顺序', () => {
+    const data = {
+      sheet_late: { uid: 'late', name: '后表', content: [['row_id', '值']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
+      sheet_early: { uid: 'early', name: '前表', content: [['row_id', '值']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+
+    const result: any = parseAndApplyTableEditsToData_ACU('<tableEdit>insertRow("0", {"0":"命中前表"})</tableEdit>', data, 'full');
+
+    expect(result).toMatchObject({ success: true, appliedEdits: 1, modifiedKeys: ['sheet_early'] });
+    expect(data.sheet_early.content[1]).toEqual(['1', '命中前表']);
+    expect(data.sheet_late.content).toEqual([['row_id', '值']]);
+  });
+
+  it('重复显示名下通过唯一 uid 修改时按 canonical sheetKey 记录统计', () => {
+    const data = {
+      sheet_a: { uid: 'first', name: '重复名', content: [['row_id', '值'], ['1', 'A']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_b: { uid: 'second', name: '重复名', content: [['row_id', '值'], ['1', 'B']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+
+    const result: any = parseAndApplyTableEditsToData_ACU('<tableEdit>updateRow("second", 0, {"0":"B2"})</tableEdit>', data, 'full');
+
+    expect(result).toMatchObject({ success: true, appliedEdits: 1, modifiedKeys: ['sheet_b'] });
+    expect(data.sheet_a).not.toHaveProperty('_lastUpdateStats');
+    expect(data.sheet_b._lastUpdateStats.changes).toBe(1);
+    expect(data.sheet_b.content[1]).toEqual(['1', 'B2']);
+  });
+
+  it.each([
+    ['负数行号', '<tableEdit>deleteRow("inventory", -1)</tableEdit>', 'invalid_row_target'],
+    ['小数行号', '<tableEdit>updateRow("inventory", 0.5, {"0":"坏值"})</tableEdit>', 'invalid_row_target'],
+    ['空更新数据', '<tableEdit>updateRow("inventory", 0, null)</tableEdit>', 'invalid_row_data'],
+  ])('%s 会 fail-closed 且不修改表头或数据', (_name, response, errorCode) => {
+    const data = {
+      sheet_0: { uid: 'inventory', name: '背包', content: [['row_id', '物品'], ['1', '铁剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const before = JSON.parse(JSON.stringify(data));
+
+    const result: any = parseAndApplyTableEditsToData_ACU(response, data, 'full');
+
+    expect(result).toMatchObject({ success: false, appliedEdits: 0 });
+    expect(result.error).toContain(errorCode);
+    expect(data).toEqual(before);
+  });
+
+  it('目标表结构无效时返回 invalid_table_structure 而不是伪成功', () => {
+    const data = {
+      sheet_0: { uid: 'inventory', name: '背包', sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const before = JSON.parse(JSON.stringify(data));
+
+    const result: any = parseAndApplyTableEditsToData_ACU('<tableEdit>insertRow("inventory", {"0":"药水"})</tableEdit>', data, 'full');
+
+    expect(result).toMatchObject({ success: false, appliedEdits: 0 });
+    expect(result.error).toContain('invalid_table_structure');
+    expect(data).toEqual(before);
+  });
+
+  it('parser 与 replay 只物化 snapshot 自带 seedRows，不读取外部模板诱饵', async () => {
+    const { getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
+    vi.mocked(getEffectiveSeedRowsForSheet_ACU).mockReturnValue([['99', '外部诱饵']] as any);
+    const parserData = {
+      sheet_0: { uid: 'sheet_0', name: '表', content: [['row_id', '值']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const replayData = JSON.parse(JSON.stringify(parserData));
+    const { applyTableOperationV2_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+
+    const parserResult: any = parseAndApplyTableEditsToData_ACU('<tableEdit>insertRow(0, {"0":"canonical"})</tableEdit>', parserData, 'full');
+    await applyTableOperationV2_ACU(replayData, { kind: 'table_edit_dsl', text: 'insertRow(0, {"0":"canonical"})' } as any);
+
+    expect(parserResult).toMatchObject({ success: true, appliedEdits: 1 });
+    expect(parserData.sheet_0.content).toEqual([['row_id', '值'], ['1', 'canonical']]);
+    expect(replayData.sheet_0.content).toEqual(parserData.sheet_0.content);
+    expect(getEffectiveSeedRowsForSheet_ACU).not.toHaveBeenCalled();
+  });
+
+  it('parser 与 replay 对非法列键使用同一严格规则', async () => {
+    const parserData = {
+      sheet_0: { uid: 'inventory', name: '表', content: [['row_id', '值A', '值B'], ['1', 'A', 'B']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const replayData = JSON.parse(JSON.stringify(parserData));
+    const parserBefore = JSON.parse(JSON.stringify(parserData));
+    const replayBefore = JSON.parse(JSON.stringify(replayData));
+    const text = 'updateRow(0, 0, {"0":"A2","1x":"不应写入","01":"也不应写入"})';
+    const { applyTableOperationV2_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+
+    const parserResult: any = parseAndApplyTableEditsToData_ACU(`<tableEdit>${text}</tableEdit>`, parserData, 'full');
+    await expect(applyTableOperationV2_ACU(replayData, { kind: 'table_edit_dsl', text } as any)).rejects.toThrow('invalid_column_target');
+
+    expect(parserResult).toMatchObject({ success: false, appliedEdits: 0 });
+    expect(parserResult.error).toContain('invalid_column_target');
+    expect(parserData).toEqual(parserBefore);
+    expect(replayData).toEqual(replayBefore);
+  });
+
+  it('updateRow 目标数据行不是数组时 fail-closed 且不伪计数', () => {
+    const data = {
+      sheet_0: { uid: 'inventory', name: '表', content: [['row_id', '值'], { bad: true }], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const before = JSON.parse(JSON.stringify(data));
+
+    const result: any = parseAndApplyTableEditsToData_ACU('<tableEdit>updateRow(0, 0, {"0":"x"})</tableEdit>', data, 'full');
+
+    expect(result).toMatchObject({ success: false, appliedEdits: 0 });
+    expect(result.error).toContain('invalid_table_structure');
+    expect(data).toEqual(before);
+  });
+
+  it.each([
+    ['空 update 对象', 'updateRow(0, 0, {})', 'invalid_row_data'],
+    ['insertRow 非规范列键', 'insertRow(0, {"01":"x"})', 'invalid_column_target'],
+    ['insertRow 越界列键', 'insertRow(0, {"1":"x"})', 'invalid_column_target'],
+    ['updateRow 越界列键', 'updateRow(0, 0, {"1":"x"})', 'invalid_column_target'],
+  ])('%s 会整批失败且不提交修改', (_name, command, errorCode) => {
+    const data = {
+      sheet_0: { uid: 'inventory', name: '表', content: [['row_id', '值'], ['1', 'A']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const before = JSON.parse(JSON.stringify(data));
+
+    const result: any = parseAndApplyTableEditsToData_ACU(`<tableEdit>${command}</tableEdit>`, data, 'full');
+
+    expect(result).toMatchObject({ success: false, appliedEdits: 0 });
+    expect(result.error).toContain(errorCode);
+    expect(data).toEqual(before);
+  });
+
+  it('deleteRow 目标业务行不是数组时返回 invalid_table_structure', () => {
+    const data = {
+      sheet_0: { uid: 'inventory', name: '表', content: [['row_id', '值'], { bad: true }], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const before = JSON.parse(JSON.stringify(data));
+
+    const result: any = parseAndApplyTableEditsToData_ACU('<tableEdit>deleteRow(0, 0)</tableEdit>', data, 'full');
+
+    expect(result).toMatchObject({ success: false, appliedEdits: 0 });
+    expect(result.error).toContain('invalid_table_structure');
+    expect(data).toEqual(before);
+  });
+
+  it.each([
+    'CREATE TABLE "inventory" (row_id INTEGER PRIMARY KEY, value TEXT);',
+    'CREATE TABLE `inventory` (row_id INTEGER PRIMARY KEY, value TEXT);',
+    'CREATE TABLE [inventory] (row_id INTEGER PRIMARY KEY, value TEXT);',
+  ])('普通目标名可命中 quoted DDL identifier: %s', ddl => {
+    const data = {
+      sheet_0: { uid: '_uid', name: '不同名称', content: [['row_id', '值'], ['1', 'A']], sourceData: { ddl }, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+
+    const result: any = parseAndApplyTableEditsToData_ACU('<tableEdit>updateRow("inventory", 0, {"0":"B"})</tableEdit>', data, 'full');
+
+    expect(result).toMatchObject({ success: true, appliedEdits: 1, modifiedKeys: ['sheet_0'] });
+    expect(data.sheet_0.content[1]).toEqual(['1', 'B']);
+  });
+
+  it('说明文字前缀与无分号多命令在 parser 和 replay 中保持一致', async () => {
+    const parserData = {
+      sheet_0: { uid: 'inventory', name: '背包', content: [['row_id', '值'], ['1', 'A']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const replayData = structuredClone(parserData);
+    const text = '说明文字 updateRow(0, 0, {"0":"B(北区)"}) insertRow(0, {"0":"C"})';
+    const { applyTableOperationV2_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+
+    const parserResult: any = parseAndApplyTableEditsToData_ACU(`<tableEdit>${text}</tableEdit>`, parserData, 'full');
+    await applyTableOperationV2_ACU(replayData, { kind: 'table_edit_dsl', text } as any);
+
+    expect(parserResult).toMatchObject({ success: true, appliedEdits: 2, modifiedKeys: ['sheet_0'] });
+    expect(parserData.sheet_0.content).toEqual([['row_id', '值'], ['1', 'B(北区)'], ['2', 'C']]);
+    expect(replayData.sheet_0.content).toEqual(parserData.sheet_0.content);
+    expect(replayData.sheet_0.sourceData.nextRowId).toBe(parserData.sheet_0.sourceData.nextRowId);
+  });
+
+  it('仅有说明文字但没有 DSL 指令时返回 malformed_command', () => {
+    const data = {
+      sheet_0: { uid: 'inventory', name: '背包', content: [['row_id', '值'], ['1', 'A']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    } as any;
+    const before = structuredClone(data);
+
+    const result: any = parseAndApplyTableEditsToData_ACU('<tableEdit>这里只是说明文字</tableEdit>', data, 'full');
+
+    expect(result).toMatchObject({ success: false, appliedEdits: 0 });
+    expect(result.error).toContain('malformed_command');
+    expect(data).toEqual(before);
+  });
+
+
+
+
+
 });

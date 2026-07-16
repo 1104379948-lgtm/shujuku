@@ -13,6 +13,7 @@ import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummar
 import { buildSheetSchemaMigrationOperation_ACU } from '../../../src/service/table/table-schema-migration';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
 import { reserveStableRowIdsForSheet_ACU } from '../../../src/shared/stable-row-id-allocator';
+import { SqliteEngine } from '../../../src/data/sqlite/sqlite-engine';
 
 function makeCheckpointData() {
   return {
@@ -547,6 +548,242 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       ['1', '第一天', '城镇(北区)', '记录包含括号(测试)，不应破坏命令切分。', '抵达城镇'],
     ]);
   });
+
+
+  it('回放 table_edit_dsl 时支持 uid、DDL 物理表名和 sheetKey 目标', async () => {
+    const data = makeDslCheckpointData();
+    data.sheet_a.sourceData.ddl = 'CREATE TABLE global_state (row_id INTEGER PRIMARY KEY, location TEXT);';
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data },
+            logEntries: [{
+              seq: 1, entryId: 'dsl-stable-target', createdAt: 2, source: 'auto_fill', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_a', 'sheet_b'], groupKeys: [],
+              operations: [{
+                kind: 'table_edit_dsl',
+                text: 'updateRow("global_state", 0, {"0":"城镇"}) insertRow("chronicle", {"0":"第一天","1":"城镇","2":"到达","3":"概要"}) updateRow("sheet_b", 0, {"3":"修订概要"})',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toMatchObject({
+      sheet_a: expect.objectContaining({ content: [['row_id', '地点'], ['1', '城镇']] }),
+      sheet_b: expect.objectContaining({ content: [['row_id', '时间跨度', '地点', '纪要', '概要'], ['1', '第一天', '城镇', '到达', '修订概要']] }),
+    });
+  });
+
+  it('回放 table_edit_dsl 遇到未知或歧义字符串目标时拒绝该 frame', async () => {
+    const data = makeDslCheckpointData();
+    data.sheet_duplicate = {
+      ...data.sheet_b,
+      uid: 'other_chronicle',
+      name: '另一个纪要表',
+      orderNo: 2,
+    };
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data },
+            logEntries: [{
+              seq: 1, entryId: 'dsl-invalid-target', createdAt: 2, source: 'auto_fill', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_a'], groupKeys: [],
+              operations: [{ kind: 'table_edit_dsl', text: 'insertRow("index_options", {"0":"x"})' }],
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('missing_table_target');
+  });
+
+
+  it('table_edit_dsl 后续命令失败时不保留前序命令的部分修改', async () => {
+    const state = makeCheckpointData();
+    const before = JSON.parse(JSON.stringify(state));
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'table_edit_dsl',
+      text: 'insertRow("inventory", {"0":"药水"}) updateRow("index_options", 0, {"0":"无效"})',
+    } as any)).rejects.toThrow('missing_table_target');
+
+    expect(state).toEqual(before);
+  });
+
+  it('table_edit_dsl 保留字符串数字索引并按 snapshot orderNo 解析', async () => {
+    const state = makeDslCheckpointData();
+    state.sheet_a.orderNo = 1;
+    state.sheet_b.orderNo = 0;
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'table_edit_dsl',
+      text: 'insertRow("0", {"0":"第一天","1":"城镇","2":"记录","3":"概要"})',
+    } as any);
+
+    expect(state.sheet_b.content[1]).toEqual(['1', '第一天', '城镇', '记录', '概要']);
+    expect(state.sheet_a.content).toEqual([['row_id', '地点'], ['1', '起点']]);
+  });
+
+  it('table_edit_dsl 对歧义目标、非法行号和损坏命令均 fail-closed', async () => {
+    const ambiguousState = makeDslCheckpointData();
+    ambiguousState.sheet_duplicate = {
+      ...JSON.parse(JSON.stringify(ambiguousState.sheet_b)),
+      uid: 'duplicate_uid',
+      orderNo: 2,
+    };
+    const ambiguousBefore = JSON.parse(JSON.stringify(ambiguousState));
+    await expect(applyTableOperationV2_ACU(ambiguousState, {
+      kind: 'table_edit_dsl',
+      text: 'insertRow("纪要表", {"0":"x"})',
+    } as any)).rejects.toThrow('ambiguous_table_target');
+    expect(ambiguousState).toEqual(ambiguousBefore);
+
+    const invalidRowState = makeCheckpointData();
+    const invalidRowBefore = JSON.parse(JSON.stringify(invalidRowState));
+    await expect(applyTableOperationV2_ACU(invalidRowState, {
+      kind: 'table_edit_dsl',
+      text: 'deleteRow("inventory", -1)',
+    } as any)).rejects.toThrow('invalid_row_target');
+    expect(invalidRowState).toEqual(invalidRowBefore);
+
+    const malformedState = makeCheckpointData();
+    const malformedBefore = JSON.parse(JSON.stringify(malformedState));
+    await expect(applyTableOperationV2_ACU(malformedState, {
+      kind: 'table_edit_dsl',
+      text: 'insertRow("inventory", {"0":"药水"}',
+    } as any)).rejects.toThrow('malformed_command');
+    expect(malformedState).toEqual(malformedBefore);
+  });
+
+  it.each([
+    ['空 update 对象', 'updateRow(0, 0, {})', 'invalid_row_data'],
+    ['insertRow 非规范列键', 'insertRow(0, {"01":"x"})', 'invalid_column_target'],
+    ['insertRow 越界列键', 'insertRow(0, {"1":"x"})', 'invalid_column_target'],
+    ['updateRow 越界列键', 'updateRow(0, 0, {"1":"x"})', 'invalid_column_target'],
+  ])('table_edit_dsl %s 时不提交 candidate', async (_name, text, errorCode) => {
+    const state = makeCheckpointData();
+    const before = structuredClone(state);
+
+    await expect(applyTableOperationV2_ACU(state, { kind: 'table_edit_dsl', text } as any)).rejects.toThrow(errorCode);
+
+    expect(state).toEqual(before);
+  });
+
+  it('table_edit_dsl deleteRow 遇到非数组业务行时 fail-closed', async () => {
+    const state = makeCheckpointData();
+    state.sheet_0.content[1] = { bad: true } as any;
+    const before = structuredClone(state);
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'table_edit_dsl', text: 'deleteRow(0, 0)',
+    } as any)).rejects.toThrow('invalid_table_structure');
+
+    expect(state).toEqual(before);
+  });
+
+  it.each([
+    'CREATE TABLE "inventory" (row_id INTEGER PRIMARY KEY, name TEXT);',
+    'CREATE TABLE `inventory` (row_id INTEGER PRIMARY KEY, name TEXT);',
+    'CREATE TABLE [inventory] (row_id INTEGER PRIMARY KEY, name TEXT);',
+  ])('table_edit_dsl 普通目标名可命中 quoted DDL identifier: %s', async ddl => {
+    const state = makeCheckpointData();
+    state.sheet_0.uid = '_uid';
+    state.sheet_0.name = '不同名称';
+    state.sheet_0.sourceData.ddl = ddl;
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'table_edit_dsl', text: 'updateRow("inventory", 0, {"0":"药水"})',
+    } as any);
+
+    expect(state.sheet_0.content[1]).toEqual(['1', '药水']);
+  });
+
+  it('已加载 runtime 下 malformed table_edit_dsl 不导出到原 state 也不销毁 runtime', async () => {
+    const state = makeCheckpointData();
+    const before = structuredClone(state);
+    const exported = structuredClone(state);
+    exported.sheet_0.content[1][1] = '运行时未提交值';
+    const dispose = vi.fn();
+    const loadedRuntime = {
+      loaded: true,
+      engine: { dispose },
+      syncBridge: {
+        exportToTableData: vi.fn(() => exported),
+        loadFromTableData: vi.fn(),
+      },
+    };
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'table_edit_dsl', text: 'insertRow("inventory", {"0":"药水"}',
+    } as any, loadedRuntime as any)).rejects.toThrow('malformed_command');
+
+    expect(state).toEqual(before);
+    expect(loadedRuntime.loaded).toBe(true);
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('已加载 runtime 的 candidate hydrate 失败时保留旧 runtime 与原 state', async () => {
+    const state = makeCheckpointData();
+    const before = structuredClone(state);
+    const exported = structuredClone(state);
+    exported.sheet_0.sourceData.ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT NOT NULL);';
+    exported.sheet_0.content[1][1] = null as any;
+    const dispose = vi.fn();
+    const loadedRuntime = {
+      loaded: true,
+      engine: { dispose },
+      syncBridge: {
+        exportToTableData: vi.fn(() => exported),
+        loadFromTableData: vi.fn(),
+      },
+    };
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'table_edit_dsl', text: 'updateRow("inventory", 0, {"0":null})',
+    } as any, loadedRuntime as any)).rejects.toThrow('[SyncBridge] 加载表 sheet_0');
+
+    expect(state).toEqual(before);
+    expect(loadedRuntime.loaded).toBe(true);
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('candidate hydrate 成功后旧 runtime dispose 抛错不阻断 state 与 runtime 提交', async () => {
+    const state = makeCheckpointData();
+    const previousEngine = { dispose: vi.fn(() => { throw new Error('dispose failed'); }) };
+    const loadedRuntime = {
+      loaded: true,
+      engine: previousEngine,
+      syncBridge: {
+        exportToTableData: vi.fn(() => structuredClone(state)),
+        loadFromTableData: vi.fn(),
+      },
+    };
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'table_edit_dsl', text: 'updateRow("inventory", 0, {"0":"钢剑"})',
+    } as any, loadedRuntime as any)).resolves.toBeUndefined();
+
+    expect(state.sheet_0.content[1]).toEqual(['1', '钢剑']);
+    expect(loadedRuntime.loaded).toBe(true);
+    expect(loadedRuntime.engine).not.toBe(previousEngine);
+    expect(previousEngine.dispose).toHaveBeenCalledTimes(1);
+  });
+
+
+
+
 
   it('row_upsert 的空 row_id 删除目标行，身份不一致的 row_upsert 拒绝回放', async () => {
     const makeChat = (cells: any[]) => [{
@@ -2049,5 +2286,239 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       _set_independentTableStates_ACU(previousIndependentStates);
     }
   });
+
+  it.each([
+    ['data_replace', (state: any) => ({
+      kind: 'data_replace', reason: 'system',
+      data: {
+        ...structuredClone(state),
+        sheet_0: {
+          ...structuredClone(state.sheet_0),
+          sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT NOT NULL);' },
+          content: [['row_id', 'name'], ['1', null]],
+        },
+      },
+    })],
+    ['sheet_replace', (state: any) => ({
+      kind: 'sheet_replace', reason: 'system', sheetKey: 'sheet_0',
+      sheet: {
+        ...structuredClone(state.sheet_0),
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT NOT NULL);' },
+        content: [['row_id', 'name'], ['1', null]],
+      },
+    })],
+    ['row_upsert', () => ({
+      kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', null],
+    })],
+  ])('已加载 runtime 下 %s hydrate 失败时不提交 state 或替换旧 runtime', async (_kind, makeOperation) => {
+    const state = makeCheckpointData();
+    const before = structuredClone(state);
+    const exported = structuredClone(state);
+    exported.sheet_0.sourceData.ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT NOT NULL);';
+    const dispose = vi.fn();
+    const loadedRuntime = {
+      loaded: true,
+      engine: { dispose },
+      syncBridge: { exportToTableData: vi.fn(() => exported), loadFromTableData: vi.fn() },
+    };
+
+    await expect(applyTableOperationV2_ACU(
+      state,
+      makeOperation(state) as any,
+      loadedRuntime as any,
+    )).rejects.toThrow('[SyncBridge] 加载表 sheet_0');
+
+    expect(state).toEqual(before);
+    expect(loadedRuntime.loaded).toBe(true);
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('完整 replay 后续失败时回滚 checkpoint 与前序 entry 的 tracking', async () => {
+    const previousIndependentStates = independentTableStates_ACU;
+    _set_independentTableStates_ACU({ existing: { lastUpdatedAiFloor: 3 } } as any);
+    const trackingBefore = structuredClone(independentTableStates_ACU);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData(),
+              scheduleSummary: { sheet_0: { lastFilledAiFloor: 10 } },
+            },
+            logEntries: [
+              {
+                seq: 1, entryId: 'tracking-success-before-failure', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 11,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'table_edit_dsl', text: 'updateRow("inventory", 0, {"0":"钢剑"})' }],
+              },
+              {
+                seq: 2, entryId: 'tracking-failure', createdAt: 3, source: 'system', targetMessageIndex: 0, aiFloor: 12,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'table_edit_dsl', text: 'insertRow("inventory", {"0":"药水"}' }],
+              },
+            ],
+          },
+        },
+      },
+    }];
+
+    try {
+      await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('malformed_command');
+      expect(independentTableStates_ACU).toEqual(trackingBefore);
+    } finally {
+      _set_independentTableStates_ACU(previousIndependentStates);
+    }
+  });
+
+  it('loaded runtime 下单表 checkpoint hydrate 失败时回滚 tracking', async () => {
+    const previousIndependentStates = independentTableStates_ACU;
+    _set_independentTableStates_ACU({ existing: { lastUpdatedAiFloor: 2 } } as any);
+    const trackingBefore = structuredClone(independentTableStates_ACU);
+    const invalidSheet = {
+      ...structuredClone(makeCheckpointData().sheet_0),
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT NOT NULL);' },
+      content: [['row_id', 'name'], ['1', null]],
+    };
+    const chat = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+              logEntries: [{
+                seq: 1, entryId: 'load-runtime', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'sql_batch', statements: ['UPDATE inventory SET name = name WHERE row_id = 1'] }],
+              }],
+            },
+          },
+        },
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              perSheetCheckpoints: {
+                sheet_0: { kind: 'sheet_full', createdAt: 3, reason: 'schema_change', sheetKey: 'sheet_0', data: invalidSheet },
+              },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    ];
+
+    try {
+      await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('[SyncBridge] 加载表 sheet_0');
+      expect(independentTableStates_ACU).toEqual(trackingBefore);
+    } finally {
+      _set_independentTableStates_ACU(previousIndependentStates);
+    }
+  });
+
+  it('loaded runtime 下 legacy patches hydrate 失败时回滚全部 tracking', async () => {
+    const previousIndependentStates = independentTableStates_ACU;
+    _set_independentTableStates_ACU({ existing: { lastUpdatedAiFloor: 4 } } as any);
+    const trackingBefore = structuredClone(independentTableStates_ACU);
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.sourceData.ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT NOT NULL);';
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [
+              {
+                seq: 1, entryId: 'legacy-load-runtime', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'sql_batch', statements: ['UPDATE inventory SET name = name WHERE row_id = 1'] }],
+              },
+              {
+                seq: 2, entryId: 'legacy-invalid-patch', createdAt: 3, source: 'system', targetMessageIndex: 0, aiFloor: 2,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                patches: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', null] }],
+              },
+            ],
+          },
+        },
+      },
+    }];
+
+    try {
+      await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('[SyncBridge] 加载表 sheet_0');
+      expect(independentTableStates_ACU).toEqual(trackingBefore);
+    } finally {
+      _set_independentTableStates_ACU(previousIndependentStates);
+    }
+  });
+
+  it('完整 replay 成功时最终 dispose 抛错只告警且仍返回 state', async () => {
+    const disposeSpy = vi.spyOn(SqliteEngine.prototype, 'dispose').mockImplementation(() => {
+      throw new Error('final dispose failed');
+    });
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    try {
+      await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toMatchObject({
+        sheet_0: expect.objectContaining({ content: [['row_id', 'name'], ['1', '铁剑']] }),
+      });
+    } finally {
+      disposeSpy.mockRestore();
+    }
+  });
+
+  it('完整 replay 主错误与最终 dispose 同时发生时保留主错误', async () => {
+    const disposeSpy = vi.spyOn(SqliteEngine.prototype, 'dispose').mockImplementation(() => {
+      throw new Error('final dispose failed');
+    });
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+            logEntries: [{
+              seq: 1, entryId: 'primary-error', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+              operations: [{ kind: 'table_edit_dsl', text: 'insertRow("inventory", {"0":"药水"}' }],
+            }],
+          },
+        },
+      },
+    }];
+
+    try {
+      await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).rejects.toThrow('malformed_command');
+    } finally {
+      disposeSpy.mockRestore();
+    }
+  });
+
 
 });

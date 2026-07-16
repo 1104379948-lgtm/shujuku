@@ -14375,6 +14375,162 @@ $CONTENT
         return Array.from(tableNames);
     }
 
+    function parseDslNonNegativeInteger_ACU(value) {
+        if (typeof value === 'number')
+            return Number.isInteger(value) && value >= 0 ? value : null;
+        if (typeof value !== 'string' || value !== value.trim() || !/^(?:0|[1-9]\d*)$/.test(value))
+            return null;
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) ? parsed : null;
+    }
+    function isDslRowDataObject_ACU(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0;
+    }
+    function validateDslColumnTargets_ACU(data, columnCount) {
+        for (const columnTarget of Object.keys(data)) {
+            const columnIndex = parseDslNonNegativeInteger_ACU(columnTarget);
+            if (columnIndex === null || columnIndex >= columnCount) {
+                return `invalid_column_target: 列目标 ${JSON.stringify(columnTarget)} 无效或超出当前表格的 ${columnCount} 个业务列`;
+            }
+        }
+        return null;
+    }
+    function normalizeSqliteIdentifier_ACU(identifier) {
+        if (identifier.length < 2)
+            return identifier;
+        const first = identifier[0];
+        const last = identifier[identifier.length - 1];
+        if (first === '"' && last === '"') {
+            return identifier.slice(1, -1).replace(/""/g, '"');
+        }
+        if (first === '`' && last === '`') {
+            return identifier.slice(1, -1).replace(/``/g, '`');
+        }
+        if (first === '[' && last === ']') {
+            return identifier.slice(1, -1).replace(/]]/g, ']');
+        }
+        return identifier;
+    }
+    function extractDslCommands_ACU(text) {
+        const cleaned = String(text || '').replace(/<!--|-->/g, '');
+        const commands = [];
+        const commandPattern = /(?:insertRow|updateRow|deleteRow)\s*\(/g;
+        let searchStart = 0;
+        while (searchStart < cleaned.length) {
+            commandPattern.lastIndex = searchStart;
+            const match = commandPattern.exec(cleaned);
+            if (!match)
+                break;
+            const commandStart = match.index;
+            const openParenIndex = cleaned.indexOf('(', commandStart);
+            let depth = 0;
+            let inString = false;
+            let stringChar = '';
+            let escaped = false;
+            let commandEnd = -1;
+            for (let i = openParenIndex; i < cleaned.length; i += 1) {
+                const char = cleaned[i];
+                if (inString) {
+                    if (escaped) {
+                        escaped = false;
+                    }
+                    else if (char === '\\') {
+                        escaped = true;
+                    }
+                    else if (char === stringChar) {
+                        inString = false;
+                    }
+                    continue;
+                }
+                if (char === '"' || char === "'") {
+                    inString = true;
+                    stringChar = char;
+                }
+                else if (char === '(') {
+                    depth += 1;
+                }
+                else if (char === ')') {
+                    depth -= 1;
+                    if (depth === 0) {
+                        commandEnd = i + 1;
+                        break;
+                    }
+                }
+            }
+            if (commandEnd === -1)
+                throw new Error('malformed_command: DSL 指令括号未闭合');
+            const command = cleaned.slice(commandStart, commandEnd).trim().replace(/;$/, '');
+            if (command)
+                commands.push(command);
+            searchStart = commandEnd;
+        }
+        if (commands.length === 0 && cleaned.trim()) {
+            throw new Error('malformed_command: table_edit_dsl 未包含可识别指令');
+        }
+        return commands;
+    }
+    function getSnapshotSheetKeysForDsl_ACU(data) {
+        if (!data || typeof data !== 'object')
+            return [];
+        return Object.keys(data)
+            .filter(key => key.startsWith('sheet_'))
+            .sort((left, right) => {
+            const leftSheet = data[left];
+            const rightSheet = data[right];
+            const leftOrder = Number.isFinite(leftSheet?.[TABLE_ORDER_FIELD_ACU]) ? Math.trunc(leftSheet[TABLE_ORDER_FIELD_ACU]) : Infinity;
+            const rightOrder = Number.isFinite(rightSheet?.[TABLE_ORDER_FIELD_ACU]) ? Math.trunc(rightSheet[TABLE_ORDER_FIELD_ACU]) : Infinity;
+            if (leftOrder !== rightOrder)
+                return leftOrder - rightOrder;
+            const nameOrder = String(leftSheet?.name ?? left).localeCompare(String(rightSheet?.name ?? right));
+            return nameOrder || left.localeCompare(right);
+        });
+    }
+    function validateSheet_ACU(sheetKey, sheet) {
+        if (!sheet || typeof sheet !== 'object' || !Array.isArray(sheet.content) || sheet.content.length === 0 || !Array.isArray(sheet.content[0])) {
+            return `invalid_table_structure: 表格 ${JSON.stringify(sheetKey)} 缺少有效的 content/header`;
+        }
+        return null;
+    }
+    function resolveDslTableTarget_ACU(data, target, sheetKeys = getSnapshotSheetKeysForDsl_ACU(data)) {
+        const numericIndex = parseDslNonNegativeInteger_ACU(target);
+        const isNumericTarget = typeof target === 'number'
+            || (typeof target === 'string' && target === target.trim() && /^(?:0|[1-9]\d*)$/.test(target));
+        if (isNumericTarget) {
+            if (numericIndex === null)
+                return { ok: false, code: 'invalid_table_target', message: `invalid_table_target: 数字表索引 ${JSON.stringify(target)} 无效` };
+            const sheetKey = sheetKeys[numericIndex];
+            const sheet = sheetKey ? data[sheetKey] : null;
+            if (!sheetKey || !sheet)
+                return { ok: false, code: 'missing_table_target', message: `missing_table_target: 数字表索引 ${numericIndex} 未匹配到当前快照中的表格` };
+            const structureError = validateSheet_ACU(sheetKey, sheet);
+            if (structureError)
+                return { ok: false, code: 'invalid_table_structure', message: structureError };
+            return { ok: true, sheetKey, sheet, tableIndex: numericIndex };
+        }
+        if (typeof target !== 'string' || !target.trim()) {
+            return { ok: false, code: 'invalid_table_target', message: `invalid_table_target: 表格目标必须是非负整数或非空字符串，当前值为 ${JSON.stringify(target)}` };
+        }
+        const identifier = target.trim();
+        const matches = sheetKeys.filter(sheetKey => {
+            const sheet = data[sheetKey];
+            if (!sheet || typeof sheet !== 'object')
+                return false;
+            const parsedDdlName = typeof sheet.sourceData?.ddl === 'string' ? parseDDLTableName(sheet.sourceData.ddl) : null;
+            const ddlName = parsedDdlName === null ? null : normalizeSqliteIdentifier_ACU(parsedDdlName);
+            return sheetKey === identifier || String(sheet.name ?? '').trim() === identifier || String(sheet.uid ?? '').trim() === identifier || ddlName === identifier;
+        });
+        if (matches.length === 0)
+            return { ok: false, code: 'missing_table_target', message: `missing_table_target: 表格目标 ${JSON.stringify(identifier)} 未匹配到当前快照中的表格` };
+        if (matches.length > 1)
+            return { ok: false, code: 'ambiguous_table_target', message: `ambiguous_table_target: 表格目标 ${JSON.stringify(identifier)} 匹配到多个当前快照表格：${matches.join(', ')}` };
+        const sheetKey = matches[0];
+        const sheet = data[sheetKey];
+        const structureError = validateSheet_ACU(sheetKey, sheet);
+        if (structureError)
+            return { ok: false, code: 'invalid_table_structure', message: structureError };
+        return { ok: true, sheetKey, sheet, tableIndex: sheetKeys.indexOf(sheetKey) };
+    }
+
     function deepClone_ACU$1(value) {
         return JSON.parse(JSON.stringify(value));
     }
@@ -14518,6 +14674,14 @@ $CONTENT
             .flatMap(statement => normalizeSqlStatementsForRuntimeLog_ACU(String(statement || '')))
             .filter(Boolean);
     }
+    function safeDisposeSqlReplayEngine_ACU(engine, context) {
+        try {
+            engine.dispose();
+        }
+        catch (disposeError) {
+            logWarn_ACU(`[V2 Replay] ${context} 清理失败: ${disposeError instanceof Error ? disposeError.message : String(disposeError)}`);
+        }
+    }
     function normalizeReplayState_ACU(state, context) {
         const normalization = normalizeCanonicalTableRows_ACU(state);
         if (normalization.errors.length > 0) {
@@ -14547,21 +14711,38 @@ $CONTENT
     async function reloadSqlReplayRuntime_ACU(runtime, state) {
         if (!runtime.loaded)
             return;
-        runtime.engine.dispose();
-        runtime.loaded = false;
-        await ensureSqlReplayRuntime_ACU(runtime, state);
+        const replacementEngine = new SqliteEngine();
+        const replacementRuntime = {
+            engine: replacementEngine,
+            syncBridge: new SyncBridge(replacementEngine),
+            loaded: false,
+        };
+        try {
+            await ensureSqlReplayRuntime_ACU(replacementRuntime, state);
+        }
+        catch (error) {
+            safeDisposeSqlReplayEngine_ACU(replacementEngine, 'replacement runtime');
+            throw error;
+        }
+        const previousEngine = runtime.engine;
+        runtime.engine = replacementRuntime.engine;
+        runtime.syncBridge = replacementRuntime.syncBridge;
+        runtime.loaded = true;
+        safeDisposeSqlReplayEngine_ACU(previousEngine, '旧 runtime（已保留成功切换后的 runtime）');
     }
     async function applySheetCheckpointsForReplay_ACU(state, checkpoints, runtime) {
         if (checkpoints.length === 0)
             return;
-        if (runtime.loaded)
-            exportSqlReplayRuntime_ACU(runtime, state);
+        const candidate = runtime.loaded
+            ? getExportedSqlReplayRuntimeState_ACU(runtime, state)
+            : deepClone_ACU$1(state);
         for (const checkpoint of checkpoints) {
-            state[checkpoint.sheetKey] = deepClone_ACU$1(checkpoint.data);
+            candidate[checkpoint.sheetKey] = deepClone_ACU$1(checkpoint.data);
         }
-        normalizeReplayState_ACU(state, '单表 checkpoint');
+        normalizeReplayState_ACU(candidate, '单表 checkpoint');
         if (runtime.loaded)
-            await reloadSqlReplayRuntime_ACU(runtime, state);
+            await reloadSqlReplayRuntime_ACU(runtime, candidate);
+        replaceState_ACU(state, candidate);
     }
     async function applySqlBatchOperationV2_ACU(state, operation, runtime) {
         const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
@@ -14683,127 +14864,80 @@ $CONTENT
             return null;
         }
     }
-    function extractTableEditDslCommands_ACU(text) {
-        const cleaned = String(text || '').replace(/<!--|-->/g, '');
-        const commands = [];
-        const commandPattern = /(?:insertRow|updateRow|deleteRow)\s*\(/g;
-        let searchStart = 0;
-        while (searchStart < cleaned.length) {
-            commandPattern.lastIndex = searchStart;
-            const match = commandPattern.exec(cleaned);
-            if (!match)
-                break;
-            const commandStart = match.index;
-            const openParenIndex = cleaned.indexOf('(', commandStart);
-            if (openParenIndex === -1)
-                break;
-            let depth = 0;
-            let inString = false;
-            let stringChar = '';
-            let escaped = false;
-            let commandEnd = -1;
-            for (let i = openParenIndex; i < cleaned.length; i += 1) {
-                const char = cleaned[i];
-                if (inString) {
-                    if (escaped) {
-                        escaped = false;
-                    }
-                    else if (char === '\\') {
-                        escaped = true;
-                    }
-                    else if (char === stringChar) {
-                        inString = false;
-                    }
-                    continue;
-                }
-                if (char === '"' || char === "'") {
-                    inString = true;
-                    stringChar = char;
-                    continue;
-                }
-                if (char === '(') {
-                    depth += 1;
-                }
-                else if (char === ')') {
-                    depth -= 1;
-                    if (depth === 0) {
-                        commandEnd = i + 1;
-                        break;
-                    }
-                }
-            }
-            if (commandEnd === -1)
-                break;
-            const command = cleaned.slice(commandStart, commandEnd).trim().replace(/;$/, '');
-            if (command)
-                commands.push(command);
-            searchStart = commandEnd;
-        }
-        return commands;
-    }
-    function resolveDslReplaySheetKeys_ACU(state) {
-        const sortedKeys = getSortedSheetKeys_ACU(state);
-        if (Array.isArray(sortedKeys) && sortedKeys.length > 0)
-            return sortedKeys;
-        return Object.keys(state).filter(k => k.startsWith('sheet_'));
-    }
     function materializeSeedRowsForDslReplay_ACU(sheet) {
         if (!Array.isArray(sheet.content) || sheet.content.length !== 1)
             return;
-        let seedRows = Array.isArray(sheet.seedRows) && sheet.seedRows.length > 0 ? sheet.seedRows : null;
-        if (!seedRows && sheet.uid && String(sheet.uid).startsWith('sheet_')) {
-            seedRows = getEffectiveSeedRowsForSheet_ACU(String(sheet.uid), {
-                guideData: null,
-                allowTemplateFallback: true,
-            });
-            if (Array.isArray(seedRows) && seedRows.length > 0)
-                sheet.seedRows = deepClone_ACU$1(seedRows);
-        }
+        const seedRows = Array.isArray(sheet.seedRows) && sheet.seedRows.length > 0 ? sheet.seedRows : null;
         if (!Array.isArray(seedRows) || seedRows.length === 0)
             return;
-        const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU$1(sheet.content[0]) : ['row_id'];
+        const headerRow = deepClone_ACU$1(sheet.content[0]);
         sheet.content = [headerRow, ...deepClone_ACU$1(seedRows)];
     }
     function applyTableEditDslOperationV2_ACU(state, text) {
-        const sheetKeys = resolveDslReplaySheetKeys_ACU(state);
-        const commands = extractTableEditDslCommands_ACU(text);
+        const sheetKeys = getSnapshotSheetKeysForDsl_ACU(state);
+        let commands;
+        try {
+            commands = extractDslCommands_ACU(text);
+        }
+        catch (error) {
+            const message = error?.message || String(error);
+            throw new Error(`[V2 Replay] ${message}`);
+        }
         for (const commandLine of commands) {
             const match = commandLine.match(/^(insertRow|deleteRow|updateRow)\s*\((.*)\)$/);
             if (!match)
-                continue;
+                throw new Error(`[V2 Replay] malformed_command: 无法解析指令 ${JSON.stringify(commandLine)}`);
             const command = match[1];
             const args = parseDslArgs_ACU(match[2]);
             if (!args)
-                continue;
-            const tableIndex = Number(args[0]);
-            const sheetKey = sheetKeys[tableIndex];
-            const sheet = sheetKey ? state[sheetKey] : null;
-            if (!sheet || !Array.isArray(sheet.content))
-                continue;
+                throw new Error(`[V2 Replay] malformed_command: 指令参数 JSON 无法解析 ${JSON.stringify(commandLine)}`);
+            const resolved = resolveDslTableTarget_ACU(state, args[0], sheetKeys);
+            if (resolved.ok === false)
+                throw new Error(`[V2 Replay] ${resolved.message}`);
+            const { sheet } = resolved;
             materializeSeedRowsForDslReplay_ACU(sheet);
             ensureStableNextRowId_ACU(sheet);
             if (command === 'insertRow') {
-                const data = args[1] || {};
-                const headers = Array.isArray(sheet.content[0]) ? sheet.content[0].slice(1) : [];
+                const data = args[1];
+                if (!isDslRowDataObject_ACU(data))
+                    throw new Error(`[V2 Replay] invalid_row_data: insertRow 的数据必须是非空对象，当前值为 ${JSON.stringify(data)}`);
+                const headers = sheet.content[0].slice(1);
+                const columnError = validateDslColumnTargets_ACU(data, headers.length);
+                if (columnError)
+                    throw new Error(`[V2 Replay] ${columnError}`);
                 const row = [allocateStableRowIdForSheet_ACU(sheet)];
                 headers.forEach((_, colIndex) => row.push(data[colIndex] ?? data[String(colIndex)] ?? ''));
                 sheet.content.push(row);
             }
             else if (command === 'deleteRow') {
-                const rowIndex = Number(args[1]);
-                if (Number.isFinite(rowIndex) && sheet.content.length > rowIndex + 1)
-                    sheet.content.splice(rowIndex + 1, 1);
+                const rowIndex = parseDslNonNegativeInteger_ACU(args[1]);
+                if (rowIndex === null)
+                    throw new Error(`[V2 Replay] invalid_row_target: deleteRow 的行号必须是非负整数，当前值为 ${JSON.stringify(args[1])}`);
+                if (sheet.content.length <= rowIndex + 1)
+                    throw new Error(`[V2 Replay] invalid_row_target: deleteRow 的行号 ${rowIndex} 不存在`);
+                if (!Array.isArray(sheet.content[rowIndex + 1])) {
+                    throw new Error(`[V2 Replay] invalid_table_structure: deleteRow 的目标行 ${rowIndex} 不是有效数组`);
+                }
+                sheet.content.splice(rowIndex + 1, 1);
             }
             else if (command === 'updateRow') {
-                const rowIndex = Number(args[1]);
-                const data = args[2] || {};
-                const row = Number.isFinite(rowIndex) ? sheet.content[rowIndex + 1] : null;
+                const rowIndex = parseDslNonNegativeInteger_ACU(args[1]);
+                if (rowIndex === null)
+                    throw new Error(`[V2 Replay] invalid_row_target: updateRow 的行号必须是非负整数，当前值为 ${JSON.stringify(args[1])}`);
+                const data = args[2];
+                if (!isDslRowDataObject_ACU(data))
+                    throw new Error(`[V2 Replay] invalid_row_data: updateRow 的数据必须是非空对象，当前值为 ${JSON.stringify(data)}`);
+                const row = sheet.content[rowIndex + 1];
+                if (row === undefined)
+                    throw new Error(`[V2 Replay] invalid_row_target: updateRow 的行号 ${rowIndex} 不存在`);
                 if (!Array.isArray(row))
-                    continue;
+                    throw new Error(`[V2 Replay] invalid_table_structure: updateRow 的目标行 ${rowIndex} 不是有效数组`);
+                const writableColumnCount = Math.max(0, Math.min(sheet.content[0].length, row.length) - 1);
+                const columnError = validateDslColumnTargets_ACU(data, writableColumnCount);
+                if (columnError)
+                    throw new Error(`[V2 Replay] ${columnError}`);
                 Object.keys(data).forEach(colIndexStr => {
-                    const colIndex = Number.parseInt(colIndexStr, 10);
-                    if (!Number.isFinite(colIndex))
-                        return;
+                    const colIndex = Number(colIndexStr);
                     row[colIndex + 1] = data[colIndexStr];
                 });
             }
@@ -14821,12 +14955,11 @@ $CONTENT
         const effectiveRuntime = runtime || ownedRuntime || null;
         try {
             if (operation.kind === 'data_replace') {
+                const candidate = deepClone_ACU$1(operation.data);
+                normalizeReplayState_ACU(candidate, 'data_replace');
                 if (effectiveRuntime?.loaded)
-                    exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-                replaceState_ACU(state, operation.data);
-                normalizeReplayState_ACU(state, 'data_replace');
-                if (effectiveRuntime?.loaded)
-                    await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+                    await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
+                replaceState_ACU(state, candidate);
                 return;
             }
             if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
@@ -14850,40 +14983,46 @@ $CONTENT
                 return;
             }
             if (operation.kind === 'sheet_replace') {
+                const candidate = effectiveRuntime?.loaded
+                    ? getExportedSqlReplayRuntimeState_ACU(effectiveRuntime, state)
+                    : deepClone_ACU$1(state);
+                candidate[operation.sheetKey] = deepClone_ACU$1(operation.sheet);
+                normalizeReplayState_ACU(candidate, 'sheet_replace');
                 if (effectiveRuntime?.loaded)
-                    exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-                state[operation.sheetKey] = deepClone_ACU$1(operation.sheet);
-                normalizeReplayState_ACU(state, 'sheet_replace');
-                if (effectiveRuntime?.loaded)
-                    await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+                    await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
+                replaceState_ACU(state, candidate);
                 return;
             }
             if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
                 if (operation.kind === 'meta_update') {
                     assertMetaUpdateDoesNotChangeDdl_ACU(operation);
                 }
+                const candidate = effectiveRuntime?.loaded
+                    ? getExportedSqlReplayRuntimeState_ACU(effectiveRuntime, state)
+                    : deepClone_ACU$1(state);
+                applyTablePatchV2_ACU(candidate, operation);
+                normalizeReplayState_ACU(candidate, operation.kind);
                 if (effectiveRuntime?.loaded)
-                    exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-                applyTablePatchV2_ACU(state, operation);
-                normalizeReplayState_ACU(state, operation.kind);
-                if (effectiveRuntime?.loaded)
-                    await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+                    await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
+                replaceState_ACU(state, candidate);
                 return;
             }
             if (operation.kind === 'table_edit_dsl') {
+                const candidate = effectiveRuntime?.loaded
+                    ? getExportedSqlReplayRuntimeState_ACU(effectiveRuntime, state)
+                    : deepClone_ACU$1(state);
+                applyTableEditDslOperationV2_ACU(candidate, operation.text);
+                normalizeReplayState_ACU(candidate, 'table_edit_dsl');
                 if (effectiveRuntime?.loaded)
-                    exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-                applyTableEditDslOperationV2_ACU(state, operation.text);
-                normalizeReplayState_ACU(state, 'table_edit_dsl');
-                if (effectiveRuntime?.loaded)
-                    await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+                    await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
+                replaceState_ACU(state, candidate);
                 return;
             }
             throw new Error(`[V2 Replay] 不支持的 operation kind: ${operation.kind}`);
         }
         finally {
             if (ownedRuntime)
-                ownedRuntime.engine.dispose();
+                safeDisposeSqlReplayEngine_ACU(ownedRuntime.engine, 'owned runtime');
         }
     }
     function collectScheduleSummaryFromFramesV2_ACU(chatArg, isolationKey, options = {}) {
@@ -14944,9 +15083,7 @@ $CONTENT
         const state = deepClone_ACU$1(checkpoint.data);
         normalizeReplayState_ACU(state, 'full checkpoint');
         const replayStartMessageIndex = checkpointRef.messageIndex;
-        if (options.updateRuntimeState !== false) {
-            replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
-        }
+        const trackingBeforeReplay = options.updateRuntimeState === false ? null : deepClone_ACU$1(independentTableStates_ACU);
         const runtime = {
             engine: new SqliteEngine(),
             syncBridge: null,
@@ -14954,6 +15091,9 @@ $CONTENT
         };
         runtime.syncBridge = new SyncBridge(runtime.engine);
         try {
+            if (options.updateRuntimeState !== false) {
+                replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
+            }
             for (const ref of frameRefs) {
                 if (ref.messageIndex < replayStartMessageIndex)
                     continue;
@@ -14983,15 +15123,17 @@ $CONTENT
                             }
                         }
                         else {
-                            if (runtime.loaded)
-                                exportSqlReplayRuntime_ACU(runtime, state);
+                            const candidate = runtime.loaded
+                                ? getExportedSqlReplayRuntimeState_ACU(runtime, state)
+                                : deepClone_ACU$1(state);
                             // 兼容旧版 derived patch log；新 V2 不再写 patches。
                             for (const patch of entry.patches || []) {
-                                applyTablePatchV2_ACU(state, patch);
+                                applyTablePatchV2_ACU(candidate, patch);
                             }
-                            normalizeReplayState_ACU(state, 'legacy patches');
+                            normalizeReplayState_ACU(candidate, 'legacy patches');
                             if (runtime.loaded)
-                                await reloadSqlReplayRuntime_ACU(runtime, state);
+                                await reloadSqlReplayRuntime_ACU(runtime, candidate);
+                            replaceState_ACU(state, candidate);
                         }
                         if (options.updateRuntimeState !== false) {
                             replayEventForState_ACU(entry, ref.aiFloor);
@@ -15008,8 +15150,15 @@ $CONTENT
                 exportSqlReplayRuntime_ACU(runtime, state);
             return state;
         }
+        catch (error) {
+            if (trackingBeforeReplay) {
+                Object.keys(independentTableStates_ACU).forEach(key => delete independentTableStates_ACU[key]);
+                Object.assign(independentTableStates_ACU, deepClone_ACU$1(trackingBeforeReplay));
+            }
+            throw error;
+        }
         finally {
-            runtime.engine.dispose();
+            safeDisposeSqlReplayEngine_ACU(runtime.engine, 'replay runtime');
         }
     }
     async function validateCurrentChatTableRecovery_ACU(options = {}) {
@@ -18008,6 +18157,8 @@ $CONTENT
             }
             responseForParsing = strictExtraction.normalizedResponse || aiResponse;
         }
+        const originalTableData = tableData;
+        tableData = JSON.parse(JSON.stringify(originalTableData));
         const extracted = extractTableEditInner_ACU(responseForParsing, { allowNoTableEditTags: true });
         if (!extracted || !extracted.inner) {
             logWarn_ACU('No recognizable table edit block found (missing <tableEdit> boundary and/or incomplete <!-- --> wrapper).');
@@ -18024,69 +18175,33 @@ $CONTENT
             logError_ACU(`[SQL Mode] ${message}`);
             throw new Error(message);
         }
-        // 指令重组：处理 AI 生成的多行指令
-        const originalLines = editsString.split('\n');
-        const commandLines = [];
-        let commandReconstructor = '';
-        let isInJsonBlock = false;
-        originalLines.forEach(line => {
-            const trimmedLine = line.trim();
-            if (trimmedLine === '')
-                return;
-            let lineContent = trimmedLine;
-            if (!isInJsonBlock && lineContent.includes('//'))
-                lineContent = stripJsonCommentsPreservingStrings_ACU(lineContent).trim();
-            if (lineContent === '')
-                return;
-            if ((lineContent.startsWith('insertRow') || lineContent.startsWith('deleteRow') || lineContent.startsWith('updateRow')) && !isInJsonBlock) {
-                if (commandReconstructor) {
-                    commandLines.push(commandReconstructor);
-                }
-                commandReconstructor = lineContent;
-            }
-            else {
-                commandReconstructor += ' ' + lineContent;
-            }
-            if (commandReconstructor) {
-                const totalOpen = (commandReconstructor.match(/{/g) || []).length;
-                const totalClose = (commandReconstructor.match(/}/g) || []).length;
-                if (totalOpen > totalClose) {
-                    isInJsonBlock = true;
-                }
-                else {
-                    isInJsonBlock = false;
-                }
-            }
-        });
-        if (commandReconstructor) {
-            commandLines.push(commandReconstructor);
+        let finalCommandLines;
+        try {
+            finalCommandLines = extractDslCommands_ACU(editsString);
         }
-        // 二次处理：拆分挤在一行里的多条指令
-        const finalCommandLines = [];
-        commandLines.forEach(line => {
-            const multiCommandPattern = /(?:^|;\s*)((?:insertRow|deleteRow|updateRow)\s*\()/g;
-            const positions = [];
-            let match;
-            while ((match = multiCommandPattern.exec(line)) !== null) {
-                positions.push(match.index + (match[0].length - match[1].length));
-            }
-            if (positions.length <= 1) {
-                finalCommandLines.push(line.replace(/;\s*$/, ''));
-            }
-            else {
-                for (let i = 0; i < positions.length; i++) {
-                    const start = positions[i];
-                    const end = i + 1 < positions.length ? positions[i + 1] : line.length;
-                    const subCommand = line.substring(start, end).replace(/;\s*$/, '').trim();
-                    if (subCommand)
-                        finalCommandLines.push(subCommand);
-                }
-            }
-        });
-        const sheetKeysForIndexing = getSortedSheetKeys_ACU(tableData);
-        const sheets = sheetKeysForIndexing.map(key => tableData[key]);
+        catch (error) {
+            const message = error?.message || String(error);
+            return { success: false, modifiedKeys: [], appliedEdits: 0, error: message };
+        }
+        const sheetKeysForIndexing = getSnapshotSheetKeysForDsl_ACU(tableData);
         let appliedEdits = 0;
-        const editCountsByTable = {};
+        const commandErrors = [];
+        const editCountsBySheetKey = {};
+        const resolveTableTarget_ACU = (target) => {
+            const resolved = resolveDslTableTarget_ACU(tableData, target, sheetKeysForIndexing);
+            if (resolved.ok === false)
+                return { error: resolved.message };
+            return { table: resolved.sheet, sheetKey: resolved.sheetKey, tableIndex: resolved.tableIndex };
+        };
+        const resolveCommandTable_ACU = (command, target) => {
+            const resolved = resolveTableTarget_ACU(target);
+            if ('error' in resolved) {
+                commandErrors.push(`${command}: ${resolved.error}`);
+                logWarn_ACU(`[表格编辑] ${command}: ${resolved.error}`);
+                return null;
+            }
+            return resolved;
+        };
         // 指令解析函数
         const parseTableEditCommandLine_ACU = (rawLine) => {
             try {
@@ -18166,10 +18281,10 @@ $CONTENT
                     const parsed = parseTableEditCommandLine_ACU(line);
                     if (!parsed || parsed.command !== 'insertRow')
                         return;
-                    const tableIndex = parsed.args?.[0];
-                    const table = sheets[tableIndex];
-                    if (!table || !table.name)
+                    const resolved = resolveTableTarget_ACU(parsed.args?.[0]);
+                    if ('error' in resolved)
                         return;
+                    const { table } = resolved;
                     if (!isSummaryOrOutlineTable_ACU(table.name))
                         return;
                     if (table.name === '总结表')
@@ -18186,26 +18301,17 @@ $CONTENT
         if (standardizedFillEnabled && !allowSummaryOutlineInsert && (summaryInsertCount > 0 || outlineInsertCount > 0)) {
             logWarn_ACU(`[屏蔽] 总结表/总体大纲新增不同步：总结=${summaryInsertCount}, 大纲=${outlineInsertCount}，本轮两表均不写入。`);
         }
-        // seedRows 物化
+        // 仅物化当前 canonical snapshot 自带的 seedRows，不读取 guide/template。
         const materializeSeedRowsIfNeeded_ACU = (table) => {
             try {
                 if (!table || typeof table !== 'object')
                     return;
                 if (!Array.isArray(table.content) || table.content.length !== 1)
                     return;
-                let sr = (Array.isArray(table.seedRows) && table.seedRows.length > 0) ? table.seedRows : null;
-                if (!sr && table.uid && String(table.uid).startsWith('sheet_')) {
-                    sr = getEffectiveSeedRowsForSheet_ACU(String(table.uid), { guideData: null, allowTemplateFallback: true });
-                    if (Array.isArray(sr) && sr.length > 0) {
-                        try {
-                            table.seedRows = JSON.parse(JSON.stringify(sr));
-                        }
-                        catch (e) { }
-                    }
-                }
+                const sr = (Array.isArray(table.seedRows) && table.seedRows.length > 0) ? table.seedRows : null;
                 if (!Array.isArray(sr) || sr.length === 0)
                     return;
-                const headerRow = Array.isArray(table.content[0]) ? JSON.parse(JSON.stringify(table.content[0])) : ["row_id"];
+                const headerRow = JSON.parse(JSON.stringify(table.content[0]));
                 const seed = JSON.parse(JSON.stringify(sr));
                 table.content = [headerRow, ...seed];
             }
@@ -18217,21 +18323,22 @@ $CONTENT
         finalCommandLines.forEach(line => {
             const parsed = parseTableEditCommandLine_ACU(line);
             if (!parsed) {
-                logWarn_ACU(`Skipping malformed or truncated command line: "${line}"`);
+                const error = 'malformed_command: 指令格式无效或参数 JSON 无法解析';
+                commandErrors.push(error);
+                logWarn_ACU(`[表格编辑] ${error}`);
                 return;
             }
             const { command, args } = parsed;
             try {
                 switch (command) {
                     case 'insertRow': {
-                        const [tableIndex, data] = args;
-                        const table = sheets[tableIndex];
-                        if (!table || !table.name) {
-                            logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping insertRow.`);
+                        const [tableTarget, data] = args;
+                        const resolved = resolveCommandTable_ACU(command, tableTarget);
+                        if (!resolved) {
                             break;
                         }
+                        const { table, sheetKey, tableIndex } = resolved;
                         materializeSeedRowsIfNeeded_ACU(table);
-                        const sheetKey = sheetKeysForIndexing[tableIndex];
                         const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
                         const isUnifiedMode = (updateMode === 'full' || updateMode === 'manual_unified' || updateMode === 'auto_unified');
                         const isStandardMode = (updateMode === 'standard' || updateMode === 'auto_standard' || updateMode === 'manual_standard');
@@ -18256,9 +18363,18 @@ $CONTENT
                             logDebug_ACU(`[屏蔽] 总结表/总体大纲新增不同步：忽略 insertRow (tableIndex: ${tableIndex}, tableName: ${table.name})`);
                             break;
                         }
-                        if (table && table.content && typeof data === 'object') {
-                            const newRow = [allocateStableRowIdForSheet_ACU(table)];
+                        if (!isDslRowDataObject_ACU(data)) {
+                            commandErrors.push(`invalid_row_data: insertRow 的数据必须是非空对象，当前值为 ${JSON.stringify(data)}`);
+                            break;
+                        }
+                        {
                             const headers = table.content[0].slice(1);
+                            const columnError = validateDslColumnTargets_ACU(data, headers.length);
+                            if (columnError) {
+                                commandErrors.push(columnError);
+                                break;
+                            }
+                            const newRow = [allocateStableRowIdForSheet_ACU(table)];
                             const specialIndexCol = (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey))
                                 ? getSummaryIndexColumnIndex_ACU(table)
                                 : -1;
@@ -18275,15 +18391,20 @@ $CONTENT
                             }
                             logDebug_ACU(`Applied insertRow to table ${tableIndex} (${table.name}) with data:`, data);
                             appliedEdits++;
-                            editCountsByTable[table.name] = (editCountsByTable[table.name] || 0) + 1;
+                            editCountsBySheetKey[sheetKey] = (editCountsBySheetKey[sheetKey] || 0) + 1;
                         }
                         break;
                     }
                     case 'deleteRow': {
-                        const [tableIndex, rowIndex] = args;
-                        const table = sheets[tableIndex];
-                        if (!table || !table.name) {
-                            logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping deleteRow.`);
+                        const [tableTarget, rowIndex] = args;
+                        const resolved = resolveCommandTable_ACU(command, tableTarget);
+                        if (!resolved) {
+                            break;
+                        }
+                        const { table, sheetKey, tableIndex } = resolved;
+                        const normalizedRowIndex = parseDslNonNegativeInteger_ACU(rowIndex);
+                        if (normalizedRowIndex === null) {
+                            commandErrors.push(`invalid_row_target: deleteRow 的行号必须是非负整数，当前值为 ${JSON.stringify(rowIndex)}`);
                             break;
                         }
                         materializeSeedRowsIfNeeded_ACU(table);
@@ -18311,24 +18432,40 @@ $CONTENT
                                 break;
                             }
                         }
-                        if (table && table.content && table.content.length > rowIndex + 1) {
+                        if (table.content.length > normalizedRowIndex + 1) {
+                            const targetRow = table.content[normalizedRowIndex + 1];
+                            if (!Array.isArray(targetRow)) {
+                                commandErrors.push(`invalid_table_structure: deleteRow 的目标行 ${normalizedRowIndex} 不是有效数组`);
+                                break;
+                            }
                             ensureStableNextRowId_ACU(table);
-                            table.content.splice(rowIndex + 1, 1);
-                            logDebug_ACU(`Applied deleteRow to table ${tableIndex} (${table.name}) at index ${rowIndex}`);
+                            table.content.splice(normalizedRowIndex + 1, 1);
+                            logDebug_ACU(`Applied deleteRow to table ${tableIndex} (${table.name}) at index ${normalizedRowIndex}`);
                             appliedEdits++;
-                            editCountsByTable[table.name] = (editCountsByTable[table.name] || 0) + 1;
+                            editCountsBySheetKey[sheetKey] = (editCountsBySheetKey[sheetKey] || 0) + 1;
+                        }
+                        else {
+                            commandErrors.push(`invalid_row_target: deleteRow 的行号 ${JSON.stringify(rowIndex)} 在表 ${JSON.stringify(table.name)} 中不存在`);
                         }
                         break;
                     }
                     case 'updateRow': {
-                        const [tableIndex, rowIndex, data] = args;
-                        const table = sheets[tableIndex];
-                        if (!table || !table.name) {
-                            logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping updateRow.`);
+                        const [tableTarget, rowIndex, data] = args;
+                        const resolved = resolveCommandTable_ACU(command, tableTarget);
+                        if (!resolved) {
+                            break;
+                        }
+                        const { table, sheetKey, tableIndex } = resolved;
+                        const normalizedRowIndex = parseDslNonNegativeInteger_ACU(rowIndex);
+                        if (normalizedRowIndex === null) {
+                            commandErrors.push(`invalid_row_target: updateRow 的行号必须是非负整数，当前值为 ${JSON.stringify(rowIndex)}`);
+                            break;
+                        }
+                        if (!isDslRowDataObject_ACU(data)) {
+                            commandErrors.push(`invalid_row_data: updateRow 的数据必须是非空对象，当前值为 ${JSON.stringify(data)}`);
                             break;
                         }
                         materializeSeedRowsIfNeeded_ACU(table);
-                        const sheetKey = sheetKeysForIndexing[tableIndex];
                         const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
                         if (isSummaryTable) {
                             logDebug_ACU(`[屏蔽] 总结表/总体大纲忽略 updateRow 操作 (tableIndex: ${tableIndex}, tableName: ${table.name})`);
@@ -18353,33 +18490,43 @@ $CONTENT
                                 break;
                             }
                         }
-                        if (table && table.content && table.content.length > rowIndex + 1 && typeof data === 'object') {
+                        if (table.content.length > normalizedRowIndex + 1) {
+                            const targetRow = table.content[normalizedRowIndex + 1];
+                            if (!Array.isArray(targetRow)) {
+                                commandErrors.push(`invalid_table_structure: updateRow 的目标行 ${normalizedRowIndex} 不是有效数组`);
+                                break;
+                            }
+                            const writableColumnCount = Math.min(table.content[0].length, targetRow.length) - 1;
+                            const columnError = validateDslColumnTargets_ACU(data, Math.max(0, writableColumnCount));
+                            if (columnError) {
+                                commandErrors.push(columnError);
+                                break;
+                            }
                             ensureStableNextRowId_ACU(table);
                             const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey) : { rows: new Set(), cols: new Set(), cells: new Set() };
-                            if (lockState.rows.has(rowIndex)) {
-                                logDebug_ACU(`[锁定] 行锁定阻止 updateRow (tableIndex: ${tableIndex}, rowIndex: ${rowIndex})`);
+                            if (lockState.rows.has(normalizedRowIndex)) {
+                                logDebug_ACU(`[锁定] 行锁定阻止 updateRow (tableIndex: ${tableIndex}, rowIndex: ${normalizedRowIndex})`);
                                 break;
                             }
                             Object.keys(data).forEach(colIndexStr => {
-                                const colIndex = parseInt(colIndexStr, 10);
-                                if (isNaN(colIndex))
-                                    return;
+                                const colIndex = Number(colIndexStr);
                                 if (lockState.cols.has(colIndex))
                                     return;
-                                if (lockState.cells.has(`${rowIndex}:${colIndex}`))
+                                if (lockState.cells.has(`${normalizedRowIndex}:${colIndex}`))
                                     return;
-                                if (table.content[rowIndex + 1].length > colIndex + 1) {
-                                    table.content[rowIndex + 1][colIndex + 1] = data[colIndexStr];
-                                }
+                                targetRow[colIndex + 1] = data[colIndexStr];
                             });
                             if (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey)) {
                                 const specialIndexCol = getSummaryIndexColumnIndex_ACU(table);
                                 if (specialIndexCol >= 0)
                                     applySummaryIndexSequenceToTable_ACU(table, specialIndexCol);
                             }
-                            logDebug_ACU(`Applied updateRow to table ${tableIndex} (${table.name}) at index ${rowIndex} with data:`, data);
+                            logDebug_ACU(`Applied updateRow to table ${tableIndex} (${table.name}) at index ${normalizedRowIndex} with data:`, data);
                             appliedEdits++;
-                            editCountsByTable[table.name] = (editCountsByTable[table.name] || 0) + 1;
+                            editCountsBySheetKey[sheetKey] = (editCountsBySheetKey[sheetKey] || 0) + 1;
+                        }
+                        else {
+                            commandErrors.push(`invalid_row_target: updateRow 的行号 ${JSON.stringify(rowIndex)} 在表 ${JSON.stringify(table.name)} 中不存在`);
                         }
                         break;
                     }
@@ -18387,27 +18534,28 @@ $CONTENT
             }
             catch (e) {
                 logError_ACU(`Failed to parse or apply command: "${line}"`, e);
+                commandErrors.push(`command_exception: ${e instanceof Error ? e.message : String(e)}`);
             }
         });
+        if (commandErrors.length > 0) {
+            return { success: false, modifiedKeys: [], appliedEdits: 0, error: commandErrors.join('；') };
+        }
         // 将统计信息写入表格对象
-        Object.keys(editCountsByTable).forEach(tableName => {
-            const sheetKey = Object.keys(tableData).find(k => tableData[k].name === tableName);
-            if (sheetKey) {
-                if (!tableData[sheetKey]._lastUpdateStats) {
-                    tableData[sheetKey]._lastUpdateStats = {};
-                }
-                tableData[sheetKey]._lastUpdateStats.changes = editCountsByTable[tableName];
+        Object.keys(editCountsBySheetKey).forEach(sheetKey => {
+            if (!tableData[sheetKey]._lastUpdateStats) {
+                tableData[sheetKey]._lastUpdateStats = {};
             }
+            tableData[sheetKey]._lastUpdateStats.changes = editCountsBySheetKey[sheetKey];
         });
         // 收集所有被修改的表格 key
         const modifiedSheetKeys = [];
-        Object.keys(editCountsByTable).forEach(tableName => {
-            if (editCountsByTable[tableName] > 0) {
-                const sheetKey = Object.keys(tableData).find(k => tableData[k].name === tableName);
-                if (sheetKey)
-                    modifiedSheetKeys.push(sheetKey);
+        Object.keys(editCountsBySheetKey).forEach(sheetKey => {
+            if (editCountsBySheetKey[sheetKey] > 0) {
+                modifiedSheetKeys.push(sheetKey);
             }
         });
+        Object.keys(originalTableData).forEach(key => delete originalTableData[key]);
+        Object.assign(originalTableData, tableData);
         return { success: true, modifiedKeys: modifiedSheetKeys, appliedEdits };
     }
     function parseAndApplyTableEdits_ACU(aiResponse, updateMode = 'standard', isImportMode = false) {

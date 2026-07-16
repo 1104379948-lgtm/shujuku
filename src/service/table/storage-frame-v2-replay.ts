@@ -7,11 +7,11 @@ import { SyncBridge } from '../../data/sqlite/sync-bridge';
 import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TablePatchV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
-import { getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
 import { normalizeSqlStatementsForRuntimeLog_ACU } from './sql-table-service';
+import { extractDslCommands_ACU, getSnapshotSheetKeysForDsl_ACU, isDslRowDataObject_ACU, parseDslNonNegativeInteger_ACU, resolveDslTableTarget_ACU, validateDslColumnTargets_ACU } from '../../shared/table-dsl-contract';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -187,6 +187,14 @@ interface SqlReplayRuntime_ACU {
   loaded: boolean;
 }
 
+function safeDisposeSqlReplayEngine_ACU(engine: Pick<SqliteEngine, 'dispose'>, context: string): void {
+  try {
+    engine.dispose();
+  } catch (disposeError) {
+    logWarn_ACU(`[V2 Replay] ${context} 清理失败: ${disposeError instanceof Error ? disposeError.message : String(disposeError)}`);
+  }
+}
+
 function normalizeReplayState_ACU(state: TableDataObject_ACU, context: string): void {
   const normalization = normalizeCanonicalTableRows_ACU(state);
   if (normalization.errors.length > 0) {
@@ -216,9 +224,23 @@ function exportSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableD
 
 async function reloadSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): Promise<void> {
   if (!runtime.loaded) return;
-  runtime.engine.dispose();
-  runtime.loaded = false;
-  await ensureSqlReplayRuntime_ACU(runtime, state);
+  const replacementEngine = new SqliteEngine();
+  const replacementRuntime: SqlReplayRuntime_ACU = {
+    engine: replacementEngine,
+    syncBridge: new SyncBridge(replacementEngine),
+    loaded: false,
+  };
+  try {
+    await ensureSqlReplayRuntime_ACU(replacementRuntime, state);
+  } catch (error) {
+    safeDisposeSqlReplayEngine_ACU(replacementEngine, 'replacement runtime');
+    throw error;
+  }
+  const previousEngine = runtime.engine;
+  runtime.engine = replacementRuntime.engine;
+  runtime.syncBridge = replacementRuntime.syncBridge;
+  runtime.loaded = true;
+  safeDisposeSqlReplayEngine_ACU(previousEngine, '旧 runtime（已保留成功切换后的 runtime）');
 }
 
 async function applySheetCheckpointsForReplay_ACU(
@@ -227,12 +249,15 @@ async function applySheetCheckpointsForReplay_ACU(
   runtime: SqlReplayRuntime_ACU,
 ): Promise<void> {
   if (checkpoints.length === 0) return;
-  if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
+  const candidate = runtime.loaded
+    ? getExportedSqlReplayRuntimeState_ACU(runtime, state)
+    : deepClone_ACU(state);
   for (const checkpoint of checkpoints) {
-    state[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
+    candidate[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
   }
-  normalizeReplayState_ACU(state, '单表 checkpoint');
-  if (runtime.loaded) await reloadSqlReplayRuntime_ACU(runtime, state);
+  normalizeReplayState_ACU(candidate, '单表 checkpoint');
+  if (runtime.loaded) await reloadSqlReplayRuntime_ACU(runtime, candidate);
+  replaceState_ACU(state, candidate);
 }
 
 async function applySqlBatchOperationV2_ACU(
@@ -360,121 +385,67 @@ function parseDslArgs_ACU(argsString: string): any[] | null {
   }
 }
 
-function extractTableEditDslCommands_ACU(text: string): string[] {
-  const cleaned = String(text || '').replace(/<!--|-->/g, '');
-  const commands: string[] = [];
-  const commandPattern = /(?:insertRow|updateRow|deleteRow)\s*\(/g;
-  let searchStart = 0;
-
-  while (searchStart < cleaned.length) {
-    commandPattern.lastIndex = searchStart;
-    const match = commandPattern.exec(cleaned);
-    if (!match) break;
-
-    const commandStart = match.index;
-    const openParenIndex = cleaned.indexOf('(', commandStart);
-    if (openParenIndex === -1) break;
-
-    let depth = 0;
-    let inString = false;
-    let stringChar = '';
-    let escaped = false;
-    let commandEnd = -1;
-
-    for (let i = openParenIndex; i < cleaned.length; i += 1) {
-      const char = cleaned[i];
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-        } else if (char === '\\') {
-          escaped = true;
-        } else if (char === stringChar) {
-          inString = false;
-        }
-        continue;
-      }
-
-      if (char === '"' || char === "'") {
-        inString = true;
-        stringChar = char;
-        continue;
-      }
-      if (char === '(') {
-        depth += 1;
-      } else if (char === ')') {
-        depth -= 1;
-        if (depth === 0) {
-          commandEnd = i + 1;
-          break;
-        }
-      }
-    }
-
-    if (commandEnd === -1) break;
-    const command = cleaned.slice(commandStart, commandEnd).trim().replace(/;$/, '');
-    if (command) commands.push(command);
-    searchStart = commandEnd;
-  }
-
-  return commands;
-}
-
-function resolveDslReplaySheetKeys_ACU(state: TableDataObject_ACU): string[] {
-  const sortedKeys = getSortedSheetKeys_ACU(state as any);
-  if (Array.isArray(sortedKeys) && sortedKeys.length > 0) return sortedKeys;
-  return Object.keys(state).filter(k => k.startsWith('sheet_'));
-}
-
 function materializeSeedRowsForDslReplay_ACU(sheet: Sheet_ACU): void {
   if (!Array.isArray(sheet.content) || sheet.content.length !== 1) return;
-  let seedRows = Array.isArray(sheet.seedRows) && sheet.seedRows.length > 0 ? sheet.seedRows : null;
-  if (!seedRows && sheet.uid && String(sheet.uid).startsWith('sheet_')) {
-    seedRows = getEffectiveSeedRowsForSheet_ACU(String(sheet.uid), {
-      guideData: null,
-      allowTemplateFallback: true,
-    });
-    if (Array.isArray(seedRows) && seedRows.length > 0) sheet.seedRows = deepClone_ACU(seedRows);
-  }
+  const seedRows = Array.isArray(sheet.seedRows) && sheet.seedRows.length > 0 ? sheet.seedRows : null;
   if (!Array.isArray(seedRows) || seedRows.length === 0) return;
-  const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU(sheet.content[0]) : ['row_id'];
+  const headerRow = deepClone_ACU(sheet.content[0]);
   sheet.content = [headerRow, ...deepClone_ACU(seedRows)];
 }
 
 function applyTableEditDslOperationV2_ACU(state: TableDataObject_ACU, text: string): void {
-  const sheetKeys = resolveDslReplaySheetKeys_ACU(state);
-  const commands = extractTableEditDslCommands_ACU(text);
+  const sheetKeys = getSnapshotSheetKeysForDsl_ACU(state);
+  let commands: string[];
+  try {
+    commands = extractDslCommands_ACU(text);
+  } catch (error: any) {
+    const message = error?.message || String(error);
+    throw new Error(`[V2 Replay] ${message}`);
+  }
 
   for (const commandLine of commands) {
     const match = commandLine.match(/^(insertRow|deleteRow|updateRow)\s*\((.*)\)$/);
-    if (!match) continue;
+    if (!match) throw new Error(`[V2 Replay] malformed_command: 无法解析指令 ${JSON.stringify(commandLine)}`);
     const command = match[1];
     const args = parseDslArgs_ACU(match[2]);
-    if (!args) continue;
-    const tableIndex = Number(args[0]);
-    const sheetKey = sheetKeys[tableIndex];
-    const sheet = sheetKey ? state[sheetKey] as Sheet_ACU : null;
-    if (!sheet || !Array.isArray(sheet.content)) continue;
+    if (!args) throw new Error(`[V2 Replay] malformed_command: 指令参数 JSON 无法解析 ${JSON.stringify(commandLine)}`);
+    const resolved = resolveDslTableTarget_ACU(state, args[0], sheetKeys);
+    if (resolved.ok === false) throw new Error(`[V2 Replay] ${resolved.message}`);
+    const { sheet } = resolved;
 
     materializeSeedRowsForDslReplay_ACU(sheet);
     ensureStableNextRowId_ACU(sheet);
 
     if (command === 'insertRow') {
-      const data = args[1] || {};
-      const headers = Array.isArray(sheet.content[0]) ? sheet.content[0].slice(1) : [];
+      const data = args[1];
+      if (!isDslRowDataObject_ACU(data)) throw new Error(`[V2 Replay] invalid_row_data: insertRow 的数据必须是非空对象，当前值为 ${JSON.stringify(data)}`);
+      const headers = sheet.content[0].slice(1);
+      const columnError = validateDslColumnTargets_ACU(data, headers.length);
+      if (columnError) throw new Error(`[V2 Replay] ${columnError}`);
       const row = [allocateStableRowIdForSheet_ACU(sheet)];
       headers.forEach((_, colIndex) => row.push(data[colIndex] ?? data[String(colIndex)] ?? ''));
       sheet.content.push(row);
     } else if (command === 'deleteRow') {
-      const rowIndex = Number(args[1]);
-      if (Number.isFinite(rowIndex) && sheet.content.length > rowIndex + 1) sheet.content.splice(rowIndex + 1, 1);
+      const rowIndex = parseDslNonNegativeInteger_ACU(args[1]);
+      if (rowIndex === null) throw new Error(`[V2 Replay] invalid_row_target: deleteRow 的行号必须是非负整数，当前值为 ${JSON.stringify(args[1])}`);
+      if (sheet.content.length <= rowIndex + 1) throw new Error(`[V2 Replay] invalid_row_target: deleteRow 的行号 ${rowIndex} 不存在`);
+      if (!Array.isArray(sheet.content[rowIndex + 1])) {
+        throw new Error(`[V2 Replay] invalid_table_structure: deleteRow 的目标行 ${rowIndex} 不是有效数组`);
+      }
+      sheet.content.splice(rowIndex + 1, 1);
     } else if (command === 'updateRow') {
-      const rowIndex = Number(args[1]);
-      const data = args[2] || {};
-      const row = Number.isFinite(rowIndex) ? sheet.content[rowIndex + 1] : null;
-      if (!Array.isArray(row)) continue;
+      const rowIndex = parseDslNonNegativeInteger_ACU(args[1]);
+      if (rowIndex === null) throw new Error(`[V2 Replay] invalid_row_target: updateRow 的行号必须是非负整数，当前值为 ${JSON.stringify(args[1])}`);
+      const data = args[2];
+      if (!isDslRowDataObject_ACU(data)) throw new Error(`[V2 Replay] invalid_row_data: updateRow 的数据必须是非空对象，当前值为 ${JSON.stringify(data)}`);
+      const row = sheet.content[rowIndex + 1];
+      if (row === undefined) throw new Error(`[V2 Replay] invalid_row_target: updateRow 的行号 ${rowIndex} 不存在`);
+      if (!Array.isArray(row)) throw new Error(`[V2 Replay] invalid_table_structure: updateRow 的目标行 ${rowIndex} 不是有效数组`);
+      const writableColumnCount = Math.max(0, Math.min(sheet.content[0].length, row.length) - 1);
+      const columnError = validateDslColumnTargets_ACU(data, writableColumnCount);
+      if (columnError) throw new Error(`[V2 Replay] ${columnError}`);
       Object.keys(data).forEach(colIndexStr => {
-        const colIndex = Number.parseInt(colIndexStr, 10);
-        if (!Number.isFinite(colIndex)) return;
+        const colIndex = Number(colIndexStr);
         row[colIndex + 1] = data[colIndexStr];
       });
     }
@@ -497,10 +468,10 @@ export async function applyTableOperationV2_ACU(
 
   try {
     if (operation.kind === 'data_replace') {
-      if (effectiveRuntime?.loaded) exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-      replaceState_ACU(state, operation.data);
-      normalizeReplayState_ACU(state, 'data_replace');
-      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+      const candidate = deepClone_ACU(operation.data);
+      normalizeReplayState_ACU(candidate, 'data_replace');
+      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
+      replaceState_ACU(state, candidate);
       return;
     }
     if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
@@ -522,33 +493,42 @@ export async function applyTableOperationV2_ACU(
       return;
     }
     if (operation.kind === 'sheet_replace') {
-      if (effectiveRuntime?.loaded) exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-      state[operation.sheetKey] = deepClone_ACU(operation.sheet);
-      normalizeReplayState_ACU(state, 'sheet_replace');
-      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+      const candidate = effectiveRuntime?.loaded
+        ? getExportedSqlReplayRuntimeState_ACU(effectiveRuntime, state)
+        : deepClone_ACU(state);
+      candidate[operation.sheetKey] = deepClone_ACU(operation.sheet);
+      normalizeReplayState_ACU(candidate, 'sheet_replace');
+      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
+      replaceState_ACU(state, candidate);
       return;
     }
     if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
       if (operation.kind === 'meta_update') {
         assertMetaUpdateDoesNotChangeDdl_ACU(operation);
       }
-      if (effectiveRuntime?.loaded) exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-      applyTablePatchV2_ACU(state, operation);
-      normalizeReplayState_ACU(state, operation.kind);
-      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+      const candidate = effectiveRuntime?.loaded
+        ? getExportedSqlReplayRuntimeState_ACU(effectiveRuntime, state)
+        : deepClone_ACU(state);
+      applyTablePatchV2_ACU(candidate, operation);
+      normalizeReplayState_ACU(candidate, operation.kind);
+      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
+      replaceState_ACU(state, candidate);
       return;
     }
     if (operation.kind === 'table_edit_dsl') {
-      if (effectiveRuntime?.loaded) exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-      applyTableEditDslOperationV2_ACU(state, operation.text);
-      normalizeReplayState_ACU(state, 'table_edit_dsl');
-      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+      const candidate = effectiveRuntime?.loaded
+        ? getExportedSqlReplayRuntimeState_ACU(effectiveRuntime, state)
+        : deepClone_ACU(state);
+      applyTableEditDslOperationV2_ACU(candidate, operation.text);
+      normalizeReplayState_ACU(candidate, 'table_edit_dsl');
+      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
+      replaceState_ACU(state, candidate);
       return;
     }
 
     throw new Error(`[V2 Replay] 不支持的 operation kind: ${(operation as any).kind}`);
   } finally {
-    if (ownedRuntime) ownedRuntime.engine.dispose();
+    if (ownedRuntime) safeDisposeSqlReplayEngine_ACU(ownedRuntime.engine, 'owned runtime');
   }
 }
 
@@ -627,9 +607,7 @@ export async function loadTableStateFromFramesV2_ACU(
   const state: TableDataObject_ACU = deepClone_ACU(checkpoint.data);
   normalizeReplayState_ACU(state, 'full checkpoint');
   const replayStartMessageIndex = checkpointRef.messageIndex;
-  if (options.updateRuntimeState !== false) {
-    replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
-  }
+  const trackingBeforeReplay = options.updateRuntimeState === false ? null : deepClone_ACU(independentTableStates_ACU);
 
   const runtime: SqlReplayRuntime_ACU = {
     engine: new SqliteEngine(),
@@ -639,6 +617,9 @@ export async function loadTableStateFromFramesV2_ACU(
   runtime.syncBridge = new SyncBridge(runtime.engine);
 
   try {
+    if (options.updateRuntimeState !== false) {
+      replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
+    }
     for (const ref of frameRefs) {
       if (ref.messageIndex < replayStartMessageIndex) continue;
       const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame);
@@ -669,13 +650,16 @@ export async function loadTableStateFromFramesV2_ACU(
               await applyTableOperationV2_ACU(state, operation, runtime);
             }
           } else {
-            if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
+            const candidate = runtime.loaded
+              ? getExportedSqlReplayRuntimeState_ACU(runtime, state)
+              : deepClone_ACU(state);
             // 兼容旧版 derived patch log；新 V2 不再写 patches。
             for (const patch of entry.patches || []) {
-              applyTablePatchV2_ACU(state, patch);
+              applyTablePatchV2_ACU(candidate, patch);
             }
-            normalizeReplayState_ACU(state, 'legacy patches');
-            if (runtime.loaded) await reloadSqlReplayRuntime_ACU(runtime, state);
+            normalizeReplayState_ACU(candidate, 'legacy patches');
+            if (runtime.loaded) await reloadSqlReplayRuntime_ACU(runtime, candidate);
+            replaceState_ACU(state, candidate);
           }
           if (options.updateRuntimeState !== false) {
             replayEventForState_ACU(entry, ref.aiFloor);
@@ -690,8 +674,14 @@ export async function loadTableStateFromFramesV2_ACU(
 
     if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
     return state;
+  } catch (error) {
+    if (trackingBeforeReplay) {
+      Object.keys(independentTableStates_ACU).forEach(key => delete independentTableStates_ACU[key]);
+      Object.assign(independentTableStates_ACU, deepClone_ACU(trackingBeforeReplay));
+    }
+    throw error;
   } finally {
-    runtime.engine.dispose();
+    safeDisposeSqlReplayEngine_ACU(runtime.engine, 'replay runtime');
   }
 }
 

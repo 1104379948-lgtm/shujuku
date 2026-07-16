@@ -63,6 +63,10 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   _set_wasStoppedByUser_ACU: vi.fn(),
   _set_manualExtraHint_ACU: vi.fn(),
   _set_currentJsonTableData_ACU: vi.fn((v: any) => { mockCurrentJsonTableData = v; }),
+  captureCurrentJsonTablePublication_ACU: vi.fn(() => ({ data: mockCurrentJsonTableData, owner: null })),
+  publishCurrentJsonTableDataForOwner_ACU: vi.fn((_owner: unknown, value: any) => { mockCurrentJsonTableData = value; }),
+  releaseCurrentJsonTableDataForOwner_ACU: vi.fn(() => false),
+  restoreCurrentJsonTablePublication_ACU: vi.fn((snapshot: any) => { mockCurrentJsonTableData = snapshot?.data ?? null; }),
   abortAllActiveRequests_ACU: vi.fn(),
   getCurrentIsolationKey_ACU: vi.fn(() => ''),
 }));
@@ -3048,7 +3052,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
-  it('SQL 模式下模型显式提供冲突 row_id 时由系统替换并推进永久高水位', async () => {
+  it('SQL 模式下 row_id 分配只基于 canonical snapshot，不从外部 seedRows 占用编号', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const { getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
@@ -3075,16 +3079,16 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(result.success).toBe(true);
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
     const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
-    expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'tpl-a'], ['2', 'sql-conflict']]);
-    expect(savePayload.tableData.sheet_0.sourceData.nextRowId).toBe(3);
+    expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'sql-conflict']]);
+    expect(savePayload.tableData.sheet_0.sourceData.nextRowId).toBe(2);
     expect(savePayload.operations).toEqual([
-      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["INSERT INTO inventory (row_id, value) VALUES (2, 'sql-conflict')"], tableName: 'inventory', reason: 'system' },
-      { kind: 'meta_update', sheetKey: 'sheet_0', meta: { sourceData: { nextRowId: 3 } } },
+      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["INSERT INTO inventory (row_id, value) VALUES (1, 'sql-conflict')"], tableName: 'inventory', reason: 'system' },
+      { kind: 'meta_update', sheetKey: 'sheet_0', meta: { sourceData: { nextRowId: 2 } } },
     ]);
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
-  it('SQL 受控提交将空表 reseed 与 AI UPDATE 持久化为同源 operations，replay 与 runtime 深一致', async () => {
+  it('SQL 受控提交不从外部 seedRows 重建 canonical 空表，replay 与 runtime 深一致', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { disposeStorageProvider, ensureStorageProviderReady_ACU } = await import('../../../src/service/table/table-storage-strategy');
     const { getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
@@ -3139,17 +3143,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(savePayload.operations).toEqual([
       {
         kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',
-        statements: [
-          "INSERT INTO inventory (row_id, value) VALUES (3, 'seed-a')",
-          "INSERT INTO inventory (row_id, value) VALUES (4, 'seed-b')",
-        ],
-        params: [[], []],
-      },
-      {
-        kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',
         statements: ["UPDATE inventory SET value = 'updated' WHERE value = 'seed-a'"],
       },
-      { kind: 'meta_update', sheetKey: 'sheet_0', meta: { sourceData: { nextRowId: 5 } } },
     ]);
 
     const replayChat = [{
@@ -3167,13 +3162,14 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     }];
     const replayed = await loadTableStateFromFramesV2_ACU(replayChat, '', { updateRuntimeState: false });
     expect(replayed).toEqual(savePayload.tableData);
-    expect(replayed?.sheet_0.sourceData.nextRowId).toBe(5);
+    expect(replayed?.sheet_0.content).toEqual([['row_id', 'value']]);
+    expect(replayed?.sheet_0.sourceData.nextRowId).toBe(3);
 
     disposeStorageProvider();
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
-  it('SQL 受控提交在完整 reseed operations 生成后拒绝非目标表，且不执行不持久化', async () => {
+  it('SQL 受控提交不因外部 seedRows 生成非目标表 operation', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { disposeStorageProvider, ensureStorageProviderReady_ACU } = await import('../../../src/service/table/table-storage-strategy');
     const { getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
@@ -3220,10 +3216,12 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false },
     );
 
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('完整 prepared batch 越权修改了非目标表 (sheet_1)');
-    expect(provider.getCurrentData()).toEqual(beforeRuntime);
-    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(provider.getCurrentData()?.sheet_1).toEqual(beforeRuntime.sheet_1);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    expect(mockPersistTablesToChatMessage.mock.calls[0][0].operations).toEqual([
+      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["UPDATE inventory SET value = 'updated' WHERE value = 'seed-a'"], tableName: 'inventory', reason: 'system' },
+    ]);
 
     disposeStorageProvider();
     vi.mocked(isSqliteMode).mockReturnValue(false);
@@ -3374,7 +3372,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
   });
 
-  it('SQL 模式下部分表无反馈时，仍用模板结构与基础数据初始化缺失表', async () => {
+  it('SQL 模式下部分表无反馈时不从模板补入 canonical snapshot 缺失表', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const { getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
@@ -3404,14 +3402,14 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
-    expect(savePayload.targetSheetKeys).toEqual(['sheet_0', 'sheet_1']);
+    expect(savePayload.targetSheetKeys).toEqual(['sheet_0']);
     expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'sql-a']]);
     expect(savePayload.tableData.sheet_0.sourceData.nextRowId).toBe(2);
-    expect(savePayload.tableData.sheet_1.content).toEqual([['row_id', 'value'], ['1', 'tpl-b']]);
+    expect(savePayload.tableData).not.toHaveProperty('sheet_1');
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
-  it('SQL 模式下模板无基础数据时，缺失表仍以表头空表落盘', async () => {
+  it('SQL 模式下模板空表也不会补入 canonical snapshot', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const { getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
@@ -3439,8 +3437,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(result.modifiedKeys).toEqual(['sheet_0']);
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
     const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
-    expect(savePayload.targetSheetKeys).toEqual(['sheet_0', 'sheet_1']);
-    expect(savePayload.tableData.sheet_1.content).toEqual([['row_id', 'value']]);
+    expect(savePayload.targetSheetKeys).toEqual(['sheet_0']);
+    expect(savePayload.tableData).not.toHaveProperty('sheet_1');
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
@@ -3478,7 +3476,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
-  it('SQL 模式下缺失表 seedRows 的 row_id 会在首次初始化时稳定化后再落盘', async () => {
+  it('SQL 模式下缺失表的外部 seedRows 不会写入 canonical snapshot', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const { getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
@@ -3505,9 +3503,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
 
     expect(result.success).toBe(true);
     const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
-    expect(savePayload.targetSheetKeys).toEqual(['sheet_0', 'sheet_1']);
-    expect(savePayload.tableData.sheet_1.content).toEqual([['row_id', 'value'], ['10', 'tpl-b'], ['11', 'tpl-c']]);
-    expect(savePayload.tableData.sheet_1.sourceData.nextRowId).toBe(12);
+    expect(savePayload.targetSheetKeys).toEqual(['sheet_0']);
+    expect(savePayload.tableData).not.toHaveProperty('sheet_1');
     expect(baseSnapshot.sheet_0.content).toEqual([['row_id', 'value']]);
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });

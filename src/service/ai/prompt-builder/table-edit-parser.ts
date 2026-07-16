@@ -5,7 +5,6 @@
  * JSON 清洗管线已提取到 json-sanitizer.ts
  */
 import { currentJsonTableData_ACU, settings_ACU } from '../../runtime/state-manager';
-import { getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU } from '../../template/chat-scope';
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../shared/utils';
 import { applySummaryIndexSequenceToTable_ACU, formatSummaryIndexCode_ACU, getSummaryIndexColumnIndex_ACU, getTableLocksForSheet_ACU, isSpecialIndexLockEnabled_ACU } from '../../runtime/helpers-remaining';
 import { sanitizeJsonPipeline_ACU, coerceLooseRowObject_ACU } from './json-sanitizer';
@@ -13,6 +12,7 @@ import { isSqliteMode } from '../../table/storage-mode';
 import { extractStrictJsonTableFillResponse_ACU } from './strict-json-table-fill';
 import { stripJsonCommentsPreservingStrings_ACU } from '../../../shared/json-helpers';
 import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../../../shared/stable-row-id-allocator';
+import { extractDslCommands_ACU, getSnapshotSheetKeysForDsl_ACU, isDslRowDataObject_ACU, parseDslNonNegativeInteger_ACU, resolveDslTableTarget_ACU, validateDslColumnTargets_ACU } from '../../../shared/table-dsl-contract';
 
   function normalizeAiResponseForTableEditParsing_ACU(text: string) {
     if (typeof text !== 'string') return '';
@@ -118,6 +118,8 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
         }
         responseForParsing = strictExtraction.normalizedResponse || aiResponse;
     }
+    const originalTableData = tableData;
+    tableData = JSON.parse(JSON.stringify(originalTableData));
 
     const extracted = extractTableEditInner_ACU(responseForParsing, { allowNoTableEditTags: true });
     if (!extracted || !extracted.inner) {
@@ -137,70 +139,35 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
         logError_ACU(`[SQL Mode] ${message}`);
         throw new Error(message);
     }
-    
-    // 指令重组：处理 AI 生成的多行指令
-    const originalLines = editsString.split('\n');
-    const commandLines = [];
-    let commandReconstructor = '';
-    let isInJsonBlock = false;
 
-    originalLines.forEach(line => {
-        const trimmedLine = line.trim();
-        if (trimmedLine === '') return;
-
-        let lineContent = trimmedLine;
-        if (!isInJsonBlock && lineContent.includes('//')) lineContent = stripJsonCommentsPreservingStrings_ACU(lineContent).trim();
-        if (lineContent === '') return;
-
-        if ((lineContent.startsWith('insertRow') || lineContent.startsWith('deleteRow') || lineContent.startsWith('updateRow')) && !isInJsonBlock) {
-            if (commandReconstructor) {
-                commandLines.push(commandReconstructor);
-            }
-            commandReconstructor = lineContent;
-        } else {
-            commandReconstructor += ' ' + lineContent;
-        }
-
-        if (commandReconstructor) {
-            const totalOpen = (commandReconstructor.match(/{/g) || []).length;
-            const totalClose = (commandReconstructor.match(/}/g) || []).length;
-            if (totalOpen > totalClose) {
-                isInJsonBlock = true;
-            } else {
-                isInJsonBlock = false;
-            }
-        }
-    });
-
-    if (commandReconstructor) {
-        commandLines.push(commandReconstructor);
+    let finalCommandLines: string[];
+    try {
+        finalCommandLines = extractDslCommands_ACU(editsString);
+    } catch (error: any) {
+        const message = error?.message || String(error);
+        return { success: false, modifiedKeys: [] as string[], appliedEdits: 0, error: message };
     }
-    
-    // 二次处理：拆分挤在一行里的多条指令
-    const finalCommandLines: string[] = [];
-    commandLines.forEach(line => {
-        const multiCommandPattern = /(?:^|;\s*)((?:insertRow|deleteRow|updateRow)\s*\()/g;
-        const positions = [];
-        let match;
-        while ((match = multiCommandPattern.exec(line)) !== null) {
-            positions.push(match.index + (match[0].length - match[1].length));
-        }
-        if (positions.length <= 1) {
-            finalCommandLines.push(line.replace(/;\s*$/, ''));
-        } else {
-            for (let i = 0; i < positions.length; i++) {
-                const start = positions[i];
-                const end = i + 1 < positions.length ? positions[i + 1] : line.length;
-                const subCommand = line.substring(start, end).replace(/;\s*$/, '').trim();
-                if (subCommand) finalCommandLines.push(subCommand);
-            }
-        }
-    });
 
-    const sheetKeysForIndexing = getSortedSheetKeys_ACU(tableData);
-    const sheets = sheetKeysForIndexing.map(key => tableData[key]);
+    const sheetKeysForIndexing = getSnapshotSheetKeysForDsl_ACU(tableData);
     let appliedEdits = 0;
-    const editCountsByTable: Record<string, number> = {};
+    const commandErrors: string[] = [];
+    const editCountsBySheetKey: Record<string, number> = {};
+
+    const resolveTableTarget_ACU = (target: unknown): { table: any; sheetKey: string; tableIndex: number } | { error: string } => {
+        const resolved = resolveDslTableTarget_ACU(tableData, target, sheetKeysForIndexing);
+        if (resolved.ok === false) return { error: resolved.message };
+        return { table: resolved.sheet, sheetKey: resolved.sheetKey, tableIndex: resolved.tableIndex };
+    };
+
+    const resolveCommandTable_ACU = (command: string, target: unknown) => {
+        const resolved = resolveTableTarget_ACU(target);
+        if ('error' in resolved) {
+            commandErrors.push(`${command}: ${resolved.error}`);
+            logWarn_ACU(`[表格编辑] ${command}: ${resolved.error}`);
+            return null;
+        }
+        return resolved;
+    };
 
     // 指令解析函数
     const parseTableEditCommandLine_ACU = (rawLine: string) => {
@@ -275,9 +242,9 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
             try {
                 const parsed = parseTableEditCommandLine_ACU(line);
                 if (!parsed || parsed.command !== 'insertRow') return;
-                const tableIndex = parsed.args?.[0];
-                const table = sheets[tableIndex];
-                if (!table || !table.name) return;
+                const resolved = resolveTableTarget_ACU(parsed.args?.[0]);
+                if ('error' in resolved) return;
+                const { table } = resolved;
                 if (!isSummaryOrOutlineTable_ACU(table.name)) return;
                 if (table.name === '总结表') summaryInsertCount++;
                 if (table.name === '总体大纲') outlineInsertCount++;
@@ -291,20 +258,14 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
         logWarn_ACU(`[屏蔽] 总结表/总体大纲新增不同步：总结=${summaryInsertCount}, 大纲=${outlineInsertCount}，本轮两表均不写入。`);
     }
 
-    // seedRows 物化
+    // 仅物化当前 canonical snapshot 自带的 seedRows，不读取 guide/template。
     const materializeSeedRowsIfNeeded_ACU = (table: any) => {
         try {
             if (!table || typeof table !== 'object') return;
             if (!Array.isArray(table.content) || table.content.length !== 1) return;
-            let sr = (Array.isArray(table.seedRows) && table.seedRows.length > 0) ? table.seedRows : null;
-            if (!sr && table.uid && String(table.uid).startsWith('sheet_')) {
-                sr = getEffectiveSeedRowsForSheet_ACU(String(table.uid), { guideData: null, allowTemplateFallback: true });
-                if (Array.isArray(sr) && sr.length > 0) {
-                    try { table.seedRows = JSON.parse(JSON.stringify(sr)); } catch (e) {}
-                }
-            }
+            const sr = (Array.isArray(table.seedRows) && table.seedRows.length > 0) ? table.seedRows : null;
             if (!Array.isArray(sr) || sr.length === 0) return;
-    const headerRow = Array.isArray(table.content[0]) ? JSON.parse(JSON.stringify(table.content[0])) : ["row_id"];
+            const headerRow = JSON.parse(JSON.stringify(table.content[0]));
             const seed = JSON.parse(JSON.stringify(sr));
             table.content = [headerRow, ...seed];
         } catch (e) { logWarn_ACU('[表格编辑] restoreSeedRows 失败:', e); }
@@ -314,7 +275,9 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
     finalCommandLines.forEach(line => {
         const parsed = parseTableEditCommandLine_ACU(line);
         if (!parsed) {
-            logWarn_ACU(`Skipping malformed or truncated command line: "${line}"`);
+            const error = 'malformed_command: 指令格式无效或参数 JSON 无法解析';
+            commandErrors.push(error);
+            logWarn_ACU(`[表格编辑] ${error}`);
             return;
         }
         const { command, args } = parsed;
@@ -322,14 +285,13 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
         try {
             switch (command) {
                 case 'insertRow': {
-                    const [tableIndex, data] = args;
-                    const table = sheets[tableIndex];
-                    if (!table || !table.name) {
-                        logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping insertRow.`);
+                    const [tableTarget, data] = args;
+                    const resolved = resolveCommandTable_ACU(command, tableTarget);
+                    if (!resolved) {
                         break;
                     }
+                    const { table, sheetKey, tableIndex } = resolved;
                     materializeSeedRowsIfNeeded_ACU(table);
-                    const sheetKey = sheetKeysForIndexing[tableIndex];
                     const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
                     const isUnifiedMode = (updateMode === 'full' || updateMode === 'manual_unified' || updateMode === 'auto_unified');
                     const isStandardMode = (updateMode === 'standard' || updateMode === 'auto_standard' || updateMode === 'manual_standard');
@@ -353,9 +315,18 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
                         logDebug_ACU(`[屏蔽] 总结表/总体大纲新增不同步：忽略 insertRow (tableIndex: ${tableIndex}, tableName: ${table.name})`);
                         break;
                     }
-                    if (table && table.content && typeof data === 'object') {
-                        const newRow: any[] = [allocateStableRowIdForSheet_ACU(table)];
+                    if (!isDslRowDataObject_ACU(data)) {
+                        commandErrors.push(`invalid_row_data: insertRow 的数据必须是非空对象，当前值为 ${JSON.stringify(data)}`);
+                        break;
+                    }
+                    {
                         const headers = table.content[0].slice(1);
+                        const columnError = validateDslColumnTargets_ACU(data, headers.length);
+                        if (columnError) {
+                            commandErrors.push(columnError);
+                            break;
+                        }
+                        const newRow: any[] = [allocateStableRowIdForSheet_ACU(table)];
                         const specialIndexCol = (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey))
                             ? getSummaryIndexColumnIndex_ACU(table)
                             : -1;
@@ -372,15 +343,20 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
                         }
                         logDebug_ACU(`Applied insertRow to table ${tableIndex} (${table.name}) with data:`, data);
                         appliedEdits++;
-                        editCountsByTable[table.name] = (editCountsByTable[table.name] || 0) + 1;
+                        editCountsBySheetKey[sheetKey] = (editCountsBySheetKey[sheetKey] || 0) + 1;
                     }
                     break;
                 }
                 case 'deleteRow': {
-                    const [tableIndex, rowIndex] = args;
-                    const table = sheets[tableIndex];
-                    if (!table || !table.name) {
-                        logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping deleteRow.`);
+                    const [tableTarget, rowIndex] = args;
+                    const resolved = resolveCommandTable_ACU(command, tableTarget);
+                    if (!resolved) {
+                        break;
+                    }
+                    const { table, sheetKey, tableIndex } = resolved;
+                    const normalizedRowIndex = parseDslNonNegativeInteger_ACU(rowIndex);
+                    if (normalizedRowIndex === null) {
+                        commandErrors.push(`invalid_row_target: deleteRow 的行号必须是非负整数，当前值为 ${JSON.stringify(rowIndex)}`);
                         break;
                     }
                     materializeSeedRowsIfNeeded_ACU(table);
@@ -409,24 +385,40 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
                             break;
                         }
                     }
-                    if (table && table.content && table.content.length > rowIndex + 1) {
+                    if (table.content.length > normalizedRowIndex + 1) {
+                        const targetRow = table.content[normalizedRowIndex + 1];
+                        if (!Array.isArray(targetRow)) {
+                            commandErrors.push(`invalid_table_structure: deleteRow 的目标行 ${normalizedRowIndex} 不是有效数组`);
+                            break;
+                        }
                         ensureStableNextRowId_ACU(table);
-                        table.content.splice(rowIndex + 1, 1);
-                        logDebug_ACU(`Applied deleteRow to table ${tableIndex} (${table.name}) at index ${rowIndex}`);
+                        table.content.splice(normalizedRowIndex + 1, 1);
+                        logDebug_ACU(`Applied deleteRow to table ${tableIndex} (${table.name}) at index ${normalizedRowIndex}`);
                         appliedEdits++;
-                        editCountsByTable[table.name] = (editCountsByTable[table.name] || 0) + 1;
+                        editCountsBySheetKey[sheetKey] = (editCountsBySheetKey[sheetKey] || 0) + 1;
+                    } else {
+                        commandErrors.push(`invalid_row_target: deleteRow 的行号 ${JSON.stringify(rowIndex)} 在表 ${JSON.stringify(table.name)} 中不存在`);
                     }
                     break;
                 }
                 case 'updateRow': {
-                    const [tableIndex, rowIndex, data] = args;
-                    const table = sheets[tableIndex];
-                    if (!table || !table.name) {
-                        logWarn_ACU(`Table at index ${tableIndex} not found or has no name. Skipping updateRow.`);
+                    const [tableTarget, rowIndex, data] = args;
+                    const resolved = resolveCommandTable_ACU(command, tableTarget);
+                    if (!resolved) {
                         break;
                     }
+                    const { table, sheetKey, tableIndex } = resolved;
+                    const normalizedRowIndex = parseDslNonNegativeInteger_ACU(rowIndex);
+                    if (normalizedRowIndex === null) {
+                        commandErrors.push(`invalid_row_target: updateRow 的行号必须是非负整数，当前值为 ${JSON.stringify(rowIndex)}`);
+                        break;
+                    }
+                    if (!isDslRowDataObject_ACU(data)) {
+                        commandErrors.push(`invalid_row_data: updateRow 的数据必须是非空对象，当前值为 ${JSON.stringify(data)}`);
+                        break;
+                    }
+
                     materializeSeedRowsIfNeeded_ACU(table);
-                    const sheetKey = sheetKeysForIndexing[tableIndex];
                     const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
 
                     if (isSummaryTable) {
@@ -452,58 +444,73 @@ import { allocateStableRowIdForSheet_ACU, ensureStableNextRowId_ACU } from '../.
                             break;
                         }
                     }
-                    if (table && table.content && table.content.length > rowIndex + 1 && typeof data === 'object') {
+                    if (table.content.length > normalizedRowIndex + 1) {
+                        const targetRow = table.content[normalizedRowIndex + 1];
+                        if (!Array.isArray(targetRow)) {
+                            commandErrors.push(`invalid_table_structure: updateRow 的目标行 ${normalizedRowIndex} 不是有效数组`);
+                            break;
+                        }
+                        const writableColumnCount = Math.min(table.content[0].length, targetRow.length) - 1;
+                        const columnError = validateDslColumnTargets_ACU(data, Math.max(0, writableColumnCount));
+                        if (columnError) {
+                            commandErrors.push(columnError);
+                            break;
+                        }
+
                         ensureStableNextRowId_ACU(table);
                         const lockState = sheetKey ? getTableLocksForSheet_ACU(sheetKey) : { rows: new Set(), cols: new Set(), cells: new Set() };
-                        if (lockState.rows.has(rowIndex)) {
-                            logDebug_ACU(`[锁定] 行锁定阻止 updateRow (tableIndex: ${tableIndex}, rowIndex: ${rowIndex})`);
+                        if (lockState.rows.has(normalizedRowIndex)) {
+                            logDebug_ACU(`[锁定] 行锁定阻止 updateRow (tableIndex: ${tableIndex}, rowIndex: ${normalizedRowIndex})`);
                             break;
                         }
                         Object.keys(data).forEach(colIndexStr => {
-                            const colIndex = parseInt(colIndexStr, 10);
-                            if (isNaN(colIndex)) return;
+                            const colIndex = Number(colIndexStr);
                             if (lockState.cols.has(colIndex)) return;
-                            if (lockState.cells.has(`${rowIndex}:${colIndex}`)) return;
-                            if (table.content[rowIndex + 1].length > colIndex + 1) {
-                                table.content[rowIndex + 1][colIndex + 1] = data[colIndexStr];
-                            }
+                            if (lockState.cells.has(`${normalizedRowIndex}:${colIndex}`)) return;
+                            targetRow[colIndex + 1] = data[colIndexStr];
                         });
                         if (isSummaryTable && sheetKey && isSpecialIndexLockEnabled_ACU(sheetKey)) {
                             const specialIndexCol = getSummaryIndexColumnIndex_ACU(table);
                             if (specialIndexCol >= 0) applySummaryIndexSequenceToTable_ACU(table, specialIndexCol);
                         }
-                        logDebug_ACU(`Applied updateRow to table ${tableIndex} (${table.name}) at index ${rowIndex} with data:`, data);
+                        logDebug_ACU(`Applied updateRow to table ${tableIndex} (${table.name}) at index ${normalizedRowIndex} with data:`, data);
                         appliedEdits++;
-                        editCountsByTable[table.name] = (editCountsByTable[table.name] || 0) + 1;
+                        editCountsBySheetKey[sheetKey] = (editCountsBySheetKey[sheetKey] || 0) + 1;
+                    } else {
+                        commandErrors.push(`invalid_row_target: updateRow 的行号 ${JSON.stringify(rowIndex)} 在表 ${JSON.stringify(table.name)} 中不存在`);
                     }
                     break;
                 }
             }
         } catch (e) {
             logError_ACU(`Failed to parse or apply command: "${line}"`, e);
+            commandErrors.push(`command_exception: ${e instanceof Error ? e.message : String(e)}`);
         }
     });
 
+    if (commandErrors.length > 0) {
+        return { success: false, modifiedKeys: [], appliedEdits: 0, error: commandErrors.join('；') };
+    }
+
     // 将统计信息写入表格对象
-    Object.keys(editCountsByTable).forEach(tableName => {
-        const sheetKey = Object.keys(tableData).find(k => tableData[k].name === tableName);
-        if (sheetKey) {
-            if (!tableData[sheetKey]._lastUpdateStats) {
-                tableData[sheetKey]._lastUpdateStats = {};
-            }
-            tableData[sheetKey]._lastUpdateStats.changes = editCountsByTable[tableName];
+    Object.keys(editCountsBySheetKey).forEach(sheetKey => {
+        if (!tableData[sheetKey]._lastUpdateStats) {
+            tableData[sheetKey]._lastUpdateStats = {};
         }
+        tableData[sheetKey]._lastUpdateStats.changes = editCountsBySheetKey[sheetKey];
     });
     
     // 收集所有被修改的表格 key
     const modifiedSheetKeys: string[] = [];
-    Object.keys(editCountsByTable).forEach(tableName => {
-        if (editCountsByTable[tableName] > 0) {
-            const sheetKey = Object.keys(tableData).find(k => tableData[k].name === tableName);
-            if (sheetKey) modifiedSheetKeys.push(sheetKey);
+    Object.keys(editCountsBySheetKey).forEach(sheetKey => {
+        if (editCountsBySheetKey[sheetKey] > 0) {
+            modifiedSheetKeys.push(sheetKey);
         }
     });
     
+    Object.keys(originalTableData).forEach(key => delete originalTableData[key]);
+    Object.assign(originalTableData, tableData);
+
     return { success: true, modifiedKeys: modifiedSheetKeys, appliedEdits };
   }
 
