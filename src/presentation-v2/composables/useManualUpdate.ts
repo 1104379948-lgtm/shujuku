@@ -3,7 +3,6 @@ import {
   currentJsonTableData_ACU,
   settings_ACU,
   abortAllActiveRequests_ACU,
-  _set_isAutoUpdatingCard_ACU,
   _set_manualExtraHint_ACU,
   _set_wasStoppedByUser_ACU,
   getCurrentIsolationKey_ACU,
@@ -38,7 +37,6 @@ export interface ManualUpdateState {
   selectedSheetSummary: ComputedRef<string>;
   checkpointFloorsLabel: ComputedRef<string>;
   manualRefillRangeLabel: ComputedRef<string>;
-  checkpointRiskMessage: ComputedRef<string>;
   vectorIndexWarning: ComputedRef<boolean>;
   refresh: () => void;
   setManualContextDepth: (value: number | string) => void;
@@ -73,61 +71,33 @@ function saveManualSelection(keys: string[]): void {
 }
 
 function normalizeNonNegativeInteger(value: unknown, fallback: number): number {
+  if (value === null || value === undefined || value === '') return fallback;
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return fallback;
   return Math.floor(n);
 }
 
 function normalizePositiveInteger(value: unknown, fallback: number): number {
+  if (value === null || value === undefined || value === '') return fallback;
   const n = Number(value);
   if (!Number.isFinite(n) || n < 1) return fallback;
   return Math.floor(n);
 }
 
 function resolveManualContextDepth(): number {
-  const fallback = normalizeNonNegativeInteger(settings_ACU.autoUpdateThreshold, 3);
-  return settings_ACU.manualUpdateContextDepth == null
-    ? fallback
-    : normalizeNonNegativeInteger(settings_ACU.manualUpdateContextDepth, fallback);
+  return normalizeNonNegativeInteger(settings_ACU.manualUpdateContextDepth, 3);
 }
 
 function resolveManualBatchSize(): number {
-  const fallback = 3;
-  return settings_ACU.manualUpdateBatchSize == null
-    ? fallback
-    : normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, fallback);
+  return normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, 3);
 }
 
-function applyManualSettingsForOrchestrator(): () => void {
-  const previousAutoUpdateThreshold = settings_ACU.autoUpdateThreshold;
-  const previousUpdateBatchSize = settings_ACU.updateBatchSize;
-
-  // orchestrateManualUpdate_ACU still reads the legacy automatic settings.
-  // Keep the temporary bridge local to this UI action so the independent
-  // manual fields do not persist back into automatic update configuration.
-  settings_ACU.autoUpdateThreshold = manualDepthForOrchestrator_ACU(
-    settings_ACU.manualUpdateContextDepth,
-    previousAutoUpdateThreshold,
-  );
-  settings_ACU.updateBatchSize = normalizePositiveInteger(
-    settings_ACU.manualUpdateBatchSize,
-    normalizePositiveInteger(previousUpdateBatchSize, 3),
-  );
-
-  return () => {
-    settings_ACU.autoUpdateThreshold = previousAutoUpdateThreshold;
-    settings_ACU.updateBatchSize = previousUpdateBatchSize;
-  };
+function resolveManualSkipFloors(): number {
+  return normalizeNonNegativeInteger(settings_ACU.manualUpdateSkipFloors, 0);
 }
 
-function manualDepthForOrchestrator_ACU(
-  manualDepth: unknown,
-  fallbackDepth: unknown,
-): number {
-  const fallback = normalizeNonNegativeInteger(fallbackDepth, 3);
-  return manualDepth == null
-    ? fallback
-    : normalizeNonNegativeInteger(manualDepth, fallback);
+function resolveManualMaxConcurrentGroups(): number {
+  return normalizePositiveInteger(settings_ACU.manualUpdateMaxConcurrentGroups, 1);
 }
 
 interface ManualRefillRangeSummary {
@@ -143,7 +113,7 @@ function resolveManualRefillRangeSummary_ACU(manualDepth: number): ManualRefillR
     .map((msg: any, index: number) => (msg && !msg.is_user ? { index, aiFloor: 0 } : null))
     .filter((item): item is { index: number; aiFloor: number } => item !== null);
   aiItems.forEach((item, idx) => { item.aiFloor = idx + 1; });
-  const skip = normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0);
+  const skip = resolveManualSkipFloors();
   const effectiveAiItems = skip > 0 ? aiItems.slice(0, -skip) : aiItems.slice();
   const contextItems = manualDepth > 0 ? effectiveAiItems.slice(-manualDepth) : effectiveAiItems;
   if (!contextItems.length) return null;
@@ -237,7 +207,6 @@ export function useManualUpdate(): ManualUpdateState {
     abortRequested = true;
     _set_wasStoppedByUser_ACU(true);
     abortAllActiveRequests_ACU();
-    _set_isAutoUpdatingCard_ACU(false);
     if (progressToastId) {
       toast.update(progressToastId, 'warning', '手动填表已终止，正在停止当前任务与后续批次...', {
         durationMs: 0,
@@ -326,17 +295,6 @@ export function useManualUpdate(): ManualUpdateState {
       : '暂无可重填 AI 楼层';
   });
 
-  const checkpointRiskMessage = computed<string>(() => {
-    const checkpoints = checkpointFloors.value;
-    const range = manualRefillRange.value;
-    if (checkpoints.length === 0 || !range) return '';
-    const checkpointIndexSet = new Set(range.indices);
-    const coveredCheckpoints = checkpoints.filter(item => checkpointIndexSet.has(item.messageIndex));
-    if (coveredCheckpoints.length !== checkpoints.length) return '';
-    const coveredFloors = coveredCheckpoints.map(item => `AI 第 ${item.aiFloor} 层`).join('、');
-    return `危险：当前聊天的所有 full checkpoint 都在本次重填范围内（${coveredFloors}）。系统首次执行时只会做边界检查；如果确认缺少重填起点前可回放 checkpoint，会在下一步要求你单独确认是否替换本次范围内选中表的基底。`;
-  });
-
   const vectorIndexWarning = computed<boolean>(() => {
     void refreshTick.value;
     try {
@@ -390,15 +348,13 @@ export function useManualUpdate(): ManualUpdateState {
 
     const confirmed = await dialogStore.confirm({
       title: '执行手动填表',
-      message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表。\n常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹，并在全部成功后写入手动重填进度记录。\n如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认；只有你在第二次确认中授权后，才会替换本次范围内选中表的旧 checkpoint 基底并写入新的单表 checkpoint。\n\n取消、失败、终止或从中断处继续时，不会清理本次重填范围之外的聊天记录表格数据，也不会在未二次确认时替换 checkpoint 基底。`,
-      dangerMessage: checkpointRiskMessage.value || undefined,
+      message: `即将执行手动填表。\n\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n系统会先原子清除本次范围内选中表的旧数据，再重新加载存储并按批次填表。范围外消息、未选中的表和其他隔离标签不会被清理。\n\n清理成功后，即使后续 AI 请求、解析或写入失败，已清理的数据和已成功写入的批次也会保留，不会执行整会话回滚。`,
+      dangerMessage: '确认后会立即清理目标范围内选中表的数据；清理成功后不会因后续失败而恢复。',
       confirmLabel: '确认并继续',
       cancelLabel: '取消',
-      confirmVariant: checkpointRiskMessage.value ? 'danger' : undefined,
+      confirmVariant: 'danger',
     });
     if (!confirmed) return;
-    // 兼容沿用 clearBeforeUpdate 参数名；service 层实际执行事务式重填，不会预清空聊天记录。
-    const clearBeforeUpdate = true;
     const targetManualTableKeys = selectedManualTableKeys.value.slice();
 
     manualUpdateBusy.value = true;
@@ -439,46 +395,24 @@ export function useManualUpdate(): ManualUpdateState {
       ));
 
     try {
-      const executeManualUpdate = async (confirmBoundaryReset: boolean) => {
-        const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
-        try {
-          return await orchestrateManualUpdate_ACU(
-            targetManualTableKeys,
-            runProcessBatch,
-            async () => { await refreshMergedDataAndNotify_ACU(); },
-            { clearBeforeUpdate, confirmBoundaryReset, onProgress: handleProgress },
-          );
-        } finally {
-          restoreAutoUpdateSettings();
-        }
-      };
-
-      let result: Awaited<ReturnType<typeof orchestrateManualUpdate_ACU>> = await executeManualUpdate(false);
-      if (!result.success && result.requiresUserConfirmation){
-        const request = result.requiresUserConfirmation;
-        const dangerConfirmed = await dialogStore.confirm({
-          title: '破坏性手动重填确认',
-          message: `${request.message}\n\n高风险操作：确认后会在一次提交中删除本次重填范围内选中表的旧表基底，并写入新的单表 checkpoint，随后才继续本次手动填表。\n目标表：${request.targetSheetKeys.join('、')}\n目标消息索引：${request.contextScopeIndices.join('、')}\n\n范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除。`,
-          dangerMessage: '此操作不可撤销。取消将不会执行基底替换，不会写入新的单表 checkpoint，也不会继续本次手动填表。',
-          confirmLabel: '我已了解风险，继续执行',
-          cancelLabel: '取消',
-          confirmVariant: 'danger',
-        });
-        if (!dangerConfirmed) {
-          finishToast('info', '已取消破坏性基底替换。');
-          return;
-        }
-        notifyProgress('已确认破坏性基底替换，继续手动填表。');
-        result = await executeManualUpdate(true);
-      }
+      const result = await orchestrateManualUpdate_ACU(
+        targetManualTableKeys,
+        runProcessBatch,
+        async () => { await refreshMergedDataAndNotify_ACU(); },
+        {
+          contextDepth: manualContextDepth.value,
+          skipFloors: resolveManualSkipFloors(),
+          batchSize: manualBatchSize.value,
+          maxConcurrentGroups: resolveManualMaxConcurrentGroups(),
+          onProgress: handleProgress,
+        },
+      );
       finishToast(
-        result.success ? (result.checkpointWarning ? 'warning' : 'success') : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'),
+        result.success ? 'success' : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'),
         result.success
           ? `${result.autoMergeTriggered
               ? `手动填表完成;自动合并总结${result.autoMergeSuccess ? '已完成' : '未完成'}。`
-              : '手动填表完成。'}${result.checkpointWarning
-                ? ` 但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}`
-                : ''}`
+              : '手动填表完成。'}`
           : (abortRequested ? '手动填表任务已由用户终止。' : (result.error || '手动填表失败。')),
       );
     } catch (error: any) {
@@ -500,7 +434,6 @@ export function useManualUpdate(): ManualUpdateState {
     selectedSheetSummary,
     checkpointFloorsLabel,
     manualRefillRangeLabel,
-    checkpointRiskMessage,
     vectorIndexWarning,
     refresh,
     setManualContextDepth,

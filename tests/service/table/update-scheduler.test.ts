@@ -26,6 +26,8 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
 
 import {
   buildAutoUpdatePlan_ACU,
+  buildManualUpdatePlan_ACU,
+  calculateManualTargetMessageIndices_ACU,
   checkAutoUpdatePreConditions_ACU,
   handleFloorIncreaseDelay_ACU,
   executeAutoUpdatePlan_ACU,
@@ -342,6 +344,104 @@ describe('buildAutoUpdatePlan_ACU', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// buildManualUpdatePlan_ACU
+// ═══════════════════════════════════════════════════════════════
+describe('buildManualUpdatePlan_ACU', () => {
+  const liveChat = [
+    { is_user: true },
+    { is_user: false }, // 1
+    { is_user: true },
+    { is_user: false }, // 3
+    { is_user: true },
+    { is_user: false }, // 5
+    { is_user: true },
+    { is_user: false }, // 7
+  ];
+
+  const manualOptions = {
+    contextDepth: 2,
+    skipFloors: 1,
+    batchSize: 4,
+  };
+
+  it('只使用显式手动参数和表的 groupId 构造计划', () => {
+    const tableData = {
+      sheet_0: {
+        name: '表A',
+        updateConfig: {
+          groupId: 7,
+          contextDepth: 99,
+          updateFrequency: 0,
+          skipFloors: 99,
+          batchSize: 1,
+        },
+      },
+      sheet_1: {
+        name: '表B',
+        updateConfig: {
+          groupId: 7,
+          contextDepth: 1,
+          updateFrequency: 100,
+          skipFloors: 0,
+          batchSize: 100,
+        },
+      },
+      sheet_2: {
+        name: '未选中表',
+        updateConfig: { groupId: 7 },
+      },
+    };
+
+    const plan = buildManualUpdatePlan_ACU(liveChat, tableData, ['sheet_0', 'sheet_1'], manualOptions);
+
+    expect(plan.tablesToUpdate).toEqual([
+      expect.objectContaining({ sheetKey: 'sheet_0', groupId: 7, indices: [3, 5], batchSize: 4 }),
+      expect.objectContaining({ sheetKey: 'sheet_1', groupId: 7, indices: [3, 5], batchSize: 4 }),
+    ]);
+    expect(plan.tablesToUpdate.map(item => item.sheetKey)).not.toContain('sheet_2');
+    expect(Object.values(plan.updateGroups)).toEqual([
+      expect.objectContaining({ groupId: 7, indices: [3, 5], batchSize: 4, sheetKeys: ['sheet_0', 'sheet_1'] }),
+    ]);
+  });
+
+  it('不同 groupId 分开分组，缺失 groupId 沿用自动计划的 -1 归一化规则', () => {
+    const tableData = {
+      sheet_0: { name: '表A', updateConfig: { groupId: 1, batchSize: 99 } },
+      sheet_1: { name: '表B', updateConfig: { groupId: 2, contextDepth: 99 } },
+      sheet_2: { name: '表C', updateConfig: { updateFrequency: 0 } },
+    };
+
+    const plan = buildManualUpdatePlan_ACU(liveChat, tableData, ['sheet_0', 'sheet_1', 'sheet_2'], manualOptions);
+
+    expect(Object.values(plan.updateGroups)).toHaveLength(3);
+    expect(Object.values(plan.updateGroups).map(group => group.groupId).sort()).toEqual([-1, 1, 2]);
+  });
+
+  it('contextDepth 为 0 时保留跳过末尾楼层后的全部 AI 消息', () => {
+    expect(calculateManualTargetMessageIndices_ACU(liveChat, {
+      contextDepth: 0,
+      skipFloors: 1,
+      batchSize: 1,
+    })).toEqual([1, 3, 5]);
+  });
+
+  it('目标表、参数或有效范围无效时明确拒绝构建计划', () => {
+    const tableData = { sheet_0: { name: '表A', updateConfig: {} } };
+
+    expect(() => buildManualUpdatePlan_ACU(liveChat, tableData, [], manualOptions))
+      .toThrow('手动填表必须至少选择一张表。');
+    expect(() => buildManualUpdatePlan_ACU(liveChat, tableData, ['sheet_0', 'sheet_0'], manualOptions))
+      .toThrow('手动填表的目标表不能重复。');
+    expect(() => buildManualUpdatePlan_ACU(liveChat, tableData, ['missing'], manualOptions))
+      .toThrow('手动填表的目标表不存在：missing');
+    expect(() => buildManualUpdatePlan_ACU(liveChat, tableData, ['sheet_0'], { ...manualOptions, batchSize: 0 }))
+      .toThrow('手动填表的 batchSize 必须是正整数。');
+    expect(() => calculateManualTargetMessageIndices_ACU(liveChat, { ...manualOptions, skipFloors: 4 }))
+      .toThrow('手动填表范围为空，没有可重新填写的 AI 消息。');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
 // handleFloorIncreaseDelay_ACU
 // ═══════════════════════════════════════════════════════════════
 describe('handleFloorIncreaseDelay_ACU', () => {
@@ -513,6 +613,48 @@ describe('executeAutoUpdatePlan_ACU', () => {
       expect.objectContaining({ key: 'group_b', groupId: 1, indices: [2], batchSize: 2, sheetKeys: ['sheet_1'], requestOptions: { skipProfileSwitch: true, forceDirectApi: true } }),
     ], 'auto_independent', {});
     expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('执行上下文可覆盖手动 mode、并发、请求选项与后处理，不影响自动默认值', async () => {
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: {
+        'group_a': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] },
+        'group_b': { indices: [2], batchSize: 2, groupId: 1, sheetKeys: ['sheet_1'], sheetNames: ['表B'] },
+      },
+    };
+    const mockGrouped = vi.fn().mockResolvedValue({ success: true, failedGroups: [] });
+    const ops = makeOps({ processGroupedUpdates: mockGrouped });
+    const onProgress = vi.fn();
+
+    await executeAutoUpdatePlan_ACU(plan, { maxConcurrentGroups: 1 }, mockSetAutoUpdating, ops, {
+      mode: 'manual_independent',
+      maxConcurrentGroups: 2,
+      processOptions: { onProgress },
+      resolveRequestOptions: (_key, group) => ({ tableApiPreset: `preset-${group.groupId}` }),
+      purgeOldLayerData: false,
+      runAutoMerge: false,
+    });
+
+    expect(mockGrouped).toHaveBeenCalledTimes(1);
+    expect(mockGrouped).toHaveBeenCalledWith([
+      expect.objectContaining({ key: 'group_a', requestOptions: { tableApiPreset: 'preset-0' } }),
+      expect.objectContaining({ key: 'group_b', requestOptions: { tableApiPreset: 'preset-1' } }),
+    ], 'manual_independent', { onProgress });
+    expect(ops.purgeOldLayerData).not.toHaveBeenCalled();
+  });
+
+  it('执行委托抛异常时仍复位 updating 状态', async () => {
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: {
+        group_a: { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] },
+      },
+    };
+    const ops = makeOps({ processGroupedUpdates: vi.fn().mockRejectedValue(new Error('grouped failure')) });
+
+    await expect(executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops)).rejects.toThrow('grouped failure');
+    expect(mockSetAutoUpdating).toHaveBeenLastCalledWith(false);
   });
 
   it('grouped 委托返回 failedGroups 时按数量汇总失败组', async () => {

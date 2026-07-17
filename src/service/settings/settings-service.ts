@@ -574,16 +574,31 @@ export   function loadSettings_ACU() {
 
       settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
 
+      const normalizeIntegerSetting_ACU = (key: string, fallback: number, minimum: number) => {
+          const rawValue = settings_ACU[key];
+          const numericValue = rawValue === null || rawValue === undefined || rawValue === ''
+              ? Number.NaN
+              : Number(rawValue);
+          const normalizedValue = Number.isFinite(numericValue) && numericValue >= minimum
+              ? Math.floor(numericValue)
+              : fallback;
+          if (rawValue !== normalizedValue) {
+              settings_ACU[key] = normalizedValue;
+              shouldPersistSettingsAfterLoad_ACU = true;
+          }
+      };
+      normalizeIntegerSetting_ACU('maxConcurrentGroups', 1, 1);
+      normalizeIntegerSetting_ACU('manualUpdateContextDepth', 3, 0);
+      normalizeIntegerSetting_ACU('manualUpdateBatchSize', 3, 1);
+      normalizeIntegerSetting_ACU('manualUpdateSkipFloors', 0, 0);
+      normalizeIntegerSetting_ACU('manualUpdateMaxConcurrentGroups', 1, 1);
+
       settingsStorageReadyForSave_ACU = true;
       refreshDefaultTableTemplateOnce_ACU(activeCode);
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();
           persistSettingsToStorage_ACU(settings_ACU, activeCode);
           logDebug_ACU(`[设置加载] 已持久化加载期默认值补齐，交火配置版本: ${VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU}`);
-      }
-
-      if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
-          settings_ACU.maxConcurrentGroups = 1;
       }
       logDebug_ACU('Settings loaded:', settings_ACU);
   }
@@ -750,6 +765,10 @@ export   function buildDefaultSettings_ACU() {
           autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
           updateBatchSize: 3,
           maxConcurrentGroups: 1,
+          manualUpdateContextDepth: 3,
+          manualUpdateBatchSize: 3,
+          manualUpdateSkipFloors: 0,
+          manualUpdateMaxConcurrentGroups: 1,
           autoUpdateEnabled: true,
           standardizedTableFillEnabled: true, // [新增] 规范填表功能
           toastMuteEnabled: false,

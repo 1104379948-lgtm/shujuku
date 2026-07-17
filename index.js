@@ -4621,6 +4621,10 @@ $CONTENT
         autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
         updateBatchSize: 3,
         maxConcurrentGroups: 1,
+        manualUpdateContextDepth: 3,
+        manualUpdateBatchSize: 3,
+        manualUpdateSkipFloors: 0,
+        manualUpdateMaxConcurrentGroups: 1,
         autoUpdateEnabled: true,
         standardizedTableFillEnabled: true,
         toastMuteEnabled: false,
@@ -35814,15 +35818,30 @@ $CONTENT
             }
         }
         settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
+        const normalizeIntegerSetting_ACU = (key, fallback, minimum) => {
+            const rawValue = settings_ACU[key];
+            const numericValue = rawValue === null || rawValue === undefined || rawValue === ''
+                ? Number.NaN
+                : Number(rawValue);
+            const normalizedValue = Number.isFinite(numericValue) && numericValue >= minimum
+                ? Math.floor(numericValue)
+                : fallback;
+            if (rawValue !== normalizedValue) {
+                settings_ACU[key] = normalizedValue;
+                shouldPersistSettingsAfterLoad_ACU = true;
+            }
+        };
+        normalizeIntegerSetting_ACU('maxConcurrentGroups', 1, 1);
+        normalizeIntegerSetting_ACU('manualUpdateContextDepth', 3, 0);
+        normalizeIntegerSetting_ACU('manualUpdateBatchSize', 3, 1);
+        normalizeIntegerSetting_ACU('manualUpdateSkipFloors', 0, 0);
+        normalizeIntegerSetting_ACU('manualUpdateMaxConcurrentGroups', 1, 1);
         settingsStorageReadyForSave_ACU = true;
         refreshDefaultTableTemplateOnce_ACU(activeCode);
         if (shouldPersistSettingsAfterLoad_ACU) {
             saveGlobalMeta_ACU();
             persistSettingsToStorage_ACU(settings_ACU, activeCode);
             logDebug_ACU(`[设置加载] 已持久化加载期默认值补齐，交火配置版本: ${VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU}`);
-        }
-        if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
-            settings_ACU.maxConcurrentGroups = 1;
         }
         logDebug_ACU('Settings loaded:', settings_ACU);
     }
@@ -35993,6 +36012,10 @@ $CONTENT
             autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
             updateBatchSize: 3,
             maxConcurrentGroups: 1,
+            manualUpdateContextDepth: 3,
+            manualUpdateBatchSize: 3,
+            manualUpdateSkipFloors: 0,
+            manualUpdateMaxConcurrentGroups: 1,
             autoUpdateEnabled: true,
             standardizedTableFillEnabled: true, // [新增] 规范填表功能
             toastMuteEnabled: false,
@@ -39819,6 +39842,88 @@ $CONTENT
         });
         return { tablesToUpdate, updateGroups };
     }
+    /**
+     * 计算手动重填的目标 AI 消息物理索引。
+     * 该结果必须同时用于预清理与更新计划，避免两个阶段的范围发生分叉。
+     */
+    function calculateManualTargetMessageIndices_ACU(liveChat, options) {
+        if (!Array.isArray(liveChat)) {
+            throw new Error('手动填表需要有效的聊天记录。');
+        }
+        if (!Number.isInteger(options.contextDepth) || options.contextDepth < 0) {
+            throw new Error('手动填表的 contextDepth 必须是非负整数。');
+        }
+        if (!Number.isInteger(options.skipFloors) || options.skipFloors < 0) {
+            throw new Error('手动填表的 skipFloors 必须是非负整数。');
+        }
+        const allAiMessageIndices = liveChat
+            .map((msg, index) => !msg.is_user ? index : -1)
+            .filter((index) => index !== -1);
+        const effectiveAiIndices = options.skipFloors > 0
+            ? allAiMessageIndices.slice(0, -options.skipFloors)
+            : allAiMessageIndices;
+        const targetMessageIndices = options.contextDepth === 0
+            ? effectiveAiIndices
+            : effectiveAiIndices.slice(-options.contextDepth);
+        if (targetMessageIndices.length === 0) {
+            throw new Error('手动填表范围为空，没有可重新填写的 AI 消息。');
+        }
+        return targetMessageIndices;
+    }
+    /**
+     * 构建手动更新计划。
+     * 手动计划仅读取每张表 updateConfig.groupId；范围和批次大小完全由显式手动参数决定。
+     */
+    function buildManualUpdatePlan_ACU(liveChat, tableData, targetSheetKeys, options) {
+        if (!tableData || typeof tableData !== 'object') {
+            throw new Error('手动填表需要有效的表格数据。');
+        }
+        if (!Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0) {
+            throw new Error('手动填表必须至少选择一张表。');
+        }
+        if (new Set(targetSheetKeys).size !== targetSheetKeys.length) {
+            throw new Error('手动填表的目标表不能重复。');
+        }
+        if (!Number.isInteger(options.batchSize) || options.batchSize <= 0) {
+            throw new Error('手动填表的 batchSize 必须是正整数。');
+        }
+        const targetMessageIndices = calculateManualTargetMessageIndices_ACU(liveChat, options);
+        const tablesToUpdate = targetSheetKeys.map(sheetKey => {
+            const table = tableData[sheetKey];
+            if (!table) {
+                throw new Error(`手动填表的目标表不存在：${sheetKey}`);
+            }
+            const rawGroupId = Number.isFinite(table.updateConfig?.groupId)
+                ? Math.trunc(table.updateConfig.groupId)
+                : -1;
+            const scheduleSignature = [rawGroupId, 'manual'].join('|');
+            return {
+                sheetKey,
+                sheetName: table.name,
+                indices: targetMessageIndices,
+                groupId: rawGroupId,
+                batchSize: options.batchSize,
+                scheduleSignature,
+            };
+        });
+        const updateGroups = {};
+        tablesToUpdate.forEach(item => {
+            const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize;
+            if (!updateGroups[key]) {
+                updateGroups[key] = {
+                    indices: item.indices,
+                    batchSize: item.batchSize,
+                    groupId: item.groupId,
+                    scheduleSignature: item.scheduleSignature,
+                    sheetKeys: [],
+                    sheetNames: [],
+                };
+            }
+            updateGroups[key].sheetKeys.push(item.sheetKey);
+            updateGroups[key].sheetNames.push(item.sheetName);
+        });
+        return { tablesToUpdate, updateGroups };
+    }
     // ============================================================
     // 前置检查
     // ============================================================
@@ -39839,19 +39944,29 @@ $CONTENT
         }
         return { canProceed: true };
     }
+    const DEFAULT_AUTO_REQUEST_OPTIONS_ACU = {
+        skipProfileSwitch: true,
+        forceDirectApi: true,
+    };
     /**
      * 执行自动更新计划：并发分组执行 + 自动合并检测 + 旧数据清理
      *
      * 纯业务编排逻辑：决定执行顺序、并发策略、错误处理。
      * 不驱动 UI，只返回结果。presentation 层根据返回值自行决定 UI 操作。
      */
-    async function executeAutoUpdatePlan_ACU(plan, settings, setAutoUpdating, ops) {
-        const { tablesToUpdate, updateGroups } = plan;
+    async function executeAutoUpdatePlan_ACU(plan, settings, setAutoUpdating, ops, executionOptions = {}) {
+        const { updateGroups } = plan;
         const groupKeys = Object.keys(updateGroups);
         if (groupKeys.length === 0)
             return { success: true, failedGroups: 0, totalGroups: 0 };
         const totalGroups = groupKeys.length;
-        const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
+        const mode = executionOptions.mode || 'auto_independent';
+        const maxConcurrentGroups = Math.max(1, executionOptions.maxConcurrentGroups ?? (settings.maxConcurrentGroups || 1));
+        const processOptions = executionOptions.processOptions || {};
+        const resolveRequestOptions = executionOptions.resolveRequestOptions
+            || (() => ({ ...DEFAULT_AUTO_REQUEST_OPTIONS_ACU }));
+        const runAutoMerge = executionOptions.runAutoMerge !== false;
+        const shouldPurgeOldLayerData = executionOptions.purgeOldLayerData !== false;
         setAutoUpdating(true);
         const failedGroupKeys = [];
         const failedGroupErrors = [];
@@ -39861,110 +39976,119 @@ $CONTENT
                 return;
             failedGroupErrors.push(`group ${groupKey}: ${message}`);
         };
-        for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
-            const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
-            if (ops.processGroupedUpdates) {
-                const groupedChunk = chunkKeys.map(key => {
-                    const group = updateGroups[key];
-                    logDebug_ACU(`[Parallel] Processing grouped update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
-                    return {
-                        key,
-                        groupId: group.groupId,
-                        indices: group.indices,
-                        batchSize: group.batchSize,
-                        sheetKeys: group.sheetKeys,
-                        requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
-                    };
-                });
-                const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', {});
-                if (!groupedResult.success) {
-                    failedGroupKeys.push(...groupedResult.failedGroups);
-                    const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
-                    groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
-                }
-            }
-            else {
-                const groupPromises = chunkKeys.map(key => (async () => {
-                    const group = updateGroups[key];
-                    logDebug_ACU(`[Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
-                    const success = await ops.processUpdates(group.indices, 'auto_independent', {
-                        targetSheetKeys: group.sheetKeys,
-                        batchSize: group.batchSize,
-                        requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
+        try {
+            for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
+                const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
+                if (ops.processGroupedUpdates) {
+                    const groupedChunk = chunkKeys.map(key => {
+                        const group = updateGroups[key];
+                        logDebug_ACU(`[Parallel] Processing grouped update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
+                        return {
+                            key,
+                            groupId: group.groupId,
+                            indices: group.indices,
+                            batchSize: group.batchSize,
+                            sheetKeys: group.sheetKeys,
+                            requestOptions: resolveRequestOptions(key, group),
+                        };
                     });
-                    return { key, success, sheetNames: group.sheetNames };
-                })());
-                const results = await Promise.allSettled(groupPromises);
-                results.forEach((result, idx) => {
-                    if (result.status === 'rejected') {
-                        failedGroupKeys.push(chunkKeys[idx]);
-                        pushGroupError_ACU(chunkKeys[idx], result.reason || '分组更新异常退出。');
-                        return;
+                    const groupedResult = await ops.processGroupedUpdates(groupedChunk, mode, processOptions);
+                    if (!groupedResult.success) {
+                        failedGroupKeys.push(...groupedResult.failedGroups);
+                        const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
+                        groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
                     }
-                    const rawResult = result.value?.success;
-                    const groupSucceeded = typeof rawResult === 'object' && rawResult !== null && 'success' in rawResult
-                        ? rawResult.success !== false
-                        : !!rawResult;
-                    if (!groupSucceeded) {
-                        failedGroupKeys.push(chunkKeys[idx]);
-                        const error = rawResult && typeof rawResult === 'object' && 'error' in rawResult
-                            ? rawResult.error
-                            : '分组更新失败，未返回具体错误。';
-                        pushGroupError_ACU(chunkKeys[idx], error);
-                    }
-                });
-            }
-        }
-        if (failedGroupKeys.length > 0) {
-            const errorSummary = failedGroupErrors.length > 0 ? `原因：${failedGroupErrors.slice(0, 3).join('；')}` : '未返回具体原因。';
-            logWarn_ACU(`并发分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。${errorSummary}`);
-        }
-        // 并发更新完成后统一刷新数据链条
-        logDebug_ACU(`All group updates completed. Forcing data refresh...`);
-        await ops.loadAllChatMessages();
-        await ops.refreshData();
-        await new Promise(resolve => setTimeout(resolve, 500));
-        setAutoUpdating(false);
-        await ops.refreshData();
-        // 自动合并总结检测
-        let autoMergeTriggered = false;
-        let autoMergeSuccess = false;
-        try {
-            const { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } = await Promise.resolve().then(function () { return mergeLogic; });
-            const trigger = checkAutoMergeTrigger_ACU();
-            if (trigger.shouldTrigger) {
-                autoMergeTriggered = true;
-                const prepared = prepareAutoMergeBatches_ACU({
-                    startIndex: 0, endIndex: trigger.mergeCount, targetCount: 1,
-                    batchSize: 5, promptTemplate: '', isAutoMode: true,
-                });
-                let acc = [];
-                for (let i = 0; i < prepared.batches.length; i++) {
-                    const batchResult = await executeAutoMergeBatch_ACU(prepared, prepared.batches[i], acc);
-                    acc = batchResult.accumulatedSummary;
                 }
-                await finalizeAutoMerge_ACU(prepared, acc);
-                autoMergeSuccess = true;
+                else {
+                    const groupPromises = chunkKeys.map(key => (async () => {
+                        const group = updateGroups[key];
+                        logDebug_ACU(`[Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
+                        const success = await ops.processUpdates(group.indices, mode, {
+                            ...processOptions,
+                            targetSheetKeys: group.sheetKeys,
+                            batchSize: group.batchSize,
+                            requestOptions: resolveRequestOptions(key, group),
+                        });
+                        return { key, success, sheetNames: group.sheetNames };
+                    })());
+                    const results = await Promise.allSettled(groupPromises);
+                    results.forEach((result, idx) => {
+                        if (result.status === 'rejected') {
+                            failedGroupKeys.push(chunkKeys[idx]);
+                            pushGroupError_ACU(chunkKeys[idx], result.reason || '分组更新异常退出。');
+                            return;
+                        }
+                        const rawResult = result.value?.success;
+                        const groupSucceeded = typeof rawResult === 'object' && rawResult !== null && 'success' in rawResult
+                            ? rawResult.success !== false
+                            : !!rawResult;
+                        if (!groupSucceeded) {
+                            failedGroupKeys.push(chunkKeys[idx]);
+                            const error = rawResult && typeof rawResult === 'object' && 'error' in rawResult
+                                ? rawResult.error
+                                : '分组更新失败，未返回具体错误。';
+                            pushGroupError_ACU(chunkKeys[idx], error);
+                        }
+                    });
+                }
             }
+            if (failedGroupKeys.length > 0) {
+                const errorSummary = failedGroupErrors.length > 0 ? `原因：${failedGroupErrors.slice(0, 3).join('；')}` : '未返回具体原因。';
+                logWarn_ACU(`并发分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。${errorSummary}`);
+            }
+            // 并发更新完成后统一刷新数据链条
+            logDebug_ACU(`All group updates completed. Forcing data refresh...`);
+            await ops.loadAllChatMessages();
+            await ops.refreshData();
+            await new Promise(resolve => setTimeout(resolve, 500));
+            await ops.refreshData();
+            // 自动合并总结检测
+            let autoMergeTriggered = false;
+            let autoMergeSuccess = false;
+            if (runAutoMerge) {
+                try {
+                    const { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } = await Promise.resolve().then(function () { return mergeLogic; });
+                    const trigger = checkAutoMergeTrigger_ACU();
+                    if (trigger.shouldTrigger) {
+                        autoMergeTriggered = true;
+                        const prepared = prepareAutoMergeBatches_ACU({
+                            startIndex: 0, endIndex: trigger.mergeCount, targetCount: 1,
+                            batchSize: 5, promptTemplate: '', isAutoMode: true,
+                        });
+                        let acc = [];
+                        for (let i = 0; i < prepared.batches.length; i++) {
+                            const batchResult = await executeAutoMergeBatch_ACU(prepared, prepared.batches[i], acc);
+                            acc = batchResult.accumulatedSummary;
+                        }
+                        await finalizeAutoMerge_ACU(prepared, acc);
+                        autoMergeSuccess = true;
+                    }
+                }
+                catch (e) {
+                    logWarn_ACU('自动合并总结检测失败:', e);
+                }
+            }
+            // 清理超出保留层数的旧数据
+            if (shouldPurgeOldLayerData) {
+                try {
+                    await ops.purgeOldLayerData();
+                }
+                catch (e) {
+                    logWarn_ACU('清理旧层数据失败:', e);
+                }
+            }
+            return {
+                success: failedGroupKeys.length === 0,
+                failedGroups: failedGroupKeys.length,
+                totalGroups,
+                errors: failedGroupErrors,
+                autoMergeTriggered,
+                autoMergeSuccess,
+            };
         }
-        catch (e) {
-            logWarn_ACU('自动合并总结检测失败:', e);
+        finally {
+            setAutoUpdating(false);
         }
-        // 清理超出保留层数的旧数据
-        try {
-            await ops.purgeOldLayerData();
-        }
-        catch (e) {
-            logWarn_ACU('清理旧层数据失败:', e);
-        }
-        return {
-            success: failedGroupKeys.length === 0,
-            failedGroups: failedGroupKeys.length,
-            totalGroups,
-            errors: failedGroupErrors,
-            autoMergeTriggered,
-            autoMergeSuccess,
-        };
     }
     // ============================================================
     // 楼层增加延迟逻辑
@@ -41715,65 +41839,6 @@ $CONTENT
             return { data: null, attempted: true };
         }
     }
-    function scanManualRefillV2ReplayBoundary_ACU(chat, currentIsolationKey, maxMessageIndex) {
-        if (!Array.isArray(chat) || maxMessageIndex < 0) {
-            return { hasCurrentIsolationV2: false, otherIsolationKeys: [] };
-        }
-        const otherIsolationKeys = new Set();
-        const boundary = Math.min(maxMessageIndex, chat.length - 1);
-        let hasCurrentIsolationV2 = false;
-        for (let i = 0; i <= boundary; i += 1) {
-            const message = chat[i];
-            if (!message || message.is_user)
-                continue;
-            const isolatedData = message.TavernDB_ACU_IsolatedData;
-            if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData))
-                continue;
-            for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
-                if (!isV2TagData_ACU(tagData))
-                    continue;
-                if (isolationKey === currentIsolationKey) {
-                    hasCurrentIsolationV2 = true;
-                }
-                else {
-                    otherIsolationKeys.add(isolationKey);
-                }
-            }
-        }
-        return { hasCurrentIsolationV2, otherIsolationKeys: [...otherIsolationKeys] };
-    }
-    function collectManualRefillRollbackMessageIndices_ACU(chat, currentIsolationKey, contextScopeIndices) {
-        const indices = new Set(contextScopeIndices);
-        for (let i = 0; i < chat.length; i += 1) {
-            const message = chat[i];
-            if (!message || message.is_user)
-                continue;
-            const tagData = message.TavernDB_ACU_IsolatedData?.[currentIsolationKey];
-            if (!isV2TagData_ACU(tagData))
-                continue;
-            if (tagData.storageFrame.checkpoint?.kind === 'full')
-                indices.add(i);
-        }
-        return [...indices].sort((a, b) => a - b);
-    }
-    async function ensureManualRefillV2ReplayBoundary_ACU(chat, currentIsolationKey, maxMessageIndex) {
-        const boundary = scanManualRefillV2ReplayBoundary_ACU(chat, currentIsolationKey, maxMessageIndex);
-        if (!boundary.hasCurrentIsolationV2) {
-            if (boundary.otherIsolationKeys.length > 0) {
-                return { success: false, code: 'isolation_mismatch', error: `手动重填中止：目标前存在其他 isolationKey 的 V2 数据（${boundary.otherIsolationKeys.join(', ')}），当前 isolationKey 不匹配。` };
-            }
-            return { success: true };
-        }
-        try {
-            const replayedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, { maxMessageIndex });
-            if (replayedData)
-                return { success: true };
-            return { success: false, code: 'no_full_checkpoint_replayable', error: '手动重填中止：找不到可用 full checkpoint，无法安全回放到重填起点前。' };
-        }
-        catch (error) {
-            return { success: false, code: 'replay_failed', error: error?.message || '手动重填中止：V2 数据回放失败，无法安全回放到重填起点前。' };
-        }
-    }
     function buildGuideOrTemplateMergeBase_ACU(batchNumber) {
         const batchIsoKey = getCurrentIsolationKey_ACU();
         const sheetGuideForBatch = getChatSheetGuideDataForIsolationKey_ACU(batchIsoKey);
@@ -43003,42 +43068,10 @@ $CONTENT
         }
     }
     /**
-     * 手动更新编排（纯业务逻辑）
-     * 从 handleManualUpdate_ACU 提取。不驱动 UI，只返回结果。
-     * presentation 层负责：收集 manualSelection、设置 manualExtraHint、刷新 UI、显示 toast、弹出确认框。
-     *
-     * @param targetKeys 手动选择的目标表格键列表
-     * @param processBatch 批处理执行回调
-     * @param refreshData 数据刷新回调
-     * @param options 可选参数：
-     *   - clearBeforeUpdate: 兼容旧调用名；启用事务式手动重填。首次重填会清理目标范围内选中表本地数据，匹配续跑进度时不预清理。
+     * 手动更新编排：计算范围、原子清理、重载运行时状态，再委托共享执行器。
+     * 不维护手动专属 checkpoint、续跑或整会话回滚状态。
      */
-    async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData, options = {}) {
-        let manualRefillSessionSnapshot = null;
-        let manualRefillRollbackAttempted = false;
-        const rollbackManualRefillSession = async () => {
-            if (!manualRefillSessionSnapshot || manualRefillRollbackAttempted)
-                return undefined;
-            manualRefillRollbackAttempted = true;
-            try {
-                await restoreManualRefillSessionSnapshotAtomic_ACU(manualRefillSessionSnapshot, getCurrentIsolationKey_ACU(), targetKeys);
-                await loadAllChatMessages_ACU();
-                await refreshData();
-                return undefined;
-            }
-            catch (error) {
-                const rollbackError = error?.message || String(error || '未知回滚错误');
-                logError_ACU('[Manual Refill] 手动重填会话回滚失败:', error);
-                return rollbackError;
-            }
-        };
-        const failManualRefillSession = async (failureError) => {
-            const rollbackError = await rollbackManualRefillSession();
-            return {
-                success: false,
-                error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError,
-            };
-        };
+    async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData, options) {
         try {
             if (isAutoUpdatingCard_ACU$1) {
                 return { success: false, error: '数据库更新正在进行中，请稍候...' };
@@ -43046,7 +43079,9 @@ $CONTENT
             if (!coreApisAreReady_ACU) {
                 return { success: false, error: 'API未就绪。' };
             }
-            const apiIsConfigured = (settings_ACU.apiMode === 'custom' && (settings_ACU.apiConfig.useMainApi || (settings_ACU.apiConfig.url && settings_ACU.apiConfig.model))) || (settings_ACU.apiMode === 'tavern' && settings_ACU.tavernProfile);
+            const apiIsConfigured = (settings_ACU.apiMode === 'custom'
+                && (settings_ACU.apiConfig.useMainApi || (settings_ACU.apiConfig.url && settings_ACU.apiConfig.model)))
+                || (settings_ACU.apiMode === 'tavern' && settings_ACU.tavernProfile);
             if (!apiIsConfigured) {
                 return { success: false, error: 'API未配置，无法更新数据库。' };
             }
@@ -43056,305 +43091,71 @@ $CONTENT
                 return { success: false, error: '数据库未加载。' };
             }
             const liveChat = getChatArray_ACU();
-            if (!liveChat || liveChat.length === 0) {
+            if (!Array.isArray(liveChat) || liveChat.length === 0) {
                 return { success: false, error: '聊天记录为空，无法更新。' };
             }
-            const allAiMessageIndices = liveChat
-                .map((msg, index) => !msg.is_user ? index : -1)
-                .filter((index) => index !== -1);
-            if (allAiMessageIndices.length === 0) {
-                return { success: false, error: '尚未检测到AI回复，无法执行手动更新。' };
-            }
-            if (!targetKeys.length) {
-                return { success: false, error: '未选择需要更新的表格。' };
-            }
-            const uiThreshold = settings_ACU.autoUpdateThreshold || 3;
-            const uiBatchSize = settings_ACU.updateBatchSize || 3;
-            const uiSkip = settings_ACU.skipUpdateFloors || 0;
-            const effectiveAiIndices = uiSkip > 0 ? allAiMessageIndices.slice(0, -uiSkip) : allAiMessageIndices.slice();
-            const contextScopeIndices = uiThreshold > 0 ? effectiveAiIndices.slice(-uiThreshold) : effectiveAiIndices;
-            if (!contextScopeIndices.length) {
-                return { success: false, error: '未找到可用的上下文进行手动更新，请检查阈值或跳过楼层设置。' };
-            }
-            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
-            const updateGroups = {};
-            targetKeys.forEach((sheetKey) => {
-                const tableConfig = templateData?.[sheetKey]?.updateConfig || {};
-                const tableGroupId = Number.isFinite(tableConfig?.groupId)
-                    ? Math.trunc(tableConfig.groupId)
-                    : -1;
-                // 手动更新只尊重分组 ID。updateFrequency/contextDepth/skipFloors 属于自动更新调度参数，
-                // 混入手动路径会让用户选择被模板参数悄悄改写，属于职责污染。
-                const groupKey = `${tableGroupId}|${contextScopeIndices.join(',')}|${uiBatchSize}`;
-                if (!updateGroups[groupKey]) {
-                    updateGroups[groupKey] = {
-                        indices: contextScopeIndices,
-                        batchSize: uiBatchSize,
-                        groupId: tableGroupId,
-                        sheetKeys: []
-                    };
-                }
-                updateGroups[groupKey].sheetKeys.push(sheetKey);
-            });
-            const groupKeys = Object.keys(updateGroups);
-            const manualRefillEnabled = options.clearBeforeUpdate === true;
-            const lastEffectiveAiIndex = effectiveAiIndices[effectiveAiIndices.length - 1];
-            const manualRefillUsesLatestRuntimeBase = manualRefillEnabled && uiSkip === 0 && contextScopeIndices[contextScopeIndices.length - 1] === lastEffectiveAiIndex;
-            const manualRefillMergeBaseMaxMessageIndex = manualRefillEnabled && !manualRefillUsesLatestRuntimeBase ? contextScopeIndices[0] - 1 : undefined;
-            let manualRefillRequiresFinalSnapshot = false;
-            if (manualRefillEnabled) {
-                const currentIsolationKey = getCurrentIsolationKey_ACU();
-                const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
-                manualRefillSessionSnapshot = captureManualRefillSessionSnapshot_ACU(rollbackMessageIndices);
-                const initialBaseline = buildGuideOrTemplateMergeBase_ACU(0);
-                if (!initialBaseline.data) {
-                    return await failManualRefillSession(initialBaseline.error || '手动重填无法从当前表格指导或模板构造临时基底。');
-                }
-                const baselineResult = await ensureManualRefillInitialBaseline_ACU({
-                    isolationKey: currentIsolationKey,
-                    targetMessageIndex: contextScopeIndices[0],
-                    data: initialBaseline.data,
-                    save: true,
-                });
-                if (!baselineResult.success) {
-                    return await failManualRefillSession(baselineResult.error || '手动重填临时基底建立失败。');
-                }
-                if (baselineResult.changed) {
-                    logDebug_ACU(`[Manual Refill] 已将 initial baseline 从 AI 楼层 #${baselineResult.movedFromMessageIndex} 前移到重填边界 #${baselineResult.targetMessageIndex}。`);
-                }
-                const replayBoundaryCheck = await ensureManualRefillV2ReplayBoundary_ACU(liveChat, currentIsolationKey, contextScopeIndices[0]);
-                if (replayBoundaryCheck.success === false) {
-                    if (replayBoundaryCheck.code !== 'no_full_checkpoint_replayable') {
-                        return await failManualRefillSession(replayBoundaryCheck.error);
-                    }
-                    if (options.confirmBoundaryReset !== true) {
-                        const rollbackError = await rollbackManualRefillSession();
-                        if (rollbackError) {
-                            return { success: false, error: `${replayBoundaryCheck.error}；临时基底回滚失败：${rollbackError}` };
-                        }
-                        return {
-                            success: false,
-                            requiresUserConfirmation: {
-                                reason: 'manual_refill_replace_sheet_baseline',
-                                replayErrorCode: replayBoundaryCheck.code,
-                                message: replayBoundaryCheck.error,
-                                contextScopeIndices: [...contextScopeIndices],
-                                targetSheetKeys: [...targetKeys],
-                            },
-                        };
-                    }
-                    try {
-                        // 重填起点之前没有可回放的目标表基底时，bounded merge base 只能是指导表/模板。
-                        // 模板只能服务本轮 prompt，绝不能提前写成 sheet_full；它会在重入时整表覆盖历史。
-                        await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
-                    }
-                    catch (error) {
-                        logError_ACU('[Manual Refill] 确认后清理选中表旧数据失败:', error);
-                        const rollbackError = await rollbackManualRefillSession();
-                        const failureError = error?.message || '手动重填确认后清理选中表旧数据失败。';
-                        return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-                    }
-                    manualRefillRequiresFinalSnapshot = true;
-                    logWarn_ACU(`[Manual Refill] ${replayBoundaryCheck.error} 用户已确认手动重填，已清理本次范围内选中表旧数据；将在全部重填成功后提交完整单表 checkpoint。`);
-                }
-                else {
-                    try {
-                        await clearManualRefillIncrementalDataInRange_ACU(contextScopeIndices, targetKeys);
-                    }
-                    catch (error) {
-                        logError_ACU('[Manual Refill] 启动前清理选中表范围内旧数据失败:', error);
-                        const failureError = error?.message || '手动重填启动前清理选中表范围内旧数据失败。';
-                        return await failManualRefillSession(failureError);
-                    }
-                }
-                try {
-                    // 清理历史 V2 数据后必须刷新 SQLite/runtime 快照，
-                    // 否则 AI prompt 基底会继续读到清理前的旧 chronicle 行（test6.8 类事故）。
-                    await reloadStorageProvider();
-                }
-                catch (error) {
-                    logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
-                    const rollbackError = await rollbackManualRefillSession();
-                    const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
-                    return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-                }
-                logDebug_ACU(`[Manual Refill] 已清理选中表范围内旧数据并刷新运行时快照，将按普通手动填写路径重写 ${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}。`);
-                if (!manualRefillUsesLatestRuntimeBase) {
-                    logDebug_ACU(`[Manual Refill] 当前重填范围不是有效 AI 尾部，将使用 <=${manualRefillMergeBaseMaxMessageIndex} 的 bounded replay 基底，避免未来楼层污染 prompt。`);
-                }
-            }
-            _set_isAutoUpdatingCard_ACU$1(true);
-            const maxConcurrentGroups = Math.max(1, Number(settings_ACU.maxConcurrentGroups) || 1);
-            const totalChunks = Math.max(1, Math.ceil(groupKeys.length / maxConcurrentGroups));
-            const failedGroups = [];
-            logDebug_ACU(`[Manual Update] 分组计划：选中 ${targetKeys.length} 张表，生成 ${groupKeys.length} 个组，最大并发组数 ${maxConcurrentGroups}。`);
-            for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
-                const chunkIndex = Math.floor(start / maxConcurrentGroups) + 1;
-                const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
-                const groupedChunk = chunkKeys.map((gKey) => {
-                    const group = updateGroups[gKey];
-                    let effectiveRequestOptions = null;
-                    if (Array.isArray(group.sheetKeys) && group.sheetKeys.length > 0) {
-                        const firstSheetKey = group.sheetKeys[0];
-                        const firstTableName = templateData?.[firstSheetKey]?.name || '';
-                        const resolvedPreset = resolveTableApiPresetOverride_ACU(firstTableName);
-                        if (resolvedPreset) {
-                            effectiveRequestOptions = { tableApiPreset: resolvedPreset };
-                        }
-                    }
-                    return {
-                        key: gKey,
-                        groupId: group.groupId,
-                        indices: group.indices,
-                        batchSize: group.batchSize,
-                        sheetKeys: group.sheetKeys,
-                        requestOptions: effectiveRequestOptions,
-                        mergeBaseMaxMessageIndex: manualRefillMergeBaseMaxMessageIndex,
-                        useLatestRuntimeMergeBase: manualRefillUsesLatestRuntimeBase,
-                    };
-                });
-                logDebug_ACU(`[Manual Update] 并发处理第 ${chunkIndex}/${totalChunks} 批，当前 ${groupedChunk.length} 组：${groupedChunk.map(group => `${group.key}(${group.sheetKeys.join(',')})`).join('; ')}`);
-                options.onProgress?.({
-                    phase: 'preparing',
-                    message: `并发处理第 ${chunkIndex}/${totalChunks} 批，当前 ${groupedChunk.length} 组。`,
-                });
-                try {
-                    await loadAllChatMessages_ACU();
-                    if (!manualRefillEnabled && shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()) {
-                        const boundaryCheckpoint = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
-                        if (!boundaryCheckpoint.success) {
-                            failedGroups.push({
-                                key: chunkKeys[0] || 'manual_boundary_checkpoint',
-                                error: boundaryCheckpoint.error || 'AI 楼层边界 checkpoint 建立失败，已停止手动更新以避免跳楼推进。',
-                            });
-                            break;
-                        }
-                    }
-                }
-                catch (checkpointError) {
-                    logError_ACU('[Manual Update] 继续下一批前同步聊天并建立 AI 楼层边界 checkpoint 异常详情:', checkpointError);
-                    failedGroups.push({
-                        key: chunkKeys[0] || 'manual_boundary_checkpoint',
-                        error: checkpointError?.message || 'AI 楼层边界 checkpoint 建立异常，已停止手动更新以避免跳楼推进。',
-                    });
-                    break;
-                }
-                try {
-                    const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
-                        onProgress: options.onProgress,
-                    });
-                    if (!chunkResult.success) {
-                        chunkResult.failedGroups.forEach(key => {
-                            failedGroups.push({ key, error: chunkResult.error || '手动更新失败或被终止。' });
-                        });
-                    }
-                    // 并发组内禁止每组单独刷新；填表保存后 currentJsonTableData_ACU 已由本轮 workingTableData 更新。
-                    // 这里只同步聊天数组，避免刚保存完又通过 refreshData 触发历史回放/重建。
-                    await loadAllChatMessages_ACU();
-                }
-                catch (error) {
-                    const failureError = error?.message || String(error || '手动重填分组执行异常。');
-                    logError_ACU('[Manual Refill] 分组执行或同步聊天失败:', error);
-                    return await failManualRefillSession(failureError);
-                }
-                if (failedGroups.length > 0) {
-                    break;
-                }
-            }
-            _set_isAutoUpdatingCard_ACU$1(false);
-            if (failedGroups.length > 0) {
-                const rollbackError = await rollbackManualRefillSession();
-                if (!manualRefillSessionSnapshot) {
-                    // 填表失败时，processUpdatesBatch 内部的 loadBatchBaseData 可能已覆盖运行时数据；
-                    // 非会话补偿路径仍需从聊天恢复运行时状态。
-                    try {
-                        await loadAllChatMessages_ACU();
-                        await refreshData();
-                    }
-                    catch (error) {
-                        logWarn_ACU('[Manual Update] 填表失败后恢复数据时出错:', error);
-                    }
-                }
-                const firstFailure = failedGroups[0];
-                const failureError = firstFailure.error || '手动更新失败或被终止。';
-                return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-            }
-            if (wasStoppedByUser_ACU$1) {
-                const rollbackError = await rollbackManualRefillSession();
-                const failureError = '手动更新已终止。';
-                return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-            }
-            if (manualRefillRequiresFinalSnapshot) {
-                const completedData = getRuntimeTableDataSnapshot_ACU();
-                if (!completedData) {
-                    const rollbackError = await rollbackManualRefillSession();
-                    const failureError = '手动重填已完成，但无法从运行时导出完整恢复快照；已拒绝写入不完整 checkpoint。';
-                    return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-                }
-                try {
-                    const snapshotResult = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
-                        isolationKey: getCurrentIsolationKey_ACU(),
-                        targetMessageIndices: contextScopeIndices,
-                        targetSheetKeys: targetKeys,
-                        snapshotData: completedData,
-                    });
-                    if (!snapshotResult.success) {
-                        logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 失败:', snapshotResult.error);
-                        return await failManualRefillSession(snapshotResult.error || '手动重填完成后提交完整单表 checkpoint 失败。');
-                    }
-                }
-                catch (error) {
-                    const failureError = error?.message || String(error || '手动重填完成后提交完整单表 checkpoint 异常。');
-                    logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 异常:', error);
-                    return await failManualRefillSession(failureError);
-                }
-            }
-            let checkpointWarning;
+            let plan;
             try {
-                await loadAllChatMessages_ACU();
-                const boundaryCheckpoint = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
-                if (!boundaryCheckpoint.success) {
-                    checkpointWarning = boundaryCheckpoint.error || '边界 checkpoint 建立失败。';
-                    logWarn_ACU(`[Manual Update] 手动填表完成，但边界 checkpoint 建立失败: ${checkpointWarning}`);
-                }
+                plan = buildManualUpdatePlan_ACU(liveChat, currentJsonTableData_ACU, targetKeys, {
+                    contextDepth: options.contextDepth,
+                    skipFloors: options.skipFloors,
+                    batchSize: options.batchSize,
+                });
             }
             catch (error) {
-                checkpointWarning = error?.message || String(error || '边界 checkpoint 建立异常。');
-                logWarn_ACU(`[Manual Update] 手动填表完成，但边界 checkpoint 建立异常: ${checkpointWarning}`);
-                logError_ACU('[Manual Update] 边界 checkpoint 建立异常详情:', error);
+                return { success: false, error: error?.message || String(error || '手动更新计划构建失败。') };
             }
-            // 手动更新完成后检测自动合并总结
-            let autoMergeTriggered = false;
-            let autoMergeSuccess = false;
+            const targetMessageIndices = plan.tablesToUpdate[0]?.indices;
+            if (!targetMessageIndices?.length) {
+                return { success: false, error: '手动填表范围为空，没有可重新填写的 AI 消息。' };
+            }
             try {
-                const trigger = checkAutoMergeTrigger_ACU();
-                if (trigger.shouldTrigger) {
-                    autoMergeTriggered = true;
-                    const prepared = prepareAutoMergeBatches_ACU({
-                        startIndex: 0, endIndex: trigger.mergeCount, targetCount: 1,
-                        batchSize: 5, promptTemplate: '', isAutoMode: true,
-                    });
-                    let acc = [];
-                    for (let i = 0; i < prepared.batches.length; i++) {
-                        const batchResult = await executeAutoMergeBatch_ACU(prepared, prepared.batches[i], acc);
-                        acc = batchResult.accumulatedSummary;
+                await clearManualRefillSheetDataInRange_ACU(targetMessageIndices, targetKeys);
+            }
+            catch (error) {
+                logError_ACU('[Manual Refill] 清理选中表范围内旧数据失败:', error);
+                return { success: false, error: error?.message || '手动重填启动前清理选中表范围内旧数据失败。' };
+            }
+            try {
+                await reloadStorageProvider();
+            }
+            catch (error) {
+                logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
+                return { success: false, error: error?.message || '手动重填清理后刷新运行时快照失败。' };
+            }
+            const tableData = currentJsonTableData_ACU;
+            const result = await executeAutoUpdatePlan_ACU(plan, {}, _set_isAutoUpdatingCard_ACU$1, {
+                processUpdates: processBatch,
+                ...(!isSqliteMode()
+                    ? {
+                        processGroupedUpdates: (groups, mode, executionOptions) => processGroupedRuntimeChunk_ACU(groups, mode, executionOptions),
                     }
-                    await finalizeAutoMerge_ACU(prepared, acc);
-                    autoMergeSuccess = true;
-                }
-            }
-            catch (e) {
-                logWarn_ACU('自动合并总结检测失败:', e);
-            }
-            return { success: true, autoMergeTriggered, autoMergeSuccess, checkpointWarning };
+                    : {}),
+                refreshData,
+                loadAllChatMessages: loadAllChatMessages_ACU,
+                purgeOldLayerData: async () => undefined,
+            }, {
+                mode: 'manual_independent',
+                maxConcurrentGroups: options.maxConcurrentGroups,
+                processOptions: { onProgress: options.onProgress },
+                purgeOldLayerData: false,
+                resolveRequestOptions: (_groupKey, group) => {
+                    const tableName = tableData?.[group.sheetKeys[0]]?.name || '';
+                    const preset = resolveTableApiPresetOverride_ACU(tableName);
+                    return preset ? { tableApiPreset: preset } : null;
+                },
+            });
+            return {
+                success: result.success,
+                ...(result.errors?.length ? { error: result.errors[0] } : {}),
+                autoMergeTriggered: result.autoMergeTriggered,
+                autoMergeSuccess: result.autoMergeSuccess,
+            };
         }
         catch (error) {
-            if (!manualRefillSessionSnapshot) {
-                throw error;
-            }
             const failureError = error?.message || String(error || '手动更新执行异常。');
             logError_ACU('[Manual Update] 执行过程中发生未处理异常:', error);
-            return await failManualRefillSession(failureError);
+            return { success: false, error: failureError };
         }
         finally {
             _set_manualExtraHint_ACU$1('');
@@ -46424,6 +46225,22 @@ $CONTENT
     function formatLegacyAiFloorRange_ACU(startAiFloor, endAiFloor) {
         return startAiFloor === endAiFloor ? `AI 第 ${startAiFloor} 层` : `AI 第 ${startAiFloor}~${endAiFloor} 层`;
     }
+    function normalizeLegacyNonNegativeInteger_ACU(value, fallback) {
+        if (value === null || value === undefined || value === '')
+            return fallback;
+        const numericValue = Number(value);
+        if (!Number.isFinite(numericValue) || numericValue < 0)
+            return fallback;
+        return Math.floor(numericValue);
+    }
+    function normalizeLegacyPositiveInteger_ACU(value, fallback) {
+        if (value === null || value === undefined || value === '')
+            return fallback;
+        const numericValue = Number(value);
+        if (!Number.isFinite(numericValue) || numericValue < 1)
+            return fallback;
+        return Math.floor(numericValue);
+    }
     function buildLegacySelectedSheetSummary_ACU(targetKeys) {
         const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object' ? currentJsonTableData_ACU : null;
         return targetKeys.map(key => `${String(tables?.[key]?.name || key)}（${key}）`).join('、');
@@ -46448,8 +46265,8 @@ $CONTENT
                 .map((msg, index) => msg && !msg.is_user ? { index, aiFloor: 0 } : null)
                 .filter((item) => item !== null);
             aiItems.forEach((item, index) => { item.aiFloor = index + 1; });
-            const skip = Number.isFinite(Number(settings_ACU.skipUpdateFloors)) ? Math.max(0, Math.floor(Number(settings_ACU.skipUpdateFloors))) : 0;
-            const manualDepth = Number.isFinite(Number(settings_ACU.manualUpdateContextDepth)) && Number(settings_ACU.manualUpdateContextDepth) > 0 ? Math.floor(Number(settings_ACU.manualUpdateContextDepth)) : aiItems.length;
+            const skip = normalizeLegacyNonNegativeInteger_ACU(settings_ACU.manualUpdateSkipFloors, 0);
+            const manualDepth = normalizeLegacyNonNegativeInteger_ACU(settings_ACU.manualUpdateContextDepth, 3);
             const effectiveAiItems = skip > 0 ? aiItems.slice(0, -skip) : aiItems.slice();
             const contextItems = manualDepth > 0 ? effectiveAiItems.slice(-manualDepth) : effectiveAiItems;
             if (!contextItems.length)
@@ -46619,19 +46436,16 @@ $CONTENT
             const selectedSheetSummary = buildLegacySelectedSheetSummary_ACU(targetKeys);
             const checkpointFloorsLabel = buildLegacyCheckpointFloorsLabel_ACU();
             const manualRefillRangeLabel = buildLegacyManualRefillRangeLabel_ACU();
-            // 弹出确认框：手动填表将使用事务式重填，失败不会改动聊天记录中的旧数据
+            // 弹出确认框：明确清理发生在 AI 调用前，且后续失败不做整会话回滚。
             const confirmed = await showCustomConfirm_ACU('手动填表确认', `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel}\n本次重填范围：${manualRefillRangeLabel}\n选中表：${selectedSheetSummary}\n\n` +
-                '系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表。\n' +
-                '常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹，并在全部成功后写入手动重填进度记录。\n' +
-                '如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认；只有你在第二次确认中授权后，才会替换本次范围内选中表的旧 checkpoint 基底并写入新的单表 checkpoint。\n' +
-                '保留边界 checkpoint 会按 AI 回复楼层计数，在达到保留窗口和 20 个 AI 楼层缓冲后自动滚动建立。\n' +
-                '取消、失败、终止或从中断处继续时，都不会清空本次重填范围之外的聊天记录表格数据，也不会在未二次确认时替换 checkpoint 基底。', { confirmLabel: '确认并继续', cancelLabel: '取消' });
+                '系统会先原子清除本次范围内选中表的旧数据，再重新加载存储并按批次填表。范围外消息、未选中的表和其他隔离标签不会被清理。\n' +
+                '清理成功后，即使后续 AI 请求、解析或写入失败，已清理的数据和已成功写入的批次也会保留，不会执行整会话回滚。', { confirmLabel: '确认并继续', cancelLabel: '取消' });
             if (!confirmed) {
                 logDebug_ACU('[更新流程] 用户取消了手动填表确认框');
                 showToastr_ACU('info', '已取消手动填表。');
                 return;
             }
-            // 调用 service 层，启用事务式手动重填（兼容沿用 clearBeforeUpdate 参数名）
+            // 调用 service 层，按显式手动参数执行范围清理与重新填表。
             _set_wasStoppedByUser_ACU$1(false);
             notifyTableFillStart();
             const stopButtonId = `acu-stop-manual-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -46646,7 +46460,6 @@ $CONTENT
                         bindTableFillStopButton_ACU(stopButtonId, () => {
                             _set_wasStoppedByUser_ACU$1(true);
                             abortAllActiveRequests_ACU$1();
-                            _set_isAutoUpdatingCard_ACU$1(false);
                             updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
                             updateLoadingToastMessage(manualProgressToast, '填表任务已终止，正在停止当前任务与后续批次...');
                             showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
@@ -46654,46 +46467,26 @@ $CONTENT
                     }
                 },
             });
-            let result = await orchestrateManualUpdate_ACU(targetKeys,
-            // processBatch 回调保留给兼容路径；当前手动填表主路径由 service grouped helper 执行。
+            const result = await orchestrateManualUpdate_ACU(targetKeys,
+            // SQLite 运行时由 service 编排器回退到 processBatch；native 运行时使用 grouped helper。
             async (indices, batchMode, batchOptions) => {
                 return processUpdates_ACU(indices, batchMode, batchOptions);
             },
             // refreshData 回调（纯数据刷新 + UI 刷新）
             async () => {
                 await refreshMergedDataAndNotifyWithUI_ACU();
-            },
-            // [新增] 传入用户确认后的预清空选项
-            {
-                clearBeforeUpdate: true,
+            }, {
+                contextDepth: normalizeLegacyNonNegativeInteger_ACU(settings_ACU.manualUpdateContextDepth, 3),
+                skipFloors: normalizeLegacyNonNegativeInteger_ACU(settings_ACU.manualUpdateSkipFloors, 0),
+                batchSize: normalizeLegacyPositiveInteger_ACU(settings_ACU.manualUpdateBatchSize, 3),
+                maxConcurrentGroups: normalizeLegacyPositiveInteger_ACU(settings_ACU.manualUpdateMaxConcurrentGroups, 1),
                 onProgress: event => handleProgressEvent(event, false, manualProgressToast),
             });
-            if (!result.success && result.requiresUserConfirmation) {
-                const request = result.requiresUserConfirmation;
-                const dangerConfirmed = await showCustomConfirm_ACU('破坏性手动重填确认', `${request.message}\n\n` +
-                    `高风险操作：确认后会在一次提交中删除本次重填范围内选中表的旧表基底，并写入新的单表 checkpoint，随后才继续本次手动填表。\n` +
-                    `目标表：${request.targetSheetKeys.join('、')}\n` +
-                    `目标消息索引：${request.contextScopeIndices.join('、')}\n\n` +
-                    '范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除。\n' +
-                    '此操作不可撤销。取消将不会执行基底替换，不会写入新的单表 checkpoint，也不会继续本次手动填表。', { confirmLabel: '我已了解风险，继续执行', cancelLabel: '取消' });
-                if (!dangerConfirmed) {
-                    clearLoadingToast(manualProgressToast);
-                    manualProgressToast = null;
-                    showToastr_ACU('info', '已取消破坏性基底替换。');
-                    return;
-                }
-                updateLoadingToastMessage(manualProgressToast, '已确认破坏性基底替换，继续手动填表。');
-                result = await orchestrateManualUpdate_ACU(targetKeys, async (indices, batchMode, batchOptions) => {
-                    return processUpdates_ACU(indices, batchMode, batchOptions);
-                }, async () => {
-                    await refreshMergedDataAndNotifyWithUI_ACU();
-                }, { clearBeforeUpdate: true, confirmBoundaryReset: true, onProgress: event => handleProgressEvent(event, false, manualProgressToast) });
-            }
             clearLoadingToast(manualProgressToast);
             manualProgressToast = null;
             // UI：根据返回值显示 toast
             if (result.success) {
-                showToastr_ACU(result.checkpointWarning ? 'warning' : 'success', result.checkpointWarning ? `手动更新完成，但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}` : '手动更新完成！');
+                showToastr_ACU('success', '手动更新完成！');
                 updateStatusDisplay();
                 notifyTableUpdate();
                 if (result.autoMergeTriggered && result.autoMergeSuccess) {
@@ -95266,47 +95059,32 @@ Expected function or array of functions, received type ${typeof value}.`
         saveSettings_ACU();
     }
     function normalizeNonNegativeInteger(value, fallback) {
+        if (value === null || value === undefined || value === '')
+            return fallback;
         const n = Number(value);
         if (!Number.isFinite(n) || n < 0)
             return fallback;
         return Math.floor(n);
     }
     function normalizePositiveInteger(value, fallback) {
+        if (value === null || value === undefined || value === '')
+            return fallback;
         const n = Number(value);
         if (!Number.isFinite(n) || n < 1)
             return fallback;
         return Math.floor(n);
     }
     function resolveManualContextDepth() {
-        const fallback = normalizeNonNegativeInteger(settings_ACU.autoUpdateThreshold, 3);
-        return settings_ACU.manualUpdateContextDepth == null
-            ? fallback
-            : normalizeNonNegativeInteger(settings_ACU.manualUpdateContextDepth, fallback);
+        return normalizeNonNegativeInteger(settings_ACU.manualUpdateContextDepth, 3);
     }
     function resolveManualBatchSize() {
-        const fallback = 3;
-        return settings_ACU.manualUpdateBatchSize == null
-            ? fallback
-            : normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, fallback);
+        return normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, 3);
     }
-    function applyManualSettingsForOrchestrator() {
-        const previousAutoUpdateThreshold = settings_ACU.autoUpdateThreshold;
-        const previousUpdateBatchSize = settings_ACU.updateBatchSize;
-        // orchestrateManualUpdate_ACU still reads the legacy automatic settings.
-        // Keep the temporary bridge local to this UI action so the independent
-        // manual fields do not persist back into automatic update configuration.
-        settings_ACU.autoUpdateThreshold = manualDepthForOrchestrator_ACU(settings_ACU.manualUpdateContextDepth, previousAutoUpdateThreshold);
-        settings_ACU.updateBatchSize = normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, normalizePositiveInteger(previousUpdateBatchSize, 3));
-        return () => {
-            settings_ACU.autoUpdateThreshold = previousAutoUpdateThreshold;
-            settings_ACU.updateBatchSize = previousUpdateBatchSize;
-        };
+    function resolveManualSkipFloors() {
+        return normalizeNonNegativeInteger(settings_ACU.manualUpdateSkipFloors, 0);
     }
-    function manualDepthForOrchestrator_ACU(manualDepth, fallbackDepth) {
-        const fallback = normalizeNonNegativeInteger(fallbackDepth, 3);
-        return manualDepth == null
-            ? fallback
-            : normalizeNonNegativeInteger(manualDepth, fallback);
+    function resolveManualMaxConcurrentGroups() {
+        return normalizePositiveInteger(settings_ACU.manualUpdateMaxConcurrentGroups, 1);
     }
     function resolveManualRefillRangeSummary_ACU(manualDepth) {
         const chat = getChatArray_ACU();
@@ -95316,7 +95094,7 @@ Expected function or array of functions, received type ${typeof value}.`
             .map((msg, index) => (msg && !msg.is_user ? { index, aiFloor: 0 } : null))
             .filter((item) => item !== null);
         aiItems.forEach((item, idx) => { item.aiFloor = idx + 1; });
-        const skip = normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0);
+        const skip = resolveManualSkipFloors();
         const effectiveAiItems = skip > 0 ? aiItems.slice(0, -skip) : aiItems.slice();
         const contextItems = manualDepth > 0 ? effectiveAiItems.slice(-manualDepth) : effectiveAiItems;
         if (!contextItems.length)
@@ -95404,7 +95182,6 @@ Expected function or array of functions, received type ${typeof value}.`
             abortRequested = true;
             _set_wasStoppedByUser_ACU$1(true);
             abortAllActiveRequests_ACU$1();
-            _set_isAutoUpdatingCard_ACU$1(false);
             if (progressToastId) {
                 toast.update(progressToastId, 'warning', '手动填表已终止，正在停止当前任务与后续批次...', {
                     durationMs: 0,
@@ -95488,18 +95265,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 ? formatAiFloorRange_ACU(range.startAiFloor, range.endAiFloor)
                 : '暂无可重填 AI 楼层';
         });
-        const checkpointRiskMessage = computed(() => {
-            const checkpoints = checkpointFloors.value;
-            const range = manualRefillRange.value;
-            if (checkpoints.length === 0 || !range)
-                return '';
-            const checkpointIndexSet = new Set(range.indices);
-            const coveredCheckpoints = checkpoints.filter(item => checkpointIndexSet.has(item.messageIndex));
-            if (coveredCheckpoints.length !== checkpoints.length)
-                return '';
-            const coveredFloors = coveredCheckpoints.map(item => `AI 第 ${item.aiFloor} 层`).join('、');
-            return `危险：当前聊天的所有 full checkpoint 都在本次重填范围内（${coveredFloors}）。系统首次执行时只会做边界检查；如果确认缺少重填起点前可回放 checkpoint，会在下一步要求你单独确认是否替换本次范围内选中表的基底。`;
-        });
         const vectorIndexWarning = computed(() => {
             void refreshTick.value;
             try {
@@ -95547,16 +95312,14 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             const confirmed = await dialogStore.confirm({
                 title: '执行手动填表',
-                message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表。\n常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹，并在全部成功后写入手动重填进度记录。\n如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认；只有你在第二次确认中授权后，才会替换本次范围内选中表的旧 checkpoint 基底并写入新的单表 checkpoint。\n\n取消、失败、终止或从中断处继续时，不会清理本次重填范围之外的聊天记录表格数据，也不会在未二次确认时替换 checkpoint 基底。`,
-                dangerMessage: checkpointRiskMessage.value || undefined,
+                message: `即将执行手动填表。\n\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n系统会先原子清除本次范围内选中表的旧数据，再重新加载存储并按批次填表。范围外消息、未选中的表和其他隔离标签不会被清理。\n\n清理成功后，即使后续 AI 请求、解析或写入失败，已清理的数据和已成功写入的批次也会保留，不会执行整会话回滚。`,
+                dangerMessage: '确认后会立即清理目标范围内选中表的数据；清理成功后不会因后续失败而恢复。',
                 confirmLabel: '确认并继续',
                 cancelLabel: '取消',
-                confirmVariant: checkpointRiskMessage.value ? 'danger' : undefined,
+                confirmVariant: 'danger',
             });
             if (!confirmed)
                 return;
-            // 兼容沿用 clearBeforeUpdate 参数名；service 层实际执行事务式重填，不会预清空聊天记录。
-            const clearBeforeUpdate = true;
             const targetManualTableKeys = selectedManualTableKeys.value.slice();
             manualUpdateBusy.value = true;
             progressToastId = null;
@@ -95578,39 +95341,17 @@ Expected function or array of functions, received type ${typeof value}.`
             };
             const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress));
             try {
-                const executeManualUpdate = async (confirmBoundaryReset) => {
-                    const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
-                    try {
-                        return await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, { clearBeforeUpdate, confirmBoundaryReset, onProgress: handleProgress });
-                    }
-                    finally {
-                        restoreAutoUpdateSettings();
-                    }
-                };
-                let result = await executeManualUpdate(false);
-                if (!result.success && result.requiresUserConfirmation) {
-                    const request = result.requiresUserConfirmation;
-                    const dangerConfirmed = await dialogStore.confirm({
-                        title: '破坏性手动重填确认',
-                        message: `${request.message}\n\n高风险操作：确认后会在一次提交中删除本次重填范围内选中表的旧表基底，并写入新的单表 checkpoint，随后才继续本次手动填表。\n目标表：${request.targetSheetKeys.join('、')}\n目标消息索引：${request.contextScopeIndices.join('、')}\n\n范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除。`,
-                        dangerMessage: '此操作不可撤销。取消将不会执行基底替换，不会写入新的单表 checkpoint，也不会继续本次手动填表。',
-                        confirmLabel: '我已了解风险，继续执行',
-                        cancelLabel: '取消',
-                        confirmVariant: 'danger',
-                    });
-                    if (!dangerConfirmed) {
-                        finishToast('info', '已取消破坏性基底替换。');
-                        return;
-                    }
-                    notifyProgress('已确认破坏性基底替换，继续手动填表。');
-                    result = await executeManualUpdate(true);
-                }
-                finishToast(result.success ? (result.checkpointWarning ? 'warning' : 'success') : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'), result.success
+                const result = await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, {
+                    contextDepth: manualContextDepth.value,
+                    skipFloors: resolveManualSkipFloors(),
+                    batchSize: manualBatchSize.value,
+                    maxConcurrentGroups: resolveManualMaxConcurrentGroups(),
+                    onProgress: handleProgress,
+                });
+                finishToast(result.success ? 'success' : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'), result.success
                     ? `${result.autoMergeTriggered
                     ? `手动填表完成;自动合并总结${result.autoMergeSuccess ? '已完成' : '未完成'}。`
-                    : '手动填表完成。'}${result.checkpointWarning
-                    ? ` 但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}`
-                    : ''}`
+                    : '手动填表完成。'}`
                     : (abortRequested ? '手动填表任务已由用户终止。' : (result.error || '手动填表失败。')));
             }
             catch (error) {
@@ -95632,7 +95373,6 @@ Expected function or array of functions, received type ${typeof value}.`
             selectedSheetSummary,
             checkpointFloorsLabel,
             manualRefillRangeLabel,
-            checkpointRiskMessage,
             vectorIndexWarning,
             refresh,
             setManualContextDepth,
@@ -95672,8 +95412,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-27c723e6] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-27c723e6] {\n  grid-template-areas:\n    \"status update\"\n    \"manual template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-27c723e6] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-27c723e6] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-27c723e6] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-27c723e6] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-27c723e6] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-27c723e6] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-27c723e6] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-27c723e6] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-27c723e6] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-27c723e6] {\n  color: var(--acu-danger);\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-27c723e6] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-27c723e6] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-27c723e6],\n.acu-v2-form-fill-page__status-table td[data-v-27c723e6] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-27c723e6] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-27c723e6] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-27c723e6] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-27c723e6] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-27c723e6] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-27c723e6] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-27c723e6] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-27c723e6] {\n    grid-template-areas:\n      \"status\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-27c723e6] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-27c723e6");
-    var FormFillPage_vue_vue_type_style_index_0_scoped_27c723e6_lang = null;
+    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-13c7c067] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-13c7c067] {\n  grid-template-areas:\n    \"status update\"\n    \"manual template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-13c7c067] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-13c7c067] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-13c7c067] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-13c7c067] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-13c7c067] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-13c7c067] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-13c7c067] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-13c7c067] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-13c7c067] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-13c7c067] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-13c7c067] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-13c7c067],\n.acu-v2-form-fill-page__status-table td[data-v-13c7c067] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-13c7c067] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-13c7c067] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-13c7c067] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-13c7c067] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-13c7c067] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-13c7c067] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-13c7c067] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-13c7c067] {\n    grid-template-areas:\n      \"status\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-13c7c067] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-13c7c067");
+    var FormFillPage_vue_vue_type_style_index_0_scoped_13c7c067_lang = null;
 
     const _hoisted_1$x = { class: "acu-v2-form-fill-page" };
     const _hoisted_2$r = ["title"];
@@ -95950,7 +95690,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-27c723e6"]]);
+    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-13c7c067"]]);
 
     var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPromptDrawer',
@@ -96421,8 +96161,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-wb-entries[data-v-46d32aa9] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-46d32aa9] {\n  padding: 8px 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entry-item[data-v-46d32aa9] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 6px 8px;\n  align-items: center;\n  padding: 3px 10px;\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-46d32aa9]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-46d32aa9] {\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-46d32aa9] {\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-46d32aa9] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-46d32aa9] {\n  border-radius: 999px;\n  padding: 1px 6px;\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-46d32aa9] {\n  border-radius: 999px;\n  padding: 1px 6px;\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\n  color: var(--acu-warning);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-46d32aa9] {\n  grid-column: 1 / -1;\n  display: grid;\n  gap: 8px;\n  margin: 4px 0 6px 24px;\n  padding: 8px;\n  border: 1px solid var(--acu-border-1);\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-46d32aa9] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-46d32aa9] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-46d32aa9] {\n    justify-content: flex-start;\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-46d32aa9] {\n    margin-left: 0;\n}\n}\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-46d32aa9");
-    var WorldbookEntryList_vue_vue_type_style_index_0_scoped_46d32aa9_lang = null;
+    injectSfcStyle("\n.acu-v2-wb-entries[data-v-f718bc0f] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-f718bc0f] {\r\n  padding: 8px 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entry-item[data-v-f718bc0f] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 6px 8px;\r\n  align-items: center;\r\n  padding: 3px 10px;\r\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-f718bc0f]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-f718bc0f] {\r\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-f718bc0f] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-f718bc0f] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-f718bc0f] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-f718bc0f] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-f718bc0f] {\r\n  grid-column: 1 / -1;\r\n  display: grid;\r\n  gap: 8px;\r\n  margin: 4px 0 6px 24px;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-f718bc0f] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-f718bc0f] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-f718bc0f] {\r\n    justify-content: flex-start;\r\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-f718bc0f] {\r\n    margin-left: 0;\n}\n}\r\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-f718bc0f");
+    var WorldbookEntryList_vue_vue_type_style_index_0_scoped_f718bc0f_lang = null;
 
     const _hoisted_1$t = { class: "acu-v2-wb-entries" };
     const _hoisted_2$o = {
@@ -96612,7 +96352,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* KEYED_FRAGMENT */
 	))]);
     }
-    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-46d32aa9"]]);
+    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-f718bc0f"]]);
 
     var _sfc_main$s = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryToolbar',
@@ -96729,8 +96469,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-0560603a] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-0560603a] {\n  margin: 0;\n  font-size: var(--acu-font-size-caption, 11px);\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-0560603a] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n\n\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-0560603a");
-    var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_0560603a_lang = null;
+    injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-deaa0ff8] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-deaa0ff8] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-deaa0ff8] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n\r\n\r\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-deaa0ff8");
+    var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_deaa0ff8_lang = null;
 
     const _hoisted_1$r = { class: "acu-v2-wb-entry-picker" };
     const _hoisted_2$n = { class: "acu-v2-wb-entry-picker__hint" };
@@ -96789,7 +96529,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-0560603a"]]);
+    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-deaa0ff8"]]);
 
     /**
      * useFormFillInjectionTarget — 填表"注入目标世界书"（Component A，§4.2）
@@ -97900,8 +97640,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-plot-page[data-v-03918404] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-plot-page[data-v-03918404] { padding: 14px;\n}\n}\n", "src/presentation-v2/pages/PlotPage.vue#style-0-03918404");
-    var PlotPage_vue_vue_type_style_index_0_scoped_03918404_lang = null;
+    injectSfcStyle("\n.acu-v2-plot-page[data-v-be88e96f] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-plot-page[data-v-be88e96f] { padding: 14px;\n}\n}\r\n", "src/presentation-v2/pages/PlotPage.vue#style-0-be88e96f");
+    var PlotPage_vue_vue_type_style_index_0_scoped_be88e96f_lang = null;
 
     const _hoisted_1$o = { class: "acu-v2-plot-page" };
     function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
@@ -97949,7 +97689,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-03918404"]]);
+    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-be88e96f"]]);
 
     var _sfc_main$n = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentAdvancedPanel',
@@ -98134,8 +97874,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-agent-advanced[data-v-795dd3ba] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-795dd3ba] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-795dd3ba] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-795dd3ba] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-795dd3ba],\n.acu-agent-advanced__prompt-head h5[data-v-795dd3ba] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-795dd3ba] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-795dd3ba] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-795dd3ba] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-795dd3ba] .acu-form-row,\n.acu-agent-advanced[data-v-795dd3ba] .acu-form-row__control,\n.acu-agent-advanced[data-v-795dd3ba] .acu-input,\n.acu-agent-advanced[data-v-795dd3ba] .acu-segmented,\n.acu-agent-advanced[data-v-795dd3ba] .acu-prompt-segs {\n  min-width: 0;\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-795dd3ba] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-795dd3ba] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-795dd3ba] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-795dd3ba],\n  .acu-agent-advanced__prompt-head[data-v-795dd3ba] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-795dd3ba] { padding: 8px;\n}\n}\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-795dd3ba");
-    var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_795dd3ba_lang = null;
+    injectSfcStyle("\n.acu-agent-advanced[data-v-f7f926ca] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-f7f926ca] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-f7f926ca] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-f7f926ca] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-f7f926ca],\r\n.acu-agent-advanced__prompt-head h5[data-v-f7f926ca] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-f7f926ca] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-f7f926ca] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-f7f926ca] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-f7f926ca] .acu-form-row,\r\n.acu-agent-advanced[data-v-f7f926ca] .acu-form-row__control,\r\n.acu-agent-advanced[data-v-f7f926ca] .acu-input,\r\n.acu-agent-advanced[data-v-f7f926ca] .acu-segmented,\r\n.acu-agent-advanced[data-v-f7f926ca] .acu-prompt-segs {\r\n  min-width: 0;\r\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-f7f926ca] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-f7f926ca] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-f7f926ca] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-f7f926ca],\r\n  .acu-agent-advanced__prompt-head[data-v-f7f926ca] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-f7f926ca] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-f7f926ca");
+    var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_f7f926ca_lang = null;
 
     const _hoisted_1$n = { class: "acu-agent-advanced" };
     const _hoisted_2$l = { class: "acu-agent-advanced__section" };
@@ -98440,7 +98180,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-795dd3ba"]]);
+    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-f7f926ca"]]);
 
     var _sfc_main$m = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentControlBar',
@@ -105829,8 +105569,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-sidebar[data-v-8c88ae3d] {\n  min-width: 0;\n  min-height: 0;\n  background: var(--acu-sidebar-bg);\n  padding: var(--acu-space-6, 24px) var(--acu-space-3, 12px) var(--acu-panel-padding, 16px);\n  overflow-y: auto;\n}\n.acu-v2-sidebar--desktop[data-v-8c88ae3d] {\n  width: var(--acu-sidebar-width, 220px);\n  flex: 0 0 var(--acu-sidebar-width, 220px);\n  border-right: 1px solid var(--acu-border-2);\n}\n.acu-v2-sidebar--drawer[data-v-8c88ae3d] {\n  width: 100%;\n  flex: 1 1 auto;\n}\n.acu-v2-sidebar__brand[data-v-8c88ae3d] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-250, 10px);\n  padding: var(--acu-space-1, 4px) var(--acu-space-1, 4px) var(--acu-space-5, 20px);\n  margin-bottom: var(--acu-page-gap, 14px);\n}\n.acu-v2-sidebar__brand-mark[data-v-8c88ae3d] {\n  width: var(--acu-space-850, 34px);\n  height: var(--acu-space-850, 34px);\n  flex: 0 0 var(--acu-space-850, 34px);\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 700;\n  letter-spacing: 0.04em;\n}\n.acu-v2-sidebar__brand-copy[data-v-8c88ae3d] {\n  min-width: 0;\n  display: block;\n}\n.acu-v2-sidebar__brand-title[data-v-8c88ae3d] {\n  display: block;\n  font-size: var(--acu-font-size-panel-title, 15px);\n  line-height: 1.25;\n  font-weight: 700;\n  color: var(--acu-text-1);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-sidebar__brand-tag[data-v-8c88ae3d] {\n  display: block;\n  margin-top: var(--acu-space-075, 3px);\n  font-size: var(--acu-font-size-caption, 11px);\n  color: var(--acu-text-3);\n}\n.acu-v2-sidebar__group[data-v-8c88ae3d] {\n  margin-bottom: var(--acu-panel-gap, 12px);\n}\n.acu-v2-sidebar__mode[data-v-8c88ae3d] {\n  width: 100%;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: var(--acu-space-175, 7px);\n  min-height: var(--acu-control-height-md, 32px);\n  margin: 0 0 var(--acu-page-gap, 14px);\n  padding: var(--acu-space-175, 7px) var(--acu-space-250, 10px);\n  border: 1px solid var(--acu-border-2);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-1) 72%, transparent);\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  cursor: pointer;\n  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n.acu-v2-sidebar__mode[data-v-8c88ae3d]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n  border-color: var(--acu-border);\n}\n.acu-v2-sidebar__group-title[data-v-8c88ae3d] {\n  padding: var(--acu-space-175, 7px) var(--acu-space-3, 12px) var(--acu-space-150, 6px);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n  letter-spacing: 0.06em;\n  color: var(--acu-text-3);\n  text-transform: uppercase;\n}\n.acu-v2-sidebar__item[data-v-8c88ae3d] {\n  display: block;\n  width: 100%;\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\n  border: 0;\n  background: transparent;\n  text-align: left;\n  font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2);\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-sidebar__item[data-v-8c88ae3d]:not(.acu-v2-sidebar__item--active):hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-sidebar__item--active[data-v-8c88ae3d] {\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n  font-weight: 600;\n}\n", "src/presentation-v2/components/Sidebar.vue#style-0-8c88ae3d");
-    var Sidebar_vue_vue_type_style_index_0_scoped_8c88ae3d_lang = null;
+    injectSfcStyle("\n.acu-v2-sidebar[data-v-c74753dc] {\r\n  min-width: 0;\r\n  min-height: 0;\r\n  background: var(--acu-sidebar-bg);\r\n  padding: var(--acu-space-6, 24px) var(--acu-space-3, 12px) var(--acu-panel-padding, 16px);\r\n  overflow-y: auto;\n}\n.acu-v2-sidebar--desktop[data-v-c74753dc] {\r\n  width: var(--acu-sidebar-width, 220px);\r\n  flex: 0 0 var(--acu-sidebar-width, 220px);\r\n  border-right: 1px solid var(--acu-border-2);\n}\n.acu-v2-sidebar--drawer[data-v-c74753dc] {\r\n  width: 100%;\r\n  flex: 1 1 auto;\n}\n.acu-v2-sidebar__brand[data-v-c74753dc] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-1, 4px) var(--acu-space-1, 4px) var(--acu-space-5, 20px);\r\n  margin-bottom: var(--acu-page-gap, 14px);\n}\n.acu-v2-sidebar__brand-mark[data-v-c74753dc] {\r\n  width: var(--acu-space-850, 34px);\r\n  height: var(--acu-space-850, 34px);\r\n  flex: 0 0 var(--acu-space-850, 34px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 700;\r\n  letter-spacing: 0.04em;\n}\n.acu-v2-sidebar__brand-copy[data-v-c74753dc] {\r\n  min-width: 0;\r\n  display: block;\n}\n.acu-v2-sidebar__brand-title[data-v-c74753dc] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.25;\r\n  font-weight: 700;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-sidebar__brand-tag[data-v-c74753dc] {\r\n  display: block;\r\n  margin-top: var(--acu-space-075, 3px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-sidebar__group[data-v-c74753dc] {\r\n  margin-bottom: var(--acu-panel-gap, 12px);\n}\n.acu-v2-sidebar__mode[data-v-c74753dc] {\r\n  width: 100%;\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-175, 7px);\r\n  min-height: var(--acu-control-height-md, 32px);\r\n  margin: 0 0 var(--acu-page-gap, 14px);\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-250, 10px);\r\n  border: 1px solid var(--acu-border-2);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-1) 72%, transparent);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n.acu-v2-sidebar__mode[data-v-c74753dc]:hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\r\n  border-color: var(--acu-border);\n}\n.acu-v2-sidebar__group-title[data-v-c74753dc] {\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-3, 12px) var(--acu-space-150, 6px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 600;\r\n  letter-spacing: 0.06em;\r\n  color: var(--acu-text-3);\r\n  text-transform: uppercase;\n}\n.acu-v2-sidebar__item[data-v-c74753dc] {\r\n  display: block;\r\n  width: 100%;\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2);\r\n  cursor: pointer;\r\n  border-radius: var(--acu-radius-sm);\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-sidebar__item[data-v-c74753dc]:not(.acu-v2-sidebar__item--active):hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-sidebar__item--active[data-v-c74753dc] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-weight: 600;\n}\r\n", "src/presentation-v2/components/Sidebar.vue#style-0-c74753dc");
+    var Sidebar_vue_vue_type_style_index_0_scoped_c74753dc_lang = null;
 
     const _hoisted_1$8 = { class: "acu-v2-sidebar__brand" };
     const _hoisted_2$7 = { class: "acu-v2-sidebar__brand-copy" };
@@ -105934,7 +105674,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* CLASS */
 	);
     }
-    var Sidebar = /*#__PURE__*/ _export_sfc(_sfc_main$8, [["render", _sfc_render$8], ["__scopeId", "data-v-8c88ae3d"]]);
+    var Sidebar = /*#__PURE__*/ _export_sfc(_sfc_main$8, [["render", _sfc_render$8], ["__scopeId", "data-v-c74753dc"]]);
 
     const THEME_DEFAULT_LIGHT = {
         id: "default-light",
@@ -110645,8 +110385,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n#acu-app-v2 {\n  --acu-safe-top: max(env(safe-area-inset-top, 0px), var(--acu-native-safe-top, 0px));\n  --acu-safe-right: max(env(safe-area-inset-right, 0px), var(--acu-native-safe-right, 0px));\n  --acu-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--acu-native-safe-bottom, 0px));\n  --acu-safe-left: max(env(safe-area-inset-left, 0px), var(--acu-native-safe-left, 0px));\n  box-sizing: border-box;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n#acu-app-v2,#acu-app-v2 * {\n  box-sizing: border-box;\n}\n#acu-app-v2 button {\n  appearance: none;\n  -webkit-appearance: none;\n  -webkit-tap-highlight-color: transparent;\n}\n#acu-app-v2 button:focus:not(:focus-visible) {\n  outline: none;\n  box-shadow: none;\n}\n.acu-v2-app[data-v-24d7b6de] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__shell[data-v-24d7b6de] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  z-index: 9000;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__header[data-v-24d7b6de] {\n  position: relative;\n  z-index: 40;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  min-height: var(--acu-shell-header-height, 50px);\n  padding:\n    var(--acu-space-2, 8px)\n    var(--acu-space-3, 12px)\n    var(--acu-space-2, 8px)\n    var(--acu-space-5, 20px);\n  background: var(--acu-bg-0);\n  border-bottom: 1px solid var(--acu-border-2);\n  flex: 0 0 auto;\n}\n.acu-v2-app__header-left[data-v-24d7b6de] {\n  display: flex;\n  align-items: center;\n  min-width: 0;\n  gap: var(--acu-space-2, 8px);\n  flex: 1 1 auto;\n}\n.acu-v2-app__menu[data-v-24d7b6de] {\n  display: none;\n  flex: 0 0 auto;\n  font-size: var(--acu-font-size-body-lg, 13px);\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-v2-app__menu[data-v-24d7b6de]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-v2-app__page-title[data-v-24d7b6de] {\n  min-width: 0;\n  margin: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n  letter-spacing: 0;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__close[data-v-24d7b6de] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__close[data-v-24d7b6de]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__body[data-v-24d7b6de] {\n  flex: 1 1 auto;\n  display: flex;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__content[data-v-24d7b6de] {\n  flex: 1 1 auto;\n  display: flex;\n  flex-direction: column;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__mobile-nav-layer[data-v-24d7b6de] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9300;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: mobile-nav-layer-in-24d7b6de 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing[data-v-24d7b6de] {\n  pointer-events: auto;\n  animation: mobile-nav-layer-out-24d7b6de 0.15s ease-in both;\n}\n.acu-v2-app__mobile-nav[data-v-24d7b6de] {\n  width: var(--acu-mobile-nav-width, 360px);\n  max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 var(--acu-mobile-nav-width, 360px);\n  display: flex;\n  flex-direction: column;\n  background: var(--acu-sidebar-bg);\n  border-right: 0;\n  box-shadow: var(--acu-shadow);\n  overflow: hidden;\n  pointer-events: auto;\n  animation: mobile-nav-drawer-in-24d7b6de 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing .acu-v2-app__mobile-nav[data-v-24d7b6de] {\n  animation: mobile-nav-drawer-out-24d7b6de 0.15s ease-in both;\n}\n@supports (width: min(1px, 100%)) {\n.acu-v2-app__mobile-nav[data-v-24d7b6de] {\n    width: min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-v2-app__mobile-nav[data-v-24d7b6de] {\n    max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-v2-app__mobile-nav[data-v-24d7b6de] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n\n/* ── Theme switcher ── */\n.acu-v2-app__header-right[data-v-24d7b6de] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n}\n.acu-v2-app__theme-switcher[data-v-24d7b6de] {\n  position: relative;\n}\n.acu-v2-app__theme-btn[data-v-24d7b6de] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__theme-btn[data-v-24d7b6de]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-menu[data-v-24d7b6de] {\n  position: absolute;\n  top: calc(100% + var(--acu-menu-offset, 6px));\n  right: 0;\n  z-index: 10;\n  margin: 0;\n  padding: var(--acu-menu-padding, 4px);\n  width: min(var(--acu-menu-width, 300px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  min-width: min(var(--acu-menu-min-width, 240px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  background: var(--acu-bg-1);\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  box-shadow: var(--acu-shadow);\n  animation: theme-menu-in-24d7b6de 0.12s ease-out both;\n}\n.acu-v2-app__theme-menu.is-closing[data-v-24d7b6de] {\n  pointer-events: none;\n  animation: theme-menu-out-24d7b6de 0.12s ease-in both;\n}\n.acu-v2-app__appearance-section[data-v-24d7b6de] {\n  min-width: 0;\n}\n.acu-v2-app__appearance-section + .acu-v2-app__appearance-section[data-v-24d7b6de] {\n  margin-top: var(--acu-menu-section-gap, 8px);\n  padding-top: var(--acu-menu-section-gap, 8px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__appearance-section-title[data-v-24d7b6de] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 700;\n  letter-spacing: 0;\n}\n.acu-v2-app__theme-list[data-v-24d7b6de] {\n  list-style: none;\n  margin: var(--acu-space-1, 4px) 0 0;\n  padding: 0;\n}\n.acu-v2-app__theme-option[data-v-24d7b6de] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  padding: var(--acu-menu-option-padding-y, 7px) var(--acu-menu-option-padding-x, 10px);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2);\n  border-radius: var(--acu-radius-sm);\n  cursor: pointer;\n  user-select: none;\n}\n.acu-v2-app__theme-option[data-v-24d7b6de]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active[data-v-24d7b6de] {\n  color: var(--acu-on-accent);\n  background: var(--acu-accent);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option-main[data-v-24d7b6de] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-2, 8px);\n  min-width: 0;\n  flex: 1 1 auto;\n}\n.acu-v2-app__theme-name[data-v-24d7b6de] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__theme-tag[data-v-24d7b6de] {\n  flex: 0 0 auto;\n  padding: var(--acu-space-025, 1px) var(--acu-space-125, 5px);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-accent) 12%, transparent);\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-micro, 10px);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tag[data-v-24d7b6de] {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-24d7b6de] {\n  display: inline-flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n  opacity: 0.72;\n}\n.acu-v2-app__theme-tools[data-v-24d7b6de] .acu-icon-btn {\n  background: transparent;\n  color: inherit;\n}\n.acu-v2-app__theme-tools[data-v-24d7b6de] .acu-icon-btn:hover:not(:disabled) {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-24d7b6de] .acu-icon-btn:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-24d7b6de] .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n  color: var(--acu-danger);\n}\n.acu-v2-app__theme-option:hover .acu-v2-app__theme-tools[data-v-24d7b6de],\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-24d7b6de] {\n  opacity: 1;\n}\n.acu-v2-app__theme-swatch[data-v-24d7b6de] {\n  display: block;\n  width: var(--acu-menu-swatch-size, 18px);\n  height: var(--acu-menu-swatch-size, 18px);\n  border-radius: 999px;\n  flex: 0 0 var(--acu-menu-swatch-size, 18px);\n  background: linear-gradient(\n    135deg,\n    var(--acu-theme-swatch-bg) 0 56%,\n    var(--acu-theme-swatch-accent) 56% 100%\n  );\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-border-2) 72%, transparent);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-swatch[data-v-24d7b6de] {\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-on-accent) 62%, transparent);\n}\n.acu-v2-app__theme-menu-footer[data-v-24d7b6de] {\n  display: flex;\n  justify-content: stretch;\n  margin-top: var(--acu-space-1, 4px);\n  padding:\n    var(--acu-menu-option-padding-y, 7px)\n    var(--acu-space-150, 6px)\n    var(--acu-space-1, 4px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__theme-menu-footer[data-v-24d7b6de] .acu-file-button,\n.acu-v2-app__theme-menu-footer[data-v-24d7b6de] .acu-btn {\n  width: 100%;\n}\n.acu-v2-app__scale-heading[data-v-24d7b6de] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  margin-bottom: var(--acu-space-175, 7px);\n}\n.acu-v2-app__scale-current[data-v-24d7b6de] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-v2-app__scale-control[data-v-24d7b6de] {\n  width: 100%;\n}\n@keyframes theme-menu-in-24d7b6de {\nfrom {\n    opacity: 0;\n    transform: translateY(-4px);\n}\nto {\n    opacity: 1;\n    transform: translateY(0);\n}\n}\n@keyframes theme-menu-out-24d7b6de {\nfrom {\n    opacity: 1;\n    transform: translateY(0);\n}\nto {\n    opacity: 0;\n    transform: translateY(-4px);\n}\n}\n@keyframes mobile-nav-layer-in-24d7b6de {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes mobile-nav-drawer-in-24d7b6de {\nfrom { transform: translateX(-100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes mobile-nav-layer-out-24d7b6de {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes mobile-nav-drawer-out-24d7b6de {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(-100%);\n}\n}\n@media (max-width: 720px) {\n.acu-v2-app__header[data-v-24d7b6de] {\n    min-height: var(--acu-shell-header-height-compact, 48px);\n    padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\n}\n.acu-v2-app__header-left[data-v-24d7b6de] {\n    gap: var(--acu-space-150, 6px);\n}\n.acu-v2-app__menu[data-v-24d7b6de] {\n    display: inline-flex;\n}\n.acu-v2-app__page-title[data-v-24d7b6de] {\n    font-size: var(--acu-font-size-page-title-compact, 18px);\n}\n.acu-v2-app__desktop-sidebar[data-v-24d7b6de] {\n    display: none;\n}\n.acu-v2-app__mobile-nav-layer[data-v-24d7b6de] {\n    display: flex;\n}\n}\n", "src/presentation-v2/App.vue#style-0-24d7b6de");
-    var App_vue_vue_type_style_index_0_scoped_24d7b6de_lang = null;
+    injectSfcStyle("\n#acu-app-v2 {\r\n  --acu-safe-top: max(env(safe-area-inset-top, 0px), var(--acu-native-safe-top, 0px));\r\n  --acu-safe-right: max(env(safe-area-inset-right, 0px), var(--acu-native-safe-right, 0px));\r\n  --acu-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--acu-native-safe-bottom, 0px));\r\n  --acu-safe-left: max(env(safe-area-inset-left, 0px), var(--acu-native-safe-left, 0px));\r\n  box-sizing: border-box;\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-ui);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n#acu-app-v2,#acu-app-v2 * {\r\n  box-sizing: border-box;\n}\n#acu-app-v2 button {\r\n  appearance: none;\r\n  -webkit-appearance: none;\r\n  -webkit-tap-highlight-color: transparent;\n}\n#acu-app-v2 button:focus:not(:focus-visible) {\r\n  outline: none;\r\n  box-shadow: none;\n}\n.acu-v2-app[data-v-e2bf0608] {\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-ui);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__shell[data-v-e2bf0608] {\r\n  position: fixed;\r\n  top: 0;\r\n  right: 0;\r\n  bottom: 0;\r\n  left: 0;\r\n  inset: 0;\r\n  z-index: 9000;\r\n  width: 100%;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  height: 100%;\r\n  height: 100vh;\r\n  height: 100dvh;\r\n  min-width: 0;\r\n  min-height: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\r\n  overflow: hidden;\r\n  background: var(--acu-bg-0);\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-ui);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__header[data-v-e2bf0608] {\r\n  position: relative;\r\n  z-index: 40;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  min-height: var(--acu-shell-header-height, 50px);\r\n  padding:\r\n    var(--acu-space-2, 8px)\r\n    var(--acu-space-3, 12px)\r\n    var(--acu-space-2, 8px)\r\n    var(--acu-space-5, 20px);\r\n  background: var(--acu-bg-0);\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  flex: 0 0 auto;\n}\n.acu-v2-app__header-left[data-v-e2bf0608] {\r\n  display: flex;\r\n  align-items: center;\r\n  min-width: 0;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex: 1 1 auto;\n}\n.acu-v2-app__menu[data-v-e2bf0608] {\r\n  display: none;\r\n  flex: 0 0 auto;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  box-shadow: none;\n}\n.acu-v2-app__menu[data-v-e2bf0608]:hover:not(:disabled) {\r\n  background: transparent;\r\n  color: var(--acu-text-1);\n}\n.acu-v2-app__page-title[data-v-e2bf0608] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  overflow: hidden;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-page-title, 22px);\r\n  font-weight: 700;\r\n  line-height: 1.2;\r\n  letter-spacing: 0;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-app__close[data-v-e2bf0608] {\r\n  width: var(--acu-shell-header-action-size, 30px);\r\n  height: var(--acu-shell-header-action-size, 30px);\r\n  border: 0;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-page-title, 22px);\r\n  line-height: 1;\r\n  cursor: pointer;\r\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__close[data-v-e2bf0608]:hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-app__body[data-v-e2bf0608] {\r\n  flex: 1 1 auto;\r\n  display: flex;\r\n  min-width: 0;\r\n  min-height: 0;\r\n  overflow: hidden;\n}\n.acu-v2-app__content[data-v-e2bf0608] {\r\n  flex: 1 1 auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  min-width: 0;\r\n  min-height: 0;\r\n  overflow: hidden;\n}\n.acu-v2-app__mobile-nav-layer[data-v-e2bf0608] {\r\n  position: fixed;\r\n  top: 0;\r\n  right: 0;\r\n  bottom: 0;\r\n  left: 0;\r\n  inset: 0;\r\n  width: 100%;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  height: 100%;\r\n  height: 100vh;\r\n  height: 100dvh;\r\n  min-height: 100vh;\r\n  min-height: 100dvh;\r\n  z-index: 9300;\r\n  display: none;\r\n  align-items: stretch;\r\n  justify-content: flex-start;\r\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\r\n  overflow: hidden;\r\n  background: rgba(0, 0, 0, 0.58);\r\n  pointer-events: auto;\r\n  overscroll-behavior: contain;\r\n  animation: mobile-nav-layer-in-e2bf0608 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing[data-v-e2bf0608] {\r\n  pointer-events: auto;\r\n  animation: mobile-nav-layer-out-e2bf0608 0.15s ease-in both;\n}\n.acu-v2-app__mobile-nav[data-v-e2bf0608] {\r\n  width: var(--acu-mobile-nav-width, 360px);\r\n  max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\r\n  height: 100%;\r\n  max-height: 100%;\r\n  min-width: 0;\r\n  min-height: 0;\r\n  align-self: stretch;\r\n  flex: 0 1 var(--acu-mobile-nav-width, 360px);\r\n  display: flex;\r\n  flex-direction: column;\r\n  background: var(--acu-sidebar-bg);\r\n  border-right: 0;\r\n  box-shadow: var(--acu-shadow);\r\n  overflow: hidden;\r\n  pointer-events: auto;\r\n  animation: mobile-nav-drawer-in-e2bf0608 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing .acu-v2-app__mobile-nav[data-v-e2bf0608] {\r\n  animation: mobile-nav-drawer-out-e2bf0608 0.15s ease-in both;\n}\n@supports (width: min(1px, 100%)) {\n.acu-v2-app__mobile-nav[data-v-e2bf0608] {\r\n    width: min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\r\n    flex: 0 0 min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-v2-app__mobile-nav[data-v-e2bf0608] {\r\n    max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-v2-app__mobile-nav[data-v-e2bf0608] {\r\n    height: 100%;\r\n    max-height: 100%;\n}\n}\r\n\r\n/* ── Theme switcher ── */\n.acu-v2-app__header-right[data-v-e2bf0608] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-1, 4px);\r\n  flex: 0 0 auto;\n}\n.acu-v2-app__theme-switcher[data-v-e2bf0608] {\r\n  position: relative;\n}\n.acu-v2-app__theme-btn[data-v-e2bf0608] {\r\n  width: var(--acu-shell-header-action-size, 30px);\r\n  height: var(--acu-shell-header-action-size, 30px);\r\n  border: 0;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  cursor: pointer;\r\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__theme-btn[data-v-e2bf0608]:hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-menu[data-v-e2bf0608] {\r\n  position: absolute;\r\n  top: calc(100% + var(--acu-menu-offset, 6px));\r\n  right: 0;\r\n  z-index: 10;\r\n  margin: 0;\r\n  padding: var(--acu-menu-padding, 4px);\r\n  width: min(var(--acu-menu-width, 300px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\r\n  min-width: min(var(--acu-menu-min-width, 240px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\r\n  background: var(--acu-bg-1);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  box-shadow: var(--acu-shadow);\r\n  animation: theme-menu-in-e2bf0608 0.12s ease-out both;\n}\n.acu-v2-app__theme-menu.is-closing[data-v-e2bf0608] {\r\n  pointer-events: none;\r\n  animation: theme-menu-out-e2bf0608 0.12s ease-in both;\n}\n.acu-v2-app__appearance-section[data-v-e2bf0608] {\r\n  min-width: 0;\n}\n.acu-v2-app__appearance-section + .acu-v2-app__appearance-section[data-v-e2bf0608] {\r\n  margin-top: var(--acu-menu-section-gap, 8px);\r\n  padding-top: var(--acu-menu-section-gap, 8px);\r\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__appearance-section-title[data-v-e2bf0608] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 700;\r\n  letter-spacing: 0;\n}\n.acu-v2-app__theme-list[data-v-e2bf0608] {\r\n  list-style: none;\r\n  margin: var(--acu-space-1, 4px) 0 0;\r\n  padding: 0;\n}\n.acu-v2-app__theme-option[data-v-e2bf0608] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-menu-option-padding-y, 7px) var(--acu-menu-option-padding-x, 10px);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2);\r\n  border-radius: var(--acu-radius-sm);\r\n  cursor: pointer;\r\n  user-select: none;\n}\n.acu-v2-app__theme-option[data-v-e2bf0608]:hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active[data-v-e2bf0608] {\r\n  color: var(--acu-on-accent);\r\n  background: var(--acu-accent);\r\n  font-weight: 600;\n}\n.acu-v2-app__theme-option-main[data-v-e2bf0608] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-2, 8px);\r\n  min-width: 0;\r\n  flex: 1 1 auto;\n}\n.acu-v2-app__theme-name[data-v-e2bf0608] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-app__theme-tag[data-v-e2bf0608] {\r\n  flex: 0 0 auto;\r\n  padding: var(--acu-space-025, 1px) var(--acu-space-125, 5px);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-accent) 12%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  font-weight: 600;\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tag[data-v-e2bf0608] {\r\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-e2bf0608] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-1, 4px);\r\n  flex: 0 0 auto;\r\n  opacity: 0.72;\n}\n.acu-v2-app__theme-tools[data-v-e2bf0608] .acu-icon-btn {\r\n  background: transparent;\r\n  color: inherit;\n}\n.acu-v2-app__theme-tools[data-v-e2bf0608] .acu-icon-btn:hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-e2bf0608] .acu-icon-btn:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-e2bf0608] .acu-icon-btn--danger:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\r\n  color: var(--acu-danger);\n}\n.acu-v2-app__theme-option:hover .acu-v2-app__theme-tools[data-v-e2bf0608],\r\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-e2bf0608] {\r\n  opacity: 1;\n}\n.acu-v2-app__theme-swatch[data-v-e2bf0608] {\r\n  display: block;\r\n  width: var(--acu-menu-swatch-size, 18px);\r\n  height: var(--acu-menu-swatch-size, 18px);\r\n  border-radius: 999px;\r\n  flex: 0 0 var(--acu-menu-swatch-size, 18px);\r\n  background: linear-gradient(\r\n    135deg,\r\n    var(--acu-theme-swatch-bg) 0 56%,\r\n    var(--acu-theme-swatch-accent) 56% 100%\r\n  );\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-border-2) 72%, transparent);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-swatch[data-v-e2bf0608] {\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-on-accent) 62%, transparent);\n}\n.acu-v2-app__theme-menu-footer[data-v-e2bf0608] {\r\n  display: flex;\r\n  justify-content: stretch;\r\n  margin-top: var(--acu-space-1, 4px);\r\n  padding:\r\n    var(--acu-menu-option-padding-y, 7px)\r\n    var(--acu-space-150, 6px)\r\n    var(--acu-space-1, 4px);\r\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__theme-menu-footer[data-v-e2bf0608] .acu-file-button,\r\n.acu-v2-app__theme-menu-footer[data-v-e2bf0608] .acu-btn {\r\n  width: 100%;\n}\n.acu-v2-app__scale-heading[data-v-e2bf0608] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: var(--acu-space-2, 8px);\r\n  margin-bottom: var(--acu-space-175, 7px);\n}\n.acu-v2-app__scale-current[data-v-e2bf0608] {\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 600;\n}\n.acu-v2-app__scale-control[data-v-e2bf0608] {\r\n  width: 100%;\n}\n@keyframes theme-menu-in-e2bf0608 {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(-4px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes theme-menu-out-e2bf0608 {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(-4px);\n}\n}\n@keyframes mobile-nav-layer-in-e2bf0608 {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes mobile-nav-drawer-in-e2bf0608 {\nfrom { transform: translateX(-100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes mobile-nav-layer-out-e2bf0608 {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes mobile-nav-drawer-out-e2bf0608 {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(-100%);\n}\n}\n@media (max-width: 720px) {\n.acu-v2-app__header[data-v-e2bf0608] {\r\n    min-height: var(--acu-shell-header-height-compact, 48px);\r\n    padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\n}\n.acu-v2-app__header-left[data-v-e2bf0608] {\r\n    gap: var(--acu-space-150, 6px);\n}\n.acu-v2-app__menu[data-v-e2bf0608] {\r\n    display: inline-flex;\n}\n.acu-v2-app__page-title[data-v-e2bf0608] {\r\n    font-size: var(--acu-font-size-page-title-compact, 18px);\n}\n.acu-v2-app__desktop-sidebar[data-v-e2bf0608] {\r\n    display: none;\n}\n.acu-v2-app__mobile-nav-layer[data-v-e2bf0608] {\r\n    display: flex;\n}\n}\r\n", "src/presentation-v2/App.vue#style-0-e2bf0608");
+    var App_vue_vue_type_style_index_0_scoped_e2bf0608_lang = null;
 
     const _hoisted_1 = { class: "acu-v2-app" };
     const _hoisted_2 = { class: "acu-v2-app__shell" };
@@ -110864,7 +110604,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		/* NEED_PATCH */
     	), [[vShow, $setup.rootShell.isOpen]])]);
     }
-    var App = /*#__PURE__*/ _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-24d7b6de"]]);
+    var App = /*#__PURE__*/ _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-e2bf0608"]]);
 
     const THEME_STYLE_NODE_ID = 'acu-v2-theme';
     const APP_ROOT_ID = 'acu-app-v2';

@@ -148,6 +148,116 @@ export function buildAutoUpdatePlan_ACU(
     return { tablesToUpdate, updateGroups };
 }
 
+/** 手动更新计划的显式调度参数，不依赖自动更新设置。 */
+export interface ManualUpdatePlanOptions_ACU {
+    /** 取有效 AI 消息范围的尾部层数；0 表示全部有效 AI 消息。 */
+    contextDepth: number;
+    /** 从最新端跳过的 AI 消息层数。 */
+    skipFloors: number;
+    /** 每次更新请求包含的目标 AI 消息数。 */
+    batchSize: number;
+}
+
+/**
+ * 计算手动重填的目标 AI 消息物理索引。
+ * 该结果必须同时用于预清理与更新计划，避免两个阶段的范围发生分叉。
+ */
+export function calculateManualTargetMessageIndices_ACU(
+    liveChat: any[],
+    options: ManualUpdatePlanOptions_ACU
+): number[] {
+    if (!Array.isArray(liveChat)) {
+        throw new Error('手动填表需要有效的聊天记录。');
+    }
+    if (!Number.isInteger(options.contextDepth) || options.contextDepth < 0) {
+        throw new Error('手动填表的 contextDepth 必须是非负整数。');
+    }
+    if (!Number.isInteger(options.skipFloors) || options.skipFloors < 0) {
+        throw new Error('手动填表的 skipFloors 必须是非负整数。');
+    }
+
+    const allAiMessageIndices = liveChat
+        .map((msg: any, index: number) => !msg.is_user ? index : -1)
+        .filter((index: number) => index !== -1);
+    const effectiveAiIndices = options.skipFloors > 0
+        ? allAiMessageIndices.slice(0, -options.skipFloors)
+        : allAiMessageIndices;
+    const targetMessageIndices = options.contextDepth === 0
+        ? effectiveAiIndices
+        : effectiveAiIndices.slice(-options.contextDepth);
+
+    if (targetMessageIndices.length === 0) {
+        throw new Error('手动填表范围为空，没有可重新填写的 AI 消息。');
+    }
+
+    return targetMessageIndices;
+}
+
+/**
+ * 构建手动更新计划。
+ * 手动计划仅读取每张表 updateConfig.groupId；范围和批次大小完全由显式手动参数决定。
+ */
+export function buildManualUpdatePlan_ACU(
+    liveChat: any[],
+    tableData: Record<string, any>,
+    targetSheetKeys: string[],
+    options: ManualUpdatePlanOptions_ACU
+): AutoUpdatePlan {
+    if (!tableData || typeof tableData !== 'object') {
+        throw new Error('手动填表需要有效的表格数据。');
+    }
+    if (!Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0) {
+        throw new Error('手动填表必须至少选择一张表。');
+    }
+    if (new Set(targetSheetKeys).size !== targetSheetKeys.length) {
+        throw new Error('手动填表的目标表不能重复。');
+    }
+    if (!Number.isInteger(options.batchSize) || options.batchSize <= 0) {
+        throw new Error('手动填表的 batchSize 必须是正整数。');
+    }
+
+    const targetMessageIndices = calculateManualTargetMessageIndices_ACU(liveChat, options);
+    const tablesToUpdate: TableUpdateItem[] = targetSheetKeys.map(sheetKey => {
+        const table = tableData[sheetKey];
+        if (!table) {
+            throw new Error(`手动填表的目标表不存在：${sheetKey}`);
+        }
+
+        const rawGroupId = Number.isFinite(table.updateConfig?.groupId)
+            ? Math.trunc(table.updateConfig.groupId)
+            : -1;
+        const scheduleSignature = [rawGroupId, 'manual'].join('|');
+
+        return {
+            sheetKey,
+            sheetName: table.name,
+            indices: targetMessageIndices,
+            groupId: rawGroupId,
+            batchSize: options.batchSize,
+            scheduleSignature,
+        };
+    });
+
+    const updateGroups: Record<string, UpdateGroup> = {};
+    tablesToUpdate.forEach(item => {
+        const key = item.scheduleSignature + '|' + item.indices.join(',') + '|' + item.batchSize;
+        if (!updateGroups[key]) {
+            updateGroups[key] = {
+                indices: item.indices,
+                batchSize: item.batchSize,
+                groupId: item.groupId,
+                scheduleSignature: item.scheduleSignature,
+                sheetKeys: [],
+                sheetNames: [],
+            };
+        }
+        updateGroups[key].sheetKeys.push(item.sheetKey);
+        updateGroups[key].sheetNames.push(item.sheetName);
+    });
+
+    return { tablesToUpdate, updateGroups };
+}
+
 // ============================================================
 // 前置检查
 // ============================================================
@@ -208,6 +318,21 @@ export interface AutoUpdateOperations {
     purgeOldLayerData: () => Promise<void>;
 }
 
+/** 共享更新执行器的可选上下文；未传入时保持自动更新行为。 */
+export interface ExecuteUpdatePlanOptions_ACU {
+    mode?: string;
+    maxConcurrentGroups?: number;
+    processOptions?: Record<string, any>;
+    resolveRequestOptions?: (groupKey: string, group: UpdateGroup) => Record<string, any> | null;
+    runAutoMerge?: boolean;
+    purgeOldLayerData?: boolean;
+}
+
+const DEFAULT_AUTO_REQUEST_OPTIONS_ACU = {
+    skipProfileSwitch: true,
+    forceDirectApi: true,
+};
+
 /**
  * 执行自动更新计划：并发分组执行 + 自动合并检测 + 旧数据清理
  * 
@@ -218,14 +343,21 @@ export async function executeAutoUpdatePlan_ACU(
     plan: AutoUpdatePlan,
     settings: any,
     setAutoUpdating: (v: boolean) => void,
-    ops: AutoUpdateOperations
+    ops: AutoUpdateOperations,
+    executionOptions: ExecuteUpdatePlanOptions_ACU = {}
 ): Promise<AutoUpdateResult> {
-    const { tablesToUpdate, updateGroups } = plan;
+    const { updateGroups } = plan;
     const groupKeys = Object.keys(updateGroups);
     if (groupKeys.length === 0) return { success: true, failedGroups: 0, totalGroups: 0 };
 
     const totalGroups = groupKeys.length;
-    const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
+    const mode = executionOptions.mode || 'auto_independent';
+    const maxConcurrentGroups = Math.max(1, executionOptions.maxConcurrentGroups ?? (settings.maxConcurrentGroups || 1));
+    const processOptions = executionOptions.processOptions || {};
+    const resolveRequestOptions = executionOptions.resolveRequestOptions
+        || (() => ({ ...DEFAULT_AUTO_REQUEST_OPTIONS_ACU }));
+    const runAutoMerge = executionOptions.runAutoMerge !== false;
+    const shouldPurgeOldLayerData = executionOptions.purgeOldLayerData !== false;
 
     setAutoUpdating(true);
 
@@ -236,116 +368,124 @@ export async function executeAutoUpdatePlan_ACU(
         if (!message) return;
         failedGroupErrors.push(`group ${groupKey}: ${message}`);
     };
-    for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
-        const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
-        if (ops.processGroupedUpdates) {
-            const groupedChunk = chunkKeys.map(key => {
-                const group = updateGroups[key];
-                logDebug_ACU(`[Parallel] Processing grouped update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
-                return {
-                    key,
-                    groupId: group.groupId,
-                    indices: group.indices,
-                    batchSize: group.batchSize,
-                    sheetKeys: group.sheetKeys,
-                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
-                };
-            });
-            const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', {});
-            if (!groupedResult.success) {
-                failedGroupKeys.push(...groupedResult.failedGroups);
-                const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
-                groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
-            }
-        } else {
-            const groupPromises = chunkKeys.map(key => (async () => {
-                const group = updateGroups[key];
-                logDebug_ACU(`[Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
-
-                const success = await ops.processUpdates(group.indices, 'auto_independent', {
-                    targetSheetKeys: group.sheetKeys,
-                    batchSize: group.batchSize,
-                    requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
+    try {
+        for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
+            const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
+            if (ops.processGroupedUpdates) {
+                const groupedChunk = chunkKeys.map(key => {
+                    const group = updateGroups[key];
+                    logDebug_ACU(`[Parallel] Processing grouped update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
+                    return {
+                        key,
+                        groupId: group.groupId,
+                        indices: group.indices,
+                        batchSize: group.batchSize,
+                        sheetKeys: group.sheetKeys,
+                        requestOptions: resolveRequestOptions(key, group),
+                    };
                 });
-
-                return { key, success, sheetNames: group.sheetNames };
-            })());
-
-            const results = await Promise.allSettled(groupPromises);
-            results.forEach((result, idx) =>{
-                if (result.status === 'rejected') {
-                    failedGroupKeys.push(chunkKeys[idx]);
-                    pushGroupError_ACU(chunkKeys[idx], result.reason || '分组更新异常退出。');
-                    return;
+                const groupedResult = await ops.processGroupedUpdates(groupedChunk, mode, processOptions);
+                if (!groupedResult.success) {
+                    failedGroupKeys.push(...groupedResult.failedGroups);
+                    const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
+                    groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
                 }
-                const rawResult = result.value?.success;
-                const groupSucceeded = typeof rawResult === 'object' && rawResult !== null && 'success' in rawResult
-                    ? (rawResult as { success?: boolean }).success !== false
-                    : !!rawResult;
-                if (!groupSucceeded) {
-                    failedGroupKeys.push(chunkKeys[idx]);
-                    const error = rawResult && typeof rawResult === 'object' && 'error' in rawResult
-                        ? (rawResult as { error?: unknown }).error
-                        : '分组更新失败，未返回具体错误。';
-                    pushGroupError_ACU(chunkKeys[idx], error);
-                }
-            });
-        }
-    }
+            } else {
+                const groupPromises = chunkKeys.map(key => (async () => {
+                    const group = updateGroups[key];
+                    logDebug_ACU(`[Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
 
-    if (failedGroupKeys.length > 0) {
-        const errorSummary = failedGroupErrors.length > 0 ? `原因：${failedGroupErrors.slice(0, 3).join('；')}` : '未返回具体原因。';
-        logWarn_ACU(`并发分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。${errorSummary}`);
-    }
+                    const success = await ops.processUpdates(group.indices, mode, {
+                        ...processOptions,
+                        targetSheetKeys: group.sheetKeys,
+                        batchSize: group.batchSize,
+                        requestOptions: resolveRequestOptions(key, group),
+                    });
 
-    // 并发更新完成后统一刷新数据链条
-    logDebug_ACU(`All group updates completed. Forcing data refresh...`);
-    await ops.loadAllChatMessages();
-    await ops.refreshData();
-    await new Promise(resolve => setTimeout(resolve, 500));
+                    return { key, success, sheetNames: group.sheetNames };
+                })());
 
-    setAutoUpdating(false);
-    await ops.refreshData();
-
-    // 自动合并总结检测
-    let autoMergeTriggered = false;
-    let autoMergeSuccess = false;
-    try {
-        const { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } = await import('../summary/merge-logic');
-        const trigger = checkAutoMergeTrigger_ACU();
-        if (trigger.shouldTrigger) {
-            autoMergeTriggered = true;
-            const prepared = prepareAutoMergeBatches_ACU({
-                startIndex: 0, endIndex: trigger.mergeCount, targetCount: 1,
-                batchSize: 5, promptTemplate: '', isAutoMode: true,
-            });
-            let acc: any[] = [];
-            for (let i = 0; i < prepared.batches.length; i++) {
-                const batchResult = await executeAutoMergeBatch_ACU(prepared, prepared.batches[i], acc);
-                acc = batchResult.accumulatedSummary;
+                const results = await Promise.allSettled(groupPromises);
+                results.forEach((result, idx) =>{
+                    if (result.status === 'rejected') {
+                        failedGroupKeys.push(chunkKeys[idx]);
+                        pushGroupError_ACU(chunkKeys[idx], result.reason || '分组更新异常退出。');
+                        return;
+                    }
+                    const rawResult = result.value?.success;
+                    const groupSucceeded = typeof rawResult === 'object' && rawResult !== null && 'success' in rawResult
+                        ? (rawResult as { success?: boolean }).success !== false
+                        : !!rawResult;
+                    if (!groupSucceeded) {
+                        failedGroupKeys.push(chunkKeys[idx]);
+                        const error = rawResult && typeof rawResult === 'object' && 'error' in rawResult
+                            ? (rawResult as { error?: unknown }).error
+                            : '分组更新失败，未返回具体错误。';
+                        pushGroupError_ACU(chunkKeys[idx], error);
+                    }
+                });
             }
-            await finalizeAutoMerge_ACU(prepared, acc);
-            autoMergeSuccess = true;
         }
-    } catch (e) {
-        logWarn_ACU('自动合并总结检测失败:', e);
-    }
 
-    // 清理超出保留层数的旧数据
-    try {
-        await ops.purgeOldLayerData();
-    } catch (e) {
-        logWarn_ACU('清理旧层数据失败:', e);
-    }
+        if (failedGroupKeys.length > 0) {
+            const errorSummary = failedGroupErrors.length > 0 ? `原因：${failedGroupErrors.slice(0, 3).join('；')}` : '未返回具体原因。';
+            logWarn_ACU(`并发分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。${errorSummary}`);
+        }
 
-    return {
-        success: failedGroupKeys.length === 0,
-        failedGroups: failedGroupKeys.length,
-        totalGroups,
-        errors: failedGroupErrors,
-        autoMergeTriggered,
-        autoMergeSuccess,
-    };
+        // 并发更新完成后统一刷新数据链条
+        logDebug_ACU(`All group updates completed. Forcing data refresh...`);
+        await ops.loadAllChatMessages();
+        await ops.refreshData();
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        await ops.refreshData();
+
+        // 自动合并总结检测
+        let autoMergeTriggered = false;
+        let autoMergeSuccess = false;
+        if (runAutoMerge) {
+            try {
+                const { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } = await import('../summary/merge-logic');
+                const trigger = checkAutoMergeTrigger_ACU();
+                if (trigger.shouldTrigger) {
+                    autoMergeTriggered = true;
+                    const prepared = prepareAutoMergeBatches_ACU({
+                        startIndex: 0, endIndex: trigger.mergeCount, targetCount: 1,
+                        batchSize: 5, promptTemplate: '', isAutoMode: true,
+                    });
+                    let acc: any[] = [];
+                    for (let i = 0; i < prepared.batches.length; i++) {
+                        const batchResult = await executeAutoMergeBatch_ACU(prepared, prepared.batches[i], acc);
+                        acc = batchResult.accumulatedSummary;
+                    }
+                    await finalizeAutoMerge_ACU(prepared, acc);
+                    autoMergeSuccess = true;
+                }
+            } catch (e) {
+                logWarn_ACU('自动合并总结检测失败:', e);
+            }
+        }
+
+        // 清理超出保留层数的旧数据
+        if (shouldPurgeOldLayerData) {
+            try {
+                await ops.purgeOldLayerData();
+            } catch (e) {
+                logWarn_ACU('清理旧层数据失败:', e);
+            }
+        }
+
+        return {
+            success: failedGroupKeys.length === 0,
+            failedGroups: failedGroupKeys.length,
+            totalGroups,
+            errors: failedGroupErrors,
+            autoMergeTriggered,
+            autoMergeSuccess,
+        };
+    } finally {
+        setAutoUpdating(false);
+    }
 }
 
 // ============================================================

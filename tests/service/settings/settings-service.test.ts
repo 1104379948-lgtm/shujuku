@@ -303,6 +303,10 @@ beforeEach(() => {
   mockSettings.currentTemplatePresetName = '';
   mockSettings.tableTemplateDefaultsRefreshVersion = '';
   mockSettings.maxConcurrentGroups = 1;
+  mockSettings.manualUpdateContextDepth = 3;
+  mockSettings.manualUpdateBatchSize = 3;
+  mockSettings.manualUpdateSkipFloors = 0;
+  mockSettings.manualUpdateMaxConcurrentGroups = 1;
   mockSettings.zeroTkOccupyModeDefault = false;
   mockSettings.characterSettings = {};
   mockGlobalMeta.activeIsolationCode = '';
@@ -358,6 +362,10 @@ describe('buildDefaultSettings_ACU', () => {
     expect(defaults.autoUpdateThreshold).toBe(3);
     expect(defaults.autoUpdateEnabled).toBe(true);
     expect(defaults.maxConcurrentGroups).toBe(1);
+    expect(defaults.manualUpdateContextDepth).toBe(3);
+    expect(defaults.manualUpdateBatchSize).toBe(3);
+    expect(defaults.manualUpdateSkipFloors).toBe(0);
+    expect(defaults.manualUpdateMaxConcurrentGroups).toBe(1);
     expect(defaults.storageMode).toBe('native');
     expect(defaults.promptTemplateSettings).toBeDefined();
     expect(defaults.promptTemplateSettings.enabled).toBe(true);
@@ -540,6 +548,23 @@ describe('loadSettings_ACU', () => {
     const calledWith = mockSetSettings.mock.calls[0][0];
     expect(calledWith.autoUpdateEnabled).toBe(true);
     expect(calledWith.maxConcurrentGroups).toBe(1);
+  });
+
+  it('历史手动参数为空或非法时归一化为独立默认值并持久化', () => {
+    mockReadProfileSettings.mockReturnValue({
+      manualUpdateContextDepth: null,
+      manualUpdateBatchSize: '',
+      manualUpdateSkipFloors: -2,
+      manualUpdateMaxConcurrentGroups: 0,
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.manualUpdateContextDepth).toBe(3);
+    expect(mockSettings.manualUpdateBatchSize).toBe(3);
+    expect(mockSettings.manualUpdateSkipFloors).toBe(0);
+    expect(mockSettings.manualUpdateMaxConcurrentGroups).toBe(1);
+    expect(mockPersistSettingsToStorage).toHaveBeenCalledWith(mockSettings, '');
   });
 
   it('有保存设置时 deepMerge 合并', () => {

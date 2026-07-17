@@ -282,11 +282,6 @@ watch(useChatChangedTick(), () => {
   gap: 8px;
 }
 
-.acu-v2-form-fill-page__checkpoint-risk {
-  color: var(--acu-danger);
-  font-weight: 700;
-}
-
 .acu-v2-form-fill-page__table-wrap {
   min-width: 0;
   overflow: auto;
