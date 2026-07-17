@@ -42997,7 +42997,7 @@ $CONTENT
                 try {
                     const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
                         onProgress: options.onProgress,
-                        ...(start === 0 && manualRefillInitialCheckpointMessageIndex !== undefined
+                        ...(manualRefillInitialCheckpointMessageIndex !== undefined
                             ? { initialCheckpointMessageIndex: manualRefillInitialCheckpointMessageIndex } : {}),
                     });
                     if (!chunkResult.success) {

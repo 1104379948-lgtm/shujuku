@@ -319,9 +319,12 @@ describe('V2 顺序日志追加', () => {
     expect(frame.logEntries).toHaveLength(2);
     expect(vi.mocked(saveChatToHost_ACU)).toHaveBeenCalledTimes(1);
 
-    const replayed = await loadTableStateFromFramesV2_ACU(mockChat, '');
-    expect(replayed?.sheet_a.content[1]).toEqual(['a1', '新A']);
-    expect(replayed?.sheet_b.content[1]).toEqual(['b1', '新B']);
+    const boundedReplayed = await loadTableStateFromFramesV2_ACU(mockChat, '', { maxMessageIndex: 0 });
+    expect(boundedReplayed?.sheet_a.content[1]).toEqual(['a1', '新A']);
+    expect(boundedReplayed?.sheet_b.content[1]).toEqual(['b1', '新B']);
+
+    const beforeCheckpoint = await loadTableStateFromFramesV2_ACU(mockChat, '', { maxMessageIndex: -1 });
+    expect(beforeCheckpoint).toBeNull();
   });
 
   it('已有 V2 checkpoint 后缺失 operation 的普通写入会失败', async () => {

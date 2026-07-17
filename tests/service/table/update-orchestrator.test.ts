@@ -1718,6 +1718,83 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(3);
   });
 
+  it('手动重填的每个外层 chunk 首 bucket 都能读取范围首同索引 checkpoint', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const chat = [
+      { is_user: false, mes: 'AI回复1' },
+      { is_user: false, mes: 'AI回复2' },
+    ] as any[];
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
+      sheet_1: { name: '表B', updateConfig: { groupId: 1 }, content: [['row_id', '值B']] },
+    });
+    mockSettings.maxConcurrentGroups = 1;
+    mockSettings.autoUpdateThreshold = 0;
+    mockSettings.updateBatchSize = 2;
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '表A', updateConfig: {}, content: [['row_id', '值A'], ['old-a', '旧A']] },
+      sheet_1: { name: '表B', updateConfig: {}, content: [['row_id', '值B'], ['old-b', '旧B']] },
+    };
+    mockInspectManualRefillBaseline.mockReturnValueOnce({
+      success: true,
+      requiresConfirmation: true,
+      checkpointInRange: false,
+      targetMessageIndex: 0,
+      replayErrorCode: 'no_full_checkpoint_replayable',
+    });
+    mockReplaceManualRefillSheetBaseline.mockImplementationOnce(async () => {
+      chat[0].TavernDB_ACU_IsolatedData = {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'manual_refill_baseline',
+              data: {
+                mate: { type: 'acu' },
+                sheet_0: { name: '表A', content: [['row_id', '值A'], ['baseline-a', '基底A']] },
+                sheet_1: { name: '表B', content: [['row_id', '值B'], ['baseline-b', '基底B']] },
+              },
+            },
+            logEntries: [],
+          },
+        },
+      };
+      return {
+        success: true,
+        targetMessageIndex: 0,
+        checkpointCount: 1,
+        checkpointCreatedOrRelocated: true,
+        clearedSheetKeys: ['sheet_0', 'sheet_1'],
+      };
+    });
+    const promptBases: any[] = [];
+    mockPrepareAIInput.mockImplementation(async (_messages: any, _mode: string, _keys: string[] | null, options: any) => {
+      promptBases.push(JSON.parse(JSON.stringify(options.tableData)));
+      return { tableDataText: '模拟数据' };
+    });
+    mockCallCustomOpenAI
+      .mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>')
+      .mockResolvedValueOnce('<tableEdit>sheet_1</tableEdit>');
+
+    const result = await orchestrateManualUpdate_ACU(
+      ['sheet_0', 'sheet_1'],
+      vi.fn().mockResolvedValue({ success: true }),
+      mockRefreshData,
+      { clearBeforeUpdate: true, confirmBoundaryReset: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(promptBases).toHaveLength(2);
+    expect(promptBases[0].sheet_0.content).toContainEqual(['baseline-a', '基底A']);
+    expect(promptBases[1].sheet_1.content).toContainEqual(['baseline-b', '基底B']);
+  });
+
   it('基底原子替换严格保存失败时不启动逐 bucket 重填', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
@@ -3210,11 +3287,15 @@ describe('processGroupedRuntimeChunk_ACU', () => {
       currentBatch: 1,
       totalBatches: 1,
     }));
-    expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({
+    const completeCallIndex = onProgress.mock.calls.findIndex(call => call[0]?.phase === 'complete');
+    expect(completeCallIndex).toBeGreaterThanOrEqual(0);
+    expect(onProgress.mock.calls[completeCallIndex][0]).toEqual(expect.objectContaining({
       phase: 'complete',
       currentBatch: 1,
       totalBatches: 1,
     }));
+    expect(mockPersistTablesToChatMessage.mock.invocationCallOrder[0])
+      .toBeLessThan(onProgress.mock.invocationCallOrder[completeCallIndex]);
   });
 
   it('连续 bucket 使用运行时快照作为下一次 prompt 基底，不从聊天历史回放', async () => {
