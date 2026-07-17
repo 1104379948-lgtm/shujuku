@@ -9119,16 +9119,15 @@ $CONTENT
      */
     function generateFallbackDDL(tableName, headers) {
         const lines = [];
+        const columnNames = buildFallbackColumnNames(headers);
         for (let i = 0; i < headers.length; i++) {
-            const colName = headers[i];
-            if (colName === 'row_id') {
-                lines.push('  row_id INTEGER PRIMARY KEY -- 行号');
+            const header = normalizeFallbackHeaderComment(headers[i], i);
+            const sqlColumnName = columnNames[i];
+            if (i === 0 && sqlColumnName === 'row_id') {
+                lines.push(`  row_id INTEGER PRIMARY KEY -- ${header}`);
+                continue;
             }
-            else if (colName) {
-                // 中文列名转为合法的 SQL 标识符
-                const sqlColName = chineseToIdentifier(colName);
-                lines.push(`  ${sqlColName} TEXT -- ${colName}`);
-            }
+            lines.push(`  ${sqlColumnName} TEXT -- ${header}`);
         }
         if (lines.length === 0) {
             lines.push('  row_id INTEGER PRIMARY KEY -- 行号');
@@ -9173,12 +9172,8 @@ $CONTENT
             || 'unknown_table';
         logDebug_ACU(`[Schema] generateInserts: 表=${tblName}, 数据行数=${content.length - 1}`);
         // 确定列名（从 DDL 解析，或从表头生成）
-        const ddlColumns = sheet.sourceData?.ddl ? parseDDLColumnNames(sheet.sourceData.ddl) : null;
-        const columnNames = ddlColumns || headers.map((h, i) => {
-            if (h === 'row_id')
-                return 'row_id';
-            return h ? chineseToIdentifier(h) : `col_${i}`;
-        });
+        const ddlColumns = sheet.sourceData?.ddl ? parseDDLColumnNames(sheet.sourceData.ddl) : [];
+        const columnNames = ddlColumns.length > 0 ? ddlColumns : buildFallbackColumnNames(headers);
         const statements = [];
         for (let r = 1; r < content.length; r++) {
             const row = content[r];
@@ -9281,12 +9276,46 @@ $CONTENT
         return cleaned || '_unknown';
     }
     /**
+     * 为缺少 DDL 的历史表构建稳定、唯一的物理列名。
+     * 首列空值是旧模板的 row_id 表示法；其余无法 ASCII 化的列按位置命名。
+     */
+    function buildFallbackColumnNames(headers) {
+        const usedNames = new Set();
+        return headers.map((header, index) => {
+            const rawHeader = String(header ?? '').trim();
+            let baseName;
+            if (index === 0 && (!rawHeader || rawHeader === 'row_id' || rawHeader === '行号')) {
+                baseName = 'row_id';
+            }
+            else if (rawHeader) {
+                baseName = chineseToIdentifier(rawHeader, index);
+            }
+            else {
+                baseName = `col_${index}`;
+            }
+            let candidate = baseName;
+            let suffix = 2;
+            while (usedNames.has(candidate.toLowerCase())) {
+                candidate = `${baseName}_${suffix}`;
+                suffix += 1;
+            }
+            usedNames.add(candidate.toLowerCase());
+            return candidate;
+        });
+    }
+    function normalizeFallbackHeaderComment(header, index) {
+        const normalized = String(header ?? '').replace(/[\r\n]+/g, ' ').trim();
+        if (normalized)
+            return normalized;
+        return index === 0 ? '行号' : `列${index}`;
+    }
+    /**
      * 将中文列名转为合法的 SQL 标识符
      * 使用拼音首字母或简单的 col_N 格式
      */
-    function chineseToIdentifier(name) {
+    function chineseToIdentifier(name, fallbackIndex) {
         if (!name)
-            return '_unknown';
+            return `col_${fallbackIndex}`;
         // 如果已经是合法标识符，直接返回
         if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name))
             return name;
@@ -9294,8 +9323,8 @@ $CONTENT
         const ascii = name.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
         if (ascii && /^[a-zA-Z_]/.test(ascii))
             return ascii;
-        // 实在不行就用 col_ 前缀
-        return `col_${ascii || 'unknown'}`;
+        // 纯中文等无法 ASCII 化的表头按列位置稳定命名，避免多个 col_unknown 冲突。
+        return `col_${fallbackIndex}`;
     }
 
     /**

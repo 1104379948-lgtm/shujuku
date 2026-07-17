@@ -152,6 +152,56 @@ describe('SyncBridge', () => {
       expect(result.values[0][0]).toBe('');
     });
 
+    it('加载缺少 DDL 且首列表头为 null 的历史中文表', () => {
+      const legacyGlobalSheet = makeSheet({
+        uid: 'sheet_dCudvUnH',
+        name: '全局数据表',
+        sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' },
+        content: [
+          [null, '主角当前所在地点', '当前时间', '上轮场景时间', '经过的时间'],
+          ['1', '城镇', '2026-01-01 12:00', '2026-01-01 11:00', '1小时'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(
+        makeTableData({ sheet_dCudvUnH: legacyGlobalSheet }),
+        { strict: true },
+      )).not.toThrow();
+
+      expect(engine.query(
+        'SELECT row_id, col_1, col_2, col_3, col_4 FROM sheet_dCudvUnH;',
+      ).values).toEqual([
+        [1, '城镇', '2026-01-01 12:00', '2026-01-01 11:00', '1小时'],
+      ]);
+
+      const exported = bridge.exportToTableData(makeMate());
+      expect((exported.sheet_dCudvUnH as Sheet_ACU).content).toEqual([
+        ['row_id', '主角当前所在地点', '当前时间', '上轮场景时间', '经过的时间'],
+        ['1', '城镇', '2026-01-01 12:00', '2026-01-01 11:00', '1小时'],
+      ]);
+    });
+
+    it('空的历史中文表也能恢复完整模板表头', () => {
+      const emptyLegacySheet = makeSheet({
+        uid: 'sheet_dCudvUnH',
+        name: '全局数据表',
+        sourceData: {},
+        content: [
+          [null, '主角当前所在地点', '当前时间', '上轮场景时间', '经过的时间'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(
+        makeTableData({ sheet_dCudvUnH: emptyLegacySheet }),
+        { strict: true },
+      )).not.toThrow();
+
+      const exported = bridge.exportToTableData(makeMate());
+      expect((exported.sheet_dCudvUnH as Sheet_ACU).content).toEqual([
+        ['row_id', '主角当前所在地点', '当前时间', '上轮场景时间', '经过的时间'],
+      ]);
+    });
+
     it('单张表加载失败不影响其他表', () => {
       // 第一张表 DDL 有语法错误
       const badSheet = makeSheet({

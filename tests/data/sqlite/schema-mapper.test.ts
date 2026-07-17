@@ -214,6 +214,26 @@ describe('generateFallbackDDL', () => {
     expect(ddl).toContain('age TEXT');
   });
 
+  it('历史 null 首列和纯中文表头生成唯一稳定列名', () => {
+    const ddl = generateFallbackDDL('sheet_dCudvUnH', [
+      null,
+      '主角当前所在地点',
+      '当前时间',
+      '上轮场景时间',
+      '经过的时间',
+    ]);
+
+    expect(parseDDLColumnNames(ddl)).toEqual(['row_id', 'col_1', 'col_2', 'col_3', 'col_4']);
+    expect(ddl).toContain('row_id INTEGER PRIMARY KEY');
+    expect(ddl).toContain('-- 行号');
+    expect(ddl).toMatch(/col_1 TEXT,? -- 主角当前所在地点/);
+  });
+
+  it('重复 ASCII 列名按 SQLite 大小写不敏感规则去重', () => {
+    const ddl = generateFallbackDDL('test_table', ['row_id', 'Name', 'name', 'Name']);
+    expect(parseDDLColumnNames(ddl)).toEqual(['row_id', 'Name', 'name_2', 'Name_3']);
+  });
+
   it('空 headers 生成最小 DDL', () => {
     const ddl = generateFallbackDDL('test_table', []);
     expect(ddl).toContain('row_id INTEGER PRIMARY KEY');
@@ -277,6 +297,23 @@ describe('generateInserts', () => {
     });
     const inserts = generateInserts(sheet, 'test_table');
     expect(inserts[0]).toContain("it''s a test");
+  });
+
+  it('缺少 DDL 时 INSERT 与 fallback DDL 使用相同列名', () => {
+    const sheet = makeSheet({
+      uid: 'sheet_dCudvUnH',
+      sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '' },
+      content: [
+        [null, '主角当前所在地点', '当前时间', '上轮场景时间', '经过的时间'],
+        ['1', '城镇', '2026-01-01 12:00', '2026-01-01 11:00', '1小时'],
+      ],
+    });
+
+    const ddlColumns = parseDDLColumnNames(generateDDL(sheet));
+    const inserts = generateInserts(sheet, 'sheet_dCudvUnH');
+
+    expect(ddlColumns).toEqual(['row_id', 'col_1', 'col_2', 'col_3', 'col_4']);
+    expect(inserts[0]).toContain('(row_id, col_1, col_2, col_3, col_4)');
   });
 
   it('空 content 返回空数组', () => {

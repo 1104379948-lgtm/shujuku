@@ -200,6 +200,63 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     ]);
   });
 
+  it('回放缺少 DDL 且首列表头为 null 的历史中文表', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: {
+                mate: { type: 'acu', version: 1 },
+                sheet_dCudvUnH: {
+                  uid: 'sheet_dCudvUnH',
+                  name: '全局数据表',
+                  content: [
+                    [null, '主角当前所在地点', '当前时间', '上轮场景时间', '经过的时间'],
+                    ['1', '起点', '2026-01-01 11:00', null, '0分钟'],
+                  ],
+                  sourceData: {},
+                  updateConfig: {},
+                  exportConfig: {},
+                  orderNo: 0,
+                },
+              },
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1,
+              entryId: 'v2_sql_legacy_chinese_headers',
+              createdAt: 2,
+              source: 'manual_crud',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: [],
+              changedSheetKeys: ['sheet_dCudvUnH'],
+              groupKeys: [],
+              operations: [{
+                kind: 'sql_batch',
+                statements: ["UPDATE sheet_dCudvUnH SET col_1 = '城镇' WHERE row_id = 1"],
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_dCudvUnH.content).toEqual([
+      ['row_id', '主角当前所在地点', '当前时间', '上轮场景时间', '经过的时间'],
+      ['1', '城镇', '2026-01-01 11:00', null, '0分钟'],
+    ]);
+  });
+
   it('回放 sql_batch 前先套用当前聊天 guide 的新 DDL/CHECK', async () => {
     const oldData = {
       mate: { type: 'acu', version: 1 },
