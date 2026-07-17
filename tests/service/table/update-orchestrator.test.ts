@@ -60,7 +60,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   get pendingFinalGenerationGreenlights_ACU() { return mockPendingFinalGenerationGreenlights; },
   independentTableStates_ACU: mockIndependentTableStates,
   _set_isAutoUpdatingCard_ACU: vi.fn((v: any) => { mockIsAutoUpdating = v; }),
-  _set_wasStoppedByUser_ACU: vi.fn((v: any) => { mockWasStopped = v; }),
+  _set_wasStoppedByUser_ACU: vi.fn(),
   _set_manualExtraHint_ACU: vi.fn(),
   _set_currentJsonTableData_ACU: vi.fn((v: any) => { mockCurrentJsonTableData = v; }),
   abortAllActiveRequests_ACU: vi.fn(),
@@ -160,22 +160,6 @@ vi.mock('../../../src/service/worldbook/pipeline', () => ({
   updateReadableLorebookEntry_ACU: (...args: any[]) => mockUpdateReadableLorebookEntry(...args),
 }));
 
-const mockResolveTableHistoryState = vi.hoisted(() => vi.fn(() => ({
-  latestAiMessageIndex: -1,
-  latestDataMessageIndex: -1,
-  lastTrackedUpdateMessageIndex: -1,
-  latestDataAiFloor: 0,
-  lastTrackedUpdateAiFloor: 0,
-  hasAnyData: false,
-  hasTrackedUpdate: false,
-})));
-vi.mock('../../../src/service/table/table-history', () => ({
-  resolveTableHistoryStateFromChat_ACU: (...args: any[]) => mockResolveTableHistoryState(...args),
-  collectV2CheckpointFloorsFromChat_ACU: vi.fn(() => []),
-  getLatestAiMessageIndexFromChat_ACU: vi.fn(() => -1),
-  countAiMessagesUpToIndex_ACU: vi.fn(() => 0),
-}));
-
 const mockCheckIfFirstTimeInit = vi.fn().mockResolvedValue(false);
 const mockSaveIndependentTable = vi.fn().mockResolvedValue({ saved: true });
 const mockPersistTablesToChatMessage = vi.fn().mockResolvedValue({ saved: true, messageIndex: 0 });
@@ -251,10 +235,8 @@ import {
   resolveUpdateMode_ACU,
   loadBatchBaseData_ACU,
   buildBatchMergeBase_ACU,
-  buildAutoResumeFillPlan_ACU,
   processUpdatesBatch_ACU,
   executeCardUpdateCore_ACU,
-  orchestrateAutoResumeFill_ACU,
   orchestrateManualUpdate_ACU,
   collectGroupFillResponse_ACU,
   applyUnifiedGroupFillResponses_ACU,
@@ -3336,135 +3318,6 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
   });
 });
 
-describe('buildAutoResumeFillPlan_ACU', () => {
-  const aiMessageIndices = Array.from({ length: 12 }, (_, index) => index * 2 + 1);
-
-  it('单表从已完成楼层继续到有效末层', () => {
-    const plan = buildAutoResumeFillPlan_ACU({
-      aiMessageIndices,
-      sheetProgress: [{ sheetKey: 'sheet_a', groupId: 1, lastFilledAiFloor: 3 }],
-      effectiveTailFloor: 10,
-      stageSpan: 0,
-      batchSize: 2,
-    });
-
-    expect(plan.stages).toHaveLength(1);
-    expect(plan.stages[0]).toEqual(expect.objectContaining({
-      fromAiFloor: 4,
-      toAiFloor: 10,
-    }));
-    expect(plan.stages[0].groups[0]).toEqual(expect.objectContaining({
-      sheetKeys: ['sheet_a'],
-      indices: aiMessageIndices.slice(3, 10),
-    }));
-  });
-
-  it('按 3/6/9 三个进度边界分阶段追平并在追平后合并同 groupId', () => {
-    const plan = buildAutoResumeFillPlan_ACU({
-      aiMessageIndices,
-      sheetProgress: [
-        { sheetKey: 'sheet_a', groupId: 7, lastFilledAiFloor: 3 },
-        { sheetKey: 'sheet_b', groupId: 7, lastFilledAiFloor: 6 },
-        { sheetKey: 'sheet_c', groupId: 7, lastFilledAiFloor: 9 },
-      ],
-      effectiveTailFloor: 12,
-      stageSpan: 0,
-      batchSize: 3,
-    });
-
-    expect(plan.stages.map(stage => [stage.fromAiFloor, stage.toAiFloor])).toEqual([
-      [4, 6],
-      [7, 9],
-      [10, 12],
-    ]);
-    expect(plan.stages.map(stage => stage.groups[0].sheetKeys)).toEqual([
-      ['sheet_a'],
-      ['sheet_a', 'sheet_b'],
-      ['sheet_a', 'sheet_b', 'sheet_c'],
-    ]);
-  });
-
-  it('stageSpan 小于进度差时继续拆分且保持阶段单调推进', () => {
-    const plan = buildAutoResumeFillPlan_ACU({
-      aiMessageIndices,
-      sheetProgress: [
-        { sheetKey: 'sheet_a', groupId: 1, lastFilledAiFloor: 3 },
-        { sheetKey: 'sheet_b', groupId: 1, lastFilledAiFloor: 6 },
-      ],
-      effectiveTailFloor: 9,
-      stageSpan: 2,
-      batchSize: 2,
-    });
-
-    expect(plan.stages.map(stage => [stage.fromAiFloor, stage.toAiFloor])).toEqual([
-      [4, 5],
-      [6, 6],
-      [7, 8],
-      [9, 9],
-    ]);
-  });
-
-  it('同阶段仅合并相同 groupId，不同 groupId 保持独立组', () => {
-    const plan = buildAutoResumeFillPlan_ACU({
-      aiMessageIndices,
-      sheetProgress: [
-        { sheetKey: 'sheet_c', groupId: 2, lastFilledAiFloor: 3 },
-        { sheetKey: 'sheet_a', groupId: 1, lastFilledAiFloor: 3 },
-        { sheetKey: 'sheet_b', groupId: 1, lastFilledAiFloor: 3 },
-      ],
-      effectiveTailFloor: 6,
-      stageSpan: 0,
-      batchSize: 2,
-    });
-
-    expect(plan.stages[0].groups).toHaveLength(2);
-    expect(plan.stages[0].groups.map(group => [group.groupId, group.sheetKeys])).toEqual([
-      [1, ['sheet_a', 'sheet_b']],
-      [2, ['sheet_c']],
-    ]);
-  });
-
-  it('无记录从第一层开始，已追平与超出末层的表不生成任务', () => {
-    const plan = buildAutoResumeFillPlan_ACU({
-      aiMessageIndices,
-      sheetProgress: [
-        { sheetKey: 'sheet_new', groupId: -1, lastFilledAiFloor: 0 },
-        { sheetKey: 'sheet_done', groupId: 1, lastFilledAiFloor: 6 },
-        { sheetKey: 'sheet_over', groupId: 2, lastFilledAiFloor: 99 },
-      ],
-      effectiveTailFloor: 6,
-      stageSpan: 0,
-      batchSize: 2,
-    });
-
-    expect(plan.stages[0]).toEqual(expect.objectContaining({ fromAiFloor: 1, toAiFloor: 6 }));
-    expect(plan.alreadyCaughtUpSheetKeys).toEqual(['sheet_done', 'sheet_over']);
-    expect(plan.clampedSheetKeys).toEqual(['sheet_over']);
-  });
-
-  it('全部追平时返回空计划', () => {
-    const plan = buildAutoResumeFillPlan_ACU({
-      aiMessageIndices,
-      sheetProgress: [{ sheetKey: 'sheet_a', groupId: 0, lastFilledAiFloor: 12 }],
-      effectiveTailFloor: 12,
-      stageSpan: 3,
-      batchSize: 2,
-    });
-    expect(plan.stages).toEqual([]);
-    expect(plan.alreadyCaughtUpSheetKeys).toEqual(['sheet_a']);
-  });
-
-  it('AI 楼层到消息索引映射不完整时拒绝生成计划', () => {
-    expect(() => buildAutoResumeFillPlan_ACU({
-      aiMessageIndices: [1, 3],
-      sheetProgress: [{ sheetKey: 'sheet_a', groupId: 0, lastFilledAiFloor: 0 }],
-      effectiveTailFloor: 3,
-      stageSpan: 0,
-      batchSize: 2,
-    })).toThrow('有效末层 3 超出 AI 消息索引数量 2');
-  });
-});
-
 describe('processGroupedRuntimeChunk_ACU', () => {
   beforeEach(async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
@@ -4025,141 +3878,5 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     } finally {
       vi.mocked(isSqliteMode).mockReturnValue(false);
     }
-  });
-});
-
-describe('orchestrateAutoResumeFill_ACU', () => {
-  const refreshData = vi.fn().mockResolvedValue(undefined);
-
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    const { loadAllChatMessages_ACU } = await import('../../../src/service/worldbook/pipeline');
-    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
-    vi.mocked(loadAllChatMessages_ACU).mockResolvedValue(undefined);
-    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
-      mate: { type: 'acu' },
-      sheet_0: { name: '表A', updateConfig: { groupId: 1 }, content: [['row_id', '值']] },
-    } as any);
-    mockIsAutoUpdating = false;
-    mockWasStopped = false;
-    mockCoreApisReady = true;
-    mockSettings = {
-      ...mockSettings,
-      apiMode: 'custom',
-      apiConfig: { useMainApi: true, url: '', model: '' },
-      autoUpdateThreshold: 2,
-      manualUpdateContextDepth: 2,
-      updateBatchSize: 2,
-      manualUpdateBatchSize: 2,
-      maxConcurrentGroups: 2,
-      skipUpdateFloors: 0,
-      tableMaxRetries: 1,
-      autoUpdateTokenThreshold: 0,
-    };
-    mockCurrentJsonTableData = {
-      sheet_0: { name: '表A', updateConfig: { groupId: 1 }, content: [['row_id', '值'], ['1', 'base']] },
-    };
-    mockChatArrayForSeedStage.splice(0, mockChatArrayForSeedStage.length,
-      { is_user: true, mes: 'U1' }, { is_user: false, mes: 'A1' },
-      { is_user: true, mes: 'U2' }, { is_user: false, mes: 'A2' },
-      { is_user: true, mes: 'U3' }, { is_user: false, mes: 'A3' },
-      { is_user: true, mes: 'U4' }, { is_user: false, mes: 'A4' },
-    );
-    mockResolveTableHistoryState.mockReturnValue({
-      latestAiMessageIndex: 7,
-      latestDataMessageIndex: 1,
-      lastTrackedUpdateMessageIndex: -1,
-      latestDataAiFloor: 1,
-      lastTrackedUpdateAiFloor: 0,
-      hasAnyData: true,
-      hasTrackedUpdate: false,
-    });
-    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
-    mockParseAndApplyTableEditsToData.mockImplementation((_aiResponse: string, tableData: any) => {
-      tableData.sheet_0.content.push([String(tableData.sheet_0.content.length), '续填']);
-      return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 };
-    });
-    mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 7 });
-    mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
-    mockShouldRotateBoundaryCheckpoint.mockReturnValue(false);
-    refreshData.mockClear();
-  });
-
-  it('全部表已追平时返回 noWork，且不调用 AI 或破坏性重填 API', async () => {
-    mockResolveTableHistoryState.mockReturnValue({
-      latestAiMessageIndex: 7,
-      latestDataMessageIndex: 7,
-      lastTrackedUpdateMessageIndex: 7,
-      latestDataAiFloor: 4,
-      lastTrackedUpdateAiFloor: 4,
-      hasAnyData: true,
-      hasTrackedUpdate: true,
-    });
-
-    const result = await orchestrateAutoResumeFill_ACU(['sheet_0'], vi.fn(), refreshData);
-
-    expect(result).toEqual(expect.objectContaining({ success: true, noWork: true, totalStageCount: 0 }));
-    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
-    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
-    expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
-    expect(mockCommitManualRefillSheetSnapshot).not.toHaveBeenCalled();
-  });
-
-  it('按 stageSpan 严格串行执行两个阶段，并保留 bounded merge base', async () => {
-    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
-    const onProgress = vi.fn();
-
-    const result = await orchestrateAutoResumeFill_ACU(['sheet_0'], vi.fn(), refreshData, { onProgress });
-
-    expect(result).toEqual(expect.objectContaining({
-      success: true,
-      completedStageCount: 2,
-      totalStageCount: 2,
-    }));
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(2);
-    const preparingMessages = onProgress.mock.calls
-      .map(call => call[0])
-      .filter(event => event.phase === 'preparing' && String(event.message || '').includes('断点续填阶段'))
-      .map(event => event.message);
-    expect(preparingMessages).toEqual([
-      expect.stringContaining('阶段 1/2（AI 第 1~2 层）'),
-      expect.stringContaining('阶段 2/2（AI 第 3~4 层）'),
-    ]);
-    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
-    expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
-    expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
-    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
-    expect(mockCommitManualRefillSheetSnapshot).not.toHaveBeenCalled();
-  });
-
-  it('第一阶段成功而第二阶段失败时保留已提交阶段且不做会话回滚', async () => {
-    mockCallCustomOpenAI
-      .mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>')
-      .mockResolvedValueOnce('无效响应');
-
-    const result = await orchestrateAutoResumeFill_ACU(['sheet_0'], vi.fn(), refreshData);
-
-    expect(result.success).toBe(false);
-    expect(result.completedStageCount).toBe(1);
-    expect(result.totalStageCount).toBe(2);
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
-    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
-    expect(refreshData).toHaveBeenCalled();
-  });
-
-  it('用户在第一阶段完成后终止时不启动下一阶段', async () => {
-    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
-    const onProgress = vi.fn((event: any) => {
-      if (event.phase === 'complete') mockWasStopped = true;
-    });
-
-    const result = await orchestrateAutoResumeFill_ACU(['sheet_0'], vi.fn(), refreshData, { onProgress });
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('断点续填已终止。');
-    expect(result.completedStageCount).toBe(1);
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
-    expect(mockIsAutoUpdating).toBe(false);
-    expect(mockWasStopped).toBe(false);
   });
 });
