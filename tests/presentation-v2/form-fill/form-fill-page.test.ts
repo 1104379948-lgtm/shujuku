@@ -62,6 +62,7 @@ async function mountFormFillPage(
   const { ref, computed } = await import('vue');
   const saveSettings = vi.fn(() => ({ saved: true, storageType: 'memory' }));
   const orchestrate = vi.fn(async (..._args: any[]) => ({ success: true }));
+  const autoResumeOrchestrate = vi.fn(async (..._args: any[]) => ({ success: true, completedStageCount: 1, totalStageCount: 1 }));
   const executeCore = vi.fn(async (..._args: any[]) => ({ success: true, modifiedKeys: [] }));
   const processUpdatesBatch = vi.fn(async (indices: number[], mode: string, options: any, executeUpdate: any) => {
     if (options?.__skipExecuteForTest) return { success: true };
@@ -186,6 +187,7 @@ async function mountFormFillPage(
     switchStorageMode: vi.fn(async (mode: string) => { settings.storageMode = mode; }),
   }));
   vi.doMock('../../../src/service/table/update-orchestrator', () => ({
+    orchestrateAutoResumeFill_ACU: autoResumeOrchestrate,
     orchestrateManualUpdate_ACU: orchestrate,
     processUpdatesBatch_ACU: processUpdatesBatch,
     executeCardUpdateCore_ACU: executeCore,
@@ -218,6 +220,7 @@ async function mountFormFillPage(
     settings,
     saveSettings,
     orchestrate,
+    autoResumeOrchestrate,
     processUpdatesBatch,
     executeCore,
     worldbookConfig,
@@ -672,6 +675,7 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(text).toContain('AI 第 3 层（历史周期基线）');
     expect(text).toContain('选中表：角色状态（sheet_a）、事件记录（sheet_b）');
     expect(text).toContain('执行手动填表');
+    expect(text).toContain('自动断点续填');
     expect(panel.querySelector('.acu-v2-form-fill-page__manual-extra .acu-toggle')).toBeNull();
     expect(panel.querySelector('.acu-v2-form-fill-page__manual-extra textarea')).not.toBeNull();
 
@@ -979,6 +983,57 @@ describe('FormFillPage · 手动填表面板', () => {
       '以下为用户的额外填表要求,请严格遵守:\n只更新角色状态。',
     );
 
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('自动断点续填只经过一次普通确认并调用非破坏性编排器', async () => {
+    const { mount, orchestrate, autoResumeOrchestrate } = await mountFormFillPage();
+    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
+      .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
+    const button = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('自动断点续填'))!;
+
+    expect(button.disabled).toBe(false);
+    button.click();
+    await Promise.resolve();
+    const dialogText = document.querySelector('.acu-dialog-layer')?.textContent || '';
+    expect(dialogText).toContain('按每张表最后一次完成的 AI 楼层生成阶段化续填计划');
+    expect(dialogText).toContain('不清理旧 checkpoint');
+    expect(dialogText).toContain('不执行破坏性基底替换');
+
+    await clickDialogButton('确认并继续');
+
+    expect(autoResumeOrchestrate).toHaveBeenCalledTimes(1);
+    expect(autoResumeOrchestrate.mock.calls[0][0]).toEqual(['sheet_a', 'sheet_b']);
+    expect(autoResumeOrchestrate.mock.calls[0][3]).toEqual({ onProgress: expect.any(Function) });
+    expect(orchestrate).not.toHaveBeenCalled();
+    expect(document.querySelector('.acu-dialog-layer')?.textContent || '')
+      .not.toContain('破坏性手动重填确认');
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('断点续填运行期间两个入口都禁用，并显示运行中文案', async () => {
+    const { mount, autoResumeOrchestrate } = await mountFormFillPage();
+    let release!: (value: any) => void;
+    autoResumeOrchestrate.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
+      .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
+    const resumeButton = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('自动断点续填'))!;
+
+    resumeButton.click();
+    await clickDialogButton('确认并继续');
+    await Promise.resolve();
+
+    const buttons = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'));
+    const busyResumeButton = buttons.find(item => item.textContent?.includes('断点续填中'))!;
+    const manualButton = buttons.find(item => item.textContent?.includes('执行手动填表'))!;
+    expect(busyResumeButton.disabled).toBe(true);
+    expect(manualButton.disabled).toBe(true);
+
+    release({ success: true, completedStageCount: 1, totalStageCount: 1 });
+    await new Promise(r => setTimeout(r, 0));
+    expect(Array.from(panel.querySelectorAll<HTMLButtonElement>('button')).find(item => item.textContent?.includes('自动断点续填'))?.disabled).toBe(false);
     mount.__resetAcuV2MountForTests();
   });
 });

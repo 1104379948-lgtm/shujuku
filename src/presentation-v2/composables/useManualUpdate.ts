@@ -15,6 +15,7 @@ import { getSortedSheetKeys_ACU } from '../../service/template/chat-scope';
 import { collectV2CheckpointFloorsFromChat_ACU } from '../../service/table/table-history';
 import {
   executeCardUpdateCore_ACU,
+  orchestrateAutoResumeFill_ACU,
   orchestrateManualUpdate_ACU,
   processUpdatesBatch_ACU,
   type BatchUpdateProgressContext,
@@ -33,6 +34,7 @@ export interface ManualUpdateState {
   manualBatchSize: Ref<number>;
   manualExtraHint: Ref<string>;
   manualUpdateBusy: Ref<boolean>;
+  autoResumeBusy: Ref<boolean>;
   sheetKeys: ComputedRef<string[]>;
   sheetNames: ComputedRef<Record<string, string>>;
   selectedSheetSummary: ComputedRef<string>;
@@ -47,6 +49,7 @@ export interface ManualUpdateState {
   selectAllManualTables: () => void;
   selectNoManualTables: () => void;
   runManualUpdate: () => Promise<void>;
+  runAutoResumeFill: () => Promise<void>;
 }
 
 function currentSheetKeys(): string[] {
@@ -194,9 +197,11 @@ export function useManualUpdate(): ManualUpdateState {
   const manualBatchSize = ref(resolveManualBatchSize());
   const manualExtraHint = ref('');
   const manualUpdateBusy = ref(false);
+  const autoResumeBusy = ref(false);
   const refreshTick = ref(0);
   let progressToastId: string | null = null;
   let abortRequested = false;
+  let activeTaskLabel = '手动填表';
 
   function progressToastOptions() {
     return {
@@ -239,13 +244,13 @@ export function useManualUpdate(): ManualUpdateState {
     abortAllActiveRequests_ACU();
     _set_isAutoUpdatingCard_ACU(false);
     if (progressToastId) {
-      toast.update(progressToastId, 'warning', '手动填表已终止，正在停止当前任务与后续批次...', {
+      toast.update(progressToastId, 'warning', `${activeTaskLabel}已终止，正在停止当前任务与后续批次...`, {
         durationMs: 0,
         muteable: false,
         dismissible: false,
       });
     } else {
-      toast.warning('手动填表已终止，正在停止当前任务与后续批次...', {
+      toast.warning(`${activeTaskLabel}已终止，正在停止当前任务与后续批次...`, {
         durationMs: 0,
         muteable: false,
         dismissible: false,
@@ -382,7 +387,7 @@ export function useManualUpdate(): ManualUpdateState {
   }
 
   async function runManualUpdate(): Promise<void> {
-    if (manualUpdateBusy.value) return;
+    if (manualUpdateBusy.value || autoResumeBusy.value) return;
     if (!selectedManualTableKeys.value.length) {
       toast.warning('未选择需要手动填表的表格。');
       return;
@@ -402,6 +407,7 @@ export function useManualUpdate(): ManualUpdateState {
     const targetManualTableKeys = selectedManualTableKeys.value.slice();
 
     manualUpdateBusy.value = true;
+    activeTaskLabel = '手动填表';
     progressToastId = null;
     abortRequested = false;
     _set_wasStoppedByUser_ACU(false);
@@ -489,12 +495,91 @@ export function useManualUpdate(): ManualUpdateState {
     }
   }
 
+  async function runAutoResumeFill(): Promise<void> {
+    if (manualUpdateBusy.value || autoResumeBusy.value) return;
+    if (!selectedManualTableKeys.value.length) {
+      toast.warning('未选择需要断点续填的表格。');
+      return;
+    }
+    const confirmed = await dialogStore.confirm({
+      title: '自动断点续填',
+      message: `即将按每张表最后一次完成的 AI 楼层生成阶段化续填计划，并追平到最新有效 AI 楼层。\n\n选中表：${selectedSheetSummary.value}\n阶段最大跨度：${manualContextDepth.value === 0 ? '不限制' : `${manualContextDepth.value} 层`}\n每次填表批量：${manualBatchSize.value} 层\n跳过最新回复：${normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0)} 层\n\n本操作只追加新的填表结果，不清理旧 checkpoint，不执行破坏性基底替换。中途失败或终止时，已经成功保存的阶段会保留。`,
+      confirmLabel: '确认并继续',
+      cancelLabel: '取消',
+    });
+    if (!confirmed) return;
+
+    const targetKeys = selectedManualTableKeys.value.slice();
+    autoResumeBusy.value = true;
+    activeTaskLabel = '断点续填';
+    progressToastId = null;
+    abortRequested = false;
+    _set_wasStoppedByUser_ACU(false);
+    notifyProgress('断点续填开始。');
+    const extra = manualExtraHint.value.trim();
+    if (extra) _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
+
+    const handleProgress = (event: CardUpdateProgressEvent) => {
+      notifyProgress(progressLabel(event));
+      if (event.phase === 'complete') {
+        try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
+        refreshTick.value++;
+      }
+    };
+    const runProcessBatch = (indices: number[], mode: string, options: any) =>
+      processUpdatesBatch_ACU(indices, mode, options, (
+        messagesToUse: any[],
+        saveTargetIndex: number,
+        updateMode: string,
+        isSilentMode: boolean,
+        targetSheetKeys: string[] | null,
+        requestOptions: Record<string, any> | null,
+        progressContext: BatchUpdateProgressContext,
+      ) => executeCardUpdateCore_ACU(
+        messagesToUse,
+        saveTargetIndex,
+        false,
+        updateMode,
+        isSilentMode,
+        targetSheetKeys,
+        requestOptions,
+        new AbortController(),
+        progressContext,
+        handleProgress,
+      ));
+
+    try {
+      const result = await orchestrateAutoResumeFill_ACU(
+        targetKeys,
+        runProcessBatch,
+        async () => { await refreshMergedDataAndNotify_ACU(); },
+        { onProgress: handleProgress },
+      );
+      finishToast(
+        result.success
+          ? (result.noWork ? 'info' : (result.checkpointWarning ? 'warning' : 'success'))
+          : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'),
+        result.success
+          ? (result.noWork
+              ? '所选表已追平，无需续填。'
+              : `断点续填完成，共完成 ${result.completedStageCount || 0}/${result.totalStageCount || 0} 个阶段。${result.checkpointWarning ? ` 但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}` : ''}`)
+          : (abortRequested ? '断点续填任务已由用户终止。' : (result.error || '断点续填失败。')),
+      );
+    } catch (error: any) {
+      finishToast('error', error?.message || '断点续填执行异常。');
+    } finally {
+      autoResumeBusy.value = false;
+      refresh();
+    }
+  }
+
   return {
     selectedManualTableKeys,
     manualContextDepth,
     manualBatchSize,
     manualExtraHint,
     manualUpdateBusy,
+    autoResumeBusy,
     sheetKeys,
     sheetNames,
     selectedSheetSummary,
@@ -509,5 +594,6 @@ export function useManualUpdate(): ManualUpdateState {
     selectAllManualTables,
     selectNoManualTables,
     runManualUpdate,
+    runAutoResumeFill,
   };
 }

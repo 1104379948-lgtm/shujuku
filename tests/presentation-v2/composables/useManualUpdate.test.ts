@@ -26,14 +26,17 @@ async function importManualUpdate() {
   };
   const chat = [{ is_user: false, mes: 'AI 1' }];
   const orchestrateManualUpdate_ACU = vi.fn();
+  const orchestrateAutoResumeFill_ACU = vi.fn();
   const refreshMergedDataAndNotify_ACU = vi.fn(async () => undefined);
   const setWasStoppedByUser = vi.fn();
+  const setIsAutoUpdatingCard = vi.fn();
+  const abortAllActiveRequests = vi.fn();
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     currentJsonTableData_ACU: currentJsonTableData,
     settings_ACU: settings,
-    abortAllActiveRequests_ACU: vi.fn(),
-    _set_isAutoUpdatingCard_ACU: vi.fn(),
+    abortAllActiveRequests_ACU: abortAllActiveRequests,
+    _set_isAutoUpdatingCard_ACU: setIsAutoUpdatingCard,
     _set_manualExtraHint_ACU: vi.fn(),
     _set_wasStoppedByUser_ACU: setWasStoppedByUser,
     getCurrentIsolationKey_ACU: vi.fn(() => ''),
@@ -55,6 +58,7 @@ async function importManualUpdate() {
   }));
   vi.doMock('../../../src/service/table/update-orchestrator', () => ({
     executeCardUpdateCore_ACU: vi.fn(),
+    orchestrateAutoResumeFill_ACU,
     orchestrateManualUpdate_ACU,
     processUpdatesBatch_ACU: vi.fn(),
   }));
@@ -78,8 +82,11 @@ async function importManualUpdate() {
     toast: useToastStore(),
     __resetToastStoreForTests,
     orchestrateManualUpdate_ACU,
+    orchestrateAutoResumeFill_ACU,
     refreshMergedDataAndNotify_ACU,
     setWasStoppedByUser,
+    setIsAutoUpdatingCard,
+    abortAllActiveRequests,
   };
 }
 
@@ -186,6 +193,108 @@ describe('useManualUpdate destructive boundary confirmation', () => {
 
     expect(toast.items.at(-1)?.kind).toBe('error');
     expect(toast.items.at(-1)?.text).toContain('确认后替换失败');
+    __resetToastStoreForTests();
+  });
+});
+
+describe('useManualUpdate runAutoResumeFill', () => {
+  it('未选表时只警告，不弹确认也不调用编排器', async () => {
+    const { useManualUpdate, dialog, toast, orchestrateAutoResumeFill_ACU, __resetToastStoreForTests } = await importManualUpdate();
+    const manual = useManualUpdate();
+    manual.selectNoManualTables();
+
+    await manual.runAutoResumeFill();
+
+    expect(dialog.active).toBeNull();
+    expect(orchestrateAutoResumeFill_ACU).not.toHaveBeenCalled();
+    expect(toast.items.at(-1)).toEqual(expect.objectContaining({
+      kind: 'warning',
+      text: '未选择需要断点续填的表格。',
+    }));
+    __resetToastStoreForTests();
+  });
+
+  it('取消普通确认时不调用任一编排器，也不出现破坏性二次确认', async () => {
+    const { useManualUpdate, dialog, orchestrateAutoResumeFill_ACU, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate();
+    const manual = useManualUpdate();
+
+    const pending = manual.runAutoResumeFill();
+    await waitForCondition(() => dialog.active?.title === '自动断点续填', '断点续填确认弹窗出现');
+    expect(dialog.active?.message).toContain('不清理旧 checkpoint');
+    expect(dialog.active?.message).toContain('不执行破坏性基底替换');
+    dialog.cancelActive();
+    await pending;
+
+    expect(orchestrateAutoResumeFill_ACU).not.toHaveBeenCalled();
+    expect(orchestrateManualUpdate_ACU).not.toHaveBeenCalled();
+    expect(dialog.active).toBeNull();
+    __resetToastStoreForTests();
+  });
+
+  it.each([
+    [{ success: true, noWork: true }, 'info', '所选表已追平，无需续填。'],
+    [{ success: true, completedStageCount: 2, totalStageCount: 2 }, 'success', '断点续填完成，共完成 2/2 个阶段。'],
+    [{ success: true, completedStageCount: 1, totalStageCount: 1, checkpointWarning: 'checkpoint 写入失败' }, 'warning', 'checkpoint 写入失败'],
+    [{ success: false, error: '阶段提交失败' }, 'error', '阶段提交失败'],
+    [{ success: false, error: '断点续填已终止。' }, 'warning', '断点续填已终止。'],
+  ])('按结果分类最终 toast，并在结束后复位 busy 与刷新：%j', async (result, expectedKind, expectedText) => {
+    const { useManualUpdate, dialog, toast, orchestrateAutoResumeFill_ACU, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate();
+    orchestrateAutoResumeFill_ACU.mockResolvedValueOnce(result);
+    const manual = useManualUpdate();
+
+    const pending = manual.runAutoResumeFill();
+    await waitForCondition(() => dialog.active?.title === '自动断点续填', '断点续填确认弹窗出现');
+    dialog.submitActive();
+    await pending;
+
+    expect(orchestrateAutoResumeFill_ACU).toHaveBeenCalledTimes(1);
+    expect(orchestrateAutoResumeFill_ACU.mock.calls[0][0]).toEqual(['sheet_0']);
+    expect(orchestrateAutoResumeFill_ACU.mock.calls[0][2]).toEqual(expect.any(Function));
+    expect(orchestrateAutoResumeFill_ACU.mock.calls[0][3]).toEqual(expect.objectContaining({ onProgress: expect.any(Function) }));
+    expect(orchestrateManualUpdate_ACU).not.toHaveBeenCalled();
+    expect(toast.items.at(-1)?.kind).toBe(expectedKind);
+    expect(toast.items.at(-1)?.text).toContain(expectedText);
+    expect(manual.autoResumeBusy.value).toBe(false);
+    __resetToastStoreForTests();
+  });
+
+  it('运行期间与手动填表互斥，停止 action 复用全局中止链', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      toast,
+      orchestrateAutoResumeFill_ACU,
+      orchestrateManualUpdate_ACU,
+      setWasStoppedByUser,
+      setIsAutoUpdatingCard,
+      abortAllActiveRequests,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    let release!: (value: any) => void;
+    orchestrateAutoResumeFill_ACU.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const manual = useManualUpdate();
+
+    const pending = manual.runAutoResumeFill();
+    await waitForCondition(() => dialog.active?.title === '自动断点续填', '断点续填确认弹窗出现');
+    dialog.submitActive();
+    await waitForCondition(() => orchestrateAutoResumeFill_ACU.mock.calls.length === 1, '断点续填编排器启动');
+    expect(manual.autoResumeBusy.value).toBe(true);
+
+    await manual.runManualUpdate();
+    expect(orchestrateManualUpdate_ACU).not.toHaveBeenCalled();
+    expect(dialog.active).toBeNull();
+
+    const action = toast.items.at(-1)?.action;
+    expect(action?.label).toBe('终止');
+    await action?.onClick();
+    expect(setWasStoppedByUser).toHaveBeenLastCalledWith(true);
+    expect(abortAllActiveRequests).toHaveBeenCalledTimes(1);
+    expect(setIsAutoUpdatingCard).toHaveBeenLastCalledWith(false);
+    expect(toast.items.at(-1)?.text).toContain('断点续填已终止');
+
+    release({ success: false, error: '断点续填已终止。' });
+    await pending;
+    expect(manual.autoResumeBusy.value).toBe(false);
     __resetToastStoreForTests();
   });
 });

@@ -41428,6 +41428,104 @@ $CONTENT
     }
     const SQL_ERROR_MARKER_ACU = '\n\n<!-- SQL_ERROR_FEEDBACK -->\n';
     const UNIFIED_GROUP_ERROR_MARKER_ACU = '\n\n<!-- UNIFIED_GROUP_ERROR_FEEDBACK -->\n';
+    function buildAutoResumeFillPlan_ACU(options) {
+        const effectiveTailFloor = Math.max(0, Math.floor(Number(options.effectiveTailFloor) || 0));
+        const stageSpan = Math.max(0, Math.floor(Number(options.stageSpan) || 0));
+        const batchSize = Math.floor(Number(options.batchSize));
+        if (!Number.isFinite(batchSize) || batchSize < 1) {
+            throw new Error('断点续填计划的批处理大小必须是大于 0 的整数。');
+        }
+        const aiMessageIndices = Array.isArray(options.aiMessageIndices) ? options.aiMessageIndices : [];
+        if (effectiveTailFloor > aiMessageIndices.length) {
+            throw new Error(`断点续填计划无法映射 AI 楼层：有效末层 ${effectiveTailFloor} 超出 AI 消息索引数量 ${aiMessageIndices.length}。`);
+        }
+        for (let i = 0; i < effectiveTailFloor; i += 1) {
+            if (!Number.isInteger(aiMessageIndices[i]) || aiMessageIndices[i] < 0 || (i > 0 && aiMessageIndices[i] <= aiMessageIndices[i - 1])) {
+                throw new Error(`断点续填计划的第 ${i + 1} 个 AI 消息索引无效或未严格递增。`);
+            }
+        }
+        const seenSheetKeys = new Set();
+        const clampedSheetKeys = [];
+        const cursors = (Array.isArray(options.sheetProgress) ? options.sheetProgress : [])
+            .map(item => ({
+            item,
+            sheetKey: String(item?.sheetKey || '').trim(),
+        }))
+            .filter(({ sheetKey }) => {
+            if (!sheetKey || seenSheetKeys.has(sheetKey))
+                return false;
+            seenSheetKeys.add(sheetKey);
+            return true;
+        })
+            .map(({ item, sheetKey }) => {
+            const rawFloor = Number.isFinite(Number(item.lastFilledAiFloor))
+                ? Math.max(0, Math.floor(Number(item.lastFilledAiFloor)))
+                : 0;
+            if (rawFloor > effectiveTailFloor)
+                clampedSheetKeys.push(sheetKey);
+            return {
+                sheetKey,
+                groupId: Number.isFinite(Number(item.groupId)) ? Math.trunc(Number(item.groupId)) : -1,
+                cursor: Math.min(rawFloor, effectiveTailFloor),
+            };
+        });
+        const alreadyCaughtUpSheetKeys = cursors
+            .filter(item => item.cursor >= effectiveTailFloor)
+            .map(item => item.sheetKey)
+            .sort();
+        const stages = [];
+        while (cursors.some(item => item.cursor < effectiveTailFloor)) {
+            const active = cursors.filter(item => item.cursor < effectiveTailFloor);
+            const frontier = Math.min(...active.map(item => item.cursor));
+            const participants = active.filter(item => item.cursor === frontier);
+            const higherCursors = cursors.map(item => item.cursor).filter(cursor => cursor > frontier);
+            const nextExistingFrontier = higherCursors.length > 0 ? Math.min(...higherCursors) : effectiveTailFloor;
+            const spanBoundary = stageSpan > 0 ? frontier + stageSpan : effectiveTailFloor;
+            const stageEnd = Math.min(nextExistingFrontier, spanBoundary, effectiveTailFloor);
+            if (stageEnd <= frontier) {
+                throw new Error(`断点续填计划无法推进：当前边界 ${frontier}，阶段末层 ${stageEnd}。`);
+            }
+            const indices = aiMessageIndices.slice(frontier, stageEnd);
+            if (indices.length !== stageEnd - frontier) {
+                throw new Error(`断点续填计划无法完整映射 AI 第 ${frontier + 1}~${stageEnd} 层。`);
+            }
+            const groupsByKey = new Map();
+            for (const participant of participants) {
+                const key = `${participant.groupId}|${indices.join(',')}|${batchSize}`;
+                const existing = groupsByKey.get(key);
+                if (existing) {
+                    existing.sheetKeys.push(participant.sheetKey);
+                }
+                else {
+                    groupsByKey.set(key, {
+                        key,
+                        groupId: participant.groupId,
+                        fromAiFloor: frontier + 1,
+                        toAiFloor: stageEnd,
+                        indices: [...indices],
+                        batchSize,
+                        sheetKeys: [participant.sheetKey],
+                    });
+                }
+            }
+            const groups = [...groupsByKey.values()]
+                .map(group => ({ ...group, sheetKeys: [...group.sheetKeys].sort() }))
+                .sort((a, b) => a.groupId - b.groupId || a.key.localeCompare(b.key));
+            stages.push({
+                stageNumber: stages.length + 1,
+                fromAiFloor: frontier + 1,
+                toAiFloor: stageEnd,
+                groups,
+            });
+            participants.forEach(item => { item.cursor = stageEnd; });
+        }
+        return {
+            effectiveTailFloor,
+            stages,
+            alreadyCaughtUpSheetKeys,
+            clampedSheetKeys: clampedSheetKeys.sort(),
+        };
+    }
     // ============================================================
     // 核心业务函数
     // ============================================================
@@ -42998,6 +43096,223 @@ $CONTENT
             return { success: true };
         }
         finally {
+            _set_isAutoUpdatingCard_ACU$1(false);
+            _set_wasStoppedByUser_ACU$1(false);
+        }
+    }
+    /**
+     * 从各表最后一次真实填表楼层继续，按进度边界分阶段追平到最新有效 AI 楼层。
+     * 该路径只追加新的 V2 填表事件，不清理历史范围，也不参与手动重填的破坏性基底替换。
+     */
+    async function orchestrateAutoResumeFill_ACU(targetKeys, processBatch, refreshData, options = {}) {
+        void processBatch;
+        let completedStageCount = 0;
+        try {
+            if (isAutoUpdatingCard_ACU$1) {
+                return { success: false, error: '数据库更新正在进行中，请稍候...' };
+            }
+            if (!coreApisAreReady_ACU) {
+                return { success: false, error: 'API未就绪。' };
+            }
+            const apiIsConfigured = (settings_ACU.apiMode === 'custom'
+                && (settings_ACU.apiConfig.useMainApi || (settings_ACU.apiConfig.url && settings_ACU.apiConfig.model)))
+                || (settings_ACU.apiMode === 'tavern' && settings_ACU.tavernProfile);
+            if (!apiIsConfigured) {
+                return { success: false, error: 'API未配置，无法执行断点续填。' };
+            }
+            if (!Array.isArray(targetKeys) || targetKeys.length === 0) {
+                return { success: false, error: '未选择需要断点续填的表格。' };
+            }
+            await loadAllChatMessages_ACU();
+            await refreshData();
+            if (!currentJsonTableData_ACU) {
+                return { success: false, error: '数据库未加载。' };
+            }
+            const liveChat = getChatArray_ACU();
+            if (!Array.isArray(liveChat) || liveChat.length === 0) {
+                return { success: false, error: '聊天记录为空，无法执行断点续填。' };
+            }
+            const allAiMessageIndices = liveChat
+                .map((msg, index) => msg && !msg.is_user ? index : -1)
+                .filter((index) => index >= 0);
+            if (allAiMessageIndices.length === 0) {
+                return { success: false, error: '尚未检测到AI回复，无法执行断点续填。' };
+            }
+            const skipFloors = Math.max(0, Math.floor(Number(settings_ACU.skipUpdateFloors) || 0));
+            const effectiveTailFloor = Math.max(0, allAiMessageIndices.length - skipFloors);
+            if (effectiveTailFloor === 0) {
+                return { success: false, error: '跳过最新回复数覆盖了全部 AI 楼层，没有可续填范围。' };
+            }
+            const fallbackStageSpan = Math.max(0, Math.floor(Number(settings_ACU.autoUpdateThreshold) || 3));
+            const stageSpan = settings_ACU.manualUpdateContextDepth == null
+                ? fallbackStageSpan
+                : Math.max(0, Math.floor(Number(settings_ACU.manualUpdateContextDepth) || 0));
+            const fallbackBatchSize = Math.max(1, Math.floor(Number(settings_ACU.updateBatchSize) || 3));
+            const batchSize = settings_ACU.manualUpdateBatchSize == null
+                ? fallbackBatchSize
+                : Math.max(1, Math.floor(Number(settings_ACU.manualUpdateBatchSize) || fallbackBatchSize));
+            const maxConcurrentGroups = Math.max(1, Math.floor(Number(settings_ACU.maxConcurrentGroups) || 1));
+            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
+            const isolationKey = getCurrentIsolationKey_ACU();
+            const sheetProgress = [...new Set(targetKeys)].map(sheetKey => {
+                const table = currentJsonTableData_ACU?.[sheetKey] || templateData?.[sheetKey];
+                const tableConfig = templateData?.[sheetKey]?.updateConfig || table?.updateConfig || {};
+                const groupId = Number.isFinite(Number(tableConfig.groupId)) ? Math.trunc(Number(tableConfig.groupId)) : -1;
+                const history = resolveTableHistoryStateFromChat_ACU(liveChat, {
+                    sheetKey,
+                    isSummaryTable: isSummaryOrOutlineTable_ACU(String(table?.name || '')),
+                    isolationKey,
+                    settings: settings_ACU,
+                });
+                return { sheetKey, groupId, lastFilledAiFloor: history.lastTrackedUpdateAiFloor };
+            });
+            const plan = buildAutoResumeFillPlan_ACU({
+                aiMessageIndices: allAiMessageIndices,
+                sheetProgress,
+                effectiveTailFloor,
+                stageSpan,
+                batchSize,
+            });
+            if (plan.stages.length === 0) {
+                return { success: true, noWork: true, completedStageCount: 0, totalStageCount: 0 };
+            }
+            _set_isAutoUpdatingCard_ACU$1(true);
+            for (const stage of plan.stages) {
+                const totalChunks = Math.ceil(stage.groups.length / maxConcurrentGroups);
+                for (let start = 0; start < stage.groups.length; start += maxConcurrentGroups) {
+                    if (wasStoppedByUser_ACU$1) {
+                        try {
+                            await refreshData();
+                        }
+                        catch (error) {
+                            logWarn_ACU('[Auto Resume] 终止后刷新运行时数据失败:', error);
+                        }
+                        return {
+                            success: false,
+                            error: '断点续填已终止。',
+                            completedStageCount,
+                            totalStageCount: plan.stages.length,
+                        };
+                    }
+                    const chunkIndex = Math.floor(start / maxConcurrentGroups) + 1;
+                    const stageChunk = stage.groups.slice(start, start + maxConcurrentGroups);
+                    const groupedChunk = stageChunk.map(group => {
+                        const firstSheetKey = group.sheetKeys[0];
+                        const firstTableName = templateData?.[firstSheetKey]?.name || currentJsonTableData_ACU?.[firstSheetKey]?.name || '';
+                        const resolvedPreset = resolveTableApiPresetOverride_ACU(firstTableName);
+                        return {
+                            key: group.key,
+                            groupId: group.groupId,
+                            indices: group.indices,
+                            batchSize: group.batchSize,
+                            sheetKeys: group.sheetKeys,
+                            requestOptions: resolvedPreset ? { tableApiPreset: resolvedPreset } : null,
+                            mergeBaseMaxMessageIndex: group.indices[0] - 1,
+                        };
+                    });
+                    options.onProgress?.({
+                        phase: 'preparing',
+                        message: `断点续填阶段 ${stage.stageNumber}/${plan.stages.length}（AI 第 ${stage.fromAiFloor}~${stage.toAiFloor} 层），并发批次 ${chunkIndex}/${totalChunks}。`,
+                    });
+                    try {
+                        await loadAllChatMessages_ACU();
+                        if (shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()) {
+                            const boundaryCheckpoint = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+                            if (!boundaryCheckpoint.success) {
+                                try {
+                                    await refreshData();
+                                }
+                                catch (error) {
+                                    logWarn_ACU('[Auto Resume] checkpoint 失败后刷新运行时数据失败:', error);
+                                }
+                                return {
+                                    success: false,
+                                    error: boundaryCheckpoint.error || 'AI 楼层边界 checkpoint 建立失败，已停止断点续填。',
+                                    completedStageCount,
+                                    totalStageCount: plan.stages.length,
+                                };
+                            }
+                        }
+                        const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
+                            onProgress: options.onProgress,
+                        });
+                        if (!chunkResult.success) {
+                            try {
+                                await refreshData();
+                            }
+                            catch (error) {
+                                logWarn_ACU('[Auto Resume] 失败后刷新运行时数据失败:', error);
+                            }
+                            return {
+                                success: false,
+                                error: wasStoppedByUser_ACU$1 ? '断点续填已终止。' : (chunkResult.error || '断点续填失败。'),
+                                completedStageCount,
+                                totalStageCount: plan.stages.length,
+                            };
+                        }
+                        await loadAllChatMessages_ACU();
+                    }
+                    catch (error) {
+                        try {
+                            await refreshData();
+                        }
+                        catch (refreshError) {
+                            logWarn_ACU('[Auto Resume] 异常后刷新运行时数据失败:', refreshError);
+                        }
+                        return {
+                            success: false,
+                            error: wasStoppedByUser_ACU$1 ? '断点续填已终止。' : (error?.message || String(error || '断点续填执行异常。')),
+                            completedStageCount,
+                            totalStageCount: plan.stages.length,
+                        };
+                    }
+                }
+                completedStageCount += 1;
+            }
+            let checkpointWarning;
+            try {
+                await loadAllChatMessages_ACU();
+                const boundaryCheckpoint = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+                if (!boundaryCheckpoint.success)
+                    checkpointWarning = boundaryCheckpoint.error || '边界 checkpoint 建立失败。';
+            }
+            catch (error) {
+                checkpointWarning = error?.message || String(error || '边界 checkpoint 建立异常。');
+            }
+            let autoMergeTriggered = false;
+            let autoMergeSuccess = false;
+            try {
+                const trigger = checkAutoMergeTrigger_ACU();
+                if (trigger.shouldTrigger) {
+                    autoMergeTriggered = true;
+                    const prepared = prepareAutoMergeBatches_ACU({
+                        startIndex: 0, endIndex: trigger.mergeCount, targetCount: 1,
+                        batchSize: 5, promptTemplate: '', isAutoMode: true,
+                    });
+                    let accumulatedSummary = [];
+                    for (const batch of prepared.batches) {
+                        const batchResult = await executeAutoMergeBatch_ACU(prepared, batch, accumulatedSummary);
+                        accumulatedSummary = batchResult.accumulatedSummary;
+                    }
+                    await finalizeAutoMerge_ACU(prepared, accumulatedSummary);
+                    autoMergeSuccess = true;
+                }
+            }
+            catch (error) {
+                logWarn_ACU('[Auto Resume] 自动合并总结检测失败:', error);
+            }
+            await refreshData();
+            return {
+                success: true,
+                completedStageCount,
+                totalStageCount: plan.stages.length,
+                autoMergeTriggered,
+                autoMergeSuccess,
+                checkpointWarning,
+            };
+        }
+        finally {
+            _set_manualExtraHint_ACU$1('');
             _set_isAutoUpdatingCard_ACU$1(false);
             _set_wasStoppedByUser_ACU$1(false);
         }
@@ -95376,9 +95691,11 @@ Expected function or array of functions, received type ${typeof value}.`
         const manualBatchSize = ref(resolveManualBatchSize());
         const manualExtraHint = ref('');
         const manualUpdateBusy = ref(false);
+        const autoResumeBusy = ref(false);
         const refreshTick = ref(0);
         let progressToastId = null;
         let abortRequested = false;
+        let activeTaskLabel = '手动填表';
         function progressToastOptions() {
             return {
                 durationMs: 0,
@@ -95418,14 +95735,14 @@ Expected function or array of functions, received type ${typeof value}.`
             abortAllActiveRequests_ACU$1();
             _set_isAutoUpdatingCard_ACU$1(false);
             if (progressToastId) {
-                toast.update(progressToastId, 'warning', '手动填表已终止，正在停止当前任务与后续批次...', {
+                toast.update(progressToastId, 'warning', `${activeTaskLabel}已终止，正在停止当前任务与后续批次...`, {
                     durationMs: 0,
                     muteable: false,
                     dismissible: false,
                 });
             }
             else {
-                toast.warning('手动填表已终止，正在停止当前任务与后续批次...', {
+                toast.warning(`${activeTaskLabel}已终止，正在停止当前任务与后续批次...`, {
                     durationMs: 0,
                     muteable: false,
                     dismissible: false,
@@ -95551,7 +95868,7 @@ Expected function or array of functions, received type ${typeof value}.`
             setManualSelectedKeys([]);
         }
         async function runManualUpdate() {
-            if (manualUpdateBusy.value)
+            if (manualUpdateBusy.value || autoResumeBusy.value)
                 return;
             if (!selectedManualTableKeys.value.length) {
                 toast.warning('未选择需要手动填表的表格。');
@@ -95571,6 +95888,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const clearBeforeUpdate = true;
             const targetManualTableKeys = selectedManualTableKeys.value.slice();
             manualUpdateBusy.value = true;
+            activeTaskLabel = '手动填表';
             progressToastId = null;
             abortRequested = false;
             _set_wasStoppedByUser_ACU$1(false);
@@ -95633,12 +95951,67 @@ Expected function or array of functions, received type ${typeof value}.`
                 refresh();
             }
         }
+        async function runAutoResumeFill() {
+            if (manualUpdateBusy.value || autoResumeBusy.value)
+                return;
+            if (!selectedManualTableKeys.value.length) {
+                toast.warning('未选择需要断点续填的表格。');
+                return;
+            }
+            const confirmed = await dialogStore.confirm({
+                title: '自动断点续填',
+                message: `即将按每张表最后一次完成的 AI 楼层生成阶段化续填计划，并追平到最新有效 AI 楼层。\n\n选中表：${selectedSheetSummary.value}\n阶段最大跨度：${manualContextDepth.value === 0 ? '不限制' : `${manualContextDepth.value} 层`}\n每次填表批量：${manualBatchSize.value} 层\n跳过最新回复：${normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0)} 层\n\n本操作只追加新的填表结果，不清理旧 checkpoint，不执行破坏性基底替换。中途失败或终止时，已经成功保存的阶段会保留。`,
+                confirmLabel: '确认并继续',
+                cancelLabel: '取消',
+            });
+            if (!confirmed)
+                return;
+            const targetKeys = selectedManualTableKeys.value.slice();
+            autoResumeBusy.value = true;
+            activeTaskLabel = '断点续填';
+            progressToastId = null;
+            abortRequested = false;
+            _set_wasStoppedByUser_ACU$1(false);
+            notifyProgress('断点续填开始。');
+            const extra = manualExtraHint.value.trim();
+            if (extra)
+                _set_manualExtraHint_ACU$1(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
+            const handleProgress = (event) => {
+                notifyProgress(progressLabel$1(event));
+                if (event.phase === 'complete') {
+                    try {
+                        topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
+                    }
+                    catch (_) { }
+                    refreshTick.value++;
+                }
+            };
+            const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress));
+            try {
+                const result = await orchestrateAutoResumeFill_ACU(targetKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, { onProgress: handleProgress });
+                finishToast(result.success
+                    ? (result.noWork ? 'info' : (result.checkpointWarning ? 'warning' : 'success'))
+                    : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'), result.success
+                    ? (result.noWork
+                        ? '所选表已追平，无需续填。'
+                        : `断点续填完成，共完成 ${result.completedStageCount || 0}/${result.totalStageCount || 0} 个阶段。${result.checkpointWarning ? ` 但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}` : ''}`)
+                    : (abortRequested ? '断点续填任务已由用户终止。' : (result.error || '断点续填失败。')));
+            }
+            catch (error) {
+                finishToast('error', error?.message || '断点续填执行异常。');
+            }
+            finally {
+                autoResumeBusy.value = false;
+                refresh();
+            }
+        }
         return {
             selectedManualTableKeys,
             manualContextDepth,
             manualBatchSize,
             manualExtraHint,
             manualUpdateBusy,
+            autoResumeBusy,
             sheetKeys,
             sheetNames,
             selectedSheetSummary,
@@ -95653,6 +96026,7 @@ Expected function or array of functions, received type ${typeof value}.`
             selectAllManualTables,
             selectNoManualTables,
             runManualUpdate,
+            runAutoResumeFill,
         };
     }
 
@@ -95684,8 +96058,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-d7cda6b1] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-d7cda6b1] {\r\n  grid-template-areas:\r\n    \"status update\"\r\n    \"manual template\"\r\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-d7cda6b1] {\r\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-d7cda6b1] {\r\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-d7cda6b1] {\r\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-d7cda6b1] {\r\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-d7cda6b1] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-d7cda6b1] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-d7cda6b1] {\r\n  max-width: min(42ch, 100%);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-d7cda6b1] {\r\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-d7cda6b1] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-d7cda6b1] {\r\n  color: var(--acu-danger);\r\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-d7cda6b1] {\r\n  min-width: 0;\r\n  overflow: auto;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-d7cda6b1] {\r\n  width: 100%;\r\n  border-collapse: collapse;\r\n  min-width: 560px;\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-d7cda6b1],\r\n.acu-v2-form-fill-page__status-table td[data-v-d7cda6b1] {\r\n  padding: 8px 10px;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-d7cda6b1] {\r\n  color: var(--acu-text-3);\r\n  font-weight: 600;\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-d7cda6b1] {\r\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-d7cda6b1] {\r\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-d7cda6b1] {\r\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-d7cda6b1] {\r\n  text-align: center !important;\r\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-d7cda6b1] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-d7cda6b1] {\r\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-d7cda6b1] {\r\n    grid-template-areas:\r\n      \"status\"\r\n      \"update\"\r\n      \"manual\"\r\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-d7cda6b1] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-d7cda6b1");
-    var FormFillPage_vue_vue_type_style_index_0_scoped_d7cda6b1_lang = null;
+    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-b9e92b4d] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-b9e92b4d] {\n  grid-template-areas:\n    \"status update\"\n    \"manual template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-b9e92b4d] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-b9e92b4d] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-b9e92b4d] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-b9e92b4d] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-b9e92b4d] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-b9e92b4d] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-b9e92b4d] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-b9e92b4d] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-b9e92b4d] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-b9e92b4d] {\n  color: var(--acu-danger);\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-b9e92b4d] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-b9e92b4d] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-b9e92b4d],\n.acu-v2-form-fill-page__status-table td[data-v-b9e92b4d] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-b9e92b4d] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-b9e92b4d] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-b9e92b4d] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-b9e92b4d] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-b9e92b4d] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-b9e92b4d] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-b9e92b4d] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-b9e92b4d] {\n    grid-template-areas:\n      \"status\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-b9e92b4d] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-b9e92b4d");
+    var FormFillPage_vue_vue_type_style_index_0_scoped_b9e92b4d_lang = null;
 
     const _hoisted_1$x = { class: "acu-v2-form-fill-page" };
     const _hoisted_2$r = ["title"];
@@ -95944,8 +96318,19 @@ Expected function or array of functions, received type ${typeof value}.`
 						_: 1
 					})) : createCommentVNode("v-if", true),
 					createBaseVNode("div", _hoisted_11$a, [createVNode($setup["AcuButton"], {
+						variant: "default",
+						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.autoResumeBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
+						onClick: $setup.manualUpdate.runAutoResumeFill
+					}, {
+						default: withCtx(() => [createTextVNode(
+							toDisplayString($setup.manualUpdate.autoResumeBusy.value ? "断点续填中..." : "自动断点续填"),
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					}, 8, ["disabled", "onClick"]), createVNode($setup["AcuButton"], {
 						variant: "primary",
-						disabled: $setup.manualUpdate.manualUpdateBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
+						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.autoResumeBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
 						onClick: $setup.manualUpdate.runManualUpdate
 					}, {
 						default: withCtx(() => [createTextVNode(
@@ -95962,7 +96347,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-d7cda6b1"]]);
+    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-b9e92b4d"]]);
 
     var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPromptDrawer',
