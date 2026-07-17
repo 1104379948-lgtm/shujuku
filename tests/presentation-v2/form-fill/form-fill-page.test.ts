@@ -185,15 +185,11 @@ async function mountFormFillPage(
     reloadStorageProvider: vi.fn(async () => {}),
     switchStorageMode: vi.fn(async (mode: string) => { settings.storageMode = mode; }),
   }));
-  vi.doMock('../../../src/service/table/update-orchestrator', async () => {
-    const actual = await vi.importActual<typeof import('../../../src/service/table/update-orchestrator')>('../../../src/service/table/update-orchestrator');
-    return {
-      ...actual,
-      orchestrateManualUpdate_ACU: orchestrate,
-      processUpdatesBatch_ACU: processUpdatesBatch,
-      executeCardUpdateCore_ACU: executeCore,
-    };
-  });
+  vi.doMock('../../../src/service/table/update-orchestrator', () => ({
+    orchestrateManualUpdate_ACU: orchestrate,
+    processUpdatesBatch_ACU: processUpdatesBatch,
+    executeCardUpdateCore_ACU: executeCore,
+  }));
   vi.doMock('../../../src/service/ai/ai-service', () => ({
     getConnectionManagerProfiles_ACU: (): any[] => [],
     fetchAvailableModels_ACU: vi.fn(async () => ({ success: true, models: [] })),
@@ -297,6 +293,7 @@ describe('FormFillPage', () => {
     expect(text).toContain('AI 第 3 层（历史周期基线）');
     expect(text).toContain('预计处理范围');
     expect(text).toContain('执行手动填表');
+    expect(text).toContain('自动追平');
     expect(text).toContain('表格模板预设');
     expect(text).toContain('打开可视化表格编辑器');
     expect(text).not.toContain('立即构建交火纪要索引');
@@ -676,6 +673,7 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(text).toContain('AI 第 3 层（历史周期基线）');
     expect(text).toContain('选中表：角色状态（sheet_a）、事件记录（sheet_b）');
     expect(text).toContain('执行手动填表');
+    expect(text).toContain('自动追平');
     expect(panel.querySelector('.acu-v2-form-fill-page__manual-extra .acu-toggle')).toBeNull();
     expect(panel.querySelector('.acu-v2-form-fill-page__manual-extra textarea')).not.toBeNull();
 
@@ -761,6 +759,38 @@ describe('FormFillPage · 手动填表面板', () => {
     await new Promise(r => setTimeout(r, 0));
 
     expect(observedSettings).toEqual([{ threshold: 100, batchSize: 4 }]);
+    expect(settings.autoUpdateThreshold).toBe(3);
+    expect(settings.updateBatchSize).toBe(2);
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('自动追平按钮按断点组串行调用共享手动 service 契约', async () => {
+    const settings = createSettings();
+    settings.manualUpdateBatchSize = 4;
+    const { mount, orchestrate } = await mountFormFillPage(settings);
+
+    const button = Array.from(document.querySelectorAll('button'))
+      .find(btn => btn.textContent?.includes('自动追平')) as HTMLButtonElement;
+    expect(button).not.toBeUndefined();
+    button.click();
+    await Promise.resolve();
+
+    const dialogText = document.querySelector('.acu-dialog-layer')?.textContent || '';
+    expect(dialogText).toContain('即将按以下 2 个范围组严格串行执行');
+    expect(dialogText).toContain('AI 第 1~3 层：事件记录');
+    expect(dialogText).toContain('AI 第 2~3 层：角色状态');
+
+    await clickDialogButton('确认并继续');
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(orchestrate).toHaveBeenCalledTimes(2);
+    expect(orchestrate.mock.calls[0][0]).toEqual(['sheet_b']);
+    expect(orchestrate.mock.calls[1][0]).toEqual(['sheet_a']);
+    for (const call of orchestrate.mock.calls) {
+      expect(Object.keys(call[3]).sort()).toEqual(['clearBeforeUpdate', 'confirmBoundaryReset', 'onProgress']);
+      expect(call[3]).toEqual(expect.objectContaining({ clearBeforeUpdate: true, confirmBoundaryReset: false }));
+    }
     expect(settings.autoUpdateThreshold).toBe(3);
     expect(settings.updateBatchSize).toBe(2);
 
@@ -982,110 +1012,6 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(manualExtraHintSetter).toHaveBeenCalledWith(
       '以下为用户的额外填表要求,请严格遵守:\n只更新角色状态。',
     );
-
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('同时显示普通与自动按钮，自动入口整体确认包含范围组摘要', async () => {
-    const { mount, orchestrate } = await mountFormFillPage();
-    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
-      .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
-    const manualButton = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('执行手动填表'))!;
-    const autoButton = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('自动断点续填'))!;
-
-    expect(manualButton).toBeDefined();
-    expect(autoButton).toBeDefined();
-    expect(manualButton.disabled).toBe(false);
-    expect(autoButton.disabled).toBe(false);
-
-    autoButton.click();
-    await Promise.resolve();
-
-    const dialogText = document.querySelector('.acu-dialog-layer')?.textContent || '';
-    expect(dialogText).toContain('执行自动断点续填');
-    expect(dialogText).toContain('目标表：角色状态（sheet_a）、事件记录（sheet_b）');
-    expect(dialogText).toContain('有效末层：AI 第 3 层');
-    expect(dialogText).toContain('范围组数量：2');
-    expect(dialogText).toContain('AI 第 1~3 层：事件记录');
-    expect(dialogText).toContain('AI 第 2~3 层：角色状态');
-    expect(dialogText).toContain('仍会弹出现有的破坏性手动重填二次确认');
-    expect(dialogText).not.toContain('高风险操作：确认后会在一次提交中删除');
-    expect(orchestrate).not.toHaveBeenCalled();
-
-    await clickDialogButton('确认并继续');
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(orchestrate).toHaveBeenCalledTimes(2);
-    expect(orchestrate.mock.calls[0][0]).toEqual(['sheet_b']);
-    expect(orchestrate.mock.calls[0][3]).toEqual(expect.objectContaining({
-      clearBeforeUpdate: true,
-      confirmBoundaryReset: false,
-      contextScopeIndicesOverride: [1, 3, 4],
-    }));
-    expect(orchestrate.mock.calls[1][0]).toEqual(['sheet_a']);
-    expect(orchestrate.mock.calls[1][3].contextScopeIndicesOverride).toEqual([3, 4]);
-
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('自动续填运行时显示运行中文案并禁用两个按钮', async () => {
-    const { mount, orchestrate } = await mountFormFillPage();
-    let releaseFirst = () => {};
-    orchestrate
-      .mockImplementationOnce(async () => {
-        await new Promise<void>(resolve => { releaseFirst = resolve; });
-        return { success: true };
-      })
-      .mockResolvedValueOnce({ success: true });
-    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
-      .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
-    const manualButton = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('执行手动填表'))!;
-    const autoButton = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('自动断点续填'))!;
-
-    autoButton.click();
-    await clickDialogButton('确认并继续');
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(orchestrate).toHaveBeenCalledTimes(1);
-    expect(autoButton.textContent || '').toContain('断点续填中...');
-    expect(autoButton.disabled).toBe(true);
-    expect(manualButton.disabled).toBe(true);
-
-    releaseFirst();
-    await new Promise(r => setTimeout(r, 0));
-    await new Promise(r => setTimeout(r, 0));
-
-    expect(orchestrate).toHaveBeenCalledTimes(2);
-    expect(autoButton.textContent || '').toContain('自动断点续填');
-    expect(autoButton.disabled).toBe(false);
-    expect(manualButton.disabled).toBe(false);
-
-    mount.__resetAcuV2MountForTests();
-  });
-
-  it('未选择表时普通与自动按钮都禁用', async () => {
-    const settings = createSettings();
-    settings.hasManualSelection = true;
-    settings.manualSelectedTables = [];
-    const { mount, orchestrate } = await mountFormFillPage(settings);
-    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
-      .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
-    const manualButton = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('执行手动填表'))!;
-    const autoButton = Array.from(panel.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('自动断点续填'))!;
-
-    expect(manualButton.disabled).toBe(true);
-    expect(autoButton.disabled).toBe(true);
-    manualButton.click();
-    autoButton.click();
-    await Promise.resolve();
-    expect(orchestrate).not.toHaveBeenCalled();
-    expect(document.querySelector('.acu-dialog-layer')).toBeNull();
 
     mount.__resetAcuV2MountForTests();
   });

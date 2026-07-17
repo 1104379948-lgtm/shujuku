@@ -235,7 +235,6 @@ import {
   resolveUpdateMode_ACU,
   loadBatchBaseData_ACU,
   buildBatchMergeBase_ACU,
-  buildAutoResumeManualGroups_ACU,
   processUpdatesBatch_ACU,
   executeCardUpdateCore_ACU,
   orchestrateManualUpdate_ACU,
@@ -1160,70 +1159,6 @@ describe('executeCardUpdateCore_ACU', () => {
   });
 });
 
-describe('buildAutoResumeManualGroups_ACU', () => {
-  const aiMessageIndices = [1, 3, 5, 7];
-
-  it('按完整待填范围合并表格，并按起始 AI 楼层稳定排序', () => {
-    const groups = buildAutoResumeManualGroups_ACU({
-      aiMessageIndices,
-      effectiveTailFloor: 4,
-      sheetProgress: [
-        { sheetKey: 'sheet_c', lastFilledAiFloor: 2 },
-        { sheetKey: 'sheet_b', lastFilledAiFloor: 0 },
-        { sheetKey: 'sheet_a', lastFilledAiFloor: 2 },
-      ],
-    });
-
-    expect(groups).toEqual([
-      {
-        targetKeys: ['sheet_b'],
-        contextScopeIndices: [1, 3, 5, 7],
-        startAiFloor: 1,
-        endAiFloor: 4,
-      },
-      {
-        targetKeys: ['sheet_a', 'sheet_c'],
-        contextScopeIndices: [5, 7],
-        startAiFloor: 3,
-        endAiFloor: 4,
-      },
-    ]);
-  });
-
-  it('忽略重复表键，将超出末层的进度 clamp 为已追平', () => {
-    const groups = buildAutoResumeManualGroups_ACU({
-      aiMessageIndices,
-      effectiveTailFloor: 3,
-      sheetProgress: [
-        { sheetKey: 'sheet_a', lastFilledAiFloor: 1 },
-        { sheetKey: 'sheet_a', lastFilledAiFloor: 0 },
-        { sheetKey: 'sheet_b', lastFilledAiFloor: 99 },
-      ],
-    });
-
-    expect(groups).toEqual([{
-      targetKeys: ['sheet_a'],
-      contextScopeIndices: [3, 5],
-      startAiFloor: 2,
-      endAiFloor: 3,
-    }]);
-  });
-
-  it('所有表已追平时返回空组', () => {
-    expect(buildAutoResumeManualGroups_ACU({
-      aiMessageIndices,
-      effectiveTailFloor: 4,
-      sheetProgress: [{ sheetKey: 'sheet_a', lastFilledAiFloor: 4 }],
-    })).toEqual([]);
-  });
-
-  it('拒绝非法尾层、倒序 AI 索引和空表键', () => {
-    expect(() => buildAutoResumeManualGroups_ACU({ aiMessageIndices, effectiveTailFloor: 5, sheetProgress: [] })).toThrow('有效末层');
-    expect(() => buildAutoResumeManualGroups_ACU({ aiMessageIndices: [1, 1], effectiveTailFloor: 2, sheetProgress: [] })).toThrow('严格递增');
-    expect(() => buildAutoResumeManualGroups_ACU({ aiMessageIndices, effectiveTailFloor: 4, sheetProgress: [{ sheetKey: '', lastFilledAiFloor: 0 }] })).toThrow('表格键不能为空');
-  });
-});
-
 // ═══════════════════════════════════════════════════════════════
 // orchestrateManualUpdate_ACU
 // ═══════════════════════════════════════════════════════════════
@@ -1360,75 +1295,6 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData);
     expect(result.success).toBe(true);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
-  });
-
-  it('合法范围覆盖只替换上下文范围，并继续使用普通手动填表的尾部 runtime 基底', async () => {
-    const { getChatArray_ACU, clearManualRefillIncrementalDataInRange_ACU } = await import('../../../src/service/chat/chat-service');
-    vi.mocked(getChatArray_ACU).mockReturnValue([
-      { is_user: true, mes: 'U1' },
-      { is_user: false, mes: 'A1' },
-      { is_user: true, mes: 'U2' },
-      { is_user: false, mes: 'A2' },
-      { is_user: true, mes: 'U3' },
-      { is_user: false, mes: 'A3' },
-    ]);
-    mockCurrentJsonTableData = {
-      mate: { type: 'acu' },
-      sheet_0: { name: '测试表', updateConfig: { groupId: 0 }, content: [['row_id', '值'], ['1', '真实运行时数据']] },
-    };
-    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
-    const promptBases: any[] = [];
-    mockPrepareAIInput.mockImplementation(async (_messages: any[], _mode: string, _keys: string[] | null, options: any) => {
-      promptBases.push(JSON.parse(JSON.stringify(options.tableData)));
-      return { tableDataText: '模拟数据' };
-    });
-
-    const result = await orchestrateManualUpdate_ACU(
-      ['sheet_0'],
-      vi.fn().mockResolvedValue({ success: true }),
-      mockRefreshData,
-      { clearBeforeUpdate: true, contextScopeIndicesOverride: [3, 5] },
-    );
-
-    expect(result.success).toBe(true);
-    expect(clearManualRefillIncrementalDataInRange_ACU).toHaveBeenCalledWith([3, 5], ['sheet_0']);
-    expect(promptBases).toHaveLength(1);
-    expect(promptBases[0].sheet_0.content).toContainEqual(['1', '真实运行时数据']);
-  });
-
-  it('未传范围覆盖时仍按 threshold 和 skipUpdateFloors 选择普通手动范围', async () => {
-    const { getChatArray_ACU, clearManualRefillIncrementalDataInRange_ACU } = await import('../../../src/service/chat/chat-service');
-    vi.mocked(getChatArray_ACU).mockReturnValue([
-      { is_user: false, mes: 'A1' },
-      { is_user: false, mes: 'A2' },
-      { is_user: false, mes: 'A3' },
-      { is_user: false, mes: 'A4' },
-    ]);
-    mockSettings.autoUpdateThreshold = 2;
-    mockSettings.skipUpdateFloors = 1;
-    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
-
-    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
-
-    expect(result.success).toBe(true);
-    expect(clearManualRefillIncrementalDataInRange_ACU).toHaveBeenCalledWith([1, 2], ['sheet_0']);
-  });
-
-  it.each([
-    { label: '空数组', override: [] },
-    { label: '倒序', override: [3, 1] },
-    { label: '重复', override: [1, 1] },
-    { label: 'user 消息索引', override: [0] },
-  ])('拒绝$label范围覆盖且不进入清理或 AI 调用', async ({ override }) => {
-    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
-    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: true }, { is_user: false, mes: 'A1' }, { is_user: true }, { is_user: false, mes: 'A2' }]);
-
-    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn(), mockRefreshData, { clearBeforeUpdate: true, contextScopeIndicesOverride: override });
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('手动填表范围覆盖必须由有效范围内严格递增的 AI 消息索引组成。');
-    expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
-    expect(mockPrepareAIInput).not.toHaveBeenCalled();
   });
 
   it('事务式手动重填启动前仅清空重填范围内选中表历史数据', async () => {

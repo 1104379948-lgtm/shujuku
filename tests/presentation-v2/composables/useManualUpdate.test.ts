@@ -11,49 +11,42 @@ async function waitForCondition(predicate: () => boolean, label: string): Promis
   throw new Error(`等待条件超时：${label}`);
 }
 
-interface ImportManualUpdateOptions {
-  settings?: Record<string, unknown>;
-  currentJsonTableData?: Record<string, any>;
-  chat?: any[];
-  lastFilledFloors?: Record<string, number>;
-}
-
-async function importManualUpdate(options: ImportManualUpdateOptions = {}) {
+async function importManualUpdate() {
   vi.resetModules();
   const settings: any = {
     autoUpdateThreshold: 3,
     updateBatchSize: 2,
-    skipUpdateFloors: 0,
     manualUpdateContextDepth: 3,
     manualUpdateBatchSize: 2,
     manualSelectedTables: ['sheet_0'],
     hasManualSelection: true,
-    ...options.settings,
   };
-  const currentJsonTableData: any = options.currentJsonTableData || {
+  const currentJsonTableData: any = {
     sheet_0: { name: '物品表', content: [['row_id', '名称']] },
+    sheet_1: { name: '角色表', content: [['row_id', '名称']] },
   };
-  const chat = options.chat || [{ is_user: false, mes: 'AI 1' }];
-  const lastFilledFloors = options.lastFilledFloors || {};
+  const chat = [{ is_user: false, mes: 'AI 1' }];
   const orchestrateManualUpdate_ACU = vi.fn();
   const refreshMergedDataAndNotify_ACU = vi.fn(async () => undefined);
   const setWasStoppedByUser = vi.fn();
-  const abortAllActiveRequests = vi.fn();
-  const resolveTableHistoryStateFromChat_ACU = vi.fn((_chat: any[], historyOptions: { sheetKey: string }) => ({
-    latestAiMessageIndex: chat.length - 1,
+  const abortAllActiveRequests_ACU = vi.fn();
+  const setIsAutoUpdatingCard = vi.fn();
+  const resolveTableHistoryStateFromChat_ACU = vi.fn((_chat: any[], options: any) => ({
+    latestAiMessageIndex: 0,
     latestDataMessageIndex: -1,
     lastTrackedUpdateMessageIndex: -1,
     latestDataAiFloor: 0,
-    lastTrackedUpdateAiFloor: lastFilledFloors[historyOptions.sheetKey] || 0,
+    lastTrackedUpdateAiFloor: 0,
     hasAnyData: false,
-    hasTrackedUpdate: (lastFilledFloors[historyOptions.sheetKey] || 0) > 0,
+    hasTrackedUpdate: false,
+    sheetKey: options.sheetKey,
   }));
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     currentJsonTableData_ACU: currentJsonTableData,
     settings_ACU: settings,
-    abortAllActiveRequests_ACU: abortAllActiveRequests,
-    _set_isAutoUpdatingCard_ACU: vi.fn(),
+    abortAllActiveRequests_ACU,
+    _set_isAutoUpdatingCard_ACU: setIsAutoUpdatingCard,
     _set_manualExtraHint_ACU: vi.fn(),
     _set_wasStoppedByUser_ACU: setWasStoppedByUser,
     getCurrentIsolationKey_ACU: vi.fn(() => ''),
@@ -74,15 +67,11 @@ async function importManualUpdate(options: ImportManualUpdateOptions = {}) {
     collectV2CheckpointFloorsFromChat_ACU: vi.fn(() => [{ messageIndex: 0, aiFloor: 1, reason: 'init' }]),
     resolveTableHistoryStateFromChat_ACU,
   }));
-  vi.doMock('../../../src/service/table/update-orchestrator', async () => {
-    const actual = await vi.importActual<typeof import('../../../src/service/table/update-orchestrator')>('../../../src/service/table/update-orchestrator');
-    return {
-      ...actual,
-      executeCardUpdateCore_ACU: vi.fn(),
-      orchestrateManualUpdate_ACU,
-      processUpdatesBatch_ACU: vi.fn(),
-    };
-  });
+  vi.doMock('../../../src/service/table/update-orchestrator', () => ({
+    executeCardUpdateCore_ACU: vi.fn(),
+    orchestrateManualUpdate_ACU,
+    processUpdatesBatch_ACU: vi.fn(),
+  }));
   vi.doMock('../../../src/service/worldbook/pipeline', () => ({
     refreshMergedDataAndNotify_ACU,
   }));
@@ -103,13 +92,14 @@ async function importManualUpdate(options: ImportManualUpdateOptions = {}) {
     toast: useToastStore(),
     __resetToastStoreForTests,
     orchestrateManualUpdate_ACU,
+    settings,
+    chat,
+    currentJsonTableData,
     refreshMergedDataAndNotify_ACU,
     setWasStoppedByUser,
-    abortAllActiveRequests,
+    abortAllActiveRequests_ACU,
+    setIsAutoUpdatingCard,
     resolveTableHistoryStateFromChat_ACU,
-    settings,
-    currentJsonTableData,
-    chat,
   };
 }
 
@@ -218,253 +208,430 @@ describe('useManualUpdate destructive boundary confirmation', () => {
     expect(toast.items.at(-1)?.text).toContain('确认后替换失败');
     __resetToastStoreForTests();
   });
+
+  it('普通入口以手动参数桥接 service，并在成功后恢复自动设置', async () => {
+    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, settings, __resetToastStoreForTests } = await importManualUpdate();
+    settings.manualUpdateContextDepth = 4;
+    settings.manualUpdateBatchSize = 5;
+    orchestrateManualUpdate_ACU.mockImplementationOnce(async (...args: any[]) => {
+      expect(settings.autoUpdateThreshold).toBe(4);
+      expect(settings.updateBatchSize).toBe(5);
+      expect(args[0]).toEqual(['sheet_0']);
+      expect(Object.keys(args[3]).sort()).toEqual(['clearBeforeUpdate', 'confirmBoundaryReset', 'onProgress']);
+      expect(args[3]).toEqual(expect.objectContaining({ clearBeforeUpdate: true, confirmBoundaryReset: false }));
+      return { success: true };
+    });
+    const manual = useManualUpdate();
+
+    const pending = manual.runManualUpdate();
+    await waitForCondition(() => dialog.active?.title === '执行手动填表', '首次确认弹窗出现');
+    dialog.submitActive();
+    await pending;
+
+    expect(settings.autoUpdateThreshold).toBe(3);
+    expect(settings.updateBatchSize).toBe(2);
+    __resetToastStoreForTests();
+  });
+
+  it('orchestrator 返回失败时恢复自动设置', async () => {
+    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, settings, __resetToastStoreForTests } = await importManualUpdate();
+    settings.manualUpdateContextDepth = 4;
+    settings.manualUpdateBatchSize = 5;
+    orchestrateManualUpdate_ACU.mockImplementationOnce(async () => {
+      expect(settings.autoUpdateThreshold).toBe(4);
+      expect(settings.updateBatchSize).toBe(5);
+      return { success: false, error: '普通入口失败' };
+    });
+    const manual = useManualUpdate();
+
+    const pending = manual.runManualUpdate();
+    await waitForCondition(() => dialog.active?.title === '执行手动填表', '首次确认弹窗出现');
+    dialog.submitActive();
+    await pending;
+
+    expect(settings.autoUpdateThreshold).toBe(3);
+    expect(settings.updateBatchSize).toBe(2);
+    __resetToastStoreForTests();
+  });
+
+  it('orchestrator 抛异常时恢复自动设置', async () => {
+    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, settings, toast, __resetToastStoreForTests } = await importManualUpdate();
+    settings.manualUpdateContextDepth = 4;
+    settings.manualUpdateBatchSize = 5;
+    orchestrateManualUpdate_ACU.mockImplementationOnce(async () => {
+      expect(settings.autoUpdateThreshold).toBe(4);
+      expect(settings.updateBatchSize).toBe(5);
+      throw new Error('普通入口异常');
+    });
+    const manual = useManualUpdate();
+
+    const pending = manual.runManualUpdate();
+    await waitForCondition(() => dialog.active?.title === '执行手动填表', '首次确认弹窗出现');
+    dialog.submitActive();
+    await pending;
+
+    expect(settings.autoUpdateThreshold).toBe(3);
+    expect(settings.updateBatchSize).toBe(2);
+    expect(toast.items.at(-1)?.text).toContain('普通入口异常');
+    __resetToastStoreForTests();
+  });
 });
 
-describe('useManualUpdate automatic resume fill', () => {
-  it('未选择表时警告且不调用 orchestrator', async () => {
-    const { useManualUpdate, toast, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate({
-      settings: { manualSelectedTables: [], hasManualSelection: true },
-    });
-    const manual = useManualUpdate();
-
-    await manual.runAutoResumeFill();
-
-    expect(orchestrateManualUpdate_ACU).not.toHaveBeenCalled();
-    expect(toast.items.at(-1)?.kind).toBe('warning');
-    expect(toast.items.at(-1)?.text).toContain('未选择');
-    __resetToastStoreForTests();
-  });
-
-  it('所选表已追平时提示且不调用 orchestrator', async () => {
-    const { useManualUpdate, toast, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate({
-      chat: [
-        { is_user: false, mes: 'AI 1' },
-        { is_user: true, mes: '用户' },
-        { is_user: false, mes: 'AI 2' },
-      ],
-      lastFilledFloors: { sheet_0: 2 },
-    });
-    const manual = useManualUpdate();
-
-    await manual.runAutoResumeFill();
-
-    expect(orchestrateManualUpdate_ACU).not.toHaveBeenCalled();
-    expect(toast.items.at(-1)?.kind).toBe('info');
-    expect(toast.items.at(-1)?.text).toContain('已追平');
-    __resetToastStoreForTests();
-  });
-
-  it('取消整体确认时不调用 orchestrator，确认摘要包含范围组', async () => {
-    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate({
-      chat: [
-        { is_user: false, mes: 'AI 1' },
-        { is_user: false, mes: 'AI 2' },
-      ],
-    });
-    const manual = useManualUpdate();
-
-    const pending = manual.runAutoResumeFill();
-    await waitForCondition(() => dialog.active?.title === '执行自动断点续填', '自动续填整体确认出现');
-    expect(dialog.active?.message).toContain('有效末层：AI 第 2 层');
-    expect(dialog.active?.message).toContain('范围组数量：1');
-    expect(dialog.active?.message).toContain('AI 第 1~2 层');
-    dialog.cancelActive();
-    await pending;
-
-    expect(orchestrateManualUpdate_ACU).not.toHaveBeenCalled();
-    __resetToastStoreForTests();
-  });
-
-  it('相同范围合并为一次调用，自动入口仅额外传入范围 override', async () => {
-    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate({
-      settings: { manualSelectedTables: ['sheet_0', 'sheet_1'] },
-      currentJsonTableData: {
-        sheet_0: { name: '物品表', content: [['row_id', '名称']] },
-        sheet_1: { name: '角色表', content: [['row_id', '名称']] },
-      },
-      chat: [
-        { is_user: false, mes: 'AI 1' },
-        { is_user: true, mes: '用户' },
-        { is_user: false, mes: 'AI 2' },
-      ],
-    });
-    orchestrateManualUpdate_ACU.mockResolvedValue({ success: true });
-    const manual = useManualUpdate();
-
-    const pending = manual.runAutoResumeFill();
-    await waitForCondition(() => dialog.active?.title === '执行自动断点续填', '自动续填整体确认出现');
+describe('useManualUpdate auto catch-up scheduling', () => {
+  async function confirmDialog(dialog: any, title: string): Promise<void> {
+    await waitForCondition(() => dialog.active?.title === title, `${title}弹窗出现`);
     dialog.submitActive();
-    await pending;
+  }
 
-    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][0]).toEqual(['sheet_0', 'sheet_1']);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).toEqual(expect.objectContaining({
-      clearBeforeUpdate: true,
-      confirmBoundaryReset: false,
-      contextScopeIndicesOverride: [0, 2],
+  it('空数据自动追平与同深度普通手动入口使用完全相同的 service 契约', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      orchestrateManualUpdate_ACU,
+      settings,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    const calls: Array<{ targetKeys: string[]; threshold: number; batchSize: number; options: any }> = [];
+    orchestrateManualUpdate_ACU.mockImplementation(async (...args: any[]) => {
+      calls.push({
+        targetKeys: args[0].slice(),
+        threshold: settings.autoUpdateThreshold,
+        batchSize: settings.updateBatchSize,
+        options: args[3],
+      });
+      return { success: true };
+    });
+    const manual = useManualUpdate();
+    manual.setManualContextDepth(1);
+
+    const manualPending = manual.runManualUpdate();
+    await confirmDialog(dialog, '执行手动填表');
+    await manualPending;
+
+    const autoPending = manual.runAutoCatchUp();
+    await confirmDialog(dialog, '执行自动追平');
+    await autoPending;
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].targetKeys).toEqual(calls[0].targetKeys);
+    expect(calls[1].threshold).toBe(calls[0].threshold);
+    expect(calls[1].batchSize).toBe(calls[0].batchSize);
+    expect(Object.keys(calls[0].options).sort()).toEqual(['clearBeforeUpdate', 'confirmBoundaryReset', 'onProgress']);
+    expect(Object.keys(calls[1].options).sort()).toEqual(['clearBeforeUpdate', 'confirmBoundaryReset', 'onProgress']);
+    expect(calls[1].options).toEqual(expect.objectContaining({ clearBeforeUpdate: true, confirmBoundaryReset: false }));
+    expect(settings.autoUpdateThreshold).toBe(3);
+    expect(settings.updateBatchSize).toBe(2);
+    __resetToastStoreForTests();
+  });
+
+  it('不同断点范围组严格串行，并在每组使用对应 context depth 后恢复设置', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      orchestrateManualUpdate_ACU,
+      resolveTableHistoryStateFromChat_ACU,
+      settings,
+      chat,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    chat.push(
+      { is_user: false, mes: 'AI 2' },
+      { is_user: false, mes: 'AI 3' },
+      { is_user: false, mes: 'AI 4' },
+      { is_user: false, mes: 'AI 5' },
+    );
+    resolveTableHistoryStateFromChat_ACU.mockImplementation((_chat: any[], options: any) => ({
+      hasAnyData: true,
+      hasTrackedUpdate: true,
+      lastTrackedUpdateAiFloor: options.sheetKey === 'sheet_0' ? 1 : 3,
     }));
-    __resetToastStoreForTests();
-  });
-
-  it('不同范围组严格串行，第一组完成前不发起第二组', async () => {
-    let resolveFirst!: (value: { success: true }) => void;
-    const firstResult = new Promise<{ success: true }>(resolve => { resolveFirst = resolve; });
-    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate({
-      settings: { manualSelectedTables: ['sheet_0', 'sheet_1'] },
-      currentJsonTableData: {
-        sheet_0: { name: '物品表', content: [['row_id', '名称']] },
-        sheet_1: { name: '角色表', content: [['row_id', '名称']] },
-      },
-      chat: [
-        { is_user: false, mes: 'AI 1' },
-        { is_user: false, mes: 'AI 2' },
-        { is_user: false, mes: 'AI 3' },
-      ],
-      lastFilledFloors: { sheet_0: 0, sheet_1: 1 },
-    });
+    let resolveFirst!: (value: any) => void;
+    const firstPending = new Promise(resolve => { resolveFirst = resolve; });
     orchestrateManualUpdate_ACU
-      .mockImplementationOnce(() => firstResult)
-      .mockResolvedValueOnce({ success: true });
+      .mockImplementationOnce(async (...args: any[]) => {
+        expect(args[0]).toEqual(['sheet_0']);
+        expect(settings.autoUpdateThreshold).toBe(4);
+        expect(settings.updateBatchSize).toBe(2);
+        return firstPending;
+      })
+      .mockImplementationOnce(async (...args: any[]) => {
+        expect(args[0]).toEqual(['sheet_1']);
+        expect(settings.autoUpdateThreshold).toBe(2);
+        expect(settings.updateBatchSize).toBe(2);
+        return { success: true };
+      });
     const manual = useManualUpdate();
+    manual.setManualSelectedKeys(['sheet_0', 'sheet_1']);
 
-    const pending = manual.runAutoResumeFill();
-    await waitForCondition(() => dialog.active?.title === '执行自动断点续填', '自动续填整体确认出现');
-    dialog.submitActive();
-    await waitForCondition(() => orchestrateManualUpdate_ACU.mock.calls.length === 1, '第一范围组开始');
+    const pending = manual.runAutoCatchUp();
+    await confirmDialog(dialog, '执行自动追平');
+    await waitForCondition(() => orchestrateManualUpdate_ACU.mock.calls.length === 1, '第一组开始');
     expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][3].contextScopeIndicesOverride).toEqual([0, 1, 2]);
-
     resolveFirst({ success: true });
     await pending;
 
     expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(2);
-    expect(orchestrateManualUpdate_ACU.mock.calls[1][3].contextScopeIndicesOverride).toEqual([1, 2]);
+    expect(settings.autoUpdateThreshold).toBe(3);
+    expect(settings.updateBatchSize).toBe(2);
     __resetToastStoreForTests();
   });
 
-  it('危险确认取消后停止后续范围组并复位 busy', async () => {
-    const requiresConfirmation = {
-      success: false,
-      requiresUserConfirmation: {
-        reason: 'manual_refill_replace_sheet_baseline',
-        replayErrorCode: 'no_full_checkpoint_replayable',
-        message: '重填起点前没有可回放 checkpoint。',
-        contextScopeIndices: [0, 1],
-        targetSheetKeys: ['sheet_0'],
-      },
-    };
-    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate({
-      settings: { manualSelectedTables: ['sheet_0', 'sheet_1'] },
-      currentJsonTableData: {
-        sheet_0: { name: '物品表', content: [['row_id', '名称']] },
-        sheet_1: { name: '角色表', content: [['row_id', '名称']] },
-      },
-      chat: [{ is_user: false }, { is_user: false }],
-      lastFilledFloors: { sheet_0: 0, sheet_1: 1 },
-    });
-    orchestrateManualUpdate_ACU.mockResolvedValueOnce(requiresConfirmation);
+  it('第一组返回失败时停止后续范围组并保留原始错误', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      toast,
+      orchestrateManualUpdate_ACU,
+      resolveTableHistoryStateFromChat_ACU,
+      chat,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    chat.push({ is_user: false, mes: 'AI 2' }, { is_user: false, mes: 'AI 3' });
+    resolveTableHistoryStateFromChat_ACU.mockImplementation((_chat: any[], options: any) => ({
+      hasAnyData: true,
+      hasTrackedUpdate: true,
+      lastTrackedUpdateAiFloor: options.sheetKey === 'sheet_0' ? 0 : 2,
+    }));
+    orchestrateManualUpdate_ACU.mockResolvedValueOnce({ success: false, error: '宿主原始写入错误' });
     const manual = useManualUpdate();
+    manual.setManualSelectedKeys(['sheet_0', 'sheet_1']);
 
-    const pending = manual.runAutoResumeFill();
-    await waitForCondition(() => dialog.active?.title === '执行自动断点续填', '自动续填整体确认出现');
-    dialog.submitActive();
-    await waitForCondition(() => dialog.active?.title === '破坏性手动重填确认', '危险确认出现');
-    expect(manual.autoResumeBusy.value).toBe(true);
-    dialog.cancelActive();
-    await pending;
-
-    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
-    expect(manual.autoResumeBusy.value).toBe(false);
-    __resetToastStoreForTests();
-  });
-
-  it('危险确认通过后以同组同 override 重入', async () => {
-    const requiresConfirmation = {
-      success: false,
-      requiresUserConfirmation: {
-        reason: 'manual_refill_replace_sheet_baseline',
-        replayErrorCode: 'no_full_checkpoint_replayable',
-        message: '重填起点前没有可回放 checkpoint。',
-        contextScopeIndices: [0, 1],
-        targetSheetKeys: ['sheet_0'],
-      },
-    };
-    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate({
-      chat: [{ is_user: false }, { is_user: false }],
-    });
-    orchestrateManualUpdate_ACU
-      .mockResolvedValueOnce(requiresConfirmation)
-      .mockResolvedValueOnce({ success: true });
-    const manual = useManualUpdate();
-
-    const pending = manual.runAutoResumeFill();
-    await waitForCondition(() => dialog.active?.title === '执行自动断点续填', '自动续填整体确认出现');
-    dialog.submitActive();
-    await waitForCondition(() => dialog.active?.title === '破坏性手动重填确认', '危险确认出现');
-    dialog.submitActive();
-    await pending;
-
-    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(2);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][0]).toEqual(orchestrateManualUpdate_ACU.mock.calls[1][0]);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][3].contextScopeIndicesOverride).toEqual([0, 1]);
-    expect(orchestrateManualUpdate_ACU.mock.calls[1][3].contextScopeIndicesOverride).toEqual([0, 1]);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][3].confirmBoundaryReset).toBe(false);
-    expect(orchestrateManualUpdate_ACU.mock.calls[1][3].confirmBoundaryReset).toBe(true);
-    __resetToastStoreForTests();
-  });
-
-  it('第一组失败后不执行后续组并复位 busy', async () => {
-    const { useManualUpdate, dialog, toast, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate({
-      settings: { manualSelectedTables: ['sheet_0', 'sheet_1'] },
-      currentJsonTableData: {
-        sheet_0: { name: '物品表', content: [['row_id', '名称']] },
-        sheet_1: { name: '角色表', content: [['row_id', '名称']] },
-      },
-      chat: [{ is_user: false }, { is_user: false }],
-      lastFilledFloors: { sheet_0: 0, sheet_1: 1 },
-    });
-    orchestrateManualUpdate_ACU.mockResolvedValueOnce({ success: false, error: '第一组失败' });
-    const manual = useManualUpdate();
-
-    const pending = manual.runAutoResumeFill();
-    await waitForCondition(() => dialog.active?.title === '执行自动断点续填', '自动续填整体确认出现');
-    dialog.submitActive();
+    const pending = manual.runAutoCatchUp();
+    await confirmDialog(dialog, '执行自动追平');
     await pending;
 
     expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
     expect(toast.items.at(-1)?.kind).toBe('error');
-    expect(toast.items.at(-1)?.text).toContain('第一组失败');
-    expect(manual.autoResumeBusy.value).toBe(false);
+    expect(toast.items.at(-1)?.text).toContain('自动追平第 1/2 组');
+    expect(toast.items.at(-1)?.text).toContain('首次 orchestrator阶段失败');
+    expect(toast.items.at(-1)?.text).toContain('宿主原始写入错误');
     __resetToastStoreForTests();
   });
 
-  it('用户终止当前组后不执行后续组', async () => {
-    let resolveFirst!: (value: { success: false; error: string }) => void;
-    const firstResult = new Promise<{ success: false; error: string }>(resolve => { resolveFirst = resolve; });
-    const { useManualUpdate, dialog, toast, orchestrateManualUpdate_ACU, abortAllActiveRequests, __resetToastStoreForTests } = await importManualUpdate({
-      settings: { manualSelectedTables: ['sheet_0', 'sheet_1'] },
-      currentJsonTableData: {
-        sheet_0: { name: '物品表', content: [['row_id', '名称']] },
-        sheet_1: { name: '角色表', content: [['row_id', '名称']] },
-      },
-      chat: [{ is_user: false }, { is_user: false }],
-      lastFilledFloors: { sheet_0: 0, sheet_1: 1 },
+  it('组间聊天结构变化时停止并要求重新规划', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      toast,
+      orchestrateManualUpdate_ACU,
+      resolveTableHistoryStateFromChat_ACU,
+      chat,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    chat.push({ is_user: false, mes: 'AI 2' }, { is_user: false, mes: 'AI 3' });
+    resolveTableHistoryStateFromChat_ACU.mockImplementation((_chat: any[], options: any) => ({
+      hasAnyData: true,
+      hasTrackedUpdate: true,
+      lastTrackedUpdateAiFloor: options.sheetKey === 'sheet_0' ? 0 : 2,
+    }));
+    orchestrateManualUpdate_ACU.mockImplementationOnce(async () => {
+      chat.push({ is_user: false, mes: '外部新增 AI' });
+      return { success: true };
     });
-    orchestrateManualUpdate_ACU.mockImplementationOnce(() => firstResult);
     const manual = useManualUpdate();
+    manual.setManualSelectedKeys(['sheet_0', 'sheet_1']);
 
-    const pending = manual.runAutoResumeFill();
-    await waitForCondition(() => dialog.active?.title === '执行自动断点续填', '自动续填整体确认出现');
-    dialog.submitActive();
-    await waitForCondition(() => orchestrateManualUpdate_ACU.mock.calls.length === 1, '第一范围组开始');
-    await toast.items.at(-1)?.action?.onClick();
-    resolveFirst({ success: false, error: '任务已终止' });
+    const pending = manual.runAutoCatchUp();
+    await confirmDialog(dialog, '执行自动追平');
     await pending;
 
-    expect(abortAllActiveRequests).toHaveBeenCalledTimes(1);
     expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
     expect(toast.items.at(-1)?.kind).toBe('warning');
-    expect(manual.autoResumeBusy.value).toBe(false);
+    expect(toast.items.at(-1)?.text).toContain('聊天或隔离范围已变化');
+    __resetToastStoreForTests();
+  });
+
+  it('破坏性确认取消时停止后续范围组', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      orchestrateManualUpdate_ACU,
+      resolveTableHistoryStateFromChat_ACU,
+      chat,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    chat.push({ is_user: false, mes: 'AI 2' }, { is_user: false, mes: 'AI 3' });
+    resolveTableHistoryStateFromChat_ACU.mockImplementation((_chat: any[], options: any) => ({
+      hasAnyData: true,
+      hasTrackedUpdate: true,
+      lastTrackedUpdateAiFloor: options.sheetKey === 'sheet_0' ? 0 : 2,
+    }));
+    orchestrateManualUpdate_ACU.mockResolvedValueOnce({
+      success: false,
+      requiresUserConfirmation: {
+        reason: 'manual_refill_replace_sheet_baseline',
+        replayErrorCode: 'no_full_checkpoint_replayable',
+        message: '需要替换基底。',
+        contextScopeIndices: [0],
+        targetSheetKeys: ['sheet_0'],
+      },
+    });
+    const manual = useManualUpdate();
+    manual.setManualSelectedKeys(['sheet_0', 'sheet_1']);
+
+    const pending = manual.runAutoCatchUp();
+    await confirmDialog(dialog, '执行自动追平');
+    await waitForCondition(() => dialog.active?.title === '破坏性手动重填确认', '破坏性确认弹窗出现');
+    dialog.cancelActive();
+    await pending;
+
+    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
+    __resetToastStoreForTests();
+  });
+
+  it('破坏性确认重入仅切换确认参数，并标记重入阶段的原始错误', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      toast,
+      orchestrateManualUpdate_ACU,
+      settings,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    orchestrateManualUpdate_ACU
+      .mockImplementationOnce(async (...args: any[]) => {
+        expect(settings.autoUpdateThreshold).toBe(1);
+        return {
+          success: false,
+          requiresUserConfirmation: {
+            reason: 'manual_refill_replace_sheet_baseline',
+            replayErrorCode: 'no_full_checkpoint_replayable',
+            message: '需要替换基底。',
+            contextScopeIndices: [0],
+            targetSheetKeys: ['sheet_0'],
+          },
+          firstArgs: args,
+        };
+      })
+      .mockImplementationOnce(async (...args: any[]) => {
+        expect(settings.autoUpdateThreshold).toBe(1);
+        return { success: false, error: '确认重入写入失败', secondArgs: args };
+      });
+    const manual = useManualUpdate();
+
+    const pending = manual.runAutoCatchUp();
+    await confirmDialog(dialog, '执行自动追平');
+    await waitForCondition(() => dialog.active?.title === '破坏性手动重填确认', '破坏性确认弹窗出现');
+    dialog.submitActive();
+    await pending;
+
+    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(2);
+    expect(orchestrateManualUpdate_ACU.mock.calls[0][0]).toEqual(['sheet_0']);
+    expect(orchestrateManualUpdate_ACU.mock.calls[1][0]).toEqual(['sheet_0']);
+    expect(Object.keys(orchestrateManualUpdate_ACU.mock.calls[0][3]).sort())
+      .toEqual(['clearBeforeUpdate', 'confirmBoundaryReset', 'onProgress']);
+    expect(Object.keys(orchestrateManualUpdate_ACU.mock.calls[1][3]).sort())
+      .toEqual(['clearBeforeUpdate', 'confirmBoundaryReset', 'onProgress']);
+    expect(orchestrateManualUpdate_ACU.mock.calls[0][3].confirmBoundaryReset).toBe(false);
+    expect(orchestrateManualUpdate_ACU.mock.calls[1][3].confirmBoundaryReset).toBe(true);
+    expect(settings.autoUpdateThreshold).toBe(3);
+    expect(settings.updateBatchSize).toBe(2);
+    expect(toast.items.at(-1)?.text).toContain('破坏性确认重入阶段失败');
+    expect(toast.items.at(-1)?.text).toContain('确认重入写入失败');
+    __resetToastStoreForTests();
+  });
+
+  it('第一组抛异常时停止后续范围组并保留异常文本', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      toast,
+      orchestrateManualUpdate_ACU,
+      resolveTableHistoryStateFromChat_ACU,
+      chat,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    chat.push({ is_user: false, mes: 'AI 2' }, { is_user: false, mes: 'AI 3' });
+    resolveTableHistoryStateFromChat_ACU.mockImplementation((_chat: any[], options: any) => ({
+      hasAnyData: true,
+      hasTrackedUpdate: true,
+      lastTrackedUpdateAiFloor: options.sheetKey === 'sheet_0' ? 0 : 2,
+    }));
+    orchestrateManualUpdate_ACU.mockRejectedValueOnce(new Error('宿主抛出的写入异常'));
+    const manual = useManualUpdate();
+    manual.setManualSelectedKeys(['sheet_0', 'sheet_1']);
+
+    const pending = manual.runAutoCatchUp();
+    await confirmDialog(dialog, '执行自动追平');
+    await pending;
+
+    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
+    expect(toast.items.at(-1)?.text).toContain('首次 orchestrator阶段失败');
+    expect(toast.items.at(-1)?.text).toContain('宿主抛出的写入异常');
+    __resetToastStoreForTests();
+  });
+
+  it('用户终止自动追平时中止当前请求且不启动后续组', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      toast,
+      orchestrateManualUpdate_ACU,
+      resolveTableHistoryStateFromChat_ACU,
+      chat,
+      abortAllActiveRequests_ACU,
+      setWasStoppedByUser,
+      setIsAutoUpdatingCard,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    chat.push({ is_user: false, mes: 'AI 2' }, { is_user: false, mes: 'AI 3' });
+    resolveTableHistoryStateFromChat_ACU.mockImplementation((_chat: any[], options: any) => ({
+      hasAnyData: true,
+      hasTrackedUpdate: true,
+      lastTrackedUpdateAiFloor: options.sheetKey === 'sheet_0' ? 0 : 2,
+    }));
+    let releaseFirst!: () => void;
+    orchestrateManualUpdate_ACU.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { releaseFirst = resolve; });
+      return { success: true };
+    });
+    const manual = useManualUpdate();
+    manual.setManualSelectedKeys(['sheet_0', 'sheet_1']);
+
+    const pending = manual.runAutoCatchUp();
+    await confirmDialog(dialog, '执行自动追平');
+    await waitForCondition(() => typeof releaseFirst === 'function', '第一组进入执行');
+    expect(manual.autoCatchUpBusy.value).toBe(true);
+    void manual.runManualUpdate();
+    expect(dialog.active).toBeNull();
+    await toast.items[0]?.action?.onClick();
+    expect(toast.items[0]?.text).toContain('自动追平已终止');
+    releaseFirst();
+    await pending;
+
+    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
+    expect(abortAllActiveRequests_ACU).toHaveBeenCalledTimes(1);
+    expect(setWasStoppedByUser).toHaveBeenCalledWith(true);
+    expect(setIsAutoUpdatingCard).toHaveBeenCalledWith(false);
+    expect(manual.autoCatchUpBusy.value).toBe(false);
+    __resetToastStoreForTests();
+  });
+
+  it('首次确认悬挂期间阻止另一入口创建竞争确认', async () => {
+    const {
+      useManualUpdate,
+      dialog,
+      orchestrateManualUpdate_ACU,
+      __resetToastStoreForTests,
+    } = await importManualUpdate();
+    const manual = useManualUpdate();
+
+    const manualPending = manual.runManualUpdate();
+    await waitForCondition(() => dialog.active?.title === '执行手动填表', '手动确认弹窗出现');
+    await manual.runAutoCatchUp();
+    expect(dialog.active?.title).toBe('执行手动填表');
+    expect(orchestrateManualUpdate_ACU).not.toHaveBeenCalled();
+    dialog.cancelActive();
+    await manualPending;
+
+    const autoPending = manual.runAutoCatchUp();
+    await waitForCondition(() => dialog.active?.title === '执行自动追平', '自动确认弹窗出现');
+    await manual.runManualUpdate();
+    expect(dialog.active?.title).toBe('执行自动追平');
+    expect(orchestrateManualUpdate_ACU).not.toHaveBeenCalled();
+    dialog.cancelActive();
+    await autoPending;
+
     __resetToastStoreForTests();
   });
 });

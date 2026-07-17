@@ -12,9 +12,11 @@ import { getChatArray_ACU } from '../../service/chat/chat-service';
 import { saveSettings_ACU } from '../../service/settings/settings-service';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
 import { getSortedSheetKeys_ACU } from '../../service/template/chat-scope';
-import { collectV2CheckpointFloorsFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../../service/table/table-history';
 import {
-  buildAutoResumeManualGroups_ACU,
+  collectV2CheckpointFloorsFromChat_ACU,
+  resolveTableHistoryStateFromChat_ACU,
+} from '../../service/table/table-history';
+import {
   executeCardUpdateCore_ACU,
   orchestrateManualUpdate_ACU,
   processUpdatesBatch_ACU,
@@ -26,6 +28,10 @@ import { topLevelWindow_ACU } from '../../shared/env';
 import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
 import { useDialogStore } from '../stores/dialog-store';
 import { useToastStore } from '../stores/toast-store';
+import {
+  planManualFillCatchUp,
+  type CatchUpGroup,
+} from './manual-fill-catch-up-planner';
 
 type MessageKind = 'info' | 'success' | 'warning' | 'error';
 
@@ -35,7 +41,7 @@ export interface ManualUpdateState {
   manualBatchSize: Ref<number>;
   manualExtraHint: Ref<string>;
   manualUpdateBusy: Ref<boolean>;
-  autoResumeBusy: Ref<boolean>;
+  autoCatchUpBusy: Ref<boolean>;
   sheetKeys: ComputedRef<string[]>;
   sheetNames: ComputedRef<Record<string, string>>;
   selectedSheetSummary: ComputedRef<string>;
@@ -50,7 +56,7 @@ export interface ManualUpdateState {
   selectAllManualTables: () => void;
   selectNoManualTables: () => void;
   runManualUpdate: () => Promise<void>;
-  runAutoResumeFill: () => Promise<void>;
+  runAutoCatchUp: () => Promise<void>;
 }
 
 function currentSheetKeys(): string[] {
@@ -102,7 +108,7 @@ function resolveManualBatchSize(): number {
     : normalizePositiveInteger(settings_ACU.manualUpdateBatchSize, fallback);
 }
 
-function applyManualSettingsForOrchestrator(): () => void {
+function applyManualSettingsForOrchestrator(contextDepth: number): () => void {
   const previousAutoUpdateThreshold = settings_ACU.autoUpdateThreshold;
   const previousUpdateBatchSize = settings_ACU.updateBatchSize;
 
@@ -110,7 +116,7 @@ function applyManualSettingsForOrchestrator(): () => void {
   // Keep the temporary bridge local to this UI action so the independent
   // manual fields do not persist back into automatic update configuration.
   settings_ACU.autoUpdateThreshold = manualDepthForOrchestrator_ACU(
-    settings_ACU.manualUpdateContextDepth,
+    contextDepth,
     previousAutoUpdateThreshold,
   );
   settings_ACU.updateBatchSize = normalizePositiveInteger(
@@ -190,16 +196,38 @@ function normalizeManualProgressMessage(message: string): string {
     .split('AI 响应').join('手动填表结果');
 }
 
-type ManualRefillOrchestratorResult = Awaited<ReturnType<typeof orchestrateManualUpdate_ACU>>;
+interface ChatStructureFingerprint {
+  isolationKey: string;
+  aiMessageIndices: number[];
+  effectiveTailFloor: number;
+}
 
-type ManualRefillGroupExecutionResult =
-  | { status: 'success'; result: ManualRefillOrchestratorResult }
-  | { status: 'cancelled' }
-  | { status: 'failed'; error: string; result?: ManualRefillOrchestratorResult };
+function collectAiMessageIndices(chat: any[]): number[] {
+  const indices: number[] = [];
+  for (let index = 0; index < chat.length; index += 1) {
+    if (chat[index] && !chat[index].is_user) indices.push(index);
+  }
+  return indices;
+}
 
-interface ExecuteManualRefillGroupOptions {
+function sameChatStructure(left: ChatStructureFingerprint, right: ChatStructureFingerprint): boolean {
+  return left.isolationKey === right.isolationKey
+    && left.effectiveTailFloor === right.effectiveTailFloor
+    && left.aiMessageIndices.length === right.aiMessageIndices.length
+    && left.aiMessageIndices.every((value, index) => value === right.aiMessageIndices[index]);
+}
+
+type ManualFillOrchestratorResult = Awaited<ReturnType<typeof orchestrateManualUpdate_ACU>>;
+type ManualFillFailureStage = '首次 orchestrator' | '破坏性确认' | '破坏性确认重入';
+
+type ManualFillSessionResult =
+  | { status: 'success'; result: ManualFillOrchestratorResult }
+  | { status: 'cancelled'; reason: 'boundary_reset' }
+  | { status: 'failed'; error: string; stage: ManualFillFailureStage; result?: ManualFillOrchestratorResult };
+
+interface ExecuteManualFillSessionOptions {
   targetKeys: string[];
-  contextScopeIndicesOverride?: number[];
+  contextDepth: number;
   handleProgress: (event: CardUpdateProgressEvent) => void;
   taskLabel: string;
 }
@@ -212,10 +240,12 @@ export function useManualUpdate(): ManualUpdateState {
   const manualBatchSize = ref(resolveManualBatchSize());
   const manualExtraHint = ref('');
   const manualUpdateBusy = ref(false);
-  const autoResumeBusy = ref(false);
+  const autoCatchUpBusy = ref(false);
   const refreshTick = ref(0);
   let progressToastId: string | null = null;
   let abortRequested = false;
+  let activeTaskLabel = '手动填表';
+  let actionPending = false;
 
   function progressToastOptions() {
     return {
@@ -258,13 +288,13 @@ export function useManualUpdate(): ManualUpdateState {
     abortAllActiveRequests_ACU();
     _set_isAutoUpdatingCard_ACU(false);
     if (progressToastId) {
-      toast.update(progressToastId, 'warning', '手动填表已终止，正在停止当前任务与后续批次...', {
+      toast.update(progressToastId, 'warning', `${activeTaskLabel}已终止，正在停止当前任务与后续批次...`, {
         durationMs: 0,
         muteable: false,
         dismissible: false,
       });
     } else {
-      toast.warning('手动填表已终止，正在停止当前任务与后续批次...', {
+      toast.warning(`${activeTaskLabel}已终止，正在停止当前任务与后续批次...`, {
         durationMs: 0,
         muteable: false,
         dismissible: false,
@@ -400,18 +430,13 @@ export function useManualUpdate(): ManualUpdateState {
     setManualSelectedKeys([]);
   }
 
-  function createManualProgressHandler(): (event: CardUpdateProgressEvent) => void {
-    return (event: CardUpdateProgressEvent) => {
-      notifyProgress(progressLabel(event));
-      if (event.phase === 'complete') {
-        try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
-        refreshTick.value++;
-      }
-    };
-  }
-
-  function createManualProcessBatch(handleProgress: (event: CardUpdateProgressEvent) => void) {
-    return (indices: number[], mode: string, options: any) =>
+  async function executeManualFillSession({
+    targetKeys,
+    contextDepth,
+    handleProgress,
+    taskLabel,
+  }: ExecuteManualFillSessionOptions): Promise<ManualFillSessionResult> {
+    const runProcessBatch = (indices: number[], mode: string, options: any) =>
       processUpdatesBatch_ACU(indices, mode, options, (
         messagesToUse: any[],
         saveTargetIndex: number,
@@ -432,37 +457,26 @@ export function useManualUpdate(): ManualUpdateState {
         progressContext,
         handleProgress,
       ));
-  }
 
-  async function executeManualRefillGroup(
-    options: ExecuteManualRefillGroupOptions,
-  ): Promise<ManualRefillGroupExecutionResult> {
-    const runProcessBatch = createManualProcessBatch(options.handleProgress);
     const executeManualUpdate = async (confirmBoundaryReset: boolean) => {
-      const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
+      const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator(contextDepth);
       try {
-        const orchestratorOptions = {
-          clearBeforeUpdate: true,
-          confirmBoundaryReset,
-          onProgress: options.handleProgress,
-          ...(options.contextScopeIndicesOverride === undefined
-            ? {}
-            : { contextScopeIndicesOverride: options.contextScopeIndicesOverride }),
-        };
         return await orchestrateManualUpdate_ACU(
-          options.targetKeys,
+          targetKeys,
           runProcessBatch,
           async () => { await refreshMergedDataAndNotify_ACU(); },
-          orchestratorOptions,
+          { clearBeforeUpdate: true, confirmBoundaryReset, onProgress: handleProgress },
         );
       } finally {
         restoreAutoUpdateSettings();
       }
     };
 
+    let failureStage: ManualFillFailureStage = '首次 orchestrator';
     try {
-      let result = await executeManualUpdate(false);
+      let result: ManualFillOrchestratorResult = await executeManualUpdate(false);
       if (!result.success && result.requiresUserConfirmation) {
+        failureStage = '破坏性确认';
         const request = result.requiresUserConfirmation;
         const dangerConfirmed = await dialogStore.confirm({
           title: '破坏性手动重填确认',
@@ -472,159 +486,210 @@ export function useManualUpdate(): ManualUpdateState {
           cancelLabel: '取消',
           confirmVariant: 'danger',
         });
-        if (!dangerConfirmed) return { status: 'cancelled' };
-        notifyProgress(`已确认破坏性基底替换，继续${options.taskLabel}。`);
+        if (!dangerConfirmed) return { status: 'cancelled', reason: 'boundary_reset' };
+        notifyProgress(`已确认破坏性基底替换，继续${taskLabel}。`);
+        failureStage = '破坏性确认重入';
         result = await executeManualUpdate(true);
       }
-      if (!result.success) {
-        return { status: 'failed', error: result.error || `${options.taskLabel}失败。`, result };
-      }
-      return { status: 'success', result };
+
+      return result.success
+        ? { status: 'success', result }
+        : { status: 'failed', error: result.error || `${taskLabel}失败。`, stage: failureStage, result };
     } catch (error: any) {
-      return { status: 'failed', error: error?.message || `${options.taskLabel}执行异常。` };
+      return { status: 'failed', error: error?.message || `${taskLabel}执行异常。`, stage: failureStage };
     }
   }
 
-  async function runManualUpdate(): Promise<void> {
-    if (manualUpdateBusy.value || autoResumeBusy.value) return;
-    if (!selectedManualTableKeys.value.length) {
-      toast.warning('未选择需要手动填表的表格。');
-      return;
-    }
-
-    const confirmed = await dialogStore.confirm({
-      title: '执行手动填表',
-      message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表。\n常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹，并在全部成功后写入手动重填进度记录。\n如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认；只有你在第二次确认中授权后，才会替换本次范围内选中表的旧 checkpoint 基底并写入新的单表 checkpoint。\n\n取消、失败、终止或从中断处继续时，不会清理本次重填范围之外的聊天记录表格数据，也不会在未二次确认时替换 checkpoint 基底。`,
-      dangerMessage: checkpointRiskMessage.value || undefined,
-      confirmLabel: '确认并继续',
-      cancelLabel: '取消',
-      confirmVariant: checkpointRiskMessage.value ? 'danger' : undefined,
-    });
-    if (!confirmed) return;
-    const targetManualTableKeys = selectedManualTableKeys.value.slice();
-
-    manualUpdateBusy.value = true;
-    progressToastId = null;
-    abortRequested = false;
-    _set_wasStoppedByUser_ACU(false);
-    notifyProgress('手动填表开始。');
-    const extra = manualExtraHint.value.trim();
-    if (extra) _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
-    const handleProgress = createManualProgressHandler();
-
-    try {
-      const execution = await executeManualRefillGroup({ targetKeys: targetManualTableKeys, handleProgress, taskLabel: '手动填表' });
-      if (execution.status === 'cancelled') {
-        finishToast('info', '已取消破坏性基底替换。');
-        return;
-      }
-      if (execution.status === 'failed') {
-        finishToast(abortRequested || execution.error.includes('终止') ? 'warning' : 'error', abortRequested ? '手动填表任务已由用户终止。' : execution.error);
-        return;
-      }
-      const result = execution.result;
-      finishToast(
-        result.checkpointWarning ? 'warning' : 'success',
-        `${result.autoMergeTriggered
-              ? `手动填表完成;自动合并总结${result.autoMergeSuccess ? '已完成' : '未完成'}。`
-              : '手动填表完成。'}${result.checkpointWarning
-                ? ` 但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}`
-                : ''}`,
-      );
-    } finally {
-      manualUpdateBusy.value = false;
-      refresh();
-    }
+  function createChatStructureFingerprint(): ChatStructureFingerprint {
+    const chat = getChatArray_ACU();
+    const aiMessageIndices = Array.isArray(chat) ? collectAiMessageIndices(chat) : [];
+    const skip = Math.min(normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0), aiMessageIndices.length);
+    return {
+      isolationKey: getCurrentIsolationKey_ACU(),
+      aiMessageIndices,
+      effectiveTailFloor: aiMessageIndices.length - skip,
+    };
   }
 
-  async function runAutoResumeFill(): Promise<void> {
-    if (manualUpdateBusy.value || autoResumeBusy.value) return;
+  function formatCatchUpGroup(group: CatchUpGroup): string {
+    const names = sheetNames.value;
+    const targets = group.targetKeys.map(key => names[key] || key).join('、');
+    return `${formatAiFloorRange_ACU(group.startAiFloor, group.endAiFloor)}：${targets}`;
+  }
+
+  async function runAutoCatchUp(): Promise<void> {
+    if (manualUpdateBusy.value || autoCatchUpBusy.value || actionPending) return;
     const targetKeys = selectedManualTableKeys.value.slice();
     if (!targetKeys.length) {
-      toast.warning('未选择需要自动断点续填的表格。');
+      toast.warning('未选择需要自动追平的表格。');
       return;
     }
 
+    actionPending = true;
     try {
       const chat = getChatArray_ACU();
       const liveChat = Array.isArray(chat) ? chat : [];
-      const aiMessageIndices = liveChat
-        .map((message: any, index: number) => message && !message.is_user ? index : -1)
-        .filter((index: number) => index >= 0);
-      const skipUpdateFloors = normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0);
-      const effectiveTailFloor = Math.max(0, aiMessageIndices.length - skipUpdateFloors);
-      const isolationKey = getCurrentIsolationKey_ACU();
-      const sheetProgress = targetKeys.map(sheetKey => {
-        const table = currentJsonTableData_ACU?.[sheetKey];
-        const history = resolveTableHistoryStateFromChat_ACU(liveChat, {
-          sheetKey,
-          isSummaryTable: isSummaryOrOutlineTable_ACU(String(table?.name || '')),
-          isolationKey,
-          settings: settings_ACU,
-        });
-        return { sheetKey, lastFilledAiFloor: history.lastTrackedUpdateAiFloor };
+      const fingerprint = createChatStructureFingerprint();
+      if (!fingerprint.aiMessageIndices.length) {
+        toast.info('当前没有可用于填表的 AI 回复。');
+        return;
+      }
+      const plan = planManualFillCatchUp({
+        aiMessageIndices: fingerprint.aiMessageIndices,
+        skipUpdateFloors: settings_ACU.skipUpdateFloors,
+        sheets: targetKeys.map(sheetKey => {
+          const table = currentJsonTableData_ACU?.[sheetKey];
+          const history = resolveTableHistoryStateFromChat_ACU(liveChat, {
+            sheetKey,
+            isSummaryTable: isSummaryOrOutlineTable_ACU(String(table?.name || '')),
+            isolationKey: fingerprint.isolationKey,
+            settings: settings_ACU,
+          });
+          return {
+            sheetKey,
+            hasAnyData: history.hasAnyData,
+            hasTrackedUpdate: history.hasTrackedUpdate,
+            lastTrackedUpdateAiFloor: history.lastTrackedUpdateAiFloor,
+          };
+        }),
       });
-      const groups = buildAutoResumeManualGroups_ACU({ aiMessageIndices, effectiveTailFloor, sheetProgress });
-      if (!groups.length) {
-        toast.info('所选表已追平，无需续填。');
+      if (!plan.length) {
+        toast.info('所选表已追平。');
         return;
       }
 
-      const groupSummary = groups.map((group, index) => {
-        const names = group.targetKeys.map(key => sheetNames.value[key] || key).join('、');
-        return `${index + 1}. ${formatAiFloorRange_ACU(group.startAiFloor, group.endAiFloor)}：${names}`;
-      }).join('\n');
       const confirmed = await dialogStore.confirm({
-        title: '执行自动断点续填',
-        message: `即将按每张表的最后填表断点自动续填。\n\n目标表：${selectedSheetSummary.value}\n有效末层：AI 第 ${effectiveTailFloor} 层\n范围组数量：${groups.length}\n${groupSummary}\n\n确认后，各范围组将严格串行进入与普通手动填表完全相同的 service 链路。若某组的重填起点前缺少可回放 checkpoint，仍会弹出现有的破坏性手动重填二次确认；取消、失败或终止会停止后续范围组。`,
+        title: '执行自动追平',
+        message: `即将按以下 ${plan.length} 个范围组严格串行执行：\n\n${plan.map((group, index) => `${index + 1}. ${formatCatchUpGroup(group)}`).join('\n')}\n\n每个范围组都会复用普通手动填表的 service 调用与破坏性边界确认；任一组取消、失败、异常、终止或聊天结构变化后，后续组不会执行。`,
         confirmLabel: '确认并继续',
         cancelLabel: '取消',
       });
       if (!confirmed) return;
 
-      autoResumeBusy.value = true;
+      autoCatchUpBusy.value = true;
       progressToastId = null;
+      activeTaskLabel = '自动追平';
       abortRequested = false;
       _set_wasStoppedByUser_ACU(false);
       const extra = manualExtraHint.value.trim();
       if (extra) _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
-      const handleProgress = createManualProgressHandler();
-      let completedGroups = 0;
 
-      try {
-        for (let index = 0; index < groups.length; index += 1) {
-          if (abortRequested) break;
-          const group = groups[index];
-          notifyProgress(`范围组 ${index + 1}/${groups.length} · ${formatAiFloorRange_ACU(group.startAiFloor, group.endAiFloor)} · ${group.targetKeys.length} 张表`);
-          const execution = await executeManualRefillGroup({
-            targetKeys: group.targetKeys,
-            contextScopeIndicesOverride: group.contextScopeIndices,
-            handleProgress,
-            taskLabel: '自动断点续填',
-          });
-          if (execution.status === 'cancelled') {
-            finishToast('info', `已取消破坏性基底替换；自动断点续填停止于范围组 ${index + 1}/${groups.length}。`);
-            return;
-          }
-          if (execution.status === 'failed') {
-            finishToast(abortRequested || execution.error.includes('终止') ? 'warning' : 'error', abortRequested ? '自动断点续填任务已由用户终止。' : execution.error);
-            return;
-          }
-          completedGroups += 1;
-        }
-        if (abortRequested) {
-          finishToast('warning', '自动断点续填任务已由用户终止。');
+      for (let index = 0; index < plan.length; index += 1) {
+        const group = plan[index];
+        if (abortRequested) break;
+        if (!sameChatStructure(fingerprint, createChatStructureFingerprint())) {
+          finishToast('warning', '自动追平已停止：聊天或隔离范围已变化，请重新规划后再执行。');
           return;
         }
-        finishToast('success', `自动断点续填完成，共完成 ${completedGroups} 个范围组。`);
-      } finally {
-        autoResumeBusy.value = false;
-        refresh();
+        const groupLabel = `自动追平第 ${index + 1}/${plan.length} 组（${formatCatchUpGroup(group)}）`;
+        notifyProgress(`${groupLabel}开始。`);
+        const handleProgress = (event: CardUpdateProgressEvent) => {
+          notifyProgress(`${groupLabel} · ${progressLabel(event)}`);
+          if (event.phase === 'complete') {
+            try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
+            refreshTick.value++;
+          }
+        };
+        const session = await executeManualFillSession({
+          targetKeys: group.targetKeys,
+          contextDepth: group.contextDepth,
+          handleProgress,
+          taskLabel: groupLabel,
+        });
+        if (session.status === 'cancelled') {
+          finishToast('info', `${groupLabel}已取消，后续范围组未执行。`);
+          return;
+        }
+        if (session.status === 'failed') {
+          finishToast(abortRequested || session.error.includes('终止') ? 'warning' : 'error',
+            `${groupLabel}在${session.stage}阶段失败：${session.error}`);
+          return;
+        }
+      }
+
+      if (abortRequested) {
+        finishToast('warning', '自动追平任务已由用户终止。');
+      } else {
+        finishToast('success', `自动追平完成，共完成 ${plan.length} 个范围组。`);
       }
     } catch (error: any) {
-      finishToast('error', error?.message || '自动断点续填执行异常。');
-      autoResumeBusy.value = false;
+      finishToast('error', `自动追平规划或调度失败：${error?.message || '未知错误'}`);
+    } finally {
+      autoCatchUpBusy.value = false;
       refresh();
+      actionPending = false;
+    }
+  }
+
+  async function runManualUpdate(): Promise<void> {
+    if (manualUpdateBusy.value || autoCatchUpBusy.value || actionPending) return;
+    actionPending = true;
+    try {
+      if (!selectedManualTableKeys.value.length) {
+        toast.warning('未选择需要手动填表的表格。');
+        return;
+      }
+
+      const confirmed = await dialogStore.confirm({
+        title: '执行手动填表',
+        message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表。\n常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹，并在全部成功后写入手动重填进度记录。\n如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认；只有你在第二次确认中授权后，才会替换本次范围内选中表的旧 checkpoint 基底并写入新的单表 checkpoint。\n\n取消、失败、终止或从中断处继续时，不会清理本次重填范围之外的聊天记录表格数据，也不会在未二次确认时替换 checkpoint 基底。`,
+        dangerMessage: checkpointRiskMessage.value || undefined,
+        confirmLabel: '确认并继续',
+        cancelLabel: '取消',
+        confirmVariant: checkpointRiskMessage.value ? 'danger' : undefined,
+      });
+      if (!confirmed) return;
+      const targetManualTableKeys = selectedManualTableKeys.value.slice();
+
+      manualUpdateBusy.value = true;
+      progressToastId = null;
+      activeTaskLabel = '手动填表';
+      abortRequested = false;
+      _set_wasStoppedByUser_ACU(false);
+      notifyProgress('手动填表开始。');
+      const extra = manualExtraHint.value.trim();
+      if (extra) _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
+      const handleProgress = (event: CardUpdateProgressEvent) => {
+        notifyProgress(progressLabel(event));
+        if (event.phase === 'complete') {
+          try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
+          refreshTick.value++;
+        }
+      };
+
+      try {
+        const session = await executeManualFillSession({
+          targetKeys: targetManualTableKeys,
+          contextDepth: manualContextDepth.value,
+          handleProgress,
+          taskLabel: '手动填表',
+        });
+        if (session.status === 'cancelled') {
+          finishToast('info', '已取消破坏性基底替换。');
+          return;
+        }
+        if (session.status === 'failed') {
+          finishToast(abortRequested || session.error.includes('终止') ? 'warning' : 'error',
+            abortRequested ? '手动填表任务已由用户终止。' : session.error);
+          return;
+        }
+        const result = session.result;
+        finishToast(
+          result.checkpointWarning ? 'warning' : 'success',
+          `${result.autoMergeTriggered
+            ? `手动填表完成;自动合并总结${result.autoMergeSuccess ? '已完成' : '未完成'}。`
+            : '手动填表完成。'}${result.checkpointWarning
+              ? ` 但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}`
+              : ''}`,
+        );
+      } catch (error: any) {
+        finishToast('error', error?.message || '手动填表执行异常。');
+      } finally {
+        manualUpdateBusy.value = false;
+        refresh();
+      }
+    } finally {
+      actionPending = false;
     }
   }
 
@@ -634,7 +699,7 @@ export function useManualUpdate(): ManualUpdateState {
     manualBatchSize,
     manualExtraHint,
     manualUpdateBusy,
-    autoResumeBusy,
+    autoCatchUpBusy,
     sheetKeys,
     sheetNames,
     selectedSheetSummary,
@@ -649,6 +714,6 @@ export function useManualUpdate(): ManualUpdateState {
     selectAllManualTables,
     selectNoManualTables,
     runManualUpdate,
-    runAutoResumeFill,
+    runAutoCatchUp,
   };
 }

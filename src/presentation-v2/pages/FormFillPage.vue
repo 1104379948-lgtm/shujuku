@@ -156,21 +156,10 @@
 
         <div class="acu-v2-form-fill-page__actions">
           <AcuButton
-            variant="default"
-            :disabled="
-              manualUpdate.manualUpdateBusy.value ||
-              manualUpdate.autoResumeBusy.value ||
-              !manualUpdate.selectedManualTableKeys.value.length
-            "
-            @click="manualUpdate.runAutoResumeFill"
-          >
-            {{ manualUpdate.autoResumeBusy.value ? "断点续填中..." : "自动断点续填" }}
-          </AcuButton>
-          <AcuButton
             variant="primary"
             :disabled="
               manualUpdate.manualUpdateBusy.value ||
-              manualUpdate.autoResumeBusy.value ||
+              manualUpdate.autoCatchUpBusy.value ||
               !manualUpdate.selectedManualTableKeys.value.length
             "
             @click="manualUpdate.runManualUpdate"
@@ -178,10 +167,22 @@
             {{
               manualUpdate.manualUpdateBusy.value
                 ? "填表中..."
+                : manualUpdate.autoCatchUpBusy.value
+                  ? "自动追平中..."
                 : manualUpdate.vectorIndexWarning.value
                   ? "交火索引已启用"
                   : "执行手动填表"
             }}
+          </AcuButton>
+          <AcuButton
+            :disabled="
+              manualUpdate.manualUpdateBusy.value ||
+              manualUpdate.autoCatchUpBusy.value ||
+              !manualUpdate.selectedManualTableKeys.value.length
+            "
+            @click="manualUpdate.runAutoCatchUp"
+          >
+            {{ manualUpdate.autoCatchUpBusy.value ? "追平中..." : "自动追平" }}
           </AcuButton>
         </div>
       </AcuPanel>
