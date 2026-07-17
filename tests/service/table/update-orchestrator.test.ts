@@ -1387,12 +1387,12 @@ describe('orchestrateManualUpdate_ACU', () => {
       data: expect.objectContaining({ sheet_0: expect.objectContaining({ name: 'chronicle' }), sheet_1: expect.objectContaining({ name: 'quest_log' }) }),
       save: true,
     }));
-    expect(mockCaptureManualRefillSessionSnapshot).toHaveBeenCalledWith([3, 5]);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(mockEnsureManualRefillInitialBaseline.mock.invocationCallOrder[0]).toBeLessThan(mockClearManualRefillIncrementalDataInRange.mock.invocationCallOrder[0]);
     expect(mockClearManualRefillIncrementalDataInRange.mock.invocationCallOrder[0]).toBeLessThan(mockReloadStorageProvider.mock.invocationCallOrder[0]);
   });
 
-  it('临时 initial baseline 建立失败时回滚并拒绝清理或刷新', async () => {
+  it('临时 initial baseline 建立失败时直接失败且不恢复启动前快照', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复1' }]);
     mockCurrentJsonTableData = { sheet_0: { name: 'chronicle', updateConfig: {}, content: [['row_id', 'code_index']] } };
@@ -1402,7 +1402,8 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('目标楼层已有 V2 logEntries');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
     expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).not.toHaveBeenCalled();
@@ -1431,7 +1432,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(processBatch).not.toHaveBeenCalled();
   });
 
-  it('临时 initial baseline 建立直接 reject 时统一回滚且返回硬失败', async () => {
+  it('临时 initial baseline 建立直接 reject 时返回硬失败且不恢复启动前快照', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复1' }]);
     mockCurrentJsonTableData = { sheet_0: { name: 'chronicle', updateConfig: {}, content: [['row_id', 'code_index']] } };
@@ -1441,12 +1442,13 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('baseline transaction rejected');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).not.toHaveBeenCalled();
   });
 
-  it('临时 baseline 落盘后 preparing 进度回调抛错时统一回滚', async () => {
+  it('临时 baseline 落盘后 preparing 进度回调抛错时不恢复启动前快照', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       { is_user: true },
@@ -1469,7 +1471,8 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('progress observer failed');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).toHaveBeenCalledTimes(1);
     expect(processBatch).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
@@ -1493,7 +1496,8 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('purge failed');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(clearManualRefillSheetDataInRange_ACU).not.toHaveBeenCalled();
     expect(mockPurgeSheetKeysFromChatHistoryHard).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
@@ -1517,7 +1521,8 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('reload failed');
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(clearManualRefillIncrementalDataInRange_ACU).toHaveBeenCalledWith([1, 3], ['sheet_0']);
     expect(clearManualRefillSheetDataInRange_ACU).not.toHaveBeenCalled();
     expect(mockPrepareAIInput).not.toHaveBeenCalled();
@@ -1653,7 +1658,8 @@ describe('orchestrateManualUpdate_ACU', () => {
       contextScopeIndices: [0, 2],
       targetSheetKeys: ['sheet_0'],
     }));
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).not.toHaveBeenCalled();
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).not.toHaveBeenCalled();
@@ -1661,7 +1667,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(processBatch).not.toHaveBeenCalled();
   });
 
-  it('无 full checkpoint 且确认前回滚失败时返回硬错误而不是确认对象', async () => {
+  it('无 full checkpoint 时恢复函数即使配置为失败也不执行，仍返回确认对象', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
@@ -1709,9 +1715,13 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], processBatch, mockRefreshData, { clearBeforeUpdate: true });
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('临时基底回滚失败：restore transaction failed');
-    expect(result.requiresUserConfirmation).toBeUndefined();
-    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+    expect(result.error).toBeUndefined();
+    expect(result.requiresUserConfirmation).toEqual(expect.objectContaining({
+      reason: 'manual_refill_replace_sheet_baseline',
+      replayErrorCode: 'no_full_checkpoint_replayable',
+    }));
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
     expect(mockClearManualRefillIncrementalDataInRange).not.toHaveBeenCalled();
     expect(mockReloadStorageProvider).not.toHaveBeenCalled();
     expect(processBatch).not.toHaveBeenCalled();
@@ -1791,8 +1801,8 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(3);
   });
 
-  it('跨 checkpoint 重填的最终快照提交失败时恢复整个重填会话快照', async () => {
-    const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+  it('跨 checkpoint 重填的最终快照提交失败时保留已写入数据且不恢复启动前快照', async () => {
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
         is_user: false,
@@ -1809,8 +1819,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: true },
       { is_user: false },
     ]);
-    const sessionSnapshot = { targetMessageIndices: [0, 2], messageFields: [{ index: 0 }, { index: 2 }] } as any;
-    vi.mocked(captureManualRefillSessionSnapshot_ACU).mockReturnValue(sessionSnapshot);
     vi.mocked(commitManualRefillSheetSnapshotInRangeAtomic_ACU).mockResolvedValue({ success: false, changed: false, clearedCount: 0, checkpointCount: 0, error: 'strict save failed' });
     mockSettings.autoUpdateThreshold = 0;
     mockSettings.updateBatchSize = 1;
@@ -1820,13 +1828,16 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true, confirmBoundaryReset: true });
 
     expect(result).toEqual(expect.objectContaining({ success: false, error: expect.stringContaining('strict save failed') }));
-    expect(captureManualRefillSessionSnapshot_ACU).toHaveBeenCalledWith([0, 2]);
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).toHaveBeenCalledWith(sessionSnapshot, '', ['sheet_0']);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    const persistedRows = mockPersistTablesToChatMessage.mock.calls.map(call => call[0].tableData.sheet_0.content);
+    expect(persistedRows.some(rows => rows.some((row: any[]) => row[0] === '2' && row[1] === '来自A'))).toBe(true);
+    expect(mockCurrentJsonTableData.sheet_0.content).toContainEqual(['2', '来自A']);
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
 
-  it('跨 checkpoint 重填在用户停止后恢复整个重填会话快照', async () => {
-    const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+  it('跨 checkpoint 重填在用户停止后保留已写入数据且不恢复启动前快照', async () => {
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
         is_user: false,
@@ -1843,8 +1854,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: true },
       { is_user: false },
     ]);
-    const sessionSnapshot = { targetMessageIndices: [0, 2], messageFields: [{ index: 0 }, { index: 2 }] } as any;
-    vi.mocked(captureManualRefillSessionSnapshot_ACU).mockReturnValue(sessionSnapshot);
     mockSettings.autoUpdateThreshold = 0;
     mockSettings.updateBatchSize = 1;
     mockPersistTablesToChatMessage.mockImplementationOnce(async () => {
@@ -1857,13 +1866,18 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true, confirmBoundaryReset: true });
 
     expect(result.success).toBe(false);
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).toHaveBeenCalledWith(sessionSnapshot, '', ['sheet_0']);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    const savedData = mockPersistTablesToChatMessage.mock.calls[0][0].tableData;
+    expect(savedData.sheet_0.content).toContainEqual(['2', '来自A']);
+    expect(mockCurrentJsonTableData.sheet_0.content).toContainEqual(['2', '来自A']);
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).not.toHaveBeenCalled();
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
 
-  it('跨 checkpoint 重填在分组后同步聊天失败时恢复整个重填会话快照', async () => {
-    const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+  it('跨 checkpoint 重填在分组后同步聊天失败时不恢复启动前快照', async () => {
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { loadAllChatMessages_ACU } = await import('../../../src/service/worldbook/pipeline');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
@@ -1881,8 +1895,6 @@ describe('orchestrateManualUpdate_ACU', () => {
       { is_user: true },
       { is_user: false },
     ]);
-    const sessionSnapshot = { targetMessageIndices: [0, 2], messageFields: [{ index: 0 }, { index: 2 }] } as any;
-    vi.mocked(captureManualRefillSessionSnapshot_ACU).mockReturnValue(sessionSnapshot);
     mockSettings.autoUpdateThreshold = 0;
     mockSettings.updateBatchSize = 1;
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
@@ -1899,16 +1911,14 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true, confirmBoundaryReset: true });
 
     expect(result).toEqual(expect.objectContaining({ success: false, error: expect.stringContaining('分组后聊天同步失败') }));
-    expect(loadAllChatMessages_ACU).toHaveBeenCalledTimes(4);
-    expect(loadCallCount).toBe(4);
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).toHaveBeenCalledWith(sessionSnapshot, '', ['sheet_0']);
-    expect(mockRefreshData).toHaveBeenCalledTimes(2);
-    expect(mockRefreshData.mock.invocationCallOrder[0]).toBeLessThan(
-      restoreManualRefillSessionSnapshotAtomic_ACU.mock.invocationCallOrder[0],
-    );
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU.mock.invocationCallOrder[0]).toBeLessThan(
-      mockRefreshData.mock.invocationCallOrder[1],
-    );
+    expect(loadAllChatMessages_ACU).toHaveBeenCalledTimes(3);
+    expect(loadCallCount).toBe(3);
+    expect(mockCaptureManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalledTimes(1);
+    const persistedData = mockPersistTablesToChatMessage.mock.calls.at(-1)?.[0].tableData;
+    expect(persistedData.sheet_0.content).toContainEqual(['2', '来自A']);
+    expect(mockCurrentJsonTableData.sheet_0.content).toContainEqual(['2', '来自A']);
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).not.toHaveBeenCalled();
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
