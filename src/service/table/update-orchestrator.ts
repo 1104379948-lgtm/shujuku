@@ -1995,8 +1995,9 @@ export async function orchestrateManualUpdate_ACU(
 ): Promise<ManualUpdateResult> {
     let manualRefillSessionSnapshot: ReturnType<typeof captureManualRefillSessionSnapshot_ACU> | null = null;
     let manualRefillRollbackAttempted = false;
+    let successfulManualRefillBucketCount = 0;
     const rollbackManualRefillSession = async (): Promise<string | undefined> => {
-        if (!manualRefillSessionSnapshot || manualRefillRollbackAttempted) return undefined;
+        if (!manualRefillSessionSnapshot || manualRefillRollbackAttempted || successfulManualRefillBucketCount > 0) return undefined;
         manualRefillRollbackAttempted = true;
         try {
             await restoreManualRefillSessionSnapshotAtomic_ACU(
@@ -2238,7 +2239,12 @@ export async function orchestrateManualUpdate_ACU(
             }
             try {
                 const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
-                    onProgress: options.onProgress,
+                    onProgress: event => {
+                        if (manualRefillSessionSnapshot && event.phase === 'complete') {
+                            successfulManualRefillBucketCount += 1;
+                        }
+                        options.onProgress?.(event);
+                    },
                 });
                 if (!chunkResult.success) {
                     chunkResult.failedGroups.forEach(key => {
@@ -2264,18 +2270,27 @@ export async function orchestrateManualUpdate_ACU(
 
         if (failedGroups.length > 0) {
             const rollbackError = await rollbackManualRefillSession();
-            if (!manualRefillSessionSnapshot) {
+            if (!manualRefillSessionSnapshot || successfulManualRefillBucketCount > 0) {
                 // 填表失败时，processUpdatesBatch 内部的 loadBatchBaseData 可能已覆盖运行时数据；
-                // 非会话补偿路径仍需从聊天恢复运行时状态。
+                // 非会话路径，以及已保留成功 bucket 的重填路径，都需从已同步聊天恢复运行时状态。
                 try {
-                    await loadAllChatMessages_ACU();
+                    if (!manualRefillSessionSnapshot) {
+                        await loadAllChatMessages_ACU();
+                    }
                     await refreshData();
                 } catch (error) {
-                    logWarn_ACU('[Manual Update] 填表失败后恢复数据时出错:', error);
+                    logWarn_ACU(
+                        successfulManualRefillBucketCount > 0
+                            ? '[Manual Refill] 保留成功 bucket 后恢复运行时数据时出错:'
+                            : '[Manual Update] 填表失败后恢复数据时出错:',
+                        error,
+                    );
                 }
             }
             const firstFailure = failedGroups[0];
-            const failureError = firstFailure.error || '手动更新失败或被终止。';
+            const failureError = wasStoppedByUser_ACU
+                ? '手动更新已终止。'
+                : firstFailure.error || '手动更新失败或被终止。';
             return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
         }
 
