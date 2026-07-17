@@ -121,6 +121,22 @@ export interface ManualUpdateResult {
     checkpointWarning?: string;
 }
 
+export interface AutoResumeManualGroup_ACU {
+    targetKeys: string[];
+    contextScopeIndices: number[];
+    startAiFloor: number;
+    endAiFloor: number;
+}
+
+export interface BuildAutoResumeManualGroupsOptions_ACU {
+    aiMessageIndices: number[];
+    effectiveTailFloor: number;
+    sheetProgress: Array<{
+        sheetKey: string;
+        lastFilledAiFloor: number;
+    }>;
+}
+
 export interface GroupFillJob_ACU {
     groupKey: string;
     groupId: number;
@@ -178,6 +194,57 @@ interface PlannedGroupedRuntimeJob_ACU {
     lastMessageIndexOfBatch: number;
     saveTargetIndex: number;
     updateMode: string;
+}
+
+export function buildAutoResumeManualGroups_ACU(
+    options: BuildAutoResumeManualGroupsOptions_ACU,
+): AutoResumeManualGroup_ACU[] {
+    const aiMessageIndices = Array.isArray(options.aiMessageIndices) ? options.aiMessageIndices : [];
+    const effectiveTailFloor = Number(options.effectiveTailFloor);
+    if (!Number.isInteger(effectiveTailFloor) || effectiveTailFloor < 0 || effectiveTailFloor > aiMessageIndices.length) {
+        throw new Error('自动断点续填的有效末层必须是 AI 消息数量范围内的非负整数。');
+    }
+    for (let index = 0; index < effectiveTailFloor; index += 1) {
+        const messageIndex = aiMessageIndices[index];
+        if (!Number.isInteger(messageIndex) || messageIndex < 0 || (index > 0 && messageIndex <= aiMessageIndices[index - 1])) {
+            throw new Error('自动断点续填的 AI 消息索引必须是严格递增的非负整数。');
+        }
+    }
+
+    const groupsByRange = new Map<string, AutoResumeManualGroup_ACU>();
+    const seenSheetKeys = new Set<string>();
+    for (const progress of Array.isArray(options.sheetProgress) ? options.sheetProgress : []) {
+        const sheetKey = String(progress?.sheetKey || '').trim();
+        if (!sheetKey) {
+            throw new Error('自动断点续填的表格键不能为空。');
+        }
+        if (seenSheetKeys.has(sheetKey)) continue;
+        seenSheetKeys.add(sheetKey);
+
+        const rawFloor = Number(progress.lastFilledAiFloor);
+        const cursor = Number.isFinite(rawFloor)
+            ? Math.min(effectiveTailFloor, Math.max(0, Math.floor(rawFloor)))
+            : 0;
+        if (cursor >= effectiveTailFloor) continue;
+
+        const contextScopeIndices = aiMessageIndices.slice(cursor, effectiveTailFloor);
+        const rangeKey = contextScopeIndices.join(',');
+        const existing = groupsByRange.get(rangeKey);
+        if (existing) {
+            existing.targetKeys.push(sheetKey);
+        } else {
+            groupsByRange.set(rangeKey, {
+                targetKeys: [sheetKey],
+                contextScopeIndices,
+                startAiFloor: cursor + 1,
+                endAiFloor: effectiveTailFloor,
+            });
+        }
+    }
+
+    return [...groupsByRange.values()]
+        .map(group => ({ ...group, targetKeys: [...group.targetKeys].sort() }))
+        .sort((left, right) => left.startAiFloor - right.startAiFloor || left.targetKeys.join(',').localeCompare(right.targetKeys.join(',')));
 }
 
 const SQL_ERROR_MARKER_ACU = '\n\n<!-- SQL_ERROR_FEEDBACK -->\n';
@@ -1991,6 +2058,7 @@ export async function orchestrateManualUpdate_ACU(
         clearBeforeUpdate?: boolean;
         confirmBoundaryReset?: boolean;
         onProgress?: (event: CardUpdateProgressEvent) => void;
+        contextScopeIndicesOverride?: number[];
     } = {},
 ): Promise<ManualUpdateResult> {
     let manualRefillSessionSnapshot: ReturnType<typeof captureManualRefillSessionSnapshot_ACU> | null = null;
@@ -2063,7 +2131,22 @@ export async function orchestrateManualUpdate_ACU(
         const uiSkip = settings_ACU.skipUpdateFloors || 0;
 
         const effectiveAiIndices = uiSkip > 0 ? allAiMessageIndices.slice(0, -uiSkip) : allAiMessageIndices.slice();
-        const contextScopeIndices = uiThreshold > 0 ? effectiveAiIndices.slice(-uiThreshold) : effectiveAiIndices;
+        let contextScopeIndices: number[];
+        if (options.contextScopeIndicesOverride !== undefined) {
+            const override = options.contextScopeIndicesOverride;
+            const effectiveIndexSet = new Set(effectiveAiIndices);
+            const valid = Array.isArray(override) && override.length > 0 && override.every((value, index) =>
+                Number.isInteger(value)
+                && effectiveIndexSet.has(value)
+                && (index === 0 || value > override[index - 1])
+            );
+            if (!valid) {
+                return { success: false, error: '手动填表范围覆盖必须由有效范围内严格递增的 AI 消息索引组成。' };
+            }
+            contextScopeIndices = [...override];
+        } else {
+            contextScopeIndices = uiThreshold > 0 ? effectiveAiIndices.slice(-uiThreshold) : effectiveAiIndices;
+        }
 
         if (!contextScopeIndices.length) {
             return { success: false, error: '未找到可用的上下文进行手动更新，请检查阈值或跳过楼层设置。' };
