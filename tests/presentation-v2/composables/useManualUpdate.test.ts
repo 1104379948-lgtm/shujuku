@@ -18,6 +18,8 @@ async function importManualUpdate() {
     updateBatchSize: 2,
     manualUpdateContextDepth: 3,
     manualUpdateBatchSize: 2,
+    skipUpdateFloors: 0,
+    maxConcurrentGroups: 1,
     manualSelectedTables: ['sheet_0'],
     hasManualSelection: true,
   };
@@ -27,15 +29,15 @@ async function importManualUpdate() {
   const chat = [{ is_user: false, mes: 'AI 1' }];
   const orchestrateManualUpdate_ACU = vi.fn();
   const refreshMergedDataAndNotify_ACU = vi.fn(async () => undefined);
-  const setWasStoppedByUser = vi.fn();
+  const abortAllActiveRequests_ACU = vi.fn();
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     currentJsonTableData_ACU: currentJsonTableData,
     settings_ACU: settings,
-    abortAllActiveRequests_ACU: vi.fn(),
+    abortAllActiveRequests_ACU,
     _set_isAutoUpdatingCard_ACU: vi.fn(),
     _set_manualExtraHint_ACU: vi.fn(),
-    _set_wasStoppedByUser_ACU: setWasStoppedByUser,
+    _set_wasStoppedByUser_ACU: vi.fn(),
     getCurrentIsolationKey_ACU: vi.fn(() => ''),
   }));
   vi.doMock('../../../src/service/chat/chat-service', () => ({
@@ -75,11 +77,12 @@ async function importManualUpdate() {
   return {
     useManualUpdate,
     dialog: useDialogStore(),
+    settings,
     toast: useToastStore(),
     __resetToastStoreForTests,
     orchestrateManualUpdate_ACU,
     refreshMergedDataAndNotify_ACU,
-    setWasStoppedByUser,
+    abortAllActiveRequests_ACU,
   };
 }
 
@@ -88,104 +91,94 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('useManualUpdate destructive boundary confirmation', () => {
-  const requiresConfirmation = {
-    success: false,
-    requiresUserConfirmation: {
-      reason: 'manual_refill_replace_sheet_baseline',
-      replayErrorCode: 'no_full_checkpoint_replayable',
-      message: '重填起点前没有可回放 checkpoint。',
-      contextScopeIndices: [0],
-      targetSheetKeys: ['sheet_0'],
-    },
-  };
-
-  it('首次确认文案只说明边界检查，不承诺空基底或立即替换 checkpoint', async () => {
+describe('useManualUpdate 单次确认与显式参数', () => {
+  it('确认文案准确说明范围清理、逐批保存与中断保留', async () => {
     const { useManualUpdate, dialog, __resetToastStoreForTests } = await importManualUpdate();
     const manual = useManualUpdate();
 
     const pending = manual.runManualUpdate();
-    await waitForCondition(() => dialog.active?.title === '执行手动填表', '首次确认弹窗出现');
+    await waitForCondition(() => dialog.active?.title === '执行手动填表', '手动填表确认弹窗出现');
 
-    expect(dialog.active?.title).toBe('执行手动填表');
-    expect(dialog.active?.message).toContain('先在 service 层做重填边界检查');
-    expect(dialog.active?.message).toContain('第二次破坏性确认');
-    expect(dialog.active?.message).not.toContain('从表头空基底开始');
-    expect(dialog.active?.message).not.toContain('执行前会先删除');
+    expect(dialog.active?.message).toContain('原子清理本次范围内选中表的旧数据');
+    expect(dialog.active?.message).toContain('每个已完成批次会立即保存并保留');
+    expect(dialog.active?.message).toContain('不会自动续跑');
+    expect(dialog.active?.message).not.toContain('第二次破坏性确认');
 
     dialog.cancelActive();
     await pending;
     __resetToastStoreForTests();
   });
 
-  it('用户取消二次确认时不第二次调用 orchestrator，且不展示 error toast', async () => {
-    const { useManualUpdate, dialog, toast, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate();
-    orchestrateManualUpdate_ACU.mockResolvedValueOnce(requiresConfirmation);
+  it('只调用一次编排器，显式传递手动参数且不污染自动设置', async () => {
+    const { useManualUpdate, dialog, settings, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate();
+    settings.autoUpdateThreshold = 9;
+    settings.updateBatchSize = 8;
+    settings.manualUpdateContextDepth = 4;
+    settings.manualUpdateBatchSize = 5;
+    settings.skipUpdateFloors = 2;
+    settings.maxConcurrentGroups = 3;
+    orchestrateManualUpdate_ACU.mockResolvedValueOnce({ success: true });
     const manual = useManualUpdate();
 
     const pending = manual.runManualUpdate();
-    await waitForCondition(() => dialog.active?.title === '执行手动填表', '首次确认弹窗出现');
+    await waitForCondition(() => dialog.active?.title === '执行手动填表', '手动填表确认弹窗出现');
     dialog.submitActive();
-    await waitForCondition(() => orchestrateManualUpdate_ACU.mock.calls.length === 1, '首次 orchestrator 调用完成');
-    await waitForCondition(() => dialog.active?.title === '破坏性手动重填确认', '破坏性二次确认弹窗出现');
-    expect(dialog.active?.title).toBe('破坏性手动重填确认');
-    expect(dialog.active?.message).toContain('高风险操作：确认后会在一次提交中删除本次重填范围内选中表的旧表基底');
-    expect(dialog.active?.message).toContain('写入新的单表 checkpoint');
-    expect(dialog.active?.message).toContain('范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除');
-    expect(dialog.active?.dangerMessage).toContain('此操作不可撤销');
-    expect(dialog.active?.dangerMessage).toContain('取消将不会执行基底替换');
-    expect(dialog.active?.dangerMessage).toContain('不会写入新的单表 checkpoint');
-
-    dialog.cancelActive();
     await pending;
 
     expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
-    expect(toast.items.some(item => item.kind === 'error')).toBe(false);
-    expect(toast.items.at(-1)?.kind).toBe('info');
-    expect(toast.items.at(-1)?.text).toContain('已取消破坏性基底替换');
+    expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).toEqual(expect.objectContaining({
+      clearBeforeUpdate: true,
+      manualContextDepth: 4,
+      manualBatchSize: 5,
+      manualSkipFloors: 2,
+      manualMaxConcurrentGroups: 3,
+    }));
+    expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).not.toHaveProperty('confirmBoundaryReset');
+    expect(settings.autoUpdateThreshold).toBe(9);
+    expect(settings.updateBatchSize).toBe(8);
     __resetToastStoreForTests();
   });
 
-  it('用户确认二次确认时第二次调用传入 confirmBoundaryReset=true', async () => {
-    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate();
-    orchestrateManualUpdate_ACU
-      .mockResolvedValueOnce(requiresConfirmation)
-      .mockResolvedValueOnce({ success: true });
+  it('终止按钮只中止本次手动任务 controller，不调用全局 abort', async () => {
+    const { useManualUpdate, dialog, toast, orchestrateManualUpdate_ACU, abortAllActiveRequests_ACU, __resetToastStoreForTests } = await importManualUpdate();
+    let resolveOrchestration!: (value: { success: boolean; error?: string }) => void;
+    orchestrateManualUpdate_ACU.mockImplementationOnce((_keys, _processBatch, _refresh, options) => new Promise(resolve => {
+      expect(options.abortController).toBeInstanceOf(AbortController);
+      resolveOrchestration = resolve;
+    }));
     const manual = useManualUpdate();
 
     const pending = manual.runManualUpdate();
-    await waitForCondition(() => dialog.active?.title === '执行手动填表', '首次确认弹窗出现');
+    await waitForCondition(() => dialog.active?.title === '执行手动填表', '手动填表确认弹窗出现');
     dialog.submitActive();
-    await waitForCondition(() => orchestrateManualUpdate_ACU.mock.calls.length === 1, '首次 orchestrator 调用完成');
-    await waitForCondition(() => dialog.active?.title === '破坏性手动重填确认', '破坏性二次确认弹窗出现');
-    dialog.submitActive();
-    await pending;
+    await waitForCondition(() => orchestrateManualUpdate_ACU.mock.calls.length === 1, '手动编排器启动');
 
-    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(2);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][0]).toEqual(['sheet_0']);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).toEqual(expect.objectContaining({ clearBeforeUpdate: true, confirmBoundaryReset: false }));
-    expect(orchestrateManualUpdate_ACU.mock.calls[1][0]).toEqual(['sheet_0']);
-    expect(orchestrateManualUpdate_ACU.mock.calls[1][3]).toEqual(expect.objectContaining({ clearBeforeUpdate: true, confirmBoundaryReset: true }));
+    const options = orchestrateManualUpdate_ACU.mock.calls[0][3];
+    const taskController = options.abortController as AbortController;
+    const stopAction = toast.items.find(item => item.action?.label === '终止')?.action;
+    expect(stopAction).toBeDefined();
+    await stopAction!.onClick();
+
+    expect(taskController.signal.aborted).toBe(true);
+    expect(abortAllActiveRequests_ACU).not.toHaveBeenCalled();
+    resolveOrchestration({ success: false, error: '手动更新已终止，已完成批次已保留。' });
+    await pending;
     __resetToastStoreForTests();
   });
 
-  it('二次确认后的 orchestrator 失败时展示 error toast', async () => {
+  it('失败时显示错误，不尝试第二次危险确认', async () => {
     const { useManualUpdate, dialog, toast, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate();
-    orchestrateManualUpdate_ACU
-      .mockResolvedValueOnce(requiresConfirmation)
-      .mockResolvedValueOnce({ success: false, error: '确认后替换失败' });
+    orchestrateManualUpdate_ACU.mockResolvedValueOnce({ success: false, error: '第三批保存失败，前序批次已保留。' });
     const manual = useManualUpdate();
 
     const pending = manual.runManualUpdate();
-    await waitForCondition(() => dialog.active?.title === '执行手动填表', '首次确认弹窗出现');
-    dialog.submitActive();
-    await waitForCondition(() => orchestrateManualUpdate_ACU.mock.calls.length === 1, '首次 orchestrator 调用完成');
-    await waitForCondition(() => dialog.active?.title === '破坏性手动重填确认', '破坏性二次确认弹窗出现');
+    await waitForCondition(() => dialog.active?.title === '执行手动填表', '手动填表确认弹窗出现');
     dialog.submitActive();
     await pending;
 
+    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
     expect(toast.items.at(-1)?.kind).toBe('error');
-    expect(toast.items.at(-1)?.text).toContain('确认后替换失败');
+    expect(toast.items.at(-1)?.text).toContain('前序批次已保留');
     __resetToastStoreForTests();
   });
 });

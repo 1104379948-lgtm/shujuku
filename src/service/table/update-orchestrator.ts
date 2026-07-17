@@ -6,7 +6,7 @@
 
 import { isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
 import { callCustomOpenAI_ACU } from '../ai/prompt-builder';
-import { captureManualRefillSessionSnapshot_ACU, clearManualRefillIncrementalDataInRange_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualRefillInitialBaseline_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
+import { clearManualRefillSheetDataInRange_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
@@ -50,7 +50,7 @@ import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvid
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transaction';
 import { runTableUpdateCommit_ACU } from './table-update-commit';
-import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
+import { resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 
 // ============================================================
 // 类型定义：返回值 + 进度事件（service 层不驱动 UI）
@@ -100,21 +100,10 @@ export interface BatchUpdateResult {
     error?: string;
 }
 
-type ManualRefillBoundaryErrorCode_ACU = 'no_full_checkpoint_replayable' | 'isolation_mismatch' | 'replay_failed';
-
-export interface ManualRefillRequiresUserConfirmation_ACU {
-    reason: 'manual_refill_replace_sheet_baseline';
-    replayErrorCode: ManualRefillBoundaryErrorCode_ACU;
-    message: string;
-    contextScopeIndices: number[];
-    targetSheetKeys: string[];
-}
-
 /** orchestrateManualUpdate 的返回值 */
 export interface ManualUpdateResult {
     success: boolean;
     error?: string;
-    requiresUserConfirmation?: ManualRefillRequiresUserConfirmation_ACU;
     /** 是否触发了自动合并 */
     autoMergeTriggered?: boolean;
     autoMergeSuccess?: boolean;
@@ -499,76 +488,6 @@ async function loadV2ReplayMergeBase_ACU(
     }
 }
 
-function scanManualRefillV2ReplayBoundary_ACU(
-    chat: any[],
-    currentIsolationKey: string,
-    maxMessageIndex: number,
-): { hasCurrentIsolationV2: boolean; otherIsolationKeys: string[] } {
-    if (!Array.isArray(chat) || maxMessageIndex < 0) {
-        return { hasCurrentIsolationV2: false, otherIsolationKeys: [] };
-    }
-
-    const otherIsolationKeys = new Set<string>();
-    const boundary = Math.min(maxMessageIndex, chat.length - 1);
-    let hasCurrentIsolationV2 = false;
-
-    for (let i = 0; i <= boundary; i += 1) {
-        const message = chat[i];
-        if (!message || message.is_user) continue;
-        const isolatedData = message.TavernDB_ACU_IsolatedData;
-        if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData)) continue;
-
-        for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
-            if (!isV2TagData_ACU(tagData)) continue;
-            if (isolationKey === currentIsolationKey) {
-                hasCurrentIsolationV2 = true;
-            } else {
-                otherIsolationKeys.add(isolationKey);
-            }
-        }
-    }
-
-    return { hasCurrentIsolationV2, otherIsolationKeys: [...otherIsolationKeys] };
-}
-
-function collectManualRefillRollbackMessageIndices_ACU(
-    chat: any[],
-    currentIsolationKey: string,
-    contextScopeIndices: number[],
-): number[] {
-    const indices = new Set(contextScopeIndices);
-    for (let i = 0; i < chat.length; i += 1) {
-        const message = chat[i];
-        if (!message || message.is_user) continue;
-        const tagData = message.TavernDB_ACU_IsolatedData?.[currentIsolationKey];
-        if (!isV2TagData_ACU(tagData)) continue;
-        if (tagData.storageFrame.checkpoint?.kind === 'full') indices.add(i);
-    }
-    return [...indices].sort((a, b) => a - b);
-}
-
-async function ensureManualRefillV2ReplayBoundary_ACU(
-    chat: any[],
-    currentIsolationKey: string,
-    maxMessageIndex: number,
-): Promise<{ success: true } | { success: false; code: ManualRefillBoundaryErrorCode_ACU; error: string }> {
-    const boundary = scanManualRefillV2ReplayBoundary_ACU(chat, currentIsolationKey, maxMessageIndex);
-    if (!boundary.hasCurrentIsolationV2) {
-        if (boundary.otherIsolationKeys.length > 0) {
-            return { success: false, code: 'isolation_mismatch', error: `手动重填中止：目标前存在其他 isolationKey 的 V2 数据（${boundary.otherIsolationKeys.join(', ')}），当前 isolationKey 不匹配。` };
-        }
-        return { success: true };
-    }
-
-    try {
-        const replayedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, { maxMessageIndex });
-        if (replayedData) return { success: true };
-        return { success: false, code: 'no_full_checkpoint_replayable', error: '手动重填中止：找不到可用 full checkpoint，无法安全回放到重填起点前。' };
-    } catch (error: any) {
-        return { success: false, code: 'replay_failed', error: error?.message || '手动重填中止：V2 数据回放失败，无法安全回放到重填起点前。' };
-    }
-}
-
 function buildGuideOrTemplateMergeBase_ACU(batchNumber: number): { data: Record<string, any> | null; error: string | null } {
     const batchIsoKey = getCurrentIsolationKey_ACU();
     const sheetGuideForBatch = getChatSheetGuideDataForIsolationKey_ACU(batchIsoKey);
@@ -654,10 +573,16 @@ export async function collectGroupFillResponse_ACU(
     options: {
         onProgress?: (event: CardUpdateProgressEvent) => void;
         maxRetriesOverride?: number;
+        respectGlobalStopFlag?: boolean;
     } = {}
 ): Promise<GroupFillResponse_ACU> {
     const effectiveAbortController = abortController || new AbortController();
+    const isAborted = (): boolean => effectiveAbortController.signal.aborted || (options.respectGlobalStopFlag !== false && wasStoppedByUser_ACU);
     options.onProgress?.({ phase: 'preparing' });
+
+    if (isAborted()) {
+        return { job, success: false, attempt: 0, aborted: true };
+    }
 
     const dynamicContent = await prepareAIInput_ACU(job.messagesForContext, job.updateMode, job.targetSheetKeys, {
         tableData: job.baseSnapshot,
@@ -678,7 +603,7 @@ export async function collectGroupFillResponse_ACU(
     let lastErrorMessage = 'AI响应中未找到完整有效的 <tableEdit> 标签';
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        if (wasStoppedByUser_ACU) {
+        if (isAborted()) {
             return { job, success: false, attempt, aborted: true };
         }
 
@@ -705,7 +630,7 @@ export async function collectGroupFillResponse_ACU(
                 tableData: job.baseSnapshot,
                 targetSheetKeys: job.targetSheetKeys,
             });
-            if (effectiveAbortController.signal.aborted || wasStoppedByUser_ACU) {
+            if (isAborted()) {
                 return { job, success: false, attempt, aborted: true };
             }
 
@@ -737,12 +662,28 @@ export async function collectGroupFillResponse_ACU(
         } catch (error: any) {
             lastErrorMessage = error?.message || '未知错误';
             logWarn_ACU(`第 ${attempt} 次尝试失败: ${lastErrorMessage}`);
-            if (error?.name === 'AbortError' || String(lastErrorMessage).toLowerCase().includes('aborted') || wasStoppedByUser_ACU) {
+            if (error?.name === 'AbortError' || String(lastErrorMessage).toLowerCase().includes('aborted') || isAborted()) {
                 return { job, success: false, attempt, aborted: true };
             }
             if (attempt < maxRetries) {
                 options.onProgress?.({ phase: 'retry', attempt, maxRetries, message: String(lastErrorMessage).substring(0, 50) });
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                await new Promise<void>(resolve => {
+                    let settled = false;
+                    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+                    const finishWait = (): void => {
+                        if (settled) return;
+                        settled = true;
+                        if (timeoutId !== undefined) clearTimeout(timeoutId);
+                        effectiveAbortController.signal.removeEventListener('abort', finishWait);
+                        resolve();
+                    };
+                    timeoutId = setTimeout(finishWait, 5000);
+                    effectiveAbortController.signal.addEventListener('abort', finishWait, { once: true }); // arch-ok: AbortSignal task cancellation, not a DOM/UI event listener.
+                    if (effectiveAbortController.signal.aborted) finishWait();
+                });
+                if (isAborted()) {
+                    return { job, success: false, attempt, aborted: true };
+                }
             }
         }
     }
@@ -1168,12 +1109,16 @@ export async function processGroupedRuntimeChunk_ACU(
     options: {
         isImportMode?: boolean;
         abortController?: AbortController;
+        respectGlobalStopFlag?: boolean;
         onProgress?: (event: CardUpdateProgressEvent) => void;
     } = {}
 ): Promise<{ success: boolean; failedGroups: string[]; error?: string }> {
     if (!Array.isArray(groups) || groups.length === 0) {
         return { success: true, failedGroups: [] };
     }
+
+    const isAborted = (): boolean => options.abortController?.signal.aborted === true || (options.respectGlobalStopFlag !== false && wasStoppedByUser_ACU);
+    if (isAborted()) return { success: false, failedGroups: groups.map(group => group.key), error: '填表任务已终止。' };
 
     const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processGroupedRuntimeChunk');
     if (!migration.success) {
@@ -1241,11 +1186,21 @@ export async function processGroupedRuntimeChunk_ACU(
     };
     for (let bucketIndex = 0; bucketIndex < orderedBuckets.length; bucketIndex++) {
         const bucket = orderedBuckets[bucketIndex];
+        if (isAborted()) {
+            bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
+            firstError = firstError || '填表任务已终止。';
+            break;
+        }
         const maxBucketRetries = Math.max(1, Number(settings_ACU.tableMaxRetries) || 3);
         let retryUnifiedError: string | null = null;
         let bucketSucceeded = false;
 
         for (let bucketAttempt = 1; bucketAttempt <= maxBucketRetries; bucketAttempt++) {
+            if (isAborted()) {
+                bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
+                firstError = firstError || '填表任务已终止。';
+                break;
+            }
             const chatHistory = getChatArray_ACU();
             const bucketFirstMessageIndex = Math.min(...bucket.plannedJobs.map(job => job.firstMessageIndexOfBatch));
             const explicitMergeBaseBounds = [...new Set(
@@ -1337,7 +1292,7 @@ export async function processGroupedRuntimeChunk_ACU(
                 job,
                 collectFeedback,
                 options.abortController,
-                { onProgress: event => emitBucketProgress(bucketIndex, event) },
+                { onProgress: event => emitBucketProgress(bucketIndex, event), respectGlobalStopFlag: options.respectGlobalStopFlag },
             )));
             let responses: GroupFillResponse_ACU[] = [];
             let collectFailed = false;
@@ -1356,6 +1311,12 @@ export async function processGroupedRuntimeChunk_ACU(
                     continue;
                 }
                 responses.push(settledResponse.value);
+            }
+
+            if (isAborted()) {
+                jobs.forEach(job => failedGroups.add(job.groupKey));
+                firstError = firstError || '填表任务已终止。';
+                break;
             }
 
             if (collectFailed) {
@@ -1381,7 +1342,7 @@ export async function processGroupedRuntimeChunk_ACU(
                         job,
                         { lastUnifiedError: formatError },
                         options.abortController,
-                        { onProgress: event => emitBucketProgress(bucketIndex, event) },
+                        { onProgress: event => emitBucketProgress(bucketIndex, event), respectGlobalStopFlag: options.respectGlobalStopFlag },
                     )));
                     for (let i = 0; i < retrySettled.length; i++) {
                         const settledResponse = retrySettled[i];
@@ -1400,6 +1361,12 @@ export async function processGroupedRuntimeChunk_ACU(
                     firstError = firstError || formatError;
                     break;
                 }
+            }
+
+            if (isAborted()) {
+                jobs.forEach(job => failedGroups.add(job.groupKey));
+                firstError = firstError || '填表任务已终止。';
+                break;
             }
 
             emitBucketProgress(bucketIndex, { phase: 'saving' });
@@ -1429,7 +1396,7 @@ export async function processGroupedRuntimeChunk_ACU(
             }
         }
 
-        if (!bucketSucceeded && options.abortController?.signal.aborted) {
+        if (!bucketSucceeded && isAborted()) {
             break;
         }
     }
@@ -1981,7 +1948,8 @@ export async function processUpdatesBatch_ACU(
  * @param processBatch 批处理执行回调
  * @param refreshData 数据刷新回调
  * @param options 可选参数：
- *   - clearBeforeUpdate: 兼容旧调用名；启用事务式手动重填。首次重填会清理目标范围内选中表本地数据，匹配续跑进度时不预清理。
+ *   - clearBeforeUpdate: 兼容旧调用名；启用原子预清理后逐 bucket 持久化的手动重填。
+ *   - abortController: 本次手动任务独占的取消控制器，不影响其他并发请求。
  */
 export async function orchestrateManualUpdate_ACU(
     targetKeys: string[],
@@ -1989,37 +1957,16 @@ export async function orchestrateManualUpdate_ACU(
     refreshData: () => Promise<void>,
     options: {
         clearBeforeUpdate?: boolean;
-        confirmBoundaryReset?: boolean;
+        manualContextDepth?: number;
+        manualBatchSize?: number;
+        manualSkipFloors?: number;
+        manualMaxConcurrentGroups?: number;
+        abortController?: AbortController;
         onProgress?: (event: CardUpdateProgressEvent) => void;
     } = {},
 ): Promise<ManualUpdateResult> {
-    let manualRefillSessionSnapshot: ReturnType<typeof captureManualRefillSessionSnapshot_ACU> | null = null;
-    let manualRefillRollbackAttempted = false;
-    const rollbackManualRefillSession = async (): Promise<string | undefined> => {
-        if (!manualRefillSessionSnapshot || manualRefillRollbackAttempted) return undefined;
-        manualRefillRollbackAttempted = true;
-        try {
-            await restoreManualRefillSessionSnapshotAtomic_ACU(
-                manualRefillSessionSnapshot,
-                getCurrentIsolationKey_ACU(),
-                targetKeys,
-            );
-            await loadAllChatMessages_ACU();
-            await refreshData();
-            return undefined;
-        } catch (error: any) {
-            const rollbackError = error?.message || String(error || '未知回滚错误');
-            logError_ACU('[Manual Refill] 手动重填会话回滚失败:', error);
-            return rollbackError;
-        }
-    };
-    const failManualRefillSession = async (failureError: string): Promise<ManualUpdateResult> => {
-        const rollbackError = await rollbackManualRefillSession();
-        return {
-            success: false,
-            error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError,
-        };
-    };
+    const isManualTaskAborted = (): boolean => options.abortController?.signal.aborted === true
+        || (!options.abortController && wasStoppedByUser_ACU);
     try {
         if (isAutoUpdatingCard_ACU) {
             return { success: false, error: '数据库更新正在进行中，请稍候...' };
@@ -2057,9 +2004,15 @@ export async function orchestrateManualUpdate_ACU(
             return { success: false, error: '未选择需要更新的表格。' };
         }
 
-        const uiThreshold = settings_ACU.autoUpdateThreshold || 3;
-        const uiBatchSize = settings_ACU.updateBatchSize || 3;
-        const uiSkip = settings_ACU.skipUpdateFloors || 0;
+        const configuredContextDepth = options.manualContextDepth ?? settings_ACU.autoUpdateThreshold;
+        const configuredBatchSize = options.manualBatchSize ?? settings_ACU.updateBatchSize;
+        const configuredSkipFloors = options.manualSkipFloors ?? settings_ACU.skipUpdateFloors;
+        const uiThreshold = Number.isFinite(Number(configuredContextDepth))
+            ? Math.max(0, Math.floor(Number(configuredContextDepth))) : 3;
+        const uiBatchSize = Number.isFinite(Number(configuredBatchSize))
+            ? Math.max(1, Math.floor(Number(configuredBatchSize))) : 3;
+        const uiSkip = Number.isFinite(Number(configuredSkipFloors))
+            ? Math.max(0, Math.floor(Number(configuredSkipFloors))) : 0;
 
         const effectiveAiIndices = uiSkip > 0 ? allAiMessageIndices.slice(0, -uiSkip) : allAiMessageIndices.slice();
         const contextScopeIndices = uiThreshold > 0 ? effectiveAiIndices.slice(-uiThreshold) : effectiveAiIndices;
@@ -2094,83 +2047,17 @@ export async function orchestrateManualUpdate_ACU(
         const lastEffectiveAiIndex = effectiveAiIndices[effectiveAiIndices.length - 1];
         const manualRefillUsesLatestRuntimeBase = manualRefillEnabled && uiSkip === 0 && contextScopeIndices[contextScopeIndices.length - 1] === lastEffectiveAiIndex;
         const manualRefillMergeBaseMaxMessageIndex = manualRefillEnabled && !manualRefillUsesLatestRuntimeBase ? contextScopeIndices[0] - 1 : undefined;
-        let manualRefillRequiresFinalSnapshot = false;
         if (manualRefillEnabled) {
-            const currentIsolationKey = getCurrentIsolationKey_ACU();
-            const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
-            manualRefillSessionSnapshot = captureManualRefillSessionSnapshot_ACU(rollbackMessageIndices);
-
-            const initialBaseline = buildGuideOrTemplateMergeBase_ACU(0);
-            if (!initialBaseline.data) {
-                return await failManualRefillSession(initialBaseline.error || '手动重填无法从当前表格指导或模板构造临时基底。');
-            }
-            const baselineResult = await ensureManualRefillInitialBaseline_ACU({
-                isolationKey: currentIsolationKey,
-                targetMessageIndex: contextScopeIndices[0],
-                data: initialBaseline.data,
-                save: true,
-            });
-            if (!baselineResult.success) {
-                return await failManualRefillSession(baselineResult.error || '手动重填临时基底建立失败。');
-            }
-            if (baselineResult.changed) {
-                logDebug_ACU(`[Manual Refill] 已将 initial baseline 从 AI 楼层 #${baselineResult.movedFromMessageIndex} 前移到重填边界 #${baselineResult.targetMessageIndex}。`);
-            }
-
-            const replayBoundaryCheck = await ensureManualRefillV2ReplayBoundary_ACU(liveChat, currentIsolationKey, contextScopeIndices[0]);
-            if (replayBoundaryCheck.success === false) {
-                if (replayBoundaryCheck.code !== 'no_full_checkpoint_replayable') {
-                    return await failManualRefillSession(replayBoundaryCheck.error);
-                }
-
-                if (options.confirmBoundaryReset !== true) {
-                    const rollbackError = await rollbackManualRefillSession();
-                    if (rollbackError) {
-                        return { success: false, error: `${replayBoundaryCheck.error}；临时基底回滚失败：${rollbackError}` };
-                    }
-                    return {
-                        success: false,
-                        requiresUserConfirmation: {
-                            reason: 'manual_refill_replace_sheet_baseline',
-                            replayErrorCode: replayBoundaryCheck.code,
-                            message: replayBoundaryCheck.error,
-                            contextScopeIndices: [...contextScopeIndices],
-                            targetSheetKeys: [...targetKeys],
-                        },
-                    };
-                }
-
-                try {
-                    // 重填起点之前没有可回放的目标表基底时，bounded merge base 只能是指导表/模板。
-                    // 模板只能服务本轮 prompt，绝不能提前写成 sheet_full；它会在重入时整表覆盖历史。
-                    await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
-                } catch (error: any) {
-                    logError_ACU('[Manual Refill] 确认后清理选中表旧数据失败:', error);
-                    const rollbackError = await rollbackManualRefillSession();
-                    const failureError = error?.message || '手动重填确认后清理选中表旧数据失败。';
-                    return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-                }
-                manualRefillRequiresFinalSnapshot = true;
-                logWarn_ACU(`[Manual Refill] ${replayBoundaryCheck.error} 用户已确认手动重填，已清理本次范围内选中表旧数据；将在全部重填成功后提交完整单表 checkpoint。`);
-            } else {
-                try {
-                    await clearManualRefillIncrementalDataInRange_ACU(contextScopeIndices, targetKeys);
-                } catch (error: any) {
-                    logError_ACU('[Manual Refill] 启动前清理选中表范围内旧数据失败:', error);
-                    const failureError = error?.message || '手动重填启动前清理选中表范围内旧数据失败。';
-                    return await failManualRefillSession(failureError);
-                }
-            }
-
             try {
-                // 清理历史 V2 数据后必须刷新 SQLite/runtime 快照，
-                // 否则 AI prompt 基底会继续读到清理前的旧 chronicle 行（test6.8 类事故）。
+                await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
                 await reloadStorageProvider();
             } catch (error: any) {
-                logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
-                const rollbackError = await rollbackManualRefillSession();
-                const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
-                return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
+                const failureError = error?.message || '手动重填启动前清理或刷新运行时快照失败。';
+                logError_ACU('[Manual Refill] 启动前清理或刷新运行时快照失败:', error);
+                return { success: false, error: failureError };
+            }
+            if (isManualTaskAborted()) {
+                return { success: false, error: '手动更新已终止，已完成批次已保留。' };
             }
             logDebug_ACU(`[Manual Refill] 已清理选中表范围内旧数据并刷新运行时快照，将按普通手动填写路径重写 ${contextScopeIndices[0]}..${contextScopeIndices[contextScopeIndices.length - 1]}。`);
             if (!manualRefillUsesLatestRuntimeBase) {
@@ -2179,13 +2066,18 @@ export async function orchestrateManualUpdate_ACU(
         }
 
         _set_isAutoUpdatingCard_ACU(true);
-        const maxConcurrentGroups = Math.max(1, Number(settings_ACU.maxConcurrentGroups) || 1);
+        const configuredMaxConcurrentGroups = options.manualMaxConcurrentGroups ?? settings_ACU.maxConcurrentGroups;
+        const maxConcurrentGroups = Number.isFinite(Number(configuredMaxConcurrentGroups))
+            ? Math.max(1, Math.floor(Number(configuredMaxConcurrentGroups))) : 1;
         const totalChunks = Math.max(1, Math.ceil(groupKeys.length / maxConcurrentGroups));
         const failedGroups: Array<{ key: string; error?: string }> = [];
 
         logDebug_ACU(`[Manual Update] 分组计划：选中 ${targetKeys.length} 张表，生成 ${groupKeys.length} 个组，最大并发组数 ${maxConcurrentGroups}。`);
 
         for (let start = 0; start < groupKeys.length; start += maxConcurrentGroups) {
+            if (isManualTaskAborted()) {
+                return { success: false, error: '手动更新已终止，已完成批次已保留。' };
+            }
             const chunkIndex = Math.floor(start / maxConcurrentGroups) + 1;
             const chunkKeys = groupKeys.slice(start, start + maxConcurrentGroups);
             const groupedChunk: GroupedRuntimeUpdateGroup_ACU[] = chunkKeys.map((gKey): GroupedRuntimeUpdateGroup_ACU => {
@@ -2218,6 +2110,9 @@ export async function orchestrateManualUpdate_ACU(
             });
             try {
                 await loadAllChatMessages_ACU();
+                if (isManualTaskAborted()) {
+                    return { success: false, error: '手动更新已终止，已完成批次已保留。' };
+                }
                 if (!manualRefillEnabled && shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()) {
                     const boundaryCheckpoint = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
                     if (!boundaryCheckpoint.success) {
@@ -2238,6 +2133,8 @@ export async function orchestrateManualUpdate_ACU(
             }
             try {
                 const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
+                    abortController: options.abortController,
+                    respectGlobalStopFlag: !options.abortController,
                     onProgress: options.onProgress,
                 });
                 if (!chunkResult.success) {
@@ -2252,7 +2149,7 @@ export async function orchestrateManualUpdate_ACU(
             } catch (error: any) {
                 const failureError = error?.message || String(error || '手动重填分组执行异常。');
                 logError_ACU('[Manual Refill] 分组执行或同步聊天失败:', error);
-                return await failManualRefillSession(failureError);
+                return { success: false, error: failureError };
             }
 
             if (failedGroups.length > 0) {
@@ -2263,56 +2160,29 @@ export async function orchestrateManualUpdate_ACU(
         _set_isAutoUpdatingCard_ACU(false);
 
         if (failedGroups.length > 0) {
-            const rollbackError = await rollbackManualRefillSession();
-            if (!manualRefillSessionSnapshot) {
-                // 填表失败时，processUpdatesBatch 内部的 loadBatchBaseData 可能已覆盖运行时数据；
-                // 非会话补偿路径仍需从聊天恢复运行时状态。
-                try {
-                    await loadAllChatMessages_ACU();
-                    await refreshData();
-                } catch (error) {
-                    logWarn_ACU('[Manual Update] 填表失败后恢复数据时出错:', error);
-                }
+            // 当前失败 bucket 可能在宿主保存结果不确定时被 commit 层重新加载。
+            // 这里仅校准运行时，绝不恢复启动前聊天快照，已成功 bucket 必须保留。
+            try {
+                await loadAllChatMessages_ACU();
+                await refreshData();
+            } catch (error) {
+                logWarn_ACU('[Manual Update] 填表失败后刷新运行时数据时出错:', error);
             }
             const firstFailure = failedGroups[0];
             const failureError = firstFailure.error || '手动更新失败或被终止。';
-            return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
+            return { success: false, error: failureError };
         }
 
-        if (wasStoppedByUser_ACU) {
-            const rollbackError = await rollbackManualRefillSession();
-            const failureError = '手动更新已终止。';
-            return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-        }
-
-        if (manualRefillRequiresFinalSnapshot) {
-            const completedData = getRuntimeTableDataSnapshot_ACU();
-            if (!completedData) {
-                const rollbackError = await rollbackManualRefillSession();
-                const failureError = '手动重填已完成，但无法从运行时导出完整恢复快照；已拒绝写入不完整 checkpoint。';
-                return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-            }
-            try {
-                const snapshotResult = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
-                    isolationKey: getCurrentIsolationKey_ACU(),
-                    targetMessageIndices: contextScopeIndices,
-                    targetSheetKeys: targetKeys,
-                    snapshotData: completedData,
-                });
-                if (!snapshotResult.success) {
-                    logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 失败:', snapshotResult.error);
-                    return await failManualRefillSession(snapshotResult.error || '手动重填完成后提交完整单表 checkpoint 失败。');
-                }
-            } catch (error: any) {
-                const failureError = error?.message || String(error || '手动重填完成后提交完整单表 checkpoint 异常。');
-                logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 异常:', error);
-                return await failManualRefillSession(failureError);
-            }
+        if (isManualTaskAborted()) {
+            return { success: false, error: '手动更新已终止，已完成批次已保留。' };
         }
 
         let checkpointWarning: string | undefined;
         try {
             await loadAllChatMessages_ACU();
+            if (isManualTaskAborted()) {
+                return { success: false, error: '手动更新已终止，已完成批次已保留。' };
+            }
             const boundaryCheckpoint = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
             if (!boundaryCheckpoint.success) {
                 checkpointWarning = boundaryCheckpoint.error || '边界 checkpoint 建立失败。';
@@ -2327,6 +2197,9 @@ export async function orchestrateManualUpdate_ACU(
         // 手动更新完成后检测自动合并总结
         let autoMergeTriggered = false;
         let autoMergeSuccess = false;
+        if (isManualTaskAborted()) {
+            return { success: false, error: '手动更新已终止，已完成批次已保留。' };
+        }
         try {
             const trigger = checkAutoMergeTrigger_ACU();
             if (trigger.shouldTrigger) {
@@ -2349,12 +2222,9 @@ export async function orchestrateManualUpdate_ACU(
 
         return { success: true, autoMergeTriggered, autoMergeSuccess, checkpointWarning };
     } catch (error: any) {
-        if (!manualRefillSessionSnapshot) {
-            throw error;
-        }
         const failureError = error?.message || String(error || '手动更新执行异常。');
         logError_ACU('[Manual Update] 执行过程中发生未处理异常:', error);
-        return await failManualRefillSession(failureError);
+        return { success: false, error: failureError };
     } finally {
         _set_manualExtraHint_ACU('');
         _set_isAutoUpdatingCard_ACU(false);

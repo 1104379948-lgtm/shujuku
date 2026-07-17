@@ -320,15 +320,13 @@ export async function handleManualUpdate_ACU() {
         const selectedSheetSummary = buildLegacySelectedSheetSummary_ACU(targetKeys);
         const checkpointFloorsLabel = buildLegacyCheckpointFloorsLabel_ACU();
         const manualRefillRangeLabel = buildLegacyManualRefillRangeLabel_ACU();
-        // 弹出确认框：手动填表将使用事务式重填，失败不会改动聊天记录中的旧数据
+        // 弹出确认框：手动填表将清理范围内选中表，再逐 bucket 保存。
         const confirmed = await showCustomConfirm_ACU(
             '手动填表确认',
             `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel}\n本次重填范围：${manualRefillRangeLabel}\n选中表：${selectedSheetSummary}\n\n` +
-            '系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表。\n' +
-            '常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹，并在全部成功后写入手动重填进度记录。\n' +
-            '如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认；只有你在第二次确认中授权后，才会替换本次范围内选中表的旧 checkpoint 基底并写入新的单表 checkpoint。\n' +
+            '确认后，系统会原子清理本次范围内选中表的旧数据，刷新本地运行时状态，再按当前上下文和批处理设置逐批填写。每个已完成批次会立即保存并保留；停止或后续批次失败时，不会自动续跑，已完成批次不会被回滚。\n' +
             '保留边界 checkpoint 会按 AI 回复楼层计数，在达到保留窗口和 20 个 AI 楼层缓冲后自动滚动建立。\n' +
-            '取消、失败、终止或从中断处继续时，都不会清空本次重填范围之外的聊天记录表格数据，也不会在未二次确认时替换 checkpoint 基底。',
+            '范围外聊天记录表格数据和未选中的表不会被清理。',
             { confirmLabel: '确认并继续', cancelLabel: '取消' }
         );
 
@@ -339,8 +337,8 @@ export async function handleManualUpdate_ACU() {
         }
 
         // 调用 service 层，启用事务式手动重填（兼容沿用 clearBeforeUpdate 参数名）
-        _set_wasStoppedByUser_ACU(false);
         notifyTableFillStart();
+        const manualAbortController = new AbortController();
         const stopButtonId = `acu-stop-manual-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
         manualProgressToast = showToastr_ACU('info', `<div><span class="acu-toast-progress-message">手动填表开始。</span>${stopButtonHtml}</div>`, {
@@ -351,12 +349,10 @@ export async function handleManualUpdate_ACU() {
             onShown: function () {
                 if (typeof bindTableFillStopButton_ACU === 'function') {
                     bindTableFillStopButton_ACU(stopButtonId, () => {
-                        _set_wasStoppedByUser_ACU(true);
-                        abortAllActiveRequests_ACU();
-                        _set_isAutoUpdatingCard_ACU(false);
-                        updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
-                        updateLoadingToastMessage(manualProgressToast, '填表任务已终止，正在停止当前任务与后续批次...');
-                        showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
+                        manualAbortController.abort();
+                        updateStatusText('正在停止当前任务与后续批次，已完成批次将保留...', false);
+                        updateLoadingToastMessage(manualProgressToast, '正在停止当前任务与后续批次，已完成批次将保留...');
+                        showToastr_ACU('warning', '正在停止当前任务与后续批次，已完成批次将保留。');
                     });
                 }
             },
@@ -372,43 +368,22 @@ export async function handleManualUpdate_ACU() {
             async () => {
                 await refreshMergedDataAndNotifyWithUI_ACU();
             },
-            // [新增] 传入用户确认后的预清空选项
+            // 手动参数显式传递，不能通过临时改写自动设置来改变执行语义。
             {
                 clearBeforeUpdate: true,
+                manualContextDepth: Number.isFinite(Number(settings_ACU.manualUpdateContextDepth))
+                    ? Math.max(0, Math.floor(Number(settings_ACU.manualUpdateContextDepth))) : 3,
+                manualBatchSize: Number.isFinite(Number(settings_ACU.manualUpdateBatchSize))
+                    ? Math.max(1, Math.floor(Number(settings_ACU.manualUpdateBatchSize))) : 3,
+                manualSkipFloors: Number.isFinite(Number(settings_ACU.skipUpdateFloors))
+                    ? Math.max(0, Math.floor(Number(settings_ACU.skipUpdateFloors))) : 0,
+                manualMaxConcurrentGroups: Number.isFinite(Number(settings_ACU.maxConcurrentGroups))
+                    ? Math.max(1, Math.floor(Number(settings_ACU.maxConcurrentGroups))) : 1,
+                abortController: manualAbortController,
                 onProgress: event => handleProgressEvent(event, false, manualProgressToast),
             }
         );
 
-        if (!result.success && result.requiresUserConfirmation) {
-            const request = result.requiresUserConfirmation;
-            const dangerConfirmed = await showCustomConfirm_ACU(
-                '破坏性手动重填确认',
-                `${request.message}\n\n` +
-                `高风险操作：确认后会在一次提交中删除本次重填范围内选中表的旧表基底，并写入新的单表 checkpoint，随后才继续本次手动填表。\n` +
-                `目标表：${request.targetSheetKeys.join('、')}\n` +
-                `目标消息索引：${request.contextScopeIndices.join('、')}\n\n` +
-                '范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除。\n' +
-                '此操作不可撤销。取消将不会执行基底替换，不会写入新的单表 checkpoint，也不会继续本次手动填表。',
-                { confirmLabel: '我已了解风险，继续执行', cancelLabel: '取消' }
-            );
-            if (!dangerConfirmed) {
-                clearLoadingToast(manualProgressToast);
-                manualProgressToast = null;
-                showToastr_ACU('info', '已取消破坏性基底替换。');
-                return;
-            }
-            updateLoadingToastMessage(manualProgressToast, '已确认破坏性基底替换，继续手动填表。');
-            result = await orchestrateManualUpdate_ACU(
-                targetKeys,
-                async (indices, batchMode, batchOptions) => {
-                    return processUpdates_ACU(indices, batchMode, batchOptions);
-                },
-                async () => {
-                    await refreshMergedDataAndNotifyWithUI_ACU();
-                },
-                { clearBeforeUpdate: true, confirmBoundaryReset: true, onProgress: event => handleProgressEvent(event, false, manualProgressToast) }
-            );
-        }
         clearLoadingToast(manualProgressToast);
         manualProgressToast = null;
 

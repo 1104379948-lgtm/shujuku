@@ -170,6 +170,8 @@ export let settings_ACU: any = {
     autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
     autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
     updateBatchSize: 3,
+    manualUpdateContextDepth: 3,
+    manualUpdateBatchSize: 3,
     maxConcurrentGroups: 1,
     autoUpdateEnabled: true,
     standardizedTableFillEnabled: true,

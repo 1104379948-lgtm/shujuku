@@ -734,19 +734,14 @@ describe('FormFillPage · 手动填表面板', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('执行手动填表时临时把独立参数桥接给 service，结束后恢复自动更新设置', async () => {
+  it('执行手动填表时显式传递独立参数且不改自动更新设置', async () => {
     const settings = createSettings();
     settings.autoUpdateThreshold = 3;
     settings.updateBatchSize = 2;
     settings.manualUpdateContextDepth = 100;
     settings.manualUpdateBatchSize = 4;
     const { mount, orchestrate } = await mountFormFillPage(settings);
-    const observedSettings: Array<{ threshold: number; batchSize: number }> = [];
     orchestrate.mockImplementation(async () => {
-      observedSettings.push({
-        threshold: settings.autoUpdateThreshold,
-        batchSize: settings.updateBatchSize,
-      });
       return { success: true };
     });
 
@@ -756,7 +751,11 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认并继续');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(observedSettings).toEqual([{ threshold: 100, batchSize: 4 }]);
+    expect(orchestrate.mock.calls[0][3]).toEqual(expect.objectContaining({
+      manualContextDepth: 100,
+      manualBatchSize: 4,
+      abortController: expect.any(AbortController),
+    }));
     expect(settings.autoUpdateThreshold).toBe(3);
     expect(settings.updateBatchSize).toBe(2);
 
@@ -777,12 +776,11 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(dialogText).toContain('当前 full checkpoint：AI 第 1 层（初始基线）、AI 第 3 层（历史周期基线）');
     expect(dialogText).toContain('本次重填范围：AI 第 1~3 层');
     expect(dialogText).toContain('选中表：角色状态（sheet_a）、事件记录（sheet_b）');
-    expect(dialogText).toContain('系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表');
-    expect(dialogText).toContain('常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹');
-    expect(dialogText).toContain('如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认');
-    expect(dialogText).toContain('不会清理本次重填范围之外的聊天记录表格数据');
-    expect(dialogText).toContain('不会在未二次确认时替换 checkpoint 基底');
-    expect(dialogText).toContain('失败、终止或从中断处继续时，不会清理本次重填范围之外的聊天记录表格数据');
+    expect(dialogText).toContain('原子清理本次范围内选中表的旧数据');
+    expect(dialogText).toContain('每个已完成批次会立即保存并保留');
+    expect(dialogText).toContain('不会自动续跑');
+    expect(dialogText).toContain('范围外聊天记录表格数据和未选中的表不会被清理');
+    expect(dialogText).not.toContain('第二次破坏性确认');
     expect(dialogText).toContain('确认并继续');
     expect(dialogText).not.toContain('直接填表');
     expect(document.querySelector('.acu-toast-viewport')?.textContent || '')
@@ -796,6 +794,11 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(orchestrate.mock.calls[0][0]).toEqual(['sheet_a', 'sheet_b']);
     expect(orchestrate.mock.calls[0][3]).toEqual(expect.objectContaining({
       clearBeforeUpdate: true,
+      manualContextDepth: 3,
+      manualBatchSize: 3,
+      manualSkipFloors: 0,
+      manualMaxConcurrentGroups: 1,
+      abortController: expect.any(AbortController),
       onProgress: expect.any(Function),
     }));
     expect(manualExtraHintSetter).not.toHaveBeenCalled();
@@ -829,10 +832,9 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(danger).not.toBeNull();
     const dangerText = danger!.textContent || '';
     expect(dangerText).toContain('所有 full checkpoint 都在本次重填范围内');
-    expect(dangerText).toContain('系统首次执行时只会做边界检查');
-    expect(dangerText).toContain('在下一步要求你单独确认是否替换本次范围内选中表的基底');
-    expect(dangerText).not.toContain('首次确认后会立即替换 checkpoint 基底');
-    expect(dangerText).not.toContain('空白结构');
+    expect(dangerText).toContain('确认后将清理本次范围内选中表的旧数据');
+    expect(dangerText).toContain('从当前范围开始重新填写');
+    expect(dangerText).not.toContain('下一步要求你单独确认');
     const confirmButton = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-dialog-layer button'))
       .find(btn => btn.textContent?.includes('确认并继续'))!;
     expect(confirmButton.className).toContain('danger');
@@ -924,11 +926,13 @@ describe('FormFillPage · 手动填表面板', () => {
   it('手动填表进度 toast 提供终止按钮并触发中止链路', async () => {
     const { mount, orchestrate, abortAllActiveRequests, setWasStoppedByUser, setIsAutoUpdatingCard } = await mountFormFillPage();
     let releaseOrchestrate = () => {};
-    orchestrate.mockImplementation(async () => {
+    let taskController: AbortController | null = null;
+    orchestrate.mockImplementation(async (_keys, _processBatch, _refresh, options) => {
+      taskController = options.abortController;
       await new Promise<void>(resolve => {
         releaseOrchestrate = resolve;
       });
-      return { success: false, error: '手动更新已终止。' };
+      return { success: false, error: '手动更新已终止，已完成批次已保留。' };
     });
 
     const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
@@ -945,11 +949,12 @@ describe('FormFillPage · 手动填表面板', () => {
     stopButton!.click();
     await Promise.resolve();
 
-    expect(setWasStoppedByUser).toHaveBeenCalledWith(false);
-    expect(setWasStoppedByUser).toHaveBeenCalledWith(true);
-    expect(abortAllActiveRequests).toHaveBeenCalledTimes(1);
-    expect(setIsAutoUpdatingCard).toHaveBeenCalledWith(false);
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '').toContain('手动填表已终止');
+    expect(taskController).toBeInstanceOf(AbortController);
+    expect(taskController!.signal.aborted).toBe(true);
+    expect(setWasStoppedByUser).not.toHaveBeenCalled();
+    expect(abortAllActiveRequests).not.toHaveBeenCalled();
+    expect(setIsAutoUpdatingCard).not.toHaveBeenCalled();
+    expect(document.querySelector('.acu-toast-viewport')?.textContent || '').toContain('已完成批次将保留');
 
     releaseOrchestrate();
     await new Promise(r => setTimeout(r, 0));

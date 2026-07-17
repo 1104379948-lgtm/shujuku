@@ -105,28 +105,38 @@ export async function runTableUpdateCommit_ACU<T>(
         const operations = persistOptions.operations ?? options.operations;
         commitRevisionWriteSet = revisionWriteSet;
         if (!options.skipChatSave) {
-          const saveResult = await persistTablesToChatMessage_ACU({
-            targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
-            targetSheetKeys,
-            updateGroupKeys: persistOptions.updateGroupKeys !== undefined ? persistOptions.updateGroupKeys : (options.updateGroupKeys ?? null),
-            trackingSheetKeys: persistOptions.trackingSheetKeys !== undefined ? persistOptions.trackingSheetKeys : (options.trackingSheetKeys ?? []),
-            tableData: applied.tableData,
-            trackAsUpdate: persistOptions.trackAsUpdate ?? options.trackAsUpdate ?? false,
-            source: options.source,
-            operations,
-            revisionWriteSet,
-            forceCheckpoint: persistOptions.forceCheckpoint,
-            checkpointReason: persistOptions.checkpointReason,
-            manualRefillProgress: persistOptions.manualRefillProgress,
-            assumeCommitLock: true,
-            transactionContext,
-          });
-          saved = saveResult.saved;
-          messageIndex = saveResult.messageIndex;
-          if (!saveResult.saved) {
-            logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update, reload runtime before releasing lock: ${saveResult.error || 'unknown error'}`);
-            await reloadStorageProvider();
-            throw new Error(saveResult.error || `${options.reason}: persist failed`);
+          try {
+            const saveResult = await persistTablesToChatMessage_ACU({
+              targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
+              targetSheetKeys,
+              updateGroupKeys: persistOptions.updateGroupKeys !== undefined ? persistOptions.updateGroupKeys : (options.updateGroupKeys ?? null),
+              trackingSheetKeys: persistOptions.trackingSheetKeys !== undefined ? persistOptions.trackingSheetKeys : (options.trackingSheetKeys ?? []),
+              tableData: applied.tableData,
+              trackAsUpdate: persistOptions.trackAsUpdate ?? options.trackAsUpdate ?? false,
+              source: options.source,
+              operations,
+              revisionWriteSet,
+              forceCheckpoint: persistOptions.forceCheckpoint,
+              checkpointReason: persistOptions.checkpointReason,
+              manualRefillProgress: persistOptions.manualRefillProgress,
+              assumeCommitLock: true,
+              transactionContext,
+            });
+            saved = saveResult.saved;
+            messageIndex = saveResult.messageIndex;
+            if (!saveResult.saved) {
+              throw new Error(saveResult.error || `${options.reason}: persist failed`);
+            }
+          } catch (error: any) {
+            const persistError = error?.message || String(error || `${options.reason}: persist failed`);
+            logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update, reload runtime before releasing lock: ${persistError}`);
+            try {
+              await reloadStorageProvider();
+            } catch (reloadError: any) {
+              const reloadMessage = reloadError?.message || String(reloadError || 'unknown reload error');
+              throw new Error(`${persistError}；运行时校准失败：${reloadMessage}`);
+            }
+            throw new Error(persistError);
           }
         }
 

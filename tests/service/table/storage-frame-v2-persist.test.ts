@@ -33,7 +33,7 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
   collectScheduleSummaryFromFramesV2_ACU: mocks.collectSummary,
 }));
 
-import { persistTableSheetCheckpointV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
+import { persistTableMutationLogV2_ACU, persistTableSheetCheckpointV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
 
 const sheetA = { uid: 'a', name: 'A', sourceData: {}, content: [['row_id', 'value'], ['1', 'new']], updateConfig: {}, exportConfig: {}, orderNo: 1 } as any;
 const sheetB = { uid: 'b', name: 'B', sourceData: {}, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 2 } as any;
@@ -227,5 +227,40 @@ describe('persistTableSheetCheckpointV2_ACU', () => {
     expect(result.saved).toBe(false);
     expect(result.error).toContain('existing full checkpoint anchor');
     expect(mocks.saveChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('persistTableMutationLogV2_ACU', () => {
+  beforeEach(() => {
+    mocks.chat.length = 0;
+    mocks.saveChat.mockReset().mockResolvedValue(undefined);
+    mocks.collectSummary.mockClear();
+    mocks.settings.dataIsolationEnabled = false;
+    mocks.settings.dataIsolationCode = '';
+  });
+
+  it('宿主保存失败时恢复 mutation log 的 isolated data 与 Identity，并继续抛出原错误', async () => {
+    const message = seedFrame();
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+    message.TavernDB_ACU_Identity = 'old-identity';
+    mocks.settings.dataIsolationEnabled = true;
+    mocks.settings.dataIsolationCode = 'new-identity';
+    const saveError = new Error('host mutation save failed');
+    mocks.saveChat.mockRejectedValueOnce(saveError);
+
+    await expect(persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'manual' }],
+      candidateChangedSheetKeys: ['sheet_a'],
+      transactionContext: makeTransaction(),
+    })).rejects.toBe(saveError);
+
+    expect(mocks.saveChat).toHaveBeenCalledOnce();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.headRevision).toBe('3:existing');
+    expect(message.TavernDB_ACU_Identity).toBe('old-identity');
   });
 });

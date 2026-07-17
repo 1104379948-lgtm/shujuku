@@ -424,17 +424,35 @@ async function persistTableMutationLogV2Core_ACU(
     logDebug_ACU(`[V2 Persist] 追加 operation log entry: messageIndex=${target.index}, seq=${entry.seq}, revision=${commitRevision}, operations=${operations.length}`);
   }
 
-  target.message.TavernDB_ACU_IsolatedData = isolatedData;
-  writeMessageIdentity_ACU(target.message, {
-    enabled: settings_ACU.dataIsolationEnabled,
-    code: settings_ACU.dataIsolationCode,
-  });
+  const hadIsolatedData = Object.prototype.hasOwnProperty.call(target.message, 'TavernDB_ACU_IsolatedData');
+  const previousIsolatedData = target.message.TavernDB_ACU_IsolatedData;
+  const hadIdentity = Object.prototype.hasOwnProperty.call(target.message, 'TavernDB_ACU_Identity');
+  const previousIdentity = target.message.TavernDB_ACU_Identity;
+  try {
+    target.message.TavernDB_ACU_IsolatedData = isolatedData;
+    writeMessageIdentity_ACU(target.message, {
+      enabled: settings_ACU.dataIsolationEnabled,
+      code: settings_ACU.dataIsolationCode,
+    });
 
-  if (operations.length === 0 && filledSheetKeys.length === 0 && !shouldCheckpoint) {
-    logWarn_ACU(`[V2 Persist] 无 operation 且无 filled 事件，仍保存空日志事件: messageIndex=${target.index}`);
+    if (operations.length === 0 && filledSheetKeys.length === 0 && !shouldCheckpoint) {
+      logWarn_ACU(`[V2 Persist] 无 operation 且无 filled 事件，仍保存空日志事件: messageIndex=${target.index}`);
+    }
+
+    await saveChatToHost_ACU();
+  } catch (error) {
+    if (hadIsolatedData) {
+      target.message.TavernDB_ACU_IsolatedData = previousIsolatedData;
+    } else {
+      delete target.message.TavernDB_ACU_IsolatedData;
+    }
+    if (hadIdentity) {
+      target.message.TavernDB_ACU_Identity = previousIdentity;
+    } else {
+      delete target.message.TavernDB_ACU_Identity;
+    }
+    throw error;
   }
-
-  await saveChatToHost_ACU();
   return { saved: true, messageIndex: target.index, entry };
 }
 

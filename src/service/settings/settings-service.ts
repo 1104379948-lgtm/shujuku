@@ -585,6 +585,12 @@ export   function loadSettings_ACU() {
       if (!Number.isFinite(settings_ACU.maxConcurrentGroups) || settings_ACU.maxConcurrentGroups < 1) {
           settings_ACU.maxConcurrentGroups = 1;
       }
+      if (!Number.isFinite(settings_ACU.manualUpdateContextDepth) || settings_ACU.manualUpdateContextDepth < 0) {
+          settings_ACU.manualUpdateContextDepth = 3;
+      }
+      if (!Number.isFinite(settings_ACU.manualUpdateBatchSize) || settings_ACU.manualUpdateBatchSize < 1) {
+          settings_ACU.manualUpdateBatchSize = 3;
+      }
       logDebug_ACU('Settings loaded:', settings_ACU);
   }
 
@@ -749,6 +755,8 @@ export   function buildDefaultSettings_ACU() {
           autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
           autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
           updateBatchSize: 3,
+          manualUpdateContextDepth: 3,
+          manualUpdateBatchSize: 3,
           maxConcurrentGroups: 1,
           autoUpdateEnabled: true,
           standardizedTableFillEnabled: true, // [新增] 规范填表功能

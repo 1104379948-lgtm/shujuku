@@ -7,6 +7,8 @@ async function importTrigger() {
   const showCustomConfirm_ACU = vi.fn();
   const showToastr_ACU = vi.fn(() => ({ find: vi.fn(() => ({ text: vi.fn() })) }));
   const orchestrateManualUpdate_ACU = vi.fn();
+  const bindTableFillStopButton_ACU = vi.fn();
+  const abortAllActiveRequests_ACU = vi.fn();
   const resetManualUpdateButton_ACU = vi.fn();
   const clear = vi.fn();
 
@@ -16,7 +18,7 @@ async function importTrigger() {
     getCurrentIsolationKey_ACU: vi.fn(() => ''),
     _set_wasStoppedByUser_ACU: vi.fn(),
     _set_isAutoUpdatingCard_ACU: vi.fn(),
-    abortAllActiveRequests_ACU: vi.fn(),
+    abortAllActiveRequests_ACU,
   }));
   vi.doMock('../../../src/service/chat/chat-service', () => ({
     getChatArray_ACU: vi.fn(() => [{ is_user: false, mes: 'AI 1' }]),
@@ -34,7 +36,7 @@ async function importTrigger() {
   vi.doMock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableFillStart: vi.fn(), _notifyTableUpdate: vi.fn() } } }));
   vi.doMock('../../../src/shared/html-helpers', () => ({ renderStopButton_ACU: vi.fn(() => '<button>stop</button>') }));
   vi.doMock('../../../src/presentation/components/status-display', () => ({
-    bindTableFillStopButton_ACU: vi.fn(),
+    bindTableFillStopButton_ACU,
     resetManualUpdateButton_ACU,
     shouldShowVectorMemoryManualUpdateWarning_ACU: vi.fn(() => false),
     syncManualUpdateButtonAvailability_ACU: vi.fn(),
@@ -53,7 +55,16 @@ async function importTrigger() {
   }));
 
   const { handleManualUpdate_ACU } = await import('../../../src/presentation/triggers/update-process');
-  return { handleManualUpdate_ACU, showCustomConfirm_ACU, showToastr_ACU, orchestrateManualUpdate_ACU, clear, resetManualUpdateButton_ACU };
+  return {
+    handleManualUpdate_ACU,
+    showCustomConfirm_ACU,
+    showToastr_ACU,
+    orchestrateManualUpdate_ACU,
+    bindTableFillStopButton_ACU,
+    abortAllActiveRequests_ACU,
+    clear,
+    resetManualUpdateButton_ACU,
+  };
 }
 
 beforeEach(() => {
@@ -61,19 +72,9 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('handleManualUpdate_ACU destructive boundary confirmation', () => {
-  const requiresConfirmation = {
-    success: false,
-    requiresUserConfirmation: {
-      reason: 'manual_refill_replace_sheet_baseline',
-      replayErrorCode: 'no_full_checkpoint_replayable',
-      message: '重填起点前没有可回放 checkpoint。',
-      contextScopeIndices: [0],
-      targetSheetKeys: ['sheet_0'],
-    },
-  };
 
-  it('首次确认文案只说明边界检查，不承诺空基底或立即替换 checkpoint', async () => {
+describe('handleManualUpdate_ACU 单次确认与显式参数', () => {
+  it('确认文案说明范围清理、逐批保存和中断保留', async () => {
     const { handleManualUpdate_ACU, showCustomConfirm_ACU } = await importTrigger();
     showCustomConfirm_ACU.mockResolvedValueOnce(false);
 
@@ -82,58 +83,71 @@ describe('handleManualUpdate_ACU destructive boundary confirmation', () => {
     expect(showCustomConfirm_ACU).toHaveBeenCalledTimes(1);
     expect(showCustomConfirm_ACU.mock.calls[0][0]).toBe('手动填表确认');
     const message = showCustomConfirm_ACU.mock.calls[0][1];
-    expect(message).toContain('先在 service 层做重填边界检查');
-    expect(message).toContain('第二次破坏性确认');
-    expect(message).not.toContain('从表头空基底开始');
-    expect(message).not.toContain('若清理后诊断日志仍提示 checkpoint 风险');
+    expect(message).toContain('原子清理本次范围内选中表的旧数据');
+    expect(message).toContain('每个已完成批次会立即保存并保留');
+    expect(message).toContain('不会自动续跑');
+    expect(message).not.toContain('第二次破坏性确认');
   });
 
-  it('用户取消二次确认时不第二次调用 orchestrator，且不展示 error toast', async () => {
-    const { handleManualUpdate_ACU, showCustomConfirm_ACU, showToastr_ACU, orchestrateManualUpdate_ACU } = await importTrigger();
-    showCustomConfirm_ACU.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-    orchestrateManualUpdate_ACU.mockResolvedValueOnce(requiresConfirmation);
+  it('确认后只调用一次编排器并传递显式手动参数', async () => {
+    const { handleManualUpdate_ACU, showCustomConfirm_ACU, orchestrateManualUpdate_ACU } = await importTrigger();
+    showCustomConfirm_ACU.mockResolvedValueOnce(true);
+    orchestrateManualUpdate_ACU.mockResolvedValueOnce({ success: true });
 
     await handleManualUpdate_ACU();
 
     expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
-    expect(showCustomConfirm_ACU).toHaveBeenCalledTimes(2);
-    expect(showCustomConfirm_ACU.mock.calls[1][0]).toBe('破坏性手动重填确认');
-    const dangerMessage = showCustomConfirm_ACU.mock.calls[1][1];
-    expect(dangerMessage).toContain('高风险操作：确认后会在一次提交中删除本次重填范围内选中表的旧表基底');
-    expect(dangerMessage).toContain('写入新的单表 checkpoint');
-    expect(dangerMessage).toContain('范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除');
-    expect(dangerMessage).toContain('此操作不可撤销');
-    expect(dangerMessage).toContain('取消将不会执行基底替换，不会写入新的单表 checkpoint');
-    expect(showToastr_ACU).toHaveBeenCalledWith('info', '已取消破坏性基底替换。');
-    expect(showToastr_ACU.mock.calls.some(call => call[0] === 'error')).toBe(false);
-  });
-
-  it('用户确认二次确认时第二次调用传入 confirmBoundaryReset=true', async () => {
-    const { handleManualUpdate_ACU, showCustomConfirm_ACU, orchestrateManualUpdate_ACU } = await importTrigger();
-    showCustomConfirm_ACU.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
-    orchestrateManualUpdate_ACU
-      .mockResolvedValueOnce(requiresConfirmation)
-      .mockResolvedValueOnce({ success: true });
-
-    await handleManualUpdate_ACU();
-
-    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(2);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][0]).toEqual(['sheet_0']);
-    expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).toEqual(expect.objectContaining({ clearBeforeUpdate: true }));
+    expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).toEqual(expect.objectContaining({
+      clearBeforeUpdate: true,
+      manualContextDepth: 3,
+      manualBatchSize: 3,
+      manualSkipFloors: 0,
+      manualMaxConcurrentGroups: 1,
+    }));
     expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).not.toHaveProperty('confirmBoundaryReset');
-    expect(orchestrateManualUpdate_ACU.mock.calls[1][0]).toEqual(['sheet_0']);
-    expect(orchestrateManualUpdate_ACU.mock.calls[1][3]).toEqual(expect.objectContaining({ clearBeforeUpdate: true, confirmBoundaryReset: true }));
   });
 
-  it('二次确认后的 orchestrator 失败时展示 error toast', async () => {
+  it('终止按钮只中止本次手动任务 controller，不调用全局 abort', async () => {
+    const {
+      handleManualUpdate_ACU,
+      showCustomConfirm_ACU,
+      showToastr_ACU,
+      orchestrateManualUpdate_ACU,
+      bindTableFillStopButton_ACU,
+      abortAllActiveRequests_ACU,
+    } = await importTrigger();
+    showCustomConfirm_ACU.mockResolvedValueOnce(true);
+    let resolveOrchestration!: (value: { success: boolean; error?: string }) => void;
+    orchestrateManualUpdate_ACU.mockImplementationOnce((_keys, _processBatch, _refresh, options) => new Promise(resolve => {
+      expect(options.abortController).toBeInstanceOf(AbortController);
+      resolveOrchestration = resolve;
+    }));
+    showToastr_ACU.mockImplementation((_kind, _message, options) => {
+      options?.onShown?.();
+      return { find: vi.fn(() => ({ text: vi.fn() })) };
+    });
+
+    const pending = handleManualUpdate_ACU();
+    await Promise.resolve();
+    expect(bindTableFillStopButton_ACU).toHaveBeenCalledTimes(1);
+    const taskController = orchestrateManualUpdate_ACU.mock.calls[0][3].abortController as AbortController;
+    bindTableFillStopButton_ACU.mock.calls[0][1]();
+
+    expect(taskController.signal.aborted).toBe(true);
+    expect(abortAllActiveRequests_ACU).not.toHaveBeenCalled();
+    resolveOrchestration({ success: false, error: '手动更新已终止，已完成批次已保留。' });
+    await pending;
+  });
+
+  it('编排失败时展示原错误，不发起第二次确认', async () => {
     const { handleManualUpdate_ACU, showCustomConfirm_ACU, showToastr_ACU, orchestrateManualUpdate_ACU } = await importTrigger();
-    showCustomConfirm_ACU.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
-    orchestrateManualUpdate_ACU
-      .mockResolvedValueOnce(requiresConfirmation)
-      .mockResolvedValueOnce({ success: false, error: '确认后替换失败' });
+    showCustomConfirm_ACU.mockResolvedValueOnce(true);
+    orchestrateManualUpdate_ACU.mockResolvedValueOnce({ success: false, error: '后续批次失败，已完成批次已保留。' });
 
     await handleManualUpdate_ACU();
 
-    expect(showToastr_ACU).toHaveBeenCalledWith('error', '确认后替换失败');
+    expect(showCustomConfirm_ACU).toHaveBeenCalledTimes(1);
+    expect(orchestrateManualUpdate_ACU).toHaveBeenCalledTimes(1);
+    expect(showToastr_ACU).toHaveBeenCalledWith('error', '后续批次失败，已完成批次已保留。');
   });
 });
