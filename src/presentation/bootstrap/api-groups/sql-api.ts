@@ -5,7 +5,12 @@
 
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../../../service/runtime/state-manager';
-import { ensureStorageProviderReady_ACU, getStorageProvider } from '../../../service/table/table-storage-strategy';
+import {
+    ensureStorageProviderReady_ACU,
+    getReadySqliteProvider_ACU,
+    getSqlRuntimeStatus_ACU,
+    isSqlRuntimeReady_ACU,
+} from '../../../service/table/table-storage-strategy';
 import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
@@ -458,6 +463,33 @@ function buildRawSqlBatchOperations_ACU(sql: string) {
     return statements.length > 0 ? [{ kind: 'sql_batch' as const, statements }] : [];
 }
 
+function executeReadySqlQuery_ACU(
+    sql: string,
+    params: SqlParam_ACU[] | undefined,
+    metadata: { sql: string; limit?: number; offset?: number },
+): PublicSqlQueryResult_ACU | null {
+    const provider = getReadySqliteProvider_ACU();
+    if (!provider) {
+        logDebug_ACU('SQL query skipped: SQLite runtime is not ready.');
+        return null;
+    }
+    return toPublicSqlQueryResult_ACU(provider.executeQuery(sql, params), metadata);
+}
+
+async function executeReadySqlQueryAsync_ACU(
+    sql: string,
+    params: SqlParam_ACU[] | undefined,
+    metadata: { sql: string; limit?: number; offset?: number },
+): Promise<PublicSqlQueryResult_ACU | null> {
+    const provider = await ensureStorageProviderReady_ACU();
+    if (provider.mode !== 'sqlite' || !provider.isReady()) {
+        logDebug_ACU('SQL async query skipped: SQLite runtime is not ready.');
+        return null;
+    }
+    return toPublicSqlQueryResult_ACU(provider.executeQuery(sql, params), metadata);
+}
+
+
 export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
     return {
         executeSqlQuery: function(sqlOrOptions: any, params?: any, options?: any): PublicSqlQueryResult_ACU | null {
@@ -470,7 +502,7 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 const limit = normalizeLimit_ACU(optionSource?.limit);
                 const offset = normalizeOffset_ACU(optionSource?.offset);
                 const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
-                return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), { sql: query.sql, limit, offset });
+                return executeReadySqlQuery_ACU(query.sql, query.params, { sql: query.sql, limit, offset });
             } catch (error) {
                 logError_ACU('executeSqlQuery failed:', error);
                 return null;
@@ -487,7 +519,7 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 const limit = normalizeLimit_ACU(optionSource?.limit);
                 const offset = normalizeOffset_ACU(optionSource?.offset);
                 const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
-                return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), { sql: query.sql, limit, offset });
+                return executeReadySqlQuery_ACU(query.sql, query.params, { sql: query.sql, limit, offset });
             } catch (error) {
                 logError_ACU('querySql failed:', error);
                 return null;
@@ -500,7 +532,7 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     throw new Error('queryTableRows: options must be an object.');
                 }
                 const query = buildQueryTableRowsSql_ACU(options);
-                return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), {
+                return executeReadySqlQuery_ACU(query.sql, query.params, {
                     sql: query.sql,
                     limit: query.limit,
                     offset: query.offset,
@@ -509,6 +541,65 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 logError_ACU('queryTableRows failed:', error);
                 return null;
             }
+        },
+
+        executeSqlQueryAsync: async function(sqlOrOptions: any, params?: any, options?: any): Promise<PublicSqlQueryResult_ACU | null> {
+            try {
+                const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSqlQueryAsync');
+                if (!isSqlReadStatement_ACU(args.sql)) {
+                    throw new Error('executeSqlQueryAsync: only SELECT/PRAGMA/EXPLAIN/WITH statements are allowed.');
+                }
+                const optionSource = isPlainObjectArg_ACU(sqlOrOptions) ? sqlOrOptions : (isPlainObjectArg_ACU(options) ? options : null);
+                const limit = normalizeLimit_ACU(optionSource?.limit);
+                const offset = normalizeOffset_ACU(optionSource?.offset);
+                const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
+                return await executeReadySqlQueryAsync_ACU(query.sql, query.params, { sql: query.sql, limit, offset });
+            } catch (error) {
+                logError_ACU('executeSqlQueryAsync failed:', error);
+                return null;
+            }
+        },
+
+        querySqlAsync: async function(sqlOrOptions: any, params?: any, options?: any): Promise<PublicSqlQueryResult_ACU | null> {
+            try {
+                const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'querySqlAsync');
+                if (!isSqlReadStatement_ACU(args.sql)) {
+                    throw new Error('querySqlAsync: only SELECT/PRAGMA/EXPLAIN/WITH statements are allowed.');
+                }
+                const optionSource = isPlainObjectArg_ACU(sqlOrOptions) ? sqlOrOptions : (isPlainObjectArg_ACU(options) ? options : null);
+                const limit = normalizeLimit_ACU(optionSource?.limit);
+                const offset = normalizeOffset_ACU(optionSource?.offset);
+                const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
+                return await executeReadySqlQueryAsync_ACU(query.sql, query.params, { sql: query.sql, limit, offset });
+            } catch (error) {
+                logError_ACU('querySqlAsync failed:', error);
+                return null;
+            }
+        },
+
+        queryTableRowsAsync: async function(options: any = {}): Promise<PublicSqlQueryResult_ACU | null> {
+            try {
+                if (!isPlainObjectArg_ACU(options)) {
+                    throw new Error('queryTableRowsAsync: options must be an object.');
+                }
+                const query = buildQueryTableRowsSql_ACU(options);
+                return await executeReadySqlQueryAsync_ACU(query.sql, query.params, {
+                    sql: query.sql,
+                    limit: query.limit,
+                    offset: query.offset,
+                });
+            } catch (error) {
+                logError_ACU('queryTableRowsAsync failed:', error);
+                return null;
+            }
+        },
+
+        getSqlRuntimeStatus: function() {
+            return getSqlRuntimeStatus_ACU();
+        },
+
+        isSqlRuntimeReady: function(): boolean {
+            return isSqlRuntimeReady_ACU();
         },
 
         executeSqlMutation: async function(sqlOrOptions: any, params?: any, options?: any): Promise<PublicSqlMutationResult_ACU> {
@@ -612,10 +703,11 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
             try {
                 const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSql');
                 if (isSqlReadStatement_ACU(args.sql)) {
-                    const queryResult = getStorageProvider().executeQuery(args.sql, args.params);
+                    const queryResult = await executeReadySqlQueryAsync_ACU(args.sql, args.params, { sql: args.sql });
+                    if (!queryResult) return null;
                     return {
                         type: 'query',
-                        result: toPublicSqlQueryResult_ACU(queryResult, { sql: args.sql }),
+                        result: queryResult,
                     };
                 }
 

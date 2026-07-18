@@ -16,6 +16,27 @@ import { invalidateTableRuntimeRevision_ACU } from './table-write-transaction';
 /** 当前活跃的 Provider 实例 */
 let currentProvider: ITableStorageProvider | null = null;
 
+export type SqlRuntimeState_ACU = 'idle' | 'initializing' | 'ready' | 'fallback' | 'failed';
+
+export type SqlRuntimeStatus_ACU = {
+  configuredMode: StorageMode;
+  activeMode: StorageMode | null;
+  state: SqlRuntimeState_ACU;
+  retryable: boolean;
+  error?: string;
+};
+
+let lifecycleGeneration = 0;
+let sqlRuntimeState: Omit<SqlRuntimeStatus_ACU, 'configuredMode' | 'activeMode'> = {
+  state: 'idle',
+  retryable: false,
+};
+let initializationFlight: {
+  generation: number;
+  mode: StorageMode;
+  promise: Promise<void>;
+} | null = null;
+
 /**
  * 获取当前存储提供者
  * 如果尚未初始化，会根据当前设置自动创建
@@ -42,6 +63,25 @@ export function getActiveStorageProvider(): ITableStorageProvider | null {
   return currentProvider;
 }
 
+/** 同步只读 SQL 仅消费已激活且就绪的 SQLite Provider，不触发懒初始化。 */
+export function getReadySqliteProvider_ACU(): ITableStorageProvider | null {
+  if (getCurrentStorageMode() !== 'sqlite') return null;
+  if (currentProvider?.mode !== 'sqlite' || !currentProvider.isReady()) return null;
+  return currentProvider;
+}
+
+export function getSqlRuntimeStatus_ACU(): SqlRuntimeStatus_ACU {
+  return {
+    configuredMode: getCurrentStorageMode(),
+    activeMode: currentProvider?.mode ?? null,
+    ...sqlRuntimeState,
+  };
+}
+
+export function isSqlRuntimeReady_ACU(): boolean {
+  return getReadySqliteProvider_ACU() !== null;
+}
+
 export async function ensureStorageProviderReady_ACU(): Promise<ITableStorageProvider> {
   const expectedMode = getCurrentStorageMode();
   const activeProvider = getActiveStorageProvider();
@@ -60,28 +100,20 @@ export async function ensureStorageProviderReady_ACU(): Promise<ITableStoragePro
  */
 export async function initStorageProvider(): Promise<void> {
   const mode = getCurrentStorageMode();
+  const generation = lifecycleGeneration;
   logDebug_ACU(`[StorageStrategy] 初始化 Provider: ${mode}`);
 
-  try {
-    const nextProvider = createProvider(mode);
-    const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
-    logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
+  if (initializationFlight?.generation === generation && initializationFlight.mode === mode) {
+    return initializationFlight.promise;
+  }
 
-    if (mode === 'sqlite' && !result.loaded && result.error) {
-      logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${result.error}`);
-      nextProvider.dispose();
-      replaceActiveProvider_ACU(createProvider('native'));
-      return;
-    }
-    replaceActiveProvider_ACU(nextProvider);
-  } catch (e: any) {
-    logError_ACU(`[StorageStrategy] 初始化失败: ${e?.message}`);
-    if (mode === 'sqlite') {
-      logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
-      replaceActiveProvider_ACU(createProvider('native'));
-      return;
-    }
-    throw e;
+  setSqlRuntimeState_ACU(mode === 'sqlite' ? 'initializing' : 'idle', mode === 'sqlite');
+  const promise = initializeAndActivateProvider_ACU(mode, generation, false);
+  initializationFlight = { generation, mode, promise };
+  try {
+    await promise;
+  } finally {
+    if (initializationFlight?.promise === promise) initializationFlight = null;
   }
 }
 
@@ -102,27 +134,9 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
 
   logDebug_ACU(`[StorageStrategy] 切换模式: ${currentMode || 'none'} → ${mode}`);
 
-  try {
-    const nextProvider = createProvider(mode);
-    const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
-    logDebug_ACU(`[StorageStrategy] 切换完成: loaded=${result.loaded}, source=${result.source}`);
-
-    if (mode === 'sqlite' && !result.loaded && result.error) {
-      logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${result.error}`);
-      nextProvider.dispose();
-      replaceActiveProvider_ACU(createProvider('native'));
-      throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
-    }
-    replaceActiveProvider_ACU(nextProvider);
-  } catch (e: any) {
-    if (e.message?.includes('已自动回退')) throw e;
-
-    logError_ACU(`[StorageStrategy] 切换异常: ${e?.message}`);
-    if (mode === 'sqlite') {
-      replaceActiveProvider_ACU(createProvider('native'));
-    }
-    throw e;
-  }
+  const generation = invalidateProviderLifecycle_ACU();
+  setSqlRuntimeState_ACU(mode === 'sqlite' ? 'initializing' : 'idle', mode === 'sqlite');
+  await initializeAndActivateProvider_ACU(mode, generation, true);
 }
 
 /**
@@ -134,11 +148,13 @@ export async function switchStorageMode(mode: StorageMode): Promise<void> {
  * 调用方应在适当时机调用 reloadStorageProvider() 重建并加载数据。
  */
 export function disposeStorageProvider(): void {
+  invalidateProviderLifecycle_ACU();
   if (currentProvider) {
     logDebug_ACU(`[StorageStrategy] 销毁当前 Provider: ${currentProvider.mode}`);
     currentProvider.dispose();
     currentProvider = null;
   }
+  setSqlRuntimeState_ACU('idle', getCurrentStorageMode() === 'sqlite');
 }
 
 /**
@@ -147,6 +163,7 @@ export function disposeStorageProvider(): void {
  */
 export async function reloadStorageProvider(): Promise<void> {
   invalidateTableRuntimeRevision_ACU({ reason: 'reloadStorageProvider' });
+  invalidateProviderLifecycle_ACU();
   const mode = getCurrentStorageMode();
   logDebug_ACU(`[StorageStrategy] 重新加载数据: ${mode}`);
   await initStorageProvider();
@@ -186,6 +203,74 @@ async function loadProviderForCurrentChat_ACU(
     throw new Error('[StorageStrategy] SQLite provider 未实现 canonical snapshot hydrate。');
   }
   return provider.loadFromData(replay.data || null);
+}
+
+async function initializeAndActivateProvider_ACU(
+  mode: StorageMode,
+  generation: number,
+  throwOnSqliteFailure: boolean,
+): Promise<void> {
+  const nextProvider = createProvider(mode);
+  try {
+    const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
+    logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
+
+    if (!isLifecycleCurrent_ACU(generation, mode)) {
+      nextProvider.dispose();
+      logDebug_ACU(`[StorageStrategy] 丢弃过期 Provider 初始化结果: mode=${mode}, generation=${generation}`);
+      return;
+    }
+
+    if (mode === 'sqlite' && !result.loaded && result.error) {
+      logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${result.error}`);
+      nextProvider.dispose();
+      replaceActiveProvider_ACU(createProvider('native'));
+      setSqlRuntimeState_ACU('fallback', true, result.error);
+      if (throwOnSqliteFailure) {
+        throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
+      }
+      return;
+    }
+
+    replaceActiveProvider_ACU(nextProvider);
+    setSqlRuntimeState_ACU(mode === 'sqlite' ? 'ready' : 'idle', false);
+  } catch (e: any) {
+    if (!isLifecycleCurrent_ACU(generation, mode)) {
+      nextProvider.dispose();
+      logDebug_ACU(`[StorageStrategy] 忽略过期 Provider 初始化异常: mode=${mode}, generation=${generation}`);
+      return;
+    }
+
+    if (e?.message?.includes('已自动回退')) throw e;
+
+    const message = e?.message || String(e);
+    logError_ACU(`[StorageStrategy] 初始化失败: ${message}`);
+    nextProvider.dispose();
+    if (mode === 'sqlite') {
+      logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
+      replaceActiveProvider_ACU(createProvider('native'));
+      setSqlRuntimeState_ACU('fallback', true, message);
+      if (!throwOnSqliteFailure) return;
+    } else {
+      setSqlRuntimeState_ACU('failed', true, message);
+    }
+    throw e;
+  }
+}
+
+function invalidateProviderLifecycle_ACU(): number {
+  lifecycleGeneration += 1;
+  initializationFlight = null;
+  return lifecycleGeneration;
+}
+
+function isLifecycleCurrent_ACU(generation: number, mode: StorageMode): boolean {
+  void mode;
+  return generation === lifecycleGeneration;
+}
+
+function setSqlRuntimeState_ACU(state: SqlRuntimeState_ACU, retryable: boolean, error?: string): void {
+  sqlRuntimeState = error ? { state, retryable, error } : { state, retryable };
 }
 
 function replaceActiveProvider_ACU(nextProvider: ITableStorageProvider): void {

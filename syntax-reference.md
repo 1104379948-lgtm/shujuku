@@ -172,9 +172,14 @@ if (rowIdx !== -1) {
 
 | 方法 | 签名 | 说明 |
 |------|------|------|
-| `querySql` | `(sqlOrOptions, params?, options?) => SqlQueryResult \| null` | 执行只读 SQL，别名见 `executeSqlQuery` |
-| `executeSqlQuery` | `(sqlOrOptions, params?, options?) => SqlQueryResult \| null` | 同 `querySql`，只允许 `SELECT / PRAGMA / EXPLAIN / WITH` |
-| `queryTableRows` | `(options) => SqlQueryResult \| null` | 声明式单表查询，自动拼 `SELECT` |
+| `querySql` / `executeSqlQuery` | `(sqlOrOptions, params?, options?) => SqlQueryResult \| null` | 同步只读查询；只消费已经 ready 的 SQLite 运行时，初始化中、原生模式或 fallback 时返回 `null` |
+| `queryTableRows` | `(options) => SqlQueryResult \| null` | 同步声明式单表查询；同样不等待初始化 |
+| `querySqlAsync` / `executeSqlQueryAsync` | `(sqlOrOptions, params?, options?) => Promise<SqlQueryResult \| null>` | 推荐的外部异步查询入口；等待当前生命周期的 SQLite 初始化完成 |
+| `queryTableRowsAsync` | `(options) => Promise<SqlQueryResult \| null>` | 异步声明式单表查询 |
+| `getSqlRuntimeStatus` | `() => SqlRuntimeStatus` | 返回 configuredMode、activeMode、state、retryable 和可选 error |
+| `isSqlRuntimeReady` | `() => boolean` | 仅当当前已激活的 SQLite Provider 可查询时返回 true |
+
+同步 API 为兼容旧脚本保留；新外部脚本不应把一次 `null` 当作永久不支持。需要等待启动或切换聊天完成时，使用异步入口，并先检查 `getSqlRuntimeStatus()`。
 
 返回结构：
 
@@ -243,9 +248,30 @@ const result = API.queryTableRows({
 console.table(result?.rows || []);
 ```
 
+**生命周期安全的外部调用**：
+
+```js
+const API = window.AutoCardUpdaterAPI;
+const runtime = API?.getSqlRuntimeStatus?.();
+
+if (runtime?.configuredMode !== 'sqlite') {
+  // 原生模式：不尝试 SQL 查询
+} else if (runtime.state === 'initializing' || runtime.state === 'idle') {
+  // 可恢复等待状态；外部状态栏应限次退避重试，不能永久缓存本次 null
+} else if (runtime.state === 'ready') {
+  const result = await API.executeSqlQueryAsync('SELECT 1 AS ok');
+  console.log(result?.rows[0]?.ok);
+} else {
+  // fallback / failed：记录 runtime.error，等待下一次聊天重载或用户切换模式
+  console.warn(runtime.error);
+}
+```
+
+状态字段含义：`idle` 表示尚未开始或已销毁运行时，`initializing` 表示初始化进行中，`ready` 表示可查询，`fallback` 表示 SQLite 已回退到原生 Provider，`failed` 表示非 SQLite 初始化失败。`retryable` 表示调用方是否可以在后续生命周期重试；它不是“可以立即无限重试”的许可。
+
 > ⚠️ SQL 查询接口是**只读**的：拒绝多语句，也拒绝 `INSERT / UPDATE / DELETE / CREATE / DROP / ALTER / VACUUM / ATTACH` 等写入类关键词。`WITH` 也会检查里面是否混入写操作。
 >
-> ⚠️ 这些 SQL 查询只在 SQLite 模式可用；原生模式没有运行时 SQL 引擎，调用会返回 `null` 并在日志里记录错误。
+> ⚠️ 这些 SQL 查询只在 SQLite 模式可用；原生模式没有运行时 SQL 引擎，调用返回 `null`。SQLite 启动或聊天切换窗口的同步 `null` 是预期状态，不会记录 ERROR；SQL 语法错误和 ready 后的真实执行错误仍会记录 ERROR。
 
 ### 二、写入表格数据（四个核心方法）
 
@@ -451,6 +477,9 @@ await window.AutoCardUpdaterAPI.refreshDataAndWorldbook();
 #### SQL 读写（sql-api，SQLite 模式）
 - `querySql(sqlOrOptions, params?, options?)` / `executeSqlQuery(sqlOrOptions, params?, options?)` — 只读 SQL 查询
 - `queryTableRows(options)` — 声明式单表查询
+- `querySqlAsync(sqlOrOptions, params?, options?)` / `executeSqlQueryAsync(sqlOrOptions, params?, options?)` — 等待 ready 的异步只读查询
+- `queryTableRowsAsync(options)` — 等待 ready 的异步声明式单表查询
+- `getSqlRuntimeStatus()` / `isSqlRuntimeReady()` — SQLite 生命周期诊断与 ready 判定
 - `executeSqlMutation(sqlOrOptions, params?, options?)` — 单条参数化 SQL 写入
 - `executeSqlBatch(sqlOrOptions, options?)` — 多语句 SQL 批量写入
 - `executeSql(sqlOrOptions, params?, options?)` — 自动判断读/写

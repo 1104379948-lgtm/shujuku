@@ -12,9 +12,17 @@ const mocks = vi.hoisted(() => ({
   saveToChat: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
   persistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
   getCurrentData: vi.fn(() => ({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } })),
+  logDebug: vi.fn(),
+  logError: vi.fn(),
+  readySqliteProvider: null as any,
+  getReadySqliteProvider: vi.fn(() => mocks.readySqliteProvider),
+  getSqlRuntimeStatus: vi.fn(() => ({ configuredMode: 'sqlite', activeMode: null, state: 'idle', retryable: true })),
+  isSqlRuntimeReady: vi.fn(() => mocks.readySqliteProvider !== null),
   runTableUpdateApplyWithScopeLock: vi.fn(async (_scopeKey: string, task: () => Promise<unknown>) => task()),
   reloadStorageProvider: vi.fn().mockResolvedValue(undefined),
   ensureStorageProviderReady: vi.fn().mockResolvedValue({
+    mode: 'sqlite',
+    isReady: () => true,
     executeQuery: vi.fn(() => ({ columns: ['id'], values: [[1]], rowCount: 1 })),
     executeMutation: vi.fn(() => ({ changes: 1, errors: [] })),
     applyEdits: vi.fn(() => ({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 2 })),
@@ -36,9 +44,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../src/shared/utils', () => ({
-  logDebug_ACU: vi.fn(),
+  logDebug_ACU: mocks.logDebug,
   logWarn_ACU: vi.fn(),
-  logError_ACU: vi.fn(),
+  logError_ACU: mocks.logError,
 }));
 
 vi.mock('../../src/presentation/components/pipeline-ui-helpers', () => ({
@@ -55,6 +63,9 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
   })),
   reloadStorageProvider: mocks.reloadStorageProvider,
   ensureStorageProviderReady_ACU: mocks.ensureStorageProviderReady,
+  getReadySqliteProvider_ACU: mocks.getReadySqliteProvider,
+  getSqlRuntimeStatus_ACU: mocks.getSqlRuntimeStatus,
+  isSqlRuntimeReady_ACU: mocks.isSqlRuntimeReady,
 }));
 
 vi.mock('../../src/service/chat/chat-service', () => ({
@@ -124,6 +135,15 @@ describe('createSqlApi', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.readySqliteProvider = {
+      mode: 'sqlite',
+      isReady: () => true,
+      executeQuery: mocks.executeQuery,
+      executeMutation: mocks.executeMutation,
+      applyEdits: mocks.applyEdits,
+      saveToChat: mocks.saveToChat,
+      getCurrentData: mocks.getCurrentData,
+    };
     mocks.executeQuery.mockReturnValue({ columns: ['id'], values: [[1]], rowCount: 1 });
     mocks.executeMutation.mockReturnValue({ changes: 1, errors: [] });
     mocks.applyEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 2 });
@@ -131,6 +151,8 @@ describe('createSqlApi', () => {
     mocks.persistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 3 });
     mocks.getCurrentData.mockReturnValue({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } });
     mocks.ensureStorageProviderReady.mockResolvedValue({
+      mode: 'sqlite',
+      isReady: () => true,
       executeQuery: mocks.executeQuery,
       executeMutation: mocks.executeMutation,
       applyEdits: mocks.applyEdits,
@@ -165,6 +187,40 @@ describe('createSqlApi', () => {
     api.executeSqlQuery({ sql: 'SELECT * FROM t WHERE name = ?', params: ['铁剑'], limit: 10, offset: 5 });
 
     expect(mocks.executeQuery).toHaveBeenCalledWith('SELECT * FROM (SELECT * FROM t WHERE name = ?) AS acu_query LIMIT ? OFFSET ?', ['铁剑', 10, 5]);
+  });
+
+  it('同步查询在 SQLite 未就绪时返回 null，不执行查询且不记录 ERROR', () => {
+    mocks.readySqliteProvider = null;
+
+    const result = api.executeSqlQuery('SELECT 1');
+
+    expect(result).toBeNull();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(mocks.logDebug).toHaveBeenCalledWith('SQL query skipped: SQLite runtime is not ready.');
+    expect(mocks.logError).not.toHaveBeenCalled();
+  });
+
+  it('异步查询等待 ready SQLite Provider 后执行查询', async () => {
+    const result = await api.executeSqlQueryAsync('SELECT 1');
+
+    expect(mocks.ensureStorageProviderReady).toHaveBeenCalledOnce();
+    expect(mocks.executeQuery).toHaveBeenCalledWith('SELECT 1', undefined);
+    expect(result).toEqual({ columns: ['id'], values: [[1]], rowCount: 1, rows: [{ id: 1 }], sql: 'SELECT 1', offset: 0 });
+  });
+
+  it('异步查询在 fallback 到 native 时不执行 native 查询', async () => {
+    mocks.ensureStorageProviderReady.mockResolvedValueOnce({ mode: 'native', isReady: () => true, executeQuery: mocks.executeQuery });
+
+    const result = await api.querySqlAsync('SELECT 1');
+
+    expect(result).toBeNull();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(mocks.logDebug).toHaveBeenCalledWith('SQL async query skipped: SQLite runtime is not ready.');
+  });
+
+  it('公开 SQLite 运行时状态与 ready 布尔值', () => {
+    expect(api.getSqlRuntimeStatus()).toEqual({ configuredMode: 'sqlite', activeMode: null, state: 'idle', retryable: true });
+    expect(api.isSqlRuntimeReady()).toBe(true);
   });
 
   it('queryTableRows 支持声明式分页查询', () => {

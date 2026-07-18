@@ -59,6 +59,14 @@ type AutoCardUpdaterSqlBatchResult = AutoCardUpdaterSqlMutationResult & {
 type AutoCardUpdaterSqlExecutionResult =
     | { type: 'query'; result: AutoCardUpdaterSqlQueryResult }
     | { type: 'mutation'; result: AutoCardUpdaterSqlMutationResult };
+type AutoCardUpdaterSqlRuntimeState = 'idle' | 'initializing' | 'ready' | 'fallback' | 'failed';
+type AutoCardUpdaterSqlRuntimeStatus = {
+    configuredMode: 'native' | 'sqlite';
+    activeMode: 'native' | 'sqlite' | null;
+    state: AutoCardUpdaterSqlRuntimeState;
+    retryable: boolean;
+    error?: string;
+};
 
 interface AutoCardUpdaterAPI {
     registerTableUpdateCallback(callback: Function): void;
@@ -179,6 +187,11 @@ interface AutoCardUpdaterAPI {
     executeSqlQuery(sqlOrOptions: any, params?: any, options?: any): AutoCardUpdaterSqlQueryResult | null;
     querySql(sqlOrOptions: any, params?: any, options?: any): AutoCardUpdaterSqlQueryResult | null;
     queryTableRows(options: { sheetKey?: string; tableName?: string; table?: string; columns?: string[]; where?: Record<string, any>; orderBy?: any; order?: any; limit?: number; offset?: number }): AutoCardUpdaterSqlQueryResult | null;
+    executeSqlQueryAsync(sqlOrOptions: any, params?: any, options?: any): Promise<AutoCardUpdaterSqlQueryResult | null>;
+    querySqlAsync(sqlOrOptions: any, params?: any, options?: any): Promise<AutoCardUpdaterSqlQueryResult | null>;
+    queryTableRowsAsync(options: { sheetKey?: string; tableName?: string; table?: string; columns?: string[]; where?: Record<string, any>; orderBy?: any; order?: any; limit?: number; offset?: number }): Promise<AutoCardUpdaterSqlQueryResult | null>;
+    getSqlRuntimeStatus(): AutoCardUpdaterSqlRuntimeStatus;
+    isSqlRuntimeReady(): boolean;
     executeSqlMutation(sqlOrOptions: any, params?: any, options?: any): Promise<AutoCardUpdaterSqlMutationResult>;
     executeSqlBatch(sqlOrOptions: any, options?: any): Promise<AutoCardUpdaterSqlBatchResult>;
     executeSql(sqlOrOptions: any, params?: any, options?: any): Promise<AutoCardUpdaterSqlExecutionResult | null>;

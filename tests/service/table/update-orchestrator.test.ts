@@ -73,6 +73,8 @@ const mockParseAndApplyTableEditsToData = vi.fn();
 const mockApplySqlEditsToTableDataSnapshot = vi.fn();
 const mockPrepareAIInput = vi.fn();
 const mockReloadStorageProvider = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const mockEnsureStorageProviderReady = vi.hoisted(() => vi.fn());
+let mockSqliteRuntimeProvider: any = null;
 
 vi.mock('../../../src/service/ai/prompt-builder', () => ({
   callCustomOpenAI_ACU: (...args: any[]) => mockCallCustomOpenAI(...args),
@@ -184,6 +186,7 @@ vi.mock('../../../src/service/table/table-storage-strategy', async (importOrigin
   return {
     ...actual,
     reloadStorageProvider: (...args: any[]) => mockReloadStorageProvider(...args),
+    ensureStorageProviderReady_ACU: (...args: any[]) => mockEnsureStorageProviderReady(...args),
   };
 });
 
@@ -248,6 +251,8 @@ import {
 beforeEach(() => {
   mockChatArrayForSeedStage.length = 0;
   Object.keys(mockIndependentTableStates).forEach(key => delete mockIndependentTableStates[key]);
+  mockSqliteRuntimeProvider?.dispose();
+  mockSqliteRuntimeProvider = null;
   mockGetChatArray_ACU.mockImplementation(() => mockChatArrayForSeedStage);
   mockClearManualRefillIncrementalDataInRange.mockResolvedValue(0);
   mockCommitManualRefillSheetSnapshot.mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 });
@@ -255,6 +260,24 @@ beforeEach(() => {
   mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
   mockPurgeSheetKeysFromChatHistoryHard.mockResolvedValue({ changed: true, changedCount: 1 });
   mockReloadStorageProvider.mockResolvedValue(undefined);
+  mockEnsureStorageProviderReady.mockImplementation(async () => {
+    if (mockSqliteRuntimeProvider) return mockSqliteRuntimeProvider;
+    const { SqlTableService } = await vi.importActual<typeof import('../../../src/service/table/sql-table-service')>('../../../src/service/table/sql-table-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const templateData = parseTableTemplateJson_ACU({ stripSeedRows: false }) || {};
+    const runtimeData = {
+      ...JSON.parse(JSON.stringify(templateData)),
+      ...JSON.parse(JSON.stringify(mockCurrentJsonTableData || {})),
+    };
+    const provider = new SqlTableService();
+    await provider.loadFromData(runtimeData);
+    if (!provider.isReady()) {
+      provider.dispose();
+      throw new Error('测试 SQLite runtime 未就绪。');
+    }
+    mockSqliteRuntimeProvider = provider;
+    return provider;
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════

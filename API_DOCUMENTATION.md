@@ -20,6 +20,7 @@ if (window.AutoCardUpdaterAPI) {
 
 - [剧情推进预设管理 API](#剧情推进预设管理-api)
 - [数据导入导出 API](#数据导入导出-api)
+- [SQLite SQL 查询 API](#sqlite-sql-查询-api)
 - [表格操作 API](#表格操作-api)
 - [设置与更新 API](#设置与更新-api)
 - [世界书操作 API](#世界书操作-api)
@@ -246,6 +247,71 @@ const restored = await window.AutoCardUpdaterAPI.restoreTableAsJson(jsonData);
 导出当前 JSON 数据到文件（会弹出保存对话框）。
 
 **返回值**: `Promise<boolean>`
+
+---
+
+## SQLite SQL 查询 API
+
+这些 API 通过 `window.AutoCardUpdaterAPI` 操作当前聊天的**内存 SQLite 运行时**。它们不修改聊天持久化数据；写入仍必须使用 `executeSqlMutation()`、`executeSqlBatch()` 或 `executeSql()`。
+
+### 运行时状态与兼容同步查询
+
+- `getSqlRuntimeStatus()` 返回 `{ configuredMode, activeMode, state, retryable, error? }`。
+- `isSqlRuntimeReady()` 仅在当前激活的 SQLite Provider 已初始化且可查询时返回 `true`。
+- 兼容同步 API：`executeSqlQuery()`、`querySql()`、`queryTableRows()` 返回 `SqlQueryResult | null`。它们**不会触发初始化**；在原生模式、启动/换聊天初始化窗口或 SQLite fallback 时返回 `null`，且不会记录 ERROR。
+
+`state` 的取值为：
+
+| 状态 | 含义 | 外部调用方动作 |
+|------|------|----------------|
+| `idle` | SQLite 尚未开始初始化或已销毁 | 若 configuredMode 为 sqlite，可限次退避重试 |
+| `initializing` | 当前聊天的 SQLite 正在加载 | 等待或使用异步查询 API |
+| `ready` | SQLite 已可查询 | 可以执行 SQL 查询 |
+| `fallback` | SQLite 初始化失败，已回退到原生 Provider | 不执行 SQL；记录 error，等待后续重载或用户修复配置 |
+| `failed` | 非 SQLite Provider 初始化失败 | 记录 error；不要无限重试 |
+
+### 异步只读查询
+
+新外部脚本应使用异步入口，它们会等待当前生命周期内的 SQLite 初始化：
+
+- `executeSqlQueryAsync(sqlOrOptions, params?, options?)`
+- `querySqlAsync(sqlOrOptions, params?, options?)`
+- `queryTableRowsAsync(options)`
+
+三个方法只接受 `SELECT`、`PRAGMA`、`EXPLAIN` 或不含写操作的 `WITH` 查询，返回 `Promise<SqlQueryResult | null>`。如果初始化最终 fallback 到 native，结果为 `null`，不会尝试对 native Provider 执行 SQL。
+
+```javascript
+const api = window.AutoCardUpdaterAPI;
+const status = api?.getSqlRuntimeStatus?.();
+
+if (status?.configuredMode === 'sqlite' && status.state !== 'fallback' && status.state !== 'failed') {
+    const result = await api.executeSqlQueryAsync(
+        'SELECT row_id, name FROM inventory WHERE quantity > ?',
+        [0],
+    );
+    console.table(result?.rows || []);
+}
+```
+
+外部状态栏在 `idle` 或 `initializing` 收到 `null` 时应使用有限退避重试，例如 200ms、500ms、1000ms、2000ms；不得把首次 `null` 缓存成永久“不支持 SQLite”。`douluo-status-bar-v2` 不在本仓库，需在其独立代码库按此契约接入。
+
+### 查询返回值
+
+成功时统一返回：
+
+```javascript
+{
+    columns: ['row_id', 'name'],
+    values: [[1, '铁剑']],
+    rows: [{ row_id: 1, name: '铁剑' }],
+    rowCount: 1,
+    sql: '实际执行的 SQL',
+    limit: 100,
+    offset: 0,
+}
+```
+
+`null` 不是空结果集：空结果集仍返回 `rowCount: 0` 的对象。调用方需要结合 `getSqlRuntimeStatus()` 区分“未就绪/不支持/初始化失败”和正常空查询结果。
 
 ---
 

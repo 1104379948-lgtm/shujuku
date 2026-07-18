@@ -7792,44 +7792,44 @@ $CONTENT
     var commonjsGlobal = typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : typeof self !== 'undefined' ? self : {};
 
     function getDefaultExportFromCjs (x) {
-    	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
+	return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, 'default') ? x['default'] : x;
     }
 
     function getDefaultExportFromNamespaceIfPresent (n) {
-    	return n && Object.prototype.hasOwnProperty.call(n, 'default') ? n['default'] : n;
+	return n && Object.prototype.hasOwnProperty.call(n, 'default') ? n['default'] : n;
     }
 
     function getDefaultExportFromNamespaceIfNotNamed (n) {
-    	return n && Object.prototype.hasOwnProperty.call(n, 'default') && Object.keys(n).length === 1 ? n['default'] : n;
+	return n && Object.prototype.hasOwnProperty.call(n, 'default') && Object.keys(n).length === 1 ? n['default'] : n;
     }
 
     function getAugmentedNamespace(n) {
       if (Object.prototype.hasOwnProperty.call(n, '__esModule')) return n;
       var f = n.default;
-    	if (typeof f == "function") {
-    		var a = function a () {
-    			var isInstance = false;
+	if (typeof f == "function") {
+		var a = function a () {
+			var isInstance = false;
           try {
             isInstance = this instanceof a;
           } catch (e) {}
-    			if (isInstance) {
+			if (isInstance) {
             return Reflect.construct(f, arguments, this.constructor);
-    			}
-    			return f.apply(this, arguments);
-    		};
-    		a.prototype = f.prototype;
+			}
+			return f.apply(this, arguments);
+		};
+		a.prototype = f.prototype;
       } else a = {};
       Object.defineProperty(a, '__esModule', {value: true});
-    	Object.keys(n).forEach(function (k) {
-    		var d = Object.getOwnPropertyDescriptor(n, k);
-    		Object.defineProperty(a, k, d.get ? d : {
-    			enumerable: true,
-    			get: function () {
-    				return n[k];
-    			}
-    		});
-    	});
-    	return a;
+	Object.keys(n).forEach(function (k) {
+		var d = Object.getOwnPropertyDescriptor(n, k);
+		Object.defineProperty(a, k, d.get ? d : {
+			enumerable: true,
+			get: function () {
+				return n[k];
+			}
+		});
+	});
+	return a;
     }
 
     var sqlAsmMemoryGrowth$1 = {exports: {}};
@@ -7859,12 +7859,12 @@ $CONTENT
     var hasRequiredSqlAsmMemoryGrowth;
 
     function requireSqlAsmMemoryGrowth () {
-    	if (hasRequiredSqlAsmMemoryGrowth) return sqlAsmMemoryGrowth$1.exports;
-    	hasRequiredSqlAsmMemoryGrowth = 1;
-    	(function (module, exports) {
-    		// We are modularizing this manually because the current modularize setting in Emscripten has some issues:
-    		// https://github.com/kripken/emscripten/issues/5820
-    		// In addition, When you use emcc's modularization, it still expects to export a global object called `Module`,
+	if (hasRequiredSqlAsmMemoryGrowth) return sqlAsmMemoryGrowth$1.exports;
+	hasRequiredSqlAsmMemoryGrowth = 1;
+	(function (module, exports) {
+		// We are modularizing this manually because the current modularize setting in Emscripten has some issues:
+		// https://github.com/kripken/emscripten/issues/5820
+		// In addition, When you use emcc's modularization, it still expects to export a global object called `Module`,
 		// which is able to be used/called before the WASM is loaded.
 		// The modularization below exports a promise that loads and resolves to the actual sql.js module.
 		// That way, this module can't be used before the WASM is finished loading.
@@ -7983,90 +7983,90 @@ $CONTENT
 		function qa(a){var b="i32";b.endsWith("*")&&(b="*");switch(b){case "i1":m[a]=0;break;case "i8":m[a]=0;break;case "i16":Ha[a>>1]=0;break;case "i32":E[a>>2]=0;break;case "i64":G("to do setValue(i64) use WASM_BIGINT");case "float":Ia[a>>2]=0;break;case "double":Ja[a>>3]=0;break;case "*":F[a>>2]=0;break;default:G(`invalid type for setValue: ${b}`);}}
 		var Xa=new TextDecoder,Ya=(a,b,c,d)=>{c=b+c;if(d)return c;for(;a[b]&&!(b>=c);)++b;return b},v=(a,b,c)=>a?Xa.decode(B.subarray(a,Ya(B,a,b,c))):"",Za=(a,b)=>{for(var c=0,d=a.length-1;0<=d;d--){var e=a[d];"."===e?a.splice(d,1):".."===e?(a.splice(d,1),c++):c&&(a.splice(d,1),c--);}if(b)for(;c;c--)a.unshift("..");return a},ia=a=>{var b="/"===a.charAt(0),c="/"===a.slice(-1);(a=Za(a.split("/").filter(d=>!!d),!b).join("/"))||b||(a=".");a&&c&&(a+="/");return (b?"/":"")+a},$a=a=>{var b=/^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/.exec(a).slice(1);
 		a=b[0];b=b[1];if(!a&&!b)return ".";b&&=b.slice(0,-1);return a+b},ab=a=>a&&a.match(/([^\/]+|\/)\/*$/)[1],bb=()=>{if(ca){var a=require$$1;return b=>a.randomFillSync(b)}return b=>crypto.getRandomValues(b)},cb=a=>{(cb=bb())(a);},db=(...a)=>{for(var b="",c=!1,d=a.length-1;-1<=d&&!c;d--){c=0<=d?a[d]:"/";if("string"!=typeof c)throw new TypeError("Arguments to path.resolve must be strings");if(!c)return "";b=c+"/"+b;c="/"===c.charAt(0);}b=Za(b.split("/").filter(e=>!!e),!c).join("/");return (c?"/":
-    		"")+b||"."},eb=a=>{var b=Ya(a,0);return Xa.decode(a.buffer?a.subarray(0,b):new Uint8Array(a.slice(0,b)))},fb=[],gb=a=>{for(var b=0,c=0;c<a.length;++c){var d=a.charCodeAt(c);127>=d?b++:2047>=d?b+=2:55296<=d&&57343>=d?(b+=4,++c):b+=3;}return b},O=(a,b,c,d)=>{if(!(0<d))return 0;var e=c;d=c+d-1;for(var g=0;g<a.length;++g){var h=a.codePointAt(g);if(127>=h){if(c>=d)break;b[c++]=h;}else if(2047>=h){if(c+1>=d)break;b[c++]=192|h>>6;b[c++]=128|h&63;}else if(65535>=h){if(c+2>=d)break;b[c++]=224|h>>12;b[c++]=128|
-    		h>>6&63;b[c++]=128|h&63;}else {if(c+3>=d)break;b[c++]=240|h>>18;b[c++]=128|h>>12&63;b[c++]=128|h>>6&63;b[c++]=128|h&63;g++;}}b[c]=0;return c-e},hb=[];function jb(a,b){hb[a]={input:[],output:[],eb:b};kb(a,tb);}
-    		var tb={open(a){var b=hb[a.node.rdev];if(!b)throw new P(43);a.tty=b;a.seekable=!1;},close(a){a.tty.eb.fsync(a.tty);},fsync(a){a.tty.eb.fsync(a.tty);},read(a,b,c,d){if(!a.tty||!a.tty.eb.Db)throw new P(60);for(var e=0,g=0;g<d;g++){try{var h=a.tty.eb.Db(a.tty);}catch(u){throw new P(29);}if(void 0===h&&0===e)throw new P(6);if(null===h||void 0===h)break;e++;b[c+g]=h;}e&&(a.node.atime=Date.now());return e},write(a,b,c,d){if(!a.tty||!a.tty.eb.wb)throw new P(60);try{for(var e=0;e<d;e++)a.tty.eb.wb(a.tty,b[c+e]);}catch(g){throw new P(29);
-    		}d&&(a.node.mtime=a.node.ctime=Date.now());return e}},ub={Db(){a:{if(!fb.length){var a=null;if(ca){var b=Buffer.alloc(256),c=0,d=process.stdin.fd;try{c=fs.readSync(d,b,0,256);}catch(e){if(e.toString().includes("EOF"))c=0;else throw e;}0<c&&(a=b.slice(0,c).toString("utf-8"));}else globalThis.window?.prompt&&(a=window.prompt("Input: "),null!==a&&(a+="\n"));if(!a){a=null;break a}b=Array(gb(a)+1);a=O(a,b,0,b.length);b.length=a;fb=b;}a=fb.shift();}return a},wb(a,b){null===b||10===b?(za(eb(a.output)),a.output=
-    		[]):0!=b&&a.output.push(b);},fsync(a){0<a.output?.length&&(za(eb(a.output)),a.output=[]);},jc(){return {dc:25856,fc:5,cc:191,ec:35387,bc:[3,28,127,21,4,0,1,0,17,19,26,0,18,15,23,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}},kc(){return 0},lc(){return [24,80]}},vb={wb(a,b){null===b||10===b?(A(eb(a.output)),a.output=[]):0!=b&&a.output.push(b);},fsync(a){0<a.output?.length&&(A(eb(a.output)),a.output=[]);}},Q={Wa:null,Xa(){return Q.createNode(null,"/",16895,0)},createNode(a,b,c,d){if(24576===(c&61440)||4096===(c&61440))throw new P(63);
-    		Q.Wa||(Q.Wa={dir:{node:{Ta:Q.La.Ta,Ua:Q.La.Ua,lookup:Q.La.lookup,hb:Q.La.hb,rename:Q.La.rename,unlink:Q.La.unlink,rmdir:Q.La.rmdir,readdir:Q.La.readdir,symlink:Q.La.symlink},stream:{Va:Q.Ma.Va}},file:{node:{Ta:Q.La.Ta,Ua:Q.La.Ua},stream:{Va:Q.Ma.Va,read:Q.Ma.read,write:Q.Ma.write,ib:Q.Ma.ib,jb:Q.Ma.jb}},link:{node:{Ta:Q.La.Ta,Ua:Q.La.Ua,readlink:Q.La.readlink},stream:{}},Ab:{node:{Ta:Q.La.Ta,Ua:Q.La.Ua},stream:wb}});c=xb(a,b,c,d);R(c.mode)?(c.La=Q.Wa.dir.node,c.Ma=Q.Wa.dir.stream,c.Na={}):32768===
-    		(c.mode&61440)?(c.La=Q.Wa.file.node,c.Ma=Q.Wa.file.stream,c.Ra=0,c.Na=null):40960===(c.mode&61440)?(c.La=Q.Wa.link.node,c.Ma=Q.Wa.link.stream):8192===(c.mode&61440)&&(c.La=Q.Wa.Ab.node,c.Ma=Q.Wa.Ab.stream);c.atime=c.mtime=c.ctime=Date.now();a&&(a.Na[b]=c,a.atime=a.mtime=a.ctime=c.atime);return c},ic(a){return a.Na?a.Na.subarray?a.Na.subarray(0,a.Ra):new Uint8Array(a.Na):new Uint8Array(0)},La:{Ta(a){var b={};b.dev=8192===(a.mode&61440)?a.id:1;b.ino=a.id;b.mode=a.mode;b.nlink=1;b.uid=0;b.gid=0;b.rdev=
-    		a.rdev;b.size=R(a.mode)?4096:32768===(a.mode&61440)?a.Ra:40960===(a.mode&61440)?a.link.length:0;b.atime=new Date(a.atime);b.mtime=new Date(a.mtime);b.ctime=new Date(a.ctime);b.blksize=4096;b.blocks=Math.ceil(b.size/b.blksize);return b},Ua(a,b){for(var c of ["mode","atime","mtime","ctime"])null!=b[c]&&(a[c]=b[c]);void 0!==b.size&&(b=b.size,a.Ra!=b&&(0==b?(a.Na=null,a.Ra=0):(c=a.Na,a.Na=new Uint8Array(b),c&&a.Na.set(c.subarray(0,Math.min(b,a.Ra))),a.Ra=b)));},lookup(){Q.pb||(Q.pb=new P(44),Q.pb.stack=
-    		"<generic error, no stack>");throw Q.pb;},hb(a,b,c,d){return Q.createNode(a,b,c,d)},rename(a,b,c){try{var d=S(b,c);}catch(g){}if(d){if(R(a.mode))for(var e in d.Na)throw new P(55);yb(d);}delete a.parent.Na[a.name];b.Na[c]=a;a.name=c;b.ctime=b.mtime=a.parent.ctime=a.parent.mtime=Date.now();},unlink(a,b){delete a.Na[b];a.ctime=a.mtime=Date.now();},rmdir(a,b){var c=S(a,b),d;for(d in c.Na)throw new P(55);delete a.Na[b];a.ctime=a.mtime=Date.now();},readdir(a){return [".","..",...Object.keys(a.Na)]},symlink(a,
-    		b,c){a=Q.createNode(a,b,41471,0);a.link=c;return a},readlink(a){if(40960!==(a.mode&61440))throw new P(28);return a.link}},Ma:{read(a,b,c,d,e){var g=a.node.Na;if(e>=a.node.Ra)return 0;a=Math.min(a.node.Ra-e,d);if(8<a&&g.subarray)b.set(g.subarray(e,e+a),c);else for(d=0;d<a;d++)b[c+d]=g[e+d];return a},write(a,b,c,d,e,g){b.buffer===m.buffer&&(g=!1);if(!d)return 0;a=a.node;a.mtime=a.ctime=Date.now();if(b.subarray&&(!a.Na||a.Na.subarray)){if(g)return a.Na=b.subarray(c,c+d),a.Ra=d;if(0===a.Ra&&0===e)return a.Na=
-    		b.slice(c,c+d),a.Ra=d;if(e+d<=a.Ra)return a.Na.set(b.subarray(c,c+d),e),d}g=e+d;var h=a.Na?a.Na.length:0;h>=g||(g=Math.max(g,h*(1048576>h?2:1.125)>>>0),0!=h&&(g=Math.max(g,256)),h=a.Na,a.Na=new Uint8Array(g),0<a.Ra&&a.Na.set(h.subarray(0,a.Ra),0));if(a.Na.subarray&&b.subarray)a.Na.set(b.subarray(c,c+d),e);else for(g=0;g<d;g++)a.Na[e+g]=b[c+g];a.Ra=Math.max(a.Ra,e+d);return d},Va(a,b,c){1===c?b+=a.position:2===c&&32768===(a.node.mode&61440)&&(b+=a.node.Ra);if(0>b)throw new P(28);return b},ib(a,b,c,
-    		d,e){if(32768!==(a.node.mode&61440))throw new P(43);a=a.node.Na;if(e&2||!a||a.buffer!==m.buffer){e=!0;d=65536*Math.ceil(b/65536);var g=zb(65536,d);g&&B.fill(0,g,g+d);d=g;if(!d)throw new P(48);if(a){if(0<c||c+b<a.length)a=a.subarray?a.subarray(c,c+b):Array.prototype.slice.call(a,c,c+b);m.set(a,d);}}else e=!1,d=a.byteOffset;return {Zb:d,Gb:e}},jb(a,b,c,d){Q.Ma.write(a,b,0,d,c,!1);return 0}}},ja=(a,b)=>{var c=0;a&&(c|=365);b&&(c|=146);return c},Ab=null,Bb={},Cb=[],Db=1,T=null,Eb=!1,Fb=!0,P=class{name="ErrnoError";constructor(a){this.Pa=
-    		a;}},Gb=class{mb={};node=null;get object(){return this.node}set object(a){this.node=a;}get flags(){return this.mb.flags}set flags(a){this.mb.flags=a;}get position(){return this.mb.position}set position(a){this.mb.position=a;}},Hb=class{La={};Ma={};lb=365;nb=146;bb=null;constructor(a,b,c,d){a||=this;this.parent=a;this.Xa=a.Xa;this.id=Db++;this.name=b;this.mode=c;this.rdev=d;this.atime=this.mtime=this.ctime=Date.now();}get read(){return (this.mode&this.lb)===this.lb}set read(a){a?this.mode|=this.lb:this.mode&=
-    		~this.lb;}get write(){return (this.mode&this.nb)===this.nb}set write(a){a?this.mode|=this.nb:this.mode&=~this.nb;}};
-    		function U(a,b={}){if(!a)throw new P(44);b.rb??(b.rb=!0);"/"===a.charAt(0)||(a="//"+a);var c=0;a:for(;40>c;c++){a=a.split("/").filter(u=>!!u);for(var d=Ab,e="/",g=0;g<a.length;g++){var h=g===a.length-1;if(h&&b.parent)break;if("."!==a[g])if(".."===a[g])if(e=$a(e),d===d.parent){a=e+"/"+a.slice(g+1).join("/");c--;continue a}else d=d.parent;else {e=ia(e+"/"+a[g]);try{d=S(d,a[g]);}catch(u){if(44===u?.Pa&&h&&b.Yb)return {path:e};throw u;}!d.bb||h&&!b.rb||(d=d.bb.root);if(40960===(d.mode&61440)&&(!h||b.ab)){if(!d.La.readlink)throw new P(52);
-    		d=d.La.readlink(d);"/"===d.charAt(0)||(d=$a(e)+"/"+d);a=d+"/"+a.slice(g+1).join("/");continue a}}}return {path:e,node:d}}throw new P(32);}function ha(a){for(var b;;){if(a===a.parent)return a=a.Xa.Fb,b?"/"!==a[a.length-1]?`${a}/${b}`:a+b:a;b=b?`${a.name}/${b}`:a.name;a=a.parent;}}function Ib(a,b){for(var c=0,d=0;d<b.length;d++)c=(c<<5)-c+b.charCodeAt(d)|0;return (a+c>>>0)%T.length}
-    		function yb(a){var b=Ib(a.parent.id,a.name);if(T[b]===a)T[b]=a.cb;else for(b=T[b];b;){if(b.cb===a){b.cb=a.cb;break}b=b.cb;}}function S(a,b){var c=R(a.mode)?(c=Jb(a,"x"))?c:a.La.lookup?0:2:54;if(c)throw new P(c);for(c=T[Ib(a.id,b)];c;c=c.cb){var d=c.name;if(c.parent.id===a.id&&d===b)return c}return a.La.lookup(a,b)}function xb(a,b,c,d){a=new Hb(a,b,c,d);b=Ib(a.parent.id,a.name);a.cb=T[b];return T[b]=a}function R(a){return 16384===(a&61440)}
-    		function Jb(a,b){return Fb?0:b.includes("r")&&!(a.mode&292)||b.includes("w")&&!(a.mode&146)||b.includes("x")&&!(a.mode&73)?2:0}function Kb(a,b){if(!R(a.mode))return 54;try{return S(a,b),20}catch(c){}return Jb(a,"wx")}function Lb(a,b,c){try{var d=S(a,b);}catch(e){return e.Pa}if(a=Jb(a,"wx"))return a;if(c){if(!R(d.mode))return 54;if(d===d.parent||"/"===ha(d))return 10}else if(R(d.mode))return 31;return 0}function Mb(a){if(!a)throw new P(63);return a}
-    		function V(a){a=Cb[a];if(!a)throw new P(8);return a}function Nb(a,b=-1){a=Object.assign(new Gb,a);if(-1==b)a:{for(b=0;4096>=b;b++)if(!Cb[b])break a;throw new P(33);}a.fd=b;return Cb[b]=a}function Ob(a,b=-1){a=Nb(a,b);a.Ma?.hc?.(a);return a}function Pb(a,b,c){var d=a?.Ma.Ua;a=d?a:b;d??=b.La.Ua;Mb(d);d(a,c);}var wb={open(a){a.Ma=Bb[a.node.rdev].Ma;a.Ma.open?.(a);},Va(){throw new P(70);}};function kb(a,b){Bb[a]={Ma:b};}
-    		function Qb(a,b){var c="/"===b;if(c&&Ab)throw new P(10);if(!c&&b){var d=U(b,{rb:!1});b=d.path;d=d.node;if(d.bb)throw new P(10);if(!R(d.mode))throw new P(54);}b={type:a,mc:{},Fb:b,Xb:[]};a=a.Xa(b);a.Xa=b;b.root=a;c?Ab=a:d&&(d.bb=b,d.Xa&&d.Xa.Xb.push(b));}function Rb(a,b,c){var d=U(a,{parent:!0}).node;a=ab(a);if(!a)throw new P(28);if("."===a||".."===a)throw new P(20);var e=Kb(d,a);if(e)throw new P(e);if(!d.La.hb)throw new P(63);return d.La.hb(d,a,b,c)}
-    		function ka(a,b=438){return Rb(a,b&4095|32768,0)}function X(a,b=511){return Rb(a,b&1023|16384,0)}function Sb(a,b,c){"undefined"==typeof c&&(c=b,b=438);Rb(a,b|8192,c);}function Tb(a,b){if(!db(a))throw new P(44);var c=U(b,{parent:!0}).node;if(!c)throw new P(44);b=ab(b);var d=Kb(c,b);if(d)throw new P(d);if(!c.La.symlink)throw new P(63);c.La.symlink(c,b,a);}
-    		function Ub(a){var b=U(a,{parent:!0}).node;a=ab(a);var c=S(b,a),d=Lb(b,a,!0);if(d)throw new P(d);if(!b.La.rmdir)throw new P(63);if(c.bb)throw new P(10);b.La.rmdir(b,a);yb(c);}function ua(a){var b=U(a,{parent:!0}).node;if(!b)throw new P(44);a=ab(a);var c=S(b,a),d=Lb(b,a,!1);if(d)throw new P(d);if(!b.La.unlink)throw new P(63);if(c.bb)throw new P(10);b.La.unlink(b,a);yb(c);}function Vb(a,b){a=U(a,{ab:!b}).node;return Mb(a.La.Ta)(a)}
-    		function Wb(a,b,c,d){Pb(a,b,{mode:c&4095|b.mode&-4096,ctime:Date.now(),Nb:d});}function la(a,b){a="string"==typeof a?U(a,{ab:!0}).node:a;Wb(null,a,b);}function Xb(a,b,c){if(R(b.mode))throw new P(31);if(32768!==(b.mode&61440))throw new P(28);var d=Jb(b,"w");if(d)throw new P(d);Pb(a,b,{size:c,timestamp:Date.now()});}
-    		function ma(a,b,c=438){if(""===a)throw new P(44);if("string"==typeof b){var d={r:0,"r+":2,w:577,"w+":578,a:1089,"a+":1090}[b];if("undefined"==typeof d)throw Error(`Unknown file open mode: ${b}`);b=d;}c=b&64?c&4095|32768:0;if("object"==typeof a)d=a;else {var e=a.endsWith("/");var g=U(a,{ab:!(b&131072),Yb:!0});d=g.node;a=g.path;}g=!1;if(b&64)if(d){if(b&128)throw new P(20);}else {if(e)throw new P(31);d=Rb(a,c|511,0);g=!0;}if(!d)throw new P(44);8192===(d.mode&61440)&&(b&=-513);if(b&65536&&!R(d.mode))throw new P(54);
-    		if(!g&&(d?40960===(d.mode&61440)?e=32:(e=["r","w","rw"][b&3],b&512&&(e+="w"),e=R(d.mode)&&("r"!==e||b&576)?31:Jb(d,e)):e=44,e))throw new P(e);b&512&&!g&&(e=d,e="string"==typeof e?U(e,{ab:!0}).node:e,Xb(null,e,0));b=Nb({node:d,path:ha(d),flags:b&-131713,seekable:!0,position:0,Ma:d.Ma,$b:[],error:!1});b.Ma.open&&b.Ma.open(b);g&&la(d,c&511);return b}function oa(a){if(null===a.fd)throw new P(8);a.tb&&(a.tb=null);try{a.Ma.close&&a.Ma.close(a);}catch(b){throw b;}finally{Cb[a.fd]=null;}a.fd=null;}
-    		function gc(a,b,c){if(null===a.fd)throw new P(8);if(!a.seekable||!a.Ma.Va)throw new P(70);if(0!=c&&1!=c&&2!=c)throw new P(28);a.position=a.Ma.Va(a,b,c);a.$b=[];}function yc(a,b,c,d,e){if(0>d||0>e)throw new P(28);if(null===a.fd)throw new P(8);if(1===(a.flags&2097155))throw new P(8);if(R(a.node.mode))throw new P(31);if(!a.Ma.read)throw new P(28);var g="undefined"!=typeof e;if(!g)e=a.position;else if(!a.seekable)throw new P(70);b=a.Ma.read(a,b,c,d,e);g||(a.position+=b);return b}
-    		function na(a,b,c,d,e){if(0>d||0>e)throw new P(28);if(null===a.fd)throw new P(8);if(0===(a.flags&2097155))throw new P(8);if(R(a.node.mode))throw new P(31);if(!a.Ma.write)throw new P(28);a.seekable&&a.flags&1024&&gc(a,0,2);var g="undefined"!=typeof e;if(!g)e=a.position;else if(!a.seekable)throw new P(70);b=a.Ma.write(a,b,c,d,e,void 0);g||(a.position+=b);return b}
-    		function sa(a){var b=b||0;var c="binary";"utf8"!==c&&"binary"!==c&&G(`Invalid encoding type "${c}"`);b=ma(a,b);a=Vb(a).size;var d=new Uint8Array(a);yc(b,d,0,a,0);"utf8"===c&&(d=eb(d));oa(b);return d}
-    		function Y(a,b,c){a=ia("/dev/"+a);var d=ja(!!b,!!c);Y.Eb??(Y.Eb=64);var e=Y.Eb++<<8|0;kb(e,{open(g){g.seekable=!1;},close(){c?.buffer?.length&&c(10);},read(g,h,u,x){for(var r=0,C=0;C<x;C++){try{var D=b();}catch(mb){throw new P(29);}if(void 0===D&&0===r)throw new P(6);if(null===D||void 0===D)break;r++;h[u+C]=D;}r&&(g.node.atime=Date.now());return r},write(g,h,u,x){for(var r=0;r<x;r++)try{c(h[u+r]);}catch(C){throw new P(29);}x&&(g.node.mtime=g.node.ctime=Date.now());return r}});Sb(a,d,e);}var Z={};
-    		function Ac(a,b,c){if("/"===b.charAt(0))return b;a=-100===a?"/":V(a).path;if(0==b.length){if(!c)throw new P(44);return a}return a+"/"+b}
-    		function Bc(a,b){F[a>>2]=b.dev;F[a+4>>2]=b.mode;F[a+8>>2]=b.nlink;F[a+12>>2]=b.uid;F[a+16>>2]=b.gid;F[a+20>>2]=b.rdev;I=[b.size>>>0,(H=b.size,1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[a+24>>2]=I[0];E[a+28>>2]=I[1];E[a+32>>2]=4096;E[a+36>>2]=b.blocks;var c=b.atime.getTime(),d=b.mtime.getTime(),e=b.ctime.getTime();I=[Math.floor(c/1E3)>>>0,(H=Math.floor(c/1E3),1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>
-    		0:0)];E[a+40>>2]=I[0];E[a+44>>2]=I[1];F[a+48>>2]=c%1E3*1E6;I=[Math.floor(d/1E3)>>>0,(H=Math.floor(d/1E3),1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[a+56>>2]=I[0];E[a+60>>2]=I[1];F[a+64>>2]=d%1E3*1E6;I=[Math.floor(e/1E3)>>>0,(H=Math.floor(e/1E3),1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[a+72>>2]=I[0];E[a+76>>2]=I[1];F[a+80>>2]=e%1E3*1E6;I=[b.ino>>>0,(H=b.ino,1<=+Math.abs(H)?0<H?+Math.floor(H/
-    		4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[a+88>>2]=I[0];E[a+92>>2]=I[1];return 0}
-    		var Cc=void 0,Dc=()=>{var a=E[+Cc>>2];Cc+=4;return a},Ec=(a,b)=>b+2097152>>>0<4194305-!!a?(a>>>0)+4294967296*b:NaN,Fc=0,Gc=[0,31,60,91,121,152,182,213,244,274,305,335],Hc=[0,31,59,90,120,151,181,212,243,273,304,334],Ic={},Jc=a=>{Fa=a;Wa||0<Fc||(k.onExit?.(a),Ea=!0);xa(a,new Qa(a));},Kc=a=>{if(!Ea)try{a();}catch(b){b instanceof Qa||"unwind"==b||xa(1,b);}finally{if(!(Wa||0<Fc))try{Fa=a=Fa,Jc(a);}catch(b){b instanceof Qa||"unwind"==b||xa(1,b);}}},Lc={},Nc=()=>{if(!Mc){var a={USER:"web_user",LOGNAME:"web_user",
-    		PATH:"/",PWD:"/",HOME:"/home/web_user",LANG:(globalThis.navigator?.language??"C").replace("-","_")+".UTF-8",_:wa||"./this.program"},b;for(b in Lc)void 0===Lc[b]?delete a[b]:a[b]=Lc[b];var c=[];for(b in a)c.push(`${b}=${a[b]}`);Mc=c;}return Mc},Mc,Oc=(a,b,c,d)=>{var e={string:r=>{var C=0;if(null!==r&&void 0!==r&&0!==r){C=gb(r)+1;var D=t(C);O(r,B,D,C);C=D;}return C},array:r=>{var C=t(r.length);m.set(r,C);return C}};a=k["_"+a];var g=[],h=0;if(d)for(var u=0;u<d.length;u++){var x=e[c[u]];x?(0===h&&(h=pa()),
-    		g[u]=x(d[u])):g[u]=d[u];}c=a(...g);return c=function(r){0!==h&&ra(h);return "string"===b?v(r):"boolean"===b?!!r:r}(c)},fa=a=>{var b=gb(a)+1,c=da(b);c&&O(a,B,c,b);return c},Pc,Qc=[],z=a=>{Pc.delete(Rc.get(a));Rc.set(a,null);Qc.push(a);},va=a=>{if(!Pc){Pc=new WeakMap;var b=Rc.length;if(Pc)for(var c=0;c<0+b;c++){var d=Rc.get(c);d&&Pc.set(d,c);}}if(b=Pc.get(a)||0)return b;b=Qc.length?Qc.pop():Rc.grow(1);Rc.set(b,a);Pc.set(a,b);return b};T=Array(4096);Qb(Q,"/");X("/tmp");X("/home");X("/home/web_user");
-    		(function(){X("/dev");kb(259,{read:()=>0,write:(d,e,g,h)=>h,Va:()=>0});Sb("/dev/null",259);jb(1280,ub);jb(1536,vb);Sb("/dev/tty",1280);Sb("/dev/tty1",1536);var a=new Uint8Array(1024),b=0,c=()=>{0===b&&(cb(a),b=a.byteLength);return a[--b]};Y("random",c);Y("urandom",c);X("/dev/shm");X("/dev/shm/tmp");})();
-    		(function(){X("/proc");var a=X("/proc/self");X("/proc/self/fd");Qb({Xa(){var b=xb(a,"fd",16895,73);b.Ma={Va:Q.Ma.Va};b.La={lookup(c,d){c=+d;var e=V(c);c={parent:null,Xa:{Fb:"fake"},La:{readlink:()=>e.path},id:c+1};return c.parent=c},readdir(){return Array.from(Cb.entries()).filter(([,c])=>c).map(([c])=>c.toString())}};return b}},"/proc/self/fd");})();k.noExitRuntime&&(Wa=k.noExitRuntime);k.print&&(za=k.print);k.printErr&&(A=k.printErr);k.wasmBinary&&(Aa=k.wasmBinary);k.thisProgram&&(wa=k.thisProgram);
-    		if(k.preInit)for("function"==typeof k.preInit&&(k.preInit=[k.preInit]);0<k.preInit.length;)k.preInit.shift()();k.stackSave=()=>pa();k.stackRestore=a=>ra(a);k.stackAlloc=a=>t(a);k.cwrap=(a,b,c,d)=>{var e=!c||c.every(g=>"number"===g||"boolean"===g);return "string"!==b&&e&&!d?k["_"+a]:(...g)=>Oc(a,b,c,g)};k.addFunction=va;k.removeFunction=z;k.UTF8ToString=v;k.stringToNewUTF8=fa;k.writeArrayToMemory=(a,b)=>{m.set(a,b);};
-    		var da,ea,zb,Sc,ra,t,pa,La,Rc,Tc={a:(a,b,c,d)=>G(`Assertion failed: ${v(a)}, at: `+[b?v(b):"unknown filename",c,d?v(d):"unknown function"]),i:function(a,b){try{return a=v(a),la(a,b),0}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return -c.Pa}},L:function(a,b,c){try{b=v(b);b=Ac(a,b);if(c&-8)return -28;var d=U(b,{ab:!0}).node;if(!d)return -44;a="";c&4&&(a+="r");c&2&&(a+="w");c&1&&(a+="x");return a&&Jb(d,a)?-2:0}catch(e){if("undefined"==typeof Z||"ErrnoError"!==e.name)throw e;return -e.Pa}},
-    		j:function(a,b){try{var c=V(a);Wb(c,c.node,b,!1);return 0}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return -d.Pa}},h:function(a){try{var b=V(a);Pb(b,b.node,{timestamp:Date.now(),Nb:!1});return 0}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return -c.Pa}},b:function(a,b,c){Cc=c;try{var d=V(a);switch(b){case 0:var e=Dc();if(0>e)break;for(;Cb[e];)e++;return Ob(d,e).fd;case 1:case 2:return 0;case 3:return d.flags;case 4:return e=Dc(),d.flags|=e,0;case 12:return e=
-    		Dc(),Ha[e+0>>1]=2,0;case 13:case 14:return 0}return -28}catch(g){if("undefined"==typeof Z||"ErrnoError"!==g.name)throw g;return -g.Pa}},g:function(a,b){try{var c=V(a),d=c.node,e=c.Ma.Ta;a=e?c:d;e??=d.La.Ta;Mb(e);var g=e(a);return Bc(b,g)}catch(h){if("undefined"==typeof Z||"ErrnoError"!==h.name)throw h;return -h.Pa}},o:function(a,b,c){b=Ec(b,c);try{if(isNaN(b))return -61;var d=V(a);if(0>b||0===(d.flags&2097155))throw new P(28);Xb(d,d.node,b);return 0}catch(e){if("undefined"==typeof Z||"ErrnoError"!==e.name)throw e;
-    		return -e.Pa}},H:function(a,b){try{if(0===b)return -28;var c=gb("/")+1;if(b<c)return -68;O("/",B,a,b);return c}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return -d.Pa}},K:function(a,b){try{return a=v(a),Bc(b,Vb(a,!0))}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return -c.Pa}},E:function(a,b,c){try{return b=v(b),b=Ac(a,b),X(b,c),0}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return -d.Pa}},J:function(a,b,c,d){try{b=v(b);var e=d&256;b=Ac(a,b,
-    		d&4096);return Bc(c,e?Vb(b,!0):Vb(b))}catch(g){if("undefined"==typeof Z||"ErrnoError"!==g.name)throw g;return -g.Pa}},C:function(a,b,c,d){Cc=d;try{b=v(b);b=Ac(a,b);var e=d?Dc():0;return ma(b,c,e).fd}catch(g){if("undefined"==typeof Z||"ErrnoError"!==g.name)throw g;return -g.Pa}},A:function(a,b,c,d){try{b=v(b);b=Ac(a,b);if(0>=d)return -28;var e=U(b).node;if(!e)throw new P(44);if(!e.La.readlink)throw new P(28);var g=e.La.readlink(e);var h=Math.min(d,gb(g)),u=m[c+h];O(g,B,c,d+1);m[c+h]=u;return h}catch(x){if("undefined"==
-    		typeof Z||"ErrnoError"!==x.name)throw x;return -x.Pa}},z:function(a){try{return a=v(a),Ub(a),0}catch(b){if("undefined"==typeof Z||"ErrnoError"!==b.name)throw b;return -b.Pa}},f:function(a,b){try{return a=v(a),Bc(b,Vb(a))}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return -c.Pa}},w:function(a,b,c){try{b=v(b);b=Ac(a,b);if(c)if(512===c)Ub(b);else return -28;else ua(b);return 0}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return -d.Pa}},v:function(a,b,c){try{b=v(b);
-    		b=Ac(a,b,!0);var d=Date.now();if(c){var e=F[c>>2]+4294967296*E[c+4>>2],g=E[c+8>>2];var h=1073741823==g?d:1073741822==g?null:1E3*e+g/1E6;c+=16;e=F[c>>2]+4294967296*E[c+4>>2];g=E[c+8>>2];var u=1073741823==g?d:1073741822==g?null:1E3*e+g/1E6;}else u=h=d;if(null!==(u??h)){a=h;var x=U(b,{ab:!0}).node;Mb(x.La.Ua)(x,{atime:a,mtime:u});}return 0}catch(r){if("undefined"==typeof Z||"ErrnoError"!==r.name)throw r;return -r.Pa}},r:()=>G(""),q:()=>{Wa=!1;Fc=0;},m:function(a,b,c){a=new Date(1E3*Ec(a,b));E[c>>2]=a.getSeconds();
-    		E[c+4>>2]=a.getMinutes();E[c+8>>2]=a.getHours();E[c+12>>2]=a.getDate();E[c+16>>2]=a.getMonth();E[c+20>>2]=a.getFullYear()-1900;E[c+24>>2]=a.getDay();b=a.getFullYear();E[c+28>>2]=(0!==b%4||0===b%100&&0!==b%400?Hc:Gc)[a.getMonth()]+a.getDate()-1|0;E[c+36>>2]=-(60*a.getTimezoneOffset());b=(new Date(a.getFullYear(),6,1)).getTimezoneOffset();var d=(new Date(a.getFullYear(),0,1)).getTimezoneOffset();E[c+32>>2]=(b!=d&&a.getTimezoneOffset()==Math.min(d,b))|0;},k:function(a,b,c,d,e,g,h,u){e=Ec(e,g);try{var x=
-    		V(d);if(0!==(b&2)&&0===(c&2)&&2!==(x.flags&2097155))throw new P(2);if(1===(x.flags&2097155))throw new P(2);if(!x.Ma.ib)throw new P(43);if(!a)throw new P(28);var r=x.Ma.ib(x,a,e,b,c);var C=r.Zb;E[h>>2]=r.Gb;F[u>>2]=C;return 0}catch(D){if("undefined"==typeof Z||"ErrnoError"!==D.name)throw D;return -D.Pa}},l:function(a,b,c,d,e,g,h){g=Ec(g,h);try{var u=V(e);if(c&2){if(32768!==(u.node.mode&61440))throw new P(43);if(!(d&2)){var x=B.slice(a,a+b);u.Ma.jb&&u.Ma.jb(u,x,g,b,d);}}}catch(r){if("undefined"==typeof Z||
-    		"ErrnoError"!==r.name)throw r;return -r.Pa}},s:(a,b)=>{Ic[a]&&(clearTimeout(Ic[a].id),delete Ic[a]);if(!b)return 0;var c=setTimeout(()=>{delete Ic[a];Kc(()=>Sc(a,performance.now()));},b);Ic[a]={id:c,nc:b};return 0},D:(a,b,c,d)=>{var e=(new Date).getFullYear(),g=(new Date(e,0,1)).getTimezoneOffset();e=(new Date(e,6,1)).getTimezoneOffset();F[a>>2]=60*Math.max(g,e);E[b>>2]=Number(g!=e);b=h=>{var u=Math.abs(h);return `UTC${0<=h?"-":"+"}${String(Math.floor(u/60)).padStart(2,"0")}${String(u%60).padStart(2,
+		"")+b||"."},eb=a=>{var b=Ya(a,0);return Xa.decode(a.buffer?a.subarray(0,b):new Uint8Array(a.slice(0,b)))},fb=[],gb=a=>{for(var b=0,c=0;c<a.length;++c){var d=a.charCodeAt(c);127>=d?b++:2047>=d?b+=2:55296<=d&&57343>=d?(b+=4,++c):b+=3;}return b},O=(a,b,c,d)=>{if(!(0<d))return 0;var e=c;d=c+d-1;for(var g=0;g<a.length;++g){var h=a.codePointAt(g);if(127>=h){if(c>=d)break;b[c++]=h;}else if(2047>=h){if(c+1>=d)break;b[c++]=192|h>>6;b[c++]=128|h&63;}else if(65535>=h){if(c+2>=d)break;b[c++]=224|h>>12;b[c++]=128|
+		h>>6&63;b[c++]=128|h&63;}else {if(c+3>=d)break;b[c++]=240|h>>18;b[c++]=128|h>>12&63;b[c++]=128|h>>6&63;b[c++]=128|h&63;g++;}}b[c]=0;return c-e},hb=[];function jb(a,b){hb[a]={input:[],output:[],eb:b};kb(a,tb);}
+		var tb={open(a){var b=hb[a.node.rdev];if(!b)throw new P(43);a.tty=b;a.seekable=!1;},close(a){a.tty.eb.fsync(a.tty);},fsync(a){a.tty.eb.fsync(a.tty);},read(a,b,c,d){if(!a.tty||!a.tty.eb.Db)throw new P(60);for(var e=0,g=0;g<d;g++){try{var h=a.tty.eb.Db(a.tty);}catch(u){throw new P(29);}if(void 0===h&&0===e)throw new P(6);if(null===h||void 0===h)break;e++;b[c+g]=h;}e&&(a.node.atime=Date.now());return e},write(a,b,c,d){if(!a.tty||!a.tty.eb.wb)throw new P(60);try{for(var e=0;e<d;e++)a.tty.eb.wb(a.tty,b[c+e]);}catch(g){throw new P(29);
+		}d&&(a.node.mtime=a.node.ctime=Date.now());return e}},ub={Db(){a:{if(!fb.length){var a=null;if(ca){var b=Buffer.alloc(256),c=0,d=process.stdin.fd;try{c=fs.readSync(d,b,0,256);}catch(e){if(e.toString().includes("EOF"))c=0;else throw e;}0<c&&(a=b.slice(0,c).toString("utf-8"));}else globalThis.window?.prompt&&(a=window.prompt("Input: "),null!==a&&(a+="\n"));if(!a){a=null;break a}b=Array(gb(a)+1);a=O(a,b,0,b.length);b.length=a;fb=b;}a=fb.shift();}return a},wb(a,b){null===b||10===b?(za(eb(a.output)),a.output=
+		[]):0!=b&&a.output.push(b);},fsync(a){0<a.output?.length&&(za(eb(a.output)),a.output=[]);},jc(){return {dc:25856,fc:5,cc:191,ec:35387,bc:[3,28,127,21,4,0,1,0,17,19,26,0,18,15,23,22,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}},kc(){return 0},lc(){return [24,80]}},vb={wb(a,b){null===b||10===b?(A(eb(a.output)),a.output=[]):0!=b&&a.output.push(b);},fsync(a){0<a.output?.length&&(A(eb(a.output)),a.output=[]);}},Q={Wa:null,Xa(){return Q.createNode(null,"/",16895,0)},createNode(a,b,c,d){if(24576===(c&61440)||4096===(c&61440))throw new P(63);
+		Q.Wa||(Q.Wa={dir:{node:{Ta:Q.La.Ta,Ua:Q.La.Ua,lookup:Q.La.lookup,hb:Q.La.hb,rename:Q.La.rename,unlink:Q.La.unlink,rmdir:Q.La.rmdir,readdir:Q.La.readdir,symlink:Q.La.symlink},stream:{Va:Q.Ma.Va}},file:{node:{Ta:Q.La.Ta,Ua:Q.La.Ua},stream:{Va:Q.Ma.Va,read:Q.Ma.read,write:Q.Ma.write,ib:Q.Ma.ib,jb:Q.Ma.jb}},link:{node:{Ta:Q.La.Ta,Ua:Q.La.Ua,readlink:Q.La.readlink},stream:{}},Ab:{node:{Ta:Q.La.Ta,Ua:Q.La.Ua},stream:wb}});c=xb(a,b,c,d);R(c.mode)?(c.La=Q.Wa.dir.node,c.Ma=Q.Wa.dir.stream,c.Na={}):32768===
+		(c.mode&61440)?(c.La=Q.Wa.file.node,c.Ma=Q.Wa.file.stream,c.Ra=0,c.Na=null):40960===(c.mode&61440)?(c.La=Q.Wa.link.node,c.Ma=Q.Wa.link.stream):8192===(c.mode&61440)&&(c.La=Q.Wa.Ab.node,c.Ma=Q.Wa.Ab.stream);c.atime=c.mtime=c.ctime=Date.now();a&&(a.Na[b]=c,a.atime=a.mtime=a.ctime=c.atime);return c},ic(a){return a.Na?a.Na.subarray?a.Na.subarray(0,a.Ra):new Uint8Array(a.Na):new Uint8Array(0)},La:{Ta(a){var b={};b.dev=8192===(a.mode&61440)?a.id:1;b.ino=a.id;b.mode=a.mode;b.nlink=1;b.uid=0;b.gid=0;b.rdev=
+		a.rdev;b.size=R(a.mode)?4096:32768===(a.mode&61440)?a.Ra:40960===(a.mode&61440)?a.link.length:0;b.atime=new Date(a.atime);b.mtime=new Date(a.mtime);b.ctime=new Date(a.ctime);b.blksize=4096;b.blocks=Math.ceil(b.size/b.blksize);return b},Ua(a,b){for(var c of ["mode","atime","mtime","ctime"])null!=b[c]&&(a[c]=b[c]);void 0!==b.size&&(b=b.size,a.Ra!=b&&(0==b?(a.Na=null,a.Ra=0):(c=a.Na,a.Na=new Uint8Array(b),c&&a.Na.set(c.subarray(0,Math.min(b,a.Ra))),a.Ra=b)));},lookup(){Q.pb||(Q.pb=new P(44),Q.pb.stack=
+		"<generic error, no stack>");throw Q.pb;},hb(a,b,c,d){return Q.createNode(a,b,c,d)},rename(a,b,c){try{var d=S(b,c);}catch(g){}if(d){if(R(a.mode))for(var e in d.Na)throw new P(55);yb(d);}delete a.parent.Na[a.name];b.Na[c]=a;a.name=c;b.ctime=b.mtime=a.parent.ctime=a.parent.mtime=Date.now();},unlink(a,b){delete a.Na[b];a.ctime=a.mtime=Date.now();},rmdir(a,b){var c=S(a,b),d;for(d in c.Na)throw new P(55);delete a.Na[b];a.ctime=a.mtime=Date.now();},readdir(a){return [".","..",...Object.keys(a.Na)]},symlink(a,
+		b,c){a=Q.createNode(a,b,41471,0);a.link=c;return a},readlink(a){if(40960!==(a.mode&61440))throw new P(28);return a.link}},Ma:{read(a,b,c,d,e){var g=a.node.Na;if(e>=a.node.Ra)return 0;a=Math.min(a.node.Ra-e,d);if(8<a&&g.subarray)b.set(g.subarray(e,e+a),c);else for(d=0;d<a;d++)b[c+d]=g[e+d];return a},write(a,b,c,d,e,g){b.buffer===m.buffer&&(g=!1);if(!d)return 0;a=a.node;a.mtime=a.ctime=Date.now();if(b.subarray&&(!a.Na||a.Na.subarray)){if(g)return a.Na=b.subarray(c,c+d),a.Ra=d;if(0===a.Ra&&0===e)return a.Na=
+		b.slice(c,c+d),a.Ra=d;if(e+d<=a.Ra)return a.Na.set(b.subarray(c,c+d),e),d}g=e+d;var h=a.Na?a.Na.length:0;h>=g||(g=Math.max(g,h*(1048576>h?2:1.125)>>>0),0!=h&&(g=Math.max(g,256)),h=a.Na,a.Na=new Uint8Array(g),0<a.Ra&&a.Na.set(h.subarray(0,a.Ra),0));if(a.Na.subarray&&b.subarray)a.Na.set(b.subarray(c,c+d),e);else for(g=0;g<d;g++)a.Na[e+g]=b[c+g];a.Ra=Math.max(a.Ra,e+d);return d},Va(a,b,c){1===c?b+=a.position:2===c&&32768===(a.node.mode&61440)&&(b+=a.node.Ra);if(0>b)throw new P(28);return b},ib(a,b,c,
+		d,e){if(32768!==(a.node.mode&61440))throw new P(43);a=a.node.Na;if(e&2||!a||a.buffer!==m.buffer){e=!0;d=65536*Math.ceil(b/65536);var g=zb(65536,d);g&&B.fill(0,g,g+d);d=g;if(!d)throw new P(48);if(a){if(0<c||c+b<a.length)a=a.subarray?a.subarray(c,c+b):Array.prototype.slice.call(a,c,c+b);m.set(a,d);}}else e=!1,d=a.byteOffset;return {Zb:d,Gb:e}},jb(a,b,c,d){Q.Ma.write(a,b,0,d,c,!1);return 0}}},ja=(a,b)=>{var c=0;a&&(c|=365);b&&(c|=146);return c},Ab=null,Bb={},Cb=[],Db=1,T=null,Eb=!1,Fb=!0,P=class{name="ErrnoError";constructor(a){this.Pa=
+		a;}},Gb=class{mb={};node=null;get object(){return this.node}set object(a){this.node=a;}get flags(){return this.mb.flags}set flags(a){this.mb.flags=a;}get position(){return this.mb.position}set position(a){this.mb.position=a;}},Hb=class{La={};Ma={};lb=365;nb=146;bb=null;constructor(a,b,c,d){a||=this;this.parent=a;this.Xa=a.Xa;this.id=Db++;this.name=b;this.mode=c;this.rdev=d;this.atime=this.mtime=this.ctime=Date.now();}get read(){return (this.mode&this.lb)===this.lb}set read(a){a?this.mode|=this.lb:this.mode&=
+		~this.lb;}get write(){return (this.mode&this.nb)===this.nb}set write(a){a?this.mode|=this.nb:this.mode&=~this.nb;}};
+		function U(a,b={}){if(!a)throw new P(44);b.rb??(b.rb=!0);"/"===a.charAt(0)||(a="//"+a);var c=0;a:for(;40>c;c++){a=a.split("/").filter(u=>!!u);for(var d=Ab,e="/",g=0;g<a.length;g++){var h=g===a.length-1;if(h&&b.parent)break;if("."!==a[g])if(".."===a[g])if(e=$a(e),d===d.parent){a=e+"/"+a.slice(g+1).join("/");c--;continue a}else d=d.parent;else {e=ia(e+"/"+a[g]);try{d=S(d,a[g]);}catch(u){if(44===u?.Pa&&h&&b.Yb)return {path:e};throw u;}!d.bb||h&&!b.rb||(d=d.bb.root);if(40960===(d.mode&61440)&&(!h||b.ab)){if(!d.La.readlink)throw new P(52);
+		d=d.La.readlink(d);"/"===d.charAt(0)||(d=$a(e)+"/"+d);a=d+"/"+a.slice(g+1).join("/");continue a}}}return {path:e,node:d}}throw new P(32);}function ha(a){for(var b;;){if(a===a.parent)return a=a.Xa.Fb,b?"/"!==a[a.length-1]?`${a}/${b}`:a+b:a;b=b?`${a.name}/${b}`:a.name;a=a.parent;}}function Ib(a,b){for(var c=0,d=0;d<b.length;d++)c=(c<<5)-c+b.charCodeAt(d)|0;return (a+c>>>0)%T.length}
+		function yb(a){var b=Ib(a.parent.id,a.name);if(T[b]===a)T[b]=a.cb;else for(b=T[b];b;){if(b.cb===a){b.cb=a.cb;break}b=b.cb;}}function S(a,b){var c=R(a.mode)?(c=Jb(a,"x"))?c:a.La.lookup?0:2:54;if(c)throw new P(c);for(c=T[Ib(a.id,b)];c;c=c.cb){var d=c.name;if(c.parent.id===a.id&&d===b)return c}return a.La.lookup(a,b)}function xb(a,b,c,d){a=new Hb(a,b,c,d);b=Ib(a.parent.id,a.name);a.cb=T[b];return T[b]=a}function R(a){return 16384===(a&61440)}
+		function Jb(a,b){return Fb?0:b.includes("r")&&!(a.mode&292)||b.includes("w")&&!(a.mode&146)||b.includes("x")&&!(a.mode&73)?2:0}function Kb(a,b){if(!R(a.mode))return 54;try{return S(a,b),20}catch(c){}return Jb(a,"wx")}function Lb(a,b,c){try{var d=S(a,b);}catch(e){return e.Pa}if(a=Jb(a,"wx"))return a;if(c){if(!R(d.mode))return 54;if(d===d.parent||"/"===ha(d))return 10}else if(R(d.mode))return 31;return 0}function Mb(a){if(!a)throw new P(63);return a}
+		function V(a){a=Cb[a];if(!a)throw new P(8);return a}function Nb(a,b=-1){a=Object.assign(new Gb,a);if(-1==b)a:{for(b=0;4096>=b;b++)if(!Cb[b])break a;throw new P(33);}a.fd=b;return Cb[b]=a}function Ob(a,b=-1){a=Nb(a,b);a.Ma?.hc?.(a);return a}function Pb(a,b,c){var d=a?.Ma.Ua;a=d?a:b;d??=b.La.Ua;Mb(d);d(a,c);}var wb={open(a){a.Ma=Bb[a.node.rdev].Ma;a.Ma.open?.(a);},Va(){throw new P(70);}};function kb(a,b){Bb[a]={Ma:b};}
+		function Qb(a,b){var c="/"===b;if(c&&Ab)throw new P(10);if(!c&&b){var d=U(b,{rb:!1});b=d.path;d=d.node;if(d.bb)throw new P(10);if(!R(d.mode))throw new P(54);}b={type:a,mc:{},Fb:b,Xb:[]};a=a.Xa(b);a.Xa=b;b.root=a;c?Ab=a:d&&(d.bb=b,d.Xa&&d.Xa.Xb.push(b));}function Rb(a,b,c){var d=U(a,{parent:!0}).node;a=ab(a);if(!a)throw new P(28);if("."===a||".."===a)throw new P(20);var e=Kb(d,a);if(e)throw new P(e);if(!d.La.hb)throw new P(63);return d.La.hb(d,a,b,c)}
+		function ka(a,b=438){return Rb(a,b&4095|32768,0)}function X(a,b=511){return Rb(a,b&1023|16384,0)}function Sb(a,b,c){"undefined"==typeof c&&(c=b,b=438);Rb(a,b|8192,c);}function Tb(a,b){if(!db(a))throw new P(44);var c=U(b,{parent:!0}).node;if(!c)throw new P(44);b=ab(b);var d=Kb(c,b);if(d)throw new P(d);if(!c.La.symlink)throw new P(63);c.La.symlink(c,b,a);}
+		function Ub(a){var b=U(a,{parent:!0}).node;a=ab(a);var c=S(b,a),d=Lb(b,a,!0);if(d)throw new P(d);if(!b.La.rmdir)throw new P(63);if(c.bb)throw new P(10);b.La.rmdir(b,a);yb(c);}function ua(a){var b=U(a,{parent:!0}).node;if(!b)throw new P(44);a=ab(a);var c=S(b,a),d=Lb(b,a,!1);if(d)throw new P(d);if(!b.La.unlink)throw new P(63);if(c.bb)throw new P(10);b.La.unlink(b,a);yb(c);}function Vb(a,b){a=U(a,{ab:!b}).node;return Mb(a.La.Ta)(a)}
+		function Wb(a,b,c,d){Pb(a,b,{mode:c&4095|b.mode&-4096,ctime:Date.now(),Nb:d});}function la(a,b){a="string"==typeof a?U(a,{ab:!0}).node:a;Wb(null,a,b);}function Xb(a,b,c){if(R(b.mode))throw new P(31);if(32768!==(b.mode&61440))throw new P(28);var d=Jb(b,"w");if(d)throw new P(d);Pb(a,b,{size:c,timestamp:Date.now()});}
+		function ma(a,b,c=438){if(""===a)throw new P(44);if("string"==typeof b){var d={r:0,"r+":2,w:577,"w+":578,a:1089,"a+":1090}[b];if("undefined"==typeof d)throw Error(`Unknown file open mode: ${b}`);b=d;}c=b&64?c&4095|32768:0;if("object"==typeof a)d=a;else {var e=a.endsWith("/");var g=U(a,{ab:!(b&131072),Yb:!0});d=g.node;a=g.path;}g=!1;if(b&64)if(d){if(b&128)throw new P(20);}else {if(e)throw new P(31);d=Rb(a,c|511,0);g=!0;}if(!d)throw new P(44);8192===(d.mode&61440)&&(b&=-513);if(b&65536&&!R(d.mode))throw new P(54);
+		if(!g&&(d?40960===(d.mode&61440)?e=32:(e=["r","w","rw"][b&3],b&512&&(e+="w"),e=R(d.mode)&&("r"!==e||b&576)?31:Jb(d,e)):e=44,e))throw new P(e);b&512&&!g&&(e=d,e="string"==typeof e?U(e,{ab:!0}).node:e,Xb(null,e,0));b=Nb({node:d,path:ha(d),flags:b&-131713,seekable:!0,position:0,Ma:d.Ma,$b:[],error:!1});b.Ma.open&&b.Ma.open(b);g&&la(d,c&511);return b}function oa(a){if(null===a.fd)throw new P(8);a.tb&&(a.tb=null);try{a.Ma.close&&a.Ma.close(a);}catch(b){throw b;}finally{Cb[a.fd]=null;}a.fd=null;}
+		function gc(a,b,c){if(null===a.fd)throw new P(8);if(!a.seekable||!a.Ma.Va)throw new P(70);if(0!=c&&1!=c&&2!=c)throw new P(28);a.position=a.Ma.Va(a,b,c);a.$b=[];}function yc(a,b,c,d,e){if(0>d||0>e)throw new P(28);if(null===a.fd)throw new P(8);if(1===(a.flags&2097155))throw new P(8);if(R(a.node.mode))throw new P(31);if(!a.Ma.read)throw new P(28);var g="undefined"!=typeof e;if(!g)e=a.position;else if(!a.seekable)throw new P(70);b=a.Ma.read(a,b,c,d,e);g||(a.position+=b);return b}
+		function na(a,b,c,d,e){if(0>d||0>e)throw new P(28);if(null===a.fd)throw new P(8);if(0===(a.flags&2097155))throw new P(8);if(R(a.node.mode))throw new P(31);if(!a.Ma.write)throw new P(28);a.seekable&&a.flags&1024&&gc(a,0,2);var g="undefined"!=typeof e;if(!g)e=a.position;else if(!a.seekable)throw new P(70);b=a.Ma.write(a,b,c,d,e,void 0);g||(a.position+=b);return b}
+		function sa(a){var b=b||0;var c="binary";"utf8"!==c&&"binary"!==c&&G(`Invalid encoding type "${c}"`);b=ma(a,b);a=Vb(a).size;var d=new Uint8Array(a);yc(b,d,0,a,0);"utf8"===c&&(d=eb(d));oa(b);return d}
+		function Y(a,b,c){a=ia("/dev/"+a);var d=ja(!!b,!!c);Y.Eb??(Y.Eb=64);var e=Y.Eb++<<8|0;kb(e,{open(g){g.seekable=!1;},close(){c?.buffer?.length&&c(10);},read(g,h,u,x){for(var r=0,C=0;C<x;C++){try{var D=b();}catch(mb){throw new P(29);}if(void 0===D&&0===r)throw new P(6);if(null===D||void 0===D)break;r++;h[u+C]=D;}r&&(g.node.atime=Date.now());return r},write(g,h,u,x){for(var r=0;r<x;r++)try{c(h[u+r]);}catch(C){throw new P(29);}x&&(g.node.mtime=g.node.ctime=Date.now());return r}});Sb(a,d,e);}var Z={};
+		function Ac(a,b,c){if("/"===b.charAt(0))return b;a=-100===a?"/":V(a).path;if(0==b.length){if(!c)throw new P(44);return a}return a+"/"+b}
+		function Bc(a,b){F[a>>2]=b.dev;F[a+4>>2]=b.mode;F[a+8>>2]=b.nlink;F[a+12>>2]=b.uid;F[a+16>>2]=b.gid;F[a+20>>2]=b.rdev;I=[b.size>>>0,(H=b.size,1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[a+24>>2]=I[0];E[a+28>>2]=I[1];E[a+32>>2]=4096;E[a+36>>2]=b.blocks;var c=b.atime.getTime(),d=b.mtime.getTime(),e=b.ctime.getTime();I=[Math.floor(c/1E3)>>>0,(H=Math.floor(c/1E3),1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>
+		0:0)];E[a+40>>2]=I[0];E[a+44>>2]=I[1];F[a+48>>2]=c%1E3*1E6;I=[Math.floor(d/1E3)>>>0,(H=Math.floor(d/1E3),1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[a+56>>2]=I[0];E[a+60>>2]=I[1];F[a+64>>2]=d%1E3*1E6;I=[Math.floor(e/1E3)>>>0,(H=Math.floor(e/1E3),1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[a+72>>2]=I[0];E[a+76>>2]=I[1];F[a+80>>2]=e%1E3*1E6;I=[b.ino>>>0,(H=b.ino,1<=+Math.abs(H)?0<H?+Math.floor(H/
+		4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[a+88>>2]=I[0];E[a+92>>2]=I[1];return 0}
+		var Cc=void 0,Dc=()=>{var a=E[+Cc>>2];Cc+=4;return a},Ec=(a,b)=>b+2097152>>>0<4194305-!!a?(a>>>0)+4294967296*b:NaN,Fc=0,Gc=[0,31,60,91,121,152,182,213,244,274,305,335],Hc=[0,31,59,90,120,151,181,212,243,273,304,334],Ic={},Jc=a=>{Fa=a;Wa||0<Fc||(k.onExit?.(a),Ea=!0);xa(a,new Qa(a));},Kc=a=>{if(!Ea)try{a();}catch(b){b instanceof Qa||"unwind"==b||xa(1,b);}finally{if(!(Wa||0<Fc))try{Fa=a=Fa,Jc(a);}catch(b){b instanceof Qa||"unwind"==b||xa(1,b);}}},Lc={},Nc=()=>{if(!Mc){var a={USER:"web_user",LOGNAME:"web_user",
+		PATH:"/",PWD:"/",HOME:"/home/web_user",LANG:(globalThis.navigator?.language??"C").replace("-","_")+".UTF-8",_:wa||"./this.program"},b;for(b in Lc)void 0===Lc[b]?delete a[b]:a[b]=Lc[b];var c=[];for(b in a)c.push(`${b}=${a[b]}`);Mc=c;}return Mc},Mc,Oc=(a,b,c,d)=>{var e={string:r=>{var C=0;if(null!==r&&void 0!==r&&0!==r){C=gb(r)+1;var D=t(C);O(r,B,D,C);C=D;}return C},array:r=>{var C=t(r.length);m.set(r,C);return C}};a=k["_"+a];var g=[],h=0;if(d)for(var u=0;u<d.length;u++){var x=e[c[u]];x?(0===h&&(h=pa()),
+		g[u]=x(d[u])):g[u]=d[u];}c=a(...g);return c=function(r){0!==h&&ra(h);return "string"===b?v(r):"boolean"===b?!!r:r}(c)},fa=a=>{var b=gb(a)+1,c=da(b);c&&O(a,B,c,b);return c},Pc,Qc=[],z=a=>{Pc.delete(Rc.get(a));Rc.set(a,null);Qc.push(a);},va=a=>{if(!Pc){Pc=new WeakMap;var b=Rc.length;if(Pc)for(var c=0;c<0+b;c++){var d=Rc.get(c);d&&Pc.set(d,c);}}if(b=Pc.get(a)||0)return b;b=Qc.length?Qc.pop():Rc.grow(1);Rc.set(b,a);Pc.set(a,b);return b};T=Array(4096);Qb(Q,"/");X("/tmp");X("/home");X("/home/web_user");
+		(function(){X("/dev");kb(259,{read:()=>0,write:(d,e,g,h)=>h,Va:()=>0});Sb("/dev/null",259);jb(1280,ub);jb(1536,vb);Sb("/dev/tty",1280);Sb("/dev/tty1",1536);var a=new Uint8Array(1024),b=0,c=()=>{0===b&&(cb(a),b=a.byteLength);return a[--b]};Y("random",c);Y("urandom",c);X("/dev/shm");X("/dev/shm/tmp");})();
+		(function(){X("/proc");var a=X("/proc/self");X("/proc/self/fd");Qb({Xa(){var b=xb(a,"fd",16895,73);b.Ma={Va:Q.Ma.Va};b.La={lookup(c,d){c=+d;var e=V(c);c={parent:null,Xa:{Fb:"fake"},La:{readlink:()=>e.path},id:c+1};return c.parent=c},readdir(){return Array.from(Cb.entries()).filter(([,c])=>c).map(([c])=>c.toString())}};return b}},"/proc/self/fd");})();k.noExitRuntime&&(Wa=k.noExitRuntime);k.print&&(za=k.print);k.printErr&&(A=k.printErr);k.wasmBinary&&(Aa=k.wasmBinary);k.thisProgram&&(wa=k.thisProgram);
+		if(k.preInit)for("function"==typeof k.preInit&&(k.preInit=[k.preInit]);0<k.preInit.length;)k.preInit.shift()();k.stackSave=()=>pa();k.stackRestore=a=>ra(a);k.stackAlloc=a=>t(a);k.cwrap=(a,b,c,d)=>{var e=!c||c.every(g=>"number"===g||"boolean"===g);return "string"!==b&&e&&!d?k["_"+a]:(...g)=>Oc(a,b,c,g)};k.addFunction=va;k.removeFunction=z;k.UTF8ToString=v;k.stringToNewUTF8=fa;k.writeArrayToMemory=(a,b)=>{m.set(a,b);};
+		var da,ea,zb,Sc,ra,t,pa,La,Rc,Tc={a:(a,b,c,d)=>G(`Assertion failed: ${v(a)}, at: `+[b?v(b):"unknown filename",c,d?v(d):"unknown function"]),i:function(a,b){try{return a=v(a),la(a,b),0}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return -c.Pa}},L:function(a,b,c){try{b=v(b);b=Ac(a,b);if(c&-8)return -28;var d=U(b,{ab:!0}).node;if(!d)return -44;a="";c&4&&(a+="r");c&2&&(a+="w");c&1&&(a+="x");return a&&Jb(d,a)?-2:0}catch(e){if("undefined"==typeof Z||"ErrnoError"!==e.name)throw e;return -e.Pa}},
+		j:function(a,b){try{var c=V(a);Wb(c,c.node,b,!1);return 0}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return -d.Pa}},h:function(a){try{var b=V(a);Pb(b,b.node,{timestamp:Date.now(),Nb:!1});return 0}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return -c.Pa}},b:function(a,b,c){Cc=c;try{var d=V(a);switch(b){case 0:var e=Dc();if(0>e)break;for(;Cb[e];)e++;return Ob(d,e).fd;case 1:case 2:return 0;case 3:return d.flags;case 4:return e=Dc(),d.flags|=e,0;case 12:return e=
+		Dc(),Ha[e+0>>1]=2,0;case 13:case 14:return 0}return -28}catch(g){if("undefined"==typeof Z||"ErrnoError"!==g.name)throw g;return -g.Pa}},g:function(a,b){try{var c=V(a),d=c.node,e=c.Ma.Ta;a=e?c:d;e??=d.La.Ta;Mb(e);var g=e(a);return Bc(b,g)}catch(h){if("undefined"==typeof Z||"ErrnoError"!==h.name)throw h;return -h.Pa}},o:function(a,b,c){b=Ec(b,c);try{if(isNaN(b))return -61;var d=V(a);if(0>b||0===(d.flags&2097155))throw new P(28);Xb(d,d.node,b);return 0}catch(e){if("undefined"==typeof Z||"ErrnoError"!==e.name)throw e;
+		return -e.Pa}},H:function(a,b){try{if(0===b)return -28;var c=gb("/")+1;if(b<c)return -68;O("/",B,a,b);return c}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return -d.Pa}},K:function(a,b){try{return a=v(a),Bc(b,Vb(a,!0))}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return -c.Pa}},E:function(a,b,c){try{return b=v(b),b=Ac(a,b),X(b,c),0}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return -d.Pa}},J:function(a,b,c,d){try{b=v(b);var e=d&256;b=Ac(a,b,
+		d&4096);return Bc(c,e?Vb(b,!0):Vb(b))}catch(g){if("undefined"==typeof Z||"ErrnoError"!==g.name)throw g;return -g.Pa}},C:function(a,b,c,d){Cc=d;try{b=v(b);b=Ac(a,b);var e=d?Dc():0;return ma(b,c,e).fd}catch(g){if("undefined"==typeof Z||"ErrnoError"!==g.name)throw g;return -g.Pa}},A:function(a,b,c,d){try{b=v(b);b=Ac(a,b);if(0>=d)return -28;var e=U(b).node;if(!e)throw new P(44);if(!e.La.readlink)throw new P(28);var g=e.La.readlink(e);var h=Math.min(d,gb(g)),u=m[c+h];O(g,B,c,d+1);m[c+h]=u;return h}catch(x){if("undefined"==
+		typeof Z||"ErrnoError"!==x.name)throw x;return -x.Pa}},z:function(a){try{return a=v(a),Ub(a),0}catch(b){if("undefined"==typeof Z||"ErrnoError"!==b.name)throw b;return -b.Pa}},f:function(a,b){try{return a=v(a),Bc(b,Vb(a))}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return -c.Pa}},w:function(a,b,c){try{b=v(b);b=Ac(a,b);if(c)if(512===c)Ub(b);else return -28;else ua(b);return 0}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return -d.Pa}},v:function(a,b,c){try{b=v(b);
+		b=Ac(a,b,!0);var d=Date.now();if(c){var e=F[c>>2]+4294967296*E[c+4>>2],g=E[c+8>>2];var h=1073741823==g?d:1073741822==g?null:1E3*e+g/1E6;c+=16;e=F[c>>2]+4294967296*E[c+4>>2];g=E[c+8>>2];var u=1073741823==g?d:1073741822==g?null:1E3*e+g/1E6;}else u=h=d;if(null!==(u??h)){a=h;var x=U(b,{ab:!0}).node;Mb(x.La.Ua)(x,{atime:a,mtime:u});}return 0}catch(r){if("undefined"==typeof Z||"ErrnoError"!==r.name)throw r;return -r.Pa}},r:()=>G(""),q:()=>{Wa=!1;Fc=0;},m:function(a,b,c){a=new Date(1E3*Ec(a,b));E[c>>2]=a.getSeconds();
+		E[c+4>>2]=a.getMinutes();E[c+8>>2]=a.getHours();E[c+12>>2]=a.getDate();E[c+16>>2]=a.getMonth();E[c+20>>2]=a.getFullYear()-1900;E[c+24>>2]=a.getDay();b=a.getFullYear();E[c+28>>2]=(0!==b%4||0===b%100&&0!==b%400?Hc:Gc)[a.getMonth()]+a.getDate()-1|0;E[c+36>>2]=-(60*a.getTimezoneOffset());b=(new Date(a.getFullYear(),6,1)).getTimezoneOffset();var d=(new Date(a.getFullYear(),0,1)).getTimezoneOffset();E[c+32>>2]=(b!=d&&a.getTimezoneOffset()==Math.min(d,b))|0;},k:function(a,b,c,d,e,g,h,u){e=Ec(e,g);try{var x=
+		V(d);if(0!==(b&2)&&0===(c&2)&&2!==(x.flags&2097155))throw new P(2);if(1===(x.flags&2097155))throw new P(2);if(!x.Ma.ib)throw new P(43);if(!a)throw new P(28);var r=x.Ma.ib(x,a,e,b,c);var C=r.Zb;E[h>>2]=r.Gb;F[u>>2]=C;return 0}catch(D){if("undefined"==typeof Z||"ErrnoError"!==D.name)throw D;return -D.Pa}},l:function(a,b,c,d,e,g,h){g=Ec(g,h);try{var u=V(e);if(c&2){if(32768!==(u.node.mode&61440))throw new P(43);if(!(d&2)){var x=B.slice(a,a+b);u.Ma.jb&&u.Ma.jb(u,x,g,b,d);}}}catch(r){if("undefined"==typeof Z||
+		"ErrnoError"!==r.name)throw r;return -r.Pa}},s:(a,b)=>{Ic[a]&&(clearTimeout(Ic[a].id),delete Ic[a]);if(!b)return 0;var c=setTimeout(()=>{delete Ic[a];Kc(()=>Sc(a,performance.now()));},b);Ic[a]={id:c,nc:b};return 0},D:(a,b,c,d)=>{var e=(new Date).getFullYear(),g=(new Date(e,0,1)).getTimezoneOffset();e=(new Date(e,6,1)).getTimezoneOffset();F[a>>2]=60*Math.max(g,e);E[b>>2]=Number(g!=e);b=h=>{var u=Math.abs(h);return `UTC${0<=h?"-":"+"}${String(Math.floor(u/60)).padStart(2,"0")}${String(u%60).padStart(2,
 		"0")}`};a=b(g);b=b(e);e<g?(O(a,B,c,17),O(b,B,d,17)):(O(a,B,d,17),O(b,B,c,17));},d:()=>Date.now(),x:()=>2147483648,c:()=>performance.now(),t:a=>{var b=B.length;a>>>=0;if(2147483648<a)return !1;for(var c=1;4>=c;c*=2){var d=b*(1+.2/c);d=Math.min(d,a+100663296);a:{d=(Math.min(2147483648,65536*Math.ceil(Math.max(a,d)/65536))-La.buffer.byteLength+65535)/65536|0;try{La.grow(d);Ka();var e=1;break a}catch(g){}e=void 0;}if(e)return !0}return !1},F:(a,b)=>{var c=0,d=0,e;for(e of Nc()){var g=b+c;F[a+d>>2]=g;c+=O(e,
-    		B,g,Infinity)+1;d+=4;}return 0},G:(a,b)=>{var c=Nc();F[a>>2]=c.length;a=0;for(var d of c)a+=gb(d)+1;F[b>>2]=a;return 0},e:function(a){try{var b=V(a);oa(b);return 0}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return c.Pa}},u:function(a,b){try{var c=V(a);m[b]=c.tty?2:R(c.mode)?3:40960===(c.mode&61440)?7:4;Ha[b+2>>1]=0;I=[0,(H=0,1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[b+8>>2]=I[0];E[b+12>>2]=I[1];I=[0,(H=0,1<=+Math.abs(H)?
-    		0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[b+16>>2]=I[0];E[b+20>>2]=I[1];return 0}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return d.Pa}},B:function(a,b,c,d){try{a:{var e=V(a);a=b;for(var g,h=b=0;h<c;h++){var u=F[a>>2],x=F[a+4>>2];a+=8;var r=yc(e,m,u,x,g);if(0>r){var C=-1;break a}b+=r;if(r<x)break;"undefined"!=typeof g&&(g+=r);}C=b;}F[d>>2]=C;return 0}catch(D){if("undefined"==typeof Z||"ErrnoError"!==D.name)throw D;return D.Pa}},n:function(a,
-    		b,c,d,e){b=Ec(b,c);try{if(isNaN(b))return 61;var g=V(a);gc(g,b,d);I=[g.position>>>0,(H=g.position,1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[e>>2]=I[0];E[e+4>>2]=I[1];g.tb&&0===b&&0===d&&(g.tb=null);return 0}catch(h){if("undefined"==typeof Z||"ErrnoError"!==h.name)throw h;return h.Pa}},I:function(a){try{var b=V(a);return b.Ma?.fsync?.(b)}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return c.Pa}},y:function(a,b,c,d){try{a:{var e=
-    		V(a);a=b;for(var g,h=b=0;h<c;h++){var u=F[a>>2],x=F[a+4>>2];a+=8;var r=na(e,m,u,x,g);if(0>r){var C=-1;break a}b+=r;if(r<x)break;"undefined"!=typeof g&&(g+=r);}C=b;}F[d>>2]=C;return 0}catch(D){if("undefined"==typeof Z||"ErrnoError"!==D.name)throw D;return D.Pa}},p:Jc};
-    		function Uc(){function a(){k.calledRun=!0;if(!Ea){if(!k.noFSInit&&!Eb){var b,c;Eb=!0;b??=k.stdin;c??=k.stdout;d??=k.stderr;b?Y("stdin",b):Tb("/dev/tty","/dev/stdin");c?Y("stdout",null,c):Tb("/dev/tty","/dev/stdout");d?Y("stderr",null,d):Tb("/dev/tty1","/dev/stderr");ma("/dev/stdin",0);ma("/dev/stdout",1);ma("/dev/stderr",1);}Vc.N();Fb=!1;k.onRuntimeInitialized?.();if(k.postRun)for("function"==typeof k.postRun&&(k.postRun=[k.postRun]);k.postRun.length;){var d=k.postRun.shift();Sa.push(d);}Ra(Sa);}}if(0<
-    		L)Va=Uc;else {if(k.preRun)for("function"==typeof k.preRun&&(k.preRun=[k.preRun]);k.preRun.length;)Ua();Ra(Ta);0<L?Va=Uc:k.setStatus?(k.setStatus("Running..."),setTimeout(()=>{setTimeout(()=>k.setStatus(""),1);a();},1)):a();}}var Vc;
-    		(async function(){function a(c){c=Vc=c.exports;k._sqlite3_free=c.P;k._sqlite3_value_text=c.Q;k._sqlite3_prepare_v2=c.R;k._sqlite3_step=c.S;k._sqlite3_reset=c.T;k._sqlite3_exec=c.U;k._sqlite3_finalize=c.V;k._sqlite3_column_name=c.W;k._sqlite3_column_text=c.X;k._sqlite3_column_type=c.Y;k._sqlite3_errmsg=c.Z;k._sqlite3_clear_bindings=c._;k._sqlite3_value_blob=c.$;k._sqlite3_value_bytes=c.aa;k._sqlite3_value_double=c.ba;k._sqlite3_value_int=c.ca;k._sqlite3_value_type=c.da;k._sqlite3_result_blob=c.ea;
-    		k._sqlite3_result_double=c.fa;k._sqlite3_result_error=c.ga;k._sqlite3_result_int=c.ha;k._sqlite3_result_int64=c.ia;k._sqlite3_result_null=c.ja;k._sqlite3_result_text=c.ka;k._sqlite3_aggregate_context=c.la;k._sqlite3_column_count=c.ma;k._sqlite3_data_count=c.na;k._sqlite3_column_blob=c.oa;k._sqlite3_column_bytes=c.pa;k._sqlite3_column_double=c.qa;k._sqlite3_bind_blob=c.ra;k._sqlite3_bind_double=c.sa;k._sqlite3_bind_int=c.ta;k._sqlite3_bind_text=c.ua;k._sqlite3_bind_parameter_index=c.va;k._sqlite3_sql=
-    		c.wa;k._sqlite3_normalized_sql=c.xa;k._sqlite3_changes=c.ya;k._sqlite3_close_v2=c.za;k._sqlite3_create_function_v2=c.Aa;k._sqlite3_update_hook=c.Ba;k._sqlite3_open=c.Ca;da=k._malloc=c.Da;ea=k._free=c.Ea;k._RegisterExtensionFunctions=c.Fa;zb=c.Ga;Sc=c.Ha;ra=c.Ia;t=c.Ja;pa=c.Ka;La=c.M;Rc=c.O;Ka();L--;k.monitorRunDependencies?.(L);0==L&&Va&&(c=Va,Va=null,c());return Vc}L++;k.monitorRunDependencies?.(L);var b={a:Tc};if(k.instantiateWasm)return new Promise(c=>{k.instantiateWasm(b,(d,e)=>{c(a(d,e));});});
-    		Na??=void 0;return a((await Pa(b)).instance)})();Uc();
+		B,g,Infinity)+1;d+=4;}return 0},G:(a,b)=>{var c=Nc();F[a>>2]=c.length;a=0;for(var d of c)a+=gb(d)+1;F[b>>2]=a;return 0},e:function(a){try{var b=V(a);oa(b);return 0}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return c.Pa}},u:function(a,b){try{var c=V(a);m[b]=c.tty?2:R(c.mode)?3:40960===(c.mode&61440)?7:4;Ha[b+2>>1]=0;I=[0,(H=0,1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[b+8>>2]=I[0];E[b+12>>2]=I[1];I=[0,(H=0,1<=+Math.abs(H)?
+		0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[b+16>>2]=I[0];E[b+20>>2]=I[1];return 0}catch(d){if("undefined"==typeof Z||"ErrnoError"!==d.name)throw d;return d.Pa}},B:function(a,b,c,d){try{a:{var e=V(a);a=b;for(var g,h=b=0;h<c;h++){var u=F[a>>2],x=F[a+4>>2];a+=8;var r=yc(e,m,u,x,g);if(0>r){var C=-1;break a}b+=r;if(r<x)break;"undefined"!=typeof g&&(g+=r);}C=b;}F[d>>2]=C;return 0}catch(D){if("undefined"==typeof Z||"ErrnoError"!==D.name)throw D;return D.Pa}},n:function(a,
+		b,c,d,e){b=Ec(b,c);try{if(isNaN(b))return 61;var g=V(a);gc(g,b,d);I=[g.position>>>0,(H=g.position,1<=+Math.abs(H)?0<H?+Math.floor(H/4294967296)>>>0:~~+Math.ceil((H-+(~~H>>>0))/4294967296)>>>0:0)];E[e>>2]=I[0];E[e+4>>2]=I[1];g.tb&&0===b&&0===d&&(g.tb=null);return 0}catch(h){if("undefined"==typeof Z||"ErrnoError"!==h.name)throw h;return h.Pa}},I:function(a){try{var b=V(a);return b.Ma?.fsync?.(b)}catch(c){if("undefined"==typeof Z||"ErrnoError"!==c.name)throw c;return c.Pa}},y:function(a,b,c,d){try{a:{var e=
+		V(a);a=b;for(var g,h=b=0;h<c;h++){var u=F[a>>2],x=F[a+4>>2];a+=8;var r=na(e,m,u,x,g);if(0>r){var C=-1;break a}b+=r;if(r<x)break;"undefined"!=typeof g&&(g+=r);}C=b;}F[d>>2]=C;return 0}catch(D){if("undefined"==typeof Z||"ErrnoError"!==D.name)throw D;return D.Pa}},p:Jc};
+		function Uc(){function a(){k.calledRun=!0;if(!Ea){if(!k.noFSInit&&!Eb){var b,c;Eb=!0;b??=k.stdin;c??=k.stdout;d??=k.stderr;b?Y("stdin",b):Tb("/dev/tty","/dev/stdin");c?Y("stdout",null,c):Tb("/dev/tty","/dev/stdout");d?Y("stderr",null,d):Tb("/dev/tty1","/dev/stderr");ma("/dev/stdin",0);ma("/dev/stdout",1);ma("/dev/stderr",1);}Vc.N();Fb=!1;k.onRuntimeInitialized?.();if(k.postRun)for("function"==typeof k.postRun&&(k.postRun=[k.postRun]);k.postRun.length;){var d=k.postRun.shift();Sa.push(d);}Ra(Sa);}}if(0<
+		L)Va=Uc;else {if(k.preRun)for("function"==typeof k.preRun&&(k.preRun=[k.preRun]);k.preRun.length;)Ua();Ra(Ta);0<L?Va=Uc:k.setStatus?(k.setStatus("Running..."),setTimeout(()=>{setTimeout(()=>k.setStatus(""),1);a();},1)):a();}}var Vc;
+		(async function(){function a(c){c=Vc=c.exports;k._sqlite3_free=c.P;k._sqlite3_value_text=c.Q;k._sqlite3_prepare_v2=c.R;k._sqlite3_step=c.S;k._sqlite3_reset=c.T;k._sqlite3_exec=c.U;k._sqlite3_finalize=c.V;k._sqlite3_column_name=c.W;k._sqlite3_column_text=c.X;k._sqlite3_column_type=c.Y;k._sqlite3_errmsg=c.Z;k._sqlite3_clear_bindings=c._;k._sqlite3_value_blob=c.$;k._sqlite3_value_bytes=c.aa;k._sqlite3_value_double=c.ba;k._sqlite3_value_int=c.ca;k._sqlite3_value_type=c.da;k._sqlite3_result_blob=c.ea;
+		k._sqlite3_result_double=c.fa;k._sqlite3_result_error=c.ga;k._sqlite3_result_int=c.ha;k._sqlite3_result_int64=c.ia;k._sqlite3_result_null=c.ja;k._sqlite3_result_text=c.ka;k._sqlite3_aggregate_context=c.la;k._sqlite3_column_count=c.ma;k._sqlite3_data_count=c.na;k._sqlite3_column_blob=c.oa;k._sqlite3_column_bytes=c.pa;k._sqlite3_column_double=c.qa;k._sqlite3_bind_blob=c.ra;k._sqlite3_bind_double=c.sa;k._sqlite3_bind_int=c.ta;k._sqlite3_bind_text=c.ua;k._sqlite3_bind_parameter_index=c.va;k._sqlite3_sql=
+		c.wa;k._sqlite3_normalized_sql=c.xa;k._sqlite3_changes=c.ya;k._sqlite3_close_v2=c.za;k._sqlite3_create_function_v2=c.Aa;k._sqlite3_update_hook=c.Ba;k._sqlite3_open=c.Ca;da=k._malloc=c.Da;ea=k._free=c.Ea;k._RegisterExtensionFunctions=c.Fa;zb=c.Ga;Sc=c.Ha;ra=c.Ia;t=c.Ja;pa=c.Ka;La=c.M;Rc=c.O;Ka();L--;k.monitorRunDependencies?.(L);0==L&&Va&&(c=Va,Va=null,c());return Vc}L++;k.monitorRunDependencies?.(L);var b={a:Tc};if(k.instantiateWasm)return new Promise(c=>{k.instantiateWasm(b,(d,e)=>{c(a(d,e));});});
+		Na??=void 0;return a((await Pa(b)).instance)})();Uc();
 
 
-    		        // The shell-pre.js and emcc-generated code goes above
-    		        return Module;
-    		    }); // The end of the promise being returned
+		        // The shell-pre.js and emcc-generated code goes above
+		        return Module;
+		    }); // The end of the promise being returned
 
-    		  return initSqlJsPromise;
-    		}; // The end of our initSqlJs function
+		  return initSqlJsPromise;
+		}; // The end of our initSqlJs function
 
-    		// This bit below is copied almost exactly from what you get when you use the MODULARIZE=1 flag with emcc
-    		// However, we don't want to use the emcc modularization. See shell-pre.js
-    		if ('object' === 'object' && 'object' === 'object'){
-    		    module.exports = initSqlJs;
-    		    // This will allow the module to be used in ES6 or CommonJS
-    		    module.exports.default = initSqlJs;
-    		}
-    		else if (typeof undefined === 'function' && undefined['amd']) {
-    		    undefined([], function() { return initSqlJs; });
-    		}
-    		else if ('object' === 'object'){
-    		    exports["Module"] = initSqlJs;
-    		} 
-    	} (sqlAsmMemoryGrowth$1, sqlAsmMemoryGrowth$1.exports));
-    	return sqlAsmMemoryGrowth$1.exports;
+		// This bit below is copied almost exactly from what you get when you use the MODULARIZE=1 flag with emcc
+		// However, we don't want to use the emcc modularization. See shell-pre.js
+		if ('object' === 'object' && 'object' === 'object'){
+		    module.exports = initSqlJs;
+		    // This will allow the module to be used in ES6 or CommonJS
+		    module.exports.default = initSqlJs;
+		}
+		else if (typeof undefined === 'function' && undefined['amd']) {
+		    undefined([], function() { return initSqlJs; });
+		}
+		else if ('object' === 'object'){
+		    exports["Module"] = initSqlJs;
+		}
+	} (sqlAsmMemoryGrowth$1, sqlAsmMemoryGrowth$1.exports));
+	return sqlAsmMemoryGrowth$1.exports;
     }
 
     var sqlAsmMemoryGrowthExports = requireSqlAsmMemoryGrowth();
@@ -15273,6 +15273,12 @@ $CONTENT
      */
     /** 当前活跃的 Provider 实例 */
     let currentProvider = null;
+    let lifecycleGeneration = 0;
+    let sqlRuntimeState = {
+        state: 'idle',
+        retryable: false,
+    };
+    let initializationFlight = null;
     /**
      * 获取当前存储提供者
      * 如果尚未初始化，会根据当前设置自动创建
@@ -15297,6 +15303,24 @@ $CONTENT
     function getActiveStorageProvider() {
         return currentProvider;
     }
+    /** 同步只读 SQL 仅消费已激活且就绪的 SQLite Provider，不触发懒初始化。 */
+    function getReadySqliteProvider_ACU() {
+        if (getCurrentStorageMode() !== 'sqlite')
+            return null;
+        if (currentProvider?.mode !== 'sqlite' || !currentProvider.isReady())
+            return null;
+        return currentProvider;
+    }
+    function getSqlRuntimeStatus_ACU() {
+        return {
+            configuredMode: getCurrentStorageMode(),
+            activeMode: currentProvider?.mode ?? null,
+            ...sqlRuntimeState,
+        };
+    }
+    function isSqlRuntimeReady_ACU() {
+        return getReadySqliteProvider_ACU() !== null;
+    }
     async function ensureStorageProviderReady_ACU() {
         const expectedMode = getCurrentStorageMode();
         const activeProvider = getActiveStorageProvider();
@@ -15315,27 +15339,20 @@ $CONTENT
      */
     async function initStorageProvider() {
         const mode = getCurrentStorageMode();
+        const generation = lifecycleGeneration;
         logDebug_ACU(`[StorageStrategy] 初始化 Provider: ${mode}`);
-        try {
-            const nextProvider = createProvider(mode);
-            const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
-            logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
-            if (mode === 'sqlite' && !result.loaded && result.error) {
-                logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${result.error}`);
-                nextProvider.dispose();
-                replaceActiveProvider_ACU(createProvider('native'));
-                return;
-            }
-            replaceActiveProvider_ACU(nextProvider);
+        if (initializationFlight?.generation === generation && initializationFlight.mode === mode) {
+            return initializationFlight.promise;
         }
-        catch (e) {
-            logError_ACU(`[StorageStrategy] 初始化失败: ${e?.message}`);
-            if (mode === 'sqlite') {
-                logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
-                replaceActiveProvider_ACU(createProvider('native'));
-                return;
-            }
-            throw e;
+        setSqlRuntimeState_ACU(mode === 'sqlite' ? 'initializing' : 'idle', mode === 'sqlite');
+        const promise = initializeAndActivateProvider_ACU(mode, generation, false);
+        initializationFlight = { generation, mode, promise };
+        try {
+            await promise;
+        }
+        finally {
+            if (initializationFlight?.promise === promise)
+                initializationFlight = null;
         }
     }
     /**
@@ -15353,27 +15370,9 @@ $CONTENT
             return;
         }
         logDebug_ACU(`[StorageStrategy] 切换模式: ${currentMode || 'none'} → ${mode}`);
-        try {
-            const nextProvider = createProvider(mode);
-            const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
-            logDebug_ACU(`[StorageStrategy] 切换完成: loaded=${result.loaded}, source=${result.source}`);
-            if (mode === 'sqlite' && !result.loaded && result.error) {
-                logError_ACU(`[StorageStrategy] SQLite 切换失败，fallback 到原生模式: ${result.error}`);
-                nextProvider.dispose();
-                replaceActiveProvider_ACU(createProvider('native'));
-                throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
-            }
-            replaceActiveProvider_ACU(nextProvider);
-        }
-        catch (e) {
-            if (e.message?.includes('已自动回退'))
-                throw e;
-            logError_ACU(`[StorageStrategy] 切换异常: ${e?.message}`);
-            if (mode === 'sqlite') {
-                replaceActiveProvider_ACU(createProvider('native'));
-            }
-            throw e;
-        }
+        const generation = invalidateProviderLifecycle_ACU();
+        setSqlRuntimeState_ACU(mode === 'sqlite' ? 'initializing' : 'idle', mode === 'sqlite');
+        await initializeAndActivateProvider_ACU(mode, generation, true);
     }
     /**
      * 立即销毁当前 Provider 实例，释放内存数据库资源
@@ -15384,11 +15383,13 @@ $CONTENT
      * 调用方应在适当时机调用 reloadStorageProvider() 重建并加载数据。
      */
     function disposeStorageProvider() {
+        invalidateProviderLifecycle_ACU();
         if (currentProvider) {
             logDebug_ACU(`[StorageStrategy] 销毁当前 Provider: ${currentProvider.mode}`);
             currentProvider.dispose();
             currentProvider = null;
         }
+        setSqlRuntimeState_ACU('idle', getCurrentStorageMode() === 'sqlite');
     }
     /**
      * 重新加载数据（楼层删除、回滚等场景）
@@ -15396,6 +15397,7 @@ $CONTENT
      */
     async function reloadStorageProvider() {
         invalidateTableRuntimeRevision_ACU({ reason: 'reloadStorageProvider' });
+        invalidateProviderLifecycle_ACU();
         const mode = getCurrentStorageMode();
         logDebug_ACU(`[StorageStrategy] 重新加载数据: ${mode}`);
         await initStorageProvider();
@@ -15428,6 +15430,65 @@ $CONTENT
             throw new Error('[StorageStrategy] SQLite provider 未实现 canonical snapshot hydrate。');
         }
         return provider.loadFromData(replay.data || null);
+    }
+    async function initializeAndActivateProvider_ACU(mode, generation, throwOnSqliteFailure) {
+        const nextProvider = createProvider(mode);
+        try {
+            const result = await loadProviderForCurrentChat_ACU(nextProvider, mode);
+            logDebug_ACU(`[StorageStrategy] 数据加载完成: loaded=${result.loaded}, source=${result.source}`);
+            if (!isLifecycleCurrent_ACU(generation, mode)) {
+                nextProvider.dispose();
+                logDebug_ACU(`[StorageStrategy] 丢弃过期 Provider 初始化结果: mode=${mode}, generation=${generation}`);
+                return;
+            }
+            if (mode === 'sqlite' && !result.loaded && result.error) {
+                logError_ACU(`[StorageStrategy] SQLite 加载失败，自动 fallback 到原生模式: ${result.error}`);
+                nextProvider.dispose();
+                replaceActiveProvider_ACU(createProvider('native'));
+                setSqlRuntimeState_ACU('fallback', true, result.error);
+                if (throwOnSqliteFailure) {
+                    throw new Error(`SQLite 模式切换失败: ${result.error}。已自动回退到原生模式。`);
+                }
+                return;
+            }
+            replaceActiveProvider_ACU(nextProvider);
+            setSqlRuntimeState_ACU(mode === 'sqlite' ? 'ready' : 'idle', false);
+        }
+        catch (e) {
+            if (!isLifecycleCurrent_ACU(generation, mode)) {
+                nextProvider.dispose();
+                logDebug_ACU(`[StorageStrategy] 忽略过期 Provider 初始化异常: mode=${mode}, generation=${generation}`);
+                return;
+            }
+            if (e?.message?.includes('已自动回退'))
+                throw e;
+            const message = e?.message || String(e);
+            logError_ACU(`[StorageStrategy] 初始化失败: ${message}`);
+            nextProvider.dispose();
+            if (mode === 'sqlite') {
+                logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
+                replaceActiveProvider_ACU(createProvider('native'));
+                setSqlRuntimeState_ACU('fallback', true, message);
+                if (!throwOnSqliteFailure)
+                    return;
+            }
+            else {
+                setSqlRuntimeState_ACU('failed', true, message);
+            }
+            throw e;
+        }
+    }
+    function invalidateProviderLifecycle_ACU() {
+        lifecycleGeneration += 1;
+        initializationFlight = null;
+        return lifecycleGeneration;
+    }
+    function isLifecycleCurrent_ACU(generation, mode) {
+        void mode;
+        return generation === lifecycleGeneration;
+    }
+    function setSqlRuntimeState_ACU(state, retryable, error) {
+        sqlRuntimeState = error ? { state, retryable, error } : { state, retryable };
     }
     function replaceActiveProvider_ACU(nextProvider) {
         const previousProvider = currentProvider;
@@ -57045,6 +57106,22 @@ $CONTENT
         const statements = splitSqlStatements(String(sql || '').replace(/<!--|-->/g, '').trim());
         return statements.length > 0 ? [{ kind: 'sql_batch', statements }] : [];
     }
+    function executeReadySqlQuery_ACU(sql, params, metadata) {
+        const provider = getReadySqliteProvider_ACU();
+        if (!provider) {
+            logDebug_ACU('SQL query skipped: SQLite runtime is not ready.');
+            return null;
+        }
+        return toPublicSqlQueryResult_ACU(provider.executeQuery(sql, params), metadata);
+    }
+    async function executeReadySqlQueryAsync_ACU(sql, params, metadata) {
+        const provider = await ensureStorageProviderReady_ACU();
+        if (provider.mode !== 'sqlite' || !provider.isReady()) {
+            logDebug_ACU('SQL async query skipped: SQLite runtime is not ready.');
+            return null;
+        }
+        return toPublicSqlQueryResult_ACU(provider.executeQuery(sql, params), metadata);
+    }
     function createSqlApi(ctx) {
         return {
             executeSqlQuery: function (sqlOrOptions, params, options) {
@@ -57057,7 +57134,7 @@ $CONTENT
                     const limit = normalizeLimit_ACU(optionSource?.limit);
                     const offset = normalizeOffset_ACU(optionSource?.offset);
                     const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
-                    return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), { sql: query.sql, limit, offset });
+                    return executeReadySqlQuery_ACU(query.sql, query.params, { sql: query.sql, limit, offset });
                 }
                 catch (error) {
                     logError_ACU('executeSqlQuery failed:', error);
@@ -57074,7 +57151,7 @@ $CONTENT
                     const limit = normalizeLimit_ACU(optionSource?.limit);
                     const offset = normalizeOffset_ACU(optionSource?.offset);
                     const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
-                    return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), { sql: query.sql, limit, offset });
+                    return executeReadySqlQuery_ACU(query.sql, query.params, { sql: query.sql, limit, offset });
                 }
                 catch (error) {
                     logError_ACU('querySql failed:', error);
@@ -57087,7 +57164,7 @@ $CONTENT
                         throw new Error('queryTableRows: options must be an object.');
                     }
                     const query = buildQueryTableRowsSql_ACU(options);
-                    return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), {
+                    return executeReadySqlQuery_ACU(query.sql, query.params, {
                         sql: query.sql,
                         limit: query.limit,
                         offset: query.offset,
@@ -57097,6 +57174,63 @@ $CONTENT
                     logError_ACU('queryTableRows failed:', error);
                     return null;
                 }
+            },
+            executeSqlQueryAsync: async function (sqlOrOptions, params, options) {
+                try {
+                    const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSqlQueryAsync');
+                    if (!isSqlReadStatement_ACU(args.sql)) {
+                        throw new Error('executeSqlQueryAsync: only SELECT/PRAGMA/EXPLAIN/WITH statements are allowed.');
+                    }
+                    const optionSource = isPlainObjectArg_ACU$1(sqlOrOptions) ? sqlOrOptions : (isPlainObjectArg_ACU$1(options) ? options : null);
+                    const limit = normalizeLimit_ACU(optionSource?.limit);
+                    const offset = normalizeOffset_ACU(optionSource?.offset);
+                    const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
+                    return await executeReadySqlQueryAsync_ACU(query.sql, query.params, { sql: query.sql, limit, offset });
+                }
+                catch (error) {
+                    logError_ACU('executeSqlQueryAsync failed:', error);
+                    return null;
+                }
+            },
+            querySqlAsync: async function (sqlOrOptions, params, options) {
+                try {
+                    const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'querySqlAsync');
+                    if (!isSqlReadStatement_ACU(args.sql)) {
+                        throw new Error('querySqlAsync: only SELECT/PRAGMA/EXPLAIN/WITH statements are allowed.');
+                    }
+                    const optionSource = isPlainObjectArg_ACU$1(sqlOrOptions) ? sqlOrOptions : (isPlainObjectArg_ACU$1(options) ? options : null);
+                    const limit = normalizeLimit_ACU(optionSource?.limit);
+                    const offset = normalizeOffset_ACU(optionSource?.offset);
+                    const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
+                    return await executeReadySqlQueryAsync_ACU(query.sql, query.params, { sql: query.sql, limit, offset });
+                }
+                catch (error) {
+                    logError_ACU('querySqlAsync failed:', error);
+                    return null;
+                }
+            },
+            queryTableRowsAsync: async function (options = {}) {
+                try {
+                    if (!isPlainObjectArg_ACU$1(options)) {
+                        throw new Error('queryTableRowsAsync: options must be an object.');
+                    }
+                    const query = buildQueryTableRowsSql_ACU(options);
+                    return await executeReadySqlQueryAsync_ACU(query.sql, query.params, {
+                        sql: query.sql,
+                        limit: query.limit,
+                        offset: query.offset,
+                    });
+                }
+                catch (error) {
+                    logError_ACU('queryTableRowsAsync failed:', error);
+                    return null;
+                }
+            },
+            getSqlRuntimeStatus: function () {
+                return getSqlRuntimeStatus_ACU();
+            },
+            isSqlRuntimeReady: function () {
+                return isSqlRuntimeReady_ACU();
             },
             executeSqlMutation: async function (sqlOrOptions, params, options) {
                 try {
@@ -57199,10 +57333,12 @@ $CONTENT
                 try {
                     const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSql');
                     if (isSqlReadStatement_ACU(args.sql)) {
-                        const queryResult = getStorageProvider().executeQuery(args.sql, args.params);
+                        const queryResult = await executeReadySqlQueryAsync_ACU(args.sql, args.params, { sql: args.sql });
+                        if (!queryResult)
+                            return null;
                         return {
                             type: 'query',
-                            result: toPublicSqlQueryResult_ACU(queryResult, { sql: args.sql }),
+                            result: queryResult,
                         };
                     }
                     const writeArgs = withInferredRawSqlTargets_ACU(args);
@@ -96052,8 +96188,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-f408fb31] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-f408fb31] {\n  grid-template-areas:\n    \"status update\"\n    \"manual template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-f408fb31] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-f408fb31] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-f408fb31] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-f408fb31] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-f408fb31] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-f408fb31] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-f408fb31] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-f408fb31] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-f408fb31] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-f408fb31] {\n  color: var(--acu-danger);\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-f408fb31] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-f408fb31] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-f408fb31],\n.acu-v2-form-fill-page__status-table td[data-v-f408fb31] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-f408fb31] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-f408fb31] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-f408fb31] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-f408fb31] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-f408fb31] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-f408fb31] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-f408fb31] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-f408fb31] {\n    grid-template-areas:\n      \"status\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-f408fb31] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-f408fb31");
-    var FormFillPage_vue_vue_type_style_index_0_scoped_f408fb31_lang = null;
+    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-e9d74f25] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-e9d74f25] {\r\n  grid-template-areas:\r\n    \"status update\"\r\n    \"manual template\"\r\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-e9d74f25] {\r\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-e9d74f25] {\r\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--template[data-v-e9d74f25] {\r\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-e9d74f25] {\r\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-e9d74f25] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-e9d74f25] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-e9d74f25] {\r\n  max-width: min(42ch, 100%);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-e9d74f25] {\r\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-e9d74f25] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-e9d74f25] {\r\n  color: var(--acu-danger);\r\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-e9d74f25] {\r\n  min-width: 0;\r\n  overflow: auto;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-e9d74f25] {\r\n  width: 100%;\r\n  border-collapse: collapse;\r\n  min-width: 560px;\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-e9d74f25],\r\n.acu-v2-form-fill-page__status-table td[data-v-e9d74f25] {\r\n  padding: 8px 10px;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-e9d74f25] {\r\n  color: var(--acu-text-3);\r\n  font-weight: 600;\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-e9d74f25] {\r\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-e9d74f25] {\r\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-e9d74f25] {\r\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-e9d74f25] {\r\n  text-align: center !important;\r\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-e9d74f25] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-e9d74f25] {\r\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-e9d74f25] {\r\n    grid-template-areas:\r\n      \"status\"\r\n      \"update\"\r\n      \"manual\"\r\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-e9d74f25] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-e9d74f25");
+    var FormFillPage_vue_vue_type_style_index_0_scoped_e9d74f25_lang = null;
 
     const _hoisted_1$x = { class: "acu-v2-form-fill-page" };
     const _hoisted_2$r = ["title"];
@@ -96340,7 +96476,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-f408fb31"]]);
+    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-e9d74f25"]]);
 
     var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPromptDrawer',
@@ -103532,8 +103668,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-71c72b29] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-71c72b29] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-71c72b29] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-71c72b29] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-71c72b29] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-71c72b29] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-71c72b29] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-71c72b29] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-71c72b29] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-71c72b29] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-71c72b29] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-71c72b29] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-71c72b29] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-71c72b29] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-71c72b29] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-71c72b29] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-71c72b29] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-71c72b29],\n.acu-v2-data-mgmt-page__command-grid[data-v-71c72b29] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-71c72b29] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-71c72b29] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-71c72b29] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-71c72b29] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-71c72b29] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-71c72b29] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-71c72b29] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-71c72b29] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-71c72b29] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-71c72b29] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-71c72b29] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-71c72b29] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-71c72b29");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_71c72b29_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-fe9bcd95] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-fe9bcd95] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-fe9bcd95] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-fe9bcd95] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-fe9bcd95] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-fe9bcd95] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\r\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-fe9bcd95] {\r\n  margin-top: 4px;\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-fe9bcd95] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 600;\r\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-fe9bcd95] {\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-fe9bcd95] .acu-disclosure-group__header {\r\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-fe9bcd95] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-fe9bcd95] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 8px;\r\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-fe9bcd95] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-fe9bcd95] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-align: left;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-fe9bcd95] {\r\n  flex-shrink: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-fe9bcd95] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-fe9bcd95] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-fe9bcd95],\r\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] {\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-fe9bcd95] {\r\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-fe9bcd95] {\r\n  margin-top: 16px;\r\n  padding-top: 16px;\r\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fe9bcd95] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fe9bcd95] .acu-file-button,\r\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fe9bcd95] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] .acu-file-button,\r\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] .acu-btn {\r\n  width: 100%;\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-fe9bcd95] {\r\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-fe9bcd95] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fe9bcd95] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-fe9bcd95");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_fe9bcd95_lang = null;
 
     const _hoisted_1$f = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$e = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -103908,7 +104044,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-71c72b29"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-fe9bcd95"]]);
 
     var _sfc_main$e = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',
@@ -111538,216 +111674,216 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_3 = { class: "acu-v2-app__body" };
     const _hoisted_4 = { class: "acu-v2-app__content" };
     const _hoisted_5 = {
-    	key: 0,
-    	class: "acu-v2-app__header"
+	key: 0,
+	class: "acu-v2-app__header"
     };
     const _hoisted_6 = { class: "acu-v2-app__header-left" };
     const _hoisted_7 = { class: "acu-v2-app__page-title" };
     const _hoisted_8 = { class: "acu-v2-app__header-right" };
     const _hoisted_9 = { class: "acu-v2-app__theme-switcher" };
     const _hoisted_10 = {
-    	class: "acu-v2-app__appearance-section",
-    	"aria-labelledby": "acu-v2-theme-section-title"
+	class: "acu-v2-app__appearance-section",
+	"aria-labelledby": "acu-v2-theme-section-title"
     };
     const _hoisted_11 = {
-    	class: "acu-v2-app__theme-list",
-    	role: "listbox",
-    	"aria-label": "选择主题"
+	class: "acu-v2-app__theme-list",
+	role: "listbox",
+	"aria-label": "选择主题"
     };
     const _hoisted_12 = ["aria-selected", "onClick"];
     const _hoisted_13 = { class: "acu-v2-app__theme-option-main" };
     const _hoisted_14 = { class: "acu-v2-app__theme-name" };
     const _hoisted_15 = {
-    	key: 0,
-    	class: "acu-v2-app__theme-tag"
+	key: 0,
+	class: "acu-v2-app__theme-tag"
     };
     const _hoisted_16 = { class: "acu-v2-app__theme-menu-footer" };
     const _hoisted_17 = {
-    	class: "acu-v2-app__appearance-section",
-    	"aria-labelledby": "acu-v2-scale-section-title"
+	class: "acu-v2-app__appearance-section",
+	"aria-labelledby": "acu-v2-scale-section-title"
     };
     const _hoisted_18 = { class: "acu-v2-app__scale-heading" };
     const _hoisted_19 = { class: "acu-v2-app__scale-current" };
     function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
-    	return openBlock(), createElementBlock("div", _hoisted_1, [withDirectives(createBaseVNode(
-    		"div",
-    		_hoisted_2,
-    		[
-    			createBaseVNode("div", _hoisted_3, [!$setup.visualizer.isActive ? (openBlock(), createBlock($setup["Sidebar"], {
-    				key: 0,
-    				class: "acu-v2-app__desktop-sidebar"
-    			})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_4, [!$setup.visualizer.isActive ? (openBlock(), createElementBlock("header", _hoisted_5, [createBaseVNode("div", _hoisted_6, [!$setup.visualizer.isActive ? (openBlock(), createBlock($setup["AcuIconButton"], {
-    				key: 0,
-    				class: "acu-v2-app__menu",
-    				icon: "fa-solid fa-bars",
-    				title: "打开导航",
-    				"aria-expanded": $setup.isMobileNavOpen,
-    				onClick: $setup.openMobileNav
-    			}, null, 8, ["aria-expanded"])) : createCommentVNode("v-if", true), createBaseVNode(
-    				"h1",
-    				_hoisted_7,
-    				toDisplayString($setup.shellTitle),
-    				1
-    				/* TEXT */
-    			)]), createBaseVNode("div", _hoisted_8, [createBaseVNode("div", _hoisted_9, [createVNode($setup["AcuIconButton"], {
-    				class: "acu-v2-app__theme-btn",
-    				icon: "fa-solid fa-gear",
-    				title: "外观：" + $setup.themeStore.activeTheme.name + "，界面缩放 " + $setup.appearanceStore.uiScaleLabel,
-    				"aria-label": "打开外观菜单",
-    				"aria-expanded": $setup.isThemeMenuOpen,
-    				onClick: $setup.toggleThemeMenu
-    			}, null, 8, ["title", "aria-expanded"]), $setup.isThemeMenuRendered ? (openBlock(), createElementBlock(
-    				"div",
-    				{
-    					key: 0,
-    					class: normalizeClass(["acu-v2-app__theme-menu", { "is-closing": $setup.isThemeMenuClosing }]),
-    					role: "dialog",
-    					"aria-label": "外观设置"
-    				},
-    				[createBaseVNode("section", _hoisted_10, [
-    					_cache[3] || (_cache[3] = createBaseVNode(
-    						"div",
-    						{
-    							id: "acu-v2-theme-section-title",
-    							class: "acu-v2-app__appearance-section-title"
-    						},
-    						"主题",
-    						-1
-    						/* CACHED */
-    					)),
-    					createBaseVNode("ul", _hoisted_11, [(openBlock(true), createElementBlock(
-    						Fragment,
-    						null,
-    						renderList($setup.themeStore.themes, (t) => {
-    							return openBlock(), createElementBlock("li", {
-    								key: t.id,
-    								role: "option",
-    								"aria-selected": t.id === $setup.themeStore.activeId,
-    								class: normalizeClass(["acu-v2-app__theme-option", { "is-active": t.id === $setup.themeStore.activeId }]),
-    								onClick: ($event) => $setup.selectTheme(t.id)
-    							}, [createBaseVNode("span", _hoisted_13, [
-    								createBaseVNode(
-    									"span",
-    									{
-    										class: "acu-v2-app__theme-swatch",
-    										style: normalizeStyle({
-    											"--acu-theme-swatch-bg": t.tokens.bg0,
-    											"--acu-theme-swatch-accent": t.tokens.accent
-    										})
-    									},
-    									null,
-    									4
-    									/* STYLE */
-    								),
-    								createBaseVNode(
-    									"span",
-    									_hoisted_14,
-    									toDisplayString(t.name),
-    									1
-    									/* TEXT */
-    								),
-    								$setup.isCustomThemeId(t.id) ? (openBlock(), createElementBlock("span", _hoisted_15, "自定义")) : createCommentVNode("v-if", true)
-    							]), createBaseVNode("span", {
-    								class: "acu-v2-app__theme-tools",
-    								onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
-    							}, [createVNode($setup["AcuIconButton"], {
-    								icon: "fa-solid fa-upload",
-    								size: "sm",
-    								title: "导出主题：" + t.name,
-    								onClick: ($event) => $setup.exportTheme(t.id)
-    							}, null, 8, ["title", "onClick"]), $setup.isCustomThemeId(t.id) ? (openBlock(), createBlock($setup["AcuIconButton"], {
-    								key: 0,
-    								icon: "fa-solid fa-trash",
-    								size: "sm",
-    								variant: "danger",
-    								title: "删除自定义主题：" + t.name,
-    								onClick: ($event) => $setup.deleteTheme(t.id)
-    							}, null, 8, ["title", "onClick"])) : createCommentVNode("v-if", true)])], 10, _hoisted_12);
-    						}),
-    						128
-    						/* KEYED_FRAGMENT */
-    					))]),
-    					createBaseVNode("div", _hoisted_16, [createVNode($setup["AcuFileButton"], {
-    						size: "sm",
-    						accept: "application/json,.json",
-    						onFile: $setup.importThemeFile
-    					}, {
-    						default: withCtx(() => [..._cache[2] || (_cache[2] = [createBaseVNode(
-    							"i",
-    							{ class: "fa-solid fa-download" },
-    							null,
-    							-1
-    							/* CACHED */
-    						), createTextVNode(
-    							" 导入主题 ",
-    							-1
-    							/* CACHED */
-    						)])]),
-    						_: 1
-    					})])
-    				]), createBaseVNode("section", _hoisted_17, [createBaseVNode("div", _hoisted_18, [_cache[4] || (_cache[4] = createBaseVNode(
-    					"span",
-    					{
-    						id: "acu-v2-scale-section-title",
-    						class: "acu-v2-app__appearance-section-title"
-    					},
-    					"界面缩放",
-    					-1
-    					/* CACHED */
-    				)), createBaseVNode(
-    					"span",
-    					_hoisted_19,
-    					toDisplayString($setup.appearanceStore.uiScaleLabel),
-    					1
-    					/* TEXT */
-    				)]), createVNode($setup["AcuSegmentedControl"], {
-    					class: "acu-v2-app__scale-control",
-    					options: $setup.uiScaleOptions,
-    					"model-value": $setup.appearanceStore.uiScale,
-    					size: "sm",
-    					"aria-label": "界面缩放",
-    					"onUpdate:modelValue": $setup.setUiScale
-    				}, null, 8, ["options", "model-value"])])],
-    				2
-    				/* CLASS */
-    			)) : createCommentVNode("v-if", true)]), createVNode($setup["AcuIconButton"], {
-    				class: "acu-v2-app__close",
-    				icon: "fa-solid fa-xmark",
-    				title: $setup.visualizer.isActive ? "关闭数据库编辑器" : "关闭新 UI",
-    				"aria-label": $setup.visualizer.isActive ? "关闭数据库编辑器" : "关闭新 UI",
-    				onClick: $setup.closeApp
-    			}, null, 8, ["title", "aria-label"])])])) : createCommentVNode("v-if", true), $setup.visualizer.isActive ? (openBlock(), createBlock($setup["VisualizerSurface"], {
-    				key: 1,
-    				onClose: $setup.closeApp
-    			})) : (openBlock(), createBlock($setup["MainArea"], { key: 2 }))])]),
-    			$setup.isMobileNavRendered ? (openBlock(), createElementBlock(
-    				"div",
-    				{
-    					key: 0,
-    					class: normalizeClass(["acu-v2-app__mobile-nav-layer", { "is-closing": $setup.isMobileNavClosing }]),
-    					onClick: withModifiers($setup.closeMobileNav, ["self"])
-    				},
-    				[createBaseVNode("aside", {
-    					class: "acu-v2-app__mobile-nav",
-    					style: $setup.mobileNavDrawerStyle,
-    					role: "dialog",
-    					"aria-modal": "true",
-    					"aria-label": "一级页导航",
-    					"data-acu-mobile-nav-width": "var(--acu-mobile-nav-width)",
-    					onClick: _cache[1] || (_cache[1] = withModifiers(() => {}, ["stop"]))
-    				}, [createVNode($setup["Sidebar"], {
-    					variant: "drawer",
-    					onNavigate: $setup.closeMobileNav
-    				})])],
-    				2
-    				/* CLASS */
-    			)) : createCommentVNode("v-if", true),
-    			createVNode($setup["AcuDialogHost"]),
-    			createVNode($setup["AcuToastViewport"])
-    		],
-    		512
-    		/* NEED_PATCH */
-    	), [[vShow, $setup.rootShell.isOpen]])]);
+	return openBlock(), createElementBlock("div", _hoisted_1, [withDirectives(createBaseVNode(
+		"div",
+		_hoisted_2,
+		[
+			createBaseVNode("div", _hoisted_3, [!$setup.visualizer.isActive ? (openBlock(), createBlock($setup["Sidebar"], {
+				key: 0,
+				class: "acu-v2-app__desktop-sidebar"
+			})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_4, [!$setup.visualizer.isActive ? (openBlock(), createElementBlock("header", _hoisted_5, [createBaseVNode("div", _hoisted_6, [!$setup.visualizer.isActive ? (openBlock(), createBlock($setup["AcuIconButton"], {
+				key: 0,
+				class: "acu-v2-app__menu",
+				icon: "fa-solid fa-bars",
+				title: "打开导航",
+				"aria-expanded": $setup.isMobileNavOpen,
+				onClick: $setup.openMobileNav
+			}, null, 8, ["aria-expanded"])) : createCommentVNode("v-if", true), createBaseVNode(
+				"h1",
+				_hoisted_7,
+				toDisplayString($setup.shellTitle),
+				1
+				/* TEXT */
+			)]), createBaseVNode("div", _hoisted_8, [createBaseVNode("div", _hoisted_9, [createVNode($setup["AcuIconButton"], {
+				class: "acu-v2-app__theme-btn",
+				icon: "fa-solid fa-gear",
+				title: "外观：" + $setup.themeStore.activeTheme.name + "，界面缩放 " + $setup.appearanceStore.uiScaleLabel,
+				"aria-label": "打开外观菜单",
+				"aria-expanded": $setup.isThemeMenuOpen,
+				onClick: $setup.toggleThemeMenu
+			}, null, 8, ["title", "aria-expanded"]), $setup.isThemeMenuRendered ? (openBlock(), createElementBlock(
+				"div",
+				{
+					key: 0,
+					class: normalizeClass(["acu-v2-app__theme-menu", { "is-closing": $setup.isThemeMenuClosing }]),
+					role: "dialog",
+					"aria-label": "外观设置"
+				},
+				[createBaseVNode("section", _hoisted_10, [
+					_cache[3] || (_cache[3] = createBaseVNode(
+						"div",
+						{
+							id: "acu-v2-theme-section-title",
+							class: "acu-v2-app__appearance-section-title"
+						},
+						"主题",
+						-1
+						/* CACHED */
+					)),
+					createBaseVNode("ul", _hoisted_11, [(openBlock(true), createElementBlock(
+						Fragment,
+						null,
+						renderList($setup.themeStore.themes, (t) => {
+							return openBlock(), createElementBlock("li", {
+								key: t.id,
+								role: "option",
+								"aria-selected": t.id === $setup.themeStore.activeId,
+								class: normalizeClass(["acu-v2-app__theme-option", { "is-active": t.id === $setup.themeStore.activeId }]),
+								onClick: ($event) => $setup.selectTheme(t.id)
+							}, [createBaseVNode("span", _hoisted_13, [
+								createBaseVNode(
+									"span",
+									{
+										class: "acu-v2-app__theme-swatch",
+										style: normalizeStyle({
+											"--acu-theme-swatch-bg": t.tokens.bg0,
+											"--acu-theme-swatch-accent": t.tokens.accent
+										})
+									},
+									null,
+									4
+									/* STYLE */
+								),
+								createBaseVNode(
+									"span",
+									_hoisted_14,
+									toDisplayString(t.name),
+									1
+									/* TEXT */
+								),
+								$setup.isCustomThemeId(t.id) ? (openBlock(), createElementBlock("span", _hoisted_15, "自定义")) : createCommentVNode("v-if", true)
+							]), createBaseVNode("span", {
+								class: "acu-v2-app__theme-tools",
+								onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
+							}, [createVNode($setup["AcuIconButton"], {
+								icon: "fa-solid fa-upload",
+								size: "sm",
+								title: "导出主题：" + t.name,
+								onClick: ($event) => $setup.exportTheme(t.id)
+							}, null, 8, ["title", "onClick"]), $setup.isCustomThemeId(t.id) ? (openBlock(), createBlock($setup["AcuIconButton"], {
+								key: 0,
+								icon: "fa-solid fa-trash",
+								size: "sm",
+								variant: "danger",
+								title: "删除自定义主题：" + t.name,
+								onClick: ($event) => $setup.deleteTheme(t.id)
+							}, null, 8, ["title", "onClick"])) : createCommentVNode("v-if", true)])], 10, _hoisted_12);
+						}),
+						128
+						/* KEYED_FRAGMENT */
+					))]),
+					createBaseVNode("div", _hoisted_16, [createVNode($setup["AcuFileButton"], {
+						size: "sm",
+						accept: "application/json,.json",
+						onFile: $setup.importThemeFile
+					}, {
+						default: withCtx(() => [..._cache[2] || (_cache[2] = [createBaseVNode(
+							"i",
+							{ class: "fa-solid fa-download" },
+							null,
+							-1
+							/* CACHED */
+						), createTextVNode(
+							" 导入主题 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					})])
+				]), createBaseVNode("section", _hoisted_17, [createBaseVNode("div", _hoisted_18, [_cache[4] || (_cache[4] = createBaseVNode(
+					"span",
+					{
+						id: "acu-v2-scale-section-title",
+						class: "acu-v2-app__appearance-section-title"
+					},
+					"界面缩放",
+					-1
+					/* CACHED */
+				)), createBaseVNode(
+					"span",
+					_hoisted_19,
+					toDisplayString($setup.appearanceStore.uiScaleLabel),
+					1
+					/* TEXT */
+				)]), createVNode($setup["AcuSegmentedControl"], {
+					class: "acu-v2-app__scale-control",
+					options: $setup.uiScaleOptions,
+					"model-value": $setup.appearanceStore.uiScale,
+					size: "sm",
+					"aria-label": "界面缩放",
+					"onUpdate:modelValue": $setup.setUiScale
+				}, null, 8, ["options", "model-value"])])],
+				2
+				/* CLASS */
+			)) : createCommentVNode("v-if", true)]), createVNode($setup["AcuIconButton"], {
+				class: "acu-v2-app__close",
+				icon: "fa-solid fa-xmark",
+				title: $setup.visualizer.isActive ? "关闭数据库编辑器" : "关闭新 UI",
+				"aria-label": $setup.visualizer.isActive ? "关闭数据库编辑器" : "关闭新 UI",
+				onClick: $setup.closeApp
+			}, null, 8, ["title", "aria-label"])])])) : createCommentVNode("v-if", true), $setup.visualizer.isActive ? (openBlock(), createBlock($setup["VisualizerSurface"], {
+				key: 1,
+				onClose: $setup.closeApp
+			})) : (openBlock(), createBlock($setup["MainArea"], { key: 2 }))])]),
+			$setup.isMobileNavRendered ? (openBlock(), createElementBlock(
+				"div",
+				{
+					key: 0,
+					class: normalizeClass(["acu-v2-app__mobile-nav-layer", { "is-closing": $setup.isMobileNavClosing }]),
+					onClick: withModifiers($setup.closeMobileNav, ["self"])
+				},
+				[createBaseVNode("aside", {
+					class: "acu-v2-app__mobile-nav",
+					style: $setup.mobileNavDrawerStyle,
+					role: "dialog",
+					"aria-modal": "true",
+					"aria-label": "一级页导航",
+					"data-acu-mobile-nav-width": "var(--acu-mobile-nav-width)",
+					onClick: _cache[1] || (_cache[1] = withModifiers(() => {}, ["stop"]))
+				}, [createVNode($setup["Sidebar"], {
+					variant: "drawer",
+					onNavigate: $setup.closeMobileNav
+				})])],
+				2
+				/* CLASS */
+			)) : createCommentVNode("v-if", true),
+			createVNode($setup["AcuDialogHost"]),
+			createVNode($setup["AcuToastViewport"])
+		],
+		512
+		/* NEED_PATCH */
+	), [[vShow, $setup.rootShell.isOpen]])]);
     }
     var App = /*#__PURE__*/ _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-e2bf0608"]]);
 

@@ -86,6 +86,9 @@ vi.mock('../../../src/service/table/native-table-service-adapter', () => ({
 import {
   getStorageProvider,
   getActiveStorageProvider,
+  getReadySqliteProvider_ACU,
+  getSqlRuntimeStatus_ACU,
+  isSqlRuntimeReady_ACU,
   initStorageProvider,
   ensureStorageProviderReady_ACU,
   switchStorageMode,
@@ -247,6 +250,66 @@ describe('table-storage-strategy', () => {
 
       expect(allCreatedProviders).toHaveLength(createdCount);
       expect(mockLoadOrCreateJsonTableFromChatHistory).toHaveBeenCalledOnce();
+    });
+
+    it('并发 SQLite 初始化复用同一回放和 hydrate 任务', async () => {
+      mockStorageMode = 'sqlite';
+      disposeStorageProvider();
+      let resolveReplay: ((value: any) => void) | undefined;
+      mockLoadOrCreateJsonTableFromChatHistory.mockImplementationOnce(() => new Promise(resolve => {
+        resolveReplay = resolve;
+      }));
+
+      const first = initStorageProvider();
+      const second = initStorageProvider();
+
+      expect(mockLoadOrCreateJsonTableFromChatHistory).toHaveBeenCalledOnce();
+      expect(getSqlRuntimeStatus_ACU()).toMatchObject({ state: 'initializing', configuredMode: 'sqlite', retryable: true });
+      resolveReplay?.({ loaded: true, source: 'merged', data: { mate: {} } });
+      await Promise.all([first, second]);
+
+      expect(getCurrentProviderMode()).toBe('sqlite');
+      expect(getSqlRuntimeStatus_ACU()).toMatchObject({ state: 'ready', activeMode: 'sqlite', retryable: false });
+    });
+
+    it('初始化任务在 dispose 后完成时不会重新激活过期 Provider', async () => {
+      mockStorageMode = 'sqlite';
+      disposeStorageProvider();
+      let resolveReplay: ((value: any) => void) | undefined;
+      mockLoadOrCreateJsonTableFromChatHistory.mockImplementationOnce(() => new Promise(resolve => {
+        resolveReplay = resolve;
+      }));
+
+      const pendingInitialization = initStorageProvider();
+      const staleProvider = allCreatedProviders.at(-1)!;
+      disposeStorageProvider();
+      resolveReplay?.({ loaded: true, source: 'merged', data: { mate: {} } });
+      await pendingInitialization;
+
+      expect(staleProvider.dispose).toHaveBeenCalledOnce();
+      expect(getActiveStorageProvider()).toBeNull();
+      expect(getSqlRuntimeStatus_ACU()).toMatchObject({ state: 'idle', activeMode: null });
+    });
+  });
+
+  describe('SQLite runtime readiness', () => {
+    it('未激活 SQLite Provider 时只读获取返回 null，且不懒初始化', () => {
+      mockStorageMode = 'sqlite';
+      disposeStorageProvider();
+      const createdCount = allCreatedProviders.length;
+
+      expect(getReadySqliteProvider_ACU()).toBeNull();
+      expect(isSqlRuntimeReady_ACU()).toBe(false);
+      expect(allCreatedProviders).toHaveLength(createdCount);
+    });
+
+    it('ready SQLite Provider 可被同步只读查询获取', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      const provider = getActiveStorageProvider();
+
+      expect(getReadySqliteProvider_ACU()).toBe(provider);
+      expect(isSqlRuntimeReady_ACU()).toBe(true);
     });
   });
 

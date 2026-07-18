@@ -24,7 +24,7 @@ describe('fix-generated-whitespace', () => {
     expect(result.fixedClosingLineCount).toBe(1);
   });
 
-  it('不改写模板字符串中的行首 space+tab 和纯闭合文本行', () => {
+  it('保留模板字符串中的物理行空白，仅规范化代码行', () => {
     const input = 'const text = `\n    \tliteral\n  } \n`;\n    \tconst value = 1;\n';
     const result = normalizeGeneratedWhitespace_ACU(input);
 
@@ -33,14 +33,11 @@ describe('fix-generated-whitespace', () => {
     expect(result.fixedClosingLineCount).toBe(0);
   });
 
-  it('不改写单引号、双引号和块注释覆盖的物理行', () => {
+  it('保留字符串、正则和注释中的物理行空白，且输出幂等', () => {
     const input = [
-      "const single = 'open",
-      '    \tstill string',
-      "end';",
-      'const double = "open',
-      '  } ',
-      'end";',
+      "const single = '  } ';",
+      'const double = "    \tliteral";',
+      'const pattern = /  } $/;',
       '/* block',
       '    \tcomment',
       '  } ',
@@ -50,14 +47,12 @@ describe('fix-generated-whitespace', () => {
     ].join('\n');
 
     const result = normalizeGeneratedWhitespace_ACU(input);
+    const repeated = normalizeGeneratedWhitespace_ACU(result.text);
 
     expect(result.text).toBe([
-      "const single = 'open",
-      '    \tstill string',
-      "end';",
-      'const double = "open',
-      '  } ',
-      'end";',
+      "const single = '  } ';",
+      'const double = "    \tliteral";',
+      'const pattern = /  } $/;',
       '/* block',
       '    \tcomment',
       '  } ',
@@ -67,5 +62,10 @@ describe('fix-generated-whitespace', () => {
     ].join('\n'));
     expect(result.fixedIndentLineCount).toBe(1);
     expect(result.fixedClosingLineCount).toBe(0);
+    expect(result.fixedTrailingWhitespaceLineCount).toBe(0);
+    expect(repeated.text).toBe(result.text);
+    expect(repeated.fixedIndentLineCount).toBe(0);
+    expect(repeated.fixedClosingLineCount).toBe(0);
+    expect(repeated.fixedTrailingWhitespaceLineCount).toBe(0);
   });
 });
