@@ -44,6 +44,30 @@ import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
       saveSettings_ACU();
   }
 
+  export function deleteTableLocksForSheet_ACU(sheetKey: string, { save = true } = {}) {
+      const normalizedSheetKey = String(sheetKey || '').trim();
+      if (!normalizedSheetKey) return false;
+      const scopeKey = getTableLockScopeKey_ACU();
+      let changed = false;
+
+      const tableLocks = settings_ACU?.tableUpdateLocks?.[scopeKey];
+      if (tableLocks && typeof tableLocks === 'object' && !Array.isArray(tableLocks)
+          && Object.prototype.hasOwnProperty.call(tableLocks, normalizedSheetKey)) {
+          delete tableLocks[normalizedSheetKey];
+          changed = true;
+      }
+
+      const specialIndexLocks = settings_ACU?.specialIndexLocks?.[scopeKey];
+      if (specialIndexLocks && typeof specialIndexLocks === 'object' && !Array.isArray(specialIndexLocks)
+          && Object.prototype.hasOwnProperty.call(specialIndexLocks, normalizedSheetKey)) {
+          delete specialIndexLocks[normalizedSheetKey];
+          changed = true;
+      }
+
+      if (save && changed) saveSettings_ACU();
+      return changed;
+  }
+
   export function toggleRowLock_ACU(sheetKey: string, rowIndex: number) {
       const lockState = getTableLocksForSheet_ACU(sheetKey);
       if (lockState.rows.has(rowIndex)) lockState.rows.delete(rowIndex);

@@ -29,6 +29,7 @@ vi.mock('../../../src/service/settings/settings-service', () => ({
 import {
   getTableLocksForSheet_ACU,
   saveTableLocksForSheet_ACU,
+  deleteTableLocksForSheet_ACU,
   toggleRowLock_ACU,
   toggleColLock_ACU,
   toggleCellLock_ACU,
@@ -81,6 +82,31 @@ describe('saveTableLocksForSheet_ACU', () => {
   it('空 sheetKey 不保存', () => {
     saveTableLocksForSheet_ACU('', { rows: new Set(), cols: new Set(), cells: new Set() });
     expect(mockSettings.tableUpdateLocks['test-chat::iso-key']).toBeUndefined();
+  });
+});
+
+describe('deleteTableLocksForSheet_ACU', () => {
+  it('只删除当前 scope 中指定表的普通锁和特殊索引锁', () => {
+    mockSettings.tableUpdateLocks = {
+      'test-chat::iso-key': {
+        sheet_remove: { rows: [1], cols: [], cells: [] },
+        sheet_keep: { rows: [2], cols: [], cells: [] },
+      },
+      'other-chat::iso-key': { sheet_remove: { rows: [3], cols: [], cells: [] } },
+    };
+    mockSettings.specialIndexLocks = {
+      'test-chat::iso-key': { sheet_remove: false, sheet_keep: true },
+      'test-chat::other-iso': { sheet_remove: false },
+    };
+
+    expect(deleteTableLocksForSheet_ACU('sheet_remove')).toBe(true);
+    expect(mockSettings.tableUpdateLocks['test-chat::iso-key'].sheet_remove).toBeUndefined();
+    expect(mockSettings.tableUpdateLocks['test-chat::iso-key'].sheet_keep).toBeDefined();
+    expect(mockSettings.tableUpdateLocks['other-chat::iso-key'].sheet_remove).toBeDefined();
+    expect(mockSettings.specialIndexLocks['test-chat::iso-key'].sheet_remove).toBeUndefined();
+    expect(mockSettings.specialIndexLocks['test-chat::iso-key'].sheet_keep).toBe(true);
+    expect(mockSettings.specialIndexLocks['test-chat::other-iso'].sheet_remove).toBe(false);
+    expect(mockSaveSettings).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -537,6 +537,7 @@ function purgePatchArrayV2_ACU(patches: any, sheetKeys: Set<string>, targetSqlTa
 function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>): boolean {
     if (!isObjectRecord_ACU(frame)) return false;
     let changed = false;
+    const previousHeadRevision = frame.headRevision;
     const targetSqlTableNames = collectSqlTargetTableNamesFromStorageFrameV2_ACU(frame, sheetKeys);
 
     const checkpoint = frame.checkpoint;
@@ -560,36 +561,49 @@ function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>
     }
 
     if (Array.isArray(frame.logEntries)) {
+        const previousEntryRevisions = new Set(frame.logEntries
+            .map((entry: any) => entry?.commitRevision)
+            .filter((revision: unknown): revision is string => typeof revision === 'string'));
+        const nextEntries: any[] = [];
         frame.logEntries.forEach((entry: any) => {
-            if (!isObjectRecord_ACU(entry)) return;
-            if (purgeEventSheetKeysV2_ACU(entry, sheetKeys)) changed = true;
+            if (!isObjectRecord_ACU(entry)) {
+                nextEntries.push(entry);
+                return;
+            }
+            let entryChanged = false;
+            if (purgeEventSheetKeysV2_ACU(entry, sheetKeys)) entryChanged = true;
             const operations = purgeOperationArrayV2_ACU(entry.operations, sheetKeys, targetSqlTableNames);
             if (operations.changed) {
                 entry.operations = operations.value;
-                changed = true;
+                entryChanged = true;
             }
             const patches = purgePatchArrayV2_ACU(entry.patches, sheetKeys, targetSqlTableNames);
             if (patches.changed) {
                 entry.patches = patches.value;
-                changed = true;
+                entryChanged = true;
             }
             const writeSet = purgeWriteSetV2_ACU(entry.writeSet, sheetKeys);
             if (writeSet.changed) {
                 entry.writeSet = writeSet.writeSet;
-                changed = true;
+                entryChanged = true;
             }
-            if (purgeManualRefillProgressV2_ACU(entry.manualRefillProgress, sheetKeys)) changed = true;
+            if (purgeManualRefillProgressV2_ACU(entry.manualRefillProgress, sheetKeys)) entryChanged = true;
             const baseRevision = purgeRuntimeRevisionSnapshotSheetKeysV2_ACU(entry.baseRevision, sheetKeys);
             if (baseRevision.changed) {
                 entry.baseRevision = baseRevision.value;
-                changed = true;
+                entryChanged = true;
             }
             const parentRevision = purgeRuntimeRevisionSnapshotSheetKeysV2_ACU(entry.parentRevision, sheetKeys);
             if (parentRevision.changed) {
                 entry.parentRevision = parentRevision.value;
-                changed = true;
+                entryChanged = true;
             }
+            if (entryChanged) changed = true;
+            if (!entryChanged || hasMeaningfulManualRefillLogPayloadV2_ACU(entry)) nextEntries.push(entry);
         });
+        if (nextEntries.length !== frame.logEntries.length) changed = true;
+        frame.logEntries = nextEntries;
+        if (changed) normalizeManualRefillFrameHeadRevisionV2_ACU(frame, previousHeadRevision, previousEntryRevisions);
     }
 
     return changed;

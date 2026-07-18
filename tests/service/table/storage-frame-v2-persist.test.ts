@@ -1825,6 +1825,86 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(mocks.guideContainer).toEqual(originalGuide);
   });
 
+  it('仅删表时在一次严格保存内清理全聊天 V2、全部隔离槽和 legacy 数据', async () => {
+    const historical = seedFrame({ logEntries: [makeEntry({ operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_b', sheet: sheetB, reason: 'system' }] })] });
+    historical.TavernDB_ACU_IsolatedData.archive = {
+      _acu_storage_version: 2,
+      storageFrame: JSON.parse(JSON.stringify(historical.TavernDB_ACU_IsolatedData[''].storageFrame)),
+      independentData: { sheet_b: { archived: true } },
+      modifiedKeys: ['sheet_b'],
+      updateGroupKeys: ['sheet_b'],
+    };
+    historical.TavernDB_ACU_IndependentData = { sheet_b: { legacy: true } };
+    historical.TavernDB_ACU_Data = { sheet_b: { legacy: true } };
+    historical.TavernDB_ACU_SummaryData = { sheet_b: { legacy: true } };
+    historical.TavernDB_ACU_ModifiedKeys = ['sheet_b'];
+    historical.TavernDB_ACU_UpdateGroupKeys = ['sheet_b'];
+    const target = seedFrame({ logEntries: [] });
+    mocks.chat.splice(0, mocks.chat.length, historical, target);
+    mocks.loadReplayState.mockResolvedValue(target.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '', sheetChanges: [], deletedSheetKeys: ['sheet_b'], guideData: { sheet_a: { name: 'A' } }, createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit', deletedSheetKeys: ['sheet_b'], purgedMessageCount: 2, checkpoints: [] });
+    expect(mocks.saveChatStrict).toHaveBeenCalledTimes(1);
+    for (const tagData of Object.values(historical.TavernDB_ACU_IsolatedData) as any[]) {
+      expect(tagData.independentData?.sheet_b).toBeUndefined();
+      expect(tagData.storageFrame.checkpoint.data.sheet_b).toBeUndefined();
+      expect(tagData.storageFrame.perSheetCheckpoints.sheet_b).toBeUndefined();
+    }
+    expect(historical.TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(historical.TavernDB_ACU_Data).toBeUndefined();
+    expect(historical.TavernDB_ACU_SummaryData).toBeUndefined();
+    expect(historical.TavernDB_ACU_ModifiedKeys).toEqual([]);
+    expect(historical.TavernDB_ACU_UpdateGroupKeys).toEqual([]);
+    expect(target.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_b).toBeUndefined();
+    expect(target.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toEqual([]);
+  });
+
+  it('删除 key 与模板变更 key 冲突时在事务前拒绝', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '', deletedSheetKeys: ['sheet_a'],
+      sheetChanges: [{ kind: 'operations', sheetKey: 'sheet_a', targetSheetData: sheetA, operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }] }],
+      guideData: { sheet_a: { name: 'A' } },
+    });
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('同时删除和变更') });
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_a).toEqual(sheetA);
+  });
+
+  it('删表严格保存失败时恢复跨消息历史字段、guide 与 scope', async () => {
+    const historical = seedFrame({ logEntries: [] });
+    historical.TavernDB_ACU_Data = { sheet_b: { legacy: true } };
+    const target = seedFrame({ logEntries: [] });
+    mocks.chat.splice(0, mocks.chat.length, historical, target);
+    mocks.loadReplayState.mockResolvedValue(target.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+    const beforeHistorical = JSON.parse(JSON.stringify(historical));
+    const beforeTarget = JSON.parse(JSON.stringify(target));
+    const beforeScope = JSON.parse(JSON.stringify(mocks.scopeContainer));
+    const beforeGuide = JSON.parse(JSON.stringify(mocks.guideContainer));
+    mocks.setGuide.mockImplementation(() => {
+      mocks.scopeContainer.template[''].changed = true;
+      mocks.guideContainer.tags[''].changed = true;
+      return true;
+    });
+    mocks.saveChatStrict.mockRejectedValueOnce(new Error('host save failed'));
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '', sheetChanges: [], deletedSheetKeys: ['sheet_b'], guideData: { sheet_a: { name: 'A' } }, createdAt: 30,
+    });
+
+    expect(result).toEqual({ saved: false, error: 'host save failed' });
+    expect(mocks.saveChatStrict).toHaveBeenCalledTimes(2);
+    expect(historical).toEqual(beforeHistorical);
+    expect(target).toEqual(beforeTarget);
+    expect(mocks.scopeContainer).toEqual(beforeScope);
+    expect(mocks.guideContainer).toEqual(beforeGuide);
+  });
+
+
   it('最新 AI 楼层不是 V2 frame 时拒绝提交，不隐式迁移或修改 guide/scope', async () => {
     const anchor = seedFrame({ logEntries: [] });
     const legacyTarget = { is_user: false, TavernDB_ACU_IndependentData: { sheet_a: { legacy: true } } };

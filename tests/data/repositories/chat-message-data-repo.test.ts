@@ -557,6 +557,63 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
     expect(entry.writeSet).toEqual([{ kind: 'sheet', sheetKey: 'sheet_1' }, { kind: 'all' }]);
   });
 
+  it('完整删除目标表独占 V2 entry 后移除空壳并将 headRevision 回退到保留 entry', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          storageFrame: {
+            version: 2,
+            headRevision: '2:removed',
+            checkpoint: { kind: 'full', data: { sheet_0: { name: '删除表' }, sheet_1: {name: '保留表' } } },
+            logEntries: [
+              {
+                seq: 1, commitRevision: '1:keep', filledSheetKeys: ['sheet_1'], changedSheetKeys: ['sheet_1'],
+                operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_1', sheet: { name: '保留表' }, reason: 'manual_crud' }],
+              },
+              {
+                seq: 2, commitRevision: '2:removed', filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'],
+                operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: { name: '表' }, reason: 'manual_crud' }],
+                writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+              },
+            ],
+            perSheetCheckpoints: { sheet_0: { kind: 'sheet_full', sheetKey: 'sheet_0', data: { name: '删除表' } } },
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+    const frame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
+    expect(frame.checkpoint.data.sheet_0).toBeUndefined();
+    expect(frame.perSheetCheckpoints.sheet_0).toBeUndefined();
+    expect(frame.logEntries).toHaveLength(1);
+    expect(frame.logEntries[0].commitRevision).toBe('1:keep');
+    expect(frame.headRevision).toBe('1:keep');
+  });
+
+  it('完整删除裁空最后一个 V2 entry 时清除悬挂的 headRevision', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          storageFrame: {
+            version: 2,
+            headRevision: '1:removed',
+            logEntries: [{
+              seq: 1, commitRevision: '1:removed', filledSheetKeys: ['sheet_0'],
+              operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: { name: '删除表' }, reason: 'manual_crud' }],
+            }],
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+    const frame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
+    expect(frame.logEntries).toEqual([]);
+    expect(frame.headRevision).toBeNull();
+  });
+
+
   it('局部改写 V2 data_replace 并保留其他 sheet 数据', () => {
     const msg: any = {
       TavernDB_ACU_IsolatedData: {

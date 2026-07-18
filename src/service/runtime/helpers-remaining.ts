@@ -28,6 +28,7 @@ export {
 export {
     getTableLocksForSheet_ACU,
     saveTableLocksForSheet_ACU,
+    deleteTableLocksForSheet_ACU,
     toggleRowLock_ACU,
     toggleColLock_ACU,
     toggleCellLock_ACU,

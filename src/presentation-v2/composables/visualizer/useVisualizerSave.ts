@@ -21,6 +21,7 @@ import {
 } from '../../../service/runtime/state-manager';
 import {
   applySummaryIndexSequenceToTable_ACU,
+  deleteTableLocksForSheet_ACU,
   getSummaryIndexColumnIndex_ACU,
   saveTableLocksForSheet_ACU,
   setSpecialIndexLockEnabled_ACU,
@@ -56,6 +57,7 @@ import {
 } from '../../../service/worldbook/injection-engine';
 import { refreshMergedDataAndNotify_ACU, updateReadableLorebookEntry_ACU } from '../../../service/worldbook/pipeline';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
+import { deleteCurrentSummaryVectorIndexFromChat_ACU } from '../../../service/vector/summary-vector-index-chat-service';
 import {
   applyVisualizerPendingDataOps_ACU,
   hasVisualizerPendingDataOps_ACU,
@@ -442,16 +444,19 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         visualizer.templateBaseData,
         orderedData,
       );
-      if (changes.deletedSheetKeys.length > 0) {
-        toastStore.error('模板保存不处理删表；请使用数据保存执行现有硬删除流程。', { muteable: false });
-        return false;
-      }
       const changedSheetKeys = [...new Set([
         ...changes.addedSheetKeys,
         ...changes.schemaChangedSheetKeys,
         ...changes.metadataChangedSheetKeys,
       ])];
-      if (changedSheetKeys.length === 0) {
+      const deletedSheetKeys = [...changes.deletedSheetKeys];
+      const deletedSummarySheetKeys = deletedSheetKeys.filter(sheetKey => {
+        const table = visualizer.templateBaseData?.[sheetKey];
+        return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name));
+      });
+      const hasRemainingSummarySheet = Object.keys(orderedData).some(sheetKey => sheetKey.startsWith('sheet_')
+        && !!orderedData[sheetKey]?.name && isSummaryOrOutlineTable_ACU(String(orderedData[sheetKey].name)));
+      if (changedSheetKeys.length === 0 && deletedSheetKeys.length === 0) {
         if (visualizer.pendingLockChanges.length > 0 || visualizer.lockDraftsDirty) {
           saveLockDrafts(visualizer.tableLockDrafts);
           visualizer.markSaved('template-chat');
@@ -549,6 +554,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       const commitResult = await commitCurrentFloorTemplateChanges_ACU({
         isolationKey: guideIsolationKey,
         sheetChanges,
+        deletedSheetKeys,
         guideData,
         syncTemplateScope: true,
         templateSource: templateScopeSource,
@@ -572,6 +578,16 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         logWarn_ACU('[ACU-V2 Visualizer] template commit saved but runtime data synchronization failed:', error);
         toastStore.warning('模板已保存，但运行时数据同步失败；请重新载入当前聊天后重试。', { muteable: false });
       }
+      for (const sheetKey of deletedSheetKeys) {
+        delete visualizer.tableLockDrafts[sheetKey];
+      }
+      visualizer.pendingLockChanges = visualizer.pendingLockChanges.filter(change => !deletedSheetKeys.includes(String(change?.sheetKey || '')));
+      try {
+        for (const sheetKey of deletedSheetKeys) deleteTableLocksForSheet_ACU(sheetKey);
+      } catch (error) {
+        logWarn_ACU('[ACU-V2 Visualizer] template commit saved but deleted-sheet lock cleanup failed:', error);
+        toastStore.warning('模板已保存，但已删除表的锁定状态清理失败；请重新载入当前聊天后重试。', { muteable: false });
+      }
       let lockSaveFailed = false;
       const hasPendingLocks = visualizer.lockDraftsDirty || visualizer.pendingLockChanges.length > 0;
       if (hasPendingLocks) try {
@@ -587,6 +603,18 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         } catch (error) {
           logWarn_ACU('[ACU-V2 Visualizer] template commit saved but reloadStorageProvider failed:', error);
           toastStore.warning('模板已保存，但 SQLite 运行时刷新失败；请重新载入当前聊天后重试。', { muteable: false });
+        }
+      }
+      if (deletedSummarySheetKeys.length > 0) {
+        try {
+          if (hasRemainingSummarySheet && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+            await enqueueSummaryVectorIndexFlush_ACU({ mode: 'sync', reason: 'visualizer_v2_template_sheet_delete' });
+          } else if (!hasRemainingSummarySheet) {
+            await deleteCurrentSummaryVectorIndexFromChat_ACU();
+          }
+        } catch (error) {
+          logWarn_ACU('[ACU-V2 Visualizer] template commit saved but summary vector index cleanup failed:', error);
+          toastStore.warning('模板已保存，但摘要向量索引清理失败；请重新载入当前聊天后重试。', { muteable: false });
         }
       }
       try {
@@ -605,7 +633,9 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       }
       const removedCount = preparation.removedNullRowCount + (commitResult.removedNullRowCount || 0);
       toastStore.success(
-        removedCount > 0 ? `模板/结构已保存到当前聊天，已移除 ${removedCount} 条缺少 row_id 的数据行。` : '模板/结构已保存到当前聊天。',
+        removedCount > 0
+          ? `模板/结构已保存到当前聊天，已删除 ${deletedSheetKeys.length} 张表并移除 ${removedCount} 条缺少 row_id 的数据行。`
+          : deletedSheetKeys.length > 0 ? `模板/结构已保存到当前聊天，已删除 ${deletedSheetKeys.length} 张表。` : '模板/结构已保存到当前聊天。',
         { muteable: false });
       return true;
     });

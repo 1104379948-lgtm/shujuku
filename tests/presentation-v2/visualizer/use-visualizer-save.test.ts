@@ -27,7 +27,10 @@ const serviceMock = vi.hoisted(() => ({
   getChatArray_ACU: vi.fn(() => [{ mes: 'ai message' }]),
   saveChatToHost_ACU: vi.fn(async () => undefined),
   applySpecialIndexSequenceToSummaryTables_ACU: vi.fn(),
+  applySummaryIndexSequenceToTable_ACU: vi.fn(),
   getTableLocksForSheet_ACU: vi.fn(() => ({ rows: new Set<number>(), cols: new Set<number>(), cells: new Set<string>() })),
+  deleteTableLocksForSheet_ACU: vi.fn(),
+  getSummaryIndexColumnIndex_ACU: vi.fn(() => -1),
   saveTableLocksForSheet_ACU: vi.fn(),
   setSpecialIndexLockEnabled_ACU: vi.fn(),
   getCurrentWorldbookConfig_ACU: vi.fn(() => ({ summaryVectorIndexModeEnabled: false })),
@@ -67,6 +70,7 @@ const serviceMock = vi.hoisted(() => ({
   refreshMergedDataAndNotify_ACU: vi.fn(async () => undefined),
   updateReadableLorebookEntry_ACU: vi.fn(async () => undefined),
   enqueueSummaryVectorIndexFlush_ACU: vi.fn(async () => undefined),
+  deleteCurrentSummaryVectorIndexFromChat_ACU: vi.fn(async () => false),
   preflightSchemaMigrations_ACU: vi.fn(async () => ({ changedSheetKeys: [], blockers: [], operations: [] })),
 }));
 
@@ -85,7 +89,10 @@ vi.mock('../../../src/service/chat/chat-service', () => ({
 }));
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
   applySpecialIndexSequenceToSummaryTables_ACU: serviceMock.applySpecialIndexSequenceToSummaryTables_ACU,
+  applySummaryIndexSequenceToTable_ACU: serviceMock.applySummaryIndexSequenceToTable_ACU,
   getTableLocksForSheet_ACU: serviceMock.getTableLocksForSheet_ACU,
+  deleteTableLocksForSheet_ACU: serviceMock.deleteTableLocksForSheet_ACU,
+  getSummaryIndexColumnIndex_ACU: serviceMock.getSummaryIndexColumnIndex_ACU,
   saveTableLocksForSheet_ACU: serviceMock.saveTableLocksForSheet_ACU,
   setSpecialIndexLockEnabled_ACU: serviceMock.setSpecialIndexLockEnabled_ACU,
 }));
@@ -138,6 +145,9 @@ vi.mock('../../../src/service/worldbook/pipeline', () => ({
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
   enqueueSummaryVectorIndexFlush_ACU: serviceMock.enqueueSummaryVectorIndexFlush_ACU,
+}));
+vi.mock('../../../src/service/vector/summary-vector-index-chat-service', () => ({
+  deleteCurrentSummaryVectorIndexFromChat_ACU: serviceMock.deleteCurrentSummaryVectorIndexFromChat_ACU,
 }));
 vi.mock('../../../src/service/table/schema-migration-preflight', () => ({
   preflightSchemaMigrations_ACU: serviceMock.preflightSchemaMigrations_ACU,
@@ -816,6 +826,136 @@ describe('useVisualizerSave', () => {
     expect(store.lockDraftsDirty).toBe(false);
     expect(store.dirty).toBe(false);
   });
+
+  it('当前聊天模板仅删表时将删除意图交给原子模板提交，且不走独立 hard purge', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_delete: { ...sheet('删除表'), uid: 'sheet_delete' },
+    }, ['sheet_keep', 'sheet_delete']);
+    store.tableLockDrafts.sheet_delete = { rows: [0], cols: [], cells: [], specialIndexLocked: true };
+    store.deleteSheet('sheet_delete');
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledTimes(1);
+    const [[options]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
+    expect(options.deletedSheetKeys).toEqual(['sheet_delete']);
+    expect(options.sheetChanges).toEqual([]);
+    expect(serviceMock.purgeSheetKeysFromChatHistoryHard_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.saveTableLocksForSheet_ACU).not.toHaveBeenCalledWith('sheet_delete', expect.anything());
+    expect(store.tableLockDrafts.sheet_delete).toBeUndefined();
+    expect(store.deletedSheetKeys).toEqual([]);
+    expect(store.lastSavedTarget).toBe('template-chat');
+  });
+
+  it('删除最后一张摘要表后清除当前聊天摘要向量索引，而不保留陈旧索引', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_summary: { ...sheet('总结表'), uid: 'sheet_summary' },
+    }, ['sheet_keep', 'sheet_summary']);
+    serviceMock.getCurrentWorldbookConfig_ACU.mockReturnValueOnce({ summaryVectorIndexModeEnabled: true });
+    store.deleteSheet('sheet_summary');
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      deletedSheetKeys: ['sheet_summary'],
+      sheetChanges: [],
+    }));
+    expect(serviceMock.deleteCurrentSummaryVectorIndexFromChat_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.enqueueSummaryVectorIndexFlush_ACU).not.toHaveBeenCalled();
+    expect(store.deletedSheetKeys).toEqual([]);
+    expect(store.lastSavedTarget).toBe('template-chat');
+  });
+
+
+  it('删除摘要表但仍保留摘要表时同步索引而不删除当前聊天索引', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_summary_keep: { ...sheet('总体大纲'), uid: 'sheet_summary_keep' },
+      sheet_summary_delete: { ...sheet('总结表'), uid: 'sheet_summary_delete' },
+    }, ['sheet_keep', 'sheet_summary_keep', 'sheet_summary_delete']);
+    serviceMock.getCurrentWorldbookConfig_ACU.mockReturnValueOnce({ summaryVectorIndexModeEnabled: true });
+    store.deleteSheet('sheet_summary_delete');
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    const [[options]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
+    expect(options.deletedSheetKeys).toEqual(['sheet_summary_delete']);
+    expect(options.templateSource.sheet_keep).toBeDefined();
+    expect(options.templateSource.sheet_summary_keep).toBeDefined();
+    expect(options.templateSource.sheet_summary_delete).toBeUndefined();
+    expect(options.guideData.sheet_summary_keep).toBeDefined();
+    expect(serviceMock.enqueueSummaryVectorIndexFlush_ACU).toHaveBeenCalledWith({
+      mode: 'sync',
+      reason: 'visualizer_v2_template_sheet_delete',
+    });
+    expect(serviceMock.deleteCurrentSummaryVectorIndexFromChat_ACU).not.toHaveBeenCalled();
+  });
+
+
+  it('删表与 metadata 变更一起保存时只将存活表生成 sheetChanges', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_delete: { ...sheet('删除表'), uid: 'sheet_delete' },
+    }, ['sheet_keep', 'sheet_delete']);
+    store.currentSheet.name = '保留表更新';
+    store.deleteSheet('sheet_delete');
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    const [[options]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
+    expect(options.deletedSheetKeys).toEqual(['sheet_delete']);
+    expect(options.sheetChanges).toEqual([expect.objectContaining({ kind: 'operations', sheetKey: 'sheet_keep' })]);
+    expect(options.sheetChanges.map((change: any) => change.sheetKey)).not.toContain('sheet_delete');
+  });
+
+  it('模板删表原子提交失败时保留删除状态、基线和锁草稿供重试', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    const initialData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_delete: { ...sheet('删除表'), uid: 'sheet_delete' },
+    };
+    store.loadSnapshot(initialData, ['sheet_keep', 'sheet_delete']);
+    store.tableLockDrafts.sheet_delete = { rows: [0], cols: [], cells: [], specialIndexLocked: true };
+    const baseDataBeforeSave = JSON.parse(JSON.stringify(store.templateBaseData));
+    store.deleteSheet('sheet_delete');
+    serviceMock.commitCurrentFloorTemplateChanges_ACU.mockResolvedValueOnce({ saved: false, error: '原子删除失败' });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({ deletedSheetKeys: ['sheet_delete'], sheetChanges: [] }));
+    expect(store.deletedSheetKeys).toEqual(['sheet_delete']);
+    expect(store.templateBaseData).toEqual(baseDataBeforeSave);
+    expect(store.tableLockDrafts.sheet_delete).toEqual({ rows: [0], cols: [], cells: [], specialIndexLocked: true });
+    expect(store.dirty).toBe(true);
+    expect(toastMock.error).toHaveBeenCalledWith('原子删除失败', { muteable: false });
+  });
+
 
   it('保存已删除表时只把 deletedSheetKeys 传给硬删除且不把删除表写入 V2 commit', async () => {
     const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');

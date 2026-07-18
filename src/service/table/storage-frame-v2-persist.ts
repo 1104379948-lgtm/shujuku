@@ -1,5 +1,5 @@
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
-import { cloneIsolatedData_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { cloneIsolatedData_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getChatScopedConfigContainer_ACU, getChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
@@ -90,6 +90,8 @@ export interface CommitCurrentFloorTemplateChangesOptions_ACU {
   targetMessageIndex?: number;
   isolationKey?: string;
   sheetChanges: TemplateSheetChange_ACU[];
+  /** 在本次模板提交中从全聊天历史精确硬删除的 Sheet。 */
+  deletedSheetKeys?: string[];
   guideData: Record<string, any>;
   /** 同步当前聊天模板 scope；由 guide setter 生成一致的 chat_override 快照。 */
   syncTemplateScope?: boolean;
@@ -107,6 +109,8 @@ export interface CommitCurrentFloorTemplateChangesResult_ACU {
   messageIndex?: number;
   checkpoints?: TableSheetCheckpointV2_ACU[];
   removedNullRowCount?: number;
+  deletedSheetKeys?: string[];
+  purgedMessageCount?: number;
   error?: string;
 }
 
@@ -558,6 +562,20 @@ function classifyTemplateCommitStorageState_ACU(
   if (orphanDetails.length > 0) return { kind: 'orphan_v2_artifacts', details: orphanDetails };
   return { kind: 'pristine_without_checkpoint' };
 }
+
+function classifyTemplateCommitStorageStateAfterDeletedSheets_ACU(
+  chat: any[],
+  isolationKey: string,
+  deletedSheetKeys: string[],
+): TemplateCommitStorageState_ACU {
+  if (deletedSheetKeys.length === 0) return classifyTemplateCommitStorageState_ACU(chat, isolationKey);
+  const simulatedChat = deepClone_ACU(chat);
+  for (const message of simulatedChat) {
+    if (message && !message.is_user) purgeSheetKeysFromMessage_ACU(message, deletedSheetKeys);
+  }
+  return classifyTemplateCommitStorageState_ACU(simulatedChat, isolationKey);
+}
+
 
 function isPlainObjectRecord_ACU(value: unknown): value is Record<string, any> {
   if (!isObjectRecord_ACU(value)) return false;
@@ -1476,14 +1494,64 @@ async function assertValidInitialTemplateSnapshot_ACU(
   }
 }
 
-function assertValidTemplateSheetChanges_ACU(sheetChanges: TemplateSheetChange_ACU[]): void {
-  if (sheetChanges.length === 0) throw new Error('当前楼层模板提交必须至少包含一个 sheet change。');
+const TEMPLATE_DELETE_MESSAGE_FIELDS_ACU = [
+  'TavernDB_ACU_IsolatedData',
+  'TavernDB_ACU_Identity',
+  'TavernDB_ACU_IndependentData',
+  'TavernDB_ACU_Data',
+  'TavernDB_ACU_SummaryData',
+  'TavernDB_ACU_ModifiedKeys',
+  'TavernDB_ACU_UpdateGroupKeys',
+] as const;
+
+type TemplateDeleteMessageSnapshot_ACU = {
+  message: Record<string, any>;
+  fields: Map<string, { hadValue: boolean; value: unknown }>;
+};
+
+function normalizeDeletedTemplateSheetKeys_ACU(value: unknown): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error('当前楼层模板提交的 deletedSheetKeys 必须为数组。');
+  const keys = value.map(key => String(key || ''));
+  if (keys.some(key => !key.startsWith('sheet_'))) throw new Error('当前楼层模板提交包含非法 deletedSheetKey。');
+  if (new Set(keys).size !== keys.length) throw new Error('当前楼层模板提交不能包含重复 deletedSheetKey。');
+  return keys;
+}
+
+function snapshotTemplateDeleteMessages_ACU(chat: unknown[], deepCloneValues: boolean): TemplateDeleteMessageSnapshot_ACU[] {
+  return chat
+    .filter((message: any) => message && !message.is_user && typeof message === 'object')
+    .map((message: Record<string, any>) => ({
+      message,
+      fields: new Map(TEMPLATE_DELETE_MESSAGE_FIELDS_ACU.map(field => [field, {
+        hadValue: Object.prototype.hasOwnProperty.call(message, field),
+        value: deepCloneValues ? cloneOptionalJson_ACU(message[field]) : message[field],
+      }])),
+    }));
+}
+
+function restoreTemplateDeleteMessageSnapshots_ACU(snapshots: TemplateDeleteMessageSnapshot_ACU[]): void {
+  for (const snapshot of snapshots) {
+    for (const [field, previous] of snapshot.fields) {
+      if (previous.hadValue) snapshot.message[field] = previous.value;
+      else delete snapshot.message[field];
+    }
+  }
+}
+
+function assertValidTemplateSheetChanges_ACU(sheetChanges: TemplateSheetChange_ACU[], deletedSheetKeys: string[]): void {
+  if (sheetChanges.length === 0 && deletedSheetKeys.length === 0) {
+    throw new Error('当前楼层模板提交必须至少包含一个 sheet change 或 deletedSheetKey。');
+  }
   const sheetKeys = sheetChanges.map(change => String(change?.sheetKey || ''));
   if (sheetKeys.some(sheetKey => !sheetKey.startsWith('sheet_'))) {
     throw new Error('当前楼层模板提交包含非法 sheetKey。');
   }
   if (new Set(sheetKeys).size !== sheetKeys.length) {
     throw new Error('当前楼层模板提交不能包含重复 sheetKey。');
+  }
+  if (sheetKeys.some(sheetKey => deletedSheetKeys.includes(sheetKey))) {
+    throw new Error('当前楼层模板提交不能同时删除和变更同一 sheetKey。');
   }
   for (const change of sheetChanges) {
     if (change.kind === 'introduction') {
@@ -1529,12 +1597,14 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     return { saved: false, error: '当前楼层模板提交必须提供有效的 guideData。' };
   }
   const requestedChanges = Array.isArray(options.sheetChanges) ? options.sheetChanges : [];
+  let deletedSheetKeys: string[];
   try {
-    assertValidTemplateSheetChanges_ACU(requestedChanges);
+    deletedSheetKeys = normalizeDeletedTemplateSheetKeys_ACU(options.deletedSheetKeys);
+    assertValidTemplateSheetChanges_ACU(requestedChanges, deletedSheetKeys);
   } catch (error: any) {
     return { saved: false, error: error?.message || String(error) };
   }
-  const sheetKeys = requestedChanges.map(change => change.sheetKey);
+  const sheetKeys = [...new Set([...requestedChanges.map(change => change.sheetKey), ...deletedSheetKeys])];
   const createdAt = options.createdAt ?? Date.now();
   if (!Number.isFinite(createdAt) || createdAt < 0) {
     return { saved: false, error: '当前楼层模板提交 requires a finite non-negative createdAt.' };
@@ -1565,9 +1635,13 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       throw new Error(`当前楼层模板提交只能写入最新 AI 楼层：requested=${target.index}, latest=${latestAiTarget.index}。`);
     }
 
-    const storageState = classifyTemplateCommitStorageState_ACU(chat, isolationKey);
+    let storageState = classifyTemplateCommitStorageState_ACU(chat, isolationKey);
     if (storageState.kind === 'legacy_persisted_data') {
-      throw new Error(`当前楼层模板提交检测到 legacy 持久化数据，必须先完成迁移：${storageState.details.join(', ')}。`);
+      const storageStateAfterDeletedSheets = classifyTemplateCommitStorageStateAfterDeletedSheets_ACU(chat, isolationKey, deletedSheetKeys);
+      if (storageStateAfterDeletedSheets.kind === 'legacy_persisted_data') {
+        throw new Error(`当前楼层模板提交检测到 legacy 持久化数据，必须先完成迁移：${storageStateAfterDeletedSheets.details.join(', ')}。`);
+      }
+      storageState = storageStateAfterDeletedSheets;
     }
     if (storageState.kind === 'orphan_v2_artifacts') {
       throw new Error(`当前楼层模板提交检测到缺少 full checkpoint 的 V2 存储痕迹，已拒绝覆盖：${storageState.details.join(', ')}。`);
@@ -1585,6 +1659,9 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     }
 
     if (storageState.kind === 'pristine_without_checkpoint') {
+      if (deletedSheetKeys.length > 0) {
+        throw new Error('预填表模板提交不支持删除历史 Sheet；当前聊天不存在可清理的 V2 checkpoint。');
+      }
       if (!isObjectRecord_ACU(options.templateSource)) {
         throw new Error('预填表模板提交必须提供完整有效的 templateSource。');
       }
@@ -1638,6 +1715,16 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     if (!isV2TagData_ACU(targetTagData)) {
       throw new Error('当前楼层模板提交要求目标 AI 楼层已存在合法 V2 storage frame；请先完成既有迁移。');
     }
+
+    const messageSnapshots = snapshotTemplateDeleteMessages_ACU(chat, deletedSheetKeys.length > 0);
+    const previousScopeContainer = cloneOptionalJson_ACU(getChatScopedConfigContainer_ACU(chat));
+    const previousGuideContainer = cloneOptionalJson_ACU(getChatSheetGuideContainer_ACU(chat));
+    let primarySaveAttempted = false;
+
+    try {
+      const purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (
+        purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count
+      ), 0);
 
     const introductionSheets = new Map<string, Sheet_ACU>();
     let removedNullRowCount = 0;
@@ -1739,14 +1826,6 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       };
     })();
 
-    const hadIsolatedData = Object.prototype.hasOwnProperty.call(target.message, 'TavernDB_ACU_IsolatedData');
-    const previousIsolatedData = target.message.TavernDB_ACU_IsolatedData;
-    const hadIdentity = Object.prototype.hasOwnProperty.call(target.message, 'TavernDB_ACU_Identity');
-    const previousIdentity = target.message.TavernDB_ACU_Identity;
-    const previousScopeContainer = cloneOptionalJson_ACU(getChatScopedConfigContainer_ACU(chat));
-    const previousGuideContainer = cloneOptionalJson_ACU(getChatSheetGuideContainer_ACU(chat));
-
-    try {
       frame.perSheetCheckpoints = {
         ...(frame.perSheetCheckpoints || {}),
         ...Object.fromEntries(checkpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
@@ -1766,20 +1845,27 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         updatedAt: createdAt,
       });
       if (!guideUpdated) throw new Error('当前楼层模板提交无法写入 guideData。');
+      primarySaveAttempted = true;
       await saveChatToHostStrict_ACU();
       logDebug_ACU(`[V2 Persist] 当前楼层模板提交完成: messageIndex=${target.index}, checkpoints=${checkpoints.length}, operations=${operations.length}, isolationKey=${isolationKey}`);
-      return { saved: true, mode: 'v2_commit', messageIndex: target.index, checkpoints, removedNullRowCount };
+      return {
+        saved: true,
+        mode: 'v2_commit',
+        messageIndex: target.index,
+        checkpoints,
+        removedNullRowCount,
+        ...(deletedSheetKeys.length > 0 ? { deletedSheetKeys, purgedMessageCount } : {}),
+      };
     } catch (error: any) {
-      if (hadIsolatedData) target.message.TavernDB_ACU_IsolatedData = previousIsolatedData;
-      else delete target.message.TavernDB_ACU_IsolatedData;
-      if (hadIdentity) target.message.TavernDB_ACU_Identity = previousIdentity;
-      else delete target.message.TavernDB_ACU_Identity;
+      restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
       setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
       setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
-      try {
-        await saveChatToHostStrict_ACU();
-      } catch (rollbackError: any) {
-        throw new Error(`${error?.message || String(error)}；回滚保存也失败：${rollbackError?.message || String(rollbackError)}`);
+      if (primarySaveAttempted) {
+        try {
+          await saveChatToHostStrict_ACU();
+        } catch (rollbackError: any) {
+          throw new Error(`${error?.message || String(error)}；回滚保存也失败：${rollbackError?.message || String(rollbackError)}`);
+        }
       }
       throw error;
     }
