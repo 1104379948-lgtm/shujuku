@@ -127,6 +127,27 @@
               模板覆盖最新层数据
             </AcuButton>
           </div>
+          <section class="acu-v2-data-mgmt-page__checkpoint-section" aria-labelledby="acu-checkpoint-title">
+            <h3 id="acu-checkpoint-title" class="acu-v2-data-mgmt-page__section-title">当前聊天 Checkpoint</h3>
+            <p class="acu-v2-data-mgmt-page__section-description">
+              导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据，
+              仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。
+              全局模板和聊天正文不变。
+            </p>
+            <div class="acu-v2-data-mgmt-page__checkpoint-actions">
+              <AcuButton block :disabled="!!flow.busyAction.value" @click="flow.exportTableCheckpoint">
+                导出 Checkpoint
+              </AcuButton>
+              <AcuFileButton
+                block
+                accept=".json,application/json"
+                :disabled="!!flow.busyAction.value"
+                @file="onImportTableCheckpoint"
+              >
+                导入 Checkpoint
+              </AcuFileButton>
+            </div>
+          </section>
         </AcuPanel>
       </div>
 
@@ -344,6 +365,24 @@ async function onOverrideLatestLayer(): Promise<void> {
   void flow.overrideLatestLayerWithTemplate();
 }
 
+async function onImportTableCheckpoint(file: File): Promise<void> {
+  const checkpoint = await flow.parseTableCheckpoint(file);
+  if (!checkpoint) return;
+  const sourceStorageMode = checkpoint.source.storageMode;
+  const targetStorageMode = flow.getCheckpointTargetStorageMode();
+  const confirmed = await dialogStore.confirm({
+    title: "恢复当前聊天 Checkpoint",
+    message: `导入将清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据。
+仅在当前激活隔离键的最新 AI 楼层重建文件中的表格数据。
+当前聊天表格模板会切换为文件模板，后续更新将使用该模板。
+全局模板和聊天正文不变。来源模式：${sourceStorageMode}；目标模式：${targetStorageMode}。确认继续？`,
+    confirmLabel: "恢复 Checkpoint",
+    confirmVariant: "danger",
+  });
+  if (!confirmed) return;
+  void flow.restoreTableCheckpoint(checkpoint);
+}
+
 async function onDeleteLocalData(mode: "current" | "all"): Promise<void> {
   const message =
     mode === "all"
@@ -534,6 +573,22 @@ watch(useChatChangedTick(), refreshAll);
   margin-top: 12px;
 }
 
+.acu-v2-data-mgmt-page__checkpoint-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));
+}
+
+.acu-v2-data-mgmt-page__checkpoint-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.acu-v2-data-mgmt-page__checkpoint-actions :deep(.acu-file-button),
+.acu-v2-data-mgmt-page__checkpoint-actions :deep(.acu-btn) { width: 100%; min-width: 0; }
+
 .acu-v2-data-mgmt-page__command-grid :deep(.acu-file-button),
 .acu-v2-data-mgmt-page__command-grid :deep(.acu-btn) {
   width: 100%;
@@ -552,6 +607,9 @@ watch(useChatChangedTick(), refreshAll);
 
 @media (max-width: 560px) {
   .acu-v2-data-mgmt-page__command-grid {
+    grid-template-columns: 1fr;
+  }
+  .acu-v2-data-mgmt-page__checkpoint-actions {
     grid-template-columns: 1fr;
   }
 }

@@ -7,6 +7,7 @@ import { DEFAULT_PLOT_SETTINGS_ACU } from '../../../shared/defaults-json.js';
 import { callApi_ACU, callApiWithPlotPreset_ACU, getApiConfigByPreset_ACU } from '../../ai/api-call';
 import { abortController_ACU, currentJsonTableData_ACU, planningGuard_ACU, settings_ACU, _set_tempPlotToSave_ACU, _set_currentJsonTableData_ACU, _set_pendingFinalGenerationGreenlights_ACU } from '../state-manager';
 import { getCharLorebooks_ACU } from '../../../data/gateways/character-gateway';
+import { getCurrentCharPrimaryLorebook_ACU } from '../../../data/gateways/worldbook-gateway';
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data/gateways/host-state-gateway';
 import { capturePlotRuntimeScope_ACU, isSamePlotRuntimeScope_ACU, isTransientLorebookNotFoundError_ACU, normalizeLorebookNames_ACU, summarizePlotRuntimeError_ACU, summarizePlotRuntimeScope_ACU } from './plot-runtime-scope';
@@ -887,6 +888,52 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
   export async function resolveCharacterLorebookNamesStable_ACU(): Promise<string[]> {
     const initialScope = capturePlotRuntimeScope_ACU();
+    const readPrimaryFallback = async (): Promise<string[] | null> => {
+      checkPlotAbortRequested_ACU();
+      const beforeScope = capturePlotRuntimeScope_ACU();
+      if (!isSamePlotRuntimeScope_ACU(initialScope, beforeScope)) {
+        logWarn_ACU('[剧情推进][世界书] 角色主世界书降级取消：读取前作用域已变化。', {
+          phase: 'resolve_character_primary_fallback',
+          initialScope: summarizePlotRuntimeScope_ACU(initialScope),
+          currentScope: summarizePlotRuntimeScope_ACU(beforeScope),
+        });
+        return null;
+      }
+
+      let primaryLorebook: unknown;
+      try {
+        primaryLorebook = await getCurrentCharPrimaryLorebook_ACU();
+      } catch (error) {
+        logWarn_ACU('[剧情推进][世界书] 角色主世界书降级读取失败。', {
+          phase: 'resolve_character_primary_fallback',
+          scope: summarizePlotRuntimeScope_ACU(capturePlotRuntimeScope_ACU()),
+          error: summarizePlotRuntimeError_ACU(error),
+        });
+        throw error;
+      }
+
+      checkPlotAbortRequested_ACU();
+      const afterScope = capturePlotRuntimeScope_ACU();
+      if (!isSamePlotRuntimeScope_ACU(initialScope, afterScope)) {
+        logWarn_ACU('[剧情推进][世界书] 角色主世界书降级取消：读取后作用域已变化。', {
+          phase: 'resolve_character_primary_fallback',
+          initialScope: summarizePlotRuntimeScope_ACU(initialScope),
+          currentScope: summarizePlotRuntimeScope_ACU(afterScope),
+        });
+        return null;
+      }
+
+      const normalizedPrimary = typeof primaryLorebook === 'string' ? primaryLorebook.trim() : '';
+      if (!normalizedPrimary) {
+        logWarn_ACU('[剧情推进][世界书] 角色主世界书降级未返回可用名称。', {
+          phase: 'resolve_character_primary_fallback',
+          scope: summarizePlotRuntimeScope_ACU(afterScope),
+        });
+        return [];
+      }
+      return [normalizedPrimary];
+    };
+
     const readOnce = async (attempt: number): Promise<string[] | null> => {
       checkPlotAbortRequested_ACU();
       const beforeScope = capturePlotRuntimeScope_ACU();
@@ -948,13 +995,18 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         logDebug_ACU('[剧情推进][世界书] 角色绑定世界书在第 2 次读取后恢复。');
         return names || [];
       } catch (retryError) {
-        logWarn_ACU('[剧情推进][世界书] 角色绑定世界书读取失败，已达到重试上限。', {
+        const canFallbackToPrimary = isTransientLorebookNotFoundError_ACU(retryError);
+        logWarn_ACU(canFallbackToPrimary
+          ? '[剧情推进][世界书] 角色绑定世界书读取失败，已达到重试上限，将尝试主世界书降级。'
+          : '[剧情推进][世界书] 角色绑定世界书读取失败，已达到重试上限。', {
           phase: 'resolve_character',
           attempt: 2,
           scope: summarizePlotRuntimeScope_ACU(capturePlotRuntimeScope_ACU()),
           error: summarizePlotRuntimeError_ACU(retryError),
         });
-        throw retryError;
+        if (!canFallbackToPrimary) throw retryError;
+        const fallbackNames = await readPrimaryFallback();
+        return fallbackNames || [];
       }
     }
   }
@@ -993,7 +1045,10 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       }
 
       bookNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).filter(Boolean))];
-      logDebug_ACU('[剧情推进] 最终要扫描的世界书列表:', bookNames);
+      logDebug_ACU('[剧情推进] 世界书扫描目标已解析。', {
+        source: worldbookSource,
+        bookCount: bookNames.length,
+      });
       if (bookNames.length === 0) {
         logWarn_ACU('[剧情推进] 没有找到任何世界书，$1 将为空');
         return '';

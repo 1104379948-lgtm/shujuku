@@ -271,6 +271,15 @@ describe('sanitizeTemplateSnapshotForChat_ACU', () => {
     expect(result!.templateObj).toBeDefined();
   });
 
+  it('按 sheet 键顺序委派 orderNo 补齐', () => {
+    sanitizeTemplateSnapshotForChat_ACU({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_b: { name: 'B', content: [['row_id']] },
+      sheet_a: { name: 'A', content: [['row_id']] },
+    });
+    expect(mockEnsureSheetOrderNumbers).toHaveBeenCalledWith(expect.any(Object), { baseOrderKeys: ['sheet_b', 'sheet_a'], forceRebuild: false });
+  });
+
   it('对象输入深拷贝后处理', () => {
     const templateObj = {
       mate: { type: 'chatSheets', version: 1 },

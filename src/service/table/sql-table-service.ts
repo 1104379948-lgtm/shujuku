@@ -362,6 +362,16 @@ export class SqlTableService implements ITableStorageProvider {
     }
   }
 
+  clearRuntimeData(): void {
+    this.engine.dispose();
+    this.engine = new SqliteEngine();
+    this.syncBridge = new SyncBridge(this.engine);
+    this._initialized = false;
+    this._existingTableSet = undefined;
+    _set_currentJsonTableData_ACU(null);
+    disposeGlobalNameMapper();
+  }
+
   /**
    * 获取当前运行时的完整表格数据
    * 从 SQLite 导出最新状态，同步更新 JSON 视图后返回

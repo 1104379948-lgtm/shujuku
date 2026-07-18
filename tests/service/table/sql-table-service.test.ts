@@ -1257,6 +1257,24 @@ describe('SqlTableService', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
+  // clearRuntimeData
+  // ═══════════════════════════════════════════════════════════════
+  describe('clearRuntimeData', () => {
+    it('释放已初始化引擎并清空 JSON 视图', async () => {
+      mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
+      await service.loadFromChat();
+      service.clearRuntimeData();
+      expect(service.isReady()).toBe(false);
+      expect(service.getCurrentData()).toBeNull();
+      expect(() => service.executeQuery('SELECT 1')).toThrow('SQLite 引擎未初始化');
+      const replaced = await service.replaceAllData(JSON.parse(JSON.stringify(testTableData)));
+      expect(replaced.success).toBe(true);
+      expect(service.isReady()).toBe(true);
+      expect(service.executeQuery('SELECT * FROM inventory').rowCount).toBe(2);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
   // saveToChat
   // ═══════════════════════════════════════════════════════════════
   describe('saveToChat', () => {

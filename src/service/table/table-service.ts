@@ -51,6 +51,8 @@ export interface TableChatPersistOptions_ACU {
   manualRefillProgress?: ManualRefillProgressV2_ACU;
   /** 调用方已处于 transactionContext.runCommit 临界区内时使用，避免嵌套 commit 锁。 */
   assumeCommitLock?: boolean;
+  /** 对破坏性复合写入要求宿主真实保存；默认保持历史宽松保存语义。 */
+  strictSave?: boolean;
   transactionContext?: TableWriteTransactionContext_ACU;
 }
 
@@ -127,6 +129,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
     checkpointReason,
     manualRefillProgress,
     assumeCommitLock,
+    strictSave,
     transactionContext,
   } = options;
 
@@ -217,6 +220,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
         isolationKey: currentIsolationKey,
         revisionWriteSet,
         assumeCommitLock,
+        strictSave,
         transactionContext,
       });
 

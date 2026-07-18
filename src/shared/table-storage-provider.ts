@@ -130,6 +130,12 @@ export interface ITableStorageProvider {
   restoreRuntimeSnapshot?(snapshot: unknown): Promise<void>;
 
   /**
+   * 精确清空运行时表格状态，不读取聊天记录也不创建模板数据。
+   * 失败补偿依赖此方法恢复“旧运行时为空”的状态，因此所有 provider 必须实现。
+   */
+  clearRuntimeData(): void;
+
+  /**
    * 执行 SQL 查询（仅 sqlite 模式支持）
    * native 模式调用时抛出 Error
    */

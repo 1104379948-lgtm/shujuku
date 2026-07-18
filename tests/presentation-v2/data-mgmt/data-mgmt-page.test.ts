@@ -7,9 +7,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_MERGE_SUMMARY_PROMPT_ACU } from '../../../src/shared/defaults-json.js';
 
 const STORAGE_KEY = 'acu_v2_ui_state';
+const capturedDownloads: string[] = [];
 
 function createSettings() {
   return {
+    storageMode: 'native',
     dataIsolationEnabled: true,
     dataIsolationCode: 'alpha',
     deleteStartFloor: 1,
@@ -60,7 +62,7 @@ function createSettings() {
   } as any;
 }
 
-async function mountDataMgmtPage() {
+async function mountDataMgmtPage(chatFileIdentifier = 'chat-data') {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
@@ -91,6 +93,9 @@ async function mountDataMgmtPage() {
   const refreshMerged = vi.fn(async () => ({ ok: true }));
   const applyTemplate = vi.fn(async () => ({ templateStr: '{}', templateObj: {} }));
   const saveChatToHost = vi.fn(async () => undefined);
+  const buildCheckpoint = vi.fn(() => ({ format: 'acu-table-checkpoint' }));
+  const parseCheckpoint = vi.fn(() => ({ success: true, checkpoint: { format: 'acu-table-checkpoint', source: { storageMode: 'native' } } }));
+  const restoreCheckpoint = vi.fn(async () => ({ success: true, restoredMessageIndex: 1 }));
   const chat = [
     {
       is_user: true,
@@ -144,11 +149,13 @@ async function mountDataMgmtPage() {
     createObjectURL: vi.fn(() => 'blob:acu-test'),
     revokeObjectURL: vi.fn(),
   });
-  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function(this: HTMLAnchorElement) {
+    capturedDownloads.push(this.download);
+  });
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     settings_ACU: settings,
-    currentChatFileIdentifier_ACU: 'chat-data',
+    currentChatFileIdentifier_ACU: chatFileIdentifier,
     currentJsonTableData_ACU: {
       mate: { type: 'chatSheets' },
       sheet_a: { name: 'A', content: [['h']], sourceData: {} },
@@ -205,6 +212,12 @@ async function mountDataMgmtPage() {
   }));
   vi.doMock('../../../src/service/table/storage-mode', () => ({
     isSqliteMode: () => false,
+    getCurrentStorageMode: () => settings.storageMode,
+  }));
+  vi.doMock('../../../src/service/table/table-checkpoint-transfer', () => ({
+    buildCurrentTableCheckpoint_ACU: buildCheckpoint,
+    parseTableCheckpointFile_ACU: parseCheckpoint,
+    restoreTableCheckpointToLatestAi_ACU: restoreCheckpoint,
   }));
 
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
@@ -227,11 +240,15 @@ async function mountDataMgmtPage() {
     applyTemplate,
     saveChatToHost,
     chat,
+    buildCheckpoint,
+    parseCheckpoint,
+    restoreCheckpoint,
   };
 }
 
 beforeEach(() => {
   localStorage.clear();
+  capturedDownloads.length = 0;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -668,8 +685,9 @@ describe('DataMgmtPage', () => {
       .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('备份与恢复'));
     expect(panel).not.toBeUndefined();
 
-    const buttons = Array.from(panel!.querySelectorAll<HTMLButtonElement>('button'));
-    expect(panel!.querySelector('.acu-v2-data-mgmt-page__command-grid')).not.toBeNull();
+    const commandGrid = panel!.querySelector('.acu-v2-data-mgmt-page__command-grid');
+    expect(commandGrid).not.toBeNull();
+    const buttons = Array.from(commandGrid!.querySelectorAll<HTMLButtonElement>('button'));
     const labels = buttons.map(button => button.textContent?.trim() || '').filter(Boolean);
     expect(labels).toEqual([
       '合并导入（模板+指令）',
@@ -680,6 +698,134 @@ describe('DataMgmtPage', () => {
     expect(buttons.find(button => button.textContent?.includes('特殊导出'))?.classList.contains('acu-btn--default')).toBe(true);
     expect(buttons.find(button => button.textContent?.includes('模板覆盖最新层数据'))?.classList.contains('acu-btn--default')).toBe(true);
     expect(buttons.find(button => button.textContent?.includes('合并导入（模板+指令）'))?.classList.contains('acu-btn--block')).toBe(true);
+
+    const checkpointSection = panel!.querySelector('.acu-v2-data-mgmt-page__checkpoint-section');
+    expect(checkpointSection).not.toBeNull();
+    expect(checkpointSection?.textContent).toContain('导出 Checkpoint');
+    expect(checkpointSection?.textContent).toContain('导入 Checkpoint');
+    expect(checkpointSection?.textContent).toContain('全部 AI 楼层、所有隔离标识');
+    expect(checkpointSection?.textContent).toContain('当前激活隔离键的最新 AI 楼层');
+    expect(checkpointSection?.textContent).toContain('后续更新将使用该模板');
+    expect(checkpointSection?.textContent).toContain('全局模板和聊天正文不变');
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('导出 Checkpoint 文件名清洗非法字符并附加固定时间戳', async () => {
+    const { mount, buildCheckpoint } = await mountDataMgmtPage('alpha/beta:*?gamma');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 12, 21, 18, 41));
+    const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page .acu-panel'))
+      .find(el => el.querySelector('.acu-panel__title')?.textContent?.includes('备份与恢复'));
+    const checkpointSection = panel!.querySelector('.acu-v2-data-mgmt-page__checkpoint-section');
+    const exportButton = Array.from(checkpointSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('导出 Checkpoint'));
+
+    exportButton!.click();
+
+    expect(buildCheckpoint).toHaveBeenCalledTimes(1);
+    expect(capturedDownloads).toEqual(['TavernDB_checkpoint_alpha_beta_gamma_20260712-211841.json']);
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:acu-test');
+
+    vi.useRealTimers();
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('导入 Checkpoint 在危险确认前不会触发恢复', async () => {
+    const { mount, parseCheckpoint, restoreCheckpoint } = await mountDataMgmtPage();
+    const input = Array.from(document.querySelectorAll<HTMLInputElement>('.acu-v2-data-mgmt-page__checkpoint-section input[type="file"]'))[0];
+    expect(input).toBeDefined();
+    const file = new File(['{}'], 'checkpoint.json', { type: 'application/json' });
+    Object.defineProperty(input!, 'files', { configurable: true, value: [file] });
+    Object.defineProperty(FileReader.prototype, 'readAsText', {
+      configurable: true,
+      value: function(this: FileReader) {
+        Object.defineProperty(this, 'result', { configurable: true, value: '{}' });
+        this.onload?.(new ProgressEvent('load'));
+      },
+    });
+    input!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(parseCheckpoint).toHaveBeenCalledWith('{}');
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('恢复当前聊天 Checkpoint');
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('来源模式：native；目标模式：native');
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('全部 AI 楼层、所有隔离标识');
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('当前激活隔离键的最新 AI 楼层');
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('后续更新将使用该模板');
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('全局模板和聊天正文不变');
+    expect(restoreCheckpoint).not.toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('恢复 Checkpoint 按完整成功、部分成功和失败反馈真实状态', async () => {
+    const { mount, restoreCheckpoint, settings } = await mountDataMgmtPage();
+    const file = new File(['{}'], 'checkpoint.json', { type: 'application/json' });
+    Object.defineProperty(FileReader.prototype, 'readAsText', {
+      configurable: true,
+      value: function(this: FileReader) {
+        Object.defineProperty(this, 'result', { configurable: true, value: '{}' });
+        this.onload?.(new ProgressEvent('load'));
+      },
+    });
+
+    restoreCheckpoint.mockResolvedValueOnce({
+      success: true, restoredMessageIndex: 1,
+      postCondition: { runtimeMatches: true, scopeIsChatOverride: true, templateMatches: true, guideMatches: true, providerMode: 'native' },
+    });
+    const input = Array.from(document.querySelectorAll<HTMLInputElement>('.acu-v2-data-mgmt-page__checkpoint-section input[type="file"]'))[0];
+    Object.defineProperty(input!, 'files', { configurable: true, value: [file] });
+    input!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+    await clickDialogButton('恢复 Checkpoint');
+    expect(document.querySelector('.acu-v2-toast--success')?.textContent).toContain('实际存储：native');
+
+    restoreCheckpoint.mockResolvedValueOnce({
+      success: true, restoredMessageIndex: 1, derivedRefreshWarnings: ['世界书刷新失败'], cleanupWarnings: ['向量 manifest 清理失败'],
+      postCondition: { runtimeMatches: false, scopeIsChatOverride: true, templateMatches: false, guideMatches: true, providerMode: 'native' },
+    });
+    const partialInput = Array.from(document.querySelectorAll<HTMLInputElement>('.acu-v2-data-mgmt-page__checkpoint-section input[type="file"]'))[0];
+    Object.defineProperty(partialInput!, 'files', { configurable: true, value: [file] });
+    partialInput!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+    await clickDialogButton('恢复 Checkpoint');
+    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('部分成功');
+    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('运行时数据不一致');
+    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('聊天模板快照不一致');
+    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('派生刷新：世界书刷新失败');
+    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('清理：向量 manifest 清理失败');
+
+    settings.storageMode = 'sqlite';
+    restoreCheckpoint.mockResolvedValueOnce({
+      success: true, restoredMessageIndex: 1,
+      postCondition: { runtimeMatches: true, scopeIsChatOverride: true, templateMatches: true, guideMatches: true, providerMode: 'native' },
+    });
+    const fallbackInput = Array.from(document.querySelectorAll<HTMLInputElement>('.acu-v2-data-mgmt-page__checkpoint-section input[type="file"]'))[0];
+    Object.defineProperty(fallbackInput!, 'files', { configurable: true, value: [file] });
+    fallbackInput!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+    await clickDialogButton('恢复 Checkpoint');
+    const warningToasts = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-toast--warning'));
+    expect(warningToasts.at(-1)?.textContent).toContain('目标设置为 SQLite，实际存储 fallback 为 native');
+
+    restoreCheckpoint.mockResolvedValueOnce({ success: true, restoredMessageIndex: 1 });
+    const missingConditionInput = Array.from(document.querySelectorAll<HTMLInputElement>('.acu-v2-data-mgmt-page__checkpoint-section input[type="file"]'))[0];
+    Object.defineProperty(missingConditionInput!, 'files', { configurable: true, value: [file] });
+    missingConditionInput!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+    await clickDialogButton('恢复 Checkpoint');
+    const finalWarningToasts = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-toast--warning'));
+    expect(finalWarningToasts.at(-1)?.textContent).toContain('恢复后置条件缺失');
+
+    restoreCheckpoint.mockResolvedValueOnce({ success: false, error: 'strict failed' });
+    const failedInput = Array.from(document.querySelectorAll<HTMLInputElement>('.acu-v2-data-mgmt-page__checkpoint-section input[type="file"]'))[0];
+    Object.defineProperty(failedInput!, 'files', { configurable: true, value: [file] });
+    failedInput!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+    await clickDialogButton('恢复 Checkpoint');
+    expect(document.querySelector('.acu-v2-toast--error')?.textContent).toContain('恢复 Checkpoint 失败：strict failed');
 
     mount.__resetAcuV2MountForTests();
   });

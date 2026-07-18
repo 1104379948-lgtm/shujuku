@@ -161,6 +161,53 @@ async function cleanupVectorIndexManifestsAfterCommit_ACU(manifests: any[]): Pro
     return warnings;
 }
 
+/**
+ * 仅供已持有独占表写事务的复合恢复流程使用。
+ * 调用方必须在一次严格聊天保存成功后，再调用 cleanupCheckpointVectorIndexManifestsAfterCommit_ACU。
+ */
+export async function clearAllAiTableDataForCheckpointRestore_ACU(): Promise<{
+    clearedCount: number;
+    vectorManifestsToDeleteAfterCommit: any[];
+}> {
+    const chat = getChatArray_ACU();
+    if (!Array.isArray(chat) || chat.length === 0) {
+        return { clearedCount: 0, vectorManifestsToDeleteAfterCommit: [] };
+    }
+
+    let clearedCount = 0;
+    const vectorManifestsToDeleteAfterCommit: any[] = [];
+    for (const msg of chat) {
+        if (!msg || msg.is_user) continue;
+        let changed = false;
+        if (msg.TavernDB_ACU_Data) { delete msg.TavernDB_ACU_Data; changed = true; }
+        if (msg.TavernDB_ACU_SummaryData) { delete msg.TavernDB_ACU_SummaryData; changed = true; }
+        if (msg.TavernDB_ACU_IndependentData) { delete msg.TavernDB_ACU_IndependentData; changed = true; }
+        if (msg.TavernDB_ACU_Identity !== undefined) { delete msg.TavernDB_ACU_Identity; changed = true; }
+        if (msg.TavernDB_ACU_IsolatedData) {
+            const isolatedData = msg.TavernDB_ACU_IsolatedData;
+            if (isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)) {
+                for (const key of Object.keys(isolatedData)) {
+                    await deleteVectorIndexManifestFromTagData_ACU(isolatedData[key], {
+                        deleteExternal: false,
+                        onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest),
+                    });
+                }
+            }
+            delete msg.TavernDB_ACU_IsolatedData;
+            changed = true;
+        }
+        if (msg.TavernDB_ACU_ModifiedKeys) { delete msg.TavernDB_ACU_ModifiedKeys; changed = true; }
+        if (msg.TavernDB_ACU_UpdateGroupKeys) { delete msg.TavernDB_ACU_UpdateGroupKeys; changed = true; }
+        if (changed) clearedCount += 1;
+    }
+    return { clearedCount, vectorManifestsToDeleteAfterCommit };
+}
+
+/** 仅供 Checkpoint 严格保存成功后的资源回收调用；失败只返回警告，不撤销已提交聊天数据。 */
+export async function cleanupCheckpointVectorIndexManifestsAfterCommit_ACU(manifests: any[]): Promise<string[]> {
+    return cleanupVectorIndexManifestsAfterCommit_ACU(manifests);
+}
+
 function messageHasLocalLayerData_ACU(msg: any): boolean {
     if (!msg || typeof msg !== 'object') return false;
     return !!(

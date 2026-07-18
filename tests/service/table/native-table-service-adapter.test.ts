@@ -33,6 +33,7 @@ vi.mock('../../../src/service/ai/prompt-builder/table-edit-parser', () => ({
 let mockCurrentJsonTableData: any = null;
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentJsonTableData_ACU() { return mockCurrentJsonTableData; },
+  _set_currentJsonTableData_ACU: (value: any) => { mockCurrentJsonTableData = value; },
 }));
 
 import { NativeTableServiceAdapter } from '../../../src/service/table/native-table-service-adapter';
@@ -103,6 +104,17 @@ describe('NativeTableServiceAdapter', () => {
 
     it('数据为 null 时返回 null', () => {
       mockCurrentJsonTableData = null;
+      expect(adapter.getCurrentData()).toBeNull();
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // clearRuntimeData
+  // ═══════════════════════════════════════════════════════════════
+  describe('clearRuntimeData', () => {
+    it('精确清空当前 JSON 运行时数据', () => {
+      mockCurrentJsonTableData = { mate: { type: 'acu' }, sheet_0: { name: '测试' } };
+      adapter.clearRuntimeData();
       expect(adapter.getCurrentData()).toBeNull();
     });
   });

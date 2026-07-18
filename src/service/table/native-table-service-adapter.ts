@@ -73,6 +73,10 @@ export class NativeTableServiceAdapter implements ITableStorageProvider {
     return { success: true, modifiedKeys, appliedEdits: modifiedKeys.length };
   }
 
+  clearRuntimeData(): void {
+    _set_currentJsonTableData_ACU(null);
+  }
+
   /**
    * 应用 AI 返回的编辑指令（DSL 格式）
    * 委托给 parseAndApplyTableEdits_ACU

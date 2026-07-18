@@ -22,7 +22,7 @@ import {
   saveSettings_ACU,
   switchIsolationProfile_ACU,
 } from '../../service/settings/settings-service';
-import { isSqliteMode } from '../../service/table/storage-mode';
+import { getCurrentStorageMode, isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
 import { getChatArray_ACU, deleteLocalDataInChatCore_ACU, overrideLatestLayerWithTemplateCore_ACU } from '../../service/chat/chat-service';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
@@ -32,6 +32,7 @@ import { applyTemplateSnapshotToScope_ACU, getDefaultTemplateSnapshot_ACU } from
 import { clearCurrentChatTemplateSnapshots_ACU, sanitizeChatSheetsObject_ACU } from '../../service/template/chat-scope';
 import { clearCurrentTableLocks_ACU } from '../../service/runtime/helpers-table-lock';
 import { clearCurrentChatPlotPresetOverride_ACU } from '../../service/plot/plot-logic';
+import { buildCurrentTableCheckpoint_ACU, parseTableCheckpointFile_ACU, restoreTableCheckpointToLatestAi_ACU, type TableCheckpointFileV1_ACU } from '../../service/table/table-checkpoint-transfer';
 import { useToastStore } from '../stores/toast-store';
 
 export type DataMgmtMessageKind = 'info' | 'success' | 'warning' | 'error';
@@ -98,6 +99,15 @@ async function readFileText(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error('文件读取失败'));
     reader.readAsText(file, 'UTF-8');
   });
+}
+
+function formatCheckpointExportTimestamp(date: Date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join('') + `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function downloadJson(filename: string, data: unknown): void {
@@ -189,6 +199,10 @@ export function useDataManagement() {
     deleteRange.endFloor = settings_ACU.deleteEndFloor || '';
     retainRecentLayers.value = normalizeRetainRecentLayers(settings_ACU.retainRecentLayers ?? 100);
     aiMessageCount.value = getAiMessageCount();
+  }
+
+  function getCheckpointTargetStorageMode(): 'native' | 'sqlite' {
+    return getCurrentStorageMode();
   }
 
   async function applyIsolation(): Promise<void> {
@@ -313,6 +327,82 @@ export function useDataManagement() {
       logError_ACU('[ACU-V2] exportJsonData failed', e);
       message.value = null;
       toast.error('导出 JSON 失败，详情见运行日志。');
+    }
+  }
+
+  function exportTableCheckpoint(): void {
+    try {
+      const checkpoint = buildCurrentTableCheckpoint_ACU();
+      const chatName = String(currentChatFileIdentifier_ACU || 'current_chat').replace(/[\\/:*?"<>|]+/g, '_');
+      downloadJson(`TavernDB_checkpoint_${chatName}_${formatCheckpointExportTimestamp()}.json`, checkpoint);
+      message.value = null;
+      toast.success('当前聊天 Checkpoint 已导出。');
+    } catch (e: any) {
+      logError_ACU('[ACU-V2] exportTableCheckpoint failed', e);
+      message.value = null;
+      toast.error(`导出 Checkpoint 失败：${e?.message || '未知错误'}`);
+    }
+  }
+
+  async function parseTableCheckpoint(file: File): Promise<TableCheckpointFileV1_ACU | null> {
+    busyAction.value = 'parse-checkpoint';
+    try {
+      const parsed = parseTableCheckpointFile_ACU(await readFileText(file));
+      if (parsed.success === false) throw new Error(parsed.error);
+      return parsed.checkpoint;
+    } catch (e: any) {
+      logError_ACU('[ACU-V2] parseTableCheckpoint failed', e);
+      message.value = null;
+      toast.error(`Checkpoint 文件无效：${e?.message || '未知错误'}`);
+      return null;
+    } finally {
+      busyAction.value = '';
+    }
+  }
+
+  async function restoreTableCheckpoint(checkpoint: TableCheckpointFileV1_ACU): Promise<void> {
+    busyAction.value = 'restore-checkpoint';
+    try {
+      const result = await restoreTableCheckpointToLatestAi_ACU(checkpoint);
+      if (!result.success) throw new Error(result.error || 'Checkpoint 恢复失败。');
+      refresh();
+      message.value = null;
+      const cleanupWarnings = result.cleanupWarnings || [];
+      const derivedRefreshWarnings = result.derivedRefreshWarnings || [];
+      const postCondition = result.postCondition;
+      const postConditionFailures = !postCondition
+        ? ['恢复后置条件缺失']
+        : [
+            !postCondition.runtimeMatches ? '运行时数据不一致' : '',
+            !postCondition.scopeIsChatOverride ? '模板作用域不是 chat_override' : '',
+            !postCondition.templateMatches ? '聊天模板快照不一致' : '',
+            !postCondition.guideMatches ? '指导表不一致' : '',
+          ].filter(Boolean);
+      const providerFallback = getCurrentStorageMode() === 'sqlite' && postCondition?.providerMode === 'native';
+      const warnings = [
+        ...derivedRefreshWarnings.map(warning => `派生刷新：${warning}`),
+        ...cleanupWarnings.map(warning => `清理：${warning}`),
+      ];
+      const targetMessage = `第 ${result.restoredMessageIndex! + 1} 条消息`;
+      const providerMessage = `实际存储：${postCondition?.providerMode || '不可用'}`;
+      if (warnings.length || postConditionFailures.length || providerFallback) {
+        const reasons = [
+          ...postConditionFailures,
+          providerFallback ? '目标设置为 SQLite，实际存储 fallback 为 native' : '',
+          ...warnings,
+        ].filter(Boolean).join('；');
+        toast.warning(`Checkpoint 已恢复到${targetMessage}，但属于部分成功：${providerMessage}；${reasons}。`, { muteable: false, durationMs: 6000 });
+      } else {
+        toast.success(`Checkpoint 已恢复到${targetMessage}；${providerMessage}。`, { muteable: false });
+      }
+      for (const warning of cleanupWarnings) logError_ACU('[ACU-V2] Checkpoint cleanup warning', warning);
+      for (const warning of derivedRefreshWarnings) logError_ACU('[ACU-V2] Checkpoint derived refresh warning', warning);
+    } catch (e: any) {
+      logError_ACU('[ACU-V2] restoreTableCheckpoint failed', e);
+      message.value = null;
+      toast.error(`恢复 Checkpoint 失败：${e?.message || '未知错误'}`, { muteable: false });
+    } finally {
+      busyAction.value = '';
     }
   }
 
@@ -482,12 +572,16 @@ export function useDataManagement() {
     aiMessageCount,
     tableCount,
     refresh,
+    getCheckpointTargetStorageMode,
     applyIsolation,
     removeHistory,
     deleteCurrentIsolationEntries,
     importCombinedSettings,
     exportCombinedSettings,
     exportJsonData,
+    exportTableCheckpoint,
+    parseTableCheckpoint,
+    restoreTableCheckpoint,
     resetAllDefaults,
     overrideLatestLayerWithTemplate,
     deleteLocalData,

@@ -1,4 +1,4 @@
-import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
+import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { cloneIsolatedData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
@@ -51,6 +51,8 @@ export interface PersistTableMutationV2Options_ACU {
   revisionWriteSet?: TableMutationWriteSetV2_ACU;
   /** 调用方已处于 transactionContext.runCommit 临界区内时使用，避免嵌套 commit 锁。 */
   assumeCommitLock?: boolean;
+  /** 对破坏性复合写入要求宿主真实保存；默认保持历史宽松保存语义。 */
+  strictSave?: boolean;
   transactionContext?: Pick<TableWriteTransactionContext_ACU, 'runCommit' | 'baseRevision' | 'writeSet' | 'assertFresh'>;
 }
 
@@ -434,7 +436,11 @@ async function persistTableMutationLogV2Core_ACU(
     logWarn_ACU(`[V2 Persist] 无 operation 且无 filled 事件，仍保存空日志事件: messageIndex=${target.index}`);
   }
 
-  await saveChatToHost_ACU();
+  if (options.strictSave) {
+    await saveChatToHostStrict_ACU();
+  } else {
+    await saveChatToHost_ACU();
+  }
   return { saved: true, messageIndex: target.index, entry };
 }
 

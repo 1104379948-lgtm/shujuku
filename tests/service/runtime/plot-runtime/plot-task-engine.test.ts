@@ -12,6 +12,7 @@ const {
   mockCallApi,
   mockCallApiWithPlotPreset,
   mockGetCharLorebooks,
+  mockGetCurrentCharPrimaryLorebook,
   mockGetChatArray,
   mockGetPersonaDescription,
   mockGetCharDescription,
@@ -56,6 +57,7 @@ const {
   mockCapturePlotRuntimeScope,
   mockIsSamePlotRuntimeScope,
   mockAbortableDelay,
+  mockLogDebug,
   mockLogError,
   mockLogWarn,
 } = vi.hoisted(() => {
@@ -95,6 +97,7 @@ const {
     mockCallApi: vi.fn(),
     mockCallApiWithPlotPreset: vi.fn(),
     mockGetCharLorebooks: vi.fn(),
+    mockGetCurrentCharPrimaryLorebook: vi.fn(),
     mockGetChatArray: vi.fn(),
     mockGetPersonaDescription: vi.fn(),
     mockGetCharDescription: vi.fn(),
@@ -139,6 +142,7 @@ const {
     mockCapturePlotRuntimeScope: vi.fn(),
     mockIsSamePlotRuntimeScope: vi.fn(),
     mockAbortableDelay: vi.fn(async () => {}),
+    mockLogDebug: vi.fn(),
     mockLogError: vi.fn(),
     mockLogWarn: vi.fn(),
   };
@@ -174,6 +178,10 @@ vi.mock('../../../../src/data/gateways/character-gateway', () => ({
   getCharLorebooks_ACU: mockGetCharLorebooks,
 }));
 
+vi.mock('../../../../src/data/gateways/worldbook-gateway', () => ({
+  getCurrentCharPrimaryLorebook_ACU: mockGetCurrentCharPrimaryLorebook,
+}));
+
 vi.mock('../../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: mockGetChatArray,
 }));
@@ -199,7 +207,7 @@ vi.mock('../../../../src/shared/utils', () => ({
   escapeRegExp_ACU: (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
   hashUserInput_ACU: mockHashUserInput,
   isEntryBlocked_ACU: mockIsEntryBlocked,
-  logDebug_ACU: vi.fn(),
+  logDebug_ACU: mockLogDebug,
   logError_ACU: mockLogError,
   logWarn_ACU: mockLogWarn,
   normalizeNonNegativeInteger_ACU: (value: any, fallback = 0) => {
@@ -334,6 +342,7 @@ beforeEach(() => {
     && before.isolationKey === after.isolationKey
   ));
   mockAbortableDelay.mockResolvedValue(undefined);
+  mockGetCurrentCharPrimaryLorebook.mockReset().mockResolvedValue(null);
   mockCurrentJsonTableDataRef.value = {
     sheet_0: {
       name: '纪要表',
@@ -755,6 +764,7 @@ describe('resolveCharacterLorebookNamesStable_ACU', () => {
 
     await expect(resolveCharacterLorebookNamesStable_ACU()).resolves.toEqual(['主书', '副书']);
     expect(mockGetCharLorebooks).toHaveBeenCalledTimes(1);
+    expect(mockGetCurrentCharPrimaryLorebook).not.toHaveBeenCalled();
     expect(mockAbortableDelay).not.toHaveBeenCalled();
   });
 
@@ -765,22 +775,53 @@ describe('resolveCharacterLorebookNamesStable_ACU', () => {
 
     await expect(resolveCharacterLorebookNamesStable_ACU()).resolves.toEqual(['恢复书']);
     expect(mockGetCharLorebooks).toHaveBeenCalledTimes(2);
+    expect(mockGetCurrentCharPrimaryLorebook).not.toHaveBeenCalled();
     expect(mockAbortableDelay).toHaveBeenCalledTimes(1);
     expect(mockAbortableDelay).toHaveBeenCalledWith(300, undefined);
   });
 
-  it('连续 not-found 在第二次失败后不再读取或等待', async () => {
+  it('连续 not-found 后使用稳定作用域内的主世界书降级', async () => {
     const sensitiveText = '用户输入、提示词和世界书正文都不能泄露';
     mockGetCharLorebooks.mockRejectedValue(new Error(`worldbook not found: ${sensitiveText}`));
+    mockGetCurrentCharPrimaryLorebook.mockResolvedValue(' 主书 ');
 
-    await expect(resolveCharacterLorebookNamesStable_ACU()).rejects.toThrow(sensitiveText);
+    await expect(resolveCharacterLorebookNamesStable_ACU()).resolves.toEqual(['主书']);
     expect(mockGetCharLorebooks).toHaveBeenCalledTimes(2);
+    expect(mockGetCurrentCharPrimaryLorebook).toHaveBeenCalledTimes(1);
     expect(mockAbortableDelay).toHaveBeenCalledTimes(1);
     expect(mockLogWarn).toHaveBeenCalledWith(
-      '[剧情推进][世界书] 角色绑定世界书读取失败，已达到重试上限。',
+      '[剧情推进][世界书] 角色绑定世界书读取失败，已达到重试上限，将尝试主世界书降级。',
       expect.objectContaining({ attempt: 2, error: { category: 'unknown' } }),
     );
     expect(JSON.stringify(mockLogWarn.mock.calls)).not.toContain(sensitiveText);
+  });
+
+  it('主世界书降级结果进入 pipeline 但不进入任何日志', async () => {
+    const sensitivePrimaryLorebook = '仅供当前角色使用的敏感主书名';
+    mockGetCharLorebooks.mockRejectedValue(new Error('worldbook not found'));
+    mockGetCurrentCharPrimaryLorebook.mockResolvedValue(sensitivePrimaryLorebook);
+
+    await expect(getWorldbookContentForPlot_ACU(
+      { plotWorldbookConfig: { source: 'character' } },
+      '继续推进',
+    )).resolves.toBe('世界书内容');
+
+    expect(mockBuildCombinedWorldbookContentByStrategy).toHaveBeenCalledTimes(1);
+    expect(mockBuildCombinedWorldbookContentByStrategy.mock.calls[0][0].bookNames).toEqual([sensitivePrimaryLorebook]);
+    const serializedLogs = JSON.stringify([
+      ...mockLogDebug.mock.calls,
+      ...mockLogWarn.mock.calls,
+      ...mockLogError.mock.calls,
+    ]);
+    expect(serializedLogs).not.toContain(sensitivePrimaryLorebook);
+  });
+
+  it.each([null, '', '   ', 7])('主世界书降级返回不可用值 %s 时返回空列表', async (primaryLorebook) => {
+    mockGetCharLorebooks.mockRejectedValue(new Error('worldbook not found'));
+    mockGetCurrentCharPrimaryLorebook.mockResolvedValue(primaryLorebook);
+
+    await expect(resolveCharacterLorebookNamesStable_ACU()).resolves.toEqual([]);
+    expect(mockGetCurrentCharPrimaryLorebook).toHaveBeenCalledTimes(1);
   });
 
   it('角色世界书失败降级日志不复制宿主错误正文', async () => {
@@ -800,7 +841,18 @@ describe('resolveCharacterLorebookNamesStable_ACU', () => {
 
     await expect(resolveCharacterLorebookNamesStable_ACU()).rejects.toThrow('permission denied');
     expect(mockGetCharLorebooks).toHaveBeenCalledTimes(1);
+    expect(mockGetCurrentCharPrimaryLorebook).not.toHaveBeenCalled();
     expect(mockAbortableDelay).not.toHaveBeenCalled();
+  });
+
+  it('第二次读取转为非 not-found 错误时不使用主世界书降级', async () => {
+    mockGetCharLorebooks
+      .mockRejectedValueOnce(new Error('worldbook not found'))
+      .mockRejectedValueOnce(new Error('permission denied'));
+
+    await expect(resolveCharacterLorebookNamesStable_ACU()).rejects.toThrow('permission denied');
+    expect(mockGetCharLorebooks).toHaveBeenCalledTimes(2);
+    expect(mockGetCurrentCharPrimaryLorebook).not.toHaveBeenCalled();
   });
 
   it('重试等待后作用域变化时不执行第二次读取', async () => {
@@ -843,6 +895,7 @@ describe('resolveCharacterLorebookNamesStable_ACU', () => {
 
     await expect(resolveCharacterLorebookNamesStable_ACU()).rejects.toThrow('TaskAbortedByUser');
     expect(mockGetCharLorebooks).toHaveBeenCalledTimes(1);
+    expect(mockGetCurrentCharPrimaryLorebook).not.toHaveBeenCalled();
     expect(mockAbortableDelay).toHaveBeenCalledTimes(1);
     expect(mockAbortableDelay).toHaveBeenCalledWith(300, controller.signal);
   });
@@ -858,7 +911,85 @@ describe('resolveCharacterLorebookNamesStable_ACU', () => {
     mockGetCharLorebooks.mockReset().mockRejectedValue(new Error('worldbook not found'));
     await expect(resolveCharacterLorebookNamesStable_ACU()).rejects.toThrow('worldbook not found');
     expect(mockGetCharLorebooks).toHaveBeenCalledTimes(1);
+    expect(mockGetCurrentCharPrimaryLorebook).not.toHaveBeenCalled();
     expect(mockAbortableDelay).not.toHaveBeenCalled();
+  });
+
+  it('主世界书降级读取前作用域变化时不调用备用 API', async () => {
+    const initialScope = { chatId: 'chat-1', characterId: '1', isolationKey: '', reliable: true };
+    const changedScope = { chatId: 'chat-2', characterId: '1', isolationKey: '', reliable: true };
+    mockCapturePlotRuntimeScope
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(changedScope);
+    mockGetCharLorebooks.mockRejectedValue(new Error('worldbook not found'));
+
+    await expect(resolveCharacterLorebookNamesStable_ACU()).resolves.toEqual([]);
+    expect(mockGetCharLorebooks).toHaveBeenCalledTimes(2);
+    expect(mockGetCurrentCharPrimaryLorebook).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['chat', { chatId: 'chat-2', characterId: '1', isolationKey: '', reliable: true }],
+    ['character', { chatId: 'chat-1', characterId: '2', isolationKey: '', reliable: true }],
+    ['isolation', { chatId: 'chat-1', characterId: '1', isolationKey: 'isolated', reliable: true }],
+  ])('主世界书降级读取后 %s 作用域变化时丢弃结果', async (_dimension, changedScope) => {
+    const initialScope = { chatId: 'chat-1', characterId: '1', isolationKey: '', reliable: true };
+    mockCapturePlotRuntimeScope
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(initialScope)
+      .mockReturnValueOnce(changedScope);
+    mockGetCharLorebooks.mockRejectedValue(new Error('worldbook not found'));
+    mockGetCurrentCharPrimaryLorebook.mockResolvedValue('旧角色主书');
+
+    await expect(resolveCharacterLorebookNamesStable_ACU()).resolves.toEqual([]);
+    expect(mockGetCurrentCharPrimaryLorebook).toHaveBeenCalledTimes(1);
+  });
+
+  it('主世界书降级 API 异常时抛出并只记录脱敏分类', async () => {
+    const sensitiveText = '用户输入、提示词和世界书正文都不能泄露';
+    mockGetCharLorebooks.mockRejectedValue(new Error('worldbook not found'));
+    mockGetCurrentCharPrimaryLorebook.mockRejectedValue(new Error(sensitiveText));
+
+    await expect(resolveCharacterLorebookNamesStable_ACU()).rejects.toThrow(sensitiveText);
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      '[剧情推进][世界书] 角色主世界书降级读取失败。',
+      expect.objectContaining({
+        phase: 'resolve_character_primary_fallback',
+        error: { category: 'unknown' },
+      }),
+    );
+    expect(JSON.stringify(mockLogWarn.mock.calls)).not.toContain(sensitiveText);
+  });
+
+  it('主世界书降级 API 触发 AbortError 时保持取消语义', async () => {
+    const abortError = new Error('aborted');
+    abortError.name = 'AbortError';
+    mockGetCharLorebooks.mockRejectedValue(new Error('worldbook not found'));
+    mockGetCurrentCharPrimaryLorebook.mockRejectedValue(abortError);
+
+    await expect(resolveCharacterLorebookNamesStable_ACU()).rejects.toBe(abortError);
+  });
+
+  it('主世界书降级 API 成功返回后全局 Abort 时不使用返回结果', async () => {
+    const controller = new AbortController();
+    mockAbortControllerRef.value = controller;
+    mockGetCharLorebooks.mockRejectedValue(new Error('worldbook not found'));
+    mockGetCurrentCharPrimaryLorebook.mockImplementationOnce(async () => {
+      controller.abort();
+      return '不应使用的主书';
+    });
+
+    await expect(resolveCharacterLorebookNamesStable_ACU()).rejects.toThrow('TaskAbortedByUser');
+    expect(mockGetCurrentCharPrimaryLorebook).toHaveBeenCalledTimes(1);
+    expect(mockBuildCombinedWorldbookContentByStrategy).not.toHaveBeenCalled();
   });
 });
 
