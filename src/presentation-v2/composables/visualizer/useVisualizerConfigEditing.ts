@@ -2,10 +2,7 @@ import { computed } from 'vue';
 import { validateDDLTextAgainstHeaders_ACU, parseDDLColumnNames, updateDDLColumnComment } from '../../../shared/ddl-utils';
 import { isSummaryOrOutlineTable_ACU } from '../../../shared/utils';
 import { settings_ACU } from '../../../service/runtime/state-manager';
-import {
-  applySummaryIndexSequenceToTable_ACU,
-  getSummaryIndexColumnIndex_ACU,
-} from '../../../service/runtime/helpers-remaining';
+import { getSummaryIndexColumnIndex_ACU } from '../../../service/runtime/helpers-remaining';
 import { saveSettings_ACU } from '../../../service/settings/settings-service';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import {
@@ -21,6 +18,11 @@ import {
   normalizeLorebookPosition_ACU,
   normalizePlacementConfig_ACU,
 } from '../../../service/worldbook/injection-engine';
+import {
+  assertVisualizerRowDataEditable_ACU,
+  assertVisualizerTemplateEditable_ACU,
+  recordVisualizerCellUpdate_ACU,
+} from '../../../service/visualizer/visualizer-data-ops';
 import { useToastStore } from '../../stores/toast-store';
 import { useVisualizerStore } from '../../stores/visualizer-store';
 
@@ -163,15 +165,17 @@ export function useVisualizerConfigEditing() {
     { value: 'index_only', label: '仅放到索引条目' },
   ];
 
-  function markDirty(): void {
+  function markTemplateDirty(): void {
+    visualizer.templateDirty = true;
     visualizer.setDirty(true);
   }
 
   function withSheet(mutator: (sheet: any) => void): void {
     const sheet = currentSheet.value;
     if (!sheet) return;
+    assertVisualizerTemplateEditable_ACU(visualizer);
     mutator(sheet);
-    markDirty();
+    markTemplateDirty();
   }
 
   function withExportConfig(mutator: (config: any, sheet: any) => void): void {
@@ -263,12 +267,22 @@ export function useVisualizerConfigEditing() {
     const key = visualizer.currentSheetKey;
     const info = specialIndex.value;
     if (!key || !info.enabled) return;
+    assertVisualizerRowDataEditable_ACU(visualizer);
     const lock = visualizer.getLockDraft(key);
     lock.specialIndexLocked = enabled === true;
     if (lock.specialIndexLocked && currentSheet.value && info.index >= 0) {
-      applySummaryIndexSequenceToTable_ACU(currentSheet.value, info.index);
+      const content = Array.isArray(currentSheet.value.content) ? currentSheet.value.content : [];
+      const columnName = String(content[0]?.[info.index + 1] ?? '').trim();
+      for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
+        const row = content[rowIndex];
+        if (!Array.isArray(row)) continue;
+        const nextValue = `AM${String(rowIndex).padStart(4, '0')}`;
+        if (row[info.index + 1] === nextValue) continue;
+        row[info.index + 1] = nextValue;
+        if (columnName) recordVisualizerCellUpdate_ACU(visualizer, key, row[0], columnName, nextValue);
+      }
     }
-    markDirty();
+    visualizer.markLockDraftChanged();
   }
 
   function setTableApiPreset(value: string): void {
@@ -354,6 +368,7 @@ export function useVisualizerConfigEditing() {
 
   function updateGlobalPlacement(key: GlobalPlacementKey, field: keyof VisualizerPlacementDraft, value: string | number): void {
     if (!visualizer.tempData) return;
+    assertVisualizerTemplateEditable_ACU(visualizer);
     const cfg = getGlobalInjectionConfigFromData_ACU(visualizer.tempData, { ensureWriteBack: true });
     const current = getGlobalPlacement(key);
     const next = {
@@ -367,7 +382,7 @@ export function useVisualizerConfigEditing() {
       visualizer.tempData.mate = { type: 'chatSheets', version: 1 };
     }
     visualizer.tempData.mate.globalInjectionConfig = cfg;
-    markDirty();
+    markTemplateDirty();
   }
 
   return {

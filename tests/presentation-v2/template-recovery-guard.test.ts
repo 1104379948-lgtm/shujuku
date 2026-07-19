@@ -44,7 +44,7 @@ describe('useTemplateRecoveryGuard', () => {
     expect(deleteLocalDataInChatCore_ACU).not.toHaveBeenCalled();
   });
 
-  it('恢复验证失败时用强风险文案确认，确认后删除当前标识数据', async () => {
+  it('保存模板恢复验证失败时确认后只返回原子删除意图', async () => {
     const {
       ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU,
       useDialogStore,
@@ -64,6 +64,23 @@ describe('useTemplateRecoveryGuard', () => {
     expect(dialog.active?.confirmLabel).toBe('删除数据并保存模板');
 
     dialog.submitActive();
+    await expect(pending).resolves.toEqual({ success: true, dataWasReset: true });
+    expect(deleteLocalDataInChatCore_ACU).not.toHaveBeenCalled();
+  });
+
+  it('切换模板恢复验证失败时确认后立即删除当前标识数据', async () => {
+    const {
+      ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU,
+      useDialogStore,
+      validateCurrentChatTableRecoveryWithGuide_ACU,
+      deleteLocalDataInChatCore_ACU,
+    } = await importGuard();
+    validateCurrentChatTableRecoveryWithGuide_ACU.mockResolvedValueOnce({ success: false, error: 'CHECK constraint failed' });
+
+    const pending = ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU({ sheet_1: {} }, 'switch-template');
+    await Promise.resolve();
+    useDialogStore().submitActive();
+
     await expect(pending).resolves.toEqual({ success: true, dataWasReset: true });
     expect(deleteLocalDataInChatCore_ACU).toHaveBeenCalledWith('current');
   });

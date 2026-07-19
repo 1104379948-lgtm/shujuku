@@ -204,6 +204,107 @@ describe('openVisualizerSurface_ACU', () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it('删表草稿关闭时路由到当前聊天模板保存，保存失败则保持编辑器打开', async () => {
+    persistAdvancedMode();
+    const saveTemplateToCurrentChat = vi.fn(async () => false);
+    const saveToChat = vi.fn(async () => true);
+    vi.doMock('../../../src/presentation-v2/composables/visualizer/useVisualizerSave', () => ({
+      useVisualizerSave: () => ({
+        saveDataToCurrentMessage: saveToChat,
+        saveTemplateToCurrentChat,
+        saveTemplateToGlobal: vi.fn(async () => true),
+        saveToChat,
+        saveToGlobal: vi.fn(async () => true),
+      }),
+    }));
+    const state = await import('../../../src/service/runtime/state-manager');
+    state._set_currentJsonTableData_ACU({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: {
+        uid: 'sheet_keep', name: '保留表', orderNo: 0,
+        content: [[null, '姓名'], ['1', 'A']],
+      },
+      sheet_delete: {
+        uid: 'sheet_delete', name: '删除表', orderNo: 1,
+        content: [[null, '事项'], ['1', '旧值']],
+      },
+    });
+    const bridge = await import('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surface');
+    const mount = await import('../../../src/presentation-v2/bootstrap/mount');
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+
+    await bridge.openVisualizerSurface_ACU({ source: 'external-api' });
+    await new Promise(r => setTimeout(r, 0));
+    const pinia = mount.getAcuV2PiniaForBridge();
+    const visualizer = useVisualizerStore(pinia!);
+    visualizer.deleteSheet('sheet_delete');
+
+    (document.querySelector('.acu-visualizer-surface__close') as HTMLButtonElement).click();
+    await Promise.resolve();
+
+    expect(document.body.textContent).toContain('保存模板/结构到当前聊天');
+    const saveButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('保存模板/结构到当前聊天'));
+    expect(saveButton).not.toBeUndefined();
+    saveButton!.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(saveTemplateToCurrentChat).toHaveBeenCalledOnce();
+    expect(saveToChat).not.toHaveBeenCalled();
+    expect(document.getElementById('acu-app-v2')?.style.display).toBe('');
+    expect(document.querySelector('[data-acu-visualizer-surface]')).not.toBeNull();
+    expect(visualizer.deletedSheetKeys).toEqual(['sheet_delete']);
+    expect(visualizer.dirty).toBe(true);
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('纯锁草稿关闭时显示锁保存目标并走数据保存入口', async () => {
+    persistAdvancedMode();
+    const saveTemplateToCurrentChat = vi.fn(async () => false);
+    const saveToChat = vi.fn(async () => true);
+    vi.doMock('../../../src/presentation-v2/composables/visualizer/useVisualizerSave', () => ({
+      useVisualizerSave: () => ({
+        saveDataToCurrentMessage: saveToChat,
+        saveTemplateToCurrentChat,
+        saveTemplateToGlobal: vi.fn(async () => true),
+        saveToChat,
+        saveToGlobal: vi.fn(async () => true),
+      }),
+    }));
+    const state = await import('../../../src/service/runtime/state-manager');
+    state._set_currentJsonTableData_ACU({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: {
+        uid: 'sheet_a', name: '角色状态', orderNo: 0,
+        content: [[null, '姓名'], ['1', 'A']],
+      },
+    });
+    const bridge = await import('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surface');
+    const mount = await import('../../../src/presentation-v2/bootstrap/mount');
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+
+    await bridge.openVisualizerSurface_ACU({ source: 'external-api' });
+    await new Promise(r => setTimeout(r, 0));
+    const pinia = mount.getAcuV2PiniaForBridge();
+    const visualizer = useVisualizerStore(pinia!);
+    visualizer.toggleRowLock('sheet_a', 0);
+
+    (document.querySelector('.acu-visualizer-surface__close') as HTMLButtonElement).click();
+    await Promise.resolve();
+
+    expect(document.body.textContent).toContain('保存表格锁设置');
+    const saveButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('保存表格锁设置'));
+    expect(saveButton).not.toBeUndefined();
+    saveButton!.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(saveToChat).toHaveBeenCalledOnce();
+    expect(saveTemplateToCurrentChat).not.toHaveBeenCalled();
+    expect(document.getElementById('acu-app-v2')?.style.display).toBe('none');
+    mount.__resetAcuV2MountForTests();
+  });
+
   it('新增行后保留数据工作区滚动位置', async () => {
     persistAdvancedMode();
     const rows = Array.from({ length: 20 }, (_, index) => [
@@ -243,6 +344,52 @@ describe('openVisualizerSurface_ACU', () => {
     const pinia = mount.getAcuV2PiniaForBridge();
     const visualizer = useVisualizerStore(pinia!);
     expect(visualizer.currentSheet.content).toHaveLength(22);
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('总结表新增和删除行后的特殊索引重排会登记 V2 行更新', async () => {
+    persistAdvancedMode();
+    const state = await import('../../../src/service/runtime/state-manager');
+    state._set_currentJsonTableData_ACU({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_summary: {
+        uid: 'sheet_summary',
+        name: '总结表',
+        orderNo: 0,
+        content: [[null, '事件', '编码索引'], ['1', '初遇', '旧值'], ['2', '再会', 'AM0002']],
+      },
+    });
+    const bridge = await import('../../../src/presentation-v2/surfaces/visualizer/open-visualizer-surface');
+    const mount = await import('../../../src/presentation-v2/bootstrap/mount');
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+
+    await bridge.openVisualizerSurface_ACU({ source: 'external-api' });
+    await new Promise(r => setTimeout(r, 0));
+    const pinia = mount.getAcuV2PiniaForBridge();
+    const visualizer = useVisualizerStore(pinia!);
+    visualizer.tableLockDrafts.sheet_summary.specialIndexLocked = true;
+    const surface = document.querySelector('[data-acu-visualizer-surface]') as HTMLElement;
+    const addButton = Array.from(surface.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('新增行'))!;
+
+    addButton.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(visualizer.currentSheet.content.slice(1).map((row: any[]) => row[2])).toEqual(['AM0001', 'AM0002', 'AM0003']);
+    expect(visualizer.pendingDataOps?.updatesByRow['sheet_summary::1']?.data).toEqual({ '编码索引': 'AM0001' });
+    expect(visualizer.pendingDataOps?.updatesByRow['sheet_summary::2']).toBeUndefined();
+
+    const firstDeleteButton = surface.querySelector<HTMLButtonElement>('button[title="删除这一行"]')!;
+    firstDeleteButton.click();
+    await Promise.resolve();
+    const layer = document.querySelector<HTMLElement>('.acu-dialog-layer')!;
+    Array.from(layer.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('删除这一行'))!
+      .click();
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(visualizer.currentSheet.content.slice(1).map((row: any[]) => row[2])).toEqual(['AM0001', 'AM0002']);
+    expect(visualizer.pendingDataOps?.updatesByRow['sheet_summary::2']?.data).toEqual({ '编码索引': 'AM0001' });
     mount.__resetAcuV2MountForTests();
   });
 

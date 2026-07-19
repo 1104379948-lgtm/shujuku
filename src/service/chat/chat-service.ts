@@ -22,7 +22,13 @@ import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU, setChat
 import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } from '../../shared/utils';
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
 import { settings_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
-import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
+import {
+    buildChatTemplateScopeStateFromCurrent_ACU,
+    sanitizeSheetForStorage_ACU,
+    setChatSheetGuideDataForIsolationKey_ACU,
+    setCurrentChatTemplateScopeState_ACU,
+} from '../template/chat-scope';
+import { getChatScopedConfigContainer_ACU, getChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import { clearTableFieldsForIsolation_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
@@ -155,7 +161,7 @@ async function cleanupVectorIndexManifestsAfterCommit_ACU(manifests: any[]): Pro
         } catch (error: any) {
             const warning = `外置向量索引资源清理失败：${error?.message || String(error || '未知错误')}`;
             warnings.push(warning);
-            logWarn_ACU(`[手动重填基底替换] ${warning}`, error);
+            logWarn_ACU(`[向量索引清理] ${warning}`, error);
         }
     }
     return warnings;
@@ -1565,6 +1571,169 @@ export async function clearManualRefillIncrementalDataInRange_ACU(targetMessageI
         writeSet,
         maintenanceMode: 'exclusive',
     }, () => clearManualRefillIncrementalDataInRangeCore_ACU(targetMessageIndices, targetSheetKeys));
+}
+
+const CURRENT_CHAT_TEMPLATE_MESSAGE_FIELDS_ACU = [
+    'TavernDB_ACU_Data',
+    'TavernDB_ACU_SummaryData',
+    'TavernDB_ACU_IndependentData',
+    'TavernDB_ACU_Identity',
+    'TavernDB_ACU_IsolatedData',
+    'TavernDB_ACU_ModifiedKeys',
+    'TavernDB_ACU_UpdateGroupKeys',
+] as const;
+
+type CurrentChatTemplateMessageSnapshot_ACU = {
+    msg: any;
+    fields: Record<string, { exists: boolean; value: any }>;
+};
+
+export interface CommitCurrentChatTemplateChangesOptions_ACU {
+    isolationKey?: string;
+    guideData: Record<string, any>;
+    templateSource: Record<string, any> | string;
+    presetName?: string;
+    deletedSheetKeys?: string[];
+    resetCurrentIsolationData?: boolean;
+}
+
+export interface CommitCurrentChatTemplateChangesResult_ACU {
+    success: boolean;
+    changed: boolean;
+    resetMessageCount: number;
+    purgedMessageCount: number;
+    cleanupWarnings?: string[];
+    error?: string;
+}
+
+function captureCurrentChatTemplateMessageSnapshots_ACU(chat: any[]): CurrentChatTemplateMessageSnapshot_ACU[] {
+    return chat
+        .filter(msg => msg && !msg.is_user)
+        .map(msg => ({
+            msg,
+            fields: CURRENT_CHAT_TEMPLATE_MESSAGE_FIELDS_ACU.reduce((out, field) => {
+                const exists = Object.prototype.hasOwnProperty.call(msg, field);
+                out[field] = { exists, value: exists ? cloneManualRefillJson_ACU(msg[field]) : undefined };
+                return out;
+            }, {} as Record<string, { exists: boolean; value: any }>),
+        }));
+}
+
+function restoreCurrentChatTemplateMessageSnapshots_ACU(snapshots: CurrentChatTemplateMessageSnapshot_ACU[]): void {
+    for (const snapshot of snapshots) {
+        for (const [field, state] of Object.entries(snapshot.fields)) {
+            if (state.exists) snapshot.msg[field] = cloneManualRefillJson_ACU(state.value);
+            else delete snapshot.msg[field];
+        }
+    }
+}
+
+export async function commitCurrentChatTemplateChangesAtomic_ACU(
+    options: CommitCurrentChatTemplateChangesOptions_ACU,
+): Promise<CommitCurrentChatTemplateChangesResult_ACU> {
+    const chat = getChatArray_ACU();
+    if (!Array.isArray(chat) || chat.length === 0 || !chat.some(msg => msg && !msg.is_user)) {
+        return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '当前聊天没有可提交模板的 AI 消息。' };
+    }
+    const isolationKey = String(options?.isolationKey ?? getCurrentIsolationKey_ACU());
+    const deletedSheetKeys = [...new Set((Array.isArray(options?.deletedSheetKeys) ? options.deletedSheetKeys : [])
+        .filter(key => typeof key === 'string' && key.startsWith('sheet_')))];
+    const guideData = cloneManualRefillJson_ACU(options?.guideData);
+    if (!guideData || typeof guideData !== 'object' || !Object.keys(guideData).some(key => key.startsWith('sheet_'))) {
+        return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '当前聊天模板提交缺少有效的 Sheet Guide。' };
+    }
+    const templateState = buildChatTemplateScopeStateFromCurrent_ACU({
+        isolationKey,
+        presetName: String(options?.presetName || ''),
+        source: 'visualizer_v2_save',
+        templateSource: options?.templateSource,
+        guideData,
+    });
+    if (!templateState) {
+        return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '无法构建当前聊天模板作用域快照。' };
+    }
+
+    const writeSet = [{ kind: 'all' as const }];
+    try {
+        return await runTableWriteTransaction_ACU({
+            source: 'system_cleanup',
+            reason: 'commitCurrentChatTemplateChanges',
+            isolationKey,
+            writeSet,
+            maintenanceMode: 'exclusive',
+        }, transactionContext => transactionContext.runCommit(async () => {
+            const messageSnapshots = captureCurrentChatTemplateMessageSnapshots_ACU(chat);
+            const oldScopeContainer = cloneManualRefillJson_ACU(getChatScopedConfigContainer_ACU(chat));
+            const oldGuideContainer = cloneManualRefillJson_ACU(getChatSheetGuideContainer_ACU(chat));
+            const vectorManifestsToDeleteAfterCommit: any[] = [];
+            let resetMessageCount = 0;
+            let purgedMessageCount = 0;
+            try {
+                const isolationConfig = {
+                    enabled: !!settings_ACU.dataIsolationEnabled,
+                    code: String(settings_ACU.dataIsolationCode || ''),
+                };
+                const clearsSummaryOrOutline = tableListContainsSummaryOrOutline_ACU(deletedSheetKeys);
+                for (const msg of chat) {
+                    if (!msg || msg.is_user) continue;
+                    let changed = false;
+                    if (options?.resetCurrentIsolationData) {
+                        const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                        await deleteVectorIndexManifestFromTagData_ACU(tagData, {
+                            deleteExternal: false,
+                            onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest),
+                        });
+                        changed = clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig) || changed;
+                        if (changed) resetMessageCount++;
+                    } else if (clearsSummaryOrOutline) {
+                        const isolatedData = msg?.TavernDB_ACU_IsolatedData;
+                        if (isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)) {
+                            for (const tagData of Object.values(isolatedData)) {
+                                await deleteVectorIndexManifestFromTagData_ACU(tagData, {
+                                    deleteExternal: false,
+                                    onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest),
+                                });
+                            }
+                        }
+                    }
+                    if (deletedSheetKeys.length > 0 && purgeSheetKeysFromMessage_ACU(msg, deletedSheetKeys)) {
+                        purgedMessageCount++;
+                    }
+                }
+                const guideSaved = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, {
+                    reason: 'visualizer_v2_save',
+                    syncTemplateScope: false,
+                });
+                if (!guideSaved) throw new Error('当前聊天 Sheet Guide 写入失败。');
+                const scopeSaved = setCurrentChatTemplateScopeState_ACU(templateState, {
+                    isolationKey,
+                    reason: 'visualizer_v2_save',
+                });
+                if (!scopeSaved) throw new Error('当前聊天模板作用域写入失败。');
+                await saveChatToHostStrict_ACU();
+                const cleanupWarnings = await cleanupVectorIndexManifestsAfterCommit_ACU(vectorManifestsToDeleteAfterCommit);
+                return {
+                    success: true,
+                    changed: true,
+                    resetMessageCount,
+                    purgedMessageCount,
+                    ...(cleanupWarnings.length ? { cleanupWarnings } : {}),
+                };
+            } catch (error: any) {
+                restoreCurrentChatTemplateMessageSnapshots_ACU(messageSnapshots);
+                setChatScopedConfigContainer_ACU(chat, oldScopeContainer);
+                setChatSheetGuideContainer_ACU(chat, oldGuideContainer);
+                try {
+                    await saveChatToHostStrict_ACU();
+                } catch (rollbackError: any) {
+                    throw new Error(`当前聊天模板提交失败：${error?.message || String(error)}；回滚保存也失败：${rollbackError?.message || String(rollbackError)}`);
+                }
+                throw error;
+            }
+        }, writeSet));
+    } catch (error: any) {
+        return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: error?.message || '当前聊天模板提交失败。' };
+    }
 }
 
 function cloneManualRefillJson_ACU<T>(value: T): T {

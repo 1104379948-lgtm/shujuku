@@ -1,16 +1,22 @@
 import { defineStore } from 'pinia';
 import { TABLE_ORDER_FIELD_ACU } from '../../shared/constants';
 import {
+  assertVisualizerDataOpsEditable_ACU,
+  assertVisualizerRowDataEditable_ACU,
+  assertVisualizerSheetDeleteEditable_ACU,
+  assertVisualizerTemplateEditable_ACU,
   createVisualizerTempRowId_ACU,
   recordVisualizerCellUpdate_ACU,
   recordVisualizerRowDelete_ACU,
   recordVisualizerRowInsert_ACU,
+  hasVisualizerPendingDataOps_ACU,
   resetVisualizerPendingDataOps_ACU,
+  type PendingVisualizerDataOps_ACU,
 } from '../../service/visualizer/visualizer-data-ops';
 
 export type VisualizerMode = 'data' | 'config' | 'assistant' | 'global' | 'table-management';
 export type VisualizerOpenSource = 'external-api' | 'v2-shell';
-export type VisualizerSaveTarget = 'data' | 'template-chat' | 'template-global' | 'chat' | 'global';
+export type VisualizerSaveTarget = 'data' | 'locks' | 'template-chat' | 'template-global' | 'chat' | 'global';
 
 export interface VisualizerSheetItem {
   key: string;
@@ -74,12 +80,15 @@ interface VisualizerState {
   isActive: boolean;
   mode: VisualizerMode;
   dirty: boolean;
+  templateDirty: boolean;
+  lockDirty: boolean;
+  draftRevision: number;
   externalRevisionChanged: boolean;
   currentSheetKey: string | null;
   tempData: Record<string, any> | null;
   sheetOrder: string[];
   deletedSheetKeys: string[];
-  pendingDataOps: any;
+  pendingDataOps: PendingVisualizerDataOps_ACU | null;
   pendingLockChanges: any[];
   tableLockDrafts: Record<string, VisualizerLockDraft>;
   isLoading: boolean;
@@ -156,6 +165,9 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
     isActive: false,
     mode: 'data',
     dirty: false,
+    templateDirty: false,
+    lockDirty: false,
+    draftRevision: 0,
     externalRevisionChanged: false,
     currentSheetKey: null,
     tempData: null,
@@ -208,6 +220,9 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
     hasSheets(state): boolean {
       return state.sheetOrder.some(key => !!state.tempData?.[key]);
     },
+    hasPendingDataChanges(state): boolean {
+      return hasVisualizerPendingDataOps_ACU(state);
+    },
   },
   actions: {
     open(snapshot: VisualizerEntrySnapshot): void {
@@ -227,8 +242,13 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.mode = mode;
     },
     setDirty(dirty: boolean): void {
+      if (dirty) this.draftRevision += 1;
       this.dirty = dirty;
       if (!dirty) this.externalRevisionChanged = false;
+    },
+    markLockDraftChanged(): void {
+      this.lockDirty = true;
+      this.setDirty(true);
     },
     setLoading(loading: boolean): void {
       this.isLoading = loading;
@@ -253,6 +273,8 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.sheetOrder = nextOrder;
       this.deletedSheetKeys = [];
       resetVisualizerPendingDataOps_ACU(this);
+      this.lockDirty = false;
+      this.draftRevision = 0;
       this.pendingLockChanges = [];
       this.tableLockDrafts = {};
       this.currentSheetKey = nextOrder.includes(this.currentSheetKey || '')
@@ -262,6 +284,7 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
         this.mode = this.currentSheetKey ? 'data' : 'global';
       }
       this.dirty = false;
+      this.templateDirty = false;
       this.externalRevisionChanged = false;
       this.loadError = '';
       this.isLoading = false;
@@ -294,20 +317,25 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.mode = 'table-management';
     },
     addSheet(key: string, sheet: Record<string, any>): void {
-      if (!this.tempData) this.tempData = { mate: { type: 'chatSheets', version: 1 } };
       const normalizedKey = String(key || '').trim();
-      if (!normalizedKey || this.tempData[normalizedKey]) return;
+      if (!normalizedKey || this.tempData?.[normalizedKey]) return;
+      assertVisualizerTemplateEditable_ACU(this);
+      if (!this.tempData) this.tempData = { mate: { type: 'chatSheets', version: 1 } };
       this.tempData[normalizedKey] = cloneData(sheet);
       this.sheetOrder = buildSheetOrder(this.tempData, [...this.sheetOrder, normalizedKey]);
       applyOrderNumbers(this.tempData, this.sheetOrder);
       this.currentSheetKey = normalizedKey;
       this.mode = 'data';
+      this.templateDirty = true;
       this.setDirty(true);
     },
     deleteSheet(key: string): void {
       if (!this.tempData?.[key]) return;
+      assertVisualizerSheetDeleteEditable_ACU(this);
       delete this.tempData[key];
       if (!this.deletedSheetKeys.includes(key)) this.deletedSheetKeys.push(key);
+      delete this.tableLockDrafts[key];
+      this.pendingLockChanges = this.pendingLockChanges.filter(change => String(change?.sheetKey || '').trim() !== key);
       this.sheetOrder = this.sheetOrder.filter(item => item !== key);
       applyOrderNumbers(this.tempData, this.sheetOrder);
       if (this.currentSheetKey === key) this.currentSheetKey = this.sheetOrder[0] || null;
@@ -319,15 +347,18 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       if (index === -1) return;
       const nextIndex = direction === 'up' ? index - 1 : index + 1;
       if (nextIndex < 0 || nextIndex >= this.sheetOrder.length) return;
+      assertVisualizerTemplateEditable_ACU(this);
       const next = [...this.sheetOrder];
       [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
       this.sheetOrder = next;
       applyOrderNumbers(this.tempData, this.sheetOrder);
+      this.templateDirty = true;
       this.setDirty(true);
     },
     addRow(): void {
       const sheet = this.currentSheet;
       if (!sheet) return;
+      assertVisualizerRowDataEditable_ACU(this);
       if (!Array.isArray(sheet.content)) sheet.content = [[null, '列1']];
       const headers = Array.isArray(sheet.content[0]) ? sheet.content[0] : [null, '列1'];
       sheet.content[0] = headers;
@@ -340,6 +371,7 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
     deleteRow(rowIndex: number): void {
       const sheet = this.currentSheet;
       if (!sheet || !Array.isArray(sheet.content)) return;
+      assertVisualizerRowDataEditable_ACU(this);
       const target = Math.trunc(Number(rowIndex));
       if (target < 0 || target >= sheet.content.length - 1) return;
       const rowId = sheet.content[target + 1]?.[0];
@@ -350,6 +382,7 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
     updateCell(rowIndex: number, columnIndex: number, value: string): void {
       const sheet = this.currentSheet;
       if (!sheet || !Array.isArray(sheet.content)) return;
+      assertVisualizerRowDataEditable_ACU(this);
       const row = Math.trunc(Number(rowIndex));
       const col = Math.trunc(Number(columnIndex));
       if (row < 0 || col < 0) return;
@@ -363,17 +396,35 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.setDirty(true);
     },
     markSaved(target: VisualizerSaveTarget): void {
-      this.deletedSheetKeys = [];
-      resetVisualizerPendingDataOps_ACU(this);
-      this.pendingLockChanges = [];
+      if (target === 'data') {
+        resetVisualizerPendingDataOps_ACU(this);
+        this.lockDirty = false;
+        this.pendingLockChanges = [];
+      } else if (target === 'locks') {
+        this.lockDirty = false;
+        this.pendingLockChanges = [];
+      } else {
+        this.templateDirty = false;
+        this.deletedSheetKeys = [];
+        this.lockDirty = false;
+        this.pendingLockChanges = [];
+      }
       this.lastSavedTarget = target;
       this.lastSavedAt = Date.now();
-      this.setDirty(false);
+      this.setDirty(
+        this.templateDirty
+        || this.deletedSheetKeys.length > 0
+        || this.lockDirty
+        || hasVisualizerPendingDataOps_ACU(this),
+      );
     },
     getLockDraft(sheetKey: string | null | undefined): VisualizerLockDraft {
       const key = String(sheetKey || '').trim();
       if (!key) return { rows: [], cols: [], cells: [], specialIndexLocked: true };
       if (!this.tableLockDrafts[key]) {
+        if (this.pendingDataOps?.committed) {
+          return { rows: [], cols: [], cells: [], specialIndexLocked: true };
+        }
         this.tableLockDrafts[key] = { rows: [], cols: [], cells: [], specialIndexLocked: true };
       }
       return this.tableLockDrafts[key];
@@ -391,33 +442,37 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       return this.getLockDraft(sheetKey).specialIndexLocked !== false;
     },
     toggleRowLock(sheetKey: string | null | undefined, rowIndex: number): void {
+      assertVisualizerDataOpsEditable_ACU(this);
       const lock = this.getLockDraft(sheetKey);
       const value = Math.trunc(Number(rowIndex));
       if (!Number.isFinite(value)) return;
       lock.rows = lock.rows.includes(value)
         ? lock.rows.filter(item => item !== value)
         : [...lock.rows, value];
-      this.setDirty(true);
+      this.markLockDraftChanged();
     },
     toggleColumnLock(sheetKey: string | null | undefined, columnIndex: number): void {
+      assertVisualizerDataOpsEditable_ACU(this);
       const lock = this.getLockDraft(sheetKey);
       const value = Math.trunc(Number(columnIndex));
       if (!Number.isFinite(value)) return;
       lock.cols = lock.cols.includes(value)
         ? lock.cols.filter(item => item !== value)
         : [...lock.cols, value];
-      this.setDirty(true);
+      this.markLockDraftChanged();
     },
     toggleCellLock(sheetKey: string | null | undefined, rowIndex: number, columnIndex: number): void {
+      assertVisualizerDataOpsEditable_ACU(this);
       const lock = this.getLockDraft(sheetKey);
       const key = `${Math.trunc(Number(rowIndex))}:${Math.trunc(Number(columnIndex))}`;
       lock.cells = lock.cells.includes(key)
         ? lock.cells.filter(item => item !== key)
         : [...lock.cells, key];
-      this.setDirty(true);
+      this.markLockDraftChanged();
     },
     applyLockChangesToDraft(changes: any[]): void {
       if (!Array.isArray(changes)) return;
+      if (changes.length) assertVisualizerDataOpsEditable_ACU(this);
       changes.forEach(change => {
         const sheetKey = String(change?.sheetKey || '').trim();
         if (!sheetKey) return;
@@ -452,10 +507,13 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
           lock.specialIndexLocked = change.specialIndexLocked;
         }
       });
-      if (changes.length) this.setDirty(true);
+      if (changes.length) {
+        this.markLockDraftChanged();
+      }
     },
     queueLockChanges(changes: any[]): void {
       if (!Array.isArray(changes) || changes.length === 0) return;
+      assertVisualizerDataOpsEditable_ACU(this);
       this.applyLockChangesToDraft(changes);
       this.pendingLockChanges = [
         ...this.pendingLockChanges,
@@ -478,6 +536,9 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.isActive = false;
       this.mode = 'data';
       this.dirty = false;
+      this.templateDirty = false;
+      this.lockDirty = false;
+      this.draftRevision = 0;
       this.externalRevisionChanged = false;
       this.currentSheetKey = null;
       this.tempData = null;

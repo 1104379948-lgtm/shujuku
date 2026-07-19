@@ -1,11 +1,9 @@
 import { TABLE_ORDER_FIELD_ACU } from '../../../shared/constants';
 import { topLevelWindow_ACU } from '../../../shared/env';
-import { safeJsonStringify_ACU } from '../../../shared/json-helpers';
 import {
   applySheetOrderNumbers_ACU,
   ensureSheetOrderNumbers_ACU,
   isSummaryOrOutlineTable_ACU,
-  logDebug_ACU,
   logWarn_ACU,
   parseTableTemplateJson_ACU,
 } from '../../../shared/utils';
@@ -13,27 +11,20 @@ import {
   isDefaultTemplatePresetSelection_ACU,
   normalizeTemplatePresetSelectionValue_ACU,
 } from '../../../shared/template-preset-utils';
-import { deleteLocalDataInChatCore_ACU, getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
+import { commitCurrentChatTemplateChangesAtomic_ACU } from '../../../service/chat/chat-service';
 import {
-  currentJsonTableData_ACU,
   getCurrentIsolationKey_ACU,
-  settings_ACU,
   _set_currentJsonTableData_ACU,
 } from '../../../service/runtime/state-manager';
 import {
   applySummaryIndexSequenceToTable_ACU,
+  commitTableLockDraftsBatch_ACU,
   getSummaryIndexColumnIndex_ACU,
-  saveTableLocksForSheet_ACU,
-  setSpecialIndexLockEnabled_ACU,
+  restoreCurrentTableLocksSnapshot_ACU,
+  type TableLocksBatchCommitResult_ACU,
 } from '../../../service/runtime/helpers-remaining';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
-import { runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
-import {
-  getLatestAiMessageIndexFromChat_ACU,
-  resolveTableHistoryStateFromChat_ACU,
-} from '../../../service/table/table-history';
 import { isSqliteMode } from '../../../service/table/storage-mode';
-import { validateCurrentChatTableRecoveryWithGuide_ACU } from '../../../service/table/storage-frame-v2-replay';
 import { reloadStorageProvider } from '../../../service/table/table-storage-strategy';
 import { applyTemplateScopeForCurrentChat_ACU } from '../../../service/settings/settings-service';
 import {
@@ -43,7 +34,6 @@ import {
   getSortedSheetKeys_ACU,
   materializeDataFromSheetGuide_ACU,
   sanitizeTemplateSnapshotForChat_ACU,
-  setChatSheetGuideDataForIsolationKey_ACU,
 } from '../../../service/template/chat-scope';
 import {
   applyTemplatePresetToCurrent_ACU,
@@ -52,17 +42,17 @@ import {
 } from '../../../service/template/template-preset-service';
 import {
   getGlobalInjectionConfigFromData_ACU,
-  purgeSheetKeysFromChatHistoryHard_ACU,
 } from '../../../service/worldbook/injection-engine';
-import { refreshMergedDataAndNotify_ACU, updateReadableLorebookEntry_ACU } from '../../../service/worldbook/pipeline';
-import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
+import { refreshMergedDataAndNotify_ACU } from '../../../service/worldbook/pipeline';
 import {
   applyVisualizerPendingDataOps_ACU,
   hasVisualizerPendingDataOps_ACU,
+  replaceVisualizerTemporaryRowIds_ACU,
+  resetVisualizerPendingDataOps_ACU,
 } from '../../../service/visualizer/visualizer-data-ops';
 import { useToastStore } from '../../stores/toast-store';
 import { ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU } from '../useTemplateRecoveryGuard';
-import { useVisualizerStore, type VisualizerLockDraft, type VisualizerSaveTarget } from '../../stores/visualizer-store';
+import { useVisualizerStore, type VisualizerLockDraft } from '../../stores/visualizer-store';
 
 export interface VisualizerSaveInteractions {
   requestGlobalPresetName?: (defaultName: string) => string | null | Promise<string | null>;
@@ -111,16 +101,29 @@ function buildOrderedData(
   return orderedData;
 }
 
-function saveLockDrafts(drafts: Record<string, VisualizerLockDraft>): void {
-  Object.entries(drafts || {}).forEach(([sheetKey, draft]) => {
-    if (!sheetKey) return;
-    saveTableLocksForSheet_ACU(sheetKey, {
-      rows: new Set(draft.rows || []),
-      cols: new Set(draft.cols || []),
-      cells: new Set(draft.cells || []),
-    });
-    setSpecialIndexLockEnabled_ACU(sheetKey, draft.specialIndexLocked !== false);
+function commitLockDrafts(
+  drafts: Record<string, VisualizerLockDraft>,
+  deletedSheetKeys: string[] = [],
+): TableLocksBatchCommitResult_ACU {
+  const result = commitTableLockDraftsBatch_ACU({
+    drafts,
+    deletedSheetKeys,
   });
+  if (!result.success) {
+    throw new Error(result.warning || '表格锁设置保存失败。');
+  }
+  return result;
+}
+
+function restoreLockDraftsAfterFailure(
+  result: TableLocksBatchCommitResult_ACU,
+  error: unknown,
+): Error {
+  if (!result.changed) return error instanceof Error ? error : new Error(String(error));
+  const rollback = restoreCurrentTableLocksSnapshot_ACU(result.snapshot);
+  const message = error instanceof Error ? error.message : String(error);
+  if (rollback.success) return new Error(message);
+  return new Error(`${message}；表格锁设置回滚也失败：${rollback.warning || '未知错误'}`);
 }
 
 type ChatSheetGuideSyncPayload = {
@@ -139,26 +142,6 @@ function buildChatSheetGuideSyncPayload(orderedData: Record<string, any>, ordere
   });
   if (!guideData || !Object.keys(guideData).some(key => key.startsWith('sheet_'))) return null;
   return { isolationKey: guideIsolationKey, guideData };
-}
-
-function persistChatSheetGuideSyncPayload(payload: ChatSheetGuideSyncPayload | null, saveToTemplate: boolean): void {
-  if (!payload) return;
-  try {
-    const syncTemplateScope = !saveToTemplate;
-    const templateScopeSource = materializeDataFromSheetGuide_ACU(payload.guideData, { includeSeedRows: true });
-    setChatSheetGuideDataForIsolationKey_ACU(payload.isolationKey, payload.guideData, {
-      reason: 'visualizer_v2_save',
-      syncTemplateScope,
-      templateSource: templateScopeSource,
-      presetName: resolveActiveTemplatePresetName_ACU({
-        fallbackToGlobal: true,
-        isolationKey: payload.isolationKey,
-      }),
-      source: 'visualizer_v2_save',
-    });
-  } catch (error) {
-    logWarn_ACU('[ACU-V2 Visualizer] Failed to sync chat sheet guide:', error);
-  }
 }
 
 async function saveGlobalTemplateSnapshot(
@@ -235,107 +218,6 @@ async function saveGlobalTemplateSnapshot(
   return { status: 'saved', presetName: finalGlobalPresetName };
 }
 
-async function saveCurrentDataToChat(
-  sheetKeysToSave: string[],
-  deletedSheetKeys: string[],
-): Promise<'memory-only' | 'saved'> {
-  const chat = getChatArray_ACU();
-  if (!chat.length) return 'memory-only';
-
-  const isolationKey = getCurrentIsolationKey_ACU();
-  const allSheetKeys = sheetKeysToSave.filter(key => !!currentJsonTableData_ACU?.[key]);
-  const latestAiIndex = getLatestAiMessageIndexFromChat_ACU(chat);
-  const bucketByIndex: Record<number, string[]> = {};
-
-  allSheetKeys.forEach(key => {
-    const table = currentJsonTableData_ACU?.[key];
-    const history = resolveTableHistoryStateFromChat_ACU(chat, {
-      sheetKey: key,
-      isSummaryTable: table ? isSummaryOrOutlineTable_ACU(table.name) : false,
-      isolationKey,
-      settings: settings_ACU,
-    });
-    const idx = history.latestDataMessageIndex !== -1
-      ? history.latestDataMessageIndex
-      : latestAiIndex;
-    if (idx === -1) return;
-    if (!bucketByIndex[idx]) bucketByIndex[idx] = [];
-    bucketByIndex[idx].push(key);
-  });
-
-  if (Object.keys(bucketByIndex).length === 0 && latestAiIndex !== -1) {
-    bucketByIndex[latestAiIndex] = [...allSheetKeys];
-  }
-  if (Object.keys(bucketByIndex).length === 0) return 'memory-only';
-
-  for (const [indexStr, keys] of Object.entries(bucketByIndex)) {
-    const idx = Number.parseInt(indexStr, 10);
-    if (Number.isNaN(idx)) continue;
-    const writeSet = keys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
-    const commitResult = await runTableUpdateCommit_ACU<null>({
-      source: 'manual_crud',
-      reason: 'visualizer_v2_save',
-      isolationKey,
-      writeSet,
-      revisionWriteSet: writeSet,
-      initialData: currentJsonTableData_ACU as any,
-      targetMessageIndex: idx,
-      targetSheetKeys: keys,
-      updateGroupKeys: null,
-      trackingSheetKeys: [],
-      trackAsUpdate: false,
-      operations: keys
-        .filter(sheetKey => Boolean((currentJsonTableData_ACU as any)?.[sheetKey]))
-        .map(sheetKey => ({ kind: 'sheet_replace' as const, sheetKey, sheet: (currentJsonTableData_ACU as any)[sheetKey], reason: 'manual_crud' as const })),
-    }, () => ({
-      success: true,
-      value: null,
-      tableData: currentJsonTableData_ACU as any,
-      mutationResult: { changes: keys.length, errors: [] },
-    }));
-    if (!commitResult.success) {
-      logWarn_ACU('[ACU-V2 Visualizer] save commit failed:', commitResult.error);
-    }
-  }
-
-  if (deletedSheetKeys.length > 0) {
-    const result = await purgeSheetKeysFromChatHistoryHard_ACU(deletedSheetKeys);
-    if (result?.changed && isSqliteMode()) {
-      try {
-        await reloadStorageProvider();
-      } catch (error) {
-        logWarn_ACU('[ACU-V2 Visualizer] reloadStorageProvider failed:', error);
-      }
-    }
-  }
-
-  await refreshMergedDataAndNotify_ACU();
-
-  const shouldSyncSummaryVectorIndex = allSheetKeys.some(sheetKey => {
-    const table = currentJsonTableData_ACU?.[sheetKey];
-    return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
-  });
-  if (shouldSyncSummaryVectorIndex && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
-    try {
-      await enqueueSummaryVectorIndexFlush_ACU({
-        targetMessageIndex: latestAiIndex !== -1 ? latestAiIndex : undefined,
-        mode: 'sync',
-        reason: 'visualizer_v2_save',
-      });
-    } catch (error) {
-      logWarn_ACU('[ACU-V2 Visualizer] summary vector index queue failed:', error);
-    }
-  }
-
-  try {
-    (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
-  } catch (error) {
-    logDebug_ACU('[ACU-V2 Visualizer] table update notification skipped:', error);
-  }
-
-  return 'saved';
-}
-
 export function useVisualizerSave(interactions: VisualizerSaveInteractions = {}) {
   const visualizer = useVisualizerStore();
   const toastStore = useToastStore();
@@ -355,40 +237,53 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
     }
   }
 
+  function assertDraftRevisionUnchanged(revision: number): void {
+    if (visualizer.draftRevision !== revision) {
+      throw new Error('保存期间草稿已发生变化，本次不会清除较新的修改。请重新保存。');
+    }
+  }
+
   async function saveDataToCurrentMessage(): Promise<boolean> {
     return runSaving(async () => {
-      const deletedSheetKeys = [...new Set((visualizer.deletedSheetKeys || [])
-        .filter(key => typeof key === 'string' && key.startsWith('sheet_')),
-      )];
-      const result = await applyVisualizerPendingDataOps_ACU(visualizer);
+      if (visualizer.templateDirty || (visualizer.deletedSheetKeys || []).length > 0) {
+        toastStore.error('存在未保存的模板/结构或删表修改；数据保存不会持久化这些修改，请先保存当前聊天模板。', { muteable: false });
+        return false;
+      }
+      const revision = visualizer.draftRevision;
+      const hasDataChanges = hasVisualizerPendingDataOps_ACU(visualizer);
+      const hasLockChanges = visualizer.lockDirty;
+      if (!hasDataChanges && !hasLockChanges) {
+        toastStore.info('没有需要保存的数据或锁增量。', { muteable: false });
+        return false;
+      }
+      const result = hasDataChanges
+        ? await applyVisualizerPendingDataOps_ACU(visualizer)
+        : { success: true, changed: false };
       if (!result.success) {
         toastStore.error(result.error || '数据保存失败。', { muteable: false });
         return false;
       }
-      if (!result.changed && deletedSheetKeys.length === 0) {
-        toastStore.info('没有需要保存的数据增量。', { muteable: false });
+      assertDraftRevisionUnchanged(revision);
+      if (hasLockChanges) commitLockDrafts(cloneData(visualizer.tableLockDrafts));
+      try {
+        await refreshMergedDataAndNotify_ACU();
+      } catch (error: any) {
+        const detail = error?.message || String(error);
+        toastStore.error(`数据已持久化，但本地刷新失败：${detail}。请重试保存完成恢复，期间不要继续编辑。`, { muteable: false });
         return false;
       }
-      if (deletedSheetKeys.length > 0) {
-        const purgeResult = await purgeSheetKeysFromChatHistoryHard_ACU(deletedSheetKeys);
-        if (purgeResult?.changed && isSqliteMode()) {
-          try {
-            await reloadStorageProvider();
-          } catch (error) {
-            logWarn_ACU('[ACU-V2 Visualizer] reloadStorageProvider failed after sheet purge:', error);
-          }
-        }
+      assertDraftRevisionUnchanged(revision);
+      if (hasDataChanges) {
+        replaceVisualizerTemporaryRowIds_ACU(visualizer, result.insertedRowIds || {});
+        resetVisualizerPendingDataOps_ACU(visualizer);
       }
-      saveLockDrafts(visualizer.tableLockDrafts);
-      await refreshMergedDataAndNotify_ACU();
       try {
         (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
       } catch {}
-      visualizer.markSaved('data');
-      toastStore.success(
-        deletedSheetKeys.length > 0 ? '数据增量与删表清理已保存到当前消息。' : '数据增量已保存到当前消息。',
-        { muteable: false },
-      );
+      visualizer.markSaved(hasDataChanges ? 'data' : 'locks');
+      toastStore.success(hasDataChanges
+        ? '数据增量已保存到当前消息。'
+        : '表格锁设置已保存。', { muteable: false });
       return true;
     });
   }
@@ -399,44 +294,87 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
         return false;
       }
-      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts);
+      const revision = visualizer.draftRevision;
+      const deletedSheetKeys = [...new Set((visualizer.deletedSheetKeys || [])
+        .filter(key => typeof key === 'string' && key.startsWith('sheet_')))];
+      const lockDrafts = cloneData(visualizer.tableLockDrafts);
+      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, lockDrafts);
       const guidePayload = buildChatSheetGuideSyncPayload(orderedData, [...visualizer.sheetOrder]);
+      if (!guidePayload) throw new Error('无法生成当前聊天 Sheet Guide。');
       const recoveryGuard = await ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU(
-        guidePayload?.guideData || null,
+        guidePayload.guideData,
         'save-template',
       );
       if (!recoveryGuard.success) return false;
-      const dataWasResetForTemplateSave = recoveryGuard.dataWasReset;
-      persistChatSheetGuideSyncPayload(guidePayload, false);
+      assertDraftRevisionUnchanged(revision);
+      const lockCommit = commitLockDrafts(lockDrafts, deletedSheetKeys);
+      let commitResult;
+      try {
+        commitResult = await commitCurrentChatTemplateChangesAtomic_ACU({
+        isolationKey: guidePayload.isolationKey,
+        guideData: guidePayload.guideData,
+        templateSource: orderedData,
+        presetName: resolveActiveTemplatePresetName_ACU({
+          fallbackToGlobal: true,
+          isolationKey: guidePayload.isolationKey,
+        }),
+        deletedSheetKeys,
+        resetCurrentIsolationData: recoveryGuard.dataWasReset,
+      });
+        if (!commitResult.success) throw new Error(commitResult.error || '当前聊天模板提交失败。');
+      } catch (error) {
+        throw restoreLockDraftsAfterFailure(lockCommit, error);
+      }
+      assertDraftRevisionUnchanged(revision);
+      if (commitResult.cleanupWarnings?.length) {
+        const detail = commitResult.cleanupWarnings.join('；');
+        logWarn_ACU('[ACU-V2 Visualizer] template commit cleanup warning:', detail);
+        toastStore.warning(`模板已提交，但外置索引资源清理未完全完成：${detail}`, { muteable: false });
+      }
       applyTemplateScopeForCurrentChat_ACU();
-      _set_currentJsonTableData_ACU(dataWasResetForTemplateSave && guidePayload
+      _set_currentJsonTableData_ACU(recoveryGuard.dataWasReset
         ? materializeDataFromSheetGuide_ACU(guidePayload.guideData, { includeSeedRows: true })
         : cloneData(orderedData));
-      await saveChatToHost_ACU();
-      saveLockDrafts(visualizer.tableLockDrafts);
-      if (isSqliteMode()) await reloadStorageProvider();
-      await refreshMergedDataAndNotify_ACU();
+      try {
+        if (isSqliteMode()) await reloadStorageProvider();
+        await refreshMergedDataAndNotify_ACU();
+      } catch (error: any) {
+        const detail = error?.message || String(error);
+        logWarn_ACU('[ACU-V2 Visualizer] derived refresh failed after template commit:', error);
+        toastStore.warning(`模板已提交，但本地派生刷新失败：${detail}。重新打开编辑器可恢复显示。`, { muteable: false });
+      }
+      assertDraftRevisionUnchanged(revision);
       try {
         (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
       } catch {}
       visualizer.markSaved('template-chat');
-      toastStore.success('模板/结构已保存到当前聊天。', { muteable: false });
+      toastStore.success(deletedSheetKeys.length > 0
+        ? '模板/结构与删表清理已原子保存到当前聊天。'
+        : '模板/结构已保存到当前聊天。', { muteable: false });
       return true;
     });
   }
 
   async function saveTemplateToGlobal(): Promise<boolean> {
     return runSaving(async () => {
+      if ((visualizer.deletedSheetKeys || []).length > 0) {
+        toastStore.error('存在待保存的删表操作；全局模板保存不能代替删表清理，请先保存数据。', { muteable: false });
+        return false;
+      }
       if (hasVisualizerPendingDataOps_ACU(visualizer)) {
         toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
         return false;
       }
-      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts);
+      const revision = visualizer.draftRevision;
+      const lockDrafts = cloneData(visualizer.tableLockDrafts);
+      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, lockDrafts);
       const globalTemplateResult = await saveGlobalTemplateSnapshot(orderedData, interactions);
       if (globalTemplateResult.status === 'cancelled') return false;
-      saveLockDrafts(visualizer.tableLockDrafts);
+      assertDraftRevisionUnchanged(revision);
+      commitLockDrafts(lockDrafts);
       if (isSqliteMode()) await reloadStorageProvider();
       await refreshMergedDataAndNotify_ACU();
+      assertDraftRevisionUnchanged(revision);
       visualizer.markSaved('template-global');
       if (globalTemplateResult.status === 'saved') {
         toastStore.success(`模板/结构已保存到全局预设：${globalTemplateResult.presetName}。`, { muteable: false });

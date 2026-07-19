@@ -10395,6 +10395,175 @@ $CONTENT
         }
         return options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(options), options.revisionWriteSet);
     }
+    function samePersistedSheets_ACU(actual, expected, sheetKeys) {
+        return sheetKeys.every(sheetKey => stableStringifyPersistedValue_ACU(actual?.[sheetKey] ?? null) === stableStringifyPersistedValue_ACU(expected?.[sheetKey] ?? null));
+    }
+    function stableStringifyPersistedValue_ACU(value) {
+        if (Array.isArray(value))
+            return `[${value.map(item => stableStringifyPersistedValue_ACU(item)).join(',')}]`;
+        if (value && typeof value === 'object') {
+            return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringifyPersistedValue_ACU(value[key])}`).join(',')}}`;
+        }
+        return JSON.stringify(value ?? null);
+    }
+    function validateBatchOperationScope_ACU(targetIndex, operations, changedSheetKeys) {
+        const changedKeys = new Set(changedSheetKeys);
+        for (const operation of operations) {
+            if (!operation || typeof operation !== 'object')
+                return `V2 batch write target ${targetIndex} has an invalid operation.`;
+            if (operation.kind === 'data_replace' || operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl') {
+                return `V2 batch write target ${targetIndex} contains unsupported unscoped operation: ${operation.kind}.`;
+            }
+            const sheetKey = typeof operation.sheetKey === 'string' ? operation.sheetKey.trim() : '';
+            if (!sheetKey || !changedKeys.has(sheetKey)) {
+                return `V2 batch write target ${targetIndex} operation scope is outside changed sheet keys.`;
+            }
+        }
+        return null;
+    }
+    function mergeBatchTargetsByMessageIndex_ACU(targets, afterData) {
+        const targetByIndex = new Map();
+        for (const target of targets) {
+            const targetIndex = Number(target?.targetMessageIndex);
+            if (!Number.isInteger(targetIndex))
+                return { error: `V2 batch write target index is invalid: ${targetIndex}.` };
+            if (!Array.isArray(target.operations) || target.operations.length === 0) {
+                return { error: `V2 batch write target ${targetIndex} has no operations.` };
+            }
+            const normalizedKeys = normalizeKeys_ACU(target.changedSheetKeys, afterData);
+            if (normalizedKeys.length === 0)
+                return { error: `V2 batch write target ${targetIndex} has no valid changed sheet keys.` };
+            const scopeError = validateBatchOperationScope_ACU(targetIndex, target.operations, normalizedKeys);
+            if (scopeError)
+                return { error: scopeError };
+            const existing = targetByIndex.get(targetIndex);
+            if (!existing) {
+                targetByIndex.set(targetIndex, {
+                    targetMessageIndex: targetIndex,
+                    operations: deepClone_ACU$2(target.operations),
+                    changedSheetKeys: normalizedKeys,
+                });
+                continue;
+            }
+            existing.operations.push(...deepClone_ACU$2(target.operations));
+            existing.changedSheetKeys = [...new Set([...existing.changedSheetKeys, ...normalizedKeys])].sort();
+        }
+        return targetByIndex;
+    }
+    async function persistTableMutationLogBatchV2Core_ACU(options) {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0)
+            return { saved: false, error: 'chat history is empty' };
+        if (!Array.isArray(options.targets) || options.targets.length === 0)
+            return { saved: false, error: 'V2 batch write requires at least one target.' };
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+        if (!latestCheckpoint)
+            return { saved: false, error: 'V2 batch write requires an existing full checkpoint anchor.' };
+        options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_persist');
+        const mergedTargets = mergeBatchTargetsByMessageIndex_ACU(options.targets, options.afterData);
+        if ('error' in mergedTargets)
+            return { saved: false, error: mergedTargets.error };
+        const targetByIndex = mergedTargets;
+        const changedSheetKeys = new Set();
+        for (const [targetIndex, target] of targetByIndex) {
+            if (!Number.isInteger(targetIndex) || targetIndex < latestCheckpoint.index || !chat[targetIndex] || chat[targetIndex].is_user) {
+                return { saved: false, error: `V2 batch write target is invalid or precedes replay checkpoint: ${targetIndex}.` };
+            }
+            target.changedSheetKeys.forEach(sheetKey => changedSheetKeys.add(sheetKey));
+        }
+        const candidateChat = deepClone_ACU$2(chat);
+        for (const [targetIndex, target] of targetByIndex) {
+            const message = candidateChat[targetIndex];
+            const isolatedData = cloneIsolatedData_ACU(message);
+            const tagData = isolatedData[isolationKey];
+            if (!isV2TagData_ACU(tagData))
+                return { saved: false, error: `V2 batch write target ${targetIndex} has no V2 storage frame.` };
+            const frame = tagData.storageFrame;
+            const nextSeq = Math.max(0, ...(frame.logEntries || []).map(item => Number(item.seq) || 0)) + 1;
+            const entryId = generateEntryId_ACU();
+            const parentRevision = frame.headRevision ?? null;
+            const entry = {
+                seq: nextSeq,
+                entryId,
+                createdAt: Date.now(),
+                source: options.source,
+                targetMessageIndex: targetIndex,
+                aiFloor: countAiFloor_ACU$1(candidateChat, targetIndex),
+                filledSheetKeys: [],
+                changedSheetKeys: target.changedSheetKeys,
+                groupKeys: [],
+                requestId: options.requestId,
+                batchId: options.batchId,
+                operations: deepClone_ACU$2(target.operations),
+                baseRevision: options.transactionContext?.baseRevision ?? parentRevision,
+                parentRevision,
+                commitRevision: buildCommitRevision_ACU(nextSeq, entryId),
+                writeSet: options.transactionContext?.writeSet,
+            };
+            frame.logEntries = [...(frame.logEntries || []), entry];
+            frame.headRevision = entry.commitRevision;
+            message.TavernDB_ACU_IsolatedData = isolatedData;
+            writeMessageIdentity_ACU(message, {
+                enabled: settings_ACU.dataIsolationEnabled,
+                code: settings_ACU.dataIsolationCode,
+            });
+        }
+        let replayed;
+        try {
+            replayed = await loadTableStateFromFramesV2_ACU(candidateChat, isolationKey);
+        }
+        catch (error) {
+            return { saved: false, error: `V2 batch candidate replay failed: ${error?.message || String(error)}` };
+        }
+        if (!replayed)
+            return { saved: false, error: 'V2 batch candidate replay produced no table data.' };
+        if (!samePersistedSheets_ACU(replayed, options.afterData, [...changedSheetKeys])) {
+            return { saved: false, error: 'V2 batch candidate replay differs from expected changed sheet data.' };
+        }
+        const snapshots = [...targetByIndex.keys()].map(index => ({
+            index,
+            message: chat[index],
+            hadIsolatedData: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_IsolatedData'),
+            isolatedData: chat[index].TavernDB_ACU_IsolatedData,
+            hadIdentity: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_Identity'),
+            identity: chat[index].TavernDB_ACU_Identity,
+        }));
+        try {
+            for (const { index } of snapshots) {
+                chat[index].TavernDB_ACU_IsolatedData = candidateChat[index].TavernDB_ACU_IsolatedData;
+                if (Object.prototype.hasOwnProperty.call(candidateChat[index], 'TavernDB_ACU_Identity')) {
+                    chat[index].TavernDB_ACU_Identity = candidateChat[index].TavernDB_ACU_Identity;
+                }
+                else {
+                    delete chat[index].TavernDB_ACU_Identity;
+                }
+            }
+            await saveChatToHostStrict_ACU();
+        }
+        catch (error) {
+            for (const snapshot of snapshots) {
+                if (snapshot.hadIsolatedData)
+                    snapshot.message.TavernDB_ACU_IsolatedData = snapshot.isolatedData;
+                else
+                    delete snapshot.message.TavernDB_ACU_IsolatedData;
+                if (snapshot.hadIdentity)
+                    snapshot.message.TavernDB_ACU_Identity = snapshot.identity;
+                else
+                    delete snapshot.message.TavernDB_ACU_Identity;
+            }
+            throw error;
+        }
+        return { saved: true, messageIndices: [...targetByIndex.keys()].sort((left, right) => left - right) };
+    }
+    async function persistTableMutationLogBatchV2_ACU(options) {
+        if (!options.transactionContext) {
+            return { saved: false, error: 'V2 batch operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
+        }
+        if (options.assumeCommitLock)
+            return persistTableMutationLogBatchV2Core_ACU(options);
+        return options.transactionContext.runCommit(() => persistTableMutationLogBatchV2Core_ACU(options), options.revisionWriteSet);
+    }
     async function persistTableSheetCheckpointV2Core_ACU(options) {
         const validation = validateSheetCheckpointInput_ACU(options);
         if ('error' in validation)
@@ -23990,6 +24159,12 @@ $CONTENT
      * service/runtime/helpers-table-lock.ts — 表格锁定与索引
      * 从 helpers-remaining.ts 拆出
      */
+    function cloneTableLockValue_ACU(value) {
+        return value == null ? value : JSON.parse(JSON.stringify(value));
+    }
+    function getSettingsSaveWarning_ACU(result) {
+        return result?.warning || result?.error || '';
+    }
     function getTableLockScopeKey_ACU() {
         const chatKey = (currentChatFileIdentifier_ACU || 'default').trim() || 'default';
         const isolationKey = getCurrentIsolationKey_ACU() || '';
@@ -24067,6 +24242,136 @@ $CONTENT
             settings_ACU.specialIndexLocks[scopeKey] = {};
         settings_ACU.specialIndexLocks[scopeKey][sheetKey] = !!enabled;
         saveSettings_ACU();
+    }
+    function captureCurrentTableLocksSnapshot_ACU() {
+        ensureTableLockStore_ACU();
+        const scopeKey = getTableLockScopeKey_ACU();
+        const hasTableLocks = Object.prototype.hasOwnProperty.call(settings_ACU.tableUpdateLocks, scopeKey);
+        const hasSpecialIndexLocks = Object.prototype.hasOwnProperty.call(settings_ACU.specialIndexLocks, scopeKey);
+        return {
+            scopeKey,
+            hasTableLocks,
+            tableLocks: hasTableLocks ? cloneTableLockValue_ACU(settings_ACU.tableUpdateLocks[scopeKey]) : null,
+            hasSpecialIndexLocks,
+            specialIndexLocks: hasSpecialIndexLocks ? cloneTableLockValue_ACU(settings_ACU.specialIndexLocks[scopeKey]) : null,
+        };
+    }
+    function restoreCurrentTableLocksSnapshot_ACU(snapshot, { save = true } = {}) {
+        ensureTableLockStore_ACU();
+        if (snapshot.hasTableLocks) {
+            settings_ACU.tableUpdateLocks[snapshot.scopeKey] = cloneTableLockValue_ACU(snapshot.tableLocks || {});
+        }
+        else {
+            delete settings_ACU.tableUpdateLocks[snapshot.scopeKey];
+        }
+        if (snapshot.hasSpecialIndexLocks) {
+            settings_ACU.specialIndexLocks[snapshot.scopeKey] = cloneTableLockValue_ACU(snapshot.specialIndexLocks || {});
+        }
+        else {
+            delete settings_ACU.specialIndexLocks[snapshot.scopeKey];
+        }
+        if (!save)
+            return { success: true, warning: '' };
+        const saveResult = saveSettings_ACU();
+        return {
+            success: !!saveResult?.saved,
+            warning: getSettingsSaveWarning_ACU(saveResult),
+        };
+    }
+    function commitTableLockDraftsBatch_ACU(options) {
+        const snapshot = captureCurrentTableLocksSnapshot_ACU();
+        const drafts = options?.drafts && typeof options.drafts === 'object' ? options.drafts : {};
+        const deletedSheetKeys = [...new Set((options?.deletedSheetKeys || [])
+                .map(key => String(key || '').trim())
+                .filter(Boolean))];
+        let changed = false;
+        deletedSheetKeys.forEach(sheetKey => {
+            const result = deleteTableLocksForSheet_ACU(sheetKey, { save: false });
+            changed = result.changed || changed;
+        });
+        Object.entries(drafts).forEach(([sheetKey, draft]) => {
+            const normalizedSheetKey = String(sheetKey || '').trim();
+            if (!normalizedSheetKey || deletedSheetKeys.includes(normalizedSheetKey))
+                return;
+            ensureTableLockStore_ACU();
+            const scopeKey = getTableLockScopeKey_ACU();
+            if (!settings_ACU.tableUpdateLocks[scopeKey])
+                settings_ACU.tableUpdateLocks[scopeKey] = {};
+            if (!settings_ACU.specialIndexLocks[scopeKey])
+                settings_ACU.specialIndexLocks[scopeKey] = {};
+            const nextTableLocks = {
+                rows: Array.from(draft?.rows || []),
+                cols: Array.from(draft?.cols || []),
+                cells: Array.from(draft?.cells || []),
+            };
+            const nextSpecialIndexLock = draft?.specialIndexLocked !== false;
+            const currentTableLocks = settings_ACU.tableUpdateLocks[scopeKey][normalizedSheetKey];
+            const currentSpecialIndexLock = settings_ACU.specialIndexLocks[scopeKey][normalizedSheetKey];
+            if (JSON.stringify(currentTableLocks) !== JSON.stringify(nextTableLocks)) {
+                settings_ACU.tableUpdateLocks[scopeKey][normalizedSheetKey] = nextTableLocks;
+                changed = true;
+            }
+            if (currentSpecialIndexLock !== nextSpecialIndexLock) {
+                settings_ACU.specialIndexLocks[scopeKey][normalizedSheetKey] = nextSpecialIndexLock;
+                changed = true;
+            }
+        });
+        if (!changed) {
+            return { success: true, changed: false, snapshot, warning: '' };
+        }
+        const saveResult = saveSettings_ACU();
+        if (saveResult?.saved) {
+            return {
+                success: true,
+                changed: true,
+                snapshot,
+                warning: getSettingsSaveWarning_ACU(saveResult),
+            };
+        }
+        restoreCurrentTableLocksSnapshot_ACU(snapshot, { save: false });
+        return {
+            success: false,
+            changed: true,
+            snapshot,
+            warning: getSettingsSaveWarning_ACU(saveResult) || '表格锁设置保存失败。',
+        };
+    }
+    function deleteTableLocksForSheet_ACU(sheetKey, { save = true } = {}) {
+        const normalizedSheetKey = String(sheetKey || '').trim();
+        const scopeKey = getTableLockScopeKey_ACU();
+        const result = {
+            scopeKey,
+            sheetKey: normalizedSheetKey,
+            removedTableLocks: false,
+            removedSpecialIndexLock: false,
+            changed: false,
+            saved: !save,
+            warning: '',
+        };
+        if (!normalizedSheetKey)
+            return result;
+        const tableBucket = settings_ACU?.tableUpdateLocks?.[scopeKey];
+        if (tableBucket && typeof tableBucket === 'object' && Object.prototype.hasOwnProperty.call(tableBucket, normalizedSheetKey)) {
+            delete tableBucket[normalizedSheetKey];
+            if (Object.keys(tableBucket).length === 0)
+                delete settings_ACU.tableUpdateLocks[scopeKey];
+            result.removedTableLocks = true;
+            result.changed = true;
+        }
+        const specialBucket = settings_ACU?.specialIndexLocks?.[scopeKey];
+        if (specialBucket && typeof specialBucket === 'object' && Object.prototype.hasOwnProperty.call(specialBucket, normalizedSheetKey)) {
+            delete specialBucket[normalizedSheetKey];
+            if (Object.keys(specialBucket).length === 0)
+                delete settings_ACU.specialIndexLocks[scopeKey];
+            result.removedSpecialIndexLock = true;
+            result.changed = true;
+        }
+        if (save && result.changed) {
+            const saveResult = saveSettings_ACU();
+            result.saved = !!saveResult?.saved;
+            result.warning = saveResult?.warning || saveResult?.error || '';
+        }
+        return result;
     }
     function clearCurrentTableLocks_ACU({ save = true } = {}) {
         const scopeKey = getTableLockScopeKey_ACU();
@@ -27222,6 +27527,12 @@ $CONTENT
         const value = Number(entry?.aiFloor);
         return Number.isFinite(value) && value > 0 ? value : fallbackAiFloor;
     }
+    /**
+     * 判断 V2 operation 是否可能修改某个 sheet。
+     *
+     * sql_batch 和 table_edit_dsl 缺少可靠的 sheet 归属信息。对于保存路由，
+     * 将其视为命中所有 sheet，宁可把新增量追加到更晚层，也不能插到未知 SQL 前面。
+     */
     function v2OperationTouchesSheet_ACU(operation, sheetKey) {
         if (!operation || typeof operation !== 'object')
             return false;
@@ -27231,7 +27542,45 @@ $CONTENT
             return operation.sheetKey === sheetKey;
         if (operation.kind === 'data_replace')
             return !!operation.data?.[sheetKey];
-        return false;
+        if (operation.kind === 'sql_sheet_batch')
+            return operation.sheetKey === sheetKey;
+        return operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl';
+    }
+    function v2EntryTouchesSheet_ACU(entry, sheetKey) {
+        return v2EventTouchesSheetData_ACU(entry, sheetKey)
+            || (Array.isArray(entry?.operations) && entry.operations.some((operation) => v2OperationTouchesSheet_ACU(operation, sheetKey)))
+            || (Array.isArray(entry?.patches) && entry.patches.some((patch) => patch?.sheetKey === sheetKey));
+    }
+    /** 返回当前 replay anchor（最新 full checkpoint）所在消息层，没有则返回 -1。 */
+    function getLatestV2FullCheckpointMessageIndex_ACU(chat, isolationKey) {
+        if (!Array.isArray(chat))
+            return -1;
+        for (let index = chat.length - 1; index >= 0; index -= 1) {
+            const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
+            if (isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full')
+                return index;
+        }
+        return -1;
+    }
+    /**
+     * 返回某个 sheet 在当前 replay 区间最后一次拥有显式增量/单表 checkpoint 的消息层。
+     * full checkpoint 是基底而不是增量记录，因此不会作为返回值；调用方据此决定追加日志或直接更新基底。
+     */
+    function getLatestV2SheetReplayMessageIndex_ACU(chat, isolationKey, sheetKey) {
+        const checkpointIndex = getLatestV2FullCheckpointMessageIndex_ACU(chat, isolationKey);
+        if (checkpointIndex < 0 || !sheetKey.startsWith('sheet_'))
+            return -1;
+        for (let index = chat.length - 1; index >= checkpointIndex; index -= 1) {
+            const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
+            if (!isV2TagData_ACU(tagData))
+                continue;
+            const frame = tagData.storageFrame;
+            if (frame.perSheetCheckpoints?.[sheetKey]?.kind === 'sheet_full')
+                return index;
+            if ((frame.logEntries || []).some((entry) => v2EntryTouchesSheet_ACU(entry, sheetKey)))
+                return index;
+        }
+        return -1;
     }
     function v2FrameHasSheetData_ACU(tagData, sheetKey) {
         if (!isV2TagData_ACU(tagData))
@@ -27242,8 +27591,7 @@ $CONTENT
         if (tagData.storageFrame.perSheetCheckpoints?.[sheetKey]?.kind === 'sheet_full') {
             return true;
         }
-        return (tagData.storageFrame.logEntries || []).some((entry) => v2EventTouchesSheetData_ACU(entry, sheetKey)
-            || (Array.isArray(entry.operations) && entry.operations.some((operation) => v2OperationTouchesSheet_ACU(operation, sheetKey))));
+        return (tagData.storageFrame.logEntries || []).some((entry) => v2EntryTouchesSheet_ACU(entry, sheetKey));
     }
     function v2FrameTrackedUpdateFloor_ACU(tagData, sheetKey, messageAiFloor) {
         if (!isV2TagData_ACU(tagData))
@@ -30341,7 +30689,7 @@ $CONTENT
             catch (error) {
                 const warning = `外置向量索引资源清理失败：${error?.message || String(error || '未知错误')}`;
                 warnings.push(warning);
-                logWarn_ACU(`[手动重填基底替换] ${warning}`, error);
+                logWarn_ACU(`[向量索引清理] ${warning}`, error);
             }
         }
         return warnings;
@@ -31637,6 +31985,149 @@ $CONTENT
             writeSet,
             maintenanceMode: 'exclusive',
         }, () => clearManualRefillIncrementalDataInRangeCore_ACU(targetMessageIndices, targetSheetKeys));
+    }
+    const CURRENT_CHAT_TEMPLATE_MESSAGE_FIELDS_ACU = [
+        'TavernDB_ACU_Data',
+        'TavernDB_ACU_SummaryData',
+        'TavernDB_ACU_IndependentData',
+        'TavernDB_ACU_Identity',
+        'TavernDB_ACU_IsolatedData',
+        'TavernDB_ACU_ModifiedKeys',
+        'TavernDB_ACU_UpdateGroupKeys',
+    ];
+    function captureCurrentChatTemplateMessageSnapshots_ACU(chat) {
+        return chat
+            .filter(msg => msg && !msg.is_user)
+            .map(msg => ({
+            msg,
+            fields: CURRENT_CHAT_TEMPLATE_MESSAGE_FIELDS_ACU.reduce((out, field) => {
+                const exists = Object.prototype.hasOwnProperty.call(msg, field);
+                out[field] = { exists, value: exists ? cloneManualRefillJson_ACU(msg[field]) : undefined };
+                return out;
+            }, {}),
+        }));
+    }
+    function restoreCurrentChatTemplateMessageSnapshots_ACU(snapshots) {
+        for (const snapshot of snapshots) {
+            for (const [field, state] of Object.entries(snapshot.fields)) {
+                if (state.exists)
+                    snapshot.msg[field] = cloneManualRefillJson_ACU(state.value);
+                else
+                    delete snapshot.msg[field];
+            }
+        }
+    }
+    async function commitCurrentChatTemplateChangesAtomic_ACU(options) {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0 || !chat.some(msg => msg && !msg.is_user)) {
+            return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '当前聊天没有可提交模板的 AI 消息。' };
+        }
+        const isolationKey = String(options?.isolationKey ?? getCurrentIsolationKey_ACU());
+        const deletedSheetKeys = [...new Set((Array.isArray(options?.deletedSheetKeys) ? options.deletedSheetKeys : [])
+                .filter(key => typeof key === 'string' && key.startsWith('sheet_')))];
+        const guideData = cloneManualRefillJson_ACU(options?.guideData);
+        if (!guideData || typeof guideData !== 'object' || !Object.keys(guideData).some(key => key.startsWith('sheet_'))) {
+            return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '当前聊天模板提交缺少有效的 Sheet Guide。' };
+        }
+        const templateState = buildChatTemplateScopeStateFromCurrent_ACU({
+            isolationKey,
+            presetName: String(options?.presetName || ''),
+            source: 'visualizer_v2_save',
+            templateSource: options?.templateSource,
+            guideData,
+        });
+        if (!templateState) {
+            return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '无法构建当前聊天模板作用域快照。' };
+        }
+        const writeSet = [{ kind: 'all' }];
+        try {
+            return await runTableWriteTransaction_ACU({
+                source: 'system_cleanup',
+                reason: 'commitCurrentChatTemplateChanges',
+                isolationKey,
+                writeSet,
+                maintenanceMode: 'exclusive',
+            }, transactionContext => transactionContext.runCommit(async () => {
+                const messageSnapshots = captureCurrentChatTemplateMessageSnapshots_ACU(chat);
+                const oldScopeContainer = cloneManualRefillJson_ACU(getChatScopedConfigContainer_ACU(chat));
+                const oldGuideContainer = cloneManualRefillJson_ACU(getChatSheetGuideContainer_ACU(chat));
+                const vectorManifestsToDeleteAfterCommit = [];
+                let resetMessageCount = 0;
+                let purgedMessageCount = 0;
+                try {
+                    const isolationConfig = {
+                        enabled: !!settings_ACU.dataIsolationEnabled,
+                        code: String(settings_ACU.dataIsolationCode || ''),
+                    };
+                    const clearsSummaryOrOutline = tableListContainsSummaryOrOutline_ACU(deletedSheetKeys);
+                    for (const msg of chat) {
+                        if (!msg || msg.is_user)
+                            continue;
+                        let changed = false;
+                        if (options?.resetCurrentIsolationData) {
+                            const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                            await deleteVectorIndexManifestFromTagData_ACU(tagData, {
+                                deleteExternal: false,
+                                onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest),
+                            });
+                            changed = clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig) || changed;
+                            if (changed)
+                                resetMessageCount++;
+                        }
+                        else if (clearsSummaryOrOutline) {
+                            const isolatedData = msg?.TavernDB_ACU_IsolatedData;
+                            if (isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)) {
+                                for (const tagData of Object.values(isolatedData)) {
+                                    await deleteVectorIndexManifestFromTagData_ACU(tagData, {
+                                        deleteExternal: false,
+                                        onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest),
+                                    });
+                                }
+                            }
+                        }
+                        if (deletedSheetKeys.length > 0 && purgeSheetKeysFromMessage_ACU(msg, deletedSheetKeys)) {
+                            purgedMessageCount++;
+                        }
+                    }
+                    const guideSaved = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, {
+                        reason: 'visualizer_v2_save',
+                        syncTemplateScope: false,
+                    });
+                    if (!guideSaved)
+                        throw new Error('当前聊天 Sheet Guide 写入失败。');
+                    const scopeSaved = setCurrentChatTemplateScopeState_ACU(templateState, {
+                        isolationKey,
+                        reason: 'visualizer_v2_save',
+                    });
+                    if (!scopeSaved)
+                        throw new Error('当前聊天模板作用域写入失败。');
+                    await saveChatToHostStrict_ACU();
+                    const cleanupWarnings = await cleanupVectorIndexManifestsAfterCommit_ACU(vectorManifestsToDeleteAfterCommit);
+                    return {
+                        success: true,
+                        changed: true,
+                        resetMessageCount,
+                        purgedMessageCount,
+                        ...(cleanupWarnings.length ? { cleanupWarnings } : {}),
+                    };
+                }
+                catch (error) {
+                    restoreCurrentChatTemplateMessageSnapshots_ACU(messageSnapshots);
+                    setChatScopedConfigContainer_ACU(chat, oldScopeContainer);
+                    setChatSheetGuideContainer_ACU(chat, oldGuideContainer);
+                    try {
+                        await saveChatToHostStrict_ACU();
+                    }
+                    catch (rollbackError) {
+                        throw new Error(`当前聊天模板提交失败：${error?.message || String(error)}；回滚保存也失败：${rollbackError?.message || String(rollbackError)}`);
+                    }
+                    throw error;
+                }
+            }, writeSet));
+        }
+        catch (error) {
+            return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: error?.message || '当前聊天模板提交失败。' };
+        }
     }
     function cloneManualRefillJson_ACU(value) {
         if (value === undefined || value === null)
@@ -48229,8 +48720,14 @@ $CONTENT
         (_c = state.pendingDataOps).deletesByRow || (_c.deletesByRow = {});
         return state.pendingDataOps;
     }
-    function quoteIdentifier_ACU$1(name) {
-        return `\`${String(name).replace(/`/g, '``')}\``;
+    function assertVisualizerDataOpsEditable_ACU(state) {
+        if (state?.isSaving) {
+            throw new Error('保存正在进行中，期间不能继续编辑。');
+        }
+        const pending = ensurePendingOps_ACU(state);
+        if (pending.committed) {
+            throw new Error('数据已持久化但本地刷新尚未完成。请先重试保存完成恢复，期间不能继续编辑。');
+        }
     }
     function rowKey_ACU(sheetKey, rowId) {
         return `${sheetKey}::${rowId}`;
@@ -48241,46 +48738,192 @@ $CONTENT
     function getSheetByKey_ACU(data, sheetKey) {
         return data && typeof data === 'object' ? data[sheetKey] : null;
     }
-    function getRuntimeSheet_ACU(sheetKey) {
-        return getSheetByKey_ACU(currentJsonTableData_ACU, sheetKey);
-    }
-    function getEnglishTableName_ACU$1(sheet) {
-        const ddlName = sheet?.sourceData?.ddl ? parseDDLTableName(sheet.sourceData.ddl) : '';
-        return String(ddlName || sheet?.name || '').trim();
-    }
-    function resolveColumnForSheet_ACU(englishTableName, colName) {
-        const mapper = getNameMapper();
-        const englishColName = mapper.resolveColumnName(englishTableName, colName);
-        const chineseColName = mapper.getChineseColumnName(englishTableName, englishColName);
-        return { englishColName, chineseColName };
-    }
-    function toSqlValueParam_ACU$1(value) {
-        if (value === undefined || value === null)
-            return null;
-        if (typeof value === 'number')
-            return Number.isFinite(value) ? value : String(value);
-        if (typeof value === 'boolean')
-            return value ? 1 : 0;
-        return String(value);
-    }
-    function buildRowDataFromTemp_ACU(state, sheetKey, rowId) {
-        const sheet = getSheetByKey_ACU(state?.tempData, sheetKey);
-        const content = Array.isArray(sheet?.content) ? sheet.content : [];
-        const headers = Array.isArray(content[0]) ? content[0] : [];
-        const row = content.find((item, index) => index > 0 && Array.isArray(item) && String(item[0] ?? '') === rowId);
-        if (!row)
-            return null;
-        const out = {};
-        for (let col = 1; col < headers.length; col += 1) {
-            const columnName = String(headers[col] || '').trim();
-            if (!columnName)
-                continue;
-            out[columnName] = row[col] === undefined ? '' : row[col];
-        }
-        return out;
-    }
     function createVisualizerTempRowId_ACU() {
         return `${TEMP_ROW_ID_PREFIX_ACU}${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    }
+    function getDraftSheetRows_ACU(sheet) {
+        const content = Array.isArray(sheet?.content) ? sheet.content : [];
+        const headers = Array.isArray(content[0]) ? content[0] : [];
+        const rows = [];
+        for (let index = 1; index < content.length; index += 1) {
+            const row = Array.isArray(content[index]) ? content[index] : [];
+            rows.push({ rowId: String(row[0] ?? '').trim(), row });
+        }
+        return { headers, rows };
+    }
+    function valuesEqual_ACU(left, right) {
+        if (Object.is(left, right))
+            return true;
+        if (left && right && typeof left === 'object' && typeof right === 'object') {
+            return JSON.stringify(left) === JSON.stringify(right);
+        }
+        return false;
+    }
+    function assertVisualizerRowDataEditable_ACU(state) {
+        assertVisualizerDataOpsEditable_ACU(state);
+        if (state?.templateDirty) {
+            throw new Error('存在未保存的模板/结构修改，请先保存模板后再编辑行数据。');
+        }
+        if (Array.isArray(state?.deletedSheetKeys) && state.deletedSheetKeys.length > 0) {
+            throw new Error('存在待保存的删表操作，请先完成删表保存后再编辑行数据。');
+        }
+    }
+    function assertVisualizerTemplateEditable_ACU(state) {
+        assertVisualizerDataOpsEditable_ACU(state);
+        if (hasVisualizerPendingDataOps_ACU(state)) {
+            throw new Error('存在未保存的行数据增量，请先保存数据后再修改模板/结构。');
+        }
+        if (Array.isArray(state?.deletedSheetKeys) && state.deletedSheetKeys.length > 0) {
+            throw new Error('存在待保存的删表操作，请先完成删表保存后再修改模板/结构。');
+        }
+    }
+    function assertVisualizerSheetDeleteEditable_ACU(state) {
+        assertVisualizerDataOpsEditable_ACU(state);
+        if (state?.templateDirty) {
+            throw new Error('存在未保存的模板/结构修改，请先保存模板后再删除表。');
+        }
+        if (hasVisualizerPendingDataOps_ACU(state)) {
+            throw new Error('存在未保存的行数据增量，请先保存数据后再删除表。');
+        }
+    }
+    function recordVisualizerDraftDataDiff_ACU(state, previousData, nextData, skipSheetKeys = []) {
+        assertVisualizerDataOpsEditable_ACU(state);
+        const skipped = new Set(Array.from(skipSheetKeys, key => String(key)));
+        const previous = previousData && typeof previousData === 'object' ? previousData : {};
+        const next = nextData && typeof nextData === 'object' ? nextData : {};
+        const pending = ensurePendingOps_ACU(state);
+        const hadPendingRowOps = Object.keys(pending.updatesByRow).length > 0
+            || Object.keys(pending.insertsByClientRowId).length > 0
+            || Object.keys(pending.deletesByRow).length > 0;
+        let hasStructuralChanges = skipped.size > 0;
+        let hasTemplateChanges = false;
+        const plans = [];
+        const sheetKeys = new Set([...Object.keys(previous), ...Object.keys(next)]);
+        sheetKeys.delete('mate');
+        for (const sheetKey of sheetKeys) {
+            if (skipped.has(sheetKey))
+                continue;
+            if (!previous[sheetKey] || !next[sheetKey]) {
+                hasStructuralChanges = true;
+                hasTemplateChanges = true;
+                continue;
+            }
+            const previousSheet = getDraftSheetRows_ACU(previous[sheetKey]);
+            const nextSheet = getDraftSheetRows_ACU(next[sheetKey]);
+            const previousHeaders = previousSheet.headers.map(header => String(header ?? '').trim());
+            const nextHeaders = nextSheet.headers.map(header => String(header ?? '').trim());
+            const schemaChanged = JSON.stringify(previousHeaders) !== JSON.stringify(nextHeaders);
+            const previousMetadata = { ...previous[sheetKey] };
+            const nextMetadata = { ...next[sheetKey] };
+            delete previousMetadata.content;
+            delete nextMetadata.content;
+            if (schemaChanged || !valuesEqual_ACU(previousMetadata, nextMetadata)) {
+                hasStructuralChanges = true;
+                hasTemplateChanges = true;
+            }
+            const previousById = new Map();
+            for (const item of previousSheet.rows) {
+                if (!item.rowId)
+                    continue;
+                if (previousById.has(item.rowId)) {
+                    throw new Error(`AI 草稿应用失败：原草稿表 ${sheetKey} 的行标识 ${item.rowId} 重复。`);
+                }
+                previousById.set(item.rowId, item);
+            }
+            const candidateIdCounts = new Map();
+            for (const item of nextSheet.rows) {
+                if (!item.rowId)
+                    continue;
+                candidateIdCounts.set(item.rowId, (candidateIdCounts.get(item.rowId) || 0) + 1);
+            }
+            for (const [rowId, count] of candidateIdCounts) {
+                if (count > 1 && previousById.has(rowId)) {
+                    throw new Error(`AI 草稿应用失败：候选表 ${sheetKey} 的既有行标识 ${rowId} 重复，无法判断行身份。`);
+                }
+            }
+            const matchedPreviousIds = new Set();
+            const oldHeaderIndex = new Map();
+            previousSheet.headers.forEach((header, index) => {
+                const name = String(header ?? '').trim();
+                if (index > 0 && name && !oldHeaderIndex.has(name))
+                    oldHeaderIndex.set(name, index);
+            });
+            const commonColumnNames = new Set(nextHeaders.filter((name, index) => index > 0 && oldHeaderIndex.has(name)));
+            const previousRowOrder = previousSheet.rows.map(item => item.rowId).filter(Boolean);
+            const nextRowOrder = nextSheet.rows.map(item => item.rowId).filter(rowId => rowId && previousById.has(rowId));
+            if (schemaChanged) {
+                for (const item of nextSheet.rows) {
+                    if (!item.rowId || candidateIdCounts.get(item.rowId) !== 1 || !previousById.has(item.rowId))
+                        continue;
+                    const oldRow = previousById.get(item.rowId).row;
+                    const sharedLength = Math.min(oldRow.length, item.row.length);
+                    const changedSharedValue = Array.from({ length: Math.max(0, sharedLength - 1) }, (_, index) => index + 1)
+                        .some(index => !valuesEqual_ACU(oldRow[index] === undefined ? '' : oldRow[index], item.row[index] === undefined ? '' : item.row[index]));
+                    const addedNonEmptyValue = item.row.slice(oldRow.length).some(value => !valuesEqual_ACU(value === undefined ? '' : value, ''));
+                    if (changedSharedValue || addedNonEmptyValue) {
+                        throw new Error(`AI 草稿应用失败：表 ${sheetKey} 同时修改了列结构和既有行数据，请拆分为两次操作后分别保存。`);
+                    }
+                }
+            }
+            if (!schemaChanged
+                && previousRowOrder.length === nextRowOrder.length
+                && previousRowOrder.every(rowId => nextRowOrder.includes(rowId))
+                && previousRowOrder.some((rowId, index) => nextRowOrder[index] !== rowId)) {
+                throw new Error(`AI 草稿应用失败：表 ${sheetKey} 调整了既有行顺序，当前 V2 row operation 不支持持久化行重排。`);
+            }
+            for (const item of nextSheet.rows) {
+                const canMatch = !!item.rowId
+                    && candidateIdCounts.get(item.rowId) === 1
+                    && previousById.has(item.rowId);
+                if (canMatch) {
+                    matchedPreviousIds.add(item.rowId);
+                    if (isTempRowId_ACU(item.rowId))
+                        continue;
+                    const oldRow = previousById.get(item.rowId).row;
+                    for (let columnIndex = 1; columnIndex < nextSheet.headers.length; columnIndex += 1) {
+                        const columnName = String(nextSheet.headers[columnIndex] ?? '').trim();
+                        if (!columnName)
+                            continue;
+                        if (schemaChanged && !commonColumnNames.has(columnName))
+                            continue;
+                        const previousColumnIndex = oldHeaderIndex.get(columnName);
+                        const oldValue = previousColumnIndex === undefined ? undefined : oldRow[previousColumnIndex];
+                        const nextValue = item.row[columnIndex] === undefined ? '' : item.row[columnIndex];
+                        if (!valuesEqual_ACU(oldValue === undefined ? '' : oldValue, nextValue)) {
+                            if (schemaChanged) {
+                                throw new Error(`AI 草稿应用失败：表 ${sheetKey} 同时修改了列结构和既有行数据，请拆分为两次操作后分别保存。`);
+                            }
+                            plans.push({ kind: 'update', sheetKey, rowId: item.rowId, columnName, value: nextValue });
+                        }
+                    }
+                    continue;
+                }
+                const clientRowId = createVisualizerTempRowId_ACU();
+                plans.push({ kind: 'insert', sheetKey, clientRowId, row: item.row });
+            }
+            for (const item of previousSheet.rows) {
+                if (item.rowId && !matchedPreviousIds.has(item.rowId)) {
+                    plans.push({ kind: 'delete', sheetKey, rowId: item.rowId });
+                }
+            }
+        }
+        if ((hasStructuralChanges || state?.templateDirty) && (hadPendingRowOps || plans.length > 0)) {
+            throw new Error('AI 草稿应用失败：结构变化不能与未保存的行数据增量混合，请先保存数据，或让 AI 分两次修改并分别保存。');
+        }
+        if (skipped.size > 0 && (hasTemplateChanges || state?.templateDirty)) {
+            throw new Error('AI 草稿应用失败：删表操作不能与模板/结构变化混合，请拆分为两次操作后分别保存。');
+        }
+        for (const plan of plans) {
+            if (plan.kind === 'update')
+                recordVisualizerCellUpdate_ACU(state, plan.sheetKey, plan.rowId, plan.columnName, plan.value);
+            else if (plan.kind === 'insert') {
+                plan.row[0] = plan.clientRowId;
+                recordVisualizerRowInsert_ACU(state, plan.sheetKey, plan.clientRowId);
+            }
+            else
+                recordVisualizerRowDelete_ACU(state, plan.sheetKey, plan.rowId);
+        }
+        return { templateChanged: hasTemplateChanges };
     }
     function resetVisualizerPendingDataOps_ACU(state) {
         state.pendingDataOps = {
@@ -48295,6 +48938,7 @@ $CONTENT
         if (!sheetKey || !normalizedRowId || !normalizedColumnName || isTempRowId_ACU(normalizedRowId))
             return;
         const pending = ensurePendingOps_ACU(state);
+        assertVisualizerDataOpsEditable_ACU(state);
         const key = rowKey_ACU(sheetKey, normalizedRowId);
         if (pending.deletesByRow[key])
             return;
@@ -48307,6 +48951,7 @@ $CONTENT
         if (!sheetKey || !clientRowId)
             return;
         const pending = ensurePendingOps_ACU(state);
+        assertVisualizerDataOpsEditable_ACU(state);
         pending.insertsByClientRowId[clientRowId] = { kind: 'insertRow', sheetKey, clientRowId };
     }
     function recordVisualizerRowDelete_ACU(state, sheetKey, rowId) {
@@ -48314,6 +48959,7 @@ $CONTENT
         if (!sheetKey || !normalizedRowId)
             return;
         const pending = ensurePendingOps_ACU(state);
+        assertVisualizerDataOpsEditable_ACU(state);
         if (isTempRowId_ACU(normalizedRowId)) {
             delete pending.insertsByClientRowId[normalizedRowId];
             return;
@@ -48338,7 +48984,8 @@ $CONTENT
     }
     function hasVisualizerPendingDataOps_ACU(state) {
         const pending = ensurePendingOps_ACU(state);
-        return Object.keys(pending.deletesByRow).length > 0
+        return !!pending.committed
+            || Object.keys(pending.deletesByRow).length > 0
             || Object.keys(pending.updatesByRow).length > 0
             || Object.keys(pending.insertsByClientRowId).length > 0;
     }
@@ -48347,65 +48994,7 @@ $CONTENT
         if (!writeSet.some(item => JSON.stringify(item) === key))
             writeSet.push(unit);
     }
-    function pushDeleteSql_ACU(statements, paramsList, writeSet, op) {
-        const sheet = getRuntimeSheet_ACU(op.sheetKey);
-        const englishTableName = getEnglishTableName_ACU$1(sheet);
-        if (!sheet || !englishTableName)
-            return `删除行失败：表 ${op.sheetKey} 在运行时不存在。`;
-        statements.push(`DELETE FROM ${quoteIdentifier_ACU$1(englishTableName)} WHERE ${quoteIdentifier_ACU$1('row_id')} = ?;`);
-        paramsList.push([toSqlValueParam_ACU$1(op.rowId)]);
-        addWriteSet_ACU(writeSet, { kind: 'row', sheetKey: op.sheetKey, rowId: op.rowId });
-        return null;
-    }
-    function pushUpdateSql_ACU(statements, paramsList, writeSet, op) {
-        const sheet = getRuntimeSheet_ACU(op.sheetKey);
-        const englishTableName = getEnglishTableName_ACU$1(sheet);
-        const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
-        if (!sheet || !englishTableName)
-            return `更新行失败：表 ${op.sheetKey} 在运行时不存在。`;
-        const setClauses = [];
-        const params = [];
-        for (const colName in op.data) {
-            const { englishColName, chineseColName } = resolveColumnForSheet_ACU(englishTableName, colName);
-            if (!headers.includes(chineseColName))
-                continue;
-            setClauses.push(`${quoteIdentifier_ACU$1(englishColName)} = ?`);
-            params.push(toSqlValueParam_ACU$1(op.data[colName]));
-            addWriteSet_ACU(writeSet, { kind: 'cell', sheetKey: op.sheetKey, rowId: op.rowId, columnKey: chineseColName });
-        }
-        if (setClauses.length === 0)
-            return null;
-        params.push(toSqlValueParam_ACU$1(op.rowId));
-        statements.push(`UPDATE ${quoteIdentifier_ACU$1(englishTableName)} SET ${setClauses.join(', ')} WHERE ${quoteIdentifier_ACU$1('row_id')} = ?;`);
-        paramsList.push(params);
-        return null;
-    }
-    function pushInsertSql_ACU(statements, paramsList, writeSet, state, op) {
-        const sheet = getRuntimeSheet_ACU(op.sheetKey);
-        const englishTableName = getEnglishTableName_ACU$1(sheet);
-        const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
-        const rowData = buildRowDataFromTemp_ACU(state, op.sheetKey, op.clientRowId);
-        if (!sheet || !englishTableName || !rowData)
-            return `新增行失败：表 ${op.sheetKey} 在运行时不存在，或临时行已丢失。`;
-        const columnNames = [];
-        const params = [];
-        for (const colName in rowData) {
-            const { englishColName, chineseColName } = resolveColumnForSheet_ACU(englishTableName, colName);
-            if (englishColName === 'row_id' || colName === 'row_id')
-                continue;
-            if (!headers.includes(chineseColName))
-                continue;
-            columnNames.push(quoteIdentifier_ACU$1(englishColName));
-            params.push(toSqlValueParam_ACU$1(rowData[colName]));
-        }
-        statements.push(columnNames.length > 0
-            ? `INSERT INTO ${quoteIdentifier_ACU$1(englishTableName)} (${columnNames.join(', ')}) VALUES (${columnNames.map(() => '?').join(', ')});`
-            : `INSERT INTO ${quoteIdentifier_ACU$1(englishTableName)} DEFAULT VALUES;`);
-        paramsList.push(params);
-        addWriteSet_ACU(writeSet, { kind: 'sheet', sheetKey: op.sheetKey });
-        return null;
-    }
-    function buildNativeWriteSet_ACU(pending) {
+    function buildVisualizerWriteSet_ACU(pending) {
         const writeSet = [];
         Object.values(pending.deletesByRow).forEach(op => addWriteSet_ACU(writeSet, { kind: 'row', sheetKey: op.sheetKey, rowId: op.rowId }));
         Object.values(pending.updatesByRow).forEach(op => {
@@ -48414,185 +49003,214 @@ $CONTENT
         Object.values(pending.insertsByClientRowId).forEach(op => addWriteSet_ACU(writeSet, { kind: 'sheet', sheetKey: op.sheetKey }));
         return writeSet;
     }
-    function getTargetSheetKeysFromWriteSet_ACU(writeSet) {
-        return [...new Set(writeSet.flatMap(unit => 'sheetKey' in unit ? [unit.sheetKey] : []))];
-    }
     function findRowIndexById_ACU(sheet, rowId) {
         const content = Array.isArray(sheet?.content) ? sheet.content : [];
+        let matchedIndex = -1;
         for (let index = 1; index < content.length; index += 1) {
-            if (String(content[index]?.[0] ?? '') === rowId)
-                return index;
+            if (String(content[index]?.[0] ?? '') !== rowId)
+                continue;
+            if (matchedIndex >= 0)
+                throw new Error(`行标识 ${rowId} 重复，无法确定要操作的行。`);
+            matchedIndex = index;
         }
-        return -1;
+        return matchedIndex;
     }
-    function buildNativeInsertCells_ACU(state, sheetKey, clientRowId, runtimeSheet) {
+    function assertValidPersistedRowIds_ACU(sheet, sheetKey, action) {
+        const content = Array.isArray(sheet?.content) ? sheet.content : [];
+        const rowIds = new Set();
+        for (let index = 1; index < content.length; index += 1) {
+            const rowId = String(content[index]?.[0] ?? '').trim();
+            const numericId = Number(rowId);
+            if (!/^[1-9]\d*$/.test(rowId) || !Number.isSafeInteger(numericId) || String(numericId) !== rowId) {
+                throw new Error(`${action}失败：表 ${sheetKey} 的行标识 ${rowId || '(空)'} 必须是正安全整数。`);
+            }
+            if (rowIds.has(rowId))
+                throw new Error(`${action}失败：表 ${sheetKey} 的行标识 ${rowId} 重复。`);
+            rowIds.add(rowId);
+        }
+    }
+    function getValidatedHeaders_ACU(sheet, sheetKey, action) {
+        const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : null;
+        if (!headers || headers.length === 0)
+            throw new Error(`${action}失败：表 ${sheetKey} 的表头无效。`);
+        const columnNames = headers.slice(1).map((header) => String(header ?? '').trim());
+        if (columnNames.some(columnName => !columnName))
+            throw new Error(`${action}失败：表 ${sheetKey} 存在空列名。`);
+        if (new Set(columnNames).size !== columnNames.length)
+            throw new Error(`${action}失败：表 ${sheetKey} 存在重复列名。`);
+        return headers;
+    }
+    function assertCompleteRow_ACU(row, headers, sheetKey, rowId, action) {
+        if (!Array.isArray(row) || row.length !== headers.length) {
+            throw new Error(`${action}失败：表 ${sheetKey} 的行 ${rowId} 与表头长度不一致。`);
+        }
+        if (String(row[0] ?? '').trim() !== rowId) {
+            throw new Error(`${action}失败：表 ${sheetKey} 的行标识不一致。`);
+        }
+        return row;
+    }
+    function toPersistedCells_ACU(cells) {
+        return cells.map(value => value === null ? null : String(value ?? ''));
+    }
+    function buildInsertCells_ACU(state, sheetKey, clientRowId, runtimeSheet) {
         const tempSheet = getSheetByKey_ACU(state?.tempData, sheetKey);
         const tempContent = Array.isArray(tempSheet?.content) ? tempSheet.content : [];
         const tempRow = tempContent.find((row, index) => index > 0 && Array.isArray(row) && String(row[0] ?? '') === clientRowId);
         if (!Array.isArray(tempRow))
             return null;
-        const headers = Array.isArray(runtimeSheet?.content?.[0]) ? runtimeSheet.content[0] : [];
-        const cells = headers.map((_, index) => tempRow[index] ?? '');
-        let nextRowId = String(Array.isArray(runtimeSheet?.content) ? runtimeSheet.content.length : 1);
+        const headers = getValidatedHeaders_ACU(runtimeSheet, sheetKey, '新增行');
+        assertValidPersistedRowIds_ACU(runtimeSheet, sheetKey, '新增行');
+        if (tempRow.length !== headers.length)
+            throw new Error(`新增行失败：表 ${sheetKey} 的临时行与表头长度不一致。`);
+        const cells = toPersistedCells_ACU(tempRow);
         const usedIds = new Set((runtimeSheet?.content || []).slice(1).map((row) => String(row?.[0] ?? '')));
-        while (usedIds.has(nextRowId))
-            nextRowId = String(Number(nextRowId) + 1);
+        const highestNumericId = Math.max(0, ...[...usedIds].map(rowId => Number(rowId)));
+        if (highestNumericId >= Number.MAX_SAFE_INTEGER) {
+            throw new Error(`新增行失败：表 ${sheetKey} 的行标识已达到安全整数上限。`);
+        }
+        const nextRowId = String(highestNumericId + 1);
         cells[0] = nextRowId;
         return cells;
     }
-    async function applyNativeVisualizerPendingDataOps_ACU(state, pending) {
-        const writeSet = buildNativeWriteSet_ACU(pending);
-        if (writeSet.length === 0)
-            return { success: true, changed: false };
-        const isolationKey = getCurrentIsolationKey_ACU();
-        const appendTargetIndex = getLatestTableAppendMessageIndexFromChat_ACU(getChatArray_ACU(), isolationKey, settings_ACU);
-        if (appendTargetIndex === -1) {
-            return { success: false, changed: false, error: '找不到可写入 V2 增量日志的 AI 楼层，已阻止保存。' };
-        }
-        const targetSheetKeys = getTargetSheetKeysFromWriteSet_ACU(writeSet);
-        const commitResult = await runTableUpdateCommit_ACU({
-            source: 'manual_crud',
-            reason: 'visualizer_save_native_batch',
-            isolationKey,
-            writeSet,
-            revisionWriteSet: writeSet,
-            initialData: currentJsonTableData_ACU,
-            targetMessageIndex: appendTargetIndex,
-            targetSheetKeys,
-            updateGroupKeys: null,
-            trackingSheetKeys: [],
-            trackAsUpdate: false,
-        }, ({ workingData }) => {
-            const data = workingData;
-            const operations = [];
-            let changes = 0;
-            for (const op of Object.values(pending.deletesByRow)) {
-                const sheet = data?.[op.sheetKey];
-                if (!sheet || !Array.isArray(sheet.content))
-                    return { success: false, error: `删除行失败：表 ${op.sheetKey} 在运行时不存在。` };
-                const beforeLength = sheet.content.length;
-                sheet.content = sheet.content.filter((row, index) => index === 0 || String(row?.[0] ?? '') !== op.rowId);
-                if (sheet.content.length === beforeLength)
-                    return { success: false, error: `删除行失败：表 ${op.sheetKey} 的行 ${op.rowId} 不存在。` };
-                operations.push({ kind: 'row_delete', sheetKey: op.sheetKey, rowId: op.rowId });
-                changes += 1;
-            }
-            for (const op of Object.values(pending.updatesByRow)) {
-                const sheet = data?.[op.sheetKey];
-                if (!sheet || !Array.isArray(sheet.content))
-                    return { success: false, error: `更新行失败：表 ${op.sheetKey} 在运行时不存在。` };
-                const rowIndex = findRowIndexById_ACU(sheet, op.rowId);
-                if (rowIndex < 1)
-                    return { success: false, error: `更新行失败：表 ${op.sheetKey} 的行 ${op.rowId} 不存在。` };
-                const headers = Array.isArray(sheet.content[0]) ? sheet.content[0] : [];
-                const row = sheet.content[rowIndex];
-                let updated = 0;
-                Object.keys(op.data).forEach(columnName => {
-                    const colIndex = headers.indexOf(columnName);
-                    if (colIndex < 1)
-                        return;
-                    row[colIndex] = op.data[columnName];
-                    updated += 1;
-                });
-                if (updated > 0) {
-                    operations.push({ kind: 'row_upsert', sheetKey: op.sheetKey, rowId: op.rowId, cells: [...row] });
-                    changes += 1;
-                }
-            }
-            for (const op of Object.values(pending.insertsByClientRowId)) {
-                const sheet = data?.[op.sheetKey];
-                if (!sheet || !Array.isArray(sheet.content))
-                    return { success: false, error: `新增行失败：表 ${op.sheetKey} 在运行时不存在。` };
-                const cells = buildNativeInsertCells_ACU(state, op.sheetKey, op.clientRowId, sheet);
-                if (!cells)
-                    return { success: false, error: `新增行失败：表 ${op.sheetKey} 的临时行已丢失。` };
-                sheet.content.push(cells);
-                operations.push({ kind: 'row_upsert', sheetKey: op.sheetKey, rowId: String(cells[0] ?? ''), cells: [...cells] });
-                changes += 1;
-            }
-            return {
-                success: true,
-                value: { changes },
-                tableData: data,
-                mutationResult: { changes, errors: [] },
-                persist: { operations },
-            };
+    function replaceVisualizerTemporaryRowIds_ACU(state, insertedRowIds) {
+        Object.entries(insertedRowIds).forEach(([clientRowId, rowId]) => {
+            Object.values(state?.tempData || {}).forEach((sheet) => {
+                if (!Array.isArray(sheet?.content))
+                    return;
+                const row = sheet.content.find((candidate, index) => index > 0 && String(candidate?.[0] ?? '') === clientRowId);
+                if (row)
+                    row[0] = rowId;
+            });
         });
-        if (!commitResult.success) {
-            return { success: false, changed: false, error: commitResult.error || '可视化编辑器原生模式增量保存失败。' };
-        }
-        resetVisualizerPendingDataOps_ACU(state);
-        return { success: true, changed: true };
+    }
+    async function refreshVisualizerRuntimeFromReplay_ACU(isolationKey) {
+        const replayedData = await loadTableStateFromFramesV2_ACU(getChatArray_ACU(), isolationKey);
+        if (!replayedData)
+            throw new Error('V2 replay 未产生表格数据，已阻止刷新运行时。');
+        _set_currentJsonTableData_ACU(replayedData);
+        if (isSqliteMode())
+            await reloadStorageProvider();
+        return replayedData;
     }
     async function applyVisualizerPendingDataOps_ACU(state) {
         const pending = ensurePendingOps_ACU(state);
+        if (pending.committed) {
+            try {
+                await refreshVisualizerRuntimeFromReplay_ACU(getCurrentIsolationKey_ACU());
+                const insertedRowIds = pending.committed.insertedRowIds;
+                return Object.keys(insertedRowIds).length > 0
+                    ? { success: true, changed: true, insertedRowIds }
+                    : { success: true, changed: true };
+            }
+            catch (error) {
+                return { success: false, changed: false, error: `数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}` };
+            }
+        }
         if (!hasVisualizerPendingDataOps_ACU(state))
             return { success: true, changed: false };
-        if (!isSqliteMode())
-            return applyNativeVisualizerPendingDataOps_ACU(state, pending);
-        const statements = [];
-        const paramsList = [];
-        const writeSet = [];
-        for (const op of Object.values(pending.deletesByRow)) {
-            const error = pushDeleteSql_ACU(statements, paramsList, writeSet, op);
-            if (error)
-                return { success: false, changed: false, error };
-        }
-        for (const op of Object.values(pending.updatesByRow)) {
-            const error = pushUpdateSql_ACU(statements, paramsList, writeSet, op);
-            if (error)
-                return { success: false, changed: false, error };
-        }
-        for (const op of Object.values(pending.insertsByClientRowId)) {
-            const error = pushInsertSql_ACU(statements, paramsList, writeSet, state, op);
-            if (error)
-                return { success: false, changed: false, error };
-        }
-        if (statements.length === 0)
-            return { success: true, changed: false };
-        const provider = getStorageProvider();
-        if (typeof provider.applyEditsBatch !== 'function') {
-            return { success: false, changed: false, error: '当前运行时不支持批量 SQL 保存，已阻止可视化编辑器数据写入。' };
-        }
+        const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('visualizer_save_v2_replay');
+        if (!migration.success)
+            return { success: false, changed: false, error: migration.error || '旧存储迁移失败，已阻止可视化编辑器保存。' };
+        if (migration.migrated)
+            await reloadStorageProvider();
+        const writeSet = buildVisualizerWriteSet_ACU(pending);
         const isolationKey = getCurrentIsolationKey_ACU();
-        const appendTargetIndex = getLatestTableAppendMessageIndexFromChat_ACU(getChatArray_ACU(), isolationKey, settings_ACU);
-        if (appendTargetIndex === -1) {
-            return { success: false, changed: false, error: '找不到可写入 V2 增量日志的 AI 楼层，已阻止保存。' };
+        try {
+            const result = await runTableWriteTransaction_ACU({
+                source: 'manual_crud',
+                reason: 'visualizer_save_v2_replay',
+                isolationKey,
+                writeSet,
+                initialData: currentJsonTableData_ACU,
+            }, async (transactionContext, workingData) => {
+                if (!workingData)
+                    throw new Error('运行时表格数据为空，已阻止可视化编辑器保存。');
+                const data = workingData;
+                const operationsBySheet = new Map();
+                const insertedRowIds = {};
+                const appendOperation = (sheetKey, operation) => {
+                    const operations = operationsBySheet.get(sheetKey) || [];
+                    operations.push(operation);
+                    operationsBySheet.set(sheetKey, operations);
+                };
+                for (const op of Object.values(pending.deletesByRow)) {
+                    const sheet = data[op.sheetKey];
+                    if (!sheet || !Array.isArray(sheet.content))
+                        throw new Error(`删除行失败：表 ${op.sheetKey} 在运行时不存在。`);
+                    assertValidPersistedRowIds_ACU(sheet, op.sheetKey, '删除行');
+                    const rowIndex = findRowIndexById_ACU(sheet, op.rowId);
+                    if (rowIndex < 1)
+                        throw new Error(`删除行失败：表 ${op.sheetKey} 的行 ${op.rowId} 不存在。`);
+                    const headers = getValidatedHeaders_ACU(sheet, op.sheetKey, '删除行');
+                    assertCompleteRow_ACU(sheet.content[rowIndex], headers, op.sheetKey, op.rowId, '删除行');
+                    sheet.content.splice(rowIndex, 1);
+                    appendOperation(op.sheetKey, { kind: 'row_delete', sheetKey: op.sheetKey, rowId: op.rowId });
+                }
+                for (const op of Object.values(pending.updatesByRow)) {
+                    const sheet = data[op.sheetKey];
+                    if (!sheet || !Array.isArray(sheet.content))
+                        throw new Error(`更新行失败：表 ${op.sheetKey} 在运行时不存在。`);
+                    assertValidPersistedRowIds_ACU(sheet, op.sheetKey, '更新行');
+                    const rowIndex = findRowIndexById_ACU(sheet, op.rowId);
+                    if (rowIndex < 1)
+                        throw new Error(`更新行失败：表 ${op.sheetKey} 的行 ${op.rowId} 不存在。`);
+                    const headers = getValidatedHeaders_ACU(sheet, op.sheetKey, '更新行');
+                    const row = assertCompleteRow_ACU(sheet.content[rowIndex], headers, op.sheetKey, op.rowId, '更新行');
+                    for (const [columnName, value] of Object.entries(op.data)) {
+                        const columnIndex = headers.indexOf(columnName);
+                        if (columnIndex < 1)
+                            throw new Error(`更新行失败：表 ${op.sheetKey} 不存在列 ${columnName}。`);
+                        row[columnIndex] = value;
+                    }
+                    const cells = toPersistedCells_ACU(row);
+                    cells[0] = op.rowId;
+                    appendOperation(op.sheetKey, { kind: 'row_upsert', sheetKey: op.sheetKey, rowId: op.rowId, cells });
+                }
+                for (const op of Object.values(pending.insertsByClientRowId)) {
+                    const sheet = data[op.sheetKey];
+                    if (!sheet || !Array.isArray(sheet.content))
+                        throw new Error(`新增行失败：表 ${op.sheetKey} 在运行时不存在。`);
+                    const cells = buildInsertCells_ACU(state, op.sheetKey, op.clientRowId, sheet);
+                    if (!cells)
+                        throw new Error(`新增行失败：表 ${op.sheetKey} 的临时行已丢失或表头无效。`);
+                    sheet.content.push(cells);
+                    const rowId = String(cells[0]);
+                    insertedRowIds[op.clientRowId] = rowId;
+                    appendOperation(op.sheetKey, { kind: 'row_upsert', sheetKey: op.sheetKey, rowId, cells });
+                }
+                const chat = getChatArray_ACU();
+                const fullCheckpointIndex = getLatestV2FullCheckpointMessageIndex_ACU(chat, isolationKey);
+                if (fullCheckpointIndex < 0)
+                    throw new Error('找不到 V2 full checkpoint，已阻止写入 log-only 增量。');
+                const targets = [...operationsBySheet.entries()].map(([sheetKey, operations]) => {
+                    const explicitReplayIndex = getLatestV2SheetReplayMessageIndex_ACU(chat, isolationKey, sheetKey);
+                    return {
+                        targetMessageIndex: explicitReplayIndex >= 0 ? explicitReplayIndex : fullCheckpointIndex,
+                        changedSheetKeys: [sheetKey],
+                        operations,
+                    };
+                });
+                const saved = await persistTableMutationLogBatchV2_ACU({
+                    source: 'manual_crud',
+                    afterData: data,
+                    targets,
+                    isolationKey,
+                    revisionWriteSet: writeSet,
+                    transactionContext,
+                });
+                if (!saved.saved)
+                    throw new Error(saved.error || 'V2 行级增量持久化失败。');
+                return { afterData: data, insertedRowIds };
+            });
+            pending.committed = result;
+            await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
+            return Object.keys(result.insertedRowIds).length > 0
+                ? { success: true, changed: true, insertedRowIds: result.insertedRowIds }
+                : { success: true, changed: true };
         }
-        const targetSheetKeys = [...new Set(writeSet.flatMap(unit => 'sheetKey' in unit ? [unit.sheetKey] : []))];
-        const commitResult = await runTableUpdateCommit_ACU({
-            source: 'manual_crud',
-            reason: 'visualizer_save_sql_batch',
-            isolationKey,
-            writeSet: writeSet.length > 0 ? writeSet : [{ kind: 'all' }],
-            revisionWriteSet: writeSet.length > 0 ? writeSet : [{ kind: 'all' }],
-            initialData: currentJsonTableData_ACU,
-            targetMessageIndex: appendTargetIndex,
-            targetSheetKeys,
-            updateGroupKeys: null,
-            trackingSheetKeys: [],
-            trackAsUpdate: false,
-            operations: [{ kind: 'sql_batch', statements, params: paramsList }],
-        }, () => {
-            const batchResult = provider.applyEditsBatch(statements, 'visualizer_save', paramsList);
-            if (!batchResult.success) {
-                return { success: false, error: batchResult.error || 'visualizer_save_sql_batch failed' };
-            }
-            const tableData = provider.getCurrentData();
-            if (!tableData)
-                return { success: false, error: 'SQLite runtime data export failed' };
-            return {
-                success: true,
-                value: { appliedEdits: batchResult.appliedEdits, changes: batchResult.appliedEdits },
-                tableData,
-                mutationResult: { changes: batchResult.appliedEdits, errors: [] },
-            };
-        });
-        if (!commitResult.success) {
-            return { success: false, changed: false, error: commitResult.error || '可视化编辑器批量 SQL 保存失败。' };
+        catch (error) {
+            return { success: false, changed: false, error: error?.message || String(error) };
         }
-        resetVisualizerPendingDataOps_ACU(state);
-        return { success: true, changed: true };
     }
 
     /**
@@ -92499,6 +93117,9 @@ Expected function or array of functions, received type ${typeof value}.`
             isActive: false,
             mode: 'data',
             dirty: false,
+            templateDirty: false,
+            lockDirty: false,
+            draftRevision: 0,
             externalRevisionChanged: false,
             currentSheetKey: null,
             tempData: null,
@@ -92553,6 +93174,9 @@ Expected function or array of functions, received type ${typeof value}.`
             hasSheets(state) {
                 return state.sheetOrder.some(key => !!state.tempData?.[key]);
             },
+            hasPendingDataChanges(state) {
+                return hasVisualizerPendingDataOps_ACU(state);
+            },
         },
         actions: {
             open(snapshot) {
@@ -92573,9 +93197,15 @@ Expected function or array of functions, received type ${typeof value}.`
                 this.mode = mode;
             },
             setDirty(dirty) {
+                if (dirty)
+                    this.draftRevision += 1;
                 this.dirty = dirty;
                 if (!dirty)
                     this.externalRevisionChanged = false;
+            },
+            markLockDraftChanged() {
+                this.lockDirty = true;
+                this.setDirty(true);
             },
             setLoading(loading) {
                 this.isLoading = loading;
@@ -92600,6 +93230,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 this.sheetOrder = nextOrder;
                 this.deletedSheetKeys = [];
                 resetVisualizerPendingDataOps_ACU(this);
+                this.lockDirty = false;
+                this.draftRevision = 0;
                 this.pendingLockChanges = [];
                 this.tableLockDrafts = {};
                 this.currentSheetKey = nextOrder.includes(this.currentSheetKey || '')
@@ -92609,6 +93241,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     this.mode = this.currentSheetKey ? 'data' : 'global';
                 }
                 this.dirty = false;
+                this.templateDirty = false;
                 this.externalRevisionChanged = false;
                 this.loadError = '';
                 this.isLoading = false;
@@ -92643,24 +93276,29 @@ Expected function or array of functions, received type ${typeof value}.`
                 this.mode = 'table-management';
             },
             addSheet(key, sheet) {
+                const normalizedKey = String(key || '').trim();
+                if (!normalizedKey || this.tempData?.[normalizedKey])
+                    return;
+                assertVisualizerTemplateEditable_ACU(this);
                 if (!this.tempData)
                     this.tempData = { mate: { type: 'chatSheets', version: 1 } };
-                const normalizedKey = String(key || '').trim();
-                if (!normalizedKey || this.tempData[normalizedKey])
-                    return;
                 this.tempData[normalizedKey] = cloneData$3(sheet);
                 this.sheetOrder = buildSheetOrder(this.tempData, [...this.sheetOrder, normalizedKey]);
                 applyOrderNumbers(this.tempData, this.sheetOrder);
                 this.currentSheetKey = normalizedKey;
                 this.mode = 'data';
+                this.templateDirty = true;
                 this.setDirty(true);
             },
             deleteSheet(key) {
                 if (!this.tempData?.[key])
                     return;
+                assertVisualizerSheetDeleteEditable_ACU(this);
                 delete this.tempData[key];
                 if (!this.deletedSheetKeys.includes(key))
                     this.deletedSheetKeys.push(key);
+                delete this.tableLockDrafts[key];
+                this.pendingLockChanges = this.pendingLockChanges.filter(change => String(change?.sheetKey || '').trim() !== key);
                 this.sheetOrder = this.sheetOrder.filter(item => item !== key);
                 applyOrderNumbers(this.tempData, this.sheetOrder);
                 if (this.currentSheetKey === key)
@@ -92676,16 +93314,19 @@ Expected function or array of functions, received type ${typeof value}.`
                 const nextIndex = direction === 'up' ? index - 1 : index + 1;
                 if (nextIndex < 0 || nextIndex >= this.sheetOrder.length)
                     return;
+                assertVisualizerTemplateEditable_ACU(this);
                 const next = [...this.sheetOrder];
                 [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
                 this.sheetOrder = next;
                 applyOrderNumbers(this.tempData, this.sheetOrder);
+                this.templateDirty = true;
                 this.setDirty(true);
             },
             addRow() {
                 const sheet = this.currentSheet;
                 if (!sheet)
                     return;
+                assertVisualizerRowDataEditable_ACU(this);
                 if (!Array.isArray(sheet.content))
                     sheet.content = [[null, '列1']];
                 const headers = Array.isArray(sheet.content[0]) ? sheet.content[0] : [null, '列1'];
@@ -92701,6 +93342,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const sheet = this.currentSheet;
                 if (!sheet || !Array.isArray(sheet.content))
                     return;
+                assertVisualizerRowDataEditable_ACU(this);
                 const target = Math.trunc(Number(rowIndex));
                 if (target < 0 || target >= sheet.content.length - 1)
                     return;
@@ -92714,6 +93356,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const sheet = this.currentSheet;
                 if (!sheet || !Array.isArray(sheet.content))
                     return;
+                assertVisualizerRowDataEditable_ACU(this);
                 const row = Math.trunc(Number(rowIndex));
                 const col = Math.trunc(Number(columnIndex));
                 if (row < 0 || col < 0)
@@ -92730,18 +93373,36 @@ Expected function or array of functions, received type ${typeof value}.`
                 this.setDirty(true);
             },
             markSaved(target) {
-                this.deletedSheetKeys = [];
-                resetVisualizerPendingDataOps_ACU(this);
-                this.pendingLockChanges = [];
+                if (target === 'data') {
+                    resetVisualizerPendingDataOps_ACU(this);
+                    this.lockDirty = false;
+                    this.pendingLockChanges = [];
+                }
+                else if (target === 'locks') {
+                    this.lockDirty = false;
+                    this.pendingLockChanges = [];
+                }
+                else {
+                    this.templateDirty = false;
+                    this.deletedSheetKeys = [];
+                    this.lockDirty = false;
+                    this.pendingLockChanges = [];
+                }
                 this.lastSavedTarget = target;
                 this.lastSavedAt = Date.now();
-                this.setDirty(false);
+                this.setDirty(this.templateDirty
+                    || this.deletedSheetKeys.length > 0
+                    || this.lockDirty
+                    || hasVisualizerPendingDataOps_ACU(this));
             },
             getLockDraft(sheetKey) {
                 const key = String(sheetKey || '').trim();
                 if (!key)
                     return { rows: [], cols: [], cells: [], specialIndexLocked: true };
                 if (!this.tableLockDrafts[key]) {
+                    if (this.pendingDataOps?.committed) {
+                        return { rows: [], cols: [], cells: [], specialIndexLocked: true };
+                    }
                     this.tableLockDrafts[key] = { rows: [], cols: [], cells: [], specialIndexLocked: true };
                 }
                 return this.tableLockDrafts[key];
@@ -92759,6 +93420,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 return this.getLockDraft(sheetKey).specialIndexLocked !== false;
             },
             toggleRowLock(sheetKey, rowIndex) {
+                assertVisualizerDataOpsEditable_ACU(this);
                 const lock = this.getLockDraft(sheetKey);
                 const value = Math.trunc(Number(rowIndex));
                 if (!Number.isFinite(value))
@@ -92766,9 +93428,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 lock.rows = lock.rows.includes(value)
                     ? lock.rows.filter(item => item !== value)
                     : [...lock.rows, value];
-                this.setDirty(true);
+                this.markLockDraftChanged();
             },
             toggleColumnLock(sheetKey, columnIndex) {
+                assertVisualizerDataOpsEditable_ACU(this);
                 const lock = this.getLockDraft(sheetKey);
                 const value = Math.trunc(Number(columnIndex));
                 if (!Number.isFinite(value))
@@ -92776,19 +93439,22 @@ Expected function or array of functions, received type ${typeof value}.`
                 lock.cols = lock.cols.includes(value)
                     ? lock.cols.filter(item => item !== value)
                     : [...lock.cols, value];
-                this.setDirty(true);
+                this.markLockDraftChanged();
             },
             toggleCellLock(sheetKey, rowIndex, columnIndex) {
+                assertVisualizerDataOpsEditable_ACU(this);
                 const lock = this.getLockDraft(sheetKey);
                 const key = `${Math.trunc(Number(rowIndex))}:${Math.trunc(Number(columnIndex))}`;
                 lock.cells = lock.cells.includes(key)
                     ? lock.cells.filter(item => item !== key)
                     : [...lock.cells, key];
-                this.setDirty(true);
+                this.markLockDraftChanged();
             },
             applyLockChangesToDraft(changes) {
                 if (!Array.isArray(changes))
                     return;
+                if (changes.length)
+                    assertVisualizerDataOpsEditable_ACU(this);
                 changes.forEach(change => {
                     const sheetKey = String(change?.sheetKey || '').trim();
                     if (!sheetKey)
@@ -92833,12 +93499,14 @@ Expected function or array of functions, received type ${typeof value}.`
                         lock.specialIndexLocked = change.specialIndexLocked;
                     }
                 });
-                if (changes.length)
-                    this.setDirty(true);
+                if (changes.length) {
+                    this.markLockDraftChanged();
+                }
             },
             queueLockChanges(changes) {
                 if (!Array.isArray(changes) || changes.length === 0)
                     return;
+                assertVisualizerDataOpsEditable_ACU(this);
                 this.applyLockChangesToDraft(changes);
                 this.pendingLockChanges = [
                     ...this.pendingLockChanges,
@@ -92862,6 +93530,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 this.isActive = false;
                 this.mode = 'data';
                 this.dirty = false;
+                this.templateDirty = false;
+                this.lockDirty = false;
+                this.draftRevision = 0;
                 this.externalRevisionChanged = false;
                 this.currentSheetKey = null;
                 this.tempData = null;
@@ -93224,6 +93895,9 @@ Expected function or array of functions, received type ${typeof value}.`
         });
         if (!confirmed)
             return { success: false, dataWasReset: false };
+        if (action === 'save-template') {
+            return { success: true, dataWasReset: true };
+        }
         const deletedCount = await deleteLocalDataInChatCore_ACU('current');
         if (deletedCount <= 0) {
             toast.error('未删除任何当前标识本地数据，模板操作已取消。', { muteable: false });
@@ -107485,15 +108159,17 @@ Expected function or array of functions, received type ${typeof value}.`
             { value: 'both', label: '原条目和索引条目都保留' },
             { value: 'index_only', label: '仅放到索引条目' },
         ];
-        function markDirty() {
+        function markTemplateDirty() {
+            visualizer.templateDirty = true;
             visualizer.setDirty(true);
         }
         function withSheet(mutator) {
             const sheet = currentSheet.value;
             if (!sheet)
                 return;
+            assertVisualizerTemplateEditable_ACU(visualizer);
             mutator(sheet);
-            markDirty();
+            markTemplateDirty();
         }
         function withExportConfig(mutator) {
             withSheet(sheet => {
@@ -107586,12 +108262,25 @@ Expected function or array of functions, received type ${typeof value}.`
             const info = specialIndex.value;
             if (!key || !info.enabled)
                 return;
+            assertVisualizerRowDataEditable_ACU(visualizer);
             const lock = visualizer.getLockDraft(key);
             lock.specialIndexLocked = enabled === true;
             if (lock.specialIndexLocked && currentSheet.value && info.index >= 0) {
-                applySummaryIndexSequenceToTable_ACU(currentSheet.value, info.index);
+                const content = Array.isArray(currentSheet.value.content) ? currentSheet.value.content : [];
+                const columnName = String(content[0]?.[info.index + 1] ?? '').trim();
+                for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
+                    const row = content[rowIndex];
+                    if (!Array.isArray(row))
+                        continue;
+                    const nextValue = `AM${String(rowIndex).padStart(4, '0')}`;
+                    if (row[info.index + 1] === nextValue)
+                        continue;
+                    row[info.index + 1] = nextValue;
+                    if (columnName)
+                        recordVisualizerCellUpdate_ACU(visualizer, key, row[0], columnName, nextValue);
+                }
             }
-            markDirty();
+            visualizer.markLockDraftChanged();
         }
         function setTableApiPreset(value) {
             const sheetName = stringValue(currentSheet.value?.name).trim();
@@ -107677,6 +108366,7 @@ Expected function or array of functions, received type ${typeof value}.`
         function updateGlobalPlacement(key, field, value) {
             if (!visualizer.tempData)
                 return;
+            assertVisualizerTemplateEditable_ACU(visualizer);
             const cfg = getGlobalInjectionConfigFromData_ACU(visualizer.tempData, { ensureWriteBack: true });
             const current = getGlobalPlacement(key);
             const next = {
@@ -107690,7 +108380,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 visualizer.tempData.mate = { type: 'chatSheets', version: 1 };
             }
             visualizer.tempData.mate.globalInjectionConfig = cfg;
-            markDirty();
+            markTemplateDirty();
         }
         return {
             isSQLite,
@@ -107886,17 +108576,24 @@ Expected function or array of functions, received type ${typeof value}.`
         applySpecialIndexSequenceFromDrafts(orderedData, lockDrafts);
         return orderedData;
     }
-    function saveLockDrafts(drafts) {
-        Object.entries(drafts || {}).forEach(([sheetKey, draft]) => {
-            if (!sheetKey)
-                return;
-            saveTableLocksForSheet_ACU(sheetKey, {
-                rows: new Set(draft.rows || []),
-                cols: new Set(draft.cols || []),
-                cells: new Set(draft.cells || []),
-            });
-            setSpecialIndexLockEnabled_ACU(sheetKey, draft.specialIndexLocked !== false);
+    function commitLockDrafts(drafts, deletedSheetKeys = []) {
+        const result = commitTableLockDraftsBatch_ACU({
+            drafts,
+            deletedSheetKeys,
         });
+        if (!result.success) {
+            throw new Error(result.warning || '表格锁设置保存失败。');
+        }
+        return result;
+    }
+    function restoreLockDraftsAfterFailure(result, error) {
+        if (!result.changed)
+            return error instanceof Error ? error : new Error(String(error));
+        const rollback = restoreCurrentTableLocksSnapshot_ACU(result.snapshot);
+        const message = error instanceof Error ? error.message : String(error);
+        if (rollback.success)
+            return new Error(message);
+        return new Error(`${message}；表格锁设置回滚也失败：${rollback.warning || '未知错误'}`);
     }
     function buildChatSheetGuideSyncPayload(orderedData, orderedKeys) {
         const guideIsolationKey = getCurrentIsolationKey_ACU();
@@ -107910,27 +108607,6 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!guideData || !Object.keys(guideData).some(key => key.startsWith('sheet_')))
             return null;
         return { isolationKey: guideIsolationKey, guideData };
-    }
-    function persistChatSheetGuideSyncPayload(payload, saveToTemplate) {
-        if (!payload)
-            return;
-        try {
-            const syncTemplateScope = !saveToTemplate;
-            const templateScopeSource = materializeDataFromSheetGuide_ACU(payload.guideData, { includeSeedRows: true });
-            setChatSheetGuideDataForIsolationKey_ACU(payload.isolationKey, payload.guideData, {
-                reason: 'visualizer_v2_save',
-                syncTemplateScope,
-                templateSource: templateScopeSource,
-                presetName: resolveActiveTemplatePresetName_ACU({
-                    fallbackToGlobal: true,
-                    isolationKey: payload.isolationKey,
-                }),
-                source: 'visualizer_v2_save',
-            });
-        }
-        catch (error) {
-            logWarn_ACU('[ACU-V2 Visualizer] Failed to sync chat sheet guide:', error);
-        }
     }
     async function saveGlobalTemplateSnapshot(orderedData, interactions) {
         const templateObj = {};
@@ -108005,102 +108681,6 @@ Expected function or array of functions, received type ${typeof value}.`
             throw new Error('模板快照应用失败。');
         return { status: 'saved', presetName: finalGlobalPresetName };
     }
-    async function saveCurrentDataToChat(sheetKeysToSave, deletedSheetKeys) {
-        const chat = getChatArray_ACU();
-        if (!chat.length)
-            return 'memory-only';
-        const isolationKey = getCurrentIsolationKey_ACU();
-        const allSheetKeys = sheetKeysToSave.filter(key => !!currentJsonTableData_ACU?.[key]);
-        const latestAiIndex = getLatestAiMessageIndexFromChat_ACU(chat);
-        const bucketByIndex = {};
-        allSheetKeys.forEach(key => {
-            const table = currentJsonTableData_ACU?.[key];
-            const history = resolveTableHistoryStateFromChat_ACU(chat, {
-                sheetKey: key,
-                isSummaryTable: table ? isSummaryOrOutlineTable_ACU(table.name) : false,
-                isolationKey,
-                settings: settings_ACU,
-            });
-            const idx = history.latestDataMessageIndex !== -1
-                ? history.latestDataMessageIndex
-                : latestAiIndex;
-            if (idx === -1)
-                return;
-            if (!bucketByIndex[idx])
-                bucketByIndex[idx] = [];
-            bucketByIndex[idx].push(key);
-        });
-        if (Object.keys(bucketByIndex).length === 0 && latestAiIndex !== -1) {
-            bucketByIndex[latestAiIndex] = [...allSheetKeys];
-        }
-        if (Object.keys(bucketByIndex).length === 0)
-            return 'memory-only';
-        for (const [indexStr, keys] of Object.entries(bucketByIndex)) {
-            const idx = Number.parseInt(indexStr, 10);
-            if (Number.isNaN(idx))
-                continue;
-            const writeSet = keys.map(sheetKey => ({ kind: 'sheet', sheetKey }));
-            const commitResult = await runTableUpdateCommit_ACU({
-                source: 'manual_crud',
-                reason: 'visualizer_v2_save',
-                isolationKey,
-                writeSet,
-                revisionWriteSet: writeSet,
-                initialData: currentJsonTableData_ACU,
-                targetMessageIndex: idx,
-                targetSheetKeys: keys,
-                updateGroupKeys: null,
-                trackingSheetKeys: [],
-                trackAsUpdate: false,
-                operations: keys
-                    .filter(sheetKey => Boolean(currentJsonTableData_ACU?.[sheetKey]))
-                    .map(sheetKey => ({ kind: 'sheet_replace', sheetKey, sheet: currentJsonTableData_ACU[sheetKey], reason: 'manual_crud' })),
-            }, () => ({
-                success: true,
-                value: null,
-                tableData: currentJsonTableData_ACU,
-                mutationResult: { changes: keys.length, errors: [] },
-            }));
-            if (!commitResult.success) {
-                logWarn_ACU('[ACU-V2 Visualizer] save commit failed:', commitResult.error);
-            }
-        }
-        if (deletedSheetKeys.length > 0) {
-            const result = await purgeSheetKeysFromChatHistoryHard_ACU(deletedSheetKeys);
-            if (result?.changed && isSqliteMode()) {
-                try {
-                    await reloadStorageProvider();
-                }
-                catch (error) {
-                    logWarn_ACU('[ACU-V2 Visualizer] reloadStorageProvider failed:', error);
-                }
-            }
-        }
-        await refreshMergedDataAndNotify_ACU();
-        const shouldSyncSummaryVectorIndex = allSheetKeys.some(sheetKey => {
-            const table = currentJsonTableData_ACU?.[sheetKey];
-            return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
-        });
-        if (shouldSyncSummaryVectorIndex && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
-            try {
-                await enqueueSummaryVectorIndexFlush_ACU({
-                    targetMessageIndex: latestAiIndex !== -1 ? latestAiIndex : undefined,
-                    mode: 'sync',
-                    reason: 'visualizer_v2_save',
-                });
-            }
-            catch (error) {
-                logWarn_ACU('[ACU-V2 Visualizer] summary vector index queue failed:', error);
-            }
-        }
-        try {
-            topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
-        }
-        catch (error) {
-            logDebug_ACU('[ACU-V2 Visualizer] table update notification skipped:', error);
-        }
-        return 'saved';
-    }
     function useVisualizerSave(interactions = {}) {
         const visualizer = useVisualizerStore();
         const toastStore = useToastStore();
@@ -108121,38 +108701,55 @@ Expected function or array of functions, received type ${typeof value}.`
                 visualizer.setSaving(false);
             }
         }
+        function assertDraftRevisionUnchanged(revision) {
+            if (visualizer.draftRevision !== revision) {
+                throw new Error('保存期间草稿已发生变化，本次不会清除较新的修改。请重新保存。');
+            }
+        }
         async function saveDataToCurrentMessage() {
             return runSaving(async () => {
-                const deletedSheetKeys = [...new Set((visualizer.deletedSheetKeys || [])
-                        .filter(key => typeof key === 'string' && key.startsWith('sheet_')))];
-                const result = await applyVisualizerPendingDataOps_ACU(visualizer);
+                if (visualizer.templateDirty || (visualizer.deletedSheetKeys || []).length > 0) {
+                    toastStore.error('存在未保存的模板/结构或删表修改；数据保存不会持久化这些修改，请先保存当前聊天模板。', { muteable: false });
+                    return false;
+                }
+                const revision = visualizer.draftRevision;
+                const hasDataChanges = hasVisualizerPendingDataOps_ACU(visualizer);
+                const hasLockChanges = visualizer.lockDirty;
+                if (!hasDataChanges && !hasLockChanges) {
+                    toastStore.info('没有需要保存的数据或锁增量。', { muteable: false });
+                    return false;
+                }
+                const result = hasDataChanges
+                    ? await applyVisualizerPendingDataOps_ACU(visualizer)
+                    : { success: true, changed: false };
                 if (!result.success) {
                     toastStore.error(result.error || '数据保存失败。', { muteable: false });
                     return false;
                 }
-                if (!result.changed && deletedSheetKeys.length === 0) {
-                    toastStore.info('没有需要保存的数据增量。', { muteable: false });
+                assertDraftRevisionUnchanged(revision);
+                if (hasLockChanges)
+                    commitLockDrafts(cloneData$1(visualizer.tableLockDrafts));
+                try {
+                    await refreshMergedDataAndNotify_ACU();
+                }
+                catch (error) {
+                    const detail = error?.message || String(error);
+                    toastStore.error(`数据已持久化，但本地刷新失败：${detail}。请重试保存完成恢复，期间不要继续编辑。`, { muteable: false });
                     return false;
                 }
-                if (deletedSheetKeys.length > 0) {
-                    const purgeResult = await purgeSheetKeysFromChatHistoryHard_ACU(deletedSheetKeys);
-                    if (purgeResult?.changed && isSqliteMode()) {
-                        try {
-                            await reloadStorageProvider();
-                        }
-                        catch (error) {
-                            logWarn_ACU('[ACU-V2 Visualizer] reloadStorageProvider failed after sheet purge:', error);
-                        }
-                    }
+                assertDraftRevisionUnchanged(revision);
+                if (hasDataChanges) {
+                    replaceVisualizerTemporaryRowIds_ACU(visualizer, result.insertedRowIds || {});
+                    resetVisualizerPendingDataOps_ACU(visualizer);
                 }
-                saveLockDrafts(visualizer.tableLockDrafts);
-                await refreshMergedDataAndNotify_ACU();
                 try {
                     topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
                 }
                 catch { }
-                visualizer.markSaved('data');
-                toastStore.success(deletedSheetKeys.length > 0 ? '数据增量与删表清理已保存到当前消息。' : '数据增量已保存到当前消息。', { muteable: false });
+                visualizer.markSaved(hasDataChanges ? 'data' : 'locks');
+                toastStore.success(hasDataChanges
+                    ? '数据增量已保存到当前消息。'
+                    : '表格锁设置已保存。', { muteable: false });
                 return true;
             });
         }
@@ -108162,45 +108759,92 @@ Expected function or array of functions, received type ${typeof value}.`
                     toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
                     return false;
                 }
-                const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts);
+                const revision = visualizer.draftRevision;
+                const deletedSheetKeys = [...new Set((visualizer.deletedSheetKeys || [])
+                        .filter(key => typeof key === 'string' && key.startsWith('sheet_')))];
+                const lockDrafts = cloneData$1(visualizer.tableLockDrafts);
+                const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, lockDrafts);
                 const guidePayload = buildChatSheetGuideSyncPayload(orderedData, [...visualizer.sheetOrder]);
-                const recoveryGuard = await ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU(guidePayload?.guideData || null, 'save-template');
+                if (!guidePayload)
+                    throw new Error('无法生成当前聊天 Sheet Guide。');
+                const recoveryGuard = await ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU(guidePayload.guideData, 'save-template');
                 if (!recoveryGuard.success)
                     return false;
-                const dataWasResetForTemplateSave = recoveryGuard.dataWasReset;
-                persistChatSheetGuideSyncPayload(guidePayload, false);
+                assertDraftRevisionUnchanged(revision);
+                const lockCommit = commitLockDrafts(lockDrafts, deletedSheetKeys);
+                let commitResult;
+                try {
+                    commitResult = await commitCurrentChatTemplateChangesAtomic_ACU({
+                        isolationKey: guidePayload.isolationKey,
+                        guideData: guidePayload.guideData,
+                        templateSource: orderedData,
+                        presetName: resolveActiveTemplatePresetName_ACU({
+                            fallbackToGlobal: true,
+                            isolationKey: guidePayload.isolationKey,
+                        }),
+                        deletedSheetKeys,
+                        resetCurrentIsolationData: recoveryGuard.dataWasReset,
+                    });
+                    if (!commitResult.success)
+                        throw new Error(commitResult.error || '当前聊天模板提交失败。');
+                }
+                catch (error) {
+                    throw restoreLockDraftsAfterFailure(lockCommit, error);
+                }
+                assertDraftRevisionUnchanged(revision);
+                if (commitResult.cleanupWarnings?.length) {
+                    const detail = commitResult.cleanupWarnings.join('；');
+                    logWarn_ACU('[ACU-V2 Visualizer] template commit cleanup warning:', detail);
+                    toastStore.warning(`模板已提交，但外置索引资源清理未完全完成：${detail}`, { muteable: false });
+                }
                 applyTemplateScopeForCurrentChat_ACU();
-                _set_currentJsonTableData_ACU(dataWasResetForTemplateSave && guidePayload
+                _set_currentJsonTableData_ACU(recoveryGuard.dataWasReset
                     ? materializeDataFromSheetGuide_ACU(guidePayload.guideData, { includeSeedRows: true })
                     : cloneData$1(orderedData));
-                await saveChatToHost_ACU();
-                saveLockDrafts(visualizer.tableLockDrafts);
-                if (isSqliteMode())
-                    await reloadStorageProvider();
-                await refreshMergedDataAndNotify_ACU();
+                try {
+                    if (isSqliteMode())
+                        await reloadStorageProvider();
+                    await refreshMergedDataAndNotify_ACU();
+                }
+                catch (error) {
+                    const detail = error?.message || String(error);
+                    logWarn_ACU('[ACU-V2 Visualizer] derived refresh failed after template commit:', error);
+                    toastStore.warning(`模板已提交，但本地派生刷新失败：${detail}。重新打开编辑器可恢复显示。`, { muteable: false });
+                }
+                assertDraftRevisionUnchanged(revision);
                 try {
                     topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
                 }
                 catch { }
                 visualizer.markSaved('template-chat');
-                toastStore.success('模板/结构已保存到当前聊天。', { muteable: false });
+                toastStore.success(deletedSheetKeys.length > 0
+                    ? '模板/结构与删表清理已原子保存到当前聊天。'
+                    : '模板/结构已保存到当前聊天。', { muteable: false });
                 return true;
             });
         }
         async function saveTemplateToGlobal() {
             return runSaving(async () => {
+                if ((visualizer.deletedSheetKeys || []).length > 0) {
+                    toastStore.error('存在待保存的删表操作；全局模板保存不能代替删表清理，请先保存数据。', { muteable: false });
+                    return false;
+                }
                 if (hasVisualizerPendingDataOps_ACU(visualizer)) {
                     toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
                     return false;
                 }
-                const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts);
+                const revision = visualizer.draftRevision;
+                const lockDrafts = cloneData$1(visualizer.tableLockDrafts);
+                const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, lockDrafts);
                 const globalTemplateResult = await saveGlobalTemplateSnapshot(orderedData, interactions);
                 if (globalTemplateResult.status === 'cancelled')
                     return false;
-                saveLockDrafts(visualizer.tableLockDrafts);
+                assertDraftRevisionUnchanged(revision);
+                commitLockDrafts(lockDrafts);
                 if (isSqliteMode())
                     await reloadStorageProvider();
                 await refreshMergedDataAndNotify_ACU();
+                assertDraftRevisionUnchanged(revision);
                 visualizer.markSaved('template-global');
                 if (globalTemplateResult.status === 'saved') {
                     toastStore.success(`模板/结构已保存到全局预设：${globalTemplateResult.presetName}。`, { muteable: false });
@@ -108546,14 +109190,21 @@ Expected function or array of functions, received type ${typeof value}.`
                 toastStore.warning('当前结构已变化，AI 草稿已失效，请重新生成。', { muteable: false });
                 return false;
             }
-            visualizer.tempData = cloneData(result.compileResult.candidateData || {});
-            visualizer.sheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
+            assertVisualizerDataOpsEditable_ACU(visualizer);
+            const previousData = visualizer.tempData || {};
+            const candidateData = cloneData(result.compileResult.candidateData || {});
+            const nextSheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
                 ? [...result.compileResult.orderedSheetKeys]
                 : [];
-            applySheetOrderNumbers_ACU(visualizer.tempData, visualizer.sheetOrder);
             const deleted = new Set(visualizer.deletedSheetKeys || []);
             asList(result.compileResult.deletedSheetKeys).forEach(key => deleted.add(String(key)));
+            applySheetOrderNumbers_ACU(candidateData, nextSheetOrder);
+            const dataDiff = recordVisualizerDraftDataDiff_ACU(visualizer, previousData, candidateData, deleted);
+            visualizer.tempData = candidateData;
+            visualizer.sheetOrder = nextSheetOrder;
             visualizer.deletedSheetKeys = Array.from(deleted);
+            if (dataDiff.templateChanged)
+                visualizer.templateDirty = true;
             visualizer.queueLockChanges(asList(result.compileResult.lockChanges));
             const previousSheetKey = visualizer.currentSheetKey;
             if (previousSheetKey && visualizer.tempData?.[previousSheetKey]) {
@@ -110125,6 +110776,7 @@ Expected function or array of functions, received type ${typeof value}.`
             __expose();
             const visualizer = useVisualizerStore();
             const dialogStore = useDialogStore();
+            const toastStore = useToastStore();
             const data = useVisualizerData();
             const config = useVisualizerConfigEditing();
             const emit = __emit;
@@ -110598,6 +111250,18 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (confirmed)
                     data.deleteSheet(key);
             }
+            function reportDataEditError(error) {
+                const message = error instanceof Error ? error.message : String(error);
+                toastStore.error(message || "修改数据行失败。", { muteable: false });
+            }
+            function updateCell(rowIndex, columnIndex, value) {
+                try {
+                    visualizer.updateCell(rowIndex, columnIndex, value);
+                }
+                catch (error) {
+                    reportDataEditError(error);
+                }
+            }
             async function deleteRow(rowIndex) {
                 const confirmed = await openConfirmDialog({
                     title: "删除数据行",
@@ -110607,7 +111271,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 });
                 if (!confirmed)
                     return;
-                visualizer.deleteRow(rowIndex);
+                try {
+                    visualizer.deleteRow(rowIndex);
+                }
+                catch (error) {
+                    reportDataEditError(error);
+                    return;
+                }
                 refreshSpecialIndexColumnDraft();
                 if (currentDataPage.value > dataPageCount.value) {
                     currentDataPage.value = dataPageCount.value;
@@ -110616,7 +111286,13 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             function addRow() {
                 preserveWorkspaceScrollPosition(() => {
-                    visualizer.addRow();
+                    try {
+                        visualizer.addRow();
+                    }
+                    catch (error) {
+                        reportDataEditError(error);
+                        return;
+                    }
                     refreshSpecialIndexColumnDraft();
                     currentDataPage.value = dataPageCount.value;
                     clearDataCellEditing();
@@ -110634,7 +111310,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 for (let rowIndex = 1; rowIndex < sheet.content.length; rowIndex += 1) {
                     const row = sheet.content[rowIndex];
                     if (Array.isArray(row)) {
-                        row[info.index + 1] = `AM${String(rowIndex).padStart(4, "0")}`;
+                        const nextValue = `AM${String(rowIndex).padStart(4, "0")}`;
+                        if (row[info.index + 1] === nextValue)
+                            continue;
+                        visualizer.updateCell(rowIndex - 1, info.index, nextValue);
                     }
                 }
             }
@@ -110665,12 +111344,17 @@ Expected function or array of functions, received type ${typeof value}.`
             useUiCloseGuard(async () => {
                 if (!visualizer.isActive || !visualizer.dirty)
                     return true;
-                const action = await openCloseDirtyDialog();
+                const saveKind = visualizer.templateDirty || visualizer.deletedSheetKeys.length > 0
+                    ? "template"
+                    : visualizer.lockDirty && !visualizer.hasPendingDataChanges ? "locks" : "data";
+                const action = await openCloseDirtyDialog(saveKind);
                 if (action === "cancel")
                     return false;
                 if (action === "discard")
                     return true;
-                return save.saveToChat();
+                return saveKind === "template"
+                    ? save.saveTemplateToCurrentChat()
+                    : save.saveToChat();
             });
             function openInputDialog(options) {
                 return dialogStore.prompt({
@@ -110715,14 +111399,19 @@ Expected function or array of functions, received type ${typeof value}.`
                 });
                 paginationResizeObserver.observe(el);
             }
-            function openCloseDirtyDialog() {
+            function openCloseDirtyDialog(saveKind) {
+                const saveTarget = saveKind === "template"
+                    ? "模板/结构到当前聊天"
+                    : saveKind === "locks"
+                        ? "表格锁设置"
+                        : "数据到当前消息";
                 return dialogStore.choose({
                     title: "关闭数据库编辑器",
-                    message: "当前草稿还没有保存。保存会先写入当前聊天再关闭；丢弃会关闭编辑器并清空这次草稿；取消关闭会回到编辑器继续处理。",
+                    message: `当前草稿还没有保存。保存会先写入${saveTarget}再关闭；丢弃会关闭编辑器并清空这次草稿；取消关闭会回到编辑器继续处理。`,
                     badge: { label: "未保存", variant: "warning" },
                     cancelLabel: "取消关闭",
                     actions: [
-                        { value: "save", label: "保存数据到当前消息", variant: "primary" },
+                        { value: "save", label: `保存${saveTarget}`, variant: "primary" },
                         { value: "discard", label: "丢弃草稿", variant: "danger" },
                     ],
                 }).then((value) => value || "cancel");
@@ -110762,14 +111451,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     currentDataPage.value = 1;
                 clearDataCellEditing();
             });
-            const __returned__ = { visualizer, dialogStore, data, config, emit, isMobileNavRendered, isMobileNavClosing, workspaceRef, paginationRef, VISUALIZER_MOBILE_NAV_LEAVE_MS, VISUALIZER_DATA_PAGE_SIZE, mobileNavDrawerStyle, get mobileNavCloseTimer() { return mobileNavCloseTimer; }, set mobileNavCloseTimer(v) { mobileNavCloseTimer = v; }, get paginationResizeObserver() { return paginationResizeObserver; }, set paginationResizeObserver(v) { paginationResizeObserver = v; }, save, modes, setWorkspaceMode, isSheetEditingMode, currentSheetName, templatePresetLabel, isMobileNavOpen, openMobileNav, closeMobileNav, clearMobileNavCloseTimer, selectNavSheet, selectTableManagementNav, returnToCurrentSheet, moveSheet, headers, VISUALIZER_SHORT_FIELD_CHAR_LIMIT, activeDataCell, activeFieldActions, fieldLockPointerAction, activeDataTextareaRef, editingColumnLayoutSnapshot, currentDataPage, dataPageJumpValue, paginationWidth, rowCount, dataPageSize, dataPageCount, isDataPaginated, dataPaginationSiblingWindow, dataPaginationItems, dataPageStartIndex, dataPageEndIndex, dataRangeText, visibleDataRows, scrollWorkspaceToTop, preserveWorkspaceScrollPosition, setDataPage, updateDataPageJumpValue, commitDataPageJumpValue, isShortDataField, getColumnIsShort, getEffectiveColumnIsShort, buildFieldLayoutRows, asTextarea, setActiveDataTextareaRef, isDataCellEditing, setActiveFieldActions, isFieldActionsActive, clearFieldActions, consumeFieldLockPointerAction, markFieldLockPointerAction, toggleFieldColumnLock, toggleFieldCellLock, handleFieldColumnLockPointerDown, handleFieldCellLockPointerDown, handleFieldColumnLockClick, handleFieldCellLockClick, handleSurfacePointerDown, startDataCellEditing, stopDataCellEditing, clearDataCellEditing, rows, footerStatus, saveDisabled, requestAddSheet, requestDeleteSheet, deleteRow, addRow, refreshSpecialIndexColumnDraft, requestAddColumn, requestDeleteColumn, openInputDialog, openConfirmDialog, updatePaginationWidth, observePaginationWidth, openCloseDirtyDialog, AcuBadge, AcuButton, AcuIconButton, AcuInfoBanner, AcuInput, AcuPanel, AcuSegmentedControl, AcuTextarea, VisualizerAssistantPanel, VisualizerConfigPanels, VisualizerGlobalInjectionPanels, VisualizerNavigation, VisualizerTableManagementPanel };
+            const __returned__ = { visualizer, dialogStore, toastStore, data, config, emit, isMobileNavRendered, isMobileNavClosing, workspaceRef, paginationRef, VISUALIZER_MOBILE_NAV_LEAVE_MS, VISUALIZER_DATA_PAGE_SIZE, mobileNavDrawerStyle, get mobileNavCloseTimer() { return mobileNavCloseTimer; }, set mobileNavCloseTimer(v) { mobileNavCloseTimer = v; }, get paginationResizeObserver() { return paginationResizeObserver; }, set paginationResizeObserver(v) { paginationResizeObserver = v; }, save, modes, setWorkspaceMode, isSheetEditingMode, currentSheetName, templatePresetLabel, isMobileNavOpen, openMobileNav, closeMobileNav, clearMobileNavCloseTimer, selectNavSheet, selectTableManagementNav, returnToCurrentSheet, moveSheet, headers, VISUALIZER_SHORT_FIELD_CHAR_LIMIT, activeDataCell, activeFieldActions, fieldLockPointerAction, activeDataTextareaRef, editingColumnLayoutSnapshot, currentDataPage, dataPageJumpValue, paginationWidth, rowCount, dataPageSize, dataPageCount, isDataPaginated, dataPaginationSiblingWindow, dataPaginationItems, dataPageStartIndex, dataPageEndIndex, dataRangeText, visibleDataRows, scrollWorkspaceToTop, preserveWorkspaceScrollPosition, setDataPage, updateDataPageJumpValue, commitDataPageJumpValue, isShortDataField, getColumnIsShort, getEffectiveColumnIsShort, buildFieldLayoutRows, asTextarea, setActiveDataTextareaRef, isDataCellEditing, setActiveFieldActions, isFieldActionsActive, clearFieldActions, consumeFieldLockPointerAction, markFieldLockPointerAction, toggleFieldColumnLock, toggleFieldCellLock, handleFieldColumnLockPointerDown, handleFieldCellLockPointerDown, handleFieldColumnLockClick, handleFieldCellLockClick, handleSurfacePointerDown, startDataCellEditing, stopDataCellEditing, clearDataCellEditing, rows, footerStatus, saveDisabled, requestAddSheet, requestDeleteSheet, reportDataEditError, updateCell, deleteRow, addRow, refreshSpecialIndexColumnDraft, requestAddColumn, requestDeleteColumn, openInputDialog, openConfirmDialog, updatePaginationWidth, observePaginationWidth, openCloseDirtyDialog, AcuBadge, AcuButton, AcuIconButton, AcuInfoBanner, AcuInput, AcuPanel, AcuSegmentedControl, AcuTextarea, VisualizerAssistantPanel, VisualizerConfigPanels, VisualizerGlobalInjectionPanels, VisualizerNavigation, VisualizerTableManagementPanel };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-visualizer-surface[data-v-3afd0539] {\r\n  flex: 1 1 auto;\r\n  min-width: 0;\r\n  min-height: 0;\r\n  display: grid;\r\n  grid-template-columns: 260px minmax(0, 1fr);\r\n  overflow: hidden;\r\n  background: var(--acu-bg-0);\r\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__sidebar[data-v-3afd0539] {\r\n  min-width: 0;\r\n  min-height: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  padding: 24px 12px 16px;\r\n  overflow-y: auto;\r\n  border-right: 1px solid var(--acu-border-2);\r\n  background: var(--acu-sidebar-bg);\n}\n.acu-visualizer-surface__main[data-v-3afd0539] {\r\n  min-width: 0;\r\n  min-height: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  overflow: hidden;\r\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\r\n  min-height: 50px;\r\n  padding: 8px 12px 8px 16px;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar-context[data-v-3afd0539] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  flex: 1 1 auto;\r\n  gap: 10px;\n}\n.acu-visualizer-surface__mobile-menu[data-v-3afd0539] {\r\n  display: none;\r\n  flex: 0 0 auto;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  box-shadow: none;\n}\n.acu-visualizer-surface__mobile-menu[data-v-3afd0539]:hover:not(:disabled) {\r\n  background: transparent;\r\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__context-items[data-v-3afd0539] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  flex: 1 1 auto;\r\n  justify-content: flex-start;\r\n  gap: 16px;\n}\n.acu-visualizer-surface__context-item[data-v-3afd0539] {\r\n  min-width: 0;\r\n  display: grid;\r\n  gap: 2px;\n}\n.acu-visualizer-surface__context-item[data-v-3afd0539]:first-child {\r\n  flex: 0 1 auto;\r\n  max-width: min(560px, 42vw);\n}\n.acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  max-width: min(260px, 20vw);\n}\n.acu-visualizer-surface__context-item span[data-v-3afd0539] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.2;\n}\n.acu-visualizer-surface__context-item strong[data-v-3afd0539] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 600;\r\n  line-height: 1.25;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-visualizer-surface__context-item:first-child strong[data-v-3afd0539] {\r\n  overflow: visible;\r\n  text-overflow: clip;\r\n  white-space: normal;\r\n  word-break: break-word;\n}\n.acu-visualizer-surface__context-badge[data-v-3afd0539] {\r\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__conflict[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  margin: 12px 16px 0;\n}\n.acu-visualizer-surface__conflict-actions[data-v-3afd0539] {\r\n  display: inline-flex;\r\n  flex-wrap: wrap;\r\n  gap: 6px;\r\n  margin-left: 8px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-3afd0539],\r\n.acu-visualizer-surface__data-toolbar-actions[data-v-3afd0539],\r\n.acu-visualizer-surface__database-toolbar[data-v-3afd0539],\r\n.acu-visualizer-surface__pagination[data-v-3afd0539],\r\n.acu-visualizer-surface__pagination-pages[data-v-3afd0539],\r\n.acu-visualizer-surface__card-header[data-v-3afd0539] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 8px;\n}\n.acu-visualizer-surface__workspace[data-v-3afd0539] {\r\n  flex: 1 1 auto;\r\n  min-height: 0;\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  overflow: auto;\r\n  padding: 16px;\n}\n.acu-visualizer-surface__loading[data-v-3afd0539] {\r\n  min-height: 140px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: 8px;\r\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__mode-tabs[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  width: min(360px, 42vw);\n}\n.acu-visualizer-surface__close[data-v-3afd0539] {\r\n  width: 30px;\r\n  height: 30px;\r\n  flex: 0 0 auto;\r\n  border: 0;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-page-title, 22px);\r\n  line-height: 1;\r\n  border-radius: var(--acu-radius-sm);\n}\n.acu-visualizer-surface__close[data-v-3afd0539]:hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__data-toolbar[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  justify-content: space-between;\r\n  padding: 4px 0 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  justify-content: flex-end;\n}\n.acu-visualizer-surface__pagination[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  justify-content: center;\r\n  gap: 14px;\r\n  padding: 6px 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-visualizer-surface__pagination-pages[data-v-3afd0539] {\r\n  min-width: 0;\r\n  flex-wrap: wrap;\r\n  justify-content: center;\r\n  gap: 8px;\n}\n.acu-visualizer-surface__page-button[data-v-3afd0539] {\r\n  width: 34px;\r\n  min-width: 34px;\r\n  height: 34px;\r\n  padding: 0;\r\n  border: 1px solid var(--acu-border);\r\n  background: var(--acu-bg-0);\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 500;\n}\n.acu-visualizer-surface__page-button[data-v-3afd0539]:hover:not(:disabled) {\r\n  border-color: var(--acu-accent);\r\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__page-button--active[data-v-3afd0539],\r\n.acu-visualizer-surface__page-button--active[data-v-3afd0539]:hover:not(:disabled) {\r\n  border-color: var(--acu-accent);\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\n}\n.acu-visualizer-surface__page-button[data-v-3afd0539]:disabled:not(\r\n    .acu-visualizer-surface__page-button--active\r\n  ) {\r\n  border-color: var(--acu-border);\r\n  background: var(--acu-bg-0);\r\n  color: var(--acu-text-2);\r\n  opacity: 1;\r\n  cursor: default;\n}\n.acu-visualizer-surface__page-jump[data-v-3afd0539] {\r\n  flex: 0 0 64px;\r\n  width: 64px;\n}\n.acu-visualizer-surface__page-jump[data-v-3afd0539] .acu-input {\r\n  min-height: 34px;\r\n  border: 1px solid var(--acu-border) !important;\r\n  background: var(--acu-bg-0) !important;\r\n  text-align: center;\r\n  font-size: var(--acu-font-size-body-lg, 13px) !important;\r\n  font-variant-numeric: tabular-nums;\n}\n.acu-visualizer-surface__data-range[data-v-3afd0539] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-visualizer-surface__database-toolbar[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  padding: 0 0 4px;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__database-toolbar h2[data-v-3afd0539] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-page-title, 22px);\r\n  font-weight: 700;\r\n  line-height: 1.2;\n}\n.acu-visualizer-surface__database-toolbar p[data-v-3afd0539] {\r\n  margin: 5px 0 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\n}\n.acu-visualizer-surface__empty[data-v-3afd0539] {\r\n  margin: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\n}\n.acu-visualizer-surface__card-grid[data-v-3afd0539] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));\r\n  gap: 12px;\n}\n.acu-visualizer-surface__data-card[data-v-3afd0539] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  height: 100%;\r\n  padding: 16px;\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-bg-1);\n}\n.acu-visualizer-surface__card-header strong[data-v-3afd0539] {\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-mono);\r\n  font-size: var(--acu-font-size-panel-title, 15px);\n}\n.acu-visualizer-surface__card-header span[data-v-3afd0539] {\r\n  min-width: 0;\r\n  margin-right: auto;\r\n  overflow: hidden;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-visualizer-surface__card-header[data-v-3afd0539] .acu-icon-btn {\r\n  background: transparent;\n}\n.acu-visualizer-surface__card-header[data-v-3afd0539]\r\n  .acu-icon-btn--default:hover:not(:disabled) {\r\n  background:\r\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\r\n    transparent;\n}\n.acu-visualizer-surface__card-header[data-v-3afd0539] .acu-icon-btn--accent {\r\n  background: var(--acu-accent-glow);\r\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__card-header[data-v-3afd0539]\r\n  .acu-icon-btn--danger:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-visualizer-surface__fields[data-v-3afd0539] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\n}\n.acu-visualizer-surface__field-row[data-v-3afd0539] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  align-items: stretch;\n}\n.acu-visualizer-surface__field-row.is-wide[data-v-3afd0539] {\r\n  grid-template-columns: minmax(0, 1fr);\n}\n.acu-visualizer-surface__field[data-v-3afd0539] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\r\n  padding: 2px;\r\n  border: 1px solid transparent;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  transition:\r\n    background 0.15s ease,\r\n    border-color 0.15s ease,\r\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field[data-v-3afd0539] .acu-textarea {\r\n  flex: 1 1 auto;\r\n  min-height: 34px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.45;\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\r\n  overflow-wrap: break-word;\n}\n.acu-visualizer-surface__field-preview[data-v-3afd0539] {\r\n  width: 100%;\r\n  min-height: 34px;\r\n  box-sizing: border-box;\r\n  padding: 8px 10px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  color: var(--acu-text-1);\r\n  cursor: text;\r\n  display: block;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.45;\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\r\n  overflow-wrap: break-word;\r\n  transition:\r\n    background 0.15s ease,\r\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field-preview[data-v-3afd0539]:hover,\r\n.acu-visualizer-surface__field-preview[data-v-3afd0539]:focus-visible {\r\n  outline: none;\r\n  background:\r\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\r\n    var(--acu-bg-2);\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-visualizer-surface__field-preview.is-empty[data-v-3afd0539] {\r\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__field-label[data-v-3afd0539] {\r\n  min-width: 0;\r\n  min-height: 24px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 6px;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 600;\n}\n.acu-visualizer-surface__field-label > span[data-v-3afd0539]:first-child {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-visualizer-surface__field-locks[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  min-width: 51px;\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: flex-end;\r\n  gap: 3px;\r\n  opacity: 0.44;\r\n  transition: opacity 0.15s ease;\n}\n.acu-visualizer-surface__field:hover .acu-visualizer-surface__field-locks[data-v-3afd0539],\r\n.acu-visualizer-surface__field:focus-within\r\n  .acu-visualizer-surface__field-locks[data-v-3afd0539],\r\n.acu-visualizer-surface__field.is-actions-active\r\n  .acu-visualizer-surface__field-locks[data-v-3afd0539],\r\n.acu-visualizer-surface__field.is-locked .acu-visualizer-surface__field-locks[data-v-3afd0539],\r\n.acu-visualizer-surface__field.is-special-index\r\n  .acu-visualizer-surface__field-locks[data-v-3afd0539] {\r\n  opacity: 1;\n}\n.acu-visualizer-surface__field-locks[data-v-3afd0539] .acu-icon-btn {\r\n  --acu-icon-btn-size: 24px;\r\n  --acu-icon-btn-font-size: 11px;\r\n  width: 24px;\r\n  height: 24px;\r\n  background: transparent !important;\n}\n.acu-visualizer-surface__field-locks[data-v-3afd0539]\r\n  .acu-icon-btn--default:hover:not(:disabled) {\r\n  background:\r\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\r\n    transparent;\r\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__field-locks[data-v-3afd0539] .acu-icon-btn--accent {\r\n  color: var(--acu-warning) !important;\r\n  background: color-mix(in srgb, var(--acu-warning) 16%, transparent) !important;\n}\n.acu-visualizer-surface__field-locks[data-v-3afd0539]\r\n  .acu-icon-btn--accent:hover:not(:disabled) {\r\n  color: var(--acu-warning) !important;\r\n  background: color-mix(in srgb, var(--acu-warning) 22%, transparent) !important;\n}\n.acu-visualizer-surface__field.is-locked[data-v-3afd0539] {\r\n  border-color: var(--acu-border);\r\n  background: color-mix(in srgb, var(--acu-warning) 8%, transparent);\n}\n.acu-visualizer-surface__field.is-actions-active[data-v-3afd0539]:not(.is-locked) {\r\n  background: color-mix(in srgb, var(--acu-accent) 6%, transparent);\n}\n.acu-visualizer-surface__footer[data-v-3afd0539] {\r\n  flex: 0 0 auto;\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\r\n  padding: 12px 16px;\r\n  border-top: 1px solid var(--acu-border-2);\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__footer-actions[data-v-3afd0539] {\r\n  display: flex;\r\n  gap: 8px;\r\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__footer-actions[data-v-3afd0539] .acu-btn {\r\n  min-width: 132px;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-3afd0539] {\r\n  position: fixed;\r\n  top: 0;\r\n  right: 0;\r\n  bottom: 0;\r\n  left: 0;\r\n  inset: 0;\r\n  width: 100%;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  height: 100%;\r\n  height: 100vh;\r\n  height: 100dvh;\r\n  min-height: 100vh;\r\n  min-height: 100dvh;\r\n  z-index: 9350;\r\n  display: none;\r\n  align-items: stretch;\r\n  justify-content: flex-start;\r\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\r\n  overflow: hidden;\r\n  background: rgba(0, 0, 0, 0.58);\r\n  pointer-events: auto;\r\n  overscroll-behavior: contain;\r\n  animation: visualizer-mobile-nav-layer-in-3afd0539 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing[data-v-3afd0539] {\r\n  pointer-events: auto;\r\n  animation: visualizer-mobile-nav-layer-out-3afd0539 0.15s ease-in both;\n}\n.acu-visualizer-surface__mobile-nav[data-v-3afd0539] {\r\n  width: 360px;\r\n  max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\r\n  height: 100%;\r\n  max-height: 100%;\r\n  min-width: 0;\r\n  min-height: 0;\r\n  align-self: stretch;\r\n  flex: 0 1 360px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  padding: 24px 12px 16px;\r\n  overflow-y: auto;\r\n  border-right: 0;\r\n  background: var(--acu-sidebar-bg);\r\n  box-shadow: var(--acu-shadow);\r\n  pointer-events: auto;\r\n  animation: visualizer-mobile-nav-drawer-in-3afd0539 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing\r\n  .acu-visualizer-surface__mobile-nav[data-v-3afd0539] {\r\n  animation: visualizer-mobile-nav-drawer-out-3afd0539 0.15s ease-in both;\n}\n@supports (width: min(360px, calc(100% - 24px))) {\n.acu-visualizer-surface__mobile-nav[data-v-3afd0539] {\r\n    width: min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\r\n    flex: 0 0 min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-visualizer-surface__mobile-nav[data-v-3afd0539] {\r\n    max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-visualizer-surface__mobile-nav[data-v-3afd0539] {\r\n    height: 100%;\r\n    max-height: 100%;\n}\n}\n@keyframes visualizer-mobile-nav-layer-in-3afd0539 {\nfrom {\r\n    opacity: 0;\n}\nto {\r\n    opacity: 1;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-in-3afd0539 {\nfrom {\r\n    transform: translateX(-100%);\n}\nto {\r\n    transform: translateX(0);\n}\n}\n@keyframes visualizer-mobile-nav-layer-out-3afd0539 {\nfrom {\r\n    opacity: 1;\n}\nto {\r\n    opacity: 0;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-out-3afd0539 {\nfrom {\r\n    transform: translateX(0);\n}\nto {\r\n    transform: translateX(-100%);\n}\n}\n@media (max-width: 1024px) {\n.acu-visualizer-surface[data-v-3afd0539] {\r\n    grid-template-columns: 220px minmax(0, 1fr);\n}\n.acu-visualizer-surface__card-grid[data-v-3afd0539] {\r\n    grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));\n}\n.acu-visualizer-surface__topbar[data-v-3afd0539] {\r\n    flex-wrap: wrap;\n}\n.acu-visualizer-surface__mode-tabs[data-v-3afd0539] {\r\n    order: 3;\r\n    width: min(420px, 100%);\n}\n}\n@media (max-width: 767px) {\n.acu-visualizer-surface[data-v-3afd0539] {\r\n    grid-template-columns: 1fr;\r\n    grid-template-rows: minmax(0, 1fr);\n}\n.acu-visualizer-surface__sidebar[data-v-3afd0539] {\r\n    display: none;\n}\n.acu-visualizer-surface__topbar[data-v-3afd0539] {\r\n    display: grid;\r\n    grid-template-columns: minmax(0, 1fr) auto;\r\n    gap: 8px;\r\n    min-height: 0;\r\n    padding: 8px;\n}\n.acu-visualizer-surface__topbar-context[data-v-3afd0539] {\r\n    grid-column: 1;\r\n    display: grid;\r\n    grid-template-columns: auto minmax(0, 1fr) auto;\r\n    align-items: center;\r\n    gap: 8px;\r\n    min-width: 0;\n}\n.acu-visualizer-surface__mobile-menu[data-v-3afd0539] {\r\n    display: inline-flex;\n}\n.acu-visualizer-surface__context-items[data-v-3afd0539] {\r\n    display: grid;\r\n    grid-template-columns: repeat(2, minmax(0, 1fr));\r\n    gap: 8px;\n}\n.acu-visualizer-surface__context-item[data-v-3afd0539]:first-child,\r\n  .acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-3afd0539] {\r\n    max-width: none;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-3afd0539] {\r\n    display: flex;\n}\n.acu-visualizer-surface__close[data-v-3afd0539] {\r\n    grid-column: 2;\r\n    grid-row: 1;\r\n    align-self: center;\n}\n.acu-visualizer-surface__mode-tabs[data-v-3afd0539] {\r\n    grid-column: 1 / -1;\r\n    width: 100%;\n}\n.acu-visualizer-surface__workspace[data-v-3afd0539] {\r\n    padding: 10px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-3afd0539],\r\n  .acu-visualizer-surface__database-toolbar[data-v-3afd0539] {\r\n    align-items: stretch;\r\n    flex-direction: column;\n}\n.acu-visualizer-surface__data-toolbar[data-v-3afd0539] .acu-btn,\r\n  .acu-visualizer-surface__database-toolbar[data-v-3afd0539] .acu-btn {\r\n    width: 100%;\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-3afd0539] {\r\n    align-items: stretch;\r\n    flex-direction: column;\n}\n.acu-visualizer-surface__pagination[data-v-3afd0539] {\r\n    align-items: center;\r\n    flex-direction: row;\r\n    flex-wrap: wrap;\r\n    gap: 6px;\r\n    padding: 2px 0 6px;\n}\n.acu-visualizer-surface__pagination-pages[data-v-3afd0539] {\r\n    flex: 0 1 auto;\r\n    align-items: center;\r\n    flex-direction: row;\r\n    flex-wrap: wrap;\r\n    gap: 5px;\n}\n.acu-visualizer-surface__page-button[data-v-3afd0539] {\r\n    width: 36px;\r\n    min-width: 36px;\r\n    height: 34px;\r\n    flex: 0 0 36px;\n}\n.acu-visualizer-surface__page-jump[data-v-3afd0539] {\r\n    flex: 0 0 54px;\r\n    width: 54px;\n}\n.acu-visualizer-surface__footer[data-v-3afd0539] {\r\n    display: grid;\r\n    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);\r\n    align-items: center;\r\n    gap: 8px;\r\n    padding: 8px;\n}\n.acu-visualizer-surface__footer > span[data-v-3afd0539] {\r\n    min-width: 0;\r\n    overflow: hidden;\r\n    text-overflow: ellipsis;\r\n    white-space: nowrap;\n}\n.acu-visualizer-surface__footer-actions[data-v-3afd0539] {\r\n    display: grid;\r\n    grid-template-columns: repeat(2, minmax(0, 1fr));\r\n    gap: 6px;\n}\n.acu-visualizer-surface__footer-actions[data-v-3afd0539] .acu-btn {\r\n    min-width: 0;\r\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-visualizer-surface__card-grid[data-v-3afd0539] {\r\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__fields[data-v-3afd0539] {\r\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__mode-tabs[data-v-3afd0539] {\r\n    width: 100%;\n}\n.acu-visualizer-surface__conflict-actions[data-v-3afd0539] {\r\n    display: flex;\r\n    margin: 8px 0 0;\n}\n.acu-visualizer-surface__footer[data-v-3afd0539] {\r\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__footer > span[data-v-3afd0539] {\r\n    display: none;\n}\n}\r\n", "src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue#style-0-3afd0539");
-    var VisualizerSurface_vue_vue_type_style_index_0_scoped_3afd0539_lang = null;
+    injectSfcStyle("\n.acu-visualizer-surface[data-v-74f7fa2a] {\n  flex: 1 1 auto;\n  min-width: 0;\n  min-height: 0;\n  display: grid;\n  grid-template-columns: 260px minmax(0, 1fr);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__sidebar[data-v-74f7fa2a] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 1px solid var(--acu-border-2);\n  background: var(--acu-sidebar-bg);\n}\n.acu-visualizer-surface__main[data-v-74f7fa2a] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  min-height: 50px;\n  padding: 8px 12px 8px 16px;\n  border-bottom: 1px solid var(--acu-border-2);\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar-context[data-v-74f7fa2a] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  gap: 10px;\n}\n.acu-visualizer-surface__mobile-menu[data-v-74f7fa2a] {\n  display: none;\n  flex: 0 0 auto;\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-visualizer-surface__mobile-menu[data-v-74f7fa2a]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__context-items[data-v-74f7fa2a] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  justify-content: flex-start;\n  gap: 16px;\n}\n.acu-visualizer-surface__context-item[data-v-74f7fa2a] {\n  min-width: 0;\n  display: grid;\n  gap: 2px;\n}\n.acu-visualizer-surface__context-item[data-v-74f7fa2a]:first-child {\n  flex: 0 1 auto;\n  max-width: min(560px, 42vw);\n}\n.acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  max-width: min(260px, 20vw);\n}\n.acu-visualizer-surface__context-item span[data-v-74f7fa2a] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.2;\n}\n.acu-visualizer-surface__context-item strong[data-v-74f7fa2a] {\n  min-width: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.25;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__context-item:first-child strong[data-v-74f7fa2a] {\n  overflow: visible;\n  text-overflow: clip;\n  white-space: normal;\n  word-break: break-word;\n}\n.acu-visualizer-surface__context-badge[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__conflict[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  margin: 12px 16px 0;\n}\n.acu-visualizer-surface__conflict-actions[data-v-74f7fa2a] {\n  display: inline-flex;\n  flex-wrap: wrap;\n  gap: 6px;\n  margin-left: 8px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-74f7fa2a],\n.acu-visualizer-surface__data-toolbar-actions[data-v-74f7fa2a],\n.acu-visualizer-surface__database-toolbar[data-v-74f7fa2a],\n.acu-visualizer-surface__pagination[data-v-74f7fa2a],\n.acu-visualizer-surface__pagination-pages[data-v-74f7fa2a],\n.acu-visualizer-surface__card-header[data-v-74f7fa2a] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-visualizer-surface__workspace[data-v-74f7fa2a] {\n  flex: 1 1 auto;\n  min-height: 0;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  overflow: auto;\n  padding: 16px;\n}\n.acu-visualizer-surface__loading[data-v-74f7fa2a] {\n  min-height: 140px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  gap: 8px;\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__mode-tabs[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  width: min(360px, 42vw);\n}\n.acu-visualizer-surface__close[data-v-74f7fa2a] {\n  width: 30px;\n  height: 30px;\n  flex: 0 0 auto;\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-visualizer-surface__close[data-v-74f7fa2a]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__data-toolbar[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  justify-content: space-between;\n  padding: 4px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  justify-content: flex-end;\n}\n.acu-visualizer-surface__pagination[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  justify-content: center;\n  gap: 14px;\n  padding: 6px 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-visualizer-surface__pagination-pages[data-v-74f7fa2a] {\n  min-width: 0;\n  flex-wrap: wrap;\n  justify-content: center;\n  gap: 8px;\n}\n.acu-visualizer-surface__page-button[data-v-74f7fa2a] {\n  width: 34px;\n  min-width: 34px;\n  height: 34px;\n  padding: 0;\n  border: 1px solid var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n}\n.acu-visualizer-surface__page-button[data-v-74f7fa2a]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__page-button--active[data-v-74f7fa2a],\n.acu-visualizer-surface__page-button--active[data-v-74f7fa2a]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-visualizer-surface__page-button[data-v-74f7fa2a]:disabled:not(\n    .acu-visualizer-surface__page-button--active\n  ) {\n  border-color: var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-2);\n  opacity: 1;\n  cursor: default;\n}\n.acu-visualizer-surface__page-jump[data-v-74f7fa2a] {\n  flex: 0 0 64px;\n  width: 64px;\n}\n.acu-visualizer-surface__page-jump[data-v-74f7fa2a] .acu-input {\n  min-height: 34px;\n  border: 1px solid var(--acu-border) !important;\n  background: var(--acu-bg-0) !important;\n  text-align: center;\n  font-size: var(--acu-font-size-body-lg, 13px) !important;\n  font-variant-numeric: tabular-nums;\n}\n.acu-visualizer-surface__data-range[data-v-74f7fa2a] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__database-toolbar[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  padding: 0 0 4px;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__database-toolbar h2[data-v-74f7fa2a] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n}\n.acu-visualizer-surface__database-toolbar p[data-v-74f7fa2a] {\n  margin: 5px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-readable, 1.55);\n}\n.acu-visualizer-surface__empty[data-v-74f7fa2a] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-visualizer-surface__card-grid[data-v-74f7fa2a] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));\n  gap: 12px;\n}\n.acu-visualizer-surface__data-card[data-v-74f7fa2a] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  height: 100%;\n  padding: 16px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-visualizer-surface__card-header strong[data-v-74f7fa2a] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-panel-title, 15px);\n}\n.acu-visualizer-surface__card-header span[data-v-74f7fa2a] {\n  min-width: 0;\n  margin-right: auto;\n  overflow: hidden;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__card-header[data-v-74f7fa2a] .acu-icon-btn {\n  background: transparent;\n}\n.acu-visualizer-surface__card-header[data-v-74f7fa2a]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n}\n.acu-visualizer-surface__card-header[data-v-74f7fa2a] .acu-icon-btn--accent {\n  background: var(--acu-accent-glow);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__card-header[data-v-74f7fa2a]\n  .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-visualizer-surface__fields[data-v-74f7fa2a] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-visualizer-surface__field-row[data-v-74f7fa2a] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  align-items: stretch;\n}\n.acu-visualizer-surface__field-row.is-wide[data-v-74f7fa2a] {\n  grid-template-columns: minmax(0, 1fr);\n}\n.acu-visualizer-surface__field[data-v-74f7fa2a] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  padding: 2px;\n  border: 1px solid transparent;\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n  transition:\n    background 0.15s ease,\n    border-color 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field[data-v-74f7fa2a] .acu-textarea {\n  flex: 1 1 auto;\n  min-height: 34px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n}\n.acu-visualizer-surface__field-preview[data-v-74f7fa2a] {\n  width: 100%;\n  min-height: 34px;\n  box-sizing: border-box;\n  padding: 8px 10px;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-1);\n  cursor: text;\n  display: block;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n  transition:\n    background 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field-preview[data-v-74f7fa2a]:hover,\n.acu-visualizer-surface__field-preview[data-v-74f7fa2a]:focus-visible {\n  outline: none;\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    var(--acu-bg-2);\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-visualizer-surface__field-preview.is-empty[data-v-74f7fa2a] {\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__field-label[data-v-74f7fa2a] {\n  min-width: 0;\n  min-height: 24px;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-visualizer-surface__field-label > span[data-v-74f7fa2a]:first-child {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__field-locks[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  min-width: 51px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  opacity: 0.44;\n  transition: opacity 0.15s ease;\n}\n.acu-visualizer-surface__field:hover .acu-visualizer-surface__field-locks[data-v-74f7fa2a],\n.acu-visualizer-surface__field:focus-within\n  .acu-visualizer-surface__field-locks[data-v-74f7fa2a],\n.acu-visualizer-surface__field.is-actions-active\n  .acu-visualizer-surface__field-locks[data-v-74f7fa2a],\n.acu-visualizer-surface__field.is-locked .acu-visualizer-surface__field-locks[data-v-74f7fa2a],\n.acu-visualizer-surface__field.is-special-index\n  .acu-visualizer-surface__field-locks[data-v-74f7fa2a] {\n  opacity: 1;\n}\n.acu-visualizer-surface__field-locks[data-v-74f7fa2a] .acu-icon-btn {\n  --acu-icon-btn-size: 24px;\n  --acu-icon-btn-font-size: 11px;\n  width: 24px;\n  height: 24px;\n  background: transparent !important;\n}\n.acu-visualizer-surface__field-locks[data-v-74f7fa2a]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__field-locks[data-v-74f7fa2a] .acu-icon-btn--accent {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 16%, transparent) !important;\n}\n.acu-visualizer-surface__field-locks[data-v-74f7fa2a]\n  .acu-icon-btn--accent:hover:not(:disabled) {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 22%, transparent) !important;\n}\n.acu-visualizer-surface__field.is-locked[data-v-74f7fa2a] {\n  border-color: var(--acu-border);\n  background: color-mix(in srgb, var(--acu-warning) 8%, transparent);\n}\n.acu-visualizer-surface__field.is-actions-active[data-v-74f7fa2a]:not(.is-locked) {\n  background: color-mix(in srgb, var(--acu-accent) 6%, transparent);\n}\n.acu-visualizer-surface__footer[data-v-74f7fa2a] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 16px;\n  border-top: 1px solid var(--acu-border-2);\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__footer-actions[data-v-74f7fa2a] {\n  display: flex;\n  gap: 8px;\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__footer-actions[data-v-74f7fa2a] .acu-btn {\n  min-width: 132px;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-74f7fa2a] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9350;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: visualizer-mobile-nav-layer-in-74f7fa2a 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing[data-v-74f7fa2a] {\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-layer-out-74f7fa2a 0.15s ease-in both;\n}\n.acu-visualizer-surface__mobile-nav[data-v-74f7fa2a] {\n  width: 360px;\n  max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 360px;\n  display: flex;\n  flex-direction: column;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 0;\n  background: var(--acu-sidebar-bg);\n  box-shadow: var(--acu-shadow);\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-drawer-in-74f7fa2a 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing\n  .acu-visualizer-surface__mobile-nav[data-v-74f7fa2a] {\n  animation: visualizer-mobile-nav-drawer-out-74f7fa2a 0.15s ease-in both;\n}\n@supports (width: min(360px, calc(100% - 24px))) {\n.acu-visualizer-surface__mobile-nav[data-v-74f7fa2a] {\n    width: min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-visualizer-surface__mobile-nav[data-v-74f7fa2a] {\n    max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-visualizer-surface__mobile-nav[data-v-74f7fa2a] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n@keyframes visualizer-mobile-nav-layer-in-74f7fa2a {\nfrom {\n    opacity: 0;\n}\nto {\n    opacity: 1;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-in-74f7fa2a {\nfrom {\n    transform: translateX(-100%);\n}\nto {\n    transform: translateX(0);\n}\n}\n@keyframes visualizer-mobile-nav-layer-out-74f7fa2a {\nfrom {\n    opacity: 1;\n}\nto {\n    opacity: 0;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-out-74f7fa2a {\nfrom {\n    transform: translateX(0);\n}\nto {\n    transform: translateX(-100%);\n}\n}\n@media (max-width: 1024px) {\n.acu-visualizer-surface[data-v-74f7fa2a] {\n    grid-template-columns: 220px minmax(0, 1fr);\n}\n.acu-visualizer-surface__card-grid[data-v-74f7fa2a] {\n    grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));\n}\n.acu-visualizer-surface__topbar[data-v-74f7fa2a] {\n    flex-wrap: wrap;\n}\n.acu-visualizer-surface__mode-tabs[data-v-74f7fa2a] {\n    order: 3;\n    width: min(420px, 100%);\n}\n}\n@media (max-width: 767px) {\n.acu-visualizer-surface[data-v-74f7fa2a] {\n    grid-template-columns: 1fr;\n    grid-template-rows: minmax(0, 1fr);\n}\n.acu-visualizer-surface__sidebar[data-v-74f7fa2a] {\n    display: none;\n}\n.acu-visualizer-surface__topbar[data-v-74f7fa2a] {\n    display: grid;\n    grid-template-columns: minmax(0, 1fr) auto;\n    gap: 8px;\n    min-height: 0;\n    padding: 8px;\n}\n.acu-visualizer-surface__topbar-context[data-v-74f7fa2a] {\n    grid-column: 1;\n    display: grid;\n    grid-template-columns: auto minmax(0, 1fr) auto;\n    align-items: center;\n    gap: 8px;\n    min-width: 0;\n}\n.acu-visualizer-surface__mobile-menu[data-v-74f7fa2a] {\n    display: inline-flex;\n}\n.acu-visualizer-surface__context-items[data-v-74f7fa2a] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n.acu-visualizer-surface__context-item[data-v-74f7fa2a]:first-child,\n  .acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-74f7fa2a] {\n    max-width: none;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-74f7fa2a] {\n    display: flex;\n}\n.acu-visualizer-surface__close[data-v-74f7fa2a] {\n    grid-column: 2;\n    grid-row: 1;\n    align-self: center;\n}\n.acu-visualizer-surface__mode-tabs[data-v-74f7fa2a] {\n    grid-column: 1 / -1;\n    width: 100%;\n}\n.acu-visualizer-surface__workspace[data-v-74f7fa2a] {\n    padding: 10px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-74f7fa2a],\n  .acu-visualizer-surface__database-toolbar[data-v-74f7fa2a] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__data-toolbar[data-v-74f7fa2a] .acu-btn,\n  .acu-visualizer-surface__database-toolbar[data-v-74f7fa2a] .acu-btn {\n    width: 100%;\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-74f7fa2a] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__pagination[data-v-74f7fa2a] {\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 6px;\n    padding: 2px 0 6px;\n}\n.acu-visualizer-surface__pagination-pages[data-v-74f7fa2a] {\n    flex: 0 1 auto;\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n.acu-visualizer-surface__page-button[data-v-74f7fa2a] {\n    width: 36px;\n    min-width: 36px;\n    height: 34px;\n    flex: 0 0 36px;\n}\n.acu-visualizer-surface__page-jump[data-v-74f7fa2a] {\n    flex: 0 0 54px;\n    width: 54px;\n}\n.acu-visualizer-surface__footer[data-v-74f7fa2a] {\n    display: grid;\n    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);\n    align-items: center;\n    gap: 8px;\n    padding: 8px;\n}\n.acu-visualizer-surface__footer > span[data-v-74f7fa2a] {\n    min-width: 0;\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n.acu-visualizer-surface__footer-actions[data-v-74f7fa2a] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n.acu-visualizer-surface__footer-actions[data-v-74f7fa2a] .acu-btn {\n    min-width: 0;\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-visualizer-surface__card-grid[data-v-74f7fa2a] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__fields[data-v-74f7fa2a] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__mode-tabs[data-v-74f7fa2a] {\n    width: 100%;\n}\n.acu-visualizer-surface__conflict-actions[data-v-74f7fa2a] {\n    display: flex;\n    margin: 8px 0 0;\n}\n.acu-visualizer-surface__footer[data-v-74f7fa2a] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__footer > span[data-v-74f7fa2a] {\n    display: none;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue#style-0-74f7fa2a");
+    var VisualizerSurface_vue_vue_type_style_index_0_scoped_74f7fa2a_lang = null;
 
     const _hoisted_1$1 = {
 	class: "acu-visualizer-surface__sidebar",
@@ -111229,7 +111918,7 @@ Expected function or array of functions, received type ${typeof value}.`
 															"auto-resize": "",
 															onFocus: ($event) => $setup.startDataCellEditing(row.index, field.columnIndex),
 															onBlur: ($event) => $setup.stopDataCellEditing(row.index, field.columnIndex),
-															"onUpdate:modelValue": (value) => $setup.visualizer.updateCell(row.index, field.columnIndex, value)
+															"onUpdate:modelValue": (value) => $setup.updateCell(row.index, field.columnIndex, value)
 														}, null, 8, [
 															"model-value",
 															"aria-label",
@@ -111392,7 +112081,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_HYDRATION */
 	);
     }
-    var VisualizerSurface = /*#__PURE__*/ _export_sfc(_sfc_main$1, [["render", _sfc_render$1], ["__scopeId", "data-v-3afd0539"]]);
+    var VisualizerSurface = /*#__PURE__*/ _export_sfc(_sfc_main$1, [["render", _sfc_render$1], ["__scopeId", "data-v-74f7fa2a"]]);
 
     /**
      * appearance-store — 新 UI 外观偏好。

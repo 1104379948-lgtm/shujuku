@@ -34,6 +34,10 @@ import {
   toggleCellLock_ACU,
   isSpecialIndexLockEnabled_ACU,
   setSpecialIndexLockEnabled_ACU,
+  captureCurrentTableLocksSnapshot_ACU,
+  restoreCurrentTableLocksSnapshot_ACU,
+  commitTableLockDraftsBatch_ACU,
+  deleteTableLocksForSheet_ACU,
   clearCurrentTableLocks_ACU,
   getSummaryIndexColumnIndex_ACU,
   formatSummaryIndexCode_ACU,
@@ -43,6 +47,7 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockSaveSettings.mockReturnValue({ saved: true, storageType: 'tavern' });
   mockSettings.tableUpdateLocks = {};
   mockSettings.specialIndexLocks = {};
 });
@@ -138,6 +143,98 @@ describe('isSpecialIndexLockEnabled_ACU / setSpecialIndexLockEnabled_ACU', () =>
     setSpecialIndexLockEnabled_ACU('sheet_0', false);
     setSpecialIndexLockEnabled_ACU('sheet_0', true);
     expect(isSpecialIndexLockEnabled_ACU('sheet_0')).toBe(true);
+  });
+});
+
+describe('deleteTableLocksForSheet_ACU', () => {
+  it('只删除目标 sheet 的普通锁和特殊索引锁', () => {
+    mockSettings.tableUpdateLocks = {
+      'test-chat::iso-key': {
+        sheet_0: { rows: [1], cols: [], cells: [] },
+        sheet_keep: { rows: [2], cols: [], cells: [] },
+      },
+    };
+    mockSettings.specialIndexLocks = {
+      'test-chat::iso-key': { sheet_0: false, sheet_keep: true },
+    };
+
+    const result = deleteTableLocksForSheet_ACU('sheet_0');
+
+    expect(result).toEqual(expect.objectContaining({
+      changed: true,
+      removedTableLocks: true,
+      removedSpecialIndexLock: true,
+      saved: true,
+    }));
+    expect(mockSettings.tableUpdateLocks['test-chat::iso-key'].sheet_0).toBeUndefined();
+    expect(mockSettings.tableUpdateLocks['test-chat::iso-key'].sheet_keep).toBeDefined();
+    expect(mockSettings.specialIndexLocks['test-chat::iso-key'].sheet_0).toBeUndefined();
+    expect(mockSettings.specialIndexLocks['test-chat::iso-key'].sheet_keep).toBe(true);
+    expect(mockSaveSettings).toHaveBeenCalledOnce();
+  });
+
+  it('空 key 无副作用，设置保存失败会返回失败信息', () => {
+    expect(deleteTableLocksForSheet_ACU('').changed).toBe(false);
+    expect(mockSaveSettings).not.toHaveBeenCalled();
+
+    mockSettings.tableUpdateLocks = {
+      'test-chat::iso-key': { sheet_0: { rows: [1], cols: [], cells: [] } },
+    };
+    mockSaveSettings.mockReturnValueOnce({ saved: false, storageType: 'memory', error: 'storage failed' });
+    const result = deleteTableLocksForSheet_ACU('sheet_0');
+    expect(result.saved).toBe(false);
+    expect(result.warning).toBe('storage failed');
+  });
+});
+
+describe('commitTableLockDraftsBatch_ACU', () => {
+  it('批量删除与写入只保存一次，并可从快照恢复', () => {
+    mockSettings.tableUpdateLocks = {
+      'test-chat::iso-key': {
+        sheet_delete: { rows: [1], cols: [], cells: [] },
+        sheet_keep: { rows: [2], cols: [], cells: [] },
+      },
+    };
+    mockSettings.specialIndexLocks = {
+      'test-chat::iso-key': { sheet_delete: false, sheet_keep: true },
+    };
+
+    const result = commitTableLockDraftsBatch_ACU({
+      deletedSheetKeys: ['sheet_delete'],
+      drafts: {
+        sheet_keep: { rows: [3], cols: [1], cells: ['0:1'], specialIndexLocked: false },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(mockSaveSettings).toHaveBeenCalledOnce();
+    expect(mockSettings.tableUpdateLocks['test-chat::iso-key']).toEqual({
+      sheet_keep: { rows: [3], cols: [1], cells: ['0:1'] },
+    });
+    expect(mockSettings.specialIndexLocks['test-chat::iso-key']).toEqual({ sheet_keep: false });
+
+    mockSaveSettings.mockClear();
+    expect(restoreCurrentTableLocksSnapshot_ACU(result.snapshot).success).toBe(true);
+    expect(mockSettings.tableUpdateLocks['test-chat::iso-key'].sheet_delete.rows).toEqual([1]);
+    expect(mockSettings.specialIndexLocks['test-chat::iso-key'].sheet_delete).toBe(false);
+    expect(mockSaveSettings).toHaveBeenCalledOnce();
+  });
+
+  it('保存失败时恢复内存快照并保留可重试结果', () => {
+    mockSettings.tableUpdateLocks = {
+      'test-chat::iso-key': { sheet_0: { rows: [1], cols: [], cells: [] } },
+    };
+    const before = captureCurrentTableLocksSnapshot_ACU();
+    mockSaveSettings.mockReturnValueOnce({ saved: false, storageType: 'memory', warning: 'settings loading' });
+
+    const result = commitTableLockDraftsBatch_ACU({
+      drafts: { sheet_0: { rows: [2], cols: [], cells: [], specialIndexLocked: false } },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.warning).toBe('settings loading');
+    expect(captureCurrentTableLocksSnapshot_ACU()).toEqual(before);
   });
 });
 

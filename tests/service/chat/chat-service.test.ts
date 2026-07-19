@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSaveChatToHostStrict, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal } = vi.hoisted(() => ({
+const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSaveChatToHostStrict, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockBuildChatTemplateScopeState, mockSetChatSheetGuideData, mockSetCurrentChatTemplateScopeState, mockGetChatScopedConfigContainer, mockGetChatSheetGuideContainer, mockSetChatScopedConfigContainer, mockSetChatSheetGuideContainer, mockRepositoryOriginals, mockClearTableFieldsForIsolation, mockPurgeSheetKeysFromMessage, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal } = vi.hoisted(() => ({
   mockSettings: {
     retainRecentLayers: 3,
     dataIsolationEnabled: false,
@@ -24,6 +24,16 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockGetLastOptimizationBase: vi.fn(() => null),
   mockSetLastOptimizationBase: vi.fn(),
   mockSanitizeSheet: vi.fn((sheet: any) => sheet),
+  mockBuildChatTemplateScopeState: vi.fn(),
+  mockSetChatSheetGuideData: vi.fn(),
+  mockSetCurrentChatTemplateScopeState: vi.fn(),
+  mockGetChatScopedConfigContainer: vi.fn(),
+  mockGetChatSheetGuideContainer: vi.fn(),
+  mockSetChatScopedConfigContainer: vi.fn(),
+  mockSetChatSheetGuideContainer: vi.fn(),
+  mockRepositoryOriginals: { clear: null as any, purge: null as any },
+  mockClearTableFieldsForIsolation: vi.fn(),
+  mockPurgeSheetKeysFromMessage: vi.fn(),
   mockPersistTablesToChatMessage: vi.fn(),
   mockRunTableUpdateCommit: vi.fn(),
   mockRunTableWriteTransaction: vi.fn(),
@@ -65,7 +75,29 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
 
 vi.mock('../../../src/service/template/chat-scope', () => ({
   sanitizeSheetForStorage_ACU: mockSanitizeSheet,
+  buildChatTemplateScopeStateFromCurrent_ACU: mockBuildChatTemplateScopeState,
+  setChatSheetGuideDataForIsolationKey_ACU: mockSetChatSheetGuideData,
+  setCurrentChatTemplateScopeState_ACU: mockSetCurrentChatTemplateScopeState,
 }));
+
+vi.mock('../../../src/data/storage/chat-history', async importOriginal => ({
+  ...(await importOriginal<any>()),
+  getChatScopedConfigContainer_ACU: mockGetChatScopedConfigContainer,
+  getChatSheetGuideContainer_ACU: mockGetChatSheetGuideContainer,
+  setChatScopedConfigContainer_ACU: mockSetChatScopedConfigContainer,
+  setChatSheetGuideContainer_ACU: mockSetChatSheetGuideContainer,
+}));
+
+vi.mock('../../../src/data/repositories/chat-message-data-repo', async importOriginal => {
+  const original = await importOriginal<any>();
+  mockRepositoryOriginals.clear = original.clearTableFieldsForIsolation_ACU;
+  mockRepositoryOriginals.purge = original.purgeSheetKeysFromMessage_ACU;
+  return {
+    ...original,
+    clearTableFieldsForIsolation_ACU: mockClearTableFieldsForIsolation,
+    purgeSheetKeysFromMessage_ACU: mockPurgeSheetKeysFromMessage,
+  };
+});
 
 vi.mock('../../../src/service/table/table-service', () => ({
   persistTablesToChatMessage_ACU: mockPersistTablesToChatMessage,
@@ -104,6 +136,7 @@ import {
   deleteLocalDataInChatCore_ACU,
   overrideLatestLayerWithTemplateCore_ACU,
   saveCurrentDataForTable_ACU,
+  commitCurrentChatTemplateChangesAtomic_ACU,
 } from '../../../src/service/chat/chat-service';
 import { resolveTableHistoryStateFromChat_ACU } from '../../../src/service/table/table-history';
 
@@ -115,6 +148,17 @@ beforeEach(() => {
   mockGetCurrentIsolationKey.mockReturnValue('');
   mockSaveChatToHost.mockResolvedValue(undefined);
   mockSaveChatToHostStrict.mockResolvedValue(undefined);
+  mockBuildChatTemplateScopeState.mockReturnValue({ version: 1, mode: 'chat_override' });
+  mockSetChatSheetGuideData.mockReturnValue(true);
+  mockSetCurrentChatTemplateScopeState.mockReturnValue(true);
+  mockGetChatScopedConfigContainer.mockReturnValue({ oldScope: true });
+  mockGetChatSheetGuideContainer.mockReturnValue({ oldGuide: true });
+  mockClearTableFieldsForIsolation.mockImplementation((...args: any[]) => (
+    mockRepositoryOriginals.clear(...args)
+  ));
+  mockPurgeSheetKeysFromMessage.mockImplementation((...args: any[]) => (
+    mockRepositoryOriginals.purge(...args)
+  ));
   mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 0 });
   mockRunTableUpdateCommit.mockImplementation(async (options: any, apply: any) => {
     mockPersistTablesToChatMessage(options);
@@ -126,7 +170,9 @@ beforeEach(() => {
       saved: true,
     };
   });
-  mockRunTableWriteTransaction.mockImplementation(async (_options: any, task: any) => task());
+  mockRunTableWriteTransaction.mockImplementation(async (_options: any, task: any) => task({
+    runCommit: async (commit: any) => commit(),
+  }));
   mockLoadTableStateFromFramesV2.mockResolvedValue({
     sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] },
   });
@@ -2423,5 +2469,169 @@ describe('ensureManualRefillInitialBaseline_ACU', () => {
       expect(chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.createdAt).toBe(30);
       expect(mockSaveChatToHost).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('commitCurrentChatTemplateChangesAtomic_ACU', () => {
+  function makeTemplateChat() {
+    return [
+      {
+        is_user: false,
+        TavernDB_ACU_Data: { sheet_delete: { value: 'legacy' }, sheet_keep: { value: 'keep' } },
+        TavernDB_ACU_IsolatedData: {
+          iso: {
+            sheet_delete: { value: 'isolated' },
+            sheet_keep: { value: 'keep' },
+            summaryVectorIndexManifest: { indexId: 'template-index' },
+            summaryVectorIndexState: { manifest: { indexId: 'template-index' } },
+          },
+        },
+        TavernDB_ACU_ModifiedKeys: ['sheet_delete', 'sheet_keep'],
+      },
+      { is_user: true, mes: 'user' },
+      {
+        is_user: false,
+        TavernDB_ACU_SummaryData: { sheet_delete: { value: 'summary' } },
+        TavernDB_ACU_UpdateGroupKeys: ['sheet_delete'],
+      },
+    ];
+  }
+
+  it('在 exclusive transaction 中提交 guide、scope 与历史清理，并严格保存一次', async () => {
+    const chat = makeTemplateChat();
+    mockGetChatArray.mockReturnValue(chat);
+    mockClearTableFieldsForIsolation.mockReturnValueOnce(true).mockReturnValueOnce(false);
+    mockPurgeSheetKeysFromMessage.mockReturnValue(true);
+
+    const result = await commitCurrentChatTemplateChangesAtomic_ACU({
+      isolationKey: 'iso',
+      guideData: { sheet_keep: { name: '保留表' } },
+      templateSource: { mate: { type: 'chatSheets', version: 1 }, sheet_keep: { name: '保留表' } },
+      presetName: '当前预设',
+      deletedSheetKeys: ['sheet_delete', 'invalid', 'sheet_delete'],
+      resetCurrentIsolationData: true,
+    });
+
+    expect(result).toEqual({ success: true, changed: true, resetMessageCount: 1, purgedMessageCount: 2 });
+    expect(mockRunTableWriteTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'system_cleanup',
+      reason: 'commitCurrentChatTemplateChanges',
+      isolationKey: 'iso',
+      maintenanceMode: 'exclusive',
+      writeSet: [{ kind: 'all' }],
+    }), expect.any(Function));
+    expect(mockBuildChatTemplateScopeState).toHaveBeenCalledWith(expect.objectContaining({
+      isolationKey: 'iso',
+      presetName: '当前预设',
+      source: 'visualizer_v2_save',
+    }));
+    expect(mockSetChatSheetGuideData).toHaveBeenCalledWith('iso', expect.any(Object), expect.objectContaining({ syncTemplateScope: false }));
+    expect(mockSetCurrentChatTemplateScopeState).toHaveBeenCalledOnce();
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
+    expect(mockDeleteSummaryVectorIndexExternal).toHaveBeenCalledWith({ indexId: 'template-index' });
+  });
+
+  it('strict save 失败时恢复七类消息字段、scope 与 guide 并严格保存回滚', async () => {
+    const chat = makeTemplateChat();
+    const before = JSON.parse(JSON.stringify(chat));
+    mockGetChatArray.mockReturnValue(chat);
+    mockClearTableFieldsForIsolation.mockImplementation((msg: any) => {
+      delete msg.TavernDB_ACU_IsolatedData;
+      msg.TavernDB_ACU_Identity = { changed: true };
+      return true;
+    });
+    mockPurgeSheetKeysFromMessage.mockImplementation((msg: any) => {
+      delete msg.TavernDB_ACU_Data;
+      delete msg.TavernDB_ACU_SummaryData;
+      msg.TavernDB_ACU_IndependentData = { changed: true };
+      msg.TavernDB_ACU_ModifiedKeys = [];
+      msg.TavernDB_ACU_UpdateGroupKeys = [];
+      return true;
+    });
+    mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('strict save failed'));
+
+    const result = await commitCurrentChatTemplateChangesAtomic_ACU({
+      isolationKey: 'iso',
+      guideData: { sheet_keep: { name: '保留表' } },
+      templateSource: { sheet_keep: { name: '保留表' } },
+      deletedSheetKeys: ['sheet_delete'],
+      resetCurrentIsolationData: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('strict save failed');
+    expect(chat).toEqual(before);
+    expect(mockSetChatScopedConfigContainer).toHaveBeenCalledWith(chat, { oldScope: true });
+    expect(mockSetChatSheetGuideContainer).toHaveBeenCalledWith(chat, { oldGuide: true });
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(2);
+    expect(mockDeleteSummaryVectorIndexExternal).not.toHaveBeenCalled();
+  });
+
+  it('外置向量资源清理失败只返回 warning，不重复聊天主提交', async () => {
+    mockGetChatArray.mockReturnValue(makeTemplateChat());
+    mockDeleteSummaryVectorIndexExternal.mockRejectedValueOnce(new Error('vector file locked'));
+
+    const result = await commitCurrentChatTemplateChangesAtomic_ACU({
+      isolationKey: 'iso',
+      guideData: { sheet_keep: { name: '保留表' } },
+      templateSource: { sheet_keep: { name: '保留表' } },
+      resetCurrentIsolationData: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.cleanupWarnings).toEqual([expect.stringContaining('vector file locked')]);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
+  });
+
+  it('guide 或 scope 写入失败时不伪造成功并执行回滚保存', async () => {
+    const chat = makeTemplateChat();
+    mockGetChatArray.mockReturnValue(chat);
+    mockSetChatSheetGuideData.mockReturnValueOnce(false);
+
+    const guideFailure = await commitCurrentChatTemplateChangesAtomic_ACU({
+      guideData: { sheet_keep: { name: '保留表' } },
+      templateSource: { sheet_keep: { name: '保留表' } },
+    });
+
+    expect(guideFailure.success).toBe(false);
+    expect(guideFailure.error).toContain('Sheet Guide 写入失败');
+    expect(mockSetCurrentChatTemplateScopeState).not.toHaveBeenCalled();
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
+
+    vi.clearAllMocks();
+    mockGetChatArray.mockReturnValue(chat);
+    mockBuildChatTemplateScopeState.mockReturnValue({ version: 1, mode: 'chat_override' });
+    mockSetChatSheetGuideData.mockReturnValue(true);
+    mockSetCurrentChatTemplateScopeState.mockReturnValue(false);
+    mockGetChatScopedConfigContainer.mockReturnValue({ oldScope: true });
+    mockGetChatSheetGuideContainer.mockReturnValue({ oldGuide: true });
+    mockSaveChatToHostStrict.mockResolvedValue(undefined);
+    mockRunTableWriteTransaction.mockImplementation(async (_options: any, task: any) => task({ runCommit: async (commit: any) => commit() }));
+
+    const scopeFailure = await commitCurrentChatTemplateChangesAtomic_ACU({
+      guideData: { sheet_keep: { name: '保留表' } },
+      templateSource: { sheet_keep: { name: '保留表' } },
+    });
+
+    expect(scopeFailure.success).toBe(false);
+    expect(scopeFailure.error).toContain('模板作用域写入失败');
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
+  });
+
+  it('主保存与回滚保存都失败时合并报告错误', async () => {
+    mockGetChatArray.mockReturnValue(makeTemplateChat());
+    mockSaveChatToHostStrict
+      .mockRejectedValueOnce(new Error('commit failed'))
+      .mockRejectedValueOnce(new Error('rollback failed'));
+
+    const result = await commitCurrentChatTemplateChangesAtomic_ACU({
+      guideData: { sheet_keep: { name: '保留表' } },
+      templateSource: { sheet_keep: { name: '保留表' } },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('commit failed');
+    expect(result.error).toContain('rollback failed');
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(2);
   });
 });

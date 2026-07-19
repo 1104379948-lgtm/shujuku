@@ -362,14 +362,7 @@
                         @blur="
                           stopDataCellEditing(row.index, field.columnIndex)
                         "
-                        @update:model-value="
-                          (value) =>
-                            visualizer.updateCell(
-                              row.index,
-                              field.columnIndex,
-                              value,
-                            )
-                        "
+                        @update:model-value="(value) => updateCell(row.index, field.columnIndex, value)"
                       />
                       <div
                         v-else
@@ -497,6 +490,7 @@ import { useVisualizerData } from "../../composables/visualizer/useVisualizerDat
 import { useVisualizerSave } from "../../composables/visualizer/useVisualizerSave";
 import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from "../../bootstrap/host-env";
 import { useDialogStore } from "../../stores/dialog-store";
+import { useToastStore } from "../../stores/toast-store";
 import { useVisualizerStore } from "../../stores/visualizer-store";
 import VisualizerAssistantPanel from "./VisualizerAssistantPanel.vue";
 import VisualizerConfigPanels from "./VisualizerConfigPanels.vue";
@@ -506,6 +500,7 @@ import VisualizerTableManagementPanel from "./VisualizerTableManagementPanel.vue
 
 const visualizer = useVisualizerStore();
 const dialogStore = useDialogStore();
+const toastStore = useToastStore();
 const data = useVisualizerData();
 const config = useVisualizerConfigEditing();
 const emit = defineEmits<{
@@ -1118,6 +1113,19 @@ async function requestDeleteSheet(key: string): Promise<void> {
   if (confirmed) data.deleteSheet(key);
 }
 
+function reportDataEditError(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  toastStore.error(message || "修改数据行失败。", { muteable: false });
+}
+
+function updateCell(rowIndex: number, columnIndex: number, value: string): void {
+  try {
+    visualizer.updateCell(rowIndex, columnIndex, value);
+  } catch (error) {
+    reportDataEditError(error);
+  }
+}
+
 async function deleteRow(rowIndex: number): Promise<void> {
   const confirmed = await openConfirmDialog({
     title: "删除数据行",
@@ -1126,7 +1134,12 @@ async function deleteRow(rowIndex: number): Promise<void> {
     confirmVariant: "danger",
   });
   if (!confirmed) return;
-  visualizer.deleteRow(rowIndex);
+  try {
+    visualizer.deleteRow(rowIndex);
+  } catch (error) {
+    reportDataEditError(error);
+    return;
+  }
   refreshSpecialIndexColumnDraft();
   if (currentDataPage.value > dataPageCount.value) {
     currentDataPage.value = dataPageCount.value;
@@ -1136,7 +1149,12 @@ async function deleteRow(rowIndex: number): Promise<void> {
 
 function addRow(): void {
   preserveWorkspaceScrollPosition(() => {
-    visualizer.addRow();
+    try {
+      visualizer.addRow();
+    } catch (error) {
+      reportDataEditError(error);
+      return;
+    }
     refreshSpecialIndexColumnDraft();
     currentDataPage.value = dataPageCount.value;
     clearDataCellEditing();
@@ -1156,7 +1174,9 @@ function refreshSpecialIndexColumnDraft(): void {
   for (let rowIndex = 1; rowIndex < sheet.content.length; rowIndex += 1) {
     const row = sheet.content[rowIndex];
     if (Array.isArray(row)) {
-      row[info.index + 1] = `AM${String(rowIndex).padStart(4, "0")}`;
+      const nextValue = `AM${String(rowIndex).padStart(4, "0")}`;
+      if (row[info.index + 1] === nextValue) continue;
+      visualizer.updateCell(rowIndex - 1, info.index, nextValue);
     }
   }
 }
@@ -1188,10 +1208,15 @@ async function requestDeleteColumn(index: number): Promise<void> {
 
 useUiCloseGuard(async () => {
   if (!visualizer.isActive || !visualizer.dirty) return true;
-  const action = await openCloseDirtyDialog();
+  const saveKind = visualizer.templateDirty || visualizer.deletedSheetKeys.length > 0
+    ? "template"
+    : visualizer.lockDirty && !visualizer.hasPendingDataChanges ? "locks" : "data";
+  const action = await openCloseDirtyDialog(saveKind);
   if (action === "cancel") return false;
   if (action === "discard") return true;
-  return save.saveToChat();
+  return saveKind === "template"
+    ? save.saveTemplateToCurrentChat()
+    : save.saveToChat();
 });
 
 function openInputDialog(options: {
@@ -1254,15 +1279,20 @@ function observePaginationWidth(el: HTMLElement | null): void {
   paginationResizeObserver.observe(el);
 }
 
-function openCloseDirtyDialog(): Promise<"save" | "discard" | "cancel"> {
+function openCloseDirtyDialog(saveKind: "template" | "data" | "locks"): Promise<"save" | "discard" | "cancel"> {
+  const saveTarget = saveKind === "template"
+    ? "模板/结构到当前聊天"
+    : saveKind === "locks"
+      ? "表格锁设置"
+      : "数据到当前消息";
   return dialogStore.choose({
     title: "关闭数据库编辑器",
     message:
-      "当前草稿还没有保存。保存会先写入当前聊天再关闭；丢弃会关闭编辑器并清空这次草稿；取消关闭会回到编辑器继续处理。",
+      `当前草稿还没有保存。保存会先写入${saveTarget}再关闭；丢弃会关闭编辑器并清空这次草稿；取消关闭会回到编辑器继续处理。`,
     badge: { label: "未保存", variant: "warning" },
     cancelLabel: "取消关闭",
     actions: [
-      { value: "save", label: "保存数据到当前消息", variant: "primary" },
+      { value: "save", label: `保存${saveTarget}`, variant: "primary" },
       { value: "discard", label: "丢弃草稿", variant: "danger" },
     ],
   }).then((value) => value || "cancel");

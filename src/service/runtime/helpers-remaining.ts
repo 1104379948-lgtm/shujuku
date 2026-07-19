@@ -28,15 +28,24 @@ export {
 export {
     getTableLocksForSheet_ACU,
     saveTableLocksForSheet_ACU,
+    commitTableLockDraftsBatch_ACU,
+    captureCurrentTableLocksSnapshot_ACU,
+    restoreCurrentTableLocksSnapshot_ACU,
+    deleteTableLocksForSheet_ACU,
     toggleRowLock_ACU,
     toggleColLock_ACU,
     toggleCellLock_ACU,
     isSpecialIndexLockEnabled_ACU,
     setSpecialIndexLockEnabled_ACU,
+    clearCurrentTableLocks_ACU,
     getSummaryIndexColumnIndex_ACU,
     formatSummaryIndexCode_ACU,
     applySummaryIndexSequenceToTable_ACU,
     applySpecialIndexSequenceToSummaryTables_ACU,
+} from './helpers-table-lock';
+export type {
+    CurrentTableLocksSnapshot_ACU,
+    TableLocksBatchCommitResult_ACU,
 } from './helpers-table-lock';
 
 // ═══ 数据合并/格式化/首楼初始化/阈值 ═══

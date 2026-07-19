@@ -6,6 +6,36 @@ import { settings_ACU, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU
 import { saveSettings_ACU } from '../settings/settings-service';
 import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
 
+export type TableLockDraft_ACU = {
+    rows?: Iterable<number> | number[];
+    cols?: Iterable<number> | number[];
+    cells?: Iterable<string> | string[];
+    specialIndexLocked?: boolean;
+};
+
+export type CurrentTableLocksSnapshot_ACU = {
+    scopeKey: string;
+    hasTableLocks: boolean;
+    tableLocks: Record<string, any> | null;
+    hasSpecialIndexLocks: boolean;
+    specialIndexLocks: Record<string, boolean> | null;
+};
+
+export type TableLocksBatchCommitResult_ACU = {
+    success: boolean;
+    changed: boolean;
+    snapshot: CurrentTableLocksSnapshot_ACU;
+    warning: string;
+};
+
+function cloneTableLockValue_ACU<T>(value: T): T {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function getSettingsSaveWarning_ACU(result: ReturnType<typeof saveSettings_ACU>): string {
+    return result?.warning || result?.error || '';
+}
+
   function getTableLockScopeKey_ACU() {
       const chatKey = (currentChatFileIdentifier_ACU || 'default').trim() || 'default';
       const isolationKey = getCurrentIsolationKey_ACU() || '';
@@ -80,6 +110,145 @@ import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
       if (!settings_ACU.specialIndexLocks[scopeKey]) settings_ACU.specialIndexLocks[scopeKey] = {};
       settings_ACU.specialIndexLocks[scopeKey][sheetKey] = !!enabled;
       saveSettings_ACU();
+  }
+
+  export function captureCurrentTableLocksSnapshot_ACU(): CurrentTableLocksSnapshot_ACU {
+      ensureTableLockStore_ACU();
+      const scopeKey = getTableLockScopeKey_ACU();
+      const hasTableLocks = Object.prototype.hasOwnProperty.call(settings_ACU.tableUpdateLocks, scopeKey);
+      const hasSpecialIndexLocks = Object.prototype.hasOwnProperty.call(settings_ACU.specialIndexLocks, scopeKey);
+      return {
+          scopeKey,
+          hasTableLocks,
+          tableLocks: hasTableLocks ? cloneTableLockValue_ACU(settings_ACU.tableUpdateLocks[scopeKey]) : null,
+          hasSpecialIndexLocks,
+          specialIndexLocks: hasSpecialIndexLocks ? cloneTableLockValue_ACU(settings_ACU.specialIndexLocks[scopeKey]) : null,
+      };
+  }
+
+  export function restoreCurrentTableLocksSnapshot_ACU(
+      snapshot: CurrentTableLocksSnapshot_ACU,
+      { save = true } = {},
+  ): { success: boolean; warning: string } {
+      ensureTableLockStore_ACU();
+      if (snapshot.hasTableLocks) {
+          settings_ACU.tableUpdateLocks[snapshot.scopeKey] = cloneTableLockValue_ACU(snapshot.tableLocks || {});
+      } else {
+          delete settings_ACU.tableUpdateLocks[snapshot.scopeKey];
+      }
+      if (snapshot.hasSpecialIndexLocks) {
+          settings_ACU.specialIndexLocks[snapshot.scopeKey] = cloneTableLockValue_ACU(snapshot.specialIndexLocks || {});
+      } else {
+          delete settings_ACU.specialIndexLocks[snapshot.scopeKey];
+      }
+      if (!save) return { success: true, warning: '' };
+      const saveResult = saveSettings_ACU();
+      return {
+          success: !!saveResult?.saved,
+          warning: getSettingsSaveWarning_ACU(saveResult),
+      };
+  }
+
+  export function commitTableLockDraftsBatch_ACU(options: {
+      drafts?: Record<string, TableLockDraft_ACU>;
+      deletedSheetKeys?: string[];
+  }): TableLocksBatchCommitResult_ACU {
+      const snapshot = captureCurrentTableLocksSnapshot_ACU();
+      const drafts = options?.drafts && typeof options.drafts === 'object' ? options.drafts : {};
+      const deletedSheetKeys = [...new Set((options?.deletedSheetKeys || [])
+          .map(key => String(key || '').trim())
+          .filter(Boolean))];
+      let changed = false;
+
+      deletedSheetKeys.forEach(sheetKey => {
+          const result = deleteTableLocksForSheet_ACU(sheetKey, { save: false });
+          changed = result.changed || changed;
+      });
+
+      Object.entries(drafts).forEach(([sheetKey, draft]) => {
+          const normalizedSheetKey = String(sheetKey || '').trim();
+          if (!normalizedSheetKey || deletedSheetKeys.includes(normalizedSheetKey)) return;
+          ensureTableLockStore_ACU();
+          const scopeKey = getTableLockScopeKey_ACU();
+          if (!settings_ACU.tableUpdateLocks[scopeKey]) settings_ACU.tableUpdateLocks[scopeKey] = {};
+          if (!settings_ACU.specialIndexLocks[scopeKey]) settings_ACU.specialIndexLocks[scopeKey] = {};
+          const nextTableLocks = {
+              rows: Array.from(draft?.rows || []),
+              cols: Array.from(draft?.cols || []),
+              cells: Array.from(draft?.cells || []),
+          };
+          const nextSpecialIndexLock = draft?.specialIndexLocked !== false;
+          const currentTableLocks = settings_ACU.tableUpdateLocks[scopeKey][normalizedSheetKey];
+          const currentSpecialIndexLock = settings_ACU.specialIndexLocks[scopeKey][normalizedSheetKey];
+          if (JSON.stringify(currentTableLocks) !== JSON.stringify(nextTableLocks)) {
+              settings_ACU.tableUpdateLocks[scopeKey][normalizedSheetKey] = nextTableLocks;
+              changed = true;
+          }
+          if (currentSpecialIndexLock !== nextSpecialIndexLock) {
+              settings_ACU.specialIndexLocks[scopeKey][normalizedSheetKey] = nextSpecialIndexLock;
+              changed = true;
+          }
+      });
+
+      if (!changed) {
+          return { success: true, changed: false, snapshot, warning: '' };
+      }
+
+      const saveResult = saveSettings_ACU();
+      if (saveResult?.saved) {
+          return {
+              success: true,
+              changed: true,
+              snapshot,
+              warning: getSettingsSaveWarning_ACU(saveResult),
+          };
+      }
+
+      restoreCurrentTableLocksSnapshot_ACU(snapshot, { save: false });
+      return {
+          success: false,
+          changed: true,
+          snapshot,
+          warning: getSettingsSaveWarning_ACU(saveResult) || '表格锁设置保存失败。',
+      };
+  }
+
+  export function deleteTableLocksForSheet_ACU(sheetKey: string, { save = true } = {}) {
+      const normalizedSheetKey = String(sheetKey || '').trim();
+      const scopeKey = getTableLockScopeKey_ACU();
+      const result = {
+          scopeKey,
+          sheetKey: normalizedSheetKey,
+          removedTableLocks: false,
+          removedSpecialIndexLock: false,
+          changed: false,
+          saved: !save,
+          warning: '',
+      };
+      if (!normalizedSheetKey) return result;
+
+      const tableBucket = settings_ACU?.tableUpdateLocks?.[scopeKey];
+      if (tableBucket && typeof tableBucket === 'object' && Object.prototype.hasOwnProperty.call(tableBucket, normalizedSheetKey)) {
+          delete tableBucket[normalizedSheetKey];
+          if (Object.keys(tableBucket).length === 0) delete settings_ACU.tableUpdateLocks[scopeKey];
+          result.removedTableLocks = true;
+          result.changed = true;
+      }
+
+      const specialBucket = settings_ACU?.specialIndexLocks?.[scopeKey];
+      if (specialBucket && typeof specialBucket === 'object' && Object.prototype.hasOwnProperty.call(specialBucket, normalizedSheetKey)) {
+          delete specialBucket[normalizedSheetKey];
+          if (Object.keys(specialBucket).length === 0) delete settings_ACU.specialIndexLocks[scopeKey];
+          result.removedSpecialIndexLock = true;
+          result.changed = true;
+      }
+
+      if (save && result.changed) {
+          const saveResult = saveSettings_ACU();
+          result.saved = !!saveResult?.saved;
+          result.warning = saveResult?.warning || saveResult?.error || '';
+      }
+      return result;
   }
 
   export function clearCurrentTableLocks_ACU({ save = true } = {}) {

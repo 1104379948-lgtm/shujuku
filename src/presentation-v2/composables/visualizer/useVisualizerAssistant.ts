@@ -10,6 +10,10 @@ import {
   type TemplateAssistantSessionResult_ACU,
   type TemplateAssistantSessionRound_ACU,
 } from '../../../service/template-assistant/service';
+import {
+  assertVisualizerDataOpsEditable_ACU,
+  recordVisualizerDraftDataDiff_ACU,
+} from '../../../service/visualizer/visualizer-data-ops';
 import { useToastStore } from '../../stores/toast-store';
 import {
   useVisualizerStore,
@@ -420,14 +424,22 @@ export function useVisualizerAssistant() {
       return false;
     }
 
-    visualizer.tempData = cloneData(result.compileResult.candidateData || {});
-    visualizer.sheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
+    assertVisualizerDataOpsEditable_ACU(visualizer);
+    const previousData = visualizer.tempData || {};
+    const candidateData = cloneData(result.compileResult.candidateData || {});
+    const nextSheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
       ? [...result.compileResult.orderedSheetKeys]
       : [];
-    applySheetOrderNumbers_ACU(visualizer.tempData, visualizer.sheetOrder);
     const deleted = new Set<string>(visualizer.deletedSheetKeys || []);
     asList(result.compileResult.deletedSheetKeys).forEach(key => deleted.add(String(key)));
+
+    applySheetOrderNumbers_ACU(candidateData, nextSheetOrder);
+    const dataDiff = recordVisualizerDraftDataDiff_ACU(visualizer, previousData, candidateData, deleted);
+
+    visualizer.tempData = candidateData;
+    visualizer.sheetOrder = nextSheetOrder;
     visualizer.deletedSheetKeys = Array.from(deleted);
+    if (dataDiff.templateChanged) visualizer.templateDirty = true;
 
     visualizer.queueLockChanges(asList(result.compileResult.lockChanges));
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { collectV2CheckpointFloorsFromChat_ACU, getLatestTableAppendMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../../../src/service/table/table-history';
+import {
+  collectV2CheckpointFloorsFromChat_ACU,
+  getLatestTableAppendMessageIndexFromChat_ACU,
+  getLatestV2FullCheckpointMessageIndex_ACU,
+  getLatestV2SheetReplayMessageIndex_ACU,
+  resolveTableHistoryStateFromChat_ACU,
+  v2OperationTouchesSheet_ACU,
+} from '../../../src/service/table/table-history';
 
 const settings = {
   dataIsolationEnabled: false,
@@ -386,5 +393,62 @@ describe('resolveTableHistoryStateFromChat_ACU', () => {
       // 历史 fixture：reason:'periodic' 仅表示旧数据兼容，新策略不再生成 periodic full checkpoint。
       { messageIndex: 4, aiFloor: 3, reason: 'periodic', createdAt: 2 },
     ]);
+  });
+});
+
+describe('V2 replay layer routing', () => {
+  it('精确识别结构化 operation，并对不透明旧 SQL 保守视为命中所有 sheet', () => {
+    expect(v2OperationTouchesSheet_ACU({ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1'] }, 'sheet_a')).toBe(true);
+    expect(v2OperationTouchesSheet_ACU({ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1'] }, 'sheet_b')).toBe(false);
+    expect(v2OperationTouchesSheet_ACU({ kind: 'data_replace', data: { mate: {}, sheet_a: {} } }, 'sheet_a')).toBe(true);
+    expect(v2OperationTouchesSheet_ACU({ kind: 'data_replace', data: { mate: {}, sheet_a: {} } }, 'sheet_b')).toBe(false);
+    expect(v2OperationTouchesSheet_ACU({ kind: 'sql_batch', statements: ['UPDATE unknown'] }, 'sheet_b')).toBe(true);
+    expect(v2OperationTouchesSheet_ACU({ kind: 'table_edit_dsl', text: 'unknown' }, 'sheet_b')).toBe(true);
+  });
+
+  it('仅返回最新显式单表层；没有显式层时调用方可回退 full checkpoint 层', () => {
+    const chat = [
+      v2Message({
+        version: 2,
+        checkpoint: {
+          kind: 'full', createdAt: 1, reason: 'init',
+          data: { mate: {}, sheet_a: { name: 'A', content: [['row_id']] }, sheet_b: { name: 'B', content: [['row_id']] } },
+        },
+        logEntries: [],
+      }),
+      { is_user: true },
+      v2Message({
+        version: 2,
+        logEntries: [{
+          seq: 1, entryId: 'sheet-a-edit', createdAt: 2, source: 'manual_crud', targetMessageIndex: 2, aiFloor: 2,
+          filledSheetKeys: [], changedSheetKeys: ['sheet_a'], groupKeys: [],
+          operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1'] }],
+        }],
+      }),
+      { is_user: true },
+      v2Message({
+        version: 2,
+        logEntries: [{
+          seq: 1, entryId: 'legacy-sql', createdAt: 3, source: 'raw_sql_batch', targetMessageIndex: 4, aiFloor: 3,
+          filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+          operations: [{ kind: 'sql_batch', statements: ['UPDATE unknown'] }],
+        }],
+      }),
+    ];
+
+    expect(getLatestV2FullCheckpointMessageIndex_ACU(chat, '')).toBe(0);
+    expect(getLatestV2SheetReplayMessageIndex_ACU(chat, '', 'sheet_a')).toBe(4);
+    expect(getLatestV2SheetReplayMessageIndex_ACU(chat, '', 'sheet_b')).toBe(4);
+  });
+
+  it('full checkpoint 本身不是显式单表层', () => {
+    const chat = [v2Message({
+      version: 2,
+      checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: {}, sheet_a: { name: 'A', content: [['row_id']] } } },
+      logEntries: [],
+    })];
+
+    expect(getLatestV2FullCheckpointMessageIndex_ACU(chat, '')).toBe(0);
+    expect(getLatestV2SheetReplayMessageIndex_ACU(chat, '', 'sheet_a')).toBe(-1);
   });
 });

@@ -36,6 +36,10 @@ export async function ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU(
   });
   if (!confirmed) return { success: false, dataWasReset: false };
 
+  if (action === 'save-template') {
+    return { success: true, dataWasReset: true };
+  }
+
   const deletedCount = await deleteLocalDataInChatCore_ACU('current');
   if (deletedCount <= 0) {
     toast.error('未删除任何当前标识本地数据，模板操作已取消。', { muteable: false });

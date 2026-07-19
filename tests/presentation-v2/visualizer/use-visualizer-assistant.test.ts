@@ -141,7 +141,7 @@ describe('useVisualizerAssistant', () => {
         uid: 'sheet_a',
         name: 'A表',
         orderNo: 0,
-        content: [[null, '姓名'], [null, 'A']],
+        content: [[null, '姓名'], ['1', 'A']],
       },
     }, ['sheet_a']);
 
@@ -153,7 +153,7 @@ describe('useVisualizerAssistant', () => {
             uid: 'sheet_a',
             name: 'A表',
             orderNo: 0,
-            content: [[null, '姓名', '状态'], [null, 'A', '警觉']],
+            content: [[null, '姓名', '状态'], ['1', 'A', '']],
           },
           sheet_b: {
             uid: 'sheet_b',
@@ -163,7 +163,7 @@ describe('useVisualizerAssistant', () => {
           },
         },
         orderedSheetKeys: ['sheet_a', 'sheet_b'],
-        deletedSheetKeys: ['sheet_old'],
+        deletedSheetKeys: [],
         diff: {
           addedSheets: [{ sheetKey: 'sheet_b', name: 'B表' }],
           deletedSheets: [],
@@ -172,24 +172,24 @@ describe('useVisualizerAssistant', () => {
           patchedSourceDataSheets: [],
           patchedUpdateConfigSheets: [],
           patchedExportConfigSheets: [],
-          patchedContentSheets: [{ sheetKey: 'sheet_a', name: 'A表', changes: ['改单元格'] }],
-          patchedSchemaSheets: [],
+          patchedContentSheets: [],
+          patchedSchemaSheets: [{ sheetKey: 'sheet_a', name: 'A表', changes: ['新增列: 状态'] }],
           patchedLockSheets: [],
           globalInjectionChanged: false,
         },
-        highRiskItems: [{ type: 'delete_sheet', label: '删除表: 旧表' }],
+        highRiskItems: [{ type: 'patch_sheet_schema', label: '修改表结构: A表' }],
       },
     }));
 
     const assistant = useVisualizerAssistant();
     expect(assistant.tableApiPreset.value).toBe('preset-beta');
-    assistant.userRequest.value = '新增状态列';
+    assistant.userRequest.value = '新增状态列和 B 表';
     await assistant.run();
 
     expect(mockRunSession).toHaveBeenCalledWith(expect.objectContaining({
       currentSheetKey: 'sheet_a',
       sheetOrder: ['sheet_a'],
-      userRequest: '新增状态列',
+      userRequest: '新增状态列和 B 表',
       tableApiPreset: 'preset-beta',
     }));
     expect(assistant.canApply.value).toBe(false);
@@ -200,8 +200,48 @@ describe('useVisualizerAssistant', () => {
 
     expect(visualizer.dirty).toBe(true);
     expect(visualizer.sheetOrder).toEqual(['sheet_a', 'sheet_b']);
-    expect(visualizer.deletedSheetKeys).toContain('sheet_old');
-    expect(visualizer.currentSheet.content[1][2]).toBe('警觉');
+    expect(visualizer.deletedSheetKeys).toEqual([]);
+    expect(visualizer.currentSheet.content[1][2]).toBe('');
+    expect(visualizer.templateDirty).toBe(true);
+    expect(visualizer.pendingDataOps).toEqual({ updatesByRow: {}, insertsByClientRowId: {}, deletesByRow: {} });
+  });
+
+  it('应用 AI 草稿时跨表归集既有行修改、新增行和删除行', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], ['1', 'A'], ['2', '删除我']] },
+      sheet_b: { uid: 'sheet_b', name: 'B表', orderNo: 1, content: [[null, '状态'], ['1', '旧']] },
+    }, ['sheet_a', 'sheet_b']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      compileResult: {
+        candidateData: {
+          mate: { type: 'chatSheets', version: 1 },
+          sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], ['1', 'A2'], [null, '新增']] },
+          sheet_b: { uid: 'sheet_b', name: 'B表', orderNo: 1, content: [[null, '状态'], ['1', '新']] },
+        },
+        orderedSheetKeys: ['sheet_a', 'sheet_b'],
+      },
+    }));
+
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '跨表更新数据';
+    await assistant.run();
+
+    expect(assistant.applyLatestDraft()).toBe(true);
+    expect(visualizer.pendingDataOps?.updatesByRow).toEqual({
+      'sheet_a::1': { kind: 'updateRow', sheetKey: 'sheet_a', rowId: '1', data: { 姓名: 'A2' } },
+      'sheet_b::1': { kind: 'updateRow', sheetKey: 'sheet_b', rowId: '1', data: { 状态: '新' } },
+    });
+    expect(visualizer.pendingDataOps?.deletesByRow['sheet_a::2']).toEqual({
+      kind: 'deleteRow', sheetKey: 'sheet_a', rowId: '2',
+    });
+    const insertedIds = Object.keys(visualizer.pendingDataOps?.insertsByClientRowId || {});
+    expect(insertedIds).toHaveLength(1);
+    expect(insertedIds[0]).toMatch(/^__acu_vis_tmp_row_/);
+    expect(visualizer.tempData?.sheet_a.content[2][0]).toBe(insertedIds[0]);
   });
 
   it('schema/DDL 高风险项必须手动确认后才能应用', async () => {
@@ -275,7 +315,7 @@ describe('useVisualizerAssistant', () => {
     const visualizer = useVisualizerStore();
     visualizer.loadSnapshot({
       mate: { type: 'chatSheets', version: 1 },
-      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], [null, 'A']] },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名', '状态'], ['1', 'A', '待机']] },
     }, ['sheet_a']);
 
     mockRunSession.mockImplementation(async (input: any) => {
@@ -287,7 +327,7 @@ describe('useVisualizerAssistant', () => {
               uid: 'sheet_a',
               name: 'A表',
               orderNo: 0,
-              content: [[null, '姓名', '状态'], [null, 'A', '警觉']],
+              content: [[null, '姓名', '状态'], ['1', 'A', '警觉']],
             },
           },
           orderedSheetKeys: ['sheet_a'],
@@ -340,6 +380,9 @@ describe('useVisualizerAssistant', () => {
     expect(remountedAssistant.canApply.value).toBe(true);
     expect(remountedAssistant.applyLatestDraft()).toBe(true);
     expect(visualizer.currentSheet.content[1][2]).toBe('警觉');
+    expect(visualizer.pendingDataOps?.updatesByRow['sheet_a::1']).toEqual({
+      kind: 'updateRow', sheetKey: 'sheet_a', rowId: '1', data: { 状态: '警觉' },
+    });
   });
 
   it('session runner 失败时把错误写入 transcript', async () => {
@@ -431,5 +474,34 @@ describe('useVisualizerAssistant', () => {
     expect(assistant.applyLatestDraft()).toBe(true);
     expect(visualizer.pendingLockChanges).toHaveLength(1);
     expect(visualizer.pendingLockChanges[0].sheetKey).toBe('sheet_a');
+  });
+
+  it('committed 状态拒绝应用 AI 草稿且不改写 visualizer 草稿', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerAssistant } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerAssistant');
+    const visualizer = useVisualizerStore();
+    visualizer.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], ['1', 'A']] },
+    }, ['sheet_a']);
+    mockRunSession.mockImplementation(async (input: any) => buildResult(input, {
+      compileResult: {
+        candidateData: { mate: { type: 'chatSheets', version: 1 }, sheet_a: { uid: 'sheet_a', name: 'A表', orderNo: 0, content: [[null, '姓名'], ['1', 'B']] } },
+      },
+    }));
+    const assistant = useVisualizerAssistant();
+    assistant.userRequest.value = '把 A 改成 B';
+    await assistant.run();
+    const beforeData = JSON.parse(JSON.stringify(visualizer.tempData));
+    const beforeOrder = [...visualizer.sheetOrder];
+    visualizer.pendingDataOps = {
+      updatesByRow: {}, insertsByClientRowId: {}, deletesByRow: {},
+      committed: { afterData: beforeData, insertedRowIds: {} },
+    };
+
+    expect(() => assistant.applyLatestDraft()).toThrow('数据已持久化但本地刷新尚未完成');
+    expect(visualizer.tempData).toEqual(beforeData);
+    expect(visualizer.sheetOrder).toEqual(beforeOrder);
+    expect(visualizer.pendingLockChanges).toEqual([]);
   });
 });
