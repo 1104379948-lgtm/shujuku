@@ -24035,9 +24035,10 @@ $CONTENT
      * 供 service 层内部使用，替代通过 topLevelWindow_ACU.AutoCardUpdaterAPI.callAI 的循环调用。
      * @param messages 消息数组 [{ role, content }]
      * @param presetName API 预设名称（空字符串表示使用当前配置）
+     * @param maxTokensOverride 可选的最大 token 数覆盖，仅允许公开层传入经校验的安全值
      * @returns AI 响应文本，失败返回 null
      */
-    async function callAIWithPreset_ACU(messages, presetName = '') {
+    async function callAIWithPreset_ACU(messages, presetName = '', maxTokensOverride) {
         if (!Array.isArray(messages) || messages.length === 0) {
             logWarn_ACU('[callAIWithPreset] messages 必须是非空数组');
             return null;
@@ -24046,7 +24047,7 @@ $CONTENT
         const effectiveApiMode = apiPresetConfig.apiMode;
         const effectiveApiConfig = apiPresetConfig.apiConfig || {};
         const effectiveTavernProfile = apiPresetConfig.tavernProfile;
-        const maxTokens = effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096;
+        const maxTokens = maxTokensOverride ?? effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096;
         logDebug_ACU(`[callAIWithPreset] 调用 AI，消息数=${messages.length}，预设=${presetName || '当前配置'}，模式=${effectiveApiMode}`);
         if (effectiveApiMode === 'tavern') {
             const profileId = effectiveTavernProfile || settings_ACU.tavernProfile;
@@ -24067,6 +24068,7 @@ $CONTENT
             const response = await generateRaw_ACU({
                 ordered_prompts: messages,
                 should_stream: settings_ACU.streamingEnabled || false,
+                max_tokens: maxTokens,
             });
             return typeof response === 'string' ? response.trim() : null;
         }
@@ -68855,8 +68857,9 @@ $CONTENT
             // =========================
             getApiPresets: function () {
                 try {
-                    const presets = settings_ACU.apiPresets || [];
-                    return JSON.parse(JSON.stringify(presets));
+                    // 已弃用：公开 API 不再返回预设内容，请使用 callAI 受限代理接口发起 AI 请求。
+                    logError_ACU('getApiPresets: 已弃用，公开 API 不再暴露预设内容，请使用 callAI');
+                    return [];
                 }
                 catch (e) {
                     logError_ACU('getApiPresets failed:', e);
@@ -68865,7 +68868,9 @@ $CONTENT
             },
             getTableApiPreset: function () {
                 try {
-                    return settings_ACU.tableApiPreset || '';
+                    // 已弃用：公开 API 不再暴露内部预设选择状态，请使用 callAI 受限代理接口并在 options 中指定 presetName。
+                    logError_ACU('getTableApiPreset: 已弃用，公开 API 不再暴露内部配置状态');
+                    return '';
                 }
                 catch (e) {
                     logError_ACU('getTableApiPreset failed:', e);
@@ -68874,22 +68879,9 @@ $CONTENT
             },
             setTableApiPreset: function (presetName) {
                 try {
-                    if (presetName === '') {
-                        settings_ACU.tableApiPreset = '';
-                        saveSettingsAndNotify_ACU();
-                        logDebug_ACU('Table API preset cleared (use current config)');
-                        return true;
-                    }
-                    const presets = settings_ACU.apiPresets || [];
-                    const exists = presets.some((p) => p.name === presetName);
-                    if (!exists) {
-                        logError_ACU(`setTableApiPreset: Preset "${presetName}" not found`);
-                        return false;
-                    }
-                    settings_ACU.tableApiPreset = presetName;
-                    saveSettingsAndNotify_ACU();
-                    logDebug_ACU(`Table API preset set to: ${presetName}`);
-                    return true;
+                    // 已弃用：公开 API 不再允许外部切换内部预设选择，请使用 callAI 受限代理接口并在 options 中指定 presetName。
+                    logError_ACU('setTableApiPreset: 已弃用，公开 API 不再允许外部修改内部配置');
+                    return false;
                 }
                 catch (e) {
                     logError_ACU('setTableApiPreset failed:', e);
@@ -68898,7 +68890,9 @@ $CONTENT
             },
             getPlotApiPreset: function () {
                 try {
-                    return settings_ACU.plotApiPreset || '';
+                    // 已弃用：公开 API 不再暴露内部预设选择状态，请使用 callAI 受限代理接口并在 options 中指定 presetName。
+                    logError_ACU('getPlotApiPreset: 已弃用，公开 API 不再暴露内部配置状态');
+                    return '';
                 }
                 catch (e) {
                     logError_ACU('getPlotApiPreset failed:', e);
@@ -68907,22 +68901,9 @@ $CONTENT
             },
             setPlotApiPreset: function (presetName) {
                 try {
-                    if (presetName === '') {
-                        settings_ACU.plotApiPreset = '';
-                        saveSettingsAndNotify_ACU();
-                        logDebug_ACU('Plot API preset cleared (use current config)');
-                        return true;
-                    }
-                    const presets = settings_ACU.apiPresets || [];
-                    const exists = presets.some((p) => p.name === presetName);
-                    if (!exists) {
-                        logError_ACU(`setPlotApiPreset: Preset "${presetName}" not found`);
-                        return false;
-                    }
-                    settings_ACU.plotApiPreset = presetName;
-                    saveSettingsAndNotify_ACU();
-                    logDebug_ACU(`Plot API preset set to: ${presetName}`);
-                    return true;
+                    // 已弃用：公开 API 不再允许外部切换内部预设选择，请使用 callAI 受限代理接口并在 options 中指定 presetName。
+                    logError_ACU('setPlotApiPreset: 已弃用，公开 API 不再允许外部修改内部配置');
+                    return false;
                 }
                 catch (e) {
                     logError_ACU('setPlotApiPreset failed:', e);
@@ -68931,39 +68912,9 @@ $CONTENT
             },
             saveApiPreset: function (presetData) {
                 try {
-                    if (!presetData || typeof presetData !== 'object') {
-                        logError_ACU('saveApiPreset: Invalid presetData');
-                        return false;
-                    }
-                    if (!presetData.name || typeof presetData.name !== 'string' || presetData.name.trim() === '') {
-                        logError_ACU('saveApiPreset: preset name is required');
-                        return false;
-                    }
-                    const newPreset = {
-                        name: presetData.name.trim(),
-                        apiMode: typeof presetData.apiMode === 'string' && presetData.apiMode.trim()
-                            ? presetData.apiMode.trim()
-                            : (settings_ACU.apiMode || 'custom'),
-                        apiConfig: presetData.apiConfig && typeof presetData.apiConfig === 'object'
-                            ? JSON.parse(JSON.stringify(presetData.apiConfig))
-                            : JSON.parse(JSON.stringify(settings_ACU.apiConfig || {})),
-                        tavernProfile: typeof presetData.tavernProfile === 'string'
-                            ? presetData.tavernProfile
-                            : (settings_ACU.tavernProfile || '')
-                    };
-                    if (!Array.isArray(settings_ACU.apiPresets)) {
-                        settings_ACU.apiPresets = [];
-                    }
-                    const existingIndex = settings_ACU.apiPresets.findIndex((p) => p?.name === newPreset.name);
-                    if (existingIndex >= 0) {
-                        settings_ACU.apiPresets[existingIndex] = newPreset;
-                    }
-                    else {
-                        settings_ACU.apiPresets.push(newPreset);
-                    }
-                    saveSettingsAndNotify_ACU();
-                    logDebug_ACU(`API preset saved from external API: ${newPreset.name}`);
-                    return true;
+                    // 已弃用：公开 API 不再允许外部保存完整 API 预设（含 apiKey/settings/tavernProfile），请通过插件内部 UI 管理预设，通过 callAI 受限代理接口发起请求。
+                    logError_ACU('saveApiPreset: 已弃用，公开 API 不再允许外部保存 API 预设，请使用内部 UI 管理预设');
+                    return false;
                 }
                 catch (e) {
                     logError_ACU('saveApiPreset failed:', e);
@@ -68972,19 +68923,9 @@ $CONTENT
             },
             loadApiPreset: function (presetName) {
                 try {
-                    if (!presetName || typeof presetName !== 'string') {
-                        logError_ACU('loadApiPreset: preset name is required');
-                        return false;
-                    }
-                    const result = loadApiPreset_ACU(presetName);
-                    if (result) {
-                        logDebug_ACU(`API preset loaded: ${presetName}`);
-                        return true;
-                    }
-                    else {
-                        logError_ACU(`loadApiPreset: Preset "${presetName}" not found`);
-                        return false;
-                    }
+                    // 已弃用：公开 API 不再允许外部加载完整 API 预设（含 apiKey/settings/tavernProfile），请通过插件内部 UI 管理预设。
+                    logError_ACU('loadApiPreset: 已弃用，公开 API 不再允许外部加载 API 预设');
+                    return false;
                 }
                 catch (e) {
                     logError_ACU('loadApiPreset failed:', e);
@@ -69199,17 +69140,9 @@ $CONTENT
             },
             deleteApiPreset: function (presetName) {
                 try {
-                    if (!presetName || typeof presetName !== 'string') {
-                        logError_ACU('deleteApiPreset: preset name is required');
-                        return false;
-                    }
-                    const deleted = deleteApiPreset_ACU(presetName);
-                    if (!deleted) {
-                        logError_ACU(`deleteApiPreset: Preset "${presetName}" not found`);
-                        return false;
-                    }
-                    logDebug_ACU(`API preset deleted: ${presetName}`);
-                    return true;
+                    // 已弃用：公开 API 不再允许外部删除 API 预设，请通过插件内部 UI 管理预设。
+                    logError_ACU('deleteApiPreset: 已弃用，公开 API 不再允许外部删除 API 预设');
+                    return false;
                 }
                 catch (e) {
                     logError_ACU('deleteApiPreset failed:', e);
@@ -69347,77 +69280,25 @@ $CONTENT
                         logError_ACU('callAI: messages must be a non-empty array');
                         return null;
                     }
-                    const presetName = options.presetName || '';
-                    const apiPresetConfig = getApiConfigByPreset_ACU(presetName);
-                    const effectiveApiMode = apiPresetConfig.apiMode;
-                    const effectiveApiConfig = apiPresetConfig.apiConfig || {};
-                    const effectiveTavernProfile = apiPresetConfig.tavernProfile;
-                    logDebug_ACU(`[callAI] Calling AI with ${messages.length} messages, preset: ${presetName || '当前配置'}, mode: ${effectiveApiMode}`);
-                    // options 层 override：调用方显式传入的 max_tokens（custom 路径专用，0 合法）
-                    // tavern 路径 max_tokens 与其他入口统一使用 ?? 链，0 为合法值
-                    const optionsMaxTokens = (options.max_tokens !== undefined || options.maxTokens !== undefined)
+                    // 白名单：仅允许 presetName / max_tokens / maxTokens
+                    const presetName = typeof options.presetName === 'string' ? options.presetName.trim() : '';
+                    const maxTokensOverride = (options.max_tokens !== undefined || options.maxTokens !== undefined)
                         ? Number(options.max_tokens ?? options.maxTokens)
                         : undefined;
-                    if (effectiveApiMode === 'tavern') {
-                        const profileId = effectiveTavernProfile || settings_ACU.tavernProfile;
-                        const tavernMaxTokens = effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096;
-                        const response = await sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens);
-                        if (response && response.result && response.result.choices && response.result.choices[0]) {
-                            return response.result.choices[0].message.content;
-                        }
-                        if (response && typeof response.content === 'string') {
-                            return response.content;
-                        }
-                        logError_ACU('[callAI] Invalid response from Tavern API:', response);
+                    // 拒绝危险字段：不允许外部传入 apiConfig/apiKey/url/requestHeaders 等
+                    const forbiddenKeys = ['apiConfig', 'apiKey', 'url', 'requestHeaders', 'bodyParams', 'excludeBodyParams', 'tavernProfile', 'model', 'temperature', 'stream'];
+                    const passedKeys = Object.keys(options).filter(k => k !== 'presetName' && k !== 'max_tokens' && k !== 'maxTokens');
+                    const hasForbidden = passedKeys.some(k => forbiddenKeys.includes(k));
+                    if (hasForbidden) {
+                        logError_ACU('callAI: options 包含禁止的配置字段，已拒绝');
                         return null;
                     }
-                    else {
-                        if (effectiveApiConfig.useMainApi) {
-                            if (isGenerateRawAvailable_ACU()) {
-                                const response = await generateRaw_ACU({
-                                    ordered_prompts: messages,
-                                    should_stream: settings_ACU.streamingEnabled || false
-                                });
-                                if (typeof response === 'string') {
-                                    return response.trim();
-                                }
-                                logError_ACU('[callAI] Main API did not return string');
-                                return null;
-                            }
-                            logError_ACU('[callAI] TavernHelper.generateRaw not available');
-                            return null;
-                        }
-                        else {
-                            if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
-                                logError_ACU('[callAI] Custom API URL or model not configured');
-                                return null;
-                            }
-                            const url = `/api/backends/chat-completions/generate`;
-                            const customOverrides = { stripModelPrefix: false };
-                            if (optionsMaxTokens !== undefined)
-                                customOverrides.maxTokens = optionsMaxTokens;
-                            const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, customOverrides));
-                            const headers = {
-                                ...getHostRequestHeaders_ACU(),
-                                'Content-Type': 'application/json'
-                            };
-                            const res = await fetch(url, { method: 'POST', headers, body });
-                            if (!res.ok) {
-                                const errTxt = await res.text();
-                                logError_ACU('[callAI] API request failed:', res.status, errTxt);
-                                return null;
-                            }
-                            const content = await handleApiResponse_ACU(res);
-                            if (content) {
-                                return content;
-                            }
-                            logError_ACU('[callAI] Invalid response from custom API');
-                            return null;
-                        }
-                    }
+                    // 委托给 service 层统一入口
+                    return await callAIWithPreset_ACU(messages, presetName, maxTokensOverride);
                 }
                 catch (e) {
-                    logError_ACU('[callAI] Failed:', e);
+                    // 不打印原始错误对象以避免泄露上游响应正文
+                    logError_ACU('[callAI] 调用失败，已返回 null');
                     return null;
                 }
             },
