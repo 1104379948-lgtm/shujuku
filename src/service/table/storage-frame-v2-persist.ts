@@ -70,6 +70,29 @@ export interface PersistTableMutationV2Options_ACU {
   transactionContext?: Pick<TableWriteTransactionContext_ACU, 'runCommit' | 'baseRevision' | 'writeSet' | 'assertFresh'>;
 }
 
+export interface PersistTableMutationLogBatchTargetV2_ACU {
+  targetMessageIndex: number;
+  operations: TableMutationOperationV2_ACU[];
+  changedSheetKeys: string[];
+}
+
+/**
+ * 多消息层 V2 增量提交。所有 target 都在内存 clone 中构造并用正式 replay 验证，
+ * 确认后才一次性写回消息对象并调用严格宿主保存。
+ */
+export interface PersistTableMutationLogBatchV2Options_ACU {
+  source: TableMutationSourceV2_ACU;
+  afterData: TableDataObject_ACU;
+  targets: PersistTableMutationLogBatchTargetV2_ACU[];
+  isolationKey?: string;
+  requestId?: string;
+  batchId?: string;
+  revisionWriteSet?: TableMutationWriteSetV2_ACU;
+  transactionContext?: Pick<TableWriteTransactionContext_ACU, 'runCommit' | 'baseRevision' | 'writeSet' | 'assertFresh'>;
+  /** 调用方已处于 transactionContext.runCommit 临界区内时使用。 */
+  assumeCommitLock?: boolean;
+}
+
 export interface PersistTableSheetCheckpointV2Options_ACU {
   targetMessageIndex?: number;
   sheetKey: string;
@@ -1151,6 +1174,184 @@ export async function persistTableMutationLogV2_ACU(
     return persistTableMutationLogV2Core_ACU(options);
   }
   return options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(options), options.revisionWriteSet);
+}
+
+function stableStringifyPersistedValue_ACU(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(item => stableStringifyPersistedValue_ACU(item)).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map(key => `${JSON.stringify(key)}:${stableStringifyPersistedValue_ACU((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function samePersistedSheets_ACU(actual: TableDataObject_ACU, expected: TableDataObject_ACU, sheetKeys: string[]): boolean {
+  return sheetKeys.every(sheetKey => stableStringifyPersistedValue_ACU(actual?.[sheetKey] ?? null) === stableStringifyPersistedValue_ACU(expected?.[sheetKey] ?? null));
+}
+
+function validateBatchOperationScope_ACU(
+  targetIndex: number,
+  operations: TableMutationOperationV2_ACU[],
+  changedSheetKeys: string[],
+): string | null {
+  const changedKeys = new Set(changedSheetKeys);
+  for (const operation of operations) {
+    if (!operation || typeof operation !== 'object') return `V2 batch write target ${targetIndex} has an invalid operation.`;
+    if (operation.kind === 'data_replace' || operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl') {
+      return `V2 batch write target ${targetIndex} contains unsupported unscoped operation: ${operation.kind}.`;
+    }
+    const sheetKey = typeof (operation as any).sheetKey === 'string' ? (operation as any).sheetKey.trim() : '';
+    if (!sheetKey || !changedKeys.has(sheetKey)) {
+      return `V2 batch write target ${targetIndex} operation scope is outside changed sheet keys.`;
+    }
+  }
+  return null;
+}
+
+function mergeBatchTargetsByMessageIndex_ACU(
+  targets: PersistTableMutationLogBatchTargetV2_ACU[],
+  afterData: TableDataObject_ACU,
+): Map<number, PersistTableMutationLogBatchTargetV2_ACU> | { error: string } {
+  const targetByIndex = new Map<number, PersistTableMutationLogBatchTargetV2_ACU>();
+  for (const target of targets) {
+    const targetIndex = Number(target?.targetMessageIndex);
+    if (!Number.isInteger(targetIndex)) return { error: `V2 batch write target index is invalid: ${targetIndex}.` };
+    if (!Array.isArray(target.operations) || target.operations.length === 0) {
+      return { error: `V2 batch write target ${targetIndex} has no operations.` };
+    }
+    const normalizedKeys = normalizeKeys_ACU(target.changedSheetKeys, afterData);
+    if (normalizedKeys.length === 0) return { error: `V2 batch write target ${targetIndex} has no valid changed sheet keys.` };
+    const scopeError = validateBatchOperationScope_ACU(targetIndex, target.operations, normalizedKeys);
+    if (scopeError) return { error: scopeError };
+    const existing = targetByIndex.get(targetIndex);
+    if (!existing) {
+      targetByIndex.set(targetIndex, {
+        targetMessageIndex: targetIndex,
+        operations: deepClone_ACU(target.operations),
+        changedSheetKeys: normalizedKeys,
+      });
+      continue;
+    }
+    existing.operations.push(...deepClone_ACU(target.operations));
+    existing.changedSheetKeys = [...new Set([...existing.changedSheetKeys, ...normalizedKeys])].sort();
+  }
+  return targetByIndex;
+}
+
+
+
+async function persistTableMutationLogBatchV2Core_ACU(
+  options: PersistTableMutationLogBatchV2Options_ACU,
+): Promise<{ saved: boolean; messageIndices?: number[]; error?: string }> {
+  const chat = getChatArray_ACU();
+  if (!Array.isArray(chat) || chat.length === 0) return { saved: false, error: 'chat history is empty' };
+  if (!Array.isArray(options.targets) || options.targets.length === 0) return { saved: false, error: 'V2 batch write requires at least one target.' };
+
+  const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+  const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+  if (!latestCheckpoint) return { saved: false, error: 'V2 batch write requires an existing full checkpoint anchor.' };
+  options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_persist');
+
+  const mergedTargets = mergeBatchTargetsByMessageIndex_ACU(options.targets, options.afterData);
+  if ('error' in mergedTargets) return { saved: false, error: mergedTargets.error };
+  const targetByIndex = mergedTargets;
+  const changedSheetKeys = new Set<string>();
+  for (const [targetIndex, target] of targetByIndex) {
+    if (!Number.isInteger(targetIndex) || targetIndex < latestCheckpoint.index || !chat[targetIndex] || chat[targetIndex].is_user) {
+      return { saved: false, error: `V2 batch write target is invalid or precedes replay checkpoint: ${targetIndex}.` };
+    }
+    target.changedSheetKeys.forEach(sheetKey => changedSheetKeys.add(sheetKey));
+  }
+
+  const candidateChat = deepClone_ACU(chat);
+  for (const [targetIndex, target] of targetByIndex) {
+    const message = candidateChat[targetIndex];
+    const isolatedData = cloneIsolatedData_ACU(message) as Record<string, any>;
+    const tagData = isolatedData[isolationKey];
+    if (!isV2TagData_ACU(tagData)) return { saved: false, error: `V2 batch write target ${targetIndex} has no V2 storage frame.` };
+    const frame = tagData.storageFrame as TableStorageFrameV2_ACU;
+    const nextSeq = Math.max(0, ...(frame.logEntries || []).map(item => Number(item.seq) || 0)) + 1;
+    const entryId = generateEntryId_ACU();
+    const parentRevision = frame.headRevision ?? null;
+    const entry: TableMutationLogEntryV2_ACU = {
+      seq: nextSeq,
+      entryId,
+      createdAt: Date.now(),
+      source: options.source,
+      targetMessageIndex: targetIndex,
+      aiFloor: countAiFloor_ACU(candidateChat, targetIndex),
+      filledSheetKeys: [],
+      changedSheetKeys: target.changedSheetKeys,
+      groupKeys: [],
+      requestId: options.requestId,
+      batchId: options.batchId,
+      operations: deepClone_ACU(target.operations),
+      baseRevision: options.transactionContext?.baseRevision ?? parentRevision,
+      parentRevision,
+      commitRevision: buildCommitRevision_ACU(nextSeq, entryId),
+      writeSet: options.transactionContext?.writeSet,
+    };
+    frame.logEntries = [...(frame.logEntries || []), entry];
+    frame.headRevision = entry.commitRevision;
+    message.TavernDB_ACU_IsolatedData = isolatedData;
+    writeMessageIdentity_ACU(message, {
+      enabled: settings_ACU.dataIsolationEnabled,
+      code: settings_ACU.dataIsolationCode,
+    });
+  }
+
+  let replayed: TableDataObject_ACU | null;
+  try {
+    replayed = await loadTableStateFromFramesV2_ACU(candidateChat, isolationKey);
+  } catch (error: any) {
+    return { saved: false, error: `V2 batch candidate replay failed: ${error?.message || String(error)}` };
+  }
+  if (!replayed) return { saved: false, error: 'V2 batch candidate replay produced no table data.' };
+  if (!samePersistedSheets_ACU(replayed, options.afterData, [...changedSheetKeys])) {
+    return { saved: false, error: 'V2 batch candidate replay differs from expected changed sheet data.' };
+  }
+
+  const snapshots = [...targetByIndex.keys()].map(index => ({
+    index,
+    message: chat[index],
+    hadIsolatedData: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_IsolatedData'),
+    isolatedData: chat[index].TavernDB_ACU_IsolatedData,
+    hadIdentity: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_Identity'),
+    identity: chat[index].TavernDB_ACU_Identity,
+  }));
+  try {
+    for (const { index } of snapshots) {
+      chat[index].TavernDB_ACU_IsolatedData = candidateChat[index].TavernDB_ACU_IsolatedData;
+      if (Object.prototype.hasOwnProperty.call(candidateChat[index], 'TavernDB_ACU_Identity')) {
+        chat[index].TavernDB_ACU_Identity = candidateChat[index].TavernDB_ACU_Identity;
+      } else {
+        delete chat[index].TavernDB_ACU_Identity;
+      }
+    }
+    await saveChatToHostStrict_ACU();
+  } catch (error) {
+    for (const snapshot of snapshots) {
+      if (snapshot.hadIsolatedData) snapshot.message.TavernDB_ACU_IsolatedData = snapshot.isolatedData;
+      else delete snapshot.message.TavernDB_ACU_IsolatedData;
+      if (snapshot.hadIdentity) snapshot.message.TavernDB_ACU_Identity = snapshot.identity;
+      else delete snapshot.message.TavernDB_ACU_Identity;
+    }
+    throw error;
+  }
+
+  return { saved: true, messageIndices: [...targetByIndex.keys()].sort((left, right) => left - right) };
+}
+
+export async function persistTableMutationLogBatchV2_ACU(
+  options: PersistTableMutationLogBatchV2Options_ACU,
+): Promise<{ saved: boolean; messageIndices?: number[]; error?: string }> {
+  if (!options.transactionContext) {
+    return { saved: false, error: 'V2 batch operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
+  }
+  if (options.assumeCommitLock) return persistTableMutationLogBatchV2Core_ACU(options);
+  return options.transactionContext.runCommit(
+    () => persistTableMutationLogBatchV2Core_ACU(options),
+    options.revisionWriteSet,
+  );
 }
 
 async function persistTableSheetCheckpointV2Core_ACU(
