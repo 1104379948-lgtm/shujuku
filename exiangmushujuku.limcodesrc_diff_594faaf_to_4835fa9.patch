@@ -1,0 +1,2450 @@
+diff --git a/src/presentation-v2/composables/useTemplateRecoveryGuard.ts b/src/presentation-v2/composables/useTemplateRecoveryGuard.ts
+index cbd320a..daed8f3 100644
+--- a/src/presentation-v2/composables/useTemplateRecoveryGuard.ts
++++ b/src/presentation-v2/composables/useTemplateRecoveryGuard.ts
+@@ -36,6 +36,10 @@ export async function ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU(
+   });
+   if (!confirmed) return { success: false, dataWasReset: false };
+ 
++  if (action === 'save-template') {
++    return { success: true, dataWasReset: true };
++  }
++
+   const deletedCount = await deleteLocalDataInChatCore_ACU('current');
+   if (deletedCount <= 0) {
+     toast.error('未删除任何当前标识本地数据，模板操作已取消。', { muteable: false });
+diff --git a/src/presentation-v2/composables/visualizer/useVisualizerAssistant.ts b/src/presentation-v2/composables/visualizer/useVisualizerAssistant.ts
+index acdd8dd..a52d3e0 100644
+--- a/src/presentation-v2/composables/visualizer/useVisualizerAssistant.ts
++++ b/src/presentation-v2/composables/visualizer/useVisualizerAssistant.ts
+@@ -10,6 +10,10 @@ import {
+   type TemplateAssistantSessionResult_ACU,
+   type TemplateAssistantSessionRound_ACU,
+ } from '../../../service/template-assistant/service';
++import {
++  assertVisualizerDataOpsEditable_ACU,
++  recordVisualizerDraftDataDiff_ACU,
++} from '../../../service/visualizer/visualizer-data-ops';
+ import { useToastStore } from '../../stores/toast-store';
+ import {
+   useVisualizerStore,
+@@ -420,14 +424,22 @@ export function useVisualizerAssistant() {
+       return false;
+     }
+ 
+-    visualizer.tempData = cloneData(result.compileResult.candidateData || {});
+-    visualizer.sheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
++    assertVisualizerDataOpsEditable_ACU(visualizer);
++    const previousData = visualizer.tempData || {};
++    const candidateData = cloneData(result.compileResult.candidateData || {});
++    const nextSheetOrder = Array.isArray(result.compileResult.orderedSheetKeys)
+       ? [...result.compileResult.orderedSheetKeys]
+       : [];
+-    applySheetOrderNumbers_ACU(visualizer.tempData, visualizer.sheetOrder);
+     const deleted = new Set<string>(visualizer.deletedSheetKeys || []);
+     asList(result.compileResult.deletedSheetKeys).forEach(key => deleted.add(String(key)));
++
++    applySheetOrderNumbers_ACU(candidateData, nextSheetOrder);
++    const dataDiff = recordVisualizerDraftDataDiff_ACU(visualizer, previousData, candidateData, deleted);
++
++    visualizer.tempData = candidateData;
++    visualizer.sheetOrder = nextSheetOrder;
+     visualizer.deletedSheetKeys = Array.from(deleted);
++    if (dataDiff.templateChanged) visualizer.templateDirty = true;
+ 
+     visualizer.queueLockChanges(asList(result.compileResult.lockChanges));
+ 
+diff --git a/src/presentation-v2/composables/visualizer/useVisualizerConfigEditing.ts b/src/presentation-v2/composables/visualizer/useVisualizerConfigEditing.ts
+index 9bca484..8d98736 100644
+--- a/src/presentation-v2/composables/visualizer/useVisualizerConfigEditing.ts
++++ b/src/presentation-v2/composables/visualizer/useVisualizerConfigEditing.ts
+@@ -2,10 +2,7 @@ import { computed } from 'vue';
+ import { validateDDLTextAgainstHeaders_ACU, parseDDLColumnNames, updateDDLColumnComment } from '../../../shared/ddl-utils';
+ import { isSummaryOrOutlineTable_ACU } from '../../../shared/utils';
+ import { settings_ACU } from '../../../service/runtime/state-manager';
+-import {
+-  applySummaryIndexSequenceToTable_ACU,
+-  getSummaryIndexColumnIndex_ACU,
+-} from '../../../service/runtime/helpers-remaining';
++import { getSummaryIndexColumnIndex_ACU } from '../../../service/runtime/helpers-remaining';
+ import { saveSettings_ACU } from '../../../service/settings/settings-service';
+ import { isSqliteMode } from '../../../service/table/storage-mode';
+ import {
+@@ -21,6 +18,11 @@ import {
+   normalizeLorebookPosition_ACU,
+   normalizePlacementConfig_ACU,
+ } from '../../../service/worldbook/injection-engine';
++import {
++  assertVisualizerRowDataEditable_ACU,
++  assertVisualizerTemplateEditable_ACU,
++  recordVisualizerCellUpdate_ACU,
++} from '../../../service/visualizer/visualizer-data-ops';
+ import { useToastStore } from '../../stores/toast-store';
+ import { useVisualizerStore } from '../../stores/visualizer-store';
+ 
+@@ -163,15 +165,17 @@ export function useVisualizerConfigEditing() {
+     { value: 'index_only', label: '仅放到索引条目' },
+   ];
+ 
+-  function markDirty(): void {
++  function markTemplateDirty(): void {
++    visualizer.templateDirty = true;
+     visualizer.setDirty(true);
+   }
+ 
+   function withSheet(mutator: (sheet: any) => void): void {
+     const sheet = currentSheet.value;
+     if (!sheet) return;
++    assertVisualizerTemplateEditable_ACU(visualizer);
+     mutator(sheet);
+-    markDirty();
++    markTemplateDirty();
+   }
+ 
+   function withExportConfig(mutator: (config: any, sheet: any) => void): void {
+@@ -263,12 +267,22 @@ export function useVisualizerConfigEditing() {
+     const key = visualizer.currentSheetKey;
+     const info = specialIndex.value;
+     if (!key || !info.enabled) return;
++    assertVisualizerRowDataEditable_ACU(visualizer);
+     const lock = visualizer.getLockDraft(key);
+     lock.specialIndexLocked = enabled === true;
+     if (lock.specialIndexLocked && currentSheet.value && info.index >= 0) {
+-      applySummaryIndexSequenceToTable_ACU(currentSheet.value, info.index);
++      const content = Array.isArray(currentSheet.value.content) ? currentSheet.value.content : [];
++      const columnName = String(content[0]?.[info.index + 1] ?? '').trim();
++      for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
++        const row = content[rowIndex];
++        if (!Array.isArray(row)) continue;
++        const nextValue = `AM${String(rowIndex).padStart(4, '0')}`;
++        if (row[info.index + 1] === nextValue) continue;
++        row[info.index + 1] = nextValue;
++        if (columnName) recordVisualizerCellUpdate_ACU(visualizer, key, row[0], columnName, nextValue);
++      }
+     }
+-    markDirty();
++    visualizer.markLockDraftChanged();
+   }
+ 
+   function setTableApiPreset(value: string): void {
+@@ -354,6 +368,7 @@ export function useVisualizerConfigEditing() {
+ 
+   function updateGlobalPlacement(key: GlobalPlacementKey, field: keyof VisualizerPlacementDraft, value: string | number): void {
+     if (!visualizer.tempData) return;
++    assertVisualizerTemplateEditable_ACU(visualizer);
+     const cfg = getGlobalInjectionConfigFromData_ACU(visualizer.tempData, { ensureWriteBack: true });
+     const current = getGlobalPlacement(key);
+     const next = {
+@@ -367,7 +382,7 @@ export function useVisualizerConfigEditing() {
+       visualizer.tempData.mate = { type: 'chatSheets', version: 1 };
+     }
+     visualizer.tempData.mate.globalInjectionConfig = cfg;
+-    markDirty();
++    markTemplateDirty();
+   }
+ 
+   return {
+diff --git a/src/presentation-v2/composables/visualizer/useVisualizerSave.ts b/src/presentation-v2/composables/visualizer/useVisualizerSave.ts
+index c24b478..0598fde 100644
+--- a/src/presentation-v2/composables/visualizer/useVisualizerSave.ts
++++ b/src/presentation-v2/composables/visualizer/useVisualizerSave.ts
+@@ -1,11 +1,9 @@
+ import { TABLE_ORDER_FIELD_ACU } from '../../../shared/constants';
+ import { topLevelWindow_ACU } from '../../../shared/env';
+-import { safeJsonStringify_ACU } from '../../../shared/json-helpers';
+ import {
+   applySheetOrderNumbers_ACU,
+   ensureSheetOrderNumbers_ACU,
+   isSummaryOrOutlineTable_ACU,
+-  logDebug_ACU,
+   logWarn_ACU,
+   parseTableTemplateJson_ACU,
+ } from '../../../shared/utils';
+@@ -13,27 +11,20 @@ import {
+   isDefaultTemplatePresetSelection_ACU,
+   normalizeTemplatePresetSelectionValue_ACU,
+ } from '../../../shared/template-preset-utils';
+-import { deleteLocalDataInChatCore_ACU, getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
++import { commitCurrentChatTemplateChangesAtomic_ACU } from '../../../service/chat/chat-service';
+ import {
+-  currentJsonTableData_ACU,
+   getCurrentIsolationKey_ACU,
+-  settings_ACU,
+   _set_currentJsonTableData_ACU,
+ } from '../../../service/runtime/state-manager';
+ import {
+   applySummaryIndexSequenceToTable_ACU,
++  commitTableLockDraftsBatch_ACU,
+   getSummaryIndexColumnIndex_ACU,
+-  saveTableLocksForSheet_ACU,
+-  setSpecialIndexLockEnabled_ACU,
++  restoreCurrentTableLocksSnapshot_ACU,
++  type TableLocksBatchCommitResult_ACU,
+ } from '../../../service/runtime/helpers-remaining';
+ import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
+-import { runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
+-import {
+-  getLatestAiMessageIndexFromChat_ACU,
+-  resolveTableHistoryStateFromChat_ACU,
+-} from '../../../service/table/table-history';
+ import { isSqliteMode } from '../../../service/table/storage-mode';
+-import { validateCurrentChatTableRecoveryWithGuide_ACU } from '../../../service/table/storage-frame-v2-replay';
+ import { reloadStorageProvider } from '../../../service/table/table-storage-strategy';
+ import { applyTemplateScopeForCurrentChat_ACU } from '../../../service/settings/settings-service';
+ import {
+@@ -43,7 +34,6 @@ import {
+   getSortedSheetKeys_ACU,
+   materializeDataFromSheetGuide_ACU,
+   sanitizeTemplateSnapshotForChat_ACU,
+-  setChatSheetGuideDataForIsolationKey_ACU,
+ } from '../../../service/template/chat-scope';
+ import {
+   applyTemplatePresetToCurrent_ACU,
+@@ -52,17 +42,17 @@ import {
+ } from '../../../service/template/template-preset-service';
+ import {
+   getGlobalInjectionConfigFromData_ACU,
+-  purgeSheetKeysFromChatHistoryHard_ACU,
+ } from '../../../service/worldbook/injection-engine';
+-import { refreshMergedDataAndNotify_ACU, updateReadableLorebookEntry_ACU } from '../../../service/worldbook/pipeline';
+-import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
++import { refreshMergedDataAndNotify_ACU } from '../../../service/worldbook/pipeline';
+ import {
+   applyVisualizerPendingDataOps_ACU,
+   hasVisualizerPendingDataOps_ACU,
++  replaceVisualizerTemporaryRowIds_ACU,
++  resetVisualizerPendingDataOps_ACU,
+ } from '../../../service/visualizer/visualizer-data-ops';
+ import { useToastStore } from '../../stores/toast-store';
+ import { ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU } from '../useTemplateRecoveryGuard';
+-import { useVisualizerStore, type VisualizerLockDraft, type VisualizerSaveTarget } from '../../stores/visualizer-store';
++import { useVisualizerStore, type VisualizerLockDraft } from '../../stores/visualizer-store';
+ 
+ export interface VisualizerSaveInteractions {
+   requestGlobalPresetName?: (defaultName: string) => string | null | Promise<string | null>;
+@@ -111,16 +101,29 @@ function buildOrderedData(
+   return orderedData;
+ }
+ 
+-function saveLockDrafts(drafts: Record<string, VisualizerLockDraft>): void {
+-  Object.entries(drafts || {}).forEach(([sheetKey, draft]) => {
+-    if (!sheetKey) return;
+-    saveTableLocksForSheet_ACU(sheetKey, {
+-      rows: new Set(draft.rows || []),
+-      cols: new Set(draft.cols || []),
+-      cells: new Set(draft.cells || []),
+-    });
+-    setSpecialIndexLockEnabled_ACU(sheetKey, draft.specialIndexLocked !== false);
++function commitLockDrafts(
++  drafts: Record<string, VisualizerLockDraft>,
++  deletedSheetKeys: string[] = [],
++): TableLocksBatchCommitResult_ACU {
++  const result = commitTableLockDraftsBatch_ACU({
++    drafts,
++    deletedSheetKeys,
+   });
++  if (!result.success) {
++    throw new Error(result.warning || '表格锁设置保存失败。');
++  }
++  return result;
++}
++
++function restoreLockDraftsAfterFailure(
++  result: TableLocksBatchCommitResult_ACU,
++  error: unknown,
++): Error {
++  if (!result.changed) return error instanceof Error ? error : new Error(String(error));
++  const rollback = restoreCurrentTableLocksSnapshot_ACU(result.snapshot);
++  const message = error instanceof Error ? error.message : String(error);
++  if (rollback.success) return new Error(message);
++  return new Error(`${message}；表格锁设置回滚也失败：${rollback.warning || '未知错误'}`);
+ }
+ 
+ type ChatSheetGuideSyncPayload = {
+@@ -141,26 +144,6 @@ function buildChatSheetGuideSyncPayload(orderedData: Record<string, any>, ordere
+   return { isolationKey: guideIsolationKey, guideData };
+ }
+ 
+-function persistChatSheetGuideSyncPayload(payload: ChatSheetGuideSyncPayload | null, saveToTemplate: boolean): void {
+-  if (!payload) return;
+-  try {
+-    const syncTemplateScope = !saveToTemplate;
+-    const templateScopeSource = materializeDataFromSheetGuide_ACU(payload.guideData, { includeSeedRows: true });
+-    setChatSheetGuideDataForIsolationKey_ACU(payload.isolationKey, payload.guideData, {
+-      reason: 'visualizer_v2_save',
+-      syncTemplateScope,
+-      templateSource: templateScopeSource,
+-      presetName: resolveActiveTemplatePresetName_ACU({
+-        fallbackToGlobal: true,
+-        isolationKey: payload.isolationKey,
+-      }),
+-      source: 'visualizer_v2_save',
+-    });
+-  } catch (error) {
+-    logWarn_ACU('[ACU-V2 Visualizer] Failed to sync chat sheet guide:', error);
+-  }
+-}
+-
+ async function saveGlobalTemplateSnapshot(
+   orderedData: Record<string, any>,
+   interactions: VisualizerSaveInteractions,
+@@ -235,107 +218,6 @@ async function saveGlobalTemplateSnapshot(
+   return { status: 'saved', presetName: finalGlobalPresetName };
+ }
+ 
+-async function saveCurrentDataToChat(
+-  sheetKeysToSave: string[],
+-  deletedSheetKeys: string[],
+-): Promise<'memory-only' | 'saved'> {
+-  const chat = getChatArray_ACU();
+-  if (!chat.length) return 'memory-only';
+-
+-  const isolationKey = getCurrentIsolationKey_ACU();
+-  const allSheetKeys = sheetKeysToSave.filter(key => !!currentJsonTableData_ACU?.[key]);
+-  const latestAiIndex = getLatestAiMessageIndexFromChat_ACU(chat);
+-  const bucketByIndex: Record<number, string[]> = {};
+-
+-  allSheetKeys.forEach(key => {
+-    const table = currentJsonTableData_ACU?.[key];
+-    const history = resolveTableHistoryStateFromChat_ACU(chat, {
+-      sheetKey: key,
+-      isSummaryTable: table ? isSummaryOrOutlineTable_ACU(table.name) : false,
+-      isolationKey,
+-      settings: settings_ACU,
+-    });
+-    const idx = history.latestDataMessageIndex !== -1
+-      ? history.latestDataMessageIndex
+-      : latestAiIndex;
+-    if (idx === -1) return;
+-    if (!bucketByIndex[idx]) bucketByIndex[idx] = [];
+-    bucketByIndex[idx].push(key);
+-  });
+-
+-  if (Object.keys(bucketByIndex).length === 0 && latestAiIndex !== -1) {
+-    bucketByIndex[latestAiIndex] = [...allSheetKeys];
+-  }
+-  if (Object.keys(bucketByIndex).length === 0) return 'memory-only';
+-
+-  for (const [indexStr, keys] of Object.entries(bucketByIndex)) {
+-    const idx = Number.parseInt(indexStr, 10);
+-    if (Number.isNaN(idx)) continue;
+-    const writeSet = keys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
+-    const commitResult = await runTableUpdateCommit_ACU<null>({
+-      source: 'manual_crud',
+-      reason: 'visualizer_v2_save',
+-      isolationKey,
+-      writeSet,
+-      revisionWriteSet: writeSet,
+-      initialData: currentJsonTableData_ACU as any,
+-      targetMessageIndex: idx,
+-      targetSheetKeys: keys,
+-      updateGroupKeys: null,
+-      trackingSheetKeys: [],
+-      trackAsUpdate: false,
+-      operations: keys
+-        .filter(sheetKey => Boolean((currentJsonTableData_ACU as any)?.[sheetKey]))
+-        .map(sheetKey => ({ kind: 'sheet_replace' as const, sheetKey, sheet: (currentJsonTableData_ACU as any)[sheetKey], reason: 'manual_crud' as const })),
+-    }, () => ({
+-      success: true,
+-      value: null,
+-      tableData: currentJsonTableData_ACU as any,
+-      mutationResult: { changes: keys.length, errors: [] },
+-    }));
+-    if (!commitResult.success) {
+-      logWarn_ACU('[ACU-V2 Visualizer] save commit failed:', commitResult.error);
+-    }
+-  }
+-
+-  if (deletedSheetKeys.length > 0) {
+-    const result = await purgeSheetKeysFromChatHistoryHard_ACU(deletedSheetKeys);
+-    if (result?.changed && isSqliteMode()) {
+-      try {
+-        await reloadStorageProvider();
+-      } catch (error) {
+-        logWarn_ACU('[ACU-V2 Visualizer] reloadStorageProvider failed:', error);
+-      }
+-    }
+-  }
+-
+-  await refreshMergedDataAndNotify_ACU();
+-
+-  const shouldSyncSummaryVectorIndex = allSheetKeys.some(sheetKey => {
+-    const table = currentJsonTableData_ACU?.[sheetKey];
+-    return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
+-  });
+-  if (shouldSyncSummaryVectorIndex && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+-    try {
+-      await enqueueSummaryVectorIndexFlush_ACU({
+-        targetMessageIndex: latestAiIndex !== -1 ? latestAiIndex : undefined,
+-        mode: 'sync',
+-        reason: 'visualizer_v2_save',
+-      });
+-    } catch (error) {
+-      logWarn_ACU('[ACU-V2 Visualizer] summary vector index queue failed:', error);
+-    }
+-  }
+-
+-  try {
+-    (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
+-  } catch (error) {
+-    logDebug_ACU('[ACU-V2 Visualizer] table update notification skipped:', error);
+-  }
+-
+-  return 'saved';
+-}
+-
+ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {}) {
+   const visualizer = useVisualizerStore();
+   const toastStore = useToastStore();
+@@ -355,40 +237,53 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
+     }
+   }
+ 
++  function assertDraftRevisionUnchanged(revision: number): void {
++    if (visualizer.draftRevision !== revision) {
++      throw new Error('保存期间草稿已发生变化，本次不会清除较新的修改。请重新保存。');
++    }
++  }
++
+   async function saveDataToCurrentMessage(): Promise<boolean> {
+     return runSaving(async () => {
+-      const deletedSheetKeys = [...new Set((visualizer.deletedSheetKeys || [])
+-        .filter(key => typeof key === 'string' && key.startsWith('sheet_')),
+-      )];
+-      const result = await applyVisualizerPendingDataOps_ACU(visualizer);
++      if (visualizer.templateDirty || (visualizer.deletedSheetKeys || []).length > 0) {
++        toastStore.error('存在未保存的模板/结构或删表修改；数据保存不会持久化这些修改，请先保存当前聊天模板。', { muteable: false });
++        return false;
++      }
++      const revision = visualizer.draftRevision;
++      const hasDataChanges = hasVisualizerPendingDataOps_ACU(visualizer);
++      const hasLockChanges = visualizer.lockDirty;
++      if (!hasDataChanges && !hasLockChanges) {
++        toastStore.info('没有需要保存的数据或锁增量。', { muteable: false });
++        return false;
++      }
++      const result = hasDataChanges
++        ? await applyVisualizerPendingDataOps_ACU(visualizer)
++        : { success: true, changed: false };
+       if (!result.success) {
+         toastStore.error(result.error || '数据保存失败。', { muteable: false });
+         return false;
+       }
+-      if (!result.changed && deletedSheetKeys.length === 0) {
+-        toastStore.info('没有需要保存的数据增量。', { muteable: false });
++      assertDraftRevisionUnchanged(revision);
++      if (hasLockChanges) commitLockDrafts(cloneData(visualizer.tableLockDrafts));
++      try {
++        await refreshMergedDataAndNotify_ACU();
++      } catch (error: any) {
++        const detail = error?.message || String(error);
++        toastStore.error(`数据已持久化，但本地刷新失败：${detail}。请重试保存完成恢复，期间不要继续编辑。`, { muteable: false });
+         return false;
+       }
+-      if (deletedSheetKeys.length > 0) {
+-        const purgeResult = await purgeSheetKeysFromChatHistoryHard_ACU(deletedSheetKeys);
+-        if (purgeResult?.changed && isSqliteMode()) {
+-          try {
+-            await reloadStorageProvider();
+-          } catch (error) {
+-            logWarn_ACU('[ACU-V2 Visualizer] reloadStorageProvider failed after sheet purge:', error);
+-          }
+-        }
++      assertDraftRevisionUnchanged(revision);
++      if (hasDataChanges) {
++        replaceVisualizerTemporaryRowIds_ACU(visualizer, result.insertedRowIds || {});
++        resetVisualizerPendingDataOps_ACU(visualizer);
+       }
+-      saveLockDrafts(visualizer.tableLockDrafts);
+-      await refreshMergedDataAndNotify_ACU();
+       try {
+         (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
+       } catch {}
+-      visualizer.markSaved('data');
+-      toastStore.success(
+-        deletedSheetKeys.length > 0 ? '数据增量与删表清理已保存到当前消息。' : '数据增量已保存到当前消息。',
+-        { muteable: false },
+-      );
++      visualizer.markSaved(hasDataChanges ? 'data' : 'locks');
++      toastStore.success(hasDataChanges
++        ? '数据增量已保存到当前消息。'
++        : '表格锁设置已保存。', { muteable: false });
+       return true;
+     });
+   }
+@@ -399,44 +294,87 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
+         toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
+         return false;
+       }
+-      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts);
++      const revision = visualizer.draftRevision;
++      const deletedSheetKeys = [...new Set((visualizer.deletedSheetKeys || [])
++        .filter(key => typeof key === 'string' && key.startsWith('sheet_')))];
++      const lockDrafts = cloneData(visualizer.tableLockDrafts);
++      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, lockDrafts);
+       const guidePayload = buildChatSheetGuideSyncPayload(orderedData, [...visualizer.sheetOrder]);
++      if (!guidePayload) throw new Error('无法生成当前聊天 Sheet Guide。');
+       const recoveryGuard = await ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU(
+-        guidePayload?.guideData || null,
++        guidePayload.guideData,
+         'save-template',
+       );
+       if (!recoveryGuard.success) return false;
+-      const dataWasResetForTemplateSave = recoveryGuard.dataWasReset;
+-      persistChatSheetGuideSyncPayload(guidePayload, false);
++      assertDraftRevisionUnchanged(revision);
++      const lockCommit = commitLockDrafts(lockDrafts, deletedSheetKeys);
++      let commitResult;
++      try {
++        commitResult = await commitCurrentChatTemplateChangesAtomic_ACU({
++        isolationKey: guidePayload.isolationKey,
++        guideData: guidePayload.guideData,
++        templateSource: orderedData,
++        presetName: resolveActiveTemplatePresetName_ACU({
++          fallbackToGlobal: true,
++          isolationKey: guidePayload.isolationKey,
++        }),
++        deletedSheetKeys,
++        resetCurrentIsolationData: recoveryGuard.dataWasReset,
++      });
++        if (!commitResult.success) throw new Error(commitResult.error || '当前聊天模板提交失败。');
++      } catch (error) {
++        throw restoreLockDraftsAfterFailure(lockCommit, error);
++      }
++      assertDraftRevisionUnchanged(revision);
++      if (commitResult.cleanupWarnings?.length) {
++        const detail = commitResult.cleanupWarnings.join('；');
++        logWarn_ACU('[ACU-V2 Visualizer] template commit cleanup warning:', detail);
++        toastStore.warning(`模板已提交，但外置索引资源清理未完全完成：${detail}`, { muteable: false });
++      }
+       applyTemplateScopeForCurrentChat_ACU();
+-      _set_currentJsonTableData_ACU(dataWasResetForTemplateSave && guidePayload
++      _set_currentJsonTableData_ACU(recoveryGuard.dataWasReset
+         ? materializeDataFromSheetGuide_ACU(guidePayload.guideData, { includeSeedRows: true })
+         : cloneData(orderedData));
+-      await saveChatToHost_ACU();
+-      saveLockDrafts(visualizer.tableLockDrafts);
+-      if (isSqliteMode()) await reloadStorageProvider();
+-      await refreshMergedDataAndNotify_ACU();
++      try {
++        if (isSqliteMode()) await reloadStorageProvider();
++        await refreshMergedDataAndNotify_ACU();
++      } catch (error: any) {
++        const detail = error?.message || String(error);
++        logWarn_ACU('[ACU-V2 Visualizer] derived refresh failed after template commit:', error);
++        toastStore.warning(`模板已提交，但本地派生刷新失败：${detail}。重新打开编辑器可恢复显示。`, { muteable: false });
++      }
++      assertDraftRevisionUnchanged(revision);
+       try {
+         (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
+       } catch {}
+       visualizer.markSaved('template-chat');
+-      toastStore.success('模板/结构已保存到当前聊天。', { muteable: false });
++      toastStore.success(deletedSheetKeys.length > 0
++        ? '模板/结构与删表清理已原子保存到当前聊天。'
++        : '模板/结构已保存到当前聊天。', { muteable: false });
+       return true;
+     });
+   }
+ 
+   async function saveTemplateToGlobal(): Promise<boolean> {
+     return runSaving(async () => {
++      if ((visualizer.deletedSheetKeys || []).length > 0) {
++        toastStore.error('存在待保存的删表操作；全局模板保存不能代替删表清理，请先保存数据。', { muteable: false });
++        return false;
++      }
+       if (hasVisualizerPendingDataOps_ACU(visualizer)) {
+         toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
+         return false;
+       }
+-      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts);
++      const revision = visualizer.draftRevision;
++      const lockDrafts = cloneData(visualizer.tableLockDrafts);
++      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, lockDrafts);
+       const globalTemplateResult = await saveGlobalTemplateSnapshot(orderedData, interactions);
+       if (globalTemplateResult.status === 'cancelled') return false;
+-      saveLockDrafts(visualizer.tableLockDrafts);
++      assertDraftRevisionUnchanged(revision);
++      commitLockDrafts(lockDrafts);
+       if (isSqliteMode()) await reloadStorageProvider();
+       await refreshMergedDataAndNotify_ACU();
++      assertDraftRevisionUnchanged(revision);
+       visualizer.markSaved('template-global');
+       if (globalTemplateResult.status === 'saved') {
+         toastStore.success(`模板/结构已保存到全局预设：${globalTemplateResult.presetName}。`, { muteable: false });
+diff --git a/src/presentation-v2/stores/visualizer-store.ts b/src/presentation-v2/stores/visualizer-store.ts
+index e392bab..2976cc9 100644
+--- a/src/presentation-v2/stores/visualizer-store.ts
++++ b/src/presentation-v2/stores/visualizer-store.ts
+@@ -1,16 +1,22 @@
+ import { defineStore } from 'pinia';
+ import { TABLE_ORDER_FIELD_ACU } from '../../shared/constants';
+ import {
++  assertVisualizerDataOpsEditable_ACU,
++  assertVisualizerRowDataEditable_ACU,
++  assertVisualizerSheetDeleteEditable_ACU,
++  assertVisualizerTemplateEditable_ACU,
+   createVisualizerTempRowId_ACU,
+   recordVisualizerCellUpdate_ACU,
+   recordVisualizerRowDelete_ACU,
+   recordVisualizerRowInsert_ACU,
++  hasVisualizerPendingDataOps_ACU,
+   resetVisualizerPendingDataOps_ACU,
++  type PendingVisualizerDataOps_ACU,
+ } from '../../service/visualizer/visualizer-data-ops';
+ 
+ export type VisualizerMode = 'data' | 'config' | 'assistant' | 'global' | 'table-management';
+ export type VisualizerOpenSource = 'external-api' | 'v2-shell';
+-export type VisualizerSaveTarget = 'data' | 'template-chat' | 'template-global' | 'chat' | 'global';
++export type VisualizerSaveTarget = 'data' | 'locks' | 'template-chat' | 'template-global' | 'chat' | 'global';
+ 
+ export interface VisualizerSheetItem {
+   key: string;
+@@ -74,12 +80,15 @@ interface VisualizerState {
+   isActive: boolean;
+   mode: VisualizerMode;
+   dirty: boolean;
++  templateDirty: boolean;
++  lockDirty: boolean;
++  draftRevision: number;
+   externalRevisionChanged: boolean;
+   currentSheetKey: string | null;
+   tempData: Record<string, any> | null;
+   sheetOrder: string[];
+   deletedSheetKeys: string[];
+-  pendingDataOps: any;
++  pendingDataOps: PendingVisualizerDataOps_ACU | null;
+   pendingLockChanges: any[];
+   tableLockDrafts: Record<string, VisualizerLockDraft>;
+   isLoading: boolean;
+@@ -156,6 +165,9 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+     isActive: false,
+     mode: 'data',
+     dirty: false,
++    templateDirty: false,
++    lockDirty: false,
++    draftRevision: 0,
+     externalRevisionChanged: false,
+     currentSheetKey: null,
+     tempData: null,
+@@ -208,6 +220,9 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+     hasSheets(state): boolean {
+       return state.sheetOrder.some(key => !!state.tempData?.[key]);
+     },
++    hasPendingDataChanges(state): boolean {
++      return hasVisualizerPendingDataOps_ACU(state);
++    },
+   },
+   actions: {
+     open(snapshot: VisualizerEntrySnapshot): void {
+@@ -227,9 +242,14 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+       this.mode = mode;
+     },
+     setDirty(dirty: boolean): void {
++      if (dirty) this.draftRevision += 1;
+       this.dirty = dirty;
+       if (!dirty) this.externalRevisionChanged = false;
+     },
++    markLockDraftChanged(): void {
++      this.lockDirty = true;
++      this.setDirty(true);
++    },
+     setLoading(loading: boolean): void {
+       this.isLoading = loading;
+       if (loading) this.loadError = '';
+@@ -253,6 +273,8 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+       this.sheetOrder = nextOrder;
+       this.deletedSheetKeys = [];
+       resetVisualizerPendingDataOps_ACU(this);
++      this.lockDirty = false;
++      this.draftRevision = 0;
+       this.pendingLockChanges = [];
+       this.tableLockDrafts = {};
+       this.currentSheetKey = nextOrder.includes(this.currentSheetKey || '')
+@@ -262,6 +284,7 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+         this.mode = this.currentSheetKey ? 'data' : 'global';
+       }
+       this.dirty = false;
++      this.templateDirty = false;
+       this.externalRevisionChanged = false;
+       this.loadError = '';
+       this.isLoading = false;
+@@ -294,20 +317,25 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+       this.mode = 'table-management';
+     },
+     addSheet(key: string, sheet: Record<string, any>): void {
+-      if (!this.tempData) this.tempData = { mate: { type: 'chatSheets', version: 1 } };
+       const normalizedKey = String(key || '').trim();
+-      if (!normalizedKey || this.tempData[normalizedKey]) return;
++      if (!normalizedKey || this.tempData?.[normalizedKey]) return;
++      assertVisualizerTemplateEditable_ACU(this);
++      if (!this.tempData) this.tempData = { mate: { type: 'chatSheets', version: 1 } };
+       this.tempData[normalizedKey] = cloneData(sheet);
+       this.sheetOrder = buildSheetOrder(this.tempData, [...this.sheetOrder, normalizedKey]);
+       applyOrderNumbers(this.tempData, this.sheetOrder);
+       this.currentSheetKey = normalizedKey;
+       this.mode = 'data';
++      this.templateDirty = true;
+       this.setDirty(true);
+     },
+     deleteSheet(key: string): void {
+       if (!this.tempData?.[key]) return;
++      assertVisualizerSheetDeleteEditable_ACU(this);
+       delete this.tempData[key];
+       if (!this.deletedSheetKeys.includes(key)) this.deletedSheetKeys.push(key);
++      delete this.tableLockDrafts[key];
++      this.pendingLockChanges = this.pendingLockChanges.filter(change => String(change?.sheetKey || '').trim() !== key);
+       this.sheetOrder = this.sheetOrder.filter(item => item !== key);
+       applyOrderNumbers(this.tempData, this.sheetOrder);
+       if (this.currentSheetKey === key) this.currentSheetKey = this.sheetOrder[0] || null;
+@@ -319,15 +347,18 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+       if (index === -1) return;
+       const nextIndex = direction === 'up' ? index - 1 : index + 1;
+       if (nextIndex < 0 || nextIndex >= this.sheetOrder.length) return;
++      assertVisualizerTemplateEditable_ACU(this);
+       const next = [...this.sheetOrder];
+       [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+       this.sheetOrder = next;
+       applyOrderNumbers(this.tempData, this.sheetOrder);
++      this.templateDirty = true;
+       this.setDirty(true);
+     },
+     addRow(): void {
+       const sheet = this.currentSheet;
+       if (!sheet) return;
++      assertVisualizerRowDataEditable_ACU(this);
+       if (!Array.isArray(sheet.content)) sheet.content = [[null, '列1']];
+       const headers = Array.isArray(sheet.content[0]) ? sheet.content[0] : [null, '列1'];
+       sheet.content[0] = headers;
+@@ -340,6 +371,7 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+     deleteRow(rowIndex: number): void {
+       const sheet = this.currentSheet;
+       if (!sheet || !Array.isArray(sheet.content)) return;
++      assertVisualizerRowDataEditable_ACU(this);
+       const target = Math.trunc(Number(rowIndex));
+       if (target < 0 || target >= sheet.content.length - 1) return;
+       const rowId = sheet.content[target + 1]?.[0];
+@@ -350,6 +382,7 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+     updateCell(rowIndex: number, columnIndex: number, value: string): void {
+       const sheet = this.currentSheet;
+       if (!sheet || !Array.isArray(sheet.content)) return;
++      assertVisualizerRowDataEditable_ACU(this);
+       const row = Math.trunc(Number(rowIndex));
+       const col = Math.trunc(Number(columnIndex));
+       if (row < 0 || col < 0) return;
+@@ -363,17 +396,35 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+       this.setDirty(true);
+     },
+     markSaved(target: VisualizerSaveTarget): void {
+-      this.deletedSheetKeys = [];
+-      resetVisualizerPendingDataOps_ACU(this);
+-      this.pendingLockChanges = [];
++      if (target === 'data') {
++        resetVisualizerPendingDataOps_ACU(this);
++        this.lockDirty = false;
++        this.pendingLockChanges = [];
++      } else if (target === 'locks') {
++        this.lockDirty = false;
++        this.pendingLockChanges = [];
++      } else {
++        this.templateDirty = false;
++        this.deletedSheetKeys = [];
++        this.lockDirty = false;
++        this.pendingLockChanges = [];
++      }
+       this.lastSavedTarget = target;
+       this.lastSavedAt = Date.now();
+-      this.setDirty(false);
++      this.setDirty(
++        this.templateDirty
++        || this.deletedSheetKeys.length > 0
++        || this.lockDirty
++        || hasVisualizerPendingDataOps_ACU(this),
++      );
+     },
+     getLockDraft(sheetKey: string | null | undefined): VisualizerLockDraft {
+       const key = String(sheetKey || '').trim();
+       if (!key) return { rows: [], cols: [], cells: [], specialIndexLocked: true };
+       if (!this.tableLockDrafts[key]) {
++        if (this.pendingDataOps?.committed) {
++          return { rows: [], cols: [], cells: [], specialIndexLocked: true };
++        }
+         this.tableLockDrafts[key] = { rows: [], cols: [], cells: [], specialIndexLocked: true };
+       }
+       return this.tableLockDrafts[key];
+@@ -391,33 +442,37 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+       return this.getLockDraft(sheetKey).specialIndexLocked !== false;
+     },
+     toggleRowLock(sheetKey: string | null | undefined, rowIndex: number): void {
++      assertVisualizerDataOpsEditable_ACU(this);
+       const lock = this.getLockDraft(sheetKey);
+       const value = Math.trunc(Number(rowIndex));
+       if (!Number.isFinite(value)) return;
+       lock.rows = lock.rows.includes(value)
+         ? lock.rows.filter(item => item !== value)
+         : [...lock.rows, value];
+-      this.setDirty(true);
++      this.markLockDraftChanged();
+     },
+     toggleColumnLock(sheetKey: string | null | undefined, columnIndex: number): void {
++      assertVisualizerDataOpsEditable_ACU(this);
+       const lock = this.getLockDraft(sheetKey);
+       const value = Math.trunc(Number(columnIndex));
+       if (!Number.isFinite(value)) return;
+       lock.cols = lock.cols.includes(value)
+         ? lock.cols.filter(item => item !== value)
+         : [...lock.cols, value];
+-      this.setDirty(true);
++      this.markLockDraftChanged();
+     },
+     toggleCellLock(sheetKey: string | null | undefined, rowIndex: number, columnIndex: number): void {
++      assertVisualizerDataOpsEditable_ACU(this);
+       const lock = this.getLockDraft(sheetKey);
+       const key = `${Math.trunc(Number(rowIndex))}:${Math.trunc(Number(columnIndex))}`;
+       lock.cells = lock.cells.includes(key)
+         ? lock.cells.filter(item => item !== key)
+         : [...lock.cells, key];
+-      this.setDirty(true);
++      this.markLockDraftChanged();
+     },
+     applyLockChangesToDraft(changes: any[]): void {
+       if (!Array.isArray(changes)) return;
++      if (changes.length) assertVisualizerDataOpsEditable_ACU(this);
+       changes.forEach(change => {
+         const sheetKey = String(change?.sheetKey || '').trim();
+         if (!sheetKey) return;
+@@ -452,10 +507,13 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+           lock.specialIndexLocked = change.specialIndexLocked;
+         }
+       });
+-      if (changes.length) this.setDirty(true);
++      if (changes.length) {
++        this.markLockDraftChanged();
++      }
+     },
+     queueLockChanges(changes: any[]): void {
+       if (!Array.isArray(changes) || changes.length === 0) return;
++      assertVisualizerDataOpsEditable_ACU(this);
+       this.applyLockChangesToDraft(changes);
+       this.pendingLockChanges = [
+         ...this.pendingLockChanges,
+@@ -478,6 +536,9 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
+       this.isActive = false;
+       this.mode = 'data';
+       this.dirty = false;
++      this.templateDirty = false;
++      this.lockDirty = false;
++      this.draftRevision = 0;
+       this.externalRevisionChanged = false;
+       this.currentSheetKey = null;
+       this.tempData = null;
+diff --git a/src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue b/src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue
+index a9285ff..5c55a68 100644
+--- a/src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue
++++ b/src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue
+@@ -362,14 +362,7 @@
+                         @blur="
+                           stopDataCellEditing(row.index, field.columnIndex)
+                         "
+-                        @update:model-value="
+-                          (value) =>
+-                            visualizer.updateCell(
+-                              row.index,
+-                              field.columnIndex,
+-                              value,
+-                            )
+-                        "
++                        @update:model-value="(value) => updateCell(row.index, field.columnIndex, value)"
+                       />
+                       <div
+                         v-else
+@@ -497,6 +490,7 @@ import { useVisualizerData } from "../../composables/visualizer/useVisualizerDat
+ import { useVisualizerSave } from "../../composables/visualizer/useVisualizerSave";
+ import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from "../../bootstrap/host-env";
+ import { useDialogStore } from "../../stores/dialog-store";
++import { useToastStore } from "../../stores/toast-store";
+ import { useVisualizerStore } from "../../stores/visualizer-store";
+ import VisualizerAssistantPanel from "./VisualizerAssistantPanel.vue";
+ import VisualizerConfigPanels from "./VisualizerConfigPanels.vue";
+@@ -506,6 +500,7 @@ import VisualizerTableManagementPanel from "./VisualizerTableManagementPanel.vue
+ 
+ const visualizer = useVisualizerStore();
+ const dialogStore = useDialogStore();
++const toastStore = useToastStore();
+ const data = useVisualizerData();
+ const config = useVisualizerConfigEditing();
+ const emit = defineEmits<{
+@@ -1118,6 +1113,19 @@ async function requestDeleteSheet(key: string): Promise<void> {
+   if (confirmed) data.deleteSheet(key);
+ }
+ 
++function reportDataEditError(error: unknown): void {
++  const message = error instanceof Error ? error.message : String(error);
++  toastStore.error(message || "修改数据行失败。", { muteable: false });
++}
++
++function updateCell(rowIndex: number, columnIndex: number, value: string): void {
++  try {
++    visualizer.updateCell(rowIndex, columnIndex, value);
++  } catch (error) {
++    reportDataEditError(error);
++  }
++}
++
+ async function deleteRow(rowIndex: number): Promise<void> {
+   const confirmed = await openConfirmDialog({
+     title: "删除数据行",
+@@ -1126,7 +1134,12 @@ async function deleteRow(rowIndex: number): Promise<void> {
+     confirmVariant: "danger",
+   });
+   if (!confirmed) return;
+-  visualizer.deleteRow(rowIndex);
++  try {
++    visualizer.deleteRow(rowIndex);
++  } catch (error) {
++    reportDataEditError(error);
++    return;
++  }
+   refreshSpecialIndexColumnDraft();
+   if (currentDataPage.value > dataPageCount.value) {
+     currentDataPage.value = dataPageCount.value;
+@@ -1136,7 +1149,12 @@ async function deleteRow(rowIndex: number): Promise<void> {
+ 
+ function addRow(): void {
+   preserveWorkspaceScrollPosition(() => {
+-    visualizer.addRow();
++    try {
++      visualizer.addRow();
++    } catch (error) {
++      reportDataEditError(error);
++      return;
++    }
+     refreshSpecialIndexColumnDraft();
+     currentDataPage.value = dataPageCount.value;
+     clearDataCellEditing();
+@@ -1156,7 +1174,9 @@ function refreshSpecialIndexColumnDraft(): void {
+   for (let rowIndex = 1; rowIndex < sheet.content.length; rowIndex += 1) {
+     const row = sheet.content[rowIndex];
+     if (Array.isArray(row)) {
+-      row[info.index + 1] = `AM${String(rowIndex).padStart(4, "0")}`;
++      const nextValue = `AM${String(rowIndex).padStart(4, "0")}`;
++      if (row[info.index + 1] === nextValue) continue;
++      visualizer.updateCell(rowIndex - 1, info.index, nextValue);
+     }
+   }
+ }
+@@ -1188,10 +1208,15 @@ async function requestDeleteColumn(index: number): Promise<void> {
+ 
+ useUiCloseGuard(async () => {
+   if (!visualizer.isActive || !visualizer.dirty) return true;
+-  const action = await openCloseDirtyDialog();
++  const saveKind = visualizer.templateDirty || visualizer.deletedSheetKeys.length > 0
++    ? "template"
++    : visualizer.lockDirty && !visualizer.hasPendingDataChanges ? "locks" : "data";
++  const action = await openCloseDirtyDialog(saveKind);
+   if (action === "cancel") return false;
+   if (action === "discard") return true;
+-  return save.saveToChat();
++  return saveKind === "template"
++    ? save.saveTemplateToCurrentChat()
++    : save.saveToChat();
+ });
+ 
+ function openInputDialog(options: {
+@@ -1254,15 +1279,20 @@ function observePaginationWidth(el: HTMLElement | null): void {
+   paginationResizeObserver.observe(el);
+ }
+ 
+-function openCloseDirtyDialog(): Promise<"save" | "discard" | "cancel"> {
++function openCloseDirtyDialog(saveKind: "template" | "data" | "locks"): Promise<"save" | "discard" | "cancel"> {
++  const saveTarget = saveKind === "template"
++    ? "模板/结构到当前聊天"
++    : saveKind === "locks"
++      ? "表格锁设置"
++      : "数据到当前消息";
+   return dialogStore.choose({
+     title: "关闭数据库编辑器",
+     message:
+-      "当前草稿还没有保存。保存会先写入当前聊天再关闭；丢弃会关闭编辑器并清空这次草稿；取消关闭会回到编辑器继续处理。",
++      `当前草稿还没有保存。保存会先写入${saveTarget}再关闭；丢弃会关闭编辑器并清空这次草稿；取消关闭会回到编辑器继续处理。`,
+     badge: { label: "未保存", variant: "warning" },
+     cancelLabel: "取消关闭",
+     actions: [
+-      { value: "save", label: "保存数据到当前消息", variant: "primary" },
++      { value: "save", label: `保存${saveTarget}`, variant: "primary" },
+       { value: "discard", label: "丢弃草稿", variant: "danger" },
+     ],
+   }).then((value) => value || "cancel");
+diff --git a/src/service/chat/chat-service.ts b/src/service/chat/chat-service.ts
+index 31a24e3..446bf5d 100644
+--- a/src/service/chat/chat-service.ts
++++ b/src/service/chat/chat-service.ts
+@@ -22,7 +22,13 @@ import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU, setChat
+ import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } from '../../shared/utils';
+ import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
+ import { settings_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
+-import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
++import {
++    buildChatTemplateScopeStateFromCurrent_ACU,
++    sanitizeSheetForStorage_ACU,
++    setChatSheetGuideDataForIsolationKey_ACU,
++    setCurrentChatTemplateScopeState_ACU,
++} from '../template/chat-scope';
++import { getChatScopedConfigContainer_ACU, getChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
+ import { clearTableFieldsForIsolation_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+ import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
+ import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
+@@ -155,7 +161,7 @@ async function cleanupVectorIndexManifestsAfterCommit_ACU(manifests: any[]): Pro
+         } catch (error: any) {
+             const warning = `外置向量索引资源清理失败：${error?.message || String(error || '未知错误')}`;
+             warnings.push(warning);
+-            logWarn_ACU(`[手动重填基底替换] ${warning}`, error);
++            logWarn_ACU(`[向量索引清理] ${warning}`, error);
+         }
+     }
+     return warnings;
+@@ -1567,6 +1573,169 @@ export async function clearManualRefillIncrementalDataInRange_ACU(targetMessageI
+     }, () => clearManualRefillIncrementalDataInRangeCore_ACU(targetMessageIndices, targetSheetKeys));
+ }
+ 
++const CURRENT_CHAT_TEMPLATE_MESSAGE_FIELDS_ACU = [
++    'TavernDB_ACU_Data',
++    'TavernDB_ACU_SummaryData',
++    'TavernDB_ACU_IndependentData',
++    'TavernDB_ACU_Identity',
++    'TavernDB_ACU_IsolatedData',
++    'TavernDB_ACU_ModifiedKeys',
++    'TavernDB_ACU_UpdateGroupKeys',
++] as const;
++
++type CurrentChatTemplateMessageSnapshot_ACU = {
++    msg: any;
++    fields: Record<string, { exists: boolean; value: any }>;
++};
++
++export interface CommitCurrentChatTemplateChangesOptions_ACU {
++    isolationKey?: string;
++    guideData: Record<string, any>;
++    templateSource: Record<string, any> | string;
++    presetName?: string;
++    deletedSheetKeys?: string[];
++    resetCurrentIsolationData?: boolean;
++}
++
++export interface CommitCurrentChatTemplateChangesResult_ACU {
++    success: boolean;
++    changed: boolean;
++    resetMessageCount: number;
++    purgedMessageCount: number;
++    cleanupWarnings?: string[];
++    error?: string;
++}
++
++function captureCurrentChatTemplateMessageSnapshots_ACU(chat: any[]): CurrentChatTemplateMessageSnapshot_ACU[] {
++    return chat
++        .filter(msg => msg && !msg.is_user)
++        .map(msg => ({
++            msg,
++            fields: CURRENT_CHAT_TEMPLATE_MESSAGE_FIELDS_ACU.reduce((out, field) => {
++                const exists = Object.prototype.hasOwnProperty.call(msg, field);
++                out[field] = { exists, value: exists ? cloneManualRefillJson_ACU(msg[field]) : undefined };
++                return out;
++            }, {} as Record<string, { exists: boolean; value: any }>),
++        }));
++}
++
++function restoreCurrentChatTemplateMessageSnapshots_ACU(snapshots: CurrentChatTemplateMessageSnapshot_ACU[]): void {
++    for (const snapshot of snapshots) {
++        for (const [field, state] of Object.entries(snapshot.fields)) {
++            if (state.exists) snapshot.msg[field] = cloneManualRefillJson_ACU(state.value);
++            else delete snapshot.msg[field];
++        }
++    }
++}
++
++export async function commitCurrentChatTemplateChangesAtomic_ACU(
++    options: CommitCurrentChatTemplateChangesOptions_ACU,
++): Promise<CommitCurrentChatTemplateChangesResult_ACU> {
++    const chat = getChatArray_ACU();
++    if (!Array.isArray(chat) || chat.length === 0 || !chat.some(msg => msg && !msg.is_user)) {
++        return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '当前聊天没有可提交模板的 AI 消息。' };
++    }
++    const isolationKey = String(options?.isolationKey ?? getCurrentIsolationKey_ACU());
++    const deletedSheetKeys = [...new Set((Array.isArray(options?.deletedSheetKeys) ? options.deletedSheetKeys : [])
++        .filter(key => typeof key === 'string' && key.startsWith('sheet_')))];
++    const guideData = cloneManualRefillJson_ACU(options?.guideData);
++    if (!guideData || typeof guideData !== 'object' || !Object.keys(guideData).some(key => key.startsWith('sheet_'))) {
++        return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '当前聊天模板提交缺少有效的 Sheet Guide。' };
++    }
++    const templateState = buildChatTemplateScopeStateFromCurrent_ACU({
++        isolationKey,
++        presetName: String(options?.presetName || ''),
++        source: 'visualizer_v2_save',
++        templateSource: options?.templateSource,
++        guideData,
++    });
++    if (!templateState) {
++        return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: '无法构建当前聊天模板作用域快照。' };
++    }
++
++    const writeSet = [{ kind: 'all' as const }];
++    try {
++        return await runTableWriteTransaction_ACU({
++            source: 'system_cleanup',
++            reason: 'commitCurrentChatTemplateChanges',
++            isolationKey,
++            writeSet,
++            maintenanceMode: 'exclusive',
++        }, transactionContext => transactionContext.runCommit(async () => {
++            const messageSnapshots = captureCurrentChatTemplateMessageSnapshots_ACU(chat);
++            const oldScopeContainer = cloneManualRefillJson_ACU(getChatScopedConfigContainer_ACU(chat));
++            const oldGuideContainer = cloneManualRefillJson_ACU(getChatSheetGuideContainer_ACU(chat));
++            const vectorManifestsToDeleteAfterCommit: any[] = [];
++            let resetMessageCount = 0;
++            let purgedMessageCount = 0;
++            try {
++                const isolationConfig = {
++                    enabled: !!settings_ACU.dataIsolationEnabled,
++                    code: String(settings_ACU.dataIsolationCode || ''),
++                };
++                const clearsSummaryOrOutline = tableListContainsSummaryOrOutline_ACU(deletedSheetKeys);
++                for (const msg of chat) {
++                    if (!msg || msg.is_user) continue;
++                    let changed = false;
++                    if (options?.resetCurrentIsolationData) {
++                        const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
++                        await deleteVectorIndexManifestFromTagData_ACU(tagData, {
++                            deleteExternal: false,
++                            onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest),
++                        });
++                        changed = clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig) || changed;
++                        if (changed) resetMessageCount++;
++                    } else if (clearsSummaryOrOutline) {
++                        const isolatedData = msg?.TavernDB_ACU_IsolatedData;
++                        if (isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData)) {
++                            for (const tagData of Object.values(isolatedData)) {
++                                await deleteVectorIndexManifestFromTagData_ACU(tagData, {
++                                    deleteExternal: false,
++                                    onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest),
++                                });
++                            }
++                        }
++                    }
++                    if (deletedSheetKeys.length > 0 && purgeSheetKeysFromMessage_ACU(msg, deletedSheetKeys)) {
++                        purgedMessageCount++;
++                    }
++                }
++                const guideSaved = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, {
++                    reason: 'visualizer_v2_save',
++                    syncTemplateScope: false,
++                });
++                if (!guideSaved) throw new Error('当前聊天 Sheet Guide 写入失败。');
++                const scopeSaved = setCurrentChatTemplateScopeState_ACU(templateState, {
++                    isolationKey,
++                    reason: 'visualizer_v2_save',
++                });
++                if (!scopeSaved) throw new Error('当前聊天模板作用域写入失败。');
++                await saveChatToHostStrict_ACU();
++                const cleanupWarnings = await cleanupVectorIndexManifestsAfterCommit_ACU(vectorManifestsToDeleteAfterCommit);
++                return {
++                    success: true,
++                    changed: true,
++                    resetMessageCount,
++                    purgedMessageCount,
++                    ...(cleanupWarnings.length ? { cleanupWarnings } : {}),
++                };
++            } catch (error: any) {
++                restoreCurrentChatTemplateMessageSnapshots_ACU(messageSnapshots);
++                setChatScopedConfigContainer_ACU(chat, oldScopeContainer);
++                setChatSheetGuideContainer_ACU(chat, oldGuideContainer);
++                try {
++                    await saveChatToHostStrict_ACU();
++                } catch (rollbackError: any) {
++                    throw new Error(`当前聊天模板提交失败：${error?.message || String(error)}；回滚保存也失败：${rollbackError?.message || String(rollbackError)}`);
++                }
++                throw error;
++            }
++        }, writeSet));
++    } catch (error: any) {
++        return { success: false, changed: false, resetMessageCount: 0, purgedMessageCount: 0, error: error?.message || '当前聊天模板提交失败。' };
++    }
++}
++
+ function cloneManualRefillJson_ACU<T>(value: T): T {
+     if (value === undefined || value === null) return value;
+     return JSON.parse(JSON.stringify(value)) as T;
+diff --git a/src/service/runtime/helpers-remaining.ts b/src/service/runtime/helpers-remaining.ts
+index d8ee59e..9fe6c36 100644
+--- a/src/service/runtime/helpers-remaining.ts
++++ b/src/service/runtime/helpers-remaining.ts
+@@ -28,16 +28,25 @@ export {
+ export {
+     getTableLocksForSheet_ACU,
+     saveTableLocksForSheet_ACU,
++    commitTableLockDraftsBatch_ACU,
++    captureCurrentTableLocksSnapshot_ACU,
++    restoreCurrentTableLocksSnapshot_ACU,
++    deleteTableLocksForSheet_ACU,
+     toggleRowLock_ACU,
+     toggleColLock_ACU,
+     toggleCellLock_ACU,
+     isSpecialIndexLockEnabled_ACU,
+     setSpecialIndexLockEnabled_ACU,
++    clearCurrentTableLocks_ACU,
+     getSummaryIndexColumnIndex_ACU,
+     formatSummaryIndexCode_ACU,
+     applySummaryIndexSequenceToTable_ACU,
+     applySpecialIndexSequenceToSummaryTables_ACU,
+ } from './helpers-table-lock';
++export type {
++    CurrentTableLocksSnapshot_ACU,
++    TableLocksBatchCommitResult_ACU,
++} from './helpers-table-lock';
+ 
+ // ═══ 数据合并/格式化/首楼初始化/阈值 ═══
+ export {
+diff --git a/src/service/runtime/helpers-table-lock.ts b/src/service/runtime/helpers-table-lock.ts
+index 5b2fe6a..937b3dc 100644
+--- a/src/service/runtime/helpers-table-lock.ts
++++ b/src/service/runtime/helpers-table-lock.ts
+@@ -6,6 +6,36 @@ import { settings_ACU, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU
+ import { saveSettings_ACU } from '../settings/settings-service';
+ import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
+ 
++export type TableLockDraft_ACU = {
++    rows?: Iterable<number> | number[];
++    cols?: Iterable<number> | number[];
++    cells?: Iterable<string> | string[];
++    specialIndexLocked?: boolean;
++};
++
++export type CurrentTableLocksSnapshot_ACU = {
++    scopeKey: string;
++    hasTableLocks: boolean;
++    tableLocks: Record<string, any> | null;
++    hasSpecialIndexLocks: boolean;
++    specialIndexLocks: Record<string, boolean> | null;
++};
++
++export type TableLocksBatchCommitResult_ACU = {
++    success: boolean;
++    changed: boolean;
++    snapshot: CurrentTableLocksSnapshot_ACU;
++    warning: string;
++};
++
++function cloneTableLockValue_ACU<T>(value: T): T {
++    return value == null ? value : JSON.parse(JSON.stringify(value));
++}
++
++function getSettingsSaveWarning_ACU(result: ReturnType<typeof saveSettings_ACU>): string {
++    return result?.warning || result?.error || '';
++}
++
+   function getTableLockScopeKey_ACU() {
+       const chatKey = (currentChatFileIdentifier_ACU || 'default').trim() || 'default';
+       const isolationKey = getCurrentIsolationKey_ACU() || '';
+@@ -82,6 +112,145 @@ import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
+       saveSettings_ACU();
+   }
+ 
++  export function captureCurrentTableLocksSnapshot_ACU(): CurrentTableLocksSnapshot_ACU {
++      ensureTableLockStore_ACU();
++      const scopeKey = getTableLockScopeKey_ACU();
++      const hasTableLocks = Object.prototype.hasOwnProperty.call(settings_ACU.tableUpdateLocks, scopeKey);
++      const hasSpecialIndexLocks = Object.prototype.hasOwnProperty.call(settings_ACU.specialIndexLocks, scopeKey);
++      return {
++          scopeKey,
++          hasTableLocks,
++          tableLocks: hasTableLocks ? cloneTableLockValue_ACU(settings_ACU.tableUpdateLocks[scopeKey]) : null,
++          hasSpecialIndexLocks,
++          specialIndexLocks: hasSpecialIndexLocks ? cloneTableLockValue_ACU(settings_ACU.specialIndexLocks[scopeKey]) : null,
++      };
++  }
++
++  export function restoreCurrentTableLocksSnapshot_ACU(
++      snapshot: CurrentTableLocksSnapshot_ACU,
++      { save = true } = {},
++  ): { success: boolean; warning: string } {
++      ensureTableLockStore_ACU();
++      if (snapshot.hasTableLocks) {
++          settings_ACU.tableUpdateLocks[snapshot.scopeKey] = cloneTableLockValue_ACU(snapshot.tableLocks || {});
++      } else {
++          delete settings_ACU.tableUpdateLocks[snapshot.scopeKey];
++      }
++      if (snapshot.hasSpecialIndexLocks) {
++          settings_ACU.specialIndexLocks[snapshot.scopeKey] = cloneTableLockValue_ACU(snapshot.specialIndexLocks || {});
++      } else {
++          delete settings_ACU.specialIndexLocks[snapshot.scopeKey];
++      }
++      if (!save) return { success: true, warning: '' };
++      const saveResult = saveSettings_ACU();
++      return {
++          success: !!saveResult?.saved,
++          warning: getSettingsSaveWarning_ACU(saveResult),
++      };
++  }
++
++  export function commitTableLockDraftsBatch_ACU(options: {
++      drafts?: Record<string, TableLockDraft_ACU>;
++      deletedSheetKeys?: string[];
++  }): TableLocksBatchCommitResult_ACU {
++      const snapshot = captureCurrentTableLocksSnapshot_ACU();
++      const drafts = options?.drafts && typeof options.drafts === 'object' ? options.drafts : {};
++      const deletedSheetKeys = [...new Set((options?.deletedSheetKeys || [])
++          .map(key => String(key || '').trim())
++          .filter(Boolean))];
++      let changed = false;
++
++      deletedSheetKeys.forEach(sheetKey => {
++          const result = deleteTableLocksForSheet_ACU(sheetKey, { save: false });
++          changed = result.changed || changed;
++      });
++
++      Object.entries(drafts).forEach(([sheetKey, draft]) => {
++          const normalizedSheetKey = String(sheetKey || '').trim();
++          if (!normalizedSheetKey || deletedSheetKeys.includes(normalizedSheetKey)) return;
++          ensureTableLockStore_ACU();
++          const scopeKey = getTableLockScopeKey_ACU();
++          if (!settings_ACU.tableUpdateLocks[scopeKey]) settings_ACU.tableUpdateLocks[scopeKey] = {};
++          if (!settings_ACU.specialIndexLocks[scopeKey]) settings_ACU.specialIndexLocks[scopeKey] = {};
++          const nextTableLocks = {
++              rows: Array.from(draft?.rows || []),
++              cols: Array.from(draft?.cols || []),
++              cells: Array.from(draft?.cells || []),
++          };
++          const nextSpecialIndexLock = draft?.specialIndexLocked !== false;
++          const currentTableLocks = settings_ACU.tableUpdateLocks[scopeKey][normalizedSheetKey];
++          const currentSpecialIndexLock = settings_ACU.specialIndexLocks[scopeKey][normalizedSheetKey];
++          if (JSON.stringify(currentTableLocks) !== JSON.stringify(nextTableLocks)) {
++              settings_ACU.tableUpdateLocks[scopeKey][normalizedSheetKey] = nextTableLocks;
++              changed = true;
++          }
++          if (currentSpecialIndexLock !== nextSpecialIndexLock) {
++              settings_ACU.specialIndexLocks[scopeKey][normalizedSheetKey] = nextSpecialIndexLock;
++              changed = true;
++          }
++      });
++
++      if (!changed) {
++          return { success: true, changed: false, snapshot, warning: '' };
++      }
++
++      const saveResult = saveSettings_ACU();
++      if (saveResult?.saved) {
++          return {
++              success: true,
++              changed: true,
++              snapshot,
++              warning: getSettingsSaveWarning_ACU(saveResult),
++          };
++      }
++
++      restoreCurrentTableLocksSnapshot_ACU(snapshot, { save: false });
++      return {
++          success: false,
++          changed: true,
++          snapshot,
++          warning: getSettingsSaveWarning_ACU(saveResult) || '表格锁设置保存失败。',
++      };
++  }
++
++  export function deleteTableLocksForSheet_ACU(sheetKey: string, { save = true } = {}) {
++      const normalizedSheetKey = String(sheetKey || '').trim();
++      const scopeKey = getTableLockScopeKey_ACU();
++      const result = {
++          scopeKey,
++          sheetKey: normalizedSheetKey,
++          removedTableLocks: false,
++          removedSpecialIndexLock: false,
++          changed: false,
++          saved: !save,
++          warning: '',
++      };
++      if (!normalizedSheetKey) return result;
++
++      const tableBucket = settings_ACU?.tableUpdateLocks?.[scopeKey];
++      if (tableBucket && typeof tableBucket === 'object' && Object.prototype.hasOwnProperty.call(tableBucket, normalizedSheetKey)) {
++          delete tableBucket[normalizedSheetKey];
++          if (Object.keys(tableBucket).length === 0) delete settings_ACU.tableUpdateLocks[scopeKey];
++          result.removedTableLocks = true;
++          result.changed = true;
++      }
++
++      const specialBucket = settings_ACU?.specialIndexLocks?.[scopeKey];
++      if (specialBucket && typeof specialBucket === 'object' && Object.prototype.hasOwnProperty.call(specialBucket, normalizedSheetKey)) {
++          delete specialBucket[normalizedSheetKey];
++          if (Object.keys(specialBucket).length === 0) delete settings_ACU.specialIndexLocks[scopeKey];
++          result.removedSpecialIndexLock = true;
++          result.changed = true;
++      }
++
++      if (save && result.changed) {
++          const saveResult = saveSettings_ACU();
++          result.saved = !!saveResult?.saved;
++          result.warning = saveResult?.warning || saveResult?.error || '';
++      }
++      return result;
++  }
++
+   export function clearCurrentTableLocks_ACU({ save = true } = {}) {
+       const scopeKey = getTableLockScopeKey_ACU();
+       const result = {
+diff --git a/src/service/table/storage-frame-v2-persist.ts b/src/service/table/storage-frame-v2-persist.ts
+index d60cb10..f54d7f3 100644
+--- a/src/service/table/storage-frame-v2-persist.ts
++++ b/src/service/table/storage-frame-v2-persist.ts
+@@ -5,7 +5,7 @@ import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+ import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
+ import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU } from './storage-frame-v2-types';
+ import { isV2TagData_ACU } from './storage-strategy-resolver';
+-import { collectScheduleSummaryFromFramesV2_ACU } from './storage-frame-v2-replay';
++import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
+ import type { TableWriteTransactionContext_ACU } from './table-write-transaction';
+ 
+ export interface TableCheckpointGenerationConfig_ACU {
+@@ -70,6 +70,29 @@ export interface PersistTableSheetCheckpointV2Options_ACU {
+   assumeCommitLock?: boolean;
+   transactionContext?: Pick<TableWriteTransactionContext_ACU, 'runCommit' | 'baseRevision' | 'writeSet' | 'assertFresh'>;
+ }
++export interface PersistTableMutationLogBatchTargetV2_ACU {
++  targetMessageIndex: number;
++  operations: TableMutationOperationV2_ACU[];
++  changedSheetKeys: string[];
++}
++
++/**
++ * 多消息层 V2 增量提交。所有 target 都在内存 clone 中构造并用正式 replay 验证，
++ * 确认后才一次性写回消息对象并调用严格宿主保存。
++ */
++export interface PersistTableMutationLogBatchV2Options_ACU {
++  source: TableMutationSourceV2_ACU;
++  afterData: TableDataObject_ACU;
++  targets: PersistTableMutationLogBatchTargetV2_ACU[];
++  isolationKey?: string;
++  requestId?: string;
++  batchId?: string;
++  revisionWriteSet?: TableMutationWriteSetV2_ACU;
++  transactionContext?: Pick<TableWriteTransactionContext_ACU, 'runCommit' | 'baseRevision' | 'writeSet' | 'assertFresh'>;
++  /** 调用方已处于 transactionContext.runCommit 临界区内时使用。 */
++  assumeCommitLock?: boolean;
++}
++
+ 
+ function safeJsonByteLength_ACU(value: unknown): number {
+   try {
+@@ -456,6 +479,183 @@ export async function persistTableMutationLogV2_ACU(
+   return options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(options), options.revisionWriteSet);
+ }
+ 
++function samePersistedSheets_ACU(actual: TableDataObject_ACU, expected: TableDataObject_ACU, sheetKeys: string[]): boolean {
++  return sheetKeys.every(sheetKey => stableStringifyPersistedValue_ACU(actual?.[sheetKey] ?? null) === stableStringifyPersistedValue_ACU(expected?.[sheetKey] ?? null));
++}
++
++function stableStringifyPersistedValue_ACU(value: unknown): string {
++  if (Array.isArray(value)) return `[${value.map(item => stableStringifyPersistedValue_ACU(item)).join(',')}]`;
++  if (value && typeof value === 'object') {
++    return `{${Object.keys(value as Record<string, unknown>).sort().map(key => `${JSON.stringify(key)}:${stableStringifyPersistedValue_ACU((value as Record<string, unknown>)[key])}`).join(',')}}`;
++  }
++  return JSON.stringify(value ?? null);
++}
++
++function validateBatchOperationScope_ACU(
++  targetIndex: number,
++  operations: TableMutationOperationV2_ACU[],
++  changedSheetKeys: string[],
++): string | null {
++  const changedKeys = new Set(changedSheetKeys);
++  for (const operation of operations) {
++    if (!operation || typeof operation !== 'object') return `V2 batch write target ${targetIndex} has an invalid operation.`;
++    if (operation.kind === 'data_replace' || operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl') {
++      return `V2 batch write target ${targetIndex} contains unsupported unscoped operation: ${operation.kind}.`;
++    }
++    const sheetKey = typeof (operation as any).sheetKey === 'string' ? (operation as any).sheetKey.trim() : '';
++    if (!sheetKey || !changedKeys.has(sheetKey)) {
++      return `V2 batch write target ${targetIndex} operation scope is outside changed sheet keys.`;
++    }
++  }
++  return null;
++}
++
++function mergeBatchTargetsByMessageIndex_ACU(
++  targets: PersistTableMutationLogBatchTargetV2_ACU[],
++  afterData: TableDataObject_ACU,
++): Map<number, PersistTableMutationLogBatchTargetV2_ACU> | { error: string } {
++  const targetByIndex = new Map<number, PersistTableMutationLogBatchTargetV2_ACU>();
++  for (const target of targets) {
++    const targetIndex = Number(target?.targetMessageIndex);
++    if (!Number.isInteger(targetIndex)) return { error: `V2 batch write target index is invalid: ${targetIndex}.` };
++    if (!Array.isArray(target.operations) || target.operations.length === 0) {
++      return { error: `V2 batch write target ${targetIndex} has no operations.` };
++    }
++    const normalizedKeys = normalizeKeys_ACU(target.changedSheetKeys, afterData);
++    if (normalizedKeys.length === 0) return { error: `V2 batch write target ${targetIndex} has no valid changed sheet keys.` };
++    const scopeError = validateBatchOperationScope_ACU(targetIndex, target.operations, normalizedKeys);
++    if (scopeError) return { error: scopeError };
++    const existing = targetByIndex.get(targetIndex);
++    if (!existing) {
++      targetByIndex.set(targetIndex, {
++        targetMessageIndex: targetIndex,
++        operations: deepClone_ACU(target.operations),
++        changedSheetKeys: normalizedKeys,
++      });
++      continue;
++    }
++    existing.operations.push(...deepClone_ACU(target.operations));
++    existing.changedSheetKeys = [...new Set([...existing.changedSheetKeys, ...normalizedKeys])].sort();
++  }
++  return targetByIndex;
++}
++
++async function persistTableMutationLogBatchV2Core_ACU(
++  options: PersistTableMutationLogBatchV2Options_ACU,
++): Promise<{ saved: boolean; messageIndices?: number[]; error?: string }> {
++  const chat = getChatArray_ACU();
++  if (!Array.isArray(chat) || chat.length === 0) return { saved: false, error: 'chat history is empty' };
++  if (!Array.isArray(options.targets) || options.targets.length === 0) return { saved: false, error: 'V2 batch write requires at least one target.' };
++
++  const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
++  const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
++  if (!latestCheckpoint) return { saved: false, error: 'V2 batch write requires an existing full checkpoint anchor.' };
++  options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_persist');
++
++  const mergedTargets = mergeBatchTargetsByMessageIndex_ACU(options.targets, options.afterData);
++  if ('error' in mergedTargets) return { saved: false, error: mergedTargets.error };
++  const targetByIndex = mergedTargets;
++  const changedSheetKeys = new Set<string>();
++  for (const [targetIndex, target] of targetByIndex) {
++    if (!Number.isInteger(targetIndex) || targetIndex < latestCheckpoint.index || !chat[targetIndex] || chat[targetIndex].is_user) {
++      return { saved: false, error: `V2 batch write target is invalid or precedes replay checkpoint: ${targetIndex}.` };
++    }
++    target.changedSheetKeys.forEach(sheetKey => changedSheetKeys.add(sheetKey));
++  }
++
++  const candidateChat = deepClone_ACU(chat);
++  for (const [targetIndex, target] of targetByIndex) {
++    const message = candidateChat[targetIndex];
++    const isolatedData = cloneIsolatedData_ACU(message) as Record<string, any>;
++    const tagData = isolatedData[isolationKey];
++    if (!isV2TagData_ACU(tagData)) return { saved: false, error: `V2 batch write target ${targetIndex} has no V2 storage frame.` };
++    const frame = tagData.storageFrame as TableStorageFrameV2_ACU;
++    const nextSeq = Math.max(0, ...(frame.logEntries || []).map(item => Number(item.seq) || 0)) + 1;
++    const entryId = generateEntryId_ACU();
++    const parentRevision = frame.headRevision ?? null;
++    const entry: TableMutationLogEntryV2_ACU = {
++      seq: nextSeq,
++      entryId,
++      createdAt: Date.now(),
++      source: options.source,
++      targetMessageIndex: targetIndex,
++      aiFloor: countAiFloor_ACU(candidateChat, targetIndex),
++      filledSheetKeys: [],
++      changedSheetKeys: target.changedSheetKeys,
++      groupKeys: [],
++      requestId: options.requestId,
++      batchId: options.batchId,
++      operations: deepClone_ACU(target.operations),
++      baseRevision: options.transactionContext?.baseRevision ?? parentRevision,
++      parentRevision,
++      commitRevision: buildCommitRevision_ACU(nextSeq, entryId),
++      writeSet: options.transactionContext?.writeSet,
++    };
++    frame.logEntries = [...(frame.logEntries || []), entry];
++    frame.headRevision = entry.commitRevision;
++    message.TavernDB_ACU_IsolatedData = isolatedData;
++    writeMessageIdentity_ACU(message, {
++      enabled: settings_ACU.dataIsolationEnabled,
++      code: settings_ACU.dataIsolationCode,
++    });
++  }
++
++  let replayed: TableDataObject_ACU | null;
++  try {
++    replayed = await loadTableStateFromFramesV2_ACU(candidateChat, isolationKey);
++  } catch (error: any) {
++    return { saved: false, error: `V2 batch candidate replay failed: ${error?.message || String(error)}` };
++  }
++  if (!replayed) return { saved: false, error: 'V2 batch candidate replay produced no table data.' };
++  if (!samePersistedSheets_ACU(replayed, options.afterData, [...changedSheetKeys])) {
++    return { saved: false, error: 'V2 batch candidate replay differs from expected changed sheet data.' };
++  }
++
++  const snapshots = [...targetByIndex.keys()].map(index => ({
++    index,
++    message: chat[index],
++    hadIsolatedData: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_IsolatedData'),
++    isolatedData: chat[index].TavernDB_ACU_IsolatedData,
++    hadIdentity: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_Identity'),
++    identity: chat[index].TavernDB_ACU_Identity,
++  }));
++  try {
++    for (const { index } of snapshots) {
++      chat[index].TavernDB_ACU_IsolatedData = candidateChat[index].TavernDB_ACU_IsolatedData;
++      if (Object.prototype.hasOwnProperty.call(candidateChat[index], 'TavernDB_ACU_Identity')) {
++        chat[index].TavernDB_ACU_Identity = candidateChat[index].TavernDB_ACU_Identity;
++      } else {
++        delete chat[index].TavernDB_ACU_Identity;
++      }
++    }
++    await saveChatToHostStrict_ACU();
++  } catch (error) {
++    for (const snapshot of snapshots) {
++      if (snapshot.hadIsolatedData) snapshot.message.TavernDB_ACU_IsolatedData = snapshot.isolatedData;
++      else delete snapshot.message.TavernDB_ACU_IsolatedData;
++      if (snapshot.hadIdentity) snapshot.message.TavernDB_ACU_Identity = snapshot.identity;
++      else delete snapshot.message.TavernDB_ACU_Identity;
++    }
++    throw error;
++  }
++
++  return { saved: true, messageIndices: [...targetByIndex.keys()].sort((left, right) => left - right) };
++}
++
++export async function persistTableMutationLogBatchV2_ACU(
++  options: PersistTableMutationLogBatchV2Options_ACU,
++): Promise<{ saved: boolean; messageIndices?: number[]; error?: string }> {
++  if (!options.transactionContext) {
++    return { saved: false, error: 'V2 batch operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
++  }
++  if (options.assumeCommitLock) return persistTableMutationLogBatchV2Core_ACU(options);
++  return options.transactionContext.runCommit(
++    () => persistTableMutationLogBatchV2Core_ACU(options),
++    options.revisionWriteSet,
++  );
++}
++
++
+ async function persistTableSheetCheckpointV2Core_ACU(
+   options: PersistTableSheetCheckpointV2Options_ACU,
+ ): Promise<{ saved: boolean; messageIndex?: number; checkpoint?: TableSheetCheckpointV2_ACU; error?: string }> {
+diff --git a/src/service/table/table-history.ts b/src/service/table/table-history.ts
+index e5e2f2d..70e65b1 100644
+--- a/src/service/table/table-history.ts
++++ b/src/service/table/table-history.ts
+@@ -62,12 +62,52 @@ function v2EntryAiFloor_ACU(entry: any, fallbackAiFloor: number): number {
+     return Number.isFinite(value) && value > 0 ? value : fallbackAiFloor;
+ }
+ 
+-function v2OperationTouchesSheet_ACU(operation: any, sheetKey: string): boolean {
++/**
++ * 判断 V2 operation 是否可能修改某个 sheet。
++ *
++ * sql_batch 和 table_edit_dsl 缺少可靠的 sheet 归属信息。对于保存路由，
++ * 将其视为命中所有 sheet，宁可把新增量追加到更晚层，也不能插到未知 SQL 前面。
++ */
++export function v2OperationTouchesSheet_ACU(operation: any, sheetKey: string): boolean {
+     if (!operation || typeof operation !== 'object') return false;
+     if (operation.kind === 'sheet_replace') return operation.sheetKey === sheetKey;
+     if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') return operation.sheetKey === sheetKey;
+     if (operation.kind === 'data_replace') return !!operation.data?.[sheetKey];
+-    return false;
++    if (operation.kind === 'sql_sheet_batch') return operation.sheetKey === sheetKey;
++    return operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl';
++}
++
++function v2EntryTouchesSheet_ACU(entry: any, sheetKey: string): boolean {
++    return v2EventTouchesSheetData_ACU(entry, sheetKey)
++        || (Array.isArray(entry?.operations) && entry.operations.some((operation: any) => v2OperationTouchesSheet_ACU(operation, sheetKey)))
++        || (Array.isArray(entry?.patches) && entry.patches.some((patch: any) => patch?.sheetKey === sheetKey));
++}
++
++/** 返回当前 replay anchor（最新 full checkpoint）所在消息层，没有则返回 -1。 */
++export function getLatestV2FullCheckpointMessageIndex_ACU(chat: ACUMessage[] | any[], isolationKey: string): number {
++    if (!Array.isArray(chat)) return -1;
++    for (let index = chat.length - 1; index >= 0; index -= 1) {
++        const tagData = readIsolatedTagData_ACU(chat[index], isolationKey) as any;
++        if (isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full') return index;
++    }
++    return -1;
++}
++
++/**
++ * 返回某个 sheet 在当前 replay 区间最后一次拥有显式增量/单表 checkpoint 的消息层。
++ * full checkpoint 是基底而不是增量记录，因此不会作为返回值；调用方据此决定追加日志或直接更新基底。
++ */
++export function getLatestV2SheetReplayMessageIndex_ACU(chat: ACUMessage[] | any[], isolationKey: string, sheetKey: string): number {
++    const checkpointIndex = getLatestV2FullCheckpointMessageIndex_ACU(chat, isolationKey);
++    if (checkpointIndex < 0 || !sheetKey.startsWith('sheet_')) return -1;
++    for (let index = chat.length - 1; index >= checkpointIndex; index -= 1) {
++        const tagData = readIsolatedTagData_ACU(chat[index], isolationKey) as any;
++        if (!isV2TagData_ACU(tagData)) continue;
++        const frame = tagData.storageFrame;
++        if (frame.perSheetCheckpoints?.[sheetKey]?.kind === 'sheet_full') return index;
++        if ((frame.logEntries || []).some((entry: any) => v2EntryTouchesSheet_ACU(entry, sheetKey))) return index;
++    }
++    return -1;
+ }
+ 
+ function v2FrameHasSheetData_ACU(tagData: any, sheetKey: string): boolean {
+@@ -79,8 +119,7 @@ function v2FrameHasSheetData_ACU(tagData: any, sheetKey: string): boolean {
+         return true;
+     }
+     return (tagData.storageFrame.logEntries || []).some((entry: any) =>
+-        v2EventTouchesSheetData_ACU(entry, sheetKey)
+-        || (Array.isArray(entry.operations) && entry.operations.some((operation: any) => v2OperationTouchesSheet_ACU(operation, sheetKey)))
++        v2EntryTouchesSheet_ACU(entry, sheetKey)
+     );
+ }
+ 
+diff --git a/src/service/visualizer/visualizer-data-ops.ts b/src/service/visualizer/visualizer-data-ops.ts
+index 0638866..c27e8e1 100644
+--- a/src/service/visualizer/visualizer-data-ops.ts
++++ b/src/service/visualizer/visualizer-data-ops.ts
+@@ -1,12 +1,13 @@
+ import { getChatArray_ACU } from '../chat/chat-service';
+-import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
+-import { getNameMapper } from '../runtime/template-vars/name-mapper';
+-import { getLatestTableAppendMessageIndexFromChat_ACU } from '../table/table-history';
+-import { getStorageProvider } from '../table/table-storage-strategy';
+-import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
++import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
++import { getLatestV2FullCheckpointMessageIndex_ACU, getLatestV2SheetReplayMessageIndex_ACU } from '../table/table-history';
++import { ensureLegacyStorageMigratedBeforeWrite_ACU } from '../table/table-service';
++import { persistTableMutationLogBatchV2_ACU } from '../table/storage-frame-v2-persist';
++import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
++import { reloadStorageProvider } from '../table/table-storage-strategy';
++import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
+ import { isSqliteMode } from '../table/storage-mode';
+ import type { TableMutationOperationV2_ACU, TableWriteConflictUnitV2_ACU } from '../table/storage-frame-v2-types';
+-import { parseDDLTableName } from '../../shared/ddl-utils';
+ 
+ const TEMP_ROW_ID_PREFIX_ACU = '__acu_vis_tmp_row_';
+ 
+@@ -29,13 +30,17 @@ type PendingDeleteRow_ACU = {
+     rowId: string;
+ };
+ 
+-type PendingVisualizerDataOps_ACU = {
++export type PendingVisualizerDataOps_ACU = {
+     updatesByRow: Record<string, PendingUpdateRow_ACU>;
+     insertsByClientRowId: Record<string, PendingInsertRow_ACU>;
+     deletesByRow: Record<string, PendingDeleteRow_ACU>;
++    committed?: {
++        afterData: any;
++        insertedRowIds: Record<string, string>;
++    };
+ };
+ 
+-function ensurePendingOps_ACU(state: any): PendingVisualizerDataOps_ACU {
++function ensurePendingOps_ACU(state: { pendingDataOps?: PendingVisualizerDataOps_ACU | null }): PendingVisualizerDataOps_ACU {
+     if (!state.pendingDataOps || typeof state.pendingDataOps !== 'object') {
+         resetVisualizerPendingDataOps_ACU(state);
+     }
+@@ -45,8 +50,14 @@ function ensurePendingOps_ACU(state: any): PendingVisualizerDataOps_ACU {
+     return state.pendingDataOps;
+ }
+ 
+-function quoteIdentifier_ACU(name: string): string {
+-    return `\`${String(name).replace(/`/g, '``')}\``;
++export function assertVisualizerDataOpsEditable_ACU(state: { pendingDataOps?: PendingVisualizerDataOps_ACU | null }): void {
++    if ((state as any)?.isSaving) {
++        throw new Error('保存正在进行中，期间不能继续编辑。');
++    }
++    const pending = ensurePendingOps_ACU(state);
++    if (pending.committed) {
++        throw new Error('数据已持久化但本地刷新尚未完成。请先重试保存完成恢复，期间不能继续编辑。');
++    }
+ }
+ 
+ function rowKey_ACU(sheetKey: string, rowId: string): string {
+@@ -61,50 +72,211 @@ function getSheetByKey_ACU(data: any, sheetKey: string): any {
+     return data && typeof data === 'object' ? data[sheetKey] : null;
+ }
+ 
+-function getRuntimeSheet_ACU(sheetKey: string): any {
+-    return getSheetByKey_ACU(currentJsonTableData_ACU, sheetKey);
++export function createVisualizerTempRowId_ACU(): string {
++    return `${TEMP_ROW_ID_PREFIX_ACU}${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+ }
+ 
+-function getEnglishTableName_ACU(sheet: any): string {
+-    const ddlName = sheet?.sourceData?.ddl ? parseDDLTableName(sheet.sourceData.ddl) : '';
+-    return String(ddlName || sheet?.name || '').trim();
++interface VisualizerDraftRow_ACU {
++    rowId: string;
++    row: any[];
+ }
+ 
+-function resolveColumnForSheet_ACU(englishTableName: string, colName: string): { englishColName: string; chineseColName: string } {
+-    const mapper = getNameMapper();
+-    const englishColName = mapper.resolveColumnName(englishTableName, colName);
+-    const chineseColName = mapper.getChineseColumnName(englishTableName, englishColName);
+-    return { englishColName, chineseColName };
++function getDraftSheetRows_ACU(sheet: any): { headers: any[]; rows: VisualizerDraftRow_ACU[] } {
++    const content = Array.isArray(sheet?.content) ? sheet.content : [];
++    const headers = Array.isArray(content[0]) ? content[0] : [];
++    const rows: VisualizerDraftRow_ACU[] = [];
++    for (let index = 1; index < content.length; index += 1) {
++        const row = Array.isArray(content[index]) ? content[index] : [];
++        rows.push({ rowId: String(row[0] ?? '').trim(), row });
++    }
++    return { headers, rows };
+ }
+ 
+-function toSqlValueParam_ACU(value: any): string | number | null {
+-    if (value === undefined || value === null) return null;
+-    if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
+-    if (typeof value === 'boolean') return value ? 1 : 0;
+-    return String(value);
++function valuesEqual_ACU(left: any, right: any): boolean {
++    if (Object.is(left, right)) return true;
++    if (left && right && typeof left === 'object' && typeof right === 'object') {
++        return JSON.stringify(left) === JSON.stringify(right);
++    }
++    return false;
+ }
+ 
+-function buildRowDataFromTemp_ACU(state: any, sheetKey: string, rowId: string): Record<string, any> | null {
+-    const sheet = getSheetByKey_ACU(state?.tempData, sheetKey);
+-    const content = Array.isArray(sheet?.content) ? sheet.content : [];
+-    const headers = Array.isArray(content[0]) ? content[0] : [];
+-    const row = content.find((item: any[], index: number) => index > 0 && Array.isArray(item) && String(item[0] ?? '') === rowId);
+-    if (!row) return null;
+-
+-    const out: Record<string, any> = {};
+-    for (let col = 1; col < headers.length; col += 1) {
+-        const columnName = String(headers[col] || '').trim();
+-        if (!columnName) continue;
+-        out[columnName] = row[col] === undefined ? '' : row[col];
++export function assertVisualizerRowDataEditable_ACU(state: any): void {
++    assertVisualizerDataOpsEditable_ACU(state);
++    if (state?.templateDirty) {
++        throw new Error('存在未保存的模板/结构修改，请先保存模板后再编辑行数据。');
++    }
++    if (Array.isArray(state?.deletedSheetKeys) && state.deletedSheetKeys.length > 0) {
++        throw new Error('存在待保存的删表操作，请先完成删表保存后再编辑行数据。');
+     }
+-    return out;
+ }
+ 
+-export function createVisualizerTempRowId_ACU(): string {
+-    return `${TEMP_ROW_ID_PREFIX_ACU}${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
++export function assertVisualizerTemplateEditable_ACU(state: any): void {
++    assertVisualizerDataOpsEditable_ACU(state);
++    if (hasVisualizerPendingDataOps_ACU(state)) {
++        throw new Error('存在未保存的行数据增量，请先保存数据后再修改模板/结构。');
++    }
++    if (Array.isArray(state?.deletedSheetKeys) && state.deletedSheetKeys.length > 0) {
++        throw new Error('存在待保存的删表操作，请先完成删表保存后再修改模板/结构。');
++    }
++}
++
++export function assertVisualizerSheetDeleteEditable_ACU(state: any): void {
++    assertVisualizerDataOpsEditable_ACU(state);
++    if (state?.templateDirty) {
++        throw new Error('存在未保存的模板/结构修改，请先保存模板后再删除表。');
++    }
++    if (hasVisualizerPendingDataOps_ACU(state)) {
++        throw new Error('存在未保存的行数据增量，请先保存数据后再删除表。');
++    }
+ }
+ 
+-export function resetVisualizerPendingDataOps_ACU(state: any): void {
++export function recordVisualizerDraftDataDiff_ACU(
++    state: any,
++    previousData: Record<string, any> | null | undefined,
++    nextData: Record<string, any> | null | undefined,
++    skipSheetKeys: Iterable<string> = [],
++): { templateChanged: boolean } {
++    assertVisualizerDataOpsEditable_ACU(state);
++    const skipped = new Set(Array.from(skipSheetKeys, key => String(key)));
++    const previous = previousData && typeof previousData === 'object' ? previousData : {};
++    const next = nextData && typeof nextData === 'object' ? nextData : {};
++    const pending = ensurePendingOps_ACU(state);
++    const hadPendingRowOps = Object.keys(pending.updatesByRow).length > 0
++        || Object.keys(pending.insertsByClientRowId).length > 0
++        || Object.keys(pending.deletesByRow).length > 0;
++    let hasStructuralChanges = skipped.size > 0;
++    let hasTemplateChanges = false;
++    const plans: Array<
++        | { kind: 'update'; sheetKey: string; rowId: string; columnName: string; value: any }
++        | { kind: 'insert'; sheetKey: string; clientRowId: string; row: any[] }
++        | { kind: 'delete'; sheetKey: string; rowId: string }
++    > = [];
++
++    const sheetKeys = new Set([...Object.keys(previous), ...Object.keys(next)]);
++    sheetKeys.delete('mate');
++    for (const sheetKey of sheetKeys) {
++        if (skipped.has(sheetKey)) continue;
++        if (!previous[sheetKey] || !next[sheetKey]) {
++            hasStructuralChanges = true;
++            hasTemplateChanges = true;
++            continue;
++        }
++        const previousSheet = getDraftSheetRows_ACU(previous[sheetKey]);
++        const nextSheet = getDraftSheetRows_ACU(next[sheetKey]);
++        const previousHeaders = previousSheet.headers.map(header => String(header ?? '').trim());
++        const nextHeaders = nextSheet.headers.map(header => String(header ?? '').trim());
++        const schemaChanged = JSON.stringify(previousHeaders) !== JSON.stringify(nextHeaders);
++        const previousMetadata = { ...previous[sheetKey] };
++        const nextMetadata = { ...next[sheetKey] };
++        delete previousMetadata.content;
++        delete nextMetadata.content;
++        if (schemaChanged || !valuesEqual_ACU(previousMetadata, nextMetadata)) {
++            hasStructuralChanges = true;
++            hasTemplateChanges = true;
++        }
++        const previousById = new Map<string, VisualizerDraftRow_ACU>();
++        for (const item of previousSheet.rows) {
++            if (!item.rowId) continue;
++            if (previousById.has(item.rowId)) {
++                throw new Error(`AI 草稿应用失败：原草稿表 ${sheetKey} 的行标识 ${item.rowId} 重复。`);
++            }
++            previousById.set(item.rowId, item);
++        }
++
++        const candidateIdCounts = new Map<string, number>();
++        for (const item of nextSheet.rows) {
++            if (!item.rowId) continue;
++            candidateIdCounts.set(item.rowId, (candidateIdCounts.get(item.rowId) || 0) + 1);
++        }
++        for (const [rowId, count] of candidateIdCounts) {
++            if (count > 1 && previousById.has(rowId)) {
++                throw new Error(`AI 草稿应用失败：候选表 ${sheetKey} 的既有行标识 ${rowId} 重复，无法判断行身份。`);
++            }
++        }
++
++        const matchedPreviousIds = new Set<string>();
++        const oldHeaderIndex = new Map<string, number>();
++        previousSheet.headers.forEach((header, index) => {
++            const name = String(header ?? '').trim();
++            if (index > 0 && name && !oldHeaderIndex.has(name)) oldHeaderIndex.set(name, index);
++        });
++        const commonColumnNames = new Set(nextHeaders.filter((name, index) => index > 0 && oldHeaderIndex.has(name)));
++        const previousRowOrder = previousSheet.rows.map(item => item.rowId).filter(Boolean);
++        const nextRowOrder = nextSheet.rows.map(item => item.rowId).filter(rowId => rowId && previousById.has(rowId));
++        if (schemaChanged) {
++            for (const item of nextSheet.rows) {
++                if (!item.rowId || candidateIdCounts.get(item.rowId) !== 1 || !previousById.has(item.rowId)) continue;
++                const oldRow = previousById.get(item.rowId)!.row;
++                const sharedLength = Math.min(oldRow.length, item.row.length);
++                const changedSharedValue = Array.from({ length: Math.max(0, sharedLength - 1) }, (_, index) => index + 1)
++                    .some(index => !valuesEqual_ACU(oldRow[index] === undefined ? '' : oldRow[index], item.row[index] === undefined ? '' : item.row[index]));
++                const addedNonEmptyValue = item.row.slice(oldRow.length).some(value => !valuesEqual_ACU(value === undefined ? '' : value, ''));
++                if (changedSharedValue || addedNonEmptyValue) {
++                    throw new Error(`AI 草稿应用失败：表 ${sheetKey} 同时修改了列结构和既有行数据，请拆分为两次操作后分别保存。`);
++                }
++            }
++        }
++        if (!schemaChanged
++            && previousRowOrder.length === nextRowOrder.length
++            && previousRowOrder.every(rowId => nextRowOrder.includes(rowId))
++            && previousRowOrder.some((rowId, index) => nextRowOrder[index] !== rowId)) {
++            throw new Error(`AI 草稿应用失败：表 ${sheetKey} 调整了既有行顺序，当前 V2 row operation 不支持持久化行重排。`);
++        }
++
++        for (const item of nextSheet.rows) {
++            const canMatch = !!item.rowId
++                && candidateIdCounts.get(item.rowId) === 1
++                && previousById.has(item.rowId);
++            if (canMatch) {
++                matchedPreviousIds.add(item.rowId);
++                if (isTempRowId_ACU(item.rowId)) continue;
++                const oldRow = previousById.get(item.rowId)!.row;
++                for (let columnIndex = 1; columnIndex < nextSheet.headers.length; columnIndex += 1) {
++                    const columnName = String(nextSheet.headers[columnIndex] ?? '').trim();
++                    if (!columnName) continue;
++                    if (schemaChanged && !commonColumnNames.has(columnName)) continue;
++                    const previousColumnIndex = oldHeaderIndex.get(columnName);
++                    const oldValue = previousColumnIndex === undefined ? undefined : oldRow[previousColumnIndex];
++                    const nextValue = item.row[columnIndex] === undefined ? '' : item.row[columnIndex];
++                    if (!valuesEqual_ACU(oldValue === undefined ? '' : oldValue, nextValue)) {
++                        if (schemaChanged) {
++                            throw new Error(`AI 草稿应用失败：表 ${sheetKey} 同时修改了列结构和既有行数据，请拆分为两次操作后分别保存。`);
++                        }
++                        plans.push({ kind: 'update', sheetKey, rowId: item.rowId, columnName, value: nextValue });
++                    }
++                }
++                continue;
++            }
++
++            const clientRowId = createVisualizerTempRowId_ACU();
++            plans.push({ kind: 'insert', sheetKey, clientRowId, row: item.row });
++        }
++
++        for (const item of previousSheet.rows) {
++            if (item.rowId && !matchedPreviousIds.has(item.rowId)) {
++                plans.push({ kind: 'delete', sheetKey, rowId: item.rowId });
++            }
++        }
++    }
++
++    if ((hasStructuralChanges || state?.templateDirty) && (hadPendingRowOps || plans.length > 0)) {
++        throw new Error('AI 草稿应用失败：结构变化不能与未保存的行数据增量混合，请先保存数据，或让 AI 分两次修改并分别保存。');
++    }
++    if (skipped.size > 0 && (hasTemplateChanges || state?.templateDirty)) {
++        throw new Error('AI 草稿应用失败：删表操作不能与模板/结构变化混合，请拆分为两次操作后分别保存。');
++    }
++
++    for (const plan of plans) {
++        if (plan.kind === 'update') recordVisualizerCellUpdate_ACU(state, plan.sheetKey, plan.rowId, plan.columnName, plan.value);
++        else if (plan.kind === 'insert') {
++            plan.row[0] = plan.clientRowId;
++            recordVisualizerRowInsert_ACU(state, plan.sheetKey, plan.clientRowId);
++        } else recordVisualizerRowDelete_ACU(state, plan.sheetKey, plan.rowId);
++    }
++    return { templateChanged: hasTemplateChanges };
++}
++
++export function resetVisualizerPendingDataOps_ACU(state: { pendingDataOps?: PendingVisualizerDataOps_ACU | null }): void {
+     state.pendingDataOps = {
+         updatesByRow: {},
+         insertsByClientRowId: {},
+@@ -118,6 +290,7 @@ export function recordVisualizerCellUpdate_ACU(state: any, sheetKey: string, row
+     if (!sheetKey || !normalizedRowId || !normalizedColumnName || isTempRowId_ACU(normalizedRowId)) return;
+ 
+     const pending = ensurePendingOps_ACU(state);
++    assertVisualizerDataOpsEditable_ACU(state);
+     const key = rowKey_ACU(sheetKey, normalizedRowId);
+     if (pending.deletesByRow[key]) return;
+     if (!pending.updatesByRow[key]) {
+@@ -129,6 +302,7 @@ export function recordVisualizerCellUpdate_ACU(state: any, sheetKey: string, row
+ export function recordVisualizerRowInsert_ACU(state: any, sheetKey: string, clientRowId: string): void {
+     if (!sheetKey || !clientRowId) return;
+     const pending = ensurePendingOps_ACU(state);
++    assertVisualizerDataOpsEditable_ACU(state);
+     pending.insertsByClientRowId[clientRowId] = { kind: 'insertRow', sheetKey, clientRowId };
+ }
+ 
+@@ -136,6 +310,7 @@ export function recordVisualizerRowDelete_ACU(state: any, sheetKey: string, rowI
+     const normalizedRowId = String(rowId ?? '').trim();
+     if (!sheetKey || !normalizedRowId) return;
+     const pending = ensurePendingOps_ACU(state);
++    assertVisualizerDataOpsEditable_ACU(state);
+     if (isTempRowId_ACU(normalizedRowId)) {
+         delete pending.insertsByClientRowId[normalizedRowId];
+         return;
+@@ -162,7 +337,8 @@ export function recordVisualizerSheetRowsUpdate_ACU(state: any, sheetKey: string
+ 
+ export function hasVisualizerPendingDataOps_ACU(state: any): boolean {
+     const pending = ensurePendingOps_ACU(state);
+-    return Object.keys(pending.deletesByRow).length > 0
++    return !!pending.committed
++        || Object.keys(pending.deletesByRow).length > 0
+         || Object.keys(pending.updatesByRow).length > 0
+         || Object.keys(pending.insertsByClientRowId).length > 0;
+ }
+@@ -172,65 +348,7 @@ function addWriteSet_ACU(writeSet: TableWriteConflictUnitV2_ACU[], unit: TableWr
+     if (!writeSet.some(item => JSON.stringify(item) === key)) writeSet.push(unit);
+ }
+ 
+-function pushDeleteSql_ACU(statements: string[], paramsList: (string | number | null)[][], writeSet: TableWriteConflictUnitV2_ACU[], op: PendingDeleteRow_ACU): string | null {
+-    const sheet = getRuntimeSheet_ACU(op.sheetKey);
+-    const englishTableName = getEnglishTableName_ACU(sheet);
+-    if (!sheet || !englishTableName) return `删除行失败：表 ${op.sheetKey} 在运行时不存在。`;
+-    statements.push(`DELETE FROM ${quoteIdentifier_ACU(englishTableName)} WHERE ${quoteIdentifier_ACU('row_id')} = ?;`);
+-    paramsList.push([toSqlValueParam_ACU(op.rowId)]);
+-    addWriteSet_ACU(writeSet, { kind: 'row', sheetKey: op.sheetKey, rowId: op.rowId });
+-    return null;
+-}
+-
+-function pushUpdateSql_ACU(statements: string[], paramsList: (string | number | null)[][], writeSet: TableWriteConflictUnitV2_ACU[], op: PendingUpdateRow_ACU): string | null {
+-    const sheet = getRuntimeSheet_ACU(op.sheetKey);
+-    const englishTableName = getEnglishTableName_ACU(sheet);
+-    const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
+-    if (!sheet || !englishTableName) return `更新行失败：表 ${op.sheetKey} 在运行时不存在。`;
+-
+-    const setClauses: string[] = [];
+-    const params: (string | number | null)[] = [];
+-    for (const colName in op.data) {
+-        const { englishColName, chineseColName } = resolveColumnForSheet_ACU(englishTableName, colName);
+-        if (!headers.includes(chineseColName)) continue;
+-        setClauses.push(`${quoteIdentifier_ACU(englishColName)} = ?`);
+-        params.push(toSqlValueParam_ACU(op.data[colName]));
+-        addWriteSet_ACU(writeSet, { kind: 'cell', sheetKey: op.sheetKey, rowId: op.rowId, columnKey: chineseColName });
+-    }
+-    if (setClauses.length === 0) return null;
+-
+-    params.push(toSqlValueParam_ACU(op.rowId));
+-    statements.push(`UPDATE ${quoteIdentifier_ACU(englishTableName)} SET ${setClauses.join(', ')} WHERE ${quoteIdentifier_ACU('row_id')} = ?;`);
+-    paramsList.push(params);
+-    return null;
+-}
+-
+-function pushInsertSql_ACU(statements: string[], paramsList: (string | number | null)[][], writeSet: TableWriteConflictUnitV2_ACU[], state: any, op: PendingInsertRow_ACU): string | null {
+-    const sheet = getRuntimeSheet_ACU(op.sheetKey);
+-    const englishTableName = getEnglishTableName_ACU(sheet);
+-    const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : [];
+-    const rowData = buildRowDataFromTemp_ACU(state, op.sheetKey, op.clientRowId);
+-    if (!sheet || !englishTableName || !rowData) return `新增行失败：表 ${op.sheetKey} 在运行时不存在，或临时行已丢失。`;
+-
+-    const columnNames: string[] = [];
+-    const params: (string | number | null)[] = [];
+-    for (const colName in rowData) {
+-        const { englishColName, chineseColName } = resolveColumnForSheet_ACU(englishTableName, colName);
+-        if (englishColName === 'row_id' || colName === 'row_id') continue;
+-        if (!headers.includes(chineseColName)) continue;
+-        columnNames.push(quoteIdentifier_ACU(englishColName));
+-        params.push(toSqlValueParam_ACU(rowData[colName]));
+-    }
+-
+-    statements.push(columnNames.length > 0
+-        ? `INSERT INTO ${quoteIdentifier_ACU(englishTableName)} (${columnNames.join(', ')}) VALUES (${columnNames.map(() => '?').join(', ')});`
+-        : `INSERT INTO ${quoteIdentifier_ACU(englishTableName)} DEFAULT VALUES;`);
+-    paramsList.push(params);
+-    addWriteSet_ACU(writeSet, { kind: 'sheet', sheetKey: op.sheetKey });
+-    return null;
+-}
+-
+-function buildNativeWriteSet_ACU(pending: PendingVisualizerDataOps_ACU): TableWriteConflictUnitV2_ACU[] {
++function buildVisualizerWriteSet_ACU(pending: PendingVisualizerDataOps_ACU): TableWriteConflictUnitV2_ACU[] {
+     const writeSet: TableWriteConflictUnitV2_ACU[] = [];
+     Object.values(pending.deletesByRow).forEach(op => addWriteSet_ACU(writeSet, { kind: 'row', sheetKey: op.sheetKey, rowId: op.rowId }));
+     Object.values(pending.updatesByRow).forEach(op => {
+@@ -240,189 +358,198 @@ function buildNativeWriteSet_ACU(pending: PendingVisualizerDataOps_ACU): TableWr
+     return writeSet;
+ }
+ 
+-function getTargetSheetKeysFromWriteSet_ACU(writeSet: TableWriteConflictUnitV2_ACU[]): string[] {
+-    return [...new Set(writeSet.flatMap(unit => 'sheetKey' in unit ? [unit.sheetKey] : []))];
++function findRowIndexById_ACU(sheet: any, rowId: string): number {
++    const content = Array.isArray(sheet?.content) ? sheet.content : [];
++    let matchedIndex = -1;
++    for (let index = 1; index < content.length; index += 1) {
++        if (String(content[index]?.[0] ?? '') !== rowId) continue;
++        if (matchedIndex >= 0) throw new Error(`行标识 ${rowId} 重复，无法确定要操作的行。`);
++        matchedIndex = index;
++    }
++    return matchedIndex;
+ }
+ 
+-function findRowIndexById_ACU(sheet: any, rowId: string): number {
++function assertValidPersistedRowIds_ACU(sheet: any, sheetKey: string, action: string): void {
+     const content = Array.isArray(sheet?.content) ? sheet.content : [];
++    const rowIds = new Set<string>();
+     for (let index = 1; index < content.length; index += 1) {
+-        if (String(content[index]?.[0] ?? '') === rowId) return index;
++        const rowId = String(content[index]?.[0] ?? '').trim();
++        const numericId = Number(rowId);
++        if (!/^[1-9]\d*$/.test(rowId) || !Number.isSafeInteger(numericId) || String(numericId) !== rowId) {
++            throw new Error(`${action}失败：表 ${sheetKey} 的行标识 ${rowId || '(空)'} 必须是正安全整数。`);
++        }
++        if (rowIds.has(rowId)) throw new Error(`${action}失败：表 ${sheetKey} 的行标识 ${rowId} 重复。`);
++        rowIds.add(rowId);
+     }
+-    return -1;
+ }
+ 
+-function buildNativeInsertCells_ACU(state: any, sheetKey: string, clientRowId: string, runtimeSheet: any): any[] | null {
++function getValidatedHeaders_ACU(sheet: any, sheetKey: string, action: string): any[] {
++    const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0] : null;
++    if (!headers || headers.length === 0) throw new Error(`${action}失败：表 ${sheetKey} 的表头无效。`);
++    const columnNames = headers.slice(1).map((header: any) => String(header ?? '').trim());
++    if (columnNames.some(columnName => !columnName)) throw new Error(`${action}失败：表 ${sheetKey} 存在空列名。`);
++    if (new Set(columnNames).size !== columnNames.length) throw new Error(`${action}失败：表 ${sheetKey} 存在重复列名。`);
++    return headers;
++}
++
++function assertCompleteRow_ACU(row: any, headers: any[], sheetKey: string, rowId: string, action: string): any[] {
++    if (!Array.isArray(row) || row.length !== headers.length) {
++        throw new Error(`${action}失败：表 ${sheetKey} 的行 ${rowId} 与表头长度不一致。`);
++    }
++    if (String(row[0] ?? '').trim() !== rowId) {
++        throw new Error(`${action}失败：表 ${sheetKey} 的行标识不一致。`);
++    }
++    return row;
++}
++
++function toPersistedCells_ACU(cells: any[]): (string | null)[] {
++    return cells.map(value => value === null ? null : String(value ?? ''));
++}
++
++function buildInsertCells_ACU(state: any, sheetKey: string, clientRowId: string, runtimeSheet: any): (string | null)[] | null {
+     const tempSheet = getSheetByKey_ACU(state?.tempData, sheetKey);
+     const tempContent = Array.isArray(tempSheet?.content) ? tempSheet.content : [];
+     const tempRow = tempContent.find((row: any[], index: number) => index > 0 && Array.isArray(row) && String(row[0] ?? '') === clientRowId);
+     if (!Array.isArray(tempRow)) return null;
+ 
+-    const headers = Array.isArray(runtimeSheet?.content?.[0]) ? runtimeSheet.content[0] : [];
+-    const cells = headers.map((_: any, index: number) => tempRow[index] ?? '');
+-    let nextRowId = String(Array.isArray(runtimeSheet?.content) ? runtimeSheet.content.length : 1);
+-    const usedIds = new Set((runtimeSheet?.content || []).slice(1).map((row: any[]) => String(row?.[0] ?? '')));
+-    while (usedIds.has(nextRowId)) nextRowId = String(Number(nextRowId) + 1);
++    const headers = getValidatedHeaders_ACU(runtimeSheet, sheetKey, '新增行');
++    assertValidPersistedRowIds_ACU(runtimeSheet, sheetKey, '新增行');
++    if (tempRow.length !== headers.length) throw new Error(`新增行失败：表 ${sheetKey} 的临时行与表头长度不一致。`);
++    const cells = toPersistedCells_ACU(tempRow);
++    const usedIds = new Set<string>((runtimeSheet?.content || []).slice(1).map((row: any[]) => String(row?.[0] ?? '')));
++    const highestNumericId = Math.max(0, ...[...usedIds].map(rowId => Number(rowId)));
++    if (highestNumericId >= Number.MAX_SAFE_INTEGER) {
++        throw new Error(`新增行失败：表 ${sheetKey} 的行标识已达到安全整数上限。`);
++    }
++    const nextRowId = String(highestNumericId + 1);
+     cells[0] = nextRowId;
+     return cells;
+ }
+ 
+-async function applyNativeVisualizerPendingDataOps_ACU(
+-    state: any,
+-    pending: PendingVisualizerDataOps_ACU,
+-): Promise<{ success: boolean; changed: boolean; error?: string }> {
+-    const writeSet = buildNativeWriteSet_ACU(pending);
+-    if (writeSet.length === 0) return { success: true, changed: false };
+-
+-    const isolationKey = getCurrentIsolationKey_ACU();
+-    const appendTargetIndex = getLatestTableAppendMessageIndexFromChat_ACU(getChatArray_ACU(), isolationKey, settings_ACU);
+-    if (appendTargetIndex === -1) {
+-        return { success: false, changed: false, error: '找不到可写入 V2 增量日志的 AI 楼层，已阻止保存。' };
+-    }
+-
+-    const targetSheetKeys = getTargetSheetKeysFromWriteSet_ACU(writeSet);
+-    const commitResult = await runTableUpdateCommit_ACU<{ changes: number }>({
+-        source: 'manual_crud',
+-        reason: 'visualizer_save_native_batch',
+-        isolationKey,
+-        writeSet,
+-        revisionWriteSet: writeSet,
+-        initialData: currentJsonTableData_ACU,
+-        targetMessageIndex: appendTargetIndex,
+-        targetSheetKeys,
+-        updateGroupKeys: null,
+-        trackingSheetKeys: [],
+-        trackAsUpdate: false,
+-    }, ({ workingData }) => {
+-        const data = workingData as any;
+-        const operations: TableMutationOperationV2_ACU[] = [];
+-        let changes = 0;
+-
+-        for (const op of Object.values(pending.deletesByRow)) {
+-            const sheet = data?.[op.sheetKey];
+-            if (!sheet || !Array.isArray(sheet.content)) return { success: false, error: `删除行失败：表 ${op.sheetKey} 在运行时不存在。` };
+-            const beforeLength = sheet.content.length;
+-            sheet.content = sheet.content.filter((row: any[], index: number) => index === 0 || String(row?.[0] ?? '') !== op.rowId);
+-            if (sheet.content.length === beforeLength) return { success: false, error: `删除行失败：表 ${op.sheetKey} 的行 ${op.rowId} 不存在。` };
+-            operations.push({ kind: 'row_delete', sheetKey: op.sheetKey, rowId: op.rowId });
+-            changes += 1;
+-        }
+-
+-        for (const op of Object.values(pending.updatesByRow)) {
+-            const sheet = data?.[op.sheetKey];
+-            if (!sheet || !Array.isArray(sheet.content)) return { success: false, error: `更新行失败：表 ${op.sheetKey} 在运行时不存在。` };
+-            const rowIndex = findRowIndexById_ACU(sheet, op.rowId);
+-            if (rowIndex < 1) return { success: false, error: `更新行失败：表 ${op.sheetKey} 的行 ${op.rowId} 不存在。` };
+-            const headers = Array.isArray(sheet.content[0]) ? sheet.content[0] : [];
+-            const row = sheet.content[rowIndex];
+-            let updated = 0;
+-            Object.keys(op.data).forEach(columnName => {
+-                const colIndex = headers.indexOf(columnName);
+-                if (colIndex < 1) return;
+-                row[colIndex] = op.data[columnName];
+-                updated += 1;
+-            });
+-            if (updated > 0) {
+-                operations.push({ kind: 'row_upsert', sheetKey: op.sheetKey, rowId: op.rowId, cells: [...row] });
+-                changes += 1;
+-            }
+-        }
+-
+-        for (const op of Object.values(pending.insertsByClientRowId)) {
+-            const sheet = data?.[op.sheetKey];
+-            if (!sheet || !Array.isArray(sheet.content)) return { success: false, error: `新增行失败：表 ${op.sheetKey} 在运行时不存在。` };
+-            const cells = buildNativeInsertCells_ACU(state, op.sheetKey, op.clientRowId, sheet);
+-            if (!cells) return { success: false, error: `新增行失败：表 ${op.sheetKey} 的临时行已丢失。` };
+-            sheet.content.push(cells);
+-            operations.push({ kind: 'row_upsert', sheetKey: op.sheetKey, rowId: String(cells[0] ?? ''), cells: [...cells] });
+-            changes += 1;
+-        }
+-
+-        return {
+-            success: true,
+-            value: { changes },
+-            tableData: data,
+-            mutationResult: { changes, errors: [] },
+-            persist: { operations },
+-        };
++export function replaceVisualizerTemporaryRowIds_ACU(state: any, insertedRowIds: Record<string, string>): void {
++    Object.entries(insertedRowIds).forEach(([clientRowId, rowId]) => {
++        Object.values(state?.tempData || {}).forEach((sheet: any) => {
++            if (!Array.isArray(sheet?.content)) return;
++            const row = sheet.content.find((candidate: any[], index: number) => index > 0 && String(candidate?.[0] ?? '') === clientRowId);
++            if (row) row[0] = rowId;
++        });
+     });
++}
+ 
+-    if (!commitResult.success) {
+-        return { success: false, changed: false, error: commitResult.error || '可视化编辑器原生模式增量保存失败。' };
+-    }
+-
+-    resetVisualizerPendingDataOps_ACU(state);
+-    return { success: true, changed: true };
++async function refreshVisualizerRuntimeFromReplay_ACU(isolationKey: string): Promise<any> {
++    const replayedData = await loadTableStateFromFramesV2_ACU(getChatArray_ACU(), isolationKey);
++    if (!replayedData) throw new Error('V2 replay 未产生表格数据，已阻止刷新运行时。');
++    _set_currentJsonTableData_ACU(replayedData);
++    if (isSqliteMode()) await reloadStorageProvider();
++    return replayedData;
+ }
+ 
+-export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ success: boolean; changed: boolean; error?: string }> {
++export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ success: boolean; changed: boolean; insertedRowIds?: Record<string, string>; error?: string }> {
+     const pending = ensurePendingOps_ACU(state);
+-    if (!hasVisualizerPendingDataOps_ACU(state)) return { success: true, changed: false };
+-    if (!isSqliteMode()) return applyNativeVisualizerPendingDataOps_ACU(state, pending);
+-
+-    const statements: string[] = [];
+-    const paramsList: (string | number | null)[][] = [];
+-    const writeSet: TableWriteConflictUnitV2_ACU[] = [];
+-
+-    for (const op of Object.values(pending.deletesByRow)) {
+-        const error = pushDeleteSql_ACU(statements, paramsList, writeSet, op);
+-        if (error) return { success: false, changed: false, error };
+-    }
+-    for (const op of Object.values(pending.updatesByRow)) {
+-        const error = pushUpdateSql_ACU(statements, paramsList, writeSet, op);
+-        if (error) return { success: false, changed: false, error };
+-    }
+-    for (const op of Object.values(pending.insertsByClientRowId)) {
+-        const error = pushInsertSql_ACU(statements, paramsList, writeSet, state, op);
+-        if (error) return { success: false, changed: false, error };
++    if (pending.committed) {
++        try {
++            await refreshVisualizerRuntimeFromReplay_ACU(getCurrentIsolationKey_ACU());
++            const insertedRowIds = pending.committed.insertedRowIds;
++            return Object.keys(insertedRowIds).length > 0
++                ? { success: true, changed: true, insertedRowIds }
++                : { success: true, changed: true };
++        } catch (error: any) {
++            return { success: false, changed: false, error: `数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}` };
++        }
+     }
++    if (!hasVisualizerPendingDataOps_ACU(state)) return { success: true, changed: false };
+ 
+-    if (statements.length === 0) return { success: true, changed: false };
+-
+-    const provider = getStorageProvider();
+-    if (typeof provider.applyEditsBatch !== 'function') {
+-        return { success: false, changed: false, error: '当前运行时不支持批量 SQL 保存，已阻止可视化编辑器数据写入。' };
+-    }
++    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('visualizer_save_v2_replay');
++    if (!migration.success) return { success: false, changed: false, error: migration.error || '旧存储迁移失败，已阻止可视化编辑器保存。' };
++    if (migration.migrated) await reloadStorageProvider();
+ 
++    const writeSet = buildVisualizerWriteSet_ACU(pending);
+     const isolationKey = getCurrentIsolationKey_ACU();
+-    const appendTargetIndex = getLatestTableAppendMessageIndexFromChat_ACU(getChatArray_ACU(), isolationKey, settings_ACU);
+-    if (appendTargetIndex === -1) {
+-        return { success: false, changed: false, error: '找不到可写入 V2 增量日志的 AI 楼层，已阻止保存。' };
+-    }
+-
+-    const targetSheetKeys = [...new Set(writeSet.flatMap(unit => 'sheetKey' in unit ? [unit.sheetKey] : []))];
+-    const commitResult = await runTableUpdateCommit_ACU<{ appliedEdits: number; changes: number }>({
+-        source: 'manual_crud',
+-        reason: 'visualizer_save_sql_batch',
+-        isolationKey,
+-        writeSet: writeSet.length > 0 ? writeSet : [{ kind: 'all' }],
+-        revisionWriteSet: writeSet.length > 0 ? writeSet : [{ kind: 'all' }],
+-        initialData: currentJsonTableData_ACU,
+-        targetMessageIndex: appendTargetIndex,
+-        targetSheetKeys,
+-        updateGroupKeys: null,
+-        trackingSheetKeys: [],
+-        trackAsUpdate: false,
+-        operations: [{ kind: 'sql_batch', statements, params: paramsList }],
+-    }, () => {
+-        const batchResult = provider.applyEditsBatch!(statements, 'visualizer_save', paramsList);
+-        if (!batchResult.success) {
+-            return { success: false, error: batchResult.error || 'visualizer_save_sql_batch failed' };
+-        }
+-        const tableData = provider.getCurrentData();
+-        if (!tableData) return { success: false, error: 'SQLite runtime data export failed' };
+-        return {
+-            success: true,
+-            value: { appliedEdits: batchResult.appliedEdits, changes: batchResult.appliedEdits },
+-            tableData,
+-            mutationResult: { changes: batchResult.appliedEdits, errors: [] },
+-        };
+-    });
++    try {
++        const result = await runTableWriteTransaction_ACU({
++            source: 'manual_crud',
++            reason: 'visualizer_save_v2_replay',
++            isolationKey,
++            writeSet,
++            initialData: currentJsonTableData_ACU,
++        }, async (transactionContext, workingData) => {
++            if (!workingData) throw new Error('运行时表格数据为空，已阻止可视化编辑器保存。');
++            const data = workingData as any;
++            const operationsBySheet = new Map<string, TableMutationOperationV2_ACU[]>();
++            const insertedRowIds: Record<string, string> = {};
++            const appendOperation = (sheetKey: string, operation: TableMutationOperationV2_ACU): void => {
++                const operations = operationsBySheet.get(sheetKey) || [];
++                operations.push(operation);
++                operationsBySheet.set(sheetKey, operations);
++            };
++
++            for (const op of Object.values(pending.deletesByRow)) {
++                const sheet = data[op.sheetKey];
++                if (!sheet || !Array.isArray(sheet.content)) throw new Error(`删除行失败：表 ${op.sheetKey} 在运行时不存在。`);
++                assertValidPersistedRowIds_ACU(sheet, op.sheetKey, '删除行');
++                const rowIndex = findRowIndexById_ACU(sheet, op.rowId);
++                if (rowIndex < 1) throw new Error(`删除行失败：表 ${op.sheetKey} 的行 ${op.rowId} 不存在。`);
++                const headers = getValidatedHeaders_ACU(sheet, op.sheetKey, '删除行');
++                assertCompleteRow_ACU(sheet.content[rowIndex], headers, op.sheetKey, op.rowId, '删除行');
++                sheet.content.splice(rowIndex, 1);
++                appendOperation(op.sheetKey, { kind: 'row_delete', sheetKey: op.sheetKey, rowId: op.rowId });
++            }
++            for (const op of Object.values(pending.updatesByRow)) {
++                const sheet = data[op.sheetKey];
++                if (!sheet || !Array.isArray(sheet.content)) throw new Error(`更新行失败：表 ${op.sheetKey} 在运行时不存在。`);
++                assertValidPersistedRowIds_ACU(sheet, op.sheetKey, '更新行');
++                const rowIndex = findRowIndexById_ACU(sheet, op.rowId);
++                if (rowIndex < 1) throw new Error(`更新行失败：表 ${op.sheetKey} 的行 ${op.rowId} 不存在。`);
++                const headers = getValidatedHeaders_ACU(sheet, op.sheetKey, '更新行');
++                const row = assertCompleteRow_ACU(sheet.content[rowIndex], headers, op.sheetKey, op.rowId, '更新行');
++                for (const [columnName, value] of Object.entries(op.data)) {
++                    const columnIndex = headers.indexOf(columnName);
++                    if (columnIndex < 1) throw new Error(`更新行失败：表 ${op.sheetKey} 不存在列 ${columnName}。`);
++                    row[columnIndex] = value;
++                }
++                const cells = toPersistedCells_ACU(row);
++                cells[0] = op.rowId;
++                appendOperation(op.sheetKey, { kind: 'row_upsert', sheetKey: op.sheetKey, rowId: op.rowId, cells });
++            }
++            for (const op of Object.values(pending.insertsByClientRowId)) {
++                const sheet = data[op.sheetKey];
++                if (!sheet || !Array.isArray(sheet.content)) throw new Error(`新增行失败：表 ${op.sheetKey} 在运行时不存在。`);
++                const cells = buildInsertCells_ACU(state, op.sheetKey, op.clientRowId, sheet);
++                if (!cells) throw new Error(`新增行失败：表 ${op.sheetKey} 的临时行已丢失或表头无效。`);
++                sheet.content.push(cells);
++                const rowId = String(cells[0]);
++                insertedRowIds[op.clientRowId] = rowId;
++                appendOperation(op.sheetKey, { kind: 'row_upsert', sheetKey: op.sheetKey, rowId, cells });
++            }
+ 
+-    if (!commitResult.success) {
+-        return { success: false, changed: false, error: commitResult.error || '可视化编辑器批量 SQL 保存失败。' };
++            const chat = getChatArray_ACU();
++            const fullCheckpointIndex = getLatestV2FullCheckpointMessageIndex_ACU(chat, isolationKey);
++            if (fullCheckpointIndex < 0) throw new Error('找不到 V2 full checkpoint，已阻止写入 log-only 增量。');
++            const targets = [...operationsBySheet.entries()].map(([sheetKey, operations]) => {
++                const explicitReplayIndex = getLatestV2SheetReplayMessageIndex_ACU(chat, isolationKey, sheetKey);
++                return {
++                    targetMessageIndex: explicitReplayIndex >= 0 ? explicitReplayIndex : fullCheckpointIndex,
++                    changedSheetKeys: [sheetKey],
++                    operations,
++                };
++            });
++            const saved = await persistTableMutationLogBatchV2_ACU({
++                source: 'manual_crud',
++                afterData: data,
++                targets,
++                isolationKey,
++                revisionWriteSet: writeSet,
++                transactionContext,
++            });
++            if (!saved.saved) throw new Error(saved.error || 'V2 行级增量持久化失败。');
++            return { afterData: data, insertedRowIds };
++        });
++        pending.committed = result;
++        await refreshVisualizerRuntimeFromReplay_ACU(isolationKey);
++        return Object.keys(result.insertedRowIds).length > 0
++            ? { success: true, changed: true, insertedRowIds: result.insertedRowIds }
++            : { success: true, changed: true };
++    } catch (error: any) {
++        return { success: false, changed: false, error: error?.message || String(error) };
+     }
+-
+-    resetVisualizerPendingDataOps_ACU(state);
+-    return { success: true, changed: true };
+ }

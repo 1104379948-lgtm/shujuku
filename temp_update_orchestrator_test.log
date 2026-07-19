@@ -1,0 +1,376 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90me:/xiangmu/shujuku[39m
+
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mauto_unified 直接返回[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mmanual_unified 直接返回[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mfull 直接返回[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mauto_summary_silent 直接返回[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mmanual_summary 返回 manual_summary[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mmanual_independent 返回 manual_independent[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mmanual 前缀默认返回 manual_standard[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mauto 模式带 summary 返回 auto_summary[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22mauto 模式默认返回 auto_standard[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22m空字符串返回 auto_standard[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mresolveUpdateMode_ACU[2m > [22m未知模式返回 auto_standard[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mloadBatchBaseData_ACU[2m > [22m从新版存储格式加载数据[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mloadBatchBaseData_ACU[2m > [22m从旧版存储格式加载数据[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mloadBatchBaseData_ACU[2m > [22m空聊天记录返回全部未找到[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mloadBatchBaseData_ACU[2m > [22m跳过 user 消息[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mloadBatchBaseData_ACU[2m > [22m找到所有表后提前退出（从后往前搜索，取最近的）[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mloadBatchBaseData_ACU[2m > [22m隔离标签匹配[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mloadBatchBaseData_ACU[2m > [22m叠加历史 delta 后会稳定化 mergedBatchData 的 row_id[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mbuildBatchMergeBase_ACU[2m > [22m无 guide 时使用模板[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mbuildBatchMergeBase_ACU[2m > [22m有 guide 时使用 guide[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mbuildBatchMergeBase_ACU[2m > [22mSQLite 有界基底缺少可回放 V2 数据时不退回最新 runtime snapshot[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mbuildBatchMergeBase_ACU[2m > [22m非 SQLite 有界基底且未进入 V2 replay 时保留 runtime snapshot fallback[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mbuildBatchMergeBase_ACU[2m > [22m非 SQLite 有界基底已进入 V2 replay 但无可用数据时不退回未来 runtime snapshot[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessUpdatesBatch_ACU[2m > [22m空索引列表返回 success: true[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessUpdatesBatch_ACU[2m > [22m执行更新回调成功时返回 success: true[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessUpdatesBatch_ACU[2m > [22m更新失败时返回 success: false 和 error[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessUpdatesBatch_ACU[2m > [22mAI 回复过短时跳过（auto 模式）[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessUpdatesBatch_ACU[2m > [22m构建合并基底失败时返回 error[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessUpdatesBatch_ACU[2m > [22m执行更新时传入基于批次历史数据的 batchBaseSnapshot 深拷贝[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m正常流程：AI 返回有效响应，解析成功，保存成功[32m 3[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m将目标表转换为 sheet 级 writeSet，并把 transactionContext 传给持久化[32m 2[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22mAI 返回后在同 scope 锁内恢复 batchBaseSnapshot，避免保存被其他组污染[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22mprepareAIInput 返回 null 时返回错误[33m 10005[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22mAI 响应无 tableEdit 标签时重试并最终失败[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22mAI 回复过短时重试并最终失败[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m用户中止时返回 aborted[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22mAbortError 时返回 aborted[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m保存失败时返回错误[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m无实质数据改动但 targetSheetKeys 非空时记录填表尝试但不推进 changed tracking[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m目标表参与本轮但仅部分表有实质修改时，只按实质修改表推进 tracking[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22mimport 模式不保存到聊天记录[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m无 onProgress 回调时不报错[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m解析失败时重试并最终失败[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m首次初始化时保存所有表，但只追踪实质修改表[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m自动更新成功后建立 AI 楼层边界 checkpoint[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU[2m > [22m自动更新成功后 boundary checkpoint 失败时不回滚主更新[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m正在更新中时返回错误[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22mAPI 未就绪时返回错误[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22mAPI 未配置时返回错误[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m数据库未加载时返回错误[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m聊天记录为空时返回错误[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m无 AI 回复时返回错误[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m未选择表格时返回错误[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m正常流程：processBatch 成功，返回 success[32m 2[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m事务式手动重填启动前仅清空重填范围内选中表历史数据[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m事务式手动重填清理后刷新 SQLite 运行时快照，再进入 AI prompt 准备[32m 2[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m重填起点早于最早 init checkpoint 时先用模板建立临时基底，再清理和刷新回放[32m 2[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m临时 initial baseline 建立失败时回滚并拒绝清理或刷新[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m普通手动更新的进度回调异常保持 rejection 契约且不触发 refill 回滚[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m临时 initial baseline 建立直接 reject 时统一回滚且返回硬失败[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m临时 baseline 落盘后 preparing 进度回调抛错时统一回滚[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m成功 bucket 的 complete 回调抛错时保留已写入数据且不回滚[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m首个 bucket 执行失败且零成功写入时恢复启动前快照[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m事务式手动重填启动前清理选中表失败时中止，避免继续使用污染基底[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m事务式手动重填清理后刷新运行时快照失败时中止，避免继续使用污染基底[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m事务式手动重填启动前不清理范围外历史基底，保护 V2 replay 初始数据[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m事务式手动重填启动前不清理 chat[0] sheet guide，避免 V2 replay 回退链路断裂[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m已有 V2 增量但无 full checkpoint 时首次返回确认信号且不写入[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m无 full checkpoint 且确认前回滚失败时返回硬错误而不是确认对象[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m无可回放 full checkpoint 且 confirmBoundaryReset=true 时仅预清理，并在成功后提交完整快照[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m跨 checkpoint 重填的最终快照提交失败时保留已成功 bucket[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m跨 checkpoint 重填在成功 bucket 后用户停止时保留已写入数据[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m跨 checkpoint 重填在成功 bucket 后同步聊天失败时保留已写入数据[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m历史基底重填第一 bucket 成功、第二 bucket 失败时保留持久化数据并恢复运行时[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m存在其他 isolationKey 的 V2 checkpoint 时手动重填中止，避免把隔离键不匹配误判为空表[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22mprocessBatch 失败时返回错误[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m自动合并触发成功时返回 autoMergeTriggered[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22mfinally 块中清理 manualExtraHint 和 isAutoUpdating[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m事务式手动重填过程中跳过写入前 retained buffer boundary checkpoint，避免预清理后被维护性 checkpoint 中断[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m手动更新整体成功后建立 retained buffer boundary checkpoint[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m用户在最后一批成功后终止时不建立完成态 boundary checkpoint[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22mboundary checkpoint 建立失败时保留成功结果并返回 checkpointWarning[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22mboundary checkpoint 建立抛异常时保留成功结果、返回 checkpointWarning 并记录异常详情[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m手动更新失败时不建立完成态 boundary checkpoint[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m不同 groupId 的手动表格按 maxConcurrentGroups 分块并输出可观测进度[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m手动分组 chunk 建立边界 checkpoint 前先同步聊天再判断是否需要滚动[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m手动分组 chunk 内在第一个响应完成前并发发起同批 group 请求[32m 8[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU[2m > [22m相同 groupId 的手动表格聚合到同一 group，而不是另起调度链[32m 1[2mms[22m[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU — SQL 错误反馈重试[2m > [22mSQL 模式下 parseAndApplyTableEdits 抛错时，错误信息注入到 tableDataText[32m 13[2mms[22m[39m
+[31m   → 解析或应用AI更新时出错: expected false to be true // Object.is equality[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU — SQL 错误反馈重试[2m > [22m非 SQL 模式下错误不注入 SQL_ERROR_FEEDBACK[32m 1[2mms[22m[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU — SQL 错误反馈重试[2m > [22mSQL 模式下多次重试时错误信息被替换（不累积）[32m 2[2mms[22m[39m
+[31m   → 填表在 3 次尝试后仍失败: [StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。: expected false to be true // Object.is equality[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU — 表级 API 预设覆盖[2m > [22m表有覆盖预设时，requestOptions 携带 tableApiPreset[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU — 表级 API 预设覆盖[2m > [22m表无覆盖预设时，requestOptions 不携带 tableApiPreset[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU — 表级 API 预设覆盖[2m > [22m表名为空时忽略覆盖[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22morchestrateManualUpdate_ACU — 表级 API 预设覆盖[2m > [22m表名有空格时进行标准化匹配[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mcollectGroupFillResponse_ACU[2m > [22m显式 baseSnapshot 传给 prepareAIInput_ACU，且 collect 阶段不触发 parse/save[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mcollectGroupFillResponse_ACU[2m > [22mAI 响应缺少完整 tableEdit 标签时按重试次数失败[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mcollectGroupFillResponse_ACU[2m > [22mSQL 模式下携带上轮错误反馈时，将 SQL_ERROR_FEEDBACK 注入到 prompt[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mcollectGroupFillResponse_ACU[2m > [22mprepareAIInput 返回 null 时直接失败[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22m按稳定顺序基于 baseSnapshot 合并响应，仅显式保存一次并触发一次 flush[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22m首次填表时 unified 路径保存全量表，但只追踪实质修改表[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22munified 中存在 no-op group 时仍整体成功但只追踪实质修改表[32m 1[2mms[22m[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下基于显式 baseSnapshot 顺序统一提交，不污染全局 currentJsonTableData[32m 2[2mms[22m[39m
+[31m   → expected false to be true // Object.is equality[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下混合 SQL/非 SQL 响应直接失败，不退化为快照写入[32m 0[2mms[22m[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式统一提交失败时返回 SQL 错误且不保存[32m 2[2mms[22m[39m
+[31m   → expected '[StorageStrategy] sqlite 存储运行时未就绪，已阻止…' to contain 'group a SQL 执行失败'[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下模板基础数据与 AI INSERT 主键冲突时返回真实 SQL 错误且不保存[32m 1[2mms[22m[39m
+[31m   → expected '[storagestrategy] sqlite 存储运行时未就绪，已阻止…' to contain 'group a'[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mparser 返回越权 modifiedKeys 时直接失败且不保存[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22m使用真实 native DSL parser 时，统一提交基于显式 baseSnapshot 而不是全局污染数据[32m 3[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mcollect 真实产物可直接进入 unified apply，不需要手工补 job[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mtargetSheetKeys 重叠时直接失败，不解析不保存不触发 flush[32m 0[2mms[22m[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下部分表无反馈时，仍用模板结构与基础数据初始化缺失表[32m 1[2mms[22m[39m
+[31m   → expected false to be true // Object.is equality[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下模板无基础数据时，缺失表仍以表头空表落盘[32m 1[2mms[22m[39m
+[31m   → expected false to be true // Object.is equality[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下已有运行数据的表不重复灌入模板基础数据，也不扩大 targetSheetKeys[32m 1[2mms[22m[39m
+[31m   → expected false to be true // Object.is equality[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下缺失表 seedRows 的 row_id 会在首次初始化时稳定化后再落盘[32m 1[2mms[22m[39m
+[31m   → expected false to be true // Object.is equality[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m空分组直接成功且不调用 AI[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m同一 bucket 的多组只统一提交一次[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mgrouped 手动路径会向 onProgress 转发 AI 调用进度[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m连续 bucket 使用运行时快照作为下一次 prompt 基底，不从聊天历史回放[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m手动重填多 bucket 使用固定 mergeBaseMaxMessageIndex，不把前一 bucket 新写增量带入后续基底[32m 2[2mms[22m[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mSQL 模式下不再早退，而是完成 grouped 统一提交[32m 1[2mms[22m[39m
+[31m   → expected false to be true // Object.is equality[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mSQLite 分组混合 SQL/非 SQL 时只重试非 SQL 组，成功 SQL 组不重试[32m 1[2mms[22m[39m
+[31m   → expected false to be true // Object.is equality[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m前一组失败时不吞掉后续 bucket 的成功写盘[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m统一提交失败后会把错误反馈注入下一轮 prompt 并重试成功[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m统一提交持续失败到耗尽重试时整 bucket 失败且不落盘[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m空 tableEdit 视为合法无更新且不重试同 bucket 的其他组[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m首次初始化时 grouped 主路径全量保存但只追踪实质修改表[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22m非空 tableEdit 未形成实质性操作时仍视为成功但不登记参与表[32m 1[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mmanual native 路径走 grouped helper 而不是 legacy processBatch[32m 0[2mms[22m[39m
+ [32m✓[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mmanual native 路径在 grouped helper 失败时返回失败且不落盘[32m 0[2mms[22m[39m
+ [31m×[39m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mmanual SQL 路径走 grouped unified helper 而不是 legacy processBatch[32m 1[2mms[22m[39m
+[31m   → expected false to be true // Object.is equality[39m
+
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 12 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU — SQL 错误反馈重试[2m > [22mSQL 模式下 parseAndApplyTableEdits 抛错时，错误信息注入到 tableDataText
+[31m[1mAssertionError[22m: 解析或应用AI更新时出错: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m2494:42[22m[39m
+    [90m2492| [39m    const result = await resultPromise;
+    [90m2493| [39m
+    [90m2494| [39m    expect(result.success, result.error).toBe(true);
+    [90m   | [39m                                         [31m^[39m
+    [90m2495| [39m    expect(callCount).toBe(2);
+    [90m2496| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mexecuteCardUpdateCore_ACU — SQL 错误反馈重试[2m > [22mSQL 模式下多次重试时错误信息被替换（不累积）
+[31m[1mAssertionError[22m: 填表在 3 次尝试后仍失败: [StorageStrategy] sqlite 存储运行时未就绪，已阻止 SQL 写入。: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m2568:42[22m[39m
+    [90m2566| [39m    const result = await resultPromise;
+    [90m2567| [39m
+    [90m2568| [39m    expect(result.success, result.error).toBe(true);
+    [90m   | [39m                                         [31m^[39m
+    [90m2569| [39m    expect(callCount).toBe(3);
+    [90m2570| [39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下基于显式 baseSnapshot 顺序统一提交，不污染全局 currentJsonTableData
+[31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m2981:28[22m[39m
+    [90m2979| [39m    const result = await applyUnifiedGroupFillResponses_ACU(responses …
+    [90m2980| [39m
+    [90m2981| [39m    expect(result.success).toBe(true);
+    [90m   | [39m                           [31m^[39m
+    [90m2982| [39m    expect(result.modifiedKeys).toEqual(['sheet_0', 'sheet_1']);
+    [90m2983| [39m    expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式统一提交失败时返回 SQL 错误且不保存
+[31m[1mAssertionError[22m: expected '[StorageStrategy] sqlite 存储运行时未就绪，已阻止…' to contain 'group a SQL 执行失败'[39m
+
+Expected: [32m"[7mgroup a[27m SQL [7m执行失败[27m"[39m
+Received: [31m"[7m[StorageStrategy] sqlite 存储运行时未就绪，已阻止[27m SQL [7m写入。[27m"[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3040:26[22m[39m
+    [90m3038| [39m
+    [90m3039| [39m    expect(result.success).toBe(false);
+    [90m3040| [39m    expect(result.error).toContain('group a SQL 执行失败');
+    [90m   | [39m                         [31m^[39m
+    [90m3041| [39m    expect(result.error).toContain('missing_col');
+    [90m3042| [39m    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下模板基础数据与 AI INSERT 主键冲突时返回真实 SQL 错误且不保存
+[31m[1mAssertionError[22m: expected '[storagestrategy] sqlite 存储运行时未就绪，已阻止…' to contain 'group a'[39m
+
+Expected: [32m"group a"[39m
+Received: [31m"[storagestrategy] sqlite 存储运行时未就绪，已阻止 sql 写入。"[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3075:29[22m[39m
+    [90m3073| [39m    expect(result.success).toBe(false);
+    [90m3074| [39m    const normalizedError = String(result.error).toLowerCase();
+    [90m3075| [39m    expect(normalizedError).toContain('group a');
+    [90m   | [39m                            [31m^[39m
+    [90m3076| [39m    expect(normalizedError).toMatch(/unique|constraint|primary/);
+    [90m3077| [39m    expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下部分表无反馈时，仍用模板结构与基础数据初始化缺失表
+[31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3209:28[22m[39m
+    [90m3207| [39m    const result = await applyUnifiedGroupFillResponses_ACU(responses …
+    [90m3208| [39m
+    [90m3209| [39m    expect(result.success).toBe(true);
+    [90m   | [39m                           [31m^[39m
+    [90m3210| [39m    expect(result.modifiedKeys).toEqual(['sheet_0']);
+    [90m3211| [39m    expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下模板无基础数据时，缺失表仍以表头空表落盘
+[31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3244:28[22m[39m
+    [90m3242| [39m    const result = await applyUnifiedGroupFillResponses_ACU(responses …
+    [90m3243| [39m
+    [90m3244| [39m    expect(result.success).toBe(true);
+    [90m   | [39m                           [31m^[39m
+    [90m3245| [39m    expect(result.modifiedKeys).toEqual(['sheet_0']);
+    [90m3246| [39m    expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下已有运行数据的表不重复灌入模板基础数据，也不扩大 targetSheetKeys
+[31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3278:28[22m[39m
+    [90m3276| [39m    const result = await applyUnifiedGroupFillResponses_ACU(responses …
+    [90m3277| [39m
+    [90m3278| [39m    expect(result.success).toBe(true);
+    [90m   | [39m                           [31m^[39m
+    [90m3279| [39m    expect(result.modifiedKeys).toEqual(['sheet_0']);
+    [90m3280| [39m    expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mapplyUnifiedGroupFillResponses_ACU[2m > [22mSQL 模式下缺失表 seedRows 的 row_id 会在首次初始化时稳定化后再落盘
+[31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3312:28[22m[39m
+    [90m3310| [39m    const result = await applyUnifiedGroupFillResponses_ACU(responses …
+    [90m3311| [39m
+    [90m3312| [39m    expect(result.success).toBe(true);
+    [90m   | [39m                           [31m^[39m
+    [90m3313| [39m    const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0…
+    [90m3314| [39m    expect(savePayload.targetSheetKeys).toEqual(['sheet_0', 'sheet_1']…
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mSQL 模式下不再早退，而是完成 grouped 统一提交
+[31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3578:28[22m[39m
+    [90m3576| [39m    ], 'manual_independent');
+    [90m3577| [39m
+    [90m3578| [39m    expect(result.success).toBe(true);
+    [90m   | [39m                           [31m^[39m
+    [90m3579| [39m    expect(result.failedGroups).toEqual([]);
+    [90m3580| [39m    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mSQLite 分组混合 SQL/非 SQL 时只重试非 SQL 组，成功 SQL 组不重试
+[31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3614:28[22m[39m
+    [90m3612| [39m    ], 'manual_independent');
+    [90m3613| [39m
+    [90m3614| [39m    expect(result.success).toBe(true);
+    [90m   | [39m                           [31m^[39m
+    [90m3615| [39m    expect(result.failedGroups).toEqual([]);
+    [90m3616| [39m    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(3);
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/12]⎯[22m[39m
+
+[41m[1m FAIL [22m[49m tests/service/table/update-orchestrator.test.ts[2m > [22mprocessGroupedRuntimeChunk_ACU[2m > [22mmanual SQL 路径走 grouped unified helper 而不是 legacy processBatch
+[31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- true[39m
+[31m+ false[39m
+
+[36m [2m❯[22m tests/service/table/update-orchestrator.test.ts:[2m3872:30[22m[39m
+    [90m3870| [39m      const result = await orchestrateManualUpdate_ACU(['sheet_0'], le…
+    [90m3871| [39m
+    [90m3872| [39m      expect(result.success).toBe(true);
+    [90m   | [39m                             [31m^[39m
+    [90m3873| [39m      expect(legacyProcessBatch).not.toHaveBeenCalled();
+    [90m3874| [39m      expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/12]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m12 failed[39m[22m[2m | [22m[1m[32m118 passed[39m[22m[90m (130)[39m
+[2m   Start at [22m 21:26:07
+[2m   Duration [22m 11.43s[2m (transform 662ms, setup 0ms, collect 1.00s, tests 10.11s, environment 0ms, prepare 110ms)[22m
+
