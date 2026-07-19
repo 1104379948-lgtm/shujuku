@@ -263,12 +263,23 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
     const writeSet = buildVisualizerWriteSet_ACU(pending);
     const isolationKey = getCurrentIsolationKey_ACU();
     try {
+        const chat = getChatArray_ACU();
+        const fullCheckpointIndex = getLatestV2FullCheckpointMessageIndex_ACU(chat, isolationKey);
+        if (fullCheckpointIndex < 0) {
+            return { success: false, changed: false, error: '找不到 V2 full checkpoint，已阻止写入 log-only 增量。' };
+        }
+        // afterData must be ops(V2 replay base). Runtime snapshots can carry seedRows /
+        // type drift / unrelated fields and falsely fail batch candidate validation.
+        const replayBase = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { updateRuntimeState: false });
+        if (!replayBase) {
+            return { success: false, changed: false, error: 'V2 replay 未产生表格数据，已阻止可视化编辑器保存。' };
+        }
         const result = await runTableWriteTransaction_ACU({
             source: 'manual_crud',
             reason: 'visualizer_save_v2_replay',
             isolationKey,
             writeSet,
-            initialData: currentJsonTableData_ACU,
+            initialData: replayBase,
         }, async (transactionContext, workingData) => {
             if (!workingData) throw new Error('运行时表格数据为空，已阻止可视化编辑器保存。');
             const data = workingData as any;
@@ -306,6 +317,7 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
                 }
                 const cells = toPersistedCells_ACU(row);
                 cells[0] = op.rowId;
+                sheet.content[rowIndex] = cells;
                 appendOperation(op.sheetKey, { kind: 'row_upsert', sheetKey: op.sheetKey, rowId: op.rowId, cells });
             }
             for (const op of Object.values(pending.insertsByClientRowId)) {
@@ -319,9 +331,6 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
                 appendOperation(op.sheetKey, { kind: 'row_upsert', sheetKey: op.sheetKey, rowId, cells });
             }
 
-            const chat = getChatArray_ACU();
-            const fullCheckpointIndex = getLatestV2FullCheckpointMessageIndex_ACU(chat, isolationKey);
-            if (fullCheckpointIndex < 0) throw new Error('找不到 V2 full checkpoint，已阻止写入 log-only 增量。');
             const targets = [...operationsBySheet.entries()].map(([sheetKey, operations]) => {
                 const explicitReplayIndex = getLatestV2SheetReplayMessageIndex_ACU(chat, isolationKey, sheetKey);
                 return {

@@ -133,7 +133,11 @@ vi.mock('../../../src/service/table/storage-mode', () => ({
 }));
 vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
   validateCurrentChatTableRecoveryWithGuide_ACU: serviceMock.validateCurrentChatTableRecoveryWithGuide_ACU || vi.fn(async () => ({ success: true })),
-  loadTableStateFromFramesV2_ACU: vi.fn(async () => serviceMock.replayData),
+  loadTableStateFromFramesV2_ACU: vi.fn(async () => {
+    // Data-save now uses V2 replay as the write base before persist.
+    if (serviceMock.replayData) return JSON.parse(JSON.stringify(serviceMock.replayData));
+    return JSON.parse(JSON.stringify(runtimeMock.getCurrentData() || {}));
+  }),
 }));
 vi.mock('../../../src/service/table/storage-frame-v2-persist', () => ({
   commitCurrentFloorTemplateChanges_ACU: serviceMock.commitCurrentFloorTemplateChanges_ACU,

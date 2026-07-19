@@ -1185,7 +1185,15 @@ function stableStringifyPersistedValue_ACU(value: unknown): string {
 }
 
 function samePersistedSheets_ACU(actual: TableDataObject_ACU, expected: TableDataObject_ACU, sheetKeys: string[]): boolean {
-  return sheetKeys.every(sheetKey => stableStringifyPersistedValue_ACU(actual?.[sheetKey] ?? null) === stableStringifyPersistedValue_ACU(expected?.[sheetKey] ?? null));
+  // Compare the durable sheet projection only. Runtime-only fields (e.g. seedRows)
+  // must not reject a valid operation batch whose content/meta match V2 replay.
+  return sheetKeys.every(sheetKey => {
+    const actualSheet = actual?.[sheetKey] as Sheet_ACU | undefined;
+    const expectedSheet = expected?.[sheetKey] as Sheet_ACU | undefined;
+    if (!actualSheet || !expectedSheet) return !actualSheet && !expectedSheet;
+    return stableStringifyPersistedValue_ACU(templateSheetPersistentProjection_ACU(actualSheet))
+      === stableStringifyPersistedValue_ACU(templateSheetPersistentProjection_ACU(expectedSheet));
+  });
 }
 
 function validateBatchOperationScope_ACU(

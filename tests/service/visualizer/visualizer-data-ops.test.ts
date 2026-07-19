@@ -61,14 +61,14 @@ function state() {
 describe('visualizer-data-ops V2 replay save', () => {
   beforeEach(() => {
     mocks.data = data();
-    mocks.replayData = null;
+    mocks.replayData = data();
     mocks.sqlite = false;
     mocks.migration.mockReset().mockResolvedValue({ success: true, migrated: false });
     mocks.persist.mockReset().mockImplementation(async (options: any) => {
       mocks.replayData = options.afterData;
       return { saved: true, messageIndices: [0] };
     });
-    mocks.replay.mockReset().mockImplementation(async () => mocks.replayData);
+    mocks.replay.mockReset().mockImplementation(async () => JSON.parse(JSON.stringify(mocks.replayData)));
     mocks.reload.mockReset().mockResolvedValue(undefined);
     mocks.transaction.mockClear();
     mocks.fullCheckpoint.mockReset().mockReturnValue(0);
@@ -87,6 +87,8 @@ describe('visualizer-data-ops V2 replay save', () => {
     const result = await applyVisualizerPendingDataOps_ACU(draft);
 
     expect(result).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '1' } });
+    // First load is the write base; second is post-save runtime refresh.
+    expect(mocks.replay).toHaveBeenCalled();
     expect(mocks.transaction).toHaveBeenCalledWith(expect.objectContaining({ reason: 'visualizer_save_v2_replay' }), expect.any(Function));
     expect(mocks.persist).toHaveBeenCalledTimes(1);
     const persistOptions = mocks.persist.mock.calls[0][0];
@@ -100,6 +102,36 @@ describe('visualizer-data-ops V2 replay save', () => {
     expect(JSON.stringify(persistOptions.targets)).not.toContain('sql_batch');
   });
 
+  it('以 V2 replay 为 afterData 基底，忽略 runtime seedRows 漂移，并把 update cells 回写为持久化形态', async () => {
+    mocks.data = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: {
+        name: 'A',
+        orderNo: 0,
+        content: [['row_id', 'value'], ['1', 'old-a']],
+        seedRows: [['1', 'seed']],
+      },
+    };
+    mocks.replayData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: {
+        name: 'A',
+        orderNo: 0,
+        content: [['row_id', 'value'], ['1', 'old-a']],
+      },
+    };
+    const draft = state();
+    recordVisualizerCellUpdate_ACU(draft, 'sheet_a', '1', 'value', 'new-a');
+
+    const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+    expect(result.success).toBe(true);
+    const persistOptions = mocks.persist.mock.calls[0][0];
+    expect(persistOptions.afterData.sheet_a.content).toEqual([['row_id', 'value'], ['1', 'new-a']]);
+    expect(persistOptions.afterData.sheet_a.seedRows).toBeUndefined();
+    expect(persistOptions.targets[0].operations[0].cells).toEqual(['1', 'new-a']);
+  });
+
   it('candidate replay 校验失败时不刷新、不标记 committed', async () => {
     const draft = state();
     recordVisualizerCellUpdate_ACU(draft, 'sheet_a', '1', 'value', 'new-a');
@@ -108,7 +140,8 @@ describe('visualizer-data-ops V2 replay save', () => {
     const result = await applyVisualizerPendingDataOps_ACU(draft);
 
     expect(result).toEqual({ success: false, changed: false, error: 'candidate mismatch' });
-    expect(mocks.replay).not.toHaveBeenCalled();
+    // Base load may call replay once; post-save runtime refresh must not run on failure.
+    expect(mocks.setCurrentData).not.toHaveBeenCalled();
     expect(draft.pendingDataOps.committed).toBeUndefined();
   });
 
@@ -116,7 +149,9 @@ describe('visualizer-data-ops V2 replay save', () => {
   it('持久化成功但 replay 刷新失败时仅重试刷新，不重复追加 operation log', async () => {
     const draft = state();
     recordVisualizerCellUpdate_ACU(draft, 'sheet_a', '1', 'value', 'new-a');
-    mocks.replay.mockRejectedValueOnce(new Error('reload replay failed'));
+    mocks.replay
+      .mockImplementationOnce(async () => JSON.parse(JSON.stringify(data())))
+      .mockRejectedValueOnce(new Error('reload replay failed'));
 
     const first = await applyVisualizerPendingDataOps_ACU(draft);
 

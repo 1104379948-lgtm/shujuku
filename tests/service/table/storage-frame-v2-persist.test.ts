@@ -2038,6 +2038,28 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     expect(mocks.saveChat).not.toHaveBeenCalled();
   });
 
+  it('候选 replay 与 afterData 仅 runtime 字段（seedRows）不同时仍接受 batch', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const afterData = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'updated']], seedRows: [['1', 'seed']] },
+      sheet_b: sheetB,
+    };
+    const replayed = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'updated']] },
+      sheet_b: sheetB,
+    };
+    mocks.loadReplayState.mockResolvedValue(replayed);
+
+    const result = await persistTableMutationLogBatchV2_ACU(makeBatchOptions(afterData, [
+      { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'updated'] }] },
+    ]));
+
+    expect(result).toMatchObject({ saved: true, messageIndices: [0] });
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+  });
+
   it('严格宿主保存失败时恢复所有 target 的 isolated data 与 identity', async () => {
     const first = seedFrame({ logEntries: [] });
     const second = { is_user: false, TavernDB_ACU_Identity: 'before-second', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: appendableFrame() } } };
