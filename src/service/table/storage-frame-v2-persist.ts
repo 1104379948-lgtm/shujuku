@@ -45,6 +45,10 @@ export interface ReplaceExistingIncrementalOptions_ACU {
 export interface PersistTableMutationV2Options_ACU {
   targetMessageIndex?: number;
   source: TableMutationSourceV2_ACU;
+  /**
+   * 调用方声明的事务后数据。持久化层不再做 replay-vs-afterData 相等性阻断；
+   * 数据正确性由来源链路保证，本层只校验输入合法性、操作可应用性与原子保存。
+   */
   afterData: TableDataObject_ACU;
   operations?: TableMutationOperationV2_ACU[];
   filledSheetKeys?: string[];
@@ -77,8 +81,9 @@ export interface PersistTableMutationLogBatchTargetV2_ACU {
 }
 
 /**
- * 多消息层 V2 增量提交。所有 target 都在内存 clone 中构造并用正式 replay 验证，
- * 确认后才一次性写回消息对象并调用严格宿主保存。
+ * 多消息层 V2 增量提交。所有 target 都在内存 clone 中构造，
+ * 确认后一次性写回消息对象并调用严格宿主保存。
+ * afterData 正确性由来源链路保证，本层不做 candidate replay 与 afterData 的相等性阻断。
  */
 export interface PersistTableMutationLogBatchV2Options_ACU {
   source: TableMutationSourceV2_ACU;
@@ -448,28 +453,15 @@ function normalizeOperations_ACU(
   return [];
 }
 
-function getOperationReplayScope_ACU(operations: TableMutationOperationV2_ACU[]): { wholeState: boolean; sheetKeys: string[] } {
-  const sheetKeys = new Set<string>();
-  for (const operation of operations) {
-    if (operation.kind === 'data_replace' || operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl') {
-      return { wholeState: true, sheetKeys: [] };
-    }
-    if ('sheetKey' in operation && typeof operation.sheetKey === 'string' && operation.sheetKey.startsWith('sheet_')) {
-      sheetKeys.add(operation.sheetKey);
-      continue;
-    }
-    throw new Error(`V2 operation log 无法确定 operation 影响范围：kind=${(operation as any).kind}。`);
-  }
-  return { wholeState: false, sheetKeys: [...sheetKeys] };
-}
-
-async function getOperationReplayPostconditionError_ACU(
+/**
+ * 写入前检查 operations 是否可在目标楼层 V2 base 上应用。
+ * 不比较 replay 结果与 afterData；调用方负责来源链路正确性。
+ */
+async function getOperationReplayApplicabilityError_ACU(
   chat: any[],
   isolationKey: string,
   targetMessageIndex: number,
   operations: TableMutationOperationV2_ACU[],
-  afterData: TableDataObject_ACU,
-  candidateChangedSheetKeys: string[],
 ): Promise<string | null> {
   if (operations.length === 0) return null;
   try {
@@ -480,28 +472,8 @@ async function getOperationReplayPostconditionError_ACU(
     if (!replayBase) {
       return 'V2 operation log 回放缺少现有 full checkpoint base，拒绝写入。';
     }
-    const replayScope = getOperationReplayScope_ACU(operations);
     const replayCandidate = deepClone_ACU(replayBase);
     for (const operation of operations) await applyTableOperationV2_ACU(replayCandidate, operation);
-
-    if (replayScope.wholeState) {
-      if (canonicalJson_ACU(replayCandidate) !== canonicalJson_ACU(afterData)) {
-        return 'V2 operation log 回放结果与 afterData 快照不一致。';
-      }
-      return null;
-    }
-
-    const affectedSheetKeys = [...new Set([...candidateChangedSheetKeys, ...replayScope.sheetKeys])];
-    if (affectedSheetKeys.length === 0) {
-      return 'V2 operation log 缺少可验证的受影响 Sheet，拒绝写入。';
-    }
-    for (const sheetKey of affectedSheetKeys) {
-      const replayedSheet = replayCandidate[sheetKey] as Sheet_ACU | undefined;
-      const expectedSheet = afterData[sheetKey] as Sheet_ACU | undefined;
-      if (!replayedSheet || !expectedSheet || canonicalJson_ACU(templateSheetPersistentProjection_ACU(replayedSheet)) !== canonicalJson_ACU(templateSheetPersistentProjection_ACU(expectedSheet))) {
-        return `V2 operation log 回放结果与 afterData Sheet 不一致：${sheetKey}。`;
-      }
-    }
     return null;
   } catch (error: any) {
     return `V2 operation log 回放失败：${error?.message || String(error)}`;
@@ -1018,15 +990,16 @@ async function persistTableMutationLogV2Core_ACU(
     return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
   }
   if (!shouldCheckpoint && operations.length > 0) {
-    const replayPostconditionError = await getOperationReplayPostconditionError_ACU(
+    const replayApplicabilityError = await getOperationReplayApplicabilityError_ACU(
       chat,
       isolationKey,
       target.index,
       operations,
-      afterData,
-      effectiveChangedSheetKeys,
     );
-    if (replayPostconditionError) return { saved: false, error: replayPostconditionError };
+    if (replayApplicabilityError) return { saved: false, error: replayApplicabilityError };
+    logDebug_ACU(
+      `[V2 Persist] operation 可应用性检查通过（已移除 afterData 相等性阻断）: messageIndex=${target.index}, source=${options.source}, operations=${operations.length}`,
+    );
   }
 
   const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
@@ -1176,26 +1149,6 @@ export async function persistTableMutationLogV2_ACU(
   return options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(options), options.revisionWriteSet);
 }
 
-function stableStringifyPersistedValue_ACU(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(item => stableStringifyPersistedValue_ACU(item)).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value as Record<string, unknown>).sort().map(key => `${JSON.stringify(key)}:${stableStringifyPersistedValue_ACU((value as Record<string, unknown>)[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(value ?? null);
-}
-
-function samePersistedSheets_ACU(actual: TableDataObject_ACU, expected: TableDataObject_ACU, sheetKeys: string[]): boolean {
-  // Compare the durable sheet projection only. Runtime-only fields (e.g. seedRows)
-  // must not reject a valid operation batch whose content/meta match V2 replay.
-  return sheetKeys.every(sheetKey => {
-    const actualSheet = actual?.[sheetKey] as Sheet_ACU | undefined;
-    const expectedSheet = expected?.[sheetKey] as Sheet_ACU | undefined;
-    if (!actualSheet || !expectedSheet) return !actualSheet && !expectedSheet;
-    return stableStringifyPersistedValue_ACU(templateSheetPersistentProjection_ACU(actualSheet))
-      === stableStringifyPersistedValue_ACU(templateSheetPersistentProjection_ACU(expectedSheet));
-  });
-}
-
 function validateBatchOperationScope_ACU(
   targetIndex: number,
   operations: TableMutationOperationV2_ACU[],
@@ -1306,17 +1259,11 @@ async function persistTableMutationLogBatchV2Core_ACU(
       code: settings_ACU.dataIsolationCode,
     });
   }
-
-  let replayed: TableDataObject_ACU | null;
-  try {
-    replayed = await loadTableStateFromFramesV2_ACU(candidateChat, isolationKey);
-  } catch (error: any) {
-    return { saved: false, error: `V2 batch candidate replay failed: ${error?.message || String(error)}` };
-  }
-  if (!replayed) return { saved: false, error: 'V2 batch candidate replay produced no table data.' };
-  if (!samePersistedSheets_ACU(replayed, options.afterData, [...changedSheetKeys])) {
-    return { saved: false, error: 'V2 batch candidate replay differs from expected changed sheet data.' };
-  }
+  const targetMessageIndices = [...targetByIndex.keys()].sort((a, b) => a - b);
+  const operationCount = [...targetByIndex.values()].reduce((sum, target) => sum + target.operations.length, 0);
+  logDebug_ACU(
+    `[V2 Persist] batch candidate 写入准备完成（已移除 afterData 相等性阻断）: source=${options.source}, targetMessageIndex=${targetMessageIndices.join(',')}, operations=${operationCount}, targets=${targetByIndex.size}, changedSheets=${changedSheetKeys.size}`,
+  );
 
   const snapshots = [...targetByIndex.keys()].map(index => ({
     index,

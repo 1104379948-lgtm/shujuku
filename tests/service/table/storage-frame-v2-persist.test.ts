@@ -316,11 +316,6 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
       operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1'] }],
       error: /回放失败.*行宽不匹配/i,
     },
-    {
-      label: 'operation 回放后与 afterData 分叉',
-      operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: '回放后的名称' } }],
-      error: /回放结果与 afterData Sheet 不一致/i,
-    },
   ])('通用 persist 在 $label 时写前拒绝且零副作用', async ({ operations, error }) => {
     const message = seedFrame({ logEntries: [] });
     message.TavernDB_ACU_Identity = 'identity-before-rejection';
@@ -347,6 +342,28 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     expect(mocks.saveChatStrict).not.toHaveBeenCalled();
   });
 
+  it('operation 可应用但结果与 afterData 分叉时仍保存（不再做 afterData 相等性阻断）', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const afterData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    mocks.loadReplayState.mockResolvedValue({ mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB });
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData,
+      filledSheetKeys: [],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: '回放后的名称' } }] as any,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(result.saved).toBe(true);
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+    expect(mocks.saveChat).toHaveBeenCalledOnce();
+  });
+
   it.each([
     {
       label: 'sql_batch',
@@ -360,7 +377,7 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
         tableName: 'inventory', reason: 'manual_crud',
       },
     },
-  ])('通用 persist 接受可回放且满足 afterData 的 $label', async ({ operation }) => {
+  ])('通用 persist 接受可回放的 $label', async ({ operation }) => {
     const sqlBaseSheet = {
       ...sheetA,
       uid: 'inventory',
@@ -1998,7 +2015,7 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     };
   }
 
-  it('在不同消息层追加 scoped row operation，候选 replay 一致后只严格保存一次', async () => {
+  it('在不同消息层追加 scoped row operation 后只严格保存一次', async () => {
     const checkpointMessage = seedFrame({ logEntries: [] });
     const laterMessage = { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: appendableFrame() } } };
     mocks.chat.splice(0, mocks.chat.length, checkpointMessage, laterMessage);
@@ -2007,7 +2024,6 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
       sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'updated']] },
       sheet_b: { ...sheetB, content: [['row_id', 'value'], ['2', 'inserted']] },
     };
-    mocks.loadReplayState.mockResolvedValue(afterData);
 
     const result = await persistTableMutationLogBatchV2_ACU(makeBatchOptions(afterData, [
       { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'updated'] }] },
@@ -2015,48 +2031,53 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     ]));
 
     expect(result).toMatchObject({ saved: true, messageIndices: [0, 1] });
-    expect(mocks.loadReplayState).toHaveBeenCalledOnce();
+    expect(mocks.loadReplayState).not.toHaveBeenCalled();
     expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
     expect(mocks.saveChat).not.toHaveBeenCalled();
     expect(checkpointMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
     expect(laterMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
   });
 
-  it('候选 replay 与 changed sheet 快照不一致时拒绝且不污染真实聊天', async () => {
+  it('candidate 与 afterData 分叉时仍保存 batch（不再做 afterData 相等性阻断）', async () => {
     const message = seedFrame({ logEntries: [] });
-    const before = message.TavernDB_ACU_IsolatedData;
-    const expected = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'expected']] }, sheet_b: sheetB };
-    mocks.loadReplayState.mockResolvedValue({ ...expected, sheet_a: sheetA });
+    // afterData 与 operation 故意分叉：operation 写 'from-operation'，afterData 却声明 'from-after-data'
+    const afterData = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'from-after-data']] },
+      sheet_b: sheetB,
+    };
 
-    const result = await persistTableMutationLogBatchV2_ACU(makeBatchOptions(expected, [
-      { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'expected'] }] },
+    const result = await persistTableMutationLogBatchV2_ACU(makeBatchOptions(afterData, [
+      {
+        targetMessageIndex: 0,
+        changedSheetKeys: ['sheet_a'],
+        operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'from-operation'] }],
+      },
     ]));
 
-    expect(result).toEqual({ saved: false, error: 'V2 batch candidate replay differs from expected changed sheet data.' });
-    expect(message.TavernDB_ACU_IsolatedData).toBe(before);
-    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
-    expect(mocks.saveChat).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ saved: true, messageIndices: [0] });
+    expect(mocks.loadReplayState).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual([
+      { kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'from-operation'] },
+    ]);
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
   });
 
-  it('候选 replay 与 afterData 仅 runtime 字段（seedRows）不同时仍接受 batch', async () => {
+  it('afterData 携带 runtime-only 字段（seedRows）时 batch 仍可保存', async () => {
     const message = seedFrame({ logEntries: [] });
     const afterData = {
       mate: { type: 'acu' },
       sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'updated']], seedRows: [['1', 'seed']] },
       sheet_b: sheetB,
     };
-    const replayed = {
-      mate: { type: 'acu' },
-      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'updated']] },
-      sheet_b: sheetB,
-    };
-    mocks.loadReplayState.mockResolvedValue(replayed);
 
     const result = await persistTableMutationLogBatchV2_ACU(makeBatchOptions(afterData, [
       { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'updated'] }] },
     ]));
 
     expect(result).toMatchObject({ saved: true, messageIndices: [0] });
+    expect(mocks.loadReplayState).not.toHaveBeenCalled();
     expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
   });
 
@@ -2067,7 +2088,6 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     const firstBefore = first.TavernDB_ACU_IsolatedData;
     const secondBefore = second.TavernDB_ACU_IsolatedData;
     const afterData = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'updated']] }, sheet_b: sheetB };
-    mocks.loadReplayState.mockResolvedValue(afterData);
     mocks.settings.dataIsolationEnabled = true;
     mocks.settings.dataIsolationCode = 'new-identity';
     mocks.saveChatStrict.mockRejectedValueOnce(new Error('host save failed'));

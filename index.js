@@ -12090,21 +12090,11 @@ $CONTENT
         }
         return [];
     }
-    function getOperationReplayScope_ACU(operations) {
-        const sheetKeys = new Set();
-        for (const operation of operations) {
-            if (operation.kind === 'data_replace' || operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl') {
-                return { wholeState: true, sheetKeys: [] };
-            }
-            if ('sheetKey' in operation && typeof operation.sheetKey === 'string' && operation.sheetKey.startsWith('sheet_')) {
-                sheetKeys.add(operation.sheetKey);
-                continue;
-            }
-            throw new Error(`V2 operation log 无法确定 operation 影响范围：kind=${operation.kind}。`);
-        }
-        return { wholeState: false, sheetKeys: [...sheetKeys] };
-    }
-    async function getOperationReplayPostconditionError_ACU(chat, isolationKey, targetMessageIndex, operations, afterData, candidateChangedSheetKeys) {
+    /**
+     * 写入前检查 operations 是否可在目标楼层 V2 base 上应用。
+     * 不比较 replay 结果与 afterData；调用方负责来源链路正确性。
+     */
+    async function getOperationReplayApplicabilityError_ACU(chat, isolationKey, targetMessageIndex, operations) {
         if (operations.length === 0)
             return null;
         try {
@@ -12115,27 +12105,9 @@ $CONTENT
             if (!replayBase) {
                 return 'V2 operation log 回放缺少现有 full checkpoint base，拒绝写入。';
             }
-            const replayScope = getOperationReplayScope_ACU(operations);
             const replayCandidate = deepClone_ACU$1(replayBase);
             for (const operation of operations)
                 await applyTableOperationV2_ACU(replayCandidate, operation);
-            if (replayScope.wholeState) {
-                if (canonicalJson_ACU(replayCandidate) !== canonicalJson_ACU(afterData)) {
-                    return 'V2 operation log 回放结果与 afterData 快照不一致。';
-                }
-                return null;
-            }
-            const affectedSheetKeys = [...new Set([...candidateChangedSheetKeys, ...replayScope.sheetKeys])];
-            if (affectedSheetKeys.length === 0) {
-                return 'V2 operation log 缺少可验证的受影响 Sheet，拒绝写入。';
-            }
-            for (const sheetKey of affectedSheetKeys) {
-                const replayedSheet = replayCandidate[sheetKey];
-                const expectedSheet = afterData[sheetKey];
-                if (!replayedSheet || !expectedSheet || canonicalJson_ACU(templateSheetPersistentProjection_ACU(replayedSheet)) !== canonicalJson_ACU(templateSheetPersistentProjection_ACU(expectedSheet))) {
-                    return `V2 operation log 回放结果与 afterData Sheet 不一致：${sheetKey}。`;
-                }
-            }
             return null;
         }
         catch (error) {
@@ -12598,9 +12570,10 @@ $CONTENT
             return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
         }
         if (!shouldCheckpoint && operations.length > 0) {
-            const replayPostconditionError = await getOperationReplayPostconditionError_ACU(chat, isolationKey, target.index, operations, afterData, effectiveChangedSheetKeys);
-            if (replayPostconditionError)
-                return { saved: false, error: replayPostconditionError };
+            const replayApplicabilityError = await getOperationReplayApplicabilityError_ACU(chat, isolationKey, target.index, operations);
+            if (replayApplicabilityError)
+                return { saved: false, error: replayApplicabilityError };
+            logDebug_ACU(`[V2 Persist] operation 可应用性检查通过（已移除 afterData 相等性阻断）: messageIndex=${target.index}, source=${options.source}, operations=${operations.length}`);
         }
         const isolatedData = cloneIsolatedData_ACU(target.message);
         const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
@@ -12738,26 +12711,6 @@ $CONTENT
         }
         return options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(options), options.revisionWriteSet);
     }
-    function stableStringifyPersistedValue_ACU(value) {
-        if (Array.isArray(value))
-            return `[${value.map(item => stableStringifyPersistedValue_ACU(item)).join(',')}]`;
-        if (value && typeof value === 'object') {
-            return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringifyPersistedValue_ACU(value[key])}`).join(',')}}`;
-        }
-        return JSON.stringify(value ?? null);
-    }
-    function samePersistedSheets_ACU(actual, expected, sheetKeys) {
-        // Compare the durable sheet projection only. Runtime-only fields (e.g. seedRows)
-        // must not reject a valid operation batch whose content/meta match V2 replay.
-        return sheetKeys.every(sheetKey => {
-            const actualSheet = actual?.[sheetKey];
-            const expectedSheet = expected?.[sheetKey];
-            if (!actualSheet || !expectedSheet)
-                return !actualSheet && !expectedSheet;
-            return stableStringifyPersistedValue_ACU(templateSheetPersistentProjection_ACU(actualSheet))
-                === stableStringifyPersistedValue_ACU(templateSheetPersistentProjection_ACU(expectedSheet));
-        });
-    }
     function validateBatchOperationScope_ACU(targetIndex, operations, changedSheetKeys) {
         const changedKeys = new Set(changedSheetKeys);
         for (const operation of operations) {
@@ -12861,18 +12814,9 @@ $CONTENT
                 code: settings_ACU.dataIsolationCode,
             });
         }
-        let replayed;
-        try {
-            replayed = await loadTableStateFromFramesV2_ACU(candidateChat, isolationKey);
-        }
-        catch (error) {
-            return { saved: false, error: `V2 batch candidate replay failed: ${error?.message || String(error)}` };
-        }
-        if (!replayed)
-            return { saved: false, error: 'V2 batch candidate replay produced no table data.' };
-        if (!samePersistedSheets_ACU(replayed, options.afterData, [...changedSheetKeys])) {
-            return { saved: false, error: 'V2 batch candidate replay differs from expected changed sheet data.' };
-        }
+        const targetMessageIndices = [...targetByIndex.keys()].sort((a, b) => a - b);
+        const operationCount = [...targetByIndex.values()].reduce((sum, target) => sum + target.operations.length, 0);
+        logDebug_ACU(`[V2 Persist] batch candidate 写入准备完成（已移除 afterData 相等性阻断）: source=${options.source}, targetMessageIndex=${targetMessageIndices.join(',')}, operations=${operationCount}, targets=${targetByIndex.size}, changedSheets=${changedSheetKeys.size}`);
         const snapshots = [...targetByIndex.keys()].map(index => ({
             index,
             message: chat[index],
