@@ -59,6 +59,7 @@ import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summ
 import {
   applyVisualizerPendingDataOps_ACU,
   hasVisualizerPendingDataOps_ACU,
+  replaceVisualizerTemporaryRowIds_ACU,
 } from '../../../service/visualizer/visualizer-data-ops';
 import { useToastStore } from '../../stores/toast-store';
 import { ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU } from '../useTemplateRecoveryGuard';
@@ -360,13 +361,21 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       const deletedSheetKeys = [...new Set((visualizer.deletedSheetKeys || [])
         .filter(key => typeof key === 'string' && key.startsWith('sheet_')),
       )];
-      const result = await applyVisualizerPendingDataOps_ACU(visualizer);
+      const hasDataChanges = hasVisualizerPendingDataOps_ACU(visualizer);
+      if (hasDataChanges && deletedSheetKeys.length > 0) {
+        toastStore.error('行数据增量与整表删除无法原子提交；请分别保存行数据和删表操作。', { muteable: false });
+        return false;
+      }
+      const hasLockChanges = visualizer.lockDirty;
+      const result = hasDataChanges
+        ? await applyVisualizerPendingDataOps_ACU(visualizer)
+        : { success: true, changed: false };
       if (!result.success) {
         toastStore.error(result.error || '数据保存失败。', { muteable: false });
         return false;
       }
-      if (!result.changed && deletedSheetKeys.length === 0) {
-        toastStore.info('没有需要保存的数据增量。', { muteable: false });
+      if (!result.changed && deletedSheetKeys.length === 0 && !hasLockChanges) {
+        toastStore.info('没有需要保存的数据、锁或删表增量。', { muteable: false });
         return false;
       }
       if (deletedSheetKeys.length > 0) {
@@ -379,14 +388,25 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
           }
         }
       }
-      saveLockDrafts(visualizer.tableLockDrafts);
-      await refreshMergedDataAndNotify_ACU();
+      if (hasLockChanges) saveLockDrafts(visualizer.tableLockDrafts);
+      try {
+        await refreshMergedDataAndNotify_ACU();
+      } catch (error: any) {
+        if (visualizer.pendingDataOps?.committed) {
+          throw new Error(`数据已持久化，但本地运行时刷新失败：${error?.message || String(error)}`);
+        }
+        throw error;
+      }
+      replaceVisualizerTemporaryRowIds_ACU(visualizer, result.insertedRowIds || {});
       try {
         (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
       } catch {}
       visualizer.markSaved('data');
       toastStore.success(
-        deletedSheetKeys.length > 0 ? '数据增量与删表清理已保存到当前消息。' : '数据增量已保存到当前消息。',
+        deletedSheetKeys.length > 0 ? '数据增量、锁设置与删表清理已保存到当前消息。'
+          : result.changed && hasLockChanges ? '数据增量与锁设置已保存到当前消息。'
+            : result.changed ? '数据增量已保存到当前消息。'
+            : '表格锁设置已保存。',
         { muteable: false },
       );
       return true;

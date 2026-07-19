@@ -115,6 +115,7 @@ describe('visualizer-store', () => {
         specialIndexLocked: true,
       },
     });
+    expect(store.lockDirty).toBe(false);
 
     store.toggleRowLock('sheet_a', 0);
     store.toggleCellLock('sheet_a', 0, 0);
@@ -131,6 +132,95 @@ describe('visualizer-store', () => {
     expect(store.isColumnLocked('sheet_a', 1)).toBe(false);
     expect(store.isCellLocked('sheet_a', 0, 0)).toBe(false);
     expect(store.isSpecialIndexLocked('sheet_a')).toBe(false);
+    expect(store.lockDirty).toBe(true);
     expect(store.dirty).toBe(true);
+  });
+
+  it('committed 状态冻结所有结构与锁草稿编辑入口', () => {
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { name: 'A', orderNo: 0, content: [[null, '列1'], ['1', '旧值']] },
+      sheet_b: { name: 'B', orderNo: 1, content: [[null, '列1'], ['1', '旧值']] },
+    }, ['sheet_a', 'sheet_b']);
+    store.loadLockDrafts({
+      sheet_a: { rows: [], cols: [], cells: [], specialIndexLocked: true },
+    });
+    store.pendingDataOps.committed = { afterData: {}, insertedRowIds: {} };
+    const before = JSON.stringify({
+      tempData: store.tempData,
+      deletedSheetKeys: store.deletedSheetKeys,
+      sheetOrder: store.sheetOrder,
+      tableLockDrafts: store.tableLockDrafts,
+      pendingLockChanges: store.pendingLockChanges,
+      dirty: store.dirty,
+      lockDirty: store.lockDirty,
+    });
+    const actions = [
+      () => store.addSheet('sheet_c', { name: 'C', content: [[null, '列1']] }),
+      () => store.deleteSheet('sheet_a'),
+      () => store.moveSheet('sheet_b', 'up'),
+      () => store.toggleRowLock('sheet_a', 0),
+      () => store.toggleColumnLock('sheet_a', 0),
+      () => store.toggleCellLock('sheet_a', 0, 0),
+      () => store.applyLockChangesToDraft([{ sheetKey: 'sheet_a', rows: [{ rowIndex: 0, locked: true }] }]),
+      () => store.queueLockChanges([{ sheetKey: 'sheet_a', rows: [{ rowIndex: 0, locked: true }] }]),
+    ];
+
+    actions.forEach(action => expect(action).toThrow('数据已持久化但本地刷新尚未完成'));
+
+    expect(JSON.stringify({
+      tempData: store.tempData,
+      deletedSheetKeys: store.deletedSheetKeys,
+      sheetOrder: store.sheetOrder,
+      tableLockDrafts: store.tableLockDrafts,
+      pendingLockChanges: store.pendingLockChanges,
+      dirty: store.dirty,
+      lockDirty: store.lockDirty,
+    })).toBe(before);
+  });
+
+  it('saving 状态冻结所有结构与锁草稿编辑入口', () => {
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { name: 'A', orderNo: 0, content: [[null, '列1'], ['1', '旧值']] },
+      sheet_b: { name: 'B', orderNo: 1, content: [[null, '列1'], ['1', '旧值']] },
+    }, ['sheet_a', 'sheet_b']);
+    store.loadLockDrafts({
+      sheet_a: { rows: [], cols: [], cells: [], specialIndexLocked: true },
+    });
+    store.setSaving(true);
+    const before = JSON.stringify({
+      tempData: store.tempData,
+      deletedSheetKeys: store.deletedSheetKeys,
+      sheetOrder: store.sheetOrder,
+      tableLockDrafts: store.tableLockDrafts,
+      pendingLockChanges: store.pendingLockChanges,
+      dirty: store.dirty,
+      lockDirty: store.lockDirty,
+    });
+    const actions = [
+      () => store.addSheet('sheet_c', { name: 'C', content: [[null, '列1']] }),
+      () => store.deleteSheet('sheet_a'),
+      () => store.moveSheet('sheet_b', 'up'),
+      () => store.toggleRowLock('sheet_a', 0),
+      () => store.toggleColumnLock('sheet_a', 0),
+      () => store.toggleCellLock('sheet_a', 0, 0),
+      () => store.applyLockChangesToDraft([{ sheetKey: 'sheet_a', rows: [{ rowIndex: 0, locked: true }] }]),
+      () => store.queueLockChanges([{ sheetKey: 'sheet_a', rows: [{ rowIndex: 0, locked: true }] }]),
+    ];
+
+    actions.forEach(action => expect(action).toThrow('保存正在进行中'));
+
+    expect(JSON.stringify({
+      tempData: store.tempData,
+      deletedSheetKeys: store.deletedSheetKeys,
+      sheetOrder: store.sheetOrder,
+      tableLockDrafts: store.tableLockDrafts,
+      pendingLockChanges: store.pendingLockChanges,
+      dirty: store.dirty,
+      lockDirty: store.lockDirty,
+    })).toBe(before);
   });
 });

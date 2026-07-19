@@ -3,13 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   chat: [] as any[],
   saveChat: vi.fn().mockResolvedValue(undefined),
+  saveChatStrict: vi.fn().mockResolvedValue(undefined),
   settings: { dataIsolationEnabled: false, dataIsolationCode: '' },
   collectSummary: vi.fn(() => ({ sheet_a: { lastFilledAiFloor: 7, lastChangedAiFloor: 6 } })),
+  loadReplayState: vi.fn(),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: vi.fn(() => mocks.chat),
   saveChatToHost_ACU: mocks.saveChat,
+  saveChatToHostStrict_ACU: mocks.saveChatStrict,
 }));
 vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   cloneIsolatedData_ACU: vi.fn((message: any) => JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData || {}))),
@@ -31,9 +34,10 @@ vi.mock('../../../src/service/table/storage-strategy-resolver', () => ({
 }));
 vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
   collectScheduleSummaryFromFramesV2_ACU: mocks.collectSummary,
+  loadTableStateFromFramesV2_ACU: mocks.loadReplayState,
 }));
 
-import { persistTableSheetCheckpointV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
+import { persistTableMutationLogBatchV2_ACU, persistTableSheetCheckpointV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
 
 const sheetA = { uid: 'a', name: 'A', sourceData: {}, content: [['row_id', 'value'], ['1', 'new']], updateConfig: {}, exportConfig: {}, orderNo: 1 } as any;
 const sheetB = { uid: 'b', name: 'B', sourceData: {}, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 2 } as any;
@@ -57,6 +61,7 @@ function seedFrame(frameOverrides: Record<string, any> = {}): any {
   };
   const message = { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame } } };
   mocks.chat.splice(0, mocks.chat.length, message);
+  mocks.loadReplayState.mockResolvedValue(frame.checkpoint?.data ?? null);
   return message;
 }
 
@@ -73,7 +78,9 @@ describe('persistTableSheetCheckpointV2_ACU', () => {
   beforeEach(() => {
     mocks.chat.length = 0;
     mocks.saveChat.mockReset().mockResolvedValue(undefined);
+    mocks.saveChatStrict.mockReset().mockResolvedValue(undefined);
     mocks.collectSummary.mockClear();
+    mocks.loadReplayState.mockReset();
     mocks.settings.dataIsolationEnabled = false;
     mocks.settings.dataIsolationCode = '';
   });
@@ -227,5 +234,96 @@ describe('persistTableSheetCheckpointV2_ACU', () => {
     expect(result.saved).toBe(false);
     expect(result.error).toContain('existing full checkpoint anchor');
     expect(mocks.saveChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('persistTableMutationLogBatchV2_ACU', () => {
+  beforeEach(() => {
+    mocks.chat.length = 0;
+    mocks.saveChat.mockReset().mockResolvedValue(undefined);
+    mocks.saveChatStrict.mockReset().mockResolvedValue(undefined);
+    mocks.loadReplayState.mockReset();
+    mocks.settings.dataIsolationEnabled = false;
+    mocks.settings.dataIsolationCode = '';
+  });
+
+  function appendableFrame(): any {
+    return {
+      version: 2,
+      headRevision: '1:existing',
+      logEntries: [],
+    };
+  }
+
+  function makeBatchOptions(afterData: any, targets: any[]) {
+    return {
+      source: 'manual_crud' as const,
+      afterData,
+      targets,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    };
+  }
+
+  it('在不同消息层追加 scoped row operation，候选 replay 一致后只严格保存一次', async () => {
+    const checkpointMessage = seedFrame({ logEntries: [] });
+    const laterMessage = { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: appendableFrame() } } };
+    mocks.chat.splice(0, mocks.chat.length, checkpointMessage, laterMessage);
+    const afterData = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'updated']] },
+      sheet_b: { ...sheetB, content: [['row_id', 'value'], ['2', 'inserted']] },
+    };
+    mocks.loadReplayState.mockResolvedValue(afterData);
+
+    const result = await persistTableMutationLogBatchV2_ACU(makeBatchOptions(afterData, [
+      { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'updated'] }] },
+      { targetMessageIndex: 1, changedSheetKeys: ['sheet_b'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_b', rowId: '2', cells: ['2', 'inserted'] }] },
+    ]));
+
+    expect(result).toMatchObject({ saved: true, messageIndices: [0, 1] });
+    expect(mocks.loadReplayState).toHaveBeenCalledOnce();
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+    expect(checkpointMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+    expect(laterMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+  });
+
+  it('候选 replay 与 changed sheet 快照不一致时拒绝且不污染真实聊天', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const before = message.TavernDB_ACU_IsolatedData;
+    const expected = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'expected']] }, sheet_b: sheetB };
+    mocks.loadReplayState.mockResolvedValue({ ...expected, sheet_a: sheetA });
+
+    const result = await persistTableMutationLogBatchV2_ACU(makeBatchOptions(expected, [
+      { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'expected'] }] },
+    ]));
+
+    expect(result).toEqual({ saved: false, error: 'V2 batch candidate replay differs from expected changed sheet data.' });
+    expect(message.TavernDB_ACU_IsolatedData).toBe(before);
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+  });
+
+  it('严格宿主保存失败时恢复所有 target 的 isolated data 与 identity', async () => {
+    const first = seedFrame({ logEntries: [] });
+    const second = { is_user: false, TavernDB_ACU_Identity: 'before-second', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: appendableFrame() } } };
+    mocks.chat.splice(0, mocks.chat.length, first, second);
+    const firstBefore = first.TavernDB_ACU_IsolatedData;
+    const secondBefore = second.TavernDB_ACU_IsolatedData;
+    const afterData = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'updated']] }, sheet_b: sheetB };
+    mocks.loadReplayState.mockResolvedValue(afterData);
+    mocks.settings.dataIsolationEnabled = true;
+    mocks.settings.dataIsolationCode = 'new-identity';
+    mocks.saveChatStrict.mockRejectedValueOnce(new Error('host save failed'));
+
+    await expect(persistTableMutationLogBatchV2_ACU(makeBatchOptions(afterData, [
+      { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'updated'] }] },
+      { targetMessageIndex: 1, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }] },
+    ]))).rejects.toThrow('host save failed');
+
+    expect(first.TavernDB_ACU_IsolatedData).toBe(firstBefore);
+    expect(second.TavernDB_ACU_IsolatedData).toBe(secondBefore);
+    expect(second.TavernDB_ACU_Identity).toBe('before-second');
   });
 });
