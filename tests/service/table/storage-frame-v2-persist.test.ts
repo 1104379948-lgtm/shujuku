@@ -1729,9 +1729,8 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
   });
 
-  it('operation 回放结果与 targetSheetData 不一致时零写入', async () => {
+  it('operation 合法时不以 targetSheetData 全量快照否决模板提交', async () => {
     const message = seedFrame({ logEntries: [] });
-    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
     const mismatchedTarget = { ...sheetA, name: '目标名称' };
 
     const result = await commitCurrentFloorTemplateChanges_ACU({
@@ -1742,13 +1741,15 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
         targetSheetData: mismatchedTarget,
         operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: '另一个名称' } }],
       }],
-      guideData: { sheet_a: { name: '目标名称' } },
+      guideData: { sheet_a: { name: '另一个名称' }, sheet_b: { name: 'B' } },
     });
 
-    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('回放结果与目标 Sheet 不一致') });
-    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
-    expect(mocks.setGuide).not.toHaveBeenCalled();
-    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+    expect(result.saved).toBe(true);
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.logEntries[frame.logEntries.length - 1]).toMatchObject({
+      operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: '另一个名称' } }],
+    });
   });
 
   it('严格保存失败时回滚 introduction shard、operation entry、headRevision、identity、guide 与 scope', async () => {

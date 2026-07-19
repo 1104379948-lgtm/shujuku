@@ -863,24 +863,52 @@ describe('useVisualizerSave', () => {
     const store = useVisualizerStore();
     store.loadSnapshot({
       mate: { type: 'chatSheets', version: 1 },
-      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
-      sheet_delete: { ...sheet('删除表'), uid: 'sheet_delete' },
-    }, ['sheet_keep', 'sheet_delete']);
-    store.tableLockDrafts.sheet_delete = { rows: [0], cols: [], cells: [], specialIndexLocked: true };
-    store.deleteSheet('sheet_delete');
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep', orderNo: 0 },
+      sheet_mid: { ...sheet('中间表'), uid: 'sheet_mid', orderNo: 1 },
+      sheet_tail: { ...sheet('尾表'), uid: 'sheet_tail', orderNo: 2 },
+    }, ['sheet_keep', 'sheet_mid', 'sheet_tail']);
+    store.tableLockDrafts.sheet_mid = { rows: [0], cols: [], cells: [], specialIndexLocked: true };
+    store.deleteSheet('sheet_mid');
 
     const saved = await useVisualizerSave().saveTemplateToCurrentChat();
 
     expect(saved).toBe(true);
     expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledTimes(1);
     const [[options]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
-    expect(options.deletedSheetKeys).toEqual(['sheet_delete']);
+    expect(options.deletedSheetKeys).toEqual(['sheet_mid']);
     expect(options.sheetChanges).toEqual([]);
     expect(serviceMock.purgeSheetKeysFromChatHistoryHard_ACU).not.toHaveBeenCalled();
-    expect(serviceMock.saveTableLocksForSheet_ACU).not.toHaveBeenCalledWith('sheet_delete', expect.anything());
-    expect(store.tableLockDrafts.sheet_delete).toBeUndefined();
+    expect(serviceMock.applySummaryIndexSequenceToTable_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.saveTableLocksForSheet_ACU).not.toHaveBeenCalledWith('sheet_mid', expect.anything());
+    expect(store.tableLockDrafts.sheet_mid).toBeUndefined();
+    expect(store.tempData?.sheet_keep.orderNo).toBe(0);
+    expect(store.tempData?.sheet_tail.orderNo).toBe(2);
     expect(store.deletedSheetKeys).toEqual([]);
     expect(store.lastSavedTarget).toBe('template-chat');
+  });
+
+  it('模板保存路径不因删表空洞对存活表生成 orderNo meta_update，也不重写摘要索引', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { ...sheet('保留表A'), uid: 'sheet_a', orderNo: 0 },
+      sheet_b: { ...sheet('总结表'), uid: 'sheet_b', orderNo: 1, content: [['row_id', '事件', '编码索引'], ['1', '旧值', 'AM0001']] },
+      sheet_c: { ...sheet('保留表C'), uid: 'sheet_c', orderNo: 2 },
+    }, ['sheet_a', 'sheet_b', 'sheet_c']);
+    store.tableLockDrafts.sheet_b = { rows: [], cols: [], cells: [], specialIndexLocked: true };
+    store.deleteSheet('sheet_b');
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    const [[options]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
+    expect(options.deletedSheetKeys).toEqual(['sheet_b']);
+    expect(options.sheetChanges).toEqual([]);
+    expect(serviceMock.applySummaryIndexSequenceToTable_ACU).not.toHaveBeenCalled();
+    expect(store.tempData?.sheet_a.orderNo).toBe(0);
+    expect(store.tempData?.sheet_c.orderNo).toBe(2);
   });
 
   it('删除最后一张摘要表后清除当前聊天摘要向量索引，而不保留陈旧索引', async () => {

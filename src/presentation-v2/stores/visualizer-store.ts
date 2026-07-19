@@ -322,7 +322,8 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       delete this.tempData[key];
       if (!this.deletedSheetKeys.includes(key)) this.deletedSheetKeys.push(key);
       this.sheetOrder = this.sheetOrder.filter(item => item !== key);
-      applyOrderNumbers(this.tempData, this.sheetOrder);
+      // Allow sparse orderNo after delete so pure sheet removal does not rewrite
+      // surviving sheets' metadata and force mixed template commits.
       if (this.currentSheetKey === key) this.currentSheetKey = this.sheetOrder[0] || null;
       if (!this.currentSheetKey && this.mode !== 'table-management') this.mode = 'global';
       this.setDirty(true);

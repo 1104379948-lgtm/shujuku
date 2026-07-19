@@ -106,6 +106,30 @@ describe('visualizer-store', () => {
     expect(store.dirty).toBe(true);
   });
 
+  it('删除中间表后存活表 orderNo 保留空洞，手动排序仍会连续重排', () => {
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: { name: 'A', orderNo: 0, content: [[null, '列1']] },
+      sheet_b: { name: 'B', orderNo: 1, content: [[null, '列1']] },
+      sheet_c: { name: 'C', orderNo: 2, content: [[null, '列1']] },
+    }, ['sheet_a', 'sheet_b', 'sheet_c']);
+
+    store.deleteSheet('sheet_b');
+
+    expect(store.sheetOrder).toEqual(['sheet_a', 'sheet_c']);
+    expect(store.deletedSheetKeys).toEqual(['sheet_b']);
+    expect(store.tempData?.sheet_a.orderNo).toBe(0);
+    expect(store.tempData?.sheet_c.orderNo).toBe(2);
+    expect(store.tempData?.sheet_b).toBeUndefined();
+
+    store.moveSheet('sheet_c', 'up');
+
+    expect(store.sheetOrder).toEqual(['sheet_c', 'sheet_a']);
+    expect(store.tempData?.sheet_c.orderNo).toBe(0);
+    expect(store.tempData?.sheet_a.orderNo).toBe(1);
+  });
+
   it('锁状态作为 visualizer 草稿维护，AI lockChanges 会合并到同一份草稿', () => {
     const store = useVisualizerStore();
     store.loadSnapshot({

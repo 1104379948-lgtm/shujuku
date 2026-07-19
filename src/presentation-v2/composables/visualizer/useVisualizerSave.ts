@@ -99,6 +99,12 @@ function buildOrderedData(
   tempData: Record<string, any> | null,
   sheetOrder: string[],
   lockDrafts: Record<string, VisualizerLockDraft>,
+  options: {
+    /** When false, preserve existing orderNo values (sparse holes allowed). Default true. */
+    renumberOrder?: boolean;
+    /** When false, skip summary special-index rewrite that mutates content. Default true. */
+    applySpecialIndex?: boolean;
+  } = {},
 ): Record<string, any> {
   const source = tempData || { mate: { type: 'chatSheets', version: 1 } };
   const orderedData: Record<string, any> = {};
@@ -108,8 +114,10 @@ function buildOrderedData(
   sheetOrder.forEach(key => {
     if (source[key]) orderedData[key] = cloneData(source[key]);
   });
-  applySheetOrderNumbers_ACU(orderedData, sheetOrder);
-  applySpecialIndexSequenceFromDrafts(orderedData, lockDrafts);
+  const renumberOrder = options.renumberOrder !== false;
+  const applySpecialIndex = options.applySpecialIndex !== false;
+  if (renumberOrder) applySheetOrderNumbers_ACU(orderedData, sheetOrder);
+  if (applySpecialIndex) applySpecialIndexSequenceFromDrafts(orderedData, lockDrafts);
   return orderedData;
 }
 
@@ -459,7 +467,10 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
         return false;
       }
-      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts);
+      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts, {
+        renumberOrder: false,
+        applySpecialIndex: false,
+      });
       const changes = classifyVisualizerTemplateChanges_ACU(
         visualizer.templateBaseData,
         orderedData,
@@ -667,7 +678,10 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         toastStore.error('存在未保存的数据增量；本次是模板保存，已阻止混合提交。', { muteable: false });
         return false;
       }
-      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts);
+      const orderedData = buildOrderedData(visualizer.tempData, visualizer.sheetOrder, visualizer.tableLockDrafts, {
+        renumberOrder: false,
+        applySpecialIndex: false,
+      });
       const globalTemplateResult = await saveGlobalTemplateSnapshot(orderedData, interactions);
       if (globalTemplateResult.status === 'cancelled') return false;
       saveLockDrafts(visualizer.tableLockDrafts);

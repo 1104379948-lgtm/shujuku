@@ -2003,8 +2003,11 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     for (const change of operationChanges) {
       for (const operation of change.operations) await applyTableOperationV2_ACU(replayCandidate, operation);
       const replayedSheet = replayCandidate[change.sheetKey] as Sheet_ACU | undefined;
-      if (!replayedSheet || canonicalJson_ACU(templateSheetPersistentProjection_ACU(replayedSheet)) !== canonicalJson_ACU(templateSheetPersistentProjection_ACU(change.targetSheetData))) {
-        throw new Error(`V2 当前楼层模板提交 operation 回放结果与目标 Sheet 不一致：${change.sheetKey}。`);
+      // Operations are the source of truth for template commits. Do not fail closed when the
+      // caller's targetSheetData (often a visualizer runtime snapshot) drifts from V2 replay base
+      // content after meta/schema-only operations.
+      if (!replayedSheet) {
+        throw new Error(`V2 当前楼层模板提交 operation 回放后缺少 Sheet：${change.sheetKey}。`);
       }
     }
 
