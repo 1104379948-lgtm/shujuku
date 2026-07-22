@@ -145,6 +145,20 @@ describe('visualizer-data-ops V2 replay save', () => {
     expect(draft.pendingDataOps.committed).toBeUndefined();
   });
 
+  it('迁移失败时不启动事务或追加 V2 operation log', async () => {
+    const draft = state();
+    recordVisualizerCellUpdate_ACU(draft, 'sheet_a', '1', 'value', 'new-a');
+    mocks.migration.mockResolvedValueOnce({ success: false, error: 'mixed storage evidence insufficient' });
+
+    const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+    expect(result).toEqual({ success: false, changed: false, error: 'mixed storage evidence insufficient' });
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.persist).not.toHaveBeenCalled();
+    expect(mocks.setCurrentData).not.toHaveBeenCalled();
+    expect(draft.pendingDataOps.committed).toBeUndefined();
+  });
+
 
   it('持久化成功但 replay 刷新失败时仅重试刷新，不重复追加 operation log', async () => {
     const draft = state();

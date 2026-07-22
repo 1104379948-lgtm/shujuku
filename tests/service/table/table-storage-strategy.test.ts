@@ -92,6 +92,7 @@ import {
   reloadStorageProvider,
   disposeStorageProvider,
   getCurrentProviderMode,
+  didSqliteFallbackAfterReload_ACU,
 } from '../../../src/service/table/table-storage-strategy';
 
 describe('table-storage-strategy', () => {
@@ -405,6 +406,41 @@ describe('table-storage-strategy', () => {
       await initStorageProvider();
       await switchStorageMode('sqlite');
       expect(getCurrentProviderMode()).toBe('sqlite');
+    });
+  });
+
+  describe('didSqliteFallbackAfterReload_ACU', () => {
+    it('SQLite 预期与设置保持不变、provider 已为 native 时报告静默 fallback', async () => {
+      mockStorageMode = 'sqlite';
+      sqliteLoadResult = { loaded: false, source: 'empty', error: 'sql.js 加载失败' };
+
+      await initStorageProvider();
+
+      expect(getCurrentProviderMode()).toBe('native');
+      expect(didSqliteFallbackAfterReload_ACU('sqlite')).toBe(true);
+    });
+
+    it('reload 期间设置切到 native 时不把 native provider 误报为 fallback', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+
+      expect(getCurrentProviderMode()).toBe('native');
+      expect(didSqliteFallbackAfterReload_ACU('sqlite')).toBe(false);
+    });
+
+    it('SQLite provider 成功就绪时不报告 fallback', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+
+      expect(getCurrentProviderMode()).toBe('sqlite');
+      expect(didSqliteFallbackAfterReload_ACU('sqlite')).toBe(false);
+    });
+
+    it('reload 前预期为 native 时不报告 fallback', async () => {
+      mockStorageMode = 'native';
+      await initStorageProvider();
+
+      expect(didSqliteFallbackAfterReload_ACU('native')).toBe(false);
     });
   });
 });

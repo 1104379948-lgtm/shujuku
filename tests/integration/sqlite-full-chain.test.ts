@@ -5,6 +5,7 @@
  * 使用真实 sql.js（如果可用），否则跳过
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import chineseDdlFixture from '../fixtures/migrations/spv7.9/sql-ddl-chinese-comments.json';
 
 vi.mock('../../src/shared/utils', () => ({
   logDebug_ACU: vi.fn(),
@@ -57,6 +58,15 @@ describe('I5: SQLite 模式完整链路（纯函数层）', () => {
       // fallback DDL 内部可能对表名做转换
       expect(ddl.length).toBeGreaterThan(0);
     });
+  });
+
+  it('合成 spv7.9 中文 DDL fixture 保留物理标识符与中文注释', () => {
+    const ddl = generateDDL(chineseDdlFixture as any);
+
+    expect(parseDDLTableName(ddl)).toBe('inventory');
+    expect(parseDDLColumnNames(ddl)).toEqual(['row_id', 'item_name', 'quantity']);
+    expect(ddl).toContain('-- 物品名');
+    expect(ddl).toContain('-- 数量');
   });
 
   describe('INSERT SQL 生成', () => {

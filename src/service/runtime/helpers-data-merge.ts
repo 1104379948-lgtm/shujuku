@@ -372,6 +372,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
           if (!migrationResult.migrated) {
               throw new Error(`旧存储迁移到 V2 失败: ${migrationResult.error || '未执行迁移'}`);
           }
+          if (!migrationResult.data) {
+              throw new Error('旧存储迁移到 V2 失败: 迁移成功结果缺少修复后的表格数据。');
+          }
           const postStrategy = resolveTableStorageStrategy_ACU(chat, currentIsolationKey, {
               enabled: settings_ACU.dataIsolationEnabled,
               code: settings_ACU.dataIsolationCode,
@@ -379,7 +382,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
           if (postStrategy.mode !== 'v2') {
               throw new Error(`旧存储迁移后二次校验失败：当前模式=${postStrategy.mode}${postStrategy.mode === 'legacy-v1' ? `，reason=${postStrategy.reason}` : ''}`);
           }
-          return migrateContentNullToRowId(mergedLegacyData);
+          return migrateContentNullToRowId(migrationResult.data);
       }
 
       return migrateContentNullToRowId(await mergeAllIndependentTablesLegacyV1_ACU());

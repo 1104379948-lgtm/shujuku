@@ -160,6 +160,16 @@ export function getCurrentProviderMode(): StorageMode | null {
   return currentProvider?.mode ?? null;
 }
 
+/**
+ * Reports a completed SQLite reload that silently degraded to the native runtime.
+ * A concurrent settings change to native is intentional and must not be reported.
+ */
+export function didSqliteFallbackAfterReload_ACU(expectedModeBeforeReload: StorageMode): boolean {
+  return expectedModeBeforeReload === 'sqlite'
+    && getCurrentStorageMode() === 'sqlite'
+    && getCurrentProviderMode() === 'native';
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 内部工具函数
 // ═══════════════════════════════════════════════════════════════

@@ -161,6 +161,7 @@ vi.mock('../../../src/service/worldbook/pipeline', () => ({
 }));
 
 const mockCheckIfFirstTimeInit = vi.fn().mockResolvedValue(false);
+const mockEnsureLegacyStorageMigratedBeforeWrite = vi.fn().mockResolvedValue({ success: true, migrated: false });
 const mockSaveIndependentTable = vi.fn().mockResolvedValue({ saved: true });
 const mockPersistTablesToChatMessage = vi.fn().mockResolvedValue({ saved: true, messageIndex: 0 });
 
@@ -176,7 +177,7 @@ vi.mock('../../../src/service/table/table-service', () => ({
     };
   }),
   checkIfFirstTimeInit_ACU: (...args: any[]) => mockCheckIfFirstTimeInit(...args),
-  ensureLegacyStorageMigratedBeforeWrite_ACU: vi.fn().mockResolvedValue({ success: true, migrated: false }),
+  ensureLegacyStorageMigratedBeforeWrite_ACU: (...args: any[]) => mockEnsureLegacyStorageMigratedBeforeWrite(...args),
   persistTablesToChatMessage_ACU: (...args: any[]) => mockPersistTablesToChatMessage(...args),
   saveIndependentTableToChatHistory_ACU: (...args: any[]) => mockSaveIndependentTable(...args),
 }));
@@ -266,6 +267,7 @@ beforeEach(() => {
   mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
   mockPurgeSheetKeysFromChatHistoryHard.mockResolvedValue({ changed: true, changedCount: 1 });
   mockReloadStorageProvider.mockResolvedValue(undefined);
+  mockEnsureLegacyStorageMigratedBeforeWrite.mockReset().mockResolvedValue({ success: true, migrated: false });
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -662,6 +664,17 @@ describe('processUpdatesBatch_ACU', () => {
   it('空索引列表返回 success: true', async () => {
     const result = await processUpdatesBatch_ACU([], 'auto_standard', {}, vi.fn());
     expect(result.success).toBe(true);
+  });
+
+  it('迁移失败时不执行任何批次更新', async () => {
+    mockEnsureLegacyStorageMigratedBeforeWrite.mockResolvedValueOnce({ success: false, error: 'mixed storage evidence insufficient' });
+    const mockExecute = vi.fn();
+
+    const result = await processUpdatesBatch_ACU([1], 'auto_standard', {}, mockExecute);
+
+    expect(result).toEqual({ success: false, error: 'mixed storage evidence insufficient' });
+    expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockReloadStorageProvider).not.toHaveBeenCalled();
   });
 
   it('执行更新回调成功时返回 success: true', async () => {
@@ -3283,6 +3296,24 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(result).toEqual({ success: true, failedGroups: [], committedBucketCount: 0 });
     expect(mockPrepareAIInput).not.toHaveBeenCalled();
     expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+  });
+
+  it('迁移失败时拒绝整组处理且不触发 AI 或持久化', async () => {
+    mockEnsureLegacyStorageMigratedBeforeWrite.mockResolvedValueOnce({ success: false, error: 'mixed storage evidence insufficient' });
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+      { key: 'group_b', groupId: 1, indices: [3], batchSize: 2, sheetKeys: ['sheet_1'], requestOptions: null },
+    ], 'manual_independent');
+
+    expect(result).toEqual({
+      success: false,
+      failedGroups: ['group_a', 'group_b'],
+      error: 'mixed storage evidence insufficient',
+      committedBucketCount: 0,
+    });
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
   it('同一 bucket 的多组只统一提交一次', async () => {

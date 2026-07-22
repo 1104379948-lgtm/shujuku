@@ -12,6 +12,12 @@ const mocks = vi.hoisted(() => ({
   saveToChat: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
   persistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
   getCurrentData: vi.fn(() => ({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } })),
+  getNameMapper: vi.fn(),
+  translateSql: vi.fn((sql: string) => sql.replaceAll('背包物品表', 'inventory').replaceAll('物品名称', 'item_name')),
+  resolveColumnName: vi.fn((_tableName: string, columnName: string) => columnName),
+  getChineseColumnName: vi.fn((_tableName: string, columnName: string) => columnName),
+  getChineseTableName: vi.fn((tableName: string) => tableName),
+  getStorageProvider: vi.fn(),
   runTableUpdateApplyWithScopeLock: vi.fn(async (_scopeKey: string, task: () => Promise<unknown>) => task()),
   reloadStorageProvider: vi.fn().mockResolvedValue(undefined),
   ensureStorageProviderReady: vi.fn().mockResolvedValue({
@@ -46,16 +52,20 @@ vi.mock('../../src/presentation/components/pipeline-ui-helpers', () => ({
 }));
 
 vi.mock('../../src/service/table/table-storage-strategy', () => ({
-  getStorageProvider: vi.fn(() => ({
+  getStorageProvider: mocks.getStorageProvider,
+  reloadStorageProvider: mocks.reloadStorageProvider,
+  ensureStorageProviderReady_ACU: mocks.ensureStorageProviderReady,
+}));
+
+function createBareProvider_ACU() {
+  return {
     executeQuery: mocks.executeQuery,
     executeMutation: mocks.executeMutation,
     applyEdits: mocks.applyEdits,
     saveToChat: mocks.saveToChat,
     getCurrentData: mocks.getCurrentData,
-  })),
-  reloadStorageProvider: mocks.reloadStorageProvider,
-  ensureStorageProviderReady_ACU: mocks.ensureStorageProviderReady,
-}));
+  };
+}
 
 vi.mock('../../src/service/chat/chat-service', () => ({
   getChatArray_ACU: mocks.getChatArray,
@@ -78,11 +88,7 @@ vi.mock('../../src/service/runtime/state-manager', () => ({
 }));
 
 vi.mock('../../src/service/runtime/template-vars/name-mapper', () => ({
-  getNameMapper: vi.fn(() => ({
-    resolveColumnName: (_tableName: string, columnName: string) => columnName,
-    getChineseColumnName: (_tableName: string, columnName: string) => columnName,
-    getChineseTableName: (tableName: string) => tableName,
-  })),
+  getNameMapper: mocks.getNameMapper,
 }));
 
 vi.mock('../../src/service/table/table-update-queue', () => ({
@@ -124,6 +130,13 @@ describe('createSqlApi', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.getStorageProvider.mockImplementation(createBareProvider_ACU);
+    mocks.getNameMapper.mockReturnValue({
+      translateSql: mocks.translateSql,
+      resolveColumnName: mocks.resolveColumnName,
+      getChineseColumnName: mocks.getChineseColumnName,
+      getChineseTableName: mocks.getChineseTableName,
+    });
     mocks.executeQuery.mockReturnValue({ columns: ['id'], values: [[1]], rowCount: 1 });
     mocks.executeMutation.mockReturnValue({ changes: 1, errors: [] });
     mocks.applyEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'], appliedEdits: 2 });
@@ -185,6 +198,26 @@ describe('createSqlApi', () => {
 
     expect(result).toBeNull();
     expect(mocks.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it('当前只读 SQL 绕过 readiness 并直接使用裸 provider，作为 P5 生命周期修复基线', () => {
+    const result = api.executeSqlQuery('SELECT * FROM inventory');
+
+    expect(result).toEqual({ columns: ['id'], values: [[1]], rowCount: 1, rows: [{ id: 1 }], sql: 'SELECT * FROM inventory', offset: 0 });
+    expect(mocks.getStorageProvider).toHaveBeenCalledOnce();
+    expect(mocks.ensureStorageProviderReady).not.toHaveBeenCalled();
+    expect(mocks.executeQuery).toHaveBeenCalledWith('SELECT * FROM inventory', undefined);
+  });
+
+  it('当前 raw SQL 不调用 NameMapper，中文表列名会原样进入 provider，作为 P6 翻译修复基线', () => {
+    const sql = "SELECT 物品名称 FROM 背包物品表 WHERE 物品名称 = '铁剑'";
+
+    const result = api.executeSqlQuery(sql);
+
+    expect(result).toEqual(expect.objectContaining({ sql }));
+    expect(mocks.getNameMapper).not.toHaveBeenCalled();
+    expect(mocks.translateSql).not.toHaveBeenCalled();
+    expect(mocks.executeQuery).toHaveBeenCalledWith(sql, undefined);
   });
 
   it('executeSqlMutation 支持参数化单条写入并默认保存通知', async () => {

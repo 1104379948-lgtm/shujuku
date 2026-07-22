@@ -148,6 +148,95 @@
               </AcuFileButton>
             </div>
           </section>
+          <section
+            v-if="flow.mixedStorageDecision.value"
+            class="acu-v2-data-mgmt-page__checkpoint-section"
+            aria-labelledby="acu-mixed-storage-title"
+          >
+            <h3 id="acu-mixed-storage-title" class="acu-v2-data-mgmt-page__section-title">混合存储决议</h3>
+            <p class="acu-v2-data-mgmt-page__section-description">
+              当前聊天同时检测到 legacy-v1 与 V2 数据。决议：{{ flow.mixedStorageDecision.value.kind }}。
+              可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。
+            </p>
+            <div class="acu-v2-data-mgmt-page__checkpoint-actions">
+              <AcuButton block :loading="flow.busyAction.value === 'export-mixed-storage-snapshots'" @click="flow.exportMixedStorageSnapshots">
+                导出 legacy/V2 快照
+              </AcuButton>
+              <AcuButton
+                v-if="flow.mixedStorageDecision.value.allowedActions.includes('keep_v2')"
+                block
+                :loading="flow.busyAction.value === 'commit-mixed-storage-keep_v2'"
+                @click="onCommitMixedStorageDecision('keep_v2')"
+              >
+                保留 V2 并清理 legacy
+              </AcuButton>
+              <AcuButton
+                v-if="flow.mixedStorageDecision.value.allowedActions.includes('commit_merge_candidate')"
+                block
+                :loading="flow.busyAction.value === 'commit-mixed-storage-commit_merge_candidate'"
+                @click="onCommitMixedStorageDecision('commit_merge_candidate')"
+              >
+                提交受限合并候选
+              </AcuButton>
+            </div>
+          </section>
+          <section
+            v-if="flow.v2RecoverySummary.value"
+            class="acu-v2-data-mgmt-page__checkpoint-section"
+            aria-labelledby="acu-v2-recovery-title"
+          >
+            <h3 id="acu-v2-recovery-title" class="acu-v2-data-mgmt-page__section-title">V2 数据恢复诊断</h3>
+            <p class="acu-v2-data-mgmt-page__section-description">
+              {{ flow.v2RecoverySummary.value.message }}
+              恢复仅使用服务端冻结候选，不会从页面读取或提交可编辑表格数据。
+            </p>
+            <div class="acu-v2-data-mgmt-page__checkpoint-actions">
+              <AcuButton block :disabled="!!flow.busyAction.value" @click="flow.exportV2RecoveryBackups">
+                导出已保存的原始 frame 备份
+              </AcuButton>
+              <AcuButton
+                v-if="flow.v2RecoverySummary.value.status === 'recoverable_repaired_checkpoint'"
+                block
+                variant="danger"
+                :loading="flow.busyAction.value === 'commit-v2-recovery'"
+                @click="onCommitV2Recovery(false)"
+              >
+                应用 Checkpoint 修复
+              </AcuButton>
+              <AcuButton
+                v-if="flow.v2RecoverySummary.value.status === 'recoverable_orphan_data_replace'"
+                block
+                variant="danger"
+                :loading="flow.busyAction.value === 'commit-v2-recovery'"
+                @click="onCommitV2Recovery(true)"
+              >
+                确认无锚点 data_replace 恢复
+              </AcuButton>
+            </div>
+          </section>
+          <section
+            v-if="flow.v2IsolationDiagnostics.value.length"
+            class="acu-v2-data-mgmt-page__checkpoint-section"
+            aria-labelledby="acu-v2-isolation-diagnostics-title"
+          >
+            <h3 id="acu-v2-isolation-diagnostics-title" class="acu-v2-data-mgmt-page__section-title">V2 隔离域恢复诊断</h3>
+            <div class="acu-v2-data-mgmt-page__form-stack">
+              <div v-for="diagnostic in flow.v2IsolationDiagnostics.value" :key="diagnostic.isolationKey" class="acu-v2-data-mgmt-page__history-item">
+                <strong>{{ diagnostic.isolationKey || '默认隔离域' }}</strong>
+                <p>{{ diagnostic.message }}</p>
+                <p v-if="!diagnostic.isCurrentIsolation">请切换到该隔离域后重新诊断；当前恢复提交不会跨隔离域执行。</p>
+                <p v-else-if="diagnostic.status.startsWith('recoverable_')">当前隔离域存在可恢复候选，请使用下方“诊断 V2 数据恢复”生成可提交计划。</p>
+              </div>
+            </div>
+          </section>
+          <div class="acu-v2-data-mgmt-page__checkpoint-actions">
+            <AcuButton block :loading="flow.busyAction.value === 'scan-v2-isolation-diagnostics'" @click="flow.scanV2IsolationDiagnostics">
+              扫描全部 V2 隔离域
+            </AcuButton>
+            <AcuButton block :loading="flow.busyAction.value === 'prepare-v2-recovery'" @click="flow.prepareV2Recovery">
+              诊断 V2 数据恢复
+            </AcuButton>
+          </div>
         </AcuPanel>
       </div>
 
@@ -276,6 +365,7 @@ import {
 } from "../composables/useDataManagement";
 import { dataMgmtCopy } from "../copy/data-mgmt-copy";
 import { useDialogStore } from "../stores/dialog-store";
+import type { MixedStorageCommitAction_ACU } from "../../shared/models/mixed-storage-commit-action";
 
 const resetDefaultsCleanupOptions: Array<{
   value: ResetDefaultsCleanupKey;
@@ -406,6 +496,52 @@ async function onDeleteLocalData(mode: "current" | "all"): Promise<void> {
   )
     return;
   void flow.deleteLocalData(mode);
+}
+
+async function onCommitMixedStorageDecision(action: MixedStorageCommitAction_ACU): Promise<void> {
+  const isMerge = action === 'commit_merge_candidate';
+  const confirmed = await dialogStore.confirm({
+    title: isMerge ? '提交混合存储合并候选' : '保留 V2 数据并清理 legacy',
+    message: isMerge
+      ? '将只提交服务端冻结且已审计通过的合并候。页面不会提交任何可编辑表格数据。确认继续？'
+      : '将保留已验证的 V2 数据并清理冗余 legacy-v1 数据。确认继续？',
+    confirmLabel: isMerge ? '继续提交候选' : '保留 V2',
+    confirmVariant: 'danger',
+  });
+  if (!confirmed) return;
+  if (isMerge) {
+    const secondConfirmed = await dialogStore.confirm({
+      title: '再次确认合并候选',
+      message: '候选内容以服务端冻结决议为准；提交后不会用 legacy 数据覆盖 V2。确认提交？',
+      confirmLabel: '确认提交候选',
+      confirmVariant: 'danger',
+    });
+    if (!secondConfirmed) return;
+  }
+  void flow.commitMixedStorageDecision(action);
+}
+
+async function onCommitV2Recovery(confirmOrphanDataReplace: boolean): Promise<void> {
+  const isOrphan = confirmOrphanDataReplace;
+  const confirmed = await dialogStore.confirm({
+    title: isOrphan ? '确认无锚点 data_replace 恢复' : '应用 V2 Checkpoint 修复',
+    message: isOrphan
+      ? '将只提交服务端冻结的无锚点 data_replace 候选。原始 frame 会保留为隔离备份，页面不会提交任何可编辑表格数据。确认继续？'
+      : '将只提交服务端冻结且已审计通过的 Checkpoint 修复候选。原始 frame 会保留为隔离备份。确认继续？',
+    confirmLabel: isOrphan ? '继续恢复' : '应用修复',
+    confirmVariant: 'danger',
+  });
+  if (!confirmed) return;
+  if (isOrphan) {
+    const secondConfirmed = await dialogStore.confirm({
+      title: '再次确认无锚点恢复',
+      message: '无锚点 data_replace 会被提升为新的 full checkpoint。恢复内容完全以服务端冻结候选为准。确认提交？',
+      confirmLabel: '确认提交恢复',
+      confirmVariant: 'danger',
+    });
+    if (!secondConfirmed) return;
+  }
+  void flow.commitV2Recovery(isOrphan);
 }
 
 async function onResetAllDefaults(): Promise<void> {

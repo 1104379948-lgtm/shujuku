@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import validV2FrameFixture from '../../fixtures/migrations/spv7.9/v2-valid-full-checkpoint.json';
+import invalidV2FrameFixture from '../../fixtures/migrations/spv7.9/v2-invalid-duplicate-row-id.json';
+import orphanV2FrameFixture from '../../fixtures/migrations/spv7.9/v2-orphan-data-replace.json';
 
 const { mockLogWarn } = vi.hoisted(() => ({
   mockLogWarn: vi.fn(),
@@ -625,6 +628,39 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     });
   });
 
+  it('可回放合成 spv7.9 valid V2 full checkpoint fixture', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: structuredClone(validV2FrameFixture) } },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toMatchObject({
+      sheet_0: expect.objectContaining({ content: [['row_id', '名称'], ['1', '铁剑']] }),
+    });
+  });
+
+  it('合成 spv7.9 invalid V2 full checkpoint fixture fail closed 且不修改 frame', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: structuredClone(invalidV2FrameFixture) } },
+    }];
+    const before = structuredClone(chat);
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
+      .rejects.toThrow('full checkpoint 行标识不合法');
+    expect(chat).toEqual(before);
+  });
+
+  it('合成 spv7.9 orphan data_replace fixture 无锚点时拒绝 replay', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: structuredClone(orphanV2FrameFixture) } },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toBeNull();
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('无锚点 V2 replay artifacts'));
+  });
+
   it('无 full checkpoint 时拒绝从 data_replace/log-only 恢复不完整数据', async () => {
     const chat = [
       {
@@ -656,6 +692,30 @@ describe('loadTableStateFromFramesV2_ACU', () => {
 
     expect(result).toBeNull();
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('无锚点 V2 replay artifacts'));
+  });
+
+  it('坏 full checkpoint 含重复 canonical row_id 时 fail closed 且不修改持久化 frame', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.content.push([' 1 ', '冒名副本']);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+    const before = structuredClone(chat);
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
+      .rejects.toThrow('full checkpoint 行标识不合法');
+
+    expect(chat).toEqual(before);
   });
 
   it('bounded replay 范围早于首个 V2 frame 时返回空基底但不误报无锚点历史', async () => {

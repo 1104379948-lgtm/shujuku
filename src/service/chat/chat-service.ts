@@ -64,6 +64,7 @@ interface RetainedCheckpointBoundary_ACU {
 export interface BoundaryCheckpointEnsureResult_ACU {
     success: boolean;
     changed: boolean;
+    failedIsolationKey?: string;
     skipped?: boolean;
     error?: string;
     anchorIndex?: number;
@@ -111,9 +112,12 @@ export interface ManualRefillSessionSnapshot_ACU {
     messageFields: Array<{
         index: number;
         hadIsolatedData: boolean;
+        originalIsolatedData: any;
         isolatedData: any;
         hadIdentity: boolean;
+        originalIdentity: any;
         identity: any;
+        originals: WeakMap<object, any>;
     }>;
 }
 
@@ -456,19 +460,32 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
 
     const anchorIndex = boundary.anchorIndex;
     if (anchorIndex !== undefined && anchorIndex >= 0 && chat[anchorIndex]) {
+        const snapshots = new Map<number, ReturnType<typeof messageFieldSnapshot_ACU>>();
+        chat.forEach((message, messageIndex) => {
+            const isolatedData = message?.TavernDB_ACU_IsolatedData;
+            const hasV2Frame = isolatedData
+                && typeof isolatedData === 'object'
+                && !Array.isArray(isolatedData)
+                && Object.values(isolatedData).some(tagData => isV2TagData_ACU(tagData));
+            if (messageIndex === anchorIndex || hasV2Frame) {
+                snapshots.set(messageIndex, messageFieldSnapshot_ACU(message));
+            }
+        });
         try {
             const changed = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex);
             const downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
             const obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
             if ((changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0) && options.save !== false) {
-                await saveChatToHost_ACU();
+                await saveChatToHostStrict_ACU();
             }
             return { success: true, changed: changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0, anchorIndex };
         } catch (error: any) {
+            snapshots.forEach((snapshot, messageIndex) => restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot));
             return {
                 success: false,
                 changed: false,
                 error: error?.message || String(error || '边界 checkpoint 写入失败。'),
+                ...(typeof error?.failedIsolationKey === 'string' ? { failedIsolationKey: error.failedIsolationKey } : {}),
                 anchorIndex,
             };
         }
@@ -646,9 +663,19 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             continue;
         }
 
-        const data = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex });
+        let data: Awaited<ReturnType<typeof loadTableStateFromFramesV2_ACU>>;
+        try {
+            data = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex });
+        } catch (error: unknown) {
+            const replayError = new Error(error instanceof Error ? error.message : String(error ?? '未知 replay 错误。')) as Error & { cause?: unknown; failedIsolationKey?: string };
+            replayError.cause = error;
+            replayError.failedIsolationKey = isolationKey;
+            throw replayError;
+        }
         if (!data) {
-            throw new Error(`边界 checkpoint 写入失败：无法在 boundaryAnchorIndex=${boundaryAnchorIndex} 前恢复 isolationKey=[${isolationKey || '无标签'}] 的 V2 数据。`);
+            const error = new Error(`边界 checkpoint 写入失败：无法在 boundaryAnchorIndex=${boundaryAnchorIndex} 前恢复 isolationKey=[${isolationKey || '无标签'}] 的 V2 数据。`) as Error & { failedIsolationKey?: string };
+            error.failedIsolationKey = isolationKey;
+            throw error;
         }
 
         const anchorMsg = chat[boundaryAnchorIndex];
@@ -1567,9 +1594,47 @@ export async function clearManualRefillIncrementalDataInRange_ACU(targetMessageI
     }, () => clearManualRefillIncrementalDataInRangeCore_ACU(targetMessageIndices, targetSheetKeys));
 }
 
-function cloneManualRefillJson_ACU<T>(value: T): T {
-    if (value === undefined || value === null) return value;
-    return JSON.parse(JSON.stringify(value)) as T;
+function cloneMessageFieldValue_ACU<T>(value: T, seen = new WeakMap<object, any>(), originals = new WeakMap<object, any>()): T {
+    if (value === null || typeof value !== 'object') return value;
+    const existing = seen.get(value);
+    if (existing) return existing;
+    if (value instanceof Date) {
+        const clone = new Date(value.getTime());
+        seen.set(value, clone);
+        originals.set(clone, value);
+        return clone as T;
+    }
+    if (value instanceof RegExp) {
+        const clone = new RegExp(value.source, value.flags);
+        seen.set(value, clone);
+        originals.set(clone, value);
+        return clone as T;
+    }
+
+    if (value instanceof Map) {
+        const clone = new Map();
+        seen.set(value, clone);
+        originals.set(clone, value);
+        value.forEach((mapValue, mapKey) => clone.set(cloneMessageFieldValue_ACU(mapKey, seen, originals), cloneMessageFieldValue_ACU(mapValue, seen, originals)));
+        return clone as T;
+    }
+    if (value instanceof Set) {
+        const clone = new Set();
+        seen.set(value, clone);
+        originals.set(clone, value);
+        value.forEach(setValue => clone.add(cloneMessageFieldValue_ACU(setValue, seen, originals)));
+        return clone as T;
+    }
+    const clone: any = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+    seen.set(value, clone);
+    originals.set(clone, value);
+    for (const key of Reflect.ownKeys(value)) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor) continue;
+        if ('value' in descriptor) descriptor.value = cloneMessageFieldValue_ACU(descriptor.value, seen, originals);
+        Object.defineProperty(clone, key, descriptor);
+    }
+    return clone;
 }
 
 function getV2FrameForIsolation_ACU(msg: any, isolationKey: string): TableStorageFrameV2_ACU | null {
@@ -1594,27 +1659,75 @@ function findManualRefillSheetBaselineTargetIndex_ACU(chat: any[], isolationKey:
 
 function messageFieldSnapshot_ACU(msg: any): {
     hadIsolatedData: boolean;
+    originalIsolatedData: any;
     isolatedData: any;
     hadIdentity: boolean;
+    originalIdentity: any;
     identity: any;
+    originals: WeakMap<object, any>;
 } {
+    const originals = new WeakMap<object, any>();
     return {
         hadIsolatedData: Object.prototype.hasOwnProperty.call(msg, 'TavernDB_ACU_IsolatedData'),
-        isolatedData: cloneManualRefillJson_ACU(msg?.TavernDB_ACU_IsolatedData),
+        originalIsolatedData: msg?.TavernDB_ACU_IsolatedData,
+        isolatedData: cloneMessageFieldValue_ACU(msg?.TavernDB_ACU_IsolatedData, new WeakMap<object, any>(), originals),
         hadIdentity: Object.prototype.hasOwnProperty.call(msg, 'TavernDB_ACU_Identity'),
-        identity: cloneManualRefillJson_ACU(msg?.TavernDB_ACU_Identity),
+        originalIdentity: msg?.TavernDB_ACU_Identity,
+        identity: cloneMessageFieldValue_ACU(msg?.TavernDB_ACU_Identity, new WeakMap<object, any>(), originals),
+        originals,
     };
+}
+
+function restoreMessageFieldValueInPlace_ACU(target: any, snapshot: any, originals: WeakMap<object, any>, seen = new WeakMap<object, any>()): any {
+    if (target === null || snapshot === null || typeof target !== 'object' || typeof snapshot !== 'object') return snapshot;
+    const restored = seen.get(snapshot);
+    if (restored) return restored;
+    const original = originals.get(snapshot);
+    const restoreTarget = original && typeof original === 'object' ? original : target;
+    seen.set(snapshot, restoreTarget);
+
+    const snapshotKeys = Reflect.ownKeys(snapshot);
+    const snapshotKeySet = new Set(snapshotKeys);
+    for (const key of Reflect.ownKeys(restoreTarget)) {
+        if (key !== 'length' && !snapshotKeySet.has(key)) delete restoreTarget[key];
+    }
+
+    const restoreKey = (key: PropertyKey): void => {
+        const snapshotDescriptor = Object.getOwnPropertyDescriptor(snapshot, key);
+        if (!snapshotDescriptor) return;
+        const targetDescriptor = Object.getOwnPropertyDescriptor(restoreTarget, key);
+        if (
+            'value' in snapshotDescriptor
+            && snapshotDescriptor.value !== null
+            && typeof snapshotDescriptor.value === 'object'
+        ) {
+            const originalValue = originals.get(snapshotDescriptor.value);
+            const currentValue = 'value' in (targetDescriptor || {}) ? targetDescriptor.value : undefined;
+            if (originalValue && typeof originalValue === 'object') {
+                snapshotDescriptor.value = restoreMessageFieldValueInPlace_ACU(originalValue, snapshotDescriptor.value, originals, seen);
+            } else if (currentValue !== null && typeof currentValue === 'object') {
+                snapshotDescriptor.value = restoreMessageFieldValueInPlace_ACU(currentValue, snapshotDescriptor.value, originals, seen);
+            }
+        }
+        Object.defineProperty(restoreTarget, key, snapshotDescriptor);
+    };
+
+    snapshotKeys.filter(key => key !== 'length').forEach(restoreKey);
+    if (Array.isArray(snapshot)) Object.defineProperty(restoreTarget, 'length', Object.getOwnPropertyDescriptor(snapshot, 'length')!);
+    return restoreTarget;
 }
 
 function restoreMessageFieldSnapshot_ACU(msg: any, snapshot: ReturnType<typeof messageFieldSnapshot_ACU>): void {
     if (!msg) return;
     if (snapshot.hadIsolatedData) {
-        msg.TavernDB_ACU_IsolatedData = snapshot.isolatedData;
+        msg.TavernDB_ACU_IsolatedData = snapshot.originalIsolatedData;
+        restoreMessageFieldValueInPlace_ACU(snapshot.originalIsolatedData, snapshot.isolatedData, snapshot.originals);
     } else {
         delete msg.TavernDB_ACU_IsolatedData;
     }
     if (snapshot.hadIdentity) {
-        msg.TavernDB_ACU_Identity = snapshot.identity;
+        msg.TavernDB_ACU_Identity = snapshot.originalIdentity;
+        restoreMessageFieldValueInPlace_ACU(snapshot.originalIdentity, snapshot.identity, snapshot.originals);
     } else {
         delete msg.TavernDB_ACU_Identity;
     }
@@ -1705,7 +1818,7 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
                     createdAt,
                     reason: 'manual',
                     sheetKey,
-                    data: cloneManualRefillJson_ACU(options.snapshotData[sheetKey]) as Sheet_ACU,
+                    data: cloneMessageFieldValue_ACU(options.snapshotData[sheetKey]) as Sheet_ACU,
                     scheduleSummary: { lastFilledAiFloor: completedAiFloor },
                 };
             }
@@ -1828,14 +1941,14 @@ export async function replaceManualRefillSheetBaselineInRangeAtomic_ACU(
             const scheduleSummary = collectedScheduleSummary && typeof collectedScheduleSummary === 'object' && !Array.isArray(collectedScheduleSummary) ? collectedScheduleSummary : {};
             const perSheetCheckpoints = { ...(existingFrame.perSheetCheckpoints || {}) };
             for (const sheetKey of options.targetSheetKeys) {
-                const sheetData = cloneManualRefillJson_ACU(options.baselineData[sheetKey]) as Sheet_ACU;
+                const sheetData = cloneMessageFieldValue_ACU(options.baselineData[sheetKey]) as Sheet_ACU;
                 perSheetCheckpoints[sheetKey] = {
                     kind: 'sheet_full',
                     createdAt,
                     reason: 'manual',
                     sheetKey,
                     data: sheetData,
-                    ...(scheduleSummary[sheetKey] ? { scheduleSummary: cloneManualRefillJson_ACU(scheduleSummary[sheetKey]) } : {}),
+                    ...(scheduleSummary[sheetKey] ? { scheduleSummary: cloneMessageFieldValue_ACU(scheduleSummary[sheetKey]) } : {}),
                 };
             }
             existingFrame.perSheetCheckpoints = perSheetCheckpoints;

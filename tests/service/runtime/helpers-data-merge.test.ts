@@ -94,7 +94,7 @@ vi.mock('../../../src/service/table/storage-strategy-resolver', () => ({
 }));
 
 vi.mock('../../../src/service/table/storage-v2-migration', () => ({
-  migrateLegacyStorageToV2OnLoad_ACU: vi.fn().mockResolvedValue({ migrated: true }),
+  migrateLegacyStorageToV2OnLoad_ACU: vi.fn().mockResolvedValue({ migrated: true, data: null }),
 }));
 
 vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
@@ -122,6 +122,7 @@ import { getChatArray_ACU } from '../../../src/data/gateways/chat-gateway';
 import { getChatSheetGuideDataForIsolationKey_ACU, materializeDataFromSheetGuide_ACU } from '../../../src/service/template/chat-scope';
 import { resolveTableStorageStrategy_ACU } from '../../../src/service/table/storage-strategy-resolver';
 import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { migrateLegacyStorageToV2OnLoad_ACU } from '../../../src/service/table/storage-v2-migration';
 
 describe('migrateContentNullToRowId', () => {
   // ═══════════════════════════════════════════════════════════════
@@ -561,6 +562,47 @@ describe('mergeAllIndependentTables_ACU', () => {
     const result = await mergeAllIndependentTables_ACU();
     expect(result).not.toBeNull();
     expect(result!.sheet_0.content[1][1]).toBe('旧版铁剑');
+  });
+
+  it('legacy-v1 迁移成功后返回修复候选数据，而非原始 legacy 合并数据', async () => {
+    const legacyData = {
+      sheet_0: {
+        name: '背包物品表',
+        content: [['row_id', '物品名称'], [' 1 ', '原始旧数据']],
+      },
+    };
+    const repairedData = {
+      sheet_0: {
+        name: '背包物品表',
+        content: [['row_id', '物品名称'], ['1', '修复后数据']],
+      },
+    };
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU)
+      .mockReturnValueOnce({ mode: 'legacy-v1' } as any)
+      .mockReturnValueOnce({ mode: 'v2' } as any);
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue(null);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(true);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue(legacyData);
+    vi.mocked(migrateLegacyStorageToV2OnLoad_ACU).mockResolvedValueOnce({ migrated: true, data: repairedData } as any);
+
+    const result = await mergeAllIndependentTables_ACU();
+
+    expect(migrateLegacyStorageToV2OnLoad_ACU).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ sheet_0: expect.objectContaining({ content: [['row_id', '物品名称'], ['1', '原始旧数据']] }) }) }));
+    expect(result).toEqual(repairedData);
+  });
+
+  it('legacy-v1 迁移声称成功但未返回候选数据时拒绝继续', async () => {
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'legacy-v1' } as any);
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue(null);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(true);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue({
+      sheet_0: { name: '背包物品表', content: [['row_id', '物品名称'], ['1', '旧数据']] },
+    });
+    vi.mocked(migrateLegacyStorageToV2OnLoad_ACU).mockResolvedValueOnce({ migrated: true } as any);
+
+    await expect(mergeAllIndependentTables_ACU()).rejects.toThrow('迁移成功结果缺少修复后的表格数据');
   });
 
   // ═══ updateConfig 兼容迁移 ═══

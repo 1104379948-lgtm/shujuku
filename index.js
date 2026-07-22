@@ -11712,53 +11712,53 @@ $CONTENT
         runtimeRevisions_ACU.clear();
     }
 
-    function isRecord_ACU$1(value) {
+    function isRecord_ACU$4(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function createResult_ACU() {
         return { valid: true, issues: [] };
     }
-    function addIssue_ACU(result, checkpointKind, context, type, details = {}) {
+    function addIssue_ACU$1(result, checkpointKind, context, type, details = {}) {
         result.valid = false;
         result.issues.push({ checkpointKind, ...context, type, ...details });
     }
     function validateCanonicalCheckpointSheet_ACU(sheet, sheetKey, checkpointKind, context = {}) {
         const result = createResult_ACU();
         if (!sheetKey.startsWith('sheet_')) {
-            addIssue_ACU(result, checkpointKind, context, 'invalid_sheet_key', { sheetKey });
+            addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet_key', { sheetKey });
             return result;
         }
-        if (!isRecord_ACU$1(sheet)) {
-            addIssue_ACU(result, checkpointKind, context, 'invalid_sheet', { sheetKey });
+        if (!isRecord_ACU$4(sheet)) {
+            addIssue_ACU$1(result, checkpointKind, context, 'invalid_sheet', { sheetKey });
             return result;
         }
         const content = sheet.content;
         if (!Array.isArray(content)) {
-            addIssue_ACU(result, checkpointKind, context, 'invalid_content', { sheetKey });
+            addIssue_ACU$1(result, checkpointKind, context, 'invalid_content', { sheetKey });
             return result;
         }
         const header = content[0];
         if (!Array.isArray(header) || header.length === 0 || header[0] !== 'row_id') {
-            addIssue_ACU(result, checkpointKind, context, 'invalid_header', { sheetKey, rowIndex: 0 });
+            addIssue_ACU$1(result, checkpointKind, context, 'invalid_header', { sheetKey, rowIndex: 0 });
             return result;
         }
         const rowIds = new Set();
         for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
             const row = content[rowIndex];
             if (!Array.isArray(row)) {
-                addIssue_ACU(result, checkpointKind, context, 'invalid_row', { sheetKey, rowIndex });
+                addIssue_ACU$1(result, checkpointKind, context, 'invalid_row', { sheetKey, rowIndex });
                 continue;
             }
             if (isEmptyCanonicalRowId_ACU(row[0])) {
-                addIssue_ACU(result, checkpointKind, context, 'empty_row_id', { sheetKey, rowIndex });
+                addIssue_ACU$1(result, checkpointKind, context, 'empty_row_id', { sheetKey, rowIndex });
                 continue;
             }
             const rowId = String(row[0]).trim();
             if (row.length !== header.length) {
-                addIssue_ACU(result, checkpointKind, context, 'row_width_mismatch', { sheetKey, rowIndex, rowId });
+                addIssue_ACU$1(result, checkpointKind, context, 'row_width_mismatch', { sheetKey, rowIndex, rowId });
             }
             if (rowIds.has(rowId)) {
-                addIssue_ACU(result, checkpointKind, context, 'duplicate_row_id', { sheetKey, rowIndex, rowId });
+                addIssue_ACU$1(result, checkpointKind, context, 'duplicate_row_id', { sheetKey, rowIndex, rowId });
                 continue;
             }
             rowIds.add(rowId);
@@ -11767,13 +11767,13 @@ $CONTENT
     }
     function validateCanonicalCheckpointData_ACU(data, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$1(data)) {
-            addIssue_ACU(result, 'data', context, 'invalid_data');
+        if (!isRecord_ACU$4(data)) {
+            addIssue_ACU$1(result, 'data', context, 'invalid_data');
             return result;
         }
         const sheets = Object.entries(data).filter(([key]) => key.startsWith('sheet_'));
         if (sheets.length === 0) {
-            addIssue_ACU(result, 'data', context, 'missing_sheet');
+            addIssue_ACU$1(result, 'data', context, 'missing_sheet');
             return result;
         }
         for (const [sheetKey, sheet] of sheets) {
@@ -11783,24 +11783,73 @@ $CONTENT
         }
         return result;
     }
+    function isNonNegativeInteger_ACU(value) {
+        return Number.isInteger(value) && Number(value) >= 0;
+    }
+    function isPositiveInteger_ACU(value) {
+        return Number.isInteger(value) && Number(value) > 0;
+    }
+    /**
+     * 仅供 mixed-storage evaluator 信任 migration lineage 前调用。
+     * 它故意不接入 canonical checkpoint 校验，以保持历史无 provenance frame 的 replay 兼容。
+     */
+    function validateMigrationProvenanceV1_ACU(provenance) {
+        const issues = [];
+        if (!isRecord_ACU$4(provenance)) {
+            return { valid: false, issues: ['provenance_not_object'] };
+        }
+        if (provenance.version !== 1)
+            issues.push('unsupported_provenance_version');
+        if (typeof provenance.legacyDataFingerprint !== 'string' || provenance.legacyDataFingerprint.trim() === '') {
+            issues.push('invalid_legacy_fingerprint');
+        }
+        const sourceIndices = provenance.legacySourceMessageIndices;
+        if (!Array.isArray(sourceIndices)
+            || sourceIndices.length === 0
+            || !sourceIndices.every(isNonNegativeInteger_ACU)
+            || sourceIndices.some((index, position) => position > 0 && index <= sourceIndices[position - 1])) {
+            issues.push('invalid_source_indices');
+        }
+        const sourceAiFloors = provenance.legacySourceAiFloors;
+        if (!Array.isArray(sourceAiFloors)
+            || !Array.isArray(sourceIndices)
+            || sourceAiFloors.length !== sourceIndices.length
+            || !sourceAiFloors.every(isPositiveInteger_ACU)) {
+            issues.push('invalid_source_ai_floors');
+        }
+        const lastChangedBySheet = provenance.legacyLastChangedAiFloorBySheet;
+        if (!isRecord_ACU$4(lastChangedBySheet)
+            || Object.keys(lastChangedBySheet).some(sheetKey => !sheetKey.startsWith('sheet_') || !isNonNegativeInteger_ACU(lastChangedBySheet[sheetKey]))) {
+            issues.push('invalid_last_changed_floor_by_sheet');
+        }
+        if (!isNonNegativeInteger_ACU(provenance.targetMessageIndex))
+            issues.push('invalid_target_message_index');
+        if (!isPositiveInteger_ACU(provenance.targetAiFloor))
+            issues.push('invalid_target_ai_floor');
+        if (typeof provenance.isolationKey !== 'string')
+            issues.push('invalid_provenance_isolation_key');
+        if (!Number.isFinite(provenance.migratedAt) || Number(provenance.migratedAt) < 0)
+            issues.push('invalid_migrated_at');
+        return { valid: issues.length === 0, issues };
+    }
     function validateCanonicalCheckpoint_ACU(checkpoint, context = {}) {
         const result = createResult_ACU();
-        if (!isRecord_ACU$1(checkpoint)) {
-            addIssue_ACU(result, 'full', context, 'checkpoint_not_object');
+        if (!isRecord_ACU$4(checkpoint)) {
+            addIssue_ACU$1(result, 'full', context, 'checkpoint_not_object');
             return result;
         }
         const kind = checkpoint.kind;
         if (kind !== 'full' && kind !== 'sheet_full') {
-            addIssue_ACU(result, 'full', context, 'invalid_checkpoint_kind');
+            addIssue_ACU$1(result, 'full', context, 'invalid_checkpoint_kind');
             return result;
         }
         const checkpointKind = kind;
         const issueContext = { ...context, reason: typeof checkpoint.reason === 'string' ? checkpoint.reason : context.reason };
         if (!Number.isFinite(checkpoint.createdAt) || Number(checkpoint.createdAt) < 0) {
-            addIssue_ACU(result, checkpointKind, issueContext, 'invalid_created_at');
+            addIssue_ACU$1(result, checkpointKind, issueContext, 'invalid_created_at');
         }
         if (typeof checkpoint.reason !== 'string' || checkpoint.reason.trim() === '') {
-            addIssue_ACU(result, checkpointKind, issueContext, 'invalid_reason');
+            addIssue_ACU$1(result, checkpointKind, issueContext, 'invalid_reason');
         }
         if (checkpointKind === 'full') {
             const validation = validateCanonicalCheckpointData_ACU(checkpoint.data, issueContext);
@@ -11810,7 +11859,7 @@ $CONTENT
         }
         const sheetKey = checkpoint.sheetKey;
         if (typeof sheetKey !== 'string' || !sheetKey.startsWith('sheet_')) {
-            addIssue_ACU(result, checkpointKind, issueContext, 'sheet_key_mismatch');
+            addIssue_ACU$1(result, checkpointKind, issueContext, 'sheet_key_mismatch');
             return result;
         }
         const validation = validateCanonicalCheckpointSheet_ACU(checkpoint.data, sheetKey, checkpointKind, issueContext);
@@ -11846,6 +11895,7 @@ $CONTENT
             ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$2(options.scheduleSummary) } : {}),
             ...(options.event ? { event: deepClone_ACU$2(options.event) } : {}),
             ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$2(options.manualRefillProgress) } : {}),
+            ...(options.migrationProvenance ? { migrationProvenance: deepClone_ACU$2(options.migrationProvenance) } : {}),
         };
         return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
     }
@@ -13572,6 +13622,1091 @@ $CONTENT
         return options.transactionContext.runCommit(() => persistTableSheetCheckpointV2Core_ACU(options), []);
     }
 
+    function isRecord_ACU$3(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function fingerprint_ACU(value) {
+        const text = JSON.stringify(value, (_key, item) => {
+            if (!isRecord_ACU$3(item))
+                return item;
+            return Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {});
+        });
+        let hash = 2166136261;
+        for (let index = 0; index < text.length; index += 1) {
+            hash ^= text.charCodeAt(index);
+            hash = Math.imul(hash, 16777619);
+        }
+        return `fnv1a:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+    }
+    function canonicalId_ACU(value) {
+        if (value === null || value === undefined)
+            return null;
+        const id = String(value).trim();
+        return id || null;
+    }
+    function addIssue_ACU(result, issue, plan) {
+        result.issues.push(issue);
+        if (plan)
+            result.repairPlan.push(plan);
+    }
+    function inspectRows_ACU(result, sheetKey, rows, pool, headerLength, ids) {
+        rows.forEach((row, offset) => {
+            const rowIndex = pool === 'content' ? offset + 1 : offset;
+            if (!Array.isArray(row)) {
+                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
+                return;
+            }
+            const rowId = canonicalId_ACU(row[0]);
+            if (!rowId)
+                addIssue_ACU(result, { code: 'upgrade_empty_row_id', sheetKey, rowIndex, rowPool: pool, message: '行缺少稳定 row_id' }, { action: 'assign_row_id', sheetKey, rowIndex, rowPool: pool });
+            else {
+                if (row[0] !== rowId)
+                    result.repairPlan.push({ action: 'normalize_row_id', sheetKey, rowIndex, rowPool: pool });
+                const existing = ids.get(rowId);
+                if (existing) {
+                    const code = existing.pool === pool ? 'upgrade_duplicate_row_id' : 'upgrade_seed_pool_conflict';
+                    const message = existing.pool === pool
+                        ? 'row_id 在同一行集中重复'
+                        : 'row_id 同时存在于 content 与 seedRows 中';
+                    addIssue_ACU(result, { code, sheetKey, rowIndex, rowPool: pool, rowId, message }, { action: 'assign_row_id', sheetKey, rowIndex, rowPool: pool });
+                }
+                else
+                    ids.set(rowId, { pool, rowIndex });
+            }
+            if (row.length < headerLength)
+                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行短于表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
+            if (row.length > headerLength)
+                addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行超出表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
+        });
+    }
+    function inspectRowsWithoutIds_ACU(result, sheetKey, rows, pool, expectedWidth) {
+        rows.forEach((row, offset) => {
+            const rowIndex = pool === 'content' ? offset + 1 : offset;
+            if (!Array.isArray(row)) {
+                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
+            }
+            else if (row.length < expectedWidth) {
+                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行短于业务表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
+            }
+            else if (row.length > expectedWidth) {
+                addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, message: '行超出业务表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
+            }
+        });
+    }
+    function determineHeaderRepair_ACU(result, sheetKey, sheet) {
+        const content = sheet.content;
+        if (!Array.isArray(content) || !Array.isArray(content[0]) || content[0].length === 0) {
+            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '缺少可识别表头，无法安全推导 row_id 位置' });
+            return null;
+        }
+        const header = content[0];
+        const firstHeader = String(header[0] ?? '').trim();
+        if (firstHeader === 'row_id')
+            return { header, insertsRowId: false };
+        if (!firstHeader || /^(id|rowid|row_id)$/i.test(firstHeader) || firstHeader === '行号') {
+            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '身份列表头可确定地规范化为 row_id' }, { action: 'rename_header', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
+            return { header: ['row_id', ...header.slice(1)], insertsRowId: false };
+        }
+        const ddl = isRecord_ACU$3(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
+        const ddlText = typeof ddl === 'string' ? ddl : '';
+        const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
+        const ddlHasLeadingRowId = ddlColumns[0]?.sqlName.toLowerCase() === 'row_id' && ddlColumns.length === header.length + 1;
+        const headerMatchesDdlWithoutRowId = ddlHasLeadingRowId && header.every((value, index) => {
+            const headerValue = String(value ?? '').trim();
+            const ddlColumn = ddlColumns[index + 1];
+            return !!headerValue && !!ddlColumn && (ddlColumn.sqlName === headerValue || ddlColumn.comment === headerValue);
+        });
+        if (headerMatchesDdlWithoutRowId) {
+            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: 'DDL 证明当前业务表头缺少 row_id 列，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
+            return { header: ['row_id', ...header], insertsRowId: true };
+        }
+        addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无法依据 DDL 安全判定应改名还是插入 row_id' });
+        return null;
+    }
+    function getTableDataFingerprint_ACU(data) {
+        return fingerprint_ACU(data);
+    }
+    function auditTableDataForUpgrade_ACU(data) {
+        const result = { status: 'clean', issues: [], repairPlan: [], dataFingerprintBefore: fingerprint_ACU(data), sourceData: data };
+        if (!isRecord_ACU$3(data)) {
+            addIssue_ACU(result, { code: 'upgrade_invalid_data', message: '表格数据不是对象' });
+            result.status = 'unrecoverable';
+            return result;
+        }
+        const sheets = Object.entries(data).filter(([key]) => key.startsWith('sheet_'));
+        if (sheets.length === 0) {
+            addIssue_ACU(result, { code: 'upgrade_missing_sheet', message: '表格数据不含 sheet_*' });
+            result.status = 'unrecoverable';
+            return result;
+        }
+        for (const [sheetKey, rawSheet] of sheets) {
+            if (!isRecord_ACU$3(rawSheet)) {
+                addIssue_ACU(result, { code: 'upgrade_invalid_data', sheetKey, message: 'sheet 不是对象' });
+                continue;
+            }
+            const headerState = determineHeaderRepair_ACU(result, sheetKey, rawSheet);
+            if (!headerState)
+                continue;
+            const content = Array.isArray(rawSheet.content) ? rawSheet.content : [];
+            const seedRows = Array.isArray(rawSheet.seedRows) ? rawSheet.seedRows : [];
+            const ids = new Map();
+            if (headerState.insertsRowId) {
+                const expectedBusinessWidth = headerState.header.length - 1;
+                inspectRowsWithoutIds_ACU(result, sheetKey, content.slice(1), 'content', expectedBusinessWidth);
+                inspectRowsWithoutIds_ACU(result, sheetKey, seedRows, 'seedRows', expectedBusinessWidth);
+                content.slice(1).forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset + 1, rowPool: 'content' }));
+                seedRows.forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset, rowPool: 'seedRows' }));
+                continue;
+            }
+            inspectRows_ACU(result, sheetKey, content.slice(1), 'content', headerState.header.length, ids);
+            inspectRows_ACU(result, sheetKey, seedRows, 'seedRows', headerState.header.length, ids);
+        }
+        if (result.issues.some(issue => issue.code === 'upgrade_invalid_data' || issue.code === 'upgrade_missing_sheet'))
+            result.status = 'unrecoverable';
+        else if (result.issues.some(issue => issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells'))
+            result.status = 'requires_confirmation';
+        else if (result.issues.length > 0)
+            result.status = 'repairable';
+        return result;
+    }
+
+    const LOCATION_ORDER = [
+        'isolated_independent', 'isolated_incremental', 'isolated_tracking_only',
+        'top_level_independent', 'top_level_standard', 'top_level_summary', 'top_level_tracking_only',
+    ];
+    function clone_ACU$6(value) { return JSON.parse(JSON.stringify(value)); }
+    function sortedUnique_ACU(values) {
+        return [...new Set(values.filter((value) => typeof value === 'string' && value.startsWith('sheet_')))].sort((a, b) => a.localeCompare(b));
+    }
+    function allowedSheetKeys_ACU(values, allowed) {
+        return sortedUnique_ACU(values).filter(key => allowed.has(key));
+    }
+    function containerKeys_ACU(value, allowed) {
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            return [];
+        return sortedUnique_ACU(Object.keys(value).filter(key => allowed.has(key)));
+    }
+    function pickSheetValues_ACU(value, sheetKeys) {
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            return {};
+        return Object.fromEntries(sheetKeys.map(sheetKey => [sheetKey, value[sheetKey]]));
+    }
+    function legacySourceFingerprintPayload_ACU(message, evidence, isolationKey) {
+        const locations = new Set(evidence.locations);
+        const payload = { messageIndex: evidence.messageIndex, locations: evidence.locations };
+        const isolated = readIsolatedTagData_ACU(message, isolationKey);
+        if (locations.has('isolated_independent') || locations.has('isolated_incremental') || locations.has('isolated_tracking_only')) {
+            payload.isolated = {
+                independentData: pickSheetValues_ACU(isolated?.independentData, evidence.sheetKeys),
+                incrementalData: pickSheetValues_ACU(isolated?.incrementalData, evidence.sheetKeys),
+                modifiedKeys: evidence.modifiedKeys,
+                updateGroupKeys: evidence.updateGroupKeys,
+            };
+        }
+        if (locations.has('top_level_independent') || locations.has('top_level_standard') || locations.has('top_level_summary') || locations.has('top_level_tracking_only')) {
+            payload.topLevel = {
+                independentData: pickSheetValues_ACU(readLegacyIndependentData_ACU(message), evidence.sheetKeys),
+                data: pickSheetValues_ACU(readLegacyStandardData_ACU(message), evidence.sheetKeys),
+                summaryData: pickSheetValues_ACU(readLegacySummaryData_ACU(message), evidence.sheetKeys),
+                modifiedKeys: evidence.modifiedKeys,
+                updateGroupKeys: evidence.updateGroupKeys,
+                identity: message?.TavernDB_ACU_Identity,
+            };
+        }
+        return payload;
+    }
+    function updateLegacyFloors_ACU(lastFilledAiFloorBySheet, lastChangedAiFloorBySheet, aiFloor, dataKeys, deltaKeys, modifiedKeys, updateGroupKeys) {
+        const noteFilled = (sheetKey) => { lastFilledAiFloorBySheet[sheetKey] = Math.max(lastFilledAiFloorBySheet[sheetKey] || 0, aiFloor); };
+        const noteChanged = (sheetKey) => { lastChangedAiFloorBySheet[sheetKey] = Math.max(lastChangedAiFloorBySheet[sheetKey] || 0, aiFloor); };
+        updateGroupKeys.forEach(noteFilled);
+        [...modifiedKeys, ...deltaKeys].forEach(sheetKey => { noteFilled(sheetKey); noteChanged(sheetKey); });
+        if (updateGroupKeys.length === 0 && modifiedKeys.length === 0 && deltaKeys.length === 0) {
+            dataKeys.forEach(sheetKey => { noteFilled(sheetKey); noteChanged(sheetKey); });
+        }
+    }
+    function eventTouchesSheet_ACU(event, sheetKey) {
+        return ['filledSheetKeys', 'changedSheetKeys', 'groupKeys'].some(key => Array.isArray(event?.[key]) && event[key].includes(sheetKey));
+    }
+    function operationTouchesSheet_ACU(operation, sheetKey) {
+        if (!operation || typeof operation !== 'object')
+            return false;
+        if (operation.kind === 'sheet_replace' || operation.kind === 'sheet_schema_migrate' || operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update' || operation.kind === 'sql_sheet_batch')
+            return operation.sheetKey === sheetKey;
+        if (operation.kind === 'data_replace')
+            return !!operation.data?.[sheetKey];
+        return operation.kind === 'sql_batch' || operation.kind === 'table_edit_dsl';
+    }
+    function frameTouchesSheet_ACU(frame, sheetKey) {
+        if (frame.perSheetCheckpoints?.[sheetKey]?.kind === 'sheet_full')
+            return true;
+        return (frame.logEntries || []).some(entry => eventTouchesSheet_ACU(entry, sheetKey)
+            || (Array.isArray(entry.operations) && entry.operations.some(operation => operationTouchesSheet_ACU(operation, sheetKey)))
+            || (Array.isArray(entry.patches) && entry.patches.some(patch => patch?.sheetKey === sheetKey)));
+    }
+    function eventChangedFloor_ACU(event, fallbackAiFloor, sheetKey) {
+        if (!eventTouchesSheet_ACU(event, sheetKey))
+            return 0;
+        return Number.isInteger(event?.aiFloor) && event.aiFloor > 0 ? event.aiFloor : fallbackAiFloor;
+    }
+    function entryChangedFloor_ACU(entry, fallbackAiFloor, sheetKey) {
+        const eventFloor = eventChangedFloor_ACU(entry, fallbackAiFloor, sheetKey);
+        if (eventFloor > 0)
+            return eventFloor;
+        const operationTouched = Array.isArray(entry?.operations)
+            && entry.operations.some((operation) => operationTouchesSheet_ACU(operation, sheetKey));
+        const patchTouched = Array.isArray(entry?.patches)
+            && entry.patches.some((patch) => patch?.sheetKey === sheetKey);
+        return operationTouched || patchTouched ? fallbackAiFloor : 0;
+    }
+    function frameHasUnanchoredArtifacts_ACU(frame) {
+        const raw = frame;
+        const perSheetCheckpoints = raw.perSheetCheckpoints;
+        const hasPerSheetCheckpointArtifact = perSheetCheckpoints !== undefined
+            && (perSheetCheckpoints === null
+                || typeof perSheetCheckpoints !== 'object'
+                || Array.isArray(perSheetCheckpoints)
+                || Object.keys(perSheetCheckpoints).length > 0);
+        const headRevision = raw.headRevision;
+        const hasHeadRevisionArtifact = headRevision !== undefined
+            && headRevision !== null
+            && (typeof headRevision !== 'string' || headRevision.length > 0);
+        return frame.logEntries.length > 0
+            || hasPerSheetCheckpointArtifact
+            || raw.manualRefillProgress !== undefined
+            || hasHeadRevisionArtifact;
+    }
+    function collectLegacyMessageEvidence_ACU(message, messageIndex, aiFloor, isolationKey, isolationConfig, allowedSheetKeys, lastFilledAiFloorBySheet, lastChangedAiFloorBySheet) {
+        const locations = new Set();
+        const sheetKeys = new Set();
+        const modifiedKeys = new Set();
+        const updateGroupKeys = new Set();
+        const addKeys = (keys) => keys.forEach(key => sheetKeys.add(key));
+        const isolated = readIsolatedTagData_ACU(message, isolationKey);
+        if (isolated && !isV2TagData_ACU(isolated)) {
+            const independentKeys = containerKeys_ACU(isolated.independentData, allowedSheetKeys);
+            const incrementalKeys = containerKeys_ACU(isolated.incrementalData, allowedSheetKeys);
+            const isolatedModifiedKeys = allowedSheetKeys_ACU(Array.isArray(isolated.modifiedKeys) ? isolated.modifiedKeys : [], allowedSheetKeys);
+            const isolatedUpdateGroupKeys = allowedSheetKeys_ACU(Array.isArray(isolated.updateGroupKeys) ? isolated.updateGroupKeys : [], allowedSheetKeys);
+            if (independentKeys.length > 0)
+                locations.add('isolated_independent');
+            if (incrementalKeys.length > 0)
+                locations.add('isolated_incremental');
+            if (independentKeys.length === 0 && incrementalKeys.length === 0 && (isolatedModifiedKeys.length > 0 || isolatedUpdateGroupKeys.length > 0))
+                locations.add('isolated_tracking_only');
+            addKeys([...independentKeys, ...incrementalKeys, ...isolatedModifiedKeys, ...isolatedUpdateGroupKeys]);
+            updateLegacyFloors_ACU(lastFilledAiFloorBySheet, lastChangedAiFloorBySheet, aiFloor, independentKeys, incrementalKeys, isolatedModifiedKeys, isolatedUpdateGroupKeys);
+            isolatedModifiedKeys.forEach(key => modifiedKeys.add(key));
+            isolatedUpdateGroupKeys.forEach(key => updateGroupKeys.add(key));
+        }
+        const identityMatchedForTopLevel = isLegacyMatchForIsolation_ACU(message, isolationConfig);
+        if (identityMatchedForTopLevel) {
+            const independentKeys = containerKeys_ACU(readLegacyIndependentData_ACU(message), allowedSheetKeys);
+            const standardKeys = containerKeys_ACU(readLegacyStandardData_ACU(message), allowedSheetKeys);
+            const summaryKeys = containerKeys_ACU(readLegacySummaryData_ACU(message), allowedSheetKeys);
+            const topLevelModifiedKeys = allowedSheetKeys_ACU(readModifiedKeys_ACU(message), allowedSheetKeys);
+            const topLevelUpdateGroupKeys = allowedSheetKeys_ACU(readUpdateGroupKeys_ACU(message), allowedSheetKeys);
+            if (independentKeys.length > 0)
+                locations.add('top_level_independent');
+            if (standardKeys.length > 0)
+                locations.add('top_level_standard');
+            if (summaryKeys.length > 0)
+                locations.add('top_level_summary');
+            if (independentKeys.length === 0 && standardKeys.length === 0 && summaryKeys.length === 0 && (topLevelModifiedKeys.length > 0 || topLevelUpdateGroupKeys.length > 0))
+                locations.add('top_level_tracking_only');
+            addKeys([...independentKeys, ...standardKeys, ...summaryKeys, ...topLevelModifiedKeys, ...topLevelUpdateGroupKeys]);
+            updateLegacyFloors_ACU(lastFilledAiFloorBySheet, lastChangedAiFloorBySheet, aiFloor, [...independentKeys, ...standardKeys, ...summaryKeys], [], topLevelModifiedKeys, topLevelUpdateGroupKeys);
+            topLevelModifiedKeys.forEach(key => modifiedKeys.add(key));
+            topLevelUpdateGroupKeys.forEach(key => updateGroupKeys.add(key));
+        }
+        if (locations.size === 0)
+            return null;
+        return {
+            messageIndex,
+            aiFloor,
+            locations: LOCATION_ORDER.filter(location => locations.has(location)),
+            sheetKeys: [...sheetKeys].sort((a, b) => a.localeCompare(b)),
+            modifiedKeys: [...modifiedKeys].sort((a, b) => a.localeCompare(b)),
+            updateGroupKeys: [...updateGroupKeys].sort((a, b) => a.localeCompare(b)),
+            identityMatchedForTopLevel,
+        };
+    }
+    async function collectMixedStorageEvidence_ACU(options) {
+        const chat = Array.isArray(options.chat) ? options.chat : [];
+        const candidateFingerprint = options.legacyCandidateData ? getTableDataFingerprint_ACU(options.legacyCandidateData) : null;
+        const allowedSheetKeys = new Set(Object.keys(options.legacyCandidateData || {}).filter(key => key.startsWith('sheet_')));
+        const legacyMessages = [];
+        const legacySourcePayloads = [];
+        const frames = [];
+        const lastFilledAiFloorBySheet = {};
+        const lastChangedAiFloorBySheet = {};
+        let aiFloor = 0;
+        for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
+            const message = chat[messageIndex];
+            if (!message || message.is_user)
+                continue;
+            aiFloor += 1;
+            const legacy = collectLegacyMessageEvidence_ACU(message, messageIndex, aiFloor, options.isolationKey, options.isolationConfig, allowedSheetKeys, lastFilledAiFloorBySheet, lastChangedAiFloorBySheet);
+            if (legacy) {
+                legacyMessages.push(legacy);
+                legacySourcePayloads.push(legacySourceFingerprintPayload_ACU(message, legacy, options.isolationKey));
+            }
+            const tagData = readIsolatedTagData_ACU(message, options.isolationKey);
+            if (isV2TagData_ACU(tagData))
+                frames.push({ messageIndex, aiFloor, frame: tagData.storageFrame });
+        }
+        const sourceMessageIndices = legacyMessages.map(message => message.messageIndex);
+        const sourceAiFloors = legacyMessages.map(message => message.aiFloor);
+        const anchor = [...frames].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+        const anchorStatus = anchor ? 'anchored' : (frames.some(ref => frameHasUnanchoredArtifacts_ACU(ref.frame)) ? 'missing_with_artifacts' : 'missing_without_artifacts');
+        const frameEvidence = frames.map(ref => ({
+            messageIndex: ref.messageIndex,
+            aiFloor: ref.aiFloor,
+            hasFullCheckpoint: ref.frame.checkpoint?.kind === 'full',
+            ...(ref.frame.checkpoint?.kind === 'full' ? { fullCheckpointReason: ref.frame.checkpoint.reason, fullCheckpointCreatedAt: ref.frame.checkpoint.createdAt } : {}),
+            perSheetCheckpointKeys: Object.keys(ref.frame.perSheetCheckpoints || {}).filter(key => key.startsWith('sheet_')).sort((a, b) => a.localeCompare(b)),
+            logEntryCount: Array.isArray(ref.frame.logEntries) ? ref.frame.logEntries.length : 0,
+            ...(ref.frame.headRevision !== undefined ? { headRevision: ref.frame.headRevision } : {}),
+        }));
+        const sheetCoverage = [...allowedSheetKeys].sort((a, b) => a.localeCompare(b)).map(sheetKey => {
+            let lastReplayMessageIndex = anchor?.frame.checkpoint?.data?.[sheetKey] ? anchor.messageIndex : null;
+            let lastReplayAiFloor = lastReplayMessageIndex === null ? null : anchor.aiFloor;
+            let lastChangedAiFloor = Math.max(Number(anchor?.frame.checkpoint?.scheduleSummary?.[sheetKey]?.lastChangedAiFloor) || 0, anchor ? eventChangedFloor_ACU(anchor.frame.checkpoint?.event, anchor.aiFloor, sheetKey) : 0);
+            for (const ref of frames) {
+                if (!anchor || ref.messageIndex < anchor.messageIndex)
+                    continue;
+                if (ref.messageIndex !== anchor.messageIndex && frameTouchesSheet_ACU(ref.frame, sheetKey)) {
+                    lastReplayMessageIndex = ref.messageIndex;
+                    lastReplayAiFloor = ref.aiFloor;
+                }
+                const sheetCheckpoint = ref.frame.perSheetCheckpoints?.[sheetKey];
+                if (sheetCheckpoint) {
+                    lastChangedAiFloor = Math.max(lastChangedAiFloor, Number(sheetCheckpoint.scheduleSummary?.lastChangedAiFloor) || 0, eventChangedFloor_ACU(sheetCheckpoint.event, ref.aiFloor, sheetKey));
+                }
+                for (const entry of ref.frame.logEntries || []) {
+                    lastChangedAiFloor = Math.max(lastChangedAiFloor, entryChangedFloor_ACU(entry, ref.aiFloor, sheetKey));
+                }
+            }
+            return { sheetKey, lastReplayMessageIndex, lastReplayAiFloor, lastChangedAiFloor };
+        });
+        let replay = { status: frames.length === 0 ? 'not_present' : 'unavailable', fingerprint: null };
+        if (anchor) {
+            try {
+                const replayed = await loadTableStateFromFramesV2_ACU(chat, options.isolationKey, { updateRuntimeState: false });
+                replay = replayed ? { status: 'success', fingerprint: getTableDataFingerprint_ACU(replayed), data: clone_ACU$6(replayed) } : { status: 'unavailable', fingerprint: null };
+            }
+            catch (error) {
+                replay = { status: 'failed', fingerprint: null, error: error instanceof Error ? error.message : String(error) };
+            }
+        }
+        const rawProvenance = anchor?.frame.checkpoint?.migrationProvenance;
+        const provenance = rawProvenance === undefined
+            ? { present: false }
+            : {
+                present: true,
+                value: clone_ACU$6(rawProvenance),
+                validation: validateMigrationProvenanceV1_ACU(rawProvenance),
+                targetMatchesAnchor: rawProvenance.targetMessageIndex === anchor.messageIndex && rawProvenance.targetAiFloor === anchor.aiFloor,
+                isolationKeyMatches: rawProvenance.isolationKey === options.isolationKey,
+                sourceEvidenceMatches: JSON.stringify(rawProvenance.legacySourceMessageIndices) === JSON.stringify(sourceMessageIndices)
+                    && JSON.stringify(rawProvenance.legacySourceAiFloors) === JSON.stringify(sourceAiFloors),
+                legacyFingerprintMatchesCandidate: candidateFingerprint === null ? null : rawProvenance.legacyDataFingerprint === candidateFingerprint,
+            };
+        const fingerprintsComparable = candidateFingerprint !== null && replay.fingerprint !== null;
+        return {
+            isolationKey: options.isolationKey,
+            legacy: { messages: legacyMessages, sourceMessageIndices, sourceAiFloors, candidateFingerprint, sourceFingerprint: getTableDataFingerprint_ACU(legacySourcePayloads), lastFilledAiFloorBySheet, lastChangedAiFloorBySheet },
+            v2: {
+                frames: frameEvidence,
+                anchor: {
+                    status: anchorStatus,
+                    messageIndex: anchor?.messageIndex ?? null,
+                    aiFloor: anchor?.aiFloor ?? null,
+                    ...(anchor ? { reason: anchor.frame.checkpoint.reason, createdAt: anchor.frame.checkpoint.createdAt, ...(anchor.frame.headRevision !== undefined ? { headRevision: anchor.frame.headRevision } : {}) } : {}),
+                },
+                sheetCoverage,
+                replay,
+                provenance,
+            },
+            comparison: { fingerprintsComparable, fingerprintsEqual: fingerprintsComparable ? candidateFingerprint === replay.fingerprint : null },
+        };
+    }
+
+    function clone_ACU$5(value) { return JSON.parse(JSON.stringify(value)); }
+    function scopeError_ACU(decision) {
+        if (getChatArray_ACU() !== decision.scopeSnapshot.chatReference)
+            return 'active chat reference changed';
+        if (String(currentChatFileIdentifier_ACU || '').trim() !== decision.scopeSnapshot.chatIdentifier)
+            return 'active chat identifier changed';
+        if (getCurrentIsolationKey_ACU() !== decision.scopeSnapshot.activeIsolationKey)
+            return 'active isolation changed';
+        return null;
+    }
+    function removeLegacy_ACU(chat, isolationKey, isolationConfig) {
+        for (const message of chat) {
+            if (!message)
+                continue;
+            const isolated = cloneIsolatedData_ACU(message);
+            if (isolated && !isV2TagData_ACU(isolated[isolationKey])) {
+                delete isolated[isolationKey];
+                if (Object.keys(isolated).length === 0)
+                    delete message.TavernDB_ACU_IsolatedData;
+                else
+                    message.TavernDB_ACU_IsolatedData = isolated;
+            }
+            if (!isLegacyMatchForIsolation_ACU(message, isolationConfig))
+                continue;
+            delete message.TavernDB_ACU_IndependentData;
+            delete message.TavernDB_ACU_Data;
+            delete message.TavernDB_ACU_SummaryData;
+            delete message.TavernDB_ACU_ModifiedKeys;
+            delete message.TavernDB_ACU_UpdateGroupKeys;
+            delete message.TavernDB_ACU_Identity;
+        }
+    }
+    function latestSafeAiTarget_ACU(chat, isolationKey) {
+        for (let index = chat.length - 1; index >= 0; index -= 1) {
+            if (!chat[index] || chat[index].is_user || isV2TagData_ACU(readIsolatedTagData_ACU(chat[index], isolationKey)))
+                continue;
+            return index;
+        }
+        return null;
+    }
+    function aiFloor_ACU(chat, index) { return chat.slice(0, index + 1).filter(message => message && !message.is_user).length; }
+    function stableJson_ACU$1(value) {
+        return JSON.stringify(value, (_key, item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item))
+                return item;
+            return Object.keys(item).sort().reduce((result, key) => {
+                result[key] = item[key];
+                return result;
+            }, {});
+        });
+    }
+    function sameEvidence_ACU(left, right) {
+        return left.legacy.candidateFingerprint === right.legacy.candidateFingerprint
+            && stableJson_ACU$1(left.legacy.sourceMessageIndices) === stableJson_ACU$1(right.legacy.sourceMessageIndices)
+            && stableJson_ACU$1(left.legacy.sourceAiFloors) === stableJson_ACU$1(right.legacy.sourceAiFloors)
+            && left.legacy.sourceFingerprint === right.legacy.sourceFingerprint
+            && left.v2.replay.fingerprint === right.v2.replay.fingerprint
+            && stableJson_ACU$1(left.v2.anchor) === stableJson_ACU$1(right.v2.anchor)
+            && stableJson_ACU$1(left.v2.frames) === stableJson_ACU$1(right.v2.frames);
+    }
+    function v2Projection_ACU(chat, isolationKey) {
+        return chat.map((message, messageIndex) => {
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            return isV2TagData_ACU(tagData) ? { messageIndex, storageFrame: tagData.storageFrame } : null;
+        });
+    }
+    async function currentEvidenceMatchesDecision_ACU(chat, decision, isolationConfig) {
+        const evidence = await collectMixedStorageEvidence_ACU({
+            chat,
+            isolationKey: decision.scopeSnapshot.activeIsolationKey,
+            isolationConfig,
+            legacyCandidateData: decision.legacyRepair.candidateData,
+        });
+        return sameEvidence_ACU(decision.evidence, evidence);
+    }
+    function commitFailure_ACU(decision, error) {
+        return { status: 'commit_failed_rolled_back', decisionId: decision.decisionId, error };
+    }
+    /**
+     * Commits only an evaluator-authorized action. Candidate construction and replay occur
+     * before mutating live chat; the host is called exactly once on a successful commit.
+     */
+    async function commitMixedStorageDecision_ACU(options) {
+        const { decision, action, isolationConfig } = options;
+        if (!decision.allowedActions.includes(action))
+            return commitFailure_ACU(decision, 'decision does not authorize this action');
+        if (action === 'keep_v2' && decision.kind !== 'equivalent_provenance_verified' && decision.kind !== 'v2_successor_verified') {
+            return commitFailure_ACU(decision, 'keep_v2 requires a verified V2 decision');
+        }
+        if (action === 'commit_merge_candidate' && (decision.kind !== 'legacy_has_v2_missing_data' || !decision.frozenMergeCandidate)) {
+            return commitFailure_ACU(decision, 'merge commit requires a frozen merge candidate');
+        }
+        const scopeError = scopeError_ACU(decision);
+        if (scopeError)
+            return commitFailure_ACU(decision, scopeError);
+        const chat = getChatArray_ACU();
+        try {
+            if (!await currentEvidenceMatchesDecision_ACU(chat, decision, isolationConfig)) {
+                return commitFailure_ACU(decision, 'mixed storage evidence changed after decision creation');
+            }
+        }
+        catch (error) {
+            return commitFailure_ACU(decision, `unable to revalidate mixed storage evidence: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const candidateChat = clone_ACU$5(chat);
+        const isolationKey = decision.scopeSnapshot.activeIsolationKey;
+        const originalV2 = v2Projection_ACU(candidateChat, isolationKey);
+        let expectedFingerprint = decision.v2Fingerprint;
+        if (action === 'commit_merge_candidate') {
+            const candidateData = clone_ACU$5(decision.frozenMergeCandidate);
+            if (auditTableDataForUpgrade_ACU(candidateData).status !== 'clean') {
+                return commitFailure_ACU(decision, 'frozen merge candidate no longer satisfies the canonical audit');
+            }
+            const targetIndex = latestSafeAiTarget_ACU(candidateChat, isolationKey);
+            const anchorIndex = decision.evidence.v2.anchor.messageIndex;
+            if (targetIndex === null || anchorIndex === null || targetIndex <= anchorIndex) {
+                return commitFailure_ACU(decision, 'no later non-V2 AI message is available for an append-only merge checkpoint');
+            }
+            const target = candidateChat[targetIndex];
+            const createdAt = Date.now();
+            const provenance = {
+                version: 1,
+                legacyDataFingerprint: getTableDataFingerprint_ACU(candidateData),
+                legacySourceMessageIndices: [...decision.evidence.legacy.sourceMessageIndices],
+                legacySourceAiFloors: [...decision.evidence.legacy.sourceAiFloors],
+                legacyLastChangedAiFloorBySheet: clone_ACU$5(decision.evidence.legacy.lastChangedAiFloorBySheet),
+                targetMessageIndex: targetIndex,
+                targetAiFloor: aiFloor_ACU(candidateChat, targetIndex),
+                isolationKey,
+                migratedAt: createdAt,
+            };
+            if (!validateMigrationProvenanceV1_ACU(provenance).valid)
+                return commitFailure_ACU(decision, 'merge provenance validation failed');
+            const checkpoint = buildCanonicalFullCheckpoint_ACU({
+                createdAt,
+                reason: 'migration',
+                data: candidateData,
+                scheduleSummary: Object.fromEntries(Object.entries(provenance.legacyLastChangedAiFloorBySheet).map(([sheetKey, lastChangedAiFloor]) => [sheetKey, { lastChangedAiFloor }])),
+                migrationProvenance: provenance,
+                context: { messageIndex: targetIndex, aiFloor: provenance.targetAiFloor, isolationKey },
+            });
+            if (!checkpoint.checkpoint)
+                return commitFailure_ACU(decision, checkpoint.error || 'merge checkpoint construction failed');
+            const isolated = cloneIsolatedData_ACU(target);
+            const existing = readIsolatedTagData_ACU(target, isolationKey);
+            isolated[isolationKey] = {
+                ...(existing?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existing.summaryVectorIndexState } : {}),
+                ...(existing?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existing.summaryVectorIndexManifest } : {}),
+                _acu_storage_version: 2,
+                storageFrame: { version: 2, headRevision: `checkpoint:mixed-merge:${createdAt.toString(36)}`, checkpoint: checkpoint.checkpoint, logEntries: [] },
+            };
+            target.TavernDB_ACU_IsolatedData = isolated;
+            expectedFingerprint = getTableDataFingerprint_ACU(candidateData);
+        }
+        removeLegacy_ACU(candidateChat, isolationKey, isolationConfig);
+        if (action === 'keep_v2' && stableJson_ACU$1(originalV2) !== stableJson_ACU$1(v2Projection_ACU(candidateChat, isolationKey))) {
+            return commitFailure_ACU(decision, 'legacy cleanup unexpectedly changed a V2 frame');
+        }
+        try {
+            const replayed = await loadTableStateFromFramesV2_ACU(candidateChat, isolationKey, { updateRuntimeState: false });
+            if (!replayed || !expectedFingerprint || getTableDataFingerprint_ACU(replayed) !== expectedFingerprint) {
+                return commitFailure_ACU(decision, 'candidate V2 replay fingerprint mismatch');
+            }
+        }
+        catch (error) {
+            return commitFailure_ACU(decision, `candidate V2 replay failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const finalScopeError = scopeError_ACU(decision);
+        if (finalScopeError)
+            return commitFailure_ACU(decision, finalScopeError);
+        const originalChat = clone_ACU$5(chat);
+        chat.splice(0, chat.length, ...candidateChat);
+        try {
+            await saveChatToHostStrict_ACU();
+        }
+        catch (error) {
+            chat.splice(0, chat.length, ...originalChat);
+            return commitFailure_ACU(decision, `host save failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const expectedStorageMode = getCurrentStorageMode();
+        try {
+            const postSaveScopeError = scopeError_ACU(decision);
+            if (postSaveScopeError)
+                throw new Error(`scope changed after host save: ${postSaveScopeError}`);
+            const committed = await loadTableStateFromFramesV2_ACU(chat, isolationKey);
+            if (!committed || !expectedFingerprint || getTableDataFingerprint_ACU(committed) !== expectedFingerprint) {
+                throw new Error('committed V2 replay fingerprint mismatch');
+            }
+            if (expectedStorageMode === 'sqlite') {
+                await reloadStorageProvider();
+                if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {
+                    throw new Error('SQLite 运行时重载后已静默回退到 native provider。');
+                }
+            }
+            const postReloadScopeError = scopeError_ACU(decision);
+            if (postReloadScopeError)
+                throw new Error(`scope changed during post-commit reload: ${postReloadScopeError}`);
+        }
+        catch (error) {
+            return { status: 'committed_postcondition_failed', decisionId: decision.decisionId, error: error instanceof Error ? error.message : String(error) };
+        }
+        return { status: 'committed', decisionId: decision.decisionId };
+    }
+
+    function isRecord_ACU$2(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function cloneData_ACU$1(data) {
+        return JSON.parse(JSON.stringify(data));
+    }
+    function getRows_ACU(sheet, pool) {
+        const source = pool === 'content' ? sheet.content : sheet.seedRows;
+        if (!Array.isArray(source))
+            return [];
+        return pool === 'content' ? source.slice(1).filter(Array.isArray) : source.filter(Array.isArray);
+    }
+    function getRow_ACU(sheet, pool, rowIndex) {
+        const rows = pool === 'content' ? sheet.content : sheet.seedRows;
+        return Array.isArray(rows) && Array.isArray(rows[rowIndex]) ? rows[rowIndex] : null;
+    }
+    function repairSheet_ACU(sheet, sheetKey, audit, remaps, overflows) {
+        const plans = audit.repairPlan.filter(plan => plan.sheetKey === sheetKey);
+        const content = Array.isArray(sheet.content) ? sheet.content : [];
+        for (const plan of plans) {
+            if (plan.action === 'rename_header' && Array.isArray(content[0]))
+                content[0][0] = 'row_id';
+            if (plan.action === 'insert_row_id_column' && Array.isArray(content[0])) {
+                content[0].unshift('row_id');
+                content.slice(1).filter(Array.isArray).forEach(row => row.unshift(null));
+                if (Array.isArray(sheet.seedRows))
+                    sheet.seedRows.filter(Array.isArray).forEach(row => row.unshift(null));
+            }
+        }
+        const allRows = [...getRows_ACU(sheet, 'content'), ...getRows_ACU(sheet, 'seedRows')];
+        const reserved = createStableRowIdReservation_ACU(allRows);
+        for (const plan of plans) {
+            if (plan.action !== 'normalize_row_id' || plan.rowIndex === undefined || !plan.rowPool)
+                continue;
+            const row = getRow_ACU(sheet, plan.rowPool, plan.rowIndex);
+            if (row && row[0] !== null && row[0] !== undefined)
+                row[0] = String(row[0]).trim();
+        }
+        for (const plan of plans) {
+            if (plan.action !== 'assign_row_id' || plan.rowIndex === undefined || !plan.rowPool)
+                continue;
+            const row = getRow_ACU(sheet, plan.rowPool, plan.rowIndex);
+            if (!row)
+                continue;
+            const previousRowId = row[0];
+            const nextRowId = allocateStableRowId_ACU(reserved);
+            row[0] = nextRowId;
+            remaps.push({ sheetKey, rowPool: plan.rowPool, rowIndex: plan.rowIndex, previousRowId, nextRowId });
+        }
+        const headerLength = Array.isArray(content[0]) ? content[0].length : 0;
+        for (const plan of plans) {
+            if (plan.rowIndex === undefined || !plan.rowPool)
+                continue;
+            const row = getRow_ACU(sheet, plan.rowPool, plan.rowIndex);
+            if (!row)
+                continue;
+            if (plan.action === 'pad_row')
+                while (row.length < headerLength)
+                    row.push(null);
+            if (plan.action === 'preserve_overflow' && row.length > headerLength) {
+                overflows.push({ sheetKey, rowPool: plan.rowPool, rowIndex: plan.rowIndex, cells: row.slice(headerLength) });
+            }
+        }
+    }
+    function repairTableDataFromAudit_ACU(audit, _options = {}) {
+        const candidateData = cloneData_ACU$1(audit.sourceData);
+        const idRemap = [];
+        const overflowCells = [];
+        if (isRecord_ACU$2(candidateData) && audit.status !== 'unrecoverable') {
+            Object.entries(candidateData).forEach(([sheetKey, sheet]) => {
+                if (!sheetKey.startsWith('sheet_') || !isRecord_ACU$2(sheet))
+                    return;
+                repairSheet_ACU(sheet, sheetKey, audit, idRemap, overflowCells);
+            });
+        }
+        return {
+            status: audit.status,
+            candidateData,
+            idRemap,
+            overflowCells,
+            dataFingerprintAfter: getTableDataFingerprint_ACU(candidateData),
+            requiresConfirmation: audit.status === 'requires_confirmation',
+        };
+    }
+
+    let decisionSequence_ACU = 0;
+    function clone_ACU$4(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function deepFreeze_ACU$2(value) {
+        if (!value || typeof value !== 'object' || Object.isFrozen(value))
+            return value;
+        Object.entries(value).forEach(([key, item]) => {
+            // scope 只保留 live chat 的引用作失效比对；冻结它会污染调用方状态。
+            if (key !== 'chatReference')
+                deepFreeze_ACU$2(item);
+        });
+        return Object.freeze(value);
+    }
+    function freezeScopeSnapshot_ACU(scopeSnapshot) {
+        return Object.freeze({ ...scopeSnapshot });
+    }
+    function captureScope_ACU(chat) {
+        return {
+            chatReference: chat,
+            chatIdentifier: String(currentChatFileIdentifier_ACU || '').trim(),
+            activeIsolationKey: getCurrentIsolationKey_ACU(),
+        };
+    }
+    function stableJson_ACU(value) {
+        return JSON.stringify(value, (_key, item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item))
+                return item;
+            return Object.keys(item).sort().reduce((result, key) => {
+                result[key] = item[key];
+                return result;
+            }, {});
+        });
+    }
+    function sheetKeys_ACU(data) {
+        return Object.keys(data).filter(key => key.startsWith('sheet_')).sort((left, right) => left.localeCompare(right));
+    }
+    function rowsById_ACU(rows, sheetKey) {
+        if (!Array.isArray(rows))
+            return new Map();
+        const result = new Map();
+        for (const row of rows) {
+            if (!Array.isArray(row) || row[0] === null || row[0] === undefined || String(row[0]).trim() === '')
+                return null;
+            const rowId = String(row[0]).trim();
+            if (result.has(rowId))
+                return null;
+            result.set(rowId, row);
+        }
+        return result;
+    }
+    function appendMissingRows_ACU(v2Rows, legacyRows, sheetKey) {
+        const v2ById = rowsById_ACU(v2Rows, sheetKey);
+        const legacyById = rowsById_ACU(legacyRows, sheetKey);
+        if (!v2ById || !legacyById)
+            return false;
+        for (const [rowId, legacyRow] of legacyById) {
+            const v2Row = v2ById.get(rowId);
+            if (v2Row && stableJson_ACU(v2Row) !== stableJson_ACU(legacyRow))
+                return false;
+            if (!v2Row)
+                v2Rows.push(clone_ACU$4(legacyRow));
+        }
+        return true;
+    }
+    function sheetMetadata_ACU(sheet) {
+        const { content: _content, seedRows: _seedRows, ...metadata } = sheet;
+        return metadata;
+    }
+    function buildConservativeMergeCandidate_ACU(legacyData, replayedV2Data) {
+        if (stableJson_ACU(legacyData.mate) !== stableJson_ACU(replayedV2Data.mate))
+            return null;
+        const legacyKeys = sheetKeys_ACU(legacyData);
+        const v2Keys = sheetKeys_ACU(replayedV2Data);
+        if (stableJson_ACU(legacyKeys) !== stableJson_ACU(v2Keys))
+            return null;
+        const candidate = clone_ACU$4(replayedV2Data);
+        for (const sheetKey of legacyKeys) {
+            const legacySheet = legacyData[sheetKey];
+            const v2Sheet = candidate[sheetKey];
+            if (!legacySheet || !v2Sheet || stableJson_ACU(sheetMetadata_ACU(legacySheet)) !== stableJson_ACU(sheetMetadata_ACU(v2Sheet)))
+                return null;
+            const legacyContent = legacySheet.content;
+            const v2Content = v2Sheet.content;
+            if (!Array.isArray(legacyContent) || !Array.isArray(v2Content)
+                || stableJson_ACU(legacyContent[0]) !== stableJson_ACU(v2Content[0]))
+                return null;
+            const candidateContentRows = v2Content.slice(1);
+            if (!appendMissingRows_ACU(candidateContentRows, legacyContent.slice(1), sheetKey))
+                return null;
+            v2Sheet.content = [v2Content[0], ...candidateContentRows];
+            if (!Array.isArray(v2Sheet.seedRows) && legacySheet.seedRows !== undefined)
+                return null;
+            if (Array.isArray(v2Sheet.seedRows) && !appendMissingRows_ACU(v2Sheet.seedRows, Array.isArray(legacySheet.seedRows) ? legacySheet.seedRows : [], sheetKey))
+                return null;
+        }
+        return auditTableDataForUpgrade_ACU(candidate).status === 'clean' ? candidate : null;
+    }
+    function coverageIsSufficient_ACU(evidence) {
+        return Object.entries(evidence.legacy.lastChangedAiFloorBySheet).every(([sheetKey, legacyFloor]) => {
+            const coverage = evidence.v2.sheetCoverage.find(item => item.sheetKey === sheetKey);
+            return !!coverage && coverage.lastChangedAiFloor >= legacyFloor;
+        });
+    }
+    function hasV2SuccessorActivity_ACU(evidence) {
+        const anchorIndex = evidence.v2.anchor.messageIndex;
+        return anchorIndex !== null && evidence.v2.frames.some(frame => frame.messageIndex > anchorIndex
+            && (frame.logEntryCount > 0 || frame.perSheetCheckpointKeys.length > 0));
+    }
+    function verifiedProvenance_ACU(evidence) {
+        const provenance = evidence.v2.provenance;
+        return provenance.present
+            && provenance.validation?.valid === true
+            && provenance.targetMatchesAnchor === true
+            && provenance.isolationKeyMatches === true
+            && provenance.sourceEvidenceMatches === true
+            && provenance.legacyFingerprintMatchesCandidate === true;
+    }
+    function actionsFor_ACU(kind) {
+        if (kind === 'equivalent_provenance_verified' || kind === 'v2_successor_verified')
+            return ['noop', 'download_snapshots', 'keep_v2'];
+        if (kind === 'legacy_has_v2_missing_data')
+            return ['noop', 'download_snapshots', 'commit_merge_candidate'];
+        return ['noop', 'download_snapshots'];
+    }
+    async function evaluateMixedStorageDecision_ACU(options) {
+        const scopeSnapshot = options.scope || captureScope_ACU(options.chat);
+        const initialChatIdentifier = String(currentChatFileIdentifier_ACU || '').trim();
+        const legacyAudit = auditTableDataForUpgrade_ACU(options.legacyData);
+        const legacyRepair = repairTableDataFromAudit_ACU(legacyAudit);
+        const repairedLegacyData = legacyRepair.candidateData;
+        const evidence = await collectMixedStorageEvidence_ACU({
+            chat: options.chat,
+            isolationKey: options.isolationKey,
+            isolationConfig: options.isolationConfig,
+            legacyCandidateData: legacyAudit.status === 'unrecoverable' ? null : repairedLegacyData,
+        });
+        const diagnostics = [];
+        const scopeMatches = scopeSnapshot.chatReference === options.chat
+            && scopeSnapshot.activeIsolationKey === options.isolationKey
+            && scopeSnapshot.chatIdentifier === initialChatIdentifier
+            && initialChatIdentifier === String(currentChatFileIdentifier_ACU || '').trim()
+            && options.isolationKey === getCurrentIsolationKey_ACU();
+        if (!scopeMatches)
+            diagnostics.push('scope_isolation_mismatch');
+        if (evidence.v2.replay.status !== 'success')
+            diagnostics.push('v2_replay_unavailable');
+        if (legacyAudit.status === 'unrecoverable' || legacyRepair.requiresConfirmation)
+            diagnostics.push('legacy_requires_confirmation');
+        if (evidence.comparison.fingerprintsEqual === true)
+            diagnostics.push('legacy_v2_fingerprints_equal');
+        if (evidence.comparison.fingerprintsEqual === false)
+            diagnostics.push('legacy_v2_fingerprints_differ');
+        let kind;
+        let frozenMergeCandidate;
+        if (evidence.v2.replay.status !== 'success') {
+            kind = 'blocked_replay_unavailable';
+        }
+        else if (legacyAudit.status === 'unrecoverable' || legacyRepair.requiresConfirmation) {
+            kind = 'blocked_legacy_requires_confirmation';
+        }
+        else {
+            const provenanceVerified = verifiedProvenance_ACU(evidence);
+            const coverageSufficient = coverageIsSufficient_ACU(evidence);
+            if (!provenanceVerified)
+                diagnostics.push(evidence.v2.provenance.present ? 'provenance_claim_mismatch' : 'provenance_missing_or_invalid');
+            if (!coverageSufficient)
+                diagnostics.push('v2_coverage_insufficient');
+            if (scopeMatches && provenanceVerified && coverageSufficient && evidence.comparison.fingerprintsEqual === true) {
+                kind = 'equivalent_provenance_verified';
+            }
+            else if (scopeMatches && provenanceVerified && coverageSufficient && evidence.comparison.fingerprintsEqual === false && hasV2SuccessorActivity_ACU(evidence)) {
+                kind = 'v2_successor_verified';
+            }
+            else {
+                if (scopeMatches && evidence.v2.replay.data && evidence.comparison.fingerprintsEqual === false) {
+                    const candidate = buildConservativeMergeCandidate_ACU(repairedLegacyData, evidence.v2.replay.data);
+                    if (candidate) {
+                        frozenMergeCandidate = candidate;
+                        diagnostics.push('merge_candidate_available');
+                    }
+                    else {
+                        diagnostics.push('merge_candidate_conflict');
+                    }
+                }
+                if (provenanceVerified && coverageSufficient && evidence.comparison.fingerprintsEqual === false && !hasV2SuccessorActivity_ACU(evidence))
+                    diagnostics.push('v2_successor_activity_missing');
+                kind = frozenMergeCandidate ? 'legacy_has_v2_missing_data' : 'conflict_requires_user_choice';
+            }
+        }
+        const createdAt = Date.now();
+        decisionSequence_ACU += 1;
+        return deepFreeze_ACU$2({
+            kind,
+            decisionId: `mixed:${createdAt.toString(36)}:${decisionSequence_ACU.toString(36)}`,
+            createdAt,
+            scopeSnapshot: freezeScopeSnapshot_ACU(scopeSnapshot),
+            evidence: clone_ACU$4(evidence),
+            legacyAudit: clone_ACU$4(legacyAudit),
+            legacyRepair: clone_ACU$4(legacyRepair),
+            legacyFingerprint: evidence.legacy.candidateFingerprint,
+            v2Fingerprint: evidence.v2.replay.fingerprint,
+            diagnosticCodes: [...new Set(diagnostics)],
+            allowedActions: actionsFor_ACU(kind),
+            ...(frozenMergeCandidate ? { frozenMergeCandidate: clone_ACU$4(frozenMergeCandidate) } : {}),
+        });
+    }
+
+    const SNAPSHOT_FORMAT_ACU = 'acu-mixed-storage-snapshot';
+    const SNAPSHOT_VERSION_ACU = 1;
+    const DANGEROUS_KEYS_ACU$1 = new Set(['__proto__', 'constructor', 'prototype']);
+    function isRecord_ACU$1(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function assertSafeJsonValue_ACU$1(value, path = '$', seen = new Set()) {
+        if (Array.isArray(value)) {
+            if (seen.has(value))
+                throw new Error(`Mixed storage snapshot 包含循环引用：${path}`);
+            seen.add(value);
+            value.forEach((item, index) => assertSafeJsonValue_ACU$1(item, `${path}[${index}]`, seen));
+            seen.delete(value);
+            return;
+        }
+        if (!isRecord_ACU$1(value))
+            return;
+        if (seen.has(value))
+            throw new Error(`Mixed storage snapshot 包含循环引用：${path}`);
+        seen.add(value);
+        for (const [key, child] of Object.entries(value)) {
+            if (DANGEROUS_KEYS_ACU$1.has(key))
+                throw new Error(`Mixed storage snapshot 包含危险键：${path}.${key}`);
+            assertSafeJsonValue_ACU$1(child, `${path}.${key}`, seen);
+        }
+        seen.delete(value);
+    }
+    function cloneAndFreeze_ACU(value) {
+        assertSafeJsonValue_ACU$1(value);
+        const cloned = JSON.parse(JSON.stringify(value));
+        return deepFreeze_ACU$1(cloned);
+    }
+    function deepFreeze_ACU$1(value) {
+        if (!value || typeof value !== 'object' || Object.isFrozen(value))
+            return value;
+        Object.values(value).forEach(deepFreeze_ACU$1);
+        return Object.freeze(value);
+    }
+    function snapshotScope_ACU(decision) {
+        return {
+            chatIdentifier: decision.scopeSnapshot.chatIdentifier,
+            activeIsolationKey: decision.scopeSnapshot.activeIsolationKey,
+        };
+    }
+    function filename_ACU(storage, decision) {
+        const chat = sanitizeFilenameComponent_ACU(decision.scopeSnapshot.chatIdentifier) || 'chat';
+        const isolation = sanitizeFilenameComponent_ACU(decision.scopeSnapshot.activeIsolationKey) || 'default-isolation';
+        const decisionId = sanitizeFilenameComponent_ACU(decision.decisionId) || 'decision';
+        return `TavernDB_mixed_${storage}_${chat}_${isolation}_${decisionId}_${decision.createdAt}.json`;
+    }
+    /** Builds detached, JSON-safe evidence exports. It never reads the live chat reference. */
+    function buildMixedStorageSnapshotTransfer_ACU(decision) {
+        const scope = snapshotScope_ACU(decision);
+        const legacyPayload = {
+            format: SNAPSHOT_FORMAT_ACU,
+            version: SNAPSHOT_VERSION_ACU,
+            storage: 'legacy-v1',
+            decisionId: decision.decisionId,
+            createdAt: decision.createdAt,
+            scope,
+            legacy: {
+                rawData: decision.legacyAudit.sourceData,
+                repairedData: decision.legacyRepair.candidateData,
+                audit: decision.legacyAudit,
+                repair: decision.legacyRepair,
+                sources: decision.evidence.legacy,
+                fingerprint: decision.legacyFingerprint,
+            },
+            v2Fingerprint: decision.v2Fingerprint,
+        };
+        const v2Payload = {
+            format: SNAPSHOT_FORMAT_ACU,
+            version: SNAPSHOT_VERSION_ACU,
+            storage: 'storage-frame-v2',
+            decisionId: decision.decisionId,
+            createdAt: decision.createdAt,
+            scope,
+            v2: {
+                replayData: decision.evidence.v2.replay.data || null,
+                anchor: decision.evidence.v2.anchor,
+                frames: decision.evidence.v2.frames,
+                headRevision: decision.evidence.v2.anchor.headRevision || null,
+                sheetCoverage: decision.evidence.v2.sheetCoverage,
+                provenance: decision.evidence.v2.provenance,
+                fingerprint: decision.v2Fingerprint,
+            },
+            legacyFingerprint: decision.legacyFingerprint,
+        };
+        return deepFreeze_ACU$1({
+            legacy: { filename: filename_ACU('legacy', decision), payload: cloneAndFreeze_ACU(legacyPayload) },
+            v2: { filename: filename_ACU('v2', decision), payload: cloneAndFreeze_ACU(v2Payload) },
+        });
+    }
+
+    const decisions_ACU = new Map();
+    let activeDecisionId_ACU = null;
+    function deepFreeze_ACU(value) {
+        if (!value || typeof value !== 'object' || Object.isFrozen(value))
+            return value;
+        Object.entries(value).forEach(([key, item]) => {
+            // chatReference 是 live chat 的 identity guard；不可 clone 或冻结它。
+            if (key !== 'chatReference')
+                deepFreeze_ACU(item);
+        });
+        return Object.freeze(value);
+    }
+    function freezeDecisionSnapshot_ACU(decision) {
+        const { chatReference, ...scope } = decision.scopeSnapshot;
+        const snapshot = JSON.parse(JSON.stringify({
+            ...decision,
+            scopeSnapshot: scope,
+        }));
+        snapshot.scopeSnapshot = { ...snapshot.scopeSnapshot, chatReference };
+        return deepFreeze_ACU(snapshot);
+    }
+    function isCurrentScope_ACU(decision) {
+        return getChatArray_ACU() === decision.scopeSnapshot.chatReference
+            && String(currentChatFileIdentifier_ACU || '').trim() === decision.scopeSnapshot.chatIdentifier
+            && getCurrentIsolationKey_ACU() === decision.scopeSnapshot.activeIsolationKey;
+    }
+    function summaryOf_ACU(decision) {
+        return Object.freeze({
+            decisionId: decision.decisionId,
+            kind: decision.kind,
+            diagnosticCodes: Object.freeze([...decision.diagnosticCodes]),
+            allowedActions: Object.freeze([...decision.allowedActions]),
+            createdAt: decision.createdAt,
+        });
+    }
+    function requireCurrentDecision_ACU(decisionId) {
+        const registered = decisions_ACU.get(decisionId);
+        if (!registered)
+            throw new Error('混合存储决议不存在、已失效或已被替换。');
+        if (!isCurrentScope_ACU(registered.decision)) {
+            decisions_ACU.delete(decisionId);
+            if (activeDecisionId_ACU === decisionId)
+                activeDecisionId_ACU = null;
+            throw new Error('混合存储决议已失效：当前聊天或隔离范围已变化。');
+        }
+        return registered;
+    }
+    function registerMixedStorageDecision_ACU(decision, isolationConfig) {
+        const frozenDecision = freezeDecisionSnapshot_ACU(decision);
+        decisions_ACU.set(frozenDecision.decisionId, { decision: frozenDecision, isolationConfig: Object.freeze({ ...isolationConfig }) });
+        activeDecisionId_ACU = decision.decisionId;
+        return summaryOf_ACU(frozenDecision);
+    }
+    function getActiveMixedStorageDecisionSummary_ACU() {
+        if (!activeDecisionId_ACU)
+            return null;
+        try {
+            return summaryOf_ACU(requireCurrentDecision_ACU(activeDecisionId_ACU).decision);
+        }
+        catch {
+            return null;
+        }
+    }
+    function buildRegisteredMixedStorageSnapshotTransfer_ACU(decisionId) {
+        return buildMixedStorageSnapshotTransfer_ACU(requireCurrentDecision_ACU(decisionId).decision);
+    }
+    async function commitRegisteredMixedStorageDecision_ACU(decisionId, action) {
+        const registered = requireCurrentDecision_ACU(decisionId);
+        const result = await commitMixedStorageDecision_ACU({
+            decision: registered.decision,
+            action,
+            isolationConfig: registered.isolationConfig,
+        });
+        if (result.status === 'committed' || result.status === 'committed_postcondition_failed') {
+            decisions_ACU.delete(decisionId);
+            if (activeDecisionId_ACU === decisionId)
+                activeDecisionId_ACU = null;
+        }
+        return result;
+    }
+    function __resetMixedStorageDecisionRegistryForTests_ACU() {
+        decisions_ACU.clear();
+        activeDecisionId_ACU = null;
+    }
+
     function deepClone_ACU(value) {
         return JSON.parse(JSON.stringify(value));
     }
@@ -13651,42 +14786,61 @@ $CONTENT
         }
     }
     function collectLegacyScheduleSummaryForMigration_ACU(chat, isolationKey, isolationConfig, data, options = {}) {
+        return collectLegacyMigrationSourceEvidence_ACU(chat, isolationKey, isolationConfig, data, options).scheduleSummary;
+    }
+    function collectLegacyMigrationSourceEvidence_ACU(chat, isolationKey, isolationConfig, data, options = {}) {
         if (!Array.isArray(chat) || chat.length === 0)
-            return {};
+            return { scheduleSummary: {}, sourceMessageIndices: [], sourceAiFloors: [] };
         const allowedSheetKeys = new Set(sheetKeysOfData_ACU(data));
         if (allowedSheetKeys.size === 0)
-            return {};
+            return { scheduleSummary: {}, sourceMessageIndices: [], sourceAiFloors: [] };
         const maxMessageIndex = Number.isInteger(options.maxMessageIndex)
             ? Math.max(0, Math.min(chat.length - 1, options.maxMessageIndex))
             : chat.length - 1;
         const summary = {};
+        const sourceMessageIndices = [];
+        const sourceAiFloors = [];
         for (let i = 0; i <= maxMessageIndex; i += 1) {
             const message = chat[i];
             if (!message || message.is_user)
                 continue;
             const aiFloor = countAiFloor_ACU(chat, i);
+            let hasLegacySource = false;
             const tagData = readIsolatedTagData_ACU(message, isolationKey);
             if (tagData && !isV2TagData_ACU(tagData)) {
+                const dataKeys = collectContainerSheetKeys_ACU(tagData.independentData, allowedSheetKeys);
+                const deltaKeys = collectContainerSheetKeys_ACU(tagData.incrementalData, allowedSheetKeys);
+                const modifiedKeys = normalizeSheetKeys_ACU$1(tagData.modifiedKeys, allowedSheetKeys);
+                const updateGroupKeys = normalizeSheetKeys_ACU$1(tagData.updateGroupKeys, allowedSheetKeys);
+                hasLegacySource = hasLegacySource || dataKeys.length > 0 || deltaKeys.length > 0 || modifiedKeys.length > 0 || updateGroupKeys.length > 0;
                 applyLegacyTracking_ACU(summary, aiFloor, allowedSheetKeys, {
-                    dataKeys: collectContainerSheetKeys_ACU(tagData.independentData, allowedSheetKeys),
-                    deltaKeys: collectContainerSheetKeys_ACU(tagData.incrementalData, allowedSheetKeys),
-                    modifiedKeys: tagData.modifiedKeys,
-                    updateGroupKeys: tagData.updateGroupKeys,
+                    dataKeys,
+                    deltaKeys,
+                    modifiedKeys,
+                    updateGroupKeys,
                 });
             }
             if (isLegacyMatchForIsolation_ACU(message, isolationConfig)) {
+                const dataKeys = [
+                    ...collectContainerSheetKeys_ACU(readLegacyIndependentData_ACU(message), allowedSheetKeys),
+                    ...collectContainerSheetKeys_ACU(readLegacyStandardData_ACU(message), allowedSheetKeys),
+                    ...collectContainerSheetKeys_ACU(readLegacySummaryData_ACU(message), allowedSheetKeys),
+                ];
+                const modifiedKeys = normalizeSheetKeys_ACU$1(readModifiedKeys_ACU(message), allowedSheetKeys);
+                const updateGroupKeys = normalizeSheetKeys_ACU$1(readUpdateGroupKeys_ACU(message), allowedSheetKeys);
+                hasLegacySource = hasLegacySource || dataKeys.length > 0 || modifiedKeys.length > 0 || updateGroupKeys.length > 0;
                 applyLegacyTracking_ACU(summary, aiFloor, allowedSheetKeys, {
-                    dataKeys: [
-                        ...collectContainerSheetKeys_ACU(readLegacyIndependentData_ACU(message), allowedSheetKeys),
-                        ...collectContainerSheetKeys_ACU(readLegacyStandardData_ACU(message), allowedSheetKeys),
-                        ...collectContainerSheetKeys_ACU(readLegacySummaryData_ACU(message), allowedSheetKeys),
-                    ],
-                    modifiedKeys: readModifiedKeys_ACU(message),
-                    updateGroupKeys: readUpdateGroupKeys_ACU(message),
+                    dataKeys,
+                    modifiedKeys,
+                    updateGroupKeys,
                 });
             }
+            if (hasLegacySource) {
+                sourceMessageIndices.push(i);
+                sourceAiFloors.push(aiFloor);
+            }
         }
-        return summary;
+        return { scheduleSummary: summary, sourceMessageIndices, sourceAiFloors };
     }
     function removeLegacyIsolatedSlot_ACU(message, isolationKey) {
         const isolatedData = cloneIsolatedData_ACU(message);
@@ -13725,11 +14879,52 @@ $CONTENT
     function buildMigrationRevision_ACU() {
         return `checkpoint:migration:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
     }
+    function captureLegacyMigrationScope_ACU(chat) {
+        return {
+            chat,
+            chatKey: String(currentChatFileIdentifier_ACU || '').trim(),
+            activeIsolationKey: getCurrentIsolationKey_ACU(),
+        };
+    }
+    function getLegacyMigrationScopeChangeError_ACU(snapshot) {
+        if (getChatArray_ACU() !== snapshot.chat) {
+            return 'legacy migration aborted: active chat changed before commit';
+        }
+        if (String(currentChatFileIdentifier_ACU || '').trim() !== snapshot.chatKey) {
+            return 'legacy migration aborted: active chat identifier changed before commit';
+        }
+        if (getCurrentIsolationKey_ACU() !== snapshot.activeIsolationKey) {
+            return 'legacy migration aborted: active isolation changed before commit';
+        }
+        return null;
+    }
+    async function getMixedStorageMigrationBlocker_ACU(chat, isolationKey, candidateData) {
+        const hasV2Data = chat.some(message => !message?.is_user
+            && isV2TagData_ACU(readIsolatedTagData_ACU(message, isolationKey)));
+        if (!hasV2Data)
+            return null;
+        try {
+            const replayedV2Data = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { updateRuntimeState: false });
+            if (!replayedV2Data) {
+                return 'mixed legacy-v1 and V2 data detected: V2 replay unavailable; automatic migration is blocked to preserve both storage histories';
+            }
+            const v2Fingerprint = getTableDataFingerprint_ACU(replayedV2Data);
+            const legacyFingerprint = getTableDataFingerprint_ACU(candidateData);
+            if (v2Fingerprint !== legacyFingerprint) {
+                return 'mixed legacy-v1 and V2 data detected: V2 replay fingerprint does not match repaired legacy data; automatic migration is blocked to prevent overwrite';
+            }
+            return 'mixed legacy-v1 and V2 data detected: V2 replay matches repaired legacy data, but automatic cleanup is blocked until an atomic migration transaction is available';
+        }
+        catch (error) {
+            return `mixed legacy-v1 and V2 data detected: V2 replay failed; automatic migration is blocked to preserve both storage histories (${error instanceof Error ? error.message : String(error)})`;
+        }
+    }
     async function migrateLegacyStorageToV2OnLoad_ACU(options) {
         const chat = getChatArray_ACU();
         if (!Array.isArray(chat) || chat.length === 0) {
             return { migrated: false, error: 'chat history is empty' };
         }
+        const scopeSnapshot = captureLegacyMigrationScope_ACU(chat);
         const sheetKeys = sheetKeysOfData_ACU(options.data);
         if (sheetKeys.length === 0) {
             return { migrated: false, error: 'legacy migration requires non-empty merged table data' };
@@ -13743,16 +14938,80 @@ $CONTENT
         if (!target) {
             return { migrated: false, error: 'no AI message found for legacy migration' };
         }
-        const existingTargetTagData = readIsolatedTagData_ACU(target.message, options.isolationKey);
-        const scheduleSummary = collectLegacyScheduleSummaryForMigration_ACU(chat, options.isolationKey, options.isolationConfig, options.data, { maxMessageIndex: target.index });
+        const audit = auditTableDataForUpgrade_ACU(options.data);
+        if (audit.status === 'unrecoverable') {
+            return { migrated: false, error: `legacy migration audit failed: ${audit.issues.map(issue => issue.code).join(', ')}` };
+        }
+        const repair = repairTableDataFromAudit_ACU(audit);
+        if (repair.requiresConfirmation) {
+            return { migrated: false, error: `legacy migration requires confirmation: ${audit.issues.map(issue => issue.code).join(', ')}` };
+        }
+        const candidateData = repair.candidateData;
+        const hasV2Data = chat.some(message => !message?.is_user
+            && isV2TagData_ACU(readIsolatedTagData_ACU(message, options.isolationKey)));
+        if (hasV2Data) {
+            const mixedDecision = await evaluateMixedStorageDecision_ACU({
+                chat,
+                isolationKey: options.isolationKey,
+                isolationConfig: options.isolationConfig,
+                legacyData: candidateData,
+            });
+            if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'v2_successor_verified') {
+                registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
+                const blocker = await getMixedStorageMigrationBlocker_ACU(chat, options.isolationKey, candidateData);
+                return {
+                    migrated: false,
+                    mixedDecision,
+                    error: blocker || `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
+                };
+            }
+            const commit = await commitMixedStorageDecision_ACU({
+                decision: mixedDecision,
+                action: 'keep_v2',
+                isolationConfig: options.isolationConfig,
+            });
+            if (commit.status !== 'committed') {
+                return {
+                    migrated: false,
+                    mixedDecision,
+                    error: `mixed legacy-v1 and V2 verified cleanup failed: ${commit.error || commit.status}`,
+                };
+            }
+            const data = mixedDecision.evidence.v2.replay.data || candidateData;
+            return { migrated: true, data, mixedDecision };
+        }
+        const candidateChat = deepClone_ACU(chat);
+        const candidateTarget = candidateChat[target.index];
+        const existingTargetTagData = readIsolatedTagData_ACU(candidateTarget, options.isolationKey);
+        const legacyEvidence = collectLegacyMigrationSourceEvidence_ACU(candidateChat, options.isolationKey, options.isolationConfig, candidateData, { maxMessageIndex: target.index });
+        const migratedAt = Date.now();
+        const targetAiFloor = countAiFloor_ACU(candidateChat, target.index);
+        const migrationProvenance = {
+            version: 1,
+            legacyDataFingerprint: getTableDataFingerprint_ACU(candidateData),
+            legacySourceMessageIndices: legacyEvidence.sourceMessageIndices,
+            legacySourceAiFloors: legacyEvidence.sourceAiFloors,
+            legacyLastChangedAiFloorBySheet: Object.fromEntries(Object.entries(legacyEvidence.scheduleSummary)
+                .filter(([, summary]) => Number.isInteger(summary.lastChangedAiFloor) && Number(summary.lastChangedAiFloor) >= 0)
+                .map(([sheetKey, summary]) => [sheetKey, Number(summary.lastChangedAiFloor)])),
+            targetMessageIndex: target.index,
+            targetAiFloor,
+            isolationKey: options.isolationKey,
+            migratedAt,
+        };
+        const provenanceValidation = validateMigrationProvenanceV1_ACU(migrationProvenance);
+        if (!provenanceValidation.valid) {
+            return { migrated: false, error: `legacy migration provenance is invalid: ${provenanceValidation.issues.join(', ')}` };
+        }
         const checkpointResult = buildCanonicalFullCheckpoint_ACU({
-            createdAt: Date.now(),
+            createdAt: migratedAt,
             reason: 'migration',
-            data: options.data,
-            scheduleSummary,
+            data: candidateData,
+            scheduleSummary: legacyEvidence.scheduleSummary,
+            migrationProvenance,
             context: {
                 messageIndex: target.index,
-                aiFloor: countAiFloor_ACU(chat, target.index),
+                aiFloor: targetAiFloor,
                 isolationKey: options.isolationKey,
             },
         });
@@ -13766,18 +15025,39 @@ $CONTENT
             checkpoint: checkpointResult.checkpoint,
             logEntries: [],
         };
-        const isolatedData = cloneIsolatedData_ACU(target.message);
+        const isolatedData = cloneIsolatedData_ACU(candidateTarget);
         isolatedData[options.isolationKey] = {
             ...(existingTargetTagData?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTargetTagData.summaryVectorIndexState } : {}),
             ...(existingTargetTagData?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existingTargetTagData.summaryVectorIndexManifest } : {}),
             storageFrame: frame,
             _acu_storage_version: 2,
         };
-        target.message.TavernDB_ACU_IsolatedData = isolatedData;
-        cleanupLegacyFieldsAfterV2Write_ACU(chat, options.isolationKey, options.isolationConfig);
-        await saveChatToHost_ACU();
+        candidateTarget.TavernDB_ACU_IsolatedData = isolatedData;
+        cleanupLegacyFieldsAfterV2Write_ACU(candidateChat, options.isolationKey, options.isolationConfig);
+        try {
+            const replayedData = await loadTableStateFromFramesV2_ACU(candidateChat, options.isolationKey, { updateRuntimeState: false });
+            if (!replayedData || getTableDataFingerprint_ACU(replayedData) !== getTableDataFingerprint_ACU(candidateData)) {
+                return { migrated: false, error: 'legacy migration candidate replay does not match repaired data' };
+            }
+        }
+        catch (error) {
+            return { migrated: false, error: `legacy migration candidate replay failed: ${error instanceof Error ? error.message : String(error)}` };
+        }
+        const scopeChangeError = getLegacyMigrationScopeChangeError_ACU(scopeSnapshot);
+        if (scopeChangeError) {
+            return { migrated: false, error: scopeChangeError };
+        }
+        const originalChat = deepClone_ACU(chat);
+        chat.splice(0, chat.length, ...candidateChat);
+        try {
+            await saveChatToHostStrict_ACU();
+        }
+        catch (error) {
+            chat.splice(0, chat.length, ...originalChat);
+            return { migrated: false, error: `legacy migration save failed: ${error instanceof Error ? error.message : String(error)}` };
+        }
         logDebug_ACU(`[V2 Migration] legacy-v1 migrated to V2 checkpoint: messageIndex=${target.index}, skipUpdateFloors=${skipUpdateFloors}, isolationKey=[${options.isolationKey || '无标签'}], sheets=${sheetKeys.length}`);
-        return { migrated: true, messageIndex: target.index };
+        return { migrated: true, messageIndex: target.index, data: candidateData };
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -13797,7 +15077,7 @@ $CONTENT
         const strategy = resolveTableStorageStrategy_ACU(chat, isolationKey, isolationConfig);
         if (strategy.mode !== 'legacy-v1')
             return { success: true, migrated: false };
-        logWarn_ACU(`[LegacyMigrationGate] ${reason}: detected legacy-v1 before write, migrating first. reason=${strategy.reason}`);
+        logWarn_ACU(`[LegacyMigrationGate] ${reason}: detected legacy-v1 before write, migrating first. reason=${strategy.reason}${strategy.warning ? `; warning=${strategy.warning}` : ''}`);
         const mergedLegacyData = await mergeAllIndependentTablesLegacyV1_ACU();
         if (!mergedLegacyData || !Object.keys(mergedLegacyData).some(k => k.startsWith('sheet_'))) {
             return { success: false, error: '旧存储迁移失败：无法从 legacy-v1 合并出有效表格数据。' };
@@ -13811,12 +15091,16 @@ $CONTENT
         if (!migrationResult.migrated) {
             return { success: false, error: `旧存储迁移到 V2 失败: ${migrationResult.error || '未执行迁移'}` };
         }
+        if (!migrationResult.data) {
+            return { success: false, error: '旧存储迁移到 V2 失败: 迁移成功结果缺少修复后的表格数据。' };
+        }
         const postStrategy = resolveTableStorageStrategy_ACU(chat, isolationKey, isolationConfig);
         if (postStrategy.mode === 'legacy-v1') {
             return { success: false, error: `旧存储迁移后仍检测到 legacy-v1: ${postStrategy.reason}` };
         }
-        _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(mergedLegacyData)));
-        return { success: true, migrated: true, data: mergedLegacyData };
+        const migratedData = migrationResult.data;
+        _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(migratedData)));
+        return { success: true, migrated: true, data: migratedData };
     }
     async function persistTablesToChatMessage_ACU(options = {}) {
         if (!options.transactionContext || options.assumeCommitLock !== true) {
@@ -16471,6 +17755,9 @@ $CONTENT
             if (!migrationResult.migrated) {
                 throw new Error(`旧存储迁移到 V2 失败: ${migrationResult.error || '未执行迁移'}`);
             }
+            if (!migrationResult.data) {
+                throw new Error('旧存储迁移到 V2 失败: 迁移成功结果缺少修复后的表格数据。');
+            }
             const postStrategy = resolveTableStorageStrategy_ACU(chat, currentIsolationKey, {
                 enabled: settings_ACU.dataIsolationEnabled,
                 code: settings_ACU.dataIsolationCode,
@@ -16478,7 +17765,7 @@ $CONTENT
             if (postStrategy.mode !== 'v2') {
                 throw new Error(`旧存储迁移后二次校验失败：当前模式=${postStrategy.mode}${postStrategy.mode === 'legacy-v1' ? `，reason=${postStrategy.reason}` : ''}`);
             }
-            return migrateContentNullToRowId(mergedLegacyData);
+            return migrateContentNullToRowId(migrationResult.data);
         }
         return migrateContentNullToRowId(await mergeAllIndependentTablesLegacyV1_ACU());
     }
@@ -18106,6 +19393,15 @@ $CONTENT
      */
     function getCurrentProviderMode() {
         return currentProvider?.mode ?? null;
+    }
+    /**
+     * Reports a completed SQLite reload that silently degraded to the native runtime.
+     * A concurrent settings change to native is intentional and must not be reported.
+     */
+    function didSqliteFallbackAfterReload_ACU(expectedModeBeforeReload) {
+        return expectedModeBeforeReload === 'sqlite'
+            && getCurrentStorageMode() === 'sqlite'
+            && getCurrentProviderMode() === 'native';
     }
     // ═══════════════════════════════════════════════════════════════
     // 内部工具函数
@@ -33825,20 +35121,33 @@ $CONTENT
         }
         const anchorIndex = boundary.anchorIndex;
         if (anchorIndex !== undefined && anchorIndex >= 0 && chat[anchorIndex]) {
+            const snapshots = new Map();
+            chat.forEach((message, messageIndex) => {
+                const isolatedData = message?.TavernDB_ACU_IsolatedData;
+                const hasV2Frame = isolatedData
+                    && typeof isolatedData === 'object'
+                    && !Array.isArray(isolatedData)
+                    && Object.values(isolatedData).some(tagData => isV2TagData_ACU(tagData));
+                if (messageIndex === anchorIndex || hasV2Frame) {
+                    snapshots.set(messageIndex, messageFieldSnapshot_ACU(message));
+                }
+            });
             try {
                 const changed = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex);
                 const downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
                 const obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
                 if ((changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0) && options.save !== false) {
-                    await saveChatToHost_ACU();
+                    await saveChatToHostStrict_ACU();
                 }
                 return { success: true, changed: changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0, anchorIndex };
             }
             catch (error) {
+                snapshots.forEach((snapshot, messageIndex) => restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot));
                 return {
                     success: false,
                     changed: false,
                     error: error?.message || String(error || '边界 checkpoint 写入失败。'),
+                    ...(typeof error?.failedIsolationKey === 'string' ? { failedIsolationKey: error.failedIsolationKey } : {}),
                     anchorIndex,
                 };
             }
@@ -33994,9 +35303,20 @@ $CONTENT
                 logDebug_ACU(`[V2 Compaction] AI 保留边界楼层 #${boundaryAnchorIndex} 已存在 isolationKey=[${isolationKey || '无标签'}] 的 compaction full checkpoint，跳过重建。`);
                 continue;
             }
-            const data = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex });
+            let data;
+            try {
+                data = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex });
+            }
+            catch (error) {
+                const replayError = new Error(error instanceof Error ? error.message : String(error ?? '未知 replay 错误。'));
+                replayError.cause = error;
+                replayError.failedIsolationKey = isolationKey;
+                throw replayError;
+            }
             if (!data) {
-                throw new Error(`边界 checkpoint 写入失败：无法在 boundaryAnchorIndex=${boundaryAnchorIndex} 前恢复 isolationKey=[${isolationKey || '无标签'}] 的 V2 数据。`);
+                const error = new Error(`边界 checkpoint 写入失败：无法在 boundaryAnchorIndex=${boundaryAnchorIndex} 前恢复 isolationKey=[${isolationKey || '无标签'}] 的 V2 数据。`);
+                error.failedIsolationKey = isolationKey;
+                throw error;
             }
             const anchorMsg = chat[boundaryAnchorIndex];
             if (!anchorMsg.TavernDB_ACU_IsolatedData || typeof anchorMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(anchorMsg.TavernDB_ACU_IsolatedData)) {
@@ -34811,10 +36131,50 @@ $CONTENT
             maintenanceMode: 'exclusive',
         }, () => clearManualRefillIncrementalDataInRangeCore_ACU(targetMessageIndices, targetSheetKeys));
     }
-    function cloneManualRefillJson_ACU(value) {
-        if (value === undefined || value === null)
+    function cloneMessageFieldValue_ACU(value, seen = new WeakMap(), originals = new WeakMap()) {
+        if (value === null || typeof value !== 'object')
             return value;
-        return JSON.parse(JSON.stringify(value));
+        const existing = seen.get(value);
+        if (existing)
+            return existing;
+        if (value instanceof Date) {
+            const clone = new Date(value.getTime());
+            seen.set(value, clone);
+            originals.set(clone, value);
+            return clone;
+        }
+        if (value instanceof RegExp) {
+            const clone = new RegExp(value.source, value.flags);
+            seen.set(value, clone);
+            originals.set(clone, value);
+            return clone;
+        }
+        if (value instanceof Map) {
+            const clone = new Map();
+            seen.set(value, clone);
+            originals.set(clone, value);
+            value.forEach((mapValue, mapKey) => clone.set(cloneMessageFieldValue_ACU(mapKey, seen, originals), cloneMessageFieldValue_ACU(mapValue, seen, originals)));
+            return clone;
+        }
+        if (value instanceof Set) {
+            const clone = new Set();
+            seen.set(value, clone);
+            originals.set(clone, value);
+            value.forEach(setValue => clone.add(cloneMessageFieldValue_ACU(setValue, seen, originals)));
+            return clone;
+        }
+        const clone = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+        seen.set(value, clone);
+        originals.set(clone, value);
+        for (const key of Reflect.ownKeys(value)) {
+            const descriptor = Object.getOwnPropertyDescriptor(value, key);
+            if (!descriptor)
+                continue;
+            if ('value' in descriptor)
+                descriptor.value = cloneMessageFieldValue_ACU(descriptor.value, seen, originals);
+            Object.defineProperty(clone, key, descriptor);
+        }
+        return clone;
     }
     function getV2FrameForIsolation_ACU(msg, isolationKey) {
         const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
@@ -34835,24 +36195,69 @@ $CONTENT
         return -1;
     }
     function messageFieldSnapshot_ACU(msg) {
+        const originals = new WeakMap();
         return {
             hadIsolatedData: Object.prototype.hasOwnProperty.call(msg, 'TavernDB_ACU_IsolatedData'),
-            isolatedData: cloneManualRefillJson_ACU(msg?.TavernDB_ACU_IsolatedData),
+            originalIsolatedData: msg?.TavernDB_ACU_IsolatedData,
+            isolatedData: cloneMessageFieldValue_ACU(msg?.TavernDB_ACU_IsolatedData, new WeakMap(), originals),
             hadIdentity: Object.prototype.hasOwnProperty.call(msg, 'TavernDB_ACU_Identity'),
-            identity: cloneManualRefillJson_ACU(msg?.TavernDB_ACU_Identity),
+            originalIdentity: msg?.TavernDB_ACU_Identity,
+            identity: cloneMessageFieldValue_ACU(msg?.TavernDB_ACU_Identity, new WeakMap(), originals),
+            originals,
         };
+    }
+    function restoreMessageFieldValueInPlace_ACU(target, snapshot, originals, seen = new WeakMap()) {
+        if (target === null || snapshot === null || typeof target !== 'object' || typeof snapshot !== 'object')
+            return snapshot;
+        const restored = seen.get(snapshot);
+        if (restored)
+            return restored;
+        const original = originals.get(snapshot);
+        const restoreTarget = original && typeof original === 'object' ? original : target;
+        seen.set(snapshot, restoreTarget);
+        const snapshotKeys = Reflect.ownKeys(snapshot);
+        const snapshotKeySet = new Set(snapshotKeys);
+        for (const key of Reflect.ownKeys(restoreTarget)) {
+            if (key !== 'length' && !snapshotKeySet.has(key))
+                delete restoreTarget[key];
+        }
+        const restoreKey = (key) => {
+            const snapshotDescriptor = Object.getOwnPropertyDescriptor(snapshot, key);
+            if (!snapshotDescriptor)
+                return;
+            const targetDescriptor = Object.getOwnPropertyDescriptor(restoreTarget, key);
+            if ('value' in snapshotDescriptor
+                && snapshotDescriptor.value !== null
+                && typeof snapshotDescriptor.value === 'object') {
+                const originalValue = originals.get(snapshotDescriptor.value);
+                const currentValue = 'value' in (targetDescriptor || {}) ? targetDescriptor.value : undefined;
+                if (originalValue && typeof originalValue === 'object') {
+                    snapshotDescriptor.value = restoreMessageFieldValueInPlace_ACU(originalValue, snapshotDescriptor.value, originals, seen);
+                }
+                else if (currentValue !== null && typeof currentValue === 'object') {
+                    snapshotDescriptor.value = restoreMessageFieldValueInPlace_ACU(currentValue, snapshotDescriptor.value, originals, seen);
+                }
+            }
+            Object.defineProperty(restoreTarget, key, snapshotDescriptor);
+        };
+        snapshotKeys.filter(key => key !== 'length').forEach(restoreKey);
+        if (Array.isArray(snapshot))
+            Object.defineProperty(restoreTarget, 'length', Object.getOwnPropertyDescriptor(snapshot, 'length'));
+        return restoreTarget;
     }
     function restoreMessageFieldSnapshot_ACU(msg, snapshot) {
         if (!msg)
             return;
         if (snapshot.hadIsolatedData) {
-            msg.TavernDB_ACU_IsolatedData = snapshot.isolatedData;
+            msg.TavernDB_ACU_IsolatedData = snapshot.originalIsolatedData;
+            restoreMessageFieldValueInPlace_ACU(snapshot.originalIsolatedData, snapshot.isolatedData, snapshot.originals);
         }
         else {
             delete msg.TavernDB_ACU_IsolatedData;
         }
         if (snapshot.hadIdentity) {
-            msg.TavernDB_ACU_Identity = snapshot.identity;
+            msg.TavernDB_ACU_Identity = snapshot.originalIdentity;
+            restoreMessageFieldValueInPlace_ACU(snapshot.originalIdentity, snapshot.identity, snapshot.originals);
         }
         else {
             delete msg.TavernDB_ACU_Identity;
@@ -34937,7 +36342,7 @@ $CONTENT
                         createdAt,
                         reason: 'manual',
                         sheetKey,
-                        data: cloneManualRefillJson_ACU(options.snapshotData[sheetKey]),
+                        data: cloneMessageFieldValue_ACU(options.snapshotData[sheetKey]),
                         scheduleSummary: { lastFilledAiFloor: completedAiFloor },
                     };
                 }
@@ -35046,14 +36451,14 @@ $CONTENT
                 const scheduleSummary = collectedScheduleSummary && typeof collectedScheduleSummary === 'object' && !Array.isArray(collectedScheduleSummary) ? collectedScheduleSummary : {};
                 const perSheetCheckpoints = { ...(existingFrame.perSheetCheckpoints || {}) };
                 for (const sheetKey of options.targetSheetKeys) {
-                    const sheetData = cloneManualRefillJson_ACU(options.baselineData[sheetKey]);
+                    const sheetData = cloneMessageFieldValue_ACU(options.baselineData[sheetKey]);
                     perSheetCheckpoints[sheetKey] = {
                         kind: 'sheet_full',
                         createdAt,
                         reason: 'manual',
                         sheetKey,
                         data: sheetData,
-                        ...(scheduleSummary[sheetKey] ? { scheduleSummary: cloneManualRefillJson_ACU(scheduleSummary[sheetKey]) } : {}),
+                        ...(scheduleSummary[sheetKey] ? { scheduleSummary: cloneMessageFieldValue_ACU(scheduleSummary[sheetKey]) } : {}),
                     };
                 }
                 existingFrame.perSheetCheckpoints = perSheetCheckpoints;
@@ -66755,24 +68160,52 @@ $CONTENT
         }
         return -1;
     }
+    function hasV2FullCheckpointAtOrBeforeTarget_ACU(targetMessageIndex, isolationKey) {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || targetMessageIndex < 0)
+            return false;
+        return chat.slice(0, targetMessageIndex + 1).some(message => {
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
+        });
+    }
     async function importTableJsonThroughCommit_ACU(jsonString, options = {}) {
-        const newData = JSON.parse(jsonString);
-        if (!newData || !newData.mate || !Object.keys(newData).some(k => k.startsWith('sheet_'))) {
-            return { success: false, error: '导入的JSON缺少关键结构 (mate, sheet_*)。' };
+        let newData;
+        try {
+            newData = JSON.parse(jsonString);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return {
+                success: false,
+                persisted: false,
+                failureStage: 'input',
+                issues: [{ code: 'import_invalid_json', message }],
+                error: `导入的JSON无法解析：${message}`,
+            };
+        }
+        if (!newData || typeof newData !== 'object' || !('mate' in newData) || !Object.keys(newData).some(k => k.startsWith('sheet_'))) {
+            return {
+                success: false,
+                persisted: false,
+                failureStage: 'input',
+                issues: [{ code: 'import_invalid_structure', message: '导入的JSON缺少关键结构 (mate, sheet_*)。' }],
+                error: '导入的JSON缺少关键结构 (mate, sheet_*)。',
+            };
         }
         const importedTableData = sanitizeChatSheetsObject_ACU(newData, { ensureMate: true });
-        const sheetKeys = Object.keys(importedTableData).filter(k => k.startsWith('sheet_'));
         const persist = options.persist !== false;
-        const provider = getStorageProvider();
-        if (typeof provider.replaceAllData !== 'function') {
-            return { success: false, error: '当前存储 provider 不支持全量替换命令。' };
-        }
-        const replaceResult = await provider.replaceAllData(importedTableData);
-        if (!replaceResult.success) {
-            return { success: false, error: replaceResult.error || '运行时全量替换失败。' };
-        }
-        const runtimeData = (provider.getCurrentData() || importedTableData);
         if (!persist) {
+            const provider = getStorageProvider();
+            if (typeof provider.replaceAllData !== 'function') {
+                return { success: false, persisted: false, failureStage: 'runtime_restore', error: '当前存储 provider 不支持全量替换命令。' };
+            }
+            const replaceResult = await provider.replaceAllData(importedTableData);
+            if (!replaceResult.success) {
+                return { success: false, persisted: false, failureStage: 'runtime_restore', error: replaceResult.error || '运行时全量替换失败。' };
+            }
+            const runtimeData = (provider.getCurrentData() || importedTableData);
+            const sheetKeys = Object.keys(runtimeData).filter(k => k.startsWith('sheet_'));
             const hasSummaryTables = Object.keys(runtimeData)
                 .filter(k => k.startsWith('sheet_'))
                 .some(k => {
@@ -66787,6 +68220,33 @@ $CONTENT
                 persisted: false,
             };
         }
+        const audit = auditTableDataForUpgrade_ACU(importedTableData);
+        const repair = repairTableDataFromAudit_ACU(audit);
+        if (audit.status === 'unrecoverable' || repair.requiresConfirmation) {
+            const diagnostics = audit.issues.map(issue => issue.code).join(', ') || audit.status;
+            return {
+                success: false,
+                persisted: false,
+                failureStage: 'preflight',
+                auditStatus: audit.status,
+                issues: audit.issues,
+                error: `导入数据需要人工确认或无法修复：${diagnostics}`,
+            };
+        }
+        const candidateData = repair.candidateData;
+        const sqlitePreflight = await validateSqliteTemplateDataStrict_ACU(candidateData);
+        if (!sqlitePreflight.success) {
+            const message = sqlitePreflight.error || '候选数据无法通过 SQLite hydrate。';
+            return {
+                success: false,
+                persisted: false,
+                failureStage: 'preflight',
+                auditStatus: audit.status,
+                issues: [{ code: 'sqlite_preflight_failed', message }],
+                error: `导入候选数据未通过 SQLite 预检：${message}`,
+            };
+        }
+        const sheetKeys = Object.keys(candidateData).filter(k => k.startsWith('sheet_'));
         const targetMessageIndex = resolveLatestAiMessageIndex_ACU();
         const commitResult = await runTableUpdateCommit_ACU({
             source: 'import',
@@ -66800,14 +68260,43 @@ $CONTENT
             updateGroupKeys: null,
             trackingSheetKeys: [],
             trackAsUpdate: false,
-            operations: [{ kind: 'data_replace', data: importedTableData, reason: 'import' }],
-        }, async () => ({
-            success: true,
-            value: true,
-            tableData: runtimeData,
-        }));
+            strictSave: true,
+        }, async () => {
+            const hasExistingAnchor = hasV2FullCheckpointAtOrBeforeTarget_ACU(targetMessageIndex, getCurrentIsolationKey_ACU());
+            return {
+                success: true,
+                value: true,
+                tableData: candidateData,
+                persist: {
+                    operations: hasExistingAnchor
+                        ? [{ kind: 'data_replace', data: candidateData, reason: 'import' }]
+                        : [],
+                },
+            };
+        });
         if (!commitResult.success || !commitResult.tableData) {
-            return { success: false, error: commitResult.error || '导入数据提交失败。' };
+            return {
+                success: false,
+                persisted: false,
+                failureStage: 'commit',
+                error: commitResult.error || '导入数据提交失败。',
+            };
+        }
+        const provider = getStorageProvider();
+        if (typeof provider.replaceAllData !== 'function') {
+            await reloadStorageProvider();
+            return { success: false, persisted: true, failureStage: 'post_commit_runtime', error: '导入数据已保存，但当前存储 provider 不支持运行时全量替换；已尝试重新加载运行时。' };
+        }
+        try {
+            const replaceResult = await provider.replaceAllData(commitResult.tableData);
+            if (!replaceResult.success) {
+                await reloadStorageProvider();
+                return { success: false, persisted: true, failureStage: 'post_commit_runtime', error: `导入数据已保存，但运行时全量替换失败；已尝试重新加载运行时：${replaceResult.error || '未知错误'}` };
+            }
+        }
+        catch (error) {
+            await reloadStorageProvider();
+            return { success: false, persisted: true, failureStage: 'post_commit_runtime', error: `导入数据已保存，但运行时全量替换异常；已尝试重新加载运行时：${error instanceof Error ? error.message : String(error)}` };
         }
         const hasSummaryTables = Object.keys(commitResult.tableData)
             .filter(k => k.startsWith('sheet_'))
@@ -68421,6 +69910,267 @@ $CONTENT
         };
     }
 
+    const plans_ACU = new Map();
+    function clone_ACU$3(value) { return JSON.parse(JSON.stringify(value)); }
+    function buildPlanId_ACU() { return `v2_recovery_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`; }
+    function getErrorMessage_ACU(error) {
+        return error instanceof Error ? error.message : String(error || '未知错误');
+    }
+    function getFrameFingerprint_ACU(frame) {
+        return JSON.stringify(frame);
+    }
+    function currentScopeMatches_ACU(plan) {
+        return getChatArray_ACU() === plan.chat
+            && String(currentChatFileIdentifier_ACU || '').trim() === plan.chatKey
+            && getCurrentIsolationKey_ACU() === plan.isolationKey;
+    }
+    function getFrames_ACU(chat, isolationKey) {
+        const frames = [];
+        for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
+            const message = chat[messageIndex];
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (isV2TagData_ACU(tagData))
+                frames.push({ messageIndex, frame: tagData.storageFrame });
+        }
+        return frames;
+    }
+    function hasReplayArtifactsAfterCheckpoint_ACU(frame) {
+        return (frame.logEntries?.length || 0) > 0
+            || Object.keys(frame.perSheetCheckpoints || {}).length > 0
+            || !!frame.manualRefillProgress;
+    }
+    function hasAnyReplayArtifacts_ACU(frame) {
+        return !!frame.checkpoint || hasReplayArtifactsAfterCheckpoint_ACU(frame);
+    }
+    function isIsolatedDataReplaceFrame_ACU(frame) {
+        if (Object.keys(frame.perSheetCheckpoints || {}).length > 0 || frame.manualRefillProgress)
+            return false;
+        if ((frame.logEntries?.length || 0) !== 1)
+            return false;
+        const entry = frame.logEntries[0];
+        return !entry?.patches?.length
+            && Array.isArray(entry.operations)
+            && entry.operations.length === 1
+            && entry.operations[0]?.kind === 'data_replace';
+    }
+    function hasLaterReplayArtifacts_ACU(frames, sourceMessageIndex) {
+        return frames.some(item => item.messageIndex > sourceMessageIndex && hasAnyReplayArtifacts_ACU(item.frame));
+    }
+    function hasSamePlanScope_ACU(left, right) {
+        return left.chat === right.chat
+            && left.chatKey === right.chatKey
+            && left.isolationKey === right.isolationKey;
+    }
+    function createPlan_ACU(plan) {
+        for (const [existingPlanId, existingPlan] of plans_ACU) {
+            if (hasSamePlanScope_ACU(existingPlan, plan))
+                plans_ACU.delete(existingPlanId);
+        }
+        const planId = buildPlanId_ACU();
+        plans_ACU.set(planId, { ...plan, planId });
+        return { planId, status: plan.status, isolationKey: plan.isolationKey, sourceMessageIndex: plan.sourceMessageIndex, requiresConfirmation: plan.requiresConfirmation, message: plan.message };
+    }
+    function getPlanSourceFrame_ACU(plan) {
+        if (!Number.isInteger(plan.sourceMessageIndex))
+            return null;
+        const message = plan.chat[plan.sourceMessageIndex];
+        const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
+        return isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
+    }
+    function buildRecoveredCandidateChat_ACU(plan) {
+        const sourceMessageIndex = plan.sourceMessageIndex;
+        if (!Number.isInteger(sourceMessageIndex))
+            throw new Error('恢复计划缺少 sourceMessageIndex。');
+        const candidateChat = clone_ACU$3(plan.chat);
+        const sourceMessage = candidateChat[sourceMessageIndex];
+        const sourceTagData = readIsolatedTagData_ACU(sourceMessage, plan.isolationKey);
+        if (!isV2TagData_ACU(sourceTagData))
+            throw new Error('恢复源消息不再包含 V2 storage frame。');
+        const checkpointBuild = buildCanonicalFullCheckpoint_ACU({
+            createdAt: Date.now(),
+            reason: 'integrity_repair',
+            data: plan.candidateData,
+        });
+        if (!checkpointBuild.checkpoint)
+            throw new Error(checkpointBuild.error);
+        const recoveryBackup = {
+            version: 1,
+            createdAt: Date.now(),
+            recoveryKind: plan.kind,
+            sourceMessageIndex,
+            failedMessageIndex: sourceMessageIndex,
+            storageFrame: clone_ACU$3(sourceTagData.storageFrame),
+        };
+        const isolatedData = cloneIsolatedData_ACU(sourceMessage);
+        const recoveredFrame = { version: 2, checkpoint: checkpointBuild.checkpoint, logEntries: [] };
+        const nextTagData = {
+            ...isolatedData[plan.isolationKey],
+            _acu_storage_version: 2,
+            storageFrame: recoveredFrame,
+            recoveryBackup,
+        };
+        isolatedData[plan.isolationKey] = nextTagData;
+        sourceMessage.TavernDB_ACU_IsolatedData = isolatedData;
+        return candidateChat;
+    }
+    function repairCandidate_ACU(data) {
+        const audit = auditTableDataForUpgrade_ACU(data);
+        if (audit.status !== 'repairable')
+            return { candidateData: null, status: audit.status };
+        const repair = repairTableDataFromAudit_ACU(audit);
+        return {
+            candidateData: repair.requiresConfirmation ? null : repair.candidateData,
+            status: audit.status,
+        };
+    }
+    function findOrphanDataReplace_ACU(frame) {
+        let candidate = null;
+        for (const entry of frame.logEntries || [])
+            for (const operation of entry?.operations || []) {
+                if (operation?.kind === 'data_replace')
+                    candidate = operation.data;
+            }
+        return candidate;
+    }
+    function diagnoseV2Recovery_ACU(chat, isolationKey) {
+        const frames = getFrames_ACU(chat, isolationKey);
+        if (frames.length === 0)
+            return { summary: { status: 'unrecoverable_no_base', isolationKey, requiresConfirmation: false, message: '当前隔离标识不存在 V2 storage frame。' } };
+        const latestFull = [...frames].reverse().find(item => item.frame.checkpoint?.kind === 'full');
+        if (latestFull?.frame.checkpoint) {
+            if (hasReplayArtifactsAfterCheckpoint_ACU(latestFull.frame) || hasLaterReplayArtifacts_ACU(frames, latestFull.messageIndex))
+                return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '坏 full checkpoint 之后仍存在 V2 replay artifact；无法证明替换不会截断数据，拒绝自动恢复。' } };
+            const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
+            if (repair.status === 'clean')
+                return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '最新 full checkpoint 已通过完整性审计，无需恢复。' } };
+            if (!repair.candidateData)
+                return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '最新 full checkpoint 不可无损自动修复；请先导出原始 frame。' } };
+            const summary = { status: 'recoverable_repaired_checkpoint', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '已生成 full 修复候选。' };
+            return { summary, plan: { ...summary, kind: 'repaired_full_checkpoint', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(latestFull.frame), candidateData: repair.candidateData } };
+        }
+        for (const item of [...frames].reverse()) {
+            if (!isIsolatedDataReplaceFrame_ACU(item.frame))
+                continue;
+            if (hasLaterReplayArtifacts_ACU(frames, item.messageIndex))
+                return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: item.messageIndex, requiresConfirmation: false, message: '无锚点 data_replace 之后仍存在 V2 replay artifact；无法证明替换不会截断数据，拒绝自动恢复。' } };
+            const candidateData = findOrphanDataReplace_ACU(item.frame);
+            if (!candidateData)
+                continue;
+            const repair = repairCandidate_ACU(candidateData);
+            if (repair.status !== 'clean' && !repair.candidateData)
+                return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: item.messageIndex, requiresConfirmation: false, message: '无锚点 data_replace 不满足无损自动修复条件。' } };
+            const summary = { status: 'recoverable_orphan_data_replace', isolationKey, sourceMessageIndex: item.messageIndex, requiresConfirmation: true, message: '检测到无锚点 data_replace；必须明确确认后才会提升为 full checkpoint。' };
+            return { summary, plan: { ...summary, kind: 'confirmed_orphan_data_replace', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(item.frame), candidateData: repair.candidateData || candidateData } };
+        }
+        return { summary: { status: 'unrecoverable_no_base', isolationKey, requiresConfirmation: false, message: '仅检测到无 base 的 V2 日志；无法编造恢复数据。' } };
+    }
+    function scanV2IsolationDiagnostics_ACU(chat = getChatArray_ACU()) {
+        const isolationKeys = new Set();
+        for (const message of chat) {
+            if (message?.is_user)
+                continue;
+            const isolatedData = message?.TavernDB_ACU_IsolatedData;
+            if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData))
+                continue;
+            for (const isolationKey of Object.keys(isolatedData)) {
+                if (isV2TagData_ACU(isolatedData[isolationKey]))
+                    isolationKeys.add(isolationKey);
+            }
+        }
+        const currentIsolationKey = getCurrentIsolationKey_ACU();
+        return [...isolationKeys].map(isolationKey => ({ ...diagnoseV2Recovery_ACU(chat, isolationKey).summary, isCurrentIsolation: isolationKey === currentIsolationKey }));
+    }
+    function prepareV2Recovery_ACU(options = {}) {
+        const chat = options.chat || getChatArray_ACU();
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const diagnosis = diagnoseV2Recovery_ACU(chat, isolationKey);
+        return diagnosis.plan ? createPlan_ACU(diagnosis.plan) : diagnosis.summary;
+    }
+    async function commitPreparedV2Recovery_ACU(planId, options = {}) {
+        const plan = plans_ACU.get(planId);
+        const failure = (error) => ({ status: 'commit_failed_rolled_back', planId, error });
+        if (!plan)
+            return failure('恢复计划不存在或已失效，请重新诊断。');
+        if (plan.requiresConfirmation && options.confirmOrphanDataReplace !== true) {
+            return failure('无锚点 data_replace 恢复必须显式确认。');
+        }
+        if (!currentScopeMatches_ACU(plan)) {
+            plans_ACU.delete(planId);
+            return failure('恢复计划作用域已变化，请重新诊断。');
+        }
+        const currentSourceFrame = getPlanSourceFrame_ACU(plan);
+        if (!currentSourceFrame || getFrameFingerprint_ACU(currentSourceFrame) !== plan.sourceFrameFingerprint) {
+            plans_ACU.delete(planId);
+            return failure('恢复源 frame 已变化，请重新诊断。');
+        }
+        let candidateChat;
+        try {
+            candidateChat = buildRecoveredCandidateChat_ACU(plan);
+            const recovered = await loadTableStateFromFramesV2_ACU(candidateChat, plan.isolationKey, { updateRuntimeState: false });
+            if (!recovered)
+                return failure('恢复候选缺少可回放的 full checkpoint。');
+        }
+        catch (error) {
+            return failure(`恢复候选回放失败：${getErrorMessage_ACU(error)}`);
+        }
+        return runTableWriteTransaction_ACU({
+            source: 'system',
+            reason: 'v2_integrity_recovery',
+            isolationKey: plan.isolationKey,
+            writeSet: [{ kind: 'all' }],
+            maintenanceMode: 'exclusive',
+        }, async (ctx) => {
+            try {
+                return await ctx.runCommit(async () => {
+                    if (!currentScopeMatches_ACU(plan)) {
+                        plans_ACU.delete(planId);
+                        return failure('恢复计划作用域已变化，请重新诊断。');
+                    }
+                    const frameBeforeCommit = getPlanSourceFrame_ACU(plan);
+                    if (!frameBeforeCommit || getFrameFingerprint_ACU(frameBeforeCommit) !== plan.sourceFrameFingerprint) {
+                        plans_ACU.delete(planId);
+                        return failure('恢复源 frame 已变化，请重新诊断。');
+                    }
+                    const beforeChat = clone_ACU$3(plan.chat);
+                    plan.chat.splice(0, plan.chat.length, ...candidateChat);
+                    try {
+                        await saveChatToHostStrict_ACU();
+                    }
+                    catch (error) {
+                        plan.chat.splice(0, plan.chat.length, ...beforeChat);
+                        return failure(`宿主保存失败，已恢复内存聊天：${getErrorMessage_ACU(error)}`);
+                    }
+                    plans_ACU.delete(planId);
+                    const expectedStorageMode = getCurrentStorageMode();
+                    try {
+                        if (!currentScopeMatches_ACU(plan))
+                            throw new Error('宿主保存后恢复计划作用域已变化。');
+                        const recovered = await loadTableStateFromFramesV2_ACU(plan.chat, plan.isolationKey);
+                        if (!recovered)
+                            throw new Error('宿主保存后恢复 checkpoint 不可回放。');
+                        if (expectedStorageMode === 'sqlite') {
+                            await reloadStorageProvider();
+                            if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {
+                                throw new Error('SQLite 运行时重载后已静默回退到 native provider。');
+                            }
+                        }
+                        if (!currentScopeMatches_ACU(plan))
+                            throw new Error('宿主保存后运行时重载期间恢复计划作用域已变化。');
+                        return { status: 'committed', planId };
+                    }
+                    catch (error) {
+                        return { status: 'committed_postcondition_failed', planId, error: getErrorMessage_ACU(error) };
+                    }
+                });
+            }
+            catch (error) {
+                return failure(getErrorMessage_ACU(error));
+            }
+        });
+    }
+
     /**
      * presentation/bootstrap/api-groups/data-admin-api.ts
      * 数据管理与导入 API — 模板导入导出 + TXT导入链路 + 合并总结
@@ -68656,6 +70406,24 @@ $CONTENT
             catch (e) {
                 logError_ACU('clearImportCache failed:', e);
                 return false;
+            } },
+            prepareV2Recovery: async function () { try {
+                return prepareV2Recovery_ACU();
+            }
+            catch (e) {
+                logError_ACU('prepareV2Recovery failed:', e);
+                return dataAdminApiError_ACU(e, 'V2 恢复诊断失败。');
+            } },
+            commitV2Recovery: async function (planId, options = {}) { try {
+                if (typeof planId !== 'string' || !planId.trim())
+                    return { success: false, error: 'planId 必须是非空字符串。' };
+                if (options === null || typeof options !== 'object' || Array.isArray(options))
+                    return { success: false, error: 'V2 恢复确认选项必须是对象。' };
+                return await commitPreparedV2Recovery_ACU(planId.trim(), { confirmOrphanDataReplace: options.confirmOrphanDataReplace === true });
+            }
+            catch (e) {
+                logError_ACU('commitV2Recovery failed:', e);
+                return dataAdminApiError_ACU(e, 'V2 恢复提交失败。');
             } },
             // 合并总结
             mergeSummaryNow: async function () { try {
@@ -106726,6 +108494,9 @@ Expected function or array of functions, received type ${typeof value}.`
         const busyAction = ref('');
         const isolationCode = ref('');
         const activeIsolationCode = ref('');
+        const mixedStorageDecision = ref(null);
+        const v2RecoverySummary = ref(null);
+        const v2IsolationDiagnostics = ref([]);
         const isolationHistory = ref([]);
         const deleteRange = reactive({
             startFloor: 1,
@@ -106762,6 +108533,7 @@ Expected function or array of functions, received type ${typeof value}.`
             deleteRange.endFloor = settings_ACU.deleteEndFloor || '';
             retainRecentLayers.value = normalizeRetainRecentLayers(settings_ACU.retainRecentLayers ?? 100);
             aiMessageCount.value = getAiMessageCount();
+            mixedStorageDecision.value = getActiveMixedStorageDecisionSummary_ACU();
         }
         function getCheckpointTargetStorageMode() {
             return getCurrentStorageMode();
@@ -106911,6 +108683,152 @@ Expected function or array of functions, received type ${typeof value}.`
                 logError_ACU('[ACU-V2] exportTableCheckpoint failed', e);
                 message.value = null;
                 toast.error(`导出 Checkpoint 失败：${e?.message || '未知错误'}`);
+            }
+        }
+        function exportMixedStorageSnapshots() {
+            const decision = mixedStorageDecision.value;
+            if (!decision) {
+                toast.warning('当前没有可导出的混合存储决议。');
+                return;
+            }
+            busyAction.value = 'export-mixed-storage-snapshots';
+            try {
+                const transfer = buildRegisteredMixedStorageSnapshotTransfer_ACU(decision.decisionId);
+                downloadJson$2(transfer.legacy.filename, transfer.legacy.payload);
+                downloadJson$2(transfer.v2.filename, transfer.v2.payload);
+                toast.success('已导出 legacy-v1 与 V2 两份混合存储快照。');
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] exportMixedStorageSnapshots failed', e);
+                mixedStorageDecision.value = getActiveMixedStorageDecisionSummary_ACU();
+                toast.error(`导出混合存储快照失败：${e?.message || '未知错误'}`);
+            }
+            finally {
+                busyAction.value = '';
+            }
+        }
+        async function commitMixedStorageDecision(action) {
+            const decision = mixedStorageDecision.value;
+            if (!decision) {
+                toast.warning('混合存储决议已失效，请重新加载当前聊天。');
+                return;
+            }
+            busyAction.value = `commit-mixed-storage-${action}`;
+            try {
+                const result = await commitRegisteredMixedStorageDecision_ACU(decision.decisionId, action);
+                mixedStorageDecision.value = getActiveMixedStorageDecisionSummary_ACU();
+                if (result.status === 'committed') {
+                    toast.success(action === 'keep_v2' ? '已保留 V2 数据并清理冗余 legacy 数据。' : '已提交经验证的混合存储合并候选。');
+                }
+                else if (result.status === 'committed_postcondition_failed') {
+                    toast.warning(`数据已保存，但后置校验失败：${result.error || '未知错误'}。请重新加载当前聊天后核对数据。`, { muteable: false, durationMs: 6000 });
+                }
+                else {
+                    toast.error(`混合存储提交失败：${result.error || '未知错误'}`);
+                }
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] commitMixedStorageDecision failed', e);
+                mixedStorageDecision.value = getActiveMixedStorageDecisionSummary_ACU();
+                toast.error(`混合存储决议已失效：${e?.message || '未知错误'}`);
+            }
+            finally {
+                busyAction.value = '';
+            }
+        }
+        function scanV2IsolationDiagnostics() {
+            busyAction.value = 'scan-v2-isolation-diagnostics';
+            try {
+                v2IsolationDiagnostics.value = scanV2IsolationDiagnostics_ACU();
+                if (v2IsolationDiagnostics.value.length === 0) {
+                    toast.warning('当前聊天不存在 V2 storage frame，无法生成隔离域恢复诊断。');
+                }
+                else {
+                    toast.info(`已完成 ${v2IsolationDiagnostics.value.length} 个 V2 隔离域的只读诊断。`);
+                }
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] scanV2IsolationDiagnostics failed', e);
+                v2IsolationDiagnostics.value = [];
+                toast.error(`V2 隔离域诊断失败：${e?.message || '未知错误'}`);
+            }
+            finally {
+                busyAction.value = '';
+            }
+        }
+        function prepareV2Recovery() {
+            busyAction.value = 'prepare-v2-recovery';
+            try {
+                v2RecoverySummary.value = prepareV2Recovery_ACU();
+                const summary = v2RecoverySummary.value;
+                if (summary.status === 'recoverable_repaired_checkpoint') {
+                    toast.warning('检测到可修复的 V2 full checkpoint。请先导出原始 frame 备份，再确认提交。', { muteable: false, durationMs: 6000 });
+                }
+                else if (summary.status === 'recoverable_orphan_data_replace') {
+                    toast.warning('检测到无锚点 data_replace。该恢复必须经过两次明确确认。', { muteable: false, durationMs: 6000 });
+                }
+                else {
+                    toast.warning(summary.message, { muteable: false, durationMs: 6000 });
+                }
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] prepareV2Recovery failed', e);
+                v2RecoverySummary.value = null;
+                toast.error(`V2 恢复诊断失败：${e?.message || '未知错误'}`);
+            }
+            finally {
+                busyAction.value = '';
+            }
+        }
+        function exportV2RecoveryBackups() {
+            const isolationKey = getCurrentIsolationKey_ACU();
+            const backups = getChatArray_ACU().flatMap((message, messageIndex) => {
+                if (message?.is_user)
+                    return [];
+                const backup = readIsolatedTagData_ACU(message, isolationKey)?.recoveryBackup;
+                return backup ? [{ messageIndex, backup: JSON.parse(JSON.stringify(backup)) }] : [];
+            });
+            if (backups.length === 0) {
+                toast.warning('当前隔离标识没有可导出的 V2 恢复原始 frame 备份。');
+                return;
+            }
+            try {
+                const chatName = String(currentChatFileIdentifier_ACU || 'current_chat').replace(/[\/:*?"<>|]+/g, '_');
+                downloadJson$2(`TavernDB_v2_recovery_backups_${chatName}_${formatCheckpointExportTimestamp()}.json`, { version: 1, isolationKey, backups });
+                toast.success(`已导出 ${backups.length} 份 V2 恢复原始 frame 备份。`);
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] exportV2RecoveryBackups failed', e);
+                toast.error(`导出 V2 恢复备份失败：${e?.message || '未知错误'}`);
+            }
+        }
+        async function commitV2Recovery(confirmOrphanDataReplace) {
+            const summary = v2RecoverySummary.value;
+            if (!summary?.planId || !summary.status.startsWith('recoverable_')) {
+                toast.warning('V2 恢复计划已失效，请重新诊断。');
+                return;
+            }
+            busyAction.value = 'commit-v2-recovery';
+            try {
+                const result = await commitPreparedV2Recovery_ACU(summary.planId, { confirmOrphanDataReplace });
+                if (result.status === 'committed') {
+                    v2RecoverySummary.value = null;
+                    toast.success('V2 恢复已保存；原始 frame 已写入隔离备份。');
+                }
+                else if (result.status === 'committed_postcondition_failed') {
+                    v2RecoverySummary.value = null;
+                    toast.warning(`V2 恢复已保存，但后置校验失败：${result.error || '未知错误'}。请重新加载当前聊天核对数据。`, { muteable: false, durationMs: 6000 });
+                }
+                else {
+                    toast.error(`V2 恢复提交失败：${result.error || '未知错误'}`);
+                }
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] commitV2Recovery failed', e);
+                toast.error(`V2 恢复提交异常：${e?.message || '未知错误'}`);
+            }
+            finally {
+                busyAction.value = '';
             }
         }
         async function parseTableCheckpoint(file) {
@@ -107135,6 +109053,9 @@ Expected function or array of functions, received type ${typeof value}.`
             busyAction,
             isolationCode,
             isolationHistory,
+            mixedStorageDecision,
+            v2RecoverySummary,
+            v2IsolationDiagnostics,
             isolationHistoryOptions,
             currentIsolationLabel,
             isolationModeLabel,
@@ -107152,6 +109073,12 @@ Expected function or array of functions, received type ${typeof value}.`
             exportCombinedSettings,
             exportJsonData,
             exportTableCheckpoint,
+            exportMixedStorageSnapshots,
+            commitMixedStorageDecision,
+            scanV2IsolationDiagnostics,
+            prepareV2Recovery,
+            exportV2RecoveryBackups,
+            commitV2Recovery,
             parseTableCheckpoint,
             restoreTableCheckpoint,
             resetAllDefaults,
@@ -107292,6 +109219,54 @@ Expected function or array of functions, received type ${typeof value}.`
                     return;
                 void flow.deleteLocalData(mode);
             }
+            async function onCommitMixedStorageDecision(action) {
+                const isMerge = action === 'commit_merge_candidate';
+                const confirmed = await dialogStore.confirm({
+                    title: isMerge ? '提交混合存储合并候选' : '保留 V2 数据并清理 legacy',
+                    message: isMerge
+                        ? '将只提交服务端冻结且已审计通过的合并候。页面不会提交任何可编辑表格数据。确认继续？'
+                        : '将保留已验证的 V2 数据并清理冗余 legacy-v1 数据。确认继续？',
+                    confirmLabel: isMerge ? '继续提交候选' : '保留 V2',
+                    confirmVariant: 'danger',
+                });
+                if (!confirmed)
+                    return;
+                if (isMerge) {
+                    const secondConfirmed = await dialogStore.confirm({
+                        title: '再次确认合并候选',
+                        message: '候选内容以服务端冻结决议为准；提交后不会用 legacy 数据覆盖 V2。确认提交？',
+                        confirmLabel: '确认提交候选',
+                        confirmVariant: 'danger',
+                    });
+                    if (!secondConfirmed)
+                        return;
+                }
+                void flow.commitMixedStorageDecision(action);
+            }
+            async function onCommitV2Recovery(confirmOrphanDataReplace) {
+                const isOrphan = confirmOrphanDataReplace;
+                const confirmed = await dialogStore.confirm({
+                    title: isOrphan ? '确认无锚点 data_replace 恢复' : '应用 V2 Checkpoint 修复',
+                    message: isOrphan
+                        ? '将只提交服务端冻结的无锚点 data_replace 候选。原始 frame 会保留为隔离备份，页面不会提交任何可编辑表格数据。确认继续？'
+                        : '将只提交服务端冻结且已审计通过的 Checkpoint 修复候选。原始 frame 会保留为隔离备份。确认继续？',
+                    confirmLabel: isOrphan ? '继续恢复' : '应用修复',
+                    confirmVariant: 'danger',
+                });
+                if (!confirmed)
+                    return;
+                if (isOrphan) {
+                    const secondConfirmed = await dialogStore.confirm({
+                        title: '再次确认无锚点恢复',
+                        message: '无锚点 data_replace 会被提升为新的 full checkpoint。恢复内容完全以服务端冻结候选为准。确认提交？',
+                        confirmLabel: '确认提交恢复',
+                        confirmVariant: 'danger',
+                    });
+                    if (!secondConfirmed)
+                        return;
+                }
+                void flow.commitV2Recovery(isOrphan);
+            }
             async function onResetAllDefaults() {
                 const selected = await dialogStore.selectMany({
                     title: "恢复默认配置",
@@ -107319,389 +109294,595 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             onMounted(refreshAll);
             watch(useChatChangedTick(), refreshAll);
-            const __returned__ = { resetDefaultsCleanupOptions, dialogStore, flow, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, get dataMgmtCopy() { return dataMgmtCopy; } };
+            const __returned__ = { resetDefaultsCleanupOptions, dialogStore, flow, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onCommitMixedStorageDecision, onCommitV2Recovery, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, get dataMgmtCopy() { return dataMgmtCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-fe9bcd95] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-fe9bcd95] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-fe9bcd95] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-fe9bcd95] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-fe9bcd95] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-fe9bcd95] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\r\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-fe9bcd95] {\r\n  margin-top: 4px;\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-fe9bcd95] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 600;\r\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-fe9bcd95] {\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-fe9bcd95] .acu-disclosure-group__header {\r\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-fe9bcd95] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-fe9bcd95] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 8px;\r\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-fe9bcd95] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-fe9bcd95] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-align: left;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-fe9bcd95] {\r\n  flex-shrink: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-fe9bcd95] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-fe9bcd95] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-fe9bcd95],\r\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] {\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-fe9bcd95] {\r\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-fe9bcd95] {\r\n  margin-top: 16px;\r\n  padding-top: 16px;\r\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fe9bcd95] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fe9bcd95] .acu-file-button,\r\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fe9bcd95] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] .acu-file-button,\r\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] .acu-btn {\r\n  width: 100%;\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-fe9bcd95] {\r\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-fe9bcd95] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-fe9bcd95] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fe9bcd95] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-fe9bcd95");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_fe9bcd95_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-ba196554] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-ba196554] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-ba196554] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-ba196554] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-ba196554] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-ba196554] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-ba196554] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-ba196554] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-ba196554] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-ba196554] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-ba196554] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-ba196554] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-ba196554] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-ba196554] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-ba196554] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-ba196554] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-ba196554] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-ba196554],\n.acu-v2-data-mgmt-page__command-grid[data-v-ba196554] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-ba196554] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-ba196554] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-ba196554] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-ba196554] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-ba196554] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-ba196554] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-ba196554] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-ba196554] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-ba196554] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-ba196554] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-ba196554] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-ba196554] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-ba196554");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_ba196554_lang = null;
 
     const _hoisted_1$f = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$e = { class: "acu-v2-data-mgmt-page__panel-stack" };
     const _hoisted_3$c = { class: "acu-v2-data-mgmt-page__form-stack" };
     const _hoisted_4$a = {
-	key: 0,
-	class: "acu-v2-data-mgmt-page__history-list"
+    	key: 0,
+    	class: "acu-v2-data-mgmt-page__history-list"
     };
     const _hoisted_5$9 = { class: "acu-v2-data-mgmt-page__history-code" };
     const _hoisted_6$8 = {
-	key: 0,
-	class: "acu-v2-data-mgmt-page__history-current"
+    	key: 0,
+    	class: "acu-v2-data-mgmt-page__history-current"
     };
     const _hoisted_7$6 = {
-	key: 1,
-	class: "acu-v2-data-mgmt-page__history-empty"
+    	key: 1,
+    	class: "acu-v2-data-mgmt-page__history-empty"
     };
     const _hoisted_8$6 = { class: "acu-v2-data-mgmt-page__actions" };
     const _hoisted_9$6 = { class: "acu-v2-data-mgmt-page__command-grid" };
     const _hoisted_10$6 = {
-	class: "acu-v2-data-mgmt-page__checkpoint-section",
-	"aria-labelledby": "acu-checkpoint-title"
+    	class: "acu-v2-data-mgmt-page__checkpoint-section",
+    	"aria-labelledby": "acu-checkpoint-title"
     };
     const _hoisted_11$6 = { class: "acu-v2-data-mgmt-page__checkpoint-actions" };
-    const _hoisted_12$6 = { class: "acu-v2-data-mgmt-page__panel-stack" };
-    const _hoisted_13$5 = {
-	class: "acu-v2-data-mgmt-page__cleanup-section",
-	"aria-labelledby": "acu-cleanup-auto-title"
+    const _hoisted_12$6 = {
+    	key: 0,
+    	class: "acu-v2-data-mgmt-page__checkpoint-section",
+    	"aria-labelledby": "acu-mixed-storage-title"
     };
-    const _hoisted_14$5 = { class: "acu-v2-data-mgmt-page__form-stack" };
+    const _hoisted_13$5 = { class: "acu-v2-data-mgmt-page__section-description" };
+    const _hoisted_14$5 = { class: "acu-v2-data-mgmt-page__checkpoint-actions" };
     const _hoisted_15$5 = {
-	class: "acu-v2-data-mgmt-page__cleanup-section",
-	"aria-labelledby": "acu-cleanup-manual-title"
+    	key: 1,
+    	class: "acu-v2-data-mgmt-page__checkpoint-section",
+    	"aria-labelledby": "acu-v2-recovery-title"
     };
-    const _hoisted_16$5 = { class: "acu-v2-data-mgmt-page__meta" };
-    const _hoisted_17$4 = { class: "acu-v2-data-mgmt-page__form-grid" };
-    const _hoisted_18$4 = { class: "acu-v2-data-mgmt-page__command-grid acu-v2-data-mgmt-page__command-grid--cleanup" };
+    const _hoisted_16$5 = { class: "acu-v2-data-mgmt-page__section-description" };
+    const _hoisted_17$4 = { class: "acu-v2-data-mgmt-page__checkpoint-actions" };
+    const _hoisted_18$4 = {
+    	key: 2,
+    	class: "acu-v2-data-mgmt-page__checkpoint-section",
+    	"aria-labelledby": "acu-v2-isolation-diagnostics-title"
+    };
+    const _hoisted_19$4 = { class: "acu-v2-data-mgmt-page__form-stack" };
+    const _hoisted_20$2 = { key: 0 };
+    const _hoisted_21$2 = { key: 1 };
+    const _hoisted_22$2 = { class: "acu-v2-data-mgmt-page__checkpoint-actions" };
+    const _hoisted_23$2 = { class: "acu-v2-data-mgmt-page__panel-stack" };
+    const _hoisted_24$2 = {
+    	class: "acu-v2-data-mgmt-page__cleanup-section",
+    	"aria-labelledby": "acu-cleanup-auto-title"
+    };
+    const _hoisted_25$2 = { class: "acu-v2-data-mgmt-page__form-stack" };
+    const _hoisted_26$2 = {
+    	class: "acu-v2-data-mgmt-page__cleanup-section",
+    	"aria-labelledby": "acu-cleanup-manual-title"
+    };
+    const _hoisted_27$2 = { class: "acu-v2-data-mgmt-page__meta" };
+    const _hoisted_28$2 = { class: "acu-v2-data-mgmt-page__form-grid" };
+    const _hoisted_29$1 = { class: "acu-v2-data-mgmt-page__command-grid acu-v2-data-mgmt-page__command-grid--cleanup" };
     function _sfc_render$f(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$f, [$setup.flow.message.value ? (openBlock(), createBlock($setup["AcuMessage"], {
-		key: 0,
-		kind: $setup.flow.message.value.kind
-	}, {
-		default: withCtx(() => [createTextVNode(
-			toDisplayString($setup.flow.message.value.text),
-			1
-			/* TEXT */
-		)]),
-		_: 1
-	}, 8, ["kind"])) : createCommentVNode("v-if", true), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-data-mgmt-page__layout" }, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_2$e, [createVNode($setup["AcuPanel"], {
-			title: $setup.dataMgmtCopy.panels.isolation.title,
-			description: $setup.dataMgmtCopy.panels.isolation.description
-		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_3$c, [createVNode($setup["AcuFormRow"], {
-				label: "标识代码",
-				hint: $setup.isolationCodeHint
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					"model-value": $setup.flow.isolationCode.value,
-					type: "text",
-					placeholder: "输入标识代码",
-					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.flow.isolationCode.value = String($event))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}, 8, ["hint"]), createVNode($setup["AcuDisclosureGroup"], {
-				class: "acu-v2-data-mgmt-page__history",
-				label: "历史标识",
-				meta: $setup.historyMetaLabel,
-				expanded: $setup.historyExpanded,
-				"body-id": "acu-data-isolation-history",
-				"body-mode": "if",
-				onToggle: _cache[1] || (_cache[1] = ($event) => $setup.historyExpanded = !$setup.historyExpanded)
-			}, {
-				default: withCtx(() => [$setup.flow.isolationHistory.value.length ? (openBlock(), createElementBlock("div", _hoisted_4$a, [(openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList($setup.flow.isolationHistory.value, (code) => {
-						return openBlock(), createElementBlock("div", {
-							key: code,
-							class: "acu-v2-data-mgmt-page__history-item"
-						}, [createVNode($setup["AcuButton"], {
-							class: "acu-v2-data-mgmt-page__history-fill",
-							size: "sm",
-							title: `填入历史标识：${code}`,
-							disabled: !!$setup.flow.busyAction.value,
-							onClick: ($event) => $setup.selectHistory(code)
-						}, {
-							default: withCtx(() => [createBaseVNode(
-								"span",
-								_hoisted_5$9,
-								toDisplayString(code),
-								1
-								/* TEXT */
-							), code === $setup.flow.currentIsolationLabel.value ? (openBlock(), createElementBlock("span", _hoisted_6$8, " 当前 ")) : createCommentVNode("v-if", true)]),
-							_: 2
-						}, 1032, [
-							"title",
-							"disabled",
-							"onClick"
-						]), createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-trash-can",
-							variant: "danger",
-							title: `删除历史标识：${code}`,
-							"aria-label": `删除历史标识：${code}`,
-							disabled: !!$setup.flow.busyAction.value,
-							onClick: ($event) => $setup.onRemoveHistory(code)
-						}, null, 8, [
-							"title",
-							"aria-label",
-							"disabled",
-							"onClick"
-						])]);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				))])) : (openBlock(), createElementBlock("p", _hoisted_7$6, " 暂无历史标识。 "))]),
-				_: 1
-			}, 8, ["meta", "expanded"])]), createBaseVNode("div", _hoisted_8$6, [createVNode($setup["AcuButton"], {
-				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
-				onClick: $setup.onDeleteCurrentIsolationEntries
-			}, {
-				default: withCtx(() => [..._cache[7] || (_cache[7] = [createTextVNode(
-					" 删除当前标识注入条目 ",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}, 8, ["loading"]), createVNode($setup["AcuButton"], {
-				variant: "primary",
-				loading: $setup.flow.busyAction.value === "apply-isolation",
-				onClick: $setup.onApplyIsolation
-			}, {
-				default: withCtx(() => [..._cache[8] || (_cache[8] = [createTextVNode(
-					" 保存并应用 ",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}, 8, ["loading"])])]),
-			_: 1
-		}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
-			title: $setup.dataMgmtCopy.panels.backup.title,
-			description: $setup.dataMgmtCopy.panels.backup.description
-		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_9$6, [
-				createVNode($setup["AcuFileButton"], {
-					variant: "primary",
-					block: "",
-					accept: ".json,application/json",
-					disabled: !!$setup.flow.busyAction.value,
-					onFile: $setup.flow.importCombinedSettings
-				}, {
-					default: withCtx(() => [..._cache[9] || (_cache[9] = [createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-download" },
-						null,
-						-1
-						/* CACHED */
-					), createTextVNode(
-						" 合并导入（模板+指令） ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["disabled", "onFile"]),
-				createVNode($setup["AcuButton"], {
-					block: "",
-					disabled: !!$setup.flow.busyAction.value,
-					onClick: $setup.flow.exportCombinedSettings
-				}, {
-					default: withCtx(() => [..._cache[10] || (_cache[10] = [createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-upload" },
-						null,
-						-1
-						/* CACHED */
-					), createTextVNode(
-						" 合并导出（模板+指令） ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["disabled", "onClick"]),
-				createVNode($setup["AcuButton"], {
-					block: "",
-					disabled: !!$setup.flow.busyAction.value,
-					onClick: $setup.flow.exportJsonData
-				}, {
-					default: withCtx(() => [..._cache[11] || (_cache[11] = [createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-upload" },
-						null,
-						-1
-						/* CACHED */
-					), createTextVNode(
-						" 特殊导出 ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["disabled", "onClick"]),
-				createVNode($setup["AcuButton"], {
-					block: "",
-					loading: $setup.flow.busyAction.value === "override-latest",
-					onClick: $setup.onOverrideLatestLayer
-				}, {
-					default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
-						" 模板覆盖最新层数据 ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["loading"])
-			]), createBaseVNode("section", _hoisted_10$6, [
-				_cache[15] || (_cache[15] = createBaseVNode(
-					"h3",
-					{
-						id: "acu-checkpoint-title",
-						class: "acu-v2-data-mgmt-page__section-title"
-					},
-					"当前聊天 Checkpoint",
-					-1
-					/* CACHED */
-				)),
-				_cache[16] || (_cache[16] = createBaseVNode(
-					"p",
-					{ class: "acu-v2-data-mgmt-page__section-description" },
-					" 导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据， 仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。 全局模板和聊天正文不变。 ",
-					-1
-					/* CACHED */
-				)),
-				createBaseVNode("div", _hoisted_11$6, [createVNode($setup["AcuButton"], {
-					block: "",
-					disabled: !!$setup.flow.busyAction.value,
-					onClick: $setup.flow.exportTableCheckpoint
-				}, {
-					default: withCtx(() => [..._cache[13] || (_cache[13] = [createTextVNode(
-						" 导出 Checkpoint ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["disabled", "onClick"]), createVNode($setup["AcuFileButton"], {
-					block: "",
-					accept: ".json,application/json",
-					disabled: !!$setup.flow.busyAction.value,
-					onFile: $setup.onImportTableCheckpoint
-				}, {
-					default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
-						" 导入 Checkpoint ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}, 8, ["disabled"])])
-			])]),
-			_: 1
-		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_12$6, [createVNode($setup["AcuPanel"], {
-			title: $setup.dataMgmtCopy.panels.cleanup.title,
-			description: $setup.dataMgmtCopy.panels.cleanup.description
-		}, {
-			default: withCtx(() => [
-				createBaseVNode("section", _hoisted_13$5, [_cache[17] || (_cache[17] = createBaseVNode(
-					"h3",
-					{
-						id: "acu-cleanup-auto-title",
-						class: "acu-v2-data-mgmt-page__section-title"
-					},
-					" 自动清理 ",
-					-1
-					/* CACHED */
-				)), createBaseVNode("div", _hoisted_14$5, [createVNode($setup["AcuFormRow"], {
-					label: "保留数据层数",
-					hint: "自动更新结束后，超过保留范围的旧楼层插件数据会被清理；不影响聊天正文。"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						type: "number",
-						min: 0,
-						step: 1,
-						"model-value": $setup.flow.retainRecentLayers.value,
-						onChange: _cache[2] || (_cache[2] = ($event) => $setup.flow.setRetainRecentLayers($event))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				})])]),
-				createBaseVNode("section", _hoisted_15$5, [
-					_cache[18] || (_cache[18] = createBaseVNode(
-						"h3",
-						{
-							id: "acu-cleanup-manual-title",
-							class: "acu-v2-data-mgmt-page__section-title"
-						},
-						" 手动删除 ",
-						-1
-						/* CACHED */
-					)),
-					createBaseVNode(
-						"p",
-						_hoisted_16$5,
-						" 当前聊天 " + toDisplayString($setup.flow.aiMessageCount.value) + " 个 AI 楼层 · 将处理：" + toDisplayString($setup.flow.rangeLabel.value),
-						1
-						/* TEXT */
-					),
-					createBaseVNode("div", _hoisted_17$4, [createVNode($setup["AcuFormRow"], {
-						label: "起始楼层",
-						hint: "从第N个楼层 AI 回复开始，留空为第 1 层。"
-					}, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							"model-value": $setup.flow.deleteRange.startFloor,
-							type: "number",
-							min: 1,
-							step: 1,
-							"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.flow.deleteRange.startFloor = $event)
-						}, null, 8, ["model-value"])]),
-						_: 1
-					}), createVNode($setup["AcuFormRow"], {
-						label: "终止楼层",
-						hint: "留空为最新楼层。"
-					}, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							"model-value": $setup.flow.deleteRange.endFloor,
-							type: "number",
-							min: 1,
-							step: 1,
-							placeholder: "到最后",
-							"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.flow.deleteRange.endFloor = $event)
-						}, null, 8, ["model-value"])]),
-						_: 1
-					})])
-				]),
-				createBaseVNode("div", _hoisted_18$4, [
-					createVNode($setup["AcuButton"], {
-						block: "",
-						loading: $setup.flow.busyAction.value === "delete-current-local",
-						onClick: _cache[5] || (_cache[5] = ($event) => $setup.onDeleteLocalData("current"))
-					}, {
-						default: withCtx(() => [..._cache[19] || (_cache[19] = [createTextVNode(
-							" 删除当前标识本地数据 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["loading"]),
-					createVNode($setup["AcuButton"], {
-						block: "",
-						variant: "danger",
-						loading: $setup.flow.busyAction.value === "delete-all-local",
-						onClick: _cache[6] || (_cache[6] = ($event) => $setup.onDeleteLocalData("all"))
-					}, {
-						default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
-							" 删除所有本地数据 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["loading"]),
-					createVNode($setup["AcuButton"], {
-						block: "",
-						loading: $setup.flow.busyAction.value === "reset-defaults",
-						onClick: $setup.onResetAllDefaults
-					}, {
-						default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
-							" 恢复默认配置 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["loading"])
-				])
-			]),
-			_: 1
-		}, 8, ["title", "description"])])]),
-		_: 1
-	})]);
+    	return openBlock(), createElementBlock("section", _hoisted_1$f, [$setup.flow.message.value ? (openBlock(), createBlock($setup["AcuMessage"], {
+    		key: 0,
+    		kind: $setup.flow.message.value.kind
+    	}, {
+    		default: withCtx(() => [createTextVNode(
+    			toDisplayString($setup.flow.message.value.text),
+    			1
+    			/* TEXT */
+    		)]),
+    		_: 1
+    	}, 8, ["kind"])) : createCommentVNode("v-if", true), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-data-mgmt-page__layout" }, {
+    		default: withCtx(() => [createBaseVNode("div", _hoisted_2$e, [createVNode($setup["AcuPanel"], {
+    			title: $setup.dataMgmtCopy.panels.isolation.title,
+    			description: $setup.dataMgmtCopy.panels.isolation.description
+    		}, {
+    			default: withCtx(() => [createBaseVNode("div", _hoisted_3$c, [createVNode($setup["AcuFormRow"], {
+    				label: "标识代码",
+    				hint: $setup.isolationCodeHint
+    			}, {
+    				default: withCtx(() => [createVNode($setup["AcuInput"], {
+    					"model-value": $setup.flow.isolationCode.value,
+    					type: "text",
+    					placeholder: "输入标识代码",
+    					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.flow.isolationCode.value = String($event))
+    				}, null, 8, ["model-value"])]),
+    				_: 1
+    			}, 8, ["hint"]), createVNode($setup["AcuDisclosureGroup"], {
+    				class: "acu-v2-data-mgmt-page__history",
+    				label: "历史标识",
+    				meta: $setup.historyMetaLabel,
+    				expanded: $setup.historyExpanded,
+    				"body-id": "acu-data-isolation-history",
+    				"body-mode": "if",
+    				onToggle: _cache[1] || (_cache[1] = ($event) => $setup.historyExpanded = !$setup.historyExpanded)
+    			}, {
+    				default: withCtx(() => [$setup.flow.isolationHistory.value.length ? (openBlock(), createElementBlock("div", _hoisted_4$a, [(openBlock(true), createElementBlock(
+    					Fragment,
+    					null,
+    					renderList($setup.flow.isolationHistory.value, (code) => {
+    						return openBlock(), createElementBlock("div", {
+    							key: code,
+    							class: "acu-v2-data-mgmt-page__history-item"
+    						}, [createVNode($setup["AcuButton"], {
+    							class: "acu-v2-data-mgmt-page__history-fill",
+    							size: "sm",
+    							title: `填入历史标识：${code}`,
+    							disabled: !!$setup.flow.busyAction.value,
+    							onClick: ($event) => $setup.selectHistory(code)
+    						}, {
+    							default: withCtx(() => [createBaseVNode(
+    								"span",
+    								_hoisted_5$9,
+    								toDisplayString(code),
+    								1
+    								/* TEXT */
+    							), code === $setup.flow.currentIsolationLabel.value ? (openBlock(), createElementBlock("span", _hoisted_6$8, " 当前 ")) : createCommentVNode("v-if", true)]),
+    							_: 2
+    						}, 1032, [
+    							"title",
+    							"disabled",
+    							"onClick"
+    						]), createVNode($setup["AcuIconButton"], {
+    							icon: "fa-solid fa-trash-can",
+    							variant: "danger",
+    							title: `删除历史标识：${code}`,
+    							"aria-label": `删除历史标识：${code}`,
+    							disabled: !!$setup.flow.busyAction.value,
+    							onClick: ($event) => $setup.onRemoveHistory(code)
+    						}, null, 8, [
+    							"title",
+    							"aria-label",
+    							"disabled",
+    							"onClick"
+    						])]);
+    					}),
+    					128
+    					/* KEYED_FRAGMENT */
+    				))])) : (openBlock(), createElementBlock("p", _hoisted_7$6, " 暂无历史标识。 "))]),
+    				_: 1
+    			}, 8, ["meta", "expanded"])]), createBaseVNode("div", _hoisted_8$6, [createVNode($setup["AcuButton"], {
+    				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
+    				onClick: $setup.onDeleteCurrentIsolationEntries
+    			}, {
+    				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
+    					" 删除当前标识注入条目 ",
+    					-1
+    					/* CACHED */
+    				)])]),
+    				_: 1
+    			}, 8, ["loading"]), createVNode($setup["AcuButton"], {
+    				variant: "primary",
+    				loading: $setup.flow.busyAction.value === "apply-isolation",
+    				onClick: $setup.onApplyIsolation
+    			}, {
+    				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
+    					" 保存并应用 ",
+    					-1
+    					/* CACHED */
+    				)])]),
+    				_: 1
+    			}, 8, ["loading"])])]),
+    			_: 1
+    		}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
+    			title: $setup.dataMgmtCopy.panels.backup.title,
+    			description: $setup.dataMgmtCopy.panels.backup.description
+    		}, {
+    			default: withCtx(() => [
+    				createBaseVNode("div", _hoisted_9$6, [
+    					createVNode($setup["AcuFileButton"], {
+    						variant: "primary",
+    						block: "",
+    						accept: ".json,application/json",
+    						disabled: !!$setup.flow.busyAction.value,
+    						onFile: $setup.flow.importCombinedSettings
+    					}, {
+    						default: withCtx(() => [..._cache[13] || (_cache[13] = [createBaseVNode(
+    							"i",
+    							{ class: "fa-solid fa-download" },
+    							null,
+    							-1
+    							/* CACHED */
+    						), createTextVNode(
+    							" 合并导入（模板+指令） ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["disabled", "onFile"]),
+    					createVNode($setup["AcuButton"], {
+    						block: "",
+    						disabled: !!$setup.flow.busyAction.value,
+    						onClick: $setup.flow.exportCombinedSettings
+    					}, {
+    						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
+    							"i",
+    							{ class: "fa-solid fa-upload" },
+    							null,
+    							-1
+    							/* CACHED */
+    						), createTextVNode(
+    							" 合并导出（模板+指令） ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["disabled", "onClick"]),
+    					createVNode($setup["AcuButton"], {
+    						block: "",
+    						disabled: !!$setup.flow.busyAction.value,
+    						onClick: $setup.flow.exportJsonData
+    					}, {
+    						default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
+    							"i",
+    							{ class: "fa-solid fa-upload" },
+    							null,
+    							-1
+    							/* CACHED */
+    						), createTextVNode(
+    							" 特殊导出 ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["disabled", "onClick"]),
+    					createVNode($setup["AcuButton"], {
+    						block: "",
+    						loading: $setup.flow.busyAction.value === "override-latest",
+    						onClick: $setup.onOverrideLatestLayer
+    					}, {
+    						default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
+    							" 模板覆盖最新层数据 ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["loading"])
+    				]),
+    				createBaseVNode("section", _hoisted_10$6, [
+    					_cache[19] || (_cache[19] = createBaseVNode(
+    						"h3",
+    						{
+    							id: "acu-checkpoint-title",
+    							class: "acu-v2-data-mgmt-page__section-title"
+    						},
+    						"当前聊天 Checkpoint",
+    						-1
+    						/* CACHED */
+    					)),
+    					_cache[20] || (_cache[20] = createBaseVNode(
+    						"p",
+    						{ class: "acu-v2-data-mgmt-page__section-description" },
+    						" 导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据， 仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。 全局模板和聊天正文不变。 ",
+    						-1
+    						/* CACHED */
+    					)),
+    					createBaseVNode("div", _hoisted_11$6, [createVNode($setup["AcuButton"], {
+    						block: "",
+    						disabled: !!$setup.flow.busyAction.value,
+    						onClick: $setup.flow.exportTableCheckpoint
+    					}, {
+    						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
+    							" 导出 Checkpoint ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["disabled", "onClick"]), createVNode($setup["AcuFileButton"], {
+    						block: "",
+    						accept: ".json,application/json",
+    						disabled: !!$setup.flow.busyAction.value,
+    						onFile: $setup.onImportTableCheckpoint
+    					}, {
+    						default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+    							" 导入 Checkpoint ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["disabled"])])
+    				]),
+    				$setup.flow.mixedStorageDecision.value ? (openBlock(), createElementBlock("section", _hoisted_12$6, [
+    					_cache[24] || (_cache[24] = createBaseVNode(
+    						"h3",
+    						{
+    							id: "acu-mixed-storage-title",
+    							class: "acu-v2-data-mgmt-page__section-title"
+    						},
+    						"混合存储决议",
+    						-1
+    						/* CACHED */
+    					)),
+    					createBaseVNode(
+    						"p",
+    						_hoisted_13$5,
+    						" 当前聊天同时检测到 legacy-v1 与 V2 数据。决议：" + toDisplayString($setup.flow.mixedStorageDecision.value.kind) + "。 可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。 ",
+    						1
+    						/* TEXT */
+    					),
+    					createBaseVNode("div", _hoisted_14$5, [
+    						createVNode($setup["AcuButton"], {
+    							block: "",
+    							loading: $setup.flow.busyAction.value === "export-mixed-storage-snapshots",
+    							onClick: $setup.flow.exportMixedStorageSnapshots
+    						}, {
+    							default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
+    								" 导出 legacy/V2 快照 ",
+    								-1
+    								/* CACHED */
+    							)])]),
+    							_: 1
+    						}, 8, ["loading", "onClick"]),
+    						$setup.flow.mixedStorageDecision.value.allowedActions.includes("keep_v2") ? (openBlock(), createBlock($setup["AcuButton"], {
+    							key: 0,
+    							block: "",
+    							loading: $setup.flow.busyAction.value === "commit-mixed-storage-keep_v2",
+    							onClick: _cache[2] || (_cache[2] = ($event) => $setup.onCommitMixedStorageDecision("keep_v2"))
+    						}, {
+    							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
+    								" 保留 V2 并清理 legacy ",
+    								-1
+    								/* CACHED */
+    							)])]),
+    							_: 1
+    						}, 8, ["loading"])) : createCommentVNode("v-if", true),
+    						$setup.flow.mixedStorageDecision.value.allowedActions.includes("commit_merge_candidate") ? (openBlock(), createBlock($setup["AcuButton"], {
+    							key: 1,
+    							block: "",
+    							loading: $setup.flow.busyAction.value === "commit-mixed-storage-commit_merge_candidate",
+    							onClick: _cache[3] || (_cache[3] = ($event) => $setup.onCommitMixedStorageDecision("commit_merge_candidate"))
+    						}, {
+    							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+    								" 提交受限合并候选 ",
+    								-1
+    								/* CACHED */
+    							)])]),
+    							_: 1
+    						}, 8, ["loading"])) : createCommentVNode("v-if", true)
+    					])
+    				])) : createCommentVNode("v-if", true),
+    				$setup.flow.v2RecoverySummary.value ? (openBlock(), createElementBlock("section", _hoisted_15$5, [
+    					_cache[28] || (_cache[28] = createBaseVNode(
+    						"h3",
+    						{
+    							id: "acu-v2-recovery-title",
+    							class: "acu-v2-data-mgmt-page__section-title"
+    						},
+    						"V2 数据恢复诊断",
+    						-1
+    						/* CACHED */
+    					)),
+    					createBaseVNode(
+    						"p",
+    						_hoisted_16$5,
+    						toDisplayString($setup.flow.v2RecoverySummary.value.message) + " 恢复仅使用服务端冻结候选，不会从页面读取或提交可编辑表格数据。 ",
+    						1
+    						/* TEXT */
+    					),
+    					createBaseVNode("div", _hoisted_17$4, [
+    						createVNode($setup["AcuButton"], {
+    							block: "",
+    							disabled: !!$setup.flow.busyAction.value,
+    							onClick: $setup.flow.exportV2RecoveryBackups
+    						}, {
+    							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
+    								" 导出已保存的原始 frame 备份 ",
+    								-1
+    								/* CACHED */
+    							)])]),
+    							_: 1
+    						}, 8, ["disabled", "onClick"]),
+    						$setup.flow.v2RecoverySummary.value.status === "recoverable_repaired_checkpoint" ? (openBlock(), createBlock($setup["AcuButton"], {
+    							key: 0,
+    							block: "",
+    							variant: "danger",
+    							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
+    							onClick: _cache[4] || (_cache[4] = ($event) => $setup.onCommitV2Recovery(false))
+    						}, {
+    							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
+    								" 应用 Checkpoint 修复 ",
+    								-1
+    								/* CACHED */
+    							)])]),
+    							_: 1
+    						}, 8, ["loading"])) : createCommentVNode("v-if", true),
+    						$setup.flow.v2RecoverySummary.value.status === "recoverable_orphan_data_replace" ? (openBlock(), createBlock($setup["AcuButton"], {
+    							key: 1,
+    							block: "",
+    							variant: "danger",
+    							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
+    							onClick: _cache[5] || (_cache[5] = ($event) => $setup.onCommitV2Recovery(true))
+    						}, {
+    							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
+    								" 确认无锚点 data_replace 恢复 ",
+    								-1
+    								/* CACHED */
+    							)])]),
+    							_: 1
+    						}, 8, ["loading"])) : createCommentVNode("v-if", true)
+    					])
+    				])) : createCommentVNode("v-if", true),
+    				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[29] || (_cache[29] = createBaseVNode(
+    					"h3",
+    					{
+    						id: "acu-v2-isolation-diagnostics-title",
+    						class: "acu-v2-data-mgmt-page__section-title"
+    					},
+    					"V2 隔离域恢复诊断",
+    					-1
+    					/* CACHED */
+    				)), createBaseVNode("div", _hoisted_19$4, [(openBlock(true), createElementBlock(
+    					Fragment,
+    					null,
+    					renderList($setup.flow.v2IsolationDiagnostics.value, (diagnostic) => {
+    						return openBlock(), createElementBlock("div", {
+    							key: diagnostic.isolationKey,
+    							class: "acu-v2-data-mgmt-page__history-item"
+    						}, [
+    							createBaseVNode(
+    								"strong",
+    								null,
+    								toDisplayString(diagnostic.isolationKey || "默认隔离域"),
+    								1
+    								/* TEXT */
+    							),
+    							createBaseVNode(
+    								"p",
+    								null,
+    								toDisplayString(diagnostic.message),
+    								1
+    								/* TEXT */
+    							),
+    							!diagnostic.isCurrentIsolation ? (openBlock(), createElementBlock("p", _hoisted_20$2, "请切换到该隔离域后重新诊断；当前恢复提交不会跨隔离域执行。")) : diagnostic.status.startsWith("recoverable_") ? (openBlock(), createElementBlock("p", _hoisted_21$2, "当前隔离域存在可恢复候选，请使用下方“诊断 V2 数据恢复”生成可提交计划。")) : createCommentVNode("v-if", true)
+    						]);
+    					}),
+    					128
+    					/* KEYED_FRAGMENT */
+    				))])])) : createCommentVNode("v-if", true),
+    				createBaseVNode("div", _hoisted_22$2, [createVNode($setup["AcuButton"], {
+    					block: "",
+    					loading: $setup.flow.busyAction.value === "scan-v2-isolation-diagnostics",
+    					onClick: $setup.flow.scanV2IsolationDiagnostics
+    				}, {
+    					default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
+    						" 扫描全部 V2 隔离域 ",
+    						-1
+    						/* CACHED */
+    					)])]),
+    					_: 1
+    				}, 8, ["loading", "onClick"]), createVNode($setup["AcuButton"], {
+    					block: "",
+    					loading: $setup.flow.busyAction.value === "prepare-v2-recovery",
+    					onClick: $setup.flow.prepareV2Recovery
+    				}, {
+    					default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
+    						" 诊断 V2 数据恢复 ",
+    						-1
+    						/* CACHED */
+    					)])]),
+    					_: 1
+    				}, 8, ["loading", "onClick"])])
+    			]),
+    			_: 1
+    		}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_23$2, [createVNode($setup["AcuPanel"], {
+    			title: $setup.dataMgmtCopy.panels.cleanup.title,
+    			description: $setup.dataMgmtCopy.panels.cleanup.description
+    		}, {
+    			default: withCtx(() => [
+    				createBaseVNode("section", _hoisted_24$2, [_cache[32] || (_cache[32] = createBaseVNode(
+    					"h3",
+    					{
+    						id: "acu-cleanup-auto-title",
+    						class: "acu-v2-data-mgmt-page__section-title"
+    					},
+    					" 自动清理 ",
+    					-1
+    					/* CACHED */
+    				)), createBaseVNode("div", _hoisted_25$2, [createVNode($setup["AcuFormRow"], {
+    					label: "保留数据层数",
+    					hint: "自动更新结束后，超过保留范围的旧楼层插件数据会被清理；不影响聊天正文。"
+    				}, {
+    					default: withCtx(() => [createVNode($setup["AcuInput"], {
+    						type: "number",
+    						min: 0,
+    						step: 1,
+    						"model-value": $setup.flow.retainRecentLayers.value,
+    						onChange: _cache[6] || (_cache[6] = ($event) => $setup.flow.setRetainRecentLayers($event))
+    					}, null, 8, ["model-value"])]),
+    					_: 1
+    				})])]),
+    				createBaseVNode("section", _hoisted_26$2, [
+    					_cache[33] || (_cache[33] = createBaseVNode(
+    						"h3",
+    						{
+    							id: "acu-cleanup-manual-title",
+    							class: "acu-v2-data-mgmt-page__section-title"
+    						},
+    						" 手动删除 ",
+    						-1
+    						/* CACHED */
+    					)),
+    					createBaseVNode(
+    						"p",
+    						_hoisted_27$2,
+    						" 当前聊天 " + toDisplayString($setup.flow.aiMessageCount.value) + " 个 AI 楼层 · 将处理：" + toDisplayString($setup.flow.rangeLabel.value),
+    						1
+    						/* TEXT */
+    					),
+    					createBaseVNode("div", _hoisted_28$2, [createVNode($setup["AcuFormRow"], {
+    						label: "起始楼层",
+    						hint: "从第N个楼层 AI 回复开始，留空为第 1 层。"
+    					}, {
+    						default: withCtx(() => [createVNode($setup["AcuInput"], {
+    							"model-value": $setup.flow.deleteRange.startFloor,
+    							type: "number",
+    							min: 1,
+    							step: 1,
+    							"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.flow.deleteRange.startFloor = $event)
+    						}, null, 8, ["model-value"])]),
+    						_: 1
+    					}), createVNode($setup["AcuFormRow"], {
+    						label: "终止楼层",
+    						hint: "留空为最新楼层。"
+    					}, {
+    						default: withCtx(() => [createVNode($setup["AcuInput"], {
+    							"model-value": $setup.flow.deleteRange.endFloor,
+    							type: "number",
+    							min: 1,
+    							step: 1,
+    							placeholder: "到最后",
+    							"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.flow.deleteRange.endFloor = $event)
+    						}, null, 8, ["model-value"])]),
+    						_: 1
+    					})])
+    				]),
+    				createBaseVNode("div", _hoisted_29$1, [
+    					createVNode($setup["AcuButton"], {
+    						block: "",
+    						loading: $setup.flow.busyAction.value === "delete-current-local",
+    						onClick: _cache[9] || (_cache[9] = ($event) => $setup.onDeleteLocalData("current"))
+    					}, {
+    						default: withCtx(() => [..._cache[34] || (_cache[34] = [createTextVNode(
+    							" 删除当前标识本地数据 ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["loading"]),
+    					createVNode($setup["AcuButton"], {
+    						block: "",
+    						variant: "danger",
+    						loading: $setup.flow.busyAction.value === "delete-all-local",
+    						onClick: _cache[10] || (_cache[10] = ($event) => $setup.onDeleteLocalData("all"))
+    					}, {
+    						default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
+    							" 删除所有本地数据 ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["loading"]),
+    					createVNode($setup["AcuButton"], {
+    						block: "",
+    						loading: $setup.flow.busyAction.value === "reset-defaults",
+    						onClick: $setup.onResetAllDefaults
+    					}, {
+    						default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
+    							" 恢复默认配置 ",
+    							-1
+    							/* CACHED */
+    						)])]),
+    						_: 1
+    					}, 8, ["loading"])
+    				])
+    			]),
+    			_: 1
+    		}, 8, ["title", "description"])])]),
+    		_: 1
+    	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-fe9bcd95"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-ba196554"]]);
 
     var _sfc_main$e = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',
@@ -107724,122 +109905,122 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$e = { class: "acu-content-replace-preset-drawer__top-actions" };
     const _hoisted_2$d = {
-	key: 1,
-	class: "acu-v2-manage-list"
+    	key: 1,
+    	class: "acu-v2-manage-list"
     };
     const _hoisted_3$b = { class: "acu-v2-manage-item__info" };
     const _hoisted_4$9 = { class: "acu-v2-manage-item__actions" };
     function _sfc_render$e(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createBlock($setup["AcuDrawer"], {
-		"is-open": $props.isOpen,
-		title: "管理正文替换预设",
-		width: "560px",
-		onClose: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("close"))
-	}, {
-		default: withCtx(() => [
-			$props.message ? (openBlock(), createBlock($setup["AcuMessage"], {
-				key: 0,
-				kind: $props.message.kind
-			}, {
-				default: withCtx(() => [createTextVNode(
-					toDisplayString($props.message.text),
-					1
-					/* TEXT */
-				)]),
-				_: 1
-			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$e, [createVNode($setup["AcuButton"], {
-				variant: "primary",
-				class: "acu-content-replace-preset-drawer__create-btn",
-				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-from-default"))
-			}, {
-				default: withCtx(() => [..._cache[2] || (_cache[2] = [createBaseVNode(
-					"i",
-					{ class: "fa-solid fa-plus" },
-					null,
-					-1
-					/* CACHED */
-				), createTextVNode(
-					" 从默认新建 ",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			})]),
-			$props.presets.length ? (openBlock(), createElementBlock("ul", _hoisted_2$d, [(openBlock(true), createElementBlock(
-				Fragment,
-				null,
-				renderList($props.presets, (preset) => {
-					return openBlock(), createElementBlock("li", {
-						key: preset.name,
-						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_3$b, [createVNode(
-						$setup["AcuText"],
-						{
-							as: "span",
-							variant: "list-title",
-							class: "acu-v2-manage-item__name"
-						},
-						{
-							default: withCtx(() => [createTextVNode(
-								toDisplayString(preset.name),
-								1
-								/* TEXT */
-							)]),
-							_: 2
-						},
-						1024
-						/* DYNAMIC_SLOTS */
-					), createVNode(
-						$setup["AcuText"],
-						{
-							as: "span",
-							variant: "caption",
-							class: "acu-v2-manage-item__meta"
-						},
-						{
-							default: withCtx(() => [createTextVNode(
-								toDisplayString(preset.promptGroup.length) + " 段提示词",
-								1
-								/* TEXT */
-							)]),
-							_: 2
-						},
-						1024
-						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_4$9, [
-						createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-upload",
-							title: "导出 JSON",
-							onClick: ($event) => _ctx.$emit("export", preset.name)
-						}, null, 8, ["onClick"]),
-						createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-i-cursor",
-							title: "重命名",
-							onClick: ($event) => _ctx.$emit("rename", preset.name)
-						}, null, 8, ["onClick"]),
-						createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-pen",
-							title: "编辑提示词",
-							onClick: ($event) => _ctx.$emit("edit", preset.name)
-						}, null, 8, ["onClick"]),
-						createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-trash-can",
-							variant: "danger",
-							title: "删除",
-							onClick: ($event) => _ctx.$emit("delete", preset.name)
-						}, null, 8, ["onClick"])
-					])]);
-				}),
-				128
-				/* KEYED_FRAGMENT */
-			))])) : (openBlock(), createBlock($setup["AcuText"], {
-				key: 2,
-				variant: "empty",
-				class: "acu-content-replace-preset-drawer__empty"
-			}, {
-				default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
-					"暂无预设。点击上方\"从默认新建\"，或使用面板下拉栏右侧的导入按钮创建。",
+    	return openBlock(), createBlock($setup["AcuDrawer"], {
+    		"is-open": $props.isOpen,
+    		title: "管理正文替换预设",
+    		width: "560px",
+    		onClose: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("close"))
+    	}, {
+    		default: withCtx(() => [
+    			$props.message ? (openBlock(), createBlock($setup["AcuMessage"], {
+    				key: 0,
+    				kind: $props.message.kind
+    			}, {
+    				default: withCtx(() => [createTextVNode(
+    					toDisplayString($props.message.text),
+    					1
+    					/* TEXT */
+    				)]),
+    				_: 1
+    			}, 8, ["kind"])) : createCommentVNode("v-if", true),
+    			createBaseVNode("div", _hoisted_1$e, [createVNode($setup["AcuButton"], {
+    				variant: "primary",
+    				class: "acu-content-replace-preset-drawer__create-btn",
+    				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-from-default"))
+    			}, {
+    				default: withCtx(() => [..._cache[2] || (_cache[2] = [createBaseVNode(
+    					"i",
+    					{ class: "fa-solid fa-plus" },
+    					null,
+    					-1
+    					/* CACHED */
+    				), createTextVNode(
+    					" 从默认新建 ",
+    					-1
+    					/* CACHED */
+    				)])]),
+    				_: 1
+    			})]),
+    			$props.presets.length ? (openBlock(), createElementBlock("ul", _hoisted_2$d, [(openBlock(true), createElementBlock(
+    				Fragment,
+    				null,
+    				renderList($props.presets, (preset) => {
+    					return openBlock(), createElementBlock("li", {
+    						key: preset.name,
+    						class: "acu-v2-manage-item"
+    					}, [createBaseVNode("div", _hoisted_3$b, [createVNode(
+    						$setup["AcuText"],
+    						{
+    							as: "span",
+    							variant: "list-title",
+    							class: "acu-v2-manage-item__name"
+    						},
+    						{
+    							default: withCtx(() => [createTextVNode(
+    								toDisplayString(preset.name),
+    								1
+    								/* TEXT */
+    							)]),
+    							_: 2
+    						},
+    						1024
+    						/* DYNAMIC_SLOTS */
+    					), createVNode(
+    						$setup["AcuText"],
+    						{
+    							as: "span",
+    							variant: "caption",
+    							class: "acu-v2-manage-item__meta"
+    						},
+    						{
+    							default: withCtx(() => [createTextVNode(
+    								toDisplayString(preset.promptGroup.length) + " 段提示词",
+    								1
+    								/* TEXT */
+    							)]),
+    							_: 2
+    						},
+    						1024
+    						/* DYNAMIC_SLOTS */
+    					)]), createBaseVNode("div", _hoisted_4$9, [
+    						createVNode($setup["AcuIconButton"], {
+    							icon: "fa-solid fa-upload",
+    							title: "导出 JSON",
+    							onClick: ($event) => _ctx.$emit("export", preset.name)
+    						}, null, 8, ["onClick"]),
+    						createVNode($setup["AcuIconButton"], {
+    							icon: "fa-solid fa-i-cursor",
+    							title: "重命名",
+    							onClick: ($event) => _ctx.$emit("rename", preset.name)
+    						}, null, 8, ["onClick"]),
+    						createVNode($setup["AcuIconButton"], {
+    							icon: "fa-solid fa-pen",
+    							title: "编辑提示词",
+    							onClick: ($event) => _ctx.$emit("edit", preset.name)
+    						}, null, 8, ["onClick"]),
+    						createVNode($setup["AcuIconButton"], {
+    							icon: "fa-solid fa-trash-can",
+    							variant: "danger",
+    							title: "删除",
+    							onClick: ($event) => _ctx.$emit("delete", preset.name)
+    						}, null, 8, ["onClick"])
+    					])]);
+    				}),
+    				128
+    				/* KEYED_FRAGMENT */
+    			))])) : (openBlock(), createBlock($setup["AcuText"], {
+    				key: 2,
+    				variant: "empty",
+    				class: "acu-content-replace-preset-drawer__empty"
+    			}, {
+    				default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
+    					"暂无预设。点击上方\"从默认新建\"，或使用面板下拉栏右侧的导入按钮创建。",
 					-1
 					/* CACHED */
 				)])]),
