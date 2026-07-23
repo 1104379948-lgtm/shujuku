@@ -7,7 +7,7 @@ import { deriveTemplatePresetNameForImport_ACU, normalizeTemplatePresetSelection
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import {
     applyTemplatePresetToCurrent_ACU,
-    applyTemplateSnapshotToScope_ACU,
+    applyChatTemplateSnapshotWithReconciliation_ACU,
     listTemplatePresetNames_ACU,
     normalizeTemplateOperationScope_ACU,
     parseImportedTemplateData_ACU,
@@ -112,18 +112,15 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                 }
 
                 // ═══ 聊天导入：应用到当前聊天作用域 ═══
-                const applied = await applyTemplateSnapshotToScope_ACU(prepared.templateStr, {
-                    scope: 'chat',
+                const applied = await applyChatTemplateSnapshotWithReconciliation_ACU(prepared.templateObj, {
                     source: 'api_import_template_chat',
                     presetName: normalizedPresetName,
-                    save: true,
-                    persistChatScope: true,
                 });
-                if (!applied) {
+                if (!applied.saved) {
                     return {
                         success: false,
                         scope: normalizedScope,
-                        message: '模板导入失败：无法应用到当前聊天。',
+                        message: `模板导入失败：${applied.error || '无法应用到当前聊天。'}`,
                     };
                 }
 

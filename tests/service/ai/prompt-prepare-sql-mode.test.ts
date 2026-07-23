@@ -22,6 +22,7 @@ vi.mock('../../../src/shared/utils', () => ({
   logDebug_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
   logError_ACU: vi.fn(),
+  hashUserInput_ACU: vi.fn((text: string) => text ? 'mock-ddl-digest' : ''),
   isSummaryOrOutlineTable_ACU: vi.fn(() => false),
   normalizeExtractRules_ACU: vi.fn(() => []),
   normalizeExcludeRules_ACU: vi.fn(() => []),
@@ -62,7 +63,9 @@ vi.mock('../../../src/service/table/table-storage-strategy', () => ({
   ensureStorageProviderReady_ACU: vi.fn(() => Promise.resolve(mockRuntimeProvider)),
 }));
 
-import { prepareAIInput_ACU } from '../../../src/service/ai/prompt-builder/prompt-prepare';
+import { formatTableForSqliteMode, prepareAIInput_ACU } from '../../../src/service/ai/prompt-builder/prompt-prepare';
+import { SqliteEngine } from '../../../src/data/sqlite/sqlite-engine';
+import { SyncBridge } from '../../../src/data/sqlite/sync-bridge';
 
 // ═══════════════════════════════════════════════════════════════
 // prepareAIInput_ACU — SQL 模式
@@ -114,7 +117,8 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result!.tableDataText).toContain('-- 当前数据');
   });
 
-  it('无 DDL 的表走原生格式化路径', async () => {
+  it('无 DDL 的表在 SQLite 模式下使用 effective fallback DDL，且不使用 seedRows', async () => {
+    mockGetEffectiveSeedRows.mockReturnValue([['9', '不应出现', '999']]);
     mockCurrentJsonTableData = {
       sheet_0: {
         name: '背包物品表',
@@ -128,9 +132,94 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
 
     const result = await prepareAIInput_ACU([], 'standard');
     expect(result).not.toBeNull();
-    // 无 DDL 时走原生格式化，输出 [tableIndex:tableName] 格式
-    expect(result!.tableDataText).toContain('[0:背包物品表]');
-    expect(result!.tableDataText).toContain('Columns:');
+    expect(result!.tableDataText).toContain('CREATE TABLE sheet_0');
+    expect(result!.tableDataText).toContain('-- WARNING: DDL 缺失，已使用运行时 fallback schema。 原始 DDL 未被改写。');
+    expect(result!.tableDataText).toContain('-- | row_id | item_name | quantity |');
+    expect(result!.tableDataText).not.toContain('不应出现');
+  });
+
+  it('显式 DDL 与遗留错序表头共存时按共享 columnMap 重排列名和行值', () => {
+    const text = formatTableForSqliteMode({
+      uid: 'chronicle',
+      name: '纪要表',
+      sourceData: {
+        ddl: `CREATE TABLE chronicle (
+          row_id INTEGER PRIMARY KEY, -- 行号
+          code_index TEXT, -- 编码索引
+          chronicle_text TEXT -- 纪要
+        );`,
+      },
+      content: [['row_id', '纪要', '编码索引'], ['1', '完整纪要正文', 'AM0001']],
+      updateConfig: {},
+    }, 0, 'sheet_chronicle', null, { allowSeedRowsFallback: false });
+
+    expect(text).toContain('-- | row_id | code_index | chronicle_text |');
+    expect(text).toContain('-- | 1 | AM0001 | 完整纪要正文 |');
+  });
+
+  it('运行时建表失败 fallback 后，prompt 使用已采用的 runtime schema 而非原始 DDL', () => {
+    const table: any = {
+      uid: 'execution_broken',
+      name: '执行失败回退表',
+      sourceData: {
+        ddl: 'CREATE TABLE execution_broken (row_id INTEGER PRIMARY KEY, item_name TEXT) INVALID_SUFFIX;',
+      },
+      content: [['row_id', '物品名称'], ['1', '铁剑']],
+      updateConfig: {},
+    };
+    Object.defineProperty(table, '_acu_runtimeEffectiveSchema', {
+      enumerable: false,
+      value: {
+        source: 'fallback_invalid',
+        diagnostics: ['显式 DDL 无法在 runtime SQLite 执行，已使用 fallback schema。'],
+        effectiveDDL: 'CREATE TABLE execution_broken (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  wu_pin_ming_cheng TEXT -- 物品名称\n);',
+        columnMap: {
+          mappings: [
+            { sourceIndex: 0, displayName: 'row_id', sqlName: 'row_id', required: true },
+            { sourceIndex: 1, displayName: '物品名称', sqlName: 'wu_pin_ming_cheng', required: false },
+          ],
+        },
+      },
+    });
+
+    const text = formatTableForSqliteMode(table, 0, 'sheet_execution', null, { allowSeedRowsFallback: false });
+
+    expect(text).toContain('wu_pin_ming_cheng TEXT');
+    expect(text).toContain('-- | row_id | wu_pin_ming_cheng |');
+    expect(text).not.toContain('INVALID_SUFFIX');
+  });
+
+  it('执行期 fallback 经真实 export 和 runtime provider 后，prompt 仍使用实际 schema', async () => {
+    const engine = new SqliteEngine();
+    const bridge = new SyncBridge(engine);
+    const originalDdl = 'CREATE TABLE execution_broken (row_id INTEGER PRIMARY KEY, -- 行号\nitem_name TEXT -- 物品名称\n) INVALID_SUFFIX;';
+    try {
+      await engine.init();
+      bridge.loadFromTableData({
+        mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: {} },
+        sheet_execution: {
+          uid: 'execution_broken',
+          name: '执行失败回退表',
+          sourceData: { ddl: originalDdl },
+          content: [['row_id', '物品名称'], ['1', '铁剑']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 0,
+        },
+      } as any, { strict: true, allowRuntimeDdlFallback: true });
+      mockCurrentJsonTableData = bridge.exportToTableData({
+        type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: {},
+      } as any);
+
+      const result = await prepareAIInput_ACU([], 'standard');
+
+      expect(result!.tableDataText).toContain('wu_pin_ming_cheng TEXT');
+      expect(result!.tableDataText).toContain('-- | row_id | wu_pin_ming_cheng |');
+      expect(result!.tableDataText).not.toContain('INVALID_SUFFIX');
+      expect((mockCurrentJsonTableData as any).sheet_execution.sourceData.ddl).toBe(originalDdl);
+    } finally {
+      engine.dispose();
+    }
   });
 
   it('SQL 模式下 $0 不直接从模板 seedRows 兜底，数据必须来自运行时 DB', async () => {
@@ -218,8 +307,9 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result).not.toBeNull();
     // 有 DDL 的表走 SQL 格式化
     expect(result!.tableDataText).toContain('CREATE TABLE inventory');
-    // 无 DDL 的表走原生格式化
-    expect(result!.tableDataText).toContain('[1:角色表]');
+    // 无 DDL 的表也必须走 SQL effective fallback，避免模型收到无法执行的原生 DSL。
+    expect(result!.tableDataText).toContain('CREATE TABLE sheet_1');
+    expect(result!.tableDataText).toContain('-- | row_id | name |');
   });
 
   it('SQL 模式下忽略显式 tableData，优先使用运行时 DB 数据', async () => {

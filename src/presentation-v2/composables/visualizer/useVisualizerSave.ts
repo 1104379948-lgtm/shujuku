@@ -34,6 +34,7 @@ import {
 } from '../../../service/table/table-history';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { commitCurrentFloorTemplateChanges_ACU } from '../../../service/table/storage-frame-v2-persist';
+import { captureTableRuntimeRevisionForWriteSet_ACU } from '../../../service/table/table-write-transaction';
 import { preflightSchemaMigrations_ACU } from '../../../service/table/schema-migration-preflight';
 import { normalizeCanonicalTableRows_ACU } from '../../../shared/canonical-row-normalizer';
 import { reloadStorageProvider } from '../../../service/table/table-storage-strategy';
@@ -497,6 +498,12 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         toastStore.info('模板结构没有变化。', { muteable: false });
         return false;
       }
+      const guideIsolationKey = getCurrentIsolationKey_ACU();
+      const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
+        [...new Set([...changedSheetKeys, ...deletedSheetKeys])]
+          .map(sheetKey => ({ kind: 'schema' as const, sheetKey })),
+        { isolationKey: guideIsolationKey },
+      );
       let schemaOperations: any[] = [];
       if (changes.schemaChangedSheetKeys.length > 0 && visualizer.templateBaseData) {
         const preflightSnapshot = {
@@ -545,7 +552,6 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
           return false;
         }
       }
-      const guideIsolationKey = getCurrentIsolationKey_ACU();
       const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(guideIsolationKey);
       const guideData = buildChatSheetGuideDataFromData_ACU(orderedData, {
         preserveSeedRowsFromGuideData: existingGuide,
@@ -592,6 +598,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         presetName: resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true, isolationKey: guideIsolationKey }),
         source: 'visualizer_v2_save',
         reason: 'visualizer_v2_schema_change',
+        baseRevision,
       });
       if (!commitResult.saved) {
         toastStore.error(commitResult.error || '模板/结构保存失败。', { muteable: false });

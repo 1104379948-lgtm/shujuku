@@ -15,6 +15,7 @@ import {
   parseDDLColumnComments,
   buildColumnNameMap,
   parseDDLColumnInfos_ACU,
+  resolveEffectiveDDL,
 } from '../../../src/data/sqlite/schema-mapper';
 import { parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU } from '../../../src/shared/ddl-utils';
 import type { Sheet_ACU } from '../../../src/shared/models/table-data';
@@ -304,6 +305,37 @@ describe('generateDDL', () => {
   });
 });
 
+describe('resolveEffectiveDDL', () => {
+  it('非法显式 DDL 仅生成 runtime fallback，不改写 sourceData.ddl', () => {
+    const sheet = makeSheet({
+      sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: 'CREATE TABLE broken ( INVALID SYNTAX;' },
+      content: [['row_id', '姓名', '状态'], ['1', 'A', '就绪']],
+    });
+
+    const resolved = resolveEffectiveDDL(sheet, 'sheet_runtime');
+
+    expect(resolved.source).toBe('fallback_invalid');
+    expect(resolved.effectiveDDL).toContain('CREATE TABLE sheet_runtime');
+    expect(resolved.effectiveDDL).toContain('xing_ming TEXT');
+    expect(resolved.columnMap.mappings.map(mapping => mapping.sqlName)).toEqual(['row_id', 'xing_ming', 'zhuang_tai']);
+    expect(sheet.sourceData.ddl).toBe('CREATE TABLE broken ( INVALID SYNTAX;');
+  });
+
+  it('fallback columnMap 与 DDL 对中文、保留字和物理冲突保持一致', () => {
+    const sheet = makeSheet({
+      content: [['row_id', '物品名称', 'select', 'Name', 'name'], ['1', '铁剑', 'x', 'A', 'B']],
+    });
+
+    const resolved = resolveEffectiveDDL(sheet, 'sheet_mapping');
+
+    expect(resolved.source).toBe('fallback_missing');
+    expect(resolved.columnMap.mappings.map(mapping => mapping.sqlName)).toEqual(['row_id', 'wu_pin_ming_cheng', 'col_select', 'name', 'name_2']);
+    for (const mapping of resolved.columnMap.mappings.slice(1)) {
+      expect(resolved.effectiveDDL).toMatch(new RegExp(`${mapping.sqlName} TEXT,? -- ${mapping.displayName}`));
+    }
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════
 // generateFallbackDDL
 // ═══════════════════════════════════════════════════════════════
@@ -321,16 +353,17 @@ describe('generateFallbackDDL', () => {
 
   it('中文列名生成稳定且唯一的 ASCII 物理列名，并保留表头注释', () => {
     const ddl = generateFallbackDDL('test_table', ['row_id', '姓名', '状态']);
-    expect(ddl).toContain('col_1 TEXT');
+    expect(ddl).toContain('xing_ming TEXT');
     expect(ddl).toContain('-- 姓名');
-    expect(ddl).toContain('col_2 TEXT -- 状态');
+    expect(ddl).toContain('zhuang_tai TEXT -- 状态');
     expect(validateDDLAgainstHeaders(ddl, ['row_id', '姓名', '状态']).valid).toBe(true);
   });
 
-  it('重复 ASCII 表头不会生成重复 DDL 列名', () => {
+  it('物理列冲突按稳定后缀消除，保留显示表头', () => {
     const ddl = generateFallbackDDL('test_table', ['row_id', 'name', 'name']);
     expect(ddl).toContain('name TEXT');
     expect(ddl).toContain('name_2 TEXT');
+    expect(ddl).toContain('-- name');
   });
 
   it('空 headers 生成最小 DDL', () => {
@@ -736,6 +769,19 @@ describe('validateDDLAgainstHeaders', () => {
     const result = validateDDLAgainstHeaders(ddl, ['行号', '开始时间', '建造时间', '消耗人力', '消耗弹药', '消耗口粮', '消耗零件']);
     expect(result.valid).toBe(true);
     expect(result.mismatches).toHaveLength(0);
+  });
+
+  it('row_id 的 INTEGER 与 PRIMARY KEY 被行内注释分隔时仍按解析结构校验', () => {
+    const ddl = `CREATE TABLE inventory (
+      row_id INTEGER -- 行号
+        PRIMARY KEY,
+      item_name TEXT -- 名称
+    );`;
+
+    const result = validateDDLAgainstHeaders(ddl, ['row_id', '名称']);
+
+    expect(result.valid).toBe(true);
+    expect(result.mismatches).toEqual([]);
   });
 
   it('列数不匹配时报告', () => {

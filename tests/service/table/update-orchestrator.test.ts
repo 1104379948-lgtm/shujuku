@@ -17,6 +17,7 @@ vi.mock('../../../src/shared/utils', () => ({
   logDebug_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
   logError_ACU: vi.fn(),
+  hashUserInput_ACU: vi.fn((text: string) => text ? 'mock-ddl-digest' : ''),
   isSummaryOrOutlineTable_ACU: vi.fn(() => false),
   parseTableTemplateJson_ACU: vi.fn(() => ({
     mate: { type: 'acu' },

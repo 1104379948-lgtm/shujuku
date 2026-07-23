@@ -12,13 +12,18 @@ import { getConfigStorage_ACU } from '../../data/storage/tavern-storage';
 import { saveCurrentProfileTemplate_ACU } from '../../data/repositories/profile-repo';
 import { persistCurrentTemplatePresetName_ACU, saveSettings_ACU } from '../settings/settings-service';
 import { applyTemplateScopeForCurrentChat_ACU } from '../settings/settings-service';
-import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
+import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
-import { activateChatTemplatePresetSelection_ACU, buildChatSheetGuideDataFromTemplateObj_ACU, buildChatTemplateScopeStateFromCurrent_ACU, clearChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, listChatTemplatePresetEntries_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, normalizeTemplateScopeMode_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU, setCurrentChatTemplateScopeState_ACU } from '../template/chat-scope';
+import { buildChatSheetGuideDataFromData_ACU, buildChatSheetGuideDataFromTemplateObj_ACU, buildChatTemplateScopeStateFromCurrent_ACU, clearChatSheetGuideDataForIsolationKey_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, listChatTemplatePresetEntries_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, normalizeTemplateScopeMode_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU, setCurrentChatTemplateScopeState_ACU } from '../template/chat-scope';
 import { refreshMergedDataAndNotify_ACU } from '../worldbook/pipeline';
 import { safeJsonParse_ACU, safeJsonStringify_ACU } from '../../shared/json-helpers';
 import { ensureSheetOrderNumbers_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { buildDefaultExportConfig_ACU, ensureExportConfigDefaults_ACU } from '../worldbook/injection-engine';
+import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from './template-import-validator';
+import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
+import { commitCurrentFloorTemplateChanges_ACU } from '../table/storage-frame-v2-persist';
+import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
+import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 
 // ═══ 预设存储 CRUD（内部辅助） ═══
 
@@ -193,6 +198,11 @@ export function parseImportedTemplateData_ACU(templateData: any) {
         }
     }
 
+    const importDiagnostics = validateImportedTemplateObject_ACU(jsonData);
+    if (importDiagnostics.length > 0) {
+        throw new TemplateImportValidationError_ACU(importDiagnostics);
+    }
+
     try {
         if (!jsonData.mate || typeof jsonData.mate !== 'object') jsonData.mate = { type: 'chatSheets', version: 1 };
         if (jsonData.mate.updateConfigUiSentinel !== -1) {
@@ -290,10 +300,18 @@ export function persistTemplateScopeSelectionState_ACU(presetName: string, { sou
 
 // ═══ 模板应用（纯业务逻辑，不做 UI 刷新） ═══
 
-export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { scope = 'global', source = 'ui', presetName = '', save = true, persistChatScope = null as boolean | null, registerChatPresetEntry = null as boolean | null } = {}) {
+export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { scope = 'global', source = 'ui', presetName = '', save = true, persistChatScope = null as boolean | null, registerChatPresetEntry = null as boolean | null, destructiveChangeConfirmed = false } = {}) {
     const normalizedScope = normalizeTemplateOperationScope_ACU(scope);
     const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateSource);
     if (!snapshot?.templateStr || !snapshot?.templateObj) return false;
+
+    if (normalizedScope === 'chat') {
+        return applyChatTemplateSnapshotWithReconciliation_ACU(snapshot.templateObj, {
+            source,
+            presetName,
+            destructiveChangeConfirmed,
+        });
+    }
 
     const normalizedPresetName = normalizeTemplatePresetSelectionValue_ACU(presetName);
     const updateGlobal = normalizedScope === 'global';
@@ -326,38 +344,104 @@ export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { sc
     };
 }
 
-export async function applyTemplatePresetToCurrent_ACU(presetName: string, { source = 'ui', updateGlobal = true, save = true, persistChatScope = undefined as boolean | undefined, chatSelectionSource = 'auto' as 'auto' | 'snapshot' | 'global' } = {}) {
+/**
+ * Applies a chat template through the only V2 template commit entrypoint.  Do not
+ * replace this with scope-only writes: doing so discards the replay/transaction
+ * contract and silently bypasses schema migration and destructive-change checks.
+ */
+export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateData: any, {
+    source = 'ui',
+    presetName = '',
+    destructiveChangeConfirmed = false,
+}: {
+    source?: string;
+    presetName?: string;
+    destructiveChangeConfirmed?: boolean;
+} = {}) {
+    const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateData);
+    if (!snapshot?.templateObj) return { saved: false, error: '模板结构无效，无法生成聊天模板提交。' };
+
+    const isolationKey = getCurrentIsolationKey_ACU();
+    // Capture before any asynchronous replay/planning work. "all" is deliberate:
+    // a template import can match, introduce, or delete sheets only after planning.
+    const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
+    let baselineData: any = null;
+    try {
+        baselineData = await loadTableStateFromFramesV2_ACU(undefined, isolationKey, { updateRuntimeState: false });
+    } catch (error) {
+        return { saved: false, error: `无法读取当前聊天 V2 replay 基线：${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (!baselineData || typeof baselineData !== 'object') {
+        baselineData = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+            ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
+            : { mate: { type: 'chatSheets', version: 1 } };
+    }
+
+    const plan = await reconcileChatTemplate_ACU({
+        baselineData,
+        templateData: snapshot.templateObj,
+        destructiveChangeConfirmed,
+    });
+    if (plan.blockers.length > 0) {
+        return { saved: false, blockers: plan.blockers, error: plan.blockers.join('；') };
+    }
+    const guideData = buildChatSheetGuideDataFromData_ACU(plan.candidateData, {
+        preserveSeedRowsFromGuideData: getChatSheetGuideDataForIsolationKey_ACU(isolationKey),
+        seedRowsFromTemplateObj: snapshot.templateObj,
+    });
+    if (!guideData) return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
+
+    const committed = await commitCurrentFloorTemplateChanges_ACU({
+        isolationKey,
+        sheetChanges: plan.sheetChanges,
+        deletedSheetKeys: plan.deletedSheetKeys,
+        guideData,
+        syncTemplateScope: true,
+        templateSource: plan.candidateData,
+        presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
+        source,
+        reason: 'chat_template_reconciliation',
+        baseRevision,
+    });
+    if (!committed.saved) return { ...committed, blockers: plan.blockers, audit: plan.audit };
+
+    _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));
+    applyTemplateScopeForCurrentChat_ACU();
+    try { await refreshMergedDataAndNotify_ACU(); } catch (error) { logWarn_ACU('[TemplateScope] 聊天模板提交成功，但运行时刷新失败:', error); }
+    return { ...committed, audit: plan.audit };
+}
+
+export async function applyTemplatePresetToCurrent_ACU(presetName: string, { source = 'ui', updateGlobal = true, save = true, persistChatScope = undefined as boolean | undefined, chatSelectionSource = 'auto' as 'auto' | 'snapshot' | 'global', destructiveChangeConfirmed = false } = {}) {
     const _persistChatScope = persistChatScope ?? !updateGlobal;
     const name = normalizeTemplatePresetSelectionValue_ACU(presetName);
     const isDefaultPreset = isDefaultTemplatePresetSelection_ACU(name);
 
     if (!updateGlobal) {
-        if (chatSelectionSource === 'global') {
-            if (!isDefaultPreset && !getTemplatePreset_ACU(name)?.templateStr) return false;
-            const snapshot = isDefaultPreset
-                ? getDefaultTemplateSnapshot_ACU()
-                : sanitizeTemplateSnapshotForChat_ACU(getTemplatePreset_ACU(name)?.templateStr || null);
-            if (!snapshot?.templateStr) return false;
-            const applied = await applyTemplateSnapshotToScope_ACU(snapshot.templateStr, {
-                scope: 'chat',
-                source,
-                save,
-                persistChatScope: true,
-                presetName: name,
-                registerChatPresetEntry: false,
-            });
-            if (!applied) return false;
-            applyTemplateScopeForCurrentChat_ACU();
-            try { await refreshMergedDataAndNotify_ACU(); } catch (e) {}
-            return { presetName: name, mode: 'chat_override', fromGlobalPreset: true, isDefault: isDefaultPreset };
-        }
-
-        const activated = await activateChatTemplatePresetSelection_ACU(name, {
+        const localSnapshot = chatSelectionSource === 'global'
+            ? null
+            : listChatTemplatePresetEntries_ACU().find((entry: any) => normalizeTemplatePresetSelectionValue_ACU(entry?.presetName || '') === name);
+        const snapshotSource = localSnapshot?.templateStr || (isDefaultPreset
+            ? getDefaultTemplateSnapshot_ACU()?.templateStr
+            : getTemplatePreset_ACU(name)?.templateStr);
+        if (!snapshotSource) return false;
+        const applied = await applyTemplateSnapshotToScope_ACU(snapshotSource, {
+            scope: 'chat',
             source,
             save,
+            persistChatScope: true,
+            presetName: name,
+            registerChatPresetEntry: false,
+            destructiveChangeConfirmed,
         });
-        if (!activated) return false;
-        return { ...activated, isDefault: isDefaultPreset };
+        if (!applied || typeof applied !== 'object' || !('saved' in applied) || !applied.saved) return applied || false;
+        return {
+            ...applied,
+            presetName: name,
+            mode: 'chat_override',
+            fromGlobalPreset: !localSnapshot,
+            fromLocalSnapshot: !!localSnapshot,
+            isDefault: isDefaultPreset,
+        };
     }
 
     let snapshot = null;

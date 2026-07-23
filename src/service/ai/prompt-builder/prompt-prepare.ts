@@ -14,7 +14,7 @@ import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, n
 import { applyContextTagFilters_ACU } from '../../runtime/helpers-remaining';
 import { isSqliteMode } from '../../table/storage-mode';
 import { ensureStorageProviderReady_ACU } from '../../table/table-storage-strategy';
-import { parseDDLColumnNames } from '../../../shared/ddl-utils';
+import { resolveEffectiveDDL, type EffectiveDDLColumnMap_ACU } from '../../../data/sqlite/schema-mapper';
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
 
   async function resolvePromptSourceTableData_ACU(options: any, sqlMode: boolean) {
@@ -104,7 +104,7 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
         }
 
         // SQLite 模式：输出 DDL + 注释数据格式；数据只来自运行时 DB，不再从模板 seedRows 兜底。
-        if (sqlMode && table.sourceData?.ddl) {
+        if (sqlMode) {
             tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, { allowSeedRowsFallback: false });
             return;
         }
@@ -280,11 +280,16 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
  */
 export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKey: string, guideData: any, options: { allowSeedRowsFallback?: boolean } = {}): string {
     let text = '';
-    const ddl = table.sourceData.ddl;
+    const runtimeSchema = table?._acu_runtimeEffectiveSchema;
+    const resolvedDDL = runtimeSchema || resolveEffectiveDDL(table, table.uid || sheetKey);
+    const ddl = resolvedDDL.effectiveDDL;
     const allowSeedRowsFallback = options.allowSeedRowsFallback !== false;
 
     // 输出 DDL
     text += ddl.trim() + '\n';
+    if (resolvedDDL.source !== 'explicit') {
+        text += `-- WARNING: ${resolvedDDL.diagnostics[0]} 原始 DDL 未被改写。\n`;
+    }
 
     // 输出 Note 和 Trigger（作为 SQL 注释）
     if (table.sourceData) {
@@ -312,8 +317,8 @@ export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKe
         text += `-- SeedRows: 已提供模板基础数据（尚未写入聊天楼层数据；本次填表可直接基于这些行更新）\n`;
     }
 
-    const ddlColumnNames = parseDDLColumnNames(ddl);
-    const headers = (ddlColumnNames.length > 0) ? ddlColumnNames : (table.content[0] || []);
+    const columnMappings: EffectiveDDLColumnMap_ACU['mappings'] = resolvedDDL.columnMap.mappings;
+    const headers = columnMappings.map(mapping => mapping.sqlName);
     const sendRowsSqlTemplate = typeof table.updateConfig?.sendRowsSqlTemplate === 'string'
         ? table.updateConfig.sendRowsSqlTemplate.trim()
         : '';
@@ -351,7 +356,8 @@ export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKe
     text += `\n-- 当前数据 (${rowsToProcess.length} rows)\n`;
     text += `-- | ${headers.join(' | ')} |\n`;
     rowsToProcess.forEach((row: any) => {
-        text += `-- | ${row.join(' | ')} |\n`;
+        const orderedValues = columnMappings.map(mapping => Array.isArray(row) ? row[mapping.sourceIndex] : null);
+        text += `-- | ${orderedValues.join(' | ')} |\n`;
     });
     text += '\n';
 

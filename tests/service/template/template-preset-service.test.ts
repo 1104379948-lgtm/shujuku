@@ -47,8 +47,10 @@ vi.mock('../../../src/service/settings/settings-service', () => ({
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
+  currentJsonTableData_ACU: { mate: { type: 'chatSheets', version: 1 } },
   getCurrentIsolationKey_ACU: vi.fn(() => ''),
   settings_ACU: mockSettings,
+  _set_currentJsonTableData_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -57,10 +59,12 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
 
 vi.mock('../../../src/service/template/chat-scope', () => ({
   activateChatTemplatePresetSelection_ACU: vi.fn(),
+  buildChatSheetGuideDataFromData_ACU: vi.fn((data: any) => data),
   buildChatSheetGuideDataFromTemplateObj_ACU: vi.fn(),
   buildChatTemplatePresetLinkState_ACU: vi.fn(),
   buildChatTemplateScopeStateFromCurrent_ACU: vi.fn(),
   clearChatSheetGuideDataForIsolationKey_ACU: vi.fn(),
+  getChatSheetGuideDataForIsolationKey_ACU: vi.fn(() => null),
   getCurrentChatTemplateScopeState_ACU: vi.fn(() => null),
   getGlobalTemplateSnapshotForCurrentProfile_ACU: vi.fn(() => null),
   listChatTemplatePresetEntries_ACU: vi.fn(() => []),
@@ -93,6 +97,18 @@ vi.mock('../../../src/service/worldbook/injection-engine', () => ({
   buildDefaultExportConfig_ACU: vi.fn(() => ({})),
   ensureExportConfigDefaults_ACU: vi.fn((c: any) => c),
 }));
+vi.mock('../../../src/service/template/chat-template-reconciler', () => ({
+  reconcileChatTemplate_ACU: vi.fn(),
+}));
+vi.mock('../../../src/service/table/storage-frame-v2-persist', () => ({
+  commitCurrentFloorTemplateChanges_ACU: vi.fn(),
+}));
+vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
+  loadTableStateFromFramesV2_ACU: vi.fn(),
+}));
+vi.mock('../../../src/service/table/table-write-transaction', () => ({
+  captureTableRuntimeRevisionForWriteSet_ACU: vi.fn(() => 'runtime-v1:test'),
+}));
 
 import {
   listTemplatePresetNames_ACU,
@@ -110,6 +126,7 @@ import {
   persistTemplateScopeSelectionState_ACU,
   applyTemplateSnapshotToScope_ACU,
   applyTemplatePresetToCurrent_ACU,
+  applyChatTemplateSnapshotWithReconciliation_ACU,
   resolveTemplateForExport_ACU,
 } from '../../../src/service/template/template-preset-service';
 
@@ -117,10 +134,16 @@ import { saveSettings_ACU } from '../../../src/service/settings/settings-service
 import { getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, activateChatTemplatePresetSelection_ACU } from '../../../src/service/template/chat-scope';
 import { getCurrentTemplatePresetName_ACU } from '../../../src/shared/template-preset-utils';
 import { parseTableTemplateJson_ACU } from '../../../src/shared/utils';
+import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from '../../../src/service/template/template-import-validator';
+import { buildDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
+import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-template-reconciler';
+import { commitCurrentFloorTemplateChanges_ACU } from '../../../src/service/table/storage-frame-v2-persist';
+import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 
 beforeEach(() => {
   // 清空 mockStore
   Object.keys(mockStore).forEach(k => delete mockStore[k]);
+  vi.clearAllMocks();
 });
 
 // ═══ CRUD ═══
@@ -290,7 +313,7 @@ describe('parseImportedTemplateData_ACU', () => {
   it('有效 JSON 字符串解析成功', () => {
     const validTemplate = {
       mate: { type: 'chatSheets', version: 1 },
-      sheet_0: { name: '表1', content: [[]], sourceData: {} },
+      sheet_legacy_random: { uid: 'sheet_legacy_random', name: '表1', content: [['row_id', '名称']], sourceData: {} },
     };
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValueOnce({
       templateStr: JSON.stringify(validTemplate),
@@ -316,6 +339,81 @@ describe('parseImportedTemplateData_ACU', () => {
   });
   it('非字符串非对象抛出错误', () => {
     expect(() => parseImportedTemplateData_ACU(123)).toThrow('无效的模板数据');
+  });
+  it('校验失败时不会调用 sanitizer 或持久化预设', () => {
+    const invalid = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_legacy_random: { uid: 'sheet_legacy_random', name: '表1', content: [['名称', 'row_id']], sourceData: {} },
+    };
+    const storeBefore = JSON.stringify(mockStore);
+    expect(() => parseImportedTemplateData_ACU(invalid)).toThrow(TemplateImportValidationError_ACU);
+    expect(sanitizeTemplateSnapshotForChat_ACU).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockStore)).toBe(storeBefore);
+  });
+});
+
+describe('validateImportedTemplateObject_ACU', () => {
+  const validSheet = (overrides: any = {}) => ({
+    uid: 'sheet_legacy_random', name: '背包', content: [['row_id', '名称']], sourceData: {}, ...overrides,
+  });
+
+  it('保留合法历史随机 key，并且不修改输入', () => {
+    const template = { mate: { type: 'chatSheets' }, sheet_legacy_random: validSheet() };
+    const before = JSON.stringify(template);
+    expect(validateImportedTemplateObject_ACU(template)).toEqual([]);
+    expect(JSON.stringify(template)).toBe(before);
+  });
+
+  it('接受项目默认模板中的混合大小写历史随机 key', () => {
+    expect(validateImportedTemplateObject_ACU(buildDefaultTableTemplateObject_ACU())).toEqual([]);
+  });
+
+  it('拒绝大小写错误或无 sheet_ 前缀的 sheet-like 顶层对象', () => {
+    const invalid = {
+      mate: { type: 'chatSheets' },
+      sheet_valid: validSheet({ uid: 'sheet_valid' }),
+      Sheet_wrong_case: validSheet({ uid: 'Sheet_wrong_case' }),
+      misplaced: validSheet({ uid: 'misplaced' }),
+      incomplete: { name: '缺字段表', content: [['row_id', '名称']] },
+    };
+    expect(validateImportedTemplateObject_ACU(invalid)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'invalid_sheet_key', sheetKey: 'Sheet_wrong_case' }),
+      expect.objectContaining({ code: 'invalid_sheet_key', sheetKey: 'misplaced' }),
+      expect.objectContaining({ code: 'invalid_sheet_key', sheetKey: 'incomplete' }),
+    ]));
+    expect(() => parseImportedTemplateData_ACU(invalid)).toThrow(TemplateImportValidationError_ACU);
+    expect(sanitizeTemplateSnapshotForChat_ACU).not.toHaveBeenCalled();
+  });
+
+  it('拒绝重复 canonical 表名和不一致 uid', () => {
+    const template = {
+      mate: { type: 'chatSheets' },
+      sheet_one: validSheet({ uid: 'sheet_one', name: ' Inventory ' }),
+      sheet_two: validSheet({ uid: 'sheet_wrong', name: 'inventory' }),
+    };
+    expect(validateImportedTemplateObject_ACU(template)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'duplicate_sheet_name', sheetKey: 'sheet_two' }),
+      expect.objectContaining({ code: 'sheet_uid_mismatch', sheetKey: 'sheet_two' }),
+    ]));
+  });
+
+  it('拒绝缺失表头、错位 row_id、空列和 canonical 重名列', () => {
+    const missingHeader = { mate: { type: 'chatSheets' }, sheet_one: validSheet({ uid: 'sheet_one', content: [] }) };
+    expect(validateImportedTemplateObject_ACU(missingHeader)).toContainEqual(expect.objectContaining({ code: 'missing_header_row' }));
+    const malformedHeaders = { mate: { type: 'chatSheets' }, sheet_one: validSheet({ uid: 'sheet_one', content: [['名称', 'row_id', ' 名称 ', '']] }) };
+    expect(validateImportedTemplateObject_ACU(malformedHeaders)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'missing_row_id' }),
+      expect.objectContaining({ code: 'misplaced_row_id', columnIndex: 1 }),
+      expect.objectContaining({ code: 'duplicate_column_name', columnIndex: 2 }),
+      expect.objectContaining({ code: 'empty_header_cell', columnIndex: 3 }),
+    ]));
+  });
+
+  it('拒绝映射到同一物理列名候选的显示列', () => {
+    const template = { mate: { type: 'chatSheets' }, sheet_one: validSheet({ uid: 'sheet_one', content: [['row_id', 'a b', 'a-b']] }) };
+    expect(validateImportedTemplateObject_ACU(template)).toContainEqual(expect.objectContaining({
+      code: 'physical_column_name_collision', columnIndex: 2, conflictsWith: 1,
+    }));
   });
 });
 
@@ -368,20 +466,32 @@ describe('applyTemplatePresetToCurrent_ACU', () => {
     const result = await applyTemplatePresetToCurrent_ACU('不存在的预设', { updateGlobal: true });
     expect(result).toBe(false);
   });
-  it('updateGlobal=false 时走 chat 路径', async () => {
-    vi.mocked(activateChatTemplatePresetSelection_ACU).mockResolvedValueOnce({ presetName: 'A' } as any);
+  it('updateGlobal=false 时通过 V2 提交应用 chat 模板', async () => {
+    const candidate = { mate: { type: 'chatSheets', version: 1 }, sheet_0: { uid: 'sheet_0', name: '表', content: [['row_id']], sourceData: {}, updateConfig: {}, exportConfig: {} } };
+    upsertTemplatePreset_ACU('预设A', JSON.stringify(candidate));
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateStr: JSON.stringify(candidate), templateObj: candidate } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'template_only' } as any);
+
     const result = await applyTemplatePresetToCurrent_ACU('预设A', { updateGlobal: false });
-    expect(result).toBeTruthy();
-    expect(activateChatTemplatePresetSelection_ACU).toHaveBeenCalled();
+
+    expect(result).toMatchObject({ presetName: '预设A', mode: 'chat_override', fromGlobalPreset: true });
+    expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledOnce();
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockRestore();
   });
 
   it('聊天选择全局预设时物化为 chat_override 快照而不是 preset_link', async () => {
     vi.mocked(activateChatTemplatePresetSelection_ACU).mockClear();
     upsertTemplatePreset_ACU('预设A', '{"sheet_0":{"name":"全局表"}}');
+    const candidate = { mate: { type: 'chatSheets', version: 1 }, sheet_0: { uid: 'sheet_0', name: '全局表', content: [['row_id']], sourceData: {}, updateConfig: {}, exportConfig: {} } };
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({
-      templateStr: '{"sheet_0":{"name":"全局表"}}',
-      templateObj: { sheet_0: { name: '全局表' } },
+      templateStr: JSON.stringify(candidate),
+      templateObj: candidate,
     } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'template_only' } as any);
 
     const result = await applyTemplatePresetToCurrent_ACU('预设A', {
       updateGlobal: false,
@@ -390,7 +500,38 @@ describe('applyTemplatePresetToCurrent_ACU', () => {
 
     expect(result).toMatchObject({ mode: 'chat_override', fromGlobalPreset: true });
     expect(activateChatTemplatePresetSelection_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledOnce();
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockRestore();
+  });
+});
+
+describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
+  const candidate = { mate: { type: 'chatSheets', version: 1 }, sheet_live: { uid: 'sheet_live', name: '背包', content: [['row_id', '名称']], sourceData: {}, updateConfig: {}, exportConfig: {} } };
+
+  it('将 replay 基线与协调结果送入唯一的 V2 原子提交入口', async () => {
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 }, sheet_live: candidate.sheet_live } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [{ kind: 'operations', sheetKey: 'sheet_live', targetSheetData: candidate.sheet_live, operations: [{ kind: 'meta_update', sheetKey: 'sheet_live', meta: { name: '背包' } }] }], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'v2_commit' } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate, { source: 'test', presetName: '预设A' });
+
+    expect(reconcileChatTemplate_ACU).toHaveBeenCalledWith(expect.objectContaining({ baselineData: expect.objectContaining({ sheet_live: candidate.sheet_live }), templateData: candidate, destructiveChangeConfirmed: false }));
+    expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      isolationKey: '', baseRevision: 'runtime-v1:test', sheetChanges: expect.any(Array), deletedSheetKeys: [], templateSource: candidate,
+    }));
+    expect(result).toMatchObject({ saved: true });
+  });
+
+  it('协调器阻断时零提交', async () => {
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: {}, sheetChanges: [], deletedSheetKeys: [], blockers: ['删除表需要确认'], audit: [] } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(result).toMatchObject({ saved: false, blockers: ['删除表需要确认'] });
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
   });
 });
 

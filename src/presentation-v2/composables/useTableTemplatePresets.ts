@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue';
 import {
+  applyTemplateSnapshotToScope_ACU,
   applyTemplatePresetToCurrent_ACU,
   deleteTemplatePreset_ACU,
   getActiveTemplatePresetMeta_ACU,
@@ -17,7 +18,6 @@ import {
   buildChatSheetGuideDataFromTemplateObj_ACU,
   getCurrentChatTemplateScopeState_ACU,
   listChatTemplateArchiveEntries_ACU,
-  restoreChatTemplateArchiveEntry_ACU,
   sanitizeChatSheetsObject_ACU,
 } from '../../service/template/chat-scope';
 import { deleteLocalDataInChatCore_ACU } from '../../service/chat/chat-service';
@@ -245,6 +245,28 @@ export function useTableTemplatePresets() {
     return recoveryGuard.success;
   }
 
+  async function applyChatTemplateWithDestructiveConfirmation(
+    apply: (destructiveChangeConfirmed: boolean) => Promise<any>,
+  ): Promise<any> {
+    const firstResult = await apply(false);
+    if (!firstResult || firstResult.saved !== false || !Array.isArray(firstResult.blockers) || firstResult.blockers.length === 0) {
+      return firstResult;
+    }
+    const destructiveBlockers = firstResult.blockers.filter((blocker: unknown) => (
+      typeof blocker === 'string' && /删除(?:表|列).+需要显式确认/.test(blocker)
+    ));
+    if (destructiveBlockers.length === 0) return firstResult;
+    const confirmed = await dialogStore.confirm({
+      title: '确认破坏性模板变更',
+      message: `此模板变更会删除现有表或列：\n${destructiveBlockers.join('\n')}`,
+      dangerMessage: '确认后将按 V2 原子提交执行。删除的数据只能通过聊天备份或 checkpoint 恢复。',
+      confirmLabel: '确认删除并继续',
+      cancelLabel: '取消',
+      confirmVariant: 'danger',
+    });
+    return confirmed ? apply(true) : firstResult;
+  }
+
   async function selectChatPreset(name: string): Promise<void> {
     const selection = decodeChatPresetValue(name);
     const normalized = normalizeTemplatePresetSelectionValue_ACU(selection.name);
@@ -252,14 +274,16 @@ export function useTableTemplatePresets() {
       const guideData = resolveGuideDataForPresetSelection(selection);
       const canProceed = await ensureTemplateSwitchCanProceed(guideData);
       if (!canProceed) return;
-      const result = await applyTemplatePresetToCurrent_ACU(normalized, {
+      const result = await applyChatTemplateWithDestructiveConfirmation(destructiveChangeConfirmed => applyTemplatePresetToCurrent_ACU(normalized, {
         source: selection.kind === 'snapshot' ? 'v2_table_chat_select_snapshot' : 'v2_table_chat_select_global',
         updateGlobal: false,
         save: true,
         persistChatScope: true,
         chatSelectionSource: selection.kind,
-      });
+        destructiveChangeConfirmed,
+      }));
       if (!result) throw new Error('当前聊天模板预设切换失败。');
+      if (result.saved === false) throw new Error(result.error || '当前聊天模板预设切换失败。');
       if (isSqliteMode()) await reloadStorageProvider();
       message.value = null;
     });
@@ -293,8 +317,19 @@ export function useTableTemplatePresets() {
         );
       const canProceed = await ensureTemplateSwitchCanProceed(guideData);
       if (!canProceed) return;
-      const result = await restoreChatTemplateArchiveEntry_ACU(selectedArchiveKey, { save: true });
+      const result = await applyChatTemplateWithDestructiveConfirmation(destructiveChangeConfirmed => applyTemplateSnapshotToScope_ACU(archive.templateStr, {
+        scope: 'chat',
+        source: 'v2_table_chat_archive_restore',
+        presetName: String(archive.presetName || '').trim(),
+        save: true,
+        persistChatScope: true,
+        registerChatPresetEntry: false,
+        destructiveChangeConfirmed,
+      }));
       if (!result) throw new Error('历史模板归档恢复失败。');
+      if ('saved' in result && result.saved === false) {
+        throw new Error('error' in result && typeof result.error === 'string' ? result.error : '历史模板归档恢复失败。');
+      }
       if (isSqliteMode()) await reloadStorageProvider();
       message.value = null;
       toast.success('已恢复历史模板归档。', { muteable: false });
@@ -404,18 +439,22 @@ export function useTableTemplatePresets() {
       });
       if (!baseName) throw new Error('无法确定导入预设名称。');
       const finalName = ensureUniqueTemplatePresetName_ACU(baseName);
-      if (!upsertTemplatePreset_ACU(finalName, prepared.templateStr)) throw new Error('模板已解析，但保存到预设库失败。');
       const canProceed = await ensureTemplateSwitchCanProceed(
         buildChatSheetGuideDataFromTemplateObj_ACU(prepared.templateObj, { stripSeedRows: false }),
       );
       if (!canProceed) return;
-      const result = await applyTemplatePresetToCurrent_ACU(finalName, {
+      const result = await applyChatTemplateWithDestructiveConfirmation(destructiveChangeConfirmed => applyTemplateSnapshotToScope_ACU(prepared.templateStr, {
+        scope: 'chat',
         source: 'v2_table_import_current',
-        updateGlobal: false,
         save: true,
         persistChatScope: true,
-      });
-      if (!result) throw new Error('模板已保存，但切换到当前聊天失败。');
+        presetName: finalName,
+        registerChatPresetEntry: false,
+        destructiveChangeConfirmed,
+      }));
+      if (!result) throw new Error('导入模板切换到当前聊天失败。');
+      if (result.saved === false) throw new Error(result.error || '导入模板切换到当前聊天失败。');
+      if (!upsertTemplatePreset_ACU(finalName, prepared.templateStr)) throw new Error('模板已应用，但保存到预设库失败。');
       if (isSqliteMode()) await reloadStorageProvider();
       message.value = null;
       toast.success(`模板已保存并切换为「${finalName}」。`, { muteable: false });

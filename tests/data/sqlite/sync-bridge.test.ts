@@ -288,6 +288,101 @@ describe('SyncBridge', () => {
       expect(engine.getTableNames()).toContain('inventory');
     });
 
+    it('runtime fallback 可加载非法显式 DDL，保留原文并按稳定 columnMap round-trip', () => {
+      const invalidDdl = 'CREATE TABLE broken_runtime ( INVALID SYNTAX;';
+      const sheet = makeSheet({
+        uid: 'sheet_runtime',
+        name: '运行时回退表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: invalidDdl,
+        },
+        content: [
+          ['row_id', '物品名称', 'select'],
+          ['1', '铁剑', '稀有'],
+        ],
+      });
+
+      bridge.loadFromTableData(makeTableData({ sheet_runtime: sheet }), { strict: true, allowRuntimeDdlFallback: true });
+
+      expect(engine.getTableNames()).toContain('sheet_runtime');
+      expect(engine.query('SELECT wu_pin_ming_cheng, col_select FROM sheet_runtime;').values).toEqual([['铁剑', '稀有']]);
+      const exported = bridge.exportToTableData(makeMate()).sheet_runtime as Sheet_ACU;
+      expect(exported.content).toEqual([
+        ['row_id', '物品名称', 'select'],
+        ['1', '铁剑', '稀有'],
+      ]);
+      expect(exported.sourceData.ddl).toBe(invalidDdl);
+    });
+
+    it('runtime fallback 按 sheetKey 记录一次结构化诊断', () => {
+      const invalidDdl = 'CREATE TABLE broken_observable ( INVALID SYNTAX;';
+      const sheet = makeSheet({
+        uid: 'sheet_observable',
+        sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: invalidDdl },
+      });
+
+      bridge.loadFromTableData(makeTableData({ sheet_observable: sheet }), { strict: true, allowRuntimeDdlFallback: true });
+      engine.run('DROP TABLE sheet_observable;');
+      bridge.loadFromTableData(makeTableData({ sheet_observable: sheet }), { strict: true, allowRuntimeDdlFallback: true });
+
+      expect(bridge.getRuntimeFallbackDiagnostics_ACU()).toEqual([expect.objectContaining({
+        sheetKey: 'sheet_observable', reason: 'fallback_invalid', effectiveTableName: 'sheet_observable', phase: 'initial_load',
+      })]);
+      expect(bridge.getRuntimeFallbackDiagnostics_ACU()[0].originalDdlDigest).toBeTruthy();
+    });
+
+    it('解析通过但 SQLite 建表失败时仅在 runtime context 重试 fallback', () => {
+      const executionInvalidDdl = `CREATE TABLE execution_broken (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  item_name TEXT -- 物品名称
+) INVALID_SUFFIX;`;
+      const sheet = makeSheet({
+        uid: 'execution_broken',
+        name: '执行失败回退表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: executionInvalidDdl,
+        },
+        content: [['row_id', '物品名称'], ['1', '铁剑']],
+      });
+
+      bridge.loadFromTableData(makeTableData({ sheet_execution: sheet }), { strict: true, allowRuntimeDdlFallback: true });
+
+      expect(engine.getTableNames()).toContain('execution_broken');
+      expect(engine.query('SELECT wu_pin_ming_cheng FROM execution_broken;').values).toEqual([['铁剑']]);
+      const exported = bridge.exportToTableData(makeMate()).sheet_execution as Sheet_ACU & { _acu_runtimeEffectiveSchema?: any };
+      expect(exported.sourceData.ddl).toBe(executionInvalidDdl);
+      expect(exported._acu_runtimeEffectiveSchema).toEqual(expect.objectContaining({
+        source: 'fallback_invalid',
+        effectiveDDL: expect.stringContaining('CREATE TABLE execution_broken'),
+      }));
+      expect(exported._acu_runtimeEffectiveSchema.effectiveDDL).not.toContain('INVALID_SUFFIX');
+      expect(JSON.stringify(exported)).not.toContain('_acu_runtimeEffectiveSchema');
+      expect(JSON.parse(JSON.stringify(exported)).sourceData.ddl).toBe(executionInvalidDdl);
+      expect(bridge.getRuntimeFallbackDiagnostics_ACU()).toEqual([expect.objectContaining({
+        sheetKey: 'sheet_execution', phase: 'runtime_ddl_retry', failureSummary: expect.stringContaining('INVALID_SUFFIX'),
+      })]);
+    });
+
+    it('DDL 合法但快照存在非空未映射字段时继续 fail closed，不触发 fallback', () => {
+      const sheet = makeSheet({
+        content: [['row_id', '物品名称', '数量', '旧字段'], ['1', '铁剑', '3', '不能丢失']],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_unsafe: sheet }), { strict: true, allowRuntimeDdlFallback: true })).toThrow('没有对应的 DDL 列');
+      expect(engine.getTableNames()).not.toContain('inventory');
+    });
+
+    it('strict hydrate 未显式允许 runtime fallback 时拒绝非法 DDL', () => {
+      const sheet = makeSheet({
+        sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: 'CREATE TABLE broken ( INVALID SYNTAX;' },
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_broken: sheet }), { strict: true })).toThrow('显式 DDL 缺少可用的 row_id INTEGER PRIMARY KEY 结构');
+      expect(engine.getTableNames()).not.toContain('sheet_broken');
+    });
+
     it('同一快照内重复 row_id 时保留最后一行且不让整表从导出结果消失', () => {
       const duplicatedRowSheet = makeSheet({
         content: [

@@ -18,6 +18,7 @@ vi.mock('../../../src/shared/utils', () => ({
   logDebug_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
   logError_ACU: vi.fn(),
+  hashUserInput_ACU: vi.fn((text: string) => text ? 'mock-ddl-digest' : ''),
   isSummaryOrOutlineTable_ACU: vi.fn(() => false),
   parseTableTemplateJson_ACU: vi.fn(() => null),
   stripSeedRowsFromTemplate_ACU: vi.fn((obj: any) => {
@@ -563,16 +564,17 @@ describe('SqlTableService', () => {
       expect(invalidData.sheet_0.content[1]).toEqual(['1', '铁剑', '3', '不能丢失']);
     });
 
-    it('strict hydrate 失败时清理部分 runtime，且不修改调用方快照', async () => {
+    it('runtime load 遇到非法显式 DDL 时使用 fallback，且不修改调用方原始 DDL', async () => {
       const invalidData = JSON.parse(JSON.stringify(testTableData));
       invalidData.sheet_0.sourceData.ddl = 'CREATE TABLE broken (';
 
       const result = await service.loadFromData(invalidData);
 
-      expect(result.loaded).toBe(false);
-      expect(result.error).toContain('sqlite_hydrate_failed');
-      expect(service.isReady()).toBe(false);
-      expect(() => service.executeQuery('SELECT 1')).toThrow('SQLite 引擎未初始化');
+      expect(result).toEqual({ loaded: true, source: 'merged' });
+      expect(service.isReady()).toBe(true);
+      expect(service.executeQuery('SELECT item_name, quantity FROM inventory ORDER BY row_id').values).toEqual([
+        ['铁剑', '3'], ['治疗药水', '5'],
+      ]);
       expect(invalidData.sheet_0.sourceData.ddl).toBe('CREATE TABLE broken (');
     });
 
@@ -839,6 +841,32 @@ describe('SqlTableService', () => {
       // 建表后 executeQuery 应正常工作
       const queryResult = service.executeQuery('SELECT * FROM inventory');
       expect(queryResult.rowCount).toBe(1);
+    });
+
+    it('新开卡首次写入遇到非法 DDL 时使用 runtime fallback，且不改写模板原文', async () => {
+      mockMergeAll.mockResolvedValue(null);
+      await service.loadFromChat();
+
+      const invalidDdl = 'CREATE TABLE inventory ( INVALID SYNTAX;';
+      const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'inventory',
+          name: '背包物品表',
+          sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: invalidDdl },
+          content: [['row_id', '物品名称', '数量']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 0,
+        },
+      } as any);
+
+      const result = service.applyEdits("INSERT INTO inventory (row_id, wu_pin_ming_cheng, shu_liang) VALUES (1, '铁剑', '3');");
+
+      expect(result.success).toBe(true);
+      expect(service.executeQuery('SELECT wu_pin_ming_cheng, shu_liang FROM inventory').values).toEqual([['铁剑', '3']]);
+      expect(vi.mocked(parseTableTemplateJson_ACU).mock.results.at(-1)?.value.sheet_0.sourceData.ddl).toBe(invalidDdl);
     });
   });
 

@@ -39,6 +39,8 @@ export async function preflightSchemaMigrations_ACU(input: {
   baselineData: TableDataObject_ACU;
   candidateData: TableDataObject_ACU;
   intents?: Record<string, SchemaMigrationPreflightIntent_ACU | undefined>;
+  /** These sheets require their explicit V2 contract even when V1 would accept the diff. */
+  forceV2SheetKeys?: readonly string[];
 }): Promise<SchemaMigrationPreflightResult_ACU> {
   const changedSheetKeys = Object.keys(input.candidateData || {}).filter(sheetKey => {
     if (!sheetKey.startsWith('sheet_')) return false;
@@ -50,10 +52,12 @@ export async function preflightSchemaMigrations_ACU(input: {
 
   const blockers: string[] = [];
   const operations: SchemaMigrationPreflightResult_ACU['operations'] = [];
+  const forceV2SheetKeys = new Set(input.forceV2SheetKeys || []);
   for (const sheetKey of changedSheetKeys) {
     const before = input.baselineData[sheetKey] as Sheet_ACU;
     const after = input.candidateData[sheetKey] as Sheet_ACU;
     try {
+      if (forceV2SheetKeys.has(sheetKey)) throw new Error('schema migration requires explicit V2 intent。');
       operations.push(await buildSheetSchemaMigrationOperation_ACU(sheetKey, before, after));
       continue;
     } catch (v1Error: any) {

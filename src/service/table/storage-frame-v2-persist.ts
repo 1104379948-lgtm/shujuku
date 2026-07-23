@@ -1843,7 +1843,49 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       }
       const previousScopeContainer = cloneOptionalJson_ACU(getChatScopedConfigContainer_ACU(chat));
       const previousGuideContainer = cloneOptionalJson_ACU(getChatSheetGuideContainer_ACU(chat));
+      const messageSnapshots = snapshotTemplateDeleteMessages_ACU(chat, true);
       try {
+        const checkpointData = deepClone_ACU(templateSnapshot);
+        const checkpointSheets = Object.keys(checkpointData).filter(key => key.startsWith('sheet_')).sort();
+        for (const sheetKey of checkpointSheets) {
+          const sheet = checkpointData[sheetKey] as Sheet_ACU;
+          sheet.content = [deepClone_ACU(sheet.content[0])];
+        }
+        const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+          createdAt,
+          reason: 'init',
+          data: checkpointData as TableDataObject_ACU,
+          event: { filledSheetKeys: [], changedSheetKeys: checkpointSheets, groupKeys: [] },
+          context: { messageIndex: target.index, aiFloor: countAiFloor_ACU(chat, target.index), isolationKey },
+        });
+        if (!checkpointResult.checkpoint) throw new Error(checkpointResult.error);
+
+        const initialSheetCheckpoints: TableSheetCheckpointV2_ACU[] = [];
+        for (const sheetKey of checkpointSheets) {
+          const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
+            createdAt,
+            reason: 'schema_change',
+            sheetKey,
+            data: checkpointData[sheetKey] as Sheet_ACU,
+            event: { filledSheetKeys: [], changedSheetKeys: [sheetKey], groupKeys: [] },
+            baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
+            context: { messageIndex: target.index, aiFloor: countAiFloor_ACU(chat, target.index), isolationKey },
+          });
+          if (!sheetCheckpointResult.checkpoint) throw new Error(sheetCheckpointResult.error);
+          initialSheetCheckpoints.push(sheetCheckpointResult.checkpoint);
+        }
+
+        const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
+        const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
+        frame.checkpoint = checkpointResult.checkpoint;
+        frame.perSheetCheckpoints = Object.fromEntries(initialSheetCheckpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint]));
+        frame.logEntries = [];
+        frame.headRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+        target.message.TavernDB_ACU_IsolatedData = isolatedData;
+        writeMessageIdentity_ACU(target.message, {
+          enabled: settings_ACU.dataIsolationEnabled,
+          code: settings_ACU.dataIsolationCode,
+        });
         const guideUpdated = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, options.guideData, {
           reason: options.reason || 'visualizer_v2_template_only',
           syncTemplateScope: true,
@@ -1854,8 +1896,9 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         });
         if (!guideUpdated) throw new Error('预填表模板提交无法原子写入 guideData 与 template scope。');
         await saveChatToHostStrict_ACU();
-        return { saved: true, mode: 'template_only', messageIndex: target.index, checkpoints: [] as TableSheetCheckpointV2_ACU[], removedNullRowCount: 0 };
+        return { saved: true, mode: 'v2_commit', messageIndex: target.index, checkpoints: initialSheetCheckpoints, removedNullRowCount: 0 };
       } catch (error: any) {
+        restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
         setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
         setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
         try {

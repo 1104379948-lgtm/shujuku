@@ -26,7 +26,7 @@ import {
 import { mergeAllIndependentTables_ACU } from '../runtime/helpers-data-merge';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
 import { buildGlobalNameMapper, disposeGlobalNameMapper } from '../runtime/template-vars/name-mapper';
-import { parseDDLTableName, generateDDL, generateInserts } from '../../data/sqlite/schema-mapper';
+import { parseDDLTableName, generateDDL, generateInserts, resolveEffectiveDDL } from '../../data/sqlite/schema-mapper';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
@@ -292,7 +292,7 @@ export class SqlTableService implements ITableStorageProvider {
         const runtimeSeedSource = mergedData;
         const runtimeSeedData = this._buildInitialRuntimeTableData_ACU(runtimeSeedSource);
         if (runtimeSeedData) {
-          this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true });
+          this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true, allowRuntimeDdlFallback: true });
           _set_currentJsonTableData_ACU(runtimeSeedData);
           this._buildNameMapper(runtimeSeedData);
           this._initialized = true;
@@ -310,7 +310,7 @@ export class SqlTableService implements ITableStorageProvider {
         return { loaded: false, source: 'empty' };
       }
 
-      this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU, { strict: true });
+      this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU, { strict: true, allowRuntimeDdlFallback: true });
       _set_currentJsonTableData_ACU(mergedData as TableDataObject_ACU);
       this._buildNameMapper(mergedData as TableDataObject_ACU);
       this._initialized = true;
@@ -742,7 +742,7 @@ export class SqlTableService implements ITableStorageProvider {
       const liveSheet = (currentJsonTableData_ACU as any)?.[key];
       const sheet = (templateData[key] as any) || liveSheet;
       if (!sheet) continue;
-      const ddl = generateDDL(sheet);
+      const ddl = resolveEffectiveDDL(sheet, sheet.uid || key).effectiveDDL;
       const tableName = parseDDLTableName(ddl);
       if (tableName && !existingTables.has(tableName)) {
         missingSheets[key] = sheet;
@@ -774,7 +774,7 @@ export class SqlTableService implements ITableStorageProvider {
 
       (partialData as any)[key] = sheetCopy;
     }
-    this.syncBridge.loadFromTableData(partialData, { strict: true });
+    this.syncBridge.loadFromTableData(partialData, { strict: true, allowRuntimeDdlFallback: true });
 
     // 合并新建的表到当前 JSON 视图
     if (currentJsonTableData_ACU) {

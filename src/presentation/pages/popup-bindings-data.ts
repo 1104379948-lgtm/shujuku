@@ -21,8 +21,8 @@ import { deleteAllGeneratedEntries_ACU, updateReadableLorebookEntry_ACU } from '
 import { refreshMergedDataAndNotifyWithUI_ACU, refreshPresetUIAfterSwitch_ACU } from '../components/pipeline-ui-helpers';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
 import { runTableUpdateCommit_ACU } from '../../service/table/table-update-commit';
-import { getTemplatePreset_ACU, applyTemplatePresetToCurrent_ACU, applyTemplateSnapshotToScope_ACU, deleteTemplatePreset_ACU, ensureUniqueTemplatePresetName_ACU, normalizeTemplateForPresetSave_ACU, parseImportedTemplateData_ACU, persistTemplateScopeSelectionState_ACU, resolveActiveTemplatePresetName_ACU, upsertTemplatePreset_ACU } from '../../service/template/template-preset-service';
-import { getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../../service/template/chat-scope';
+import { getTemplatePreset_ACU, applyChatTemplateSnapshotWithReconciliation_ACU, applyTemplatePresetToCurrent_ACU, applyTemplateSnapshotToScope_ACU, deleteTemplatePreset_ACU, ensureUniqueTemplatePresetName_ACU, normalizeTemplateForPresetSave_ACU, parseImportedTemplateData_ACU, resolveActiveTemplatePresetName_ACU, upsertTemplatePreset_ACU } from '../../service/template/template-preset-service';
+import { getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../../service/template/chat-scope';
 import { loadTemplatePresetSelect_ACU } from '../components/template-preset-ui';
 import { openNewVisualizer_ACU } from './visualizer';
 import { deleteLocalDataInChat_ACU, exportCurrentJsonData_ACU, exportTableTemplate_ACU, importTableTemplate_ACU, migrateLegacySummaryVectorIndex_ACU, overrideLatestLayerWithTemplate_ACU, resetAllToDefaults_ACU, resetTableTemplate_ACU } from '../triggers/data-admin-ui';
@@ -746,6 +746,19 @@ export async function bindDataEvents_ACU(): Promise<void> {
             loadTemplatePresetSelect_ACU({ globalSelectName, keepGlobalValue });
         };
 
+        const applyChatTemplateWithDestructiveConfirmation_ACU = async (apply: (destructiveChangeConfirmed: boolean) => Promise<any>) => {
+            const firstResult = await apply(false);
+            if (!firstResult || firstResult.saved !== false || !Array.isArray(firstResult.blockers)) return firstResult;
+            const destructiveBlockers = firstResult.blockers.filter((blocker: unknown) => (
+                typeof blocker === 'string' && /删除(?:表|列).+需要显式确认/.test(blocker)
+            ));
+            if (destructiveBlockers.length === 0) return firstResult;
+            const confirmed = confirm(
+                `此模板变更会删除现有表或列：\n${destructiveBlockers.join('\n')}\n\n确认后将按 V2 原子提交执行。删除的数据只能通过聊天备份或 checkpoint 恢复。`,
+            );
+            return confirmed ? apply(true) : firstResult;
+        };
+
         const persistCurrentTemplateChatSnapshot_ACU = async ({ source = 'ui_chat_save', presetName = null, showToast = true } = {}) => {
             const selectedChatPresetName = normalizeTemplatePresetSelectionValue_ACU(
                 jQuery_API_ACU($templateChatPresetSelect_ACU).val(),
@@ -753,18 +766,22 @@ export async function bindDataEvents_ACU(): Promise<void> {
             const resolvedPresetName = presetName === null
                 ? (selectedChatPresetName || resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true }))
                 : normalizeTemplatePresetSelectionValue_ACU(presetName);
-            const guideData = getChatSheetGuideDataForIsolationKey_ACU(getCurrentIsolationKey_ACU());
-            persistTemplateScopeSelectionState_ACU(resolvedPresetName, {
+            const applied = await applyChatTemplateWithDestructiveConfirmation_ACU(destructiveChangeConfirmed => applyTemplateSnapshotToScope_ACU(TABLE_TEMPLATE_ACU, {
+                scope: 'chat',
                 source,
-                updateGlobal: false,
                 save: true,
                 persistChatScope: true,
-                templateSource: TABLE_TEMPLATE_ACU,
-                guideData,
-                scopeMode: 'chat_override',
-                registerChatPresetEntry: true,
-            });
-            applyTemplateScopeForCurrentChat_ACU();
+                presetName: resolvedPresetName,
+                registerChatPresetEntry: false,
+                destructiveChangeConfirmed,
+            }));
+            if (!applied || ('saved' in applied && applied.saved === false)) {
+                const error = applied && typeof applied === 'object' && 'error' in applied && typeof applied.error === 'string'
+                    ? applied.error
+                    : '当前聊天模板预设保存失败。';
+                showToastr_ACU('error', error, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                return false;
+            }
             try { await refreshMergedDataAndNotifyWithUI_ACU(); } catch (e) {}
             refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
             if (showToast) {
@@ -827,12 +844,13 @@ export async function bindDataEvents_ACU(): Promise<void> {
                 const name = normalizeTemplatePresetSelectionValue_ACU(jQuery_API_ACU(this).val());
                 const displayName = name || '默认预设';
                 showToastr_ACU('info', `正在切换当前聊天模板预设：${displayName}...`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
-                const result = await applyTemplatePresetToCurrent_ACU(name, {
+                const result = await applyChatTemplateWithDestructiveConfirmation_ACU(destructiveChangeConfirmed => applyTemplatePresetToCurrent_ACU(name, {
                     source: 'ui_chat_select',
                     updateGlobal: false,
                     save: true,
                     persistChatScope: true,
-                });
+                    destructiveChangeConfirmed,
+                }));
                 if (result) {
                     refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
                     if ((result as any).mode === 'chat_override') {
@@ -1040,16 +1058,13 @@ export async function bindDataEvents_ACU(): Promise<void> {
                                 fallbackLabel: selectedChatPresetName || fallbackLabel,
                             }) || selectedChatPresetName || fallbackLabel,
                         );
-                        const applied = await applyTemplateSnapshotToScope_ACU(prepared.templateStr, {
-                            scope: 'chat',
+                        const applied = await applyChatTemplateWithDestructiveConfirmation_ACU(destructiveChangeConfirmed => applyChatTemplateSnapshotWithReconciliation_ACU(prepared.templateObj, {
                             source: 'ui_chat_import',
                             presetName,
-                            save: true,
-                            persistChatScope: true,
-                            registerChatPresetEntry: true,
-                        });
-                        if (!applied) {
-                            throw new Error('模板结构无效，无法生成当前聊天模板预设。');
+                            destructiveChangeConfirmed,
+                        }));
+                        if (!applied.saved) {
+                            throw new Error(applied.error || '模板结构无效，无法生成当前聊天模板预设。');
                         }
                         try { await refreshMergedDataAndNotifyWithUI_ACU(); } catch (e) {}
                         refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });

@@ -19,7 +19,7 @@ import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 
 import { ensureSheetOrderNumbers_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
-import { applyTemplateSnapshotToScope_ACU, normalizeTemplateOperationScope_ACU, parseImportedTemplateData_ACU, upsertTemplatePreset_ACU } from '../../service/template/template-preset-service';
+import { applyChatTemplateSnapshotWithReconciliation_ACU, applyTemplateSnapshotToScope_ACU, normalizeTemplateOperationScope_ACU, parseImportedTemplateData_ACU, upsertTemplatePreset_ACU } from '../../service/template/template-preset-service';
 import { applyCombinedSettingsImport_ACU } from '../../service/settings/settings-service';
 import { getTemplatePresetSelectJQ_ACU, refreshTemplatePresetSelectInUI_ACU } from '../components/template-preset-ui';
 import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-display';
@@ -419,16 +419,12 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
                     }
                     logDebug_ACU(`[TemplateScope] Template imported to global preset library: ${derivedPresetName}. saveOk=${savePresetOk}`);
                 } else {
-                    // ═══ 聊天导入：应用到当前聊天作用域 ═══
-                    const applied = await applyTemplateSnapshotToScope_ACU(prepared.templateStr, {
-                        scope: 'chat',
+                    const applied = await applyChatTemplateSnapshotWithReconciliation_ACU(prepared.templateObj, {
                         source: 'ui_chat_import',
                         presetName: derivedPresetName,
-                        save: true,
-                        persistChatScope: true,
                     });
-                    if (!applied) {
-                        throw new Error('模板已解析，但应用到当前聊天失败。');
+                    if (!applied.saved) {
+                        throw new Error(applied.error || '模板已解析，但应用到当前聊天失败。');
                     }
 
                     try { await refreshMergedDataAndNotifyWithUI_ACU(); } catch (e) {}

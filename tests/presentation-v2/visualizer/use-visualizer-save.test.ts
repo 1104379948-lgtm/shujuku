@@ -87,6 +87,7 @@ const serviceMock = vi.hoisted(() => ({
   enqueueSummaryVectorIndexFlush_ACU: vi.fn(async () => undefined),
   deleteCurrentSummaryVectorIndexFromChat_ACU: vi.fn(async () => false),
   preflightSchemaMigrations_ACU: vi.fn(async () => ({ changedSheetKeys: [], blockers: [], operations: [] })),
+  captureTableRuntimeRevisionForWriteSet_ACU: vi.fn(() => 'captured-template-revision'),
 }));
 
 const toastMock = vi.hoisted(() => ({
@@ -145,6 +146,7 @@ vi.mock('../../../src/service/table/storage-frame-v2-persist', () => ({
 }));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: serviceMock.runTableWriteTransaction_ACU,
+  captureTableRuntimeRevisionForWriteSet_ACU: serviceMock.captureTableRuntimeRevisionForWriteSet_ACU,
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({
   applyTemplateScopeForCurrentChat_ACU: serviceMock.applyTemplateScopeForCurrentChat_ACU,
@@ -388,6 +390,7 @@ describe('useVisualizerSave', () => {
     expect(serviceMock.ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU).not.toHaveBeenCalled();
     expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({
       isolationKey: 'iso-test',
+      baseRevision: 'captured-template-revision',
       guideData: expect.any(Object),
       syncTemplateScope: true,
       templateSource: expect.objectContaining({
@@ -402,6 +405,10 @@ describe('useVisualizerSave', () => {
         })],
       })],
     }));
+    expect(serviceMock.captureTableRuntimeRevisionForWriteSet_ACU).toHaveBeenCalledWith(
+      [{ kind: 'schema', sheetKey: 'sheet_test_vz2' }],
+      { isolationKey: 'iso-test' },
+    );
     expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledTimes(1);
     expect(serviceMock.applyTemplateScopeForCurrentChat_ACU).toHaveBeenCalled();
     expect(runtimeMock._set_currentJsonTableData_ACU).toHaveBeenCalledWith(expect.objectContaining({

@@ -240,7 +240,7 @@ describe('table schema migration P2 contract', () => {
     expect(state).toEqual(makeState(before));
   });
 
-  it('physical add/drop 未完整 mapping 或缺 fillStrategy 均 fail closed', async () => {
+  it('physical rename 仍要求 mapping，新增列仍要求 fillStrategy', async () => {
     const before = makeSheet({
       content: [['row_id', 'name'], ['1', '铁剑']],
       sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);' },
@@ -249,10 +249,11 @@ describe('table schema migration P2 contract', () => {
       content: [['row_id', 'item_name'], ['1', '铁剑']],
       sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);' },
     });
-    await expect(buildSheetSchemaMigrationOperationV2_ACU('sheet_inventory', before, renamed, {
+    const renameWithoutMapping = buildSheetSchemaMigrationOperationV2_ACU('sheet_inventory', before, renamed, {
       physicalColumnMappings: [], fills: {}, conversions: [],
-      migrationPolicy: { destructiveChangeConfirmed: false, lossyConversionConfirmed: false },
-    })).rejects.toThrow('physicalColumnMappings');
+      migrationPolicy: { destructiveChangeConfirmed: true, lossyConversionConfirmed: false },
+    });
+    await expect(renameWithoutMapping).rejects.toThrow('fillStrategy');
 
     const added = makeSheet({
       content: [['row_id', 'item_name', 'quality'], ['1', '铁剑', null]],

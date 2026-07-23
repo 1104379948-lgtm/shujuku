@@ -29,7 +29,12 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', async importOri
     }
   }),
 }));
-vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
+vi.mock('../../../src/shared/utils', () => ({
+  logDebug_ACU: vi.fn(),
+  logWarn_ACU: vi.fn(),
+  logError_ACU: vi.fn(),
+  hashUserInput_ACU: vi.fn((text: string) => text ? 'mock-ddl-digest' : ''),
+}));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   getCurrentIsolationKey_ACU: vi.fn(() => ''),
   settings_ACU: mocks.settings,
@@ -817,7 +822,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     }));
   });
 
-  it('pristine 聊天保存完整模板快照时只提交 guide/template scope，不创建 V2 checkpoint', async () => {
+  it('pristine 聊天保存完整模板快照时创建 header-only V2 checkpoint 与 sheet checkpoints', async () => {
     const message = { is_user: false } as any;
     mocks.chat.push(message);
     const templateSource = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB };
@@ -836,12 +841,51 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       createdAt: 30,
     });
 
-    expect(result).toMatchObject({ saved: true, mode: 'template_only', messageIndex: 0, checkpoints: [], removedNullRowCount: 0 });
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit', messageIndex: 0, removedNullRowCount: 0 });
+    expect(result.checkpoints).toHaveLength(2);
     expect(mocks.loadReplayState).not.toHaveBeenCalled();
     expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
     expect(mocks.setGuide).toHaveBeenCalledOnce();
-    expect(message.TavernDB_ACU_IsolatedData).toBeUndefined();
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.checkpoint).toMatchObject({ kind: 'full', reason: 'init' });
+    expect(frame.checkpoint.data.sheet_a.content).toEqual([['row_id', 'value']]);
+    expect(frame.perSheetCheckpoints.sheet_a).toMatchObject({
+      kind: 'sheet_full', sheetKey: 'sheet_a', data: { content: [['row_id', 'value']] },
+    });
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
+  });
+
+  it('显式 baseRevision 在事务进入前透传，且 stale plan 在任何模板副作用前被拒绝', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+    const staleError = new Error('runtime revision conflict');
+    mocks.runTransaction.mockImplementationOnce(async (_options: any, task: any) => task({
+      baseRevision: 'runtime-v1:stale',
+      assertFresh: () => { throw staleError; },
+      runCommit: async (commitTask: () => any) => commitTask(),
+    }));
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      baseRevision: 'runtime-v1:expected',
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: '新名称' } }],
+      }],
+      guideData: { sheet_a: { name: '新名称' }, sheet_b: { name: 'B' } },
+    });
+
+    expect(mocks.runTransaction).toHaveBeenCalledWith(expect.objectContaining({
+      baseRevision: 'runtime-v1:expected',
+      writeSet: [{ kind: 'schema', sheetKey: 'sheet_a' }],
+    }), expect.any(Function));
+    expect(result).toEqual({ saved: false, error: 'runtime revision conflict' });
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toEqual([]);
   });
 
   it('尚无 full checkpoint 且缺少完整 templateSource 时拒绝并保持消息不变', async () => {
@@ -1022,7 +1066,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_Identity).toBe('old-identity');
   });
 
-  it('连续 template-only 保存始终不创建 V2 数据或 identity', async () => {
+  it('初次模板提交创建 V2 anchor，后续提交复用该 anchor', async () => {
     const message = { is_user: false } as any;
     mocks.chat.push(message);
     const templateSource = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB };
@@ -1040,17 +1084,22 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     };
 
     const first = await commitCurrentFloorTemplateChanges_ACU(options);
+    mocks.loadReplayState.mockResolvedValue({
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value']] },
+      sheet_b: sheetB,
+    });
     const second = await commitCurrentFloorTemplateChanges_ACU(options);
 
-    expect(first).toMatchObject({ saved: true, mode: 'template_only' });
-    expect(second).toMatchObject({ saved: true, mode: 'template_only' });
+    expect(first).toMatchObject({ saved: true, mode: 'v2_commit' });
+    expect(second).toMatchObject({ saved: true, mode: 'v2_commit' });
     expect(mocks.saveChatStrict).toHaveBeenCalledTimes(2);
     expect(mocks.setGuide).toHaveBeenCalledTimes(2);
-    expect(message.TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toMatchObject({ kind: 'full' });
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
 
-  it('template-only 仅传递目标 isolation 的 guide/scope 更新请求', async () => {
+  it('首次模板 checkpoint 仅传递目标 isolation 的 guide/scope 更新请求', async () => {
     const message = { is_user: false } as any;
     mocks.chat.push(message);
 
@@ -1067,12 +1116,16 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       syncTemplateScope: true,
     });
 
-    expect(result).toMatchObject({ saved: true, mode: 'template_only' });
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit' });
     expect(mocks.setGuide).toHaveBeenCalledWith('isolated-template', expect.any(Object), expect.objectContaining({
       syncTemplateScope: true,
       templateSource: expect.any(Object),
     }));
-    expect(message.TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(message.TavernDB_ACU_IsolatedData['isolated-template'].storageFrame.checkpoint).toMatchObject({
+      kind: 'full',
+      reason: 'init',
+      data: { sheet_a: { content: [['row_id', 'value']] } },
+    });
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
 
@@ -1107,7 +1160,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
 
-  it('template-only 后首次真实数据写入才创建唯一 full/init checkpoint，且使用当次完整 afterData', async () => {
+  it('初次模板提交创建 header-only init checkpoint，后续真实数据作为 V2 operation 写入', async () => {
     const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
     const message = { is_user: false } as any;
     mocks.chat.push(message);
@@ -1129,9 +1182,19 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       templateSource,
     });
 
-    expect(templateResult).toMatchObject({ saved: true, mode: 'template_only' });
-    expect(message.TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(templateResult).toMatchObject({ saved: true, mode: 'v2_commit' });
+    let frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.checkpoint).toMatchObject({
+      kind: 'full',
+      reason: 'init',
+      data: { sheet_a: { content: [['row_id', 'value']] } },
+    });
 
+    mocks.loadReplayState.mockResolvedValue({
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value']] },
+      sheet_b: sheetB,
+    });
     const afterData = {
       mate: { type: 'acu' },
       sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'first-real-data']] },
@@ -1143,7 +1206,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       afterData,
       filledSheetKeys: ['sheet_a'],
       candidateChangedSheetKeys: ['sheet_a'],
-      operations: [],
+      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'first-real-data'] }],
       checkpointReason: 'init',
       forceCheckpoint: true,
       strictSave: true,
@@ -1152,9 +1215,13 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(firstWrite.saved).toBe(true);
-    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
-    expect(frame.checkpoint).toMatchObject({ kind: 'full', reason: 'init', data: afterData });
-    expect(frame.logEntries).toEqual([]);
+    frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.checkpoint).toMatchObject({
+      kind: 'full', reason: 'init', data: { sheet_a: { content: [['row_id', 'value']] } },
+    });
+    expect(frame.logEntries).toMatchObject([
+      { operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'first-real-data'] }] },
+    ]);
 
     const firstImportMessage = { is_user: false } as any;
     mocks.chat.splice(0, mocks.chat.length, firstImportMessage);
@@ -1289,8 +1356,18 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
 
     expect(secondWrite.saved).toBe(true);
     const persistedFrame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
-    expect(persistedFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'init', data: afterData });
-    expect(persistedFrame.logEntries).toHaveLength(1);
+    expect(persistedFrame.checkpoint).toMatchObject({
+      kind: 'full',
+      reason: 'init',
+      data: { sheet_a: { content: [['row_id', 'value']] } },
+    });
+    expect(persistedFrame.logEntries).toHaveLength(2);
+    expect(persistedFrame.logEntries[0].operations).toEqual([
+      { kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'first-real-data'] },
+    ]);
+    expect(persistedFrame.logEntries[1].operations).toEqual([
+      { kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } },
+    ]);
   });
 
   it('在最新 AI 楼层原子追加多个既有 Sheet operation 与 guide，并且严格保存一次', async () => {

@@ -493,7 +493,8 @@ export function validateDDLTextAgainstHeaders_ACU(
 
   const columnInfos = parseDDLColumnInfos_ACU(trimmed);
   const firstColumn = columnInfos[0];
-  if (!firstColumn || firstColumn.sqlName.toLowerCase() !== 'row_id' || !/row_id\s+INTEGER\s+PRIMARY\s+KEY/i.test(trimmed)) {
+  if (!firstColumn || firstColumn.sqlName.toLowerCase() !== 'row_id'
+    || firstColumn.declaredType !== 'INTEGER' || !firstColumn.isPrimaryKey) {
     return { valid: false, message: '✗ 缺少 row_id INTEGER PRIMARY KEY 列（必须作为第一列）' };
   }
 

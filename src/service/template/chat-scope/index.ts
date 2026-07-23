@@ -24,7 +24,6 @@ export {
     listChatTemplateArchiveEntries_ACU,
     getChatTemplateArchiveOptionLabel_ACU,
     upsertChatTemplatePresetEntry_ACU,
-    restoreChatTemplateArchiveEntry_ACU,
     buildChatTemplatePresetLinkState_ACU,
     activateChatTemplatePresetSelection_ACU,
     clearCurrentChatTemplateSnapshots_ACU,

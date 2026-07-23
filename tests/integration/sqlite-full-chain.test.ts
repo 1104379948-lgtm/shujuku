@@ -53,7 +53,7 @@ describe('I5: SQLite 模式完整链路（纯函数层）', () => {
     });
 
     it('无 DDL 时使用 fallback DDL 生成', () => {
-      const ddl = generateFallbackDDL('test_table', ['colA', 'colB']);
+      const ddl = generateFallbackDDL('test_table', ['row_id', 'colA', 'colB']);
       expect(ddl).toContain('CREATE TABLE');
       // fallback DDL 内部可能对表名做转换
       expect(ddl.length).toBeGreaterThan(0);
@@ -96,13 +96,13 @@ describe('I5: SQLite 模式完整链路（纯函数层）', () => {
 
   describe('DDL 中的特殊字符处理', () => {
     it('列名包含空格时生成有效 DDL', () => {
-      const ddl = generateFallbackDDL('test_table', ['col name', 'another_col']);
+      const ddl = generateFallbackDDL('test_table', ['row_id', 'col name', 'another_col']);
       expect(ddl).toContain('CREATE TABLE');
       expect(ddl.length).toBeGreaterThan(0);
     });
 
     it('英文表名和列名生成有效 DDL', () => {
-      const ddl = generateFallbackDDL('test_table', ['col1', 'col2']);
+      const ddl = generateFallbackDDL('test_table', ['row_id', 'col1', 'col2']);
       expect(ddl).toContain('CREATE TABLE');
       expect(ddl.length).toBeGreaterThan(0);
     });

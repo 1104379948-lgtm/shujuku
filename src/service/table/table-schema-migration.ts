@@ -317,7 +317,6 @@ function buildMigratedSheetV2_ACU(currentSheet: Sheet_ACU, operation: TableSheet
   });
   const removed = current.columns.slice(1).filter(column => !targetByName.has(column.physicalName) && !mappings.some(item => item.fromPhysicalName === column.physicalName));
   const added = operation.targetSchema.columns.slice(1).filter(column => !sourceByName.has(column.physicalName) && !mappedSource.has(column.physicalName));
-  if (mappings.length === 0 && removed.length > 0 && added.length > 0) throw new Error('新增与删除 physical column 同时存在时必须由完整的一对一 physicalColumnMappings 覆盖。');
   if (removed.length > 0 && !operation.migrationPolicy?.destructiveChangeConfirmed) throw new Error('schema migration V2 删除列需要 destructiveChangeConfirmed。');
 
   const conversionByTarget = new Map<string, TableSchemaConversionPolicyV2_ACU>();
