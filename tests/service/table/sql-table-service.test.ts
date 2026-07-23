@@ -354,6 +354,30 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('SQL 语句无法归属到单表日志');
   });
+
+  it('严格单表日志模式下拒绝 mutation 引用其他 Sheet', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_1 = {
+      uid: 'quest_log',
+      name: '任务表',
+      sourceData: { ddl: 'CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, item_name TEXT NOT NULL, quantity INTEGER DEFAULT 1);' },
+      content: [['row_id', 'item_name', 'quantity'], ['2', '支线任务', '1']],
+      updateConfig: {},
+      exportConfig: {},
+      orderNo: 1,
+    };
+
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      'INSERT INTO inventory SELECT row_id, item_name, quantity FROM quest_log;',
+      inputSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('跨 Sheet 表引用被拒绝');
+    expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
+  });
 });
 
 describe('rebindSqlMutationTableIdentifiers_ACU', () => {
@@ -364,12 +388,36 @@ describe('rebindSqlMutationTableIdentifiers_ACU', () => {
   it('将唯一 DDL alias 的目标标识符改写为 runtime 物理名', () => {
     expect(rebindSqlMutationTableIdentifiers_ACU([
       "INSERT INTO `inventory` VALUES (1, 'inventory');",
+      "INSERT OR REPLACE INTO inventory VALUES (2, 'replace');",
       'UPDATE inventory SET value = \'inventory\' WHERE row_id = 1;',
       'DELETE FROM inventory WHERE value = \'inventory\';',
     ], tableData)).toEqual([
       "INSERT INTO `beibaowupinbiao` VALUES (1, 'inventory');",
+      "INSERT OR REPLACE INTO beibaowupinbiao VALUES (2, 'replace');",
       'UPDATE beibaowupinbiao SET value = \'inventory\' WHERE row_id = 1;',
       'DELETE FROM beibaowupinbiao WHERE value = \'inventory\';',
+    ]);
+  });
+
+  it('同时重绑定 INSERT/UPDATE/DELETE 目标与嵌套 FROM/JOIN 中的 DDL alias', () => {
+    expect(rebindSqlMutationTableIdentifiers_ACU([
+      "INSERT INTO inventory (row_id, value) VALUES ((SELECT COALESCE(MAX(row_id), 0) + 1 FROM inventory), '新值');",
+      'UPDATE inventory SET value = (SELECT value FROM inventory WHERE row_id = 1) WHERE row_id = 1;',
+      'DELETE FROM inventory WHERE row_id IN (SELECT row_id FROM inventory WHERE row_id = 99);',
+      'INSERT INTO inventory SELECT a.row_id + 1, a.value FROM inventory a JOIN inventory b ON a.row_id = b.row_id;',
+    ], tableData)).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, value) VALUES ((SELECT COALESCE(MAX(row_id), 0) + 1 FROM beibaowupinbiao), '新值');",
+      'UPDATE beibaowupinbiao SET value = (SELECT value FROM beibaowupinbiao WHERE row_id = 1) WHERE row_id = 1;',
+      'DELETE FROM beibaowupinbiao WHERE row_id IN (SELECT row_id FROM beibaowupinbiao WHERE row_id = 99);',
+      'INSERT INTO beibaowupinbiao SELECT a.row_id + 1, a.value FROM beibaowupinbiao a JOIN beibaowupinbiao b ON a.row_id = b.row_id;',
+    ]);
+  });
+
+  it('保留字符串与注释内容，并按原 quoting 风格重绑定标识符', () => {
+    expect(rebindSqlMutationTableIdentifiers_ACU([
+      "UPDATE `inventory` SET value = 'FROM inventory' /* JOIN inventory */ WHERE row_id IN (SELECT row_id FROM [inventory]);",
+    ], tableData)).toEqual([
+      "UPDATE `beibaowupinbiao` SET value = 'FROM inventory' /* JOIN inventory */ WHERE row_id IN (SELECT row_id FROM [beibaowupinbiao]);",
     ]);
   });
 
@@ -381,6 +429,32 @@ describe('rebindSqlMutationTableIdentifiers_ACU', () => {
 
     expect(() => rebindSqlMutationTableIdentifiers_ACU(['INSERT INTO legacy VALUES (1);'], ambiguousData))
       .toThrow('无法唯一解析 SQL 目标表标识符：legacy');
+  });
+
+  it('拒绝嵌套表引用命中歧义 DDL alias', () => {
+    const ambiguousReferenceData = {
+      ...tableData,
+      sheet_1: { name: '表A', sourceData: { ddl: 'CREATE TABLE legacy (row_id INTEGER PRIMARY KEY);' } },
+      sheet_2: { name: '表B', sourceData: { ddl: 'CREATE TABLE legacy (row_id INTEGER PRIMARY KEY);' } },
+    } as any;
+
+    expect(() => rebindSqlMutationTableIdentifiers_ACU([
+      'UPDATE inventory SET value = (SELECT MAX(row_id) FROM legacy) WHERE row_id = 1;',
+    ], ambiguousReferenceData)).toThrow('无法唯一解析 SQL 表引用：legacy');
+  });
+
+  it('严格单表模式拒绝可解析到其他物理表的 FROM/JOIN/逗号连接引用', () => {
+    const multiSheetData = {
+      ...tableData,
+      sheet_1: { name: '任务表', sourceData: { ddl: 'CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY);' } },
+    } as any;
+
+    expect(() => rebindSqlMutationTableIdentifiers_ACU([
+      'INSERT INTO inventory SELECT row_id, value FROM quest_log;',
+    ], multiSheetData, { requireSinglePhysicalTable: true })).toThrow('跨 Sheet 表引用被拒绝');
+    expect(() => rebindSqlMutationTableIdentifiers_ACU([
+      'INSERT INTO inventory SELECT a.row_id + 1, a.value FROM inventory a, quest_log q;',
+    ], multiSheetData, { requireSinglePhysicalTable: true })).toThrow('跨 Sheet 表引用被拒绝');
   });
 
   it('不把 uid 或显示名当作 runtime SQL alias', () => {

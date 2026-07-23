@@ -290,6 +290,8 @@ interface SqlReplayIdentifierToken_ACU {
   end: number;
   value: string;
   quote: '"' | '`' | '[' | null;
+  depth: number;
+  commaBefore: boolean;
 }
 
 function isSqlReplayIdentifierStart_ACU(char: string): boolean {
@@ -312,6 +314,8 @@ function isSqlReplayIdentifierPart_ACU(char: string): boolean {
 function tokenizeSqlReplayIdentifiers_ACU(statement: string): SqlReplayIdentifierToken_ACU[] {
   const tokens: SqlReplayIdentifierToken_ACU[] = [];
   let index = 0;
+  let depth = 0;
+  const commaBeforeDepths = new Set<number>();
   while (index < statement.length) {
     const char = statement[index];
     const next = statement[index + 1];
@@ -344,6 +348,22 @@ function tokenizeSqlReplayIdentifiers_ACU(statement: string): SqlReplayIdentifie
       if (index > statement.length || statement[index - 1] !== "'") throw new Error('[V2 Replay] SQL 字符串未闭合，无法安全重绑定表名。');
       continue;
     }
+    if (char === ',') {
+      commaBeforeDepths.add(depth);
+      index += 1;
+      continue;
+    }
+    if (char === '(') {
+      commaBeforeDepths.delete(depth);
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1);
+      index += 1;
+      continue;
+    }
     if (char === '"' || char === '`' || char === '[') {
       const closing = char === '[' ? ']' : char;
       const start = index;
@@ -365,14 +385,14 @@ function tokenizeSqlReplayIdentifiers_ACU(statement: string): SqlReplayIdentifie
         break;
       }
       if (!closed) throw new Error('[V2 Replay] SQL 引号标识符未闭合，无法安全重绑定表名。');
-      tokens.push({ start, end: index, value, quote: char });
+      tokens.push({ start, end: index, value, quote: char, depth, commaBefore: commaBeforeDepths.delete(depth) });
       continue;
     }
     if (isSqlReplayIdentifierStart_ACU(char)) {
       const start = index;
       index += 1;
       while (index < statement.length && isSqlReplayIdentifierPart_ACU(statement[index])) index += 1;
-      tokens.push({ start, end: index, value: statement.slice(start, index), quote: null });
+      tokens.push({ start, end: index, value: statement.slice(start, index), quote: null, depth, commaBefore: commaBeforeDepths.delete(depth) });
       continue;
     }
     index += 1;
@@ -387,10 +407,18 @@ function sqlReplayKeyword_ACU(token: SqlReplayIdentifierToken_ACU | undefined, k
 function getSqlReplayMutationTargetToken_ACU(tokens: SqlReplayIdentifierToken_ACU[]): SqlReplayIdentifierToken_ACU {
   const first = tokens[0];
   if (sqlReplayKeyword_ACU(first, 'INSERT') || sqlReplayKeyword_ACU(first, 'REPLACE')) {
-    if (!sqlReplayKeyword_ACU(tokens[1], 'INTO') || !tokens[2]) {
+    let index = 1;
+    if (sqlReplayKeyword_ACU(first, 'INSERT') && sqlReplayKeyword_ACU(tokens[index], 'OR')) {
+      const action = tokens[index + 1];
+      if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
+        throw new Error('[V2 Replay] INSERT OR 子句非法，无法安全重绑定表名。');
+      }
+      index += 2;
+    }
+    if (!sqlReplayKeyword_ACU(tokens[index], 'INTO') || !tokens[index + 1]) {
       throw new Error('[V2 Replay] INSERT/REPLACE SQL 缺少可验证的目标表。');
     }
-    return tokens[2];
+    return tokens[index + 1];
   }
   if (sqlReplayKeyword_ACU(first, 'UPDATE')) {
     let index = 1;
@@ -411,6 +439,52 @@ function getSqlReplayMutationTargetToken_ACU(tokens: SqlReplayIdentifierToken_AC
     return tokens[2];
   }
   throw new Error(`[V2 Replay] 不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
+}
+
+function collectSqlReplayTableReferenceTokens_ACU(
+  tokens: SqlReplayIdentifierToken_ACU[],
+  mutationTarget: SqlReplayIdentifierToken_ACU,
+): SqlReplayIdentifierToken_ACU[] {
+  const fromClauseTerminators = new Set([
+    'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW', 'RETURNING', 'VALUES', 'SET',
+  ]);
+  const references = new Map<number, SqlReplayIdentifierToken_ACU>([[mutationTarget.start, mutationTarget]]);
+  const cteNames = new Set<string>();
+  for (let index = 0; index + 2 < tokens.length; index += 1) {
+    if (sqlReplayKeyword_ACU(tokens[index], 'WITH') && sqlReplayKeyword_ACU(tokens[index + 2], 'AS')) {
+      cteNames.add(tokens[index + 1].value.toLowerCase());
+    }
+  }
+  const activeFromDepths = new Set<number>();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const keyword = token.quote === null ? token.value.toUpperCase() : '';
+    if (fromClauseTerminators.has(keyword)) activeFromDepths.delete(token.depth);
+    if (keyword === 'FROM') activeFromDepths.add(token.depth);
+
+    if (keyword === 'FROM' || keyword === 'JOIN') {
+      const reference = tokens[index + 1];
+      if (reference && reference.depth === token.depth && !cteNames.has(reference.value.toLowerCase())) {
+        references.set(reference.start, reference);
+      }
+      continue;
+    }
+    if (token.commaBefore && activeFromDepths.has(token.depth) && !cteNames.has(token.value.toLowerCase())) {
+      references.set(token.start, token);
+    }
+  }
+  return [...references.values()];
+}
+
+function applySqlReplayIdentifierReplacements_ACU(
+  statement: string,
+  replacements: Array<{ token: SqlReplayIdentifierToken_ACU; physicalName: string }>,
+): string {
+  let result = statement;
+  for (const { token, physicalName } of [...replacements].sort((a, b) => b.token.start - a.token.start)) {
+    result = `${result.slice(0, token.start)}${formatSqlReplayIdentifier_ACU(physicalName, token.quote)}${result.slice(token.end)}`;
+  }
+  return result;
 }
 
 function formatSqlReplayIdentifier_ACU(value: string, quote: SqlReplayIdentifierToken_ACU['quote']): string {
@@ -478,7 +552,24 @@ function rebindSqlReplayTableIdentifiers_ACU(
       const sheetKey = operation.kind === 'sql_sheet_batch' ? operation.sheetKey : '(legacy sql_batch)';
       throw new Error(`[V2 Replay] sql_sheet_batch 跨 Sheet 引用被拒绝：sheetKey=${sheetKey}, table=${target.value}。`);
     }
-    return `${statement.slice(0, target.start)}${formatSqlReplayIdentifier_ACU(physicalName, target.quote)}${statement.slice(target.end)}`;
+    const replacements: Array<{ token: SqlReplayIdentifierToken_ACU; physicalName: string }> = [];
+    for (const reference of collectSqlReplayTableReferenceTokens_ACU(tokens, target)) {
+      if (reference.start === target.start) {
+        replacements.push({ token: reference, physicalName });
+        continue;
+      }
+      const referenceName = reference.value.toLowerCase();
+      const resolved = referenceName === targetName
+        ? physicalName
+        : targets.get(referenceName);
+      if (resolved === undefined) continue;
+      if (!resolved) throw new Error(`[V2 Replay] 无法唯一解析 SQL 表引用：${reference.value}。`);
+      if (scopedPhysicalName && resolved !== scopedPhysicalName) {
+        throw new Error(`[V2 Replay] sql_sheet_batch 跨 Sheet 引用被拒绝：sheetKey=${operation.kind === 'sql_sheet_batch' ? operation.sheetKey : '(legacy sql_batch)'}, table=${reference.value}。`);
+      }
+      replacements.push({ token: reference, physicalName: resolved });
+    }
+    return applySqlReplayIdentifierReplacements_ACU(statement, replacements);
   });
 }
 

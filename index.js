@@ -36481,6 +36481,8 @@ $CONTENT
     function tokenizeSqlReplayIdentifiers_ACU(statement) {
         const tokens = [];
         let index = 0;
+        let depth = 0;
+        const commaBeforeDepths = new Set();
         while (index < statement.length) {
             const char = statement[index];
             const next = statement[index + 1];
@@ -36517,6 +36519,22 @@ $CONTENT
                     throw new Error('[V2 Replay] SQL 字符串未闭合，无法安全重绑定表名。');
                 continue;
             }
+            if (char === ',') {
+                commaBeforeDepths.add(depth);
+                index += 1;
+                continue;
+            }
+            if (char === '(') {
+                commaBeforeDepths.delete(depth);
+                depth += 1;
+                index += 1;
+                continue;
+            }
+            if (char === ')') {
+                depth = Math.max(0, depth - 1);
+                index += 1;
+                continue;
+            }
             if (char === '"' || char === '`' || char === '[') {
                 const closing = char === '[' ? ']' : char;
                 const start = index;
@@ -36539,7 +36557,7 @@ $CONTENT
                 }
                 if (!closed)
                     throw new Error('[V2 Replay] SQL 引号标识符未闭合，无法安全重绑定表名。');
-                tokens.push({ start, end: index, value, quote: char });
+                tokens.push({ start, end: index, value, quote: char, depth, commaBefore: commaBeforeDepths.delete(depth) });
                 continue;
             }
             if (isSqlReplayIdentifierStart_ACU(char)) {
@@ -36547,7 +36565,7 @@ $CONTENT
                 index += 1;
                 while (index < statement.length && isSqlReplayIdentifierPart_ACU(statement[index]))
                     index += 1;
-                tokens.push({ start, end: index, value: statement.slice(start, index), quote: null });
+                tokens.push({ start, end: index, value: statement.slice(start, index), quote: null, depth, commaBefore: commaBeforeDepths.delete(depth) });
                 continue;
             }
             index += 1;
@@ -36560,10 +36578,18 @@ $CONTENT
     function getSqlReplayMutationTargetToken_ACU(tokens) {
         const first = tokens[0];
         if (sqlReplayKeyword_ACU(first, 'INSERT') || sqlReplayKeyword_ACU(first, 'REPLACE')) {
-            if (!sqlReplayKeyword_ACU(tokens[1], 'INTO') || !tokens[2]) {
+            let index = 1;
+            if (sqlReplayKeyword_ACU(first, 'INSERT') && sqlReplayKeyword_ACU(tokens[index], 'OR')) {
+                const action = tokens[index + 1];
+                if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
+                    throw new Error('[V2 Replay] INSERT OR 子句非法，无法安全重绑定表名。');
+                }
+                index += 2;
+            }
+            if (!sqlReplayKeyword_ACU(tokens[index], 'INTO') || !tokens[index + 1]) {
                 throw new Error('[V2 Replay] INSERT/REPLACE SQL 缺少可验证的目标表。');
             }
-            return tokens[2];
+            return tokens[index + 1];
         }
         if (sqlReplayKeyword_ACU(first, 'UPDATE')) {
             let index = 1;
@@ -36585,6 +36611,45 @@ $CONTENT
             return tokens[2];
         }
         throw new Error(`[V2 Replay] 不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
+    }
+    function collectSqlReplayTableReferenceTokens_ACU(tokens, mutationTarget) {
+        const fromClauseTerminators = new Set([
+            'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW', 'RETURNING', 'VALUES', 'SET',
+        ]);
+        const references = new Map([[mutationTarget.start, mutationTarget]]);
+        const cteNames = new Set();
+        for (let index = 0; index + 2 < tokens.length; index += 1) {
+            if (sqlReplayKeyword_ACU(tokens[index], 'WITH') && sqlReplayKeyword_ACU(tokens[index + 2], 'AS')) {
+                cteNames.add(tokens[index + 1].value.toLowerCase());
+            }
+        }
+        const activeFromDepths = new Set();
+        for (let index = 0; index < tokens.length; index += 1) {
+            const token = tokens[index];
+            const keyword = token.quote === null ? token.value.toUpperCase() : '';
+            if (fromClauseTerminators.has(keyword))
+                activeFromDepths.delete(token.depth);
+            if (keyword === 'FROM')
+                activeFromDepths.add(token.depth);
+            if (keyword === 'FROM' || keyword === 'JOIN') {
+                const reference = tokens[index + 1];
+                if (reference && reference.depth === token.depth && !cteNames.has(reference.value.toLowerCase())) {
+                    references.set(reference.start, reference);
+                }
+                continue;
+            }
+            if (token.commaBefore && activeFromDepths.has(token.depth) && !cteNames.has(token.value.toLowerCase())) {
+                references.set(token.start, token);
+            }
+        }
+        return [...references.values()];
+    }
+    function applySqlReplayIdentifierReplacements_ACU(statement, replacements) {
+        let result = statement;
+        for (const { token, physicalName } of [...replacements].sort((a, b) => b.token.start - a.token.start)) {
+            result = `${result.slice(0, token.start)}${formatSqlReplayIdentifier_ACU(physicalName, token.quote)}${result.slice(token.end)}`;
+        }
+        return result;
     }
     function formatSqlReplayIdentifier_ACU(value, quote) {
         if (quote === '"')
@@ -36651,7 +36716,26 @@ $CONTENT
                 const sheetKey = operation.kind === 'sql_sheet_batch' ? operation.sheetKey : '(legacy sql_batch)';
                 throw new Error(`[V2 Replay] sql_sheet_batch 跨 Sheet 引用被拒绝：sheetKey=${sheetKey}, table=${target.value}。`);
             }
-            return `${statement.slice(0, target.start)}${formatSqlReplayIdentifier_ACU(physicalName, target.quote)}${statement.slice(target.end)}`;
+            const replacements = [];
+            for (const reference of collectSqlReplayTableReferenceTokens_ACU(tokens, target)) {
+                if (reference.start === target.start) {
+                    replacements.push({ token: reference, physicalName });
+                    continue;
+                }
+                const referenceName = reference.value.toLowerCase();
+                const resolved = referenceName === targetName
+                    ? physicalName
+                    : targets.get(referenceName);
+                if (resolved === undefined)
+                    continue;
+                if (!resolved)
+                    throw new Error(`[V2 Replay] 无法唯一解析 SQL 表引用：${reference.value}。`);
+                if (scopedPhysicalName && resolved !== scopedPhysicalName) {
+                    throw new Error(`[V2 Replay] sql_sheet_batch 跨 Sheet 引用被拒绝：sheetKey=${operation.kind === 'sql_sheet_batch' ? operation.sheetKey : '(legacy sql_batch)'}, table=${reference.value}。`);
+                }
+                replacements.push({ token: reference, physicalName: resolved });
+            }
+            return applySqlReplayIdentifierReplacements_ACU(statement, replacements);
         });
     }
     function assertMetaUpdateDoesNotChangeDdl_ACU(patch) {
@@ -44872,6 +44956,8 @@ $CONTENT
     function tokenizeSqlMutationIdentifiers_ACU(statement) {
         const tokens = [];
         let index = 0;
+        let depth = 0;
+        const commaBeforeDepths = new Set();
         while (index < statement.length) {
             const char = statement[index];
             const next = statement[index + 1];
@@ -44908,6 +44994,22 @@ $CONTENT
                     throw new Error('SQL 字符串未闭合，无法安全重绑定表名。');
                 continue;
             }
+            if (char === ',') {
+                commaBeforeDepths.add(depth);
+                index += 1;
+                continue;
+            }
+            if (char === '(') {
+                commaBeforeDepths.delete(depth);
+                depth += 1;
+                index += 1;
+                continue;
+            }
+            if (char === ')') {
+                depth = Math.max(0, depth - 1);
+                index += 1;
+                continue;
+            }
             if (char === '"' || char === '`' || char === '[') {
                 const closing = char === '[' ? ']' : char;
                 const start = index;
@@ -44930,7 +45032,7 @@ $CONTENT
                 }
                 if (!closed)
                     throw new Error('SQL 引号标识符未闭合，无法安全重绑定表名。');
-                tokens.push({ start, end: index, value, quote: char });
+                tokens.push({ start, end: index, value, quote: char, depth, commaBefore: commaBeforeDepths.delete(depth) });
                 continue;
             }
             if (isSqlMutationIdentifierStart_ACU(char)) {
@@ -44938,7 +45040,7 @@ $CONTENT
                 index += 1;
                 while (index < statement.length && isSqlMutationIdentifierPart_ACU(statement[index]))
                     index += 1;
-                tokens.push({ start, end: index, value: statement.slice(start, index), quote: null });
+                tokens.push({ start, end: index, value: statement.slice(start, index), quote: null, depth, commaBefore: commaBeforeDepths.delete(depth) });
                 continue;
             }
             index += 1;
@@ -44951,9 +45053,18 @@ $CONTENT
     function getSqlMutationTargetToken_ACU(tokens) {
         const first = tokens[0];
         if (isSqlMutationKeyword_ACU(first, 'INSERT') || isSqlMutationKeyword_ACU(first, 'REPLACE')) {
-            if (!isSqlMutationKeyword_ACU(tokens[1], 'INTO') || !tokens[2])
+            let index = 1;
+            if (isSqlMutationKeyword_ACU(first, 'INSERT') && isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
+                const action = tokens[index + 1];
+                if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
+                    throw new Error('INSERT OR 子句非法，无法安全重绑定表名。');
+                }
+                index += 2;
+            }
+            if (!isSqlMutationKeyword_ACU(tokens[index], 'INTO') || !tokens[index + 1]) {
                 throw new Error('INSERT/REPLACE SQL 缺少可验证的目标表。');
-            return tokens[2];
+            }
+            return tokens[index + 1];
         }
         if (isSqlMutationKeyword_ACU(first, 'UPDATE')) {
             let index = 1;
@@ -44975,6 +45086,45 @@ $CONTENT
         }
         throw new Error(`不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
     }
+    function collectSqlMutationTableReferenceTokens_ACU(tokens, mutationTarget) {
+        const fromClauseTerminators = new Set([
+            'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW', 'RETURNING', 'VALUES', 'SET',
+        ]);
+        const references = new Map([[mutationTarget.start, mutationTarget]]);
+        const cteNames = new Set();
+        for (let index = 0; index + 2 < tokens.length; index += 1) {
+            if (isSqlMutationKeyword_ACU(tokens[index], 'WITH') && isSqlMutationKeyword_ACU(tokens[index + 2], 'AS')) {
+                cteNames.add(tokens[index + 1].value.toLowerCase());
+            }
+        }
+        const activeFromDepths = new Set();
+        for (let index = 0; index < tokens.length; index += 1) {
+            const token = tokens[index];
+            const keyword = token.quote === null ? token.value.toUpperCase() : '';
+            if (fromClauseTerminators.has(keyword))
+                activeFromDepths.delete(token.depth);
+            if (keyword === 'FROM')
+                activeFromDepths.add(token.depth);
+            if (keyword === 'FROM' || keyword === 'JOIN') {
+                const reference = tokens[index + 1];
+                if (reference && reference.depth === token.depth && !cteNames.has(reference.value.toLowerCase())) {
+                    references.set(reference.start, reference);
+                }
+                continue;
+            }
+            if (token.commaBefore && activeFromDepths.has(token.depth) && !cteNames.has(token.value.toLowerCase())) {
+                references.set(token.start, token);
+            }
+        }
+        return [...references.values()];
+    }
+    function applySqlMutationIdentifierReplacements_ACU(statement, replacements) {
+        let result = statement;
+        for (const { token, physicalName } of [...replacements].sort((a, b) => b.token.start - a.token.start)) {
+            result = `${result.slice(0, token.start)}${formatSqlMutationIdentifier_ACU(physicalName, token.quote)}${result.slice(token.end)}`;
+        }
+        return result;
+    }
     function formatSqlMutationIdentifier_ACU(value, quote) {
         if (quote === '"')
             return `"${value.replace(/"/g, '""')}"`;
@@ -44985,11 +45135,12 @@ $CONTENT
         return value;
     }
     /**
-     * Rebinds a mutation target from a unique display/legacy alias to the
-     * authoritative runtime physical name. Only the verified target identifier is
-     * changed; comments and string literals are never rewritten.
+     * Rebinds mutation table identifiers from unique DDL/runtime aliases to their
+     * authoritative runtime physical names. Comments and string literals are never
+     * rewritten. Strict sheet-scoped callers may reject references resolved to a
+     * different physical table so the emitted sql_sheet_batch remains replayable.
      */
-    function rebindSqlMutationTableIdentifiers_ACU(statements, tableData) {
+    function rebindSqlMutationTableIdentifiers_ACU(statements, tableData, options = {}) {
         const physicalNames = resolvePhysicalTableNames_ACU(tableData);
         const targets = new Map();
         for (const [sheetKey, physicalName] of physicalNames) {
@@ -45007,9 +45158,10 @@ $CONTENT
             }
         }
         return statements.map(statement => {
+            const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
             let target;
             try {
-                target = getSqlMutationTargetToken_ACU(tokenizeSqlMutationIdentifiers_ACU(statement));
+                target = getSqlMutationTargetToken_ACU(tokens);
             }
             catch (error) {
                 if (String(error?.message || error).startsWith('不支持安全重绑定的 SQL 语句类型：'))
@@ -45021,7 +45173,19 @@ $CONTENT
                 return statement;
             if (!physicalName)
                 throw new Error(`无法唯一解析 SQL 目标表标识符：${target.value}。`);
-            return `${statement.slice(0, target.start)}${formatSqlMutationIdentifier_ACU(physicalName, target.quote)}${statement.slice(target.end)}`;
+            const replacements = [];
+            for (const reference of collectSqlMutationTableReferenceTokens_ACU(tokens, target)) {
+                const resolved = targets.get(reference.value.toLowerCase());
+                if (resolved === undefined)
+                    continue;
+                if (!resolved)
+                    throw new Error(`无法唯一解析 SQL 表引用：${reference.value}。`);
+                if (options.requireSinglePhysicalTable === true && resolved !== physicalName) {
+                    throw new Error(`SQL mutation 跨 Sheet 表引用被拒绝：target=${target.value}, reference=${reference.value}。`);
+                }
+                replacements.push({ token: reference, physicalName: resolved });
+            }
+            return applySqlMutationIdentifierReplacements_ACU(statement, replacements);
         });
     }
     function mapSqlTableNamesToSheetKeys_ACU(tableData, tableNames) {
@@ -45728,7 +45892,9 @@ $CONTENT
         try {
             const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
             const snapshotCopy = JSON.parse(JSON.stringify(tableData || {}));
-            const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], snapshotCopy)[0];
+            const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], snapshotCopy, {
+                requireSinglePhysicalTable: operationOptions.requireSheetScopedOperations === true,
+            })[0];
             await engine.init();
             syncBridge.loadFromTableData(snapshotCopy, { strict: true });
             const result = engine.run(runtimeSql, params);
@@ -45780,7 +45946,9 @@ $CONTENT
                 return { success: true, modifiedKeys: [], appliedEdits: 0, workingData: JSON.parse(JSON.stringify(tableData || {})) };
             }
             const snapshotCopy = JSON.parse(JSON.stringify(tableData || {}));
-            const statements = rebindSqlMutationTableIdentifiers_ACU(rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))), snapshotCopy);
+            const statements = rebindSqlMutationTableIdentifiers_ACU(rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))), snapshotCopy, {
+                requireSinglePhysicalTable: operationOptions.requireSheetScopedOperations === true,
+            });
             await engine.init();
             syncBridge.loadFromTableData(snapshotCopy, { strict: true });
             engine.runBatch(statements);

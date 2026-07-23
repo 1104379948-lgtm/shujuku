@@ -288,6 +288,45 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(result?.sheet_0.sourceData.ddl).toBe('CREATE TABLE chronicle (row_id INTEGER PRIMARY KEY, name TEXT);');
   });
 
+  it('回放 INSERT 时同时重绑定目标表与 VALUES 子查询中的历史 DDL alias', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.uid = 'chronicle';
+    checkpointData.sheet_0.name = '纪要表';
+    checkpointData.sheet_0.sourceData.ddl = 'CREATE TABLE chronicle (row_id INTEGER PRIMARY KEY, name TEXT);';
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: checkpointData,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'legacy-chronicle-insert-subquery', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'chronicle',
+                statements: ["INSERT INTO chronicle (row_id, name) VALUES ((SELECT COALESCE(MAX(row_id), 0) + 1 FROM chronicle), '子查询重绑定成功')"],
+                reason: 'manual_crud',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '铁剑'],
+      ['2', '子查询重绑定成功'],
+    ]);
+  });
+
   it('将历史 physical tableName 重绑定到同 sheet 当前 physical 表名', async () => {
     const checkpointData = makeCheckpointData();
     // 旧日志写入时该 sheet 的显示名为“旧背包”，之后重命名为“背包”。
@@ -321,6 +360,42 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '重命名后仍可回放']]);
   });
 
+  it('历史 physical tableName 出现在 VALUES 子查询时也重绑定到当前 physical 表名', async () => {
+    const checkpointData = makeCheckpointData();
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: checkpointData,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'renamed-physical-subquery', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'jiubeibao',
+                statements: ["INSERT INTO jiubeibao (row_id, name) VALUES ((SELECT COALESCE(MAX(row_id), 0) + 1 FROM jiubeibao), '历史物理名子查询')"],
+                reason: 'manual_crud',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '铁剑'],
+      ['2', '历史物理名子查询'],
+    ]);
+  });
+
   it('sql_sheet_batch 的 tableName 与 sheetKey 不一致时 fail closed', async () => {
     const checkpointData = makeCheckpointData();
     const chat = [{
@@ -349,6 +424,86 @@ describe('loadTableStateFromFramesV2_ACU', () => {
 
     await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('tableName 与 sheetKey 不一致');
     expect(checkpointData.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑']]);
+  });
+
+  it('回放 UPDATE、DELETE、INSERT SELECT、JOIN 与多个同表子查询时完整重绑定 DDL alias', async () => {
+    const state = makeCheckpointData();
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'sql_sheet_batch',
+      sheetKey: 'sheet_0',
+      tableName: 'inventory',
+      statements: [
+        "UPDATE inventory SET name = (SELECT name FROM inventory WHERE row_id = 1) || '-更新' WHERE row_id = 1",
+        "INSERT OR REPLACE INTO inventory SELECT row_id + 1, name || '-复制' FROM inventory WHERE row_id = 1",
+        "UPDATE inventory SET name = name || '-关联' WHERE EXISTS (SELECT 1 FROM inventory a JOIN inventory b ON a.row_id = b.row_id)",
+        "UPDATE inventory SET name = name || '-逗号' WHERE EXISTS (SELECT 1 FROM inventory a, inventory b WHERE a.row_id = b.row_id)",
+        'DELETE FROM inventory WHERE row_id IN (SELECT row_id FROM inventory WHERE row_id = 999)',
+      ],
+      reason: 'manual_crud',
+    } as any);
+
+    expect(state.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '铁剑-更新-关联-逗号'],
+      ['2', '铁剑-更新-复制-关联-逗号'],
+    ]);
+  });
+
+  it('回放时保留字符串和注释，并按原 quoting 风格重绑定表引用', async () => {
+    const state = makeCheckpointData();
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'sql_sheet_batch',
+      sheetKey: 'sheet_0',
+      tableName: 'inventory',
+      statements: ["UPDATE `inventory` SET name = 'FROM inventory JOIN inventory' /* FROM inventory */ WHERE row_id IN (SELECT row_id FROM [inventory] WHERE row_id = 1)"],
+      reason: 'manual_crud',
+    } as any);
+
+    expect(state.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', 'FROM inventory JOIN inventory'],
+    ]);
+  });
+
+  it('sql_sheet_batch 的嵌套 FROM 或逗号连接引用其他 Sheet 时 fail closed', async () => {
+    const state = makeCheckpointData();
+    state.sheet_1 = {
+      uid: 'quest_log', name: '任务表', content: [['row_id', 'name'], ['2', '支线任务']],
+      sourceData: { ddl: 'CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, name TEXT);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 1,
+    };
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory',
+      statements: ['INSERT INTO inventory SELECT row_id, name FROM quest_log'], reason: 'manual_crud',
+    } as any)).rejects.toThrow('sql_sheet_batch 跨 Sheet 引用被拒绝');
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory',
+      statements: ['INSERT INTO inventory SELECT a.row_id + 1, a.name FROM inventory a, quest_log q'], reason: 'manual_crud',
+    } as any)).rejects.toThrow('sql_sheet_batch 跨 Sheet 引用被拒绝');
+    expect(state.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑']]);
+  });
+
+  it('sql_sheet_batch 的嵌套表引用命中歧义 DDL alias 时 fail closed', async () => {
+    const state = makeCheckpointData();
+    state.sheet_1 = {
+      uid: 'legacy_a', name: '表A', content: [['row_id'], ['1']],
+      sourceData: { ddl: 'CREATE TABLE legacy (row_id INTEGER PRIMARY KEY);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 1,
+    };
+    state.sheet_2 = {
+      uid: 'legacy_b', name: '表B', content: [['row_id'], ['1']],
+      sourceData: { ddl: 'CREATE TABLE legacy (row_id INTEGER PRIMARY KEY);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 2,
+    };
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory',
+      statements: ['UPDATE inventory SET name = (SELECT MAX(row_id) FROM legacy) WHERE row_id = 1'], reason: 'manual_crud',
+    } as any)).rejects.toThrow('无法唯一解析 SQL 表引用：legacy');
+    expect(state.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑']]);
   });
 
   it('同楼层单表 checkpoint 引入新 DDL/CHECK 后再回放 sql_batch', async () => {
