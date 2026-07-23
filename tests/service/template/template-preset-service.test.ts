@@ -102,6 +102,7 @@ vi.mock('../../../src/service/template/chat-template-reconciler', () => ({
 }));
 vi.mock('../../../src/service/table/storage-frame-v2-persist', () => ({
   commitCurrentFloorTemplateChanges_ACU: vi.fn(),
+  commitCurrentFloorTemplateScopeOnly_ACU: vi.fn(),
 }));
 vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
   loadTableStateFromFramesV2_ACU: vi.fn(),
@@ -137,7 +138,10 @@ import { parseTableTemplateJson_ACU } from '../../../src/shared/utils';
 import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from '../../../src/service/template/template-import-validator';
 import { buildDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
 import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-template-reconciler';
-import { commitCurrentFloorTemplateChanges_ACU } from '../../../src/service/table/storage-frame-v2-persist';
+import {
+  commitCurrentFloorTemplateChanges_ACU,
+  commitCurrentFloorTemplateScopeOnly_ACU,
+} from '../../../src/service/table/storage-frame-v2-persist';
 import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 
 beforeEach(() => {
@@ -466,18 +470,21 @@ describe('applyTemplatePresetToCurrent_ACU', () => {
     const result = await applyTemplatePresetToCurrent_ACU('不存在的预设', { updateGlobal: true });
     expect(result).toBe(false);
   });
-  it('updateGlobal=false 时通过 V2 提交应用 chat 模板', async () => {
+  it('updateGlobal=false 且无结构变化时通过 scope-only 提交应用 chat 模板', async () => {
     const candidate = { mate: { type: 'chatSheets', version: 1 }, sheet_0: { uid: 'sheet_0', name: '表', content: [['row_id']], sourceData: {}, updateConfig: {}, exportConfig: {} } };
     upsertTemplatePreset_ACU('预设A', JSON.stringify(candidate));
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateStr: JSON.stringify(candidate), templateObj: candidate } as any);
-    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue(candidate as any);
     vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [], deletedSheetKeys: [], blockers: [], audit: [] } as any);
-    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'template_only' } as any);
+    vi.mocked(commitCurrentFloorTemplateScopeOnly_ACU).mockResolvedValue({ saved: true, mode: 'scope_only' } as any);
 
     const result = await applyTemplatePresetToCurrent_ACU('预设A', { updateGlobal: false });
 
     expect(result).toMatchObject({ presetName: '预设A', mode: 'chat_override', fromGlobalPreset: true });
-    expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledOnce();
+    expect(commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      baselineData: candidate, candidateData: candidate, templateSource: candidate,
+    }));
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockRestore();
   });
 
@@ -489,9 +496,9 @@ describe('applyTemplatePresetToCurrent_ACU', () => {
       templateStr: JSON.stringify(candidate),
       templateObj: candidate,
     } as any);
-    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue(candidate as any);
     vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [], deletedSheetKeys: [], blockers: [], audit: [] } as any);
-    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'template_only' } as any);
+    vi.mocked(commitCurrentFloorTemplateScopeOnly_ACU).mockResolvedValue({ saved: true, mode: 'scope_only' } as any);
 
     const result = await applyTemplatePresetToCurrent_ACU('预设A', {
       updateGlobal: false,
@@ -500,7 +507,10 @@ describe('applyTemplatePresetToCurrent_ACU', () => {
 
     expect(result).toMatchObject({ mode: 'chat_override', fromGlobalPreset: true });
     expect(activateChatTemplatePresetSelection_ACU).not.toHaveBeenCalled();
-    expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledOnce();
+    expect(commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      baselineData: candidate, candidateData: candidate, templateSource: candidate,
+    }));
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockRestore();
   });
 });

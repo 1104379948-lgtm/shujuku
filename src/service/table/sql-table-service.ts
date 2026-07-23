@@ -31,6 +31,7 @@ import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqli
 import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
+import { getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
   workingData?: TableDataObject_ACU;
@@ -86,6 +87,163 @@ export function normalizeSqlStatementsForRuntimeLog_ACU(sqlStatements: string): 
     .filter(Boolean);
 }
 
+interface SqlMutationIdentifierToken_ACU {
+  start: number;
+  end: number;
+  value: string;
+  quote: '"' | '`' | '[' | null;
+}
+
+function isSqlMutationIdentifierStart_ACU(char: string): boolean {
+  if (char.length !== 1) return false;
+  const code = char.charCodeAt(0);
+  return char === '_' || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isSqlMutationIdentifierPart_ACU(char: string): boolean {
+  if (char.length !== 1) return false;
+  const code = char.charCodeAt(0);
+  return isSqlMutationIdentifierStart_ACU(char) || char === '$' || (code >= 48 && code <= 57);
+}
+
+/** Tokenizes identifiers while deliberately skipping SQL strings and comments. */
+function tokenizeSqlMutationIdentifiers_ACU(statement: string): SqlMutationIdentifierToken_ACU[] {
+  const tokens: SqlMutationIdentifierToken_ACU[] = [];
+  let index = 0;
+  while (index < statement.length) {
+    const char = statement[index];
+    const next = statement[index + 1];
+    if (char === '-' && next === '-') {
+      index += 2;
+      while (index < statement.length && statement[index] !== '\n' && statement[index] !== '\r') index += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      index += 2;
+      while (index < statement.length && !(statement[index] === '*' && statement[index + 1] === '/')) index += 1;
+      if (index >= statement.length) throw new Error('SQL 块注释未闭合，无法安全重绑定表名。');
+      index += 2;
+      continue;
+    }
+    if (char === "'") {
+      index += 1;
+      while (index < statement.length) {
+        if (statement[index] !== "'") {
+          index += 1;
+        } else if (statement[index + 1] === "'") {
+          index += 2;
+        } else {
+          index += 1;
+          break;
+        }
+      }
+      if (index > statement.length || statement[index - 1] !== "'") throw new Error('SQL 字符串未闭合，无法安全重绑定表名。');
+      continue;
+    }
+    if (char === '"' || char === '`' || char === '[') {
+      const closing = char === '[' ? ']' : char;
+      const start = index;
+      let value = '';
+      index += 1;
+      let closed = false;
+      while (index < statement.length) {
+        if (statement[index] !== closing) {
+          value += statement[index++];
+        } else if (statement[index + 1] === closing) {
+          value += closing;
+          index += 2;
+        } else {
+          index += 1;
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) throw new Error('SQL 引号标识符未闭合，无法安全重绑定表名。');
+      tokens.push({ start, end: index, value, quote: char });
+      continue;
+    }
+    if (isSqlMutationIdentifierStart_ACU(char)) {
+      const start = index;
+      index += 1;
+      while (index < statement.length && isSqlMutationIdentifierPart_ACU(statement[index])) index += 1;
+      tokens.push({ start, end: index, value: statement.slice(start, index), quote: null });
+      continue;
+    }
+    index += 1;
+  }
+  return tokens;
+}
+
+function isSqlMutationKeyword_ACU(token: SqlMutationIdentifierToken_ACU | undefined, keyword: string): boolean {
+  return !!token && token.quote === null && token.value.toUpperCase() === keyword;
+}
+
+function getSqlMutationTargetToken_ACU(tokens: SqlMutationIdentifierToken_ACU[]): SqlMutationIdentifierToken_ACU {
+  const first = tokens[0];
+  if (isSqlMutationKeyword_ACU(first, 'INSERT') || isSqlMutationKeyword_ACU(first, 'REPLACE')) {
+    if (!isSqlMutationKeyword_ACU(tokens[1], 'INTO') || !tokens[2]) throw new Error('INSERT/REPLACE SQL 缺少可验证的目标表。');
+    return tokens[2];
+  }
+  if (isSqlMutationKeyword_ACU(first, 'UPDATE')) {
+    let index = 1;
+    if (isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
+      const action = tokens[index + 1];
+      if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
+        throw new Error('UPDATE OR 子句非法，无法安全重绑定表名。');
+      }
+      index += 2;
+    }
+    if (!tokens[index]) throw new Error('UPDATE SQL 缺少可验证的目标表。');
+    return tokens[index];
+  }
+  if (isSqlMutationKeyword_ACU(first, 'DELETE')) {
+    if (!isSqlMutationKeyword_ACU(tokens[1], 'FROM') || !tokens[2]) throw new Error('DELETE SQL 缺少可验证的目标表。');
+    return tokens[2];
+  }
+  throw new Error(`不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
+}
+
+function formatSqlMutationIdentifier_ACU(value: string, quote: SqlMutationIdentifierToken_ACU['quote']): string {
+  if (quote === '"') return `"${value.replace(/"/g, '""')}"`;
+  if (quote === '`') return `\`${value.replace(/`/g, '``')}\``;
+  if (quote === '[') return `[${value.replace(/]/g, ']]')}]`;
+  return value;
+}
+
+/**
+ * Rebinds a mutation target from a unique display/legacy alias to the
+ * authoritative runtime physical name. Only the verified target identifier is
+ * changed; comments and string literals are never rewritten.
+ */
+export function rebindSqlMutationTableIdentifiers_ACU(statements: string[], tableData: TableDataObject_ACU): string[] {
+  const physicalNames = resolvePhysicalTableNames_ACU(tableData);
+  const targets = new Map<string, string>();
+  for (const [sheetKey, physicalName] of physicalNames) {
+    const sheet = tableData[sheetKey] as any;
+    const aliases = [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName];
+    for (const alias of aliases) {
+      const normalized = String(alias || '').trim().toLowerCase();
+      if (!normalized) continue;
+      const existing = targets.get(normalized);
+      if (existing && existing !== physicalName) targets.set(normalized, '');
+      else if (existing !== '') targets.set(normalized, physicalName);
+    }
+  }
+  return statements.map(statement => {
+    let target: SqlMutationIdentifierToken_ACU;
+    try {
+      target = getSqlMutationTargetToken_ACU(tokenizeSqlMutationIdentifiers_ACU(statement));
+    } catch (error: any) {
+      if (String(error?.message || error).startsWith('不支持安全重绑定的 SQL 语句类型：')) return statement;
+      throw error;
+    }
+    const physicalName = targets.get(target.value.toLowerCase());
+    if (physicalName === undefined) return statement;
+    if (!physicalName) throw new Error(`无法唯一解析 SQL 目标表标识符：${target.value}。`);
+    return `${statement.slice(0, target.start)}${formatSqlMutationIdentifier_ACU(physicalName, target.quote)}${statement.slice(target.end)}`;
+  });
+}
+
 export function mapSqlTableNamesToSheetKeys_ACU(tableData: TableDataObject_ACU | null | undefined, tableNames: string[]): string[] {
   if (!tableData || !Array.isArray(tableNames) || tableNames.length === 0) return [];
   const matchedKeys = new Set<string>();
@@ -95,10 +253,12 @@ export function mapSqlTableNamesToSheetKeys_ACU(tableData: TableDataObject_ACU |
     const tableNameFromUid = typeof sheet?.uid === 'string' ? sheet.uid.trim() : '';
     const tableNameFromName = typeof sheet?.name === 'string' ? sheet.name.trim() : '';
     const tableNameFromDDL = typeof sheet?.sourceData?.ddl === 'string' ? parseDDLTableName(sheet.sourceData.ddl) : '';
+    const runtimeTableName = getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
     if (
       (tableNameFromUid && tableNames.includes(tableNameFromUid))
       || (tableNameFromName && tableNames.includes(tableNameFromName))
       || (tableNameFromDDL && tableNames.includes(tableNameFromDDL))
+      || tableNames.includes(runtimeTableName)
     ) {
       matchedKeys.add(sheetKey);
     }
@@ -112,10 +272,11 @@ function appendSqlSheetBatchOperation_ACU(
   statement: string,
   param: TableSqlBindValueV2_ACU[] | undefined,
   reason: 'manual_crud' | 'import' | 'system',
-  tableName?: string,
+  tableName: string,
 ): void {
   const last = operations[operations.length - 1] as any;
   if (last?.kind === 'sql_sheet_batch' && last.sheetKey === sheetKey) {
+    if (last.tableName !== tableName) throw new Error(`sql_sheet_batch 合并时发现 runtime 表名不一致：${sheetKey}。`);
     last.statements.push(statement);
     if (param !== undefined || Array.isArray(last.params)) {
       if (!Array.isArray(last.params)) last.params = [];
@@ -128,7 +289,7 @@ function appendSqlSheetBatchOperation_ACU(
     sheetKey,
     statements: [statement],
     ...(param !== undefined ? { params: [param] } : {}),
-    ...(tableName ? { tableName } : {}),
+    tableName,
     reason,
   });
 }
@@ -176,15 +337,16 @@ export function buildSqlSheetBatchOperations_ACU(
     const tableNames = extractTableNamesFromStatements([statement]);
     const sheetKeys = mapSqlTableNamesToSheetKeys_ACU(tableData, tableNames);
     if (sheetKeys.length === 1) {
-      classifiedSheetKeys.add(sheetKeys[0]);
-      appendSqlSheetBatchOperation_ACU(operations, sheetKeys[0], statement, param, reason, tableNames[0]);
+      const sheetKey = sheetKeys[0];
+      classifiedSheetKeys.add(sheetKey);
+      appendSqlSheetBatchOperation_ACU(operations, sheetKey, statement, param, reason, getPhysicalTableNameForSheet_ACU(tableData, sheetKey));
       return;
     }
     if (sheetKeys.length === 0 && allowFallback) {
       const sheetKey = fallbackTargetSheetKeys[0];
       classifiedSheetKeys.add(sheetKey);
       unknownStatements.push(statement);
-      appendSqlSheetBatchOperation_ACU(operations, sheetKey, statement, param, reason);
+      appendSqlSheetBatchOperation_ACU(operations, sheetKey, statement, param, reason, getPhysicalTableNameForSheet_ACU(tableData, sheetKey));
       return;
     }
     if (sheetKeys.length > 1) {
@@ -598,8 +760,7 @@ export class SqlTableService implements ITableStorageProvider {
         const sheet = (currentJsonTableData_ACU as any)[sheetKey];
         if (!sheet?.sourceData?.ddl) continue;
 
-        const tableName = parseDDLTableName(sheet.sourceData.ddl);
-        if (!tableName) continue;
+        const tableName = getPhysicalTableNameForSheet_ACU(currentJsonTableData_ACU, sheetKey);
 
         const existingTables = this._existingTableSet ??= new Set(this.engine.getTableNames());
         // 检查表是否存在且为空
@@ -657,11 +818,9 @@ export class SqlTableService implements ITableStorageProvider {
         if (!sheet || typeof sheet !== 'object') continue;
         // NameMapper 必须和 SQLite 实际采用的 schema 一致。直接读取 sourceData.ddl
         // 会在 fallback_invalid 场景留下无法映射运行时物理列名的陈旧映射。
-        const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key).effectiveDDL;
-        const tableName = parseDDLTableName(effectiveDDL);
-        if (tableName) {
-          ddlMap.set(tableName, effectiveDDL);
-        }
+        const runtimeTableName = getPhysicalTableNameForSheet_ACU(data, key);
+        const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key, runtimeTableName).effectiveDDL;
+        ddlMap.set(runtimeTableName, effectiveDDL);
       }
       ensureGlobalNameMapperForDDLs_ACU(ddlMap);
     } catch (e: any) {
@@ -687,14 +846,8 @@ export class SqlTableService implements ITableStorageProvider {
     for (const [key, value] of Object.entries(currentJsonTableData_ACU)) {
       if (!key.startsWith('sheet_')) continue;
       const sheet = value as any;
-      // 从 DDL 中解析表名进行匹配
-      const ddl = sheet?.sourceData?.ddl;
-      if (ddl) {
-        const match = ddl.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/i);
-        if (match && tableNames.includes(match[1])) {
-          keys.push(key);
-        }
-      }
+      const runtimeTableName = getPhysicalTableNameForSheet_ACU(currentJsonTableData_ACU, key);
+      if (tableNames.includes(runtimeTableName)) keys.push(key);
     }
     return keys;
   }
@@ -748,9 +901,8 @@ export class SqlTableService implements ITableStorageProvider {
       const liveSheet = (currentJsonTableData_ACU as any)?.[key];
       const sheet = (templateData[key] as any) || liveSheet;
       if (!sheet) continue;
-      const ddl = resolveEffectiveDDL(sheet, sheet.uid || key).effectiveDDL;
-      const tableName = parseDDLTableName(ddl);
-      if (tableName && !existingTables.has(tableName)) {
+      const runtimeTableName = getPhysicalTableNameForSheet_ACU(templateData, key);
+      if (!existingTables.has(runtimeTableName)) {
         missingSheets[key] = sheet;
       }
     }
@@ -863,14 +1015,15 @@ export async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(
   try {
     const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
     const snapshotCopy = JSON.parse(JSON.stringify(tableData || {})) as TableDataObject_ACU;
+    const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], snapshotCopy)[0];
     await engine.init();
     syncBridge.loadFromTableData(snapshotCopy, { strict: true });
-    const result = engine.run(normalizedSql, params);
+    const result = engine.run(runtimeSql, params);
     const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy));
-    const modifiedTableNames = extractTableNamesFromStatements([normalizedSql]);
+    const modifiedTableNames = extractTableNamesFromStatements([runtimeSql]);
     const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
     const normalizedParams = Array.isArray(params) && params.length > 0 ? params.map(value => value ?? null) : undefined;
-    const operationBuild = buildSqlSheetBatchOperations_ACU([normalizedSql], workingData, {
+    const operationBuild = buildSqlSheetBatchOperations_ACU([runtimeSql], workingData, {
       params: normalizedParams ? [normalizedParams] : undefined,
       fallbackTargetSheetKeys: operationOptions.targetSheetKeys,
       allowSingleTargetFallback: operationOptions.allowSingleTargetFallback === true,
@@ -923,8 +1076,11 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
       return { success: true, modifiedKeys: [], appliedEdits: 0, workingData: JSON.parse(JSON.stringify(tableData || {})) };
     }
 
-    const statements = rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt)));
     const snapshotCopy = JSON.parse(JSON.stringify(tableData || {})) as TableDataObject_ACU;
+    const statements = rebindSqlMutationTableIdentifiers_ACU(
+      rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))),
+      snapshotCopy,
+    );
     await engine.init();
     syncBridge.loadFromTableData(snapshotCopy, { strict: true });
     engine.runBatch(statements);

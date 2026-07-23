@@ -24,11 +24,13 @@ export {
   updateDDLColumnComment,
   parseDDLColumnInfos_ACU,
   validateDDLTextAgainstHeaders_ACU,
+  rebindCreateTableName_ACU,
 } from '../../shared/ddl-utils';
 import {
   parseDDLColumnInfos_ACU,
   parseDDLTableName,
   parseDDLColumnNames,
+  rebindCreateTableName_ACU,
   validateDDLTextAgainstHeaders_ACU,
 } from '../../shared/ddl-utils';
 
@@ -83,6 +85,7 @@ export interface EffectiveDDLResult_ACU {
 export function resolveEffectiveDDL(
   sheet: Sheet_ACU,
   fallbackTableName?: string,
+  runtimeTableName?: string,
 ): EffectiveDDLResult_ACU {
   const headers = sheet.content?.[0];
   const safeHeaders = Array.isArray(headers) && headers.length > 0
@@ -91,7 +94,7 @@ export function resolveEffectiveDDL(
   const originalDDL = typeof sheet.sourceData?.ddl === 'string' ? sheet.sourceData.ddl.trim() : '';
 
   if (!originalDDL) {
-    return buildRuntimeFallbackDDL_ACU(sheet, fallbackTableName, 'fallback_missing', 'DDL 缺失，已使用运行时 fallback schema。');
+    return buildRuntimeFallbackDDL_ACU(sheet, runtimeTableName || fallbackTableName, 'fallback_missing', 'DDL 缺失，已使用运行时 fallback schema。');
   }
 
   const normalizedDDL = normalizeSqlStructure(originalDDL);
@@ -99,17 +102,20 @@ export function resolveEffectiveDDL(
   const firstColumn = columns[0];
   if (parseDDLTableName(normalizedDDL) && firstColumn?.sqlName === 'row_id'
     && firstColumn.declaredType === 'INTEGER' && firstColumn.isPrimaryKey) {
-    logDebug_ACU(`[Schema] resolveEffectiveDDL: 使用用户定义 DDL, 表名=${parseDDLTableName(normalizedDDL) || 'unknown'}`);
+    const effectiveDDL = runtimeTableName
+      ? rebindCreateTableName_ACU(normalizedDDL, runtimeTableName)
+      : normalizedDDL;
+    logDebug_ACU(`[Schema] resolveEffectiveDDL: 使用用户定义 DDL, runtime表名=${parseDDLTableName(effectiveDDL) || 'unknown'}`);
     return {
       originalDDL,
-      effectiveDDL: normalizedDDL,
+      effectiveDDL,
       source: 'explicit',
       diagnostics: [],
       columnMap: buildExplicitColumnMap_ACU(sheet, normalizedDDL, safeHeaders),
     };
   }
 
-  return buildRuntimeFallbackDDL_ACU(sheet, fallbackTableName, 'fallback_invalid', '显式 DDL 缺少可用的 row_id INTEGER PRIMARY KEY 结构。');
+  return buildRuntimeFallbackDDL_ACU(sheet, runtimeTableName || fallbackTableName, 'fallback_invalid', '显式 DDL 缺少可用的 row_id INTEGER PRIMARY KEY 结构。');
 }
 
 export function buildRuntimeFallbackDDL_ACU(

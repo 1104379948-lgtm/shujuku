@@ -8,10 +8,12 @@ import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqli
 import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TablePatchV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
-import { getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
+import { ensureStableRowIdsForSeedRows_ACU, getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
+import { resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
+import { parseDDLTableName } from '../../shared/ddl-utils';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -277,9 +279,207 @@ async function applySqlBatchOperationV2_ACU(
 ): Promise<void> {
   const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
   if (statements.length === 0) return;
+  const reboundStatements = rebindSqlReplayTableIdentifiers_ACU(statements, state, operation);
   await ensureSqlReplayRuntime_ACU(runtime, state);
   const params = Array.isArray(operation.params) ? operation.params : undefined;
-  runtime.engine.runBatch(statements, params);
+  runtime.engine.runBatch(reboundStatements, params);
+}
+
+interface SqlReplayIdentifierToken_ACU {
+  start: number;
+  end: number;
+  value: string;
+  quote: '"' | '`' | '[' | null;
+}
+
+function isSqlReplayIdentifierStart_ACU(char: string): boolean {
+  if (char.length !== 1) return false;
+  const code = char.charCodeAt(0);
+  return char === '_' || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isSqlReplayIdentifierPart_ACU(char: string): boolean {
+  if (char.length !== 1) return false;
+  const code = char.charCodeAt(0);
+  return isSqlReplayIdentifierStart_ACU(char) || char === '$' || (code >= 48 && code <= 57);
+}
+
+
+/**
+ * Tokenizes identifiers only. Strings and comments are intentionally skipped,
+ * so a table-like word in narrative text can never be rebound.
+ */
+function tokenizeSqlReplayIdentifiers_ACU(statement: string): SqlReplayIdentifierToken_ACU[] {
+  const tokens: SqlReplayIdentifierToken_ACU[] = [];
+  let index = 0;
+  while (index < statement.length) {
+    const char = statement[index];
+    const next = statement[index + 1];
+    if (char === '-' && next === '-') {
+      index += 2;
+      while (index < statement.length && statement[index] !== '\n' && statement[index] !== '\r') index += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      index += 2;
+      while (index < statement.length && !(statement[index] === '*' && statement[index + 1] === '/')) index += 1;
+      if (index >= statement.length) throw new Error('[V2 Replay] SQL 块注释未闭合，无法安全重绑定表名。');
+      index += 2;
+      continue;
+    }
+    if (char === "'") {
+      index += 1;
+      while (index < statement.length) {
+        if (statement[index] !== "'") {
+          index += 1;
+          continue;
+        }
+        if (statement[index + 1] === "'") {
+          index += 2;
+          continue;
+        }
+        index += 1;
+        break;
+      }
+      if (index > statement.length || statement[index - 1] !== "'") throw new Error('[V2 Replay] SQL 字符串未闭合，无法安全重绑定表名。');
+      continue;
+    }
+    if (char === '"' || char === '`' || char === '[') {
+      const closing = char === '[' ? ']' : char;
+      const start = index;
+      let value = '';
+      index += 1;
+      let closed = false;
+      while (index < statement.length) {
+        if (statement[index] !== closing) {
+          value += statement[index++];
+          continue;
+        }
+        if (statement[index + 1] === closing) {
+          value += closing;
+          index += 2;
+          continue;
+        }
+        index += 1;
+        closed = true;
+        break;
+      }
+      if (!closed) throw new Error('[V2 Replay] SQL 引号标识符未闭合，无法安全重绑定表名。');
+      tokens.push({ start, end: index, value, quote: char });
+      continue;
+    }
+    if (isSqlReplayIdentifierStart_ACU(char)) {
+      const start = index;
+      index += 1;
+      while (index < statement.length && isSqlReplayIdentifierPart_ACU(statement[index])) index += 1;
+      tokens.push({ start, end: index, value: statement.slice(start, index), quote: null });
+      continue;
+    }
+    index += 1;
+  }
+  return tokens;
+}
+
+function sqlReplayKeyword_ACU(token: SqlReplayIdentifierToken_ACU | undefined, keyword: string): boolean {
+  return !!token && token.quote === null && token.value.toUpperCase() === keyword;
+}
+
+function getSqlReplayMutationTargetToken_ACU(tokens: SqlReplayIdentifierToken_ACU[]): SqlReplayIdentifierToken_ACU {
+  const first = tokens[0];
+  if (sqlReplayKeyword_ACU(first, 'INSERT') || sqlReplayKeyword_ACU(first, 'REPLACE')) {
+    if (!sqlReplayKeyword_ACU(tokens[1], 'INTO') || !tokens[2]) {
+      throw new Error('[V2 Replay] INSERT/REPLACE SQL 缺少可验证的目标表。');
+    }
+    return tokens[2];
+  }
+  if (sqlReplayKeyword_ACU(first, 'UPDATE')) {
+    let index = 1;
+    if (sqlReplayKeyword_ACU(tokens[index], 'OR')) {
+      const action = tokens[index + 1];
+      if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
+        throw new Error('[V2 Replay] UPDATE OR 子句非法，无法安全重绑定表名。');
+      }
+      index += 2;
+    }
+    if (!tokens[index]) throw new Error('[V2 Replay] UPDATE SQL 缺少可验证的目标表。');
+    return tokens[index];
+  }
+  if (sqlReplayKeyword_ACU(first, 'DELETE')) {
+    if (!sqlReplayKeyword_ACU(tokens[1], 'FROM') || !tokens[2]) {
+      throw new Error('[V2 Replay] DELETE SQL 缺少可验证的目标表。');
+    }
+    return tokens[2];
+  }
+  throw new Error(`[V2 Replay] 不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
+}
+
+function formatSqlReplayIdentifier_ACU(value: string, quote: SqlReplayIdentifierToken_ACU['quote']): string {
+  if (quote === '"') return `"${value.replace(/"/g, '""')}"`;
+  if (quote === '`') return `\`${value.replace(/`/g, '``')}\``;
+  if (quote === '[') return `[${value.replace(/]/g, ']]')}]`;
+  return value;
+}
+
+function rebindSqlReplayTableIdentifiers_ACU(
+  statements: string[],
+  state: TableDataObject_ACU,
+  operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
+): string[] {
+  const physicalNames = resolvePhysicalTableNames_ACU(state);
+  const targets = new Map<string, string>();
+  for (const [sheetKey, physicalName] of physicalNames) {
+    const sheet = state[sheetKey] as Sheet_ACU | undefined;
+    if (!sheet) continue;
+    const aliases = [parseDDLTableName(sheet.sourceData?.ddl || ''), physicalName];
+    for (const alias of aliases) {
+      const normalized = String(alias || '').trim().toLowerCase();
+      if (!normalized) continue;
+      const existing = targets.get(normalized);
+      if (existing && existing !== physicalName) {
+        targets.set(normalized, '');
+      } else if (existing !== '') {
+        targets.set(normalized, physicalName);
+      }
+    }
+  }
+  const scopedPhysicalName = operation.kind === 'sql_sheet_batch'
+    ? physicalNames.get(operation.sheetKey)
+    : undefined;
+  if (operation.kind === 'sql_sheet_batch' && !scopedPhysicalName) {
+    throw new Error(`[V2 Replay] sql_sheet_batch 指向不存在的 Sheet：${operation.sheetKey}。`);
+  }
+  const recordedTableName = operation.kind === 'sql_sheet_batch'
+    ? operation.tableName?.trim().toLowerCase()
+    : undefined;
+  if (operation.kind === 'sql_sheet_batch' && recordedTableName) {
+    const recordedPhysicalName = targets.get(recordedTableName);
+    if (recordedPhysicalName === '' || (recordedPhysicalName && recordedPhysicalName !== scopedPhysicalName)) {
+      throw new Error(`[V2 Replay] sql_sheet_batch 的 tableName 与 sheetKey 不一致：sheetKey=${operation.sheetKey}, tableName=${operation.tableName}。`);
+    }
+  }
+
+  return statements.map(statement => {
+    const tokens = tokenizeSqlReplayIdentifiers_ACU(statement);
+    const target = getSqlReplayMutationTargetToken_ACU(tokens);
+    const targetName = target.value.toLowerCase();
+    let physicalName = targets.get(targetName);
+    // 物理表名会随显示名变更。旧日志中未知于当前 schema 的 tableName 只在
+    // 它与 SQL 实际目标完全一致时，才能作为该 sheet 的历史物理名重绑定。
+    if (physicalName === undefined && scopedPhysicalName && recordedTableName === targetName) {
+      physicalName = scopedPhysicalName;
+    }
+    if (!physicalName) {
+      throw new Error(`[V2 Replay] 无法唯一解析 SQL 目标表标识符：${target.value}。`);
+    }
+    if (scopedPhysicalName && recordedTableName && targets.get(recordedTableName) === undefined && targetName !== recordedTableName) {
+      throw new Error(`[V2 Replay] sql_sheet_batch 的 tableName 与 sheetKey 不一致：记录的历史表名未与 SQL 目标一致（tableName=${recordedTableName}, table=${target.value}）。`);
+    }
+    if (scopedPhysicalName && physicalName !== scopedPhysicalName) {
+      const sheetKey = operation.kind === 'sql_sheet_batch' ? operation.sheetKey : '(legacy sql_batch)';
+      throw new Error(`[V2 Replay] sql_sheet_batch 跨 Sheet 引用被拒绝：sheetKey=${sheetKey}, table=${target.value}。`);
+    }
+    return `${statement.slice(0, target.start)}${formatSqlReplayIdentifier_ACU(physicalName, target.quote)}${statement.slice(target.end)}`;
+  });
 }
 
 function assertMetaUpdateDoesNotChangeDdl_ACU(patch: Extract<TablePatchV2_ACU, { kind: 'meta_update' }>): void {
@@ -476,7 +676,8 @@ function materializeSeedRowsForDslReplay_ACU(sheet: Sheet_ACU): void {
   }
   if (!Array.isArray(seedRows) || seedRows.length === 0) return;
   const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU(sheet.content[0]) : ['row_id'];
-  sheet.content = [headerRow, ...deepClone_ACU(seedRows)];
+  // 与实时 DSL 路径保持同一身份契约：只有明确的 seedRows 新行能在物化时补 row_id。
+  sheet.content = [headerRow, ...ensureStableRowIdsForSeedRows_ACU(seedRows)];
 }
 
 function applyTableEditDslOperationV2_ACU(state: TableDataObject_ACU, text: string): void {

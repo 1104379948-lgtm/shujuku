@@ -42,7 +42,9 @@ vi.mock('../../src/service/table/storage-mode', () => ({
 
 const {
   mockApplyParameterizedSqlMutation,
+  mockBuildSqlSheetBatchOperations,
   mockPersistTablesToChatMessage,
+  mockRebindSqlMutationTableIdentifiers,
   mockExecuteRuntimeMutation,
   mockGetRuntimeData,
   mockCreateRuntimeSnapshot,
@@ -52,8 +54,21 @@ const {
   mockRunTableWriteTransaction,
 } = vi.hoisted(() => ({
   mockApplyParameterizedSqlMutation: vi.fn(),
+  mockBuildSqlSheetBatchOperations: vi.fn((statements: string[], _tableData: any, options: any) => ({
+    operations: [{
+      kind: 'sql_sheet_batch',
+      sheetKey: options.fallbackTargetSheetKeys?.[0] || 'sheet_0',
+      tableName: 'beibaowupinbiao',
+      statements,
+      reason: options.reason,
+    }],
+  })),
   mockPersistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true, messageIndex: 0 }),
-  mockExecuteRuntimeMutation: vi.fn(() => ({ changes: 1, errors: [] })),
+  mockRebindSqlMutationTableIdentifiers: vi.fn((statements: string[]) => statements),
+  mockExecuteRuntimeMutation: vi.fn((_sql: string, _params?: any[]) => ({
+    changes: 1,
+    errors: [] as string[],
+  })),
   mockGetRuntimeData: vi.fn(),
   mockCreateRuntimeSnapshot: vi.fn(() => new Uint8Array([1, 2, 3])),
   mockRestoreRuntimeSnapshot: vi.fn().mockResolvedValue(undefined),
@@ -87,6 +102,8 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
 
 vi.mock('../../src/service/table/sql-table-service', () => ({
   applyParameterizedSqlMutationToTableDataSnapshot_ACU: mockApplyParameterizedSqlMutation,
+  buildSqlSheetBatchOperations_ACU: mockBuildSqlSheetBatchOperations,
+  rebindSqlMutationTableIdentifiers_ACU: mockRebindSqlMutationTableIdentifiers,
 }));
 
 vi.mock('../../src/service/table/table-service', () => ({
@@ -295,7 +312,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 UPDATE SQL（列名为字符串）', async () => {
       await api.updateCell('背包物品表', 1, '数量', '10');
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'UPDATE `inventory` SET `quantity` = ? WHERE `row_id` = ?;',
+        'UPDATE `beibaowupinbiao` SET `quantity` = ? WHERE `row_id` = ?;',
         ['10', '1'],
       );
     });
@@ -312,7 +329,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 UPDATE SQL（列名为数字索引）', async () => {
       await api.updateCell('背包物品表', 1, 1, '新铁剑');
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'UPDATE `inventory` SET `item_name` = ? WHERE `row_id` = ?;',
+        'UPDATE `beibaowupinbiao` SET `item_name` = ? WHERE `row_id` = ?;',
         ['新铁剑', '1'],
       );
     });
@@ -320,7 +337,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('value 为 null 时生成 NULL', async () => {
       await api.updateCell('背包物品表', 1, '数量', null);
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'UPDATE `inventory` SET `quantity` = ? WHERE `row_id` = ?;',
+        'UPDATE `beibaowupinbiao` SET `quantity` = ? WHERE `row_id` = ?;',
         [null, '1'],
       );
     });
@@ -328,8 +345,18 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('value 包含单引号时正确转义', async () => {
       await api.updateCell('背包物品表', 1, '物品名', "铁剑'加强版");
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'UPDATE `inventory` SET `item_name` = ? WHERE `row_id` = ?;',
+        'UPDATE `beibaowupinbiao` SET `item_name` = ? WHERE `row_id` = ?;',
         ["铁剑'加强版", '1'],
+      );
+    });
+
+    it('历史 DDL 表名只能定位 sheet，写入必须使用显示名派生的 runtime 表名', async () => {
+      const result = await api.updateCell('inventory', 1, '数量', '10');
+
+      expect(result).toBe(true);
+      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
+        'UPDATE `beibaowupinbiao` SET `quantity` = ? WHERE `row_id` = ?;',
+        ['10', '1'],
       );
     });
 
@@ -399,14 +426,14 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 UPDATE SQL（多列）', async () => {
       await api.updateRow('背包物品表', 1, { '物品名': '钢剑', '数量': '7' });
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'UPDATE `inventory` SET `item_name` = ?, `quantity` = ? WHERE `row_id` = ?;',
+        'UPDATE `beibaowupinbiao` SET `item_name` = ?, `quantity` = ? WHERE `row_id` = ?;',
         ['钢剑', '7', '1'],
       );
     });
 
     it('跳过 isImportMode 内部标记', async () => {
       await api.updateRow('背包物品表', 1, { '物品名': '钢剑', isImportMode: true });
-      expect(mockExecuteRuntimeMutation.mock.calls[0][0] as string).not.toContain('isImportMode');
+      expect(String(mockExecuteRuntimeMutation.mock.calls[0]?.[0] || '')).not.toContain('isImportMode');
     });
 
     it('包含未解析列时原子拒绝，不能执行部分更新', async () => {
@@ -450,7 +477,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 INSERT SQL', async () => {
       await api.insertRow('背包物品表', { '物品名': '盾牌', '数量': '1' });
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'INSERT INTO `inventory` (`item_name`, `quantity`) VALUES (?, ?);',
+        'INSERT INTO `beibaowupinbiao` (`item_name`, `quantity`) VALUES (?, ?);',
         ['盾牌', '1'],
       );
     });
@@ -458,20 +485,20 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('跳过 row_id 列（自增）', async () => {
       await api.insertRow('背包物品表', { row_id: '99', '物品名': '盾牌' });
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'INSERT INTO `inventory` (`item_name`) VALUES (?);',
+        'INSERT INTO `beibaowupinbiao` (`item_name`) VALUES (?);',
         ['盾牌'],
       );
     });
 
     it('空 data 生成 DEFAULT VALUES', async () => {
       await api.insertRow('背包物品表', {});
-      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith('INSERT INTO `inventory` DEFAULT VALUES;', []);
+      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith('INSERT INTO `beibaowupinbiao` DEFAULT VALUES;', []);
     });
 
     it('value 为 null 时将 null 作为参数传递', async () => {
       await api.insertRow('背包物品表', { '物品名': null, '数量': '1' });
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'INSERT INTO `inventory` (`item_name`, `quantity`) VALUES (?, ?);',
+        'INSERT INTO `beibaowupinbiao` (`item_name`, `quantity`) VALUES (?, ?);',
         [null, '1'],
       );
     });
@@ -479,7 +506,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('value 包含单引号时传递原始值不作转义（由参数化查询处理）', async () => {
       await api.insertRow('背包物品表', { '物品名': "铁剑'加强版" });
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'INSERT INTO `inventory` (`item_name`) VALUES (?);',
+        'INSERT INTO `beibaowupinbiao` (`item_name`) VALUES (?);',
         ["铁剑'加强版"],
       );
     });
@@ -565,7 +592,7 @@ describe('createTableCrudApi — SQLite 模式', () => {
     it('生成正确的 DELETE SQL', async () => {
       await api.deleteRow('背包物品表', 1);
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
-        'DELETE FROM `inventory` WHERE `row_id` = ?;',
+        'DELETE FROM `beibaowupinbiao` WHERE `row_id` = ?;',
         ['1'],
       );
     });

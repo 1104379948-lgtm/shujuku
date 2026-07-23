@@ -133,13 +133,25 @@ export interface CommitCurrentFloorTemplateChangesOptions_ACU {
 
 export interface CommitCurrentFloorTemplateChangesResult_ACU {
   saved: boolean;
-  mode?: 'template_only' | 'v2_commit';
+  mode?: 'template_only' | 'scope_only' | 'v2_commit';
   messageIndex?: number;
   checkpoints?: TableSheetCheckpointV2_ACU[];
   removedNullRowCount?: number;
   deletedSheetKeys?: string[];
   purgedMessageCount?: number;
   error?: string;
+}
+
+export interface CommitCurrentFloorTemplateScopeOnlyOptions_ACU {
+  isolationKey?: string;
+  baselineData: TableDataObject_ACU;
+  candidateData: TableDataObject_ACU;
+  guideData: Record<string, any>;
+  templateSource: any;
+  presetName?: string;
+  source?: string;
+  reason?: string;
+  createdAt?: number;
 }
 
 type TemplatePersistOperation_ACU = Extract<TableMutationOperationV2_ACU, {
@@ -1561,6 +1573,81 @@ function canonicalJson_ACU(value: unknown): string {
   if (!value || typeof value !== 'object') return JSON.stringify(value);
   const record = value as Record<string, unknown>;
   return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson_ACU(record[key])}`).join(',')}}`;
+}
+
+function templatePersistentProjectionMatches_ACU(
+  baselineData: TableDataObject_ACU,
+  candidateData: TableDataObject_ACU,
+): boolean {
+  const project = (data: TableDataObject_ACU): Record<string, unknown> => Object.fromEntries(
+    Object.keys(data)
+      .filter(key => key.startsWith('sheet_'))
+      .sort()
+      .map(key => [key, templateSheetPersistentProjection_ACU(data[key] as Sheet_ACU)]),
+  );
+  return canonicalJson_ACU(project(baselineData)) === canonicalJson_ACU(project(candidateData));
+}
+
+/**
+ * Persists a chat template selection when reconciliation has proved that no
+ * sheet-level storage mutation is necessary. This deliberately remains a
+ * separate API: the structural commit entry point must keep rejecting empty
+ * change sets so accidental lost migrations cannot be reported as success.
+ */
+export async function commitCurrentFloorTemplateScopeOnly_ACU(
+  options: CommitCurrentFloorTemplateScopeOnlyOptions_ACU,
+): Promise<CommitCurrentFloorTemplateChangesResult_ACU> {
+  if (!options.guideData || typeof options.guideData !== 'object' || Array.isArray(options.guideData)) {
+    return { saved: false, error: 'scope-only 模板提交必须提供有效的 guideData。' };
+  }
+  if (!options.baselineData || !options.candidateData
+    || !templatePersistentProjectionMatches_ACU(options.baselineData, options.candidateData)) {
+    return { saved: false, error: 'scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致。' };
+  }
+  const createdAt = options.createdAt ?? Date.now();
+  if (!Number.isFinite(createdAt) || createdAt < 0) {
+    return { saved: false, error: 'scope-only 模板提交 requires a finite non-negative createdAt.' };
+  }
+  const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+  try {
+    return await runTableWriteTransaction_ACU({
+      source: 'template_assistant',
+      reason: options.reason || 'commitCurrentFloorTemplateScopeOnly',
+      isolationKey,
+      writeSet: [{ kind: 'all' }],
+      maintenanceMode: 'exclusive',
+    }, async transactionContext => transactionContext.runCommit(async () => {
+      const chat = getChatArray_ACU();
+      if (!Array.isArray(chat) || chat.length === 0) throw new Error('chat history is empty');
+      transactionContext.assertFresh?.('commitCurrentFloorTemplateScopeOnly:before_commit');
+      const previousScopeContainer = cloneOptionalJson_ACU(getChatScopedConfigContainer_ACU(chat));
+      const previousGuideContainer = cloneOptionalJson_ACU(getChatSheetGuideContainer_ACU(chat));
+      try {
+        const guideUpdated = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, options.guideData, {
+          reason: options.reason || 'chat_template_scope_only',
+          syncTemplateScope: true,
+          templateSource: options.templateSource,
+          presetName: options.presetName,
+          source: options.source,
+          updatedAt: createdAt,
+        });
+        if (!guideUpdated) throw new Error('scope-only 模板提交无法写入 guideData 与 template scope。');
+        await saveChatToHostStrict_ACU();
+        return { saved: true, mode: 'scope_only' as const };
+      } catch (error: any) {
+        setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
+        setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
+        try {
+          await saveChatToHostStrict_ACU();
+        } catch (rollbackError: any) {
+          throw new Error(`${error?.message || String(error)}；回滚保存也失败：${rollbackError?.message || String(rollbackError)}`);
+        }
+        throw error;
+      }
+    }, []));
+  } catch (error: any) {
+    return { saved: false, error: error?.message || String(error) };
+  }
 }
 
 function assertValidTemplateMetaUpdate_ACU(operation: Record<string, any>, sheetKey: string): void {

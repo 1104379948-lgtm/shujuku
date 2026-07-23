@@ -22,6 +22,22 @@ export function parseDDLTableName(ddl: string): string | null {
 }
 
 /**
+ * Rebinds only the CREATE TABLE identifier in a parsed DDL statement.
+ * It deliberately does not use a broad replacement: literals, comments,
+ * constraints and nested expressions must remain byte-for-byte untouched.
+ */
+export function rebindCreateTableName_ACU(ddl: string, tableName: string): string {
+  const value = String(ddl || '');
+  const replacement = String(tableName || '').trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(replacement)) {
+    throw new Error(`无效的 SQLite runtime 表名：${replacement || '(empty)'}`);
+  }
+  const bounds = findCreateTableDefinitionBounds_ACU(value);
+  if (!bounds) throw new Error('无法解析 CREATE TABLE 语句，不能重绑定 runtime 表名。');
+  return `${value.slice(0, bounds.tableNameStart)}${replacement}${value.slice(bounds.tableNameEnd)}`;
+}
+
+/**
  * 从 DDL 第一行注释中解析中文表名
  * 格式：CREATE TABLE table_name ( -- 中文表名
  * @param ddl CREATE TABLE 语句
@@ -274,7 +290,13 @@ function getCreateTableDefinitionBody_ACU(ddl: string): string | null {
   return bounds ? value.slice(bounds.openingIndex + 1, bounds.closingIndex) : null;
 }
 
-function findCreateTableDefinitionBounds_ACU(value: string): { tableName: string; openingIndex: number; closingIndex: number } | null {
+function findCreateTableDefinitionBounds_ACU(value: string): {
+  tableName: string;
+  tableNameStart: number;
+  tableNameEnd: number;
+  openingIndex: number;
+  closingIndex: number;
+} | null {
   let index = skipSqlTrivia_ACU(value, 0);
   index = consumeSqlKeyword_ACU(value, index, 'CREATE');
   if (index < 0) return null;
@@ -326,7 +348,9 @@ function findCreateTableDefinitionBounds_ACU(value: string): { tableName: string
       continue;
     }
     if (char === '(') depth += 1;
-    if (char === ')' && --depth === 0) return { tableName: value.slice(tableNameStart, tableNameEnd), openingIndex, closingIndex: index };
+    if (char === ')' && --depth === 0) {
+      return { tableName: value.slice(tableNameStart, tableNameEnd), tableNameStart, tableNameEnd, openingIndex, closingIndex: index };
+    }
   }
   return null;
 }

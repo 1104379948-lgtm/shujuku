@@ -64,6 +64,19 @@ describe('NameMapper', () => {
       const m = NameMapper.fromDDLs(ddlMap);
       expect(m.tableCount).toBe(1);
     });
+
+    it('以 runtime physical name map key 而非 DDL 内旧表名建立映射', () => {
+      const m = NameMapper.fromDDLs(new Map([
+        ['jiyaobiao', `CREATE TABLE chronicle ( -- 纪要表
+  row_id INTEGER PRIMARY KEY, -- 行号
+  content TEXT -- 内容
+);`],
+      ]));
+
+      expect(m.resolveTableName('纪要表')).toBe('jiyaobiao');
+      expect(m.resolveColumnName('jiyaobiao', '内容')).toBe('content');
+      expect(m.getAllTableNames()).toEqual(['jiyaobiao']);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════

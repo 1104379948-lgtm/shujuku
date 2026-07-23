@@ -1838,6 +1838,11 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockSettings.updateBatchSize = 1;
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
     mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    mockParseAndApplyTableEditsToData.mockImplementation(() => ({
+      success: true,
+      modifiedKeys: ['sheet_0'],
+      appliedEdits: 0,
+    }));
 
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true, confirmBoundaryReset: true });
 
@@ -2922,8 +2927,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'base-a'], ['2', 'sql-a']]);
     expect(mockCurrentJsonTableData.sheet_1.content).toEqual([['row_id', 'value'], ['1', 'base-b'], ['2', 'sql-b']]);
     expect(mockPersistTablesToChatMessage.mock.calls[0][0].operations).toEqual([
-      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["INSERT INTO inventory VALUES (2, 'sql-a')"], tableName: 'inventory', reason: 'system' },
-      { kind: 'sql_sheet_batch', sheetKey: 'sheet_1', statements: ["INSERT INTO quest_log VALUES (2, 'sql-b')"], tableName: 'quest_log', reason: 'system' },
+      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["INSERT INTO biaoa VALUES (2, 'sql-a')"], tableName: 'biaoa', reason: 'system' },
+      { kind: 'sql_sheet_batch', sheetKey: 'sheet_1', statements: ["INSERT INTO biaob VALUES (2, 'sql-b')"], tableName: 'biaob', reason: 'system' },
     ]);
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
@@ -3281,11 +3286,11 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 3 });
     mockParseAndApplyTableEditsToData.mockImplementation((aiResponse: string, tableData: any) => {
       if (aiResponse.includes('sheet_0')) {
-        tableData.sheet_0.content.push(['2', '来自A']);
+        tableData.sheet_0.content.push([String(tableData.sheet_0.content.length), '来自A']);
         return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 };
       }
       if (aiResponse.includes('sheet_1')) {
-        tableData.sheet_1.content.push(['2', '来自B']);
+        tableData.sheet_1.content.push([String(tableData.sheet_1.content.length), '来自B']);
         return { success: true, modifiedKeys: ['sheet_1'], appliedEdits: 1 };
       }
       return { success: false, modifiedKeys: [], appliedEdits: 0 };

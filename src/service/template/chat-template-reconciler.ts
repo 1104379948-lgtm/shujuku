@@ -1,6 +1,6 @@
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
-import { parseDDLColumnInfos_ACU, parseDDLTableName, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
+import { parseDDLColumnInfos_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
 import { preflightSchemaMigrations_ACU, type SchemaMigrationPreflightIntent_ACU } from '../table/schema-migration-preflight';
 import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist';
 import { applyTableOperationV2_ACU } from '../table/storage-frame-v2-replay';
@@ -229,7 +229,6 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
   const beforeColumns = parseDDLColumnInfos_ACU(String(before.sourceData?.ddl || ''));
   const targetColumns = parseDDLColumnInfos_ACU(String(template.sourceData?.ddl || ''));
   if (beforeColumns.length !== beforeHeaders.length || targetColumns.length !== targetHeaders.length) throw new Error('DDL 与表头列数不一致。');
-  if (parseDDLTableName(String(before.sourceData?.ddl || '')) !== parseDDLTableName(String(template.sourceData?.ddl || ''))) throw new Error('同名表不能改变 SQLite 物理表名。');
   const beforeByCanonical = new Map(beforeHeaders.slice(1).map((name, index) => [canonicalizeDisplayName_ACU(name), { index: index + 1, physical: beforeColumns[index + 1].sqlName, header: name }]));
   const targetByCanonical = new Map(targetHeaders.slice(1).map((name, index) => [canonicalizeDisplayName_ACU(name), { index: index + 1, physical: targetColumns[index + 1].sqlName, header: name, column: targetColumns[index + 1] }]));
   if (beforeByCanonical.size !== beforeHeaders.length - 1 || targetByCanonical.size !== targetHeaders.length - 1) throw new Error('存在空列或规范化重复列。');

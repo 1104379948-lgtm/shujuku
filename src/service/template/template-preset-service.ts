@@ -21,7 +21,7 @@ import { ensureSheetOrderNumbers_ACU, logWarn_ACU, parseTableTemplateJson_ACU } 
 import { buildDefaultExportConfig_ACU, ensureExportConfigDefaults_ACU } from '../worldbook/injection-engine';
 import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from './template-import-validator';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
-import { commitCurrentFloorTemplateChanges_ACU } from '../table/storage-frame-v2-persist';
+import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
 import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 
@@ -391,18 +391,30 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
     });
     if (!guideData) return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
 
-    const committed = await commitCurrentFloorTemplateChanges_ACU({
-        isolationKey,
-        sheetChanges: plan.sheetChanges,
-        deletedSheetKeys: plan.deletedSheetKeys,
-        guideData,
-        syncTemplateScope: true,
-        templateSource: plan.candidateData,
-        presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
-        source,
-        reason: 'chat_template_reconciliation',
-        baseRevision,
-    });
+    const hasStructuralChanges = plan.sheetChanges.length > 0 || plan.deletedSheetKeys.length > 0;
+    const committed = hasStructuralChanges
+        ? await commitCurrentFloorTemplateChanges_ACU({
+            isolationKey,
+            sheetChanges: plan.sheetChanges,
+            deletedSheetKeys: plan.deletedSheetKeys,
+            guideData,
+            syncTemplateScope: true,
+            templateSource: plan.candidateData,
+            presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
+            source,
+            reason: 'chat_template_reconciliation',
+            baseRevision,
+        })
+        : await commitCurrentFloorTemplateScopeOnly_ACU({
+            isolationKey,
+            baselineData,
+            candidateData: plan.candidateData,
+            guideData,
+            templateSource: plan.candidateData,
+            presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
+            source,
+            reason: 'chat_template_reconciliation',
+        });
     if (!committed.saved) return { ...committed, blockers: plan.blockers, audit: plan.audit };
 
     _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));

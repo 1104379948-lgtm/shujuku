@@ -88,7 +88,13 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: mocks.runTransaction,
 }));
 
-import { commitCurrentFloorTemplateChanges_ACU, persistNullRowCleanupShards_ACU, persistTableMutationLogBatchV2_ACU, persistTableSheetCheckpointV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
+import {
+  commitCurrentFloorTemplateChanges_ACU,
+  commitCurrentFloorTemplateScopeOnly_ACU,
+  persistNullRowCleanupShards_ACU,
+  persistTableMutationLogBatchV2_ACU,
+  persistTableSheetCheckpointV2_ACU,
+} from '../../../src/service/table/storage-frame-v2-persist';
 import { buildSheetSchemaMigrationOperation_ACU } from '../../../src/service/table/table-schema-migration';
 
 const sheetA = { uid: 'a', name: 'A', sourceData: {}, content: [['row_id', 'value'], ['1', 'new']], updateConfig: {}, exportConfig: {}, orderNo: 1 } as any;
@@ -820,6 +826,95 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       assertFresh: vi.fn(),
       runCommit: async (commitTask: () => any) => commitTask(),
     }));
+  });
+
+  describe('commitCurrentFloorTemplateScopeOnly_ACU', () => {
+    const scopeOnlyData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_a: sheetA,
+      sheet_b: sheetB,
+    } as any;
+
+    it('持久化 Sheet 投影一致时仅写入 guide 与 template scope，不创建 V2 frame', async () => {
+      const message = { is_user: false } as any;
+      mocks.chat.push(message);
+
+      const result = await commitCurrentFloorTemplateScopeOnly_ACU({
+        isolationKey: 'scope-only',
+        baselineData: scopeOnlyData,
+        candidateData: JSON.parse(JSON.stringify(scopeOnlyData)),
+        guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+        templateSource: scopeOnlyData,
+        presetName: '预设A',
+        source: 'test',
+        createdAt: 30,
+      });
+
+      expect(result).toEqual({ saved: true, mode: 'scope_only' });
+      expect(mocks.runTransaction).toHaveBeenCalledWith(expect.objectContaining({
+        source: 'template_assistant', isolationKey: 'scope-only', writeSet: [{ kind: 'all' }], maintenanceMode: 'exclusive',
+      }), expect.any(Function));
+      expect(mocks.setGuide).toHaveBeenCalledWith('scope-only', expect.any(Object), expect.objectContaining({
+        syncTemplateScope: true, templateSource: scopeOnlyData, presetName: '预设A', source: 'test', updatedAt: 30,
+      }));
+      expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+      expect(message.TavernDB_ACU_IsolatedData).toBeUndefined();
+    });
+
+    it('持久化 Sheet 投影不一致时拒绝，且不进入事务或保存', async () => {
+      mocks.chat.push({ is_user: false });
+      const changedCandidate = JSON.parse(JSON.stringify(scopeOnlyData));
+      changedCandidate.sheet_a.name = '已变更';
+
+      const result = await commitCurrentFloorTemplateScopeOnly_ACU({
+        baselineData: scopeOnlyData,
+        candidateData: changedCandidate,
+        guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+        templateSource: changedCandidate,
+      });
+
+      expect(result).toMatchObject({ saved: false, error: expect.stringContaining('持久化 Sheet 投影完全一致') });
+      expect(mocks.runTransaction).not.toHaveBeenCalled();
+      expect(mocks.setGuide).not.toHaveBeenCalled();
+      expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    });
+
+    it('无效 guideData 时在副作用前拒绝', async () => {
+      const result = await commitCurrentFloorTemplateScopeOnly_ACU({
+        baselineData: scopeOnlyData,
+        candidateData: JSON.parse(JSON.stringify(scopeOnlyData)),
+        guideData: [] as any,
+        templateSource: scopeOnlyData,
+      });
+
+      expect(result).toMatchObject({ saved: false, error: expect.stringContaining('有效的 guideData') });
+      expect(mocks.runTransaction).not.toHaveBeenCalled();
+      expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    });
+
+    it('严格保存失败时恢复 scope 与 guide 容器并执行回滚保存', async () => {
+      mocks.chat.push({ is_user: false });
+      const originalScope = JSON.parse(JSON.stringify(mocks.scopeContainer));
+      const originalGuide = JSON.parse(JSON.stringify(mocks.guideContainer));
+      mocks.setGuide.mockImplementation(() => {
+        mocks.scopeContainer.template[''].changed = true;
+        mocks.guideContainer.tags[''].changed = true;
+        return true;
+      });
+      mocks.saveChatStrict.mockRejectedValueOnce(new Error('host save failed')).mockResolvedValueOnce(undefined);
+
+      const result = await commitCurrentFloorTemplateScopeOnly_ACU({
+        baselineData: scopeOnlyData,
+        candidateData: JSON.parse(JSON.stringify(scopeOnlyData)),
+        guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+        templateSource: scopeOnlyData,
+      });
+
+      expect(result).toEqual({ saved: false, error: 'host save failed' });
+      expect(mocks.saveChatStrict).toHaveBeenCalledTimes(2);
+      expect(mocks.scopeContainer).toEqual(originalScope);
+      expect(mocks.guideContainer).toEqual(originalGuide);
+    });
   });
 
   it('pristine 聊天保存完整模板快照时创建 header-only V2 checkpoint 与 sheet checkpoints', async () => {

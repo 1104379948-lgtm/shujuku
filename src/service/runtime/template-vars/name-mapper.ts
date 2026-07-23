@@ -10,7 +10,6 @@
  */
 
 import {
-  parseDDLTableName,
   parseDDLChineseName,
   parseDDLColumnComments,
 } from '../../../shared/ddl-utils';
@@ -47,7 +46,7 @@ export function getNameMapper(): NameMapper {
  * 从所有表的 DDL 构建全局 NameMapper
  * 在 SQLite 加载完成后调用
  *
- * @param ddlMap 表英文名 → DDL 语句的映射
+ * @param ddlMap runtime 物理表名 → 有效 DDL 的映射
  */
 export function buildGlobalNameMapper(ddlMap: Map<string, string>): void {
   _globalNameMapperSchemaSignature = buildDDLMapSignature_ACU(ddlMap);
@@ -74,8 +73,9 @@ export function ensureGlobalNameMapperForDDLs_ACU(ddlMap: Map<string, string>): 
 export function resolveRuntimeEffectiveDDL_ACU(
   sheet: Sheet_ACU,
   fallbackTableName?: string,
+  runtimeTableName?: string,
 ): EffectiveDDLResult_ACU {
-  return resolveEffectiveDDL(sheet, fallbackTableName);
+  return resolveEffectiveDDL(sheet, fallbackTableName, runtimeTableName);
 }
 
 /** 当前全局 mapper 是否精确对应给定的有效 DDL 集合。 */
@@ -119,17 +119,17 @@ export class NameMapper {
 
   /**
    * 从多张表的 DDL 构建映射器
-   * @param ddlMap 表英文名 → DDL 语句的映射
+   *
+   * Map key 是由完整 TableDataObject 分配的 runtime 物理表名；不能从
+   * 用户可编辑的 DDL 文本重新推导，否则显示名与 DDL 名不一致时会向 SQLite
+   * 发出不存在的表名。
    */
   static fromDDLs(ddlMap: Map<string, string>): NameMapper {
     const mapper = new NameMapper();
 
-    for (const [_key, ddl] of ddlMap) {
-      if (!ddl) continue;
-
-      // 解析英文表名
-      const englishTableName = parseDDLTableName(ddl);
-      if (!englishTableName) continue;
+    for (const [physicalTableName, ddl] of ddlMap) {
+      const englishTableName = String(physicalTableName || '').trim();
+      if (!englishTableName || !ddl) continue;
 
       // 解析中文表名（DDL 第一行注释）
       const chineseTableName = parseDDLChineseName(ddl);

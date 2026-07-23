@@ -16,6 +16,7 @@ import type { ApiGroupContext } from './callback-api';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { ensureGlobalNameMapperForDDLs_ACU, getNameMapper, resolveRuntimeEffectiveDDL_ACU } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
+import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity';
 import { getLatestTableAppendMessageIndexFromChat_ACU } from '../../../service/table/table-history';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
@@ -23,15 +24,11 @@ import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '..
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
 
 /**
- * 从 sheet 解析英文物理表名
- * 必须与 SyncBridge 使用相同的稳定 sheet key fallback，不能使用用户可改的显示名。
+ * 从完整表集合分配 runtime 物理表名。collision hash 依赖完整集合，不能从单个
+ * sheet 或其 DDL 文本推导。
  */
-function getEnglishTableName(sheet: any, sheetKey: string): string {
-    if (!sheet || typeof sheet !== 'object') return sheetKey;
-    const ddl = resolveRuntimeEffectiveDDL_ACU(sheet, sheet.uid || sheetKey).effectiveDDL;
-    const parsed = parseDDLTableName(ddl);
-    if (parsed) return parsed;
-    return sheetKey;
+function getEnglishTableName(tableData: Record<string, any>, sheetKey: string): string {
+    return getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
 }
 
 /**
@@ -43,11 +40,13 @@ function ensureNameMapperForTableData_ACU(tableData: Record<string, any>): void 
     const ddlMap = new Map<string, string>();
     for (const [sheetKey, sheet] of Object.entries(tableData || {})) {
         if (!sheetKey.startsWith('sheet_') || !sheet || typeof sheet !== 'object') continue;
-        const ddl = resolveRuntimeEffectiveDDL_ACU(sheet as any, (sheet as any).uid || sheetKey).effectiveDDL;
-        const tableName = parseDDLTableName(ddl);
-        if (tableName) {
-            ddlMap.set(tableName, ddl);
-        }
+        const runtimeTableName = getEnglishTableName(tableData, sheetKey);
+        const ddl = resolveRuntimeEffectiveDDL_ACU(
+            sheet as any,
+            (sheet as any).uid || sheetKey,
+            runtimeTableName,
+        ).effectiveDDL;
+        ddlMap.set(runtimeTableName, ddl);
     }
     ensureGlobalNameMapperForDDLs_ACU(ddlMap);
 }
@@ -72,7 +71,7 @@ function findTargetSheetInData_ACU(
             return {
                 sheet,
                 sheetKey,
-                englishTableName: getEnglishTableName(sheet, sheetKey),
+                englishTableName: getEnglishTableName(tableData, sheetKey),
             };
         }
     }
@@ -88,17 +87,17 @@ function findTargetSheetInData_ACU(
                 return {
                     sheet,
                     sheetKey,
-                    englishTableName: getEnglishTableName(sheet, sheetKey),
+                    englishTableName: getEnglishTableName(tableData, sheetKey),
                 };
             }
         }
     }
 
-    // 路径 3：直接从 DDL 的英文表名匹配（兜底，覆盖 NameMapper 未构建的场景）
+    // 路径 3：runtime physical name 直接匹配。
     for (const sheetKey in tableData) {
         if (!sheetKey.startsWith('sheet_')) continue;
         const sheet = tableData[sheetKey];
-        const english = getEnglishTableName(sheet, sheetKey);
+        const english = getEnglishTableName(tableData, sheetKey);
         if (english && english === tableName) {
             return {
                 sheet,
@@ -106,6 +105,27 @@ function findTargetSheetInData_ACU(
                 englishTableName: english,
             };
         }
+    }
+
+    // 路径 4：兼容历史 DDL 名称以定位 sheet；它绝不能成为 SQL 的目标表名。
+    const ddlAliasMatches: Array<{ sheet: any; sheetKey: string }> = [];
+    for (const sheetKey in tableData) {
+        if (!sheetKey.startsWith('sheet_')) continue;
+        const sheet = tableData[sheetKey];
+        if (!sheet || typeof sheet !== 'object') continue;
+        const ddlTableName = parseDDLTableName(String(sheet.sourceData?.ddl || ''));
+        if (ddlTableName && ddlTableName === tableName) {
+            ddlAliasMatches.push({ sheet, sheetKey });
+        }
+    }
+
+    if (ddlAliasMatches.length === 1) {
+        const [{ sheet, sheetKey }] = ddlAliasMatches;
+        return {
+            sheet,
+            sheetKey,
+            englishTableName: getEnglishTableName(tableData, sheetKey),
+        };
     }
 
     return null;

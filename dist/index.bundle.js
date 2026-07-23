@@ -33626,6 +33626,9 @@ $CONTENT
 
     const SHEET_KEY_ALGORITHM_VERSION_ACU = 1;
     const MAX_SHEET_SLUG_LENGTH_ACU = 48;
+    const PHYSICAL_TABLE_NAME_ALGORITHM_VERSION_ACU = 1;
+    const MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU = 48;
+    const SQLITE_RESERVED_TABLE_PREFIXES_ACU = ['sqlite_', '_acu_'];
     /** Comparison-only normalization. Never write this value back to the display name. */
     function canonicalizeDisplayName_ACU(value) {
         return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
@@ -33654,6 +33657,53 @@ $CONTENT
     function buildStableSheetKeyCandidate_ACU(displayName) {
         const slug = toAsciiSlug_ACU(displayName);
         return slug ? `sheet_${slug}` : null;
+    }
+    /**
+     * Runtime SQLite names are derived from the display name, not from a legacy
+     * CREATE TABLE identifier embedded in user-authored DDL. Allocation must use
+     * the complete sheet set so slug collisions stay deterministic.
+     */
+    function resolvePhysicalTableNames_ACU(data) {
+        const entries = Object.keys(data || {})
+            .filter(sheetKey => sheetKey.startsWith('sheet_'))
+            .sort()
+            .map(sheetKey => ({ sheetKey, sheet: data[sheetKey] }));
+        const baseByKey = new Map(entries.map(({ sheetKey, sheet }) => [sheetKey, physicalTableNameBase_ACU(sheet, sheetKey)]));
+        const groups = new Map();
+        for (const [sheetKey, base] of baseByKey) {
+            const group = groups.get(base.toLowerCase()) || [];
+            group.push(sheetKey);
+            groups.set(base.toLowerCase(), group);
+        }
+        const result = new Map();
+        for (const { sheetKey } of entries) {
+            const base = baseByKey.get(sheetKey);
+            const group = groups.get(base.toLowerCase());
+            result.set(sheetKey, group.length === 1 ? base : `${truncatePhysicalTableNameForHash_ACU(base)}_${stableHash_ACU(sheetKey)}`);
+        }
+        return result;
+    }
+    function getPhysicalTableNameForSheet_ACU(data, sheetKey) {
+        const resolved = resolvePhysicalTableNames_ACU(data).get(sheetKey);
+        if (!resolved)
+            throw new Error(`无法为 Sheet 分配 SQLite runtime 表名：${sheetKey}`);
+        return resolved;
+    }
+    /** Use resolvePhysicalTableNames_ACU whenever collision arbitration is possible. */
+    function resolvePhysicalTableName_ACU(sheet, sheetKey) {
+        return physicalTableNameBase_ACU(sheet, sheetKey);
+    }
+    function physicalTableNameBase_ACU(sheet, sheetKey) {
+        const displaySlug = toAsciiSlug_ACU(sheet?.name).replace(/_/g, '');
+        const keySlug = toAsciiSlug_ACU(String(sheetKey || '').replace(/^sheet_/, '')).replace(/_/g, '');
+        let candidate = (displaySlug || keySlug || 'sheet').slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU);
+        if (/^[0-9]/.test(candidate) || SQLITE_RESERVED_TABLE_PREFIXES_ACU.some(prefix => candidate.toLowerCase().startsWith(prefix))) {
+            candidate = `table_${candidate}`;
+        }
+        return candidate.slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU) || 'table_sheet';
+    }
+    function truncatePhysicalTableNameForHash_ACU(value) {
+        return value.slice(0, Math.max(1, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU - 11)).replace(/_+$/g, '') || 'table';
     }
     /**
      * Allocates identities for a new batch while preserving supplied persisted identities verbatim.
@@ -34281,6 +34331,22 @@ $CONTENT
         return bounds?.tableName || null;
     }
     /**
+     * Rebinds only the CREATE TABLE identifier in a parsed DDL statement.
+     * It deliberately does not use a broad replacement: literals, comments,
+     * constraints and nested expressions must remain byte-for-byte untouched.
+     */
+    function rebindCreateTableName_ACU(ddl, tableName) {
+        const value = String(ddl || '');
+        const replacement = String(tableName || '').trim();
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(replacement)) {
+            throw new Error(`无效的 SQLite runtime 表名：${replacement || '(empty)'}`);
+        }
+        const bounds = findCreateTableDefinitionBounds_ACU(value);
+        if (!bounds)
+            throw new Error('无法解析 CREATE TABLE 语句，不能重绑定 runtime 表名。');
+        return `${value.slice(0, bounds.tableNameStart)}${replacement}${value.slice(bounds.tableNameEnd)}`;
+    }
+    /**
      * 从 DDL 第一行注释中解析中文表名
      * 格式：CREATE TABLE table_name ( -- 中文表名
      * @param ddl CREATE TABLE 语句
@@ -34583,8 +34649,9 @@ $CONTENT
             }
             if (char === '(')
                 depth += 1;
-            if (char === ')' && --depth === 0)
-                return { tableName: value.slice(tableNameStart, tableNameEnd), openingIndex, closingIndex: index };
+            if (char === ')' && --depth === 0) {
+                return { tableName: value.slice(tableNameStart, tableNameEnd), tableNameStart, tableNameEnd, openingIndex, closingIndex: index };
+            }
         }
         return null;
     }
@@ -34995,30 +35062,33 @@ $CONTENT
      * Persistence and migration callers must reject fallback_invalid explicitly;
      * runtime callers may use its generated effectiveDDL after recording a diagnostic.
      */
-    function resolveEffectiveDDL(sheet, fallbackTableName) {
+    function resolveEffectiveDDL(sheet, fallbackTableName, runtimeTableName) {
         const headers = sheet.content?.[0];
         const safeHeaders = Array.isArray(headers) && headers.length > 0
             ? headers.map(header => String(header ?? ''))
             : ['row_id'];
         const originalDDL = typeof sheet.sourceData?.ddl === 'string' ? sheet.sourceData.ddl.trim() : '';
         if (!originalDDL) {
-            return buildRuntimeFallbackDDL_ACU(sheet, fallbackTableName, 'fallback_missing', 'DDL 缺失，已使用运行时 fallback schema。');
+            return buildRuntimeFallbackDDL_ACU(sheet, runtimeTableName || fallbackTableName, 'fallback_missing', 'DDL 缺失，已使用运行时 fallback schema。');
         }
         const normalizedDDL = normalizeSqlStructure(originalDDL);
         const columns = parseDDLColumnInfos_ACU(normalizedDDL);
         const firstColumn = columns[0];
         if (parseDDLTableName(normalizedDDL) && firstColumn?.sqlName === 'row_id'
             && firstColumn.declaredType === 'INTEGER' && firstColumn.isPrimaryKey) {
-            logDebug_ACU(`[Schema] resolveEffectiveDDL: 使用用户定义 DDL, 表名=${parseDDLTableName(normalizedDDL) || 'unknown'}`);
+            const effectiveDDL = runtimeTableName
+                ? rebindCreateTableName_ACU(normalizedDDL, runtimeTableName)
+                : normalizedDDL;
+            logDebug_ACU(`[Schema] resolveEffectiveDDL: 使用用户定义 DDL, runtime表名=${parseDDLTableName(effectiveDDL) || 'unknown'}`);
             return {
                 originalDDL,
-                effectiveDDL: normalizedDDL,
+                effectiveDDL,
                 source: 'explicit',
                 diagnostics: [],
                 columnMap: buildExplicitColumnMap_ACU(sheet, normalizedDDL, safeHeaders),
             };
         }
-        return buildRuntimeFallbackDDL_ACU(sheet, fallbackTableName, 'fallback_invalid', '显式 DDL 缺少可用的 row_id INTEGER PRIMARY KEY 结构。');
+        return buildRuntimeFallbackDDL_ACU(sheet, runtimeTableName || fallbackTableName, 'fallback_invalid', '显式 DDL 缺少可用的 row_id INTEGER PRIMARY KEY 结构。');
     }
     function buildRuntimeFallbackDDL_ACU(sheet, fallbackTableName, source = 'fallback_missing', diagnostic = 'DDL 缺失，已使用运行时 fallback schema。') {
         const headers = Array.isArray(sheet.content?.[0]) && sheet.content[0].length > 0
@@ -35428,13 +35498,14 @@ $CONTENT
             this.engine.run(META_TABLE_DDL);
             // 遍历所有 sheet
             const sheetKeys = Object.keys(data).filter(k => k.startsWith('sheet_'));
+            const physicalTableNames = resolvePhysicalTableNames_ACU(data);
             logDebug_ACU(`[SyncBridge] 开始加载 ${sheetKeys.length} 张表到 SQLite`);
             for (const key of sheetKeys) {
                 const sheet = data[key];
                 if (!sheet || !Array.isArray(sheet.content))
                     continue;
                 try {
-                    this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true);
+                    this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true, physicalTableNames.get(key));
                 }
                 catch (e) {
                     const errorMessage = e?.message || String(e);
@@ -35498,8 +35569,8 @@ $CONTENT
         // 内部方法
         // ═══════════════════════════════════════════════════════════════
         /** 加载单张 sheet 到 SQLite */
-        _loadSheet(sheetKey, sheet, allowRuntimeDdlFallback) {
-            const resolvedDDL = resolveEffectiveDDL(sheet, sheet.uid || sheetKey);
+        _loadSheet(sheetKey, sheet, allowRuntimeDdlFallback, runtimeTableName) {
+            const resolvedDDL = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, runtimeTableName);
             if (resolvedDDL.source === 'fallback_invalid' && !allowRuntimeDdlFallback) {
                 throw new Error(resolvedDDL.diagnostics[0]);
             }
@@ -35537,7 +35608,7 @@ $CONTENT
                 // INSERT/约束/映射错误必须原样 fail closed，防止用全 TEXT 表偷偷吞掉数据完整性问题。
                 if (resolvedDDL.source !== 'explicit' || !allowRuntimeDdlFallback || !/^第 1 条语句失败:/.test(error?.message || ''))
                     throw error;
-                const fallback = buildRuntimeFallbackDDL_ACU(sheet, sheet.uid || sheetKey, 'fallback_invalid', '显式 DDL 无法在 runtime SQLite 执行，已使用 fallback schema。');
+                const fallback = buildRuntimeFallbackDDL_ACU(sheet, runtimeTableName || sheet.uid || sheetKey, 'fallback_invalid', '显式 DDL 无法在 runtime SQLite 执行，已使用 fallback schema。');
                 this._recordRuntimeFallbackDiagnostic(sheetKey, fallback, 'runtime_ddl_retry', error?.message || String(error));
                 executeResolvedDDL(fallback);
                 this._recordRuntimeEffectiveSchema(sheetKey, fallback);
@@ -35623,18 +35694,21 @@ $CONTENT
         }
         /** 通过 SQL 表名查找对应的元数据 */
         _findMetaByTableName(metaMap, tableName) {
-            // 遍历元数据，找到 DDL 中表名匹配的那条
-            for (const [, meta] of metaMap) {
-                const ddl = meta.sourceData?.ddl;
-                if (ddl) {
-                    const ddlTableName = parseDDLTableName(ddl);
-                    if (ddlTableName === tableName)
-                        return meta;
-                }
+            const metadataData = { mate: {} };
+            for (const [sheetKey, meta] of metaMap) {
+                metadataData[sheetKey] = {
+                    uid: meta.uid,
+                    name: meta.name,
+                    sourceData: meta.sourceData || {},
+                    content: [],
+                    updateConfig: meta.updateConfig || {},
+                    exportConfig: meta.exportConfig || {},
+                    orderNo: meta.orderNo,
+                };
             }
-            // fallback：用 uid 匹配
-            for (const [, meta] of metaMap) {
-                if (meta.uid === tableName)
+            const physicalTableNames = resolvePhysicalTableNames_ACU(metadataData);
+            for (const [sheetKey, meta] of metaMap) {
+                if (physicalTableNames.get(sheetKey) === tableName)
                     return meta;
             }
             return null;
@@ -35828,8 +35902,6 @@ $CONTENT
     function getExpectedChanges_ACU(before, target) {
         if (before.uid !== target.uid)
             throw new Error('schema migration 不允许修改 sheet uid。');
-        if (before.tableName !== target.tableName)
-            throw new Error('schema migration 不允许修改物理表名。');
         if (canonicalJson_ACU$1(before.tableConstraints) !== canonicalJson_ACU$1(target.tableConstraints))
             throw new Error('P1 不支持表级 constraint 变更。');
         if (before.tableSuffix !== target.tableSuffix)
@@ -35991,8 +36063,8 @@ $CONTENT
         const current = getSheetSchemaDescriptorV2Contract_ACU(currentSheet);
         assertDescriptorV2MatchesSheet_ACU(operation.beforeSchema, currentSheet, 'schema migration V2 beforeSchema');
         assertDescriptorV2MatchesSheet_ACU(operation.targetSchema, descriptorV2ToSheet_ACU(operation.targetSchema), 'schema migration V2 targetSchema');
-        if (current.uid !== operation.targetSchema.uid || current.tableName !== operation.targetSchema.tableName)
-            throw new Error('schema migration V2 不允许修改 sheet uid 或物理表名。');
+        if (current.uid !== operation.targetSchema.uid)
+            throw new Error('schema migration V2 不允许修改 sheet uid。');
         if (current.columns[0]?.physicalName !== 'row_id' || operation.targetSchema.columns[0]?.physicalName !== 'row_id')
             throw new Error('schema migration V2 必须保留 row_id。');
         const sourceByName = new Map(current.columns.map(column => [column.physicalName, column]));
@@ -36385,9 +36457,202 @@ $CONTENT
         const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
         if (statements.length === 0)
             return;
+        const reboundStatements = rebindSqlReplayTableIdentifiers_ACU(statements, state, operation);
         await ensureSqlReplayRuntime_ACU(runtime, state);
         const params = Array.isArray(operation.params) ? operation.params : undefined;
-        runtime.engine.runBatch(statements, params);
+        runtime.engine.runBatch(reboundStatements, params);
+    }
+    function isSqlReplayIdentifierStart_ACU(char) {
+        if (char.length !== 1)
+            return false;
+        const code = char.charCodeAt(0);
+        return char === '_' || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    }
+    function isSqlReplayIdentifierPart_ACU(char) {
+        if (char.length !== 1)
+            return false;
+        const code = char.charCodeAt(0);
+        return isSqlReplayIdentifierStart_ACU(char) || char === '$' || (code >= 48 && code <= 57);
+    }
+    /**
+     * Tokenizes identifiers only. Strings and comments are intentionally skipped,
+     * so a table-like word in narrative text can never be rebound.
+     */
+    function tokenizeSqlReplayIdentifiers_ACU(statement) {
+        const tokens = [];
+        let index = 0;
+        while (index < statement.length) {
+            const char = statement[index];
+            const next = statement[index + 1];
+            if (char === '-' && next === '-') {
+                index += 2;
+                while (index < statement.length && statement[index] !== '\n' && statement[index] !== '\r')
+                    index += 1;
+                continue;
+            }
+            if (char === '/' && next === '*') {
+                index += 2;
+                while (index < statement.length && !(statement[index] === '*' && statement[index + 1] === '/'))
+                    index += 1;
+                if (index >= statement.length)
+                    throw new Error('[V2 Replay] SQL 块注释未闭合，无法安全重绑定表名。');
+                index += 2;
+                continue;
+            }
+            if (char === "'") {
+                index += 1;
+                while (index < statement.length) {
+                    if (statement[index] !== "'") {
+                        index += 1;
+                        continue;
+                    }
+                    if (statement[index + 1] === "'") {
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                    break;
+                }
+                if (index > statement.length || statement[index - 1] !== "'")
+                    throw new Error('[V2 Replay] SQL 字符串未闭合，无法安全重绑定表名。');
+                continue;
+            }
+            if (char === '"' || char === '`' || char === '[') {
+                const closing = char === '[' ? ']' : char;
+                const start = index;
+                let value = '';
+                index += 1;
+                let closed = false;
+                while (index < statement.length) {
+                    if (statement[index] !== closing) {
+                        value += statement[index++];
+                        continue;
+                    }
+                    if (statement[index + 1] === closing) {
+                        value += closing;
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                    closed = true;
+                    break;
+                }
+                if (!closed)
+                    throw new Error('[V2 Replay] SQL 引号标识符未闭合，无法安全重绑定表名。');
+                tokens.push({ start, end: index, value, quote: char });
+                continue;
+            }
+            if (isSqlReplayIdentifierStart_ACU(char)) {
+                const start = index;
+                index += 1;
+                while (index < statement.length && isSqlReplayIdentifierPart_ACU(statement[index]))
+                    index += 1;
+                tokens.push({ start, end: index, value: statement.slice(start, index), quote: null });
+                continue;
+            }
+            index += 1;
+        }
+        return tokens;
+    }
+    function sqlReplayKeyword_ACU(token, keyword) {
+        return !!token && token.quote === null && token.value.toUpperCase() === keyword;
+    }
+    function getSqlReplayMutationTargetToken_ACU(tokens) {
+        const first = tokens[0];
+        if (sqlReplayKeyword_ACU(first, 'INSERT') || sqlReplayKeyword_ACU(first, 'REPLACE')) {
+            if (!sqlReplayKeyword_ACU(tokens[1], 'INTO') || !tokens[2]) {
+                throw new Error('[V2 Replay] INSERT/REPLACE SQL 缺少可验证的目标表。');
+            }
+            return tokens[2];
+        }
+        if (sqlReplayKeyword_ACU(first, 'UPDATE')) {
+            let index = 1;
+            if (sqlReplayKeyword_ACU(tokens[index], 'OR')) {
+                const action = tokens[index + 1];
+                if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
+                    throw new Error('[V2 Replay] UPDATE OR 子句非法，无法安全重绑定表名。');
+                }
+                index += 2;
+            }
+            if (!tokens[index])
+                throw new Error('[V2 Replay] UPDATE SQL 缺少可验证的目标表。');
+            return tokens[index];
+        }
+        if (sqlReplayKeyword_ACU(first, 'DELETE')) {
+            if (!sqlReplayKeyword_ACU(tokens[1], 'FROM') || !tokens[2]) {
+                throw new Error('[V2 Replay] DELETE SQL 缺少可验证的目标表。');
+            }
+            return tokens[2];
+        }
+        throw new Error(`[V2 Replay] 不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
+    }
+    function formatSqlReplayIdentifier_ACU(value, quote) {
+        if (quote === '"')
+            return `"${value.replace(/"/g, '""')}"`;
+        if (quote === '`')
+            return `\`${value.replace(/`/g, '``')}\``;
+        if (quote === '[')
+            return `[${value.replace(/]/g, ']]')}]`;
+        return value;
+    }
+    function rebindSqlReplayTableIdentifiers_ACU(statements, state, operation) {
+        const physicalNames = resolvePhysicalTableNames_ACU(state);
+        const targets = new Map();
+        for (const [sheetKey, physicalName] of physicalNames) {
+            const sheet = state[sheetKey];
+            if (!sheet)
+                continue;
+            const aliases = [parseDDLTableName(sheet.sourceData?.ddl || ''), physicalName];
+            for (const alias of aliases) {
+                const normalized = String(alias || '').trim().toLowerCase();
+                if (!normalized)
+                    continue;
+                const existing = targets.get(normalized);
+                if (existing && existing !== physicalName) {
+                    targets.set(normalized, '');
+                }
+                else if (existing !== '') {
+                    targets.set(normalized, physicalName);
+                }
+            }
+        }
+        const scopedPhysicalName = operation.kind === 'sql_sheet_batch'
+            ? physicalNames.get(operation.sheetKey)
+            : undefined;
+        if (operation.kind === 'sql_sheet_batch' && !scopedPhysicalName) {
+            throw new Error(`[V2 Replay] sql_sheet_batch 指向不存在的 Sheet：${operation.sheetKey}。`);
+        }
+        const recordedTableName = operation.kind === 'sql_sheet_batch'
+            ? operation.tableName?.trim().toLowerCase()
+            : undefined;
+        if (operation.kind === 'sql_sheet_batch' && recordedTableName) {
+            const recordedPhysicalName = targets.get(recordedTableName);
+            if (recordedPhysicalName === '' || (recordedPhysicalName && recordedPhysicalName !== scopedPhysicalName)) {
+                throw new Error(`[V2 Replay] sql_sheet_batch 的 tableName 与 sheetKey 不一致：sheetKey=${operation.sheetKey}, tableName=${operation.tableName}。`);
+            }
+        }
+        return statements.map(statement => {
+            const tokens = tokenizeSqlReplayIdentifiers_ACU(statement);
+            const target = getSqlReplayMutationTargetToken_ACU(tokens);
+            const targetName = target.value.toLowerCase();
+            let physicalName = targets.get(targetName);
+            // 物理表名会随显示名变更。旧日志中未知于当前 schema 的 tableName 只在
+            // 它与 SQL 实际目标完全一致时，才能作为该 sheet 的历史物理名重绑定。
+            if (physicalName === undefined && scopedPhysicalName && recordedTableName === targetName) {
+                physicalName = scopedPhysicalName;
+            }
+            if (!physicalName) {
+                throw new Error(`[V2 Replay] 无法唯一解析 SQL 目标表标识符：${target.value}。`);
+            }
+            if (scopedPhysicalName && recordedTableName && targets.get(recordedTableName) === undefined && targetName !== recordedTableName) {
+                throw new Error(`[V2 Replay] sql_sheet_batch 的 tableName 与 sheetKey 不一致：记录的历史表名未与 SQL 目标一致（tableName=${recordedTableName}, table=${target.value}）。`);
+            }
+            if (scopedPhysicalName && physicalName !== scopedPhysicalName) {
+                const sheetKey = operation.kind === 'sql_sheet_batch' ? operation.sheetKey : '(legacy sql_batch)';
+                throw new Error(`[V2 Replay] sql_sheet_batch 跨 Sheet 引用被拒绝：sheetKey=${sheetKey}, table=${target.value}。`);
+            }
+            return `${statement.slice(0, target.start)}${formatSqlReplayIdentifier_ACU(physicalName, target.quote)}${statement.slice(target.end)}`;
+        });
     }
     function assertMetaUpdateDoesNotChangeDdl_ACU(patch) {
         const sourceData = patch.meta?.sourceData;
@@ -36585,7 +36850,8 @@ $CONTENT
         if (!Array.isArray(seedRows) || seedRows.length === 0)
             return;
         const headerRow = Array.isArray(sheet.content[0]) ? deepClone_ACU$4(sheet.content[0]) : ['row_id'];
-        sheet.content = [headerRow, ...deepClone_ACU$4(seedRows)];
+        // 与实时 DSL 路径保持同一身份契约：只有明确的 seedRows 新行能在物化时补 row_id。
+        sheet.content = [headerRow, ...ensureStableRowIdsForSeedRows_ACU(seedRows)];
     }
     function applyTableEditDslOperationV2_ACU(state, text) {
         const sheetKeys = resolveDslReplaySheetKeys_ACU(state);
@@ -38658,6 +38924,77 @@ $CONTENT
             return JSON.stringify(value);
         const record = value;
         return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson_ACU(record[key])}`).join(',')}}`;
+    }
+    function templatePersistentProjectionMatches_ACU(baselineData, candidateData) {
+        const project = (data) => Object.fromEntries(Object.keys(data)
+            .filter(key => key.startsWith('sheet_'))
+            .sort()
+            .map(key => [key, templateSheetPersistentProjection_ACU(data[key])]));
+        return canonicalJson_ACU(project(baselineData)) === canonicalJson_ACU(project(candidateData));
+    }
+    /**
+     * Persists a chat template selection when reconciliation has proved that no
+     * sheet-level storage mutation is necessary. This deliberately remains a
+     * separate API: the structural commit entry point must keep rejecting empty
+     * change sets so accidental lost migrations cannot be reported as success.
+     */
+    async function commitCurrentFloorTemplateScopeOnly_ACU(options) {
+        if (!options.guideData || typeof options.guideData !== 'object' || Array.isArray(options.guideData)) {
+            return { saved: false, error: 'scope-only 模板提交必须提供有效的 guideData。' };
+        }
+        if (!options.baselineData || !options.candidateData
+            || !templatePersistentProjectionMatches_ACU(options.baselineData, options.candidateData)) {
+            return { saved: false, error: 'scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致。' };
+        }
+        const createdAt = options.createdAt ?? Date.now();
+        if (!Number.isFinite(createdAt) || createdAt < 0) {
+            return { saved: false, error: 'scope-only 模板提交 requires a finite non-negative createdAt.' };
+        }
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        try {
+            return await runTableWriteTransaction_ACU({
+                source: 'template_assistant',
+                reason: options.reason || 'commitCurrentFloorTemplateScopeOnly',
+                isolationKey,
+                writeSet: [{ kind: 'all' }],
+                maintenanceMode: 'exclusive',
+            }, async (transactionContext) => transactionContext.runCommit(async () => {
+                const chat = getChatArray_ACU();
+                if (!Array.isArray(chat) || chat.length === 0)
+                    throw new Error('chat history is empty');
+                transactionContext.assertFresh?.('commitCurrentFloorTemplateScopeOnly:before_commit');
+                const previousScopeContainer = cloneOptionalJson_ACU(getChatScopedConfigContainer_ACU(chat));
+                const previousGuideContainer = cloneOptionalJson_ACU(getChatSheetGuideContainer_ACU(chat));
+                try {
+                    const guideUpdated = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, options.guideData, {
+                        reason: options.reason || 'chat_template_scope_only',
+                        syncTemplateScope: true,
+                        templateSource: options.templateSource,
+                        presetName: options.presetName,
+                        source: options.source,
+                        updatedAt: createdAt,
+                    });
+                    if (!guideUpdated)
+                        throw new Error('scope-only 模板提交无法写入 guideData 与 template scope。');
+                    await saveChatToHostStrict_ACU();
+                    return { saved: true, mode: 'scope_only' };
+                }
+                catch (error) {
+                    setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
+                    setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
+                    try {
+                        await saveChatToHostStrict_ACU();
+                    }
+                    catch (rollbackError) {
+                        throw new Error(`${error?.message || String(error)}；回滚保存也失败：${rollbackError?.message || String(rollbackError)}`);
+                    }
+                    throw error;
+                }
+            }, []));
+        }
+        catch (error) {
+            return { saved: false, error: error?.message || String(error) };
+        }
     }
     function assertValidTemplateMetaUpdate_ACU(operation, sheetKey) {
         if (!isPlainObjectRecord_ACU(operation.meta)) {
@@ -42185,7 +42522,8 @@ $CONTENT
                 if (!Array.isArray(sr) || sr.length === 0)
                     return;
                 const headerRow = Array.isArray(table.content[0]) ? JSON.parse(JSON.stringify(table.content[0])) : ["row_id"];
-                const seed = JSON.parse(JSON.stringify(sr));
+                // seedRows 是明确的新行来源；在物化时分配身份，不能把空 row_id 留给 V2 persist 拒绝。
+                const seed = ensureStableRowIdsForSeedRows_ACU(sr);
                 table.content = [headerRow, ...seed];
             }
             catch (e) {
@@ -42873,8 +43211,6 @@ $CONTENT
         const targetColumns = parseDDLColumnInfos_ACU(String(template.sourceData?.ddl || ''));
         if (beforeColumns.length !== beforeHeaders.length || targetColumns.length !== targetHeaders.length)
             throw new Error('DDL 与表头列数不一致。');
-        if (parseDDLTableName(String(before.sourceData?.ddl || '')) !== parseDDLTableName(String(template.sourceData?.ddl || '')))
-            throw new Error('同名表不能改变 SQLite 物理表名。');
         const beforeByCanonical = new Map(beforeHeaders.slice(1).map((name, index) => [canonicalizeDisplayName_ACU(name), { index: index + 1, physical: beforeColumns[index + 1].sqlName, header: name }]));
         const targetByCanonical = new Map(targetHeaders.slice(1).map((name, index) => [canonicalizeDisplayName_ACU(name), { index: index + 1, physical: targetColumns[index + 1].sqlName, header: name, column: targetColumns[index + 1] }]));
         if (beforeByCanonical.size !== beforeHeaders.length - 1 || targetByCanonical.size !== targetHeaders.length - 1)
@@ -43311,18 +43647,30 @@ $CONTENT
         });
         if (!guideData)
             return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
-        const committed = await commitCurrentFloorTemplateChanges_ACU({
-            isolationKey,
-            sheetChanges: plan.sheetChanges,
-            deletedSheetKeys: plan.deletedSheetKeys,
-            guideData,
-            syncTemplateScope: true,
-            templateSource: plan.candidateData,
-            presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
-            source,
-            reason: 'chat_template_reconciliation',
-            baseRevision,
-        });
+        const hasStructuralChanges = plan.sheetChanges.length > 0 || plan.deletedSheetKeys.length > 0;
+        const committed = hasStructuralChanges
+            ? await commitCurrentFloorTemplateChanges_ACU({
+                isolationKey,
+                sheetChanges: plan.sheetChanges,
+                deletedSheetKeys: plan.deletedSheetKeys,
+                guideData,
+                syncTemplateScope: true,
+                templateSource: plan.candidateData,
+                presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
+                source,
+                reason: 'chat_template_reconciliation',
+                baseRevision,
+            })
+            : await commitCurrentFloorTemplateScopeOnly_ACU({
+                isolationKey,
+                baselineData,
+                candidateData: plan.candidateData,
+                guideData,
+                templateSource: plan.candidateData,
+                presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
+                source,
+                reason: 'chat_template_reconciliation',
+            });
         if (!committed.saved)
             return { ...committed, blockers: plan.blockers, audit: plan.audit };
         _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));
@@ -44275,7 +44623,7 @@ $CONTENT
      * 从所有表的 DDL 构建全局 NameMapper
      * 在 SQLite 加载完成后调用
      *
-     * @param ddlMap 表英文名 → DDL 语句的映射
+     * @param ddlMap runtime 物理表名 → 有效 DDL 的映射
      */
     function buildGlobalNameMapper(ddlMap) {
         _globalNameMapperSchemaSignature = buildDDLMapSignature_ACU(ddlMap);
@@ -44297,8 +44645,8 @@ $CONTENT
      * 解析运行时有效 DDL（包括缺失或无效 DDL 的 fallback）。
      * presentation 必须经 service 层使用该解析，不能直接依赖 data/sqlite。
      */
-    function resolveRuntimeEffectiveDDL_ACU(sheet, fallbackTableName) {
-        return resolveEffectiveDDL(sheet, fallbackTableName);
+    function resolveRuntimeEffectiveDDL_ACU(sheet, fallbackTableName, runtimeTableName) {
+        return resolveEffectiveDDL(sheet, fallbackTableName, runtimeTableName);
     }
     /** 当前全局 mapper 是否精确对应给定的有效 DDL 集合。 */
     function isGlobalNameMapperCurrentForDDLs_ACU(ddlMap) {
@@ -44338,16 +44686,16 @@ $CONTENT
         }
         /**
          * 从多张表的 DDL 构建映射器
-         * @param ddlMap 表英文名 → DDL 语句的映射
+         *
+         * Map key 是由完整 TableDataObject 分配的 runtime 物理表名；不能从
+         * 用户可编辑的 DDL 文本重新推导，否则显示名与 DDL 名不一致时会向 SQLite
+         * 发出不存在的表名。
          */
         static fromDDLs(ddlMap) {
             const mapper = new NameMapper();
-            for (const [_key, ddl] of ddlMap) {
-                if (!ddl)
-                    continue;
-                // 解析英文表名
-                const englishTableName = parseDDLTableName(ddl);
-                if (!englishTableName)
+            for (const [physicalTableName, ddl] of ddlMap) {
+                const englishTableName = String(physicalTableName || '').trim();
+                if (!englishTableName || !ddl)
                     continue;
                 // 解析中文表名（DDL 第一行注释）
                 const chineseTableName = parseDDLChineseName(ddl);
@@ -44508,6 +44856,174 @@ $CONTENT
             .map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt)))
             .filter(Boolean);
     }
+    function isSqlMutationIdentifierStart_ACU(char) {
+        if (char.length !== 1)
+            return false;
+        const code = char.charCodeAt(0);
+        return char === '_' || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    }
+    function isSqlMutationIdentifierPart_ACU(char) {
+        if (char.length !== 1)
+            return false;
+        const code = char.charCodeAt(0);
+        return isSqlMutationIdentifierStart_ACU(char) || char === '$' || (code >= 48 && code <= 57);
+    }
+    /** Tokenizes identifiers while deliberately skipping SQL strings and comments. */
+    function tokenizeSqlMutationIdentifiers_ACU(statement) {
+        const tokens = [];
+        let index = 0;
+        while (index < statement.length) {
+            const char = statement[index];
+            const next = statement[index + 1];
+            if (char === '-' && next === '-') {
+                index += 2;
+                while (index < statement.length && statement[index] !== '\n' && statement[index] !== '\r')
+                    index += 1;
+                continue;
+            }
+            if (char === '/' && next === '*') {
+                index += 2;
+                while (index < statement.length && !(statement[index] === '*' && statement[index + 1] === '/'))
+                    index += 1;
+                if (index >= statement.length)
+                    throw new Error('SQL 块注释未闭合，无法安全重绑定表名。');
+                index += 2;
+                continue;
+            }
+            if (char === "'") {
+                index += 1;
+                while (index < statement.length) {
+                    if (statement[index] !== "'") {
+                        index += 1;
+                    }
+                    else if (statement[index + 1] === "'") {
+                        index += 2;
+                    }
+                    else {
+                        index += 1;
+                        break;
+                    }
+                }
+                if (index > statement.length || statement[index - 1] !== "'")
+                    throw new Error('SQL 字符串未闭合，无法安全重绑定表名。');
+                continue;
+            }
+            if (char === '"' || char === '`' || char === '[') {
+                const closing = char === '[' ? ']' : char;
+                const start = index;
+                let value = '';
+                index += 1;
+                let closed = false;
+                while (index < statement.length) {
+                    if (statement[index] !== closing) {
+                        value += statement[index++];
+                    }
+                    else if (statement[index + 1] === closing) {
+                        value += closing;
+                        index += 2;
+                    }
+                    else {
+                        index += 1;
+                        closed = true;
+                        break;
+                    }
+                }
+                if (!closed)
+                    throw new Error('SQL 引号标识符未闭合，无法安全重绑定表名。');
+                tokens.push({ start, end: index, value, quote: char });
+                continue;
+            }
+            if (isSqlMutationIdentifierStart_ACU(char)) {
+                const start = index;
+                index += 1;
+                while (index < statement.length && isSqlMutationIdentifierPart_ACU(statement[index]))
+                    index += 1;
+                tokens.push({ start, end: index, value: statement.slice(start, index), quote: null });
+                continue;
+            }
+            index += 1;
+        }
+        return tokens;
+    }
+    function isSqlMutationKeyword_ACU(token, keyword) {
+        return !!token && token.quote === null && token.value.toUpperCase() === keyword;
+    }
+    function getSqlMutationTargetToken_ACU(tokens) {
+        const first = tokens[0];
+        if (isSqlMutationKeyword_ACU(first, 'INSERT') || isSqlMutationKeyword_ACU(first, 'REPLACE')) {
+            if (!isSqlMutationKeyword_ACU(tokens[1], 'INTO') || !tokens[2])
+                throw new Error('INSERT/REPLACE SQL 缺少可验证的目标表。');
+            return tokens[2];
+        }
+        if (isSqlMutationKeyword_ACU(first, 'UPDATE')) {
+            let index = 1;
+            if (isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
+                const action = tokens[index + 1];
+                if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
+                    throw new Error('UPDATE OR 子句非法，无法安全重绑定表名。');
+                }
+                index += 2;
+            }
+            if (!tokens[index])
+                throw new Error('UPDATE SQL 缺少可验证的目标表。');
+            return tokens[index];
+        }
+        if (isSqlMutationKeyword_ACU(first, 'DELETE')) {
+            if (!isSqlMutationKeyword_ACU(tokens[1], 'FROM') || !tokens[2])
+                throw new Error('DELETE SQL 缺少可验证的目标表。');
+            return tokens[2];
+        }
+        throw new Error(`不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
+    }
+    function formatSqlMutationIdentifier_ACU(value, quote) {
+        if (quote === '"')
+            return `"${value.replace(/"/g, '""')}"`;
+        if (quote === '`')
+            return `\`${value.replace(/`/g, '``')}\``;
+        if (quote === '[')
+            return `[${value.replace(/]/g, ']]')}]`;
+        return value;
+    }
+    /**
+     * Rebinds a mutation target from a unique display/legacy alias to the
+     * authoritative runtime physical name. Only the verified target identifier is
+     * changed; comments and string literals are never rewritten.
+     */
+    function rebindSqlMutationTableIdentifiers_ACU(statements, tableData) {
+        const physicalNames = resolvePhysicalTableNames_ACU(tableData);
+        const targets = new Map();
+        for (const [sheetKey, physicalName] of physicalNames) {
+            const sheet = tableData[sheetKey];
+            const aliases = [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName];
+            for (const alias of aliases) {
+                const normalized = String(alias || '').trim().toLowerCase();
+                if (!normalized)
+                    continue;
+                const existing = targets.get(normalized);
+                if (existing && existing !== physicalName)
+                    targets.set(normalized, '');
+                else if (existing !== '')
+                    targets.set(normalized, physicalName);
+            }
+        }
+        return statements.map(statement => {
+            let target;
+            try {
+                target = getSqlMutationTargetToken_ACU(tokenizeSqlMutationIdentifiers_ACU(statement));
+            }
+            catch (error) {
+                if (String(error?.message || error).startsWith('不支持安全重绑定的 SQL 语句类型：'))
+                    return statement;
+                throw error;
+            }
+            const physicalName = targets.get(target.value.toLowerCase());
+            if (physicalName === undefined)
+                return statement;
+            if (!physicalName)
+                throw new Error(`无法唯一解析 SQL 目标表标识符：${target.value}。`);
+            return `${statement.slice(0, target.start)}${formatSqlMutationIdentifier_ACU(physicalName, target.quote)}${statement.slice(target.end)}`;
+        });
+    }
     function mapSqlTableNamesToSheetKeys_ACU(tableData, tableNames) {
         if (!tableData || !Array.isArray(tableNames) || tableNames.length === 0)
             return [];
@@ -44519,9 +45035,11 @@ $CONTENT
             const tableNameFromUid = typeof sheet?.uid === 'string' ? sheet.uid.trim() : '';
             const tableNameFromName = typeof sheet?.name === 'string' ? sheet.name.trim() : '';
             const tableNameFromDDL = typeof sheet?.sourceData?.ddl === 'string' ? parseDDLTableName(sheet.sourceData.ddl) : '';
+            const runtimeTableName = getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
             if ((tableNameFromUid && tableNames.includes(tableNameFromUid))
                 || (tableNameFromName && tableNames.includes(tableNameFromName))
-                || (tableNameFromDDL && tableNames.includes(tableNameFromDDL))) {
+                || (tableNameFromDDL && tableNames.includes(tableNameFromDDL))
+                || tableNames.includes(runtimeTableName)) {
                 matchedKeys.add(sheetKey);
             }
         }
@@ -44530,6 +45048,8 @@ $CONTENT
     function appendSqlSheetBatchOperation_ACU(operations, sheetKey, statement, param, reason, tableName) {
         const last = operations[operations.length - 1];
         if (last?.kind === 'sql_sheet_batch' && last.sheetKey === sheetKey) {
+            if (last.tableName !== tableName)
+                throw new Error(`sql_sheet_batch 合并时发现 runtime 表名不一致：${sheetKey}。`);
             last.statements.push(statement);
             if (param !== undefined || Array.isArray(last.params)) {
                 if (!Array.isArray(last.params))
@@ -44543,7 +45063,7 @@ $CONTENT
             sheetKey,
             statements: [statement],
             ...(param !== undefined ? { params: [param] } : {}),
-            ...(tableName ? { tableName } : {}),
+            tableName,
             reason,
         });
     }
@@ -44582,15 +45102,16 @@ $CONTENT
             const tableNames = extractTableNamesFromStatements([statement]);
             const sheetKeys = mapSqlTableNamesToSheetKeys_ACU(tableData, tableNames);
             if (sheetKeys.length === 1) {
-                classifiedSheetKeys.add(sheetKeys[0]);
-                appendSqlSheetBatchOperation_ACU(operations, sheetKeys[0], statement, param, reason, tableNames[0]);
+                const sheetKey = sheetKeys[0];
+                classifiedSheetKeys.add(sheetKey);
+                appendSqlSheetBatchOperation_ACU(operations, sheetKey, statement, param, reason, getPhysicalTableNameForSheet_ACU(tableData, sheetKey));
                 return;
             }
             if (sheetKeys.length === 0 && allowFallback) {
                 const sheetKey = fallbackTargetSheetKeys[0];
                 classifiedSheetKeys.add(sheetKey);
                 unknownStatements.push(statement);
-                appendSqlSheetBatchOperation_ACU(operations, sheetKey, statement, param, reason);
+                appendSqlSheetBatchOperation_ACU(operations, sheetKey, statement, param, reason, getPhysicalTableNameForSheet_ACU(tableData, sheetKey));
                 return;
             }
             if (sheetKeys.length > 1) {
@@ -44970,9 +45491,7 @@ $CONTENT
                     const sheet = currentJsonTableData_ACU[sheetKey];
                     if (!sheet?.sourceData?.ddl)
                         continue;
-                    const tableName = parseDDLTableName(sheet.sourceData.ddl);
-                    if (!tableName)
-                        continue;
+                    const tableName = getPhysicalTableNameForSheet_ACU(currentJsonTableData_ACU, sheetKey);
                     const existingTables = this._existingTableSet ?? (this._existingTableSet = new Set(this.engine.getTableNames()));
                     // 检查表是否存在且为空
                     if (!existingTables.has(tableName))
@@ -45028,11 +45547,9 @@ $CONTENT
                         continue;
                     // NameMapper 必须和 SQLite 实际采用的 schema 一致。直接读取 sourceData.ddl
                     // 会在 fallback_invalid 场景留下无法映射运行时物理列名的陈旧映射。
-                    const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key).effectiveDDL;
-                    const tableName = parseDDLTableName(effectiveDDL);
-                    if (tableName) {
-                        ddlMap.set(tableName, effectiveDDL);
-                    }
+                    const runtimeTableName = getPhysicalTableNameForSheet_ACU(data, key);
+                    const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key, runtimeTableName).effectiveDDL;
+                    ddlMap.set(runtimeTableName, effectiveDDL);
                 }
                 ensureGlobalNameMapperForDDLs_ACU(ddlMap);
             }
@@ -45060,14 +45577,9 @@ $CONTENT
                 if (!key.startsWith('sheet_'))
                     continue;
                 const sheet = value;
-                // 从 DDL 中解析表名进行匹配
-                const ddl = sheet?.sourceData?.ddl;
-                if (ddl) {
-                    const match = ddl.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/i);
-                    if (match && tableNames.includes(match[1])) {
-                        keys.push(key);
-                    }
-                }
+                const runtimeTableName = getPhysicalTableNameForSheet_ACU(currentJsonTableData_ACU, key);
+                if (tableNames.includes(runtimeTableName))
+                    keys.push(key);
             }
             return keys;
         }
@@ -45118,9 +45630,8 @@ $CONTENT
                 const sheet = templateData[key] || liveSheet;
                 if (!sheet)
                     continue;
-                const ddl = resolveEffectiveDDL(sheet, sheet.uid || key).effectiveDDL;
-                const tableName = parseDDLTableName(ddl);
-                if (tableName && !existingTables.has(tableName)) {
+                const runtimeTableName = getPhysicalTableNameForSheet_ACU(templateData, key);
+                if (!existingTables.has(runtimeTableName)) {
                     missingSheets[key] = sheet;
                 }
             }
@@ -45217,14 +45728,15 @@ $CONTENT
         try {
             const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
             const snapshotCopy = JSON.parse(JSON.stringify(tableData || {}));
+            const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], snapshotCopy)[0];
             await engine.init();
             syncBridge.loadFromTableData(snapshotCopy, { strict: true });
-            const result = engine.run(normalizedSql, params);
+            const result = engine.run(runtimeSql, params);
             const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy));
-            const modifiedTableNames = extractTableNamesFromStatements([normalizedSql]);
+            const modifiedTableNames = extractTableNamesFromStatements([runtimeSql]);
             const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
             const normalizedParams = Array.isArray(params) && params.length > 0 ? params.map(value => value ?? null) : undefined;
-            const operationBuild = buildSqlSheetBatchOperations_ACU([normalizedSql], workingData, {
+            const operationBuild = buildSqlSheetBatchOperations_ACU([runtimeSql], workingData, {
                 params: normalizedParams ? [normalizedParams] : undefined,
                 fallbackTargetSheetKeys: operationOptions.targetSheetKeys,
                 allowSingleTargetFallback: operationOptions.allowSingleTargetFallback === true,
@@ -45267,8 +45779,8 @@ $CONTENT
             if (rawStatements.length === 0) {
                 return { success: true, modifiedKeys: [], appliedEdits: 0, workingData: JSON.parse(JSON.stringify(tableData || {})) };
             }
-            const statements = rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt)));
             const snapshotCopy = JSON.parse(JSON.stringify(tableData || {}));
+            const statements = rebindSqlMutationTableIdentifiers_ACU(rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))), snapshotCopy);
             await engine.init();
             syncBridge.loadFromTableData(snapshotCopy, { strict: true });
             engine.runBatch(statements);
@@ -58067,6 +58579,39 @@ $CONTENT
     function normalizeSqlBindParams_ACU(params) {
         return Array.isArray(params) && params.length > 0 ? [params.map(value => value ?? null)] : undefined;
     }
+    /**
+     * Final persistence boundary: reject malformed row identities without repairing
+     * data. Identity allocation belongs to the row creation path; repairing here
+     * would hide the origin of a corrupt row and could change persisted semantics.
+     */
+    function assertPersistableRowIdentities_ACU(data, reason) {
+        for (const [sheetKey, sheet] of Object.entries(data)) {
+            if (!sheetKey.startsWith('sheet_'))
+                continue;
+            const content = sheet?.content;
+            if (!Array.isArray(content) || content.length === 0)
+                continue;
+            const headers = content[0];
+            if (!Array.isArray(headers) || String(headers[0] ?? '') !== 'row_id') {
+                throw new Error(`[TableUpdateCommit] ${reason}: sheetKey=${sheetKey} 缺少 row_id 首列表头。`);
+            }
+            const rowIds = new Set();
+            for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
+                const row = content[rowIndex];
+                if (!Array.isArray(row)) {
+                    throw new Error(`[TableUpdateCommit] ${reason}: sheetKey=${sheetKey}, rowIndex=${rowIndex} 不是数组行。`);
+                }
+                const rowId = String(row[0] ?? '').trim();
+                if (!rowId) {
+                    throw new Error(`[TableUpdateCommit] ${reason}: sheetKey=${sheetKey}, rowIndex=${rowIndex} 的 row_id 为空。`);
+                }
+                if (rowIds.has(rowId)) {
+                    throw new Error(`[TableUpdateCommit] ${reason}: sheetKey=${sheetKey}, rowIndex=${rowIndex} 的 row_id 重复：${rowId}。`);
+                }
+                rowIds.add(rowId);
+            }
+        }
+    }
     async function runTableUpdateCommit_ACU(options, apply) {
         try {
             const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
@@ -58098,6 +58643,7 @@ $CONTENT
                     const operations = persistOptions.operations ?? options.operations;
                     commitRevisionWriteSet = revisionWriteSet;
                     if (!options.skipChatSave) {
+                        assertPersistableRowIdentities_ACU(applied.tableData, options.reason);
                         const saveResult = await persistTablesToChatMessage_ACU({
                             targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
                             targetSheetKeys,
@@ -58148,9 +58694,13 @@ $CONTENT
                 statements: [options.sql],
                 ...(normalizeSqlBindParams_ACU(options.params) ? { params: normalizeSqlBindParams_ACU(options.params) } : {}),
             }];
-        return runTableUpdateCommit_ACU({ ...options, operations }, async () => {
+        return runTableUpdateCommit_ACU({ ...options, operations }, async ({ workingData }) => {
             const provider = await ensureStorageProviderReady_ACU();
-            const mutationResult = provider.executeMutation(options.sql, options.params);
+            const runtimeData = (workingData || currentJsonTableData_ACU);
+            const runtimeSql = runtimeData
+                ? rebindSqlMutationTableIdentifiers_ACU([options.sql], runtimeData)[0]
+                : options.sql;
+            const mutationResult = provider.executeMutation(runtimeSql, options.params);
             if (mutationResult.errors?.length) {
                 return { success: false, error: mutationResult.errors.join(', '), mutationResult };
             }
@@ -58162,11 +58712,19 @@ $CONTENT
             if (validationError) {
                 return { success: false, error: validationError, mutationResult, tableData: tableData };
             }
+            const runtimeOperations = options.operations ? undefined : buildSqlSheetBatchOperations_ACU([runtimeSql], tableData, {
+                params: normalizeSqlBindParams_ACU(options.params),
+                fallbackTargetSheetKeys: options.targetSheetKeys || undefined,
+                allowSingleTargetFallback: true,
+                keepLegacyForUnclassified: true,
+                reason: 'manual_crud',
+            }).operations;
             return {
                 success: true,
                 value: options.mapValue({ mutationResult, tableData: tableData }),
                 tableData: tableData,
                 mutationResult,
+                ...(runtimeOperations ? { persist: { operations: runtimeOperations } } : {}),
             };
         });
     }
@@ -73544,7 +74102,17 @@ $CONTENT
             const operations = [];
             const sqlTexts = [];
             for (const response of sortedResponses) {
-                const sqlText = response.tableEditText || '';
+                let sqlText;
+                try {
+                    sqlText = rebindSqlMutationTableIdentifiers_ACU([response.tableEditText || ''], baseSnapshot)[0];
+                }
+                catch (error) {
+                    return {
+                        success: false,
+                        modifiedKeys: [],
+                        error: `统一提交失败：group ${response.job.groupKey} SQL 执行失败。${error?.message || String(error)}`,
+                    };
+                }
                 const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(sqlText, baseSnapshot);
                 if (Array.isArray(response.job.targetSheetKeys) && response.job.targetSheetKeys.length > 0) {
                     const allowedSheetKeys = new Set(response.job.targetSheetKeys);
@@ -74116,9 +74684,10 @@ $CONTENT
                             skipChatSave: isImportMode,
                         }, async () => {
                             const provider = await ensureStorageProviderReady_ACU();
+                            const runtimeSqlText = rebindSqlMutationTableIdentifiers_ACU([collectResult.tableEditText || ''], rawBaseSnapshot)[0];
                             let parseResult;
                             try {
-                                parseResult = provider.applyEdits(collectResult.tableEditText || '', updateMode);
+                                parseResult = provider.applyEdits(runtimeSqlText, updateMode);
                             }
                             catch (error) {
                                 return { success: false, error: error?.message || String(error) };
@@ -74129,7 +74698,7 @@ $CONTENT
                                 return { success: false, error: parseResult?.error || '解析或应用AI更新时出错' };
                             }
                             const runtimeData = (provider.getCurrentData() || currentJsonTableData_ACU || rawBaseSnapshot);
-                            const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(collectResult.tableEditText || '', runtimeData, targetSheetKeys);
+                            const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(runtimeSqlText, runtimeData, targetSheetKeys);
                             if (operationBuild.success === false) {
                                 return { success: false, error: operationBuild.error };
                             }
@@ -74164,7 +74733,10 @@ $CONTENT
                                 if (fullTemplate) {
                                     allSheetKeys.forEach(sheetKey => {
                                         if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {
-                                            runtimeData[sheetKey] = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                            const templateSheet = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                            if (Array.isArray(templateSheet.content))
+                                                templateSheet.content = ensureStableRowIdsForSheetContent_ACU(templateSheet.content);
+                                            runtimeData[sheetKey] = templateSheet;
                                             logDebug_ACU(`[Init] Table ${sheetKey} not modified by AI, using template data (may include seed rows).`);
                                         }
                                     });
@@ -74273,7 +74845,10 @@ $CONTENT
                             if (fullTemplate) {
                                 allSheetKeys.forEach(sheetKey => {
                                     if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {
-                                        workingTableData[sheetKey] = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                        const templateSheet = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                        if (Array.isArray(templateSheet.content))
+                                            templateSheet.content = ensureStableRowIdsForSheetContent_ACU(templateSheet.content);
+                                        workingTableData[sheetKey] = templateSheet;
                                         logDebug_ACU(`[Init] Table ${sheetKey} not modified by AI, using template data (may include seed rows).`);
                                     }
                                 });
@@ -88528,14 +89103,8 @@ $CONTENT
             params: [...(params || []), limit, offset],
         };
     }
-    function getEnglishTableName_ACU(sheet, fallback) {
-        const ddl = sheet?.sourceData?.ddl;
-        if (ddl) {
-            const parsed = parseDDLTableName(ddl);
-            if (parsed)
-                return parsed;
-        }
-        return fallback;
+    function getEnglishTableName_ACU(tableData, sheetKey) {
+        return getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
     }
     function findQueryTargetSheet_ACU(tableNameOrSheetKey) {
         const tableData = currentJsonTableData_ACU;
@@ -88544,16 +89113,29 @@ $CONTENT
             return null;
         if (input.startsWith('sheet_') && tableData[input]) {
             const sheet = tableData[input];
-            return { sheet, sheetKey: input, englishTableName: getEnglishTableName_ACU(sheet, String(sheet?.name || input)) };
+            return { sheet, sheetKey: input, englishTableName: getEnglishTableName_ACU(tableData, input) };
         }
         const mapper = getNameMapper();
         const maybeChineseName = mapper.getChineseTableName(input);
         for (const sheetKey of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
             const sheet = tableData[sheetKey];
-            const english = getEnglishTableName_ACU(sheet, String(sheet?.name || sheetKey));
+            const english = getEnglishTableName_ACU(tableData, sheetKey);
             if (sheet?.name === input || sheet?.name === maybeChineseName || english === input) {
                 return { sheet, sheetKey, englishTableName: english };
             }
+        }
+        // 旧 DDL 内的表名只作为 sheet 定位别名；多个 sheet 复用同一别名时不能猜测。
+        const ddlAliasMatches = [];
+        for (const sheetKey of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
+            const sheet = tableData[sheetKey];
+            const ddlTableName = parseDDLTableName(String(sheet?.sourceData?.ddl || ''));
+            if (ddlTableName === input) {
+                ddlAliasMatches.push({ sheet, sheetKey });
+            }
+        }
+        if (ddlAliasMatches.length === 1) {
+            const [{ sheet, sheetKey }] = ddlAliasMatches;
+            return { sheet, sheetKey, englishTableName: getEnglishTableName_ACU(tableData, sheetKey) };
         }
         return null;
     }
@@ -88649,10 +89231,6 @@ $CONTENT
         return Array.isArray(keys) && keys.length > 0
             ? keys.map(sheetKey => ({ kind: 'sheet', sheetKey }))
             : [{ kind: 'all' }];
-    }
-    function buildRawSqlBatchOperations_ACU(sql) {
-        const statements = splitSqlStatements(String(sql || '').replace(/<!--|-->/g, '').trim());
-        return statements.length > 0 ? [{ kind: 'sql_batch', statements }] : [];
     }
     function createSqlApi(ctx) {
         return {
@@ -88764,11 +89342,14 @@ $CONTENT
                         updateGroupKeys: args.updateGroupKeys,
                         trackingSheetKeys: args.trackingSheetKeys === undefined ? [] : args.trackingSheetKeys,
                         trackAsUpdate: false,
-                        operations: buildRawSqlBatchOperations_ACU(args.sql),
                         skipChatSave: args.skipChatSave,
-                    }, async () => {
+                    }, async ({ workingData }) => {
                         const provider = await ensureStorageProviderReady_ACU();
-                        const batchResult = provider.applyEdits(args.sql, 'raw_sql_api');
+                        const runtimeStatements = rebindSqlMutationTableIdentifiers_ACU(splitSqlStatements(String(args.sql || '').replace(/<!--|-->/g, '').trim()), (workingData || currentJsonTableData_ACU));
+                        const batchResult = typeof provider.applyEditsBatch === 'function'
+                            ? provider.applyEditsBatch(runtimeStatements, 'raw_sql_api')
+                            // 保留语句边界，避免可选 batch 能力缺失时将多条 SQL 拼成非法单句。
+                            : provider.applyEdits(runtimeStatements.join(';\n'), 'raw_sql_api');
                         if (!batchResult.success) {
                             return { success: false, error: batchResult.error || 'executeSqlBatch failed' };
                         }
@@ -88776,10 +89357,17 @@ $CONTENT
                         if (!tableData) {
                             return { success: false, error: 'SQLite runtime data export failed' };
                         }
+                        const operationBuild = buildSqlSheetBatchOperations_ACU(runtimeStatements, tableData, {
+                            fallbackTargetSheetKeys: args.targetSheetKeys || undefined,
+                            allowSingleTargetFallback: true,
+                            keepLegacyForUnclassified: true,
+                            reason: 'manual_crud',
+                        });
                         return {
                             success: true,
                             tableData: tableData,
                             mutationResult: { changes: batchResult.appliedEdits, errors: [] },
+                            persist: { operations: operationBuild.operations },
                             value: {
                                 success: true,
                                 modifiedKeys: batchResult.modifiedKeys,
@@ -94972,17 +95560,11 @@ $CONTENT
      * 表格 CRUD API — updateCell / updateRow / insertRow / deleteRow
      */
     /**
-     * 从 sheet 解析英文物理表名
-     * 必须与 SyncBridge 使用相同的稳定 sheet key fallback，不能使用用户可改的显示名。
+     * 从完整表集合分配 runtime 物理表名。collision hash 依赖完整集合，不能从单个
+     * sheet 或其 DDL 文本推导。
      */
-    function getEnglishTableName(sheet, sheetKey) {
-        if (!sheet || typeof sheet !== 'object')
-            return sheetKey;
-        const ddl = resolveRuntimeEffectiveDDL_ACU(sheet, sheet.uid || sheetKey).effectiveDDL;
-        const parsed = parseDDLTableName(ddl);
-        if (parsed)
-            return parsed;
-        return sheetKey;
+    function getEnglishTableName(tableData, sheetKey) {
+        return getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
     }
     /**
      * CRUD 入口需要以本次 canonical JSON 视图为准同步 mapper。
@@ -94994,11 +95576,9 @@ $CONTENT
         for (const [sheetKey, sheet] of Object.entries(tableData || {})) {
             if (!sheetKey.startsWith('sheet_') || !sheet || typeof sheet !== 'object')
                 continue;
-            const ddl = resolveRuntimeEffectiveDDL_ACU(sheet, sheet.uid || sheetKey).effectiveDDL;
-            const tableName = parseDDLTableName(ddl);
-            if (tableName) {
-                ddlMap.set(tableName, ddl);
-            }
+            const runtimeTableName = getEnglishTableName(tableData, sheetKey);
+            const ddl = resolveRuntimeEffectiveDDL_ACU(sheet, sheet.uid || sheetKey, runtimeTableName).effectiveDDL;
+            ddlMap.set(runtimeTableName, ddl);
         }
         ensureGlobalNameMapperForDDLs_ACU(ddlMap);
     }
@@ -95020,7 +95600,7 @@ $CONTENT
                 return {
                     sheet,
                     sheetKey,
-                    englishTableName: getEnglishTableName(sheet, sheetKey),
+                    englishTableName: getEnglishTableName(tableData, sheetKey),
                 };
             }
         }
@@ -95036,17 +95616,17 @@ $CONTENT
                     return {
                         sheet,
                         sheetKey,
-                        englishTableName: getEnglishTableName(sheet, sheetKey),
+                        englishTableName: getEnglishTableName(tableData, sheetKey),
                     };
                 }
             }
         }
-        // 路径 3：直接从 DDL 的英文表名匹配（兜底，覆盖 NameMapper 未构建的场景）
+        // 路径 3：runtime physical name 直接匹配。
         for (const sheetKey in tableData) {
             if (!sheetKey.startsWith('sheet_'))
                 continue;
             const sheet = tableData[sheetKey];
-            const english = getEnglishTableName(sheet, sheetKey);
+            const english = getEnglishTableName(tableData, sheetKey);
             if (english && english === tableName) {
                 return {
                     sheet,
@@ -95054,6 +95634,27 @@ $CONTENT
                     englishTableName: english,
                 };
             }
+        }
+        // 路径 4：兼容历史 DDL 名称以定位 sheet；它绝不能成为 SQL 的目标表名。
+        const ddlAliasMatches = [];
+        for (const sheetKey in tableData) {
+            if (!sheetKey.startsWith('sheet_'))
+                continue;
+            const sheet = tableData[sheetKey];
+            if (!sheet || typeof sheet !== 'object')
+                continue;
+            const ddlTableName = parseDDLTableName(String(sheet.sourceData?.ddl || ''));
+            if (ddlTableName && ddlTableName === tableName) {
+                ddlAliasMatches.push({ sheet, sheetKey });
+            }
+        }
+        if (ddlAliasMatches.length === 1) {
+            const [{ sheet, sheetKey }] = ddlAliasMatches;
+            return {
+                sheet,
+                sheetKey,
+                englishTableName: getEnglishTableName(tableData, sheetKey),
+            };
         }
         return null;
     }

@@ -253,6 +253,104 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     ]);
   });
 
+  it('将历史 chronicle SQL 安全重绑定到显示名派生的 jiyaobiao runtime 表', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.uid = 'chronicle';
+    checkpointData.sheet_0.name = '纪要表';
+    checkpointData.sheet_0.sourceData.ddl = 'CREATE TABLE chronicle (row_id INTEGER PRIMARY KEY, name TEXT);';
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: checkpointData,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'legacy-chronicle-sql', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'chronicle',
+                statements: ["UPDATE chronicle SET name = '重绑定成功' WHERE row_id = 1"], reason: 'manual_crud',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '重绑定成功']]);
+    expect(result?.sheet_0.sourceData.ddl).toBe('CREATE TABLE chronicle (row_id INTEGER PRIMARY KEY, name TEXT);');
+  });
+
+  it('将历史 physical tableName 重绑定到同 sheet 当前 physical 表名', async () => {
+    const checkpointData = makeCheckpointData();
+    // 旧日志写入时该 sheet 的显示名为“旧背包”，之后重命名为“背包”。
+    // 因此 oldbeibao 不是当前 DDL alias，也不是当前 runtime 表名。
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: checkpointData,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'renamed-physical-sql', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'jiubeibao',
+                statements: ["UPDATE jiubeibao SET name = '重命名后仍可回放' WHERE row_id = 1"], reason: 'manual_crud',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '重命名后仍可回放']]);
+  });
+
+  it('sql_sheet_batch 的 tableName 与 sheetKey 不一致时 fail closed', async () => {
+    const checkpointData = makeCheckpointData();
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: checkpointData,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'mismatched-sheet-sql', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'unrelated_table',
+                statements: ["UPDATE inventory SET name = '不应写入' WHERE row_id = 1"], reason: 'manual_crud',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('tableName 与 sheetKey 不一致');
+    expect(checkpointData.sheet_0.content).toEqual([['row_id', 'name'], ['1', '铁剑']]);
+  });
+
   it('同楼层单表 checkpoint 引入新 DDL/CHECK 后再回放 sql_batch', async () => {
     const oldData = {
       mate: { type: 'acu', version: 1 },

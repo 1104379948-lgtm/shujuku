@@ -13,6 +13,7 @@ import { buildRuntimeFallbackDDL_ACU, createSheetInsertPlan, generateInserts, re
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/models/table-data';
 import { hashUserInput_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
+import { resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 
 /** 同步桥的元数据表名（内部使用，对用户和 AI 不可见） */
 const META_TABLE_NAME = '_acu_sheet_meta';
@@ -79,13 +80,14 @@ export class SyncBridge {
 
     // 遍历所有 sheet
     const sheetKeys = Object.keys(data).filter(k => k.startsWith('sheet_'));
+    const physicalTableNames = resolvePhysicalTableNames_ACU(data);
     logDebug_ACU(`[SyncBridge] 开始加载 ${sheetKeys.length} 张表到 SQLite`);
     for (const key of sheetKeys) {
       const sheet = data[key] as Sheet_ACU;
       if (!sheet || !Array.isArray(sheet.content)) continue;
 
       try {
-        this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true);
+        this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true, physicalTableNames.get(key));
       } catch (e: any) {
         const errorMessage = e?.message || String(e);
         const reason = /^第 \d+ 条语句失败:/.test(errorMessage) ? 'SQLite 写入失败' : errorMessage;
@@ -155,8 +157,8 @@ export class SyncBridge {
   // ═══════════════════════════════════════════════════════════════
 
   /** 加载单张 sheet 到 SQLite */
-  private _loadSheet(sheetKey: string, sheet: Sheet_ACU, allowRuntimeDdlFallback: boolean): void {
-    const resolvedDDL = resolveEffectiveDDL(sheet, sheet.uid || sheetKey);
+  private _loadSheet(sheetKey: string, sheet: Sheet_ACU, allowRuntimeDdlFallback: boolean, runtimeTableName?: string): void {
+    const resolvedDDL = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, runtimeTableName);
     if (resolvedDDL.source === 'fallback_invalid' && !allowRuntimeDdlFallback) {
       throw new Error(resolvedDDL.diagnostics[0]);
     }
@@ -198,7 +200,7 @@ export class SyncBridge {
       // runBatch 已保证失败事务回滚。仅首条 CREATE TABLE 执行失败才允许一次 runtime fallback；
       // INSERT/约束/映射错误必须原样 fail closed，防止用全 TEXT 表偷偷吞掉数据完整性问题。
       if (resolvedDDL.source !== 'explicit' || !allowRuntimeDdlFallback || !/^第 1 条语句失败:/.test(error?.message || '')) throw error;
-      const fallback = buildRuntimeFallbackDDL_ACU(sheet, sheet.uid || sheetKey, 'fallback_invalid', '显式 DDL 无法在 runtime SQLite 执行，已使用 fallback schema。');
+      const fallback = buildRuntimeFallbackDDL_ACU(sheet, runtimeTableName || sheet.uid || sheetKey, 'fallback_invalid', '显式 DDL 无法在 runtime SQLite 执行，已使用 fallback schema。');
       this._recordRuntimeFallbackDiagnostic(sheetKey, fallback, 'runtime_ddl_retry', error?.message || String(error));
       executeResolvedDDL(fallback);
       this._recordRuntimeEffectiveSchema(sheetKey, fallback);
@@ -295,17 +297,21 @@ export class SyncBridge {
 
   /** 通过 SQL 表名查找对应的元数据 */
   private _findMetaByTableName(metaMap: Map<string, SheetMeta>, tableName: string): SheetMeta | null {
-    // 遍历元数据，找到 DDL 中表名匹配的那条
-    for (const [, meta] of metaMap) {
-      const ddl = meta.sourceData?.ddl;
-      if (ddl) {
-        const ddlTableName = parseDDLTableName(ddl);
-        if (ddlTableName === tableName) return meta;
-      }
+    const metadataData: TableDataObject_ACU = { mate: {} as Mate_ACU };
+    for (const [sheetKey, meta] of metaMap) {
+      metadataData[sheetKey] = {
+        uid: meta.uid,
+        name: meta.name,
+        sourceData: meta.sourceData || {},
+        content: [],
+        updateConfig: meta.updateConfig || {},
+        exportConfig: meta.exportConfig || {},
+        orderNo: meta.orderNo,
+      } as Sheet_ACU;
     }
-    // fallback：用 uid 匹配
-    for (const [, meta] of metaMap) {
-      if (meta.uid === tableName) return meta;
+    const physicalTableNames = resolvePhysicalTableNames_ACU(metadataData);
+    for (const [sheetKey, meta] of metaMap) {
+      if (physicalTableNames.get(sheetKey) === tableName) return meta;
     }
     return null;
   }

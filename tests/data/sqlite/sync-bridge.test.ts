@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { SqliteEngine } from '../../../src/data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../../src/data/sqlite/sync-bridge';
+import { getPhysicalTableNameForSheet_ACU } from '../../../src/shared/sheet-identity';
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../../src/shared/models/table-data';
 
 // ═══════════════════════════════════════════════════════════════
@@ -55,6 +56,10 @@ function makeTableData(sheets: Record<string, Sheet_ACU> = {}): TableDataObject_
   return data;
 }
 
+function getRuntimeTableName(data: TableDataObject_ACU, sheetKey: string): string {
+  return getPhysicalTableNameForSheet_ACU(data, sheetKey);
+}
+
 describe('SyncBridge', () => {
   let engine: SqliteEngine;
   let bridge: SyncBridge;
@@ -75,14 +80,15 @@ describe('SyncBridge', () => {
   describe('loadFromTableData', () => {
     it('加载单张表到 SQLite', () => {
       const data = makeTableData({ sheet_0: makeSheet() });
+      const tableName = getRuntimeTableName(data, 'sheet_0');
       bridge.loadFromTableData(data);
 
       // 验证表已创建
       const tableNames = engine.getTableNames();
-      expect(tableNames).toContain('inventory');
+      expect(tableNames).toContain(tableName);
 
       // 验证数据已灌入
-      const result = engine.query('SELECT * FROM inventory;');
+      const result = engine.query(`SELECT * FROM ${tableName};`);
       expect(result.values).toHaveLength(2);
       expect(result.values[0][1]).toBe('铁剑');
       expect(result.values[1][1]).toBe('治疗药水');
@@ -112,8 +118,8 @@ describe('SyncBridge', () => {
       });
       bridge.loadFromTableData(data);
 
-      expect(engine.getTableNames()).toContain('inventory');
-      expect(engine.getTableNames()).toContain('characters');
+      expect(engine.getTableNames()).toContain(getRuntimeTableName(data, 'sheet_0'));
+      expect(engine.getTableNames()).toContain(getRuntimeTableName(data, 'sheet_1'));
     });
 
     it('null 或空对象不报错', () => {
@@ -145,14 +151,15 @@ describe('SyncBridge', () => {
         ],
       });
       const data = makeTableData({ sheet_0: characterSheet });
+      const tableName = getRuntimeTableName(data, 'sheet_0');
 
       expect(() => bridge.loadFromTableData(data, { strict: true })).not.toThrow();
 
-      const result = engine.query('SELECT note FROM characters WHERE name = ?;', ['角色A']);
+      const result = engine.query(`SELECT note FROM ${tableName} WHERE name = ?;`, ['角色A']);
       expect(result.values[0][0]).toBe('');
     });
 
-    it('旧 chronicle 表头错序时按 DDL 注释写入正确物理列并保持 round-trip', () => {
+    it('显式 legacy DDL 表名不覆盖显示名派生的 runtime 物理名，且保持 round-trip', () => {
       const chronicleSheet = makeSheet({
         uid: 'chronicle',
         name: '纪要表',
@@ -175,8 +182,10 @@ describe('SyncBridge', () => {
 
       bridge.loadFromTableData(makeTableData({ sheet_chronicle: chronicleSheet }), { strict: true });
 
+      expect(engine.getTableNames()).toContain('jiyaobiao');
+      expect(engine.getTableNames()).not.toContain('chronicle');
       expect(engine.query(
-        'SELECT code_index, time_span, summary, chronicle_text, key_dialogue FROM chronicle WHERE row_id = 1;'
+        'SELECT code_index, time_span, summary, chronicle_text, key_dialogue FROM jiyaobiao WHERE row_id = 1;'
       ).values).toEqual([
         ['AM0001', '2026-10-15 14:30 ~ 2026-10-15 15:00', '摘要', '完整纪要正文', null],
       ]);
@@ -226,12 +235,14 @@ describe('SyncBridge', () => {
         ],
       });
 
-      bridge.loadFromTableData(makeTableData({ sheet_invalid: invalidSheet, sheet_valid: makeSheet() }));
+      const data = makeTableData({ sheet_invalid: invalidSheet, sheet_valid: makeSheet() });
+      const validTableName = getRuntimeTableName(data, 'sheet_valid');
+      bridge.loadFromTableData(data);
 
       expect(engine.getTableNames()).not.toContain('required_value');
       expect(engine.query("SELECT sheet_key FROM _acu_sheet_meta WHERE sheet_key = 'sheet_invalid';").values).toEqual([]);
-      expect(engine.getTableNames()).toContain('inventory');
-      expect(engine.query('SELECT item_name FROM inventory ORDER BY row_id;').values).toEqual([
+      expect(engine.getTableNames()).toContain(validTableName);
+      expect(engine.query(`SELECT item_name FROM ${validTableName} ORDER BY row_id;`).values).toEqual([
         ['铁剑'],
         ['治疗药水'],
       ]);
@@ -254,12 +265,14 @@ describe('SyncBridge', () => {
         ],
       });
 
-      bridge.loadFromTableData(makeTableData({ sheet_invalid: invalidSheet, sheet_valid: makeSheet() }));
+      const data = makeTableData({ sheet_invalid: invalidSheet, sheet_valid: makeSheet() });
+      const validTableName = getRuntimeTableName(data, 'sheet_valid');
+      bridge.loadFromTableData(data);
 
       expect(engine.getTableNames()).not.toContain('checked_value');
       expect(engine.query("SELECT sheet_key FROM _acu_sheet_meta WHERE sheet_key = 'sheet_invalid';").values).toEqual([]);
-      expect(engine.getTableNames()).toContain('inventory');
-      expect(engine.query('SELECT item_name FROM inventory ORDER BY row_id;').values).toEqual([
+      expect(engine.getTableNames()).toContain(validTableName);
+      expect(engine.query(`SELECT item_name FROM ${validTableName} ORDER BY row_id;`).values).toEqual([
         ['铁剑'],
         ['治疗药水'],
       ]);
@@ -280,12 +293,13 @@ describe('SyncBridge', () => {
         sheet_0: badSheet,
         sheet_1: makeSheet(),
       });
+      const validTableName = getRuntimeTableName(data, 'sheet_1');
 
       // 不应该抛出错误（内部 try-catch 隔离）
       expect(() => bridge.loadFromTableData(data)).not.toThrow();
 
       // 好的表应该正常加载
-      expect(engine.getTableNames()).toContain('inventory');
+      expect(engine.getTableNames()).toContain(validTableName);
     });
 
     it('runtime fallback 可加载非法显式 DDL，保留原文并按稳定 columnMap round-trip', () => {
@@ -302,11 +316,13 @@ describe('SyncBridge', () => {
           ['1', '铁剑', '稀有'],
         ],
       });
+      const data = makeTableData({ sheet_runtime: sheet });
+      const tableName = getRuntimeTableName(data, 'sheet_runtime');
 
-      bridge.loadFromTableData(makeTableData({ sheet_runtime: sheet }), { strict: true, allowRuntimeDdlFallback: true });
+      bridge.loadFromTableData(data, { strict: true, allowRuntimeDdlFallback: true });
 
-      expect(engine.getTableNames()).toContain('sheet_runtime');
-      expect(engine.query('SELECT wu_pin_ming_cheng, col_select FROM sheet_runtime;').values).toEqual([['铁剑', '稀有']]);
+      expect(engine.getTableNames()).toContain(tableName);
+      expect(engine.query(`SELECT wu_pin_ming_cheng, col_select FROM ${tableName};`).values).toEqual([['铁剑', '稀有']]);
       const exported = bridge.exportToTableData(makeMate()).sheet_runtime as Sheet_ACU;
       expect(exported.content).toEqual([
         ['row_id', '物品名称', 'select'],
@@ -321,13 +337,15 @@ describe('SyncBridge', () => {
         uid: 'sheet_observable',
         sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: invalidDdl },
       });
+      const data = makeTableData({ sheet_observable: sheet });
+      const tableName = getRuntimeTableName(data, 'sheet_observable');
 
-      bridge.loadFromTableData(makeTableData({ sheet_observable: sheet }), { strict: true, allowRuntimeDdlFallback: true });
-      engine.run('DROP TABLE sheet_observable;');
-      bridge.loadFromTableData(makeTableData({ sheet_observable: sheet }), { strict: true, allowRuntimeDdlFallback: true });
+      bridge.loadFromTableData(data, { strict: true, allowRuntimeDdlFallback: true });
+      engine.run(`DROP TABLE ${tableName};`);
+      bridge.loadFromTableData(data, { strict: true, allowRuntimeDdlFallback: true });
 
       expect(bridge.getRuntimeFallbackDiagnostics_ACU()).toEqual([expect.objectContaining({
-        sheetKey: 'sheet_observable', reason: 'fallback_invalid', effectiveTableName: 'sheet_observable', phase: 'initial_load',
+        sheetKey: 'sheet_observable', reason: 'fallback_invalid', effectiveTableName: tableName, phase: 'initial_load',
       })]);
       expect(bridge.getRuntimeFallbackDiagnostics_ACU()[0].originalDdlDigest).toBeTruthy();
     });
@@ -346,16 +364,18 @@ describe('SyncBridge', () => {
         },
         content: [['row_id', '物品名称'], ['1', '铁剑']],
       });
+      const data = makeTableData({ sheet_execution: sheet });
+      const tableName = getRuntimeTableName(data, 'sheet_execution');
 
-      bridge.loadFromTableData(makeTableData({ sheet_execution: sheet }), { strict: true, allowRuntimeDdlFallback: true });
+      bridge.loadFromTableData(data, { strict: true, allowRuntimeDdlFallback: true });
 
-      expect(engine.getTableNames()).toContain('execution_broken');
-      expect(engine.query('SELECT wu_pin_ming_cheng FROM execution_broken;').values).toEqual([['铁剑']]);
+      expect(engine.getTableNames()).toContain(tableName);
+      expect(engine.query(`SELECT wu_pin_ming_cheng FROM ${tableName};`).values).toEqual([['铁剑']]);
       const exported = bridge.exportToTableData(makeMate()).sheet_execution as Sheet_ACU & { _acu_runtimeEffectiveSchema?: any };
       expect(exported.sourceData.ddl).toBe(executionInvalidDdl);
       expect(exported._acu_runtimeEffectiveSchema).toEqual(expect.objectContaining({
         source: 'fallback_invalid',
-        effectiveDDL: expect.stringContaining('CREATE TABLE execution_broken'),
+        effectiveDDL: expect.stringContaining(`CREATE TABLE ${tableName}`),
       }));
       expect(exported._acu_runtimeEffectiveSchema.effectiveDDL).not.toContain('INVALID_SUFFIX');
       expect(JSON.stringify(exported)).not.toContain('_acu_runtimeEffectiveSchema');
@@ -369,9 +389,10 @@ describe('SyncBridge', () => {
       const sheet = makeSheet({
         content: [['row_id', '物品名称', '数量', '旧字段'], ['1', '铁剑', '3', '不能丢失']],
       });
+      const data = makeTableData({ sheet_unsafe: sheet });
 
-      expect(() => bridge.loadFromTableData(makeTableData({ sheet_unsafe: sheet }), { strict: true, allowRuntimeDdlFallback: true })).toThrow('没有对应的 DDL 列');
-      expect(engine.getTableNames()).not.toContain('inventory');
+      expect(() => bridge.loadFromTableData(data, { strict: true, allowRuntimeDdlFallback: true })).toThrow('没有对应的 DDL 列');
+      expect(engine.getTableNames()).not.toContain(getRuntimeTableName(data, 'sheet_unsafe'));
     });
 
     it('strict hydrate 未显式允许 runtime fallback 时拒绝非法 DDL', () => {
@@ -391,9 +412,11 @@ describe('SyncBridge', () => {
           ['1', '新快照行', '9', '后续消息覆盖'],
         ],
       });
+      const data = makeTableData({ sheet_0: duplicatedRowSheet });
+      const tableName = getRuntimeTableName(data, 'sheet_0');
 
-      expect(() => bridge.loadFromTableData(makeTableData({ sheet_0: duplicatedRowSheet }))).not.toThrow();
-      expect(engine.query('SELECT item_name, quantity, description FROM inventory ORDER BY row_id;').values).toEqual([
+      expect(() => bridge.loadFromTableData(data)).not.toThrow();
+      expect(engine.query(`SELECT item_name, quantity, description FROM ${tableName} ORDER BY row_id;`).values).toEqual([
         ['新快照行', 9, '后续消息覆盖'],
       ]);
 
@@ -482,10 +505,11 @@ describe('SyncBridge', () => {
   describe('syncToJson', () => {
     it('同步 SQLite 数据到 JSON 视图', () => {
       const originalData = makeTableData({ sheet_0: makeSheet() });
+      const tableName = getRuntimeTableName(originalData, 'sheet_0');
       bridge.loadFromTableData(originalData);
 
       // 在 SQLite 中修改数据
-      engine.run("UPDATE inventory SET quantity = 10 WHERE item_name = '铁剑';");
+      engine.run(`UPDATE ${tableName} SET quantity = 10 WHERE item_name = '铁剑';`);
 
       // 同步到 JSON
       const synced = bridge.syncToJson(originalData);

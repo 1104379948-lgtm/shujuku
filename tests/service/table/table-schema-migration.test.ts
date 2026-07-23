@@ -146,20 +146,18 @@ describe('table schema migration P1 contract', () => {
     }
   });
 
-  it('表级约束或物理表名变化均 fail closed', async () => {
+  it('表级约束变更 fail closed，DDL 作者表名变化不改变 runtime 物理名', async () => {
     const before = makeSheet();
     await expect(buildSheetSchemaMigrationOperation_ACU('sheet_inventory', before, makeSheet({
       sourceData: { ddl: 'CREATE TABLE inventory (\n row_id INTEGER PRIMARY KEY, -- 行号\n item_name TEXT, -- 名称\n UNIQUE (item_name)\n);' },
     }))).rejects.toThrow('表级 constraint');
-    await expect(buildSheetSchemaMigrationOperation_ACU('sheet_inventory', before, makeSheet({
+    const renamedDdl = makeSheet({
       sourceData: { ddl: 'CREATE TABLE inventory_next (\n row_id INTEGER PRIMARY KEY, -- 行号\n item_name TEXT -- 名称\n);' },
-    }))).rejects.toThrow('物理表名');
-    const quotedBefore = makeSheet({
-      sourceData: { ddl: 'CREATE TABLE "inventory(x)" (\n row_id INTEGER PRIMARY KEY, -- 行号\n item_name TEXT -- 名称\n);' },
     });
-    await expect(buildSheetSchemaMigrationOperation_ACU('sheet_inventory', quotedBefore, makeSheet({
-      sourceData: { ddl: 'CREATE TABLE "inventory(y)" (\n row_id INTEGER PRIMARY KEY, -- 行号\n item_name TEXT -- 名称\n);' },
-    }))).rejects.toThrow('物理表名');
+    const operation = await buildSheetSchemaMigrationOperation_ACU('sheet_inventory', before, renamedDdl);
+    const result = await applySheetSchemaMigrationOperation_ACU(makeState(before), operation);
+
+    expect(result.sheet_inventory.sourceData.ddl).toContain('CREATE TABLE inventory_next');
   });
 
   it('完整 candidate 中其他 sheet 的 SQLite 约束失败时拒绝且原 state 不变', async () => {

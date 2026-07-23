@@ -1,7 +1,11 @@
 import { pinyin } from 'pinyin-pro';
+import type { Sheet_ACU, TableDataObject_ACU } from './models/table-data';
 
 export const SHEET_KEY_ALGORITHM_VERSION_ACU = 1;
 export const MAX_SHEET_SLUG_LENGTH_ACU = 48;
+export const PHYSICAL_TABLE_NAME_ALGORITHM_VERSION_ACU = 1;
+const MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU = 48;
+const SQLITE_RESERVED_TABLE_PREFIXES_ACU = ['sqlite_', '_acu_'];
 
 export interface SheetNameDiagnostic_ACU {
   code: 'empty_name' | 'duplicate_canonical_name' | 'duplicate_sheet_key';
@@ -56,6 +60,57 @@ export function toAsciiSlug_ACU(value: unknown, maxLength = MAX_SHEET_SLUG_LENGT
 export function buildStableSheetKeyCandidate_ACU(displayName: unknown): string | null {
   const slug = toAsciiSlug_ACU(displayName);
   return slug ? `sheet_${slug}` : null;
+}
+
+/**
+ * Runtime SQLite names are derived from the display name, not from a legacy
+ * CREATE TABLE identifier embedded in user-authored DDL. Allocation must use
+ * the complete sheet set so slug collisions stay deterministic.
+ */
+export function resolvePhysicalTableNames_ACU(data: TableDataObject_ACU | Record<string, unknown>): Map<string, string> {
+  const entries = Object.keys(data || {})
+    .filter(sheetKey => sheetKey.startsWith('sheet_'))
+    .sort()
+    .map(sheetKey => ({ sheetKey, sheet: (data as Record<string, Sheet_ACU>)[sheetKey] }));
+  const baseByKey = new Map(entries.map(({ sheetKey, sheet }) => [sheetKey, physicalTableNameBase_ACU(sheet, sheetKey)]));
+  const groups = new Map<string, string[]>();
+  for (const [sheetKey, base] of baseByKey) {
+    const group = groups.get(base.toLowerCase()) || [];
+    group.push(sheetKey);
+    groups.set(base.toLowerCase(), group);
+  }
+  const result = new Map<string, string>();
+  for (const { sheetKey } of entries) {
+    const base = baseByKey.get(sheetKey)!;
+    const group = groups.get(base.toLowerCase())!;
+    result.set(sheetKey, group.length === 1 ? base : `${truncatePhysicalTableNameForHash_ACU(base)}_${stableHash_ACU(sheetKey)}`);
+  }
+  return result;
+}
+
+export function getPhysicalTableNameForSheet_ACU(data: TableDataObject_ACU | Record<string, unknown>, sheetKey: string): string {
+  const resolved = resolvePhysicalTableNames_ACU(data).get(sheetKey);
+  if (!resolved) throw new Error(`无法为 Sheet 分配 SQLite runtime 表名：${sheetKey}`);
+  return resolved;
+}
+
+/** Use resolvePhysicalTableNames_ACU whenever collision arbitration is possible. */
+export function resolvePhysicalTableName_ACU(sheet: Sheet_ACU | null | undefined, sheetKey: string): string {
+  return physicalTableNameBase_ACU(sheet, sheetKey);
+}
+
+function physicalTableNameBase_ACU(sheet: Sheet_ACU | null | undefined, sheetKey: string): string {
+  const displaySlug = toAsciiSlug_ACU(sheet?.name).replace(/_/g, '');
+  const keySlug = toAsciiSlug_ACU(String(sheetKey || '').replace(/^sheet_/, '')).replace(/_/g, '');
+  let candidate = (displaySlug || keySlug || 'sheet').slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU);
+  if (/^[0-9]/.test(candidate) || SQLITE_RESERVED_TABLE_PREFIXES_ACU.some(prefix => candidate.toLowerCase().startsWith(prefix))) {
+    candidate = `table_${candidate}`;
+  }
+  return candidate.slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU) || 'table_sheet';
+}
+
+function truncatePhysicalTableNameForHash_ACU(value: string): string {
+  return value.slice(0, Math.max(1, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU - 11)).replace(/_+$/g, '') || 'table';
 }
 
 /**

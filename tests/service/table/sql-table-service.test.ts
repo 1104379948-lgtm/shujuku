@@ -108,6 +108,7 @@ vi.mock('../../../src/shared/json-helpers', () => ({
 import {
   applySqlEditsToTableDataSnapshot_ACU,
   buildSqlSheetBatchOperations_ACU,
+  rebindSqlMutationTableIdentifiers_ACU,
   SqlTableService,
   splitSqlStatements,
   extractTableNamesFromStatements,
@@ -333,10 +334,10 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
       kind: 'sql_sheet_batch',
       sheetKey: 'sheet_0',
       statements: [
-        'UPDATE inventory SET quantity = 9 WHERE row_id = 1',
-        "INSERT INTO inventory VALUES (2, '治疗药水', 5)",
+        'UPDATE beibaowupinbiao SET quantity = 9 WHERE row_id = 1',
+        "INSERT INTO beibaowupinbiao VALUES (2, '治疗药水', 5)",
       ],
-      tableName: 'inventory',
+      tableName: 'beibaowupinbiao',
       reason: 'system',
     }]);
   });
@@ -355,6 +356,41 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
   });
 });
 
+describe('rebindSqlMutationTableIdentifiers_ACU', () => {
+  const tableData: any = {
+    sheet_0: { uid: 'legacy_uid', name: '背包物品表', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT);' } },
+  };
+
+  it('将唯一 DDL alias 的目标标识符改写为 runtime 物理名', () => {
+    expect(rebindSqlMutationTableIdentifiers_ACU([
+      "INSERT INTO `inventory` VALUES (1, 'inventory');",
+      'UPDATE inventory SET value = \'inventory\' WHERE row_id = 1;',
+      'DELETE FROM inventory WHERE value = \'inventory\';',
+    ], tableData)).toEqual([
+      "INSERT INTO `beibaowupinbiao` VALUES (1, 'inventory');",
+      'UPDATE beibaowupinbiao SET value = \'inventory\' WHERE row_id = 1;',
+      'DELETE FROM beibaowupinbiao WHERE value = \'inventory\';',
+    ]);
+  });
+
+  it('拒绝多个 sheet 共用的 DDL alias', () => {
+    const ambiguousData = {
+      sheet_0: { name: '表A', sourceData: { ddl: 'CREATE TABLE legacy (row_id INTEGER PRIMARY KEY);' } },
+      sheet_1: { name: '表B', sourceData: { ddl: 'CREATE TABLE legacy (row_id INTEGER PRIMARY KEY);' } },
+    } as any;
+
+    expect(() => rebindSqlMutationTableIdentifiers_ACU(['INSERT INTO legacy VALUES (1);'], ambiguousData))
+      .toThrow('无法唯一解析 SQL 目标表标识符：legacy');
+  });
+
+  it('不把 uid 或显示名当作 runtime SQL alias', () => {
+    expect(rebindSqlMutationTableIdentifiers_ACU(['INSERT INTO legacy_uid VALUES (1);'], tableData))
+      .toEqual(['INSERT INTO legacy_uid VALUES (1);']);
+    expect(() => rebindSqlMutationTableIdentifiers_ACU(['INSERT INTO beibaowupinbiao VALUES (1);'], tableData))
+      .not.toThrow();
+  });
+});
+
 describe('buildSqlSheetBatchOperations_ACU', () => {
   const tableData: any = {
     sheet_0: { uid: 'inventory', name: '背包表', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT);' } },
@@ -369,8 +405,8 @@ describe('buildSqlSheetBatchOperations_ACU', () => {
     ], tableData, { reason: 'system' });
 
     expect(result.operations).toEqual([
-      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["INSERT INTO inventory VALUES (1, 'a')", "UPDATE inventory SET value = 'b' WHERE row_id = 1"], tableName: 'inventory', reason: 'system' },
-      { kind: 'sql_sheet_batch', sheetKey: 'sheet_1', statements: ["INSERT INTO quest_log VALUES (1, 'q')"], tableName: 'quest_log', reason: 'system' },
+      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["INSERT INTO inventory VALUES (1, 'a')", "UPDATE inventory SET value = 'b' WHERE row_id = 1"], tableName: 'beibaobiao', reason: 'system' },
+      { kind: 'sql_sheet_batch', sheetKey: 'sheet_1', statements: ["INSERT INTO quest_log VALUES (1, 'q')"], tableName: 'renwubiao', reason: 'system' },
     ]);
     expect(result.unknownStatements).toEqual([]);
     expect(result.ambiguousStatements).toEqual([]);
@@ -383,7 +419,7 @@ describe('buildSqlSheetBatchOperations_ACU', () => {
       { fallbackTargetSheetKeys: ['sheet_0'], allowSingleTargetFallback: true, reason: 'system' },
     );
 
-    expect(result.operations).toEqual([{ kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ['CREATE TABLE temp_table (row_id INTEGER PRIMARY KEY)'], reason: 'system' }]);
+    expect(result.operations).toEqual([{ kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ['CREATE TABLE temp_table (row_id INTEGER PRIMARY KEY)'], tableName: 'beibaobiao', reason: 'system' }]);
     expect(result.unknownStatements).toEqual(['CREATE TABLE temp_table (row_id INTEGER PRIMARY KEY)']);
   });
 });
@@ -405,7 +441,7 @@ describe('SqlTableService', () => {
     mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
     sheet_0: {
       uid: 'inventory',
-      name: '背包物品表',
+      name: 'inventory',
       sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
       content: [
         ['row_id', 'item_name', 'quantity'],
@@ -474,7 +510,7 @@ describe('SqlTableService', () => {
         mate: { type: 'acu', version: 1 },
         sheet_0: {
           uid: 'inventory',
-          name: '背包物品表',
+          name: 'inventory',
           sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
           content: [
             ['row_id', 'item_name', 'quantity'],
@@ -549,7 +585,7 @@ describe('SqlTableService', () => {
 
       expect(result).toEqual({ loaded: true, source: 'merged' });
       expect(service.isReady()).toBe(true);
-      expect(service.executeQuery('SELECT code_index, chronicle_text FROM chronicle WHERE row_id = 1').values).toEqual([
+      expect(service.executeQuery('SELECT code_index, chronicle_text FROM jiyaobiao WHERE row_id = 1').values).toEqual([
         ['AM0001', '完整纪要正文'],
       ]);
       expect(canonicalData.sheet_0.content[1]).toEqual(['1', '完整纪要正文', 'AM0001']);
@@ -639,21 +675,21 @@ describe('SqlTableService', () => {
       const questDDL = `CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);`;
       const data = {
         mate: { type: 'acu', version: 1 },
-        sheet_0: { uid: 'inventory', name: '背包', sourceData: { ddl: TEST_DDL }, content: [['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
-        sheet_1: { uid: 'weapon_log', name: '武器记录', sourceData: { ddl: weaponDDL }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
-        sheet_2: { uid: 'quest_log', name: '任务记录', sourceData: { ddl: questDDL }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 2 },
+        sheet_0: { uid: 'inventory', name: 'inventory', sourceData: { ddl: TEST_DDL }, content: [['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+        sheet_1: { uid: 'weapon_log', name: 'weaponlog', sourceData: { ddl: weaponDDL }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
+        sheet_2: { uid: 'quest_log', name: 'questlog', sourceData: { ddl: questDDL }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 2 },
       };
       mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(data)));
       await service.loadFromChat();
 
       expect(() => service.applyEdits([
-        "INSERT INTO weapon_log VALUES (1, 'A表已写');",
-        "INSERT INTO quest_log VALUES (1, 'B表已写');",
+        "INSERT INTO weaponlog VALUES (1, 'A表已写');",
+        "INSERT INTO questlog VALUES (1, 'B表已写');",
         "INSERT INTO inventory (missing_col) VALUES ('C表报错');",
       ].join('\n'))).toThrow();
 
-      expect(service.executeQuery('SELECT COUNT(*) FROM weapon_log').values[0][0]).toBe(0);
-      expect(service.executeQuery('SELECT COUNT(*) FROM quest_log').values[0][0]).toBe(0);
+      expect(service.executeQuery('SELECT COUNT(*) FROM weaponlog').values[0][0]).toBe(0);
+      expect(service.executeQuery('SELECT COUNT(*) FROM questlog').values[0][0]).toBe(0);
     });
 
     it('空字符串返回成功（无操作）', () => {
@@ -839,7 +875,7 @@ describe('SqlTableService', () => {
         mate: { type: 'acu', version: 1 },
         sheet_0: {
           uid: 'inventory',
-          name: '背包物品表',
+          name: 'inventory',
           sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
           content: [['row_id', 'item_name', 'quantity']],
           updateConfig: {},
@@ -868,7 +904,7 @@ describe('SqlTableService', () => {
         mate: { type: 'acu', version: 1 },
         sheet_0: {
           uid: 'inventory',
-          name: '背包物品表',
+          name: 'inventory',
           sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: invalidDdl },
           content: [['row_id', '物品名称', '数量']],
           updateConfig: {},
@@ -906,7 +942,7 @@ describe('SqlTableService', () => {
         mate: { type: 'acu', version: 1 },
         sheet_0: {
           uid: 'inventory',
-          name: '背包物品表',
+          name: 'inventory',
           sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL_WITH_SEED },
           content: [['row_id', 'item_name', 'quantity']], // 只有表头
           updateConfig: {},
@@ -943,7 +979,7 @@ describe('SqlTableService', () => {
         mate: { type: 'acu', version: 1 },
         sheet_0: {
           uid: 'inventory',
-          name: '背包物品表',
+          name: 'inventory',
           sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL_WITH_SEED },
           content: [['row_id', 'item_name', 'quantity']],
           updateConfig: {},
@@ -975,7 +1011,7 @@ describe('SqlTableService', () => {
         mate: { type: 'acu', version: 1 },
         sheet_0: {
           uid: 'inventory',
-          name: '背包物品表',
+          name: 'inventory',
           sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL_WITH_SEED },
           content: [['row_id', 'item_name', 'quantity']],
           updateConfig: {},
@@ -1012,7 +1048,7 @@ describe('SqlTableService', () => {
         mate: { type: 'acu', version: 1 },
         sheet_0: {
           uid: 'inventory',
-          name: '背包物品表',
+          name: 'inventory',
           sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
           content: [['row_id', 'item_name', 'quantity']],
           updateConfig: {},
@@ -1061,7 +1097,7 @@ describe('SqlTableService', () => {
           mate: { type: 'acu', version: 1 },
           sheet_0: {
             uid: 'chat_table',
-            name: '聊天专属表',
+            name: 'chattable',
             sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: CHAT_TEMPLATE_DDL },
             content: [['row_id', 'name']],
             updateConfig: {},
@@ -1088,11 +1124,11 @@ describe('SqlTableService', () => {
       } as any);
 
       // applyEdits 触发建表
-      const result = service.applyEdits("INSERT INTO chat_table VALUES (1, '测试');");
+      const result = service.applyEdits("INSERT INTO chattable VALUES (1, '测试');");
       expect(result.success).toBe(true);
 
       // 验证 chat_table 被建出来了
-      const chatQuery = service.executeQuery('SELECT * FROM chat_table');
+      const chatQuery = service.executeQuery('SELECT * FROM chattable');
       expect(chatQuery.rowCount).toBe(1);
 
       // 验证 global_table 没有被建出来
@@ -1129,7 +1165,7 @@ describe('SqlTableService', () => {
           mate: { type: 'acu', version: 1 },
           sheet_0: {
             uid: 'chat_table',
-            name: '聊天专属表',
+            name: 'chattable',
             sourceData: { ddl: newDDL },
             content: [['row_id', '状态']],
             updateConfig: {},
@@ -1140,10 +1176,10 @@ describe('SqlTableService', () => {
         presetName: '聊天预设',
       });
 
-      const result = service.executeMutation("INSERT INTO chat_table VALUES (1, 'new');");
+      const result = service.executeMutation("INSERT INTO chattable VALUES (1, 'new');");
 
       expect(result.errors).toEqual([]);
-      expect(service.executeQuery('SELECT status FROM chat_table').values[0][0]).toBe('new');
+      expect(service.executeQuery('SELECT status FROM chattable').values[0][0]).toBe('new');
     });
 
     it('inherit_global 模式下 fallback 到全局模板', async () => {
@@ -1159,7 +1195,7 @@ describe('SqlTableService', () => {
         mate: { type: 'acu', version: 1 },
         sheet_0: {
           uid: 'inventory',
-          name: '背包物品表',
+          name: 'inventory',
           sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
           content: [['row_id', 'item_name', 'quantity']],
           updateConfig: {},
@@ -1193,7 +1229,7 @@ describe('SqlTableService', () => {
           mate: { type: 'acu', version: 1 },
           sheet_0: {
             uid: 'inventory',
-            name: '背包物品表',
+            name: 'inventory',
             sourceData: { note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '', ddl: TEST_DDL },
             content: [['row_id', 'item_name', 'quantity']],
             updateConfig: {},

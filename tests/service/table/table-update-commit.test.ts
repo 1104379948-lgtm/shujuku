@@ -77,4 +77,52 @@ describe('runTableUpdateCommit_ACU migration gate', () => {
     expect(mocks.ensureProvider).not.toHaveBeenCalled();
     expect(mocks.persist).not.toHaveBeenCalled();
   });
+
+  it('persist 前只读拒绝空 row_id，且不会调用持久化或修复数据', async () => {
+    const invalidData: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'sheet_0',
+        name: '损坏表',
+        content: [['row_id', '名称'], ['', '未分配身份']],
+      },
+    };
+    mocks.migration.mockResolvedValue({ success: true, migrated: false });
+    mocks.transaction.mockImplementation(async (_options: any, task: any) => task({
+      runCommit: async (commitTask: any) => commitTask(),
+    }, null));
+
+    const result = await runTableUpdateCommit_ACU(options('test_row_identity_guard'), async () => ({
+      success: true,
+      tableData: invalidData,
+      value: 'unreachable',
+    }));
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('sheetKey=sheet_0, rowIndex=1 的 row_id 为空') });
+    expect(mocks.persist).not.toHaveBeenCalled();
+    expect(invalidData.sheet_0.content[1][0]).toBe('');
+  });
+
+  it('persist 前拒绝重复 row_id，并提供可定位的行号', async () => {
+    const invalidData: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'sheet_0',
+        name: '损坏表',
+        content: [['row_id', '名称'], ['stable', '第一行'], ['stable', '第二行']],
+      },
+    };
+    mocks.migration.mockResolvedValue({ success: true, migrated: false });
+    mocks.transaction.mockImplementation(async (_options: any, task: any) => task({
+      runCommit: async (commitTask: any) => commitTask(),
+    }, null));
+
+    const result = await runTableUpdateCommit_ACU(options('test_duplicate_row_identity_guard'), async () => ({
+      success: true,
+      tableData: invalidData,
+    }));
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('sheetKey=sheet_0, rowIndex=2 的 row_id 重复：stable') });
+    expect(mocks.persist).not.toHaveBeenCalled();
+  });
 });

@@ -8,8 +8,9 @@ import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../../../s
 import { ensureStorageProviderReady_ACU, getStorageProvider } from '../../../service/table/table-storage-strategy';
 import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
+import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
-import { extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
+import { buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
 import type { TableWriteConflictUnitV2_ACU } from '../../../service/table/storage-frame-v2-types';
 import type { SqlMutationResult, SqlQueryResult } from '../../../shared/table-storage-provider';
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
@@ -331,13 +332,8 @@ function buildLimitedReadSql_ACU(sql: string, params: SqlParam_ACU[] | undefined
     };
 }
 
-function getEnglishTableName_ACU(sheet: any, fallback: string): string {
-    const ddl = sheet?.sourceData?.ddl;
-    if (ddl) {
-        const parsed = parseDDLTableName(ddl);
-        if (parsed) return parsed;
-    }
-    return fallback;
+function getEnglishTableName_ACU(tableData: Record<string, any>, sheetKey: string): string {
+    return getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
 }
 
 function findQueryTargetSheet_ACU(tableNameOrSheetKey: string): { sheet: any; sheetKey: string; englishTableName: string } | null {
@@ -347,18 +343,33 @@ function findQueryTargetSheet_ACU(tableNameOrSheetKey: string): { sheet: any; sh
 
     if (input.startsWith('sheet_') && tableData[input]) {
         const sheet = tableData[input];
-        return { sheet, sheetKey: input, englishTableName: getEnglishTableName_ACU(sheet, String(sheet?.name || input)) };
+        return { sheet, sheetKey: input, englishTableName: getEnglishTableName_ACU(tableData, input) };
     }
 
     const mapper = getNameMapper();
     const maybeChineseName = mapper.getChineseTableName(input);
     for (const sheetKey of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
         const sheet = tableData[sheetKey];
-        const english = getEnglishTableName_ACU(sheet, String(sheet?.name || sheetKey));
+        const english = getEnglishTableName_ACU(tableData, sheetKey);
         if (sheet?.name === input || sheet?.name === maybeChineseName || english === input) {
             return { sheet, sheetKey, englishTableName: english };
         }
     }
+
+    // 旧 DDL 内的表名只作为 sheet 定位别名；多个 sheet 复用同一别名时不能猜测。
+    const ddlAliasMatches: Array<{ sheet: any; sheetKey: string }> = [];
+    for (const sheetKey of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
+        const sheet = tableData[sheetKey];
+        const ddlTableName = parseDDLTableName(String(sheet?.sourceData?.ddl || ''));
+        if (ddlTableName === input) {
+            ddlAliasMatches.push({ sheet, sheetKey });
+        }
+    }
+    if (ddlAliasMatches.length === 1) {
+        const [{ sheet, sheetKey }] = ddlAliasMatches;
+        return { sheet, sheetKey, englishTableName: getEnglishTableName_ACU(tableData, sheetKey) };
+    }
+
     return null;
 }
 
@@ -451,11 +462,6 @@ function buildRawSqlWriteSet_ACU(options: SqlMutationOptions_ACU): TableWriteCon
     return Array.isArray(keys) && keys.length > 0
         ? keys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }))
         : [{ kind: 'all' as const }];
-}
-
-function buildRawSqlBatchOperations_ACU(sql: string) {
-    const statements = splitSqlStatements(String(sql || '').replace(/<!--|-->/g, '').trim());
-    return statements.length > 0 ? [{ kind: 'sql_batch' as const, statements }] : [];
 }
 
 export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
@@ -568,11 +574,17 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     updateGroupKeys: args.updateGroupKeys,
                     trackingSheetKeys: args.trackingSheetKeys === undefined ? [] : args.trackingSheetKeys,
                     trackAsUpdate: false,
-                    operations: buildRawSqlBatchOperations_ACU(args.sql),
                     skipChatSave: args.skipChatSave,
-                }, async () => {
+                }, async ({ workingData }) => {
                     const provider = await ensureStorageProviderReady_ACU();
-                    const batchResult = provider.applyEdits(args.sql, 'raw_sql_api');
+                    const runtimeStatements = rebindSqlMutationTableIdentifiers_ACU(
+                        splitSqlStatements(String(args.sql || '').replace(/<!--|-->/g, '').trim()),
+                        (workingData || currentJsonTableData_ACU) as any,
+                    );
+                    const batchResult = typeof provider.applyEditsBatch === 'function'
+                        ? provider.applyEditsBatch(runtimeStatements, 'raw_sql_api')
+                        // 保留语句边界，避免可选 batch 能力缺失时将多条 SQL 拼成非法单句。
+                        : provider.applyEdits(runtimeStatements.join(';\n'), 'raw_sql_api');
                     if (!batchResult.success) {
                         return { success: false, error: batchResult.error || 'executeSqlBatch failed' };
                     }
@@ -580,10 +592,21 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     if (!tableData) {
                         return { success: false, error: 'SQLite runtime data export failed' };
                     }
+                    const operationBuild = buildSqlSheetBatchOperations_ACU(
+                        runtimeStatements,
+                        tableData as any,
+                        {
+                            fallbackTargetSheetKeys: args.targetSheetKeys || undefined,
+                            allowSingleTargetFallback: true,
+                            keepLegacyForUnclassified: true,
+                            reason: 'manual_crud',
+                        },
+                    );
                     return {
                         success: true,
                         tableData: tableData as any,
                         mutationResult: { changes: batchResult.appliedEdits, errors: [] },
+                        persist: { operations: operationBuild.operations },
                         value: {
                             success: true,
                             modifiedKeys: batchResult.modifiedKeys,

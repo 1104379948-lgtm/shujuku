@@ -7,6 +7,7 @@ import { ensureStorageProviderReady_ACU, reloadStorageProvider } from './table-s
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import type { ReplaceExistingIncrementalOptions_ACU } from './storage-frame-v2-persist';
 import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
+import { buildSqlSheetBatchOperations_ACU, rebindSqlMutationTableIdentifiers_ACU } from './sql-table-service';
 
 export interface TableUpdateCommitApplyContext_ACU {
   transactionContext: TableWriteTransactionContext_ACU;
@@ -75,6 +76,38 @@ function normalizeSqlBindParams_ACU(params: (string | number | null)[] | undefin
   return Array.isArray(params) && params.length > 0 ? [params.map(value => value ?? null)] : undefined;
 }
 
+/**
+ * Final persistence boundary: reject malformed row identities without repairing
+ * data. Identity allocation belongs to the row creation path; repairing here
+ * would hide the origin of a corrupt row and could change persisted semantics.
+ */
+function assertPersistableRowIdentities_ACU(data: TableDataObject_ACU, reason: string): void {
+  for (const [sheetKey, sheet] of Object.entries(data)) {
+    if (!sheetKey.startsWith('sheet_')) continue;
+    const content = (sheet as any)?.content;
+    if (!Array.isArray(content) || content.length === 0) continue;
+    const headers = content[0];
+    if (!Array.isArray(headers) || String(headers[0] ?? '') !== 'row_id') {
+      throw new Error(`[TableUpdateCommit] ${reason}: sheetKey=${sheetKey} 缺少 row_id 首列表头。`);
+    }
+    const rowIds = new Set<string>();
+    for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
+      const row = content[rowIndex];
+      if (!Array.isArray(row)) {
+        throw new Error(`[TableUpdateCommit] ${reason}: sheetKey=${sheetKey}, rowIndex=${rowIndex} 不是数组行。`);
+      }
+      const rowId = String(row[0] ?? '').trim();
+      if (!rowId) {
+        throw new Error(`[TableUpdateCommit] ${reason}: sheetKey=${sheetKey}, rowIndex=${rowIndex} 的 row_id 为空。`);
+      }
+      if (rowIds.has(rowId)) {
+        throw new Error(`[TableUpdateCommit] ${reason}: sheetKey=${sheetKey}, rowIndex=${rowIndex} 的 row_id 重复：${rowId}。`);
+      }
+      rowIds.add(rowId);
+    }
+  }
+}
+
 export async function runTableUpdateCommit_ACU<T>(
   options: RunTableUpdateCommitOptions_ACU,
   apply: (context: TableUpdateCommitApplyContext_ACU) => Promise<TableUpdateCommitApplyResult_ACU<T>> | TableUpdateCommitApplyResult_ACU<T>,
@@ -111,6 +144,7 @@ export async function runTableUpdateCommit_ACU<T>(
         const operations = persistOptions.operations ?? options.operations;
         commitRevisionWriteSet = revisionWriteSet;
         if (!options.skipChatSave) {
+          assertPersistableRowIdentities_ACU(applied.tableData, options.reason);
           const saveResult = await persistTablesToChatMessage_ACU({
             targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
             targetSheetKeys,
@@ -171,9 +205,13 @@ export async function runSqliteRuntimeMutationCommit_ACU<T>(
     statements: [options.sql],
     ...(normalizeSqlBindParams_ACU(options.params) ? { params: normalizeSqlBindParams_ACU(options.params) } : {}),
   }];
-  return runTableUpdateCommit_ACU({ ...options, operations }, async () => {
+  return runTableUpdateCommit_ACU({ ...options, operations }, async ({ workingData }) => {
     const provider = await ensureStorageProviderReady_ACU();
-    const mutationResult = provider.executeMutation(options.sql, options.params);
+    const runtimeData = (workingData || currentJsonTableData_ACU) as TableDataObject_ACU | null;
+    const runtimeSql = runtimeData
+      ? rebindSqlMutationTableIdentifiers_ACU([options.sql], runtimeData)[0]
+      : options.sql;
+    const mutationResult = provider.executeMutation(runtimeSql, options.params);
     if (mutationResult.errors?.length) {
       return { success: false, error: mutationResult.errors.join(', '), mutationResult };
     }
@@ -185,11 +223,23 @@ export async function runSqliteRuntimeMutationCommit_ACU<T>(
     if (validationError) {
       return { success: false, error: validationError, mutationResult, tableData: tableData as TableDataObject_ACU };
     }
+    const runtimeOperations = options.operations ? undefined : buildSqlSheetBatchOperations_ACU(
+      [runtimeSql],
+      tableData as TableDataObject_ACU,
+      {
+        params: normalizeSqlBindParams_ACU(options.params),
+        fallbackTargetSheetKeys: options.targetSheetKeys || undefined,
+        allowSingleTargetFallback: true,
+        keepLegacyForUnclassified: true,
+        reason: 'manual_crud',
+      },
+    ).operations;
     return {
       success: true,
       value: options.mapValue({ mutationResult, tableData: tableData as TableDataObject_ACU }),
       tableData: tableData as TableDataObject_ACU,
       mutationResult,
+      ...(runtimeOperations ? { persist: { operations: runtimeOperations } } : {}),
     };
   });
 }

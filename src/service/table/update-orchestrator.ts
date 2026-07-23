@@ -47,7 +47,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU } from './sql-table-service';
 import { loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -966,7 +966,16 @@ export async function applyUnifiedGroupFillResponses_ACU(
         const sqlTexts: string[] = [];
 
         for (const response of sortedResponses) {
-            const sqlText = response.tableEditText || '';
+            let sqlText: string;
+            try {
+                sqlText = rebindSqlMutationTableIdentifiers_ACU([response.tableEditText || ''], baseSnapshot as any)[0];
+            } catch (error: any) {
+                return {
+                    success: false,
+                    modifiedKeys: [],
+                    error: `统一提交失败：group ${response.job.groupKey} SQL 执行失败。${error?.message || String(error)}`,
+                };
+            }
             const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(sqlText, baseSnapshot);
             if (Array.isArray(response.job.targetSheetKeys) && response.job.targetSheetKeys.length > 0) {
                 const allowedSheetKeys = new Set(response.job.targetSheetKeys);
@@ -1629,9 +1638,10 @@ export async function executeCardUpdateCore_ACU(
                         skipChatSave: isImportMode,
                     }, async () => {
                         const provider = await ensureStorageProviderReady_ACU();
+                        const runtimeSqlText = rebindSqlMutationTableIdentifiers_ACU([collectResult.tableEditText || ''], rawBaseSnapshot as any)[0];
                         let parseResult: any;
                         try {
-                            parseResult = provider.applyEdits(collectResult.tableEditText || '', updateMode);
+                            parseResult = provider.applyEdits(runtimeSqlText, updateMode);
                         } catch (error: any) {
                             return { success: false, error: error?.message || String(error) };
                         }
@@ -1642,7 +1652,7 @@ export async function executeCardUpdateCore_ACU(
                         }
 
                         const runtimeData = (provider.getCurrentData() || currentJsonTableData_ACU || rawBaseSnapshot) as Record<string, any>;
-                        const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(collectResult.tableEditText || '', runtimeData, targetSheetKeys);
+                        const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(runtimeSqlText, runtimeData, targetSheetKeys);
                         if (operationBuild.success === false) {
                             return { success: false, error: operationBuild.error };
                         }
@@ -1680,7 +1690,9 @@ export async function executeCardUpdateCore_ACU(
                             if (fullTemplate) {
                                 allSheetKeys.forEach(sheetKey => {
                                     if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {
-                                        runtimeData[sheetKey] = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                        const templateSheet = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                        if (Array.isArray(templateSheet.content)) templateSheet.content = ensureStableRowIdsForSheetContent_ACU(templateSheet.content);
+                                        runtimeData[sheetKey] = templateSheet;
                                         logDebug_ACU(`[Init] Table ${sheetKey} not modified by AI, using template data (may include seed rows).`);
                                     }
                                 });
@@ -1798,7 +1810,9 @@ export async function executeCardUpdateCore_ACU(
                         if (fullTemplate) {
                             allSheetKeys.forEach(sheetKey => {
                                 if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {
-                                    workingTableData[sheetKey] = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                    const templateSheet = JSON.parse(JSON.stringify(fullTemplate[sheetKey]));
+                                    if (Array.isArray(templateSheet.content)) templateSheet.content = ensureStableRowIdsForSheetContent_ACU(templateSheet.content);
+                                    workingTableData[sheetKey] = templateSheet;
                                     logDebug_ACU(`[Init] Table ${sheetKey} not modified by AI, using template data (may include seed rows).`);
                                 }
                             });
