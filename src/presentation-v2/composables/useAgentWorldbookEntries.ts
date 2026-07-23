@@ -1,6 +1,11 @@
 import { ref, shallowRef } from 'vue';
 import { getLorebookEntriesByNames_ACU } from '../../service/worldbook/pipeline';
-import { getPlotAgentWorldbookSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
+import { refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU } from '../../service/agent/agent-worldbook-takeover';
+import {
+  buildWorldbookSnapshotEntryIndexByBook_ACU,
+  getWorldbookSnapshotEntryForDisplay_ACU,
+  resolveWorldbookEntryTakeoverState_ACU,
+} from './worldbook-entry-display';
 import {
   deleteWorldbookEntrySkillMeta_ACU,
   parseWorldbookSkillMetaFromComment_ACU,
@@ -26,27 +31,8 @@ export type AgentWorldbookEntryItem = WorldbookEntryDisplayItem_ACU;
 export type AgentWorldbookEntryGroup = WorldbookEntryDisplayGroup_ACU;
 export type AgentWorldbookSkillifySelectedEntry = WorldbookSkillifySelectedEntry_ACU;
 
-function buildSnapshotUidSet_ACU(): Map<string, Set<string>> {
-  const result = new Map<string, Set<string>>();
-  const snapshot = getPlotAgentWorldbookSnapshot_ACU();
-  if (snapshot.active !== true) return result;
-  for (const [bookName, entries] of Object.entries(snapshot.books || {})) {
-    const uids = new Set((Array.isArray(entries) ? entries : []).map(entry => String(entry?.uid ?? '')).filter(Boolean));
-    if (uids.size > 0) result.set(bookName, uids);
-  }
-  return result;
-}
-
 function getEntryLabel_ACU(entry: any): string {
   return stripWorldbookSkillMetaBlock_ACU(String(entry?.comment || entry?.name || '')).trim() || `条目 ${entry?.uid}`;
-}
-
-function getTakeoverState_ACU(bookName: string, entry: any, hasSkill: boolean, snapshotUids: Map<string, Set<string>>): AgentWorldbookEntryTakeoverState {
-  if (snapshotUids.get(bookName)?.has(String(entry?.uid))) {
-    return entry?.enabled !== false && String(entry?.type || '').trim().toLowerCase() === 'constant' ? 'final_greenlight' : 'taken_over';
-  }
-  if (entry?.enabled === false) return 'initial_disabled';
-  return hasSkill ? 'skill_ready' : 'native';
 }
 
 function selectionKey_ACU(bookName: string, uid: number): string {
@@ -57,11 +43,11 @@ function isAgentWorldbookEntryVisible_ACU(
   bookName: string,
   entry: any,
   skillMeta: WorldbookSkillMeta_ACU | null,
-  snapshotUids: Map<string, Set<string>>,
+  snapshotEntry: unknown,
 ): boolean {
   return isWorldbookEntrySkillifyCandidate_ACU(entry)
     || skillMeta !== null
-    || snapshotUids.get(bookName)?.has(String(entry?.uid)) === true;
+    || !!snapshotEntry;
 }
 
 export interface UseAgentWorldbookEntriesOptions {
@@ -86,8 +72,9 @@ export function useAgentWorldbookEntries(options: UseAgentWorldbookEntriesOption
         status.value = 'success';
         return [];
       }
+      const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
+      const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
       const entriesByBook = await getLorebookEntriesByNames_ACU(uniqueBookNames) as Record<string, any[]>;
-      const snapshotUids = buildSnapshotUidSet_ACU();
       const nextGroups: AgentWorldbookEntryGroup[] = [];
       const visibleSelections = new Set<string>();
       for (const bookName of uniqueBookNames) {
@@ -95,7 +82,8 @@ export function useAgentWorldbookEntries(options: UseAgentWorldbookEntriesOption
         const items = entries.flatMap((entry: any): AgentWorldbookEntryItem[] => {
           const comment = String(entry?.comment || entry?.name || '');
           const skillMeta = parseWorldbookSkillMetaFromComment_ACU(comment);
-          if (!isAgentWorldbookEntryVisible_ACU(bookName, entry, skillMeta, snapshotUids)) {
+          const snapshotEntry = getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry);
+          if (!isAgentWorldbookEntryVisible_ACU(bookName, entry, skillMeta, snapshotEntry)) {
             return [];
           }
           const key = selectionKey_ACU(bookName, entry.uid);
@@ -107,7 +95,7 @@ export function useAgentWorldbookEntries(options: UseAgentWorldbookEntriesOption
             comment,
             skillMeta,
             hasSkill: !!skillMeta,
-            agentTakeoverState: getTakeoverState_ACU(bookName, entry, !!skillMeta, snapshotUids),
+            agentTakeoverState: resolveWorldbookEntryTakeoverState_ACU(entry, !!skillMeta, snapshotEntry),
             checked: false,
             skillifySelected: selected.value.has(key),
             skillifySelectable: isWorldbookEntrySkillifyCandidate_ACU(entry),

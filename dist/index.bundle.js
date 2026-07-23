@@ -44251,6 +44251,16 @@ $CONTENT
      */
     /** 全局 NameMapper 单例 */
     let _globalNameMapper = null;
+    /** 当前 mapper 对应的有效 DDL 集合签名；null 表示尚未绑定到任何 runtime schema。 */
+    let _globalNameMapperSchemaSignature = null;
+    function buildDDLMapSignature_ACU(ddlMap) {
+        return [...ddlMap.entries()]
+            .map(([tableName, ddl]) => [String(tableName || '').trim(), String(ddl || '').trim()])
+            .filter(([tableName, ddl]) => !!tableName && !!ddl)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([tableName, ddl]) => `${tableName}\u0000${ddl}`)
+            .join('\u0001');
+    }
     /**
      * 获取全局 NameMapper 实例
      * 如果尚未构建，返回一个空的 NameMapper（所有名称直接透传）
@@ -44268,14 +44278,46 @@ $CONTENT
      * @param ddlMap 表英文名 → DDL 语句的映射
      */
     function buildGlobalNameMapper(ddlMap) {
+        _globalNameMapperSchemaSignature = buildDDLMapSignature_ACU(ddlMap);
         _globalNameMapper = NameMapper.fromDDLs(ddlMap);
         logDebug_ACU(`[NameMapper] 全局映射器已构建: ${_globalNameMapper.tableCount} 张表`);
+    }
+    /**
+     * 仅当 mapper 尚未绑定当前有效 schema 时重建。
+     * 不能用 tableCount 判断就绪：不同模板可能拥有相同数量的表但列映射已经变化。
+     */
+    function ensureGlobalNameMapperForDDLs_ACU(ddlMap) {
+        const nextSignature = buildDDLMapSignature_ACU(ddlMap);
+        if (!_globalNameMapper || _globalNameMapperSchemaSignature !== nextSignature) {
+            buildGlobalNameMapper(ddlMap);
+        }
+        return _globalNameMapper;
+    }
+    /**
+     * 解析运行时有效 DDL（包括缺失或无效 DDL 的 fallback）。
+     * presentation 必须经 service 层使用该解析，不能直接依赖 data/sqlite。
+     */
+    function resolveRuntimeEffectiveDDL_ACU(sheet, fallbackTableName) {
+        return resolveEffectiveDDL(sheet, fallbackTableName);
+    }
+    /** 当前全局 mapper 是否精确对应给定的有效 DDL 集合。 */
+    function isGlobalNameMapperCurrentForDDLs_ACU(ddlMap) {
+        return _globalNameMapper !== null
+            && _globalNameMapperSchemaSignature === buildDDLMapSignature_ACU(ddlMap);
+    }
+    /** 供诊断使用；不暴露 DDL 内容，避免日志泄漏模板。 */
+    function getGlobalNameMapperStatus_ACU() {
+        return {
+            ready: _globalNameMapper !== null,
+            tableCount: _globalNameMapper?.tableCount ?? 0,
+        };
     }
     /**
      * 销毁全局 NameMapper
      */
     function disposeGlobalNameMapper() {
         _globalNameMapper = null;
+        _globalNameMapperSchemaSignature = null;
     }
     /**
      * 中英文名称双向映射器
@@ -44365,6 +44407,15 @@ $CONTENT
                 return trimmed;
             // 未找到映射，原样返回（可能是英文名或未知名）
             return trimmed;
+        }
+        /** 指定表中是否存在已确认的中文展示列名或英文物理列名。 */
+        hasColumnName(tableName, columnName) {
+            if (!tableName || !columnName)
+                return false;
+            const trimmed = columnName.trim();
+            return this.columnNameMap.has(`${tableName}.${trimmed}`)
+                || this.reverseColumnMap.has(`${tableName}.${trimmed}`)
+                || trimmed === 'row_id';
         }
         /**
          * 反向：英文表名→中文（用于展示给用户）
@@ -44576,6 +44627,7 @@ $CONTENT
         async restoreRuntimeSnapshot(snapshot) {
             if (!(snapshot instanceof Uint8Array))
                 throw new Error('SQLite 运行时快照无效，无法恢复。');
+            disposeGlobalNameMapper();
             await this.engine.loadFromBinary(snapshot);
             this._initialized = true;
             this._existingTableSet = undefined;
@@ -44676,6 +44728,7 @@ $CONTENT
         async replaceAllData(data) {
             try {
                 const cloned = JSON.parse(JSON.stringify(data || {}));
+                disposeGlobalNameMapper();
                 this.engine.dispose();
                 this.engine = new SqliteEngine();
                 this.syncBridge = new SyncBridge(this.engine);
@@ -44691,6 +44744,7 @@ $CONTENT
             }
             catch (e) {
                 const message = e?.message || String(e);
+                disposeGlobalNameMapper();
                 logError_ACU(`[SqlTableService] 运行时全量替换失败: ${message}`);
                 return { success: false, modifiedKeys: [], appliedEdits: 0, error: message };
             }
@@ -44831,6 +44885,9 @@ $CONTENT
         // ═══════════════════════════════════════════════════════════════
         /** 重置本实例的 SQLite runtime；不触碰调用方持有的 canonical JSON 快照。 */
         _resetRuntimeForLoad_ACU() {
+            // 新 runtime 在成功 hydrate 前没有可证明匹配的 schema；保留旧 mapper
+            // 会让并发/重载后的外部 CRUD 把展示列解析到上一份 SQLite schema。
+            disposeGlobalNameMapper();
             this.engine.dispose();
             this.engine = new SqliteEngine();
             this.syncBridge = new SyncBridge(this.engine);
@@ -44967,17 +45024,17 @@ $CONTENT
                     if (!key.startsWith('sheet_'))
                         continue;
                     const sheet = value;
-                    const ddl = sheet?.sourceData?.ddl;
-                    if (!ddl)
+                    if (!sheet || typeof sheet !== 'object')
                         continue;
-                    const tableName = parseDDLTableName(ddl);
+                    // NameMapper 必须和 SQLite 实际采用的 schema 一致。直接读取 sourceData.ddl
+                    // 会在 fallback_invalid 场景留下无法映射运行时物理列名的陈旧映射。
+                    const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key).effectiveDDL;
+                    const tableName = parseDDLTableName(effectiveDDL);
                     if (tableName) {
-                        ddlMap.set(tableName, ddl);
+                        ddlMap.set(tableName, effectiveDDL);
                     }
                 }
-                if (ddlMap.size > 0) {
-                    buildGlobalNameMapper(ddlMap);
-                }
+                ensureGlobalNameMapperForDDLs_ACU(ddlMap);
             }
             catch (e) {
                 logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${e?.message}`);
@@ -45068,8 +45125,12 @@ $CONTENT
                 }
             }
             // 所有表都已存在，无需建表
-            if (Object.keys(missingSheets).length === 0)
+            if (Object.keys(missingSheets).length === 0) {
+                // 不能因物理表已存在就跳过映射同步：删楼回滚/模板切换可重建
+                // SQLite runtime，却不会制造缺表；此时外部 CRUD 仍需当前 schema 的列映射。
+                this._buildNameMapper(currentJsonTableData_ACU || templateData);
                 return;
+            }
             logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
             // 构造只包含缺失表的数据子集，交给 syncBridge 建表
             // [修复] 同时为缺失表注入 seedRows（初始数据），使建表后 SQLite 中包含初版快照
@@ -48699,6 +48760,9 @@ $CONTENT
         const commentHash = typeof source.commentHash === 'string' && source.commentHash.trim() ? source.commentHash.trim() : undefined;
         return {
             uid: source.uid,
+            ...(source.takeoverStatus === 'pending' || source.takeoverStatus === 'applied'
+                ? { takeoverStatus: source.takeoverStatus }
+                : {}),
             previousEnabled: source.previousEnabled !== false,
             previousKeys: normalizeSnapshotKeys_ACU(source.previousKeys),
             previousType,
@@ -49791,7 +49855,7 @@ $CONTENT
                 continue;
             const uidSet = new Set();
             for (const entry of entries) {
-                if (!hasValidWorldbookUid_ACU(entry?.uid))
+                if (!hasValidWorldbookUid_ACU(entry?.uid) || entry.takeoverStatus === 'pending')
                     continue;
                 uidSet.add(String(entry.uid));
             }
@@ -49843,14 +49907,130 @@ $CONTENT
     function buildActiveSnapshot_ACU(selectionSignature, books) {
         return { active: true, selectionSignature, createdAt: Date.now(), books };
     }
+    function isTakeoverSnapshotEntryApplied_ACU(entry) {
+        return entry.takeoverStatus !== 'pending';
+    }
+    function mergeSnapshotEntry_ACU(existingEntry, incomingEntry) {
+        return {
+            uid: existingEntry.uid,
+            takeoverStatus: isTakeoverSnapshotEntryApplied_ACU(existingEntry) || isTakeoverSnapshotEntryApplied_ACU(incomingEntry)
+                ? 'applied'
+                : 'pending',
+            previousEnabled: typeof existingEntry.previousEnabled === 'boolean'
+                ? existingEntry.previousEnabled
+                : incomingEntry.previousEnabled,
+            previousKeys: Array.isArray(existingEntry.previousKeys)
+                ? existingEntry.previousKeys
+                : incomingEntry.previousKeys,
+            previousType: existingEntry.previousType === undefined || existingEntry.previousType === null
+                ? incomingEntry.previousType
+                : existingEntry.previousType,
+            commentHash: String(existingEntry.commentHash || '').trim() || incomingEntry.commentHash,
+        };
+    }
+    function mergeSnapshotBooks_ACU(existingBooks, candidateBooks) {
+        const mergedBooks = {};
+        for (const books of [existingBooks, candidateBooks]) {
+            for (const [bookName, entries] of Object.entries(books || {})) {
+                const normalizedBookName = String(bookName || '').trim();
+                if (!normalizedBookName || !Array.isArray(entries))
+                    continue;
+                const mergedEntries = mergedBooks[normalizedBookName] || (mergedBooks[normalizedBookName] = []);
+                const entryIndexByUid = new Map(mergedEntries.map((entry, index) => [String(entry?.uid), index]));
+                for (const entry of entries) {
+                    if (!hasValidWorldbookUid_ACU(entry?.uid))
+                        continue;
+                    const existingIndex = entryIndexByUid.get(String(entry.uid));
+                    if (existingIndex === undefined) {
+                        mergedEntries.push(entry);
+                        entryIndexByUid.set(String(entry.uid), mergedEntries.length - 1);
+                        continue;
+                    }
+                    mergedEntries[existingIndex] = mergeSnapshotEntry_ACU(mergedEntries[existingIndex], entry);
+                }
+            }
+        }
+        return Object.fromEntries(Object.entries(mergedBooks).filter(([, entries]) => entries.length > 0));
+    }
+    function setSnapshotEntryStatusByUpdates_ACU(books, updates, takeoverStatus) {
+        const uidsByBook = new Map();
+        for (const update of updates) {
+            const bookName = String(update.bookName || '').trim();
+            if (!bookName || !hasValidWorldbookUid_ACU(update.uid))
+                continue;
+            const uids = uidsByBook.get(bookName) || new Set();
+            uids.add(String(update.uid));
+            uidsByBook.set(bookName, uids);
+        }
+        return Object.fromEntries(Object.entries(books || {}).map(([bookName, entries]) => [
+            bookName,
+            (entries || []).map(entry => uidsByBook.get(bookName)?.has(String(entry.uid))
+                ? { ...entry, takeoverStatus }
+                : entry),
+        ]));
+    }
+    function markSnapshotBooksPending_ACU(books) {
+        return Object.fromEntries(Object.entries(books || {}).map(([bookName, entries]) => [
+            bookName,
+            (entries || []).map(entry => ({ ...entry, takeoverStatus: 'pending' })),
+        ]));
+    }
+    function hasSnapshotEntriesAbsentFrom_ACU(existingBooks, incomingBooks) {
+        const mergedBooks = mergeSnapshotBooks_ACU(existingBooks, incomingBooks);
+        for (const [bookName, entries] of Object.entries(incomingBooks || {})) {
+            const existingEntriesByUid = new Map((existingBooks[bookName] || []).map(entry => [String(entry?.uid), entry]));
+            const mergedEntriesByUid = new Map((mergedBooks[bookName] || []).map(entry => [String(entry?.uid), entry]));
+            if ((entries || []).some(entry => {
+                if (!hasValidWorldbookUid_ACU(entry?.uid))
+                    return false;
+                const existingEntry = existingEntriesByUid.get(String(entry.uid));
+                const mergedEntry = mergedEntriesByUid.get(String(entry.uid));
+                return !existingEntry
+                    || existingEntry.commentHash !== mergedEntry?.commentHash
+                    || existingEntry.previousType !== mergedEntry?.previousType
+                    || JSON.stringify(existingEntry.previousKeys) !== JSON.stringify(mergedEntry?.previousKeys)
+                    || existingEntry.previousEnabled !== mergedEntry?.previousEnabled;
+            })) {
+                return true;
+            }
+        }
+        return false;
+    }
     function buildInactiveSnapshot_ACU(selectionSignature = '') {
         return { active: false, selectionSignature, createdAt: 0, books: {} };
     }
     function stripTakeoverMetaBlock_ACU(comment) {
         return normalizeCommentText_ACU(comment)
-            .replace(AGENT_TAKEOVER_META_PATTERN_ACU, '\n')
+            .replace(AGENT_TAKEOVER_META_PATTERN_ACU, (block, rawMeta) => {
+            try {
+                const meta = JSON.parse(rawMeta.trim());
+                return meta.version === 1 && meta.kind === 'agent_worldbook_takeover' ? '\n' : block;
+            }
+            catch {
+                return block;
+            }
+        })
             .replace(/\n{3,}/g, '\n\n')
             .trim();
+    }
+    function hasTakeoverMetaBlock_ACU(comment) {
+        return new RegExp(AGENT_TAKEOVER_META_PATTERN_ACU.source).test(normalizeCommentText_ACU(comment));
+    }
+    function hasUnsupportedTakeoverMetaBlock_ACU(comment) {
+        const text = normalizeCommentText_ACU(comment);
+        const pattern = new RegExp(AGENT_TAKEOVER_META_PATTERN_ACU.source, 'g');
+        let match;
+        while ((match = pattern.exec(text))) {
+            try {
+                const meta = JSON.parse(match[1].trim());
+                if (meta.version !== 1 || meta.kind !== 'agent_worldbook_takeover')
+                    return true;
+            }
+            catch {
+                return true;
+            }
+        }
+        return false;
     }
     function normalizeTakeoverComparableComment_ACU(comment) {
         return stripWorldbookSkillMetaBlock_ACU(stripTakeoverMetaBlock_ACU(comment));
@@ -49936,6 +50116,14 @@ $CONTENT
     function setPlotAgentWorldbookSnapshot_ACU(snapshot) {
         setAgentWorldbookSnapshotState_ACU(snapshot);
     }
+    /**
+     * 切换角色卡会话时丢弃上一会话的内存快照。
+     * 持久 state 仍由下一次按当前角色绑定刷新时读取，不能在这里删除或改写世界书条目。
+     */
+    function resetPlotAgentWorldbookSessionSnapshot_ACU() {
+        setAgentWorldbookSnapshotState_ACU(buildInactiveSnapshot_ACU());
+        preTakeoverSnapshotResolutionPromisesBySignature_ACU.clear();
+    }
     const preTakeoverSnapshotResolutionPromisesBySignature_ACU = new Map();
     async function readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, initialRevision) {
         const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature);
@@ -49966,11 +50154,42 @@ $CONTENT
         void resolutionPromise.then(clearResolutionPromise, clearResolutionPromise);
         return resolutionPromise;
     }
-    async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature) {
-        const state = await readAgentWorldbookStateFromWorldbooks_ACU();
-        if (state.snapshot.active === true && state.snapshot.selectionSignature === selectionSignature) {
-            return state.snapshot;
+    async function backfillMissingTakeoverMeta_ACU(snapshot) {
+        for (const [bookName, snapshotEntries] of Object.entries(snapshot.books || {})) {
+            if (!bookName || !Array.isArray(snapshotEntries) || snapshotEntries.length === 0)
+                continue;
+            try {
+                const snapshotEntriesByUid = new Map(snapshotEntries
+                    .filter(snapshotEntry => hasValidWorldbookUid_ACU(snapshotEntry?.uid))
+                    .map(snapshotEntry => [String(snapshotEntry.uid), snapshotEntry]));
+                const entries = await getLorebookEntries_ACU(bookName);
+                const patches = (entries || []).flatMap(entry => {
+                    const snapshotEntry = snapshotEntriesByUid.get(String(entry?.uid));
+                    if (!snapshotEntry)
+                        return [];
+                    const currentComment = normalizeCommentText_ACU(entry?.comment);
+                    if (hasTakeoverMetaBlock_ACU(currentComment)
+                        || !doesTakeoverSnapshotCommentHashMatch_ACU(snapshotEntry.commentHash, currentComment)
+                        || (entry?.enabled !== false && !isFinalGenerationBlueLightEntry_ACU(entry)))
+                        return [];
+                    return [{
+                            uid: entry.uid,
+                            comment: buildTakeoverMetaComment_ACU(currentComment, snapshot.selectionSignature, snapshot.createdAt, snapshotEntry),
+                        }];
+                });
+                if (patches.length > 0)
+                    await setLorebookEntries_ACU(bookName, patches);
+            }
+            catch (error) {
+                logWarn_ACU(`[Agent世界书] 为旧接管条目补写可分享恢复元数据失败：${bookName}`, error);
+            }
         }
+    }
+    async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, options = {}) {
+        const state = await readAgentWorldbookStateFromWorldbooks_ACU();
+        const activeStateSnapshot = state.snapshot.active === true && state.snapshot.selectionSignature === selectionSignature
+            ? state.snapshot
+            : null;
         const snapshotBooks = {};
         let createdAt = 0;
         for (const bookName of resolvedBookNames) {
@@ -49984,6 +50203,7 @@ $CONTENT
                     continue;
                 bookSnapshot.push({
                     uid: entry.uid,
+                    takeoverStatus: 'applied',
                     previousEnabled: meta.previousEnabled !== false,
                     previousKeys: Array.isArray(meta.previousKeys) ? meta.previousKeys : [],
                     previousType: meta.previousType,
@@ -49995,14 +50215,36 @@ $CONTENT
                 snapshotBooks[bookName] = bookSnapshot;
         }
         if (Object.keys(snapshotBooks).length > 0) {
-            const migratedSnapshot = { active: true, selectionSignature, createdAt: createdAt || Date.now(), books: snapshotBooks };
-            try {
-                await writeAgentWorldbookStateToWorldbook_ACU({ snapshot: migratedSnapshot });
+            const mergedBooks = mergeSnapshotBooks_ACU(activeStateSnapshot?.books || {}, snapshotBooks);
+            const mergedSnapshot = {
+                active: true,
+                selectionSignature,
+                createdAt: Math.max(activeStateSnapshot?.createdAt || 0, createdAt || 0) || Date.now(),
+                books: mergedBooks,
+            };
+            if (!activeStateSnapshot || hasSnapshotEntriesAbsentFrom_ACU(activeStateSnapshot.books, snapshotBooks)) {
+                try {
+                    const writeResult = await writeAgentWorldbookStateToWorldbook_ACU({ snapshot: mergedSnapshot });
+                    if (!writeResult.updated) {
+                        logWarn_ACU('[Agent世界书] 迁移接管快照到独立状态条目未落盘，将继续保留条目 meta 作为恢复依据。');
+                        return activeStateSnapshot || buildInactiveSnapshot_ACU(selectionSignature);
+                    }
+                }
+                catch (error) {
+                    logWarn_ACU('[Agent世界书] 迁移旧接管快照到独立状态条目失败。', error);
+                    return activeStateSnapshot || buildInactiveSnapshot_ACU(selectionSignature);
+                }
             }
-            catch (error) {
-                logWarn_ACU('[Agent世界书] 迁移旧接管快照到独立状态条目失败。', error);
+            if (options.backfillMissingMeta !== false) {
+                await backfillMissingTakeoverMeta_ACU(mergedSnapshot);
             }
-            return migratedSnapshot;
+            return mergedSnapshot;
+        }
+        if (activeStateSnapshot) {
+            if (options.backfillMissingMeta !== false) {
+                await backfillMissingTakeoverMeta_ACU(activeStateSnapshot);
+            }
+            return activeStateSnapshot;
         }
         const legacySnapshot = getLegacyPlotAgentWorldbookSnapshot_ACU();
         const snapshot = legacySnapshot.active === true && legacySnapshot.selectionSignature === selectionSignature
@@ -50069,6 +50311,12 @@ $CONTENT
             for (const snapshotEntry of entriesToCheck) {
                 if (!hasValidWorldbookUid_ACU(snapshotEntry?.uid))
                     continue;
+                if (snapshotEntry.takeoverStatus === 'pending') {
+                    if (!keptBooks[normalizedBookName])
+                        keptBooks[normalizedBookName] = [];
+                    keptBooks[normalizedBookName].push(snapshotEntry);
+                    continue;
+                }
                 const currentEntry = currentByUid.get(String(snapshotEntry.uid));
                 const stillHasSkillMeta = currentEntry ? hasUsableWorldbookSkillMeta_ACU$1(currentEntry?.comment) : false;
                 if (stillHasSkillMeta) {
@@ -50086,21 +50334,51 @@ $CONTENT
         const staleSnapshot = pruned > 0
             ? buildActiveSnapshot_ACU(selectionSignature, staleBooks)
             : buildInactiveSnapshot_ACU(selectionSignature);
-        const restoreResult = pruned > 0
-            ? await restoreSnapshotEntries_ACU(staleSnapshot)
-            : { restored: 0, skipped: 0, failed: 0 };
         const hasKeptEntries = Object.values(keptBooks).some(entries => Array.isArray(entries) && entries.length > 0);
         return {
             snapshot: hasKeptEntries ? buildActiveSnapshot_ACU(selectionSignature, keptBooks) : buildInactiveSnapshot_ACU(selectionSignature),
-            restored: restoreResult.restored,
-            skipped: restoreResult.skipped,
-            failed: restoreResult.failed,
+            restored: 0,
+            skipped: 0,
+            failed: 0,
             pruned,
+            staleSnapshot,
         };
     }
-    async function disableTakeoverCandidates_ACU(snapshotBooks) {
+    function filterSnapshotBooksByUpdates_ACU(books, updates) {
+        const allowedByBook = new Map();
+        for (const update of updates) {
+            const bookName = String(update?.bookName || '').trim();
+            if (!bookName || !hasValidWorldbookUid_ACU(update?.uid))
+                continue;
+            const allowed = allowedByBook.get(bookName) || new Set();
+            allowed.add(String(update.uid));
+            allowedByBook.set(bookName, allowed);
+        }
+        return Object.fromEntries(Object.entries(books || {}).flatMap(([bookName, entries]) => {
+            const allowed = allowedByBook.get(bookName);
+            const filtered = (entries || []).filter(entry => allowed?.has(String(entry?.uid)));
+            return filtered.length > 0 ? [[bookName, filtered]] : [];
+        }));
+    }
+    function excludeSnapshotEntriesByUpdates_ACU(books, updates) {
+        const excludedByBook = new Map();
+        for (const update of updates) {
+            const bookName = String(update?.bookName || '').trim();
+            if (!bookName || !hasValidWorldbookUid_ACU(update?.uid))
+                continue;
+            const excluded = excludedByBook.get(bookName) || new Set();
+            excluded.add(String(update.uid));
+            excludedByBook.set(bookName, excluded);
+        }
+        return Object.fromEntries(Object.entries(books || {}).flatMap(([bookName, entries]) => {
+            const excluded = excludedByBook.get(bookName);
+            const filtered = (entries || []).filter(entry => !excluded?.has(String(entry?.uid)));
+            return filtered.length > 0 ? [[bookName, filtered]] : [];
+        }));
+    }
+    async function disableTakeoverCandidates_ACU(snapshot, candidateBooks) {
         const updatesByBook = new Map();
-        for (const [bookName, snapshotEntries] of Object.entries(snapshotBooks || {})) {
+        for (const [bookName, snapshotEntries] of Object.entries(candidateBooks || {})) {
             if (!bookName)
                 continue;
             const uidSet = new Set();
@@ -50118,37 +50396,65 @@ $CONTENT
         }
         let disabled = 0;
         let failed = 0;
+        const report = { applied: [], failed: [] };
         for (const [bookName, uidSet] of updatesByBook.entries()) {
             try {
                 const entries = await getLorebookEntries_ACU(bookName);
+                const snapshotEntriesByUid = new Map((snapshot.books[bookName] || [])
+                    .filter(snapshotEntry => hasValidWorldbookUid_ACU(snapshotEntry?.uid))
+                    .map(snapshotEntry => [String(snapshotEntry.uid), snapshotEntry]));
                 const patchEntries = (entries || [])
-                    .filter(entry => uidSet.has(String(entry?.uid)))
-                    .map(entry => ({ uid: entry.uid, enabled: false }));
+                    .map(entry => ({ entry, snapshotEntry: snapshotEntriesByUid.get(String(entry?.uid)) }))
+                    .filter(({ entry, snapshotEntry }) => uidSet.has(String(entry?.uid)) && snapshotEntry)
+                    .map(({ entry, snapshotEntry }) => ({
+                    uid: entry.uid,
+                    enabled: false,
+                    comment: buildTakeoverMetaComment_ACU(entry?.comment, snapshot.selectionSignature, snapshot.createdAt, snapshotEntry),
+                }));
                 if (patchEntries.length === 0)
                     continue;
                 await setLorebookEntries_ACU(bookName, patchEntries);
-                disabled += patchEntries.length;
+                const patchedEntriesByUid = new Map((await getLorebookEntries_ACU(bookName) || []).map(entry => [String(entry?.uid), entry]));
+                for (const patch of patchEntries) {
+                    const currentEntry = patchedEntriesByUid.get(String(patch.uid));
+                    const meta = parseTakeoverMetaFromComment_ACU(currentEntry?.comment);
+                    const update = { bookName, uid: patch.uid };
+                    if (currentEntry?.enabled === false && meta?.selectionSignature === snapshot.selectionSignature) {
+                        disabled += 1;
+                        report.applied.push(update);
+                    }
+                    else {
+                        failed += 1;
+                        report.failed.push(update);
+                    }
+                }
             }
             catch (error) {
-                failed += uidSet.size;
+                const failedUpdates = [...uidSet].map(uid => ({ bookName, uid }));
+                failed += failedUpdates.length;
+                report.failed.push(...failedUpdates);
+                logWarn_ACU(`[Agent世界书] 禁用世界书接管候选失败：${bookName}`, error);
             }
         }
-        return { disabled, failed };
+        return { disabled, failed, report };
     }
     async function restoreSnapshotEntries_ACU(snapshot) {
         let restored = 0;
         let skipped = 0;
         let failed = 0;
+        const report = { applied: [], failed: [] };
         for (const [bookName, snapshotEntries] of Object.entries(snapshot.books || {})) {
             const normalizedBookName = String(bookName || '').trim();
-            const entriesToRestore = Array.isArray(snapshotEntries) ? snapshotEntries : [];
+            const entriesToRestore = Array.isArray(snapshotEntries)
+                ? snapshotEntries.filter(entry => entry.takeoverStatus !== 'pending') : [];
             if (!normalizedBookName || entriesToRestore.length === 0)
                 continue;
+            const patches = [];
+            let currentEntriesRead = false;
             try {
                 const currentEntries = await getLorebookEntries_ACU(normalizedBookName);
+                currentEntriesRead = true;
                 const currentByUid = new Map((currentEntries || []).map(entry => [String(entry?.uid), entry]));
-                const patches = [];
-                let restoredInBook = 0;
                 for (const snapshotEntry of entriesToRestore) {
                     if (!hasValidWorldbookUid_ACU(snapshotEntry?.uid)) {
                         logWarn_ACU(`[Agent世界书] 跳过恢复世界书条目：${normalizedBookName} 中存在无效 uid。`, snapshotEntry?.uid);
@@ -50162,11 +50468,19 @@ $CONTENT
                         continue;
                     }
                     const currentComment = typeof currentEntry.comment === 'string' ? currentEntry.comment : '';
+                    if (hasUnsupportedTakeoverMetaBlock_ACU(currentComment)) {
+                        logWarn_ACU(`[Agent世界书] 跳过恢复世界书条目：${normalizedBookName}#${snapshotEntry.uid} 包含不受支持的接管元数据版本。`);
+                        skipped += 1;
+                        continue;
+                    }
                     const strippedComment = stripTakeoverMetaBlock_ACU(currentComment);
+                    if (!snapshotEntry.commentHash) {
+                        logWarn_ACU(`[Agent世界书] 跳过恢复世界书条目：${normalizedBookName}#${snapshotEntry.uid} 缺少 comment 指纹，避免覆盖用户修改。`);
+                        skipped += 1;
+                        continue;
+                    }
                     if (!doesTakeoverSnapshotCommentHashMatch_ACU(snapshotEntry.commentHash, currentComment)) {
                         logWarn_ACU(`[Agent世界书] 跳过恢复世界书条目：${normalizedBookName}#${snapshotEntry.uid} comment 已变化，避免覆盖用户修改。`);
-                        if (strippedComment !== currentComment)
-                            patches.push({ uid: snapshotEntry.uid, comment: strippedComment });
                         skipped += 1;
                         continue;
                     }
@@ -50177,19 +50491,67 @@ $CONTENT
                         keys: Array.isArray(snapshotEntry.previousKeys) ? snapshotEntry.previousKeys : [],
                         type: snapshotEntry.previousType,
                     });
-                    restoredInBook += 1;
                 }
                 if (patches.length > 0) {
                     await setLorebookEntries_ACU(normalizedBookName, patches);
-                    restored += restoredInBook;
+                    const patchedEntriesByUid = new Map((await getLorebookEntries_ACU(normalizedBookName) || []).map(entry => [String(entry?.uid), entry]));
+                    for (const patch of patches) {
+                        const currentEntry = patchedEntriesByUid.get(String(patch.uid));
+                        const keysMatch = JSON.stringify(currentEntry?.keys || []) === JSON.stringify(patch.keys || []);
+                        const restoredEntry = currentEntry
+                            && currentEntry.enabled === patch.enabled
+                            && currentEntry.type === patch.type
+                            && keysMatch
+                            && !hasTakeoverMetaBlock_ACU(currentEntry.comment);
+                        const update = { bookName: normalizedBookName, uid: patch.uid };
+                        if (restoredEntry) {
+                            restored += 1;
+                            report.applied.push(update);
+                        }
+                        else {
+                            failed += 1;
+                            report.failed.push(update);
+                        }
+                    }
                 }
             }
             catch (error) {
                 logWarn_ACU(`[Agent世界书] 恢复世界书条目失败：${normalizedBookName}`, error);
-                failed += entriesToRestore.length;
+                const failedUpdates = currentEntriesRead
+                    ? patches.map(patch => ({ bookName: normalizedBookName, uid: patch.uid }))
+                    : entriesToRestore
+                        .filter(entry => hasValidWorldbookUid_ACU(entry?.uid))
+                        .map(entry => ({ bookName: normalizedBookName, uid: entry.uid }));
+                failed += failedUpdates.length;
+                report.failed.push(...failedUpdates);
             }
         }
-        return { restored, skipped, failed };
+        return { restored, skipped, failed, report };
+    }
+    async function collectRecoveredPendingSnapshotUpdates_ACU(snapshot) {
+        const recovered = [];
+        for (const [bookName, snapshotEntries] of Object.entries(snapshot.books || {})) {
+            const pendingEntries = (snapshotEntries || []).filter(entry => entry.takeoverStatus === 'pending' && hasValidWorldbookUid_ACU(entry?.uid));
+            if (pendingEntries.length === 0)
+                continue;
+            const entries = await getLorebookEntries_ACU(bookName);
+            const entriesByUid = new Map((entries || []).map(entry => [String(entry?.uid), entry]));
+            for (const snapshotEntry of pendingEntries) {
+                const entry = entriesByUid.get(String(snapshotEntry.uid));
+                if (!entry || hasTakeoverMetaBlock_ACU(entry.comment))
+                    continue;
+                if (!snapshotEntry.commentHash || !doesTakeoverSnapshotCommentHashMatch_ACU(snapshotEntry.commentHash, String(entry.comment || '')))
+                    continue;
+                const previousKeys = Array.isArray(snapshotEntry.previousKeys) ? snapshotEntry.previousKeys : [];
+                const keys = Array.isArray(entry.keys) ? entry.keys : [];
+                if (entry.enabled !== (snapshotEntry.previousEnabled !== false)
+                    || entry.type !== snapshotEntry.previousType
+                    || JSON.stringify(keys) !== JSON.stringify(previousKeys))
+                    continue;
+                recovered.push({ bookName, uid: snapshotEntry.uid });
+            }
+        }
+        return recovered;
     }
     async function writeFinalGenerationGreenlights_ACU(greenlights) {
         const snapshot = getPlotAgentWorldbookSnapshot_ACU();
@@ -50274,53 +50636,101 @@ $CONTENT
                 updates: [],
             };
         }
+        const existingSnapshot = await readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, getAgentWorldbookSnapshotRevision_ACU());
         const { snapshotBooks, updates } = await collectTakeoverCandidates_ACU(resolvedBookNames);
         const totalCandidates = updates.length || Object.values(snapshotBooks || {}).reduce((sum, entries) => sum + (Array.isArray(entries) ? entries.length : 0), 0);
-        const existingSnapshot = getPlotAgentWorldbookSnapshot_ACU();
-        const shouldKeepExistingActiveSnapshot = totalCandidates === 0 && existingSnapshot.active === true && existingSnapshot.selectionSignature === selectionSignature;
-        const reconciledExistingSnapshot = shouldKeepExistingActiveSnapshot
+        const shouldReconcileExistingActiveSnapshot = existingSnapshot.active === true && existingSnapshot.selectionSignature === selectionSignature;
+        const reconciledExistingSnapshot = shouldReconcileExistingActiveSnapshot
             ? await reconcileExistingTakeoverSnapshotWithSkillMeta_ACU(existingSnapshot, selectionSignature)
-            : { snapshot: buildInactiveSnapshot_ACU(selectionSignature), restored: 0, skipped: 0, failed: 0, pruned: 0 };
-        const snapshot = totalCandidates > 0
-            ? buildActiveSnapshot_ACU(selectionSignature, snapshotBooks)
-            : (shouldKeepExistingActiveSnapshot ? reconciledExistingSnapshot.snapshot : buildInactiveSnapshot_ACU(selectionSignature));
+            : { snapshot: buildInactiveSnapshot_ACU(selectionSignature), restored: 0, skipped: 0, failed: 0, pruned: 0, staleSnapshot: buildInactiveSnapshot_ACU(selectionSignature) };
+        const pendingCandidateBooks = markSnapshotBooksPending_ACU(snapshotBooks);
+        const workingSnapshotBooks = mergeSnapshotBooks_ACU(existingSnapshot.books, pendingCandidateBooks);
+        const workingSnapshot = Object.keys(workingSnapshotBooks).length > 0
+            ? buildActiveSnapshot_ACU(selectionSignature, workingSnapshotBooks)
+            : buildInactiveSnapshot_ACU(selectionSignature);
         let stateWriteFailed = 0;
-        if (snapshot.active === true || reconciledExistingSnapshot.pruned > 0) {
+        let persistentSnapshot = existingSnapshot;
+        let stateWriteSucceeded = false;
+        if (workingSnapshot.active === true) {
             try {
-                const stateWriteResult = await writeAgentWorldbookStateToWorldbook_ACU({ snapshot });
-                if (!stateWriteResult.updated)
+                const stateWriteResult = await writeAgentWorldbookStateToWorldbook_ACU({ snapshot: workingSnapshot });
+                stateWriteSucceeded = stateWriteResult.updated;
+                if (!stateWriteSucceeded)
                     stateWriteFailed = totalCandidates > 0 ? totalCandidates : reconciledExistingSnapshot.pruned;
+                if (stateWriteSucceeded)
+                    persistentSnapshot = workingSnapshot;
             }
             catch (error) {
                 logWarn_ACU('[Agent世界书] 写入独立接管快照失败，已阻止本次物理禁用以避免无法恢复。', error);
                 stateWriteFailed = totalCandidates > 0 ? totalCandidates : reconciledExistingSnapshot.pruned;
             }
         }
-        const { disabled, failed } = totalCandidates > 0 && stateWriteFailed === 0
-            ? await disableTakeoverCandidates_ACU(snapshotBooks)
-            : { disabled: 0, failed: 0 };
-        setPlotAgentWorldbookSnapshot_ACU(stateWriteFailed > 0
-            ? buildInactiveSnapshot_ACU(selectionSignature)
-            : snapshot);
-        const totalFailed = failed + stateWriteFailed + reconciledExistingSnapshot.failed;
-        const reconciledChanged = reconciledExistingSnapshot.restored > 0 || reconciledExistingSnapshot.skipped > 0 || reconciledExistingSnapshot.failed > 0 || reconciledExistingSnapshot.pruned > 0;
+        const disableResult = totalCandidates > 0
+            && stateWriteSucceeded
+            ? await disableTakeoverCandidates_ACU(workingSnapshot, pendingCandidateBooks)
+            : { disabled: 0, failed: 0, report: { applied: [], failed: [] } };
+        const candidateOutcomeBooks = setSnapshotEntryStatusByUpdates_ACU(pendingCandidateBooks, disableResult.report.applied, 'applied');
+        let restoreResult = { restored: 0, skipped: 0, failed: 0, report: { applied: [], failed: [] } };
+        const staleUpdates = Object.entries(reconciledExistingSnapshot.staleSnapshot.books)
+            .flatMap(([bookName, entries]) => (entries || []).map(entry => ({ bookName, uid: entry.uid })));
+        if (reconciledExistingSnapshot.pruned > 0 && stateWriteSucceeded) {
+            const restorePendingBooks = setSnapshotEntryStatusByUpdates_ACU(workingSnapshot.books, staleUpdates, 'pending');
+            const restorePendingSnapshot = buildActiveSnapshot_ACU(selectionSignature, restorePendingBooks);
+            try {
+                const stateWriteResult = await writeAgentWorldbookStateToWorldbook_ACU({ snapshot: restorePendingSnapshot });
+                if (!stateWriteResult.updated) {
+                    stateWriteFailed += reconciledExistingSnapshot.pruned;
+                }
+                else {
+                    persistentSnapshot = restorePendingSnapshot;
+                    restoreResult = await restoreSnapshotEntries_ACU(reconciledExistingSnapshot.staleSnapshot);
+                }
+            }
+            catch (error) {
+                logWarn_ACU('[Agent世界书] 标记接管恢复待处理状态失败，未恢复旧条目以保留可重试状态。', error);
+                stateWriteFailed += reconciledExistingSnapshot.pruned;
+            }
+        }
+        if (stateWriteSucceeded && stateWriteFailed === 0 && (totalCandidates > 0 || reconciledExistingSnapshot.pruned > 0)) {
+            const unresolvedStaleBooks = setSnapshotEntryStatusByUpdates_ACU(excludeSnapshotEntriesByUpdates_ACU(reconciledExistingSnapshot.staleSnapshot.books, restoreResult.report.applied), staleUpdates, 'applied');
+            const finalizedBooks = mergeSnapshotBooks_ACU(reconciledExistingSnapshot.snapshot.books, mergeSnapshotBooks_ACU(candidateOutcomeBooks, unresolvedStaleBooks));
+            const finalizedSnapshot = Object.keys(finalizedBooks).length > 0
+                ? buildActiveSnapshot_ACU(selectionSignature, finalizedBooks)
+                : buildInactiveSnapshot_ACU(selectionSignature);
+            try {
+                const stateWriteResult = await writeAgentWorldbookStateToWorldbook_ACU({ snapshot: finalizedSnapshot });
+                if (stateWriteResult.updated) {
+                    persistentSnapshot = finalizedSnapshot;
+                }
+                else {
+                    stateWriteFailed += Math.max(disableResult.failed, restoreResult.failed, totalCandidates, reconciledExistingSnapshot.pruned);
+                }
+            }
+            catch (error) {
+                logWarn_ACU('[Agent世界书] 接管结果收敛写入失败，已保留 pending 状态供后续刷新处理。', error);
+                stateWriteFailed += Math.max(disableResult.failed, restoreResult.failed, totalCandidates, reconciledExistingSnapshot.pruned);
+            }
+        }
+        setPlotAgentWorldbookSnapshot_ACU(persistentSnapshot);
+        const totalFailed = disableResult.failed + stateWriteFailed + restoreResult.failed;
+        const reconciledChanged = restoreResult.restored > 0 || restoreResult.skipped > 0 || restoreResult.failed > 0 || reconciledExistingSnapshot.pruned > 0;
         return {
-            updated: disabled > 0 || totalFailed > 0 || reconciledChanged,
+            updated: disableResult.disabled > 0 || totalFailed > 0 || reconciledChanged,
             reason: stateWriteFailed > 0
                 ? 'snapshot_state_write_failed'
                 : (totalCandidates > 0
                     ? 'native_worldbook_trigger_disabled'
                     : (reconciledExistingSnapshot.pruned > 0
                         ? 'native_worldbook_trigger_snapshot_reconciled'
-                        : (shouldKeepExistingActiveSnapshot
+                        : (shouldReconcileExistingActiveSnapshot
                             ? 'native_worldbook_trigger_already_disabled'
                             : 'empty_candidates'))),
             bookNames: resolvedBookNames,
             selectionSignature,
             totalCandidates,
-            disabled,
+            disabled: disableResult.disabled,
             failed: totalFailed,
-            snapshot,
+            snapshot: persistentSnapshot,
             updates,
         };
     }
@@ -50328,39 +50738,106 @@ $CONTENT
         const cleanupMode = options.cleanupMode || 'full';
         const resolvedBookNames = await resolveTakeoverBookNames_ACU();
         const selectionSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
-        const stateSnapshot = await readPlotAgentWorldbookStateSnapshotOnly_ACU(selectionSignature);
-        const worldbookSnapshot = stateSnapshot.active === true ? stateSnapshot : await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature);
+        const worldbookSnapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { backfillMissingMeta: false });
         const legacySnapshot = getLegacyPlotAgentWorldbookSnapshot_ACU();
-        const shouldUseWorldbookSnapshot = stateSnapshot.active === true && stateSnapshot.selectionSignature === selectionSignature;
-        const shouldUseLegacySnapshot = !shouldUseWorldbookSnapshot && legacySnapshot.active === true && legacySnapshot.selectionSignature === selectionSignature;
-        const snapshot = shouldUseWorldbookSnapshot
-            ? stateSnapshot
-            : (shouldUseLegacySnapshot ? legacySnapshot : worldbookSnapshot);
+        const stateSnapshot = await readPlotAgentWorldbookStateSnapshotOnly_ACU(selectionSignature);
+        const shouldUseLegacySnapshot = stateSnapshot.active !== true
+            && legacySnapshot.active === true
+            && legacySnapshot.selectionSignature === selectionSignature;
+        const snapshot = worldbookSnapshot;
         const shouldRestoreSnapshot = snapshot.active === true && snapshot.selectionSignature === selectionSignature;
-        const restoreResult = shouldRestoreSnapshot
+        let recoveredPendingUpdates = [];
+        let pendingRecoveryReadFailed = false;
+        if (cleanupMode === 'full' && shouldRestoreSnapshot) {
+            try {
+                recoveredPendingUpdates = await collectRecoveredPendingSnapshotUpdates_ACU(snapshot);
+            }
+            catch (error) {
+                pendingRecoveryReadFailed = true;
+                logWarn_ACU('[Agent世界书] 检查待处理恢复结果失败，已保留 pending 状态供后续诊断。', error);
+            }
+        }
+        const restoreUpdates = cleanupMode === 'full' && shouldRestoreSnapshot
+            ? Object.entries(snapshot.books || {}).flatMap(([bookName, entries]) => (entries || [])
+                .filter(entry => entry.takeoverStatus !== 'pending' && hasValidWorldbookUid_ACU(entry?.uid))
+                .map(entry => ({ bookName, uid: entry.uid })))
+            : [];
+        const restorePendingSnapshot = shouldRestoreSnapshot && restoreUpdates.length > 0
+            ? buildActiveSnapshot_ACU(selectionSignature, setSnapshotEntryStatusByUpdates_ACU(snapshot.books, restoreUpdates, 'pending'))
+            : snapshot;
+        let stateWriteFailed = 0;
+        let pendingSnapshotPersisted = false;
+        if (restoreUpdates.length > 0) {
+            try {
+                const stateWriteResult = await writeAgentWorldbookStateToWorldbook_ACU({ snapshot: restorePendingSnapshot });
+                pendingSnapshotPersisted = stateWriteResult.updated;
+                if (!pendingSnapshotPersisted)
+                    stateWriteFailed = restoreUpdates.length;
+            }
+            catch (error) {
+                stateWriteFailed = restoreUpdates.length;
+                logWarn_ACU('[Agent世界书] 标记接管恢复待处理状态失败，未恢复条目以保留可重试状态。', error);
+            }
+        }
+        const restoreResult = shouldRestoreSnapshot && (cleanupMode !== 'full' || restoreUpdates.length === 0 || pendingSnapshotPersisted)
             ? await restoreSnapshotEntries_ACU(snapshot)
-            : { restored: 0, skipped: 0, failed: 0 };
-        const canCleanupPersistentSnapshot = cleanupMode === 'full' && shouldRestoreSnapshot && restoreResult.skipped === 0 && restoreResult.failed === 0;
+            : { restored: 0, skipped: 0, failed: 0, report: { applied: [], failed: [] } };
+        const completedRestoreUpdates = [
+            ...recoveredPendingUpdates,
+            ...restoreResult.report.applied,
+        ];
+        const remainingBooks = shouldRestoreSnapshot
+            ? excludeSnapshotEntriesByUpdates_ACU(restorePendingSnapshot.books, completedRestoreUpdates)
+            : {};
+        const finalizedSnapshot = Object.keys(remainingBooks).length > 0
+            ? buildActiveSnapshot_ACU(selectionSignature, remainingBooks)
+            : buildInactiveSnapshot_ACU(selectionSignature);
+        let persistentSnapshot = pendingSnapshotPersisted ? restorePendingSnapshot : snapshot;
+        const canFinalizeSnapshot = cleanupMode === 'full'
+            && shouldRestoreSnapshot
+            && !pendingRecoveryReadFailed
+            && (restoreUpdates.length === 0 || pendingSnapshotPersisted);
+        if (canFinalizeSnapshot && shouldRestoreSnapshot) {
+            try {
+                const stateWriteResult = await writeAgentWorldbookStateToWorldbook_ACU({ snapshot: finalizedSnapshot });
+                if (stateWriteResult.updated) {
+                    persistentSnapshot = finalizedSnapshot;
+                }
+                else {
+                    stateWriteFailed += Math.max(1, completedRestoreUpdates.length);
+                }
+            }
+            catch (error) {
+                stateWriteFailed += Math.max(1, completedRestoreUpdates.length);
+                logWarn_ACU('[Agent世界书] 接管恢复结果收敛写入失败，已保留 pending 状态供后续诊断。', error);
+            }
+        }
+        const canCleanupPersistentSnapshot = cleanupMode === 'full'
+            && canFinalizeSnapshot
+            && shouldRestoreSnapshot
+            && stateWriteFailed === 0
+            && finalizedSnapshot.active !== true;
         const canClearLegacySnapshot = cleanupMode === 'full' && shouldUseLegacySnapshot && restoreResult.skipped === 0 && restoreResult.failed === 0;
         const deletedFinalGreenlights = await deleteInternalEntriesByComment_ACU(resolvedBookNames, AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU);
         const deletedSnapshots = cleanupMode === 'full' ? await deleteInternalEntriesByComment_ACU(resolvedBookNames, AGENT_WORLDBOOK_SNAPSHOT_COMMENT_ACU) : 0;
         const deletedStateEntries = canCleanupPersistentSnapshot ? await deleteAgentWorldbookStateEntry_ACU() : 0;
         const legacySnapshotCleared = canClearLegacySnapshot && clearLegacyPlotAgentWorldbookSnapshot_ACU() ? 1 : 0;
         const cleaned = deletedFinalGreenlights + deletedSnapshots + deletedStateEntries + legacySnapshotCleared;
-        const changed = restoreResult.restored + restoreResult.failed + cleaned;
-        const shouldKeepSnapshotCache = shouldRestoreSnapshot && (cleanupMode === 'restore_only' || restoreResult.skipped > 0 || restoreResult.failed > 0);
-        setPlotAgentWorldbookSnapshot_ACU(shouldKeepSnapshotCache
-            ? snapshot
-            : buildInactiveSnapshot_ACU(selectionSignature));
+        const changed = restoreResult.restored + restoreResult.failed + stateWriteFailed + cleaned;
+        setPlotAgentWorldbookSnapshot_ACU(canCleanupPersistentSnapshot
+            ? buildInactiveSnapshot_ACU(selectionSignature)
+            : persistentSnapshot);
         return {
             updated: changed > 0,
-            reason: restoreResult.restored > 0
-                ? 'native_worldbook_trigger_restored'
-                : (restoreResult.failed > 0
-                    ? 'native_worldbook_trigger_restore_failed'
-                    : (restoreResult.skipped > 0
-                        ? 'native_worldbook_trigger_restore_skipped'
-                        : (cleaned > 0 ? 'legacy_artifacts_cleaned' : 'no_active_snapshot'))),
+            reason: stateWriteFailed > 0
+                ? 'snapshot_state_write_failed'
+                : (restoreResult.restored > 0
+                    ? 'native_worldbook_trigger_restored'
+                    : (restoreResult.failed > 0
+                        ? 'native_worldbook_trigger_restore_failed'
+                        : (restoreResult.skipped > 0
+                            ? 'native_worldbook_trigger_restore_skipped'
+                            : (cleaned > 0 ? 'legacy_artifacts_cleaned' : 'no_active_snapshot')))),
             bookNames: resolvedBookNames,
             selectionSignature,
             restored: restoreResult.restored,
@@ -55742,6 +56219,8 @@ $CONTENT
             const byUid = new Map();
             for (const entry of entries) {
                 const uid = String(entry?.uid ?? '').trim();
+                if (entry?.takeoverStatus === 'pending')
+                    continue;
                 if (uid)
                     byUid.set(uid, entry);
             }
@@ -56064,6 +56543,7 @@ $CONTENT
         if (!chatFileName || typeof chatFileName !== 'string' || chatFileName.trim() === '' || chatFileName.trim() === 'null') {
             if (!Array.isArray(getChatArray_ACU()) || getChatArray_ACU().length === 0) {
                 logDebug_ACU(`ACU: Received invalid chat file name "${chatFileName}" with no active chat. Clearing runtime state.`);
+                resetPlotAgentWorldbookSessionSnapshot_ACU();
                 _set_currentChatFileIdentifier_ACU('');
                 _set_currentJsonTableData_ACU(null);
                 _set_independentTableStates_ACU({});
@@ -56086,6 +56566,9 @@ $CONTENT
         // [FIX] Reload all settings to ensure template is not stale for new chats.
         // MUST be called AFTER setting currentChatFileIdentifier_ACU so it loads the correct character settings.
         loadSettings_ACU();
+        // 当前角色卡绑定在后续读取时重新解析；这里只清除上一会话的内存快照。
+        // 不得删除或重写旧世界书中的持久 Agent state。
+        resetPlotAgentWorldbookSessionSnapshot_ACU();
         _set_currentJsonTableData_ACU(null);
         _set_independentTableStates_ACU({});
         _set_allChatMessages_ACU([]);
@@ -93628,6 +94111,7 @@ $CONTENT
         _set_lastTotalAiMessages_ACU(0);
     }
     function clearRuntimeForNoActiveChat_ACU(chatFileName) {
+        resetPlotAgentWorldbookSessionSnapshot_ACU();
         clearDerivedRuntimeState_ACU();
         _set_currentChatFileIdentifier_ACU('');
         generationGate_ACU.lastUserMessageId = null;
@@ -94489,16 +94973,34 @@ $CONTENT
      */
     /**
      * 从 sheet 解析英文物理表名
-     * 优先从 DDL 解析，fallback 为传入的 tableName 或 sheet.name
+     * 必须与 SyncBridge 使用相同的稳定 sheet key fallback，不能使用用户可改的显示名。
      */
-    function getEnglishTableName(sheet, fallback) {
-        const ddl = sheet?.sourceData?.ddl;
-        if (ddl) {
-            const parsed = parseDDLTableName(ddl);
-            if (parsed)
-                return parsed;
+    function getEnglishTableName(sheet, sheetKey) {
+        if (!sheet || typeof sheet !== 'object')
+            return sheetKey;
+        const ddl = resolveRuntimeEffectiveDDL_ACU(sheet, sheet.uid || sheetKey).effectiveDDL;
+        const parsed = parseDDLTableName(ddl);
+        if (parsed)
+            return parsed;
+        return sheetKey;
+    }
+    /**
+     * CRUD 入口需要以本次 canonical JSON 视图为准同步 mapper。
+     * 回滚和 provider 重载可以发生在 SqlTableService 的常规 hydrate 生命周期之外，
+     * 不能让 getNameMapper() 的惰性空实例把中文展示列直接当 SQLite 物理列。
+     */
+    function ensureNameMapperForTableData_ACU(tableData) {
+        const ddlMap = new Map();
+        for (const [sheetKey, sheet] of Object.entries(tableData || {})) {
+            if (!sheetKey.startsWith('sheet_') || !sheet || typeof sheet !== 'object')
+                continue;
+            const ddl = resolveRuntimeEffectiveDDL_ACU(sheet, sheet.uid || sheetKey).effectiveDDL;
+            const tableName = parseDDLTableName(ddl);
+            if (tableName) {
+                ddlMap.set(tableName, ddl);
+            }
         }
-        return fallback;
+        ensureGlobalNameMapperForDDLs_ACU(ddlMap);
     }
     /**
      * 查找指定表格的目标 sheet 和 sheetKey
@@ -94508,6 +95010,7 @@ $CONTENT
     function findTargetSheetInData_ACU(tableData, tableName) {
         if (!tableData)
             return null;
+        ensureNameMapperForTableData_ACU(tableData);
         // 路径 1：按 sheet.name（中文显示名）直接匹配
         for (const sheetKey in tableData) {
             if (!sheetKey.startsWith('sheet_'))
@@ -94517,7 +95020,7 @@ $CONTENT
                 return {
                     sheet,
                     sheetKey,
-                    englishTableName: getEnglishTableName(sheet, tableName),
+                    englishTableName: getEnglishTableName(sheet, sheetKey),
                 };
             }
         }
@@ -94533,7 +95036,7 @@ $CONTENT
                     return {
                         sheet,
                         sheetKey,
-                        englishTableName: getEnglishTableName(sheet, tableName),
+                        englishTableName: getEnglishTableName(sheet, sheetKey),
                     };
                 }
             }
@@ -94543,7 +95046,7 @@ $CONTENT
             if (!sheetKey.startsWith('sheet_'))
                 continue;
             const sheet = tableData[sheetKey];
-            const english = getEnglishTableName(sheet, '');
+            const english = getEnglishTableName(sheet, sheetKey);
             if (english && english === tableName) {
                 return {
                     sheet,
@@ -94564,11 +95067,17 @@ $CONTENT
      * 原生模式下 NameMapper 未构建，resolve* 方法会原样返回——
      * 此时 englishColName === chineseColName === 原始 colName，行为与旧版一致。
      */
-    function resolveColumnForSheet(englishTableName, colName) {
+    function resolveColumnForSheet(englishTableName, sheetKey, colName) {
         const mapper = getNameMapper();
-        const englishColName = mapper.resolveColumnName(englishTableName, colName);
+        const normalizedColumnName = String(colName || '').trim();
+        const resolved = mapper.hasColumnName(englishTableName, normalizedColumnName);
+        const englishColName = mapper.resolveColumnName(englishTableName, normalizedColumnName);
         const chineseColName = mapper.getChineseColumnName(englishTableName, englishColName);
-        return { englishColName, chineseColName };
+        return {
+            englishColName,
+            chineseColName,
+            resolved,
+        };
     }
     function toSqlValueParam_ACU(value) {
         if (value === undefined || value === null)
@@ -94788,7 +95297,11 @@ $CONTENT
                         rawColName = String(normalizedColIdentifier); // 可能中文也可能英文
                     }
                     // 统一翻译为英文+中文双形态
-                    const { englishColName, chineseColName } = resolveColumnForSheet(englishTableName, rawColName);
+                    const { englishColName, chineseColName, resolved } = resolveColumnForSheet(englishTableName, targetSheetKey, rawColName);
+                    if (isSqliteMode() && !resolved) {
+                        logError_ACU(`updateCell: Column mapping is unavailable. sheetKey=${targetSheetKey}, table=${englishTableName}, column=${rawColName}; SQLite write was rejected.`);
+                        return false;
+                    }
                     // 校验列名：用中文形态和 headers 比对（headers 是中文），
                     // 这样用户传英文列名也能通过校验
                     if (numericColIdentifier === null) {
@@ -94930,10 +95443,14 @@ $CONTENT
                         for (const colName in normalizedData) {
                             if (colName === 'isImportMode')
                                 continue; // 跳过内部标记
-                            const { englishColName, chineseColName } = resolveColumnForSheet(englishTableName, colName);
+                            const { englishColName, chineseColName, resolved } = resolveColumnForSheet(englishTableName, targetSheetKey, colName);
+                            if (!resolved) {
+                                logError_ACU(`updateRow: Column mapping is unavailable. sheetKey=${targetSheetKey}, table=${englishTableName}, column=${colName}; SQLite write was rejected.`);
+                                return false;
+                            }
                             if (!headers.includes(chineseColName)) {
-                                logWarn_ACU(`updateRow: Column "${colName}" not found in table "${tableName}".`);
-                                continue;
+                                logError_ACU(`updateRow: Column "${colName}" is absent from canonical headers. sheetKey=${targetSheetKey}, table=${englishTableName}; SQLite write was rejected.`);
+                                return false;
                             }
                             setClauses.push(`${quoteIdentifier(englishColName)} = ?`);
                             params.push(toSqlValueParam_ACU(normalizedData[colName]));
@@ -95005,7 +95522,7 @@ $CONTENT
                             for (const colName in normalizedData) {
                                 if (colName === 'isImportMode')
                                     continue;
-                                const { chineseColName } = resolveColumnForSheet(workingTarget.englishTableName, colName);
+                                const { chineseColName } = resolveColumnForSheet(workingTarget.englishTableName, workingTarget.sheetKey, colName);
                                 const colIndex = headers.indexOf(chineseColName);
                                 if (colIndex !== -1) {
                                     row[colIndex] = normalizedData[colName];
@@ -95064,12 +95581,18 @@ $CONTENT
                         const colNames = [];
                         const params = [];
                         for (const colName in normalizedData) {
-                            const { englishColName, chineseColName } = resolveColumnForSheet(englishTableName, colName);
+                            const { englishColName, chineseColName, resolved } = resolveColumnForSheet(englishTableName, targetSheetKey, colName);
                             // 跳过 row_id（自增主键），同时检查英文形态和原始名，防止用户传中文"行号"等变体
                             if (englishColName === 'row_id' || colName === 'row_id')
                                 continue;
-                            if (!headers.includes(chineseColName))
-                                continue;
+                            if (!resolved) {
+                                logError_ACU(`insertRow: Column mapping is unavailable. sheetKey=${targetSheetKey}, table=${englishTableName}, column=${colName}; SQLite write was rejected.`);
+                                return -1;
+                            }
+                            if (!headers.includes(chineseColName)) {
+                                logError_ACU(`insertRow: Column "${colName}" is absent from canonical headers. sheetKey=${targetSheetKey}, table=${englishTableName}; SQLite write was rejected.`);
+                                return -1;
+                            }
                             colNames.push(quoteIdentifier(englishColName));
                             params.push(toSqlValueParam_ACU(normalizedData[colName]));
                         }
@@ -95142,7 +95665,7 @@ $CONTENT
                             const workingHeaders = workingSheet.content[0] || [];
                             const newRow = new Array(workingHeaders.length).fill('');
                             for (const colName in normalizedData) {
-                                const { chineseColName } = resolveColumnForSheet(workingTarget.englishTableName, colName);
+                                const { chineseColName } = resolveColumnForSheet(workingTarget.englishTableName, workingTarget.sheetKey, colName);
                                 const colIndex = workingHeaders.indexOf(chineseColName);
                                 if (colIndex !== -1) {
                                     newRow[colIndex] = normalizedData[colName];
@@ -128915,7 +129438,9 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!Array.isArray(entries))
                 continue;
             const entriesByUid = new Map(entries
-                .filter((entry) => !!entry && String(entry.uid ?? '') !== '')
+                .filter((entry) => !!entry
+                && entry.takeoverStatus !== 'pending'
+                && String(entry.uid ?? '') !== '')
                 .map(entry => [String(entry.uid), entry]));
             if (entriesByUid.size > 0)
                 result.set(bookName, entriesByUid);
@@ -128998,8 +129523,9 @@ Expected function or array of functions, received type ${typeof value}.`
             error.value = '';
             try {
                 const enabledEntries = ensureEnabledEntries();
+                const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
                 const entriesMap = await getLorebookEntriesByNames_ACU(unique);
-                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(getPlotAgentWorldbookSnapshot_ACU());
+                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
                 let settingsChanged = false;
                 const result = [];
                 for (const bookName of unique) {
@@ -129632,8 +130158,9 @@ Expected function or array of functions, received type ${typeof value}.`
             error.value = '';
             try {
                 const cfg = ensurePlotWorldbookConfig();
+                const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
                 const entriesMap = await getLorebookEntriesByNames_ACU(unique);
-                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(getPlotAgentWorldbookSnapshot_ACU());
+                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
                 let settingsChanged = false;
                 const result = [];
                 for (const bookName of unique) {
@@ -130600,36 +131127,16 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     var WorldbookAgentControlBar = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-b1d37101"]]);
 
-    function buildSnapshotUidSet_ACU() {
-        const result = new Map();
-        const snapshot = getPlotAgentWorldbookSnapshot_ACU();
-        if (snapshot.active !== true)
-            return result;
-        for (const [bookName, entries] of Object.entries(snapshot.books || {})) {
-            const uids = new Set((Array.isArray(entries) ? entries : []).map(entry => String(entry?.uid ?? '')).filter(Boolean));
-            if (uids.size > 0)
-                result.set(bookName, uids);
-        }
-        return result;
-    }
     function getEntryLabel_ACU(entry) {
         return stripWorldbookSkillMetaBlock_ACU(String(entry?.comment || entry?.name || '')).trim() || `条目 ${entry?.uid}`;
-    }
-    function getTakeoverState_ACU(bookName, entry, hasSkill, snapshotUids) {
-        if (snapshotUids.get(bookName)?.has(String(entry?.uid))) {
-            return entry?.enabled !== false && String(entry?.type || '').trim().toLowerCase() === 'constant' ? 'final_greenlight' : 'taken_over';
-        }
-        if (entry?.enabled === false)
-            return 'initial_disabled';
-        return hasSkill ? 'skill_ready' : 'native';
     }
     function selectionKey_ACU(bookName, uid) {
         return `${bookName}\u0000${String(uid)}`;
     }
-    function isAgentWorldbookEntryVisible_ACU(bookName, entry, skillMeta, snapshotUids) {
+    function isAgentWorldbookEntryVisible_ACU(bookName, entry, skillMeta, snapshotEntry) {
         return isWorldbookEntrySkillifyCandidate_ACU(entry)
             || skillMeta !== null
-            || snapshotUids.get(bookName)?.has(String(entry?.uid)) === true;
+            || !!snapshotEntry;
     }
     function useAgentWorldbookEntries(options = {}) {
         const groups = shallowRef([]);
@@ -130648,8 +131155,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     status.value = 'success';
                     return [];
                 }
+                const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
+                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
                 const entriesByBook = await getLorebookEntriesByNames_ACU(uniqueBookNames);
-                const snapshotUids = buildSnapshotUidSet_ACU();
                 const nextGroups = [];
                 const visibleSelections = new Set();
                 for (const bookName of uniqueBookNames) {
@@ -130657,7 +131165,8 @@ Expected function or array of functions, received type ${typeof value}.`
                     const items = entries.flatMap((entry) => {
                         const comment = String(entry?.comment || entry?.name || '');
                         const skillMeta = parseWorldbookSkillMetaFromComment_ACU(comment);
-                        if (!isAgentWorldbookEntryVisible_ACU(bookName, entry, skillMeta, snapshotUids)) {
+                        const snapshotEntry = getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry);
+                        if (!isAgentWorldbookEntryVisible_ACU(bookName, entry, skillMeta, snapshotEntry)) {
                             return [];
                         }
                         const key = selectionKey_ACU(bookName, entry.uid);
@@ -130669,7 +131178,7 @@ Expected function or array of functions, received type ${typeof value}.`
                                 comment,
                                 skillMeta,
                                 hasSkill: !!skillMeta,
-                                agentTakeoverState: getTakeoverState_ACU(bookName, entry, !!skillMeta, snapshotUids),
+                                agentTakeoverState: resolveWorldbookEntryTakeoverState_ACU(entry, !!skillMeta, snapshotEntry),
                                 checked: false,
                                 skillifySelected: selected.value.has(key),
                                 skillifySelectable: isWorldbookEntrySkillifyCandidate_ACU(entry),

@@ -25,7 +25,7 @@ import {
 } from '../runtime/state-manager';
 import { mergeAllIndependentTables_ACU } from '../runtime/helpers-data-merge';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
-import { buildGlobalNameMapper, disposeGlobalNameMapper } from '../runtime/template-vars/name-mapper';
+import { disposeGlobalNameMapper, ensureGlobalNameMapperForDDLs_ACU } from '../runtime/template-vars/name-mapper';
 import { parseDDLTableName, generateDDL, generateInserts, resolveEffectiveDDL } from '../../data/sqlite/schema-mapper';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
@@ -226,6 +226,7 @@ export class SqlTableService implements ITableStorageProvider {
 
   async restoreRuntimeSnapshot(snapshot: unknown): Promise<void> {
     if (!(snapshot instanceof Uint8Array)) throw new Error('SQLite 运行时快照无效，无法恢复。');
+    disposeGlobalNameMapper();
     await this.engine.loadFromBinary(snapshot);
     this._initialized = true;
     this._existingTableSet = undefined;
@@ -343,6 +344,7 @@ export class SqlTableService implements ITableStorageProvider {
   async replaceAllData(data: TableDataObject_ACU): Promise<ApplyEditsResult> {
     try {
       const cloned = JSON.parse(JSON.stringify(data || {})) as TableDataObject_ACU;
+      disposeGlobalNameMapper();
       this.engine.dispose();
       this.engine = new SqliteEngine();
       this.syncBridge = new SyncBridge(this.engine);
@@ -357,6 +359,7 @@ export class SqlTableService implements ITableStorageProvider {
       return { success: true, modifiedKeys, appliedEdits: modifiedKeys.length };
     } catch (e: any) {
       const message = e?.message || String(e);
+      disposeGlobalNameMapper();
       logError_ACU(`[SqlTableService] 运行时全量替换失败: ${message}`);
       return { success: false, modifiedKeys: [], appliedEdits: 0, error: message };
     }
@@ -515,6 +518,9 @@ export class SqlTableService implements ITableStorageProvider {
 
   /** 重置本实例的 SQLite runtime；不触碰调用方持有的 canonical JSON 快照。 */
   private _resetRuntimeForLoad_ACU(): void {
+    // 新 runtime 在成功 hydrate 前没有可证明匹配的 schema；保留旧 mapper
+    // 会让并发/重载后的外部 CRUD 把展示列解析到上一份 SQLite schema。
+    disposeGlobalNameMapper();
     this.engine.dispose();
     this.engine = new SqliteEngine();
     this.syncBridge = new SyncBridge(this.engine);
@@ -648,16 +654,16 @@ export class SqlTableService implements ITableStorageProvider {
       for (const [key, value] of Object.entries(data)) {
         if (!key.startsWith('sheet_')) continue;
         const sheet = value as any;
-        const ddl = sheet?.sourceData?.ddl;
-        if (!ddl) continue;
-        const tableName = parseDDLTableName(ddl);
+        if (!sheet || typeof sheet !== 'object') continue;
+        // NameMapper 必须和 SQLite 实际采用的 schema 一致。直接读取 sourceData.ddl
+        // 会在 fallback_invalid 场景留下无法映射运行时物理列名的陈旧映射。
+        const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key).effectiveDDL;
+        const tableName = parseDDLTableName(effectiveDDL);
         if (tableName) {
-          ddlMap.set(tableName, ddl);
+          ddlMap.set(tableName, effectiveDDL);
         }
       }
-      if (ddlMap.size > 0) {
-        buildGlobalNameMapper(ddlMap);
-      }
+      ensureGlobalNameMapperForDDLs_ACU(ddlMap);
     } catch (e: any) {
       logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${e?.message}`);
     }
@@ -750,7 +756,12 @@ export class SqlTableService implements ITableStorageProvider {
     }
 
     // 所有表都已存在，无需建表
-    if (Object.keys(missingSheets).length === 0) return;
+    if (Object.keys(missingSheets).length === 0) {
+      // 不能因物理表已存在就跳过映射同步：删楼回滚/模板切换可重建
+      // SQLite runtime，却不会制造缺表；此时外部 CRUD 仍需当前 schema 的列映射。
+      this._buildNameMapper(currentJsonTableData_ACU || templateData);
+      return;
+    }
 
     logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
 

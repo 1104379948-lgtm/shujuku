@@ -1090,6 +1090,7 @@ function buildPreTakeoverSnapshotEntryMap_ACU(
         const byUid = new Map<string, AgentWorldbookControlSnapshotEntry_ACU>();
         for (const entry of entries) {
             const uid = String(entry?.uid ?? '').trim();
+            if (entry?.takeoverStatus === 'pending') continue;
             if (uid) byUid.set(uid, entry);
         }
         if (byUid.size > 0) result.set(bookName, byUid);

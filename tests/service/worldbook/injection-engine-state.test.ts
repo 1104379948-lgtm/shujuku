@@ -21,6 +21,7 @@ const {
   mockRunTableWriteTransaction,
   mockCHAT_SHEET_GUIDE_FIELD,
   mockListLorebooks,
+  mockResetPlotAgentWorldbookSessionSnapshot,
 } = vi.hoisted(() => ({
   mockSettings: {
     dataIsolationEnabled: false,
@@ -78,6 +79,7 @@ const {
     runCommit: async (commitTask: any) => commitTask(),
   })),
   mockCHAT_SHEET_GUIDE_FIELD: 'chatSheetGuide',
+  mockResetPlotAgentWorldbookSessionSnapshot: vi.fn(),
 }));
 
 vi.mock('../../../src/service/settings/settings-readers', () => ({
@@ -146,6 +148,10 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
 
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: mockRunTableWriteTransaction,
+}));
+
+vi.mock('../../../src/service/agent/agent-worldbook-takeover', () => ({
+  resetPlotAgentWorldbookSessionSnapshot_ACU: mockResetPlotAgentWorldbookSessionSnapshot,
 }));
 
 import {
@@ -247,6 +253,7 @@ describe('resetScriptStateForNewChat_ACU', () => {
     await resetScriptStateForNewChat_ACU('new-chat.jsonl');
     expect(mockSetCurrentChatFileIdentifier).toHaveBeenCalledWith('clean-chat');
     expect(mockLoadSettings).toHaveBeenCalled();
+    expect(mockResetPlotAgentWorldbookSessionSnapshot).toHaveBeenCalledTimes(1);
     expect(mockSetAllChatMessages).toHaveBeenCalledWith([]);
     expect(mockSetLastTotalAiMessages).toHaveBeenCalledWith(0);
     expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith(null);
@@ -276,6 +283,7 @@ describe('resetScriptStateForNewChat_ACU', () => {
     await resetScriptStateForNewChat_ACU('');
 
     expect(mockSetCurrentChatFileIdentifier).toHaveBeenCalledWith('');
+    expect(mockResetPlotAgentWorldbookSessionSnapshot).toHaveBeenCalledTimes(1);
     expect(mockSetCurrentJsonTableData).toHaveBeenCalledWith(null);
     expect(mockSetIndependentTableStates).toHaveBeenCalledWith({});
     expect(mockSetAllChatMessages).toHaveBeenCalledWith([]);
@@ -292,6 +300,7 @@ describe('resetScriptStateForNewChat_ACU', () => {
 
     expect(mockSetCurrentChatFileIdentifier).not.toHaveBeenCalled();
     expect(mockSetCurrentJsonTableData).not.toHaveBeenCalled();
+    expect(mockResetPlotAgentWorldbookSessionSnapshot).not.toHaveBeenCalled();
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('invalid chat file name'));
   });
 

@@ -11,6 +11,7 @@ import { SillyTavern_API_ACU } from '../../shared/host-api';
 import { currentChatFileIdentifier_ACU, generationGate_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessAutoTableUpdateForGenerationEnded_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_isProcessing_Plot_ACU, _set_lastTotalAiMessages_ACU} from '../../service/runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
+import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
 import { reloadStorageProvider, disposeStorageProvider } from '../../service/table/table-storage-strategy';
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { loadAllChatMessages_ACU } from '../../service/worldbook/pipeline';
@@ -67,6 +68,7 @@ function clearDerivedRuntimeState_ACU(): void {
 }
 
 function clearRuntimeForNoActiveChat_ACU(chatFileName: unknown): void {
+  resetPlotAgentWorldbookSessionSnapshot_ACU();
   clearDerivedRuntimeState_ACU();
   _set_currentChatFileIdentifier_ACU('');
   generationGate_ACU.lastUserMessageId = null;

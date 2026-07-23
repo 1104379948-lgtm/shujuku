@@ -14,7 +14,7 @@ import {
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import type { ApiGroupContext } from './callback-api';
 import { isSqliteMode } from '../../../service/table/storage-mode';
-import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
+import { ensureGlobalNameMapperForDDLs_ACU, getNameMapper, resolveRuntimeEffectiveDDL_ACU } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
 import { getLatestTableAppendMessageIndexFromChat_ACU } from '../../../service/table/table-history';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
@@ -24,15 +24,32 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
 
 /**
  * 从 sheet 解析英文物理表名
- * 优先从 DDL 解析，fallback 为传入的 tableName 或 sheet.name
+ * 必须与 SyncBridge 使用相同的稳定 sheet key fallback，不能使用用户可改的显示名。
  */
-function getEnglishTableName(sheet: any, fallback: string): string {
-    const ddl = sheet?.sourceData?.ddl;
-    if (ddl) {
-        const parsed = parseDDLTableName(ddl);
-        if (parsed) return parsed;
+function getEnglishTableName(sheet: any, sheetKey: string): string {
+    if (!sheet || typeof sheet !== 'object') return sheetKey;
+    const ddl = resolveRuntimeEffectiveDDL_ACU(sheet, sheet.uid || sheetKey).effectiveDDL;
+    const parsed = parseDDLTableName(ddl);
+    if (parsed) return parsed;
+    return sheetKey;
+}
+
+/**
+ * CRUD 入口需要以本次 canonical JSON 视图为准同步 mapper。
+ * 回滚和 provider 重载可以发生在 SqlTableService 的常规 hydrate 生命周期之外，
+ * 不能让 getNameMapper() 的惰性空实例把中文展示列直接当 SQLite 物理列。
+ */
+function ensureNameMapperForTableData_ACU(tableData: Record<string, any>): void {
+    const ddlMap = new Map<string, string>();
+    for (const [sheetKey, sheet] of Object.entries(tableData || {})) {
+        if (!sheetKey.startsWith('sheet_') || !sheet || typeof sheet !== 'object') continue;
+        const ddl = resolveRuntimeEffectiveDDL_ACU(sheet as any, (sheet as any).uid || sheetKey).effectiveDDL;
+        const tableName = parseDDLTableName(ddl);
+        if (tableName) {
+            ddlMap.set(tableName, ddl);
+        }
     }
-    return fallback;
+    ensureGlobalNameMapperForDDLs_ACU(ddlMap);
 }
 
 /**
@@ -45,6 +62,7 @@ function findTargetSheetInData_ACU(
     tableName: string,
 ): { sheet: any; sheetKey: string; englishTableName: string } | null {
     if (!tableData) return null;
+    ensureNameMapperForTableData_ACU(tableData);
 
     // 路径 1：按 sheet.name（中文显示名）直接匹配
     for (const sheetKey in tableData) {
@@ -54,7 +72,7 @@ function findTargetSheetInData_ACU(
             return {
                 sheet,
                 sheetKey,
-                englishTableName: getEnglishTableName(sheet, tableName),
+                englishTableName: getEnglishTableName(sheet, sheetKey),
             };
         }
     }
@@ -70,7 +88,7 @@ function findTargetSheetInData_ACU(
                 return {
                     sheet,
                     sheetKey,
-                    englishTableName: getEnglishTableName(sheet, tableName),
+                    englishTableName: getEnglishTableName(sheet, sheetKey),
                 };
             }
         }
@@ -80,7 +98,7 @@ function findTargetSheetInData_ACU(
     for (const sheetKey in tableData) {
         if (!sheetKey.startsWith('sheet_')) continue;
         const sheet = tableData[sheetKey];
-        const english = getEnglishTableName(sheet, '');
+        const english = getEnglishTableName(sheet, sheetKey);
         if (english && english === tableName) {
             return {
                 sheet,
@@ -108,12 +126,19 @@ export function findTargetSheet(
  */
 function resolveColumnForSheet(
     englishTableName: string,
+    sheetKey: string,
     colName: string,
-): { englishColName: string; chineseColName: string } {
+): { englishColName: string; chineseColName: string; resolved: boolean } {
     const mapper = getNameMapper();
-    const englishColName = mapper.resolveColumnName(englishTableName, colName);
+    const normalizedColumnName = String(colName || '').trim();
+    const resolved = mapper.hasColumnName(englishTableName, normalizedColumnName);
+    const englishColName = mapper.resolveColumnName(englishTableName, normalizedColumnName);
     const chineseColName = mapper.getChineseColumnName(englishTableName, englishColName);
-    return { englishColName, chineseColName };
+    return {
+        englishColName,
+        chineseColName,
+        resolved,
+    };
 }
 
 function toSqlValueParam_ACU(value: any): string | number | null {
@@ -443,7 +468,11 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                 }
 
                 // 统一翻译为英文+中文双形态
-                const { englishColName, chineseColName } = resolveColumnForSheet(englishTableName, rawColName);
+                const { englishColName, chineseColName, resolved } = resolveColumnForSheet(englishTableName, targetSheetKey, rawColName);
+                if (isSqliteMode() && !resolved) {
+                    logError_ACU(`updateCell: Column mapping is unavailable. sheetKey=${targetSheetKey}, table=${englishTableName}, column=${rawColName}; SQLite write was rejected.`);
+                    return false;
+                }
 
                 // 校验列名：用中文形态和 headers 比对（headers 是中文），
                 // 这样用户传英文列名也能通过校验
@@ -591,10 +620,14 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         const headers = targetSheet.content[0] || [];
                         for (const colName in normalizedData) {
                             if (colName === 'isImportMode') continue; // 跳过内部标记
-                            const { englishColName, chineseColName } = resolveColumnForSheet(englishTableName, colName);
+                            const { englishColName, chineseColName, resolved } = resolveColumnForSheet(englishTableName, targetSheetKey, colName);
+                            if (!resolved) {
+                                logError_ACU(`updateRow: Column mapping is unavailable. sheetKey=${targetSheetKey}, table=${englishTableName}, column=${colName}; SQLite write was rejected.`);
+                                return false;
+                            }
                             if (!headers.includes(chineseColName)) {
-                                logWarn_ACU(`updateRow: Column "${colName}" not found in table "${tableName}".`);
-                                continue;
+                                logError_ACU(`updateRow: Column "${colName}" is absent from canonical headers. sheetKey=${targetSheetKey}, table=${englishTableName}; SQLite write was rejected.`);
+                                return false;
                             }
                             setClauses.push(`${quoteIdentifier(englishColName)} = ?`);
                             params.push(toSqlValueParam_ACU(normalizedData[colName]));
@@ -663,7 +696,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         let updated = 0;
                         for (const colName in normalizedData) {
                             if (colName === 'isImportMode') continue;
-                            const { chineseColName } = resolveColumnForSheet(workingTarget.englishTableName, colName);
+                            const { chineseColName } = resolveColumnForSheet(workingTarget.englishTableName, workingTarget.sheetKey, colName);
                             const colIndex = headers.indexOf(chineseColName);
                             if (colIndex !== -1) {
                                 row[colIndex] = normalizedData[colName];
@@ -730,10 +763,17 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         const colNames: string[] = [];
                         const params: (string | number | null)[] = [];
                         for (const colName in normalizedData) {
-                            const { englishColName, chineseColName } = resolveColumnForSheet(englishTableName, colName);
+                            const { englishColName, chineseColName, resolved } = resolveColumnForSheet(englishTableName, targetSheetKey, colName);
                             // 跳过 row_id（自增主键），同时检查英文形态和原始名，防止用户传中文"行号"等变体
                             if (englishColName === 'row_id' || colName === 'row_id') continue;
-                            if (!headers.includes(chineseColName)) continue;
+                            if (!resolved) {
+                                logError_ACU(`insertRow: Column mapping is unavailable. sheetKey=${targetSheetKey}, table=${englishTableName}, column=${colName}; SQLite write was rejected.`);
+                                return -1;
+                            }
+                            if (!headers.includes(chineseColName)) {
+                                logError_ACU(`insertRow: Column "${colName}" is absent from canonical headers. sheetKey=${targetSheetKey}, table=${englishTableName}; SQLite write was rejected.`);
+                                return -1;
+                            }
                             colNames.push(quoteIdentifier(englishColName));
                             params.push(toSqlValueParam_ACU(normalizedData[colName]));
                         }
@@ -802,7 +842,7 @@ export function createTableCrudApi(ctx: ApiGroupContext): Record<string, Functio
                         const newRow = new Array(workingHeaders.length).fill('');
 
                         for (const colName in normalizedData) {
-                            const { chineseColName } = resolveColumnForSheet(workingTarget.englishTableName, colName);
+                            const { chineseColName } = resolveColumnForSheet(workingTarget.englishTableName, workingTarget.sheetKey, colName);
                             const colIndex = workingHeaders.indexOf(chineseColName);
                             if (colIndex !== -1) {
                                 newRow[colIndex] = normalizedData[colName];

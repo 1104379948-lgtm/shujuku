@@ -55,9 +55,13 @@ vi.mock('../../../src/service/runtime/helpers-data-merge', () => ({
 }));
 
 // mock name-mapper
+const { mockEnsureGlobalNameMapper, mockDisposeGlobalNameMapper } = vi.hoisted(() => ({
+  mockEnsureGlobalNameMapper: vi.fn(),
+  mockDisposeGlobalNameMapper: vi.fn(),
+}));
 vi.mock('../../../src/service/runtime/template-vars/name-mapper', () => ({
-  buildGlobalNameMapper: vi.fn(),
-  disposeGlobalNameMapper: vi.fn(),
+  ensureGlobalNameMapperForDDLs_ACU: mockEnsureGlobalNameMapper,
+  disposeGlobalNameMapper: mockDisposeGlobalNameMapper,
 }));
 
 // mock chat-scope（getEffectiveSeedRowsForSheet_ACU + getCurrentChatTemplateScopeState_ACU）
@@ -417,6 +421,8 @@ describe('SqlTableService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCurrentJsonTableData = null;
+    mockEnsureGlobalNameMapper.mockReturnValue(undefined);
+    mockDisposeGlobalNameMapper.mockReturnValue(undefined);
     // 重置 mock 返回值，防止测试之间的状态泄漏
     mockGetEffectiveSeedRows.mockReturnValue([]);
     mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
@@ -576,6 +582,15 @@ describe('SqlTableService', () => {
         ['铁剑', '3'], ['治疗药水', '5'],
       ]);
       expect(invalidData.sheet_0.sourceData.ddl).toBe('CREATE TABLE broken (');
+    });
+
+    it('loadFromData 重置 runtime 时先使旧 mapper 失效，再按新 schema 重建', async () => {
+      const canonicalData = JSON.parse(JSON.stringify(testTableData));
+
+      await service.loadFromData(canonicalData);
+
+      expect(mockDisposeGlobalNameMapper).toHaveBeenCalledBefore(mockEnsureGlobalNameMapper);
+      expect(mockEnsureGlobalNameMapper).toHaveBeenLastCalledWith(expect.any(Map));
     });
 
     it('加载后可以执行查询', async () => {
@@ -1332,6 +1347,7 @@ describe('SqlTableService', () => {
       await service.loadFromChat();
       service.clearRuntimeData();
       expect(service.isReady()).toBe(false);
+      expect(mockDisposeGlobalNameMapper).toHaveBeenCalled();
       expect(service.getCurrentData()).toBeNull();
       expect(() => service.executeQuery('SELECT 1')).toThrow('SQLite 引擎未初始化');
       const replaced = await service.replaceAllData(JSON.parse(JSON.stringify(testTableData)));
@@ -1367,6 +1383,7 @@ describe('SqlTableService', () => {
       await service.loadFromChat();
       service.dispose();
       expect(() => service.executeQuery('SELECT 1')).toThrow();
+      expect(mockDisposeGlobalNameMapper).toHaveBeenCalled();
     });
 
     it('多次 dispose 不抛出', async () => {

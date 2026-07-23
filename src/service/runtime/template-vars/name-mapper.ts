@@ -15,9 +15,22 @@ import {
   parseDDLColumnComments,
 } from '../../../shared/ddl-utils';
 import { logDebug_ACU, logWarn_ACU } from '../../../shared/utils';
+import { resolveEffectiveDDL, type EffectiveDDLResult_ACU } from '../../../data/sqlite/schema-mapper';
+import type { Sheet_ACU } from '../../../shared/models/table-data';
 
 /** 全局 NameMapper 单例 */
 let _globalNameMapper: NameMapper | null = null;
+/** 当前 mapper 对应的有效 DDL 集合签名；null 表示尚未绑定到任何 runtime schema。 */
+let _globalNameMapperSchemaSignature: string | null = null;
+
+function buildDDLMapSignature_ACU(ddlMap: Map<string, string>): string {
+  return [...ddlMap.entries()]
+    .map(([tableName, ddl]) => [String(tableName || '').trim(), String(ddl || '').trim()] as const)
+    .filter(([tableName, ddl]) => !!tableName && !!ddl)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([tableName, ddl]) => `${tableName}\u0000${ddl}`)
+    .join('\u0001');
+}
 
 /**
  * 获取全局 NameMapper 实例
@@ -37,8 +50,46 @@ export function getNameMapper(): NameMapper {
  * @param ddlMap 表英文名 → DDL 语句的映射
  */
 export function buildGlobalNameMapper(ddlMap: Map<string, string>): void {
+  _globalNameMapperSchemaSignature = buildDDLMapSignature_ACU(ddlMap);
   _globalNameMapper = NameMapper.fromDDLs(ddlMap);
   logDebug_ACU(`[NameMapper] 全局映射器已构建: ${_globalNameMapper.tableCount} 张表`);
+}
+
+/**
+ * 仅当 mapper 尚未绑定当前有效 schema 时重建。
+ * 不能用 tableCount 判断就绪：不同模板可能拥有相同数量的表但列映射已经变化。
+ */
+export function ensureGlobalNameMapperForDDLs_ACU(ddlMap: Map<string, string>): NameMapper {
+  const nextSignature = buildDDLMapSignature_ACU(ddlMap);
+  if (!_globalNameMapper || _globalNameMapperSchemaSignature !== nextSignature) {
+    buildGlobalNameMapper(ddlMap);
+  }
+  return _globalNameMapper!;
+}
+
+/**
+ * 解析运行时有效 DDL（包括缺失或无效 DDL 的 fallback）。
+ * presentation 必须经 service 层使用该解析，不能直接依赖 data/sqlite。
+ */
+export function resolveRuntimeEffectiveDDL_ACU(
+  sheet: Sheet_ACU,
+  fallbackTableName?: string,
+): EffectiveDDLResult_ACU {
+  return resolveEffectiveDDL(sheet, fallbackTableName);
+}
+
+/** 当前全局 mapper 是否精确对应给定的有效 DDL 集合。 */
+export function isGlobalNameMapperCurrentForDDLs_ACU(ddlMap: Map<string, string>): boolean {
+  return _globalNameMapper !== null
+    && _globalNameMapperSchemaSignature === buildDDLMapSignature_ACU(ddlMap);
+}
+
+/** 供诊断使用；不暴露 DDL 内容，避免日志泄漏模板。 */
+export function getGlobalNameMapperStatus_ACU(): { ready: boolean; tableCount: number } {
+  return {
+    ready: _globalNameMapper !== null,
+    tableCount: _globalNameMapper?.tableCount ?? 0,
+  };
 }
 
 /**
@@ -46,6 +97,7 @@ export function buildGlobalNameMapper(ddlMap: Map<string, string>): void {
  */
 export function disposeGlobalNameMapper(): void {
   _globalNameMapper = null;
+  _globalNameMapperSchemaSignature = null;
 }
 
 /**
@@ -134,6 +186,15 @@ export class NameMapper {
     if (this.reverseColumnMap.has(`${tableName}.${trimmed}`)) return trimmed;
     // 未找到映射，原样返回（可能是英文名或未知名）
     return trimmed;
+  }
+
+  /** 指定表中是否存在已确认的中文展示列名或英文物理列名。 */
+  hasColumnName(tableName: string, columnName: string): boolean {
+    if (!tableName || !columnName) return false;
+    const trimmed = columnName.trim();
+    return this.columnNameMap.has(`${tableName}.${trimmed}`)
+      || this.reverseColumnMap.has(`${tableName}.${trimmed}`)
+      || trimmed === 'row_id';
   }
 
   /**
