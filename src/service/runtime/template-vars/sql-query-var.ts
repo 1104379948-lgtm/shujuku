@@ -735,7 +735,13 @@ export function evaluateRawSqlExpression(expr: string, options: RawSqlEvaluation
     return formatQueryResultAsText(result.columns, result.values);
   } catch (e: any) {
     if (options.throwOnError === true) throw new Error('sql_query_execution_failed');
-    logError_ACU(`[SQL] 表达式执行失败: ${expr} → ${e?.message}`);
+    const message = e?.message || String(e);
+    // 未建表属于预期时序（首次填表前模板 SELECT 先行），降级为 debug，避免刷 ERROR。
+    if (/no such table/i.test(message)) {
+      logDebug_ACU(`[SQL] 查询命中未建表（预期时序）: ${expr} → ${message}`);
+    } else {
+      logError_ACU(`[SQL] 表达式执行失败: ${expr} → ${message}`);
+    }
     return '';
   }
 }

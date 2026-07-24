@@ -71,6 +71,7 @@ vi.mock('../../../src/service/vector/vector-memory-config', () => ({
     embeddingModel: 'test-model',
     summaryIndexChunkSentenceCount: 1,
     summaryIndexArchiveMaxConcurrency: 10,
+    summaryIndexV2WriteEnabled: true,
     threshold: 1,
     archiveTriggerCount: 1,
     archiveBatchSize: 1,

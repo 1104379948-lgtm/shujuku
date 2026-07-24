@@ -8251,7 +8251,16 @@ $CONTENT
             }
             catch (e) {
                 if (options.suppressErrorLog !== true) {
-                    logError_ACU('[SQLite引擎] query 执行失败:', sql.substring(0, 200), '| 错误:', e?.message || String(e));
+                    const message = e?.message || String(e);
+                    // “no such table” 属于预期时序：新开卡/首次填表前，模板 SELECT 会先于建表执行
+                    // （建表仅在写操作触发，见 sql-table-service.ts executeMutation）。
+                    // 这类情况降级为 debug，避免刷 ERROR 噪音；语法错误、no such column 等仍按 ERROR 上报。
+                    if (/no such table/i.test(message)) {
+                        logDebug_ACU('[SQLite引擎] query 命中未建表（预期时序）:', sql.substring(0, 200), '| 错误:', message);
+                    }
+                    else {
+                        logError_ACU('[SQLite引擎] query 执行失败:', sql.substring(0, 200), '| 错误:', message);
+                    }
                 }
                 throw e;
             }
@@ -47093,7 +47102,14 @@ $CONTENT
         catch (e) {
             if (options.throwOnError === true)
                 throw new Error('sql_query_execution_failed');
-            logError_ACU(`[SQL] 表达式执行失败: ${expr} → ${e?.message}`);
+            const message = e?.message || String(e);
+            // 未建表属于预期时序（首次填表前模板 SELECT 先行），降级为 debug，避免刷 ERROR。
+            if (/no such table/i.test(message)) {
+                logDebug_ACU(`[SQL] 查询命中未建表（预期时序）: ${expr} → ${message}`);
+            }
+            else {
+                logError_ACU(`[SQL] 表达式执行失败: ${expr} → ${message}`);
+            }
             return '';
         }
     }
