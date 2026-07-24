@@ -37403,6 +37403,11 @@ $CONTENT
         if (state.allRevision !== snapshot.allRevision) {
             throw new Error(`[RuntimeRevision] 运行时全局数据已变化：baseAll=${snapshot.allRevision}, currentAll=${state.allRevision}。请重新读取当前数据后重试。reason=${reason}`);
         }
+        // `all` 快照在捕获时不记录任何 per-sheet 基准（snapshot.sheets 为空），其新鲜度已由上面的
+        // global 检查完整保证。此时不能再用缺省基准 0 去比对具体表的 per-sheet revision，否则任何
+        // 曾被写过的表（actual>0）都会被误判为“已变化”，导致模板切回等 all 捕获场景确定性失败。
+        if (snapshot.all)
+            return;
         const normalized = normalizeTableWriteSet_ACU(writeSet);
         for (const unit of normalized) {
             if (unit.kind === 'all')
