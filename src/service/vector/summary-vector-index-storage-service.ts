@@ -1866,6 +1866,11 @@ function sortAndDedupeVectorChunks_ACU(chunks: ChatSummaryVectorIndexChunk_ACU[]
     return Array.from(byChunkId.values()).sort((left, right) => left.sequence - right.sequence || left.chunkId.localeCompare(right.chunkId));
 }
 
+function normalizeLegacyIsolationKey_ACU(value: unknown): string {
+    const raw = String(value ?? '');
+    return raw === '' || raw === 'default' ? 'default' : raw;
+}
+
 function assertSingleSnapshotFieldMatches_ACU(
     path: string,
     field: string,
@@ -1885,15 +1890,21 @@ export function validateSingleFileSnapshotIdentity_ACU(
     blob: VectorIndexSingleSnapshotBlob_ACU,
     snapshotPath: string,
 ): void {
+    const expectedIdentity = manifest.storageIdentity;
+    const actualIdentity = blob.storageIdentity;
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'indexId', manifest.indexId, blob.indexId);
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'chatKey', manifest.chatKey, blob.chatKey);
-    assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'isolationKey', manifest.isolationKey, blob.isolationKey);
+    if (!expectedIdentity && !actualIdentity) {
+        assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'isolationKey',
+            normalizeLegacyIsolationKey_ACU(manifest.isolationKey),
+            normalizeLegacyIsolationKey_ACU(blob.isolationKey));
+    } else {
+        assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'isolationKey', manifest.isolationKey, blob.isolationKey);
+    }
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'sourceTableKey', manifest.sourceTableKey, blob.sourceTableKey);
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'embeddingModel', manifest.embeddingModel, blob.embeddingModel);
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'dimension', manifest.dimension, blob.dimension);
 
-    const expectedIdentity = manifest.storageIdentity;
-    const actualIdentity = blob.storageIdentity;
     if (!expectedIdentity && !actualIdentity) return;
     if (!expectedIdentity || !actualIdentity) {
         throw new Error(`交火向量单文件快照 V2 身份元数据不完整: ${snapshotPath} expectedLayout=${expectedIdentity?.layoutVersion || 'legacy'} actualLayout=${actualIdentity?.layoutVersion || 'legacy'}`);

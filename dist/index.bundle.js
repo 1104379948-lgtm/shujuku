@@ -62041,6 +62041,10 @@ $CONTENT
         // batchRefs 按 base -> delta 读取；相同 chunkId 必须让后出现的 delta 覆盖 base。
         return Array.from(byChunkId.values()).sort((left, right) => left.sequence - right.sequence || left.chunkId.localeCompare(right.chunkId));
     }
+    function normalizeLegacyIsolationKey_ACU(value) {
+        const raw = String(value ?? '');
+        return raw === '' || raw === 'default' ? 'default' : raw;
+    }
     function assertSingleSnapshotFieldMatches_ACU(path, field, expected, actual) {
         if (String(actual ?? '') === String(expected ?? ''))
             return;
@@ -62051,14 +62055,19 @@ $CONTENT
      * 旧 single-file snapshot 没有 storageIdentity 时保留兼容读取，但仍校验其可用的 scope 与向量兼容字段。
      */
     function validateSingleFileSnapshotIdentity_ACU(manifest, blob, snapshotPath) {
+        const expectedIdentity = manifest.storageIdentity;
+        const actualIdentity = blob.storageIdentity;
         assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'indexId', manifest.indexId, blob.indexId);
         assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'chatKey', manifest.chatKey, blob.chatKey);
-        assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'isolationKey', manifest.isolationKey, blob.isolationKey);
+        if (!expectedIdentity && !actualIdentity) {
+            assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'isolationKey', normalizeLegacyIsolationKey_ACU(manifest.isolationKey), normalizeLegacyIsolationKey_ACU(blob.isolationKey));
+        }
+        else {
+            assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'isolationKey', manifest.isolationKey, blob.isolationKey);
+        }
         assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'sourceTableKey', manifest.sourceTableKey, blob.sourceTableKey);
         assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'embeddingModel', manifest.embeddingModel, blob.embeddingModel);
         assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'dimension', manifest.dimension, blob.dimension);
-        const expectedIdentity = manifest.storageIdentity;
-        const actualIdentity = blob.storageIdentity;
         if (!expectedIdentity && !actualIdentity)
             return;
         if (!expectedIdentity || !actualIdentity) {

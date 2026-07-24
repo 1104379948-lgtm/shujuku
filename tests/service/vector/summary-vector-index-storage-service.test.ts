@@ -180,6 +180,68 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
       .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
   });
 
+  it('legacy 默认隔离域兼容 manifest=default 与 blob 空 isolationKey', async () => {
+    const manifest = manifest_ACU();
+    manifest.isolationKey = 'default';
+    delete manifest.storageIdentity;
+    const blob = blob_ACU(manifest);
+    blob.isolationKey = '';
+    delete blob.storageIdentity;
+    delete blob.manifest.storageIdentity;
+    h.read.mockResolvedValue({ ok: true, data: blob });
+
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+    expect(h.putHot).toHaveBeenCalled();
+  });
+
+  it('legacy 非默认 isolationKey 仍严格拒绝身份漂移', async () => {
+    const manifest = manifest_ACU();
+    delete manifest.storageIdentity;
+    const blob = blob_ACU(manifest);
+    blob.isolationKey = '';
+    delete blob.storageIdentity;
+    delete blob.manifest.storageIdentity;
+    h.read.mockResolvedValue({ ok: true, data: blob });
+
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
+      .rejects.toThrow(/field=isolationKey expected=iso-a actual=default/);
+    expect(h.putHot).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['manifest 空白', ' ', ''],
+    ['blob 空白', '', '\t'],
+    ['default 前后空白', ' default ', 'default'],
+    ['非默认 key 前后空白', ' iso-a ', 'iso-a'],
+    ['default 大小写漂移', 'Default', 'default'],
+  ])('legacy 不清洗 isolationKey：%s', async (_caseName, manifestIsolationKey, blobIsolationKey) => {
+    const manifest = manifest_ACU();
+    manifest.isolationKey = manifestIsolationKey;
+    delete manifest.storageIdentity;
+    const blob = blob_ACU(manifest);
+    blob.isolationKey = blobIsolationKey;
+    delete blob.storageIdentity;
+    delete blob.manifest.storageIdentity;
+    h.read.mockResolvedValue({ ok: true, data: blob });
+
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
+      .rejects.toThrow('field=isolationKey');
+    expect(h.putHot).not.toHaveBeenCalled();
+  });
+
+  it('V2 默认隔离域仍严格拒绝 default 与空 isolationKey 漂移', async () => {
+    const manifest = manifest_ACU();
+    manifest.isolationKey = 'default';
+    const blob = blob_ACU(manifest);
+    blob.isolationKey = '';
+    h.read.mockResolvedValue({ ok: true, data: blob });
+
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
+      .rejects.toThrow(/field=isolationKey expected=default actual=/);
+    expect(h.putHot).not.toHaveBeenCalled();
+  });
+
   it('拒绝 blob 内嵌 manifest 与外层 V2 manifest 的身份漂移', async () => {
     const manifest = manifest_ACU();
     const blob = blob_ACU(manifest);
