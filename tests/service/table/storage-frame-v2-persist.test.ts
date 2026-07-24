@@ -1802,6 +1802,59 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(targetMessage.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
     expect(targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toBeUndefined();
   });
+  // [表级隐藏/reveal 语义1] 阶段一红测试：当前 introduction 死结的目标行为。
+  // 场景同上（历史 full checkpoint 含 sheet_new 数据、active 已无），但按语义1，
+  // 重新引入应走 reveal 恢复“离开时最新状态”，而非拒绝。阶段三实现后转绿。
+  it('[reveal-语义1] 历史含同名 sheet 且 active 已无时，reveal 恢复离开时数据而非拒绝', async () => {
+    const historicalSheetWithData = {
+      ...sheetB,
+      uid: 'historical-sheet',
+      name: '重要NPC表',
+      content: [['row_id', 'value'], ['1', '离开B时的数据']],
+    };
+    const historicalMessage = seedFrame({
+      checkpoint: {
+        kind: 'full', createdAt: 1, reason: 'init',
+        data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB, sheet_new: historicalSheetWithData },
+      },
+      logEntries: [],
+      perSheetCheckpoints: {},
+    });
+    const targetMessage = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 2, reason: 'system',
+              data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+            },
+            logEntries: [makeEntry({
+              operations: [{ kind: 'data_replace', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB }, reason: 'system' }],
+            })],
+            perSheetCheckpoints: {},
+          },
+        },
+      },
+    };
+    mocks.chat.splice(0, mocks.chat.length, historicalMessage, targetMessage);
+    mocks.loadReplayState.mockResolvedValue(targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'reveal', sheetKey: 'sheet_new', sheetData: historicalSheetWithData } as any],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: '重要NPC表' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const revealCheckpoint = targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints?.sheet_new;
+    expect(revealCheckpoint?.timeline?.kind).toBe('sheet_reveal');
+    expect(revealCheckpoint?.data?.content).toEqual([['row_id', 'value'], ['1', '离开B时的数据']]);
+  });
+
 
   it('带业务行的新 sheet 不能作为 introduction 且零写入', async () => {
     const message = seedFrame({ logEntries: [] });

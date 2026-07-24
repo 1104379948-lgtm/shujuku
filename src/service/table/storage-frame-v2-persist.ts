@@ -170,6 +170,16 @@ export type TemplateSheetChange_ACU =
     sheetData: Sheet_ACU;
   }
   | {
+    kind: 'reveal';
+    sheetKey: string;
+    sheetData: Sheet_ACU;
+  }
+  | {
+    kind: 'hide';
+    sheetKey: string;
+    sheetData: Sheet_ACU;
+  }
+  | {
     kind: 'operations';
     sheetKey: string;
     targetSheetData: Sheet_ACU;
@@ -901,6 +911,40 @@ function historyContainsOrCannotDisproveSheet_ACU(
   }
   return false;
 }
+/**
+ * 定位 reveal 数据来源（语义1：恢复"离开时最新状态"）。
+ *
+ * 关键数据安全约束：不取任何单一 checkpoint 的静态快照（可能是中间态/过期态），
+ * 而是从 target.index 向前逐楼层做 bounded replay，找到该 sheet 仍可见的"最高楼层"，
+ * 其 replay 结果即为该表最后一次可见时的完整状态。找不到任何可见状态则返回 null（fail closed）。
+ */
+async function locateRevealSourceSheetData_ACU(
+  chat: any[],
+  isolationKey: string,
+  maxMessageIndex: number,
+  sheetKey: string,
+): Promise<Sheet_ACU | null> {
+  for (let boundary = maxMessageIndex; boundary >= 0; boundary -= 1) {
+    const tagData = chat[boundary]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    if (!hasV2HistoryMarker_ACU(tagData)) continue;
+    let replayed: TableDataObject_ACU | null = null;
+    try {
+      replayed = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundary, updateRuntimeState: false });
+    } catch {
+      // 该边界 replay 失败不代表更早边界不可用；继续向前寻找可信可见状态。
+      continue;
+    }
+    if (replayed && Object.prototype.hasOwnProperty.call(replayed, sheetKey)) {
+      const candidate = (replayed as Record<string, unknown>)[sheetKey];
+      if (isObjectRecord_ACU(candidate)) {
+        return deepClone_ACU(candidate) as Sheet_ACU;
+      }
+    }
+  }
+  return null;
+}
+
+
 
 function validateSheetCheckpointInput_ACU(
   options: PersistTableSheetCheckpointV2Options_ACU,
@@ -1763,7 +1807,7 @@ function assertValidTemplateSheetChanges_ACU(sheetChanges: TemplateSheetChange_A
     throw new Error('当前楼层模板提交不能同时删除和变更同一 sheetKey。');
   }
   for (const change of sheetChanges) {
-    if (change.kind === 'introduction' || change.kind === 'rebase') {
+    if (change.kind === 'introduction' || change.kind === 'rebase' || change.kind === 'reveal' || change.kind === 'hide') {
       if (!isObjectRecord_ACU(change.sheetData)) throw new Error(`当前楼层模板提交缺少可恢复 Sheet：${change.sheetKey}。`);
       continue;
     }
@@ -1980,8 +2024,14 @@ export async function commitCurrentFloorTemplateChanges_ACU(
 
     const introductionSheets = new Map<string, Sheet_ACU>();
     const rebaseSheets = new Map<string, Sheet_ACU>();
+    const revealSheets = new Map<string, Sheet_ACU>();
+    const hideSheetKeys = new Set<string>();
     let removedNullRowCount = 0;
     for (const change of requestedChanges) {
+      if (change.kind === 'hide') {
+        hideSheetKeys.add(change.sheetKey);
+        continue;
+      }
       const targetSheetData = deepClone_ACU(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
       if (change.kind === 'introduction' && targetSheetData.content?.length !== 1) {
         throw new Error(`V2 sheet introduction only accepts a header-only sheet: sheetKey=${change.sheetKey}.`);
@@ -2006,6 +2056,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       createSheetInsertPlan(targetSheetData);
       if (change.kind === 'introduction') introductionSheets.set(change.sheetKey, targetSheetData);
       else if (change.kind === 'rebase') rebaseSheets.set(change.sheetKey, targetSheetData);
+      else if (change.kind === 'reveal') revealSheets.set(change.sheetKey, targetSheetData);
     }
 
     const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
@@ -2020,14 +2071,30 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     const checkpoints: TableSheetCheckpointV2_ACU[] = [];
     const scheduleSummaryBySheet = collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index });
     const targetFrameLastLogSeq = getValidatedFrameLastLogSeq_ACU(frame);
+    // reveal 目标集合：包括显式 reveal change，以及"introduction 但历史存在(active 无)"自动转 reveal 的 sheetKey。
+    const revealDataBySheet = new Map<string, Sheet_ACU>();
     for (const change of requestedChanges.filter(item => item.kind === 'introduction')) {
-      if (
-        historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, change.sheetKey)
-        || Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey)
-        || Object.prototype.hasOwnProperty.call(frame.perSheetCheckpoints || {}, change.sheetKey)
-      ) {
+      const activeHas = Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey)
+        || Object.prototype.hasOwnProperty.call(frame.perSheetCheckpoints || {}, change.sheetKey);
+      const historyHas = historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, change.sheetKey);
+      if (activeHas) {
+        // 仍活跃：既非全新，也非可恢复的隐藏表 → 保持 introduction 冲突防覆盖语义。
         throw new Error(`V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`);
       }
+      if (historyHas) {
+        // historyHas 有两种含义：(1) 历史确实曾有该表（可恢复的隐藏表）；
+        // (2) 历史 frame 畸形/无法证伪（`cannot disprove`）——此时并非真的曾有该表，
+        // 不能凭损坏历史臆造 reveal 数据。二者的区分依据：能否 bounded replay 定位到可信数据。
+        const revealSource = await locateRevealSourceSheetData_ACU(chat, isolationKey, target.index, change.sheetKey);
+        if (revealSource) {
+          // 能定位到可信历史可见数据 → 曾被隐藏的表，reveal 恢复"离开时最新状态"（语义1）。
+          revealDataBySheet.set(change.sheetKey, revealSource);
+          continue;
+        }
+        // 定位不到可信数据（含历史畸形、无法证伪）→ 保持 introduction 保守拒绝，绝不基于损坏历史覆盖。
+        throw new Error(`V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`);
+      }
+      // 真正全新表：走 introduction。
       const existingCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
       if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
         throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${change.sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
@@ -2043,6 +2110,38 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
         timeline: {
           kind: 'sheet_introduction' as const,
+          activateAtMessageIndex: target.index,
+          afterSeq: targetFrameLastLogSeq,
+        },
+        baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
+      });
+    }
+
+    // 显式 reveal change：数据来源为 caller 提供的 sheetData（已在准备循环校验/建表计划）。
+    for (const change of requestedChanges.filter(item => item.kind === 'reveal')) {
+      revealDataBySheet.set(change.sheetKey, revealSheets.get(change.sheetKey)!);
+    }
+
+    // 统一写入 reveal checkpoint（timeline: sheet_reveal，回放语义同 rebase）。
+    for (const [sheetKey, revealData] of revealDataBySheet) {
+      if (Object.prototype.hasOwnProperty.call(activeReplayState, sheetKey)) {
+        throw new Error(`V2 sheet reveal requires a hidden sheet: sheetKey=${sheetKey} 仍存在于 active checkpoint state。`);
+      }
+      const existingCheckpoint = frame.perSheetCheckpoints?.[sheetKey];
+      if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
+        throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
+      }
+      const scheduleSummary = scheduleSummaryBySheet[sheetKey];
+      checkpoints.push({
+        kind: 'sheet_full',
+        createdAt,
+        reason: 'schema_change',
+        sheetKey,
+        data: revealData,
+        ...(scheduleSummary ? { scheduleSummary: deepClone_ACU(scheduleSummary) } : {}),
+        event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
+        timeline: {
+          kind: 'sheet_reveal' as const,
           activateAtMessageIndex: target.index,
           afterSeq: targetFrameLastLogSeq,
         },
@@ -2080,6 +2179,38 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
       });
     }
+
+    // hide：将当前可见的表标记隐藏，数据完整保留在 checkpoint.data，不 purge。
+    for (const sheetKey of hideSheetKeys) {
+      if (deletedSheetKeys.includes(sheetKey)) {
+        throw new Error(`V2 sheet hide 不能与删除同一 sheetKey 组合：${sheetKey}。`);
+      }
+      const hideSource = await locateRevealSourceSheetData_ACU(chat, isolationKey, target.index, sheetKey);
+      if (!hideSource) {
+        throw new Error(`V2 sheet hide 无法定位待隐藏表的当前数据：sheetKey=${sheetKey}。`);
+      }
+      const existingCheckpoint = frame.perSheetCheckpoints?.[sheetKey];
+      if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
+        throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
+      }
+      const scheduleSummary = scheduleSummaryBySheet[sheetKey];
+      checkpoints.push({
+        kind: 'sheet_full',
+        createdAt,
+        reason: 'schema_change',
+        sheetKey,
+        data: hideSource,
+        ...(scheduleSummary ? { scheduleSummary: deepClone_ACU(scheduleSummary) } : {}),
+        event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
+        timeline: {
+          kind: 'sheet_hide' as const,
+          activateAtMessageIndex: target.index,
+          afterSeq: targetFrameLastLogSeq,
+        },
+        baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
+      });
+    }
+
 
     const operationChanges = requestedChanges.filter((change): change is Extract<TemplateSheetChange_ACU, { kind: 'operations' }> => change.kind === 'operations');
     const operations = operationChanges.flatMap(change => change.operations.map(operation => deepClone_ACU(operation)));

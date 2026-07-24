@@ -8,7 +8,7 @@
 
 import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normalizeIsolationCode_ACU } from '../../shared/data-constants';
 import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU} from '../../shared/defaults-json.js';
-import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
+import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -516,9 +516,20 @@ export   function loadSettings_ACU() {
                   shouldPersistSettingsAfterLoad_ACU = true;
               }
           };
-          // Rollout 安全闸门是独立的幂等迁移：不能受旧默认值刷新 marker 限制，
-          // 否则已升级 marker 但缺字段的用户会绕过 V2 默认关闭策略。
+          // Rollout 闸门迁移：默认值已切换到 true。
+          // 1) 缺字段的用户由 fillMissing 补为 true。
+          // 2) 独立的 SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION marker 用于一次性强制反转
+          //    此前显式保存过 false 的用户；marker 写入后用户手动再关会被永久保留。
           fillMissing_ACU('summaryIndexV2WriteEnabled', (defaultVectorMemoryConfig_ACU as any).summaryIndexV2WriteEnabled === true);
+          if (vectorConfig.summaryIndexV2WriteForceEnableVersion !== SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU) {
+              if (vectorConfig.summaryIndexV2WriteEnabled !== true) {
+                  vectorConfig.summaryIndexV2WriteEnabled = true;
+                  shouldPersistSettingsAfterLoad_ACU = true;
+                  logDebug_ACU(`[交火模式配置] 一次性强制开启 V2 writer: ${SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU}`);
+              }
+              vectorConfig.summaryIndexV2WriteForceEnableVersion = SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU;
+              shouldPersistSettingsAfterLoad_ACU = true;
+          }
           fillMissing_ACU('summaryIndexV2WriteScopeAllowlist', (defaultVectorMemoryConfig_ACU as any).summaryIndexV2WriteScopeAllowlist || []);
           if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
               const fillMissingPromptGroup_ACU = (key: string, value: any[]) => {

@@ -37,15 +37,27 @@ describe('reconcileChatTemplate_ACU', () => {
     expect({ baseline, template }).toEqual(original);
   });
 
-  it('新增表只产生 header-only introduction，旧表删除需要确认', async () => {
+  it('新增表只产生 header-only introduction；旧表默认走 hide，仅硬删除才需确认', async () => {
     const baseline = state({ sheet_old: sheet('sheet_old', '旧表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值') });
     const template = state({ sheet_new: sheet('sheet_new', '新表', ['row_id', 'value'], 'row_id INTEGER PRIMARY KEY, value TEXT', [['9', '示例']]) });
 
-    const rejected = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+    // 默认行为（语义1）：切换默认走 hide，不再要求删除确认。
+    const defaultPlan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+    expect(defaultPlan.blockers).toEqual([]);
+    expect(defaultPlan.hiddenSheetKeys).toEqual(['sheet_old']);
+    expect(defaultPlan.deletedSheetKeys).toEqual([]);
+    expect(defaultPlan.candidateData.sheet_new.content).toEqual([['row_id', 'value']]);
+    expect(defaultPlan.sheetChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' }),
+      expect.objectContaining({ kind: 'hide', sheetKey: 'sheet_old' }),
+    ]));
+
+    // 显式硬删除仍需 destructiveChangeConfirmed 显式确认。
+    const rejected = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, hardDeleteMissingSheets: true });
     expect(rejected.blockers.join('\n')).toContain('删除表');
     expect(rejected.sheetChanges).toEqual([]);
 
-    const accepted = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+    const accepted = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true, hardDeleteMissingSheets: true });
     expect(accepted.blockers).toEqual([]);
     expect(accepted.deletedSheetKeys).toEqual(['sheet_old']);
     expect(accepted.candidateData.sheet_new.content).toEqual([['row_id', 'value']]);
@@ -409,7 +421,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.audit.every(item => item.operations.length === 0)).toBe(true);
   });
 
-  it('audit 与实际 change set 对账，包含 schema、metadata、introduction 和 delete 摘要', async () => {
+  it('audit 与实际 change set 对账，包含 schema、metadata、introduction 和 hide/delete 摘要', async () => {
     const baselineSheet = sheet('sheet_old', '旧表', ['row_id', 'value'], 'row_id INTEGER PRIMARY KEY, value TEXT', []);
     baselineSheet.sourceData.ddl = 'CREATE TABLE old_table (row_id INTEGER PRIMARY KEY, value TEXT);';
     const matchedBaseline = sheet('sheet_legacy', '背包', ['row_id', 'item_name'], 'row_id INTEGER PRIMARY KEY, item_name TEXT', [['1', '铁剑']]);
@@ -419,22 +431,31 @@ describe('reconcileChatTemplate_ACU', () => {
     const templateNew = sheet('sheet_new', '新表', ['row_id', 'value'], 'row_id INTEGER PRIMARY KEY, value TEXT', []);
     templateNew.sourceData.ddl = 'CREATE TABLE new_table (row_id INTEGER PRIMARY KEY, value TEXT);';
 
-    const plan = await reconcileChatTemplate_ACU({
+    // 默认路径（语义1）：缺失表 sheet_old 走 hide，不再产出 delete。
+    const defaultPlan = await reconcileChatTemplate_ACU({
       baselineData: state({ sheet_old: baselineSheet, sheet_legacy: matchedBaseline }),
       templateData: state({ sheet_imported: templateMatched, sheet_new: templateNew }),
-      destructiveChangeConfirmed: true,
+      destructiveChangeConfirmed: false,
     });
 
-    expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_old).toBeUndefined();
-    const matchedAudit = plan.audit.find(item => item.sheetKey === 'sheet_legacy');
+    expect(defaultPlan.blockers).toEqual([]);
+    expect(defaultPlan.candidateData.sheet_old).toBeUndefined();
+    const matchedAudit = defaultPlan.audit.find(item => item.sheetKey === 'sheet_legacy');
     expect(matchedAudit).toMatchObject({
       baselineSheetKey: 'sheet_legacy', templateSheetKey: 'sheet_imported', canonicalName: '背包', metadataChangedFields: ['orderNo'],
     });
-    // rebase 语义：结构 + metadata 统一并入整表 checkpoint，audit.operations 仅记录 rebase。
     expect(matchedAudit?.operations).toEqual([{ kind: 'rebase' }]);
-    expect(plan.audit.find(item => item.sheetKey === 'sheet_new')?.operations).toEqual([{ kind: 'introduction' }]);
-    expect(plan.audit.find(item => item.sheetKey === 'sheet_old')?.operations).toEqual([{ kind: 'delete' }]);
+    expect(defaultPlan.audit.find(item => item.sheetKey === 'sheet_new')?.operations).toEqual([{ kind: 'introduction' }]);
+    expect(defaultPlan.audit.find(item => item.sheetKey === 'sheet_old')?.operations).toEqual([{ kind: 'hide' }]);
+
+    // 显式硬删除路径：hardDeleteMissingSheets=true + destructiveChangeConfirmed=true，产出 delete。
+    const hardDeletePlan = await reconcileChatTemplate_ACU({
+      baselineData: state({ sheet_old: baselineSheet, sheet_legacy: matchedBaseline }),
+      templateData: state({ sheet_imported: templateMatched, sheet_new: templateNew }),
+      destructiveChangeConfirmed: true,
+      hardDeleteMissingSheets: true,
+    });
+    expect(hardDeletePlan.audit.find(item => item.sheetKey === 'sheet_old')?.operations).toEqual([{ kind: 'delete' }]);
   });
 
 

@@ -175,10 +175,17 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
     }
     const expectedScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(task.chatKey, task.isolationKey, task.sourceTableKey);
     if (!task.isolationKey || task.scopeKey !== expectedScopeKey) {
-        const message = `旧版 flush task 缺少可验证三元 scope，已保留等待人工或激活 scope 后重建：task=${task.scopeKey}`;
-        await markFlushTaskFailure_ACU(task, message, false);
-        logWarn_ACU('[交火向量索引] 拒绝执行身份不完整的旧版 flush task:', message);
-        return { success: false, reason: 'flush_legacy_scope_unresolved', error: message };
+        // legacy scope：老版本代码遗留、无法通过当前三元 canonical 校验的任务。
+        // 保留只会永远命中告警噪音；直接删除即可，dirty state 由后续正常写路径重建。
+        const message = `旧版 flush task 缺少可验证三元 scope，已从队列中清理：task=${task.scopeKey}`;
+        clearFlushTimer_ACU(task.scopeKey);
+        await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
+        logSummaryVectorIndexIdentityEvent_ACU('debug', 'flush', 'legacy_scope_purged', {
+            scopeFingerprint: task.scopeKey,
+            error: message,
+        });
+        logDebug_ACU('[交火向量索引] 已清理身份不完整的旧版 flush task:', message);
+        return { success: true, skipped: true, reason: 'flush_legacy_scope_purged' };
     }
     const activeIsolationKey = normalizeKeyPart_ACU(getCurrentIsolationKey_ACU());
     if (task.isolationKey !== activeIsolationKey) {
@@ -253,9 +260,24 @@ export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): P
         isolationKey,
         sourceTableKey,
     });
+    const activeScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
     let restored = 0;
+    let purgedLegacy = 0;
     const now = Date.now();
     for (const task of tasks) {
+        // 启动期主动清理身份不完整的旧版 task：
+        // list 已按三元字段过滤到当前 active scope，但更早版本的 scopeKey 算法可能与当前不一致，
+        // 保留只会成为长期告警噪音；dirty state 会由后续正常写路径重新入队。
+        if (!task.isolationKey || task.scopeKey !== activeScopeKey) {
+            clearFlushTimer_ACU(task.scopeKey);
+            await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
+            logSummaryVectorIndexIdentityEvent_ACU('debug', 'flush', 'legacy_scope_purged', {
+                scopeFingerprint: task.scopeKey,
+                error: `restore 时发现身份不完整的旧版 flush task：task=${task.scopeKey}`,
+            });
+            purgedLegacy += 1;
+            continue;
+        }
         if (task.status === 'ready' || task.status === 'failed_terminal') continue;
         if (task.status === 'flushing' && now - task.updatedAt > SUMMARY_VECTOR_INDEX_FLUSHING_STALE_MS_ACU) {
             await markFlushTaskFailure_ACU(task, '上次 flush 在执行中断后超时，已重新排队。', false);
@@ -270,7 +292,10 @@ export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): P
         restored += 1;
     }
     if (restored > 0) {
-        logDebug_ACU(`[交火向量索引] 已恢复当前 scope 防抖 flush 队列：scope=${buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey)}, count=${restored}`);
+        logDebug_ACU(`[交火向量索引] 已恢复当前 scope 防抖 flush 队列：scope=${activeScopeKey}, count=${restored}`);
+    }
+    if (purgedLegacy > 0) {
+        logDebug_ACU(`[交火向量索引] 启动期清理身份不完整的旧版 flush task：count=${purgedLegacy}`);
     }
     return restored;
 }

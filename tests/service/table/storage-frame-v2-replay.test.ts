@@ -2042,6 +2042,63 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(result?.sheet_0.content).toEqual([['row_id', 'name', 'quality'], ['1', '铁剑', ''], ['2', '木剑', '']]);
   });
 
+  it('sheet_reveal 分片在 afterSeq 之后整表恢复被隐藏的表（恢复离开时数据）', async () => {
+    const rootData = makeCheckpointData();
+    // 根 checkpoint 中不含 sheet_revived（已隐藏）；reveal 分片将其带数据整表恢复。
+    const revivedSheet = {
+      uid: 'revived', name: '重要NPC表',
+      content: [['row_id', 'value'], ['1', '离开时的数据']],
+      sourceData: { ddl: 'CREATE TABLE revived (row_id INTEGER PRIMARY KEY, value TEXT);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 5,
+    } as any;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
+            perSheetCheckpoints: {
+              sheet_revived: { kind: 'sheet_full', createdAt: 3, reason: 'schema_change', sheetKey: 'sheet_revived', data: revivedSheet, timeline: { kind: 'sheet_reveal', activateAtMessageIndex: 0, afterSeq: 0 } },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_revived?.content).toEqual([['row_id', 'value'], ['1', '离开时的数据']]);
+  });
+
+  it('sheet_hide 分片在 afterSeq 之后从 replay state 移除该表可见性（数据不参与 active state）', async () => {
+    const rootData = makeCheckpointData();
+    // 根 checkpoint 含 sheet_0；hide 分片在 afterSeq=0 之后将其从 active state 移除。
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
+            perSheetCheckpoints: {
+              sheet_0: { kind: 'sheet_full', createdAt: 3, reason: 'schema_change', sheetKey: 'sheet_0', data: rootData.sheet_0, timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 0 } },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result && Object.prototype.hasOwnProperty.call(result, 'sheet_0')).toBe(false);
+  });
+
+
   it('rebase 分片与旧 sheet_schema_migrate 无关，非法 timeline kind fail-closed', async () => {
     const rootData = makeCheckpointData();
     const chat = [{

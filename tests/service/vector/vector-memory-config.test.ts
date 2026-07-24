@@ -49,7 +49,7 @@ describe('vector-memory-config hybrid retrieval fields', () => {
       summaryIndexV2WriteEnabled: false,
     });
 
-    expect(defaults.summaryIndexV2WriteEnabled).toBe(false);
+    expect(defaults.summaryIndexV2WriteEnabled).toBe(true);
     expect(enabled.summaryIndexV2WriteEnabled).toBe(true);
     expect(override.summaryIndexV2WriteEnabled).toBe(false);
   });
@@ -77,6 +77,6 @@ describe('vector-memory-config hybrid retrieval fields', () => {
     expect(config.summaryIndexBm25CandidateLimit).toBe(5);
     expect(config.summaryIndexRrfK).toBe(11);
     expect(config.summaryIndexCandidateLimit).toBe(8);
-    expect(config.summaryIndexV2WriteEnabled).toBe(false);
+    expect(config.summaryIndexV2WriteEnabled).toBe(true);
   });
 });

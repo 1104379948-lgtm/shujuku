@@ -107,6 +107,31 @@ export interface TableSheetRebaseTimelineV2_ACU {
   afterSeq: number;
 }
 
+/**
+ * 表级恢复（reveal）基底：将被隐藏（active state 已无）的表重新显示。
+ * 回放语义与 rebase 完全一致（afterSeq 之后用 checkpoint.data 整表替换 replay state），
+ * 区别仅在写入守卫方向：该表必须“历史存在但 active 不存在”。checkpoint.data 为离开时的最新状态。
+ */
+export interface TableSheetRevealTimelineV2_ACU {
+  kind: 'sheet_reveal';
+  /** reveal shard 所在的 AI message index。 */
+  activateAtMessageIndex: number;
+  /** 同一 frame 中在该 seq 之后才用 checkpoint.data 整表恢复 replay state。 */
+  afterSeq: number;
+}
+
+/**
+ * 表级隐藏（hide）标记：将一个当前可见的表从 active replay state 移除可见性，但数据完整保留。
+ * 回放时在 afterSeq 之后从 state 删除该 sheetKey；数据仍存于此 checkpoint.data 供后续 reveal 恢复。
+ */
+export interface TableSheetHideTimelineV2_ACU {
+  kind: 'sheet_hide';
+  /** hide shard 所在的 AI message index。 */
+  activateAtMessageIndex: number;
+  /** 同一 frame 中在该 seq 之后才从 replay state 移除该表。 */
+  afterSeq: number;
+}
+
 export interface TableSheetCheckpointV2_ACU {
   kind: 'sheet_full';
   createdAt: number;
@@ -117,7 +142,7 @@ export interface TableSheetCheckpointV2_ACU {
   event?: TableMutationEventV2_ACU;
   manualRefillProgress?: ManualRefillProgressV2_ACU;
   baseRevision?: string | null;
-  timeline?: TableSheetIntroductionTimelineV2_ACU | TableSheetRebaseTimelineV2_ACU;
+  timeline?: TableSheetIntroductionTimelineV2_ACU | TableSheetRebaseTimelineV2_ACU | TableSheetRevealTimelineV2_ACU | TableSheetHideTimelineV2_ACU;
 }
 
 export type TableMutationOperationV2_ACU =

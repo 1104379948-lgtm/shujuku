@@ -145,6 +145,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 500,
   TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU: 'test-table-defaults-refresh',
   VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
+  SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU: 'spv3.6.10-v2-writer-force-enable',
   defaultWorldbookConfig_ACU: {
     zeroTkOccupyMode: false,
     outlineEntryEnabled: true,
@@ -160,7 +161,7 @@ vi.mock('../../../src/shared/defaults', () => ({
     recallCandidateLimit: 100,
     summaryIndexKeywordMinRows: 200,
     recentFixedInjectCount: 50,
-    summaryIndexV2WriteEnabled: false,
+    summaryIndexV2WriteEnabled: true,
     summaryIndexV2WriteScopeAllowlist: [],
     summaryPromptGroup: []
   },
@@ -565,7 +566,7 @@ describe('loadSettings_ACU', () => {
 
     loadSettings_ACU();
 
-    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(false);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(true);
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteScopeAllowlist).toEqual([]);
     expect(mockSaveGlobalMeta).toHaveBeenCalled();
   });
@@ -578,13 +579,13 @@ describe('loadSettings_ACU', () => {
 
     loadSettings_ACU();
 
-    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(false);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(true);
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteScopeAllowlist).toEqual([]);
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.keywordPromptGroup).toEqual([{ content: '用户自定义关键词提示词' }]);
     expect(mockSaveGlobalMeta).toHaveBeenCalled();
   });
 
-  it('迁移默认值时保留用户显式关闭的 V2 writer，不得擅自重新开启', () => {
+  it('一次性强制开启 V2 writer：未标记 marker 的显式 false 会被反转为 true 并写入 marker', () => {
     mockGlobalMeta.vectorMemoryConfigGlobal = {
       defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
       summaryIndexV2WriteEnabled: false,
@@ -593,8 +594,27 @@ describe('loadSettings_ACU', () => {
 
     loadSettings_ACU();
 
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(true);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteScopeAllowlist).toEqual(['scope-user-configured']);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteForceEnableVersion)
+      .toBe('spv3.6.10-v2-writer-force-enable');
+    expect(mockSaveGlobalMeta).toHaveBeenCalled();
+  });
+
+  it('已标记 V2 writer force enable marker 后，保留用户手动关闭的 writer 显式意图', () => {
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      summaryIndexV2WriteEnabled: false,
+      summaryIndexV2WriteScopeAllowlist: ['scope-user-configured'],
+      summaryIndexV2WriteForceEnableVersion: 'spv3.6.10-v2-writer-force-enable',
+    };
+
+    loadSettings_ACU();
+
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(false);
     expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteScopeAllowlist).toEqual(['scope-user-configured']);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteForceEnableVersion)
+      .toBe('spv3.6.10-v2-writer-force-enable');
   });
 
   it('解析异常时回退到默认设置', () => {

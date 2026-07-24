@@ -134,7 +134,8 @@ function getValidatedSheetCheckpoints_ACU(frame: TableStorageFrameV2_ACU): Table
     }
     if (checkpoint.timeline !== undefined) {
       const timeline = checkpoint.timeline;
-      if ((timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase')
+      if ((timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase'
+        && timeline.kind !== 'sheet_reveal' && timeline.kind !== 'sheet_hide')
         || !Number.isInteger(timeline.activateAtMessageIndex)
         || timeline.activateAtMessageIndex < 0
         || !Number.isInteger(timeline.afterSeq)
@@ -267,7 +268,13 @@ async function applySheetCheckpointsForReplay_ACU(
   if (checkpoints.length === 0) return;
   if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
   for (const checkpoint of checkpoints) {
-    state[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
+    if (checkpoint.timeline?.kind === 'sheet_hide') {
+      // hide：从 active replay state 移除该表的可见性（数据仍留存于 checkpoint.data 供后续 reveal）。
+      delete state[checkpoint.sheetKey];
+    } else {
+      // introduction / rebase / reveal：用 checkpoint.data 整表写入 replay state。
+      state[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
+    }
   }
   normalizeReplayState_ACU(state, '单表 checkpoint');
   if (runtime.loaded) await reloadSqlReplayRuntime_ACU(runtime, state);

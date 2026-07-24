@@ -84,14 +84,19 @@ describe('summary-vector-index flush queue scope', () => {
     clearSummaryVectorIndexDirtyForRealign_ACU(scopeB);
   });
 
-  it('拒绝旧版缺少可验证三元 scope 的任务，不执行 archive', async () => {
+  it('自动清理旧版缺少可验证三元 scope 的任务，不执行 archive', async () => {
     h.task = task('flush::chat-a', { isolationKey: '' });
-    await expect(flushSummaryVectorIndexTaskNow_ACU('flush::chat-a')).resolves.toMatchObject({ reason: 'flush_legacy_scope_unresolved' });
+    await expect(flushSummaryVectorIndexTaskNow_ACU('flush::chat-a')).resolves.toMatchObject({
+      success: true,
+      skipped: true,
+      reason: 'flush_legacy_scope_purged',
+    });
     expect(h.archive).not.toHaveBeenCalled();
+    expect(h.remove).toHaveBeenCalledWith('flush::chat-a');
     expect(h.logIdentityEvent).toHaveBeenCalledWith(
       'debug',
       'flush',
-      'failed_retryable',
+      'legacy_scope_purged',
       expect.objectContaining({ scopeFingerprint: 'flush::chat-a' }),
     );
   });

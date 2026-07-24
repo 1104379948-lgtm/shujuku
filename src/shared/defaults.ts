@@ -176,6 +176,9 @@ export const AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU = 2000;
 // --- 一次性默认值刷新版本标记 ---
 export const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.6.3-keyword-prompt-content-based-refresh';
 export const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.3-table-template-ddl-relaxed-force-default';
+// V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，
+// 迁移执行一次后写入 marker，之后用户仍可再次手动关闭并被永久保留。
+export const SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU = 'spv3.6.10-v2-writer-force-enable';
 
 // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
 export const defaultVectorMemoryConfig_ACU = {
@@ -205,9 +208,9 @@ export const defaultVectorMemoryConfig_ACU = {
   summaryPromptGroupId: 'remote-memory-archive-default',
   archiveWithoutSummary: false,
   recentFixedInjectCount: 50,
-  // 灰度期默认只启用 V2 reader/validator/telemetry；writer 必须由运维显式开启。
-  // 回滚只能关闭 writer，禁止退回 legacy 路径覆盖旧对象。
-  summaryIndexV2WriteEnabled: false,
+  // V2 writer 已在生产开启：新装或未显式配置的用户默认走 V2 归档路径。
+  // 若需临时熔断，只能通过前端开关或运维显式改为 false；关闭只阻止新写入，绝不回退覆盖旧对象。
+  summaryIndexV2WriteEnabled: true,
   // 非空时仅允许列出的 canonical scope fingerprint 写入 V2；空数组表示不额外限制已显式开启的 writer。
   summaryIndexV2WriteScopeAllowlist: [] as string[],
   // [交火向量索引·实验] 基线+滚动增量写入（默认关闭，省远程上传带宽；读取侧自动识别两种格式）。

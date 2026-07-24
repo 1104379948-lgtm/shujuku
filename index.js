@@ -3913,6 +3913,9 @@ $CONTENT
     // --- 一次性默认值刷新版本标记 ---
     const VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU = 'spv3.6.3-keyword-prompt-content-based-refresh';
     const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.3-table-template-ddl-relaxed-force-default';
+    // V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，
+    // 迁移执行一次后写入 marker，之后用户仍可再次手动关闭并被永久保留。
+    const SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU = 'spv3.6.10-v2-writer-force-enable';
     // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
     const defaultVectorMemoryConfig_ACU = {
         enabled: false,
@@ -3941,9 +3944,9 @@ $CONTENT
         summaryPromptGroupId: 'remote-memory-archive-default',
         archiveWithoutSummary: false,
         recentFixedInjectCount: 50,
-        // 灰度期默认只启用 V2 reader/validator/telemetry；writer 必须由运维显式开启。
-        // 回滚只能关闭 writer，禁止退回 legacy 路径覆盖旧对象。
-        summaryIndexV2WriteEnabled: false,
+        // V2 writer 已在生产开启：新装或未显式配置的用户默认走 V2 归档路径。
+        // 若需临时熔断，只能通过前端开关或运维显式改为 false；关闭只阻止新写入，绝不回退覆盖旧对象。
+        summaryIndexV2WriteEnabled: true,
         // 非空时仅允许列出的 canonical scope fingerprint 写入 V2；空数组表示不额外限制已显式开启的 writer。
         summaryIndexV2WriteScopeAllowlist: [],
         // [交火向量索引·实验] 基线+滚动增量写入（默认关闭，省远程上传带宽；读取侧自动识别两种格式）。
@@ -36666,7 +36669,8 @@ $CONTENT
             }
             if (checkpoint.timeline !== undefined) {
                 const timeline = checkpoint.timeline;
-                if ((timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase')
+                if ((timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase'
+                    && timeline.kind !== 'sheet_reveal' && timeline.kind !== 'sheet_hide')
                     || !Number.isInteger(timeline.activateAtMessageIndex)
                     || timeline.activateAtMessageIndex < 0
                     || !Number.isInteger(timeline.afterSeq)
@@ -36789,7 +36793,14 @@ $CONTENT
         if (runtime.loaded)
             exportSqlReplayRuntime_ACU(runtime, state);
         for (const checkpoint of checkpoints) {
-            state[checkpoint.sheetKey] = deepClone_ACU$4(checkpoint.data);
+            if (checkpoint.timeline?.kind === 'sheet_hide') {
+                // hide：从 active replay state 移除该表的可见性（数据仍留存于 checkpoint.data 供后续 reveal）。
+                delete state[checkpoint.sheetKey];
+            }
+            else {
+                // introduction / rebase / reveal：用 checkpoint.data 整表写入 replay state。
+                state[checkpoint.sheetKey] = deepClone_ACU$4(checkpoint.data);
+            }
         }
         normalizeReplayState_ACU(state, '单表 checkpoint');
         if (runtime.loaded)
@@ -38492,6 +38503,35 @@ $CONTENT
         }
         return false;
     }
+    /**
+     * 定位 reveal 数据来源（语义1：恢复"离开时最新状态"）。
+     *
+     * 关键数据安全约束：不取任何单一 checkpoint 的静态快照（可能是中间态/过期态），
+     * 而是从 target.index 向前逐楼层做 bounded replay，找到该 sheet 仍可见的"最高楼层"，
+     * 其 replay 结果即为该表最后一次可见时的完整状态。找不到任何可见状态则返回 null（fail closed）。
+     */
+    async function locateRevealSourceSheetData_ACU(chat, isolationKey, maxMessageIndex, sheetKey) {
+        for (let boundary = maxMessageIndex; boundary >= 0; boundary -= 1) {
+            const tagData = chat[boundary]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            if (!hasV2HistoryMarker_ACU(tagData))
+                continue;
+            let replayed = null;
+            try {
+                replayed = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundary, updateRuntimeState: false });
+            }
+            catch {
+                // 该边界 replay 失败不代表更早边界不可用；继续向前寻找可信可见状态。
+                continue;
+            }
+            if (replayed && Object.prototype.hasOwnProperty.call(replayed, sheetKey)) {
+                const candidate = replayed[sheetKey];
+                if (isObjectRecord_ACU$1(candidate)) {
+                    return deepClone_ACU$1(candidate);
+                }
+            }
+        }
+        return null;
+    }
     function validateSheetCheckpointInput_ACU(options) {
         if (typeof options.sheetKey !== 'string' || !options.sheetKey.startsWith('sheet_')) {
             return { error: 'V2 sheet checkpoint requires a sheetKey beginning with "sheet_".' };
@@ -39303,7 +39343,7 @@ $CONTENT
             throw new Error('当前楼层模板提交不能同时删除和变更同一 sheetKey。');
         }
         for (const change of sheetChanges) {
-            if (change.kind === 'introduction' || change.kind === 'rebase') {
+            if (change.kind === 'introduction' || change.kind === 'rebase' || change.kind === 'reveal' || change.kind === 'hide') {
                 if (!isObjectRecord_ACU$1(change.sheetData))
                     throw new Error(`当前楼层模板提交缺少可恢复 Sheet：${change.sheetKey}。`);
                 continue;
@@ -39512,8 +39552,14 @@ $CONTENT
                     const purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count), 0);
                     const introductionSheets = new Map();
                     const rebaseSheets = new Map();
+                    const revealSheets = new Map();
+                    const hideSheetKeys = new Set();
                     let removedNullRowCount = 0;
                     for (const change of requestedChanges) {
+                        if (change.kind === 'hide') {
+                            hideSheetKeys.add(change.sheetKey);
+                            continue;
+                        }
                         const targetSheetData = deepClone_ACU$1(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
                         if (change.kind === 'introduction' && targetSheetData.content?.length !== 1) {
                             throw new Error(`V2 sheet introduction only accepts a header-only sheet: sheetKey=${change.sheetKey}.`);
@@ -39541,6 +39587,8 @@ $CONTENT
                             introductionSheets.set(change.sheetKey, targetSheetData);
                         else if (change.kind === 'rebase')
                             rebaseSheets.set(change.sheetKey, targetSheetData);
+                        else if (change.kind === 'reveal')
+                            revealSheets.set(change.sheetKey, targetSheetData);
                     }
                     const isolatedData = cloneIsolatedData_ACU(target.message);
                     const frame = isolatedData[isolationKey]?.storageFrame;
@@ -39554,12 +39602,30 @@ $CONTENT
                     const checkpoints = [];
                     const scheduleSummaryBySheet = collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index });
                     const targetFrameLastLogSeq = getValidatedFrameLastLogSeq_ACU(frame);
+                    // reveal 目标集合：包括显式 reveal change，以及"introduction 但历史存在(active 无)"自动转 reveal 的 sheetKey。
+                    const revealDataBySheet = new Map();
                     for (const change of requestedChanges.filter(item => item.kind === 'introduction')) {
-                        if (historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, change.sheetKey)
-                            || Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey)
-                            || Object.prototype.hasOwnProperty.call(frame.perSheetCheckpoints || {}, change.sheetKey)) {
+                        const activeHas = Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey)
+                            || Object.prototype.hasOwnProperty.call(frame.perSheetCheckpoints || {}, change.sheetKey);
+                        const historyHas = historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, change.sheetKey);
+                        if (activeHas) {
+                            // 仍活跃：既非全新，也非可恢复的隐藏表 → 保持 introduction 冲突防覆盖语义。
                             throw new Error(`V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`);
                         }
+                        if (historyHas) {
+                            // historyHas 有两种含义：(1) 历史确实曾有该表（可恢复的隐藏表）；
+                            // (2) 历史 frame 畸形/无法证伪（`cannot disprove`）——此时并非真的曾有该表，
+                            // 不能凭损坏历史臆造 reveal 数据。二者的区分依据：能否 bounded replay 定位到可信数据。
+                            const revealSource = await locateRevealSourceSheetData_ACU(chat, isolationKey, target.index, change.sheetKey);
+                            if (revealSource) {
+                                // 能定位到可信历史可见数据 → 曾被隐藏的表，reveal 恢复"离开时最新状态"（语义1）。
+                                revealDataBySheet.set(change.sheetKey, revealSource);
+                                continue;
+                            }
+                            // 定位不到可信数据（含历史畸形、无法证伪）→ 保持 introduction 保守拒绝，绝不基于损坏历史覆盖。
+                            throw new Error(`V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`);
+                        }
+                        // 真正全新表：走 introduction。
                         const existingCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
                         if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
                             throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${change.sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
@@ -39575,6 +39641,36 @@ $CONTENT
                             event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
                             timeline: {
                                 kind: 'sheet_introduction',
+                                activateAtMessageIndex: target.index,
+                                afterSeq: targetFrameLastLogSeq,
+                            },
+                            baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
+                        });
+                    }
+                    // 显式 reveal change：数据来源为 caller 提供的 sheetData（已在准备循环校验/建表计划）。
+                    for (const change of requestedChanges.filter(item => item.kind === 'reveal')) {
+                        revealDataBySheet.set(change.sheetKey, revealSheets.get(change.sheetKey));
+                    }
+                    // 统一写入 reveal checkpoint（timeline: sheet_reveal，回放语义同 rebase）。
+                    for (const [sheetKey, revealData] of revealDataBySheet) {
+                        if (Object.prototype.hasOwnProperty.call(activeReplayState, sheetKey)) {
+                            throw new Error(`V2 sheet reveal requires a hidden sheet: sheetKey=${sheetKey} 仍存在于 active checkpoint state。`);
+                        }
+                        const existingCheckpoint = frame.perSheetCheckpoints?.[sheetKey];
+                        if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
+                            throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
+                        }
+                        const scheduleSummary = scheduleSummaryBySheet[sheetKey];
+                        checkpoints.push({
+                            kind: 'sheet_full',
+                            createdAt,
+                            reason: 'schema_change',
+                            sheetKey,
+                            data: revealData,
+                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$1(scheduleSummary) } : {}),
+                            event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
+                            timeline: {
+                                kind: 'sheet_reveal',
                                 activateAtMessageIndex: target.index,
                                 afterSeq: targetFrameLastLogSeq,
                             },
@@ -39603,6 +39699,36 @@ $CONTENT
                             event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
                             timeline: {
                                 kind: 'sheet_rebase',
+                                activateAtMessageIndex: target.index,
+                                afterSeq: targetFrameLastLogSeq,
+                            },
+                            baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
+                        });
+                    }
+                    // hide：将当前可见的表标记隐藏，数据完整保留在 checkpoint.data，不 purge。
+                    for (const sheetKey of hideSheetKeys) {
+                        if (deletedSheetKeys.includes(sheetKey)) {
+                            throw new Error(`V2 sheet hide 不能与删除同一 sheetKey 组合：${sheetKey}。`);
+                        }
+                        const hideSource = await locateRevealSourceSheetData_ACU(chat, isolationKey, target.index, sheetKey);
+                        if (!hideSource) {
+                            throw new Error(`V2 sheet hide 无法定位待隐藏表的当前数据：sheetKey=${sheetKey}。`);
+                        }
+                        const existingCheckpoint = frame.perSheetCheckpoints?.[sheetKey];
+                        if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
+                            throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
+                        }
+                        const scheduleSummary = scheduleSummaryBySheet[sheetKey];
+                        checkpoints.push({
+                            kind: 'sheet_full',
+                            createdAt,
+                            reason: 'schema_change',
+                            sheetKey,
+                            data: hideSource,
+                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$1(scheduleSummary) } : {}),
+                            event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
+                            timeline: {
+                                kind: 'sheet_hide',
                                 activateAtMessageIndex: target.index,
                                 afterSeq: targetFrameLastLogSeq,
                             },
@@ -43105,6 +43231,7 @@ $CONTENT
         const templateData = clone_ACU$4(input.templateData);
         const blockers = [];
         const deletedSheetKeys = [];
+        const hiddenSheetKeys = [];
         const audit = [];
         const candidateData = stripRuntimeSeedRows_ACU(baselineData);
         candidateData.mate = clone_ACU$4(templateData.mate || baselineData.mate);
@@ -43173,11 +43300,19 @@ $CONTENT
         for (const [key, sheet] of listSheets_ACU(baselineData)) {
             if (matchedKeys.has(key))
                 continue;
-            if (!input.destructiveChangeConfirmed)
-                blockers.push(`删除表「${sheet.name || key}」需要显式确认。`);
-            deletedSheetKeys.push(key);
-            delete candidateData[key];
-            audit.push({ sheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
+            // 目标模板缺失的既有表：默认隐藏保留（语义1），仅在显式硬删除时才进 deletedSheetKeys。
+            if (input.hardDeleteMissingSheets === true) {
+                if (!input.destructiveChangeConfirmed)
+                    blockers.push(`删除表「${sheet.name || key}」需要显式确认。`);
+                deletedSheetKeys.push(key);
+                delete candidateData[key];
+                audit.push({ sheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
+            }
+            else {
+                hiddenSheetKeys.push(key);
+                delete candidateData[key];
+                audit.push({ sheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: [], hiddenColumns: headers_ACU(sheet).slice(1), physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
+            }
         }
         if (blockers.length > 0)
             return emptyPlan_ACU(baselineData, audit, blockers);
@@ -43192,6 +43327,11 @@ $CONTENT
                 sheetChanges.push({ kind: 'rebase', sheetKey: key, sheetData: sheet });
                 audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'rebase' });
             }
+        }
+        // 隐藏表：产出 hide change（sheetData 携带 baseline 结构，persist 层据此定位并保留数据）。
+        for (const key of hiddenSheetKeys) {
+            sheetChanges.push({ kind: 'hide', sheetKey: key, sheetData: clone_ACU$4(baselineData[key]) });
+            audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'hide' });
         }
         candidateData.mate = clone_ACU$4(candidateData.mate);
         try {
@@ -43208,7 +43348,7 @@ $CONTENT
         }
         for (const key of deletedSheetKeys)
             audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'delete' });
-        return { candidateData, sheetChanges, deletedSheetKeys, audit, blockers: [] };
+        return { candidateData, sheetChanges, deletedSheetKeys, hiddenSheetKeys, audit, blockers: [] };
     }
     function stripRuntimeSeedRows_ACU(data) {
         const clone = clone_ACU$4(data);
@@ -43221,6 +43361,7 @@ $CONTENT
             candidateData: stripRuntimeSeedRows_ACU(candidateData),
             sheetChanges: [],
             deletedSheetKeys: [],
+            hiddenSheetKeys: [],
             audit: audit.map(item => ({ ...item, operations: [] })),
             blockers,
         };
@@ -68411,9 +68552,20 @@ $CONTENT
                     shouldPersistSettingsAfterLoad_ACU = true;
                 }
             };
-            // Rollout 安全闸门是独立的幂等迁移：不能受旧默认值刷新 marker 限制，
-            // 否则已升级 marker 但缺字段的用户会绕过 V2 默认关闭策略。
+            // Rollout 闸门迁移：默认值已切换到 true。
+            // 1) 缺字段的用户由 fillMissing 补为 true。
+            // 2) 独立的 SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION marker 用于一次性强制反转
+            //    此前显式保存过 false 的用户；marker 写入后用户手动再关会被永久保留。
             fillMissing_ACU('summaryIndexV2WriteEnabled', defaultVectorMemoryConfig_ACU.summaryIndexV2WriteEnabled === true);
+            if (vectorConfig.summaryIndexV2WriteForceEnableVersion !== SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU) {
+                if (vectorConfig.summaryIndexV2WriteEnabled !== true) {
+                    vectorConfig.summaryIndexV2WriteEnabled = true;
+                    shouldPersistSettingsAfterLoad_ACU = true;
+                    logDebug_ACU(`[交火模式配置] 一次性强制开启 V2 writer: ${SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU}`);
+                }
+                vectorConfig.summaryIndexV2WriteForceEnableVersion = SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU;
+                shouldPersistSettingsAfterLoad_ACU = true;
+            }
             fillMissing_ACU('summaryIndexV2WriteScopeAllowlist', defaultVectorMemoryConfig_ACU.summaryIndexV2WriteScopeAllowlist || []);
             if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
                 const fillMissingPromptGroup_ACU = (key, value) => {
@@ -74120,10 +74272,17 @@ $CONTENT
         }
         const expectedScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(task.chatKey, task.isolationKey, task.sourceTableKey);
         if (!task.isolationKey || task.scopeKey !== expectedScopeKey) {
-            const message = `旧版 flush task 缺少可验证三元 scope，已保留等待人工或激活 scope 后重建：task=${task.scopeKey}`;
-            await markFlushTaskFailure_ACU(task, message, false);
-            logWarn_ACU('[交火向量索引] 拒绝执行身份不完整的旧版 flush task:', message);
-            return { success: false, reason: 'flush_legacy_scope_unresolved', error: message };
+            // legacy scope：老版本代码遗留、无法通过当前三元 canonical 校验的任务。
+            // 保留只会永远命中告警噪音；直接删除即可，dirty state 由后续正常写路径重建。
+            const message = `旧版 flush task 缺少可验证三元 scope，已从队列中清理：task=${task.scopeKey}`;
+            clearFlushTimer_ACU(task.scopeKey);
+            await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
+            logSummaryVectorIndexIdentityEvent_ACU('debug', 'flush', 'legacy_scope_purged', {
+                scopeFingerprint: task.scopeKey,
+                error: message,
+            });
+            logDebug_ACU('[交火向量索引] 已清理身份不完整的旧版 flush task:', message);
+            return { success: true, skipped: true, reason: 'flush_legacy_scope_purged' };
         }
         const activeIsolationKey = normalizeKeyPart_ACU(getCurrentIsolationKey_ACU());
         if (task.isolationKey !== activeIsolationKey) {
@@ -74199,9 +74358,24 @@ $CONTENT
             isolationKey,
             sourceTableKey,
         });
+        const activeScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
         let restored = 0;
+        let purgedLegacy = 0;
         const now = Date.now();
         for (const task of tasks) {
+            // 启动期主动清理身份不完整的旧版 task：
+            // list 已按三元字段过滤到当前 active scope，但更早版本的 scopeKey 算法可能与当前不一致，
+            // 保留只会成为长期告警噪音；dirty state 会由后续正常写路径重新入队。
+            if (!task.isolationKey || task.scopeKey !== activeScopeKey) {
+                clearFlushTimer_ACU(task.scopeKey);
+                await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
+                logSummaryVectorIndexIdentityEvent_ACU('debug', 'flush', 'legacy_scope_purged', {
+                    scopeFingerprint: task.scopeKey,
+                    error: `restore 时发现身份不完整的旧版 flush task：task=${task.scopeKey}`,
+                });
+                purgedLegacy += 1;
+                continue;
+            }
             if (task.status === 'ready' || task.status === 'failed_terminal')
                 continue;
             if (task.status === 'flushing' && now - task.updatedAt > SUMMARY_VECTOR_INDEX_FLUSHING_STALE_MS_ACU) {
@@ -74217,7 +74391,10 @@ $CONTENT
             restored += 1;
         }
         if (restored > 0) {
-            logDebug_ACU(`[交火向量索引] 已恢复当前 scope 防抖 flush 队列：scope=${buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey)}, count=${restored}`);
+            logDebug_ACU(`[交火向量索引] 已恢复当前 scope 防抖 flush 队列：scope=${activeScopeKey}, count=${restored}`);
+        }
+        if (purgedLegacy > 0) {
+            logDebug_ACU(`[交火向量索引] 启动期清理身份不完整的旧版 flush task：count=${purgedLegacy}`);
         }
         return restored;
     }
