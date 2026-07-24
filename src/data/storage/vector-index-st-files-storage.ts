@@ -34,6 +34,8 @@ function normalizeError_ACU(error: any): string {
     return String(error?.message || error || '未知错误');
 }
 
+const VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU = 240;
+
 function normalizeFileNamePart_ACU(value: string): string {
     return String(value || 'default')
         .replace(/[^a-zA-Z0-9_-]+/g, '_')
@@ -119,6 +121,54 @@ export function buildVectorIndexSnapshotFilePath_ACU(parts: {
         return `${scope}_${indexId}_${role}_${shardName}`;
     }
     return `${scope}_${indexId}_${role}`;
+}
+
+/**
+ * V2 单文件快照必须是 immutable object path。角色名只是展示信息，绝不能参与寻址；
+ * 否则改名会把同一逻辑 scope 分裂成不同文件。scope token 是完整 JSON tuple 的 UTF-8
+ * base64url 编码，而不是短哈希；不能拿 32 位散列充当生产级唯一标识，碰撞后仍会覆盖对象。
+ */
+export function buildVectorIndexSingleSnapshotV2ScopeToken_ACU(parts: {
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+}): string {
+    const scopeJson = JSON.stringify([
+        String(parts.chatKey || 'current-chat'),
+        String(parts.isolationKey || 'default'),
+        String(parts.sourceTableKey || 'summary'),
+    ]);
+    const bytes = new TextEncoder().encode(scopeJson);
+    let binary = '';
+    bytes.forEach((byte) => {
+        binary += String.fromCharCode(byte);
+    });
+    return btoa(binary)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/g, '');
+}
+
+export function buildVectorIndexSingleSnapshotV2FilePath_ACU(parts: {
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+    indexId: string;
+    writeGeneration: string;
+    /** 仅为调用端兼容；V2 path 不使用该字段。 */
+    chatName?: string;
+}): string {
+    const scopeToken = buildVectorIndexSingleSnapshotV2ScopeToken_ACU(parts);
+    const indexId = normalizePathSegment_ACU(parts.indexId || 'snapshot');
+    const writeGeneration = normalizePathSegment_ACU(parts.writeGeneration || 'write');
+    const path = `TavernDB_ACU_vector_v2_${scopeToken}_${indexId}_${writeGeneration}_snapshot`;
+    if (path.length > VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU) {
+        throw new Error(
+            `[纪要向量索引] V2 快照对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}。`
+            + '请缩短 chatKey、isolationKey 或 sourceTableKey；禁止截断 canonical scope 后继续写入。',
+        );
+    }
+    return path;
 }
 
 export function buildVectorIndexSingleSnapshotFilePath_ACU(parts: {
@@ -365,7 +415,9 @@ export async function saveVectorIndexRegistry_ACU(registry: SummaryVectorIndexRe
         status: 'ready',
     });
     if (!saved.ok) {
-        logWarn_ACU('[交火向量索引] registry 保存失败:', saved.error);
+        const detail = saved.error || '未知上传失败';
+        logWarn_ACU('[交火向量索引] registry 保存失败:', detail);
+        throw new Error(`[交火向量索引] registry 保存失败: path=${SUMMARY_VECTOR_INDEX_REGISTRY_PATH_ACU}; error=${detail}`);
     }
 }
 

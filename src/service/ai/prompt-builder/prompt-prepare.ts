@@ -15,6 +15,7 @@ import { applyContextTagFilters_ACU } from '../../runtime/helpers-remaining';
 import { isSqliteMode } from '../../table/storage-mode';
 import { ensureStorageProviderReady_ACU } from '../../table/table-storage-strategy';
 import { resolveEffectiveDDL, type EffectiveDDLColumnMap_ACU } from '../../../data/sqlite/schema-mapper';
+import { getSheetColumnProjection_ACU, projectSheetDDLForVisibleColumns_ACU, projectSheetRowToVisibleColumns_ACU } from '../../../shared/ddl-utils';
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
 
   async function resolvePromptSourceTableData_ACU(options: any, sqlMode: boolean) {
@@ -121,6 +122,8 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
             try { _seedRowsTablesUsed_ACU.push(String(table.name || sheetKey)); } catch (e) {}
         }
         const effectiveAllRows = (allRows.length > 0) ? allRows : (seedRows.length > 0 ? seedRows : []);
+        const visibleColumns = getSheetColumnProjection_ACU(table).visibleColumns.filter(column => column.sourceIndex > 0);
+        const visibleHeaders = visibleColumns.map(column => column.header);
 
         if (effectiveAllRows.length === 0) {
             tableDataText += `[${tableIndex}:${table.name}]\n`;
@@ -128,7 +131,7 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
             // 原先使用 i + 1 导致列头标注为 [1:列名],[2:列名]...，
             // 而默认提示词示例使用 {"0":"...","1":"..."} 的 0 基格式，
             // 模型会把列头编号 "1" 跟对象键 "1" 做映射，导致所有数据整体右移一列。
-            const headers = table.content[0] ? table.content[0].slice(1).map((h: any, i: number) => `[${i}:${h}]`).join(', ') : 'No Headers';
+            const headers = visibleHeaders.length > 0 ? visibleHeaders.map((h: any, i: number) => `[${i}:${h}]`).join(', ') : 'No Headers';
             tableDataText += `  Columns: ${headers}\n`;
 
             if (table.sourceData) {
@@ -140,7 +143,7 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
         } else {
             tableDataText += `[${tableIndex}:${table.name}]\n`;
             // [修复] 同上——列头编号 0 基，与原生 DSL 对象键语义对齐
-            const headers = table.content[0] ? table.content[0].slice(1).map((h: any, i: number) => `[${i}:${h}]`).join(', ') : 'No Headers';
+            const headers = visibleHeaders.length > 0 ? visibleHeaders.map((h: any, i: number) => `[${i}:${h}]`).join(', ') : 'No Headers';
             tableDataText += `  Columns: ${headers}\n`;
             if (table.sourceData) {
                 tableDataText += `  - Note: ${table.sourceData.note || 'N/A'}\n`;
@@ -173,7 +176,7 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
             if (rowsToProcess.length > 0) {
                 rowsToProcess.forEach((row: any, index: number) => {
                     const originalRowIndex = startIndex + index;
-                    const rowData = row.slice(1).join(', ');
+                    const rowData = visibleColumns.map(column => Array.isArray(row) ? row[column.sourceIndex] : null).join(', ');
                     tableDataText += `  [${originalRowIndex}] ${rowData}\n`;
                 });
             } else {
@@ -280,9 +283,24 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
  */
 export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKey: string, guideData: any, options: { allowSeedRowsFallback?: boolean } = {}): string {
     let text = '';
+    const projection = getSheetColumnProjection_ACU(table);
+    const hasHiddenPhysicalColumns = projection.hiddenPhysicalColumns.length > 0;
+    const visibleDDL = projectSheetDDLForVisibleColumns_ACU(table);
+    const promptSchemaTable = hasHiddenPhysicalColumns
+        ? {
+            ...table,
+            sourceData: { ...table.sourceData, ddl: visibleDDL, hiddenPhysicalColumns: [] },
+            content: (Array.isArray(table.content) ? table.content : []).map((row: unknown[]) =>
+                projectSheetRowToVisibleColumns_ACU(table, row)),
+        }
+        : table;
     const runtimeSchema = table?._acu_runtimeEffectiveSchema;
-    const resolvedDDL = runtimeSchema || resolveEffectiveDDL(table, table.uid || sheetKey);
-    const ddl = resolvedDDL.effectiveDDL;
+    const resolvedDDL = (!hasHiddenPhysicalColumns && runtimeSchema)
+        || resolveEffectiveDDL(promptSchemaTable, table.uid || sheetKey);
+    const ddl = hasHiddenPhysicalColumns
+        ? resolvedDDL.effectiveDDL
+        : projectSheetDDLForVisibleColumns_ACU(table, resolvedDDL.effectiveDDL);
+    const visiblePhysicalNames = new Set(projection.visibleColumns.map(column => column.physicalName.toLowerCase()));
     const allowSeedRowsFallback = options.allowSeedRowsFallback !== false;
 
     // 输出 DDL
@@ -303,7 +321,10 @@ export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKe
     const allRows = table.content.slice(1);
     const seedRows = allowSeedRowsFallback ? getEffectiveSeedRowsForSheet_ACU(sheetKey, { guideData, allowTemplateFallback: true }) : [];
     const isUsingSeedRows = (allRows.length === 0 && seedRows.length > 0);
-    const effectiveAllRows = (allRows.length > 0) ? allRows : (seedRows.length > 0 ? seedRows : []);
+    const sourceRows = (allRows.length > 0) ? allRows : (seedRows.length > 0 ? seedRows : []);
+    const effectiveAllRows = hasHiddenPhysicalColumns
+        ? sourceRows.map((row: unknown[]) => projectSheetRowToVisibleColumns_ACU(table, row))
+        : sourceRows;
 
     if (effectiveAllRows.length === 0) {
         if (table.sourceData?.initNode) {
@@ -317,13 +338,15 @@ export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKe
         text += `-- SeedRows: 已提供模板基础数据（尚未写入聊天楼层数据；本次填表可直接基于这些行更新）\n`;
     }
 
-    const columnMappings: EffectiveDDLColumnMap_ACU['mappings'] = resolvedDDL.columnMap.mappings;
+    const columnMappings: EffectiveDDLColumnMap_ACU['mappings'] = projection.hiddenPhysicalColumns.length === 0
+        ? resolvedDDL.columnMap.mappings
+        : resolvedDDL.columnMap.mappings.filter((mapping: EffectiveDDLColumnMap_ACU['mappings'][number]) => visiblePhysicalNames.has(mapping.sqlName.toLowerCase()));
     const headers = columnMappings.map(mapping => mapping.sqlName);
     const sendRowsSqlTemplate = typeof table.updateConfig?.sendRowsSqlTemplate === 'string'
         ? table.updateConfig.sendRowsSqlTemplate.trim()
         : '';
 
-    if (sendRowsSqlTemplate) {
+    if (sendRowsSqlTemplate && !hasHiddenPhysicalColumns) {
         const renderedRows = replaceDbSqlVariables(sendRowsSqlTemplate).trim();
         text += `\n-- 当前数据\n`;
         text += renderedRows
@@ -331,6 +354,9 @@ export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKe
             : '-- (No data rows)\n';
         text += '\n';
         return text;
+    }
+    if (sendRowsSqlTemplate) {
+        logWarn_ACU(`[SQLite prompt] 已忽略表 ${table.name || sheetKey} 的 sendRowsSqlTemplate：隐藏 physical columns 时无法证明自定义 SQL 不会泄露隐藏数据。`);
     }
 
     // 行数限制逻辑（与原生模式一致）

@@ -1,5 +1,5 @@
 import { computed } from 'vue';
-import { validateDDLTextAgainstHeaders_ACU, parseDDLColumnNames, updateDDLColumnComment } from '../../../shared/ddl-utils';
+import { getSheetColumnProjection_ACU, validateDDLTextAgainstHeaders_ACU, parseDDLColumnNames, updateDDLColumnComment } from '../../../shared/ddl-utils';
 import { isSummaryOrOutlineTable_ACU } from '../../../shared/utils';
 import { settings_ACU } from '../../../service/runtime/state-manager';
 import {
@@ -95,6 +95,13 @@ export function useVisualizerConfigEditing() {
       ? currentSheet.value.content[0]
       : [];
     return headerRow.slice(1).map((item: any, index: number) => stringValue(item || `字段 ${index + 1}`));
+  });
+  const visibleColumnEntries = computed(() => {
+    const sheet = currentSheet.value;
+    if (!sheet) return [];
+    return getSheetColumnProjection_ACU(sheet).visibleColumns
+      .filter(column => column.sourceIndex > 0)
+      .map(column => ({ header: column.header, columnIndex: column.sourceIndex - 1 }));
   });
 
   const exportConfig = computed(() =>
@@ -376,6 +383,7 @@ export function useVisualizerConfigEditing() {
     isSQLite,
     currentSheet,
     headers,
+    visibleColumnEntries,
     exportConfig,
     fixedConfigEnabled,
     importantPersonsFixedIndexEnabled,

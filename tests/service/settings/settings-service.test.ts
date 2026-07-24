@@ -160,6 +160,8 @@ vi.mock('../../../src/shared/defaults', () => ({
     recallCandidateLimit: 100,
     summaryIndexKeywordMinRows: 200,
     recentFixedInjectCount: 50,
+    summaryIndexV2WriteEnabled: false,
+    summaryIndexV2WriteScopeAllowlist: [],
     summaryPromptGroup: []
   },
   buildDefaultPlotWorldbookConfig_ACU: () => ({ source: 'character', manualSelection: [] }),
@@ -309,6 +311,7 @@ beforeEach(() => {
   mockGlobalMeta.isolationCodeList = [];
   mockGlobalMeta.migratedLegacySingleStore = true;
   mockGlobalMeta.zeroTkOccupyModeGlobal = false;
+  mockGlobalMeta.vectorMemoryConfigGlobal = null;
   _set_settingsStorageReadyForSave_ACU(true);
 });
 
@@ -553,6 +556,45 @@ describe('loadSettings_ACU', () => {
     const calledWith = mockSetSettings.mock.calls[0][0];
     expect(calledWith.autoUpdateEnabled).toBe(false);
     expect(calledWith.customField).toBe('自定义值');
+  });
+
+  it('补齐缺失的 V2 rollout 开关与 allowlist，且持久化全局配置', () => {
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'old-vector-defaults',
+    };
+
+    loadSettings_ACU();
+
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(false);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteScopeAllowlist).toEqual([]);
+    expect(mockSaveGlobalMeta).toHaveBeenCalled();
+  });
+
+  it('当前 defaults marker 下仍补齐缺失的 V2 rollout 字段并持久化，不触发关键词默认值覆盖', () => {
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      keywordPromptGroup: [{ content: '用户自定义关键词提示词' }],
+    };
+
+    loadSettings_ACU();
+
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(false);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteScopeAllowlist).toEqual([]);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.keywordPromptGroup).toEqual([{ content: '用户自定义关键词提示词' }]);
+    expect(mockSaveGlobalMeta).toHaveBeenCalled();
+  });
+
+  it('迁移默认值时保留用户显式关闭的 V2 writer，不得擅自重新开启', () => {
+    mockGlobalMeta.vectorMemoryConfigGlobal = {
+      defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      summaryIndexV2WriteEnabled: false,
+      summaryIndexV2WriteScopeAllowlist: ['scope-user-configured'],
+    };
+
+    loadSettings_ACU();
+
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteEnabled).toBe(false);
+    expect(mockGlobalMeta.vectorMemoryConfigGlobal.summaryIndexV2WriteScopeAllowlist).toEqual(['scope-user-configured']);
   });
 
   it('解析异常时回退到默认设置', () => {

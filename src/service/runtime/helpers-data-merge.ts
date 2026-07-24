@@ -22,6 +22,7 @@ import { migrateLegacyStorageToV2OnLoad_ACU } from '../table/storage-v2-migratio
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
+import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 
 /**
  * Legacy entry point retained for callers that need in-place normalization.
@@ -435,7 +436,8 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
         // All other tables, including '全局数据表', are added to the readable text
         readableText += `# ${table.name}\n\n`;
-        const headers = table.content[0] ? table.content[0].slice(1) : [];
+        const visibleColumns = getSheetColumnProjection_ACU(table).visibleColumns.filter(column => column.sourceIndex > 0);
+        const headers = visibleColumns.map(column => column.header);
         if (headers.length > 0) {
             readableText += `| ${headers.join(' | ')} |\n`;
             readableText += `|${headers.map(() => '---').join('|')}|\n`;
@@ -444,7 +446,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
         const rows = table.content.slice(1);
         if (rows.length > 0) {
             rows.forEach((row: any[]) => {
-                const rowData = row.slice(1);
+                const rowData = visibleColumns.map(column => row[column.sourceIndex]);
                 readableText += `| ${rowData.join(' | ')} |\n`;
             });
         }

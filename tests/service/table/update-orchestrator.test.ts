@@ -2737,6 +2737,70 @@ describe('collectGroupFillResponse_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
+  it('SQLite AI 响应引用隐藏物理列时在 collect 阶段拒绝并进入重试错误', async () => {
+    const job: any = createJob();
+    job.baseSnapshot = {
+      sheet_0: {
+        uid: 'inventory',
+        name: '背包表',
+        sourceData: {
+          ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, legacy_note TEXT);',
+          hiddenPhysicalColumns: ['legacy_note'],
+        },
+        content: [
+          ['row_id', '名称', '旧备注'],
+          ['1', '铁剑', '历史秘密'],
+        ],
+      },
+    };
+    mockSettings.tableMaxRetries = 1;
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '投影后的数据' });
+    mockCallCustomOpenAI.mockResolvedValue("<tableEdit>UPDATE inventory SET legacy_note = '改写' WHERE row_id = 1;</tableEdit>");
+
+    const result = await collectGroupFillResponse_ACU(job);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('隐藏物理列');
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
+  it.each([
+    'SELECT legacy_note FROM inventory',
+    'PRAGMA table_info(inventory)',
+    'COMMIT',
+    'ROLLBACK',
+    'VACUUM',
+    'ALTER TABLE inventory DROP COLUMN legacy_note',
+  ])('SQLite AI 响应的非 mutation SQL 在 collect 阶段 fail closed：%s', async statement => {
+    const job: any = createJob();
+    job.baseSnapshot = {
+      sheet_0: {
+        uid: 'inventory',
+        name: '背包表',
+        sourceData: {
+          ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, legacy_note TEXT);',
+          hiddenPhysicalColumns: ['legacy_note'],
+        },
+        content: [['row_id', '名称', '旧备注'], ['1', '铁剑', '历史秘密']],
+      },
+    };
+    mockSettings.tableMaxRetries = 1;
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '投影后的数据' });
+    mockCallCustomOpenAI.mockResolvedValue(`<tableEdit>${statement}</tableEdit>`);
+
+    const result = await collectGroupFillResponse_ACU(job);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('不支持安全重绑定的 SQL 语句类型');
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
   it('prepareAIInput 返回 null 时直接失败', async () => {
     const job = createJob();
     mockPrepareAIInput.mockResolvedValue(null);

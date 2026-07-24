@@ -75,7 +75,10 @@ export function isInvalidExternalVectorFileError_ACU(message: string): boolean {
         || text.includes('交火向量索引内容包校验失败')
         || text.includes('交火向量单文件快照协议不匹配')
         || text.includes('交火向量单文件快照身份不匹配')
-        || text.includes('交火向量单文件快照表标识不匹配');
+        || text.includes('交火向量单文件快照表标识不匹配')
+        || text.includes('交火向量单文件快照 v2 身份元数据不完整')
+        || text.includes('交火向量单文件快照 v2 manifest 缺少 snapshot 元数据')
+        || text.includes('交火向量单文件快照 v2 内嵌 manifest 缺失');
 }
 
 export async function preloadSummaryVectorIndexCacheForCurrentChat_ACU(): Promise<SummaryVectorIndexCachePreloadResult_ACU> {

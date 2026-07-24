@@ -11,6 +11,7 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } f
 import { isEntryBlocked_ACU } from '../../shared/utils';
 import { formatJsonToReadable_ACU, maybeLiftWorldbookSuppression_ACU, mergeAllIndependentTables_ACU, shouldSuppressWorldbookInjection_ACU } from '../runtime/helpers-remaining';
 import { normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
+import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { persistNullRowCleanupShards_ACU, type NullRowCleanupPersistStatus_ACU } from '../table/storage-frame-v2-persist';
 import { allocConsecutiveOrderBlock_ACU, applyPlacementToEntry_ACU, buildDefaultGlobalInjectionConfig_ACU, buildUsedOrderSet_ACU, ensureExportConfigDefaults_ACU, ensureGlobalInjectionConfigDefaults_ACU, getEntryOrderNumber_ACU, getFixedPlacementDefaultsForTable_ACU, getInjectionTargetLorebook_ACU, getIsolationPrefix_ACU, isEntryPlacementMatched_ACU, normalizeLorebookPosition_ACU, normalizePlacementConfig_ACU, updateCustomTableExports_ACU, updateImportantPersonsRelatedEntries_ACU, updateOutlineTableEntry_ACU, updateSummaryTableEntries_ACU } from './injection-engine';
 // pipeline.ts
@@ -66,30 +67,38 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
     }
     
     const { readableText, importantPersonsTable, summaryTable, outlineTable } = formatJsonToReadable_ACU(mergedData);
+    const hasNonEmptyVisibleCell_ACU = (table: any) => {
+        const content = table?.content;
+        if (!Array.isArray(content) || content.length <= 1) return false;
+        let visibleColumns: ReturnType<typeof getSheetColumnProjection_ACU>['visibleColumns'];
+        try {
+            visibleColumns = getSheetColumnProjection_ACU(table).visibleColumns
+                .filter(column => column.sourceIndex > 0);
+        } catch {
+            return false;
+        }
+        for (let r = 1; r < content.length; r++) {
+            const row = content[r];
+            if (!Array.isArray(row)) continue;
+            for (const column of visibleColumns) {
+                const cell = row[column.sourceIndex];
+                if (cell === null || cell === undefined) continue;
+                if (typeof cell === 'string') {
+                    if (cell.trim() !== '') return true;
+                } else if (typeof cell === 'number') {
+                    if (!Number.isNaN(cell)) return true;
+                } else {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
     const hasAnyNonEmptyCell_ACU = (data: Record<string, any> | null) => {
         if (!data) return false;
         const sheetKeys = Object.keys(data).filter(k => k.startsWith('sheet_'));
         for (const sheetKey of sheetKeys) {
-            const table = data[sheetKey];
-            const content = table?.content;
-            if (!Array.isArray(content) || content.length <= 1) continue;
-            for (let r = 1; r < content.length; r++) {
-                const row = content[r];
-                if (!Array.isArray(row)) continue;
-                for (let c = 1; c < row.length; c++) {
-                    const cell = row[c];
-                    if (cell === null || cell === undefined) continue;
-                    if (typeof cell === 'string') {
-                        if (cell.trim() !== '') return true;
-                    } else if (typeof cell === 'number') {
-                        if (!Number.isNaN(cell)) return true;
-                    } else if (typeof cell === 'boolean') {
-                        return true;
-                    } else {
-                        return true;
-                    }
-                }
-            }
+            if (hasNonEmptyVisibleCell_ACU(data[sheetKey])) return true;
         }
         return false;
     };
@@ -274,8 +283,8 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
             const memoryStartEntry = entries.find(e => e.comment === MEMORY_START_COMMENT);
             const memoryEndEntry = entries.find(e => e.comment === MEMORY_END_COMMENT);
 
-            // [修复] 检查总结表是否有数据（至少有一行非表头数据）
-            const hasSummaryData = summaryTable && summaryTable.content && summaryTable.content.length > 1;
+            // 对外世界书只由可见列驱动；隐藏历史数据不能制造空壳记忆条目。
+            const hasSummaryData = hasNonEmptyVisibleCell_ACU(summaryTable);
             
             if (!hasSummaryData) {
                 // [修复] 没有总结表数据时，删除已存在的 MemoryStart/MemoryEnd 条目
@@ -291,7 +300,9 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                 // 有总结表数据时，正常创建或更新 MemoryStart/MemoryEnd 条目
                 // 准备总结表表头内容
                 let summaryHeaderContent = '';
-                const summaryHeaders = summaryTable.content[0].slice(1);
+                const summaryHeaders = getSheetColumnProjection_ACU(summaryTable).visibleColumns
+                    .filter(column => column.sourceIndex > 0)
+                    .map(column => column.header);
                 if (summaryHeaders.length > 0) {
                     summaryHeaderContent = `# ${summaryTable.name}\n\n| ${summaryHeaders.join(' | ')} |\n|${summaryHeaders.map(() => '---').join('|')}|`;
                 }

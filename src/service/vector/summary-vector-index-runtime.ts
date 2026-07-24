@@ -19,7 +19,12 @@ import {
     assignSummaryVectorIndexStateToTagData_ACU,
     getLatestSummaryVectorIndexSnapshotState_ACU,
 } from './summary-vector-index-state-service';
-import { loadSummaryVectorIndexChunksFromManifest_ACU } from './summary-vector-index-storage-service';
+import {
+    loadSummaryVectorIndexChunksFromManifest_ACU,
+    logSummaryVectorIndexIdentityEvent_ACU,
+    validateSingleFileSnapshotIdentity_ACU,
+    type VectorIndexSingleSnapshotBlob_ACU,
+} from './summary-vector-index-storage-service';
 import {
     clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU,
     clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU,
@@ -275,19 +280,6 @@ async function upsertOriginalSummaryIndexEntry_ACU(content: string): Promise<voi
     }
 }
 
-interface RuntimeSingleSnapshotBlob_ACU {
-    schema?: string;
-    indexId?: string;
-    chatKey?: string;
-    isolationKey?: string;
-    sourceTableKey?: string;
-    sourceTableName?: string;
-    snapshotMessageId?: string;
-    indexedAt?: string;
-    manifest?: ChatSummaryVectorIndexManifest_ACU;
-    rows?: ChatSummaryVectorIndexRow_ACU[];
-}
-
 interface LiveSummaryVectorRows_ACU {
     summaryKey: string;
     rows: SummaryVectorArchivePreparedRow_ACU[];
@@ -347,14 +339,24 @@ function isSingleFileSnapshotManifest_ACU(manifest: ChatSummaryVectorIndexManife
 }
 
 async function enqueueSummaryVectorIndexRebuild_ACU(layer: SummaryVectorIndexSnapshotLayer_ACU | null, reason: string): Promise<void> {
-    markSummaryVectorIndexDirtyForRealign_ACU(reason);
     const queued = await enqueueSummaryVectorIndexFlush_ACU({
         targetMessageIndex: layer?.messageIndex,
         mode: 'sync',
         debounceMs: 0,
         reason,
     });
+    if (queued.queued && queued.scopeKey) {
+        markSummaryVectorIndexDirtyForRealign_ACU(queued.scopeKey, reason);
+        logSummaryVectorIndexIdentityEvent_ACU('debug', 'rebuild', 'enqueued', {
+            manifest: layer?.summaryVectorIndexState?.manifest,
+            scopeFingerprint: queued.scopeKey,
+        });
+    }
     if (!queued.queued) {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'rebuild', 'enqueue_rejected', {
+            manifest: layer?.summaryVectorIndexState?.manifest,
+            error: queued.reason || 'unknown',
+        });
         logWarn_ACU(`[交火模式纪要索引] 已标记索引待重建，但 flush 入队失败：reason=${queued.reason || 'unknown'}`);
     }
 }
@@ -368,29 +370,62 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
     if (!manifest || !isSingleFileSnapshotManifest_ACU(manifest)) return null;
     const snapshotPath = normalizeText_ACU(manifest.manifestFile || manifest.files?.[0]?.path);
     if (!snapshotPath) return null;
-    const loaded = await readVectorIndexJsonFile_ACU<RuntimeSingleSnapshotBlob_ACU>(snapshotPath);
+    const loaded = await readVectorIndexJsonFile_ACU<VectorIndexSingleSnapshotBlob_ACU>(snapshotPath);
     if (!loaded.ok || !loaded.data || typeof loaded.data !== 'object') {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'reader_unreadable', {
+            manifest,
+            path: snapshotPath,
+            error: loaded.error || snapshotPath,
+        });
         logWarn_ACU('[交火模式纪要索引] single_file_snapshot 指针对齐读取失败:', loaded.error || snapshotPath);
         return null;
     }
     const blob = loaded.data;
     const blobManifest = blob.manifest;
-    if (blob.schema !== 'single_file_snapshot' || !blobManifest || blobManifest.snapshot?.mode !== 'single_file_snapshot') return null;
-    if (normalizeText_ACU(blob.indexId) !== normalizeText_ACU(blobManifest.indexId)) return null;
-    if (normalizeText_ACU(blob.chatKey) !== normalizeText_ACU(blobManifest.chatKey)) return null;
-    if (normalizeText_ACU(blob.isolationKey) !== normalizeText_ACU(blobManifest.isolationKey)) return null;
-    if (normalizeText_ACU(blob.sourceTableKey) !== normalizeText_ACU(blobManifest.sourceTableKey)) return null;
-    if (normalizeText_ACU(blobManifest.sourceTableKey) !== normalizeText_ACU(manifest.sourceTableKey)) return null;
-    if (normalizeText_ACU(blobManifest.chatKey) !== normalizeText_ACU(manifest.chatKey)) return null;
-    if (params.latestLayer && normalizeText_ACU(blobManifest.isolationKey) !== normalizeText_ACU(params.latestLayer.isolationKey)) return null;
-    if (params.liveRows && normalizeText_ACU(blob.sourceTableKey) !== params.liveRows.summaryKey) return null;
-    if (blobManifest.status !== 'ready') return null;
-    if (normalizeText_ACU(blobManifest.manifestFile) !== snapshotPath) return null;
-    if (normalizeText_ACU(blobManifest.rowsFile) !== snapshotPath) return null;
-    if (normalizeText_ACU(blobManifest.tombstoneFile) !== snapshotPath) return null;
+    if (blob.schema !== 'single_file_snapshot' || !blobManifest || blobManifest.snapshot?.mode !== 'single_file_snapshot') {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'snapshot_shape_rejected', {
+            manifest,
+            path: snapshotPath,
+        });
+        return null;
+    }
+    try {
+        // realign 是写 pointer 的自愈入口，不能维护一套缩水校验；必须复用正式 reader 契约。
+        validateSingleFileSnapshotIdentity_ACU(blobManifest, blob, snapshotPath);
+    } catch (error) {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'identity_validation_failed', {
+            manifest: blobManifest,
+            path: snapshotPath,
+            error,
+        });
+        logWarn_ACU('[交火模式纪要索引] single_file_snapshot 指针对齐身份校验失败，拒绝 repoint:', error);
+        return null;
+    }
+    const scopeMatches = normalizeText_ACU(blobManifest.sourceTableKey) === normalizeText_ACU(manifest.sourceTableKey)
+        && normalizeText_ACU(blobManifest.chatKey) === normalizeText_ACU(manifest.chatKey)
+        && normalizeText_ACU(blobManifest.isolationKey) === normalizeText_ACU(manifest.isolationKey)
+        && (!params.latestLayer || normalizeText_ACU(blobManifest.isolationKey) === normalizeText_ACU(params.latestLayer.isolationKey))
+        && (!params.liveRows || normalizeText_ACU(blob.sourceTableKey) === params.liveRows.summaryKey);
+    if (!scopeMatches) {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'scope_mismatch', { manifest: blobManifest, path: snapshotPath });
+        return null;
+    }
+    if (blobManifest.status !== 'ready') {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'not_ready', { manifest: blobManifest, path: snapshotPath });
+        return null;
+    }
+    if (normalizeText_ACU(blobManifest.manifestFile) !== snapshotPath
+        || normalizeText_ACU(blobManifest.rowsFile) !== snapshotPath
+        || normalizeText_ACU(blobManifest.tombstoneFile) !== snapshotPath) {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'canonical_path_mismatch', { manifest: blobManifest, path: snapshotPath });
+        return null;
+    }
     const currentRevision = Number(manifest.snapshot?.revision || 0);
     const diskRevision = Number(blobManifest.snapshot?.revision || 0);
-    if (diskRevision < currentRevision) return null;
+    if (diskRevision < currentRevision) {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'revision_stale', { manifest: blobManifest, path: snapshotPath });
+        return null;
+    }
     const activeRowKeys = new Set(blobManifest.snapshot?.activeRowKeys || []);
     const diskRows = (Array.isArray(blob.rows) ? blob.rows : [])
         .filter((row) => row && row.status !== 'removed' && (activeRowKeys.size === 0 || activeRowKeys.has(row.rowKey)));
@@ -428,6 +463,7 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
     assignSummaryVectorIndexStateToTagData_ACU(nextTagData, alignedState, alignedManifest);
     writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
     await saveChatToHost_ACU();
+    logSummaryVectorIndexIdentityEvent_ACU('debug', 'realign', 'accepted', { manifest: alignedManifest, path: snapshotPath });
     logWarn_ACU(`[交火模式纪要索引] 已从 single_file_snapshot 磁盘文件对齐索引指针：indexId=${alignedManifest.indexId}, revision=${diskRevision}`);
     return alignedState;
 }

@@ -6,6 +6,7 @@
  */
 
 import { logWarn_ACU } from './utils';
+import type { Sheet_ACU } from './models/table-data';
 
 // ═══════════════════════════════════════════════════════════════
 // DDL 解析
@@ -182,6 +183,91 @@ export function parseDDLColumnInfos_ACU(ddl: string): DDLColumnInfo_ACU[] {
       defaultExpression,
     };
   });
+}
+
+export interface SheetColumnProjectionItem_ACU {
+  sourceIndex: number;
+  physicalName: string;
+  header: string;
+  hidden: boolean;
+}
+
+/**
+ * Resolves the persisted physical-column visibility contract without changing
+ * the sheet's schema or row layout. Consumers must keep sourceIndex when they
+ * project rows; a visible array index is not a physical column index.
+ */
+export function getSheetColumnProjection_ACU(sheet: Sheet_ACU): {
+  columns: SheetColumnProjectionItem_ACU[];
+  visibleColumns: SheetColumnProjectionItem_ACU[];
+  hiddenPhysicalColumns: string[];
+} {
+  const headers = Array.isArray(sheet?.content?.[0])
+    ? sheet.content[0].map(value => String(value ?? ''))
+    : [];
+  const ddlColumns = parseDDLColumnInfos_ACU(String(sheet?.sourceData?.ddl || ''));
+  const rawHidden = sheet?.sourceData?.hiddenPhysicalColumns;
+  if (rawHidden !== undefined && !Array.isArray(rawHidden)) {
+    throw new Error('hiddenPhysicalColumns 必须是 physical column 字符串数组。');
+  }
+  const hidden = (rawHidden || []).map(value => String(value ?? '').trim()).filter(Boolean);
+  const hiddenCanonical = hidden.map(value => value.toLowerCase());
+  if (new Set(hiddenCanonical).size !== hiddenCanonical.length) {
+    throw new Error('hiddenPhysicalColumns 包含大小写不敏感的重复 physical column。');
+  }
+  if (hiddenCanonical.includes('row_id')) throw new Error('row_id 不允许隐藏。');
+  if (hidden.length > 0 && ddlColumns.length !== headers.length) {
+    throw new Error('hiddenPhysicalColumns 需要与 content[0] 完整对齐的 DDL。');
+  }
+  const physicalNames = ddlColumns.length === headers.length
+    ? ddlColumns.map(column => column.sqlName)
+    : headers;
+  const physicalCanonical = new Set(physicalNames.map(value => value.toLowerCase()));
+  const unknown = hidden.filter(value => !physicalCanonical.has(value.toLowerCase()));
+  if (unknown.length > 0) {
+    throw new Error(`hiddenPhysicalColumns 指向不存在的 physical column「${unknown.join('、')}」。`);
+  }
+  const hiddenSet = new Set(hiddenCanonical);
+  const columns = headers.map((header, sourceIndex): SheetColumnProjectionItem_ACU => ({
+    sourceIndex,
+    physicalName: physicalNames[sourceIndex] || header,
+    header,
+    hidden: hiddenSet.has((physicalNames[sourceIndex] || header).toLowerCase()),
+  }));
+  return {
+    columns,
+    visibleColumns: columns.filter(column => !column.hidden),
+    hiddenPhysicalColumns: hidden,
+  };
+}
+
+/** Builds a prompt-only DDL view. It never mutates or replaces persisted DDL. */
+export function projectSheetDDLForVisibleColumns_ACU(sheet: Sheet_ACU, ddlOverride?: string): string {
+  const ddl = String(ddlOverride || sheet?.sourceData?.ddl || '');
+  const projection = getSheetColumnProjection_ACU(sheet);
+  if (projection.hiddenPhysicalColumns.length === 0) return ddl;
+  const bounds = findCreateTableDefinitionBounds_ACU(ddl);
+  const infos = parseDDLColumnInfos_ACU(ddl);
+  if (!bounds || infos.length !== projection.columns.length) {
+    throw new Error('无法为隐藏列构建安全的可见 DDL 投影。');
+  }
+  const visibleIndexes = new Set(projection.visibleColumns.map(column => column.sourceIndex));
+  const definitions = infos
+    .filter(info => visibleIndexes.has(info.index))
+    .map(info => info.normalizedDefinition);
+  if (definitions.length === 0 || infos[0]?.sqlName.toLowerCase() !== 'row_id') {
+    throw new Error('可见 DDL 投影必须保留 row_id。');
+  }
+  const body = definitions.map((definition, index) => `  ${definition}${index < definitions.length - 1 ? ',' : ''}`).join('\n');
+  return `${ddl.slice(0, bounds.openingIndex + 1)}\n${body}\n${ddl.slice(bounds.closingIndex)}`;
+}
+
+export function projectSheetRowToVisibleColumns_ACU(sheet: Sheet_ACU, row: readonly unknown[]): unknown[] {
+  return getSheetColumnProjection_ACU(sheet).visibleColumns.map(column => row[column.sourceIndex]);
+}
+
+export function projectSheetHeadersToVisibleColumns_ACU(sheet: Sheet_ACU): string[] {
+  return getSheetColumnProjection_ACU(sheet).visibleColumns.map(column => column.header);
 }
 
 /**

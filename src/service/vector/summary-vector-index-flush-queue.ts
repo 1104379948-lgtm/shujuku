@@ -1,4 +1,4 @@
-import { currentChatFileIdentifier_ACU } from '../runtime/state-manager';
+import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import {
     deleteSummaryVectorFlushTask_ACU,
@@ -8,8 +8,14 @@ import {
     type SummaryVectorIndexFlushTaskMode_ACU,
     type SummaryVectorIndexFlushTaskRecord_ACU,
 } from '../../data/storage/vector-index-hot-cache';
-import { archiveSummaryVectorIndexNow_ACU, findSummaryTable_ACU, type SummaryVectorIndexArchiveResult_ACU } from './summary-vector-index-archive-service';
+import {
+    archiveSummaryVectorIndexNow_ACU,
+    buildSummaryVectorIndexArchiveScopeKey_ACU,
+    findSummaryTable_ACU,
+    type SummaryVectorIndexArchiveResult_ACU,
+} from './summary-vector-index-archive-service';
 import { clearSummaryVectorIndexDirtyForRealign_ACU } from './summary-vector-index-realign-state';
+import { logSummaryVectorIndexIdentityEvent_ACU } from './summary-vector-index-storage-service';
 
 const SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU = 2500;
 const SUMMARY_VECTOR_INDEX_FLUSHING_STALE_MS_ACU = 60_000;
@@ -21,6 +27,8 @@ export interface SummaryVectorIndexFlushQueueOptions_ACU {
     mode?: SummaryVectorIndexFlushTaskMode_ACU;
     debounceMs?: number;
     reason?: string;
+    isolationKey?: string;
+    sourceTableKey?: string;
 }
 
 export interface SummaryVectorIndexFlushQueueResult_ACU {
@@ -43,9 +51,17 @@ function normalizeKeyPart_ACU(value: any): string {
     return String(value || '').trim();
 }
 
-/** scope key 只用 chatKey，与 spv3.6.7+ 外部快照路径设计一致 */
-export function buildSummaryVectorIndexFlushScopeKey_ACU(chatKey: string): string {
-    return `flush::${normalizeKeyPart_ACU(chatKey) || 'default'}`;
+/** 与 archive lock、realign state 复用同一三元 canonical scope。 */
+export function buildSummaryVectorIndexFlushScopeKey_ACU(
+    chatKey: string,
+    isolationKey: string,
+    sourceTableKey: string,
+): string {
+    return buildSummaryVectorIndexArchiveScopeKey_ACU({
+        chatKey: normalizeKeyPart_ACU(chatKey) || 'current-chat',
+        isolationKey: normalizeKeyPart_ACU(isolationKey) || 'default',
+        sourceTableKey: normalizeKeyPart_ACU(sourceTableKey) || 'summary',
+    });
 }
 
 function normalizeErrorMessage_ACU(error: unknown): string {
@@ -86,6 +102,10 @@ async function markFlushTaskFailure_ACU(task: SummaryVectorIndexFlushTaskRecord_
         debounceUntil: Date.now() + SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU,
         lastError: error,
     });
+    logSummaryVectorIndexIdentityEvent_ACU(terminal ? 'warn' : 'debug', 'flush', terminal ? 'failed_terminal' : 'failed_retryable', {
+        scopeFingerprint: task.scopeKey,
+        error,
+    });
 }
 
 function scheduleFlushTaskTimer_ACU(task: SummaryVectorIndexFlushTaskRecord_ACU): void {
@@ -102,7 +122,9 @@ function scheduleFlushTaskTimer_ACU(task: SummaryVectorIndexFlushTaskRecord_ACU)
 
 export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorIndexFlushQueueOptions_ACU = {}): Promise<SummaryVectorIndexFlushQueueResult_ACU> {
     const selectedSummary = findSummaryTable_ACU();
-    if (!selectedSummary?.summaryKey) {
+    const sourceTableKey = normalizeKeyPart_ACU(options.sourceTableKey || selectedSummary?.summaryKey);
+    const isolationKey = normalizeKeyPart_ACU(options.isolationKey || getCurrentIsolationKey_ACU());
+    if (!selectedSummary?.summaryKey || !sourceTableKey || sourceTableKey !== normalizeKeyPart_ACU(selectedSummary.summaryKey)) {
         return { queued: false, skipped: true, reason: 'summary_table_not_found' };
     }
     const chatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
@@ -117,12 +139,12 @@ export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorI
     const debounceMs = Number.isFinite(rawDebounceMs)
         ? Math.max(0, rawDebounceMs)
         : SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU;
-    const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey);
+    const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
     const task = await upsertSummaryVectorFlushTask_ACU({
         scopeKey,
         chatKey,
-        isolationKey: '',
-        sourceTableKey: normalizeKeyPart_ACU(selectedSummary.summaryKey),
+        isolationKey,
+        sourceTableKey,
         targetMessageIndex: options.targetMessageIndex,
         mode: options.mode === 'append' ? 'append' : 'sync',
         status: 'queued',
@@ -149,6 +171,19 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
         const message = `flush scope 与当前聊天上下文不一致：task=${task.chatKey}, active=${activeChatKey}`;
         await markFlushTaskFailure_ACU(task, message, false);
         logWarn_ACU('[交火向量索引] 跳过防抖 flush，当前上下文不匹配:', message);
+        return { success: false, reason: 'flush_scope_mismatch', error: message };
+    }
+    const expectedScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(task.chatKey, task.isolationKey, task.sourceTableKey);
+    if (!task.isolationKey || task.scopeKey !== expectedScopeKey) {
+        const message = `旧版 flush task 缺少可验证三元 scope，已保留等待人工或激活 scope 后重建：task=${task.scopeKey}`;
+        await markFlushTaskFailure_ACU(task, message, false);
+        logWarn_ACU('[交火向量索引] 拒绝执行身份不完整的旧版 flush task:', message);
+        return { success: false, reason: 'flush_legacy_scope_unresolved', error: message };
+    }
+    const activeIsolationKey = normalizeKeyPart_ACU(getCurrentIsolationKey_ACU());
+    if (task.isolationKey !== activeIsolationKey) {
+        const message = `flush isolation 与当前上下文不一致：task=${task.isolationKey}, active=${activeIsolationKey}`;
+        await markFlushTaskFailure_ACU(task, message, false);
         return { success: false, reason: 'flush_scope_mismatch', error: message };
     }
 
@@ -181,11 +216,13 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
             mode: task.mode,
             saveChatAfterWrite: true,
             force: true,
+            isolationKey: task.isolationKey,
+            sourceTableKey: task.sourceTableKey,
         });
         if (result.success) {
             await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
             if (shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result)) {
-                clearSummaryVectorIndexDirtyForRealign_ACU();
+                clearSummaryVectorIndexDirtyForRealign_ACU(task.scopeKey);
             }
             logDebug_ACU(`[交火向量索引] 防抖 flush 完成：scope=${task.scopeKey}, skipped=${result.skipped}, reason=${result.reason || ''}`);
             return { success: true, skipped: result.skipped, reason: result.reason, result };
@@ -207,7 +244,15 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
 export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): Promise<number> {
     const chatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
     if (!chatKey) return 0;
-    const tasks = await listSummaryVectorFlushTasks_ACU({ chatKey });
+    const isolationKey = normalizeKeyPart_ACU(getCurrentIsolationKey_ACU());
+    const selectedSummary = findSummaryTable_ACU();
+    const sourceTableKey = normalizeKeyPart_ACU(selectedSummary?.summaryKey);
+    if (!sourceTableKey) return 0;
+    const tasks = await listSummaryVectorFlushTasks_ACU({
+        chatKey,
+        isolationKey,
+        sourceTableKey,
+    });
     let restored = 0;
     const now = Date.now();
     for (const task of tasks) {
@@ -225,7 +270,7 @@ export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): P
         restored += 1;
     }
     if (restored > 0) {
-        logDebug_ACU(`[交火向量索引] 已恢复当前聊天防抖 flush 队列：count=${restored}`);
+        logDebug_ACU(`[交火向量索引] 已恢复当前 scope 防抖 flush 队列：scope=${buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey)}, count=${restored}`);
     }
     return restored;
 }

@@ -17,7 +17,7 @@ import {
   parseDDLColumnInfos_ACU,
   resolveEffectiveDDL,
 } from '../../../src/data/sqlite/schema-mapper';
-import { parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU } from '../../../src/shared/ddl-utils';
+import { getSheetColumnProjection_ACU, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, projectSheetDDLForVisibleColumns_ACU, projectSheetRowToVisibleColumns_ACU } from '../../../src/shared/ddl-utils';
 import type { Sheet_ACU } from '../../../src/shared/models/table-data';
 
 // ═══════════════════════════════════════════════════════════════
@@ -273,6 +273,53 @@ describe('parseDDLTableSuffix_ACU', () => {
     ;`, 'STRICT'],
   ])('%s 被稳定规范化', (_name, ddl, expected) => {
     expect(parseDDLTableSuffix_ACU(ddl)).toBe(expected);
+  });
+});
+
+describe('hiddenPhysicalColumns projection', () => {
+  const sheet = makeSheet({
+    sourceData: {
+      note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+      ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, legacy_note TEXT, quantity INTEGER);',
+      hiddenPhysicalColumns: ['legacy_note'],
+    },
+    content: [
+      ['row_id', '名称', '旧备注', '数量'],
+      ['1', '铁剑', '历史秘密', '3'],
+    ],
+  });
+
+  it('按 physical column 投影 DDL 与行，并保留右侧可见列 sourceIndex', () => {
+    const projection = getSheetColumnProjection_ACU(sheet);
+    expect(projection.visibleColumns.map(column => ({ physicalName: column.physicalName, sourceIndex: column.sourceIndex }))).toEqual([
+      { physicalName: 'row_id', sourceIndex: 0 },
+      { physicalName: 'item_name', sourceIndex: 1 },
+      { physicalName: 'quantity', sourceIndex: 3 },
+    ]);
+    expect(projectSheetDDLForVisibleColumns_ACU(sheet)).not.toContain('legacy_note');
+    expect(projectSheetRowToVisibleColumns_ACU(sheet, sheet.content[1])).toEqual(['1', '铁剑', '3']);
+    expect(sheet.content[1]).toEqual(['1', '铁剑', '历史秘密', '3']);
+  });
+
+  it('非法 hiddenPhysicalColumns 配置 fail closed', () => {
+    expect(() => getSheetColumnProjection_ACU({ ...sheet, sourceData: { ...sheet.sourceData, hiddenPhysicalColumns: 'legacy_note' as any } }))
+      .toThrow('必须是 physical column 字符串数组');
+    expect(() => getSheetColumnProjection_ACU({ ...sheet, sourceData: { ...sheet.sourceData, hiddenPhysicalColumns: ['legacy_note', 'LEGACY_NOTE'] } }))
+      .toThrow('大小写不敏感的重复');
+    expect(() => getSheetColumnProjection_ACU({ ...sheet, sourceData: { ...sheet.sourceData, hiddenPhysicalColumns: ['row_id'] } }))
+      .toThrow('row_id 不允许隐藏');
+    expect(() => getSheetColumnProjection_ACU({ ...sheet, sourceData: { ...sheet.sourceData, hiddenPhysicalColumns: ['missing_col'] } }))
+      .toThrow('指向不存在的 physical column');
+  });
+
+  it('DDL 与表头无法完整对齐时拒绝隐藏投影', () => {
+    expect(() => getSheetColumnProjection_ACU({
+      ...sheet,
+      sourceData: {
+        ...sheet.sourceData,
+        ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, legacy_note TEXT);',
+      },
+    })).toThrow('需要与 content[0] 完整对齐的 DDL');
   });
 });
 

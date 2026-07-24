@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-template-reconciler';
+import { buildDefaultTableTemplateObject_ACU, buildOriginalDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
+import { getSheetColumnProjection_ACU } from '../../../src/shared/ddl-utils';
 
 function sheet(key: string, name: string, headers: string[], ddlColumns: string, rows: Array<Array<string | null>> = [['1', '铁剑']]): any {
   return {
@@ -49,15 +51,28 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(accepted.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' })]);
   });
 
-  it('删列和新增 NOT NULL 无 literal default 时 fail closed', async () => {
+  it('模板缺失旧列时保留并隐藏；新增 NOT NULL 无 literal default 时仍 fail closed', async () => {
     const baseline = state({
-      sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', '名称', '备注'], 'row_id INTEGER PRIMARY KEY, item_name TEXT -- 名称, note TEXT -- 备注', [['1', '铁剑', '旧备注']]),
+      sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', '名称', '备注'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT, -- 名称\n  note TEXT -- 备注', [['1', '铁剑', '旧备注']]),
     });
     const dropTemplate = state({
-      sheet_new: sheet('sheet_new', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY, item_name TEXT -- 名称'),
+      sheet_new: sheet('sheet_new', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT -- 名称'),
     });
     const unconfirmed = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: dropTemplate, destructiveChangeConfirmed: false });
-    expect(unconfirmed.blockers.join('\n')).toContain('删除列');
+    expect(unconfirmed.blockers).toEqual([]);
+    expect(unconfirmed.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '备注'], ['1', '铁剑', '旧备注']]);
+    expect(unconfirmed.candidateData.sheet_legacy.sourceData.hiddenPhysicalColumns).toEqual(['note']);
+    expect(unconfirmed.audit[0]).toMatchObject({ deletedColumns: [], hiddenColumns: ['备注'], destructiveChangeConfirmed: false });
+
+    const restored = await reconcileChatTemplate_ACU({
+      baselineData: unconfirmed.candidateData,
+      templateData: baseline,
+      destructiveChangeConfirmed: false,
+    });
+    expect(restored.blockers).toEqual([]);
+    expect(restored.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '备注'], ['1', '铁剑', '旧备注']]);
+    expect(restored.candidateData.sheet_legacy.sourceData.hiddenPhysicalColumns).toEqual([]);
+    expect(getSheetColumnProjection_ACU(restored.candidateData.sheet_legacy).visibleColumns.map(column => column.header)).toEqual(['row_id', '名称', '备注']);
 
     const baselineWithoutDrop = state({
       sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT -- 名称'),
@@ -74,6 +89,184 @@ describe('reconcileChatTemplate_ACU', () => {
     const template = state({ sheet_taken: sheet('sheet_taken', '新表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值') });
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
     expect(plan.blockers.join('\n')).toContain('已被当前聊天占用');
+  });
+
+  it('同一稳定 key 的表名仅增减末尾“表”时按既有 Sheet 协调，而非误判 key 被占用', async () => {
+    const baseline = state({
+      sheet_DpKcVGqg: sheet('sheet_DpKcVGqg', '主角信息', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', [['1', '助手']]),
+    });
+    const template = state({
+      sheet_DpKcVGqg: sheet('sheet_DpKcVGqg', '主角信息表', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_DpKcVGqg).toMatchObject({ uid: 'sheet_DpKcVGqg', name: '主角信息表' });
+    expect(plan.candidateData.sheet_DpKcVGqg.content).toEqual([['row_id', '姓名'], ['1', '助手']]);
+    expect(plan.deletedSheetKeys).toEqual([]);
+  });
+
+  it('任意用户表名仅增减末尾“表”时仍视为不同表，不扩大历史兼容范围', async () => {
+    const baseline = state({
+      sheet_stable: sheet('sheet_stable', '订单', ['row_id', '编号'], 'row_id INTEGER PRIMARY KEY,\n  order_no TEXT -- 编号', [['1', 'A-1']]),
+    });
+    const template = state({
+      sheet_stable: sheet('sheet_stable', '订单表', ['row_id', '编号'], 'row_id INTEGER PRIMARY KEY,\n  order_no TEXT -- 编号', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+
+    expect(plan.blockers.join('\n')).toContain('已被当前聊天占用');
+    expect(plan.sheetChanges).toEqual([]);
+    expect(plan.deletedSheetKeys).toEqual([]);
+    expect(plan.candidateData.sheet_stable.content[1][1]).toBe('A-1');
+  });
+
+  it('稳定 key 与精确表名分别命中不同历史表时 fail closed，禁止静默串表', async () => {
+    const baseline = state({
+      sheet_stable: sheet('sheet_stable', '主角信息', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', [['1', '稳定 key 数据']]),
+      sheet_other: sheet('sheet_other', '主角信息表', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', [['2', '同名表数据']]),
+    });
+    const template = state({
+      sheet_stable: sheet('sheet_stable', '主角信息表', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+
+    expect(plan.blockers.join('\n')).toContain('无法唯一协调');
+    expect(plan.sheetChanges).toEqual([]);
+    expect(plan.deletedSheetKeys).toEqual([]);
+    expect(plan.candidateData.sheet_stable.content[1][1]).toBe('稳定 key 数据');
+    expect(plan.candidateData.sheet_other.content[1][1]).toBe('同名表数据');
+  });
+
+  it.each([
+    ['精确名称项在前', ['sheet_other', 'sheet_DpKcVGqg']],
+    ['历史别名项在前', ['sheet_DpKcVGqg', 'sheet_other']],
+  ])('多个模板表争用同一历史 Sheet 时 fail closed：%s', async (_label, order) => {
+    const baseline = state({
+      sheet_DpKcVGqg: sheet('sheet_DpKcVGqg', '主角信息', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', [['1', '历史数据']]),
+    });
+    const entries: Record<string, any> = {
+      sheet_other: sheet('sheet_other', '主角信息', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', []),
+      sheet_DpKcVGqg: sheet('sheet_DpKcVGqg', '主角信息表', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', []),
+    };
+    const template = state(Object.fromEntries(order.map(key => [key, entries[key]])));
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+
+    expect(plan.blockers.join('\n')).toContain('多个表同时匹配');
+    expect(plan.sheetChanges).toEqual([]);
+    expect(plan.deletedSheetKeys).toEqual([]);
+    expect(plan.candidateData.sheet_DpKcVGqg.content).toEqual([
+      ['row_id', '姓名'],
+      ['1', '历史数据'],
+    ]);
+  });
+
+  it('同一稳定 key 下 physical column 未变时允许表头改名并继承历史数据', async () => {
+    const baseline = state({
+      sheet_stable: sheet('sheet_stable', '全局数据表', ['row_id', '主角当前所在地点'], 'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 主角当前所在地点', [['1', '御苑']]),
+    });
+    const template = state({
+      sheet_stable: sheet('sheet_stable', '全局数据表', ['row_id', '当前详细地点'], 'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 当前详细地点', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_stable.content).toEqual([['row_id', '当前详细地点'], ['1', '御苑']]);
+    expect(plan.audit[0]).toMatchObject({ inheritedColumns: ['当前详细地点'], addedColumns: [], deletedColumns: [] });
+  });
+
+  it('不同 key 的模板仍禁止用同名 physical column 将删除列重解释为新字段', async () => {
+    const baseline = state({
+      sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', '备注'], 'row_id INTEGER PRIMARY KEY, note TEXT -- 备注', [['1', '旧备注']]),
+    });
+    const template = state({
+      sheet_imported: sheet('sheet_imported', '背包', ['row_id', '品质'], 'row_id INTEGER PRIMARY KEY, note TEXT -- 品质', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+
+    expect(plan.blockers.join('\n')).toContain('无法安全重解释历史数据');
+    expect(plan.sheetChanges).toEqual([]);
+  });
+
+  it('不同 key 的 physical column 仅大小写不同时仍按 SQLite 身份冲突 fail closed', async () => {
+    const baseline = state({
+      sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', '备注'], 'row_id INTEGER PRIMARY KEY,\n  Note TEXT -- 备注', [['1', '旧备注']]),
+    });
+    const template = state({
+      sheet_imported: sheet('sheet_imported', '背包', ['row_id', '品质'], 'row_id INTEGER PRIMARY KEY,\n  note TEXT -- 品质', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+
+    expect(plan.blockers.join('\n')).toContain('无法安全重解释历史数据');
+    expect(plan.sheetChanges).toEqual([]);
+    expect(plan.deletedSheetKeys).toEqual([]);
+  });
+
+  it('旧默认模板切换到当前默认模板时协调稳定 key、历史表名与同 physical 列的显示名变更', async () => {
+    const original = buildOriginalDefaultTableTemplateObject_ACU() as any;
+    const current = buildDefaultTableTemplateObject_ACU() as any;
+    const globalKey = 'sheet_dCudvUnH';
+    const protagonistKey = 'sheet_DpKcVGqg';
+    const skillsKey = 'sheet_lEARaBa8';
+    const baseline = state({
+      [globalKey]: structuredClone(original[globalKey]),
+      [protagonistKey]: structuredClone(original[protagonistKey]),
+      [skillsKey]: structuredClone(original[skillsKey]),
+    });
+    baseline[globalKey].content.push(['1', '御苑', '2026-02-03 09:00', null, '0分']);
+    baseline[protagonistKey].name = '主角信息';
+    baseline[protagonistKey].content.push(['1', '助手', '女/18', '红发', '研究员', '旧经历', '理性']);
+    baseline[skillsKey].content[0][3] = '技能等级';
+    baseline[skillsKey].sourceData.ddl = baseline[skillsKey].sourceData.ddl.replace('-- 等级/阶段', '-- 技能等级');
+    baseline[skillsKey].content.push(['1', '分析', '主动', 'Lv.1', '定位问题']);
+    const template = state({
+      [globalKey]: structuredClone(current[globalKey]),
+      [protagonistKey]: structuredClone(current[protagonistKey]),
+      [skillsKey]: structuredClone(current[skillsKey]),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData[globalKey].content).toEqual([
+      current[globalKey].content[0],
+      ['1', null, '御苑', null, null, null, '0分', '2026-02-03 09:00'],
+    ]);
+    expect(plan.candidateData[skillsKey].content).toEqual([
+      current[skillsKey].content[0],
+      ['1', '分析', '主动', 'Lv.1', '定位问题'],
+    ]);
+    expect(plan.candidateData[protagonistKey].name).toBe('主角信息表');
+    expect(getSheetColumnProjection_ACU(plan.candidateData[protagonistKey]).visibleColumns.map(column => column.header)).toEqual(current[protagonistKey].content[0]);
+    expect(plan.candidateData[protagonistKey].content[1]).toEqual([
+      '1', null, null, null, '红发', null, null, null, null,
+      '助手', '女/18', '研究员', '旧经历', '理性',
+    ]);
+    expect(plan.candidateData[protagonistKey].sourceData.hiddenPhysicalColumns).toHaveLength(5);
+    expect(plan.deletedSheetKeys).toEqual([]);
+    expect(plan.audit.find(item => item.sheetKey === globalKey)).toMatchObject({
+      inheritedColumns: expect.arrayContaining(['当前详细地点', '上轮场景时间', '经过的时间', '当前时间']),
+      addedColumns: expect.arrayContaining(['全局状态', '当前次要地区', '当前主要地区']),
+      deletedColumns: [],
+    });
+    expect(plan.audit.find(item => item.sheetKey === skillsKey)).toMatchObject({
+      inheritedColumns: expect.arrayContaining(['等级/阶段']),
+      addedColumns: [],
+      deletedColumns: [],
+    });
+    expect(plan.audit.find(item => item.sheetKey === protagonistKey)).toMatchObject({
+      inheritedColumns: ['外貌特征'],
+      addedColumns: expect.arrayContaining(['姓名', '性别', '年龄', '身份', '近况', '所在地点', '随身财物']),
+      deletedColumns: [],
+      hiddenColumns: expect.arrayContaining(['人物名称', '性别/年龄', '职业/身份', '过往经历', '性格特点']),
+    });
   });
 
   it('以 V2 replay 作为 candidate 事实来源，BOOLEAN DEFAULT TRUE 使用 SQLite 单元格表示', async () => {
@@ -108,17 +301,18 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.sheetChanges).toEqual([]);
   });
 
-  it('删除列并新增不同 physical 列时保留继承列，并以 null 填充新列', async () => {
+  it('模板缺失列与新增列并存时保留旧值、隐藏旧列并以 null 填充新列', async () => {
     const baseline = state({ sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', 'item_name', 'note'], 'row_id INTEGER PRIMARY KEY, item_name TEXT, note TEXT', [['1', '铁剑', '旧备注']]) });
     const template = state({ sheet_imported: sheet('sheet_imported', '背包', ['row_id', 'item_name', 'quality'], 'row_id INTEGER PRIMARY KEY, item_name TEXT, quality TEXT', []) });
 
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', 'item_name', 'quality'], ['1', '铁剑', null]]);
+    expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', 'item_name', 'quality', 'note'], ['1', '铁剑', null, '旧备注']]);
+    expect(plan.candidateData.sheet_legacy.sourceData.hiddenPhysicalColumns).toEqual(['note']);
     expect((plan.sheetChanges[0] as any).operations[0]).toMatchObject({
       contractVersion: 2,
-      migrationPolicy: { destructiveChangeConfirmed: true },
+      migrationPolicy: { destructiveChangeConfirmed: false },
       fills: { quality: { kind: 'literal' } },
     });
   });
@@ -142,7 +336,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.blockers.join('\n')).toContain('无法安全表达删除');
   });
 
-  it('合法 physical rename 可与独立删除和新增列一起回放', async () => {
+  it('合法 physical rename 可与独立隐藏和新增列一起回放', async () => {
     const baseline = state({
       sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', '名称', '备注'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT, -- 名称\n  note TEXT -- 备注', [['1', '铁剑', '旧备注']]),
     });
@@ -153,7 +347,8 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', null]]);
+    expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质', '备注'], ['1', '铁剑', null, '旧备注']]);
+    expect(plan.candidateData.sheet_legacy.sourceData.hiddenPhysicalColumns).toEqual(['note']);
     expect((plan.sheetChanges[0] as any).operations[0].physicalColumnMappings).toEqual([{ fromPhysicalName: 'item_name', toPhysicalName: 'item_title' }]);
   });
 

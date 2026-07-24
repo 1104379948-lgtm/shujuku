@@ -1417,6 +1417,69 @@ describe('updateReadableLorebookEntry_ACU', () => {
     expect(mockUpdateCustomTableExports).toHaveBeenCalledWith(expect.any(Object), true, 'target-book');
     expect(mockGwGetLorebookEntries).toHaveBeenCalledWith('target-book');
   });
+
+  it('总结表仅有隐藏列数据时删除 MemoryStart/MemoryEnd，而不创建空壳记忆条目', async () => {
+    mockMergeAllIndependentTables.mockResolvedValue({
+      sheet_0: {
+        name: '公开表',
+        content: [['row_id', '名称'], ['1', '可见数据']],
+      },
+    });
+    mockFormatJsonToReadable.mockReturnValue({
+      readableText: '公开表数据',
+      importantPersonsTable: null,
+      outlineTable: null,
+      summaryTable: {
+        name: '总结表',
+        sourceData: {
+          ddl: 'CREATE TABLE summary (row_id INTEGER PRIMARY KEY, summary TEXT, legacy_note TEXT);',
+          hiddenPhysicalColumns: ['legacy_note'],
+        },
+        content: [['row_id', '总结', '旧备注'], ['1', '', '隐藏历史']],
+      },
+    });
+    mockGwGetLorebookEntries.mockResolvedValue([
+      { uid: 101, comment: 'TavernDB-ACU-MemoryStart' },
+      { uid: 102, comment: 'TavernDB-ACU-MemoryEnd' },
+    ]);
+
+    await updateReadableLorebookEntry_ACU(true, false);
+
+    expect(mockGwDeleteLorebookEntries).toHaveBeenCalledWith('test-lorebook', [101, 102]);
+    expect(mockGwCreateLorebookEntries).not.toHaveBeenCalledWith(
+      'test-lorebook',
+      expect.arrayContaining([expect.objectContaining({ comment: 'TavernDB-ACU-MemoryStart' })]),
+    );
+  });
+
+  it('全部数据仅存在于隐藏列时按公开视图清理旧世界书条目', async () => {
+    mockMergeAllIndependentTables.mockResolvedValue({
+      sheet_0: {
+        name: '隐藏历史表',
+        sourceData: {
+          ddl: 'CREATE TABLE history (row_id INTEGER PRIMARY KEY, title TEXT, legacy_note TEXT);',
+          hiddenPhysicalColumns: ['legacy_note'],
+        },
+        content: [['row_id', '标题', '旧备注'], ['1', '', '隐藏历史']],
+      },
+    });
+    mockFormatJsonToReadable.mockReturnValue({
+      readableText: '数据库为空。',
+      importantPersonsTable: null,
+      summaryTable: null,
+      outlineTable: null,
+    });
+    mockGwGetLorebookEntries.mockResolvedValue([
+      { uid: 201, comment: 'TavernDB-ACU-ReadableDataTable' },
+      { uid: 202, comment: 'TavernDB-ACU-WrapperStart' },
+      { uid: 203, comment: 'TavernDB-ACU-MemoryStart' },
+    ]);
+
+    await updateReadableLorebookEntry_ACU(true, false);
+
+    expect(mockGwDeleteLorebookEntries).toHaveBeenCalledWith('test-lorebook', [201, 202, 203]);
+    expect(mockUpdateCustomTableExports).toHaveBeenCalledWith(null, false, null);
+  });
 });
 
 describe('collectCombinedWorldbookEntriesByStrategy_ACU entryStateView', () => {

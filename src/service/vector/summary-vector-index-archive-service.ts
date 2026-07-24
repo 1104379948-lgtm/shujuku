@@ -11,9 +11,10 @@ import type {
     ChatSummaryVectorIndexRow_ACU,
     ChatSummaryVectorIndexState_ACU,
 } from '../../data/models/chat-message-data';
+import type { SummaryVectorIndexExternalFileRef_ACU } from './summary-vector-index-types';
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
 import type { VectorEmbeddingResult_ACU } from '../../data/gateways/vector-embedding-gateway';
-import { saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
+import { saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { getChatArray_ACU } from '../chat/chat-service';
 import { getLatestAiMessageIndexFromChat_ACU } from '../table/table-history';
@@ -30,19 +31,23 @@ import {
     getAggregatedSummaryVectorIndexSnapshot_ACU,
 } from './summary-vector-index-state-service';
 import {
+    abortSummaryVectorIndexSnapshotPublication_ACU,
     deleteSummaryVectorIndexExternal_ACU,
     isLegacySummaryVectorIndexManifest_ACU,
     loadSummaryVectorIndexChunksFromManifest_ACU,
+    logSummaryVectorIndexIdentityEvent_ACU,
     normalizeSummaryVectorIndexManifestForRead_ACU,
+    finalizeSummaryVectorIndexSnapshotPublication_ACU,
     persistSummaryVectorIndexSnapshot_ACU,
 } from './summary-vector-index-storage-service';
 import { hashUserInput_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 
 type SummaryVectorIndexArchiveMode_ACU = 'append' | 'sync';
 
-type SummaryVectorIndexArchiveOptions_ACU = {
+export type SummaryVectorIndexArchiveOptions_ACU = {
     targetMessageIndex?: number;
     mode?: SummaryVectorIndexArchiveMode_ACU;
+    /** 仅允许 durable publish；延迟保存没有 publication handle，不能安全暴露。 */
     saveChatAfterWrite?: boolean;
     /** 为 true 时跳过 "无变更" 检测，强制执行归档写入（含外置文件上传） */
     force?: boolean;
@@ -52,6 +57,10 @@ type SummaryVectorIndexArchiveOptions_ACU = {
      * 这实现了"纪要表变动→增量向量化→向量数据变动→防抖→本地归档"的正确触发链。
      */
     vectorizeOnly?: boolean;
+    /** Flush 恢复时必须使用入队时捕获的 scope，不能在执行时静默漂移到当前 isolation。 */
+    isolationKey?: string;
+    /** Flush 恢复时必须使用入队时捕获的纪要表。 */
+    sourceTableKey?: string;
 };
 
 export interface SummaryVectorIndexArchiveResult_ACU {
@@ -102,6 +111,7 @@ interface SummaryVectorIndexPendingArchive_ACU {
     finalChunks: ChatSummaryVectorIndexChunk_ACU[];
     targetMessageIndex: number;
     snapshotMessageId: string;
+    isolationKey: string;
     sourceTableKey: string;
     sourceTableName: string;
     indexedAt: string;
@@ -142,6 +152,7 @@ async function persistPendingVectorIndexArchive_ACU(scopeKey: string): Promise<v
             finalChunks: pending.finalChunks,
             targetMessageIndex: pending.targetMessageIndex,
             snapshotMessageId: pending.snapshotMessageId,
+            isolationKey: pending.isolationKey,
             sourceTableKey: pending.sourceTableKey,
             sourceTableName: pending.sourceTableName,
             indexedAt: pending.indexedAt,
@@ -164,16 +175,16 @@ export function flushPendingVectorIndexArchives_ACU(): void {
     }
 }
 
-function buildSummaryVectorIndexArchiveScopeKey_ACU(parts: {
+export function buildSummaryVectorIndexArchiveScopeKey_ACU(parts: {
     chatKey: string;
     isolationKey: string;
     sourceTableKey: string;
 }): string {
-    return [
+    return JSON.stringify([
         String(parts.chatKey || 'current-chat'),
         String(parts.isolationKey || 'default'),
         String(parts.sourceTableKey || 'summary'),
-    ].join('::');
+    ]);
 }
 
 async function runSummaryVectorIndexArchiveWithScopeLock_ACU<T>(
@@ -239,6 +250,29 @@ function buildResult_ACU(partial: Partial<SummaryVectorIndexArchiveResult_ACU> =
     };
 }
 
+const SUMMARY_VECTOR_INDEX_PUBLISH_MUTATED_MESSAGE_FIELDS_ACU = [
+    'TavernDB_ACU_IsolatedData',
+    'TavernDB_ACU_Identity',
+    'TavernDB_ACU_IndependentData',
+    'TavernDB_ACU_ModifiedKeys',
+    'TavernDB_ACU_UpdateGroupKeys',
+    '_acu_remote_memory_snapshot_anchor',
+] as const;
+
+function captureSummaryVectorIndexPublishMessageState_ACU(message: any): Map<string, { exists: boolean; value: unknown }> {
+    return new Map(SUMMARY_VECTOR_INDEX_PUBLISH_MUTATED_MESSAGE_FIELDS_ACU.map((field) => [
+        field,
+        { exists: Object.prototype.hasOwnProperty.call(message, field), value: message[field] },
+    ]));
+}
+
+function restoreSummaryVectorIndexPublishMessageState_ACU(message: any, snapshot: Map<string, { exists: boolean; value: unknown }>): void {
+    snapshot.forEach(({ exists, value }, field) => {
+        if (exists) message[field] = value;
+        else delete message[field];
+    });
+}
+
 function normalizeText_ACU(value: any): string {
     return String(value ?? '').trim();
 }
@@ -265,12 +299,14 @@ function buildPreparedRowFingerprint_ACU(row: SummaryVectorArchivePreparedRow_AC
     ].join('\n'));
 }
 
-export function findSummaryTable_ACU(): SummaryTableSelection_ACU | null {
+export function findSummaryTable_ACU(sourceTableKey?: string): SummaryTableSelection_ACU | null {
     if (!currentJsonTableData_ACU || typeof currentJsonTableData_ACU !== 'object') {
         return null;
     }
 
-    const summaryKey = Object.keys(currentJsonTableData_ACU).find((key) => {
+    const requestedKey = normalizeText_ACU(sourceTableKey);
+    const candidateKeys = requestedKey ? [requestedKey] : Object.keys(currentJsonTableData_ACU);
+    const summaryKey = candidateKeys.find((key) => {
         const table = currentJsonTableData_ACU[key];
         return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
     });
@@ -677,6 +713,7 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     indexedAt: string;
     skippedRowCount: number;
     mode: SummaryVectorIndexArchiveMode_ACU;
+    isolationKey: string;
     saveChatAfterWrite?: boolean;
 }): Promise<void> {
     const message = options.chat[options.targetMessageIndex];
@@ -749,7 +786,7 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
         indexedAt: options.indexedAt,
         skippedRowCount: options.skippedRowCount,
     });
-    const isolationKey = getCurrentIsolationKey_ACU();
+    const isolationKey = options.isolationKey;
     const existingTagData = readIsolatedTagData_ACU(message, isolationKey) || {
         independentData: {},
         modifiedKeys: [],
@@ -773,6 +810,9 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
         ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
     } as any;
     const shouldWriteLegacyCompat = !existingTagDataIsV2 && isLegacyV1TagData_ACU(existingTagData);
+    let uploadedFiles: SummaryVectorIndexExternalFileRef_ACU[] = [];
+    let publishedManifest: any = null;
+    let publishMessageState: Map<string, { exists: boolean; value: unknown }> | null = null;
     if (nextState) {
         const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
         const persisted = await persistSummaryVectorIndexSnapshot_ACU({
@@ -795,48 +835,60 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
             snapshotRevision: previousManifest?.snapshot?.revision || 0,
             sourceMessageIndex: options.targetMessageIndex,
         });
+        uploadedFiles = persisted.uploadedFiles;
+        publishedManifest = persisted.manifest;
         assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
         logDebug_ACU(`[纪要向量索引] 已写入最新层内容寻址 manifest：rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}, chunkRefs=${persisted.manifest.contentAddressed?.chunkRefs?.length || 0}`);
     } else {
         assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
     }
-    nextIsolatedData[isolationKey] = nextTagData;
-    message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-    writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
-    const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
-    if (anchorForMessage?.anchor) {
-        persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
-    }
-    writeMessageIdentity_ACU(message, {
-        enabled: settings_ACU.dataIsolationEnabled,
-        code: settings_ACU.dataIsolationCode,
-    });
-    if (shouldWriteLegacyCompat) {
-        writeLegacyCompatData_ACU(
-            message,
-            nextTagData.independentData || {},
-            nextTagData.modifiedKeys || [],
-            nextTagData.updateGroupKeys || [],
-            { legacyConfirmed: true },
-        );
-    }
-    if (options.saveChatAfterWrite !== false) {
-        await saveChatToHost_ACU();
+    publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
+    try {
+        nextIsolatedData[isolationKey] = nextTagData;
+        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+        writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
+        const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
+        if (anchorForMessage?.anchor) {
+            persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
+        }
+        writeMessageIdentity_ACU(message, {
+            enabled: settings_ACU.dataIsolationEnabled,
+            code: settings_ACU.dataIsolationCode,
+        });
+        if (shouldWriteLegacyCompat) {
+            writeLegacyCompatData_ACU(
+                message,
+                nextTagData.independentData || {},
+                nextTagData.modifiedKeys || [],
+                nextTagData.updateGroupKeys || [],
+                { legacyConfirmed: true },
+            );
+        }
+        await saveChatToHostStrict_ACU();
+        await finalizeSummaryVectorIndexSnapshotPublication_ACU(uploadedFiles);
+    } catch (error) {
+        restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
+        abortSummaryVectorIndexSnapshotPublication_ACU(uploadedFiles);
+        if (publishedManifest) {
+            logSummaryVectorIndexIdentityEvent_ACU('warn', 'publish', 'orphan_retained', {
+                manifest: publishedManifest,
+                error,
+            });
+        }
+        throw error;
     }
 }
 
 async function clearSummaryVectorIndexCheckpoint_ACU(params: {
     chat: any[];
     targetMessageIndex: number;
+    isolationKey: string;
 }): Promise<boolean> {
     const message = params.chat?.[params.targetMessageIndex];
     if (!message || message.is_user) return false;
-    const isolationKey = getCurrentIsolationKey_ACU();
+    const isolationKey = params.isolationKey;
     const existingTagData = readIsolatedTagData_ACU(message, isolationKey);
     const manifest = existingTagData?.summaryVectorIndexManifest || existingTagData?.summaryVectorIndexState?.manifest || null;
-    if (manifest) {
-        await deleteSummaryVectorIndexExternal_ACU(manifest);
-    }
     if (!existingTagData?.summaryVectorIndexState && !existingTagData?.summaryVectorIndexManifest) return !!manifest;
 
     const nextIsolatedData = cloneIsolatedData_ACU(message);
@@ -858,28 +910,48 @@ async function clearSummaryVectorIndexCheckpoint_ACU(params: {
     } as any;
     const shouldWriteLegacyCompat = !existingTagDataIsV2 && isLegacyV1TagData_ACU(existingTagData);
     assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
-    nextIsolatedData[isolationKey] = nextTagData;
-    message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-    writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
-    writeMessageIdentity_ACU(message, {
-        enabled: settings_ACU.dataIsolationEnabled,
-        code: settings_ACU.dataIsolationCode,
-    });
-    if (shouldWriteLegacyCompat) {
-        writeLegacyCompatData_ACU(
-            message,
-            nextTagData.independentData || {},
-            nextTagData.modifiedKeys || [],
-            nextTagData.updateGroupKeys || [],
-            { legacyConfirmed: true },
-        );
+    const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
+    try {
+        nextIsolatedData[isolationKey] = nextTagData;
+        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+        writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
+        writeMessageIdentity_ACU(message, {
+            enabled: settings_ACU.dataIsolationEnabled,
+            code: settings_ACU.dataIsolationCode,
+        });
+        if (shouldWriteLegacyCompat) {
+            writeLegacyCompatData_ACU(
+                message,
+                nextTagData.independentData || {},
+                nextTagData.modifiedKeys || [],
+                nextTagData.updateGroupKeys || [],
+                { legacyConfirmed: true },
+            );
+        }
+        await saveChatToHostStrict_ACU();
+    } catch (error) {
+        restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
+        throw error;
     }
-    await saveChatToHost_ACU();
+    if (manifest) {
+        try {
+            await deleteSummaryVectorIndexExternal_ACU(manifest);
+        } catch (error) {
+            logWarn_ACU('[纪要向量索引] 空纪要表指针已提交，但旧外置文件延后清理:', error);
+        }
+    }
     logDebug_ACU(`[纪要向量索引] 当前纪要表无有效条目，已清理目标楼层交火索引 manifest: messageIndex=${params.targetMessageIndex}`);
     return true;
 }
 
 export async function migrateLegacySummaryVectorIndexToContentAddressed_ACU(options: { saveChatAfterWrite?: boolean } = {}): Promise<SummaryVectorIndexArchiveResult_ACU> {
+    if (options.saveChatAfterWrite === false) {
+        return buildResult_ACU({
+            success: false,
+            reason: 'summary_vector_index_delayed_publish_unsupported',
+            errors: ['纪要向量索引不支持延迟保存：没有可跨调用边界确认 durable publish 的安全句柄。'],
+        });
+    }
     const config = getEffectiveSummaryVectorIndexConfig_ACU();
     const validation = validateSummaryVectorIndexConfig_ACU(config);
     if (!validation.valid) {
@@ -999,24 +1071,34 @@ export async function migrateLegacySummaryVectorIndexToContentAddressed_ACU(opti
     } as any;
     const shouldWriteLegacyCompat = !existingTagDataIsV2 && isLegacyV1TagData_ACU(existingTagData);
     assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
-    nextIsolatedData[isolationKey] = nextTagData;
-    message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-    writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
-    writeMessageIdentity_ACU(message, {
-        enabled: settings_ACU.dataIsolationEnabled,
-        code: settings_ACU.dataIsolationCode,
-    });
-    if (shouldWriteLegacyCompat) {
-        writeLegacyCompatData_ACU(
-            message,
-            nextTagData.independentData || {},
-            nextTagData.modifiedKeys || [],
-            nextTagData.updateGroupKeys || [],
-            { legacyConfirmed: true },
-        );
-    }
-    if (options.saveChatAfterWrite !== false) {
-        await saveChatToHost_ACU();
+    const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
+    try {
+        nextIsolatedData[isolationKey] = nextTagData;
+        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+        writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
+        writeMessageIdentity_ACU(message, {
+            enabled: settings_ACU.dataIsolationEnabled,
+            code: settings_ACU.dataIsolationCode,
+        });
+        if (shouldWriteLegacyCompat) {
+            writeLegacyCompatData_ACU(
+                message,
+                nextTagData.independentData || {},
+                nextTagData.modifiedKeys || [],
+                nextTagData.updateGroupKeys || [],
+                { legacyConfirmed: true },
+            );
+        }
+        await saveChatToHostStrict_ACU();
+        await finalizeSummaryVectorIndexSnapshotPublication_ACU(persisted.uploadedFiles);
+    } catch (error) {
+        restoreSummaryVectorIndexPublishMessageState_ACU(message, publishMessageState);
+        abortSummaryVectorIndexSnapshotPublication_ACU(persisted.uploadedFiles);
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'publish', 'orphan_retained', {
+            manifest: persisted.manifest,
+            error,
+        });
+        throw error;
     }
     logDebug_ACU(`[纪要向量索引] 已非破坏迁移旧 shard manifest 到内容寻址协议：old=${manifest.indexId}, new=${persisted.manifest.indexId}, rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}`);
     return buildResult_ACU({
@@ -1032,6 +1114,13 @@ export async function migrateLegacySummaryVectorIndexToContentAddressed_ACU(opti
 }
 
 export async function archiveSummaryVectorIndexNow_ACU(options: SummaryVectorIndexArchiveOptions_ACU = {}): Promise<SummaryVectorIndexArchiveResult_ACU> {
+    if (options.saveChatAfterWrite === false) {
+        return buildResult_ACU({
+            success: false,
+            reason: 'summary_vector_index_delayed_publish_unsupported',
+            errors: ['纪要向量索引不支持延迟保存：没有可跨调用边界确认 durable publish 的安全句柄。'],
+        });
+    }
     const config = getEffectiveSummaryVectorIndexConfig_ACU();
     const validation = validateSummaryVectorIndexConfig_ACU(config);
     if (!validation.valid) {
@@ -1042,7 +1131,12 @@ export async function archiveSummaryVectorIndexNow_ACU(options: SummaryVectorInd
         });
     }
 
-    const selectedSummary = findSummaryTable_ACU();
+    const activeIsolationKey = getCurrentIsolationKey_ACU();
+    if (options.isolationKey && options.isolationKey !== activeIsolationKey) {
+        return buildResult_ACU({ success: false, reason: 'archive_scope_not_active', errors: ['归档只能处理当前激活的 isolation scope。'] });
+    }
+    const isolationKey = options.isolationKey || activeIsolationKey;
+    const selectedSummary = findSummaryTable_ACU(options.sourceTableKey);
     if (!selectedSummary) {
         return buildResult_ACU({
             success: true,
@@ -1070,13 +1164,16 @@ export async function archiveSummaryVectorIndexNow_ACU(options: SummaryVectorInd
         });
     }
 
-    const isolationKey = getCurrentIsolationKey_ACU();
     const archiveScopeKey = buildSummaryVectorIndexArchiveScopeKey_ACU({
         chatKey: currentChatFileIdentifier_ACU,
         isolationKey,
         sourceTableKey: selectedSummary.summaryKey,
     });
-    return runSummaryVectorIndexArchiveWithScopeLock_ACU(archiveScopeKey, () => archiveSummaryVectorIndexNowUnlocked_ACU(options));
+    return runSummaryVectorIndexArchiveWithScopeLock_ACU(archiveScopeKey, () => archiveSummaryVectorIndexNowUnlocked_ACU({
+        ...options,
+        isolationKey,
+        sourceTableKey: selectedSummary.summaryKey,
+    }));
 }
 
 async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIndexArchiveOptions_ACU = {}): Promise<SummaryVectorIndexArchiveResult_ACU> {
@@ -1090,7 +1187,12 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         });
     }
 
-    const selectedSummary = findSummaryTable_ACU();
+    const activeIsolationKey = getCurrentIsolationKey_ACU();
+    if (options.isolationKey && options.isolationKey !== activeIsolationKey) {
+        return buildResult_ACU({ success: false, reason: 'archive_scope_not_active', errors: ['归档只能处理当前激活的 isolation scope。'] });
+    }
+    const isolationKey = options.isolationKey || activeIsolationKey;
+    const selectedSummary = findSummaryTable_ACU(options.sourceTableKey);
     if (!selectedSummary) {
         return buildResult_ACU({
             success: true,
@@ -1142,7 +1244,11 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         const archiveMode: SummaryVectorIndexArchiveMode_ACU = options.mode === 'append' ? 'append' : 'sync';
         if (archiveMode === 'sync') {
             try {
-                const cleared = await clearSummaryVectorIndexCheckpoint_ACU({ chat, targetMessageIndex });
+                const cleared = await clearSummaryVectorIndexCheckpoint_ACU({
+                    chat,
+                    targetMessageIndex,
+                    isolationKey,
+                });
                 return buildResult_ACU({
                     success: true,
                     skipped: !cleared,
@@ -1243,7 +1349,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         if (options.vectorizeOnly) {
             const scopeKey = buildSummaryVectorIndexArchiveScopeKey_ACU({
                 chatKey: currentChatFileIdentifier_ACU,
-                isolationKey: getCurrentIsolationKey_ACU(),
+                isolationKey,
                 sourceTableKey: selectedSummary.summaryKey,
             });
             pendingVectorIndexArchives_ACU.set(scopeKey, {
@@ -1255,6 +1361,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 finalChunks: finalResult.chunks,
                 targetMessageIndex,
                 snapshotMessageId,
+                isolationKey,
                 sourceTableKey: selectedSummary.summaryKey,
                 sourceTableName,
                 indexedAt,
@@ -1290,7 +1397,8 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
             indexedAt,
             skippedRowCount: prepared.skippedRowCount,
             mode: archiveMode,
-            saveChatAfterWrite: options.saveChatAfterWrite !== false,
+            isolationKey,
+            saveChatAfterWrite: true,
         });
 
         return buildResult_ACU({

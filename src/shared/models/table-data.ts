@@ -54,6 +54,11 @@ export interface SheetSourceData_ACU {
   insertNode: string;
   /** SQLite 模式下的建表 DDL（可选，仅 sqlite 模式使用） */
   ddl?: string;
+  /**
+   * 仅从活动模板/UI/AI 投影中隐藏的 SQLite physical column。
+   * 底层 DDL、content 表头与历史行仍完整保留这些列。
+   */
+  hiddenPhysicalColumns?: string[];
 }
 
 /** 单张表格（sheet）的完整结构 */

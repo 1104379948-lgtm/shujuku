@@ -107,6 +107,7 @@ vi.mock('../../../src/shared/json-helpers', () => ({
 // 现在 import 被测模块
 import {
   applySqlEditsToTableDataSnapshot_ACU,
+  assertNoHiddenPhysicalColumnMutations_ACU,
   buildSqlSheetBatchOperations_ACU,
   rebindSqlMutationTableIdentifiers_ACU,
   SqlTableService,
@@ -413,6 +414,14 @@ describe('rebindSqlMutationTableIdentifiers_ACU', () => {
     ]);
   });
 
+  it.each([
+    ['UPDATE main.inventory SET value = \'x\' WHERE row_id = 1;', 'UPDATE main.beibaowupinbiao SET value = \'x\' WHERE row_id = 1;'],
+    ['UPDATE "main"."inventory" SET value = \'x\' WHERE row_id = 1;', 'UPDATE "main"."beibaowupinbiao" SET value = \'x\' WHERE row_id = 1;'],
+    ['INSERT INTO [main].[inventory] (row_id, value) VALUES (1, \'x\');', 'INSERT INTO [main].[beibaowupinbiao] (row_id, value) VALUES (1, \'x\');'],
+  ])('保留 schema qualifier 并重绑定其目标表：%s', (statement, expected) => {
+    expect(rebindSqlMutationTableIdentifiers_ACU([statement], tableData)).toEqual([expected]);
+  });
+
   it('保留字符串与注释内容，并按原 quoting 风格重绑定标识符', () => {
     expect(rebindSqlMutationTableIdentifiers_ACU([
       "UPDATE `inventory` SET value = 'FROM inventory' /* JOIN inventory */ WHERE row_id IN (SELECT row_id FROM [inventory]);",
@@ -462,6 +471,78 @@ describe('rebindSqlMutationTableIdentifiers_ACU', () => {
       .toEqual(['INSERT INTO legacy_uid VALUES (1);']);
     expect(() => rebindSqlMutationTableIdentifiers_ACU(['INSERT INTO beibaowupinbiao VALUES (1);'], tableData))
       .not.toThrow();
+  });
+});
+
+describe('assertNoHiddenPhysicalColumnMutations_ACU', () => {
+  const tableData: any = {
+    sheet_0: {
+      uid: 'inventory',
+      name: '背包物品表',
+      sourceData: {
+        ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, legacy_note TEXT, quantity INTEGER);',
+        hiddenPhysicalColumns: ['legacy_note'],
+      },
+      content: [
+        ['row_id', '名称', '旧备注', '数量'],
+        ['1', '铁剑', '历史秘密', '3'],
+      ],
+    },
+  };
+
+  it('拒绝 UPDATE、INSERT 和 WHERE 引用隐藏物理列', () => {
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([
+      "UPDATE inventory SET legacy_note = '改写' WHERE row_id = 1",
+    ], tableData)).toThrow('不允许引用隐藏物理列');
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([
+      "INSERT INTO inventory (row_id, item_name, legacy_note, quantity) VALUES (2, '药水', '秘密', 1)",
+    ], tableData)).toThrow('不允许引用隐藏物理列');
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([
+      "UPDATE inventory SET quantity = 4 WHERE legacy_note = '历史秘密'",
+    ], tableData)).toThrow('不允许引用隐藏物理列');
+  });
+
+  it('存在隐藏列时拒绝省略 INSERT 列清单，避免按完整物理顺序写穿', () => {
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([
+      "INSERT INTO inventory VALUES (2, '药水', '秘密', 1)",
+    ], tableData)).toThrow('必须显式列出可见目标列');
+  });
+
+  it('允许只引用可见列，并忽略字符串与注释中的隐藏列文本', () => {
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([
+      "UPDATE inventory SET quantity = quantity + 1, item_name = 'legacy_note' /* legacy_note */ WHERE row_id = 1",
+      "INSERT INTO inventory (row_id, item_name, quantity) VALUES (2, '药水', 1)",
+    ], tableData)).not.toThrow();
+  });
+
+  it.each([
+    'UPDATE main.inventory SET legacy_note = \'改写\' WHERE row_id = 1',
+    'UPDATE "main"."inventory" SET "legacy_note" = \'改写\' WHERE row_id = 1',
+    'UPDATE `main`.`inventory` SET `legacy_note` = \'改写\' WHERE row_id = 1',
+    'UPDATE [main].[inventory] SET [legacy_note] = \'改写\' WHERE row_id = 1',
+    "INSERT INTO main.inventory (row_id, item_name, legacy_note, quantity) VALUES (2, '药水', '秘密', 1)",
+    "DELETE FROM main.inventory WHERE legacy_note = '历史秘密'",
+  ])('拒绝 schema-qualified 或 quoted target 对隐藏列的引用：%s', statement => {
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([statement], tableData))
+      .toThrow('不允许引用隐藏物理列');
+  });
+
+  it.each([
+    'ALTER TABLE inventory DROP COLUMN legacy_note',
+    'CREATE TABLE another_table (id INTEGER)',
+    'DROP TABLE inventory',
+    'BEGIN',
+    'COMMIT',
+  ])('对 AI SQL 的非 mutation 语句 fail closed：%s', statement => {
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([statement], tableData))
+      .toThrow('不支持安全重绑定的 SQL 语句类型');
+  });
+
+  it('拒绝多语句中位于后续语句的隐藏列引用', () => {
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([
+      "UPDATE inventory SET quantity = 4 WHERE row_id = 1",
+      "UPDATE inventory SET legacy_note = '历史秘密' WHERE row_id = 1",
+    ], tableData)).toThrow('不允许引用隐藏物理列');
   });
 });
 

@@ -8,7 +8,7 @@ import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync';
 import { ensureInitialSeedCheckpoint_ACU, handleChatCompletionReady_ACU, loadPresetAndCleanCharacterData_ACU } from '../../service/runtime/helpers-remaining';
 import { SillyTavern_API_ACU } from '../../shared/host-api';
-import { currentChatFileIdentifier_ACU, generationGate_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessAutoTableUpdateForGenerationEnded_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_isProcessing_Plot_ACU, _set_lastTotalAiMessages_ACU} from '../../service/runtime/state-manager';
+import { currentChatFileIdentifier_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessAutoTableUpdateForGenerationEnded_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_isProcessing_Plot_ACU, _set_lastTotalAiMessages_ACU} from '../../service/runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
@@ -28,6 +28,7 @@ import { processSummaryVectorIndexBeforeGenerationWithUI_ACU } from '../componen
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
 import { markSummaryVectorIndexDirtyForRealign_ACU } from '../../service/vector/summary-vector-index-realign-state';
+import { buildSummaryVectorIndexArchiveScopeKey_ACU, findSummaryTable_ACU } from '../../service/vector/summary-vector-index-archive-service';
 import { topLevelWindow_ACU } from '../../shared/env';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
@@ -485,8 +486,16 @@ export   function mainInitialize_ACU() {
                         const realignDirtyReason = evName === 'MESSAGE_DELETED'
                             ? 'chat_modified_deleted'
                             : 'chat_modified_swiped';
-                        markSummaryVectorIndexDirtyForRealign_ACU(realignDirtyReason);
-                        logDebug_ACU(`[交火向量索引] ${evName}: 已标记下一次归档后执行懒对齐。`);
+                        const summaryTable = findSummaryTable_ACU();
+                        if (currentChatFileIdentifier_ACU && summaryTable?.summaryKey) {
+                            const scopeKey = buildSummaryVectorIndexArchiveScopeKey_ACU({
+                                chatKey: currentChatFileIdentifier_ACU,
+                                isolationKey: getCurrentIsolationKey_ACU(),
+                                sourceTableKey: summaryTable.summaryKey,
+                            });
+                            markSummaryVectorIndexDirtyForRealign_ACU(scopeKey, realignDirtyReason);
+                            logDebug_ACU(`[交火向量索引] ${evName}: 已标记 scope=${scopeKey} 下一次归档后执行懒对齐。`);
+                        }
                     }, 500)); // 使用防抖处理快速滑动
                 });
             }

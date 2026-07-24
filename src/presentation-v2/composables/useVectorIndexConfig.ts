@@ -34,7 +34,10 @@ import { getLastMessageIndex_ACU } from '../../service/chat/chat-service';
 import { updateReadableLorebookEntry_ACU } from '../../service/worldbook/pipeline';
 import { defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { currentJsonTableData_ACU } from '../../service/runtime/state-manager';
-import type { SummaryVectorIndexStats_ACU } from '../../service/vector/summary-vector-index-types';
+import type {
+  SummaryVectorIndexHealthReport_ACU,
+  SummaryVectorIndexStats_ACU,
+} from '../../service/vector/summary-vector-index-types';
 import { useToastStore } from '../stores/toast-store';
 
 type MessageKind = 'info' | 'success' | 'warning' | 'error';
@@ -89,6 +92,8 @@ export interface VectorIndexForm {
   summaryIndexArchiveMaxConcurrency: number;
   summaryIndexRollingDeltaEnabled: boolean;
   summaryIndexRollingDeltaFoldThreshold: number;
+  summaryIndexV2WriteEnabled: boolean;
+  summaryIndexV2WriteScopeAllowlistText: string;
   // 关键词生成
   keywordApiPreset: string;
   keywordContextPairCount: number;
@@ -150,6 +155,8 @@ function createEmptyForm(): VectorIndexForm {
     summaryIndexArchiveMaxConcurrency: defaults.summaryIndexArchiveMaxConcurrency ?? 30,
     summaryIndexRollingDeltaEnabled: defaults.summaryIndexRollingDeltaEnabled === true,
     summaryIndexRollingDeltaFoldThreshold: defaults.summaryIndexRollingDeltaFoldThreshold,
+    summaryIndexV2WriteEnabled: defaults.summaryIndexV2WriteEnabled === true,
+    summaryIndexV2WriteScopeAllowlistText: Array.isArray(defaults.summaryIndexV2WriteScopeAllowlist) ? defaults.summaryIndexV2WriteScopeAllowlist.join('\n') : '',
     keywordApiPreset: defaults.keywordApiPreset || '',
     keywordContextPairCount: defaults.keywordContextPairCount,
     keywordGenerationMaxAttempts: defaults.keywordGenerationMaxAttempts,
@@ -203,6 +210,7 @@ export function useVectorIndexConfig() {
   const maintenanceBusy = ref(false);
   const statusLoading = ref(false);
   const indexStats = ref<SummaryVectorIndexStats_ACU | null>(null);
+  const healthReport = ref<SummaryVectorIndexHealthReport_ACU | null>(null);
   const displayRowCount = ref(0);
   const displayChunkCount = ref(0);
   let progressToastId: string | null = null;
@@ -243,6 +251,8 @@ export function useVectorIndexConfig() {
     form.summaryIndexArchiveMaxConcurrency = config.summaryIndexArchiveMaxConcurrency;
     form.summaryIndexRollingDeltaEnabled = config.summaryIndexRollingDeltaEnabled === true;
     form.summaryIndexRollingDeltaFoldThreshold = config.summaryIndexRollingDeltaFoldThreshold;
+    form.summaryIndexV2WriteEnabled = config.summaryIndexV2WriteEnabled === true;
+    form.summaryIndexV2WriteScopeAllowlistText = Array.isArray(config.summaryIndexV2WriteScopeAllowlist) ? config.summaryIndexV2WriteScopeAllowlist.join('\n') : '';
     form.keywordApiPreset = config.keywordApiPreset || '';
     form.keywordContextPairCount = config.keywordContextPairCount;
     form.keywordGenerationMaxAttempts = config.keywordGenerationMaxAttempts;
@@ -326,11 +336,23 @@ export function useVectorIndexConfig() {
   }
 
   function setBooleanField<
-    K extends 'summaryIndexRollingDeltaEnabled',
+    K extends 'summaryIndexRollingDeltaEnabled' | 'summaryIndexV2WriteEnabled',
   >(key: K, value: boolean): void {
     const next = value === true;
     (form as any)[key] = next;
     updateGlobalVectorMemoryConfigFields_ACU({ [key]: next });
+    saveSettings_ACU();
+    runValidation();
+    pushSavedMessage();
+  }
+
+  function setV2WriteScopeAllowlist(raw: string): void {
+    const normalized = Array.from(new Set(String(raw || '')
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean)));
+    form.summaryIndexV2WriteScopeAllowlistText = normalized.join('\n');
+    updateGlobalVectorMemoryConfigFields_ACU({ summaryIndexV2WriteScopeAllowlist: normalized });
     saveSettings_ACU();
     runValidation();
     pushSavedMessage();
@@ -423,8 +445,12 @@ export function useVectorIndexConfig() {
     try {
       const snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
       const state = snapshot?.summaryVectorIndexState || null;
-      const stats = await getSummaryVectorIndexStats_ACU(state?.manifest || null);
+      const [stats, health] = await Promise.all([
+        getSummaryVectorIndexStats_ACU(state?.manifest || null),
+        inspectSummaryVectorIndexHealth_ACU(),
+      ]);
       indexStats.value = stats;
+      healthReport.value = health;
       const stateRows = Array.isArray(state?.rows)
         ? state.rows.filter((row: any) => row?.status !== 'removed').length
         : 0;
@@ -490,7 +516,7 @@ export function useVectorIndexConfig() {
       const result = await migrateLegacySummaryVectorIndexToContentAddressed_ACU();
       await refreshIndexStatus(false);
       if (result.success && !result.skipped) {
-        notify('success', `旧交火索引非破坏迁移完成：${result.indexedRowCount || 0} 行，${result.chunkCount || 0} 个 chunks。旧楼层引用保持不变。`, { muteable: false });
+        notify('success', `旧交火索引非破坏迁移完成：${result.indexedRowCount || 0} 行，${result.chunkCount || 0} 个 chunks。新 V2 pointer 已 durable 发布；旧外置对象未在主提交路径删除，后续由安全 GC 处理。`, { muteable: false });
         return;
       }
 
@@ -587,6 +613,14 @@ export function useVectorIndexConfig() {
         label: '归档队列',
         value: `${(stats?.flushTaskDirtyCount || 0) + (stats?.flushTaskQueuedCount || 0) + (stats?.flushTaskFlushingCount || 0)} 等待 / ${stats?.flushTaskFailedCount || 0} 失败`,
       },
+      {
+        label: '身份健康',
+        value: `${healthReport.value?.status || 'unknown'} / ${healthReport.value?.identityMismatchCount || 0} identity / ${healthReport.value?.pathIdentityCollisionCount || 0} collision / ${healthReport.value?.checksumMismatchCount || 0} checksum`,
+      },
+      {
+        label: 'Legacy 待迁移',
+        value: healthReport.value?.legacyManifestCount || 0,
+      },
       { label: '更新时间', value: formatTime(stats?.updatedAt || ''), key: 'updatedAt' },
     ];
   });
@@ -609,6 +643,7 @@ export function useVectorIndexConfig() {
     maintenanceBusy,
     statusLoading,
     indexStats,
+    healthReport,
     statusLabel,
     statusVariant,
     statusStatsItems,
@@ -622,6 +657,7 @@ export function useVectorIndexConfig() {
     setApiField,
     setNumberField,
     setBooleanField,
+    setV2WriteScopeAllowlist,
     setMinScore,
     addPromptSegment,
     deletePromptSegment,

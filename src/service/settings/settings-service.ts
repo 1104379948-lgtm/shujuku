@@ -509,14 +509,18 @@ export   function loadSettings_ACU() {
       // 只能补缺失字段，绝不能在版本刷新时覆盖用户已经填写的模型、API、召回参数或提示词。
       if (globalMeta_ACU.vectorMemoryConfigGlobal && typeof globalMeta_ACU.vectorMemoryConfigGlobal === 'object' && !Array.isArray(globalMeta_ACU.vectorMemoryConfigGlobal)) {
           const vectorConfig = globalMeta_ACU.vectorMemoryConfigGlobal as any;
+          const cloneDefaultValue_ACU = (value: any) => JSON.parse(JSON.stringify(value));
+          const fillMissing_ACU = (key: string, value: any) => {
+              if (typeof vectorConfig[key] === 'undefined' || vectorConfig[key] === null || vectorConfig[key] === '') {
+                  vectorConfig[key] = cloneDefaultValue_ACU(value);
+                  shouldPersistSettingsAfterLoad_ACU = true;
+              }
+          };
+          // Rollout 安全闸门是独立的幂等迁移：不能受旧默认值刷新 marker 限制，
+          // 否则已升级 marker 但缺字段的用户会绕过 V2 默认关闭策略。
+          fillMissing_ACU('summaryIndexV2WriteEnabled', (defaultVectorMemoryConfig_ACU as any).summaryIndexV2WriteEnabled === true);
+          fillMissing_ACU('summaryIndexV2WriteScopeAllowlist', (defaultVectorMemoryConfig_ACU as any).summaryIndexV2WriteScopeAllowlist || []);
           if (vectorConfig.defaultsRefreshVersion !== VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU) {
-              const cloneDefaultValue_ACU = (value: any) => JSON.parse(JSON.stringify(value));
-              const fillMissing_ACU = (key: string, value: any) => {
-                  if (typeof vectorConfig[key] === 'undefined' || vectorConfig[key] === null || vectorConfig[key] === '') {
-                      vectorConfig[key] = cloneDefaultValue_ACU(value);
-                      shouldPersistSettingsAfterLoad_ACU = true;
-                  }
-              };
               const fillMissingPromptGroup_ACU = (key: string, value: any[]) => {
                   if (!Array.isArray(vectorConfig[key]) || vectorConfig[key].length === 0) {
                       vectorConfig[key] = cloneDefaultValue_ACU(value || []);

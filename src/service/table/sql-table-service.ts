@@ -32,6 +32,7 @@ import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
+import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
   workingData?: TableDataObject_ACU;
@@ -198,7 +199,24 @@ function isSqlMutationKeyword_ACU(token: SqlMutationIdentifierToken_ACU | undefi
   return !!token && token.quote === null && token.value.toUpperCase() === keyword;
 }
 
-function getSqlMutationTargetToken_ACU(tokens: SqlMutationIdentifierToken_ACU[]): SqlMutationIdentifierToken_ACU {
+function getQualifiedSqlIdentifierTail_ACU(
+  statement: string,
+  tokens: SqlMutationIdentifierToken_ACU[],
+  startIndex: number,
+): SqlMutationIdentifierToken_ACU | undefined {
+  let token = tokens[startIndex];
+  if (!token) return undefined;
+  let index = startIndex;
+  while (tokens[index + 1]
+    && tokens[index + 1].depth === token.depth
+    && /^\s*\.\s*$/.test(statement.slice(token.end, tokens[index + 1].start))) {
+    index += 1;
+    token = tokens[index];
+  }
+  return token;
+}
+
+function getSqlMutationTargetToken_ACU(statement: string, tokens: SqlMutationIdentifierToken_ACU[]): SqlMutationIdentifierToken_ACU {
   const first = tokens[0];
   if (isSqlMutationKeyword_ACU(first, 'INSERT') || isSqlMutationKeyword_ACU(first, 'REPLACE')) {
     let index = 1;
@@ -209,10 +227,11 @@ function getSqlMutationTargetToken_ACU(tokens: SqlMutationIdentifierToken_ACU[])
       }
       index += 2;
     }
-    if (!isSqlMutationKeyword_ACU(tokens[index], 'INTO') || !tokens[index + 1]) {
+    const target = getQualifiedSqlIdentifierTail_ACU(statement, tokens, index + 1);
+    if (!isSqlMutationKeyword_ACU(tokens[index], 'INTO') || !target) {
       throw new Error('INSERT/REPLACE SQL 缺少可验证的目标表。');
     }
-    return tokens[index + 1];
+    return target;
   }
   if (isSqlMutationKeyword_ACU(first, 'UPDATE')) {
     let index = 1;
@@ -223,17 +242,20 @@ function getSqlMutationTargetToken_ACU(tokens: SqlMutationIdentifierToken_ACU[])
       }
       index += 2;
     }
-    if (!tokens[index]) throw new Error('UPDATE SQL 缺少可验证的目标表。');
-    return tokens[index];
+    const target = getQualifiedSqlIdentifierTail_ACU(statement, tokens, index);
+    if (!target) throw new Error('UPDATE SQL 缺少可验证的目标表。');
+    return target;
   }
   if (isSqlMutationKeyword_ACU(first, 'DELETE')) {
-    if (!isSqlMutationKeyword_ACU(tokens[1], 'FROM') || !tokens[2]) throw new Error('DELETE SQL 缺少可验证的目标表。');
-    return tokens[2];
+    const target = getQualifiedSqlIdentifierTail_ACU(statement, tokens, 2);
+    if (!isSqlMutationKeyword_ACU(tokens[1], 'FROM') || !target) throw new Error('DELETE SQL 缺少可验证的目标表。');
+    return target;
   }
   throw new Error(`不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
 }
 
 function collectSqlMutationTableReferenceTokens_ACU(
+  statement: string,
   tokens: SqlMutationIdentifierToken_ACU[],
   mutationTarget: SqlMutationIdentifierToken_ACU,
 ): SqlMutationIdentifierToken_ACU[] {
@@ -255,7 +277,7 @@ function collectSqlMutationTableReferenceTokens_ACU(
     if (keyword === 'FROM') activeFromDepths.add(token.depth);
 
     if (keyword === 'FROM' || keyword === 'JOIN') {
-      const reference = tokens[index + 1];
+      const reference = getQualifiedSqlIdentifierTail_ACU(statement, tokens, index + 1);
       if (reference && reference.depth === token.depth && !cteNames.has(reference.value.toLowerCase())) {
         references.set(reference.start, reference);
       }
@@ -312,7 +334,7 @@ export function rebindSqlMutationTableIdentifiers_ACU(
     const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
     let target: SqlMutationIdentifierToken_ACU;
     try {
-      target = getSqlMutationTargetToken_ACU(tokens);
+      target = getSqlMutationTargetToken_ACU(statement, tokens);
     } catch (error: any) {
       if (String(error?.message || error).startsWith('不支持安全重绑定的 SQL 语句类型：')) return statement;
       throw error;
@@ -321,7 +343,7 @@ export function rebindSqlMutationTableIdentifiers_ACU(
     if (physicalName === undefined) return statement;
     if (!physicalName) throw new Error(`无法唯一解析 SQL 目标表标识符：${target.value}。`);
     const replacements: Array<{ token: SqlMutationIdentifierToken_ACU; physicalName: string }> = [];
-    for (const reference of collectSqlMutationTableReferenceTokens_ACU(tokens, target)) {
+    for (const reference of collectSqlMutationTableReferenceTokens_ACU(statement, tokens, target)) {
       const resolved = targets.get(reference.value.toLowerCase());
       if (resolved === undefined) continue;
       if (!resolved) throw new Error(`无法唯一解析 SQL 表引用：${reference.value}。`);
@@ -332,6 +354,59 @@ export function rebindSqlMutationTableIdentifiers_ACU(
     }
     return applySqlMutationIdentifierReplacements_ACU(statement, replacements);
   });
+}
+
+/**
+ * Rejects AI-authored INSERT/UPDATE assignments that target hidden physical
+ * columns. It deliberately reuses the mutation tokenizer so strings and
+ * comments cannot masquerade as identifiers.
+ */
+export function assertNoHiddenPhysicalColumnMutations_ACU(
+  statements: string[],
+  tableData: Record<string, any>,
+): void {
+  const physicalNames = resolvePhysicalTableNames_ACU(tableData as TableDataObject_ACU);
+  const sheetsByAlias = new Map<string, { sheetKey: string; sheet: any } | null>();
+  for (const [sheetKey, physicalName] of physicalNames) {
+    const sheet = tableData[sheetKey] as any;
+    for (const alias of [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName]) {
+      const normalized = String(alias || '').trim().toLowerCase();
+      if (!normalized) continue;
+      const existing = sheetsByAlias.get(normalized);
+      if (existing && existing.sheetKey !== sheetKey) sheetsByAlias.set(normalized, null);
+      else if (existing !== null) sheetsByAlias.set(normalized, { sheetKey, sheet });
+    }
+  }
+
+  for (const statement of statements) {
+    const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
+    const target = getSqlMutationTargetToken_ACU(statement, tokens);
+    const resolved = sheetsByAlias.get(target.value.toLowerCase());
+    if (resolved === undefined) continue;
+    if (resolved === null) throw new Error(`无法唯一解析隐藏列保护的 SQL 目标表：${target.value}。`);
+    const hidden = new Set(getSheetColumnProjection_ACU(resolved.sheet).hiddenPhysicalColumns.map(name => name.toLowerCase()));
+    if (hidden.size === 0) continue;
+
+    const hiddenReferences = tokens.filter(token => token !== target && hidden.has(token.value.toLowerCase()));
+    if (hiddenReferences.length > 0) {
+      throw new Error(`SQL mutation 不允许引用隐藏物理列：${[...new Set(hiddenReferences.map(token => token.value))].join('、')}。`);
+    }
+
+    const first = tokens[0];
+    const isInsert = isSqlMutationKeyword_ACU(first, 'INSERT') || isSqlMutationKeyword_ACU(first, 'REPLACE');
+    if (isInsert) {
+      const targetIndex = tokens.indexOf(target);
+      const clauseIndex = tokens.findIndex((token, index) => index > targetIndex
+        && token.depth === target.depth
+        && token.quote === null
+        && new Set(['VALUES', 'SELECT', 'DEFAULT']).has(token.value.toUpperCase()));
+      const beforeClause = clauseIndex === -1 ? tokens.slice(targetIndex + 1) : tokens.slice(targetIndex + 1, clauseIndex);
+      const columnTokens = beforeClause.filter(token => token.depth === target.depth + 1);
+      if (columnTokens.length === 0) {
+        throw new Error(`存在隐藏物理列时，INSERT/REPLACE 必须显式列出可见目标列：${target.value}。`);
+      }
+    }
+  }
 }
 
 export function mapSqlTableNamesToSheetKeys_ACU(tableData: TableDataObject_ACU | null | undefined, tableNames: string[]): string[] {

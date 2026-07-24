@@ -1,6 +1,6 @@
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
-import { parseDDLColumnInfos_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
+import { getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU, parseDDLTableConstraints_ACU, parseDDLTableName, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
 import { preflightSchemaMigrations_ACU, type SchemaMigrationPreflightIntent_ACU } from '../table/schema-migration-preflight';
 import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist';
 import { applyTableOperationV2_ACU } from '../table/storage-frame-v2-replay';
@@ -23,6 +23,7 @@ export interface ChatTemplateReconcileAudit_ACU {
   inheritedColumns: string[];
   addedColumns: string[];
   deletedColumns: string[];
+  hiddenColumns: string[];
   physicalColumnMappings: Array<{ fromPhysicalName: string; toPhysicalName: string }>;
   fills: Array<{ physicalName: string; kind: string; literal: unknown }>;
   affectedRowCount: number;
@@ -63,15 +64,30 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
   const metadataByKey = new Map<string, Record<string, any>>();
   const matchedKeys = new Set<string>();
   for (const [canonicalName, templateEntry] of templateByName) {
-    const previous = baselineByName.get(canonicalName);
+    const matchedByName = baselineByName.get(canonicalName);
+    const occupiedByKey = baselineData[templateEntry.key] as Sheet_ACU | undefined;
+    if (matchedByName && occupiedByKey && matchedByName.key !== templateEntry.key) {
+      blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」的名称匹配当前聊天 key「${matchedByName.key}」，但模板 key「${templateEntry.key}」已被表「${occupiedByKey.name || templateEntry.key}」占用，无法唯一协调。`);
+      continue;
+    }
+    let previous = matchedByName;
+    // 早期内置模板曾在保持稳定 key 的同时混用“主角信息”与“主角信息表”。
+    // 兼容范围绑定已知稳定 key 与明确名称对，禁止把任意“名称/名称表”推断成同一张用户表。
+    if (!previous && occupiedByKey && areLegacyEquivalentSheetNames_ACU(templateEntry.key, occupiedByKey.name, templateEntry.sheet.name)) {
+      previous = { key: templateEntry.key, sheet: occupiedByKey };
+    }
     if (!previous) {
-      if (baselineData[templateEntry.key]) {
+      if (occupiedByKey) {
         blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」的 key「${templateEntry.key}」已被当前聊天占用。`);
         continue;
       }
       const introduced = asHeaderOnlySheet_ACU(templateEntry.sheet, templateEntry.key);
       candidateData[templateEntry.key] = introduced;
-      audit.push({ sheetKey: templateEntry.key, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: 0, metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+      audit.push({ sheetKey: templateEntry.key, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: 0, metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+      continue;
+    }
+    if (matchedKeys.has(previous.key)) {
+      blockers.push(`导入模板中的多个表同时匹配当前聊天表「${previous.sheet.name || previous.key}」（key=${previous.key}），无法唯一协调。`);
       continue;
     }
     matchedKeys.add(previous.key);
@@ -90,7 +106,7 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
     if (!input.destructiveChangeConfirmed) blockers.push(`删除表「${sheet.name || key}」需要显式确认。`);
     deletedSheetKeys.push(key);
     delete (candidateData as any)[key];
-    audit.push({ sheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
+    audit.push({ sheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
   }
   if (blockers.length > 0) return emptyPlan_ACU(baselineData, audit, blockers);
 
@@ -134,6 +150,7 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
     for (const [key, sheet] of listSheets_ACU(replayedData)) {
       const validation = validateDDLTextAgainstHeaders_ACU(String(sheet.sourceData?.ddl || ''), headers_ACU(sheet));
       if (!validation.valid) throw new Error(`${key}: ${validation.message}`);
+      getSheetColumnProjection_ACU(sheet);
     }
     await hydrateTableDataStrict_ACU(replayedData);
   } catch (error: any) {
@@ -190,6 +207,17 @@ function indexSheetsByName_ACU(data: TableDataObject_ACU, label: string, blocker
   return entries;
 }
 
+function areLegacyEquivalentSheetNames_ACU(sheetKey: string, left: unknown, right: unknown): boolean {
+  const knownAliases = new Map<string, ReadonlySet<string>>([
+    ['sheet_DpKcVGqg', new Set(['主角信息', '主角信息表'])],
+  ]);
+  const aliases = knownAliases.get(sheetKey);
+  if (!aliases) return false;
+  const leftName = canonicalizeDisplayName_ACU(left);
+  const rightName = canonicalizeDisplayName_ACU(right);
+  return leftName !== rightName && aliases.has(leftName) && aliases.has(rightName);
+}
+
 function headers_ACU(sheet: Sheet_ACU): string[] {
   const headers = sheet?.content?.[0];
   if (!Array.isArray(headers) || headers[0] !== 'row_id') throw new Error('缺少 row_id 首列表头。');
@@ -229,51 +257,112 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
   const beforeColumns = parseDDLColumnInfos_ACU(String(before.sourceData?.ddl || ''));
   const targetColumns = parseDDLColumnInfos_ACU(String(template.sourceData?.ddl || ''));
   if (beforeColumns.length !== beforeHeaders.length || targetColumns.length !== targetHeaders.length) throw new Error('DDL 与表头列数不一致。');
-  const beforeByCanonical = new Map(beforeHeaders.slice(1).map((name, index) => [canonicalizeDisplayName_ACU(name), { index: index + 1, physical: beforeColumns[index + 1].sqlName, header: name }]));
-  const targetByCanonical = new Map(targetHeaders.slice(1).map((name, index) => [canonicalizeDisplayName_ACU(name), { index: index + 1, physical: targetColumns[index + 1].sqlName, header: name, column: targetColumns[index + 1] }]));
+  const beforeEntries = beforeHeaders.slice(1).map((name, index) => ({
+    canonical: canonicalizeDisplayName_ACU(name), index: index + 1, physical: beforeColumns[index + 1].sqlName, header: name,
+  }));
+  const targetEntries = targetHeaders.slice(1).map((name, index) => ({
+    canonical: canonicalizeDisplayName_ACU(name), index: index + 1, physical: targetColumns[index + 1].sqlName, header: name, column: targetColumns[index + 1],
+  }));
+  const beforeByCanonical = new Map(beforeEntries.map(column => [column.canonical, column]));
+  const targetByCanonical = new Map(targetEntries.map(column => [column.canonical, column]));
   if (beforeByCanonical.size !== beforeHeaders.length - 1 || targetByCanonical.size !== targetHeaders.length - 1) throw new Error('存在空列或规范化重复列。');
+  const beforeByPhysical = new Map(beforeEntries.map(column => [column.physical.toLowerCase(), column]));
+  const targetByPhysical = new Map(targetEntries.map(column => [column.physical.toLowerCase(), column]));
+  if (beforeByPhysical.size !== beforeEntries.length || targetByPhysical.size !== targetEntries.length) throw new Error('DDL 存在重复 physical column。');
+
+  const matchedBeforeCanonical = new Set<string>();
+  const matchedTargetCanonical = new Set<string>();
   const mappings: Array<{ fromPhysicalName: string; toPhysicalName: string }> = [];
   const inheritedColumns: string[] = [];
   for (const [canonicalName, target] of targetByCanonical) {
     const source = beforeByCanonical.get(canonicalName);
     if (!source) continue;
+    matchedBeforeCanonical.add(source.canonical);
+    matchedTargetCanonical.add(target.canonical);
     inheritedColumns.push(target.header);
     if (source.physical !== target.physical) mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
   }
-  const deletedColumns = [...beforeByCanonical].filter(([name]) => !targetByCanonical.has(name)).map(([, column]) => column.header);
-  const addedColumns = [...targetByCanonical].filter(([name]) => !beforeByCanonical.has(name)).map(([, column]) => column.header);
-  if (deletedColumns.length > 0 && !destructiveChangeConfirmed) throw new Error(`删除列「${deletedColumns.join('、')}」需要显式确认。`);
-  const deletedPhysicalNames = new Set([...beforeByCanonical]
-    .filter(([name]) => !targetByCanonical.has(name))
-    .map(([, column]) => column.physical));
-  const reusedPhysicalNames = [...targetByCanonical]
-    .filter(([name, column]) => !beforeByCanonical.has(name) && deletedPhysicalNames.has(column.physical))
-    .map(([, column]) => column.physical);
+
+  // 同一稳定 Sheet key 下，physical column 才是持久化数据身份；表头只是可变显示名。
+  // 不同 key 的导入模板仍禁止依赖 physical 同名推断，以免把无关字段重新解释为旧数据。
+  if (sheetKey === templateSheetKey) {
+    for (const target of targetEntries) {
+      if (matchedTargetCanonical.has(target.canonical)) continue;
+      const source = beforeByPhysical.get(target.physical.toLowerCase());
+      if (!source || matchedBeforeCanonical.has(source.canonical)) continue;
+      matchedBeforeCanonical.add(source.canonical);
+      matchedTargetCanonical.add(target.canonical);
+      inheritedColumns.push(target.header);
+      if (source.physical !== target.physical) {
+        mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
+      }
+    }
+  }
+
+  const hiddenEntries = beforeEntries.filter(column => !matchedBeforeCanonical.has(column.canonical));
+  const hiddenColumns = hiddenEntries.map(column => column.header);
+  const addedColumns = targetEntries.filter(column => !matchedTargetCanonical.has(column.canonical)).map(column => column.header);
+  const hiddenPhysicalNames = new Set(hiddenEntries.map(column => column.physical.toLowerCase()));
+  const reusedPhysicalNames = targetEntries
+    .filter(column => !matchedTargetCanonical.has(column.canonical) && hiddenPhysicalNames.has(column.physical.toLowerCase()))
+    .map(column => column.physical);
   if (reusedPhysicalNames.length > 0) {
-    throw new Error(`新增列复用了已删除列的 physical column「${reusedPhysicalNames.join('、')}」，无法安全重解释历史数据。`);
+    throw new Error(`新增列复用了无法证明同一身份的历史 physical column「${reusedPhysicalNames.join('、')}」，无法安全重解释历史数据。`);
   }
   const fills: Record<string, any> = {};
-  for (const [name, target] of targetByCanonical) {
-    if (beforeByCanonical.has(name)) continue;
+  for (const target of targetEntries) {
+    if (matchedTargetCanonical.has(target.canonical)) continue;
     const literal = target.column.isNotNull ? parseDDLSafeDefaultLiteral_ACU(target.column.defaultExpression) : { kind: 'null' as const, sql: 'NULL' as const, value: null };
     if (!literal) throw new Error(`新增 NOT NULL 列「${target.header}」缺少可验证的 DDL literal DEFAULT。`);
     fills[target.physical] = { kind: target.column.isNotNull ? 'ddl_literal_default' : 'literal', literal };
   }
   const sheet = clone_ACU(template);
   sheet.uid = before.uid;
-  sheet.content = [targetHeaders];
+  const retainedHiddenColumns = hiddenEntries.map(entry => beforeColumns[entry.index]);
+  const retainedHiddenHeaders = hiddenEntries.map(entry => entry.header);
+  sheet.content = [[...targetHeaders, ...retainedHiddenHeaders]];
+  sheet.sourceData = clone_ACU(template.sourceData);
+  sheet.sourceData.ddl = buildRetainedColumnDDL_ACU(before, template, targetColumns, targetHeaders, retainedHiddenColumns, retainedHiddenHeaders);
+  const activePhysical = new Set(targetColumns.map(column => column.sqlName.toLowerCase()));
+  const previousHidden = getSheetColumnProjection_ACU(before).hiddenPhysicalColumns;
+  const candidatePhysical = new Map([...targetColumns, ...retainedHiddenColumns].map(column => [column.sqlName.toLowerCase(), column.sqlName]));
+  const hiddenPhysicalColumns = [...previousHidden, ...retainedHiddenColumns.map(column => column.sqlName)]
+    .filter(name => !activePhysical.has(name.toLowerCase()) && candidatePhysical.has(name.toLowerCase()))
+    .filter((name, index, values) => values.findIndex(value => value.toLowerCase() === name.toLowerCase()) === index)
+    .map(name => candidatePhysical.get(name.toLowerCase())!);
+  if (previousHidden.length > 0 || hiddenPhysicalColumns.length > 0) sheet.sourceData.hiddenPhysicalColumns = hiddenPhysicalColumns;
+  else delete sheet.sourceData.hiddenPhysicalColumns;
   delete sheet.seedRows;
   const intent: SchemaMigrationPreflightIntent_ACU = {
     physicalColumnMappings: mappings,
     fills,
     conversions: [],
-    migrationPolicy: { destructiveChangeConfirmed: deletedColumns.length > 0, lossyConversionConfirmed: false },
+    migrationPolicy: { destructiveChangeConfirmed: false, lossyConversionConfirmed: false },
   };
-  const meta = buildPersistentMetadataUpdate_ACU(before, template);
+  const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
   return { sheet, intent, meta, audit: { sheetKey, match: 'matched', baselineSheetKey: sheetKey, templateSheetKey, baselineName: before.name,
-    templateName: template.name, canonicalName: canonicalizeDisplayName_ACU(before.name), inheritedColumns, addedColumns, deletedColumns,
+    templateName: template.name, canonicalName: canonicalizeDisplayName_ACU(before.name), inheritedColumns, addedColumns, deletedColumns: [], hiddenColumns,
     physicalColumnMappings: mappings, fills: Object.entries(fills).map(([physicalName, fill]) => ({ physicalName, kind: fill.kind, literal: clone_ACU(fill.literal) })),
-    affectedRowCount: before.content.length - 1, metadataChanged: !!meta, metadataChangedFields: meta ? Object.keys(meta) : [], destructiveChangeConfirmed: deletedColumns.length > 0, operations: [] } };
+    affectedRowCount: before.content.length - 1, metadataChanged: !!meta, metadataChangedFields: meta ? Object.keys(meta) : [], destructiveChangeConfirmed: false, operations: [] } };
+}
+
+function buildRetainedColumnDDL_ACU(before: Sheet_ACU, template: Sheet_ACU, targetColumns: ReturnType<typeof parseDDLColumnInfos_ACU>, targetHeaders: string[], retainedColumns: ReturnType<typeof parseDDLColumnInfos_ACU>, retainedHeaders: string[]): string {
+  const templateDDL = String(template.sourceData?.ddl || '');
+  const tableName = parseDDLTableName(templateDDL);
+  if (!tableName) throw new Error('模板 DDL 缺少可解析的物理表名。');
+  const allColumns = [...targetColumns, ...retainedColumns];
+  const definitions = allColumns.map((column, index) => {
+    const header = index < targetColumns.length ? targetHeaders[index] : retainedHeaders[index - targetColumns.length];
+    const comment = header && header !== column.sqlName ? ` -- ${header}` : '';
+    return { definition: column.normalizedDefinition, comment };
+  });
+  const constraints = Array.from(new Set([
+    ...parseDDLTableConstraints_ACU(String(before.sourceData?.ddl || '')),
+    ...parseDDLTableConstraints_ACU(templateDDL),
+  ]));
+  const suffix = parseDDLTableSuffix_ACU(templateDDL);
+  const entries = [...definitions, ...constraints.map(definition => ({ definition, comment: '' }))];
+  return `CREATE TABLE ${tableName} (\n${entries.map((entry, index) => `  ${entry.definition}${index < entries.length - 1 ? ',' : ''}${entry.comment}`).join('\n')}\n)${suffix ? ` ${suffix}` : ''};`;
 }
 
 function buildPersistentMetadataUpdate_ACU(before: Sheet_ACU, template: Sheet_ACU): Record<string, any> | undefined {

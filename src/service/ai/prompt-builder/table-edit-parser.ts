@@ -529,7 +529,7 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
       // 跳过 HTML 注释残留
       if (trimmed.startsWith('<!--') || trimmed.startsWith('-->')) continue;
       // 检查是否以 SQL 关键字开头
-      const sqlKeywords = /^(INSERT|UPDATE|DELETE|ALTER|BEGIN|CREATE|DROP|REPLACE)\b/i;
+      const sqlKeywords = /^(INSERT|UPDATE|DELETE|ALTER|BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|CREATE|DROP|REPLACE|SELECT|WITH|PRAGMA|VACUUM|REINDEX|ANALYZE|ATTACH|DETACH)\b/i;
       return sqlKeywords.test(trimmed);
     }
     return false;

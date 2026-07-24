@@ -6,7 +6,7 @@
  * 注意：helpers-data-merge.ts 的导入链会触发 env.ts 中的 window.parent 访问，
  * 需要在 import 前 mock 掉 env.ts 和其他依赖浏览器环境的模块
  */
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 
 // mock 掉所有依赖浏览器环境的模块
 vi.mock('../../../src/shared/env', () => ({
@@ -352,11 +352,9 @@ describe('migrateContentNullToRowId', () => {
 // ═══════════════════════════════════════════════════════════════
 // mergeAllIndependentTables_ACU 核心数据合并测试
 // ═══════════════════════════════════════════════════════════════
-import { mergeAllIndependentTables_ACU } from '../../../src/service/runtime/helpers-data-merge';
-import { getChatArray_ACU } from '../../../src/data/gateways/chat-gateway';
 import { getCurrentIsolationKey_ACU } from '../../../src/service/runtime/state-manager';
 import { readIsolatedTagData_ACU, isLegacyMatchForIsolation_ACU, readLegacyIndependentData_ACU } from '../../../src/data/repositories/chat-message-data-repo';
-import { getChatSheetGuideDataForIsolationKey_ACU, getTemplateSheetKeys_ACU, getSortedSheetKeys_ACU, reorderDataBySheetKeys_ACU, materializeDataFromSheetGuide_ACU } from '../../../src/service/template/chat-scope';
+import { getTemplateSheetKeys_ACU, getSortedSheetKeys_ACU, reorderDataBySheetKeys_ACU } from '../../../src/service/template/chat-scope';
 
 describe('mergeAllIndependentTables_ACU', () => {
   beforeEach(() => {
@@ -768,6 +766,28 @@ describe('formatJsonToReadable_ACU', () => {
     expect(result.readableText).toContain('| 药水 | 5 |');
     // row_id 不应出现在输出中
     expect(result.readableText).not.toContain('row_id');
+  });
+
+  it('普通表 Markdown 隐藏 physical column 并保持右侧可见列对齐', () => {
+    const jsonData = {
+      sheet_0: {
+        name: '背包物品表',
+        sourceData: {
+          ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, legacy_note TEXT, quantity INTEGER);',
+          hiddenPhysicalColumns: ['legacy_note'],
+        },
+        content: [
+          ['row_id', '物品名称', '旧备注', '数量'],
+          ['1', '铁剑', '历史秘密', '3'],
+        ],
+      },
+    };
+
+    const result = formatJsonToReadable_ACU(jsonData);
+    expect(result.readableText).toContain('| 物品名称 | 数量 |');
+    expect(result.readableText).toContain('| 铁剑 | 3 |');
+    expect(result.readableText).not.toContain('旧备注');
+    expect(result.readableText).not.toContain('历史秘密');
   });
 
   it('重要人物表被提取到独立字段，不出现在 readableText 中', () => {
