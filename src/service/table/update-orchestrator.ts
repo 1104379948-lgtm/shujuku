@@ -392,15 +392,9 @@ function buildSqlSheetBatchOperationsFromText_ACU(
     const buildResult = buildSqlSheetBatchOperations_ACU(statements, tableData as any, {
         fallbackTargetSheetKeys: Array.isArray(targetSheetKeys) ? targetSheetKeys : [],
         allowSingleTargetFallback: true,
-        keepLegacyForUnclassified: false,
+        keepLegacyForUnclassified: true,
         reason: 'system',
     });
-    const hasUnclassified = buildResult.unknownStatements.length > 0
-        || buildResult.ambiguousStatements.length > 0
-        || buildResult.operations.some(operation => operation.kind === 'sql_batch');
-    if (hasUnclassified) {
-        return { success: false, error: 'SQL 语句无法归属到单表日志，拒绝写入不可预清理的 SQL 增量。' };
-    }
     return { success: true, operations: buildResult.operations };
 }
 

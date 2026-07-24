@@ -317,21 +317,10 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
   });
 
   it.each([
-    {
-      label: 'row_upsert 身份不一致',
-      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['2', 'new'] }],
-      error: /回放失败.*身份不一致/i,
-    },
-    {
-      label: 'row_upsert 行宽不匹配',
-      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1'] }],
-      error: /回放失败.*行宽不匹配/i,
-    },
-  ])('通用 persist 在 $label 时写前拒绝且零副作用', async ({ operations, error }) => {
+    { label: 'row_upsert 身份不一致', operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['2', 'new'] }] },
+    { label: 'row_upsert 行宽不匹配', operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1'] }] },
+  ])('通用 persist 原样保存已生成的 $label operation，且不做 replay applicability 预检', async ({ operations }) => {
     const message = seedFrame({ logEntries: [] });
-    message.TavernDB_ACU_Identity = 'identity-before-rejection';
-    const isolatedDataBefore = message.TavernDB_ACU_IsolatedData;
-    const messageBefore = JSON.parse(JSON.stringify(message));
     const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
 
     const result = await persistTableMutationLogV2_ACU({
@@ -345,12 +334,10 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
       assumeCommitLock: true,
     });
 
-    expect(result).toEqual({ saved: false, error: expect.stringMatching(error) });
-    expect(message).toEqual(messageBefore);
-    expect(message.TavernDB_ACU_IsolatedData).toBe(isolatedDataBefore);
-    expect(message.TavernDB_ACU_Identity).toBe('identity-before-rejection');
-    expect(mocks.saveChat).not.toHaveBeenCalled();
-    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(result.saved).toBe(true);
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual(operations);
+    expect(mocks.loadReplayState).not.toHaveBeenCalled();
+    expect(mocks.saveChat).toHaveBeenCalledOnce();
   });
 
   it('operation 可应用但结果与 afterData 分叉时仍保存（不再做 afterData 相等性阻断）', async () => {
@@ -378,17 +365,18 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
   it.each([
     {
       label: 'sql_batch',
-      operation: { kind: 'sql_batch', statements: ["UPDATE inventory SET value = 'sql-updated' WHERE row_id = 1"] },
+      operation: { kind: 'sql_batch', statements: ["UPDATE inventory SET value = ? WHERE row_id = ?"], params: [['sql-updated', 1]] },
     },
     {
       label: 'sql_sheet_batch',
       operation: {
         kind: 'sql_sheet_batch', sheetKey: 'sheet_a',
-        statements: ["UPDATE inventory SET value = 'sql-updated' WHERE row_id = 1"],
+        statements: ['UPDATE inventory SET value = ? WHERE row_id = ?'],
+        params: [['sql-updated', 1]],
         tableName: 'inventory', reason: 'manual_crud',
       },
     },
-  ])('通用 persist 接受可回放的 $label', async ({ operation }) => {
+  ])('通用 persist 原样持久化 $label，不判断 replay applicability', async ({ operation }) => {
     const sqlBaseSheet = {
       ...sheetA,
       uid: 'inventory',
@@ -406,7 +394,6 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
       sheet_a: { ...sqlBaseSheet, content: [['row_id', 'value'], ['1', 'sql-updated']] },
       sheet_b: sheetB,
     } as any;
-    mocks.loadReplayState.mockResolvedValue({ mate: { type: 'acu' }, sheet_a: sqlBaseSheet, sheet_b: sheetB });
     const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
 
     const result = await persistTableMutationLogV2_ACU({
@@ -422,6 +409,8 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
 
     expect(result.saved).toBe(true);
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+    expect(mocks.loadReplayState).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual([operation]);
     expect(mocks.saveChat).toHaveBeenCalledOnce();
   });
 

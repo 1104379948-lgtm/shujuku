@@ -10,14 +10,13 @@ import shortRowFixture from '../../fixtures/migrations/spv7.9/row-width-short.js
 import longRowFixture from '../../fixtures/migrations/spv7.9/row-width-long.json';
 import mixedLegacyV2Fixture from '../../fixtures/migrations/spv7.9/mixed-legacy-v2.json';
 
-const { mockChatRef, mockSaveChatToHost, mockRuntimeScope, runAfterReplay } = vi.hoisted(() => ({
+const { mockChatRef, mockSaveChatToHost, mockRuntimeScope } = vi.hoisted(() => ({
   mockChatRef: { value: [] as any[] },
   mockSaveChatToHost: vi.fn().mockResolvedValue(undefined),
   mockRuntimeScope: {
     chatIdentifier: 'migration-test-chat',
     isolationKey: '',
   },
-  runAfterReplay: { value: null as (() => void) | null },
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -30,20 +29,6 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentChatFileIdentifier_ACU() { return mockRuntimeScope.chatIdentifier; },
   getCurrentIsolationKey_ACU: vi.fn(() => mockRuntimeScope.isolationKey),
 }));
-
-vi.mock('../../../src/service/table/storage-frame-v2-replay', async () => {
-  const actual = await vi.importActual<typeof import('../../../src/service/table/storage-frame-v2-replay')>('../../../src/service/table/storage-frame-v2-replay');
-  return {
-    ...actual,
-    loadTableStateFromFramesV2_ACU: async (...args: Parameters<typeof actual.loadTableStateFromFramesV2_ACU>) => {
-      const result = await actual.loadTableStateFromFramesV2_ACU(...args);
-      const callback = runAfterReplay.value;
-      runAfterReplay.value = null;
-      callback?.();
-      return result;
-    },
-  };
-});
 
 vi.mock('../../../src/shared/utils', async () => {
   const actual = await vi.importActual<any>('../../../src/shared/utils');
@@ -126,7 +111,6 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     mockSaveChatToHost.mockClear();
     mockRuntimeScope.chatIdentifier = 'migration-test-chat';
     mockRuntimeScope.isolationKey = '';
-    runAfterReplay.value = null;
   });
 
   it('在数据库加载阶段把原版顶层旧字段迁移为 V2 migration checkpoint，并清理旧字段', async () => {
@@ -461,63 +445,18 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     expect(mockChatRef.value).toEqual(before);
   });
 
-  it.each([
-    {
-      name: 'V2 replay 与修复后的 legacy 数据相同',
-      v2Frame: (data: any) => ({
-        version: 2,
-        headRevision: 'checkpoint:existing-same',
-        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data },
-        logEntries: [],
-      }),
-      expectedError: 'V2 replay matches repaired legacy data',
-    },
-    {
-      name: 'V2 replay 与修复后的 legacy 数据不同',
-      v2Frame: (_data: any) => ({
-        version: 2,
-        headRevision: 'checkpoint:existing-different',
-        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'V2 铁剑']]) } },
-        logEntries: [],
-      }),
-      expectedError: 'V2 replay fingerprint does not match repaired legacy data',
-    },
-    {
-      name: 'V2 artifact 没有 full checkpoint',
-      v2Frame: (_data: any) => ({
-        version: 2,
-        logEntries: [{
-          seq: 1,
-          entryId: 'orphan-data-replace',
-          createdAt: 1,
-          source: 'import',
-          targetMessageIndex: 0,
-          aiFloor: 1,
-          filledSheetKeys: ['sheet_0'],
-          changedSheetKeys: ['sheet_0'],
-          groupKeys: [],
-          operations: [{ kind: 'data_replace', data: { sheet_0: sheet('孤立 V2') }, reason: 'import' }],
-        }],
-      }),
-      expectedError: 'V2 replay unavailable',
-    },
-    {
-      name: 'V2 full checkpoint 含重复 canonical row_id',
-      v2Frame: (_data: any) => ({
-        version: 2,
-        headRevision: 'checkpoint:invalid',
-        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: sheet('背包', [['row_id', '名称'], ['1', '铁剑'], [' 1 ', '冒名副本']]) } },
-        logEntries: [],
-      }),
-      expectedError: 'V2 replay failed',
-    },
-  ])('mixed legacy-v1 + V2：$name 时拒绝自动迁移且零写入', async ({ v2Frame, expectedError }) => {
+  it('mixed legacy/V2 缺少已验证 provenance 时只按决策协议阻止自动迁移，不再比较 candidate 与 replay', async () => {
     const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'legacy 铁剑']]) } as any;
     mockChatRef.value = [
       {
         is_user: false,
         TavernDB_ACU_IsolatedData: {
-          '': { _acu_storage_version: 2, storageFrame: v2Frame(data) },
+          '': { _acu_storage_version: 2, storageFrame: {
+            version: 2,
+            headRevision: 'checkpoint:existing',
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'V2 铁剑']]) } },
+            logEntries: [],
+          } },
         },
       },
       {
@@ -536,72 +475,13 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
       isolationConfig: { enabled: false, code: '' },
     });
 
-    expect(result).toEqual(expect.objectContaining({ migrated: false, error: expect.stringContaining(expectedError) }));
+    expect(result.mixedDecision?.kind).toBe('conflict_requires_user_choice');
+    expect(result).toEqual(expect.objectContaining({ migrated: false, error: 'mixed legacy-v1 and V2 data detected: conflict_requires_user_choice; automatic migration remains blocked' }));
     expect(mockSaveChatToHost).not.toHaveBeenCalled();
     expect(mockChatRef.value.flatMap(message => Object.values(message?.TavernDB_ACU_IsolatedData || {})).some((tagData: any) => tagData?.storageFrame?.checkpoint?.migrationProvenance)).toBe(false);
     expect(mockChatRef.value).toEqual(before);
   });
 
-  it('候选 replay 期间切换 active chat 时拒绝提交，不改写任一 chat', async () => {
-    const data = { sheet_0: sheet('旧聊天背包') } as any;
-    setLegacyMigrationChat(data);
-    const oldChat = mockChatRef.value;
-    const oldChatBefore = structuredClone(oldChat);
-    const nextChat = [{ is_user: false, mes: 'new chat', TavernDB_ACU_IndependentData: { sheet_9: sheet('新聊天数据') } }];
-    const nextChatBefore = structuredClone(nextChat);
-    runAfterReplay.value = () => { mockChatRef.value = nextChat; };
-
-    const result = await migrateLegacyStorageToV2OnLoad_ACU({
-      data,
-      isolationKey: '',
-      isolationConfig: { enabled: false, code: '' },
-    });
-
-    expect(result).toEqual(expect.objectContaining({ migrated: false, error: expect.stringContaining('active chat changed before commit') }));
-    expect(mockSaveChatToHost).not.toHaveBeenCalled();
-    expect(oldChat).toEqual(oldChatBefore);
-    expect(mockChatRef.value).toEqual(nextChatBefore);
-  });
-
-  it('候选 replay 期间仅 active chat identifier 变化时拒绝提交且不改写 chat', async () => {
-    const data = { sheet_0: sheet('旧聊天背包') } as any;
-    setLegacyMigrationChat(data);
-    const before = structuredClone(mockChatRef.value);
-    runAfterReplay.value = () => { mockRuntimeScope.chatIdentifier = 'another-chat'; };
-
-    const result = await migrateLegacyStorageToV2OnLoad_ACU({
-      data,
-      isolationKey: '',
-      isolationConfig: { enabled: false, code: '' },
-    });
-
-    expect(result).toEqual(expect.objectContaining({
-      migrated: false,
-      error: expect.stringContaining('active chat identifier changed before commit'),
-    }));
-    expect(mockSaveChatToHost).not.toHaveBeenCalled();
-    expect(mockChatRef.value).toEqual(before);
-  });
-
-  it('候选 replay 期间仅 active isolation 变化时拒绝提交且不改写 chat', async () => {
-    const data = { sheet_0: sheet('旧聊天背包') } as any;
-    setLegacyMigrationChat(data);
-    const before = structuredClone(mockChatRef.value);
-    runAfterReplay.value = () => { mockRuntimeScope.isolationKey = 'another-isolation'; };
-
-    const result = await migrateLegacyStorageToV2OnLoad_ACU({
-      data,
-      isolationKey: '',
-      isolationConfig: { enabled: false, code: '' },
-    });
-
-    expect(result).toEqual(expect.objectContaining({
-      migrated: false,
-      error: expect.stringContaining('active isolation changed before commit'),
-    }));
-    expect(mockSaveChatToHost).not.toHaveBeenCalled();
-    expect(mockChatRef.value).toEqual(before);
-  });
 
   it('严格保存失败时恢复整个 legacy chat，不留下半迁移状态', async () => {
     const data = { sheet_0: sheet('背包') } as any;

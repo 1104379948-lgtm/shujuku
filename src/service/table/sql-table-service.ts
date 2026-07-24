@@ -218,9 +218,21 @@ function getQualifiedSqlIdentifierTail_ACU(
 
 function getSqlMutationTargetToken_ACU(statement: string, tokens: SqlMutationIdentifierToken_ACU[]): SqlMutationIdentifierToken_ACU {
   const first = tokens[0];
-  if (isSqlMutationKeyword_ACU(first, 'INSERT') || isSqlMutationKeyword_ACU(first, 'REPLACE')) {
-    let index = 1;
-    if (isSqlMutationKeyword_ACU(first, 'INSERT') && isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
+  const actionIndex = isSqlMutationKeyword_ACU(first, 'WITH')
+    ? tokens.findIndex((token, index) => index > 0 && token.depth === 0 && (
+      isSqlMutationKeyword_ACU(token, 'INSERT')
+      || isSqlMutationKeyword_ACU(token, 'REPLACE')
+      || isSqlMutationKeyword_ACU(token, 'UPDATE')
+      || isSqlMutationKeyword_ACU(token, 'DELETE')
+    ))
+    : 0;
+  const action = tokens[actionIndex];
+  if (actionIndex < 0) {
+    throw new Error('WITH SQL 缺少可验证的写入语句。');
+  }
+  if (isSqlMutationKeyword_ACU(action, 'INSERT') || isSqlMutationKeyword_ACU(action, 'REPLACE')) {
+    let index = actionIndex + 1;
+    if (isSqlMutationKeyword_ACU(action, 'INSERT') && isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
       const action = tokens[index + 1];
       if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
         throw new Error('INSERT OR 子句非法，无法安全重绑定表名。');
@@ -233,8 +245,8 @@ function getSqlMutationTargetToken_ACU(statement: string, tokens: SqlMutationIde
     }
     return target;
   }
-  if (isSqlMutationKeyword_ACU(first, 'UPDATE')) {
-    let index = 1;
+  if (isSqlMutationKeyword_ACU(action, 'UPDATE')) {
+    let index = actionIndex + 1;
     if (isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
       const action = tokens[index + 1];
       if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
@@ -246,12 +258,12 @@ function getSqlMutationTargetToken_ACU(statement: string, tokens: SqlMutationIde
     if (!target) throw new Error('UPDATE SQL 缺少可验证的目标表。');
     return target;
   }
-  if (isSqlMutationKeyword_ACU(first, 'DELETE')) {
-    const target = getQualifiedSqlIdentifierTail_ACU(statement, tokens, 2);
-    if (!isSqlMutationKeyword_ACU(tokens[1], 'FROM') || !target) throw new Error('DELETE SQL 缺少可验证的目标表。');
+  if (isSqlMutationKeyword_ACU(action, 'DELETE')) {
+    const target = getQualifiedSqlIdentifierTail_ACU(statement, tokens, actionIndex + 2);
+    if (!isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'FROM') || !target) throw new Error('DELETE SQL 缺少可验证的目标表。');
     return target;
   }
-  throw new Error(`不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
+  throw new Error(`不支持安全重绑定的 SQL 语句类型：${action?.value || first?.value || 'empty'}。`);
 }
 
 function collectSqlMutationTableReferenceTokens_ACU(
@@ -347,9 +359,6 @@ export function rebindSqlMutationTableIdentifiers_ACU(
       const resolved = targets.get(reference.value.toLowerCase());
       if (resolved === undefined) continue;
       if (!resolved) throw new Error(`无法唯一解析 SQL 表引用：${reference.value}。`);
-      if (options.requireSinglePhysicalTable === true && resolved !== physicalName) {
-        throw new Error(`SQL mutation 跨 Sheet 表引用被拒绝：target=${target.value}, reference=${reference.value}。`);
-      }
       replacements.push({ token: reference, physicalName: resolved });
     }
     return applySqlMutationIdentifierReplacements_ACU(statement, replacements);
@@ -1194,17 +1203,9 @@ export async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(
       params: normalizedParams ? [normalizedParams] : undefined,
       fallbackTargetSheetKeys: operationOptions.targetSheetKeys,
       allowSingleTargetFallback: operationOptions.allowSingleTargetFallback === true,
-      keepLegacyForUnclassified: operationOptions.keepLegacyForUnclassified === true || operationOptions.requireSheetScopedOperations !== true,
+      keepLegacyForUnclassified: true,
       reason: 'system',
     });
-
-    if (operationOptions.requireSheetScopedOperations === true && (
-      operationBuild.operations.some(operation => operation.kind === 'sql_batch')
-      || operationBuild.unknownStatements.length > 0
-      || operationBuild.ambiguousStatements.length > 0
-    )) {
-      return { success: false, modifiedKeys: [], appliedEdits: 0, changes: 0, error: 'SQL 语句无法归属到单表日志，拒绝写入不可预清理的 SQL 增量。' };
-    }
 
     logDebug_ACU(`[SqlTableService] 参数化快照 SQL 执行成功: changes=${result.changes}, modifiedKeys=${modifiedKeys.join(',')}`);
     return {
@@ -1261,17 +1262,9 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
     const operationBuild = buildSqlSheetBatchOperations_ACU(statements, workingData, {
       fallbackTargetSheetKeys: operationOptions.targetSheetKeys,
       allowSingleTargetFallback: operationOptions.allowSingleTargetFallback === true,
-      keepLegacyForUnclassified: operationOptions.keepLegacyForUnclassified === true || operationOptions.requireSheetScopedOperations !== true,
+      keepLegacyForUnclassified: true,
       reason: 'system',
     });
-
-    if (operationOptions.requireSheetScopedOperations === true && (
-      operationBuild.operations.some(operation => operation.kind === 'sql_batch')
-      || operationBuild.unknownStatements.length > 0
-      || operationBuild.ambiguousStatements.length > 0
-    )) {
-      return { success: false, modifiedKeys: [], appliedEdits: 0, error: 'SQL 语句无法归属到单表日志，拒绝写入不可预清理的 SQL 增量。' };
-    }
 
 
     logDebug_ACU(`[SqlTableService] 快照 SQL 执行成功: ${statements.length} 条语句, modifiedKeys=${modifiedKeys.join(',')}`);

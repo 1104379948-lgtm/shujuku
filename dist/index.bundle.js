@@ -36548,286 +36548,9 @@ $CONTENT
         const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
         if (statements.length === 0)
             return;
-        const reboundStatements = rebindSqlReplayTableIdentifiers_ACU(statements, state, operation);
         await ensureSqlReplayRuntime_ACU(runtime, state);
         const params = Array.isArray(operation.params) ? operation.params : undefined;
-        runtime.engine.runBatch(reboundStatements, params);
-    }
-    function isSqlReplayIdentifierStart_ACU(char) {
-        if (char.length !== 1)
-            return false;
-        const code = char.charCodeAt(0);
-        return char === '_' || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
-    }
-    function isSqlReplayIdentifierPart_ACU(char) {
-        if (char.length !== 1)
-            return false;
-        const code = char.charCodeAt(0);
-        return isSqlReplayIdentifierStart_ACU(char) || char === '$' || (code >= 48 && code <= 57);
-    }
-    /**
-     * Tokenizes identifiers only. Strings and comments are intentionally skipped,
-     * so a table-like word in narrative text can never be rebound.
-     */
-    function tokenizeSqlReplayIdentifiers_ACU(statement) {
-        const tokens = [];
-        let index = 0;
-        let depth = 0;
-        const commaBeforeDepths = new Set();
-        while (index < statement.length) {
-            const char = statement[index];
-            const next = statement[index + 1];
-            if (char === '-' && next === '-') {
-                index += 2;
-                while (index < statement.length && statement[index] !== '\n' && statement[index] !== '\r')
-                    index += 1;
-                continue;
-            }
-            if (char === '/' && next === '*') {
-                index += 2;
-                while (index < statement.length && !(statement[index] === '*' && statement[index + 1] === '/'))
-                    index += 1;
-                if (index >= statement.length)
-                    throw new Error('[V2 Replay] SQL 块注释未闭合，无法安全重绑定表名。');
-                index += 2;
-                continue;
-            }
-            if (char === "'") {
-                index += 1;
-                while (index < statement.length) {
-                    if (statement[index] !== "'") {
-                        index += 1;
-                        continue;
-                    }
-                    if (statement[index + 1] === "'") {
-                        index += 2;
-                        continue;
-                    }
-                    index += 1;
-                    break;
-                }
-                if (index > statement.length || statement[index - 1] !== "'")
-                    throw new Error('[V2 Replay] SQL 字符串未闭合，无法安全重绑定表名。');
-                continue;
-            }
-            if (char === ',') {
-                commaBeforeDepths.add(depth);
-                index += 1;
-                continue;
-            }
-            if (char === '(') {
-                commaBeforeDepths.delete(depth);
-                depth += 1;
-                index += 1;
-                continue;
-            }
-            if (char === ')') {
-                depth = Math.max(0, depth - 1);
-                index += 1;
-                continue;
-            }
-            if (char === '"' || char === '`' || char === '[') {
-                const closing = char === '[' ? ']' : char;
-                const start = index;
-                let value = '';
-                index += 1;
-                let closed = false;
-                while (index < statement.length) {
-                    if (statement[index] !== closing) {
-                        value += statement[index++];
-                        continue;
-                    }
-                    if (statement[index + 1] === closing) {
-                        value += closing;
-                        index += 2;
-                        continue;
-                    }
-                    index += 1;
-                    closed = true;
-                    break;
-                }
-                if (!closed)
-                    throw new Error('[V2 Replay] SQL 引号标识符未闭合，无法安全重绑定表名。');
-                tokens.push({ start, end: index, value, quote: char, depth, commaBefore: commaBeforeDepths.delete(depth) });
-                continue;
-            }
-            if (isSqlReplayIdentifierStart_ACU(char)) {
-                const start = index;
-                index += 1;
-                while (index < statement.length && isSqlReplayIdentifierPart_ACU(statement[index]))
-                    index += 1;
-                tokens.push({ start, end: index, value: statement.slice(start, index), quote: null, depth, commaBefore: commaBeforeDepths.delete(depth) });
-                continue;
-            }
-            index += 1;
-        }
-        return tokens;
-    }
-    function sqlReplayKeyword_ACU(token, keyword) {
-        return !!token && token.quote === null && token.value.toUpperCase() === keyword;
-    }
-    function getSqlReplayMutationTargetToken_ACU(tokens) {
-        const first = tokens[0];
-        if (sqlReplayKeyword_ACU(first, 'INSERT') || sqlReplayKeyword_ACU(first, 'REPLACE')) {
-            let index = 1;
-            if (sqlReplayKeyword_ACU(first, 'INSERT') && sqlReplayKeyword_ACU(tokens[index], 'OR')) {
-                const action = tokens[index + 1];
-                if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
-                    throw new Error('[V2 Replay] INSERT OR 子句非法，无法安全重绑定表名。');
-                }
-                index += 2;
-            }
-            if (!sqlReplayKeyword_ACU(tokens[index], 'INTO') || !tokens[index + 1]) {
-                throw new Error('[V2 Replay] INSERT/REPLACE SQL 缺少可验证的目标表。');
-            }
-            return tokens[index + 1];
-        }
-        if (sqlReplayKeyword_ACU(first, 'UPDATE')) {
-            let index = 1;
-            if (sqlReplayKeyword_ACU(tokens[index], 'OR')) {
-                const action = tokens[index + 1];
-                if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
-                    throw new Error('[V2 Replay] UPDATE OR 子句非法，无法安全重绑定表名。');
-                }
-                index += 2;
-            }
-            if (!tokens[index])
-                throw new Error('[V2 Replay] UPDATE SQL 缺少可验证的目标表。');
-            return tokens[index];
-        }
-        if (sqlReplayKeyword_ACU(first, 'DELETE')) {
-            if (!sqlReplayKeyword_ACU(tokens[1], 'FROM') || !tokens[2]) {
-                throw new Error('[V2 Replay] DELETE SQL 缺少可验证的目标表。');
-            }
-            return tokens[2];
-        }
-        throw new Error(`[V2 Replay] 不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
-    }
-    function collectSqlReplayTableReferenceTokens_ACU(tokens, mutationTarget) {
-        const fromClauseTerminators = new Set([
-            'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW', 'RETURNING', 'VALUES', 'SET',
-        ]);
-        const references = new Map([[mutationTarget.start, mutationTarget]]);
-        const cteNames = new Set();
-        for (let index = 0; index + 2 < tokens.length; index += 1) {
-            if (sqlReplayKeyword_ACU(tokens[index], 'WITH') && sqlReplayKeyword_ACU(tokens[index + 2], 'AS')) {
-                cteNames.add(tokens[index + 1].value.toLowerCase());
-            }
-        }
-        const activeFromDepths = new Set();
-        for (let index = 0; index < tokens.length; index += 1) {
-            const token = tokens[index];
-            const keyword = token.quote === null ? token.value.toUpperCase() : '';
-            if (fromClauseTerminators.has(keyword))
-                activeFromDepths.delete(token.depth);
-            if (keyword === 'FROM')
-                activeFromDepths.add(token.depth);
-            if (keyword === 'FROM' || keyword === 'JOIN') {
-                const reference = tokens[index + 1];
-                if (reference && reference.depth === token.depth && !cteNames.has(reference.value.toLowerCase())) {
-                    references.set(reference.start, reference);
-                }
-                continue;
-            }
-            if (token.commaBefore && activeFromDepths.has(token.depth) && !cteNames.has(token.value.toLowerCase())) {
-                references.set(token.start, token);
-            }
-        }
-        return [...references.values()];
-    }
-    function applySqlReplayIdentifierReplacements_ACU(statement, replacements) {
-        let result = statement;
-        for (const { token, physicalName } of [...replacements].sort((a, b) => b.token.start - a.token.start)) {
-            result = `${result.slice(0, token.start)}${formatSqlReplayIdentifier_ACU(physicalName, token.quote)}${result.slice(token.end)}`;
-        }
-        return result;
-    }
-    function formatSqlReplayIdentifier_ACU(value, quote) {
-        if (quote === '"')
-            return `"${value.replace(/"/g, '""')}"`;
-        if (quote === '`')
-            return `\`${value.replace(/`/g, '``')}\``;
-        if (quote === '[')
-            return `[${value.replace(/]/g, ']]')}]`;
-        return value;
-    }
-    function rebindSqlReplayTableIdentifiers_ACU(statements, state, operation) {
-        const physicalNames = resolvePhysicalTableNames_ACU(state);
-        const targets = new Map();
-        for (const [sheetKey, physicalName] of physicalNames) {
-            const sheet = state[sheetKey];
-            if (!sheet)
-                continue;
-            const aliases = [parseDDLTableName(sheet.sourceData?.ddl || ''), physicalName];
-            for (const alias of aliases) {
-                const normalized = String(alias || '').trim().toLowerCase();
-                if (!normalized)
-                    continue;
-                const existing = targets.get(normalized);
-                if (existing && existing !== physicalName) {
-                    targets.set(normalized, '');
-                }
-                else if (existing !== '') {
-                    targets.set(normalized, physicalName);
-                }
-            }
-        }
-        const scopedPhysicalName = operation.kind === 'sql_sheet_batch'
-            ? physicalNames.get(operation.sheetKey)
-            : undefined;
-        if (operation.kind === 'sql_sheet_batch' && !scopedPhysicalName) {
-            throw new Error(`[V2 Replay] sql_sheet_batch 指向不存在的 Sheet：${operation.sheetKey}。`);
-        }
-        const recordedTableName = operation.kind === 'sql_sheet_batch'
-            ? operation.tableName?.trim().toLowerCase()
-            : undefined;
-        if (operation.kind === 'sql_sheet_batch' && recordedTableName) {
-            const recordedPhysicalName = targets.get(recordedTableName);
-            if (recordedPhysicalName === '' || (recordedPhysicalName && recordedPhysicalName !== scopedPhysicalName)) {
-                throw new Error(`[V2 Replay] sql_sheet_batch 的 tableName 与 sheetKey 不一致：sheetKey=${operation.sheetKey}, tableName=${operation.tableName}。`);
-            }
-        }
-        return statements.map(statement => {
-            const tokens = tokenizeSqlReplayIdentifiers_ACU(statement);
-            const target = getSqlReplayMutationTargetToken_ACU(tokens);
-            const targetName = target.value.toLowerCase();
-            let physicalName = targets.get(targetName);
-            // 物理表名会随显示名变更。旧日志中未知于当前 schema 的 tableName 只在
-            // 它与 SQL 实际目标完全一致时，才能作为该 sheet 的历史物理名重绑定。
-            if (physicalName === undefined && scopedPhysicalName && recordedTableName === targetName) {
-                physicalName = scopedPhysicalName;
-            }
-            if (!physicalName) {
-                throw new Error(`[V2 Replay] 无法唯一解析 SQL 目标表标识符：${target.value}。`);
-            }
-            if (scopedPhysicalName && recordedTableName && targets.get(recordedTableName) === undefined && targetName !== recordedTableName) {
-                throw new Error(`[V2 Replay] sql_sheet_batch 的 tableName 与 sheetKey 不一致：记录的历史表名未与 SQL 目标一致（tableName=${recordedTableName}, table=${target.value}）。`);
-            }
-            if (scopedPhysicalName && physicalName !== scopedPhysicalName) {
-                const sheetKey = operation.kind === 'sql_sheet_batch' ? operation.sheetKey : '(legacy sql_batch)';
-                throw new Error(`[V2 Replay] sql_sheet_batch 跨 Sheet 引用被拒绝：sheetKey=${sheetKey}, table=${target.value}。`);
-            }
-            const replacements = [];
-            for (const reference of collectSqlReplayTableReferenceTokens_ACU(tokens, target)) {
-                if (reference.start === target.start) {
-                    replacements.push({ token: reference, physicalName });
-                    continue;
-                }
-                const referenceName = reference.value.toLowerCase();
-                const resolved = referenceName === targetName
-                    ? physicalName
-                    : targets.get(referenceName);
-                if (resolved === undefined)
-                    continue;
-                if (!resolved)
-                    throw new Error(`[V2 Replay] 无法唯一解析 SQL 表引用：${reference.value}。`);
-                if (scopedPhysicalName && resolved !== scopedPhysicalName) {
-                    throw new Error(`[V2 Replay] sql_sheet_batch 跨 Sheet 引用被拒绝：sheetKey=${operation.kind === 'sql_sheet_batch' ? operation.sheetKey : '(legacy sql_batch)'}, table=${reference.value}。`);
-                }
-                replacements.push({ token: reference, physicalName: resolved });
-            }
-            return applySqlReplayIdentifierReplacements_ACU(statement, replacements);
-        });
+        runtime.engine.runBatch(statements, params);
     }
     function assertMetaUpdateDoesNotChangeDdl_ACU(patch) {
         const sourceData = patch.meta?.sourceData;
@@ -37241,8 +36964,14 @@ $CONTENT
                     try {
                         await applyDueIntroductions(entry.seq);
                         if (Array.isArray(entry.operations) && entry.operations.length > 0) {
-                            for (const operation of entry.operations) {
-                                await applyTableOperationV2_ACU(state, operation, runtime);
+                            for (const [operationIndex, operation] of entry.operations.entries()) {
+                                try {
+                                    await applyTableOperationV2_ACU(state, operation, runtime);
+                                }
+                                catch (error) {
+                                    const message = error instanceof Error ? error.message : String(error);
+                                    throw new Error(`[V2 Replay] operation failed: messageIndex=${ref.messageIndex}, seq=${entry.seq}, operationIndex=${operationIndex}, kind=${String(operation?.kind || 'unknown')}: ${message}`);
+                                }
                             }
                         }
                         else {
@@ -38083,30 +37812,6 @@ $CONTENT
         }
         return [];
     }
-    /**
-     * 写入前检查 operations 是否可在目标楼层 V2 base 上应用。
-     * 不比较 replay 结果与 afterData；调用方负责来源链路正确性。
-     */
-    async function getOperationReplayApplicabilityError_ACU(chat, isolationKey, targetMessageIndex, operations) {
-        if (operations.length === 0)
-            return null;
-        try {
-            const replayBase = await loadTableStateFromFramesV2_ACU(chat, isolationKey, {
-                maxMessageIndex: targetMessageIndex,
-                updateRuntimeState: false,
-            });
-            if (!replayBase) {
-                return 'V2 operation log 回放缺少现有 full checkpoint base，拒绝写入。';
-            }
-            const replayCandidate = deepClone_ACU$1(replayBase);
-            for (const operation of operations)
-                await applyTableOperationV2_ACU(replayCandidate, operation);
-            return null;
-        }
-        catch (error) {
-            return `V2 operation log 回放失败：${error?.message || String(error)}`;
-        }
-    }
     function getOrInitV2Frame_ACU(isolatedData, isolationKey) {
         const tagData = isolatedData[isolationKey];
         if (isV2TagData_ACU(tagData)) {
@@ -38561,12 +38266,6 @@ $CONTENT
             && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
         if (shouldCheckpoint && operations.length > 0) {
             return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
-        }
-        if (!shouldCheckpoint && operations.length > 0) {
-            const replayApplicabilityError = await getOperationReplayApplicabilityError_ACU(chat, isolationKey, target.index, operations);
-            if (replayApplicabilityError)
-                return { saved: false, error: replayApplicabilityError };
-            logDebug_ACU(`[V2 Persist] operation 可应用性检查通过（已移除 afterData 相等性阻断）: messageIndex=${target.index}, source=${options.source}, operations=${operations.length}`);
         }
         const isolatedData = cloneIsolatedData_ACU(target.message);
         const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
@@ -39586,19 +39285,7 @@ $CONTENT
                         });
                     }
                     const operationChanges = requestedChanges.filter((change) => change.kind === 'operations');
-                    const replayCandidate = deepClone_ACU$1(activeReplayState);
                     const operations = operationChanges.flatMap(change => change.operations.map(operation => deepClone_ACU$1(operation)));
-                    for (const change of operationChanges) {
-                        for (const operation of change.operations)
-                            await applyTableOperationV2_ACU(replayCandidate, operation);
-                        const replayedSheet = replayCandidate[change.sheetKey];
-                        // Operations are the source of truth for template commits. Do not fail closed when the
-                        // caller's targetSheetData (often a visualizer runtime snapshot) drifts from V2 replay base
-                        // content after meta/schema-only operations.
-                        if (!replayedSheet) {
-                            throw new Error(`V2 当前楼层模板提交 operation 回放后缺少 Sheet：${change.sheetKey}。`);
-                        }
-                    }
                     const entryOptions = operations.length === 0 ? undefined : (() => {
                         const seq = targetFrameLastLogSeq + 1;
                         const parentRevision = frame.headRevision ?? null;
@@ -40167,8 +39854,10 @@ $CONTENT
         return { status: 'commit_failed_rolled_back', decisionId: decision.decisionId, error };
     }
     /**
-     * Commits only an evaluator-authorized action. Candidate construction and replay occur
-     * before mutating live chat; the host is called exactly once on a successful commit.
+     * Commits only an evaluator-authorized action. Before mutation, source evidence and scope
+     * are refreshed to reject stale decisions; a merge candidate is then deterministically
+     * constructed from the frozen decision without replaying it as a post-generation proof.
+     * The host is called exactly once on a successful commit.
      */
     async function commitMixedStorageDecision_ACU(options) {
         const { decision, action, isolationConfig } = options;
@@ -40195,7 +39884,6 @@ $CONTENT
         const candidateChat = clone_ACU$6(chat);
         const isolationKey = decision.scopeSnapshot.activeIsolationKey;
         const originalV2 = v2Projection_ACU(candidateChat, isolationKey);
-        let expectedFingerprint = decision.v2Fingerprint;
         if (action === 'commit_merge_candidate') {
             const candidateData = clone_ACU$6(decision.frozenMergeCandidate);
             if (auditTableDataForUpgrade_ACU(candidateData).status !== 'clean') {
@@ -40240,20 +39928,10 @@ $CONTENT
                 storageFrame: { version: 2, headRevision: `checkpoint:mixed-merge:${createdAt.toString(36)}`, checkpoint: checkpoint.checkpoint, logEntries: [] },
             };
             target.TavernDB_ACU_IsolatedData = isolated;
-            expectedFingerprint = getTableDataFingerprint_ACU(candidateData);
         }
         removeLegacy_ACU(candidateChat, isolationKey, isolationConfig);
         if (action === 'keep_v2' && stableJson_ACU$1(originalV2) !== stableJson_ACU$1(v2Projection_ACU(candidateChat, isolationKey))) {
             return commitFailure_ACU(decision, 'legacy cleanup unexpectedly changed a V2 frame');
-        }
-        try {
-            const replayed = await loadTableStateFromFramesV2_ACU(candidateChat, isolationKey, { updateRuntimeState: false });
-            if (!replayed || !expectedFingerprint || getTableDataFingerprint_ACU(replayed) !== expectedFingerprint) {
-                return commitFailure_ACU(decision, 'candidate V2 replay fingerprint mismatch');
-            }
-        }
-        catch (error) {
-            return commitFailure_ACU(decision, `candidate V2 replay failed: ${error instanceof Error ? error.message : String(error)}`);
         }
         const finalScopeError = scopeError_ACU(decision);
         if (finalScopeError)
@@ -40272,10 +39950,6 @@ $CONTENT
             const postSaveScopeError = scopeError_ACU(decision);
             if (postSaveScopeError)
                 throw new Error(`scope changed after host save: ${postSaveScopeError}`);
-            const committed = await loadTableStateFromFramesV2_ACU(chat, isolationKey);
-            if (!committed || !expectedFingerprint || getTableDataFingerprint_ACU(committed) !== expectedFingerprint) {
-                throw new Error('committed V2 replay fingerprint mismatch');
-            }
             if (expectedStorageMode === 'sqlite') {
                 await reloadStorageProvider();
                 if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {
@@ -40955,27 +40629,6 @@ $CONTENT
         }
         return null;
     }
-    async function getMixedStorageMigrationBlocker_ACU(chat, isolationKey, candidateData) {
-        const hasV2Data = chat.some(message => !message?.is_user
-            && isV2TagData_ACU(readIsolatedTagData_ACU(message, isolationKey)));
-        if (!hasV2Data)
-            return null;
-        try {
-            const replayedV2Data = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { updateRuntimeState: false });
-            if (!replayedV2Data) {
-                return 'mixed legacy-v1 and V2 data detected: V2 replay unavailable; automatic migration is blocked to preserve both storage histories';
-            }
-            const v2Fingerprint = getTableDataFingerprint_ACU(replayedV2Data);
-            const legacyFingerprint = getTableDataFingerprint_ACU(candidateData);
-            if (v2Fingerprint !== legacyFingerprint) {
-                return 'mixed legacy-v1 and V2 data detected: V2 replay fingerprint does not match repaired legacy data; automatic migration is blocked to prevent overwrite';
-            }
-            return 'mixed legacy-v1 and V2 data detected: V2 replay matches repaired legacy data, but automatic cleanup is blocked until an atomic migration transaction is available';
-        }
-        catch (error) {
-            return `mixed legacy-v1 and V2 data detected: V2 replay failed; automatic migration is blocked to preserve both storage histories (${error instanceof Error ? error.message : String(error)})`;
-        }
-    }
     async function migrateLegacyStorageToV2OnLoad_ACU(options) {
         const chat = getChatArray_ACU();
         if (!Array.isArray(chat) || chat.length === 0) {
@@ -41015,11 +40668,10 @@ $CONTENT
             });
             if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'v2_successor_verified') {
                 registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
-                const blocker = await getMixedStorageMigrationBlocker_ACU(chat, options.isolationKey, candidateData);
                 return {
                     migrated: false,
                     mixedDecision,
-                    error: blocker || `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
+                    error: `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
                 };
             }
             const commit = await commitMixedStorageDecision_ACU({
@@ -41091,15 +40743,6 @@ $CONTENT
         };
         candidateTarget.TavernDB_ACU_IsolatedData = isolatedData;
         cleanupLegacyFieldsAfterV2Write_ACU(candidateChat, options.isolationKey, options.isolationConfig);
-        try {
-            const replayedData = await loadTableStateFromFramesV2_ACU(candidateChat, options.isolationKey, { updateRuntimeState: false });
-            if (!replayedData || getTableDataFingerprint_ACU(replayedData) !== getTableDataFingerprint_ACU(candidateData)) {
-                return { migrated: false, error: 'legacy migration candidate replay does not match repaired data' };
-            }
-        }
-        catch (error) {
-            return { migrated: false, error: `legacy migration candidate replay failed: ${error instanceof Error ? error.message : String(error)}` };
-        }
         const scopeChangeError = getLegacyMigrationScopeChangeError_ACU(scopeSnapshot);
         if (scopeChangeError) {
             return { migrated: false, error: scopeChangeError };
@@ -45247,9 +44890,19 @@ $CONTENT
     }
     function getSqlMutationTargetToken_ACU(statement, tokens) {
         const first = tokens[0];
-        if (isSqlMutationKeyword_ACU(first, 'INSERT') || isSqlMutationKeyword_ACU(first, 'REPLACE')) {
-            let index = 1;
-            if (isSqlMutationKeyword_ACU(first, 'INSERT') && isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
+        const actionIndex = isSqlMutationKeyword_ACU(first, 'WITH')
+            ? tokens.findIndex((token, index) => index > 0 && token.depth === 0 && (isSqlMutationKeyword_ACU(token, 'INSERT')
+                || isSqlMutationKeyword_ACU(token, 'REPLACE')
+                || isSqlMutationKeyword_ACU(token, 'UPDATE')
+                || isSqlMutationKeyword_ACU(token, 'DELETE')))
+            : 0;
+        const action = tokens[actionIndex];
+        if (actionIndex < 0) {
+            throw new Error('WITH SQL 缺少可验证的写入语句。');
+        }
+        if (isSqlMutationKeyword_ACU(action, 'INSERT') || isSqlMutationKeyword_ACU(action, 'REPLACE')) {
+            let index = actionIndex + 1;
+            if (isSqlMutationKeyword_ACU(action, 'INSERT') && isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
                 const action = tokens[index + 1];
                 if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
                     throw new Error('INSERT OR 子句非法，无法安全重绑定表名。');
@@ -45262,8 +44915,8 @@ $CONTENT
             }
             return target;
         }
-        if (isSqlMutationKeyword_ACU(first, 'UPDATE')) {
-            let index = 1;
+        if (isSqlMutationKeyword_ACU(action, 'UPDATE')) {
+            let index = actionIndex + 1;
             if (isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
                 const action = tokens[index + 1];
                 if (!action || action.quote !== null || !new Set(['ROLLBACK', 'ABORT', 'REPLACE', 'FAIL', 'IGNORE']).has(action.value.toUpperCase())) {
@@ -45276,13 +44929,13 @@ $CONTENT
                 throw new Error('UPDATE SQL 缺少可验证的目标表。');
             return target;
         }
-        if (isSqlMutationKeyword_ACU(first, 'DELETE')) {
-            const target = getQualifiedSqlIdentifierTail_ACU(statement, tokens, 2);
-            if (!isSqlMutationKeyword_ACU(tokens[1], 'FROM') || !target)
+        if (isSqlMutationKeyword_ACU(action, 'DELETE')) {
+            const target = getQualifiedSqlIdentifierTail_ACU(statement, tokens, actionIndex + 2);
+            if (!isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'FROM') || !target)
                 throw new Error('DELETE SQL 缺少可验证的目标表。');
             return target;
         }
-        throw new Error(`不支持安全重绑定的 SQL 语句类型：${first?.value || 'empty'}。`);
+        throw new Error(`不支持安全重绑定的 SQL 语句类型：${action?.value || first?.value || 'empty'}。`);
     }
     function collectSqlMutationTableReferenceTokens_ACU(statement, tokens, mutationTarget) {
         const fromClauseTerminators = new Set([
@@ -45378,9 +45031,6 @@ $CONTENT
                     continue;
                 if (!resolved)
                     throw new Error(`无法唯一解析 SQL 表引用：${reference.value}。`);
-                if (options.requireSinglePhysicalTable === true && resolved !== physicalName) {
-                    throw new Error(`SQL mutation 跨 Sheet 表引用被拒绝：target=${target.value}, reference=${reference.value}。`);
-                }
                 replacements.push({ token: reference, physicalName: resolved });
             }
             return applySqlMutationIdentifierReplacements_ACU(statement, replacements);
@@ -46156,14 +45806,9 @@ $CONTENT
                 params: normalizedParams ? [normalizedParams] : undefined,
                 fallbackTargetSheetKeys: operationOptions.targetSheetKeys,
                 allowSingleTargetFallback: operationOptions.allowSingleTargetFallback === true,
-                keepLegacyForUnclassified: operationOptions.keepLegacyForUnclassified === true || operationOptions.requireSheetScopedOperations !== true,
+                keepLegacyForUnclassified: true,
                 reason: 'system',
             });
-            if (operationOptions.requireSheetScopedOperations === true && (operationBuild.operations.some(operation => operation.kind === 'sql_batch')
-                || operationBuild.unknownStatements.length > 0
-                || operationBuild.ambiguousStatements.length > 0)) {
-                return { success: false, modifiedKeys: [], appliedEdits: 0, changes: 0, error: 'SQL 语句无法归属到单表日志，拒绝写入不可预清理的 SQL 增量。' };
-            }
             logDebug_ACU(`[SqlTableService] 参数化快照 SQL 执行成功: changes=${result.changes}, modifiedKeys=${modifiedKeys.join(',')}`);
             return {
                 success: true,
@@ -46208,14 +45853,9 @@ $CONTENT
             const operationBuild = buildSqlSheetBatchOperations_ACU(statements, workingData, {
                 fallbackTargetSheetKeys: operationOptions.targetSheetKeys,
                 allowSingleTargetFallback: operationOptions.allowSingleTargetFallback === true,
-                keepLegacyForUnclassified: operationOptions.keepLegacyForUnclassified === true || operationOptions.requireSheetScopedOperations !== true,
+                keepLegacyForUnclassified: true,
                 reason: 'system',
             });
-            if (operationOptions.requireSheetScopedOperations === true && (operationBuild.operations.some(operation => operation.kind === 'sql_batch')
-                || operationBuild.unknownStatements.length > 0
-                || operationBuild.ambiguousStatements.length > 0)) {
-                return { success: false, modifiedKeys: [], appliedEdits: 0, error: 'SQL 语句无法归属到单表日志，拒绝写入不可预清理的 SQL 增量。' };
-            }
             logDebug_ACU(`[SqlTableService] 快照 SQL 执行成功: ${statements.length} 条语句, modifiedKeys=${modifiedKeys.join(',')}`);
             return {
                 success: true,
@@ -74575,15 +74215,9 @@ $CONTENT
         const buildResult = buildSqlSheetBatchOperations_ACU(statements, tableData, {
             fallbackTargetSheetKeys: Array.isArray(targetSheetKeys) ? targetSheetKeys : [],
             allowSingleTargetFallback: true,
-            keepLegacyForUnclassified: false,
+            keepLegacyForUnclassified: true,
             reason: 'system',
         });
-        const hasUnclassified = buildResult.unknownStatements.length > 0
-            || buildResult.ambiguousStatements.length > 0
-            || buildResult.operations.some(operation => operation.kind === 'sql_batch');
-        if (hasUnclassified) {
-            return { success: false, error: 'SQL 语句无法归属到单表日志，拒绝写入不可预清理的 SQL 增量。' };
-        }
         return { success: true, operations: buildResult.operations };
     }
     function buildSheetReplaceOperationsFromData_ACU(afterData, sheetKeys, reason) {
@@ -84868,7 +84502,7 @@ $CONTENT
         font-family: var(--vis-font-serif);
         color: var(--vis-text-main);
     }
-    
+
     /* ✅ 可视化编辑器复选框：古典风格（仅限 #acu-visualizer-content 作用域） */
     #acu-visualizer-content input[type="checkbox"] {
         -webkit-appearance: none;
@@ -84908,7 +84542,7 @@ $CONTENT
         outline: 2px solid var(--vis-accent-glow);
         outline-offset: 2px;
     }
-    
+
     /* ═══ 顶部标题栏 ═══ */
     .acu-vis-header {
         flex: 0 0 56px;
@@ -84919,7 +84553,7 @@ $CONTENT
         align-items: center;
         padding: 0 24px;
     }
-    
+
     .acu-vis-title {
         font-family: var(--vis-font-serif);
         font-size: 16px;
@@ -84931,7 +84565,7 @@ $CONTENT
         color: var(--vis-accent);
         margin-right: 12px;
     }
-    
+
     .acu-vis-actions { display: flex; gap: 10px; }
     .acu-vis-content { flex: 1; display: flex; overflow: hidden; min-width: 0; }
     .acu-vis-workspace {
@@ -84972,7 +84606,7 @@ $CONTENT
     #acu-visualizer-content[data-assistant-layout="default"] .acu-vis-assistant-dock {
         display: none;
     }
-    
+
     /* ═══ 侧边栏 ═══ */
     .acu-vis-sidebar {
         flex: 0 0 340px; /* 增大侧边栏宽度以显示更长的表格名 */
@@ -84986,7 +84620,7 @@ $CONTENT
         flex-direction: column;
         gap: 6px;
     }
-    
+
     .acu-vis-sidebar::before {
         content: '表格列表';
         display: block;
@@ -84997,7 +84631,7 @@ $CONTENT
         border-bottom: 1px solid var(--vis-border-color);
         margin-bottom: 8px;
     }
-    
+
     /* ═══ 主内容区 ═══ */
     .acu-vis-main {
         flex: 1;
@@ -85009,7 +84643,7 @@ $CONTENT
         overflow-y: auto;
         padding: 24px;
     }
-    
+
     /* ═══ AI 改表助手面板宿主 ═══ */
     #acu-vis-assistant-host {
         position: relative;
@@ -85021,7 +84655,7 @@ $CONTENT
         z-index: 1;
         pointer-events: none;
     }
-    
+
     /* ═══ 表格导航项 ═══ */
     .acu-table-nav-item {
         padding: 10px 12px;
@@ -85037,7 +84671,7 @@ $CONTENT
         position: relative;
         padding-left: 20px;
     }
-    
+
     /* 古典竖线装饰 */
     .acu-table-nav-item::before {
         content: '';
@@ -85050,25 +84684,25 @@ $CONTENT
         background-color: var(--vis-border-color);
         transition: background-color 0.2s ease;
     }
-    
+
     .acu-table-nav-item:hover {
         background: var(--vis-bg-hover);
         color: var(--vis-text-main);
     }
-    
+
     .acu-table-nav-item:hover::before {
         background-color: var(--vis-accent);
     }
-    
+
     .acu-table-nav-item.active {
         background: color-mix(in srgb, var(--vis-accent) 10%, transparent);
         color: var(--vis-accent);
     }
-    
+
     .acu-table-nav-item.active::before {
         background-color: var(--vis-accent);
     }
-    
+
     .acu-table-nav-item i { width: 20px; text-align: center; color: var(--vis-text-mute); }
     .acu-table-nav-item.active i { color: var(--vis-accent); }
 
@@ -85080,7 +84714,7 @@ $CONTENT
         min-width: 0; /* 允许 flex 子项收缩 */
         width: 0; /* 配合 flex: 1 确保能正确计算宽度 */
     }
-    
+
     .acu-table-index {
         flex-shrink: 0;
         min-width: 28px;
@@ -85090,7 +84724,7 @@ $CONTENT
         font-family: var(--vis-font-serif);
         letter-spacing: 1px;
     }
-    
+
     .acu-table-name {
         /* 表格名称：优先完整显示，超长时省略 */
         flex: 1 1 0; /* 使用 flex-basis: 0 确保正确伸展 */
@@ -85101,7 +84735,7 @@ $CONTENT
         white-space: nowrap;
         line-height: 1.4;
     }
-    
+
     .acu-table-nav-actions {
         display: flex;
         gap: 2px;
@@ -85111,15 +84745,15 @@ $CONTENT
         margin-left: auto; /* 使用 auto margin 将按钮推到最右边 */
         padding-left: 6px; /* 与内容保持间距 */
     }
-    
+
     .acu-table-nav-item:hover .acu-table-nav-actions {
         opacity: 1;
     }
-    
+
     .acu-table-nav-item.active .acu-table-nav-actions {
         opacity: 0.7; /* 选中项也显示操作按钮 */
     }
-    
+
     .acu-table-order-btn {
         background: transparent;
         border: 1px solid var(--vis-border-color);
@@ -85134,13 +84768,13 @@ $CONTENT
         transition: all 0.15s;
         font-size: 10px;
     }
-    
+
     .acu-table-order-btn:hover {
         background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         border-color: var(--vis-accent);
         color: var(--vis-accent);
     }
-    
+
     .acu-table-order-btn:disabled {
         opacity: 0.25;
         cursor: not-allowed;
@@ -85172,7 +84806,7 @@ $CONTENT
         height: 32px;
         letter-spacing: 1px;
     }
-    
+
     .acu-btn-secondary {
         background: transparent;
         color: var(--vis-text-dim);
@@ -85198,7 +84832,7 @@ $CONTENT
         gap: 16px;
         align-content: flex-start;
     }
-    
+
     .acu-data-card {
         background: var(--vis-bg-light);
         border-radius: 2px;
@@ -85210,11 +84844,11 @@ $CONTENT
         border: 1px solid var(--vis-border-color);
         transition: border-color 0.2s ease;
     }
-    
+
     .acu-data-card:hover {
         border-color: var(--vis-accent);
     }
-    
+
     .acu-card-header {
         padding: 12px 16px;
         background: var(--vis-bg-stats);
@@ -85227,7 +84861,7 @@ $CONTENT
         color: var(--vis-text-main);
         letter-spacing: 1px;
     }
-    
+
     .acu-card-body {
         padding: 14px 16px;
         font-size: 13px;
@@ -85237,16 +84871,16 @@ $CONTENT
         line-height: 1.8;
         color: var(--vis-text-dim);
     }
-    
+
     .acu-field-row { display: flex; flex-direction: column; gap: 4px; }
-    
+
     .acu-field-label {
         font-size: 10px;
         color: var(--vis-text-mute);
         font-weight: normal;
         letter-spacing: 1px;
     }
-    
+
     .acu-field-value {
         padding: 8px 10px;
         border: 1px solid transparent;
@@ -85279,19 +84913,19 @@ $CONTENT
         margin: 0 auto;
         border: 1px solid var(--vis-border-color);
     }
-    
+
     .acu-config-section {
         margin-bottom: 24px;
         padding-bottom: 24px;
         border-bottom: 1px solid var(--vis-border-color);
     }
-    
+
     .acu-config-section:last-child {
         border-bottom: none;
         margin-bottom: 0;
         padding-bottom: 0;
     }
-    
+
     .acu-config-section h4 {
         margin: 0 0 16px 0;
         color: var(--vis-text-main);
@@ -85300,9 +84934,9 @@ $CONTENT
         font-weight: normal;
         letter-spacing: 2px;
     }
-    
+
     .acu-form-group { margin-bottom: 16px; }
-    
+
     .acu-form-group label {
         display: block;
         margin-bottom: 6px;
@@ -85311,7 +84945,7 @@ $CONTENT
         font-size: 12px;
         letter-spacing: 1px;
     }
-    
+
     .acu-form-input {
         width: 100%;
         padding: 10px 12px;
@@ -85324,13 +84958,13 @@ $CONTENT
         color: var(--vis-text-main);
         transition: border-color 0.15s, box-shadow 0.15s;
     }
-    
+
     .acu-form-input:focus {
         outline: none;
         border-color: var(--vis-accent);
         box-shadow: 0 0 0 2px var(--vis-accent-glow);
     }
-    
+
     .acu-form-textarea {
         width: 100%;
         padding: 10px 12px;
@@ -85345,20 +84979,20 @@ $CONTENT
         color: var(--vis-text-main);
         line-height: 1.8;
     }
-    
+
     .acu-form-textarea:focus {
         outline: none;
         border-color: var(--vis-accent);
         box-shadow: 0 0 0 2px var(--vis-accent-glow);
     }
-    
+
     .acu-hint {
         font-size: 11px;
         color: var(--vis-text-mute);
         margin-top: 4px;
         letter-spacing: 0.5px;
     }
-    
+
     /* ═══ 模式切换 ═══ */
     .acu-mode-switch {
         display: flex;
@@ -85368,7 +85002,7 @@ $CONTENT
         margin-right: 12px;
         border: 1px solid var(--vis-border-color);
     }
-    
+
     .acu-mode-btn {
         padding: 6px 16px;
         border-radius: 1px;
@@ -85429,7 +85063,7 @@ $CONTENT
         border-color: color-mix(in srgb, var(--vis-accent) 20%, var(--vis-border-color));
         opacity: 0.85;
     }
-    
+
     .acu-col-item {
         display: flex;
         gap: 8px;
@@ -85439,7 +85073,7 @@ $CONTENT
         border-radius: 1px;
         border: 1px solid var(--vis-border-color);
     }
-    
+
     .acu-col-input {
         flex: 1;
         padding: 8px 10px;
@@ -85451,13 +85085,13 @@ $CONTENT
         color: var(--vis-text-main);
         transition: border-color 0.15s ease;
     }
-    
+
     .acu-col-input:focus {
         outline: none;
         border-color: var(--vis-accent);
         box-shadow: 0 0 0 2px var(--vis-accent-glow);
     }
-    
+
     .acu-col-btn {
         padding: 6px 10px;
         cursor: pointer;
@@ -85469,35 +85103,35 @@ $CONTENT
         font-size: 11px;
         font-family: var(--vis-font-serif);
     }
-    
+
     .acu-col-btn:hover {
         background: color-mix(in srgb, var(--vis-accent) 12%, transparent);
         border-color: var(--vis-accent);
         color: var(--vis-accent);
     }
-    
+
     /* ═══ 滚动条 ═══ */
     .acu-vis-sidebar::-webkit-scrollbar,
     .acu-vis-main::-webkit-scrollbar {
         width: 4px;
     }
-    
+
     .acu-vis-sidebar::-webkit-scrollbar-track,
     .acu-vis-main::-webkit-scrollbar-track {
         background: transparent;
     }
-    
+
     .acu-vis-sidebar::-webkit-scrollbar-thumb,
     .acu-vis-main::-webkit-scrollbar-thumb {
         background: var(--vis-border-color);
         border-radius: 1px;
     }
-    
+
     .acu-vis-sidebar::-webkit-scrollbar-thumb:hover,
     .acu-vis-main::-webkit-scrollbar-thumb:hover {
         background: var(--vis-text-mute);
     }
-    
+
     /* ═══ 新增表格按钮 ═══ */
     .acu-add-table-btn {
         padding: 10px 12px;
@@ -85516,14 +85150,14 @@ $CONTENT
         margin-top: 8px;
         letter-spacing: 1px;
     }
-    
+
     .acu-add-table-btn:hover {
         background: var(--vis-bg-hover);
         border-color: var(--vis-accent);
         border-style: solid;
         color: var(--vis-accent);
     }
-    
+
     /* ═══ 删除表格按钮 ═══ */
     .acu-vis-del-table-btn {
         background: transparent;
@@ -85535,28 +85169,28 @@ $CONTENT
         transition: all 0.15s ease;
         font-size: 12px;
     }
-    
+
     .acu-vis-del-table-btn:hover {
         opacity: 1;
         color: var(--vis-accent);
     }
-    
+
     /* ═══════════════════════════════════════════════════════════════
        响应式布局 - 可视化编辑器
        ═══════════════════════════════════════════════════════════════ */
-    
+
     /* 宽屏优化 (≥1400px) - 适度增大侧边栏显示更完整的表格名 */
     @media screen and (min-width: 1400px) {
         .acu-vis-sidebar {
             flex: 0 0 320px; /* 从380px拉窄到320px，避免占用过多空间 */
             max-width: 380px;
         }
-        
+
         .acu-table-nav-item {
             padding: 10px 12px;
             width: 100%; /* 确保占满侧边栏宽度 */
         }
-        
+
         .acu-table-name {
             /* 宽屏时允许表格名换行显示 */
             white-space: normal;
@@ -85565,25 +85199,25 @@ $CONTENT
             width: 0;
         }
     }
-    
+
     /* 超宽屏 (≥1800px) */
     @media screen and (min-width: 1800px) {
         .acu-vis-sidebar {
             flex: 0 0 360px; /* 从420px拉窄到360px */
             max-width: 420px;
         }
-        
+
         .acu-table-name {
             font-size: 14px;
         }
     }
-    
+
     /* 平板及以下 (≤768px) */
     @media screen and (max-width: 768px) {
         #acu-visualizer-content {
             font-size: 13px;
         }
-        
+
         /* 顶部栏 */
         .acu-vis-header {
             flex: 0 0 auto;
@@ -85592,7 +85226,7 @@ $CONTENT
             flex-wrap: wrap;
             gap: 10px;
         }
-        
+
         .acu-vis-title {
             font-size: 14px;
             letter-spacing: 2px;
@@ -85600,25 +85234,25 @@ $CONTENT
             text-align: center;
             order: 1;
         }
-        
+
         .acu-mode-switch {
             order: 2;
             margin-right: 0;
         }
-        
+
         .acu-vis-actions {
             order: 3;
             width: 100%;
             justify-content: center;
         }
-        
+
         /* 内容区域 - 垂直布局 */
         .acu-vis-content {
             flex-direction: column;
             min-height: 0;
             overflow: hidden;
         }
-        
+
         /* 侧边栏变为顶部横向滚动 */
         .acu-vis-sidebar {
             flex: 0 0 auto;
@@ -85642,16 +85276,16 @@ $CONTENT
             justify-content: flex-start !important;
             align-items: stretch;
         }
-        
+
         .acu-vis-sidebar::before {
             display: none;
         }
-        
+
         .acu-vis-sidebar::-webkit-scrollbar {
             height: 4px;
             width: auto;
         }
-        
+
         /* 表格导航项 - 横向布局 */
         .acu-table-nav-item {
             /* 显式禁用 grow/shrink，保证按内容紧凑排列；超出则横向滚动 */
@@ -85661,13 +85295,13 @@ $CONTENT
             min-width: fit-content; /* 确保最小宽度包裹内容 */
             display: inline-flex;
         }
-        
+
         .acu-table-nav-content {
             gap: 6px;
             flex: 0 0 auto; /* 横向滚动时不伸缩，保持内容宽度 */
             width: auto; /* 重置宽度 */
         }
-        
+
         .acu-table-name {
             white-space: nowrap; /* 确保表格名不换行 */
             overflow: visible; /* 窄屏下不截断，完整显示 */
@@ -85675,11 +85309,11 @@ $CONTENT
             flex: 0 0 auto; /* 不伸缩，宽度由内容决定 */
             width: auto; /* 重置宽度 */
         }
-        
+
         .acu-table-index {
             display: none; /* 隐藏序号 */
         }
-        
+
         .acu-table-nav-actions {
             opacity: 1;
             gap: 2px;
@@ -85688,20 +85322,20 @@ $CONTENT
             margin-left: 6px !important;
             padding-left: 0;
         }
-        
+
         .acu-table-order-btn {
             width: 20px;
             height: 20px;
             font-size: 9px;
         }
-        
+
         /* 新增表格按钮 */
         .acu-add-table-btn {
             flex-shrink: 0;
             padding: 8px 12px;
             margin-top: 0;
         }
-        
+
         .acu-vis-workspace {
             flex: 1 1 auto;
             min-width: 0;
@@ -85720,7 +85354,7 @@ $CONTENT
             overflow-y: auto;
             -webkit-overflow-scrolling: touch;
         }
-        
+
         /* 数据卡片 */
         .acu-card-grid {
             display: flex;
@@ -85729,106 +85363,106 @@ $CONTENT
             gap: 12px;
             align-content: stretch;
         }
-        
+
         .acu-data-card {
             width: 100%;
             min-width: 0;
         }
-        
+
         .acu-card-header {
             padding: 10px 12px;
             font-size: 13px;
         }
-        
+
         .acu-card-body {
             padding: 10px 12px;
             font-size: 12px;
         }
-        
+
         /* 配置面板 */
         .acu-config-panel {
             padding: 16px;
         }
-        
+
         .acu-config-section {
             margin-bottom: 16px;
             padding-bottom: 16px;
         }
-        
+
         .acu-config-section h4 {
             font-size: 14px;
         }
-        
+
         .acu-form-group {
             margin-bottom: 12px;
         }
-        
+
         .acu-form-input,
         .acu-form-textarea {
             font-size: 14px; /* 防止iOS缩放 */
             padding: 10px;
         }
-        
+
         /* 列编辑器 */
         .acu-col-item {
             flex-wrap: wrap;
             gap: 6px;
         }
-        
+
         .acu-col-input {
             width: 100%;
             flex: none;
         }
-        
+
         /* 按钮 */
         .acu-btn-primary,
         .acu-btn-secondary {
             padding: 10px 16px;
             font-size: 12px;
         }
-        
+
     }
-    
+
     /* 手机 (≤480px) */
     @media screen and (max-width: 480px) {
         #acu-visualizer-content {
             font-size: 12px;
         }
-        
+
         .acu-vis-header {
             padding: 8px 12px;
         }
-        
+
         .acu-vis-title {
             font-size: 13px;
             letter-spacing: 1px;
         }
-        
+
         .acu-vis-title i {
             display: none;
         }
-        
+
         .acu-mode-switch {
             padding: 2px;
         }
-        
+
         .acu-mode-btn {
             padding: 5px 10px;
             font-size: 11px;
         }
-        
+
         .acu-btn-primary,
         .acu-btn-secondary {
             padding: 8px 12px;
             font-size: 11px;
         }
-        
+
         .acu-vis-sidebar {
             max-height: 100px;
             padding: 8px;
             gap: 6px;
         }
-        
+
         .acu-table-nav-item {
             padding: 6px 10px;
             font-size: 11px;
@@ -85837,271 +85471,271 @@ $CONTENT
             flex: 0 0 auto;
             display: inline-flex;
         }
-        
+
         .acu-table-name {
             white-space: nowrap;
             overflow: visible;
             text-overflow: clip;
             width: auto;
         }
-        
+
         .acu-table-order-btn {
             width: 18px;
             height: 18px;
         }
-        
+
         .acu-vis-main {
             padding: 12px;
         }
-        
+
         .acu-data-card {
             border-radius: 3px;
         }
-        
+
         .acu-card-header {
             padding: 8px 10px;
             font-size: 12px;
         }
-        
+
         .acu-card-body {
             padding: 8px 10px;
             gap: 8px;
         }
-        
+
         .acu-field-label {
             font-size: 9px;
         }
-        
+
         .acu-field-value {
             padding: 5px 6px;
             font-size: 12px;
             min-height: 16px;
         }
-        
+
         .acu-config-panel {
             padding: 12px;
             border-radius: 3px;
         }
-        
+
         .acu-config-section h4 {
             font-size: 13px;
             margin-bottom: 12px;
         }
-        
+
         .acu-form-group label {
             font-size: 11px;
         }
-        
+
         .acu-hint {
             font-size: 10px;
         }
-        
+
         .acu-col-item {
             padding: 6px 8px;
         }
-        
+
         .acu-col-input {
             padding: 6px 8px;
             font-size: 13px;
         }
-        
+
         .acu-col-btn {
             padding: 5px 8px;
             font-size: 11px;
         }
     }
-    
+
     /* 超小屏幕 (≤360px) */
     @media screen and (max-width: 360px) {
         #acu-visualizer-content {
             font-size: 11px;
         }
-        
+
         .acu-vis-header {
             padding: 4px 8px;
             min-height: 40px;
             gap: 6px;
         }
-        
+
         .acu-vis-title {
             font-size: 11px;
             letter-spacing: 0.5px;
         }
-        
+
         .acu-mode-switch {
             padding: 1px;
         }
-        
+
         .acu-mode-btn {
             padding: 4px 8px;
             font-size: 10px;
         }
-        
+
         .acu-vis-actions {
             gap: 4px;
         }
-        
+
         .acu-btn-primary,
         .acu-btn-secondary {
             padding: 5px 8px;
             font-size: 10px;
         }
-        
+
         .acu-vis-sidebar {
             max-height: 75px;
             padding: 4px;
             gap: 4px;
         }
-        
+
         .acu-table-nav-item {
             padding: 4px 6px;
             font-size: 10px;
         }
-        
+
         .acu-table-order-btn {
             width: 16px;
             height: 16px;
             font-size: 8px;
         }
-        
+
         .acu-add-table-btn {
             padding: 4px 8px;
             font-size: 10px;
         }
-        
+
         .acu-vis-main {
             padding: 8px;
         }
-        
+
         .acu-card-grid {
             gap: 8px;
         }
-        
+
         .acu-data-card {
             border-radius: 4px;
         }
-        
+
         .acu-card-header {
             padding: 6px 8px;
             font-size: 11px;
         }
-        
+
         .acu-card-body {
             padding: 6px 8px;
             gap: 6px;
         }
-        
+
         .acu-field-label {
             font-size: 8px;
         }
-        
+
         .acu-field-value {
             padding: 4px 5px;
             font-size: 11px;
             min-height: 14px;
         }
-        
+
         .acu-config-panel {
             padding: 8px;
             border-radius: 4px;
         }
-        
+
         .acu-config-section {
             margin-bottom: 12px;
             padding-bottom: 12px;
         }
-        
+
         .acu-config-section h4 {
             font-size: 12px;
             margin-bottom: 10px;
         }
-        
+
         .acu-form-group {
             margin-bottom: 10px;
         }
-        
+
         .acu-form-group label {
             font-size: 10px;
         }
-        
+
         .acu-form-input,
         .acu-form-textarea {
             padding: 8px;
             font-size: 14px; /* 防止iOS缩放 */
         }
-        
+
         .acu-hint {
             font-size: 9px;
         }
-        
+
         .acu-col-item {
             padding: 5px 6px;
         }
-        
+
         .acu-col-input {
             padding: 5px 6px;
             font-size: 12px;
         }
-        
+
         .acu-col-btn {
             padding: 4px 6px;
             font-size: 10px;
         }
     }
-    
+
     /* 超极小屏幕 (≤320px) */
     @media screen and (max-width: 320px) {
         #acu-visualizer-content {
             font-size: 10px;
         }
-        
+
         .acu-vis-header {
             padding: 3px 6px;
             min-height: 36px;
         }
-        
+
         .acu-vis-title {
             font-size: 10px;
         }
-        
+
         .acu-mode-btn {
             padding: 3px 6px;
             font-size: 9px;
         }
-        
+
         .acu-btn-primary,
         .acu-btn-secondary {
             padding: 4px 6px;
             font-size: 9px;
         }
-        
+
         .acu-vis-sidebar {
             max-height: 65px;
             padding: 3px;
         }
-        
+
         .acu-table-nav-item {
             padding: 3px 5px;
             font-size: 9px;
         }
-        
+
         .acu-vis-main {
             padding: 6px;
         }
-        
+
         .acu-card-header {
             padding: 5px 6px;
             font-size: 10px;
         }
-        
+
         .acu-card-body {
             padding: 5px 6px;
         }
-        
+
         .acu-config-panel {
             padding: 6px;
         }
-        
+
         .acu-config-section h4 {
             font-size: 11px;
         }
@@ -93332,8 +92966,8 @@ $CONTENT
                     #${POPUP_ID_ACU} .toggle-switch input:checked + .slider:before { transform: translateY(-50%) translateX(20px); }
 
                     /* 提示词编辑器 */
-                    #${POPUP_ID_ACU} .prompt-segment {
-                        margin-bottom: 12px;
+                    #${POPUP_ID_ACU} .prompt-segment { 
+                        margin-bottom: 12px; 
                         border: 1px solid var(--acu-border);
                         background: var(--acu-bg-2);
                         padding: 12px;
@@ -93341,7 +92975,7 @@ $CONTENT
                     }
                     #${POPUP_ID_ACU} .prompt-segment-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
                     #${POPUP_ID_ACU} .prompt-segment-role { width: 120px !important; flex-grow: 0; }
-                    #${POPUP_ID_ACU} .prompt-segment-delete-btn {
+                    #${POPUP_ID_ACU} .prompt-segment-delete-btn { 
                         width: 28px; height: 28px; padding: 0;
                         border-radius: 999px;
                         border: 1px solid rgba(255, 107, 107, 0.35);
@@ -93350,7 +92984,7 @@ $CONTENT
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn {
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn { 
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -93386,7 +93020,7 @@ $CONTENT
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn {
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn { 
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -93422,7 +93056,7 @@ $CONTENT
                         max-height: 220px;
                         overflow: auto;
                     }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item {
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item { 
                         padding: 8px 10px;
                         border-radius: 6px;
                         cursor: pointer;
@@ -93433,7 +93067,7 @@ $CONTENT
                         border: 1px solid transparent;
                     }
                     #${POPUP_ID_ACU} .qrf_worldbook_list_item:hover { background: var(--acu-bg-2); color: var(--acu-text-1); }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected {
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected { 
                         background: rgba(37, 99, 235, 0.08);
                         border-color: rgba(37, 99, 235, 0.25);
                         color: var(--acu-accent);
@@ -93451,7 +93085,7 @@ $CONTENT
                         color: var(--acu-text-3);
                         text-align: left;
                     }
-
+                    
                     /* 底部状态栏：独立成条，居中不“歪” */
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-status-message {
                         margin: 12px 0 0 0;
@@ -93463,7 +93097,7 @@ $CONTENT
                         background: var(--acu-bg-2);
                         color: var(--acu-text-2);
                         }
-
+                        
                     /* 状态显示 */
                         #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-card-update-status-display {
                         padding: 10px 12px;
@@ -93473,7 +93107,7 @@ $CONTENT
                         color: var(--acu-text-2);
                         }
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-total-messages-display { color: var(--acu-text-3); font-size: 12px; }
-
+                        
                     /* 表格 */
                     #${POPUP_ID_ACU} table { width: 100%; border-collapse: collapse; }
                     #${POPUP_ID_ACU} table th { color: var(--acu-text-3); font-weight: 600; font-size: 12px; }
@@ -93485,7 +93119,7 @@ $CONTENT
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-track { background: transparent; border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb { background: var(--acu-border-2); border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb:hover { background: var(--acu-text-3); }
-
+                        
                     /* Toast 终止按钮（剧情推进） */
                     #toast-container .qrf-abort-btn {
                         margin-left: 8px;
@@ -93720,7 +93354,7 @@ $CONTENT
                             line-height: 1.35 !important;
                         }
                     }
-
+                    
                     /* ═══ 手机横屏/小平板 (≤768px) ═══ */
                     @media screen and (max-width: 768px) {
                         #${POPUP_ID_ACU} {
@@ -93774,7 +93408,7 @@ $CONTENT
                             justify-content: flex-start !important;
                         }
                     }
-
+                    
                     /* ═══ 手机竖屏 (≤520px) ═══ */
                     @media screen and (max-width: 520px) {
                         #${POPUP_ID_ACU} {
@@ -93852,7 +93486,7 @@ $CONTENT
                             font-size: 0.9em;
                             height: 36px;
                         }
-
+                        
                         /* 移动端：按钮自然宽度flex-wrap */
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
@@ -93861,11 +93495,11 @@ $CONTENT
                             padding: 6px 12px !important;
                         }
                     }
-
+                    
                     /* ═══ 极窄屏 (≤420px) ═══ */
                     @media screen and (max-width: 420px) {
-                        #${POPUP_ID_ACU} {
-                            padding: 4px;
+                        #${POPUP_ID_ACU} { 
+                            padding: 4px; 
                             padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 4px; margin-top: 4px; min-height: 0; }
@@ -93877,12 +93511,12 @@ $CONTENT
                         #${POPUP_ID_ACU} .acu-tabs-nav { padding: 3px; gap: 2px; flex-shrink: 0; border-radius: 16px; }
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 4px 8px !important; font-size: 10px !important; }
                         #${POPUP_ID_ACU} label { font-size: 10px; margin-bottom: 3px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
-                            padding: 6px 8px !important;
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
+                            padding: 6px 8px !important; 
                             border-radius: 6px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
-                            padding: 5px 8px !important;
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
+                            padding: 5px 8px !important; 
                             min-height: 28px !important;
                             font-size: 11px !important;
                             border-radius: 6px !important;
@@ -93900,11 +93534,11 @@ $CONTENT
                             border-radius: 6px !important;
                         }
                     }
-
+                    
                     /* ═══ 超小屏 (≤360px) ═══ */
                     @media screen and (max-width: 360px) {
-                        #${POPUP_ID_ACU} {
-                            padding: 3px;
+                        #${POPUP_ID_ACU} { 
+                            padding: 3px; 
                             padding-bottom: calc(3px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 3px; margin-top: 3px; min-height: 0; }
@@ -93918,13 +93552,13 @@ $CONTENT
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 3px 6px !important; font-size: 10px !important; border-radius: 12px !important; }
                         #${POPUP_ID_ACU} .acu-tab-button::after { display: none !important; }
                         #${POPUP_ID_ACU} label { font-size: 9px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
-                            padding: 5px 6px !important;
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
+                            padding: 5px 6px !important; 
                             font-size: 14px !important;
                             border-radius: 5px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
-                            padding: 4px 6px !important;
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
+                            padding: 4px 6px !important; 
                             min-height: 26px !important;
                             font-size: 10px !important;
                             border-radius: 5px !important;
@@ -93934,8 +93568,8 @@ $CONTENT
                             gap: 3px !important;
                         }
                         #${POPUP_ID_ACU} .checkbox-group label { font-size: 9px !important; line-height: 1.2 !important; }
-                        #${POPUP_ID_ACU} input[type="checkbox"] {
-                            width: 15px !important;
+                        #${POPUP_ID_ACU} input[type="checkbox"] { 
+                            width: 15px !important; 
                             height: 15px !important;
                             min-width: 15px !important;
                             min-height: 15px !important;
@@ -94015,7 +93649,7 @@ $CONTENT
                         color: #dc2626;
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn .fa-solid { opacity: 0.92; }
-
+                    
                     /* 超极小屏幕 (≤320px) */
                     @media screen and (max-width: 320px) {
                         #${POPUP_ID_ACU} {
@@ -94100,18 +93734,18 @@ $CONTENT
         }).join('');
         return `
         <div class="acu-theme-selector" style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select"
+            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select" 
                     style="padding: 4px 8px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-control-bg, #ffffff) !important; color: var(--acu-text-1, #1a2332) !important; font-size: 12px !important; cursor: pointer !important; max-width: 140px !important; font-family: inherit !important;"
                     title="切换界面主题">
                 ${options}
             </select>
             <div class="acu-theme-actions" style="display: flex; gap: 4px;">
-                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import"
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import" 
                         style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导入自定义主题">
                     <i class="fa-solid fa-upload" style="font-size: 11px;"></i>
                 </button>
-                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export"
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export" 
                         style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导出当前主题模板（完整可编辑版）">
                     <i class="fa-solid fa-download" style="font-size: 11px;"></i>
@@ -98370,12 +98004,9 @@ $CONTENT
         let candidateChat;
         try {
             candidateChat = buildRecoveredCandidateChat_ACU(plan);
-            const recovered = await loadTableStateFromFramesV2_ACU(candidateChat, plan.isolationKey, { updateRuntimeState: false });
-            if (!recovered)
-                return failure('恢复候选缺少可回放的 full checkpoint。');
         }
         catch (error) {
-            return failure(`恢复候选回放失败：${getErrorMessage_ACU(error)}`);
+            return failure(`恢复候选构造失败：${getErrorMessage_ACU(error)}`);
         }
         return runTableWriteTransaction_ACU({
             source: 'system',
@@ -98409,9 +98040,6 @@ $CONTENT
                     try {
                         if (!currentScopeMatches_ACU(plan))
                             throw new Error('宿主保存后恢复计划作用域已变化。');
-                        const recovered = await loadTableStateFromFramesV2_ACU(plan.chat, plan.isolationKey);
-                        if (!recovered)
-                            throw new Error('宿主保存后恢复 checkpoint 不可回放。');
                         if (expectedStorageMode === 'sqlite') {
                             await reloadStorageProvider();
                             if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {

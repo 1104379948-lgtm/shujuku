@@ -7,7 +7,6 @@ import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder';
 import type { MixedStorageDecision_ACU } from './mixed-storage-decision';
 import { collectMixedStorageEvidence_ACU } from './mixed-storage-evidence';
-import { loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
 import { getCurrentStorageMode } from './storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from './table-storage-strategy';
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
@@ -94,8 +93,10 @@ function commitFailure_ACU(decision: MixedStorageDecision_ACU, error: string): M
 }
 
 /**
- * Commits only an evaluator-authorized action. Candidate construction and replay occur
- * before mutating live chat; the host is called exactly once on a successful commit.
+ * Commits only an evaluator-authorized action. Before mutation, source evidence and scope
+ * are refreshed to reject stale decisions; a merge candidate is then deterministically
+ * constructed from the frozen decision without replaying it as a post-generation proof.
+ * The host is called exactly once on a successful commit.
  */
 export async function commitMixedStorageDecision_ACU(options: MixedStorageCommitOptions_ACU): Promise<MixedStorageCommitResult_ACU> {
   const { decision, action, isolationConfig } = options;
@@ -120,7 +121,6 @@ export async function commitMixedStorageDecision_ACU(options: MixedStorageCommit
   const candidateChat = clone_ACU(chat);
   const isolationKey = decision.scopeSnapshot.activeIsolationKey;
   const originalV2 = v2Projection_ACU(candidateChat, isolationKey);
-  let expectedFingerprint = decision.v2Fingerprint;
   if (action === 'commit_merge_candidate') {
     const candidateData = clone_ACU(decision.frozenMergeCandidate!);
     if (auditTableDataForUpgrade_ACU(candidateData).status !== 'clean') {
@@ -163,19 +163,10 @@ export async function commitMixedStorageDecision_ACU(options: MixedStorageCommit
       storageFrame: { version: 2, headRevision: `checkpoint:mixed-merge:${createdAt.toString(36)}`, checkpoint: checkpoint.checkpoint, logEntries: [] },
     };
     target.TavernDB_ACU_IsolatedData = isolated;
-    expectedFingerprint = getTableDataFingerprint_ACU(candidateData);
   }
   removeLegacy_ACU(candidateChat, isolationKey, isolationConfig);
   if (action === 'keep_v2' && stableJson_ACU(originalV2) !== stableJson_ACU(v2Projection_ACU(candidateChat, isolationKey))) {
     return commitFailure_ACU(decision, 'legacy cleanup unexpectedly changed a V2 frame');
-  }
-  try {
-    const replayed = await loadTableStateFromFramesV2_ACU(candidateChat, isolationKey, { updateRuntimeState: false });
-    if (!replayed || !expectedFingerprint || getTableDataFingerprint_ACU(replayed) !== expectedFingerprint) {
-      return commitFailure_ACU(decision, 'candidate V2 replay fingerprint mismatch');
-    }
-  } catch (error) {
-    return commitFailure_ACU(decision, `candidate V2 replay failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   const finalScopeError = scopeError_ACU(decision);
   if (finalScopeError) return commitFailure_ACU(decision, finalScopeError);
@@ -192,10 +183,6 @@ export async function commitMixedStorageDecision_ACU(options: MixedStorageCommit
   try {
     const postSaveScopeError = scopeError_ACU(decision);
     if (postSaveScopeError) throw new Error(`scope changed after host save: ${postSaveScopeError}`);
-    const committed = await loadTableStateFromFramesV2_ACU(chat, isolationKey);
-    if (!committed || !expectedFingerprint || getTableDataFingerprint_ACU(committed) !== expectedFingerprint) {
-      throw new Error('committed V2 replay fingerprint mismatch');
-    }
     if (expectedStorageMode === 'sqlite') {
       await reloadStorageProvider();
       if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {

@@ -11,7 +11,6 @@ import { commitMixedStorageDecision_ACU } from './mixed-storage-commit';
 import { evaluateMixedStorageDecision_ACU, type MixedStorageDecision_ACU } from './mixed-storage-decision';
 import { registerMixedStorageDecision_ACU } from './mixed-storage-decision-registry';
 import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder';
-import { loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
 
@@ -271,33 +270,6 @@ function getLegacyMigrationScopeChangeError_ACU(snapshot: LegacyMigrationScopeSn
   return null;
 }
 
-async function getMixedStorageMigrationBlocker_ACU(
-  chat: any[],
-  isolationKey: string,
-  candidateData: TableDataObject_ACU,
-): Promise<string | null> {
-  const hasV2Data = chat.some(message => !message?.is_user
-    && isV2TagData_ACU(readIsolatedTagData_ACU(message, isolationKey)));
-  if (!hasV2Data) return null;
-
-  try {
-    const replayedV2Data = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { updateRuntimeState: false });
-    if (!replayedV2Data) {
-      return 'mixed legacy-v1 and V2 data detected: V2 replay unavailable; automatic migration is blocked to preserve both storage histories';
-    }
-
-    const v2Fingerprint = getTableDataFingerprint_ACU(replayedV2Data);
-    const legacyFingerprint = getTableDataFingerprint_ACU(candidateData);
-    if (v2Fingerprint !== legacyFingerprint) {
-      return 'mixed legacy-v1 and V2 data detected: V2 replay fingerprint does not match repaired legacy data; automatic migration is blocked to prevent overwrite';
-    }
-
-    return 'mixed legacy-v1 and V2 data detected: V2 replay matches repaired legacy data, but automatic cleanup is blocked until an atomic migration transaction is available';
-  } catch (error) {
-    return `mixed legacy-v1 and V2 data detected: V2 replay failed; automatic migration is blocked to preserve both storage histories (${error instanceof Error ? error.message : String(error)})`;
-  }
-}
-
 export async function migrateLegacyStorageToV2OnLoad_ACU(
   options: LegacyToV2MigrationOptions_ACU,
 ): Promise<LegacyToV2MigrationResult_ACU> {
@@ -343,11 +315,10 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
     });
     if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'v2_successor_verified') {
       registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
-      const blocker = await getMixedStorageMigrationBlocker_ACU(chat, options.isolationKey, candidateData);
       return {
         migrated: false,
         mixedDecision,
-        error: blocker || `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
+        error: `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
       };
     }
     const commit = await commitMixedStorageDecision_ACU({
@@ -428,15 +399,6 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
   };
   candidateTarget.TavernDB_ACU_IsolatedData = isolatedData;
   cleanupLegacyFieldsAfterV2Write_ACU(candidateChat, options.isolationKey, options.isolationConfig);
-
-  try {
-    const replayedData = await loadTableStateFromFramesV2_ACU(candidateChat, options.isolationKey, { updateRuntimeState: false });
-    if (!replayedData || getTableDataFingerprint_ACU(replayedData) !== getTableDataFingerprint_ACU(candidateData)) {
-      return { migrated: false, error: 'legacy migration candidate replay does not match repaired data' };
-    }
-  } catch (error) {
-    return { migrated: false, error: `legacy migration candidate replay failed: ${error instanceof Error ? error.message : String(error)}` };
-  }
 
   const scopeChangeError = getLegacyMigrationScopeChangeError_ACU(scopeSnapshot);
   if (scopeChangeError) {

@@ -8,7 +8,7 @@ import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
 import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU } from './storage-frame-v2-types';
 import { hasLegacyTopLevelTableData_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
-import { applyTableOperationV2_ACU, collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
+import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU } from '../../data/sqlite/schema-mapper';
@@ -463,33 +463,6 @@ function normalizeOperations_ACU(
     }];
   }
   return [];
-}
-
-/**
- * 写入前检查 operations 是否可在目标楼层 V2 base 上应用。
- * 不比较 replay 结果与 afterData；调用方负责来源链路正确性。
- */
-async function getOperationReplayApplicabilityError_ACU(
-  chat: any[],
-  isolationKey: string,
-  targetMessageIndex: number,
-  operations: TableMutationOperationV2_ACU[],
-): Promise<string | null> {
-  if (operations.length === 0) return null;
-  try {
-    const replayBase = await loadTableStateFromFramesV2_ACU(chat, isolationKey, {
-      maxMessageIndex: targetMessageIndex,
-      updateRuntimeState: false,
-    });
-    if (!replayBase) {
-      return 'V2 operation log 回放缺少现有 full checkpoint base，拒绝写入。';
-    }
-    const replayCandidate = deepClone_ACU(replayBase);
-    for (const operation of operations) await applyTableOperationV2_ACU(replayCandidate, operation);
-    return null;
-  } catch (error: any) {
-    return `V2 operation log 回放失败：${error?.message || String(error)}`;
-  }
 }
 
 function getOrInitV2Frame_ACU(isolatedData: Record<string, any>, isolationKey: string): TableStorageFrameV2_ACU {
@@ -1000,18 +973,6 @@ async function persistTableMutationLogV2Core_ACU(
     && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
   if (shouldCheckpoint && operations.length > 0) {
     return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
-  }
-  if (!shouldCheckpoint && operations.length > 0) {
-    const replayApplicabilityError = await getOperationReplayApplicabilityError_ACU(
-      chat,
-      isolationKey,
-      target.index,
-      operations,
-    );
-    if (replayApplicabilityError) return { saved: false, error: replayApplicabilityError };
-    logDebug_ACU(
-      `[V2 Persist] operation 可应用性检查通过（已移除 afterData 相等性阻断）: messageIndex=${target.index}, source=${options.source}, operations=${operations.length}`,
-    );
   }
 
   const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
@@ -2083,18 +2044,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     }
 
     const operationChanges = requestedChanges.filter((change): change is Extract<TemplateSheetChange_ACU, { kind: 'operations' }> => change.kind === 'operations');
-    const replayCandidate = deepClone_ACU(activeReplayState);
     const operations = operationChanges.flatMap(change => change.operations.map(operation => deepClone_ACU(operation)));
-    for (const change of operationChanges) {
-      for (const operation of change.operations) await applyTableOperationV2_ACU(replayCandidate, operation);
-      const replayedSheet = replayCandidate[change.sheetKey] as Sheet_ACU | undefined;
-      // Operations are the source of truth for template commits. Do not fail closed when the
-      // caller's targetSheetData (often a visualizer runtime snapshot) drifts from V2 replay base
-      // content after meta/schema-only operations.
-      if (!replayedSheet) {
-        throw new Error(`V2 当前楼层模板提交 operation 回放后缺少 Sheet：${change.sheetKey}。`);
-      }
-    }
 
     const entryOptions: AppendMutationLogEntryOptions_ACU | undefined = operations.length === 0 ? undefined : (() => {
       const seq = targetFrameLastLogSeq + 1;

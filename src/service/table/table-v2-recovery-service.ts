@@ -6,7 +6,6 @@ import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder
 import { auditTableDataForUpgrade_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
 import { getCurrentStorageMode } from './storage-mode';
-import { loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from './table-storage-strategy';
 import type { TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
@@ -234,10 +233,8 @@ export async function commitPreparedV2Recovery_ACU(
   let candidateChat: any[];
   try {
     candidateChat = buildRecoveredCandidateChat_ACU(plan);
-    const recovered = await loadTableStateFromFramesV2_ACU(candidateChat, plan.isolationKey, { updateRuntimeState: false });
-    if (!recovered) return failure('恢复候选缺少可回放的 full checkpoint。');
   } catch (error) {
-    return failure(`恢复候选回放失败：${getErrorMessage_ACU(error)}`);
+    return failure(`恢复候选构造失败：${getErrorMessage_ACU(error)}`);
   }
 
   return runTableWriteTransaction_ACU({
@@ -272,8 +269,6 @@ export async function commitPreparedV2Recovery_ACU(
         const expectedStorageMode = getCurrentStorageMode();
         try {
           if (!currentScopeMatches_ACU(plan)) throw new Error('宿主保存后恢复计划作用域已变化。');
-          const recovered = await loadTableStateFromFramesV2_ACU(plan.chat, plan.isolationKey);
-          if (!recovered) throw new Error('宿主保存后恢复 checkpoint 不可回放。');
           if (expectedStorageMode === 'sqlite') {
             await reloadStorageProvider();
             if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {
