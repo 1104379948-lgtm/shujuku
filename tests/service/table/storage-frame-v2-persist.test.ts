@@ -1612,6 +1612,62 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       timeline: { kind: 'sheet_introduction', activateAtMessageIndex: 0, afterSeq: 7 },
     });
   });
+  it('既有表的 rebase 在目标 frame 尾部日志后写入 sheet_rebase timeline 且携带数据行', async () => {
+    const rebasedSheet = {
+      uid: 'inventory', name: '背包', orderNo: 0,
+      content: [['row_id', '名称', '品质'], ['1', '铁剑', '']],
+      sourceData: { ddl: 'CREATE TABLE inventory (\n  row_id INTEGER PRIMARY KEY,\n  item_name TEXT, -- 名称\n  quality TEXT NOT NULL -- 品质\n);' },
+      updateConfig: {}, exportConfig: {},
+    } as any;
+    const message = seedFrame({
+      checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } },
+      logEntries: [makeEntry({ seq: 7 })],
+      perSheetCheckpoints: {},
+    });
+    mocks.loadReplayState.mockResolvedValue({ mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB });
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'rebase', sheetKey: 'sheet_a', sheetData: rebasedSheet }],
+      guideData: { sheet_a: { name: '背包' }, sheet_b: { name: 'B' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.perSheetCheckpoints.sheet_a).toMatchObject({
+      kind: 'sheet_full', sheetKey: 'sheet_a', reason: 'schema_change',
+      timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 0, afterSeq: 7 },
+    });
+    expect(frame.perSheetCheckpoints.sheet_a.data.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', '']]);
+  });
+
+  it('rebase 目标表不存在于 active replay state 时拒绝', async () => {
+    const rebasedSheet = {
+      uid: 'ghost', name: '幽灵表', orderNo: 0,
+      content: [['row_id', 'value']],
+      sourceData: { ddl: 'CREATE TABLE ghost (row_id INTEGER PRIMARY KEY, value TEXT);' },
+      updateConfig: {}, exportConfig: {},
+    } as any;
+    seedFrame({
+      checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } },
+      logEntries: [makeEntry({ seq: 7 })],
+      perSheetCheckpoints: {},
+    });
+    mocks.loadReplayState.mockResolvedValue({ mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB });
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'rebase', sheetKey: 'sheet_ghost', sheetData: rebasedSheet }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(false);
+    expect(String(result.error || '')).toContain('rebase');
+  });
+
+
 
   it('历史 full checkpoint 后的正常增量 frame 继续走 V2 commit', async () => {
     const historicalMessage = seedFrame({ logEntries: [], perSheetCheckpoints: {} });

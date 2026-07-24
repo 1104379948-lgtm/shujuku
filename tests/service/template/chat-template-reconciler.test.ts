@@ -31,7 +31,8 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', null]]);
     expect(plan.candidateData.sheet_imported).toBeUndefined();
     expect(plan.sheetChanges).toEqual([expect.objectContaining({
-      kind: 'operations', sheetKey: 'sheet_legacy', operations: expect.arrayContaining([expect.objectContaining({ contractVersion: 2, fills: expect.objectContaining({ quality: expect.objectContaining({ kind: 'literal' }) }) })]),
+      kind: 'rebase', sheetKey: 'sheet_legacy',
+      sheetData: expect.objectContaining({ content: [['row_id', '名称', '品质'], ['1', '铁剑', null]] }),
     })]);
     expect({ baseline, template }).toEqual(original);
   });
@@ -81,7 +82,9 @@ describe('reconcileChatTemplate_ACU', () => {
       sheet_new: sheet('sheet_new', '背包', ['row_id', '名称', '品质'], 'row_id INTEGER PRIMARY KEY, item_name TEXT -- 名称, quality TEXT NOT NULL -- 品质'),
     });
     const invalidDefault = await reconcileChatTemplate_ACU({ baselineData: baselineWithoutDrop, templateData: requiredTemplate, destructiveChangeConfirmed: false });
-    expect(invalidDefault.blockers.join('\n')).toContain('DEFAULT');
+    // rebase 语义下：新增 NOT NULL 无 DEFAULT 列以空串回填，TEXT NOT NULL 接受 '' → 协调成功。
+    expect(invalidDefault.blockers).toEqual([]);
+    expect(invalidDefault.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', '']]);
   });
 
   it('拒绝新表占用当前聊天已有不同表的 key', async () => {
@@ -281,8 +284,8 @@ describe('reconcileChatTemplate_ACU', () => {
 
     expect(plan.blockers).toEqual([]);
     expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', 'item_name', 'equipped'], ['1', '铁剑', '1']]);
-    expect((plan.sheetChanges[0] as any).targetSheetData.content).toEqual(plan.candidateData.sheet_legacy.content);
-    expect(plan.audit[0]).toMatchObject({ affectedRowCount: 1, fills: [{ physicalName: 'equipped', kind: 'ddl_literal_default' }] });
+    expect((plan.sheetChanges[0] as any).sheetData.content).toEqual(plan.candidateData.sheet_legacy.content);
+    expect(plan.audit[0]).toMatchObject({ affectedRowCount: 1, fills: [{ physicalName: 'equipped', kind: 'literal_default', literal: '1' }] });
   });
 
   it.each([
@@ -310,10 +313,10 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.blockers).toEqual([]);
     expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', 'item_name', 'quality', 'note'], ['1', '铁剑', null, '旧备注']]);
     expect(plan.candidateData.sheet_legacy.sourceData.hiddenPhysicalColumns).toEqual(['note']);
-    expect((plan.sheetChanges[0] as any).operations[0]).toMatchObject({
-      contractVersion: 2,
-      migrationPolicy: { destructiveChangeConfirmed: false },
-      fills: { quality: { kind: 'literal' } },
+    expect(plan.sheetChanges[0]).toMatchObject({
+      kind: 'rebase',
+      sheetKey: 'sheet_legacy',
+      sheetData: { content: [['row_id', 'item_name', 'quality', 'note'], ['1', '铁剑', null, '旧备注']] },
     });
   });
 
@@ -327,13 +330,15 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.candidateData.sheet_new.seedRows).toBeUndefined();
   });
 
-  it('拒绝 meta_update 无法表达的 sourceData 删除', async () => {
+  it('rebase 语义下 sourceData 字段删除可通过整表 checkpoint 表达', async () => {
     const baselineSheet = sheet('sheet_legacy', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY, item_name TEXT -- 名称');
     baselineSheet.sourceData.note = '旧说明';
     const templateSheet = sheet('sheet_imported', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY, item_name TEXT -- 名称');
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({ sheet_legacy: baselineSheet }), templateData: state({ sheet_imported: templateSheet }), destructiveChangeConfirmed: false });
 
-    expect(plan.blockers.join('\n')).toContain('无法安全表达删除');
+    expect(plan.blockers).toEqual([]);
+    // 模板 sourceData 不含 note → checkpoint.data 的 sourceData 也不再包含该字段。
+    expect(plan.candidateData.sheet_legacy.sourceData.note).toBeUndefined();
   });
 
   it('合法 physical rename 可与独立隐藏和新增列一起回放', async () => {
@@ -349,7 +354,8 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.blockers).toEqual([]);
     expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质', '备注'], ['1', '铁剑', null, '旧备注']]);
     expect(plan.candidateData.sheet_legacy.sourceData.hiddenPhysicalColumns).toEqual(['note']);
-    expect((plan.sheetChanges[0] as any).operations[0].physicalColumnMappings).toEqual([{ fromPhysicalName: 'item_name', toPhysicalName: 'item_title' }]);
+    expect(plan.sheetChanges[0]).toMatchObject({ kind: 'rebase', sheetKey: 'sheet_legacy' });
+    expect(plan.audit[0].physicalColumnMappings).toEqual([{ fromPhysicalName: 'item_name', toPhysicalName: 'item_title' }]);
   });
 
   it('删列与新增列复用同一 physical 名称时仍 fail closed，不能把旧值改解释为新字段', async () => {
@@ -378,7 +384,7 @@ describe('reconcileChatTemplate_ACU', () => {
 
     expect(plan.blockers).toEqual([]);
     expect(plan.candidateData.sheet_legacy.seedRows).toBeUndefined();
-    expect((plan.sheetChanges[0] as any).targetSheetData.seedRows).toBeUndefined();
+    expect((plan.sheetChanges[0] as any).sheetData.seedRows).toBeUndefined();
   });
 
   it('blocker 结果返回已剥离运行时字段的 baseline，而非半构造候选', async () => {
@@ -425,10 +431,8 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(matchedAudit).toMatchObject({
       baselineSheetKey: 'sheet_legacy', templateSheetKey: 'sheet_imported', canonicalName: '背包', metadataChangedFields: ['orderNo'],
     });
-    expect(matchedAudit?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'sheet_schema_migrate', contractVersion: 2 }),
-      { kind: 'meta_update' },
-    ]));
+    // rebase 语义：结构 + metadata 统一并入整表 checkpoint，audit.operations 仅记录 rebase。
+    expect(matchedAudit?.operations).toEqual([{ kind: 'rebase' }]);
     expect(plan.audit.find(item => item.sheetKey === 'sheet_new')?.operations).toEqual([{ kind: 'introduction' }]);
     expect(plan.audit.find(item => item.sheetKey === 'sheet_old')?.operations).toEqual([{ kind: 'delete' }]);
   });

@@ -36112,7 +36112,7 @@ $CONTENT
         if (new Set(values).size !== values.length)
             throw new Error(`${label} 包含重复项。`);
     }
-    function literalToCellValue_ACU(literal) {
+    function literalToCellValue_ACU$1(literal) {
         if (literal.kind === 'null')
             return null;
         if (literal.kind === 'boolean')
@@ -36234,7 +36234,7 @@ $CONTENT
             const targetRow = operation.targetSchema.columns.map(target => {
                 const sourceName = sourceForTarget(target.physicalName);
                 if (!sourceName)
-                    return literalToCellValue_ACU(fills[target.physicalName].literal);
+                    return literalToCellValue_ACU$1(fills[target.physicalName].literal);
                 const sourceIndex = sourceByName.get(sourceName).index;
                 const policy = conversionByTarget.get(target.physicalName);
                 if (!policy)
@@ -36657,12 +36657,12 @@ $CONTENT
             }
             if (checkpoint.timeline !== undefined) {
                 const timeline = checkpoint.timeline;
-                if (timeline.kind !== 'sheet_introduction'
+                if ((timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase')
                     || !Number.isInteger(timeline.activateAtMessageIndex)
                     || timeline.activateAtMessageIndex < 0
                     || !Number.isInteger(timeline.afterSeq)
                     || timeline.afterSeq < 0) {
-                    throw new Error(`perSheetCheckpoints.${recordKey} 包含非法 introduction timeline`);
+                    throw new Error(`perSheetCheckpoints.${recordKey} 包含非法 timeline`);
                 }
             }
             return checkpoint;
@@ -38269,7 +38269,7 @@ $CONTENT
     }
     function timelineIsValidForIntroductionHistory_ACU(value) {
         return value === undefined || (isObjectRecord_ACU$1(value)
-            && value.kind === 'sheet_introduction'
+            && (value.kind === 'sheet_introduction' || value.kind === 'sheet_rebase')
             && Number.isInteger(value.activateAtMessageIndex) && value.activateAtMessageIndex >= 0
             && Number.isInteger(value.afterSeq) && value.afterSeq >= 0);
     }
@@ -39289,7 +39289,7 @@ $CONTENT
             throw new Error('当前楼层模板提交不能同时删除和变更同一 sheetKey。');
         }
         for (const change of sheetChanges) {
-            if (change.kind === 'introduction') {
+            if (change.kind === 'introduction' || change.kind === 'rebase') {
                 if (!isObjectRecord_ACU$1(change.sheetData))
                     throw new Error(`当前楼层模板提交缺少可恢复 Sheet：${change.sheetKey}。`);
                 continue;
@@ -39401,7 +39401,7 @@ $CONTENT
                         if (!isObjectRecord_ACU$1(snapshotSheet) || !Array.isArray(snapshotSheet.content)) {
                             throw new Error(`预填表模板提交的 templateSource 缺少变更 Sheet：${change.sheetKey}。`);
                         }
-                        const expectedSheet = deepClone_ACU$1(change.kind === 'introduction' ? change.sheetData : change.targetSheetData);
+                        const expectedSheet = deepClone_ACU$1(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
                         const expectedNormalization = normalizeCanonicalTableRows_ACU({ [change.sheetKey]: expectedSheet });
                         if (expectedNormalization.errors.length > 0) {
                             throw new Error(`预填表模板提交目标 Sheet 行标识不合法：${formatCanonicalRowIssues_ACU(expectedNormalization.errors)}`);
@@ -39497,9 +39497,10 @@ $CONTENT
                 try {
                     const purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count), 0);
                     const introductionSheets = new Map();
+                    const rebaseSheets = new Map();
                     let removedNullRowCount = 0;
                     for (const change of requestedChanges) {
-                        const targetSheetData = deepClone_ACU$1(change.kind === 'introduction' ? change.sheetData : change.targetSheetData);
+                        const targetSheetData = deepClone_ACU$1(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
                         if (change.kind === 'introduction' && targetSheetData.content?.length !== 1) {
                             throw new Error(`V2 sheet introduction only accepts a header-only sheet: sheetKey=${change.sheetKey}.`);
                         }
@@ -39524,6 +39525,8 @@ $CONTENT
                         createSheetInsertPlan(targetSheetData);
                         if (change.kind === 'introduction')
                             introductionSheets.set(change.sheetKey, targetSheetData);
+                        else if (change.kind === 'rebase')
+                            rebaseSheets.set(change.sheetKey, targetSheetData);
                     }
                     const isolatedData = cloneIsolatedData_ACU(target.message);
                     const frame = isolatedData[isolationKey]?.storageFrame;
@@ -39558,6 +39561,34 @@ $CONTENT
                             event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
                             timeline: {
                                 kind: 'sheet_introduction',
+                                activateAtMessageIndex: target.index,
+                                afterSeq: targetFrameLastLogSeq,
+                            },
+                            baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
+                        });
+                    }
+                    for (const change of requestedChanges.filter(item => item.kind === 'rebase')) {
+                        if (!Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey)) {
+                            throw new Error(`V2 sheet rebase requires an existing sheet: sheetKey=${change.sheetKey} is absent from the active checkpoint state.`);
+                        }
+                        if (deletedSheetKeys.includes(change.sheetKey)) {
+                            throw new Error(`V2 sheet rebase 不能与删除同一 sheetKey 组合：${change.sheetKey}。`);
+                        }
+                        const existingCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+                        if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
+                            throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${change.sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
+                        }
+                        const scheduleSummary = scheduleSummaryBySheet[change.sheetKey];
+                        checkpoints.push({
+                            kind: 'sheet_full',
+                            createdAt,
+                            reason: 'schema_change',
+                            sheetKey: change.sheetKey,
+                            data: rebaseSheets.get(change.sheetKey),
+                            ...(scheduleSummary ? { scheduleSummary: deepClone_ACU$1(scheduleSummary) } : {}),
+                            event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
+                            timeline: {
+                                kind: 'sheet_rebase',
                                 activateAtMessageIndex: target.index,
                                 afterSeq: targetFrameLastLogSeq,
                             },
@@ -43051,68 +43082,6 @@ $CONTENT
         return sheetFieldCount >= 2;
     }
 
-    function isSheet_ACU(value) {
-        return !!value && typeof value === 'object' && !Array.isArray(value);
-    }
-    function schemaProjection_ACU(sheet) {
-        return JSON.stringify({
-            uid: sheet.uid,
-            headers: Array.isArray(sheet.content?.[0]) ? sheet.content[0] : [],
-            ddl: sheet.sourceData?.ddl || '',
-        });
-    }
-    /**
-     * Read-only validation for editor candidates. It never creates a frame entry or
-     * mutates either input. V1-compatible changes remain V1 contracts; changes
-     * outside that subset require the caller to supply an explicit V2 intent.
-     */
-    async function preflightSchemaMigrations_ACU(input) {
-        const changedSheetKeys = Object.keys(input.candidateData || {}).filter(sheetKey => {
-            if (!sheetKey.startsWith('sheet_'))
-                return false;
-            const before = input.baselineData?.[sheetKey];
-            const after = input.candidateData?.[sheetKey];
-            return isSheet_ACU(before) && isSheet_ACU(after) && schemaProjection_ACU(before) !== schemaProjection_ACU(after);
-        });
-        if (changedSheetKeys.length === 0)
-            return { changedSheetKeys, blockers: [], operations: [] };
-        const blockers = [];
-        const operations = [];
-        const forceV2SheetKeys = new Set(input.forceV2SheetKeys || []);
-        for (const sheetKey of changedSheetKeys) {
-            const before = input.baselineData[sheetKey];
-            const after = input.candidateData[sheetKey];
-            try {
-                if (forceV2SheetKeys.has(sheetKey))
-                    throw new Error('schema migration requires explicit V2 intent。');
-                operations.push(await buildSheetSchemaMigrationOperation_ACU(sheetKey, before, after));
-                continue;
-            }
-            catch (v1Error) {
-                const intent = input.intents?.[sheetKey];
-                if (!intent) {
-                    blockers.push(`${sheetKey}: ${v1Error?.message || 'schema migration 缺少显式 V2 intent。'}`);
-                    continue;
-                }
-                try {
-                    operations.push(await buildSheetSchemaMigrationOperationV2_ACU(sheetKey, before, after, intent));
-                }
-                catch (v2Error) {
-                    blockers.push(`${sheetKey}: ${v2Error?.message || 'schema migration V2 preflight 失败。'}`);
-                }
-            }
-        }
-        if (blockers.length > 0)
-            return { changedSheetKeys, blockers, operations: [] };
-        try {
-            await hydrateTableDataStrict_ACU(input.candidateData);
-        }
-        catch (error) {
-            return { changedSheetKeys, operations: [], blockers: [`完整 candidate SQLite hydrate 失败: ${error?.message || String(error)}`] };
-        }
-        return { changedSheetKeys, blockers: [], operations };
-    }
-
     /**
      * Builds a read-only V2 change plan. Runtime writes, guide persistence and locking remain
      * owned by commitCurrentFloorTemplateChanges_ACU; this function deliberately has no I/O.
@@ -43125,6 +43094,10 @@ $CONTENT
         const audit = [];
         const candidateData = stripRuntimeSeedRows_ACU(baselineData);
         candidateData.mate = clone_ACU$4(templateData.mate || baselineData.mate);
+        for (const [key, sheet] of listSheets_ACU(templateData))
+            normalizeTemplateSheetRowIdColumn_ACU(sheet, key, blockers);
+        if (blockers.length > 0)
+            return emptyPlan_ACU(baselineData, audit, blockers);
         for (const [key, sheet] of listSheets_ACU(baselineData)) {
             try {
                 validateBaselineSheetRows_ACU(sheet);
@@ -43137,9 +43110,8 @@ $CONTENT
         const templateByName = indexSheetsByName_ACU(templateData, '导入模板', blockers);
         if (blockers.length > 0)
             return emptyPlan_ACU(baselineData, audit, blockers);
-        const intents = {};
-        const metadataByKey = new Map();
         const matchedKeys = new Set();
+        const rebaseKeys = new Set();
         for (const [canonicalName, templateEntry] of templateByName) {
             const matchedByName = baselineByName.get(canonicalName);
             const occupiedByKey = baselineData[templateEntry.key];
@@ -43158,9 +43130,14 @@ $CONTENT
                     blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」的 key「${templateEntry.key}」已被当前聊天占用。`);
                     continue;
                 }
-                const introduced = asHeaderOnlySheet_ACU(templateEntry.sheet, templateEntry.key);
-                candidateData[templateEntry.key] = introduced;
-                audit.push({ sheetKey: templateEntry.key, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: 0, metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+                try {
+                    const introduced = asHeaderOnlySheet_ACU(templateEntry.sheet, templateEntry.key);
+                    candidateData[templateEntry.key] = introduced;
+                    audit.push({ sheetKey: templateEntry.key, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: 0, metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+                }
+                catch (error) {
+                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${templateEntry.key}) 无法引入：${error?.message || String(error)}`);
+                }
                 continue;
             }
             if (matchedKeys.has(previous.key)) {
@@ -43169,11 +43146,10 @@ $CONTENT
             }
             matchedKeys.add(previous.key);
             try {
-                const reconciled = reconcileMatchedSheet_ACU(previous.sheet, templateEntry.sheet, previous.key, templateEntry.key, input.destructiveChangeConfirmed);
+                const reconciled = reconcileMatchedSheet_ACU(previous.sheet, templateEntry.sheet, previous.key, templateEntry.key);
                 candidateData[previous.key] = reconciled.sheet;
-                intents[previous.key] = reconciled.intent;
-                if (reconciled.meta)
-                    metadataByKey.set(previous.key, reconciled.meta);
+                if (reconciled.changed)
+                    rebaseKeys.add(previous.key);
                 audit.push(reconciled.audit);
             }
             catch (error) {
@@ -43191,62 +43167,34 @@ $CONTENT
         }
         if (blockers.length > 0)
             return emptyPlan_ACU(baselineData, audit, blockers);
-        const changedKeys = Object.keys(intents);
-        const preflight = await preflightSchemaMigrations_ACU({
-            baselineData,
-            candidateData,
-            intents,
-            forceV2SheetKeys: changedKeys,
-        });
-        if (preflight.blockers.length > 0)
-            return emptyPlan_ACU(baselineData, audit, preflight.blockers);
-        const schemaByKey = new Map(preflight.operations.map(operation => [operation.sheetKey, operation]));
-        for (const item of audit) {
-            const operation = schemaByKey.get(item.sheetKey);
-            if (operation)
-                item.operations.push({ kind: operation.kind, contractVersion: operation.contractVersion, beforeSchemaDigest: operation.beforeSchemaDigest, targetSchemaDigest: operation.targetSchemaDigest });
-        }
-        const replayedData = stripRuntimeSeedRows_ACU(baselineData);
-        for (const operation of preflight.operations)
-            await applyTableOperationV2_ACU(replayedData, operation);
+        // checkpoint.data 就是协调器算好的目标全量；结构变更统一表达为数据边界上的 per-sheet checkpoint。
         const sheetChanges = [];
-        for (const key of deletedSheetKeys)
-            delete replayedData[key];
         for (const [key, sheet] of listSheets_ACU(candidateData)) {
-            const schemaOperation = schemaByKey.get(key);
             if (!baselineData[key]) {
                 sheetChanges.push({ kind: 'introduction', sheetKey: key, sheetData: sheet });
-                replayedData[key] = clone_ACU$4(sheet);
                 audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'introduction' });
             }
-            else {
-                const operations = schemaOperation ? [schemaOperation] : [];
-                const meta = metadataByKey.get(key);
-                if (meta) {
-                    operations.push({ kind: 'meta_update', sheetKey: key, meta });
-                    await applyTableOperationV2_ACU(replayedData, operations[operations.length - 1]);
-                    audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'meta_update' });
-                }
-                if (operations.length > 0)
-                    sheetChanges.push({ kind: 'operations', sheetKey: key, targetSheetData: replayedData[key], operations });
+            else if (rebaseKeys.has(key)) {
+                sheetChanges.push({ kind: 'rebase', sheetKey: key, sheetData: sheet });
+                audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'rebase' });
             }
         }
-        replayedData.mate = clone_ACU$4(candidateData.mate);
+        candidateData.mate = clone_ACU$4(candidateData.mate);
         try {
-            for (const [key, sheet] of listSheets_ACU(replayedData)) {
+            for (const [key, sheet] of listSheets_ACU(candidateData)) {
                 const validation = validateDDLTextAgainstHeaders_ACU(String(sheet.sourceData?.ddl || ''), headers_ACU(sheet));
                 if (!validation.valid)
                     throw new Error(`${key}: ${validation.message}`);
                 getSheetColumnProjection_ACU(sheet);
             }
-            await hydrateTableDataStrict_ACU(replayedData);
+            await hydrateTableDataStrict_ACU(candidateData);
         }
         catch (error) {
             return emptyPlan_ACU(baselineData, audit, [`完整 replay candidate SQLite hydrate 失败: ${error?.message || String(error)}`]);
         }
         for (const key of deletedSheetKeys)
             audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'delete' });
-        return { candidateData: replayedData, sheetChanges, deletedSheetKeys, audit, blockers: [] };
+        return { candidateData, sheetChanges, deletedSheetKeys, audit, blockers: [] };
     }
     function stripRuntimeSeedRows_ACU(data) {
         const clone = clone_ACU$4(data);
@@ -43305,6 +43253,42 @@ $CONTENT
             throw new Error('缺少 row_id 首列表头。');
         return headers.map(value => String(value ?? ''));
     }
+    /**
+     * 仅作用于模板侧 sheet：缺失 row_id 首列时自动注入（表头 + 顺序行号 + row_id PRIMARY KEY DDL 兜底）；
+     * row_id 错位（出现在非首列）或 content 结构非法则记录带表名/key 的 blocker，绝不裸抛。
+     */
+    function normalizeTemplateSheetRowIdColumn_ACU(sheet, sheetKey, blockers) {
+        const label = `表「${sheet?.name || sheetKey}」(${sheetKey})`;
+        const content = sheet?.content;
+        if (!Array.isArray(content) || !Array.isArray(content[0])) {
+            blockers.push(`${label} content 结构非法，无法解析表头。`);
+            return;
+        }
+        const headers = content[0];
+        if (headers[0] === 'row_id')
+            return;
+        if (headers.some(name => String(name ?? '') === 'row_id')) {
+            blockers.push(`${label} 的 row_id 列不在首列，无法自动修复，请调整模板列顺序。`);
+            return;
+        }
+        content[0] = ['row_id', ...headers.map(value => String(value ?? ''))];
+        for (let index = 1; index < content.length; index += 1) {
+            if (!Array.isArray(content[index])) {
+                blockers.push(`${label} 第 ${index + 1} 行不是数组。`);
+                return;
+            }
+            content[index] = [String(index), ...content[index].map((value) => (value === null ? null : String(value ?? '')))];
+        }
+        const ddl = String(sheet.sourceData?.ddl || '').trim();
+        if (ddl) {
+            const tableName = parseDDLTableName(ddl);
+            if (tableName && !/\brow_id\b/i.test(ddl)) {
+                if (!sheet.sourceData || typeof sheet.sourceData !== 'object')
+                    sheet.sourceData = {};
+                sheet.sourceData.ddl = ddl.replace(/\(/, '(\n  row_id INTEGER PRIMARY KEY,');
+            }
+        }
+    }
     function asHeaderOnlySheet_ACU(sheet, sheetKey) {
         const clone = clone_ACU$4(sheet);
         if (clone.uid !== sheetKey)
@@ -43330,7 +43314,7 @@ $CONTENT
             rowIds.add(rowId);
         }
     }
-    function reconcileMatchedSheet_ACU(before, template, sheetKey, templateSheetKey, destructiveChangeConfirmed) {
+    function reconcileMatchedSheet_ACU(before, template, sheetKey, templateSheetKey) {
         const beforeHeaders = headers_ACU(before);
         const targetHeaders = headers_ACU(template);
         const beforeColumns = parseDDLColumnInfos_ACU(String(before.sourceData?.ddl || ''));
@@ -43353,6 +43337,7 @@ $CONTENT
             throw new Error('DDL 存在重复 physical column。');
         const matchedBeforeCanonical = new Set();
         const matchedTargetCanonical = new Set();
+        const targetSourceByCanonical = new Map();
         const mappings = [];
         const inheritedColumns = [];
         for (const [canonicalName, target] of targetByCanonical) {
@@ -43361,6 +43346,7 @@ $CONTENT
                 continue;
             matchedBeforeCanonical.add(source.canonical);
             matchedTargetCanonical.add(target.canonical);
+            targetSourceByCanonical.set(target.canonical, source);
             inheritedColumns.push(target.header);
             if (source.physical !== target.physical)
                 mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
@@ -43376,6 +43362,7 @@ $CONTENT
                     continue;
                 matchedBeforeCanonical.add(source.canonical);
                 matchedTargetCanonical.add(target.canonical);
+                targetSourceByCanonical.set(target.canonical, source);
                 inheritedColumns.push(target.header);
                 if (source.physical !== target.physical) {
                     mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
@@ -43392,20 +43379,51 @@ $CONTENT
         if (reusedPhysicalNames.length > 0) {
             throw new Error(`新增列复用了无法证明同一身份的历史 physical column「${reusedPhysicalNames.join('、')}」，无法安全重解释历史数据。`);
         }
-        const fills = {};
+        // 新列填充决策（替代 fills 静态契约）：可解析 literal DEFAULT → 该值；NOT NULL 无 DEFAULT → 空串；nullable → null。
+        const fillAudit = [];
+        const fillByTargetCanonical = new Map();
         for (const target of targetEntries) {
             if (matchedTargetCanonical.has(target.canonical))
                 continue;
-            const literal = target.column.isNotNull ? parseDDLSafeDefaultLiteral_ACU(target.column.defaultExpression) : { kind: 'null', sql: 'NULL', value: null };
-            if (!literal)
-                throw new Error(`新增 NOT NULL 列「${target.header}」缺少可验证的 DDL literal DEFAULT。`);
-            fills[target.physical] = { kind: target.column.isNotNull ? 'ddl_literal_default' : 'literal', literal };
+            const literal = parseDDLSafeDefaultLiteral_ACU(target.column.defaultExpression);
+            let value;
+            let kind;
+            if (literal) {
+                value = literalToCellValue_ACU(literal);
+                kind = 'literal_default';
+            }
+            else if (target.column.isNotNull) {
+                value = '';
+                kind = 'empty_not_null';
+            }
+            else {
+                value = null;
+                kind = 'null';
+            }
+            fillByTargetCanonical.set(target.canonical, value);
+            fillAudit.push({ physicalName: target.physical, kind, literal: value });
         }
         const sheet = clone_ACU$4(template);
         sheet.uid = before.uid;
         const retainedHiddenColumns = hiddenEntries.map(entry => beforeColumns[entry.index]);
         const retainedHiddenHeaders = hiddenEntries.map(entry => entry.header);
-        sheet.content = [[...targetHeaders, ...retainedHiddenHeaders]];
+        // 迁移后数据行（纯 JS 直通，替代契约驱动迁移）：匹配列原值直通，新列取填充值，隐藏列原值保留。
+        const migratedRows = [];
+        for (let rowIndex = 1; rowIndex < before.content.length; rowIndex += 1) {
+            const beforeRow = before.content[rowIndex];
+            const targetRow = [beforeRow[0] ?? null];
+            for (const target of targetEntries) {
+                const source = targetSourceByCanonical.get(target.canonical);
+                if (source)
+                    targetRow.push(beforeRow[source.index] ?? null);
+                else
+                    targetRow.push(fillByTargetCanonical.get(target.canonical) ?? null);
+            }
+            for (const hidden of hiddenEntries)
+                targetRow.push(beforeRow[hidden.index] ?? null);
+            migratedRows.push(targetRow);
+        }
+        sheet.content = [[...targetHeaders, ...retainedHiddenHeaders], ...migratedRows];
         sheet.sourceData = clone_ACU$4(template.sourceData);
         sheet.sourceData.ddl = buildRetainedColumnDDL_ACU(before, template, targetColumns, targetHeaders, retainedHiddenColumns, retainedHiddenHeaders);
         const activePhysical = new Set(targetColumns.map(column => column.sqlName.toLowerCase()));
@@ -43420,16 +43438,13 @@ $CONTENT
         else
             delete sheet.sourceData.hiddenPhysicalColumns;
         delete sheet.seedRows;
-        const intent = {
-            physicalColumnMappings: mappings,
-            fills,
-            conversions: [],
-            migrationPolicy: { destructiveChangeConfirmed: false, lossyConversionConfirmed: false },
-        };
         const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
-        return { sheet, intent, meta, audit: { sheetKey, match: 'matched', baselineSheetKey: sheetKey, templateSheetKey, baselineName: before.name,
+        const beforeProjection = clone_ACU$4(before);
+        delete beforeProjection.seedRows;
+        const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
+        return { sheet, changed, meta, audit: { sheetKey, match: 'matched', baselineSheetKey: sheetKey, templateSheetKey, baselineName: before.name,
                 templateName: template.name, canonicalName: canonicalizeDisplayName_ACU(before.name), inheritedColumns, addedColumns, deletedColumns: [], hiddenColumns,
-                physicalColumnMappings: mappings, fills: Object.entries(fills).map(([physicalName, fill]) => ({ physicalName, kind: fill.kind, literal: clone_ACU$4(fill.literal) })),
+                physicalColumnMappings: mappings, fills: fillAudit,
                 affectedRowCount: before.content.length - 1, metadataChanged: !!meta, metadataChangedFields: meta ? Object.keys(meta) : [], destructiveChangeConfirmed: false, operations: [] } };
     }
     function buildRetainedColumnDDL_ACU(before, template, targetColumns, targetHeaders, retainedColumns, retainedHeaders) {
@@ -43457,17 +43472,14 @@ $CONTENT
         delete beforeSourceData.ddl;
         delete targetSourceData.ddl;
         const removedSourceDataKeys = Object.keys(beforeSourceData).filter(key => !Object.prototype.hasOwnProperty.call(targetSourceData, key));
-        if (removedSourceDataKeys.length > 0) {
-            throw new Error(`模板删除了 sourceData 字段「${removedSourceDataKeys.join('、')}」，当前 V2 meta_update 只能浅合并，无法安全表达删除。`);
-        }
         const sourceDataDelta = Object.fromEntries(Object.entries(targetSourceData).filter(([key, value]) => !sameValue_ACU(beforeSourceData[key], value)));
         const meta = {};
         if (before.name !== template.name)
             meta.name = template.name;
         if (before.orderNo !== template.orderNo)
             meta.orderNo = template.orderNo;
-        if (Object.keys(sourceDataDelta).length > 0)
-            meta.sourceData = sourceDataDelta;
+        if (Object.keys(sourceDataDelta).length > 0 || removedSourceDataKeys.length > 0)
+            meta.sourceData = clone_ACU$4(targetSourceData);
         if (!sameValue_ACU(before.updateConfig, template.updateConfig))
             meta.updateConfig = clone_ACU$4(template.updateConfig);
         if (!sameValue_ACU(before.exportConfig, template.exportConfig))
@@ -43476,6 +43488,13 @@ $CONTENT
     }
     function sameValue_ACU(left, right) {
         return JSON.stringify(left) === JSON.stringify(right);
+    }
+    function literalToCellValue_ACU(literal) {
+        if (literal.kind === 'null')
+            return null;
+        if (literal.kind === 'boolean')
+            return literal.value ? '1' : '0';
+        return String(literal.value);
     }
 
     /**
@@ -43821,11 +43840,17 @@ $CONTENT
                 ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
                 : { mate: { type: 'chatSheets', version: 1 } };
         }
-        const plan = await reconcileChatTemplate_ACU({
-            baselineData,
-            templateData: snapshot.templateObj,
-            destructiveChangeConfirmed,
-        });
+        let plan;
+        try {
+            plan = await reconcileChatTemplate_ACU({
+                baselineData,
+                templateData: snapshot.templateObj,
+                destructiveChangeConfirmed,
+            });
+        }
+        catch (error) {
+            return { saved: false, error: `模板协调失败：${error instanceof Error ? error.message : String(error)}` };
+        }
         if (plan.blockers.length > 0) {
             return { saved: false, blockers: plan.blockers, error: plan.blockers.join('；') };
         }
@@ -100279,6 +100304,68 @@ $CONTENT
             lockChanges: [],
             schemaMigrationIntents: {},
         };
+    }
+
+    function isSheet_ACU(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+    function schemaProjection_ACU(sheet) {
+        return JSON.stringify({
+            uid: sheet.uid,
+            headers: Array.isArray(sheet.content?.[0]) ? sheet.content[0] : [],
+            ddl: sheet.sourceData?.ddl || '',
+        });
+    }
+    /**
+     * Read-only validation for editor candidates. It never creates a frame entry or
+     * mutates either input. V1-compatible changes remain V1 contracts; changes
+     * outside that subset require the caller to supply an explicit V2 intent.
+     */
+    async function preflightSchemaMigrations_ACU(input) {
+        const changedSheetKeys = Object.keys(input.candidateData || {}).filter(sheetKey => {
+            if (!sheetKey.startsWith('sheet_'))
+                return false;
+            const before = input.baselineData?.[sheetKey];
+            const after = input.candidateData?.[sheetKey];
+            return isSheet_ACU(before) && isSheet_ACU(after) && schemaProjection_ACU(before) !== schemaProjection_ACU(after);
+        });
+        if (changedSheetKeys.length === 0)
+            return { changedSheetKeys, blockers: [], operations: [] };
+        const blockers = [];
+        const operations = [];
+        const forceV2SheetKeys = new Set(input.forceV2SheetKeys || []);
+        for (const sheetKey of changedSheetKeys) {
+            const before = input.baselineData[sheetKey];
+            const after = input.candidateData[sheetKey];
+            try {
+                if (forceV2SheetKeys.has(sheetKey))
+                    throw new Error('schema migration requires explicit V2 intent。');
+                operations.push(await buildSheetSchemaMigrationOperation_ACU(sheetKey, before, after));
+                continue;
+            }
+            catch (v1Error) {
+                const intent = input.intents?.[sheetKey];
+                if (!intent) {
+                    blockers.push(`${sheetKey}: ${v1Error?.message || 'schema migration 缺少显式 V2 intent。'}`);
+                    continue;
+                }
+                try {
+                    operations.push(await buildSheetSchemaMigrationOperationV2_ACU(sheetKey, before, after, intent));
+                }
+                catch (v2Error) {
+                    blockers.push(`${sheetKey}: ${v2Error?.message || 'schema migration V2 preflight 失败。'}`);
+                }
+            }
+        }
+        if (blockers.length > 0)
+            return { changedSheetKeys, blockers, operations: [] };
+        try {
+            await hydrateTableDataStrict_ACU(input.candidateData);
+        }
+        catch (error) {
+            return { changedSheetKeys, operations: [], blockers: [`完整 candidate SQLite hydrate 失败: ${error?.message || String(error)}`] };
+        }
+        return { changedSheetKeys, blockers: [], operations };
     }
 
     const joinLines_ACU = (...lines) => lines.join('\n');

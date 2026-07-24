@@ -165,6 +165,11 @@ export type TemplateSheetChange_ACU =
     sheetData: Sheet_ACU;
   }
   | {
+    kind: 'rebase';
+    sheetKey: string;
+    sheetData: Sheet_ACU;
+  }
+  | {
     kind: 'operations';
     sheetKey: string;
     targetSheetData: Sheet_ACU;
@@ -676,7 +681,7 @@ function manualRefillProgressIsValidForIntroductionHistory_ACU(value: unknown): 
 function timelineIsValidForIntroductionHistory_ACU(value: unknown): boolean {
   return value === undefined || (
     isObjectRecord_ACU(value)
-    && value.kind === 'sheet_introduction'
+    && (value.kind === 'sheet_introduction' || value.kind === 'sheet_rebase')
     && Number.isInteger(value.activateAtMessageIndex) && value.activateAtMessageIndex >= 0
     && Number.isInteger(value.afterSeq) && value.afterSeq >= 0
   );
@@ -1758,7 +1763,7 @@ function assertValidTemplateSheetChanges_ACU(sheetChanges: TemplateSheetChange_A
     throw new Error('当前楼层模板提交不能同时删除和变更同一 sheetKey。');
   }
   for (const change of sheetChanges) {
-    if (change.kind === 'introduction') {
+    if (change.kind === 'introduction' || change.kind === 'rebase') {
       if (!isObjectRecord_ACU(change.sheetData)) throw new Error(`当前楼层模板提交缺少可恢复 Sheet：${change.sheetKey}。`);
       continue;
     }
@@ -1876,7 +1881,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         if (!isObjectRecord_ACU(snapshotSheet) || !Array.isArray(snapshotSheet.content)) {
           throw new Error(`预填表模板提交的 templateSource 缺少变更 Sheet：${change.sheetKey}。`);
         }
-        const expectedSheet = deepClone_ACU(change.kind === 'introduction' ? change.sheetData : change.targetSheetData);
+        const expectedSheet = deepClone_ACU(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
         const expectedNormalization = normalizeCanonicalTableRows_ACU({ [change.sheetKey]: expectedSheet });
         if (expectedNormalization.errors.length > 0) {
           throw new Error(`预填表模板提交目标 Sheet 行标识不合法：${formatCanonicalRowIssues_ACU(expectedNormalization.errors)}`);
@@ -1974,9 +1979,10 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       ), 0);
 
     const introductionSheets = new Map<string, Sheet_ACU>();
+    const rebaseSheets = new Map<string, Sheet_ACU>();
     let removedNullRowCount = 0;
     for (const change of requestedChanges) {
-      const targetSheetData = deepClone_ACU(change.kind === 'introduction' ? change.sheetData : change.targetSheetData);
+      const targetSheetData = deepClone_ACU(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
       if (change.kind === 'introduction' && targetSheetData.content?.length !== 1) {
         throw new Error(`V2 sheet introduction only accepts a header-only sheet: sheetKey=${change.sheetKey}.`);
       }
@@ -1999,6 +2005,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       }
       createSheetInsertPlan(targetSheetData);
       if (change.kind === 'introduction') introductionSheets.set(change.sheetKey, targetSheetData);
+      else if (change.kind === 'rebase') rebaseSheets.set(change.sheetKey, targetSheetData);
     }
 
     const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
@@ -2036,6 +2043,37 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
         timeline: {
           kind: 'sheet_introduction' as const,
+          activateAtMessageIndex: target.index,
+          afterSeq: targetFrameLastLogSeq,
+        },
+        baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
+      });
+    }
+
+    for (const change of requestedChanges.filter(item => item.kind === 'rebase')) {
+      if (
+        !Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey)
+      ) {
+        throw new Error(`V2 sheet rebase requires an existing sheet: sheetKey=${change.sheetKey} is absent from the active checkpoint state.`);
+      }
+      if (deletedSheetKeys.includes(change.sheetKey)) {
+        throw new Error(`V2 sheet rebase 不能与删除同一 sheetKey 组合：${change.sheetKey}。`);
+      }
+      const existingCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+      if (existingCheckpoint && Number(existingCheckpoint.createdAt) > createdAt) {
+        throw new Error(`V2 sheet checkpoint cannot replace a newer checkpoint: sheetKey=${change.sheetKey}, existingCreatedAt=${existingCheckpoint.createdAt}, requestedCreatedAt=${createdAt}.`);
+      }
+      const scheduleSummary = scheduleSummaryBySheet[change.sheetKey];
+      checkpoints.push({
+        kind: 'sheet_full',
+        createdAt,
+        reason: 'schema_change',
+        sheetKey: change.sheetKey,
+        data: rebaseSheets.get(change.sheetKey)!,
+        ...(scheduleSummary ? { scheduleSummary: deepClone_ACU(scheduleSummary) } : {}),
+        event: { filledSheetKeys: [], changedSheetKeys: [change.sheetKey] },
+        timeline: {
+          kind: 'sheet_rebase' as const,
           activateAtMessageIndex: target.index,
           afterSeq: targetFrameLastLogSeq,
         },

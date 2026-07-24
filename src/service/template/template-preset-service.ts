@@ -377,11 +377,16 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
             : { mate: { type: 'chatSheets', version: 1 } };
     }
 
-    const plan = await reconcileChatTemplate_ACU({
-        baselineData,
-        templateData: snapshot.templateObj,
-        destructiveChangeConfirmed,
-    });
+    let plan;
+    try {
+        plan = await reconcileChatTemplate_ACU({
+            baselineData,
+            templateData: snapshot.templateObj,
+            destructiveChangeConfirmed,
+        });
+    } catch (error) {
+        return { saved: false, error: `模板协调失败：${error instanceof Error ? error.message : String(error)}` };
+    }
     if (plan.blockers.length > 0) {
         return { saved: false, blockers: plan.blockers, error: plan.blockers.join('；') };
     }

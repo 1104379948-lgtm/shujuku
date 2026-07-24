@@ -2008,6 +2008,63 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('introduction shard messageIndex 不匹配');
     expect(() => collectScheduleSummaryFromFramesV2_ACU(chat, '')).toThrow('introduction shard messageIndex 不匹配');
   });
+  it('rebase 分片在 afterSeq 之后整表替换既有表结构（E3：前置日志先应用）', async () => {
+    const rootData = makeCheckpointData();
+    // 边界楼层已有 AI 填表日志（seq=1 追加一行），随后 rebase 在 afterSeq=1 之后整表替换为新结构。
+    const rebasedSheet = {
+      uid: 'inventory', name: 'inventory',
+      content: [['row_id', 'name', 'quality'], ['1', '铁剑', ''], ['2', '木剑', '']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT, quality TEXT NOT NULL);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 0,
+    } as any;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
+            perSheetCheckpoints: {
+              sheet_0: { kind: 'sheet_full', createdAt: 3, reason: 'schema_change', sheetKey: 'sheet_0', data: rebasedSheet, timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 0, afterSeq: 1 } },
+            },
+            logEntries: [
+              { seq: 1, entryId: 'ai-fill', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: [], groupKeys: [], operations: [{ kind: 'data_replace', data: { ...rootData, sheet_0: { ...rootData.sheet_0, content: [['row_id', 'name'], ['1', '铁剑'], ['2', '木剑']] } }, reason: 'system' }] },
+            ],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    // rebase 在 seq=1 日志之后生效：新结构（含 quality 列）+ 两行数据都在。
+    expect(result?.sheet_0.content).toEqual([['row_id', 'name', 'quality'], ['1', '铁剑', ''], ['2', '木剑', '']]);
+  });
+
+  it('rebase 分片与旧 sheet_schema_migrate 无关，非法 timeline kind fail-closed', async () => {
+    const rootData = makeCheckpointData();
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
+            perSheetCheckpoints: {
+              sheet_0: { kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_0', data: rootData.sheet_0, timeline: { kind: 'sheet_bogus', activateAtMessageIndex: 0, afterSeq: 0 } },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('非法 timeline');
+  });
+
+
 
   it('首个 schema operation 即使没有前置 SQL 也必须执行真实 SQLite hydrate', async () => {
     const before = makeCheckpointData().sheet_0;

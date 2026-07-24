@@ -94,6 +94,19 @@ export interface TableSheetIntroductionTimelineV2_ACU {
   afterSeq: number;
 }
 
+/**
+ * 既有表在数据边界（最新 AI 楼层）上的结构 rebase 基底：模板切换产生的新列/列定义变化/
+ * 隐藏列保留，统一表达为该楼层的 per-sheet full checkpoint，在 afterSeq 之后整表替换 replay state。
+ * 与 introduction 的区别仅在写入守卫方向（表必须已存在），回放调度语义完全一致。
+ */
+export interface TableSheetRebaseTimelineV2_ACU {
+  kind: 'sheet_rebase';
+  /** rebase shard 所在的 AI message index。 */
+  activateAtMessageIndex: number;
+  /** 同一 frame 中在该 seq 之后才用 checkpoint.data 整表替换 replay state。 */
+  afterSeq: number;
+}
+
 export interface TableSheetCheckpointV2_ACU {
   kind: 'sheet_full';
   createdAt: number;
@@ -104,7 +117,7 @@ export interface TableSheetCheckpointV2_ACU {
   event?: TableMutationEventV2_ACU;
   manualRefillProgress?: ManualRefillProgressV2_ACU;
   baseRevision?: string | null;
-  timeline?: TableSheetIntroductionTimelineV2_ACU;
+  timeline?: TableSheetIntroductionTimelineV2_ACU | TableSheetRebaseTimelineV2_ACU;
 }
 
 export type TableMutationOperationV2_ACU =

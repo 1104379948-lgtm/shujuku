@@ -134,12 +134,12 @@ function getValidatedSheetCheckpoints_ACU(frame: TableStorageFrameV2_ACU): Table
     }
     if (checkpoint.timeline !== undefined) {
       const timeline = checkpoint.timeline;
-      if (timeline.kind !== 'sheet_introduction'
+      if ((timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase')
         || !Number.isInteger(timeline.activateAtMessageIndex)
         || timeline.activateAtMessageIndex < 0
         || !Number.isInteger(timeline.afterSeq)
         || timeline.afterSeq < 0) {
-        throw new Error(`perSheetCheckpoints.${recordKey} 包含非法 introduction timeline`);
+        throw new Error(`perSheetCheckpoints.${recordKey} 包含非法 timeline`);
       }
     }
     return checkpoint;
