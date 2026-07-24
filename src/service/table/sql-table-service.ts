@@ -33,6 +33,7 @@ import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
+import { rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
   workingData?: TableDataObject_ACU;
@@ -322,47 +323,32 @@ function formatSqlMutationIdentifier_ACU(value: string, quote: SqlMutationIdenti
 
 /**
  * Rebinds mutation table identifiers from unique DDL/runtime aliases to their
- * authoritative runtime physical names. Comments and string literals are never
- * rewritten. Strict sheet-scoped callers may reject references resolved to a
- * different physical table so the emitted sql_sheet_batch remains replayable.
+ * authoritative runtime physical names for SQL generation.
  */
 export function rebindSqlMutationTableIdentifiers_ACU(
-  statements: string[], tableData: TableDataObject_ACU, options: { requireSinglePhysicalTable?: boolean } = {},
+  statements: string[],
+  tableData: TableDataObject_ACU,
 ): string[] {
   const physicalNames = resolvePhysicalTableNames_ACU(tableData);
-  const targets = new Map<string, string>();
+  const aliases = new Map<string, string>();
+  const conflicts = new Set<string>();
+  const addAlias = (alias: unknown, physicalName: string): void => {
+    const normalized = String(alias || '').trim().toLowerCase();
+    if (!normalized) return;
+    if (conflicts.has(normalized)) return;
+    const existing = aliases.get(normalized);
+    if (existing && existing !== physicalName) {
+      aliases.delete(normalized);
+      conflicts.add(normalized);
+      return;
+    }
+    aliases.set(normalized, physicalName);
+  };
   for (const [sheetKey, physicalName] of physicalNames) {
     const sheet = tableData[sheetKey] as any;
-    const aliases = [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName];
-    for (const alias of aliases) {
-      const normalized = String(alias || '').trim().toLowerCase();
-      if (!normalized) continue;
-      const existing = targets.get(normalized);
-      if (existing && existing !== physicalName) targets.set(normalized, '');
-      else if (existing !== '') targets.set(normalized, physicalName);
-    }
+    [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName].forEach(alias => addAlias(alias, physicalName));
   }
-  return statements.map(statement => {
-    const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
-    let target: SqlMutationIdentifierToken_ACU;
-    try {
-      target = getSqlMutationTargetToken_ACU(statement, tokens);
-    } catch (error: any) {
-      if (String(error?.message || error).startsWith('不支持安全重绑定的 SQL 语句类型：')) return statement;
-      throw error;
-    }
-    const physicalName = targets.get(target.value.toLowerCase());
-    if (physicalName === undefined) return statement;
-    if (!physicalName) throw new Error(`无法唯一解析 SQL 目标表标识符：${target.value}。`);
-    const replacements: Array<{ token: SqlMutationIdentifierToken_ACU; physicalName: string }> = [];
-    for (const reference of collectSqlMutationTableReferenceTokens_ACU(statement, tokens, target)) {
-      const resolved = targets.get(reference.value.toLowerCase());
-      if (resolved === undefined) continue;
-      if (!resolved) throw new Error(`无法唯一解析 SQL 表引用：${reference.value}。`);
-      replacements.push({ token: reference, physicalName: resolved });
-    }
-    return applySqlMutationIdentifierReplacements_ACU(statement, replacements);
-  });
+  return rebindSqlMutationTableReferences_ACU(statements, aliases);
 }
 
 /**
@@ -1189,9 +1175,7 @@ export async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(
   try {
     const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
     const snapshotCopy = JSON.parse(JSON.stringify(tableData || {})) as TableDataObject_ACU;
-    const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], snapshotCopy, {
-      requireSinglePhysicalTable: operationOptions.requireSheetScopedOperations === true,
-    })[0];
+    const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], snapshotCopy)[0];
     await engine.init();
     syncBridge.loadFromTableData(snapshotCopy, { strict: true });
     const result = engine.run(runtimeSql, params);
@@ -1248,9 +1232,6 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
     const statements = rebindSqlMutationTableIdentifiers_ACU(
       rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))),
       snapshotCopy,
-      {
-        requireSinglePhysicalTable: operationOptions.requireSheetScopedOperations === true,
-      },
     );
     await engine.init();
     syncBridge.loadFromTableData(snapshotCopy, { strict: true });

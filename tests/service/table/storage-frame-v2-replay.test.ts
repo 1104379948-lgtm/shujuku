@@ -253,6 +253,177 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     ]);
   });
 
+  it('宽松映射历史 DDL 表名、sheetKey 与 sql_sheet_batch tableName 到当前 runtime 表名', async () => {
+    const data = {
+      mate: { type: 'acu', version: 1 },
+      sheet_global: {
+        uid: 'global_state_sheet',
+        name: '全局数据表',
+        content: [['row_id', 'story_state', 'note'], ['1', '初始状态', ''] ],
+        sourceData: {
+          ddl: 'CREATE TABLE "global_state" (row_id INTEGER PRIMARY KEY, story_state TEXT, note TEXT);',
+        },
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'legacy-global-state', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_global'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_global', tableName: 'obsolete_metadata', reason: 'system',
+                statements: [
+                  "WITH source AS (SELECT ? AS row_id, ? AS story_state) UPDATE [global_state] SET story_state = (SELECT story_state FROM source), note = 'global_state must remain text' /* global_state comment */ WHERE row_id = (SELECT row_id FROM source) AND EXISTS (WITH RECURSIVE global_state(row_id) AS (SELECT 1) SELECT 1 FROM global_state)",
+                  'INSERT INTO sheet_global (row_id, story_state, note) VALUES (?, ?, ?)',
+                ],
+                params: [[1, '更新后'], [2, '新增状态', 'sheet key alias']],
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_global.content).toEqual([
+      ['row_id', 'story_state', 'note'],
+      ['1', '更新后', 'global_state must remain text'],
+      ['2', '新增状态', 'sheet key alias'],
+    ]);
+  });
+
+  it('宽松映射去前缀 sheetKey、uid 与 sql_sheet_batch metadata 表名', async () => {
+    const data = {
+      mate: { type: 'acu', version: 1 },
+      sheet_global: {
+        uid: 'global_state_uid',
+        name: '全局数据表',
+        content: [['row_id', 'note'], ['1', '初始状态']],
+        sourceData: { ddl: 'CREATE TABLE global_state (row_id INTEGER PRIMARY KEY, note TEXT);' },
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'legacy-sheet-identities', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_global'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_global', tableName: 'obsolete_metadata', reason: 'system',
+                statements: [
+                  "UPDATE global SET note = 'short-key' WHERE row_id = 1",
+                  "UPDATE global_state_uid SET note = 'uid' WHERE row_id = 1",
+                  "UPDATE obsolete_metadata SET note = 'operation-table-name' WHERE row_id = 1",
+                ],
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_global.content).toEqual([
+      ['row_id', 'note'],
+      ['1', 'operation-table-name'],
+    ]);
+  });
+
+  it('冲突的 replay alias 保持原 SQL，并保留 SQLite operation 上下文', async () => {
+    const data = {
+      mate: { type: 'acu', version: 1 },
+      sheet_alpha: {
+        uid: 'alpha_uid', name: '甲表', content: [['row_id', 'note'], ['1', 'a']],
+        sourceData: { ddl: 'CREATE TABLE global_state (row_id INTEGER PRIMARY KEY, note TEXT);' },
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+      sheet_beta: {
+        uid: 'beta_uid', name: '乙表', content: [['row_id', 'note'], ['1', 'b']],
+        sourceData: { ddl: 'CREATE TABLE global_state (row_id INTEGER PRIMARY KEY, note TEXT);' },
+        updateConfig: {}, exportConfig: {}, orderNo: 1,
+      },
+    } as any;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'conflicting-legacy-name', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_alpha'], groupKeys: [],
+              operations: [{
+                kind: 'sql_batch',
+                statements: ["UPDATE global_state SET note = 'must not choose a sheet' WHERE row_id = 1"],
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow(
+      /messageIndex=0, seq=1, operationIndex=0, kind=sql_batch:.*no such table: global_state/i,
+    );
+  });
+
+  it('宽松映射不改写 CTE、字符串或未知表，仍保留真实 SQLite 错误', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+            logEntries: [{
+              seq: 1, entryId: 'unknown-table', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'obsolete_table', reason: 'system',
+                statements: [
+                  "WITH inventory AS (SELECT 1 AS row_id) INSERT INTO nonexistent_table (row_id) SELECT row_id FROM inventory -- inventory remains a CTE",
+                ],
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow(/no such table: nonexistent_table/i);
+  });
+
 
   it('直接执行历史 WITH SQL、参数与混合 SQL operation，不消费 sheet 元数据', async () => {
     const chat = [{

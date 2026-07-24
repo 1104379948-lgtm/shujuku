@@ -310,6 +310,20 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     expect(mockCurrentJsonTableData).toBeNull();
   });
 
+  it('generation 链不接受 replay 专属 sheetKey 或 uid alias', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.uid = 'inventory_uid';
+
+    const sheetKeyResult = await applySqlEditsToTableDataSnapshot_ACU('UPDATE sheet_0 SET quantity = 9 WHERE row_id = 1;', inputSnapshot);
+    const uidResult = await applySqlEditsToTableDataSnapshot_ACU('UPDATE inventory_uid SET quantity = 9 WHERE row_id = 1;', inputSnapshot);
+
+    expect(sheetKeyResult.success).toBe(false);
+    expect(sheetKeyResult.error).toMatch(/no such table: sheet_0/i);
+    expect(uidResult.success).toBe(false);
+    expect(uidResult.error).toMatch(/no such table: inventory_uid/i);
+    expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
+  });
+
   it('SQL 失败时返回错误且不污染输入快照与全局状态', async () => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
     const result = await applySqlEditsToTableDataSnapshot_ACU('UPDATE inventory SET missing_col = 1 WHERE row_id = 1;', inputSnapshot);

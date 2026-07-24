@@ -12,6 +12,9 @@ import { ensureStableRowIdsForSeedRows_ACU, getEffectiveSeedRowsForSheet_ACU, ge
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
+import { getPhysicalTableNameForSheet_ACU } from '../../shared/sheet-identity';
+import { parseDDLTableName } from '../../shared/ddl-utils';
+import { decodeSqlIdentifier_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -270,6 +273,42 @@ async function applySheetCheckpointsForReplay_ACU(
   if (runtime.loaded) await reloadSqlReplayRuntime_ACU(runtime, state);
 }
 
+function buildReplaySqlTableAliases_ACU(
+  state: TableDataObject_ACU,
+  operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
+): Map<string, string> {
+  const isPlainSqlIdentifier = (value: unknown): value is string => (
+    typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(value)
+  );
+  const aliases = new Map<string, string>();
+  const conflicts = new Set<string>();
+  const addAlias = (alias: unknown, runtimeName: string): void => {
+    const normalized = decodeSqlIdentifier_ACU(alias).trim().toLowerCase();
+    if (!normalized || conflicts.has(normalized)) return;
+    const existing = aliases.get(normalized);
+    if (existing && existing !== runtimeName) {
+      aliases.delete(normalized);
+      conflicts.add(normalized);
+      return;
+    }
+    aliases.set(normalized, runtimeName);
+  };
+  for (const [sheetKey, value] of Object.entries(state)) {
+    if (!sheetKey.startsWith('sheet_')) continue;
+    const sheet = value as Sheet_ACU;
+    const runtimeName = getPhysicalTableNameForSheet_ACU(state, sheetKey);
+    addAlias(parseDDLTableName(String(sheet?.sourceData?.ddl || '')), runtimeName);
+    addAlias(runtimeName, runtimeName);
+    if (isPlainSqlIdentifier(sheetKey)) addAlias(sheetKey, runtimeName);
+    if (isPlainSqlIdentifier(sheetKey.slice('sheet_'.length))) addAlias(sheetKey.slice('sheet_'.length), runtimeName);
+    if (isPlainSqlIdentifier(sheet?.uid)) addAlias(sheet.uid, runtimeName);
+  }
+  if (operation.kind === 'sql_sheet_batch' && state[operation.sheetKey]) {
+    addAlias(operation.tableName, getPhysicalTableNameForSheet_ACU(state, operation.sheetKey));
+  }
+  return aliases;
+}
+
 async function applySqlBatchOperationV2_ACU(
   state: TableDataObject_ACU,
   operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
@@ -278,8 +317,11 @@ async function applySqlBatchOperationV2_ACU(
   const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
   if (statements.length === 0) return;
   await ensureSqlReplayRuntime_ACU(runtime, state);
+  const replayStatements = rebindSqlMutationTableReferences_ACU(statements, buildReplaySqlTableAliases_ACU(state, operation), {
+    lenient: true,
+  });
   const params = Array.isArray(operation.params) ? operation.params : undefined;
-  runtime.engine.runBatch(statements, params);
+  runtime.engine.runBatch(replayStatements, params);
 }
 
 
