@@ -971,6 +971,8 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     const introduced = frame.perSheetCheckpoints?.sheet_new;
     expect(introduced).toBeDefined();
     expect(introduced?.timeline?.kind).toBe('sheet_introduction');
+    // 锚点只提供表结构：带上数据行会与本次增量的同 row_id 冲突（UNIQUE constraint failed）。
+    expect(introduced?.data?.content).toEqual([['row_id', 'value']]);
     // 锚点必须在本次增量之前生效。
     const appendedSeq = frame.logEntries[frame.logEntries.length - 1]?.seq;
     expect(introduced?.timeline?.afterSeq).toBeLessThan(Number(appendedSeq));

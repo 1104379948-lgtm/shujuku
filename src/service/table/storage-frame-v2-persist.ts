@@ -1138,11 +1138,18 @@ async function persistTableMutationLogV2Core_ACU(
         );
         const introduced: TableSheetCheckpointV2_ACU[] = [];
         for (const sheetKey of missingSheetKeys) {
+          // 锚点只提供表结构，必须裁成 header-only：
+          // 本次增量会自行写入数据行，若锚点带上同样的行，回放时会主键冲突
+          // （UNIQUE constraint failed）。
+          const anchorSheet = deepClone_ACU((afterData as any)[sheetKey]) as Sheet_ACU;
+          if (Array.isArray(anchorSheet?.content) && anchorSheet.content.length > 0) {
+            anchorSheet.content = [deepClone_ACU(anchorSheet.content[0])];
+          }
           const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
             createdAt: now,
             reason: 'schema_change',
             sheetKey,
-            data: (afterData as any)[sheetKey],
+            data: anchorSheet,
             event: { filledSheetKeys: [], changedSheetKeys: [sheetKey], groupKeys: [] },
             baseRevision: requestedBaseRevision,
             context: { messageIndex: target.index, aiFloor, isolationKey },
