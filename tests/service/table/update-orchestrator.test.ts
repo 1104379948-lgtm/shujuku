@@ -1641,7 +1641,7 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(3);
   });
 
-  it('跨 checkpoint 重填的最终快照提交失败时恢复整个重填会话快照', async () => {
+  it('跨 checkpoint 重填的最终快照提交失败时保留已提交 bucket，不回滚会话快照', async () => {
     const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
@@ -1676,11 +1676,13 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result).toEqual(expect.objectContaining({ success: false, error: expect.stringContaining('strict save failed') }));
     expect(captureManualRefillSessionSnapshot_ACU).toHaveBeenCalledWith([0, 2]);
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).toHaveBeenCalledWith(sessionSnapshot, '', ['sheet_0']);
+    // 已有 bucket 成功提交，回滚会连带丢掉用户已填好的楼层，因此必须保留。
+    expect(restoreManualRefillSessionSnapshotAtomic_ACU).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
 
-  it('跨 checkpoint 重填在用户停止后恢复整个重填会话快照', async () => {
+  it('跨 checkpoint 重填在用户停止后保留已提交 bucket，不回滚会话快照', async () => {
     const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       {
@@ -1712,12 +1714,13 @@ describe('orchestrateManualUpdate_ACU', () => {
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
 
     expect(result.success).toBe(false);
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).toHaveBeenCalledWith(sessionSnapshot, '', ['sheet_0']);
+    expect(restoreManualRefillSessionSnapshotAtomic_ACU).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).not.toHaveBeenCalled();
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
 
-  it('跨 checkpoint 重填在分组后同步聊天失败时恢复整个重填会话快照', async () => {
+  it('跨 checkpoint 重填在分组后同步聊天失败时保留已提交 bucket，不回滚会话快照', async () => {
     const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     const { loadAllChatMessages_ACU } = await import('../../../src/service/worldbook/pipeline');
     vi.mocked(getChatArray_ACU).mockReturnValue([
@@ -1756,14 +1759,9 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(result).toEqual(expect.objectContaining({ success: false, error: expect.stringContaining('分组后聊天同步失败') }));
     expect(loadAllChatMessages_ACU).toHaveBeenCalledTimes(4);
     expect(loadCallCount).toBe(4);
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU).toHaveBeenCalledWith(sessionSnapshot, '', ['sheet_0']);
-    expect(mockRefreshData).toHaveBeenCalledTimes(2);
-    expect(mockRefreshData.mock.invocationCallOrder[0]).toBeLessThan(
-      restoreManualRefillSessionSnapshotAtomic_ACU.mock.invocationCallOrder[0],
-    );
-    expect(restoreManualRefillSessionSnapshotAtomic_ACU.mock.invocationCallOrder[0]).toBeLessThan(
-      mockRefreshData.mock.invocationCallOrder[1],
-    );
+    // 同步失败发生在已有 bucket 提交之后，保留已填数据并按聊天记录重新同步。
+    expect(restoreManualRefillSessionSnapshotAtomic_ACU).not.toHaveBeenCalled();
+    expect(mockRefreshData).toHaveBeenCalled();
     expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).not.toHaveBeenCalled();
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
@@ -1880,6 +1878,51 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(result.error).toContain('终止');
     expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
   });
+
+  it('手动重填已提交 bucket 后用户终止时不回滚，保留已填数据并重新同步', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true },
+      { is_user: false, mes: 'AI回复' },
+    ]);
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '事件'], ['1', '旧值']] },
+    };
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    // 首个 bucket 成功落盘后用户点终止。
+    mockPersistTablesToChatMessage.mockImplementationOnce(async () => {
+      mockWasStopped = true;
+      return { saved: true, messageIndex: 1 };
+    });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('终止');
+    // 已有成功提交的 bucket，绝不能把数据回滚到填表前。
+    expect(mockRestoreManualRefillSessionSnapshot).not.toHaveBeenCalled();
+    // 但必须按聊天记录重新同步运行时数据。
+    expect(mockRefreshData).toHaveBeenCalled();
+  });
+
+  it('手动重填一个 bucket 都未成功就失败时回滚，避免旧数据净损失', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true },
+      { is_user: false, mes: 'AI回复' },
+    ]);
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '事件'], ['1', '旧值']] },
+    };
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: false, error: '保存失败' });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+
+    expect(result.success).toBe(false);
+    expect(mockRestoreManualRefillSessionSnapshot).toHaveBeenCalledTimes(1);
+  });
+
 
   it('boundary checkpoint 建立失败时保留成功结果并返回 checkpointWarning', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');

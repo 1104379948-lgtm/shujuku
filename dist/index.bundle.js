@@ -76841,9 +76841,15 @@ $CONTENT
         let manualRefillSessionSnapshot = null;
         let manualRefillRollbackAttempted = false;
         let committedBucketCount = 0;
-        // 手动重填总是先清空范围内选中表的 checkpoint 与增量，因此本次会话在收尾时
-        // 必然需要补写完整单表 checkpoint；失败时一律回滚到会话前快照。
+        // 回滚只用于“清理已发生但一个 bucket 都没成功”的窗口：此时旧数据已被删、
+        // 新数据尚未写入，必须还原以免净损失。
+        //
+        // 一旦有 bucket 成功提交（用户中途终止、网络中断、后续批次失败），就绝不回滚：
+        // 已填好的楼层是用户的真实成果，回滚会把它们连同旧数据一起丢掉。首个成功 bucket
+        // 在锚点缺失时已由 persist 层写成 init full checkpoint，因此保留下来的增量可以回放。
         const rollbackManualRefillSession = async () => {
+            if (committedBucketCount > 0)
+                return undefined;
             if (!manualRefillSessionSnapshot || manualRefillRollbackAttempted)
                 return undefined;
             manualRefillRollbackAttempted = true;
@@ -76861,6 +76867,17 @@ $CONTENT
         };
         const failManualRefillSession = async (failureError) => {
             const rollbackError = await rollbackManualRefillSession();
+            if (!rollbackError && committedBucketCount > 0) {
+                // 未回滚时运行时快照可能停在中间态，需要按聊天记录里的已提交事实重新同步，
+                // 否则界面会显示与持久化结果不一致的数据。
+                try {
+                    await loadAllChatMessages_ACU();
+                    await refreshData();
+                }
+                catch (refreshError) {
+                    logWarn_ACU('[Manual Refill] 已提交 bucket 后刷新运行时数据失败:', refreshError);
+                }
+            }
             return {
                 success: false,
                 error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError,
@@ -77040,9 +77057,7 @@ $CONTENT
             if (manualRefillEnabled) {
                 const completedData = getRuntimeTableDataSnapshot_ACU();
                 if (!completedData) {
-                    const rollbackError = await rollbackManualRefillSession();
-                    const failureError = '手动重填已完成，但无法从运行时导出完整恢复快照；已拒绝写入不完整 checkpoint。';
-                    return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
+                    return await failManualRefillSession('手动重填已完成，但无法从运行时导出完整恢复快照；已拒绝写入不完整 checkpoint。');
                 }
                 try {
                     const snapshotResult = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
