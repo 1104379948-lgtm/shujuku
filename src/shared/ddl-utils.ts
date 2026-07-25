@@ -263,13 +263,20 @@ export function projectSheetDDLForVisibleColumns_ACU(sheet: Sheet_ACU, ddlOverri
     throw new Error('无法为隐藏列构建安全的可见 DDL 投影。');
   }
   const visibleIndexes = new Set(projection.visibleColumns.map(column => column.sourceIndex));
-  const definitions = infos
-    .filter(info => visibleIndexes.has(info.index))
-    .map(info => info.normalizedDefinition);
-  if (definitions.length === 0 || infos[0]?.sqlName.toLowerCase() !== 'row_id') {
+  const visible = infos.filter(info => visibleIndexes.has(info.index));
+  if (visible.length === 0 || infos[0]?.sqlName.toLowerCase() !== 'row_id') {
     throw new Error('可见 DDL 投影必须保留 row_id。');
   }
-  const body = definitions.map((definition, index) => `  ${definition}${index < definitions.length - 1 ? ',' : ''}`).join('\n');
+  // 必须把列注释带回投影结果：注释是中文表头与 SQL 列名的唯一映射依据。
+  // 丢掉它会让 resolveInsertColumnMappings 无法把中文表头匹配到任何 DDL 列，
+  // 进而以「表头没有对应的 DDL 列」拒绝写入；prompt 里的 AI 也会失去列语义。
+  const body = visible
+    .map((info, index) => {
+      const comma = index < visible.length - 1 ? ',' : '';
+      const comment = info.comment ? ` -- ${info.comment}` : '';
+      return `  ${info.normalizedDefinition}${comma}${comment}`;
+    })
+    .join('\n');
   return `${ddl.slice(0, bounds.openingIndex + 1)}\n${body}\n${ddl.slice(bounds.closingIndex)}`;
 }
 

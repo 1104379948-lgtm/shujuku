@@ -300,6 +300,38 @@ describe('hiddenPhysicalColumns projection', () => {
     expect(projectSheetRowToVisibleColumns_ACU(sheet, sheet.content[1])).toEqual(['1', '铁剑', '3']);
     expect(sheet.content[1]).toEqual(['1', '铁剑', '历史秘密', '3']);
   });
+  it('隐藏列投影保留剩余列的中文注释', () => {
+    // 注释是中文表头与 SQL 列名的唯一映射依据。投影时丢掉注释会让
+    // resolveInsertColumnMappings 匹配不到任何列，以「表头没有对应的 DDL 列」拒绝写入；
+    // prompt 里的 AI 也会失去列语义。
+    const commented = makeSheet({
+      sourceData: {
+        note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+        ddl: [
+          'CREATE TABLE inventory (',
+          '  row_id INTEGER PRIMARY KEY, -- 行号',
+          '  item_name TEXT, -- 名称',
+          '  legacy_note TEXT, -- 旧备注',
+          '  quantity INTEGER -- 数量',
+          ');',
+        ].join('\n'),
+        hiddenPhysicalColumns: ['legacy_note'],
+      },
+      content: [
+        ['row_id', '名称', '旧备注', '数量'],
+        ['1', '铁剑', '历史秘密', '3'],
+      ],
+    });
+
+    const projected = projectSheetDDLForVisibleColumns_ACU(commented);
+    expect(projected).not.toContain('legacy_note');
+    expect(projected).not.toContain('旧备注');
+    expect(projected).toContain('-- 行号');
+    expect(projected).toContain('-- 名称');
+    expect(projected).toContain('-- 数量');
+  });
+
+
 
   it('非法 hiddenPhysicalColumns 配置 fail closed', () => {
     expect(() => getSheetColumnProjection_ACU({ ...sheet, sourceData: { ...sheet.sourceData, hiddenPhysicalColumns: 'legacy_note' as any } }))

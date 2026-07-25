@@ -310,8 +310,20 @@ function buildReplaySqlTableAliases_ACU(
     if (isPlainSqlIdentifier(sheetKey.slice('sheet_'.length))) addAlias(sheetKey.slice('sheet_'.length), runtimeName);
     if (isPlainSqlIdentifier(sheet?.uid)) addAlias(sheet.uid, runtimeName);
   }
-  if (operation.kind === 'sql_sheet_batch' && state[operation.sheetKey]) {
-    addAlias(operation.tableName, getPhysicalTableNameForSheet_ACU(state, operation.sheetKey));
+  if (operation.kind === 'sql_sheet_batch') {
+    // operation.tableName 是写入当时的历史物理表名，属于历史事实。
+    // 表可能已改名（原名/拼音名互换）或该 sheetKey 暂不在当前 replay state 中，
+    // 但只要能确定目标运行时表，就必须为历史名注册别名，否则这条增量会以
+    // no such table 让整次回放失败。
+    let target: string | null = null;
+    if (state[operation.sheetKey]) {
+      target = getPhysicalTableNameForSheet_ACU(state, operation.sheetKey);
+    } else {
+      // sheetKey 不在 state 中时，退而按历史表名在已注册别名里定位目标表。
+      const historical = decodeSqlIdentifier_ACU(operation.tableName).trim().toLowerCase();
+      target = aliases.get(historical) || null;
+    }
+    if (target) addAlias(operation.tableName, target);
   }
   return aliases;
 }
