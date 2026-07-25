@@ -110,6 +110,12 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   captureTableRuntimeRevisionForWriteSet_ACU: vi.fn(() => 'runtime-v1:test'),
 }));
+vi.mock('../../../src/service/table/storage-mode', () => ({
+  isSqliteMode: vi.fn(() => true),
+}));
+vi.mock('../../../src/service/table/table-storage-strategy', () => ({
+  reloadStorageProvider: vi.fn(),
+}));
 
 import {
   listTemplatePresetNames_ACU,
@@ -138,6 +144,8 @@ import { parseTableTemplateJson_ACU } from '../../../src/shared/utils';
 import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from '../../../src/service/template/template-import-validator';
 import { buildDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
 import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-template-reconciler';
+import { isSqliteMode } from '../../../src/service/table/storage-mode';
+import { reloadStorageProvider } from '../../../src/service/table/table-storage-strategy';
 import {
   commitCurrentFloorTemplateChanges_ACU,
   commitCurrentFloorTemplateScopeOnly_ACU,
@@ -542,6 +550,45 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
 
     expect(result).toMatchObject({ saved: false, blockers: ['删除表需要确认'] });
     expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+  });
+
+  it('SQLite 模式提交成功后按 checkpoint 重建 runtime 快照', async () => {
+    // checkpoint 已落盘但 runtime 仍是旧快照时，新引入表自带数据会在编辑器里显示 0 行。
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_live', sheetData: candidate.sheet_live }], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'v2_commit' } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(result).toMatchObject({ saved: true });
+    expect(reloadStorageProvider).toHaveBeenCalled();
+  });
+
+  it('非 SQLite 模式不触发 runtime 重建', async () => {
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_live', sheetData: candidate.sheet_live }], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'v2_commit' } as any);
+
+    await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(reloadStorageProvider).not.toHaveBeenCalled();
+  });
+
+  it('runtime 重建失败不推翻已保存的提交结果', async () => {
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    vi.mocked(reloadStorageProvider).mockRejectedValueOnce(new Error('reload boom'));
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_live', sheetData: candidate.sheet_live }], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'v2_commit' } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(result).toMatchObject({ saved: true });
   });
 });
 

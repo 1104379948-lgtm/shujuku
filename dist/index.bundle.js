@@ -44221,6 +44221,16 @@ $CONTENT
             return { ...committed, blockers: plan.blockers, audit: plan.audit };
         _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));
         applyTemplateScopeForCurrentChat_ACU();
+        // checkpoint 已落盘，但 SQLite runtime 仍是切换前的旧快照。
+        // 必须按 checkpoint 重建 runtime，否则新引入表自带的数据在编辑器/查询里读不到（显示 0 行）。
+        if (isSqliteMode()) {
+            try {
+                await reloadStorageProvider();
+            }
+            catch (error) {
+                logWarn_ACU('[TemplateScope] 聊天模板提交成功，但 SQLite 运行时重建失败:', error);
+            }
+        }
         try {
             await refreshMergedDataAndNotify_ACU();
         }

@@ -24,6 +24,8 @@ import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
 import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
+import { isSqliteMode } from '../table/storage-mode';
+import { reloadStorageProvider } from '../table/table-storage-strategy';
 
 // ═══ 预设存储 CRUD（内部辅助） ═══
 
@@ -424,6 +426,15 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
 
     _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));
     applyTemplateScopeForCurrentChat_ACU();
+    // checkpoint 已落盘，但 SQLite runtime 仍是切换前的旧快照。
+    // 必须按 checkpoint 重建 runtime，否则新引入表自带的数据在编辑器/查询里读不到（显示 0 行）。
+    if (isSqliteMode()) {
+        try {
+            await reloadStorageProvider();
+        } catch (error) {
+            logWarn_ACU('[TemplateScope] 聊天模板提交成功，但 SQLite 运行时重建失败:', error);
+        }
+    }
     try { await refreshMergedDataAndNotify_ACU(); } catch (error) { logWarn_ACU('[TemplateScope] 聊天模板提交成功，但运行时刷新失败:', error); }
     return { ...committed, audit: plan.audit };
 }
