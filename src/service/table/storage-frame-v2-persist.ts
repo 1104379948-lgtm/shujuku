@@ -374,7 +374,13 @@ function countAiFloor_ACU(chat: any[], messageIndex: number): number {
   return count;
 }
 
-function hasAnyV2Checkpoint_ACU(chat: any[], isolationKey: string, maxMessageIndex = chat.length - 1): boolean {
+/**
+ * 判断目标楼层及之前是否存在可作为回放锚点的 full checkpoint。
+ *
+ * 缺少锚点时本次写入会被 persist 层视为初始 full checkpoint，
+ * 调用方必须只提交 afterData 快照、不得附带 operations。
+ */
+export function hasAnyV2Checkpoint_ACU(chat: any[], isolationKey: string, maxMessageIndex = chat.length - 1): boolean {
   return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
     const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
     return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';

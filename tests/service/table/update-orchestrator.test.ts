@@ -2627,6 +2627,29 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     mockUpdateReadableLorebookEntry.mockResolvedValue(undefined);
     mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 3 });
     mockGetChatArray_ACU.mockImplementation(() => mockChatArrayForSeedStage);
+    // 这些用例验证的是“已有锚点后的增量提交”，因此必须在目标楼层前放一个
+    // full checkpoint；否则本次写入会被判定为初始 checkpoint 而不带 operations。
+    mockChatArrayForSeedStage.length = 0;
+    mockChatArrayForSeedStage.push(
+      {
+        is_user: false,
+        mes: 'AI锚点',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { name: '表A', content: [['row_id', '值']] } } },
+              logEntries: [],
+            },
+          },
+        },
+      } as any,
+      { is_user: true, mes: '用户' } as any,
+      { is_user: false, mes: 'AI2' } as any,
+      { is_user: true, mes: '用户2' } as any,
+      { is_user: false, mes: 'AI3' } as any,
+    );
     mockParseAndApplyTableEditsToData.mockImplementation((aiResponse: string, tableData: any) => {
       if (aiResponse.includes('sheet_0')) {
         tableData.sheet_0.content.push(['2', '来自A']);
@@ -2685,6 +2708,55 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(baseSnapshot.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a']]);
     expect(baseSnapshot.sheet_1.content).toEqual([['row_id', '值'], ['1', 'base-b']]);
   });
+  it('目标楼层前缺少 full checkpoint 锚点时只提交 afterData 快照，不附带 operations', async () => {
+    // 清空锚点：模拟手动重填已删除范围内 checkpoint，或全新隔离域首次写入。
+    mockChatArrayForSeedStage.length = 0;
+    mockChatArrayForSeedStage.push(
+      { is_user: true, mes: '用户' } as any,
+      { is_user: false, mes: 'AI1' } as any,
+      { is_user: true, mes: '用户2' } as any,
+      { is_user: false, mes: 'AI2' } as any,
+    );
+    const baseSnapshot = {
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+      sheet_1: { name: '表B', content: [['row_id', '值'], ['1', 'base-b']] },
+    };
+    const responses = [
+      { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_0</tableEdit>', tableEditText: 'sheet_0', job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+    ];
+
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+    expect(result.success).toBe(true);
+    const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+    // persist 层会把本次写入当作初始 full checkpoint，那种形态拒收 operations。
+    expect(savePayload.operations).toEqual([]);
+    // afterData 仍然是填表后的完整快照，checkpoint 不会丢数据。
+    expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a'], ['2', '来自A']]);
+  });
+
+  it('锚点存在时恢复增量提交，仍然生成 sheet_replace operations', async () => {
+    const baseSnapshot = {
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    };
+    const responses = [
+      { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_0</tableEdit>', tableEditText: 'sheet_0', job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+    ];
+
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+    expect(result.success).toBe(true);
+    const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+    expect(savePayload.operations).toEqual([
+      { kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: expect.objectContaining({
+        content: [['row_id', '值'], ['1', 'base-a'], ['2', '来自A']],
+      }), reason: 'system' },
+    ]);
+  });
+
+
 
   it('首次填表时 unified 路径保存全量表，但只追踪实质修改表', async () => {
     mockCheckIfFirstTimeInit.mockResolvedValue(true);

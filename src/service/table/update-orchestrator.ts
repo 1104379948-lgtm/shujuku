@@ -41,6 +41,7 @@ function resolveTableApiPresetOverride_ACU(tableName: any): string {
     return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
 }
 import { checkIfFirstTimeInit_ACU, ensureLegacyStorageMigratedBeforeWrite_ACU } from './table-service';
+import { hasAnyV2Checkpoint_ACU } from './storage-frame-v2-persist';
 import { parseAndApplyTableEditsToData_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
 import { extractStrictJsonTableFillResponse_ACU } from '../ai/prompt-builder/strict-json-table-fill';
 import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
@@ -967,14 +968,23 @@ export async function applyUnifiedGroupFillResponses_ACU(
             }
 
             const runtimeData = provider.getCurrentData() || currentJsonTableData_ACU || baseSnapshot;
+            // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始 checkpoint，
+            // 只接受 afterData，不能附带 sql_sheet_batch operations。
+            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
+                getChatArray_ACU() || [],
+                getCurrentIsolationKey_ACU(),
+                options.saveTargetIndex,
+            );
             operations.length = 0;
-            sortedResponses.forEach((response, index) => {
-                const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
-                if (operationBuild.success === false) {
-                    throw new Error(`统一提交失败：group ${response.job.groupKey} ${operationBuild.error}`);
-                }
-                operations.push(...operationBuild.operations);
-            });
+            if (hasCheckpointAnchor) {
+                sortedResponses.forEach((response, index) => {
+                    const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
+                    if (operationBuild.success === false) {
+                        throw new Error(`统一提交失败：group ${response.job.groupKey} ${operationBuild.error}`);
+                    }
+                    operations.push(...operationBuild.operations);
+                });
+            }
             const parsedModifiedKeys: string[] = Array.isArray(parseResult.modifiedKeys)
                 ? parseResult.modifiedKeys.filter((key: unknown): key is string => typeof key === 'string')
                 : [];
@@ -1094,7 +1104,16 @@ export async function applyUnifiedGroupFillResponses_ACU(
         const fillAttemptKeys = [...allTargetSheetKeySet]
             .filter(sheetKey => Boolean((workingTableData as any)?.[sheetKey]))
             .sort();
-        const snapshotOperations = buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system');
+        // 目标楼层前没有 full checkpoint 锚点时，本次写入会被 persist 层当作初始
+        // full checkpoint；该形态只接受 afterData 快照，附带 operations 会被拒绝。
+        const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
+            getChatArray_ACU() || [],
+            getCurrentIsolationKey_ACU(),
+            options.saveTargetIndex,
+        );
+        const effectiveOperations = hasCheckpointAnchor
+            ? [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')]
+            : [];
         const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
             source: 'group_fill',
@@ -1109,7 +1128,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
             updateGroupKeys: fillAttemptKeys,
             trackingSheetKeys: keysToTrack,
             trackAsUpdate: true,
-            operations: [...operations, ...snapshotOperations],
+            operations: effectiveOperations,
             replaceExistingIncremental: options.replaceExistingIncremental,
             manualRefillProgress: options.manualRefillProgress,
         }, () => ({
