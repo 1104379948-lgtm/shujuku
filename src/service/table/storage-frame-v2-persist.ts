@@ -2033,8 +2033,10 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         continue;
       }
       const targetSheetData = deepClone_ACU(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
-      if (change.kind === 'introduction' && targetSheetData.content?.length !== 1) {
-        throw new Error(`V2 sheet introduction only accepts a header-only sheet: sheetKey=${change.sheetKey}.`);
+      // introduction 允许两种形态：header-only 空壳（首次填表前可改结构），
+      // 或模板自带数据的整表（作者已定义初始格式，引入时即落盘）。
+      if (change.kind === 'introduction' && !Array.isArray(targetSheetData.content?.[0])) {
+        throw new Error(`V2 sheet introduction requires a header row: sheetKey=${change.sheetKey}.`);
       }
       const normalization = normalizeCanonicalTableRows_ACU({ [change.sheetKey]: targetSheetData });
       removedNullRowCount += normalization.removedRows.length;

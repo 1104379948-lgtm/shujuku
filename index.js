@@ -39692,8 +39692,10 @@ $CONTENT
                             continue;
                         }
                         const targetSheetData = deepClone_ACU$1(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
-                        if (change.kind === 'introduction' && targetSheetData.content?.length !== 1) {
-                            throw new Error(`V2 sheet introduction only accepts a header-only sheet: sheetKey=${change.sheetKey}.`);
+                        // introduction 允许两种形态：header-only 空壳（首次填表前可改结构），
+                        // 或模板自带数据的整表（作者已定义初始格式，引入时即落盘）。
+                        if (change.kind === 'introduction' && !Array.isArray(targetSheetData.content?.[0])) {
+                            throw new Error(`V2 sheet introduction requires a header row: sheetKey=${change.sheetKey}.`);
                         }
                         const normalization = normalizeCanonicalTableRows_ACU({ [change.sheetKey]: targetSheetData });
                         removedNullRowCount += normalization.removedRows.length;
@@ -43408,9 +43410,9 @@ $CONTENT
                     continue;
                 }
                 try {
-                    const introduced = asHeaderOnlySheet_ACU(templateEntry.sheet, templateEntry.key);
+                    const introduced = asIntroducedSheet_ACU(templateEntry.sheet, templateEntry.key);
                     candidateData[templateEntry.key] = introduced;
-                    audit.push({ sheetKey: templateEntry.key, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: 0, metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+                    audit.push({ sheetKey: templateEntry.key, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
                 }
                 catch (error) {
                     blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${templateEntry.key}) 无法引入：${error?.message || String(error)}`);
@@ -43580,12 +43582,27 @@ $CONTENT
             }
         }
     }
-    function asHeaderOnlySheet_ACU(sheet, sheetKey) {
+    /**
+     * 新增表的引入形态按“模板是否自带数据”分流：
+     * - 自带数据：作者已定义初始格式，原样保留数据行，引入时即落盘建表。
+     * - 不带数据：保持 header-only 空壳，保留“首次填表前可自由修改表结构”的能力。
+     * 两种形态都要求 uid 等于 key，且 seedRows 不随 sheet 落盘（数据已在 content 中）。
+     */
+    function asIntroducedSheet_ACU(sheet, sheetKey) {
         const clone = clone_ACU$4(sheet);
         if (clone.uid !== sheetKey)
             throw new Error(`新增表 uid 必须等于 key：${sheetKey}。`);
-        clone.content = [headers_ACU(clone)];
+        const headers = headers_ACU(clone);
+        const templateRows = Array.isArray(clone.content) ? clone.content.slice(1) : [];
+        const seedRows = Array.isArray(clone.seedRows) ? clone.seedRows : [];
+        // content 数据行优先；仅 seedRows 提供数据时也视为“自带数据”。
+        const dataRows = templateRows.length > 0 ? templateRows : seedRows;
+        clone.content = dataRows.length > 0
+            ? [headers, ...dataRows.map(row => (Array.isArray(row) ? [...row] : [row]))]
+            : [headers];
         delete clone.seedRows;
+        if (dataRows.length > 0)
+            validateBaselineSheetRows_ACU(clone);
         return clone;
     }
     function validateBaselineSheetRows_ACU(sheet) {

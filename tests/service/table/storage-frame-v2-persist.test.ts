@@ -1856,10 +1856,11 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
   });
 
 
-  it('带业务行的新 sheet 不能作为 introduction 且零写入', async () => {
+  it('模板自带数据的新 sheet 作为 introduction 直接连数据落 checkpoint', async () => {
+    // 作者在模板里自带初始数据 = 明确的格式意图，引入时即写入 checkpoint；
+    // 落盘后该表已非空，后续填表不会再对它重复插入同一批 row_id。
     const message = seedFrame({ logEntries: [] });
-    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
-    const sheetWithDataRow = { ...sheetB, uid: 'new-with-data', name: '含数据新表', content: [['row_id', 'value'], ['1', '业务数据']] };
+    const sheetWithDataRow = { ...sheetB, uid: 'sheet_new', name: '含数据新表', content: [['row_id', 'value'], ['1', '业务数据']] };
 
     const result = await commitCurrentFloorTemplateChanges_ACU({
       isolationKey: '',
@@ -1868,11 +1869,26 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       createdAt: 30,
     });
 
-    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('header-only') });
-    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
-    expect(mocks.setGuide).not.toHaveBeenCalled();
-    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toBeUndefined();
+    expect(result.saved).toBe(true);
+    const introduced = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new;
+    expect(introduced?.timeline?.kind).toBe('sheet_introduction');
+    expect(introduced?.data?.content).toEqual([['row_id', 'value'], ['1', '业务数据']]);
+  });
+
+  it('无数据的新 sheet 仍以 header-only 空壳引入（保留首次填表前可改结构）', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const headerOnlySheet = { ...sheetB, uid: 'sheet_new', name: '空壳新表', content: [['row_id', 'value']] };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: headerOnlySheet }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: '空壳新表' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const introduced = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new;
+    expect(introduced?.data?.content).toEqual([['row_id', 'value']]);
   });
 
   it.each([

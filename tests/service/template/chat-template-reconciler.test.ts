@@ -37,7 +37,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect({ baseline, template }).toEqual(original);
   });
 
-  it('新增表只产生 header-only introduction；旧表默认走 hide，仅硬删除才需确认', async () => {
+  it('新增表 introduction 保留模板自带数据；旧表默认走 hide，仅硬删除才需确认', async () => {
     const baseline = state({ sheet_old: sheet('sheet_old', '旧表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值') });
     const template = state({ sheet_new: sheet('sheet_new', '新表', ['row_id', 'value'], 'row_id INTEGER PRIMARY KEY, value TEXT', [['9', '示例']]) });
 
@@ -46,7 +46,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(defaultPlan.blockers).toEqual([]);
     expect(defaultPlan.hiddenSheetKeys).toEqual(['sheet_old']);
     expect(defaultPlan.deletedSheetKeys).toEqual([]);
-    expect(defaultPlan.candidateData.sheet_new.content).toEqual([['row_id', 'value']]);
+    expect(defaultPlan.candidateData.sheet_new.content).toEqual([['row_id', 'value'], ['9', '示例']]);
     expect(defaultPlan.sheetChanges).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' }),
       expect.objectContaining({ kind: 'hide', sheetKey: 'sheet_old' }),
@@ -60,7 +60,7 @@ describe('reconcileChatTemplate_ACU', () => {
     const accepted = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true, hardDeleteMissingSheets: true });
     expect(accepted.blockers).toEqual([]);
     expect(accepted.deletedSheetKeys).toEqual(['sheet_old']);
-    expect(accepted.candidateData.sheet_new.content).toEqual([['row_id', 'value']]);
+    expect(accepted.candidateData.sheet_new.content).toEqual([['row_id', 'value'], ['9', '示例']]);
     expect(accepted.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' })]);
   });
 
@@ -332,14 +332,34 @@ describe('reconcileChatTemplate_ACU', () => {
     });
   });
 
-  it('新增表 introduction 隔离模板 seedRows', async () => {
+  it('新增表 introduction 保留模板自带数据行，content 优先于 seedRows', async () => {
+    // 模板自带数据 = 作者的格式意图，引入时即随 checkpoint 落盘；
+    // seedRows 不再随 sheet 落盘（数据已在 content 中），避免二次注入撞 row_id。
     const templateSheet = sheet('sheet_new', '新表', ['row_id', 'value'], 'row_id INTEGER PRIMARY KEY, value TEXT', [['9', '示例']]);
     templateSheet.seedRows = [['9', 'seed']];
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_new).toMatchObject({ content: [['row_id', 'value']] });
+    expect(plan.candidateData.sheet_new).toMatchObject({ content: [['row_id', 'value'], ['9', '示例']] });
     expect(plan.candidateData.sheet_new.seedRows).toBeUndefined();
+  });
+
+  it('新增表无 content 数据行时，退回使用模板 seedRows 作为初始数据', async () => {
+    const templateSheet = sheet('sheet_new', '新表', ['row_id', 'value'], 'row_id INTEGER PRIMARY KEY, value TEXT', []);
+    templateSheet.seedRows = [['9', 'seed']];
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_new).toMatchObject({ content: [['row_id', 'value'], ['9', 'seed']] });
+    expect(plan.candidateData.sheet_new.seedRows).toBeUndefined();
+  });
+
+  it('新增表完全无数据时仍为 header-only 空壳', async () => {
+    const templateSheet = sheet('sheet_new', '新表', ['row_id', 'value'], 'row_id INTEGER PRIMARY KEY, value TEXT', []);
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_new).toMatchObject({ content: [['row_id', 'value']] });
   });
 
   it('rebase 语义下 sourceData 字段删除可通过整表 checkpoint 表达', async () => {
