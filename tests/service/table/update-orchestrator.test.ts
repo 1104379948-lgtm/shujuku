@@ -2795,6 +2795,51 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a'], ['2', '来自A']]);
   });
 
+  it('checkpoint 已承载部分目标表时仍视为有效锚点，新表不得清空 operations', async () => {
+    // 回归：锚点判定若要求 checkpoint 包含全部目标表，则只要本次涉及一张新表
+    // 就会被误判为无锚点，operations 被清空，数据静默写不进去也不报错。
+    mockChatArrayForSeedStage.length = 0;
+    mockChatArrayForSeedStage.push(
+      {
+        is_user: false,
+        mes: 'AI锚点',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              // 锚点里只有 sheet_0，sheet_1 是本次新引入的表。
+              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { name: '表A', content: [['row_id', '值']] } } },
+              logEntries: [],
+            },
+          },
+        },
+      } as any,
+      { is_user: true, mes: '用户' } as any,
+      { is_user: false, mes: 'AI2' } as any,
+      { is_user: true, mes: '用户2' } as any,
+      { is_user: false, mes: 'AI3' } as any,
+    );
+    const baseSnapshot = {
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+      sheet_1: { name: '表B', content: [['row_id', '值'], ['1', 'base-b']] },
+    };
+    const responses = [
+      { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_0</tableEdit>', tableEditText: 'sheet_0', job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_1</tableEdit>', tableEditText: 'sheet_1', job: { groupKey: 'b', groupId: 2, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+    ];
+
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+    expect(result.success).toBe(true);
+    const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+    // 锚点有效，必须正常生成 sheet_replace 增量，不能为空。
+    expect(savePayload.operations.length).toBeGreaterThan(0);
+    expect(savePayload.operations.map((op: any) => op.sheetKey).sort()).toEqual(['sheet_0', 'sheet_1']);
+  });
+
+
   it('目标楼层前缺少 full checkpoint 锚点时只提交 afterData 快照，不附带 operations', async () => {
     // 清空锚点：模拟手动重填已删除范围内 checkpoint，或全新隔离域首次写入。
     mockChatArrayForSeedStage.length = 0;

@@ -38166,14 +38166,19 @@ $CONTENT
      * 缺少锚点时本次写入会被 persist 层视为初始 full checkpoint，
      * 调用方必须只提交 afterData 快照、不得附带 operations。
      *
-     * 传入 requiredSheetKeys 时还要求该 checkpoint 的 data 真正承载这些表。
+     * 传入 anchorSheetKeys 时，要求 checkpoint 的 data 至少承载其中一张表。
+     *
      * 手动重填会清空范围内 checkpoint.data 里的目标表但保留 checkpoint 本体；
-     * 这种 checkpoint 对被清空的表不是有效锚点，必须重新建立，否则回放会从
-     * 缺表的 checkpoint 起算而丢数据。
+     * 那种“目标表全被清空”的 checkpoint 不是有效锚点，必须重建，否则回放会从
+     * 缺表的基底起算而丢数据。
+     *
+     * 这里刻意用“至少一张”而不是“全部”：正常填表经常包含 checkpoint 里尚不存在
+     * 的新表，若要求全部命中会把有效锚点误判为缺失，导致 operations 被清空、
+     * 数据静默写不进去。
      */
-    function hasAnyV2Checkpoint_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1, requiredSheetKeys) {
-        const requiredKeys = Array.isArray(requiredSheetKeys)
-            ? requiredSheetKeys.filter(sheetKey => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))
+    function hasAnyV2Checkpoint_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1, anchorSheetKeys) {
+        const anchorKeys = Array.isArray(anchorSheetKeys)
+            ? anchorSheetKeys.filter(sheetKey => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))
             : [];
         return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
             const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
@@ -38182,12 +38187,12 @@ $CONTENT
             const checkpoint = tagData.storageFrame.checkpoint;
             if (checkpoint?.kind !== 'full')
                 return false;
-            if (requiredKeys.length === 0)
+            if (anchorKeys.length === 0)
                 return true;
             const data = checkpoint.data;
             if (!data || typeof data !== 'object')
                 return false;
-            return requiredKeys.every(sheetKey => Boolean(data[sheetKey]));
+            return anchorKeys.some(sheetKey => Boolean(data[sheetKey]));
         });
     }
     function hasAnyV2Frame_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
@@ -38732,8 +38737,11 @@ $CONTENT
         }
         const filledSheetKeys = normalizeKeys_ACU(options.filledSheetKeys, afterData);
         const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
-        // 锚点必须真正承载本次写入涉及的表：手动重填清空范围内 checkpoint.data 后，
-        // 残留的空 checkpoint 不能当作锚点，否则增量会挂在缺表的基底上导致回放丢数据。
+        // 锚点至少要承载本次写入涉及的一张表：手动重填清空范围内 checkpoint.data 后，
+        // 目标表全被清空的残留 checkpoint 不能当作锚点，否则增量会挂在缺表的基底上导致回放丢数据。
+        //
+        // 只要求“至少一张”：正常填表常包含 checkpoint 里尚不存在的新表，
+        // 要求全部命中会把有效锚点误判为缺失，进而清空 operations 让数据静默写不进去。
         const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index, candidateChangedSheetKeys);
         const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey, target.index);
         const operations = normalizeOperations_ACU(options.operations, afterData, options.source, hasExistingCheckpoint);
@@ -75680,6 +75688,10 @@ $CONTENT
                         operations.push(...operationBuild.operations);
                     });
                 }
+                else {
+                    logDebug_ACU(`[V2 Fill] 目标楼层 #${options.saveTargetIndex} 前无承载目标表的 full checkpoint，`
+                        + `本次以初始 checkpoint 形式提交 SQL 运行时快照（tracked=${keysToTrack.join(',') || '无'}）。`);
+                }
                 const fillAttemptKeys = [...allTargetSheetKeySet]
                     .filter(sheetKey => Boolean(runtimeData?.[sheetKey]))
                     .sort();
@@ -75781,9 +75793,16 @@ $CONTENT
             // 判定必须与 persist 层一致（同样按 candidateChangedSheetKeys 校验锚点承载的表），
             // 否则手动重填清空 checkpoint.data 后会写出挂在缺表基底上的孤立增量。
             const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex, keysToTrack);
-            const effectiveOperations = hasCheckpointAnchor
-                ? [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')]
-                : [];
+            let effectiveOperations = [];
+            if (hasCheckpointAnchor) {
+                effectiveOperations = [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')];
+            }
+            else {
+                // 本次写入将成为初始 full checkpoint，afterData 快照已包含全部结果；
+                // 记录日志便于区分“按设计走 checkpoint”与“锚点判定异常导致数据未落增量”。
+                logDebug_ACU(`[V2 Fill] 目标楼层 #${options.saveTargetIndex} 前无承载目标表的 full checkpoint，`
+                    + `本次以初始 checkpoint 形式提交快照（tracked=${keysToTrack.join(',') || '无'}）。`);
+            }
             const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet', sheetKey }));
             const commitResult = await runTableUpdateCommit_ACU({
                 source: 'group_fill',

@@ -998,6 +998,11 @@ export async function applyUnifiedGroupFillResponses_ACU(
                     }
                     operations.push(...operationBuild.operations);
                 });
+            } else {
+                logDebug_ACU(
+                    `[V2 Fill] 目标楼层 #${options.saveTargetIndex} 前无承载目标表的 full checkpoint，`
+                    + `本次以初始 checkpoint 形式提交 SQL 运行时快照（tracked=${keysToTrack.join(',') || '无'}）。`,
+                );
             }
             const fillAttemptKeys = [...allTargetSheetKeySet]
                 .filter(sheetKey => Boolean((runtimeData as any)?.[sheetKey]))
@@ -1115,9 +1120,17 @@ export async function applyUnifiedGroupFillResponses_ACU(
             options.saveTargetIndex,
             keysToTrack,
         );
-        const effectiveOperations = hasCheckpointAnchor
-            ? [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')]
-            : [];
+        let effectiveOperations: TableMutationOperationV2_ACU[] = [];
+        if (hasCheckpointAnchor) {
+            effectiveOperations = [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')];
+        } else {
+            // 本次写入将成为初始 full checkpoint，afterData 快照已包含全部结果；
+            // 记录日志便于区分“按设计走 checkpoint”与“锚点判定异常导致数据未落增量”。
+            logDebug_ACU(
+                `[V2 Fill] 目标楼层 #${options.saveTargetIndex} 前无承载目标表的 full checkpoint，`
+                + `本次以初始 checkpoint 形式提交快照（tracked=${keysToTrack.join(',') || '无'}）。`,
+            );
+        }
         const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
             source: 'group_fill',
