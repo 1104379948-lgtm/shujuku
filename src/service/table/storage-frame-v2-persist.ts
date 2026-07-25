@@ -2106,13 +2106,14 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     // reveal 目标集合：包括显式 reveal change，以及"introduction 但历史存在(active 无)"自动转 reveal 的 sheetKey。
     const revealDataBySheet = new Map<string, Sheet_ACU>();
     for (const change of requestedChanges.filter(item => item.kind === 'introduction')) {
-      // 已被 hide 的表不算“仍活跃”：hide 的语义就是把该表从 active state 移除。
-      // 若把 hide checkpoint 也当作活跃，重新切回带该表的模板时会永远走不到 reveal 分支，
-      // 而被误判成“重复引入”直接拒绝。
+      // 是否“仍活跃”只由 replay 后的 active state 判定。
+      //
+      // perSheetCheckpoints 只是历史痕迹：表可能经由 hide、data_replace 或早期删除逻辑
+      // 离开 active state，却仍留下一个没有 hide timeline 的 sheet checkpoint。
+      // 把这种痕迹当作“仍活跃”，会让重新切回带该表的模板时走不到下面的唤醒分支，
+      // 被误判成“重复引入”直接拒绝。历史里存在过的表由 historyHas 分支负责唤醒。
       const existingSheetCheckpoint = (frame.perSheetCheckpoints || {})[change.sheetKey] as TableSheetCheckpointV2_ACU | undefined;
-      const checkpointMarksHidden = existingSheetCheckpoint?.timeline?.kind === 'sheet_hide';
-      const activeHas = Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey)
-        || (!!existingSheetCheckpoint && !checkpointMarksHidden);
+      const activeHas = Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey);
       const historyHas = historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, change.sheetKey);
       if (activeHas) {
         // 仍活跃：既非全新，也非可恢复的隐藏表 → 保持 introduction 冲突防覆盖语义。
@@ -2128,10 +2129,13 @@ export async function commitCurrentFloorTemplateChanges_ACU(
           revealDataBySheet.set(change.sheetKey, revealSource);
           continue;
         }
-        // bounded replay 粒度是楼层：同一楼内 hide 的表无法靠"更早楼层"找回可见状态。
-        // 此时改用本 frame hide checkpoint 的 data —— 它就是该表被隐藏前的完整状态，
-        // 是可信来源（由 hide 提交时的 locateRevealSourceSheetData_ACU 写入），不是臆造。
-        if (checkpointMarksHidden && isObjectRecord_ACU(existingSheetCheckpoint?.data)) {
+        // bounded replay 粒度是楼层：同一楼内离开 active state 的表无法靠“更早楼层”找回可见状态。
+        // 此时改用本 frame 里该表 sheet checkpoint 的 data —— 它就是该表离开前的完整状态，
+        // 是提交时写入的可信来源，不是臆造。
+        //
+        // 不要求它带 hide timeline：表也可能经由 data_replace 或早期删除逻辑离开，
+        // 只留下无 timeline 的残留 checkpoint；那种 data 同样是可信的离开前状态。
+        if (isObjectRecord_ACU(existingSheetCheckpoint?.data)) {
           revealDataBySheet.set(change.sheetKey, deepClone_ACU(existingSheetCheckpoint!.data) as Sheet_ACU);
           continue;
         }

@@ -1796,6 +1796,41 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '隐藏前的数据']]);
   });
 
+  it('无 hide timeline 的残留 sheet checkpoint 不算仍活跃，重新引入时唤醒历史数据', async () => {
+    // 复现：表已经离开 active state（data_replace / 早期删除逻辑），但 perSheetCheckpoints
+    // 里还留着一个没有 hide timeline 的 sheet checkpoint。
+    // 这种痕迹不能被当成“仍活跃”，否则切回带该表的模板会被误报“重复引入”。
+    const staleData = { ...sheetB, uid: 'sheet_stale', name: '主角装备表', content: [['row_id', 'value'], ['1', '离开前的数据']] };
+    const message = seedFrame({
+      logEntries: [],
+      perSheetCheckpoints: {
+        sheet_stale: {
+          kind: 'sheet_full', createdAt: 10, reason: 'schema_change', sheetKey: 'sheet_stale',
+          data: staleData,
+          // 注意：没有 timeline，不是 hide 标记。
+        },
+      },
+    });
+    const activeState = message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data;
+    // active replay state 里该表始终不存在；bounded replay 也找不回可见状态，
+    // 唤醒数据只能来自 perSheetCheckpoints 里那个无 timeline 的残留 checkpoint。
+    mocks.loadReplayState.mockResolvedValue(activeState);
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_stale', sheetData: staleData }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_stale: { name: '主角装备表' } },
+      createdAt: 30,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.saved).toBe(true);
+    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_stale;
+    expect(revived?.timeline?.kind).toBe('sheet_reveal');
+    expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '离开前的数据']]);
+  });
+
+
 
 
   it('replay state 已存在同名 sheet 但 target frame 无 shard 时拒绝 introduction 且零写入', async () => {
