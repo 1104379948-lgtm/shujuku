@@ -1147,18 +1147,33 @@ export class SqlTableService implements ITableStorageProvider {
     // [修复] 同时为缺失表注入 seedRows（初始数据），使建表后 SQLite 中包含初版快照
     // 设计文档 Q9 确认：seedRows 是初版快照，应写入 SQLite 作为真实数据
     const partialData: TableDataObject_ACU = { mate: templateData.mate };
+    // 建表用的 templateData 已被 stripSeedRows 剥掉数据行，需要一份保留数据行的模板，
+    // 用来还原「模板自带数据」的表。作者在模板里写了数据就代表要保留这个格式，
+    // 不能只在「首次填表」时才生效（shouldUseInitialSeedRows_ACU 的限定）。
+    const templateWithRows = this._resolveCurrentChatTemplate(false);
     for (const [key, sheet] of Object.entries(missingSheets)) {
       const sheetCopy = JSON.parse(JSON.stringify(sheet));
 
-      // 如果 sheet 的 content 只有表头（stripSeedRows 后的空壳），尝试注入 seedRows
-      if (Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
-        const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
+      // content 只有表头时补数据：模板作者自带的数据行优先，其次才是 guide/seedRows。
+      // templateData 已被 stripSeedRows 剥掉数据行，所以必须回到未 strip 的模板取。
+      const templateRows = (templateWithRows as any)?.[key]?.content;
+      const authoredRows = Array.isArray(templateRows) && templateRows.length > 1
+        ? templateRows.slice(1)
+        : [];
+      const needsRows = !Array.isArray(sheetCopy.content) || sheetCopy.content.length <= 1;
+      if (needsRows) {
+        const seedRows = authoredRows.length > 0
+          ? authoredRows
+          : getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
         if (Array.isArray(seedRows) && seedRows.length > 0) {
           // seedRows 是不含表头的纯数据行，拼接到表头后面
           sheetCopy.content = [sheetCopy.content[0] || [], ...seedRows];
           sheetCopy.content = ensureStableRowIdsForSheetContent_ACU(sheetCopy.content);
           logDebug_ACU(`[SqlTableService] 表 ${key} (${sheetCopy.name}) 注入 ${seedRows.length} 行 seedRows 作为初版快照`);
         }
+      } else {
+        // content 已带数据行（未被 strip 的路径）：确保 row_id 稳定后直接使用。
+        sheetCopy.content = ensureStableRowIdsForSheetContent_ACU(sheetCopy.content);
       }
 
       (partialData as any)[key] = sheetCopy;

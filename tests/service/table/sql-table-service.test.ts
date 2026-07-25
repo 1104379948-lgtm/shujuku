@@ -695,6 +695,7 @@ describe('SqlTableService', () => {
       expect(queryResult.values[0]).toContain('铁剑');
     });
 
+
     it('仅有基底状态数据时也写入运行时 SQLite，但不保留内部标记', async () => {
       const baseStateData = JSON.parse(JSON.stringify(testTableData));
       baseStateData.sheet_0._acu_from_base_state = true;

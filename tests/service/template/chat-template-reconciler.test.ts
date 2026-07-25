@@ -64,6 +64,63 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(accepted.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' })]);
   });
 
+  it('旧表无数据且新模板同名表有数据时，采用模板数据', async () => {
+    // 与“是否首楼、是否已初始化”无关，只看该表当前有没有数据。
+    const baseline = state({
+      sheet_rules: sheet('sheet_rules', '系统规则表', ['row_id', '规则名称'],
+        'row_id INTEGER PRIMARY KEY,\n  rule_name TEXT -- 规则名称', []),
+    });
+    const template = state({
+      sheet_rules2: sheet('sheet_rules2', '系统规则表', ['row_id', '规则名称'],
+        'row_id INTEGER PRIMARY KEY,\n  rule_name TEXT -- 规则名称', [
+          [null as any, '属性说明'],
+          [null as any, '升级公式'],
+        ]),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_rules.content).toEqual([
+      ['row_id', '规则名称'],
+      ['1', '属性说明'],
+      ['2', '升级公式'],
+    ]);
+  });
+
+  it('旧表已有数据时忽略模板自带数据，以旧表为主', async () => {
+    const baseline = state({
+      sheet_rules: sheet('sheet_rules', '系统规则表', ['row_id', '规则名称'],
+        'row_id INTEGER PRIMARY KEY,\n  rule_name TEXT -- 规则名称', [['1', '旧数据']]),
+    });
+    const template = state({
+      sheet_rules2: sheet('sheet_rules2', '系统规则表', ['row_id', '规则名称'],
+        'row_id INTEGER PRIMARY KEY,\n  rule_name TEXT -- 规则名称', [[null as any, '模板数据']]),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_rules.content).toEqual([['row_id', '规则名称'], ['1', '旧数据']]);
+  });
+
+  it('两边都无数据时保持表头空表', async () => {
+    const baseline = state({
+      sheet_rules: sheet('sheet_rules', '系统规则表', ['row_id', '规则名称'],
+        'row_id INTEGER PRIMARY KEY,\n  rule_name TEXT -- 规则名称', []),
+    });
+    const template = state({
+      sheet_rules2: sheet('sheet_rules2', '系统规则表', ['row_id', '规则名称'],
+        'row_id INTEGER PRIMARY KEY,\n  rule_name TEXT -- 规则名称', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_rules.content).toEqual([['row_id', '规则名称']]);
+  });
+
+
   it('模板声明 columnAliases 时，列改名仍能继承数据', async () => {
     const baseline = state({
       sheet_g: sheet('sheet_g', '表', ['row_id', '上轮场景时间'],
@@ -449,6 +506,25 @@ describe('reconcileChatTemplate_ACU', () => {
       sheetData: { content: [['row_id', 'item_name', 'quality', 'note'], ['1', '铁剑', null, '旧备注']] },
     });
   });
+
+  it('模板数据行 row_id 为 null（真实模板形态）时仍能带数据引入', async () => {
+    // 真实模板里作者不写 row_id，首列是 null（不是空串）。
+    const templateSheet = sheet('sheet_rules', '系统规则表', ['row_id', '规则类别', '规则名称'],
+      'row_id INTEGER PRIMARY KEY,\n  rule_category TEXT, -- 规则类别\n  rule_name TEXT -- 规则名称', [
+        [null as any, '六维属性', '属性说明'],
+        [null as any, '经验', '升级公式'],
+      ]);
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_rules: templateSheet }), destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_rules.content).toEqual([
+      ['row_id', '规则类别', '规则名称'],
+      ['1', '六维属性', '属性说明'],
+      ['2', '经验', '升级公式'],
+    ]);
+    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_rules' })]);
+  });
+
 
   it('新增表 introduction 保留模板自带数据行，content 优先于 seedRows', async () => {
     // 模板自带数据 = 作者的格式意图，引入时即随 checkpoint 落盘；

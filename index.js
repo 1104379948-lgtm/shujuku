@@ -43793,7 +43793,18 @@ $CONTENT
                 targetRow.push(beforeRow[hidden.index] ?? null);
             migratedRows.push(targetRow);
         }
-        sheet.content = [[...targetHeaders, ...retainedHiddenHeaders], ...migratedRows];
+        const nextHeaders = [...targetHeaders, ...retainedHiddenHeaders];
+        // 数据归属规则：
+        // - 旧表已有数据 → 以旧表为主，忽略模板自带数据（避免覆盖用户/AI 写过的内容）。
+        // - 旧表无数据且模板自带数据 → 采用模板数据（作者定义的初始格式必须落地），
+        //   与「是否首楼、是否首次初始化」无关。
+        // - 两边都无数据 → 表头空表。
+        const templateRows = Array.isArray(template.content) ? template.content.slice(1) : [];
+        const useTemplateRows = migratedRows.length === 0 && templateRows.length > 0;
+        const adoptedRows = useTemplateRows
+            ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, retainedHiddenHeaders.length)
+            : migratedRows;
+        sheet.content = [nextHeaders, ...adoptedRows];
         sheet.sourceData = clone_ACU$4(template.sourceData);
         // 列身份由 canonical 显示名决定，物理列名一旦确立就不再随模板 DDL 文本变动。
         // 若采用模板的物理名，同一显示名会在切模板时被改名（如 last_round_time → prev_scene_time），
@@ -43852,6 +43863,34 @@ $CONTENT
             throw new Error(`无法重绑定物理列名：列定义未以列名起头（${column.sqlName}）。`);
         }
         return { ...column, sqlName: nextSqlName, normalizedDefinition: `${nextSqlName}${remainder}` };
+    }
+    /**
+     * 把模板自带数据行整形成当前目标结构：按目标列数对齐，为保留的隐藏列补 null，
+     * 并为缺失的 row_id 分配稳定值（模板作者通常不写 row_id，首列常为 null）。
+     * 行宽超过目标可见列时 fail-loud，不静默截断丢数据。
+     */
+    function adoptTemplateRowsForMatchedSheet_ACU(templateRows, visibleColumnCount, hiddenColumnCount) {
+        const rows = templateRows.map(row => {
+            const cells = (Array.isArray(row) ? row : [row])
+                .map(cell => (cell === null || cell === undefined ? null : String(cell)));
+            // cells[0] 是 row_id，其后是可见列。
+            const expected = visibleColumnCount + 1;
+            if (cells.length > expected) {
+                throw new Error(`模板数据行宽度为 ${cells.length}，超过目标可见列 ${expected} 列。`);
+            }
+            while (cells.length < expected)
+                cells.push(null);
+            // 隐藏列在新数据下无值。
+            for (let index = 0; index < hiddenColumnCount; index += 1)
+                cells.push(null);
+            return cells;
+        });
+        const reserved = createStableRowIdReservation_ACU(rows);
+        for (const row of rows) {
+            const rowId = row[0] === null ? '' : String(row[0]).trim();
+            row[0] = rowId || allocateStableRowId_ACU(reserved);
+        }
+        return rows;
     }
     /**
      * 汇总旧表与模板声明的 columnAliases，得到 physical column name(lowercase) → canonical 历史显示名列表。
@@ -46547,17 +46586,33 @@ $CONTENT
             // [修复] 同时为缺失表注入 seedRows（初始数据），使建表后 SQLite 中包含初版快照
             // 设计文档 Q9 确认：seedRows 是初版快照，应写入 SQLite 作为真实数据
             const partialData = { mate: templateData.mate };
+            // 建表用的 templateData 已被 stripSeedRows 剥掉数据行，需要一份保留数据行的模板，
+            // 用来还原「模板自带数据」的表。作者在模板里写了数据就代表要保留这个格式，
+            // 不能只在「首次填表」时才生效（shouldUseInitialSeedRows_ACU 的限定）。
+            const templateWithRows = this._resolveCurrentChatTemplate(false);
             for (const [key, sheet] of Object.entries(missingSheets)) {
                 const sheetCopy = JSON.parse(JSON.stringify(sheet));
-                // 如果 sheet 的 content 只有表头（stripSeedRows 后的空壳），尝试注入 seedRows
-                if (Array.isArray(sheetCopy.content) && sheetCopy.content.length <= 1) {
-                    const seedRows = getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
+                // content 只有表头时补数据：模板作者自带的数据行优先，其次才是 guide/seedRows。
+                // templateData 已被 stripSeedRows 剥掉数据行，所以必须回到未 strip 的模板取。
+                const templateRows = templateWithRows?.[key]?.content;
+                const authoredRows = Array.isArray(templateRows) && templateRows.length > 1
+                    ? templateRows.slice(1)
+                    : [];
+                const needsRows = !Array.isArray(sheetCopy.content) || sheetCopy.content.length <= 1;
+                if (needsRows) {
+                    const seedRows = authoredRows.length > 0
+                        ? authoredRows
+                        : getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
                     if (Array.isArray(seedRows) && seedRows.length > 0) {
                         // seedRows 是不含表头的纯数据行，拼接到表头后面
                         sheetCopy.content = [sheetCopy.content[0] || [], ...seedRows];
                         sheetCopy.content = ensureStableRowIdsForSheetContent_ACU(sheetCopy.content);
                         logDebug_ACU(`[SqlTableService] 表 ${key} (${sheetCopy.name}) 注入 ${seedRows.length} 行 seedRows 作为初版快照`);
                     }
+                }
+                else {
+                    // content 已带数据行（未被 strip 的路径）：确保 row_id 稳定后直接使用。
+                    sheetCopy.content = ensureStableRowIdsForSheetContent_ACU(sheetCopy.content);
                 }
                 partialData[key] = sheetCopy;
             }

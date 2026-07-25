@@ -439,7 +439,18 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
     for (const hidden of hiddenEntries) targetRow.push(beforeRow[hidden.index] ?? null);
     migratedRows.push(targetRow);
   }
-  sheet.content = [[...targetHeaders, ...retainedHiddenHeaders], ...migratedRows];
+  const nextHeaders = [...targetHeaders, ...retainedHiddenHeaders];
+  // 数据归属规则：
+  // - 旧表已有数据 → 以旧表为主，忽略模板自带数据（避免覆盖用户/AI 写过的内容）。
+  // - 旧表无数据且模板自带数据 → 采用模板数据（作者定义的初始格式必须落地），
+  //   与「是否首楼、是否首次初始化」无关。
+  // - 两边都无数据 → 表头空表。
+  const templateRows = Array.isArray(template.content) ? template.content.slice(1) : [];
+  const useTemplateRows = migratedRows.length === 0 && templateRows.length > 0;
+  const adoptedRows: Array<Array<string | null>> = useTemplateRows
+    ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, retainedHiddenHeaders.length)
+    : migratedRows;
+  sheet.content = [nextHeaders, ...adoptedRows];
   sheet.sourceData = clone_ACU(template.sourceData);
   // 列身份由 canonical 显示名决定，物理列名一旦确立就不再随模板 DDL 文本变动。
   // 若采用模板的物理名，同一显示名会在切模板时被改名（如 last_round_time → prev_scene_time），
@@ -503,6 +514,38 @@ function renamePhysicalColumn_ACU(
   }
   return { ...column, sqlName: nextSqlName, normalizedDefinition: `${nextSqlName}${remainder}` };
 }
+
+/**
+ * 把模板自带数据行整形成当前目标结构：按目标列数对齐，为保留的隐藏列补 null，
+ * 并为缺失的 row_id 分配稳定值（模板作者通常不写 row_id，首列常为 null）。
+ * 行宽超过目标可见列时 fail-loud，不静默截断丢数据。
+ */
+function adoptTemplateRowsForMatchedSheet_ACU(
+  templateRows: unknown[],
+  visibleColumnCount: number,
+  hiddenColumnCount: number,
+): Array<Array<string | null>> {
+  const rows = templateRows.map(row => {
+    const cells: Array<string | null> = (Array.isArray(row) ? row : [row])
+      .map(cell => (cell === null || cell === undefined ? null : String(cell)));
+    // cells[0] 是 row_id，其后是可见列。
+    const expected = visibleColumnCount + 1;
+    if (cells.length > expected) {
+      throw new Error(`模板数据行宽度为 ${cells.length}，超过目标可见列 ${expected} 列。`);
+    }
+    while (cells.length < expected) cells.push(null);
+    // 隐藏列在新数据下无值。
+    for (let index = 0; index < hiddenColumnCount; index += 1) cells.push(null);
+    return cells;
+  });
+  const reserved = createStableRowIdReservation_ACU(rows);
+  for (const row of rows) {
+    const rowId = row[0] === null ? '' : String(row[0]).trim();
+    row[0] = rowId || allocateStableRowId_ACU(reserved);
+  }
+  return rows;
+}
+
 
 /**
  * 汇总旧表与模板声明的 columnAliases，得到 physical column name(lowercase) → canonical 历史显示名列表。
