@@ -418,10 +418,20 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
   }
   sheet.content = [[...targetHeaders, ...retainedHiddenHeaders], ...migratedRows];
   sheet.sourceData = clone_ACU(template.sourceData);
-  sheet.sourceData.ddl = buildRetainedColumnDDL_ACU(before, template, targetColumns, targetHeaders, retainedHiddenColumns, retainedHiddenHeaders);
-  const activePhysical = new Set(targetColumns.map(column => column.sqlName.toLowerCase()));
+  // 列身份由 canonical 显示名决定，物理列名一旦确立就不再随模板 DDL 文本变动。
+  // 若采用模板的物理名，同一显示名会在切模板时被改名（如 last_round_time → prev_scene_time），
+  // 而历史 log 里的 SQL 仍按旧物理名书写，回放时必然撞 "has no column named ..."。
+  const effectiveTargetColumns = targetColumns.map((column, index) => {
+    if (index === 0) return column;
+    const target = targetEntries[index - 1];
+    const source = target ? targetSourceByCanonical.get(target.canonical) : undefined;
+    if (!source || source.physical === column.sqlName) return column;
+    return renamePhysicalColumn_ACU(column, source.physical);
+  });
+  sheet.sourceData.ddl = buildRetainedColumnDDL_ACU(before, template, effectiveTargetColumns, targetHeaders, retainedHiddenColumns, retainedHiddenHeaders);
+  const activePhysical = new Set(effectiveTargetColumns.map(column => column.sqlName.toLowerCase()));
   const previousHidden = getSheetColumnProjection_ACU(before).hiddenPhysicalColumns;
-  const candidatePhysical = new Map([...targetColumns, ...retainedHiddenColumns].map(column => [column.sqlName.toLowerCase(), column.sqlName]));
+  const candidatePhysical = new Map([...effectiveTargetColumns, ...retainedHiddenColumns].map(column => [column.sqlName.toLowerCase(), column.sqlName]));
   const hiddenPhysicalColumns = [...previousHidden, ...retainedHiddenColumns.map(column => column.sqlName)]
     .filter(name => !activePhysical.has(name.toLowerCase()) && candidatePhysical.has(name.toLowerCase()))
     .filter((name, index, values) => values.findIndex(value => value.toLowerCase() === name.toLowerCase()) === index)
@@ -437,6 +447,24 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
     physicalColumnMappings: mappings, fills: fillAudit,
     affectedRowCount: before.content.length - 1, metadataChanged: !!meta, metadataChangedFields: meta ? Object.keys(meta) : [], destructiveChangeConfirmed: false, operations: [] } };
 }
+
+/**
+ * 把列定义的物理列名换成已存在的名字，保留类型、约束与 DEFAULT 不变。
+ * 只替换 normalizedDefinition 开头的标识符（解析保证它以列名起头），
+ * 不做全文替换，避免误伤 DEFAULT 字面量或约束中的同名片段。
+ */
+function renamePhysicalColumn_ACU(
+  column: ReturnType<typeof parseDDLColumnInfos_ACU>[number],
+  nextSqlName: string,
+): ReturnType<typeof parseDDLColumnInfos_ACU>[number] {
+  const definition = column.normalizedDefinition;
+  const remainder = definition.slice(column.sqlName.length);
+  if (!definition.startsWith(column.sqlName)) {
+    throw new Error(`无法重绑定物理列名：列定义未以列名起头（${column.sqlName}）。`);
+  }
+  return { ...column, sqlName: nextSqlName, normalizedDefinition: `${nextSqlName}${remainder}` };
+}
+
 
 function buildRetainedColumnDDL_ACU(before: Sheet_ACU, template: Sheet_ACU, targetColumns: ReturnType<typeof parseDDLColumnInfos_ACU>, targetHeaders: string[], retainedColumns: ReturnType<typeof parseDDLColumnInfos_ACU>, retainedHeaders: string[]): string {
   const templateDDL = String(template.sourceData?.ddl || '');

@@ -64,6 +64,52 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(accepted.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' })]);
   });
 
+  it('canonical 相同但模板物理列名不同时，沁用既有物理列名，不随模板改名', async () => {
+    // 列身份由 canonical 显示名判定；物理列名一旦确立就不能变。
+    // 否则历史 log 里按旧物理名书写的 SQL 回放时会撞 "has no column named ..."。
+    const baseline = state({
+      sheet_g: sheet('sheet_g', '全局数据表', ['row_id', '上轮场景时间', '当前时间'],
+        'row_id INTEGER PRIMARY KEY,\n  last_round_time TEXT, -- 上轮场景时间\n  current_time TEXT -- 当前时间', [['1', 'T0', 'T1']]),
+    });
+    // 模板用同样的显示名，但物理列名不同。
+    const template = state({
+      sheet_g2: sheet('sheet_g2', '全局数据表', ['row_id', '上轮场景时间', '当前时间'],
+        'row_id INTEGER PRIMARY KEY,\n  prev_scene_time TEXT, -- 上轮场景时间\n  cur_time TEXT -- 当前时间'),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    const ddl = plan.candidateData.sheet_g.sourceData.ddl as string;
+    // 沁用旧物理名，不采用模板的新名。
+    expect(ddl).toContain('last_round_time');
+    expect(ddl).toContain('current_time');
+    expect(ddl).not.toContain('prev_scene_time');
+    expect(ddl).not.toContain('cur_time');
+    // 数据与显示名不变。
+    expect(plan.candidateData.sheet_g.content).toEqual([['row_id', '上轮场景时间', '当前时间'], ['1', 'T0', 'T1']]);
+  });
+
+  it('沁用旧物理列名时保留模板列的类型与约束', async () => {
+    const baseline = state({
+      sheet_g: sheet('sheet_g', '表', ['row_id', '数量'],
+        'row_id INTEGER PRIMARY KEY,\n  old_qty TEXT -- 数量', [['1', '3']]),
+    });
+    const template = state({
+      sheet_g2: sheet('sheet_g2', '表', ['row_id', '数量'],
+        'row_id INTEGER PRIMARY KEY,\n  new_qty INTEGER NOT NULL DEFAULT 0 -- 数量'),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    const ddl = plan.candidateData.sheet_g.sourceData.ddl as string;
+    // 列名沁用旧名，但类型/约束/DEFAULT 采用模板的。
+    expect(ddl).toMatch(/old_qty INTEGER NOT NULL DEFAULT 0/);
+    expect(ddl).not.toContain('new_qty');
+  });
+
+
   it('模板缺失旧列时保留并隐藏；新增 NOT NULL 无 literal default 时仍 fail closed', async () => {
     const baseline = state({
       sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', '名称', '备注'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT, -- 名称\n  note TEXT -- 备注', [['1', '铁剑', '旧备注']]),
