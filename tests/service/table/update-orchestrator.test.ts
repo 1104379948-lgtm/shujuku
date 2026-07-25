@@ -2682,7 +2682,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
             _acu_storage_version: 2,
             storageFrame: {
               version: 2,
-              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { name: '表A', content: [['row_id', '值']] } } },
+              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { name: '表A', content: [['row_id', '值']] }, sheet_1: { name: '表B', content: [['row_id', '值']] } } },
               logEntries: [],
             },
           },
@@ -2751,6 +2751,50 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(baseSnapshot.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a']]);
     expect(baseSnapshot.sheet_1.content).toEqual([['row_id', '值'], ['1', 'base-b']]);
   });
+
+  it('锚点 checkpoint 已被清空目标表时视为无锚点，重建初始 checkpoint 而不写孤立增量', async () => {
+    // 场景：数据 1-8 层、checkpoint 在第 1 层，重填范围覆盖第 1 层。
+    // 预清理会清空该 checkpoint.data 里的目标表但保留 kind='full'；
+    // 残留的空 checkpoint 对被清表不是有效锚点，否则增量挂在缺表基底上，
+    // 中断后回放就会得到空数据。
+    mockChatArrayForSeedStage.length = 0;
+    mockChatArrayForSeedStage.push(
+      {
+        is_user: false,
+        mes: 'AI锚点',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' } } },
+              logEntries: [],
+            },
+          },
+        },
+      } as any,
+      { is_user: true, mes: '用户' } as any,
+      { is_user: false, mes: 'AI2' } as any,
+      { is_user: true, mes: '用户2' } as any,
+      { is_user: false, mes: 'AI3' } as any,
+    );
+    const baseSnapshot = {
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    };
+    const responses = [
+      { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_0</tableEdit>', tableEditText: 'sheet_0', job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+    ];
+
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+    expect(result.success).toBe(true);
+    const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+    // 必须重建成初始 full checkpoint，因此不得附带 operations。
+    expect(savePayload.operations).toEqual([]);
+    expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a'], ['2', '来自A']]);
+  });
+
   it('目标楼层前缺少 full checkpoint 锚点时只提交 afterData 快照，不附带 operations', async () => {
     // 清空锚点：模拟手动重填已删除范围内 checkpoint，或全新隔离域首次写入。
     mockChatArrayForSeedStage.length = 0;

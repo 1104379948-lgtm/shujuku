@@ -38165,11 +38165,29 @@ $CONTENT
      *
      * 缺少锚点时本次写入会被 persist 层视为初始 full checkpoint，
      * 调用方必须只提交 afterData 快照、不得附带 operations。
+     *
+     * 传入 requiredSheetKeys 时还要求该 checkpoint 的 data 真正承载这些表。
+     * 手动重填会清空范围内 checkpoint.data 里的目标表但保留 checkpoint 本体；
+     * 这种 checkpoint 对被清空的表不是有效锚点，必须重新建立，否则回放会从
+     * 缺表的 checkpoint 起算而丢数据。
      */
-    function hasAnyV2Checkpoint_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
+    function hasAnyV2Checkpoint_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1, requiredSheetKeys) {
+        const requiredKeys = Array.isArray(requiredSheetKeys)
+            ? requiredSheetKeys.filter(sheetKey => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))
+            : [];
         return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
             const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
-            return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
+            if (!isV2TagData_ACU(tagData))
+                return false;
+            const checkpoint = tagData.storageFrame.checkpoint;
+            if (checkpoint?.kind !== 'full')
+                return false;
+            if (requiredKeys.length === 0)
+                return true;
+            const data = checkpoint.data;
+            if (!data || typeof data !== 'object')
+                return false;
+            return requiredKeys.every(sheetKey => Boolean(data[sheetKey]));
         });
     }
     function hasAnyV2Frame_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
@@ -38714,7 +38732,9 @@ $CONTENT
         }
         const filledSheetKeys = normalizeKeys_ACU(options.filledSheetKeys, afterData);
         const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
-        const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index);
+        // 锚点必须真正承载本次写入涉及的表：手动重填清空范围内 checkpoint.data 后，
+        // 残留的空 checkpoint 不能当作锚点，否则增量会挂在缺表的基底上导致回放丢数据。
+        const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index, candidateChangedSheetKeys);
         const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey, target.index);
         const operations = normalizeOperations_ACU(options.operations, afterData, options.source, hasExistingCheckpoint);
         const effectiveChangedSheetKeys = candidateChangedSheetKeys;
@@ -75626,19 +75646,7 @@ $CONTENT
                     };
                 }
                 const runtimeData = provider.getCurrentData() || currentJsonTableData_ACU || baseSnapshot;
-                // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始 checkpoint，
-                // 只接受 afterData，不能附带 sql_sheet_batch operations。
-                const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex);
                 operations.length = 0;
-                if (hasCheckpointAnchor) {
-                    sortedResponses.forEach((response, index) => {
-                        const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
-                        if (operationBuild.success === false) {
-                            throw new Error(`统一提交失败：group ${response.job.groupKey} ${operationBuild.error}`);
-                        }
-                        operations.push(...operationBuild.operations);
-                    });
-                }
                 const parsedModifiedKeys = Array.isArray(parseResult.modifiedKeys)
                     ? parseResult.modifiedKeys.filter((key) => typeof key === 'string')
                     : [];
@@ -75652,6 +75660,18 @@ $CONTENT
                     ? allRuntimeSheetKeys
                     : [...new Set([...modifiedKeys, ...initializedKeys])].sort();
                 const keysToTrack = [...new Set([...modifiedKeys, ...initializedKeys])].sort();
+                // 与快照路径同理：缺少承载目标表的 full checkpoint 锚点时本次写入是初始
+                // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations。
+                const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex, keysToTrack);
+                if (hasCheckpointAnchor) {
+                    sortedResponses.forEach((response, index) => {
+                        const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
+                        if (operationBuild.success === false) {
+                            throw new Error(`统一提交失败：group ${response.job.groupKey} ${operationBuild.error}`);
+                        }
+                        operations.push(...operationBuild.operations);
+                    });
+                }
                 const fillAttemptKeys = [...allTargetSheetKeySet]
                     .filter(sheetKey => Boolean(runtimeData?.[sheetKey]))
                     .sort();
@@ -75750,7 +75770,9 @@ $CONTENT
                 .sort();
             // 目标楼层前没有 full checkpoint 锚点时，本次写入会被 persist 层当作初始
             // full checkpoint；该形态只接受 afterData 快照，附带 operations 会被拒绝。
-            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex);
+            // 判定必须与 persist 层一致（同样按 candidateChangedSheetKeys 校验锚点承载的表），
+            // 否则手动重填清空 checkpoint.data 后会写出挂在缺表基底上的孤立增量。
+            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex, keysToTrack);
             const effectiveOperations = hasCheckpointAnchor
                 ? [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')]
                 : [];

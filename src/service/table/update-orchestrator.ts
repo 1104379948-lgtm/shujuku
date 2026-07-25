@@ -968,23 +968,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
             }
 
             const runtimeData = provider.getCurrentData() || currentJsonTableData_ACU || baseSnapshot;
-            // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始 checkpoint，
-            // 只接受 afterData，不能附带 sql_sheet_batch operations。
-            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
-                getChatArray_ACU() || [],
-                getCurrentIsolationKey_ACU(),
-                options.saveTargetIndex,
-            );
             operations.length = 0;
-            if (hasCheckpointAnchor) {
-                sortedResponses.forEach((response, index) => {
-                    const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
-                    if (operationBuild.success === false) {
-                        throw new Error(`统一提交失败：group ${response.job.groupKey} ${operationBuild.error}`);
-                    }
-                    operations.push(...operationBuild.operations);
-                });
-            }
             const parsedModifiedKeys: string[] = Array.isArray(parseResult.modifiedKeys)
                 ? parseResult.modifiedKeys.filter((key: unknown): key is string => typeof key === 'string')
                 : [];
@@ -998,6 +982,23 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 ? allRuntimeSheetKeys
                 : [...new Set([...modifiedKeys, ...initializedKeys])].sort();
             const keysToTrack = [...new Set([...modifiedKeys, ...initializedKeys])].sort();
+            // 与快照路径同理：缺少承载目标表的 full checkpoint 锚点时本次写入是初始
+            // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations。
+            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
+                getChatArray_ACU() || [],
+                getCurrentIsolationKey_ACU(),
+                options.saveTargetIndex,
+                keysToTrack,
+            );
+            if (hasCheckpointAnchor) {
+                sortedResponses.forEach((response, index) => {
+                    const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
+                    if (operationBuild.success === false) {
+                        throw new Error(`统一提交失败：group ${response.job.groupKey} ${operationBuild.error}`);
+                    }
+                    operations.push(...operationBuild.operations);
+                });
+            }
             const fillAttemptKeys = [...allTargetSheetKeySet]
                 .filter(sheetKey => Boolean((runtimeData as any)?.[sheetKey]))
                 .sort();
@@ -1106,10 +1107,13 @@ export async function applyUnifiedGroupFillResponses_ACU(
             .sort();
         // 目标楼层前没有 full checkpoint 锚点时，本次写入会被 persist 层当作初始
         // full checkpoint；该形态只接受 afterData 快照，附带 operations 会被拒绝。
+        // 判定必须与 persist 层一致（同样按 candidateChangedSheetKeys 校验锚点承载的表），
+        // 否则手动重填清空 checkpoint.data 后会写出挂在缺表基底上的孤立增量。
         const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
             getChatArray_ACU() || [],
             getCurrentIsolationKey_ACU(),
             options.saveTargetIndex,
+            keysToTrack,
         );
         const effectiveOperations = hasCheckpointAnchor
             ? [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')]

@@ -379,11 +379,30 @@ function countAiFloor_ACU(chat: any[], messageIndex: number): number {
  *
  * 缺少锚点时本次写入会被 persist 层视为初始 full checkpoint，
  * 调用方必须只提交 afterData 快照、不得附带 operations。
+ *
+ * 传入 requiredSheetKeys 时还要求该 checkpoint 的 data 真正承载这些表。
+ * 手动重填会清空范围内 checkpoint.data 里的目标表但保留 checkpoint 本体；
+ * 这种 checkpoint 对被清空的表不是有效锚点，必须重新建立，否则回放会从
+ * 缺表的 checkpoint 起算而丢数据。
  */
-export function hasAnyV2Checkpoint_ACU(chat: any[], isolationKey: string, maxMessageIndex = chat.length - 1): boolean {
+export function hasAnyV2Checkpoint_ACU(
+  chat: any[],
+  isolationKey: string,
+  maxMessageIndex = chat.length - 1,
+  requiredSheetKeys?: string[] | null,
+): boolean {
+  const requiredKeys = Array.isArray(requiredSheetKeys)
+    ? requiredSheetKeys.filter(sheetKey => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))
+    : [];
   return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
     const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
-    return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
+    if (!isV2TagData_ACU(tagData)) return false;
+    const checkpoint = tagData.storageFrame.checkpoint;
+    if (checkpoint?.kind !== 'full') return false;
+    if (requiredKeys.length === 0) return true;
+    const data = checkpoint.data;
+    if (!data || typeof data !== 'object') return false;
+    return requiredKeys.every(sheetKey => Boolean((data as any)[sheetKey]));
   });
 }
 
@@ -1005,7 +1024,9 @@ async function persistTableMutationLogV2Core_ACU(
   }
   const filledSheetKeys = normalizeKeys_ACU(options.filledSheetKeys, afterData);
   const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
-  const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index);
+  // 锚点必须真正承载本次写入涉及的表：手动重填清空范围内 checkpoint.data 后，
+  // 残留的空 checkpoint 不能当作锚点，否则增量会挂在缺表的基底上导致回放丢数据。
+  const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index, candidateChangedSheetKeys);
   const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey, target.index);
   const operations = normalizeOperations_ACU(options.operations, afterData, options.source, hasExistingCheckpoint);
   const effectiveChangedSheetKeys = candidateChangedSheetKeys;
