@@ -354,6 +354,49 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.candidateData.sheet_new.seedRows).toBeUndefined();
   });
 
+  it('模板数据行缺少 row_id 时自动补齐稳定 row_id，不再拒绝引入', async () => {
+    // 模板作者通常不手写 row_id：首列为空串/缺失。引入必须成功并补齐 1..n。
+    const templateSheet = sheet('sheet_new', '系统规则表', ['row_id', 'rule_name', 'rule_desc'],
+      'row_id INTEGER PRIMARY KEY, rule_name TEXT, rule_desc TEXT', [
+        ['', '六维属性', '力量/敏捷/体质'],
+        ['', '初始分配', '总值36点'],
+      ]);
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_new.content).toEqual([
+      ['row_id', 'rule_name', 'rule_desc'],
+      ['1', '六维属性', '力量/敏捷/体质'],
+      ['2', '初始分配', '总值36点'],
+    ]);
+  });
+
+  it('模板已显式给出 row_id 时保留原值，只为缺失行分配', async () => {
+    const templateSheet = sheet('sheet_new', '系统规则表', ['row_id', 'rule_name'],
+      'row_id INTEGER PRIMARY KEY, rule_name TEXT', [
+        ['5', '已有ID'],
+        ['', '待分配'],
+      ]);
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_new.content).toEqual([
+      ['row_id', 'rule_name'],
+      ['5', '已有ID'],
+      ['1', '待分配'],
+    ]);
+  });
+
+  it('模板数据行末尾省略单元格时按表头宽度补齐', async () => {
+    const templateSheet = sheet('sheet_new', '系统规则表', ['row_id', 'a', 'b'],
+      'row_id INTEGER PRIMARY KEY, a TEXT, b TEXT', [['', '只有A']]);
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_new.content).toEqual([['row_id', 'a', 'b'], ['1', '只有A', '']]);
+  });
+
+
   it('新增表完全无数据时仍为 header-only 空壳', async () => {
     const templateSheet = sheet('sheet_new', '新表', ['row_id', 'value'], 'row_id INTEGER PRIMARY KEY, value TEXT', []);
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });

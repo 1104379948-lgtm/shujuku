@@ -1,5 +1,6 @@
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU, parseDDLTableConstraints_ACU, parseDDLTableName, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
 import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist';
 import { hydrateTableDataStrict_ACU } from '../table/sqlite-template-validation';
@@ -270,12 +271,39 @@ function asIntroducedSheet_ACU(sheet: Sheet_ACU, sheetKey: string): Sheet_ACU {
   // content 数据行优先；仅 seedRows 提供数据时也视为“自带数据”。
   const dataRows = templateRows.length > 0 ? templateRows : seedRows;
   clone.content = dataRows.length > 0
-    ? [headers, ...dataRows.map(row => (Array.isArray(row) ? [...row] : [row]))]
+    ? [headers, ...assignMissingRowIds_ACU(dataRows.map(row => normalizeIntroducedRow_ACU(row, headers.length, sheetKey)))]
     : [headers];
   delete clone.seedRows;
   if (dataRows.length > 0) validateBaselineSheetRows_ACU(clone);
   return clone;
 }
+
+/**
+ * 模板作者通常不手写 row_id，首列多为空。引入前按现有稳定分配器补齐缺失 row_id，
+ * 已显式给出的 row_id 一律保留原值，绝不重写。
+ */
+function assignMissingRowIds_ACU(rows: string[][]): string[][] {
+  const reserved = createStableRowIdReservation_ACU(rows);
+  for (const row of rows) {
+    const rowId = row[0] === null || row[0] === undefined ? '' : String(row[0]).trim();
+    row[0] = rowId || allocateStableRowId_ACU(reserved);
+  }
+  return rows;
+}
+
+/**
+ * 模板行末尾省略单元格是常见写法，按表头宽度补 null 即可。
+ * 但行宽超过表头说明模板结构本身不一致，必须 fail-loud，不能静默截断丢数据。
+ */
+function normalizeIntroducedRow_ACU(row: unknown, headerWidth: number, sheetKey: string): string[] {
+  const cells: string[] = (Array.isArray(row) ? row : [row]).map(cell => (cell === null || cell === undefined ? '' : String(cell)));
+  if (cells.length > headerWidth) {
+    throw new Error(`模板数据行宽度为 ${cells.length}，超过表头 ${headerWidth} 列（${sheetKey}）。`);
+  }
+  while (cells.length < headerWidth) cells.push('');
+  return cells;
+}
+
 
 function validateBaselineSheetRows_ACU(sheet: Sheet_ACU): void {
   const headers = headers_ACU(sheet);
