@@ -74901,8 +74901,6 @@ $CONTENT
             batchSize: normalizedPositiveInteger_ACU(input.batchSize, 1),
             requestOptions: input.requestOptions || null,
             updateMode: input.updateMode || 'manual_independent',
-            mergeBaseMaxMessageIndex: Number.isInteger(input.mergeBaseMaxMessageIndex) ? input.mergeBaseMaxMessageIndex : null,
-            useLatestRuntimeMergeBase: input.useLatestRuntimeMergeBase === true,
             executionKind: input.executionKind || 'standard',
         });
     }
@@ -74915,8 +74913,6 @@ $CONTENT
             sheetKeys: inputs.map(input => input.sheetKey).sort(),
             requestOptions: first.requestOptions || null,
             updateMode: first.updateMode || 'manual_independent',
-            ...(Number.isInteger(first.mergeBaseMaxMessageIndex) ? { mergeBaseMaxMessageIndex: first.mergeBaseMaxMessageIndex } : {}),
-            ...(first.useLatestRuntimeMergeBase === true ? { useLatestRuntimeMergeBase: true } : {}),
             executionKind: first.executionKind || 'standard',
         };
     }
@@ -75994,23 +75990,10 @@ $CONTENT
                     firstError = firstError || '同一提交批次包含不一致的表格基底边界，已中止以避免重填数据污染。';
                     break;
                 }
-                const latestRuntimeBaseRequested = bucket.plannedJobs.some(job => job.group.useLatestRuntimeMergeBase === true);
-                if (latestRuntimeBaseRequested && explicitMergeBaseBounds.length > 0) {
-                    bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
-                    firstError = firstError || '同一提交批次同时要求最新运行时基底与历史边界基底，已中止以避免重填数据污染。';
-                    break;
-                }
-                const allJobsUseLatestRuntimeBase = latestRuntimeBaseRequested
-                    && bucket.plannedJobs.every(job => job.group.useLatestRuntimeMergeBase === true);
-                if (latestRuntimeBaseRequested && !allJobsUseLatestRuntimeBase) {
-                    bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
-                    firstError = firstError || '同一提交批次混用了最新运行时基底与默认历史边界基底，已中止以避免重填数据污染。';
-                    break;
-                }
-                const mergeBaseMaxMessageIndex = explicitMergeBaseBounds.length === 1 ? explicitMergeBaseBounds[0] : bucketFirstMessageIndex - 1;
-                const baseResult = allJobsUseLatestRuntimeBase
-                    ? await buildBatchMergeBase_ACU(bucket.batchNumber)
-                    : await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
+                // 基底边界必须随 bucket 推进：显式边界只作为下界，保证本 bucket 之前刚提交的
+                // 增量进入 prompt 基底，同时不把本 bucket 之后尚未处理的楼层带进来。
+                const mergeBaseMaxMessageIndex = Math.max(explicitMergeBaseBounds.length === 1 ? explicitMergeBaseBounds[0] : Number.NEGATIVE_INFINITY, bucketFirstMessageIndex - 1);
+                const baseResult = await buildBatchMergeBase_ACU(bucket.batchNumber, { maxMessageIndex: mergeBaseMaxMessageIndex });
                 if (!baseResult.data) {
                     bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
                     firstError = firstError || baseResult.error || '无法构建合并基底，操作已终止。';
@@ -77071,9 +77054,8 @@ $CONTENT
             });
             const groupKeys = Object.keys(updateGroups);
             const manualRefillEnabled = options.clearBeforeUpdate === true;
-            const lastEffectiveAiIndex = effectiveAiIndices[effectiveAiIndices.length - 1];
-            const manualRefillUsesLatestRuntimeBase = manualRefillEnabled && uiSkip === 0 && contextScopeIndices[contextScopeIndices.length - 1] === lastEffectiveAiIndex;
-            const manualRefillMergeBaseMaxMessageIndex = manualRefillEnabled && !manualRefillUsesLatestRuntimeBase ? contextScopeIndices[0] - 1 : undefined;
+            // 手动填表在清理本次范围内的回放增量后，基底解析完全沿用自动填表语义
+            // （逐 bucket 取 bucketFirstMessageIndex - 1），不再注入手动专属基底边界。
             if (manualRefillEnabled) {
                 const currentIsolationKey = getCurrentIsolationKey_ACU();
                 const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
@@ -77143,9 +77125,6 @@ $CONTENT
                         return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
                     }
                 }
-                if (!manualRefillUsesLatestRuntimeBase) {
-                    logDebug_ACU(`[Manual Refill] 当前重填范围不是有效 AI 尾部，将使用 <=${manualRefillMergeBaseMaxMessageIndex} 的 bounded replay 基底，避免未来楼层污染 prompt。`);
-                }
             }
             _set_isAutoUpdatingCard_ACU$1(true);
             const maxConcurrentGroups = Math.max(1, Number(settings_ACU.maxConcurrentGroups) || 1);
@@ -77164,8 +77143,6 @@ $CONTENT
                         batchSize: group.batchSize,
                         sheetKeys: group.sheetKeys,
                         requestOptions: group.requestOptions,
-                        mergeBaseMaxMessageIndex: manualRefillMergeBaseMaxMessageIndex,
-                        useLatestRuntimeMergeBase: manualRefillUsesLatestRuntimeBase,
                     };
                 });
                 logDebug_ACU(`[Manual Update] 并发处理第 ${chunkIndex}/${totalChunks} 批，当前 ${groupedChunk.length} 组：${groupedChunk.map(group => `${group.key}(${group.sheetKeys.join(',')})`).join('; ')}`);

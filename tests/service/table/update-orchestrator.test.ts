@@ -3555,7 +3555,7 @@ describe('processGroupedRuntimeChunk_ACU', () => {
   });
 
 
-  it('手动重填多 bucket 使用固定 mergeBaseMaxMessageIndex，不把前一 bucket 新写增量带入后续基底', async () => {
+  it('手动重填多 bucket 逐 bucket 前移基底边界，纳入前一 bucket 增量且排除未处理楼层', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const chat = Array.from({ length: 31 }, (_, index) => ({ is_user: false, mes: `AI ${index}` })) as any[];
@@ -3622,6 +3622,35 @@ describe('processGroupedRuntimeChunk_ACU', () => {
       if (aiResponse.includes('29-30')) tableData.sheet_0.content.push(['29', '第29层新值'], ['30', '第30层新值']);
       return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 2 };
     });
+    // 把每个 bucket 的提交结果作为 V2 增量写回聊天，模拟真实持久化，
+    // 使后续 bucket 的 bounded replay 能够看到刚提交的行。
+    mockPersistTablesToChatMessage.mockImplementation(async (options: any) => {
+      const appendedRows = (options.tableData?.sheet_0?.content || []).slice(21);
+      chat[options.targetMessageIndex].TavernDB_ACU_IsolatedData = {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1,
+              entryId: `new-${options.targetMessageIndex}`,
+              createdAt: options.targetMessageIndex,
+              source: 'manual_fill',
+              targetMessageIndex: options.targetMessageIndex,
+              aiFloor: options.targetMessageIndex + 1,
+              filledSheetKeys: ['sheet_0'],
+              changedSheetKeys: ['sheet_0'],
+              groupKeys: ['sheet_0'],
+              operations: appendedRows.map((row: string[]) => ({
+                kind: 'row_upsert', sheetKey: 'sheet_0', rowId: row[0], cells: row,
+              })),
+              writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+            }],
+          },
+        },
+      };
+      return { saved: true, messageIndex: options.targetMessageIndex };
+    });
 
     const result = await processGroupedRuntimeChunk_ACU([
       { key: 'manual_refill', groupId: 0, indices: [27, 28, 29, 30], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null, mergeBaseMaxMessageIndex: 26 },
@@ -3630,8 +3659,13 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(result.success).toBe(true);
     expect(promptBaseRows).toHaveLength(2);
     expect(promptBaseRows[0]).toHaveLength(27);
-    expect(promptBaseRows[1]).toEqual(promptBaseRows[0]);
-    expect(promptBaseRows[1].some(row => row[0] === '27' || row[0] === '28' || row[0] === '29' || row[0] === '30')).toBe(false);
+    // 第一个 bucket 起点为 27，边界 26：不得包含 27~30 的行。
+    expect(promptBaseRows[0].some(row => ['27', '28', '29', '30'].includes(row[0]))).toBe(false);
+    // 第二个 bucket 起点为 29，边界前移到 28：必须纳入上一 bucket 刚提交的 27、28，
+    // 同时仍不得包含本 bucket 尚未处理的 29、30。
+    expect(promptBaseRows[1].map(row => row[0])).toContain('27');
+    expect(promptBaseRows[1].map(row => row[0])).toContain('28');
+    expect(promptBaseRows[1].some(row => ['29', '30'].includes(row[0]))).toBe(false);
   });
 
   it('SQL 模式下不再早退，而是完成 grouped 统一提交', async () => {
