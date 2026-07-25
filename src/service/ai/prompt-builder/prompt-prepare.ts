@@ -6,7 +6,7 @@
 import { manualExtraHint_ACU } from '../../runtime/state-manager';
 import { currentJsonTableData_ACU, settings_ACU } from '../../runtime/state-manager';
 import { getUserName_ACU } from '../../../data/gateways/host-state-gateway';
-import { attachSeedRowsToCurrentDataFromGuide_ACU, ensureChatSheetGuideSeeded_ACU, getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU } from '../../template/chat-scope';
+import { attachSeedRowsToCurrentDataFromGuide_ACU, ensureChatSheetGuideSeeded_ACU, getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU, filterSheetKeysByTemplateScope_ACU, projectSheetForTemplateScope_ACU, resolveTemplateScope_ACU } from '../../template/chat-scope';
 import { getCombinedWorldbookContent_ACU, getWorldBooks_ACU } from '../../worldbook/pipeline';
 import { isDatabaseGeneratedLorebookEntry_ACU, resolveGeneratedEntriesForTable_ACU } from '../../worldbook/worldbook-placeholder-classification';
 import { resolvePreTakeoverWorldbookSnapshot_ACU } from '../../agent/agent-worldbook-takeover';
@@ -75,10 +75,15 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
 
     let tableDataText = '';
     let _seedRowsTablesUsed_ACU: string[] = [];
-    const tableIndexes = getSortedSheetKeys_ACU(workingTableData);
+    // 模板只起指导作用：只有模板声明的表参与 prompt。
+    // 范围未知（解析失败）时不过滤，避免把所有表判成不参与。
+    const templateScope = resolveTemplateScope_ACU(options?.isolationKey);
+    const tableIndexes = filterSheetKeysByTemplateScope_ACU(getSortedSheetKeys_ACU(workingTableData), templateScope);
     tableIndexes.forEach((sheetKey, tableIndex) => {
-        const table = workingTableData[sheetKey];
-        if (!table || !table.name || !table.content) return;
+        const rawTable = workingTableData[sheetKey];
+        if (!rawTable || !rawTable.name || !rawTable.content) return;
+        // 模板未声明的列合并进 hiddenPhysicalColumns，只影响投影，不改写持久化数据。
+        const table: any = projectSheetForTemplateScope_ACU(rawTable, templateScope, sheetKey);
 
         if (targetSheetKeys && Array.isArray(targetSheetKeys)) {
             if (!targetSheetKeys.includes(sheetKey)) return;

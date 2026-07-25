@@ -34580,24 +34580,35 @@ $CONTENT
         }
         if (hiddenCanonical.includes('row_id'))
             throw new Error('row_id 不允许隐藏。');
-        if (hidden.length > 0 && ddlColumns.length !== headers.length) {
-            throw new Error('hiddenPhysicalColumns 需要与 content[0] 完整对齐的 DDL。');
+        // DDL 与 content[0] 列数不一致时无法按下标推出物理列名，只能退化为按表头名判定隐藏。
+        // 这不是错误：模板范围投影会在「模板列少于运行时列」时构造这种形态。
+        const canMapByIndex = ddlColumns.length === headers.length;
+        if (hidden.length > 0 && !canMapByIndex) {
+            logWarn_ACU('[SheetProjection] DDL 与 content[0] 列数不一致，隐藏列按表头名匹配。');
         }
-        const physicalNames = ddlColumns.length === headers.length
+        const physicalNames = canMapByIndex
             ? ddlColumns.map(column => column.sqlName)
             : headers;
-        const physicalCanonical = new Set(physicalNames.map(value => value.toLowerCase()));
+        // 无法按下标对齐时，隐藏名可能来自 DDL 物理名也可能来自表头名，两者都算已知，
+        // 否则模板范围投影传入的物理列名会被误判为「不存在的 physical column」。
+        const physicalCanonical = new Set([
+            ...physicalNames.map(value => value.toLowerCase()),
+            ...(canMapByIndex ? [] : ddlColumns.map(column => column.sqlName.toLowerCase())),
+        ]);
         const unknown = hidden.filter(value => !physicalCanonical.has(value.toLowerCase()));
         if (unknown.length > 0) {
             throw new Error(`hiddenPhysicalColumns 指向不存在的 physical column「${unknown.join('、')}」。`);
         }
         const hiddenSet = new Set(hiddenCanonical);
-        const columns = headers.map((header, sourceIndex) => ({
-            sourceIndex,
-            physicalName: physicalNames[sourceIndex] || header,
-            header,
-            hidden: hiddenSet.has((physicalNames[sourceIndex] || header).toLowerCase()),
-        }));
+        const columns = headers.map((header, sourceIndex) => {
+            const physicalName = physicalNames[sourceIndex] || header;
+            // 无法按下标对齐时，同一列既可能以 DDL 物理名也可能以表头名被列入隐藏集合。
+            const ddlName = canMapByIndex ? '' : (ddlColumns[sourceIndex]?.sqlName || '');
+            const hidden = hiddenSet.has(physicalName.toLowerCase())
+                || (!!ddlName && hiddenSet.has(ddlName.toLowerCase()))
+                || (!!header && hiddenSet.has(String(header).toLowerCase()));
+            return { sourceIndex, physicalName, header, hidden };
+        });
         return {
             columns,
             visibleColumns: columns.filter(column => !column.hidden),
@@ -38165,34 +38176,11 @@ $CONTENT
      *
      * 缺少锚点时本次写入会被 persist 层视为初始 full checkpoint，
      * 调用方必须只提交 afterData 快照、不得附带 operations。
-     *
-     * 传入 anchorSheetKeys 时，要求 checkpoint 的 data 至少承载其中一张表。
-     *
-     * 手动重填会清空范围内 checkpoint.data 里的目标表但保留 checkpoint 本体；
-     * 那种“目标表全被清空”的 checkpoint 不是有效锚点，必须重建，否则回放会从
-     * 缺表的基底起算而丢数据。
-     *
-     * 这里刻意用“至少一张”而不是“全部”：正常填表经常包含 checkpoint 里尚不存在
-     * 的新表，若要求全部命中会把有效锚点误判为缺失，导致 operations 被清空、
-     * 数据静默写不进去。
      */
-    function hasAnyV2Checkpoint_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1, anchorSheetKeys) {
-        const anchorKeys = Array.isArray(anchorSheetKeys)
-            ? anchorSheetKeys.filter(sheetKey => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_'))
-            : [];
+    function hasAnyV2Checkpoint_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
         return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
             const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
-            if (!isV2TagData_ACU(tagData))
-                return false;
-            const checkpoint = tagData.storageFrame.checkpoint;
-            if (checkpoint?.kind !== 'full')
-                return false;
-            if (anchorKeys.length === 0)
-                return true;
-            const data = checkpoint.data;
-            if (!data || typeof data !== 'object')
-                return false;
-            return anchorKeys.some(sheetKey => Boolean(data[sheetKey]));
+            return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
         });
     }
     function hasAnyV2Frame_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
@@ -38737,12 +38725,7 @@ $CONTENT
         }
         const filledSheetKeys = normalizeKeys_ACU(options.filledSheetKeys, afterData);
         const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
-        // 锚点至少要承载本次写入涉及的一张表：手动重填清空范围内 checkpoint.data 后，
-        // 目标表全被清空的残留 checkpoint 不能当作锚点，否则增量会挂在缺表的基底上导致回放丢数据。
-        //
-        // 只要求“至少一张”：正常填表常包含 checkpoint 里尚不存在的新表，
-        // 要求全部命中会把有效锚点误判为缺失，进而清空 operations 让数据静默写不进去。
-        const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index, candidateChangedSheetKeys);
+        const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index);
         const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey, target.index);
         const operations = normalizeOperations_ACU(options.operations, afterData, options.source, hasExistingCheckpoint);
         const effectiveChangedSheetKeys = candidateChangedSheetKeys;
@@ -39810,6 +39793,7 @@ $CONTENT
                                 continue;
                             }
                             // 定位不到可信数据（含历史畸形、无法证伪）→ 保持 introduction 保守拒绝，绝不基于损坏历史覆盖。
+                            // 若强行按全新表引入，新写的空 checkpoint 会在回放时盖掉历史上曾存在的同名表数据。
                             throw new Error(`V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`);
                         }
                         // 真正全新表：走 introduction。
@@ -52418,11 +52402,16 @@ $CONTENT
         }
         let tableDataText = '';
         let _seedRowsTablesUsed_ACU = [];
-        const tableIndexes = getSortedSheetKeys_ACU(workingTableData);
+        // 模板只起指导作用：只有模板声明的表参与 prompt。
+        // 范围未知（解析失败）时不过滤，避免把所有表判成不参与。
+        const templateScope = resolveTemplateScope_ACU(options?.isolationKey);
+        const tableIndexes = filterSheetKeysByTemplateScope_ACU(getSortedSheetKeys_ACU(workingTableData), templateScope);
         tableIndexes.forEach((sheetKey, tableIndex) => {
-            const table = workingTableData[sheetKey];
-            if (!table || !table.name || !table.content)
+            const rawTable = workingTableData[sheetKey];
+            if (!rawTable || !rawTable.name || !rawTable.content)
                 return;
+            // 模板未声明的列合并进 hiddenPhysicalColumns，只影响投影，不改写持久化数据。
+            const table = projectSheetForTemplateScope_ACU(rawTable, templateScope, sheetKey);
             if (targetSheetKeys && Array.isArray(targetSheetKeys)) {
                 if (!targetSheetKeys.includes(sheetKey))
                     return;
@@ -67658,6 +67647,156 @@ $CONTENT
         return snapshot || sanitizeTemplateSnapshotForChat_ACU(DEFAULT_TABLE_TEMPLATE_ACU);
     }
 
+    function collectScopeFromDataObject_ACU(dataObj) {
+        if (!dataObj || typeof dataObj !== 'object')
+            return null;
+        const sheetKeys = new Set();
+        const sheets = {};
+        Object.keys(dataObj).forEach(key => {
+            if (!key.startsWith('sheet_'))
+                return;
+            const sheet = dataObj[key];
+            if (!sheet || typeof sheet !== 'object')
+                return;
+            sheetKeys.add(key);
+            sheets[key] = sheet;
+        });
+        if (sheetKeys.size === 0)
+            return null;
+        return { sheetKeys, sheets };
+    }
+    /**
+     * 解析当前生效的模板范围。
+     *
+     * 优先用 sheet guide（它已处理 chat_override / preset_link / 全局的优先级），
+     * 其次回退到全局模板 JSON。两者都拿不到时返回 null。
+     */
+    function resolveTemplateScope_ACU(isolationKey) {
+        try {
+            const guideData = getChatSheetGuideDataForIsolationKey_ACU(isolationKey ?? '');
+            const guideScope = collectScopeFromDataObject_ACU(guideData);
+            if (guideScope)
+                return guideScope;
+        }
+        catch (error) {
+            logWarn_ACU('[TemplateScope] 读取 sheet guide 失败，尝试回退到全局模板。', error);
+        }
+        try {
+            const templateObj = parseTableTemplateJson_ACU({ stripSeedRows: true });
+            const templateScope = collectScopeFromDataObject_ACU(templateObj);
+            if (templateScope)
+                return templateScope;
+        }
+        catch (error) {
+            logWarn_ACU('[TemplateScope] 解析全局模板失败，模板范围视为未知。', error);
+        }
+        return null;
+    }
+    /**
+     * 按模板范围过滤 sheetKey 列表。范围未知时原样返回（不过滤）。
+     */
+    function filterSheetKeysByTemplateScope_ACU(sheetKeys, scope) {
+        if (!scope)
+            return [...sheetKeys];
+        return sheetKeys.filter(sheetKey => scope.sheetKeys.has(sheetKey));
+    }
+    function collectDeclaredPhysicalNames_ACU(scopeSheet) {
+        const declared = new Set();
+        try {
+            getSheetColumnProjection_ACU(scopeSheet).columns.forEach(column => {
+                if (column.physicalName)
+                    declared.add(column.physicalName.toLowerCase());
+                if (column.header)
+                    declared.add(String(column.header).toLowerCase());
+            });
+        }
+        catch (error) {
+            logWarn_ACU('[TemplateScope] 无法解析模板表的列投影，该表列级范围视为未知。', error);
+            return new Set();
+        }
+        return declared;
+    }
+    /**
+     * 计算运行时表中“模板未声明”的物理列名，用于合并进 hiddenPhysicalColumns。
+     *
+     * 返回空数组表示无需隐藏（含“范围未知”情形）。row_id 永不隐藏。
+     */
+    function resolveOutOfScopeColumns_ACU(sheet, scopeSheet) {
+        if (!sheet || !scopeSheet)
+            return [];
+        const declared = collectDeclaredPhysicalNames_ACU(scopeSheet);
+        if (declared.size === 0)
+            return [];
+        let columns;
+        try {
+            columns = getSheetColumnProjection_ACU(sheet).columns;
+        }
+        catch (error) {
+            logWarn_ACU('[TemplateScope] 无法解析运行时表的列投影，跳过列级范围过滤。', error);
+            return [];
+        }
+        const outOfScope = [];
+        columns.forEach(column => {
+            const physicalName = column.physicalName;
+            if (!physicalName)
+                return;
+            if (physicalName.toLowerCase() === 'row_id')
+                return;
+            if (declared.has(physicalName.toLowerCase()))
+                return;
+            if (column.header && declared.has(String(column.header).toLowerCase()))
+                return;
+            outOfScope.push(physicalName);
+        });
+        return outOfScope;
+    }
+    /**
+     * 为 prompt / 填表投影构造一份副本，把模板未声明的列合并进 hiddenPhysicalColumns。
+     *
+     * 不改写传入的 sheet；无需隐藏时直接返回原对象以避免无意义拷贝。
+     */
+    function projectSheetForTemplateScope_ACU(sheet, scope, sheetKey) {
+        if (!scope)
+            return sheet;
+        const scopeSheet = scope.sheets[sheetKey];
+        if (!scopeSheet)
+            return sheet;
+        const outOfScope = resolveOutOfScopeColumns_ACU(sheet, scopeSheet);
+        if (outOfScope.length === 0)
+            return sheet;
+        const existingHidden = Array.isArray(sheet.sourceData?.hiddenPhysicalColumns)
+            ? sheet.sourceData.hiddenPhysicalColumns.map(value => String(value ?? '')).filter(Boolean)
+            : [];
+        const merged = [];
+        [...existingHidden, ...outOfScope].forEach(name => {
+            if (!merged.some(value => value.toLowerCase() === name.toLowerCase()))
+                merged.push(name);
+        });
+        return {
+            ...sheet,
+            sourceData: { ...(sheet.sourceData || {}), hiddenPhysicalColumns: merged },
+        };
+    }
+    /**
+     * 按模板范围过滤一份运行时表数据，用于 prompt 投影。
+     * 不得用于持久化写入或保留边界 checkpoint。
+     */
+    function projectTableDataForTemplateScope_ACU(tableData, scope) {
+        if (!scope || !tableData || typeof tableData !== 'object')
+            return tableData;
+        const out = {};
+        Object.keys(tableData).forEach(key => {
+            if (!key.startsWith('sheet_')) {
+                out[key] = tableData[key];
+                return;
+            }
+            if (!scope.sheetKeys.has(key))
+                return;
+            out[key] = projectSheetForTemplateScope_ACU(tableData[key], scope, key);
+        });
+        return out;
+    }
+
     /**
      * service/template/chat-scope/index.ts — 统一 re-export
      * 保持外部 import { xxx } from '.../chat-scope' 路径不变
@@ -75668,17 +75807,20 @@ $CONTENT
                     : [];
                 const modifiedKeys = Array.from(new Set(parsedModifiedKeys)).sort();
                 const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
-                const allRuntimeSheetKeys = getSortedSheetKeys_ACU(runtimeData);
+                // 模板只起指导作用：快照只覆盖模板声明的表；范围外的表保持休眠。
+                const snapshotScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+                const scopedKeys = (keys) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
+                const allRuntimeSheetKeys = scopedKeys(getSortedSheetKeys_ACU(runtimeData));
                 const initializedKeys = [...allTargetSheetKeySet]
                     .filter(sheetKey => Boolean(runtimeData?.[sheetKey]) && !Boolean(baseSnapshot?.[sheetKey]))
                     .sort();
                 const keysToSave = isFirstTimeInit
                     ? allRuntimeSheetKeys
-                    : [...new Set([...modifiedKeys, ...initializedKeys])].sort();
-                const keysToTrack = [...new Set([...modifiedKeys, ...initializedKeys])].sort();
-                // 与快照路径同理：缺少承载目标表的 full checkpoint 锚点时本次写入是初始
+                    : scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
+                const keysToTrack = scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
+                // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始
                 // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations。
-                const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex, keysToTrack);
+                const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex);
                 if (hasCheckpointAnchor) {
                     sortedResponses.forEach((response, index) => {
                         const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
@@ -75779,20 +75921,24 @@ $CONTENT
         const modifiedKeys = [...modifiedKeySet].sort();
         if (!options.isImportMode) {
             const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
-            const allUnifiedSheetKeys = getSortedSheetKeys_ACU(workingTableData);
+            // 模板只起指导作用：快照只覆盖模板声明的表。
+            // 模板范围外的表保持休眠，其数据留在更早的帧与保留边界 checkpoint 中，不被覆盖也不被删除。
+            const snapshotScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+            const scopedKeys = (keys) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
+            const allUnifiedSheetKeys = scopedKeys(getSortedSheetKeys_ACU(workingTableData));
             const initializedKeys = [...initializedSheetKeys].sort();
             const keysToSave = isFirstTimeInit
                 ? allUnifiedSheetKeys
-                : [...new Set([...modifiedKeys, ...initializedKeys])].sort();
-            const keysToTrack = [...new Set([...modifiedKeys, ...initializedKeys])].sort();
+                : scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
+            const keysToTrack = scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
             const fillAttemptKeys = [...allTargetSheetKeySet]
                 .filter(sheetKey => Boolean(workingTableData?.[sheetKey]))
+                .filter(sheetKey => scopedKeys([sheetKey]).length > 0)
                 .sort();
             // 目标楼层前没有 full checkpoint 锚点时，本次写入会被 persist 层当作初始
             // full checkpoint；该形态只接受 afterData 快照，附带 operations 会被拒绝。
-            // 判定必须与 persist 层一致（同样按 candidateChangedSheetKeys 校验锚点承载的表），
-            // 否则手动重填清空 checkpoint.data 后会写出挂在缺表基底上的孤立增量。
-            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex, keysToTrack);
+            // 判定必须与 persist 层的 hasExistingCheckpoint 保持同一判据。
+            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex);
             let effectiveOperations = [];
             if (hasCheckpointAnchor) {
                 effectiveOperations = [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')];
@@ -75851,8 +75997,25 @@ $CONTENT
         const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
         const failedGroups = new Set();
         let firstError;
+        // 模板只起指导作用：只有模板声明的表参与填表。
+        // 范围未知时不过滤，避免把所有表判成不参与导致数据写不进去。
+        const templateScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+        const scopedGroups = groups
+            .map(group => {
+            const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(group.sheetKeys || [], templateScope);
+            if (scopedSheetKeys.length === (group.sheetKeys || []).length)
+                return group;
+            const dropped = (group.sheetKeys || []).filter(sheetKey => !scopedSheetKeys.includes(sheetKey));
+            logDebug_ACU(`[TemplateScope] group ${group.key} 剔除模板未声明的表：${dropped.join('、')}。`);
+            return { ...group, sheetKeys: scopedSheetKeys };
+        })
+            .filter(group => (group.sheetKeys || []).length > 0);
+        if (scopedGroups.length === 0) {
+            logDebug_ACU('[TemplateScope] 所有分组的目标表都不在模板范围内，本次无需填表。');
+            return { success: true, failedGroups: [], committedBucketCount: 0 };
+        }
         const transactionBuckets = new Map();
-        for (const group of groups) {
+        for (const group of scopedGroups) {
             const batchSize = Math.max(1, Number(group.batchSize) || Number(settings_ACU.updateBatchSize) || 2);
             const groupBatches = [];
             for (let i = 0; i < group.indices.length; i += batchSize) {

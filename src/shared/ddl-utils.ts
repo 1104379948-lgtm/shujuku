@@ -216,24 +216,35 @@ export function getSheetColumnProjection_ACU(sheet: Sheet_ACU): {
     throw new Error('hiddenPhysicalColumns 包含大小写不敏感的重复 physical column。');
   }
   if (hiddenCanonical.includes('row_id')) throw new Error('row_id 不允许隐藏。');
-  if (hidden.length > 0 && ddlColumns.length !== headers.length) {
-    throw new Error('hiddenPhysicalColumns 需要与 content[0] 完整对齐的 DDL。');
+  // DDL 与 content[0] 列数不一致时无法按下标推出物理列名，只能退化为按表头名判定隐藏。
+  // 这不是错误：模板范围投影会在「模板列少于运行时列」时构造这种形态。
+  const canMapByIndex = ddlColumns.length === headers.length;
+  if (hidden.length > 0 && !canMapByIndex) {
+    logWarn_ACU('[SheetProjection] DDL 与 content[0] 列数不一致，隐藏列按表头名匹配。');
   }
-  const physicalNames = ddlColumns.length === headers.length
+  const physicalNames = canMapByIndex
     ? ddlColumns.map(column => column.sqlName)
     : headers;
-  const physicalCanonical = new Set(physicalNames.map(value => value.toLowerCase()));
+  // 无法按下标对齐时，隐藏名可能来自 DDL 物理名也可能来自表头名，两者都算已知，
+  // 否则模板范围投影传入的物理列名会被误判为「不存在的 physical column」。
+  const physicalCanonical = new Set([
+    ...physicalNames.map(value => value.toLowerCase()),
+    ...(canMapByIndex ? [] : ddlColumns.map(column => column.sqlName.toLowerCase())),
+  ]);
   const unknown = hidden.filter(value => !physicalCanonical.has(value.toLowerCase()));
   if (unknown.length > 0) {
     throw new Error(`hiddenPhysicalColumns 指向不存在的 physical column「${unknown.join('、')}」。`);
   }
   const hiddenSet = new Set(hiddenCanonical);
-  const columns = headers.map((header, sourceIndex): SheetColumnProjectionItem_ACU => ({
-    sourceIndex,
-    physicalName: physicalNames[sourceIndex] || header,
-    header,
-    hidden: hiddenSet.has((physicalNames[sourceIndex] || header).toLowerCase()),
-  }));
+  const columns = headers.map((header, sourceIndex): SheetColumnProjectionItem_ACU => {
+    const physicalName = physicalNames[sourceIndex] || header;
+    // 无法按下标对齐时，同一列既可能以 DDL 物理名也可能以表头名被列入隐藏集合。
+    const ddlName = canMapByIndex ? '' : (ddlColumns[sourceIndex]?.sqlName || '');
+    const hidden = hiddenSet.has(physicalName.toLowerCase())
+      || (!!ddlName && hiddenSet.has(ddlName.toLowerCase()))
+      || (!!header && hiddenSet.has(String(header).toLowerCase()));
+    return { sourceIndex, physicalName, header, hidden };
+  });
   return {
     columns,
     visibleColumns: columns.filter(column => !column.hidden),

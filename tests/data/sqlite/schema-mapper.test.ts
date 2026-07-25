@@ -312,14 +312,19 @@ describe('hiddenPhysicalColumns projection', () => {
       .toThrow('指向不存在的 physical column');
   });
 
-  it('DDL 与表头无法完整对齐时拒绝隐藏投影', () => {
-    expect(() => getSheetColumnProjection_ACU({
+  it('DDL 与表头无法完整对齐时按名匹配隐藏列，而不是拒绝投影', () => {
+    // 模板范围投影会构造「模板列少于运行时列」的形态：DDL 列数与 content[0] 不等。
+    // 此时不再抛错，而是按 DDL 物理名 / 表头名匹配隐藏列。
+    const projection = getSheetColumnProjection_ACU({
       ...sheet,
       sourceData: {
         ...sheet.sourceData,
         ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, legacy_note TEXT);',
       },
-    })).toThrow('需要与 content[0] 完整对齐的 DDL');
+    });
+    // legacy_note 在 DDL 里存在，仍应被识别为隐藏列。
+    expect(projection.hiddenPhysicalColumns).toEqual(['legacy_note']);
+    expect(projection.visibleColumns.some(column => column.header === '旧备注')).toBe(false);
   });
 });
 

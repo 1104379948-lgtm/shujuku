@@ -74,6 +74,7 @@ const mockParseAndApplyTableEditsToData = vi.fn();
 const mockApplySqlEditsToTableDataSnapshot = vi.fn();
 const mockPrepareAIInput = vi.fn();
 const mockReloadStorageProvider = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const mockResolveTemplateScope = vi.hoisted(() => vi.fn(() => null as any));
 
 vi.mock('../../../src/service/ai/prompt-builder', () => ({
   callCustomOpenAI_ACU: (...args: any[]) => mockCallCustomOpenAI(...args),
@@ -127,6 +128,10 @@ vi.mock('../../../src/service/worldbook/injection-engine-state', () => ({
 
 vi.mock('../../../src/service/template/chat-scope', () => ({
   getChatSheetGuideDataForIsolationKey_ACU: vi.fn(() => null),
+  // 模板范围默认「未知」→ 不过滤，保持既有用例语义（这些用例不验证模板范围）。
+  resolveTemplateScope_ACU: (...args: any[]) => mockResolveTemplateScope(...args),
+  filterSheetKeysByTemplateScope_ACU: (keys: string[], scope: any) => (scope ? keys.filter((k: string) => scope.sheetKeys.has(k)) : [...keys]),
+  projectSheetForTemplateScope_ACU: vi.fn((sheet: any) => sheet),
   getEffectiveSeedRowsForSheet_ACU: vi.fn(() => []),
   shouldUseInitialSeedRows_ACU: vi.fn(() => {
     const chat = mockGetChatArray_ACU();
@@ -2751,53 +2756,10 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(baseSnapshot.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a']]);
     expect(baseSnapshot.sheet_1.content).toEqual([['row_id', '值'], ['1', 'base-b']]);
   });
-
-  it('锚点 checkpoint 已被清空目标表时视为无锚点，重建初始 checkpoint 而不写孤立增量', async () => {
-    // 场景：数据 1-8 层、checkpoint 在第 1 层，重填范围覆盖第 1 层。
-    // 预清理会清空该 checkpoint.data 里的目标表但保留 kind='full'；
-    // 残留的空 checkpoint 对被清表不是有效锚点，否则增量挂在缺表基底上，
-    // 中断后回放就会得到空数据。
-    mockChatArrayForSeedStage.length = 0;
-    mockChatArrayForSeedStage.push(
-      {
-        is_user: false,
-        mes: 'AI锚点',
-        TavernDB_ACU_IsolatedData: {
-          '': {
-            _acu_storage_version: 2,
-            storageFrame: {
-              version: 2,
-              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' } } },
-              logEntries: [],
-            },
-          },
-        },
-      } as any,
-      { is_user: true, mes: '用户' } as any,
-      { is_user: false, mes: 'AI2' } as any,
-      { is_user: true, mes: '用户2' } as any,
-      { is_user: false, mes: 'AI3' } as any,
-    );
-    const baseSnapshot = {
-      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
-    };
-    const responses = [
-      { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_0</tableEdit>', tableEditText: 'sheet_0', job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
-    ];
-
-    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
-    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
-
-    expect(result.success).toBe(true);
-    const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
-    // 必须重建成初始 full checkpoint，因此不得附带 operations。
-    expect(savePayload.operations).toEqual([]);
-    expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a'], ['2', '来自A']]);
-  });
-
-  it('checkpoint 已承载部分目标表时仍视为有效锚点，新表不得清空 operations', async () => {
-    // 回归：锚点判定若要求 checkpoint 包含全部目标表，则只要本次涉及一张新表
-    // 就会被误判为无锚点，operations 被清空，数据静默写不进去也不报错。
+  it('存在 full checkpoint 时新表不得清空 operations', async () => {
+    // 回归：锚点判定一旦按目标表内容反推（要求 checkpoint 承载全部/部分目标表），
+    // 只要本次涉及一张 checkpoint 里还没有的新表就会被误判为无锚点，
+    // operations 被清空，数据静默写不进去也不报错。判据只能是「有没有 full checkpoint」。
     mockChatArrayForSeedStage.length = 0;
     mockChatArrayForSeedStage.push(
       {
@@ -2838,6 +2800,55 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(savePayload.operations.length).toBeGreaterThan(0);
     expect(savePayload.operations.map((op: any) => op.sheetKey).sort()).toEqual(['sheet_0', 'sheet_1']);
   });
+
+  it('模板范围只含 sheet_0 时，快照与 operations 只覆盖 sheet_0，范围外的 sheet_1 不写入', async () => {
+    mockChatArrayForSeedStage.length = 0;
+    mockChatArrayForSeedStage.push(
+      {
+        is_user: false,
+        mes: 'AI锚点',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: { mate: { type: 'acu' }, sheet_0: { name: '表A', content: [['row_id', '值']] }, sheet_1: { name: '表B', content: [['row_id', '值']] } } },
+              logEntries: [],
+            },
+          },
+        },
+      } as any,
+      { is_user: true, mes: '用户' } as any,
+      { is_user: false, mes: 'AI2' } as any,
+      { is_user: true, mes: '用户2' } as any,
+      { is_user: false, mes: 'AI3' } as any,
+    );
+    // 模板范围只声明 sheet_0；sheet_1 在运行时存在但不在范围内，应保持休眠。
+    mockResolveTemplateScope.mockReturnValue({ sheetKeys: new Set(['sheet_0']), sheets: {} } as any);
+    try {
+      const baseSnapshot = {
+        sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+        sheet_1: { name: '表B', content: [['row_id', '值'], ['1', 'base-b']] },
+      };
+      const responses = [
+        { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_0</tableEdit>', tableEditText: 'sheet_0', job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+        { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_1</tableEdit>', tableEditText: 'sheet_1', job: { groupKey: 'b', groupId: 2, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      ];
+      mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+      const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+      expect(result.success).toBe(true);
+      const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+      // 快照与追踪只覆盖模板范围内的 sheet_0。
+      expect(savePayload.targetSheetKeys).toEqual(['sheet_0']);
+      expect(savePayload.trackingSheetKeys).toEqual(['sheet_0']);
+      // operations 不得包含范围外的 sheet_1。
+      expect(savePayload.operations.some((op: any) => op.sheetKey === 'sheet_1')).toBe(false);
+    } finally {
+      mockResolveTemplateScope.mockReturnValue(null as any);
+    }
+  });
+
 
 
   it('目标楼层前缺少 full checkpoint 锚点时只提交 afterData 快照，不附带 operations', async () => {

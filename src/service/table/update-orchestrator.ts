@@ -9,7 +9,7 @@ import { callCustomOpenAI_ACU } from '../ai/prompt-builder';
 import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
-import { ensureStableRowIdsForSheetContent_ACU, getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
+import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU, resolveTemplateScope_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../vector/summary-vector-index-flush-queue';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
@@ -974,21 +974,23 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 : [];
             const modifiedKeys: string[] = Array.from(new Set<string>(parsedModifiedKeys)).sort();
             const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
-            const allRuntimeSheetKeys: string[] = getSortedSheetKeys_ACU(runtimeData);
+            // 模板只起指导作用：快照只覆盖模板声明的表；范围外的表保持休眠。
+            const snapshotScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+            const scopedKeys = (keys: readonly string[]) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
+            const allRuntimeSheetKeys: string[] = scopedKeys(getSortedSheetKeys_ACU(runtimeData));
             const initializedKeys = [...allTargetSheetKeySet]
                 .filter(sheetKey => Boolean((runtimeData as any)?.[sheetKey]) && !Boolean((baseSnapshot as any)?.[sheetKey]))
                 .sort();
             const keysToSave = isFirstTimeInit
                 ? allRuntimeSheetKeys
-                : [...new Set([...modifiedKeys, ...initializedKeys])].sort();
-            const keysToTrack = [...new Set([...modifiedKeys, ...initializedKeys])].sort();
-            // 与快照路径同理：缺少承载目标表的 full checkpoint 锚点时本次写入是初始
+                : scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
+            const keysToTrack = scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
+            // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始
             // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations。
             const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
                 getChatArray_ACU() || [],
                 getCurrentIsolationKey_ACU(),
                 options.saveTargetIndex,
-                keysToTrack,
             );
             if (hasCheckpointAnchor) {
                 sortedResponses.forEach((response, index) => {
@@ -1101,24 +1103,27 @@ export async function applyUnifiedGroupFillResponses_ACU(
     const modifiedKeys = [...modifiedKeySet].sort();
     if (!options.isImportMode) {
         const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
-        const allUnifiedSheetKeys = getSortedSheetKeys_ACU(workingTableData);
+        // 模板只起指导作用：快照只覆盖模板声明的表。
+        // 模板范围外的表保持休眠，其数据留在更早的帧与保留边界 checkpoint 中，不被覆盖也不被删除。
+        const snapshotScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+        const scopedKeys = (keys: readonly string[]) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
+        const allUnifiedSheetKeys = scopedKeys(getSortedSheetKeys_ACU(workingTableData));
         const initializedKeys = [...initializedSheetKeys].sort();
         const keysToSave = isFirstTimeInit
             ? allUnifiedSheetKeys
-            : [...new Set([...modifiedKeys, ...initializedKeys])].sort();
-        const keysToTrack = [...new Set([...modifiedKeys, ...initializedKeys])].sort();
+            : scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
+        const keysToTrack = scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
         const fillAttemptKeys = [...allTargetSheetKeySet]
             .filter(sheetKey => Boolean((workingTableData as any)?.[sheetKey]))
+            .filter(sheetKey => scopedKeys([sheetKey]).length > 0)
             .sort();
         // 目标楼层前没有 full checkpoint 锚点时，本次写入会被 persist 层当作初始
         // full checkpoint；该形态只接受 afterData 快照，附带 operations 会被拒绝。
-        // 判定必须与 persist 层一致（同样按 candidateChangedSheetKeys 校验锚点承载的表），
-        // 否则手动重填清空 checkpoint.data 后会写出挂在缺表基底上的孤立增量。
+        // 判定必须与 persist 层的 hasExistingCheckpoint 保持同一判据。
         const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
             getChatArray_ACU() || [],
             getCurrentIsolationKey_ACU(),
             options.saveTargetIndex,
-            keysToTrack,
         );
         let effectiveOperations: TableMutationOperationV2_ACU[] = [];
         if (hasCheckpointAnchor) {
@@ -1207,6 +1212,23 @@ export async function processGroupedRuntimeChunk_ACU(
     const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
     const failedGroups = new Set<string>();
     let firstError: string | undefined;
+    // 模板只起指导作用：只有模板声明的表参与填表。
+    // 范围未知时不过滤，避免把所有表判成不参与导致数据写不进去。
+    const templateScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+    const scopedGroups = groups
+        .map(group => {
+            const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(group.sheetKeys || [], templateScope);
+            if (scopedSheetKeys.length === (group.sheetKeys || []).length) return group;
+            const dropped = (group.sheetKeys || []).filter(sheetKey => !scopedSheetKeys.includes(sheetKey));
+            logDebug_ACU(`[TemplateScope] group ${group.key} 剔除模板未声明的表：${dropped.join('、')}。`);
+            return { ...group, sheetKeys: scopedSheetKeys };
+        })
+        .filter(group => (group.sheetKeys || []).length > 0);
+    if (scopedGroups.length === 0) {
+        logDebug_ACU('[TemplateScope] 所有分组的目标表都不在模板范围内，本次无需填表。');
+        return { success: true, failedGroups: [], committedBucketCount: 0 };
+    }
+
     const transactionBuckets = new Map<string, {
         saveTargetIndex: number;
         batchNumber: number;
@@ -1214,7 +1236,7 @@ export async function processGroupedRuntimeChunk_ACU(
         plannedJobs: PlannedGroupedRuntimeJob_ACU[];
     }>();
 
-    for (const group of groups) {
+    for (const group of scopedGroups) {
         const batchSize = Math.max(1, Number(group.batchSize) || Number(settings_ACU.updateBatchSize) || 2);
         const groupBatches: number[][] = [];
         for (let i = 0; i < group.indices.length; i += batchSize) {

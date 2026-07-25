@@ -16,6 +16,10 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
   ensureChatSheetGuideSeeded_ACU: vi.fn().mockResolvedValue(null),
   attachSeedRowsToCurrentDataFromGuide_ACU: vi.fn(),
   getSortedSheetKeys_ACU: vi.fn((data: any) => data ? Object.keys(data).filter((k: string) => k.startsWith('sheet_')) : []),
+  // 模板范围默认「未知」，即不过滤，保持既有用例语义。
+  resolveTemplateScope_ACU: vi.fn(() => null),
+  filterSheetKeysByTemplateScope_ACU: vi.fn((keys: string[]) => [...keys]),
+  projectSheetForTemplateScope_ACU: vi.fn((sheet: any) => sheet),
 }));
 
 vi.mock('../../../src/shared/utils', () => ({
