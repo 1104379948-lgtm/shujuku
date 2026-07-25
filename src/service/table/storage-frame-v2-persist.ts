@@ -2205,7 +2205,12 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         timeline: {
           kind: 'sheet_hide' as const,
           activateAtMessageIndex: target.index,
-          afterSeq: targetFrameLastLogSeq,
+          // hide 必须晚于本次提交写入的 log 生效：该 log（seq = targetFrameLastLogSeq + 1）
+          // 可能仍包含针对待隐藏表的合法 operation（例如切模板前刚补齐填表）。
+          // 回放判定是 afterSeq < nextSeq，用 targetFrameLastLogSeq 会让 hide 抢在该 log 之前
+          // 删表，导致后续 operation 撞上 no such table。
+          // introduction / rebase / reveal 相反，必须早于本批 log，故仍用 targetFrameLastLogSeq。
+          afterSeq: targetFrameLastLogSeq + 1,
         },
         baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
       });

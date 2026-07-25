@@ -2098,6 +2098,122 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(result && Object.prototype.hasOwnProperty.call(result, 'sheet_0')).toBe(false);
   });
 
+  it('hide 的 afterSeq 晚于同 frame 日志时，先执行针对该表的 operation 再隐藏（切回原模板不再崩溃）', async () => {
+    // 复现真实场景：多表模板下 sheet_extra 已存在于 active state（已被一键补齐填过），
+    // 同 frame 仍有 seq=1 的 sql_sheet_batch 写该表；随后切回默认模板写入 hide。
+    // perSheetCheckpoints 是按 sheetKey 唯一的 map，hide 会覆盖先前的 introduction，
+    // 所以存档里只剩 hide 一条。hide 必须晚于 seq=1 生效，否则表被提前删 → no such table。
+    const rootData = makeCheckpointData();
+    rootData.sheet_extra = {
+      uid: 'extra',
+      name: '系统规则表',
+      content: [['row_id', 'rule_name']],
+      sourceData: { ddl: 'CREATE TABLE extra_rules (row_id INTEGER PRIMARY KEY, rule_name TEXT);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 9,
+    };
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
+            perSheetCheckpoints: {
+              // 修复后的值：afterSeq = lastLogSeq + 1 = 2，使 hide 晚于 seq=1 生效。
+              sheet_extra: {
+                kind: 'sheet_full', createdAt: 4, reason: 'schema_change', sheetKey: 'sheet_extra',
+                data: rootData.sheet_extra,
+                timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 2 },
+              },
+            },
+            logEntries: [{
+              seq: 1,
+              entryId: 'fill-extra',
+              createdAt: 3,
+              source: 'manual_crud',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: ['sheet_extra'],
+              changedSheetKeys: ['sheet_extra'],
+              groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_extra',
+                tableName: 'extra_rules',
+                reason: 'system',
+                statements: ['INSERT INTO extra_rules (row_id, rule_name) VALUES (?, ?)'],
+                params: [[1, '六维属性']],
+              }],
+            }],
+          },
+        },
+      },
+    }] as any[];
+
+    // 不报错（afterSeq=0 的旧行为会抛 no such table），且最终该表被隐藏。
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+    expect(result).not.toBeNull();
+    expect(result && Object.prototype.hasOwnProperty.call(result, 'sheet_extra')).toBe(false);
+    // 原有表不受影响。
+    expect(result?.sheet_0?.content).toEqual([['row_id', 'name'], ['1', '铁剑']]);
+  });
+
+  it('hide 的 afterSeq 早于同 frame 日志时复现旧 bug（回归护栏）', async () => {
+    // 锁住因果：afterSeq=0 会让 hide 抢在 seq=1 之前删表，导致 operation 撞上 no such table。
+    const rootData = makeCheckpointData();
+    rootData.sheet_extra = {
+      uid: 'extra',
+      name: '系统规则表',
+      content: [['row_id', 'rule_name']],
+      sourceData: { ddl: 'CREATE TABLE extra_rules (row_id INTEGER PRIMARY KEY, rule_name TEXT);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 9,
+    };
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
+            perSheetCheckpoints: {
+              sheet_extra: {
+                kind: 'sheet_full', createdAt: 4, reason: 'schema_change', sheetKey: 'sheet_extra',
+                data: rootData.sheet_extra,
+                timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 0 },
+              },
+            },
+            logEntries: [{
+              seq: 1,
+              entryId: 'fill-extra',
+              createdAt: 3,
+              source: 'manual_crud',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: ['sheet_extra'],
+              changedSheetKeys: ['sheet_extra'],
+              groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_extra',
+                tableName: 'extra_rules',
+                reason: 'system',
+                statements: ['INSERT INTO extra_rules (row_id, rule_name) VALUES (?, ?)'],
+                params: [[1, '六维属性']],
+              }],
+            }],
+          },
+        },
+      },
+    }] as any[];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow(/no such table/);
+  });
+
+
+
+
 
   it('rebase 分片与旧 sheet_schema_migrate 无关，非法 timeline kind fail-closed', async () => {
     const rootData = makeCheckpointData();
