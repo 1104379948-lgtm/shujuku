@@ -109,11 +109,74 @@ import {
   applySqlEditsToTableDataSnapshot_ACU,
   assertNoHiddenPhysicalColumnMutations_ACU,
   buildSqlSheetBatchOperations_ACU,
+  rebindSqlMutationTableIdentifiers_ACU,
   SqlTableService,
   splitSqlStatements,
   extractTableNamesFromStatements,
 } from '../../../src/service/table/sql-table-service';
 import { parseTableTemplateJson_ACU } from '../../../src/shared/utils';
+// ═══════════════════════════════════════════════════════════════
+// 回归：新卡首次填表时 rebind 必须覆盖模板里的表（no such table 修复）
+// ═══════════════════════════════════════════════════════════════
+describe('rebindSqlMutationTableIdentifiers_ACU · 模板别名补充', () => {
+  const protagonistDdl = `CREATE TABLE protagonist_info ( -- 主角信息表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  name TEXT -- 姓名\n);`;
+  const templateData: any = {
+    mate: {},
+    sheet_zhujue: {
+      uid: 'protagonist',
+      name: '主角信息表',
+      sourceData: { ddl: protagonistDdl },
+      content: [['row_id', '姓名']],
+      updateConfig: {},
+      exportConfig: {},
+      orderNo: 0,
+    },
+  };
+
+  beforeEach(() => {
+    mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
+  });
+
+  it('运行时快照为空时，仍能借模板把 DDL 旧表名重绑定为拼音物理名', () => {
+    mockGetCurrentChatTemplateScopeState.mockReturnValue({
+      mode: 'chat_override',
+      templateStr: JSON.stringify(templateData),
+    });
+    // 场景 A：新卡首次填表，baseSnapshot 里还没有这张表。
+    const emptySnapshot: any = { mate: {} };
+    const [rebound] = rebindSqlMutationTableIdentifiers_ACU(
+      ["INSERT INTO protagonist_info (row_id, name) VALUES (1, '阿不思')"],
+      emptySnapshot,
+    );
+    expect(rebound).toContain('zhujuexinxibiao');
+    expect(rebound).not.toContain('protagonist_info');
+  });
+
+  it('显式传入 null 补充源时不读模板，保持调用方完全控制', () => {
+    mockGetCurrentChatTemplateScopeState.mockReturnValue({
+      mode: 'chat_override',
+      templateStr: JSON.stringify(templateData),
+    });
+    const [rebound] = rebindSqlMutationTableIdentifiers_ACU(
+      ["INSERT INTO protagonist_info (row_id, name) VALUES (1, '阿不思')"],
+      { mate: {} } as any,
+      null,
+    );
+    expect(rebound).toContain('protagonist_info');
+  });
+
+  it('运行时快照已有该表时，物理名解析结果一致（幂等）', () => {
+    const [rebound] = rebindSqlMutationTableIdentifiers_ACU(
+      ["INSERT INTO protagonist_info (row_id, name) VALUES (1, '阿不思')"],
+      templateData,
+      null,
+    );
+    expect(rebound).toContain('zhujuexinxibiao');
+    expect(rebound).not.toContain('protagonist_info');
+  });
+});
+
+
 
 // ═══════════════════════════════════════════════════════════════
 // 纯函数测试：splitSqlStatements

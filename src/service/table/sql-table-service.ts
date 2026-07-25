@@ -324,12 +324,17 @@ function formatSqlMutationIdentifier_ACU(value: string, quote: SqlMutationIdenti
 /**
  * Rebinds mutation table identifiers from unique DDL/runtime aliases to their
  * authoritative runtime physical names for SQL generation.
+ *
+ * 别名来源必须与建表来源一致。建表走 _ensureTablesFromTemplate（模板权威），
+ * 而 tableData 常是运行时/聊天合并快照：新卡首次填表时快照里还没有该表，
+ * 只用快照建别名会漏掉 DDL 旧名，导致 rebind 原样放行并撞上 no such table。
+ * 因此额外接收 supplementalData（通常为当前聊天模板）参与别名解析。
  */
 export function rebindSqlMutationTableIdentifiers_ACU(
   statements: string[],
   tableData: TableDataObject_ACU,
+  supplementalData?: TableDataObject_ACU | Record<string, unknown> | null,
 ): string[] {
-  const physicalNames = resolvePhysicalTableNames_ACU(tableData);
   const aliases = new Map<string, string>();
   const conflicts = new Set<string>();
   const addAlias = (alias: unknown, physicalName: string): void => {
@@ -344,11 +349,54 @@ export function rebindSqlMutationTableIdentifiers_ACU(
     }
     aliases.set(normalized, physicalName);
   };
-  for (const [sheetKey, physicalName] of physicalNames) {
-    const sheet = tableData[sheetKey] as any;
-    [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName].forEach(alias => addAlias(alias, physicalName));
+  // 建表权威是模板（_ensureTablesFromTemplate），运行时快照在新卡首次填表时还没有该表。
+  // 未显式传入补充源时默认取当前聊天模板，保证别名覆盖与实际建表一致。
+  const templateSource = supplementalData === undefined
+    ? resolveCurrentChatTemplateForAliases_ACU()
+    : supplementalData;
+  // 先模板，后运行时快照：快照代表当前真实结构，同名别名冲突时以其为准。
+  for (const source of [templateSource, tableData]) {
+    if (!source || typeof source !== 'object') continue;
+    let physicalNames: Map<string, string>;
+    try {
+      physicalNames = resolvePhysicalTableNames_ACU(source);
+    } catch (e: any) {
+      // 该来源存在拼音冲突时跳过它，交由另一来源兜底；冲突本身由启动自检负责上报。
+      logWarn_ACU(`[SqlTableService] 别名来源存在物理名冲突，已跳过: ${e?.message || e}`);
+      continue;
+    }
+    for (const [sheetKey, physicalName] of physicalNames) {
+      const sheet = (source as Record<string, any>)[sheetKey];
+      [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName].forEach(alias => addAlias(alias, physicalName));
+    }
   }
   return rebindSqlMutationTableReferences_ACU(statements, aliases);
+}
+
+/**
+ * 解析当前聊天生效模板，仅用于 rebind 别名补充。
+ * 解析失败时返回 null：别名补充是增强项，绝不能因此让 rebind 整体失败。
+ */
+function resolveCurrentChatTemplateForAliases_ACU(): TableDataObject_ACU | null {
+  try {
+    const scopeState = getCurrentChatTemplateScopeState_ACU();
+    let templateStr: string | null = null;
+    if (scopeState?.mode === 'chat_override' && scopeState.templateStr) {
+      templateStr = scopeState.templateStr;
+    } else if (scopeState?.mode === 'preset_link' && scopeState.presetName) {
+      templateStr = getTemplatePreset_ACU(scopeState.presetName)?.templateStr || null;
+    }
+    if (templateStr) {
+      const parsed = safeJsonParse_ACU(templateStr, null);
+      if (parsed && typeof parsed === 'object') {
+        return stripSeedRowsFromTemplate_ACU(JSON.parse(JSON.stringify(parsed))) as TableDataObject_ACU;
+      }
+    }
+    return parseTableTemplateJson_ACU({ stripSeedRows: true }) as TableDataObject_ACU | null;
+  } catch (e: any) {
+    logWarn_ACU(`[SqlTableService] rebind 别名模板解析失败，仅用运行时快照: ${e?.message || e}`);
+    return null;
+  }
 }
 
 /**
