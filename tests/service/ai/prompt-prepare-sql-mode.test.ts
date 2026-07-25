@@ -109,8 +109,10 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
 
     const result = await prepareAIInput_ACU([], 'standard');
     expect(result).not.toBeNull();
-    // SQL 模式下应输出 DDL
-    expect(result!.tableDataText).toContain('CREATE TABLE inventory');
+    // SQL 模式下应输出 DDL，且表名必须是 runtime 物理名（显示名拼音），
+    // 不能是 DDL 原文英文名——否则 AI 照抄后 SQL 会撞 no such table。
+    expect(result!.tableDataText).toContain('CREATE TABLE beibaowupinbiao');
+    expect(result!.tableDataText).not.toContain('CREATE TABLE inventory');
     // 应输出 Note 注释
     expect(result!.tableDataText).toContain('-- Note: 记录角色背包中的物品');
     // 应输出当前数据（注释格式）
@@ -132,7 +134,7 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
 
     const result = await prepareAIInput_ACU([], 'standard');
     expect(result).not.toBeNull();
-    expect(result!.tableDataText).toContain('CREATE TABLE sheet_0');
+    expect(result!.tableDataText).toContain('CREATE TABLE beibaowupinbiao');
     expect(result!.tableDataText).toContain('-- WARNING: DDL 缺失，已使用运行时 fallback schema。 原始 DDL 未被改写。');
     expect(result!.tableDataText).toContain('-- | row_id | item_name | quantity |');
     expect(result!.tableDataText).not.toContain('不应出现');
@@ -306,9 +308,9 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     const result = await prepareAIInput_ACU([], 'standard');
     expect(result).not.toBeNull();
     // 有 DDL 的表走 SQL 格式化
-    expect(result!.tableDataText).toContain('CREATE TABLE inventory');
+    expect(result!.tableDataText).toContain('CREATE TABLE beibaowupinbiao');
     // 无 DDL 的表也必须走 SQL effective fallback，避免模型收到无法执行的原生 DSL。
-    expect(result!.tableDataText).toContain('CREATE TABLE sheet_1');
+    expect(result!.tableDataText).toContain('CREATE TABLE juesebiao');
     expect(result!.tableDataText).toContain('-- | row_id | name |');
   });
 
@@ -337,7 +339,7 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     const result = await prepareAIInput_ACU([], 'standard', null, { tableData: explicitTableData });
 
     expect(result).not.toBeNull();
-    expect(result!.tableDataText).toContain('CREATE TABLE runtime_table');
+    expect(result!.tableDataText).toContain('CREATE TABLE yunxingshibiao');
     expect(result!.tableDataText).toContain('运行时值');
     expect(result!.tableDataText).not.toContain('explicit_table');
     expect(result!.tableDataText).not.toContain('显式快照值');
@@ -366,8 +368,8 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     const result = await prepareAIInput_ACU([], 'standard', ['sheet_1']);
     expect(result).not.toBeNull();
     // 只输出 sheet_1
-    expect(result!.tableDataText).toContain('CREATE TABLE characters');
-    expect(result!.tableDataText).not.toContain('CREATE TABLE inventory');
+    expect(result!.tableDataText).toContain('CREATE TABLE juesebiao');
+    expect(result!.tableDataText).not.toContain('CREATE TABLE beibaowupinbiao');
   });
 
   it('对话消息被正确格式化', async () => {

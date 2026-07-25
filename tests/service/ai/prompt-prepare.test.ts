@@ -126,6 +126,37 @@ describe('formatTableForSqliteMode', () => {
     expect(result).toContain('CREATE TABLE inventory');
   });
 
+  it('传入 runtimeTableName 时把 DDL 表名重绑定为运行时物理名', () => {
+    // AI 必须看到真实的 runtime 表名（显示名拼音），否则会照抄 DDL 原文英文名，
+    // 生成的 SQL 打到不存在的表上 → no such table。
+    const table = {
+      name: '主角信息',
+      sourceData: {
+        ddl: 'CREATE TABLE protagonist_info (row_id INTEGER PRIMARY KEY, character_name TEXT);',
+        note: '', insertNode: '', updateNode: '', deleteNode: '',
+      },
+      content: [['row_id', 'character_name']],
+      updateConfig: {},
+    };
+    const result = formatTableForSqliteMode(table, 0, 'sheet_zhujue', null, { runtimeTableName: 'zhujuexinxi' });
+    expect(result).toContain('CREATE TABLE zhujuexinxi');
+    expect(result).not.toContain('protagonist_info');
+  });
+
+  it('未传 runtimeTableName 时保持原 DDL 表名（向后兼容）', () => {
+    const table = {
+      name: '主角信息',
+      sourceData: {
+        ddl: 'CREATE TABLE protagonist_info (row_id INTEGER PRIMARY KEY, character_name TEXT);',
+        note: '', insertNode: '', updateNode: '', deleteNode: '',
+      },
+ content: [['row_id', 'character_name']],
+      updateConfig: {},
+    };
+    const result = formatTableForSqliteMode(table, 0, 'sheet_zhujue', null);
+    expect(result).toContain('CREATE TABLE protagonist_info');
+  });
+
   // ═══════════════════════════════════════════════════════════════
   // Note 和 Trigger 注释
   // ═══════════════════════════════════════════════════════════════

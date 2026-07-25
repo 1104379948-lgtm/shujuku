@@ -52207,7 +52207,10 @@ $CONTENT
             }
             // SQLite 模式：输出 DDL + 注释数据格式；数据只来自运行时 DB，不再从模板 seedRows 兜底。
             if (sqlMode) {
-                tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, { allowSeedRowsFallback: false });
+                tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, {
+                    allowSeedRowsFallback: false,
+                    runtimeTableName: resolveRuntimeTableNameForPrompt_ACU(workingTableData, sheetKey),
+                });
                 return;
             }
             const allRows = table.content.slice(1);
@@ -52378,6 +52381,20 @@ $CONTENT
         };
     }
     /**
+     * 解析提示词用的 runtime 物理表名（显示名拼音）。
+     * 拼音冲突等异常下返回 undefined：提示词构建不应因此硬失败，
+     * 退回未重绑定的 DDL 仍能让 AI 看到列结构，冲突本身由启动自检负责上报。
+     */
+    function resolveRuntimeTableNameForPrompt_ACU(data, sheetKey) {
+        try {
+            return getPhysicalTableNameForSheet_ACU(data, sheetKey);
+        }
+        catch (e) {
+            logWarn_ACU(`[AI输入准备] 无法解析 runtime 物理表名，提示词将使用原 DDL 表名: ${sheetKey}: ${e?.message || e}`);
+            return undefined;
+        }
+    }
+    /**
      * SQLite 模式下的表格格式化
      * 输出 DDL + Note/Trigger 注释 + 当前数据（注释格式）
      */
@@ -52394,8 +52411,10 @@ $CONTENT
             }
             : table;
         const runtimeSchema = table?._acu_runtimeEffectiveSchema;
+        // 必须把 runtime 物理表名（显示名拼音）传进去重绑定 CREATE TABLE 标识符。
+        // 漏传会让提示词出现 DDL 原文英文名，AI 照抄后 SQL 打到不存在的表上（no such table）。
         const resolvedDDL = (!hasHiddenPhysicalColumns && runtimeSchema)
-            || resolveEffectiveDDL(promptSchemaTable, table.uid || sheetKey);
+            || resolveEffectiveDDL(promptSchemaTable, table.uid || sheetKey, options.runtimeTableName);
         const ddl = hasHiddenPhysicalColumns
             ? resolvedDDL.effectiveDDL
             : projectSheetDDLForVisibleColumns_ACU(table, resolvedDDL.effectiveDDL);
