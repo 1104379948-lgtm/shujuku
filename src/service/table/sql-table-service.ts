@@ -31,7 +31,7 @@ import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqli
 import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
-import { getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
+import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
 
@@ -591,6 +591,21 @@ export class SqlTableService implements ITableStorageProvider {
     const mergedData = data ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : null;
     this._resetRuntimeForLoad_ACU();
 
+    // 启动自检（fail-loud）：拼音物理名冲突必须在建表前拦截，给出可读的改名指引，
+    // 而不是等到 hydrate 时被 generic catch 吞成 sqlite_hydrate_failed。
+    if (mergedData) {
+      try {
+        assertNoPhysicalTableNameCollision_ACU(mergedData);
+      } catch (e: any) {
+        if (e instanceof PhysicalTableNameCollisionError_ACU) {
+          this._resetRuntimeForLoad_ACU();
+          logError_ACU(`[SqlTableService] ${e.message}`);
+          return { loaded: false, source: 'empty', error: `physical_table_name_collision: ${e.message}` };
+        }
+        throw e;
+      }
+    }
+
     try {
       await this.engine.init();
     } catch (e: any) {
@@ -1051,6 +1066,9 @@ export class SqlTableService implements ITableStorageProvider {
       if (existingTables.size > 0) return;
       throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
     }
+
+    // 建表前自检：模板内拼音物理名冲突直接 fail-loud，避免建表途中报晦涩的 SQL 错误。
+    assertNoPhysicalTableNameCollision_ACU(templateData);
 
     // 收集当前聊天模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
     const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));

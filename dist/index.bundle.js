@@ -33660,6 +33660,22 @@ $CONTENT
     const PHYSICAL_TABLE_NAME_ALGORITHM_VERSION_ACU = 1;
     const MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU = 48;
     const SQLITE_RESERVED_TABLE_PREFIXES_ACU = ['sqlite_', '_acu_'];
+    /**
+     * Thrown when two distinct sheets resolve to the same physical table name.
+     * This is a fail-loud signal: the user must rename one of the colliding tables.
+     * It is never recovered from by silently mutating a name, because that would
+     * reintroduce set-dependent drift.
+     */
+    class PhysicalTableNameCollisionError_ACU extends Error {
+        constructor(collisions) {
+            const detail = collisions
+                .map(c => `「${c.physicalTableName}」← ${c.sheetKeys.join(' / ')}`)
+                .join('；');
+            super(`SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
+            this.name = 'PhysicalTableNameCollisionError_ACU';
+            this.collisions = collisions;
+        }
+    }
     /** Comparison-only normalization. Never write this value back to the display name. */
     function canonicalizeDisplayName_ACU(value) {
         return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
@@ -33691,26 +33707,39 @@ $CONTENT
     }
     /**
      * Runtime SQLite names are derived from the display name, not from a legacy
-     * CREATE TABLE identifier embedded in user-authored DDL. Allocation must use
-     * the complete sheet set so slug collisions stay deterministic.
+     * CREATE TABLE identifier embedded in user-authored DDL. Each name is a
+     * deterministic pure function of the sheet's own display name and is
+     * independent of which other sheets are present, so building/filling/exporting
+     * always agree. Duplicate slugs are a hard error (see the fail-loud note below).
      */
     function resolvePhysicalTableNames_ACU(data) {
         const entries = Object.keys(data || {})
             .filter(sheetKey => sheetKey.startsWith('sheet_'))
             .sort()
             .map(sheetKey => ({ sheetKey, sheet: data[sheetKey] }));
-        const baseByKey = new Map(entries.map(({ sheetKey, sheet }) => [sheetKey, physicalTableNameBase_ACU(sheet, sheetKey)]));
-        const groups = new Map();
-        for (const [sheetKey, base] of baseByKey) {
-            const group = groups.get(base.toLowerCase()) || [];
-            group.push(sheetKey);
-            groups.set(base.toLowerCase(), group);
-        }
+        // 物理表名是 sheetKey 的确定性纯函数（仅由该 sheet 的显示名 slug 决定），
+        // 绝不依赖“当前还有哪些别的表在场”。这样建表、填表、导出三处对同一 sheetKey
+        // 永远解析出同一个名字，从根上消除集合漂移导致的 no such table。
+        //
+        // 拼音 slug 相同但 sheetKey 不同 = 真实物理表名冲突。此处 fail-loud 抛出，
+        // 而不是静默追加 hash 令两表分叉——静默重命名会随入参集合变化重新产生漂移。
+        // 冲突应由启动自检提前拦截并提示用户改名（见 assertNoPhysicalTableNameCollision_ACU）。
         const result = new Map();
-        for (const { sheetKey } of entries) {
-            const base = baseByKey.get(sheetKey);
-            const group = groups.get(base.toLowerCase());
-            result.set(sheetKey, group.length === 1 ? base : `${truncatePhysicalTableNameForHash_ACU(base)}_${stableHash_ACU(sheetKey)}`);
+        const ownerBySlug = new Map();
+        const collisions = [];
+        for (const { sheetKey, sheet } of entries) {
+            const base = physicalTableNameBase_ACU(sheet, sheetKey);
+            const normalized = base.toLowerCase();
+            const owner = ownerBySlug.get(normalized);
+            if (owner && owner !== sheetKey) {
+                collisions.push({ physicalTableName: base, sheetKeys: [owner, sheetKey] });
+                continue;
+            }
+            ownerBySlug.set(normalized, sheetKey);
+            result.set(sheetKey, base);
+        }
+        if (collisions.length > 0) {
+            throw new PhysicalTableNameCollisionError_ACU(collisions);
         }
         return result;
     }
@@ -33733,8 +33762,43 @@ $CONTENT
         }
         return candidate.slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU) || 'table_sheet';
     }
-    function truncatePhysicalTableNameForHash_ACU(value) {
-        return value.slice(0, Math.max(1, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU - 11)).replace(/_+$/g, '') || 'table';
+    /**
+     * Detects physical-table-name collisions without throwing. Startup self-check
+     * uses this to fail loud before any DDL runs. Returns [] when every sheet maps
+     * to a unique physical name.
+     */
+    function detectPhysicalTableNameCollisions_ACU(data) {
+        const ownerBySlug = new Map();
+        const grouped = new Map();
+        const entries = Object.keys(data || {})
+            .filter(sheetKey => sheetKey.startsWith('sheet_'))
+            .sort()
+            .map(sheetKey => ({ sheetKey, sheet: data[sheetKey] }));
+        for (const { sheetKey, sheet } of entries) {
+            const base = physicalTableNameBase_ACU(sheet, sheetKey);
+            const normalized = base.toLowerCase();
+            const owner = ownerBySlug.get(normalized);
+            if (!owner) {
+                ownerBySlug.set(normalized, { sheetKey, base });
+                continue;
+            }
+            if (owner.sheetKey === sheetKey)
+                continue;
+            const set = grouped.get(normalized) || new Set([owner.sheetKey]);
+            set.add(sheetKey);
+            grouped.set(normalized, set);
+        }
+        return [...grouped.entries()].map(([normalized, sheetKeys]) => ({
+            physicalTableName: ownerBySlug.get(normalized).base,
+            sheetKeys: [...sheetKeys],
+        }));
+    }
+    /** Startup guard: throws PhysicalTableNameCollisionError_ACU when any collision exists. */
+    function assertNoPhysicalTableNameCollision_ACU(data) {
+        const collisions = detectPhysicalTableNameCollisions_ACU(data);
+        if (collisions.length > 0) {
+            throw new PhysicalTableNameCollisionError_ACU(collisions);
+        }
     }
     /**
      * Allocates identities for a new batch while preserving supplied persisted identities verbatim.
@@ -35566,8 +35630,13 @@ $CONTENT
   order_no INTEGER DEFAULT 0,
   source_data_json TEXT,
   update_config_json TEXT,
-  export_config_json TEXT
+  export_config_json TEXT,
+  physical_table_name TEXT
 );`;
+    /** meta 表历史版本没有 physical_table_name 列；老库加载时补列，失败降级不阻断。 */
+    const META_TABLE_MIGRATIONS_ACU = [
+        { column: 'physical_table_name', ddl: `ALTER TABLE ${META_TABLE_NAME} ADD COLUMN physical_table_name TEXT;` },
+    ];
     class SyncBridge {
         constructor(engine) {
             this.engine = engine;
@@ -35576,6 +35645,28 @@ $CONTENT
         }
         getRuntimeFallbackDiagnostics_ACU() {
             return Array.from(this.runtimeFallbackDiagnostics.values());
+        }
+        /** 老库补齐 meta 新列。ALTER 幂等：已存在的列会报错，捕获后忽略；缺列才补。 */
+        _ensureMetaSchema() {
+            let existingColumns;
+            try {
+                existingColumns = new Set(this.engine.getTableInfo(META_TABLE_NAME).map(col => col.name));
+            }
+            catch (e) {
+                logWarn_ACU(`[SyncBridge] 读取 meta 表结构失败，跳过迁移: ${e?.message || e}`);
+                return;
+            }
+            for (const migration of META_TABLE_MIGRATIONS_ACU) {
+                if (existingColumns.has(migration.column))
+                    continue;
+                try {
+                    this.engine.run(migration.ddl);
+                }
+                catch (e) {
+                    // 补列失败不阻断加载：多路识别会降级为“新算法 + DDL 别名”。
+                    logWarn_ACU(`[SyncBridge] meta 迁移失败（${migration.column}），降级识别: ${e?.message || e}`);
+                }
+            }
         }
         /**
          * 从 TableDataObject 加载到 SQLite
@@ -35599,6 +35690,7 @@ $CONTENT
                 logWarn_ACU(message);
             }
             this.engine.run(META_TABLE_DDL);
+            this._ensureMetaSchema();
             // 遍历所有 sheet
             const sheetKeys = Object.keys(data).filter(k => k.startsWith('sheet_'));
             const physicalTableNames = resolvePhysicalTableNames_ACU(data);
@@ -35677,7 +35769,7 @@ $CONTENT
             if (resolvedDDL.source === 'fallback_invalid' && !allowRuntimeDdlFallback) {
                 throw new Error(resolvedDDL.diagnostics[0]);
             }
-            const metaSql = `INSERT OR REPLACE INTO ${META_TABLE_NAME} (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json) VALUES (?, ?, ?, ?, ?, ?, ?);`;
+            const metaSql = `INSERT OR REPLACE INTO ${META_TABLE_NAME} (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json, physical_table_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?);`;
             const executeResolvedDDL = (candidate) => {
                 const tableName = parseDDLTableName(candidate.effectiveDDL);
                 if (!tableName)
@@ -35696,6 +35788,7 @@ $CONTENT
                         JSON.stringify(sheet.sourceData || {}),
                         JSON.stringify(sheet.updateConfig || {}),
                         JSON.stringify(sheet.exportConfig || {}),
+                        tableName,
                     ],
                 ]);
             };
@@ -35777,16 +35870,23 @@ $CONTENT
             const map = new Map();
             try {
                 const result = this.engine.query(`SELECT * FROM ${META_TABLE_NAME};`);
+                // 按列名取值，避免新增列后位置漂移读错字段。
+                const col = new Map(result.columns.map((name, index) => [name, index]));
+                const at = (row, name) => col.has(name) ? row[col.get(name)] : null;
                 for (const row of result.values) {
-                    const sheetKey = String(row[0]);
+                    const sheetKey = String(at(row, 'sheet_key'));
+                    const storedPhysical = at(row, 'physical_table_name');
                     map.set(sheetKey, {
                         sheetKey,
-                        uid: String(row[1]),
-                        name: String(row[2]),
-                        orderNo: Number(row[3]) || 0,
-                        sourceData: safeJsonParse(row[4]),
-                        updateConfig: safeJsonParse(row[5]),
-                        exportConfig: safeJsonParse(row[6]),
+                        uid: String(at(row, 'uid')),
+                        name: String(at(row, 'name')),
+                        orderNo: Number(at(row, 'order_no')) || 0,
+                        sourceData: safeJsonParse(at(row, 'source_data_json')),
+                        updateConfig: safeJsonParse(at(row, 'update_config_json')),
+                        exportConfig: safeJsonParse(at(row, 'export_config_json')),
+                        physicalTableName: storedPhysical != null && String(storedPhysical).trim()
+                            ? String(storedPhysical)
+                            : undefined,
                     });
                 }
             }
@@ -35795,24 +35895,55 @@ $CONTENT
             }
             return map;
         }
-        /** 通过 SQL 表名查找对应的元数据 */
+        /**
+         * 通过 SQLite 实际表名反查元数据（“多方位识别”健全性读取）。
+         * 依次尝试三条识别路径，任一唯一命中即认，兼容不同历史命名的存量库：
+         *   1. meta 存储的 physical_table_name（历史真实建表名，最高优先）
+         *   2. 当前算法 resolvePhysicalTableNames_ACU 的结果（新库主路径）
+         *   3. 用户 DDL 内的 CREATE TABLE 名（旧命名别名；多表复用同名时不猜）
+         * 命中后把实际表名回填 meta.physicalTableName，供导出与后续识别对齐。
+         */
         _findMetaByTableName(metaMap, tableName) {
-            const metadataData = { mate: {} };
-            for (const [sheetKey, meta] of metaMap) {
-                metadataData[sheetKey] = {
-                    uid: meta.uid,
-                    name: meta.name,
-                    sourceData: meta.sourceData || {},
-                    content: [],
-                    updateConfig: meta.updateConfig || {},
-                    exportConfig: meta.exportConfig || {},
-                    orderNo: meta.orderNo,
-                };
-            }
-            const physicalTableNames = resolvePhysicalTableNames_ACU(metadataData);
-            for (const [sheetKey, meta] of metaMap) {
-                if (physicalTableNames.get(sheetKey) === tableName)
+            // 路径 1：meta 存储的物理名。
+            for (const meta of metaMap.values()) {
+                if (meta.physicalTableName && meta.physicalTableName === tableName)
                     return meta;
+            }
+            // 路径 2：当前算法重算。拼音冲突会抛错，此处降级为不命中，交由其它路径兜底。
+            try {
+                const metadataData = { mate: {} };
+                for (const [sheetKey, meta] of metaMap) {
+                    metadataData[sheetKey] = {
+                        uid: meta.uid,
+                        name: meta.name,
+                        sourceData: meta.sourceData || {},
+                        content: [],
+                        updateConfig: meta.updateConfig || {},
+                        exportConfig: meta.exportConfig || {},
+                        orderNo: meta.orderNo,
+                    };
+                }
+                const physicalTableNames = resolvePhysicalTableNames_ACU(metadataData);
+                for (const [sheetKey, meta] of metaMap) {
+                    if (physicalTableNames.get(sheetKey) === tableName) {
+                        meta.physicalTableName = tableName;
+                        return meta;
+                    }
+                }
+            }
+            catch (e) {
+                logWarn_ACU(`[SyncBridge] 物理名重算命中冲突，降级 DDL 别名识别: ${e?.message || e}`);
+            }
+            // 路径 3：DDL 内旧表名作为别名；唯一命中才认，多表复用同名时拒绝猜测。
+            const ddlAliasMatches = [];
+            for (const meta of metaMap.values()) {
+                const ddlName = parseDDLTableName(String(meta.sourceData?.ddl || ''));
+                if (ddlName && ddlName === tableName)
+                    ddlAliasMatches.push(meta);
+            }
+            if (ddlAliasMatches.length === 1) {
+                ddlAliasMatches[0].physicalTableName = tableName;
+                return ddlAliasMatches[0];
             }
             return null;
         }
@@ -45682,6 +45813,21 @@ $CONTENT
         async loadFromData(data) {
             const mergedData = data ? JSON.parse(JSON.stringify(data)) : null;
             this._resetRuntimeForLoad_ACU();
+            // 启动自检（fail-loud）：拼音物理名冲突必须在建表前拦截，给出可读的改名指引，
+            // 而不是等到 hydrate 时被 generic catch 吞成 sqlite_hydrate_failed。
+            if (mergedData) {
+                try {
+                    assertNoPhysicalTableNameCollision_ACU(mergedData);
+                }
+                catch (e) {
+                    if (e instanceof PhysicalTableNameCollisionError_ACU) {
+                        this._resetRuntimeForLoad_ACU();
+                        logError_ACU(`[SqlTableService] ${e.message}`);
+                        return { loaded: false, source: 'empty', error: `physical_table_name_collision: ${e.message}` };
+                    }
+                    throw e;
+                }
+            }
             try {
                 await this.engine.init();
             }
@@ -46122,6 +46268,8 @@ $CONTENT
                     return;
                 throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
             }
+            // 建表前自检：模板内拼音物理名冲突直接 fail-loud，避免建表途中报晦涩的 SQL 错误。
+            assertNoPhysicalTableNameCollision_ACU(templateData);
             // 收集当前聊天模板中所有表的 sheetKey 和表名，找出 SQLite 中缺失的
             const sheetKeys = Object.keys(templateData).filter(k => k.startsWith('sheet_'));
             const missingSheets = {};

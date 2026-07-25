@@ -26,8 +26,14 @@ const META_TABLE_DDL = `CREATE TABLE IF NOT EXISTS ${META_TABLE_NAME} (
   order_no INTEGER DEFAULT 0,
   source_data_json TEXT,
   update_config_json TEXT,
-  export_config_json TEXT
+  export_config_json TEXT,
+  physical_table_name TEXT
 );`;
+
+/** meta 表历史版本没有 physical_table_name 列；老库加载时补列，失败降级不阻断。 */
+const META_TABLE_MIGRATIONS_ACU: ReadonlyArray<{ column: string; ddl: string }> = [
+  { column: 'physical_table_name', ddl: `ALTER TABLE ${META_TABLE_NAME} ADD COLUMN physical_table_name TEXT;` },
+];
 
 export interface RuntimeDdlFallbackDiagnostic_ACU {
   sheetKey: string;
@@ -56,6 +62,26 @@ export class SyncBridge {
     return Array.from(this.runtimeFallbackDiagnostics.values());
   }
 
+  /** 老库补齐 meta 新列。ALTER 幂等：已存在的列会报错，捕获后忽略；缺列才补。 */
+  private _ensureMetaSchema(): void {
+    let existingColumns: Set<string>;
+    try {
+      existingColumns = new Set(this.engine.getTableInfo(META_TABLE_NAME).map(col => col.name));
+    } catch (e: any) {
+      logWarn_ACU(`[SyncBridge] 读取 meta 表结构失败，跳过迁移: ${e?.message || e}`);
+      return;
+    }
+    for (const migration of META_TABLE_MIGRATIONS_ACU) {
+      if (existingColumns.has(migration.column)) continue;
+      try {
+        this.engine.run(migration.ddl);
+      } catch (e: any) {
+        // 补列失败不阻断加载：多路识别会降级为“新算法 + DDL 别名”。
+        logWarn_ACU(`[SyncBridge] meta 迁移失败（${migration.column}），降级识别: ${e?.message || e}`);
+      }
+    }
+  }
+
   /**
    * 从 TableDataObject 加载到 SQLite
    * 1. 创建元数据表
@@ -77,6 +103,7 @@ export class SyncBridge {
       logWarn_ACU(message);
     }
     this.engine.run(META_TABLE_DDL);
+    this._ensureMetaSchema();
 
     // 遍历所有 sheet
     const sheetKeys = Object.keys(data).filter(k => k.startsWith('sheet_'));
@@ -163,7 +190,7 @@ export class SyncBridge {
       throw new Error(resolvedDDL.diagnostics[0]);
     }
 
-    const metaSql = `INSERT OR REPLACE INTO ${META_TABLE_NAME} (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json) VALUES (?, ?, ?, ?, ?, ?, ?);`;
+    const metaSql = `INSERT OR REPLACE INTO ${META_TABLE_NAME} (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json, physical_table_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?);`;
     const executeResolvedDDL = (candidate: typeof resolvedDDL) => {
       const tableName = parseDDLTableName(candidate.effectiveDDL);
       if (!tableName) throw new Error(`无法从 DDL 中解析表名: ${candidate.effectiveDDL.substring(0, 100)}`);
@@ -184,6 +211,7 @@ export class SyncBridge {
             JSON.stringify(sheet.sourceData || {}),
             JSON.stringify(sheet.updateConfig || {}),
             JSON.stringify(sheet.exportConfig || {}),
+            tableName,
           ],
         ],
       );
@@ -277,16 +305,24 @@ export class SyncBridge {
     const map = new Map<string, SheetMeta>();
     try {
       const result = this.engine.query(`SELECT * FROM ${META_TABLE_NAME};`);
+      // 按列名取值，避免新增列后位置漂移读错字段。
+      const col = new Map(result.columns.map((name, index) => [name, index]));
+      const at = (row: SqlJsValueType[], name: string): SqlJsValueType =>
+        col.has(name) ? row[col.get(name)!] : null;
       for (const row of result.values) {
-        const sheetKey = String(row[0]);
+        const sheetKey = String(at(row, 'sheet_key'));
+        const storedPhysical = at(row, 'physical_table_name');
         map.set(sheetKey, {
           sheetKey,
-          uid: String(row[1]),
-          name: String(row[2]),
-          orderNo: Number(row[3]) || 0,
-          sourceData: safeJsonParse(row[4]),
-          updateConfig: safeJsonParse(row[5]),
-          exportConfig: safeJsonParse(row[6]),
+          uid: String(at(row, 'uid')),
+          name: String(at(row, 'name')),
+          orderNo: Number(at(row, 'order_no')) || 0,
+          sourceData: safeJsonParse(at(row, 'source_data_json')),
+          updateConfig: safeJsonParse(at(row, 'update_config_json')),
+          exportConfig: safeJsonParse(at(row, 'export_config_json')),
+          physicalTableName: storedPhysical != null && String(storedPhysical).trim()
+            ? String(storedPhysical)
+            : undefined,
         });
       }
     } catch (_) {
@@ -295,23 +331,54 @@ export class SyncBridge {
     return map;
   }
 
-  /** 通过 SQL 表名查找对应的元数据 */
+  /**
+   * 通过 SQLite 实际表名反查元数据（“多方位识别”健全性读取）。
+   * 依次尝试三条识别路径，任一唯一命中即认，兼容不同历史命名的存量库：
+   *   1. meta 存储的 physical_table_name（历史真实建表名，最高优先）
+   *   2. 当前算法 resolvePhysicalTableNames_ACU 的结果（新库主路径）
+   *   3. 用户 DDL 内的 CREATE TABLE 名（旧命名别名；多表复用同名时不猜）
+   * 命中后把实际表名回填 meta.physicalTableName，供导出与后续识别对齐。
+   */
   private _findMetaByTableName(metaMap: Map<string, SheetMeta>, tableName: string): SheetMeta | null {
-    const metadataData: TableDataObject_ACU = { mate: {} as Mate_ACU };
-    for (const [sheetKey, meta] of metaMap) {
-      metadataData[sheetKey] = {
-        uid: meta.uid,
-        name: meta.name,
-        sourceData: meta.sourceData || {},
-        content: [],
-        updateConfig: meta.updateConfig || {},
-        exportConfig: meta.exportConfig || {},
-        orderNo: meta.orderNo,
-      } as Sheet_ACU;
+    // 路径 1：meta 存储的物理名。
+    for (const meta of metaMap.values()) {
+      if (meta.physicalTableName && meta.physicalTableName === tableName) return meta;
     }
-    const physicalTableNames = resolvePhysicalTableNames_ACU(metadataData);
-    for (const [sheetKey, meta] of metaMap) {
-      if (physicalTableNames.get(sheetKey) === tableName) return meta;
+
+    // 路径 2：当前算法重算。拼音冲突会抛错，此处降级为不命中，交由其它路径兜底。
+    try {
+      const metadataData: TableDataObject_ACU = { mate: {} as Mate_ACU };
+      for (const [sheetKey, meta] of metaMap) {
+        metadataData[sheetKey] = {
+          uid: meta.uid,
+          name: meta.name,
+          sourceData: meta.sourceData || {},
+          content: [],
+          updateConfig: meta.updateConfig || {},
+          exportConfig: meta.exportConfig || {},
+          orderNo: meta.orderNo,
+        } as Sheet_ACU;
+      }
+      const physicalTableNames = resolvePhysicalTableNames_ACU(metadataData);
+      for (const [sheetKey, meta] of metaMap) {
+        if (physicalTableNames.get(sheetKey) === tableName) {
+          meta.physicalTableName = tableName;
+          return meta;
+        }
+      }
+    } catch (e: any) {
+      logWarn_ACU(`[SyncBridge] 物理名重算命中冲突，降级 DDL 别名识别: ${e?.message || e}`);
+    }
+
+    // 路径 3：DDL 内旧表名作为别名；唯一命中才认，多表复用同名时拒绝猜测。
+    const ddlAliasMatches: SheetMeta[] = [];
+    for (const meta of metaMap.values()) {
+      const ddlName = parseDDLTableName(String(meta.sourceData?.ddl || ''));
+      if (ddlName && ddlName === tableName) ddlAliasMatches.push(meta);
+    }
+    if (ddlAliasMatches.length === 1) {
+      ddlAliasMatches[0].physicalTableName = tableName;
+      return ddlAliasMatches[0];
     }
     return null;
   }
@@ -326,6 +393,8 @@ interface SheetMeta {
   sourceData: any;
   updateConfig: any;
   exportConfig: any;
+  /** meta 表存储的历史物理表名（多路识别路径 1）；老库或未回填时为 undefined。 */
+  physicalTableName?: string;
 }
 
 /** 安全的 JSON 解析 */

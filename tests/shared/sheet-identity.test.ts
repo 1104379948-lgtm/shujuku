@@ -6,6 +6,12 @@ import {
   SHEET_KEY_ALGORITHM_VERSION_ACU,
   toAsciiSlug_ACU,
 } from '../../src/shared/sheet-identity';
+import {
+  assertNoPhysicalTableNameCollision_ACU,
+  detectPhysicalTableNameCollisions_ACU,
+  PhysicalTableNameCollisionError_ACU,
+  resolvePhysicalTableNames_ACU,
+} from '../../src/shared/sheet-identity';
 
 describe('sheet identity', () => {
   it('版本化并规范化显示名，但不要求调用方回写原名', () => {
@@ -69,5 +75,44 @@ describe('sheet identity', () => {
     expect(key).toMatch(/^sheet_[a-z0-9_]+$/);
     expect(key.length).toBeLessThanOrEqual(54);
     expect(buildStableSheetKeyCandidate_ACU(name)).toBe(key);
+  });
+});
+
+describe('physical table name (deterministic)', () => {
+  const sheet = (name: string) => ({ name } as any);
+
+  it('物理名与入参集合无关：全量与子集对同一 sheetKey 结果一致', () => {
+    const full = {
+      mate: {},
+      sheet_beibao: sheet('背包'),
+      sheet_juese: sheet('角色'),
+      sheet_renwu: sheet('任务'),
+    } as any;
+    const subset = { mate: {}, sheet_juese: sheet('角色') } as any;
+    const fromFull = resolvePhysicalTableNames_ACU(full).get('sheet_juese');
+    const fromSubset = resolvePhysicalTableNames_ACU(subset).get('sheet_juese');
+    expect(fromFull).toBe(fromSubset);
+    expect(fromFull).toBeTruthy();
+  });
+
+  it('物理名是纯拼音，不带 hash 后缀', () => {
+    const data = { mate: {}, sheet_beibao: sheet('背包物品表') } as any;
+    expect(resolvePhysicalTableNames_ACU(data).get('sheet_beibao')).toBe('beibaowupinbiao');
+  });
+
+  it('同音不同 sheetKey 触发冲突：resolve 抛错，detect 报告，assert 抛错', () => {
+    const data = { mate: {}, sheet_beibao: sheet('背包'), sheet_beibao2: sheet('被包') } as any;
+    expect(() => resolvePhysicalTableNames_ACU(data)).toThrow(PhysicalTableNameCollisionError_ACU);
+    const collisions = detectPhysicalTableNameCollisions_ACU(data);
+    expect(collisions).toHaveLength(1);
+    expect(collisions[0].physicalTableName).toBe('beibao');
+    expect(new Set(collisions[0].sheetKeys)).toEqual(new Set(['sheet_beibao', 'sheet_beibao2']));
+    expect(() => assertNoPhysicalTableNameCollision_ACU(data)).toThrow(PhysicalTableNameCollisionError_ACU);
+  });
+
+  it('无冲突时 detect 返回空、assert 不抛', () => {
+    const data = { mate: {}, sheet_beibao: sheet('背包'), sheet_juese: sheet('角色') } as any;
+    expect(detectPhysicalTableNameCollisions_ACU(data)).toEqual([]);
+    expect(() => assertNoPhysicalTableNameCollision_ACU(data)).not.toThrow();
   });
 });

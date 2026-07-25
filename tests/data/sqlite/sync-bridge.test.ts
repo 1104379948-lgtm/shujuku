@@ -555,6 +555,64 @@ describe('SyncBridge', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
+  // meta 物理名列 + 多路识别（健全化读取）
+  // ═══════════════════════════════════════════════════════════════
+  describe('meta 多路识别', () => {
+    it('_acu_sheet_meta 记录 physical_table_name，值等于实际建表名', () => {
+      const data = makeTableData({ sheet_0: makeSheet() });
+      const tableName = getRuntimeTableName(data, 'sheet_0');
+      bridge.loadFromTableData(data);
+
+      const meta = engine.query('SELECT physical_table_name FROM _acu_sheet_meta WHERE sheet_key = ?;', ['sheet_0']);
+      expect(meta.values[0][0]).toBe(tableName);
+    });
+
+    it('路径1：meta 存储物理名可反查导出，即使实际表名是历史 hash 形态', () => {
+      // 模拟老库：物理表名带历史 hash 后缀，且 meta 里存的就是这个历史名。
+      const legacyTable = 'beibaowupinbiao_deadbeef01';
+      engine.run(`CREATE TABLE ${legacyTable} ( -- 背包物品表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  item_name TEXT -- 物品名称\n);`);
+      engine.run(`INSERT INTO ${legacyTable} (row_id, item_name) VALUES (1, '铁剑');`);
+      engine.run(`CREATE TABLE IF NOT EXISTS _acu_sheet_meta (
+        sheet_key TEXT PRIMARY KEY, uid TEXT NOT NULL, name TEXT NOT NULL, order_no INTEGER DEFAULT 0,
+        source_data_json TEXT, update_config_json TEXT, export_config_json TEXT, physical_table_name TEXT
+      );`);
+      engine.run(
+        'INSERT INTO _acu_sheet_meta (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json, physical_table_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+        ['sheet_beibao', 'inventory', '背包物品表', 0, '{}', '{}', '{}', legacyTable],
+      );
+
+      const exported = bridge.exportToTableData(makeMate());
+      expect(exported.sheet_beibao).toBeDefined();
+      expect((exported.sheet_beibao as Sheet_ACU).name).toBe('背包物品表');
+    });
+
+    it('路径3：老库 meta 无 physical_table_name 且新算法算不出时，靠 DDL 内旧表名唯一命中导出', () => {
+      // 老库：物理表名 = 用户 DDL 里写死的英文名，与显示名拼音不一致；meta 无物理名列。
+      const legacyTable = 'legacy_chronicle';
+      engine.run(`CREATE TABLE ${legacyTable} ( -- 纪要表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  summary TEXT -- 概览\n);`);
+      engine.run(`INSERT INTO ${legacyTable} (row_id, summary) VALUES (1, '摘要');`);
+      // 仅建老结构（无 physical_table_name 列），模拟未迁移库。
+      engine.run(`CREATE TABLE IF NOT EXISTS _acu_sheet_meta (
+        sheet_key TEXT PRIMARY KEY, uid TEXT NOT NULL, name TEXT NOT NULL, order_no INTEGER DEFAULT 0,
+        source_data_json TEXT, update_config_json TEXT, export_config_json TEXT
+      );`);
+      const ddl = `CREATE TABLE ${legacyTable} ( -- 纪要表\n  row_id INTEGER PRIMARY KEY, -- 行号\n  summary TEXT -- 概览\n);`;
+      // 显示名故意留空，逼新算法路径失效，仅剩 DDL 别名路径。
+      engine.run(
+     'INSERT INTO _acu_sheet_meta (sheet_key, uid, name, order_no, source_data_json, update_config_json, export_config_json) VALUES (?, ?, ?, ?, ?, ?, ?);',
+        ['sheet_chronicle', 'chronicle', 'X', 0, JSON.stringify({ ddl }), '{}', '{}'],
+      );
+
+      const exported = bridge.exportToTableData(makeMate());
+      expect(exported.sheet_chronicle).toBeDefined();
+      expect((exported.sheet_chronicle as Sheet_ACU).content).toEqual([
+        ['row_id', '概览'],
+        ['1', '摘要'],
+      ]);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
   // 无 DDL 的 fallback 模式
   // ═══════════════════════════════════════════════════════════════
   describe('无 DDL 的 fallback 模式', () => {

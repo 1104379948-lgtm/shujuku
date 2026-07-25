@@ -31,6 +31,30 @@ export interface StableSheetKeyAllocation_ACU {
   diagnostics: SheetNameDiagnostic_ACU[];
 }
 
+/** One physical-table-name collision: distinct sheetKeys resolving to the same slug. */
+export interface PhysicalTableNameCollision_ACU {
+  physicalTableName: string;
+  sheetKeys: string[];
+}
+
+/**
+ * Thrown when two distinct sheets resolve to the same physical table name.
+ * This is a fail-loud signal: the user must rename one of the colliding tables.
+ * It is never recovered from by silently mutating a name, because that would
+ * reintroduce set-dependent drift.
+ */
+export class PhysicalTableNameCollisionError_ACU extends Error {
+  readonly collisions: PhysicalTableNameCollision_ACU[];
+  constructor(collisions: PhysicalTableNameCollision_ACU[]) {
+    const detail = collisions
+      .map(c => `「${c.physicalTableName}」← ${c.sheetKeys.join(' / ')}`)
+      .join('；');
+    super(`SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
+    this.name = 'PhysicalTableNameCollisionError_ACU';
+    this.collisions = collisions;
+  }
+}
+
 /** Comparison-only normalization. Never write this value back to the display name. */
 export function canonicalizeDisplayName_ACU(value: unknown): string {
   return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
@@ -64,26 +88,39 @@ export function buildStableSheetKeyCandidate_ACU(displayName: unknown): string |
 
 /**
  * Runtime SQLite names are derived from the display name, not from a legacy
- * CREATE TABLE identifier embedded in user-authored DDL. Allocation must use
- * the complete sheet set so slug collisions stay deterministic.
+ * CREATE TABLE identifier embedded in user-authored DDL. Each name is a
+ * deterministic pure function of the sheet's own display name and is
+ * independent of which other sheets are present, so building/filling/exporting
+ * always agree. Duplicate slugs are a hard error (see the fail-loud note below).
  */
 export function resolvePhysicalTableNames_ACU(data: TableDataObject_ACU | Record<string, unknown>): Map<string, string> {
   const entries = Object.keys(data || {})
     .filter(sheetKey => sheetKey.startsWith('sheet_'))
     .sort()
     .map(sheetKey => ({ sheetKey, sheet: (data as Record<string, Sheet_ACU>)[sheetKey] }));
-  const baseByKey = new Map(entries.map(({ sheetKey, sheet }) => [sheetKey, physicalTableNameBase_ACU(sheet, sheetKey)]));
-  const groups = new Map<string, string[]>();
-  for (const [sheetKey, base] of baseByKey) {
-    const group = groups.get(base.toLowerCase()) || [];
-    group.push(sheetKey);
-    groups.set(base.toLowerCase(), group);
-  }
+  // 物理表名是 sheetKey 的确定性纯函数（仅由该 sheet 的显示名 slug 决定），
+  // 绝不依赖“当前还有哪些别的表在场”。这样建表、填表、导出三处对同一 sheetKey
+  // 永远解析出同一个名字，从根上消除集合漂移导致的 no such table。
+  //
+  // 拼音 slug 相同但 sheetKey 不同 = 真实物理表名冲突。此处 fail-loud 抛出，
+  // 而不是静默追加 hash 令两表分叉——静默重命名会随入参集合变化重新产生漂移。
+  // 冲突应由启动自检提前拦截并提示用户改名（见 assertNoPhysicalTableNameCollision_ACU）。
   const result = new Map<string, string>();
-  for (const { sheetKey } of entries) {
-    const base = baseByKey.get(sheetKey)!;
-    const group = groups.get(base.toLowerCase())!;
-    result.set(sheetKey, group.length === 1 ? base : `${truncatePhysicalTableNameForHash_ACU(base)}_${stableHash_ACU(sheetKey)}`);
+  const ownerBySlug = new Map<string, string>();
+  const collisions: PhysicalTableNameCollision_ACU[] = [];
+  for (const { sheetKey, sheet } of entries) {
+    const base = physicalTableNameBase_ACU(sheet, sheetKey);
+    const normalized = base.toLowerCase();
+    const owner = ownerBySlug.get(normalized);
+    if (owner && owner !== sheetKey) {
+      collisions.push({ physicalTableName: base, sheetKeys: [owner, sheetKey] });
+      continue;
+    }
+    ownerBySlug.set(normalized, sheetKey);
+    result.set(sheetKey, base);
+  }
+  if (collisions.length > 0) {
+    throw new PhysicalTableNameCollisionError_ACU(collisions);
   }
   return result;
 }
@@ -109,8 +146,47 @@ function physicalTableNameBase_ACU(sheet: Sheet_ACU | null | undefined, sheetKey
   return candidate.slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU) || 'table_sheet';
 }
 
-function truncatePhysicalTableNameForHash_ACU(value: string): string {
-  return value.slice(0, Math.max(1, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU - 11)).replace(/_+$/g, '') || 'table';
+/**
+ * Detects physical-table-name collisions without throwing. Startup self-check
+ * uses this to fail loud before any DDL runs. Returns [] when every sheet maps
+ * to a unique physical name.
+ */
+export function detectPhysicalTableNameCollisions_ACU(
+  data: TableDataObject_ACU | Record<string, unknown>,
+): PhysicalTableNameCollision_ACU[] {
+  const ownerBySlug = new Map<string, { sheetKey: string; base: string }>();
+  const grouped = new Map<string, Set<string>>();
+  const entries = Object.keys(data || {})
+    .filter(sheetKey => sheetKey.startsWith('sheet_'))
+    .sort()
+    .map(sheetKey => ({ sheetKey, sheet: (data as Record<string, Sheet_ACU>)[sheetKey] }));
+  for (const { sheetKey, sheet } of entries) {
+    const base = physicalTableNameBase_ACU(sheet, sheetKey);
+    const normalized = base.toLowerCase();
+    const owner = ownerBySlug.get(normalized);
+    if (!owner) {
+      ownerBySlug.set(normalized, { sheetKey, base });
+      continue;
+    }
+    if (owner.sheetKey === sheetKey) continue;
+    const set = grouped.get(normalized) || new Set<string>([owner.sheetKey]);
+    set.add(sheetKey);
+    grouped.set(normalized, set);
+  }
+  return [...grouped.entries()].map(([normalized, sheetKeys]) => ({
+    physicalTableName: ownerBySlug.get(normalized)!.base,
+    sheetKeys: [...sheetKeys],
+  }));
+}
+
+/** Startup guard: throws PhysicalTableNameCollisionError_ACU when any collision exists. */
+export function assertNoPhysicalTableNameCollision_ACU(
+  data: TableDataObject_ACU | Record<string, unknown>,
+): void {
+  const collisions = detectPhysicalTableNameCollisions_ACU(data);
+  if (collisions.length > 0) {
+    throw new PhysicalTableNameCollisionError_ACU(collisions);
+  }
 }
 
 /**
