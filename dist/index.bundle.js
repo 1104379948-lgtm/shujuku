@@ -38832,6 +38832,70 @@ $CONTENT
             logDebug_ACU(`[V2 Persist] 写入 full checkpoint: messageIndex=${target.index}, revision=${checkpointRevision}, sheets=${Object.keys(afterData).filter(k => k.startsWith('sheet_')).length}`);
         }
         else if (shouldAppendLogEntry) {
+            // 目标表必须在本楼的回放起点里已存在，否则这条增量永远无法回放（no such table）。
+            //
+            // 触发场景：先用旧模板填过表，之后切到新模板（新增表或新增列，rebase checkpoint
+            // 落在最新楼层），再对更早的楼层追平。那些楼的 full checkpoint 是切模板前写的，
+            // 不含新表；直接写增量就会产出注定回放失败的日志。
+            // 此时应先为该表在本楼写 per-sheet checkpoint 把它引入，再追加增量。
+            const operationSheetKeys = [...new Set(operations
+                    .map(operation => operation?.sheetKey)
+                    .filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_')))];
+            if (operationSheetKeys.length > 0) {
+                // 只做静态扫描，不触发 replay：persist 层不判断 replay applicability。
+                // 判据是「本楼及之前是否有任何 checkpoint 覆盖过该表」——这正是回放建表的来源。
+                const isSheetAnchoredAtOrBefore = (sheetKey) => {
+                    for (let index = 0; index <= target.index && index < chat.length; index += 1) {
+                        const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
+                        if (!isV2TagData_ACU(tagData))
+                            continue;
+                        const targetFrame = tagData.storageFrame;
+                        const fullData = targetFrame?.checkpoint?.data;
+                        if (fullData && typeof fullData === 'object' && Object.prototype.hasOwnProperty.call(fullData, sheetKey)) {
+                            return true;
+                        }
+                        const perSheet = targetFrame?.perSheetCheckpoints;
+                        const sheetCheckpoint = perSheet && typeof perSheet === 'object' ? perSheet[sheetKey] : undefined;
+                        if (sheetCheckpoint && sheetCheckpoint.timeline?.kind !== 'sheet_hide')
+                            return true;
+                    }
+                    return false;
+                };
+                {
+                    const missingSheetKeys = operationSheetKeys.filter(sheetKey => Boolean(afterData[sheetKey]) && !isSheetAnchoredAtOrBefore(sheetKey));
+                    const introduced = [];
+                    for (const sheetKey of missingSheetKeys) {
+                        const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
+                            createdAt: now,
+                            reason: 'schema_change',
+                            sheetKey,
+                            data: afterData[sheetKey],
+                            event: { filledSheetKeys: [], changedSheetKeys: [sheetKey], groupKeys: [] },
+                            baseRevision: requestedBaseRevision,
+                            context: { messageIndex: target.index, aiFloor, isolationKey },
+                        });
+                        if (!sheetCheckpointResult.checkpoint) {
+                            return { saved: false, error: sheetCheckpointResult.error };
+                        }
+                        // timeline 决定回放时该表在本楼何时进入 state：必须早于本次追加的增量。
+                        introduced.push({
+                            ...sheetCheckpointResult.checkpoint,
+                            timeline: {
+                                kind: 'sheet_introduction',
+                                activateAtMessageIndex: target.index,
+                                afterSeq: Math.max(0, ...frame.logEntries.map(item => Number(item.seq) || 0)),
+                            },
+                        });
+                    }
+                    if (introduced.length > 0) {
+                        frame.perSheetCheckpoints = {
+                            ...(frame.perSheetCheckpoints || {}),
+                            ...Object.fromEntries(introduced.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
+                        };
+                        logDebug_ACU(`[V2 Persist] 为本楼缺失的目标表补写 per-sheet checkpoint：${introduced.map(c => c.sheetKey).join('、')}（messageIndex=${target.index}）。`);
+                    }
+                }
+            }
             const nextSeq = Math.max(0, ...frame.logEntries.map(item => Number(item.seq) || 0)) + 1;
             const parentRevision = options.parentRevision !== undefined ? options.parentRevision : (frame.headRevision ?? null);
             entry = appendMutationLogEntry_ACU(frame, {
@@ -64252,60 +64316,6 @@ $CONTENT
         return result;
     }
     /**
-     * 清理旧版“表头清单”（TavernDB_ACU_TableHeaderGuide）。
-     *
-     * 该字段固定挂在 chat[0]，按隔离键分组存储，与 AI 楼层无关，
-     * 因此不会被“按楼层遍历 AI 消息”的删除逻辑覆盖到。
-     *
-     * mode='all' 整个字段删除；mode='current' 只删当前隔离键，
-     * 所有隔离键都清空后再删整个字段。
-     */
-    function clearLegacyTableHeaderGuide_ACU(chat, mode, isolationKey) {
-        const first = Array.isArray(chat) && chat.length > 0 ? chat[0] : null;
-        if (!first)
-            return false;
-        const raw = first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
-        if (raw === undefined || raw === null || raw === '')
-            return false;
-        if (mode === 'all') {
-            delete first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
-            logDebug_ACU('[数据删除] 已清理旧版表头清单（全部隔离标识）。');
-            return true;
-        }
-        let legacyObj = null;
-        if (typeof raw === 'string') {
-            try {
-                legacyObj = JSON.parse(raw);
-            }
-            catch {
-                legacyObj = null;
-            }
-        }
-        else {
-            legacyObj = raw;
-        }
-        // 无法解析或不含 tags 分组时不做部分删除，避免误删其他隔离标识的数据。
-        if (!legacyObj || typeof legacyObj !== 'object' || Array.isArray(legacyObj))
-            return false;
-        const tags = legacyObj.tags;
-        if (!tags || typeof tags !== 'object' || Array.isArray(tags))
-            return false;
-        if (!Object.prototype.hasOwnProperty.call(tags, isolationKey))
-            return false;
-        delete tags[isolationKey];
-        if (Object.keys(tags).length === 0) {
-            delete first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
-        }
-        else {
-            legacyObj.tags = tags;
-            first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU] = typeof raw === 'string'
-                ? JSON.stringify(legacyObj)
-                : legacyObj;
-        }
-        logDebug_ACU(`[数据删除] 已清理旧版表头清单（隔离标识: ${isolationKey || '无标签'}）。`);
-        return true;
-    }
-    /**
      * 删除聊天记录中的本地数据（核心业务逻辑）
      * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
      *
@@ -64402,13 +64412,6 @@ $CONTENT
                     deletedCount++;
                 }
             }
-        }
-        // 旧版“表头清单”固定挂在 chat[0]，与楼层范围无关，因此只在删除覆盖完整范围时清理，
-        // 避免局部删除误删仍被其他楼层依赖的兼容指导数据。
-        const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
-            && (endFloor === null || endFloor >= aiMessageIndices.length);
-        if (isFullRangeDeletion && clearLegacyTableHeaderGuide_ACU(chat, mode, currentIsolationKey)) {
-            deletedCount++;
         }
         if (deletedCount > 0) {
             await saveChatToHost_ACU();

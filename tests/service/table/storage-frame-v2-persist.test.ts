@@ -938,6 +938,47 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
+  it('目标表在本楼未被任何 checkpoint 锚定时，先补写 per-sheet checkpoint 再追加增量', async () => {
+    // 复现：先用旧模板填过表，切到新模板（新增表/列，rebase 落在最新楼层），
+    // 再对更早楼层追平。那些楼的 full checkpoint 不含新表，直接写增量会产出
+    // 回放时 no such table 的日志。
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const message = seedFrame({
+      checkpoint: {
+        kind: 'full', createdAt: 1, reason: 'init',
+        // 旧模板基底：只有 sheet_a，没有 sheet_new。
+        data: { mate: { type: 'acu' }, sheet_a: sheetA },
+      },
+      logEntries: [],
+      perSheetCheckpoints: {},
+    });
+
+    const newSheet = { ...sheetB, uid: 'sheet_new', name: '新模板新表', content: [['row_id', 'value'], ['1', '新数据']] };
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_new: newSheet } as any,
+      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_new', rowId: '1', cells: ['1', '新数据'] }] as any,
+      candidateChangedSheetKeys: ['sheet_new'],
+      filledSheetKeys: ['sheet_new'],
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.saved).toBe(true);
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    // 必须为本楼缺失的目标表补写 per-sheet checkpoint，否则增量无法回放。
+    const introduced = frame.perSheetCheckpoints?.sheet_new;
+    expect(introduced).toBeDefined();
+    expect(introduced?.timeline?.kind).toBe('sheet_introduction');
+    // 锚点必须在本次增量之前生效。
+    const appendedSeq = frame.logEntries[frame.logEntries.length - 1]?.seq;
+    expect(introduced?.timeline?.afterSeq).toBeLessThan(Number(appendedSeq));
+    // 已锚定的 sheet_a 不应被重复补写。
+    expect(frame.perSheetCheckpoints?.sheet_a).toBeUndefined();
+  });
+
+
   it('pristine 聊天提交 hide 变更时不要求 templateSource 包含被隐藏表', async () => {
     // 复现：无数据（无 full checkpoint）的聊天切模板，reconciler 会为模板中缺失的
     // 旧表产出 hide 变更，同时把它从 candidateData（即 templateSource）删除。

@@ -1103,6 +1103,72 @@ async function persistTableMutationLogV2Core_ACU(
     frame.logEntries = [];
     logDebug_ACU(`[V2 Persist] 写入 full checkpoint: messageIndex=${target.index}, revision=${checkpointRevision}, sheets=${Object.keys(afterData).filter(k => k.startsWith('sheet_')).length}`);
   } else if (shouldAppendLogEntry) {
+    // 目标表必须在本楼的回放起点里已存在，否则这条增量永远无法回放（no such table）。
+    //
+    // 触发场景：先用旧模板填过表，之后切到新模板（新增表或新增列，rebase checkpoint
+    // 落在最新楼层），再对更早的楼层追平。那些楼的 full checkpoint 是切模板前写的，
+    // 不含新表；直接写增量就会产出注定回放失败的日志。
+    // 此时应先为该表在本楼写 per-sheet checkpoint 把它引入，再追加增量。
+    const operationSheetKeys = [...new Set(
+      operations
+        .map(operation => (operation as any)?.sheetKey)
+        .filter((sheetKey: unknown): sheetKey is string => typeof sheetKey === 'string' && sheetKey.startsWith('sheet_')),
+    )];
+    if (operationSheetKeys.length > 0) {
+      // 只做静态扫描，不触发 replay：persist 层不判断 replay applicability。
+      // 判据是「本楼及之前是否有任何 checkpoint 覆盖过该表」——这正是回放建表的来源。
+      const isSheetAnchoredAtOrBefore = (sheetKey: string): boolean => {
+        for (let index = 0; index <= target.index && index < chat.length; index += 1) {
+          const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
+          if (!isV2TagData_ACU(tagData)) continue;
+          const targetFrame = tagData.storageFrame as any;
+          const fullData = targetFrame?.checkpoint?.data;
+          if (fullData && typeof fullData === 'object' && Object.prototype.hasOwnProperty.call(fullData, sheetKey)) {
+            return true;
+          }
+          const perSheet = targetFrame?.perSheetCheckpoints;
+          const sheetCheckpoint = perSheet && typeof perSheet === 'object' ? perSheet[sheetKey] : undefined;
+          if (sheetCheckpoint && sheetCheckpoint.timeline?.kind !== 'sheet_hide') return true;
+        }
+        return false;
+      };
+      {
+        const missingSheetKeys = operationSheetKeys.filter(
+          sheetKey => Boolean((afterData as any)[sheetKey]) && !isSheetAnchoredAtOrBefore(sheetKey),
+        );
+        const introduced: TableSheetCheckpointV2_ACU[] = [];
+        for (const sheetKey of missingSheetKeys) {
+          const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
+            createdAt: now,
+            reason: 'schema_change',
+            sheetKey,
+            data: (afterData as any)[sheetKey],
+            event: { filledSheetKeys: [], changedSheetKeys: [sheetKey], groupKeys: [] },
+            baseRevision: requestedBaseRevision,
+            context: { messageIndex: target.index, aiFloor, isolationKey },
+          });
+          if (!sheetCheckpointResult.checkpoint) {
+            return { saved: false, error: sheetCheckpointResult.error };
+          }
+          // timeline 决定回放时该表在本楼何时进入 state：必须早于本次追加的增量。
+          introduced.push({
+            ...sheetCheckpointResult.checkpoint,
+            timeline: {
+              kind: 'sheet_introduction' as const,
+              activateAtMessageIndex: target.index,
+              afterSeq: Math.max(0, ...frame.logEntries.map(item => Number(item.seq) || 0)),
+            },
+          });
+        }
+        if (introduced.length > 0) {
+          frame.perSheetCheckpoints = {
+            ...(frame.perSheetCheckpoints || {}),
+            ...Object.fromEntries(introduced.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
+          };
+          logDebug_ACU(`[V2 Persist] 为本楼缺失的目标表补写 per-sheet checkpoint：${introduced.map(c => c.sheetKey).join('、')}（messageIndex=${target.index}）。`);
+        }
+      }
+    }
     const nextSeq = Math.max(0, ...frame.logEntries.map(item => Number(item.seq) || 0)) + 1;
     const parentRevision = options.parentRevision !== undefined ? options.parentRevision : (frame.headRevision ?? null);
     entry = appendMutationLogEntry_ACU(frame, {
