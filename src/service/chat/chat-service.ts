@@ -70,23 +70,6 @@ export interface BoundaryCheckpointEnsureResult_ACU {
     anchorIndex?: number;
 }
 
-export interface ManualRefillInitialBaselineEnsureResult_ACU {
-    success: boolean;
-    changed: boolean;
-    skipped?: boolean;
-    error?: string;
-    targetMessageIndex?: number;
-    movedFromMessageIndex?: number;
-    downgradedCount?: number;
-}
-
-export interface ManualRefillInitialBaselineEnsureOptions_ACU {
-    isolationKey: string;
-    targetMessageIndex: number;
-    data: Record<string, any>;
-    save?: boolean;
-}
-
 export interface BoundaryCheckpointEnsureOptions_ACU {
     reason?: 'purge' | 'manual_refill' | 'auto_update';
     save?: boolean;
@@ -543,98 +526,6 @@ export async function ensureV2BoundaryCheckpointForRetainedBuffer_ACU(
             logDebug_ACU(`[V2 Compaction] AI 楼层总数(${boundary.aiMessageIndices.length}) < 滚动触发层数(${boundary.effectiveRetainCount}=保留${retainCount}+缓冲${RETAIN_RECENT_CHECKPOINT_BUFFER_LAYERS_ACU})，无需建立边界 checkpoint。`);
         }
         return ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(chat, boundary, options);
-    });
-}
-
-export async function ensureManualRefillInitialBaseline_ACU(
-    options: ManualRefillInitialBaselineEnsureOptions_ACU,
-): Promise<ManualRefillInitialBaselineEnsureResult_ACU> {
-    return runTableWriteTransaction_ACU({
-        source: 'system_cleanup',
-        reason: 'manual_refill_initial_baseline_move',
-        isolationKey: options.isolationKey,
-        writeSet: [{ kind: 'all' }],
-        maintenanceMode: 'exclusive',
-    }, async () => {
-        try {
-            const chat = getChatArray_ACU();
-            if (!Array.isArray(chat) || chat.length === 0) {
-                return { success: false, changed: false, error: '聊天记录为空，无法前移手动重填 initial baseline。' };
-            }
-
-            const targetIndex = options.targetMessageIndex;
-            const targetMsg = chat[targetIndex];
-            if (!targetMsg || targetMsg.is_user) {
-                return { success: false, changed: false, error: `手动重填 initial baseline 前移失败：targetMessageIndex=${targetIndex} 不是有效 AI 楼层。` };
-            }
-
-            const refs = collectV2FullCheckpointRefsForIsolation_ACU(chat, options.isolationKey);
-            if (refs.length === 0) {
-                return { success: true, changed: false, skipped: true, targetMessageIndex: targetIndex };
-            }
-
-            const compactionRefs = refs.filter(ref => ref.checkpoint.reason === 'compaction');
-            const initRefs = refs.filter(ref => ref.checkpoint.reason === 'init');
-            if (compactionRefs.length > 0) {
-                let downgradedCount = 0;
-                for (const initRef of initRefs) {
-                    if (initRef.messageIndex < Math.min(...compactionRefs.map(ref => ref.messageIndex))) {
-                        if (downgradeV2FullCheckpointAtIndex_ACU(chat, options.isolationKey, initRef.messageIndex)) downgradedCount += 1;
-                    }
-                }
-                if (downgradedCount > 0 && options.save !== false) await saveChatToHost_ACU();
-                return { success: true, changed: downgradedCount > 0, skipped: downgradedCount === 0, targetMessageIndex: targetIndex, downgradedCount };
-            }
-
-            const unsafeRefs = refs.filter(ref => ref.checkpoint.reason !== 'init');
-            if (unsafeRefs.length > 0) {
-                return { success: true, changed: false, skipped: true, targetMessageIndex: targetIndex };
-            }
-
-            const sortedInitRefs = [...initRefs].sort((a, b) => a.messageIndex - b.messageIndex);
-            const earliestInit = sortedInitRefs[0];
-            if (!earliestInit || earliestInit.messageIndex <= targetIndex) {
-                return { success: true, changed: false, skipped: true, targetMessageIndex: targetIndex };
-            }
-
-            const existingTargetTagData = targetMsg.TavernDB_ACU_IsolatedData?.[options.isolationKey];
-            if (isV2TagData_ACU(existingTargetTagData) && Array.isArray(existingTargetTagData.storageFrame.logEntries) && existingTargetTagData.storageFrame.logEntries.length > 0) {
-                return { success: false, changed: false, error: `手动重填 initial baseline 前移失败：目标楼层 #${targetIndex} 已存在 V2 logEntries，拒绝覆盖。`, targetMessageIndex: targetIndex };
-            }
-
-            if (!targetMsg.TavernDB_ACU_IsolatedData || typeof targetMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(targetMsg.TavernDB_ACU_IsolatedData)) {
-                targetMsg.TavernDB_ACU_IsolatedData = {};
-            }
-            const existingTargetTag = targetMsg.TavernDB_ACU_IsolatedData[options.isolationKey];
-            const data = JSON.parse(JSON.stringify(options.data || {}));
-            targetMsg.TavernDB_ACU_IsolatedData[options.isolationKey] = {
-                ...(existingTargetTag?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTargetTag.summaryVectorIndexState } : {}),
-                ...(existingTargetTag?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existingTargetTag.summaryVectorIndexManifest } : {}),
-                storageFrame: {
-                    version: 2,
-                    checkpoint: {
-                        kind: 'full',
-                        createdAt: Date.now(),
-                        reason: 'init',
-                        data,
-                        scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, options.isolationKey, { maxMessageIndex: targetIndex }),
-                    },
-                    logEntries: [],
-                },
-                _acu_storage_version: 2,
-            };
-
-            let downgradedCount = 0;
-            for (const initRef of sortedInitRefs) {
-                if (initRef.messageIndex === targetIndex) continue;
-                if (downgradeV2FullCheckpointAtIndex_ACU(chat, options.isolationKey, initRef.messageIndex)) downgradedCount += 1;
-            }
-
-            if (options.save !== false) await saveChatToHost_ACU();
-            return { success: true, changed: true, targetMessageIndex: targetIndex, movedFromMessageIndex: earliestInit.messageIndex, downgradedCount };
-        } catch (error: any) {
-            return { success: false, changed: false, error: error?.message || String(error || '手动重填 initial baseline 前移失败。') };
-        }
     });
 }
 

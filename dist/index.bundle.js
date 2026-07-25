@@ -63721,92 +63721,6 @@ $CONTENT
             return ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(chat, boundary, options);
         });
     }
-    async function ensureManualRefillInitialBaseline_ACU(options) {
-        return runTableWriteTransaction_ACU({
-            source: 'system_cleanup',
-            reason: 'manual_refill_initial_baseline_move',
-            isolationKey: options.isolationKey,
-            writeSet: [{ kind: 'all' }],
-            maintenanceMode: 'exclusive',
-        }, async () => {
-            try {
-                const chat = getChatArray_ACU();
-                if (!Array.isArray(chat) || chat.length === 0) {
-                    return { success: false, changed: false, error: '聊天记录为空，无法前移手动重填 initial baseline。' };
-                }
-                const targetIndex = options.targetMessageIndex;
-                const targetMsg = chat[targetIndex];
-                if (!targetMsg || targetMsg.is_user) {
-                    return { success: false, changed: false, error: `手动重填 initial baseline 前移失败：targetMessageIndex=${targetIndex} 不是有效 AI 楼层。` };
-                }
-                const refs = collectV2FullCheckpointRefsForIsolation_ACU(chat, options.isolationKey);
-                if (refs.length === 0) {
-                    return { success: true, changed: false, skipped: true, targetMessageIndex: targetIndex };
-                }
-                const compactionRefs = refs.filter(ref => ref.checkpoint.reason === 'compaction');
-                const initRefs = refs.filter(ref => ref.checkpoint.reason === 'init');
-                if (compactionRefs.length > 0) {
-                    let downgradedCount = 0;
-                    for (const initRef of initRefs) {
-                        if (initRef.messageIndex < Math.min(...compactionRefs.map(ref => ref.messageIndex))) {
-                            if (downgradeV2FullCheckpointAtIndex_ACU(chat, options.isolationKey, initRef.messageIndex))
-                                downgradedCount += 1;
-                        }
-                    }
-                    if (downgradedCount > 0 && options.save !== false)
-                        await saveChatToHost_ACU();
-                    return { success: true, changed: downgradedCount > 0, skipped: downgradedCount === 0, targetMessageIndex: targetIndex, downgradedCount };
-                }
-                const unsafeRefs = refs.filter(ref => ref.checkpoint.reason !== 'init');
-                if (unsafeRefs.length > 0) {
-                    return { success: true, changed: false, skipped: true, targetMessageIndex: targetIndex };
-                }
-                const sortedInitRefs = [...initRefs].sort((a, b) => a.messageIndex - b.messageIndex);
-                const earliestInit = sortedInitRefs[0];
-                if (!earliestInit || earliestInit.messageIndex <= targetIndex) {
-                    return { success: true, changed: false, skipped: true, targetMessageIndex: targetIndex };
-                }
-                const existingTargetTagData = targetMsg.TavernDB_ACU_IsolatedData?.[options.isolationKey];
-                if (isV2TagData_ACU(existingTargetTagData) && Array.isArray(existingTargetTagData.storageFrame.logEntries) && existingTargetTagData.storageFrame.logEntries.length > 0) {
-                    return { success: false, changed: false, error: `手动重填 initial baseline 前移失败：目标楼层 #${targetIndex} 已存在 V2 logEntries，拒绝覆盖。`, targetMessageIndex: targetIndex };
-                }
-                if (!targetMsg.TavernDB_ACU_IsolatedData || typeof targetMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(targetMsg.TavernDB_ACU_IsolatedData)) {
-                    targetMsg.TavernDB_ACU_IsolatedData = {};
-                }
-                const existingTargetTag = targetMsg.TavernDB_ACU_IsolatedData[options.isolationKey];
-                const data = JSON.parse(JSON.stringify(options.data || {}));
-                targetMsg.TavernDB_ACU_IsolatedData[options.isolationKey] = {
-                    ...(existingTargetTag?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTargetTag.summaryVectorIndexState } : {}),
-                    ...(existingTargetTag?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existingTargetTag.summaryVectorIndexManifest } : {}),
-                    storageFrame: {
-                        version: 2,
-                        checkpoint: {
-                            kind: 'full',
-                            createdAt: Date.now(),
-                            reason: 'init',
-                            data,
-                            scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, options.isolationKey, { maxMessageIndex: targetIndex }),
-                        },
-                        logEntries: [],
-                    },
-                    _acu_storage_version: 2,
-                };
-                let downgradedCount = 0;
-                for (const initRef of sortedInitRefs) {
-                    if (initRef.messageIndex === targetIndex)
-                        continue;
-                    if (downgradeV2FullCheckpointAtIndex_ACU(chat, options.isolationKey, initRef.messageIndex))
-                        downgradedCount += 1;
-                }
-                if (options.save !== false)
-                    await saveChatToHost_ACU();
-                return { success: true, changed: true, targetMessageIndex: targetIndex, movedFromMessageIndex: earliestInit.messageIndex, downgradedCount };
-            }
-            catch (error) {
-                return { success: false, changed: false, error: error?.message || String(error || '手动重填 initial baseline 前移失败。') };
-            }
-        });
-    }
     async function writeV2BoundaryCheckpointBeforePurge_ACU(chat, boundaryAnchorIndex) {
         if (boundaryAnchorIndex < 0 || !chat[boundaryAnchorIndex] || chat[boundaryAnchorIndex].is_user) {
             throw new Error(`边界 checkpoint 写入失败：boundaryAnchorIndex=${boundaryAnchorIndex} 不是有效 AI 楼层。`);
@@ -75279,33 +75193,6 @@ $CONTENT
             return { data: null, attempted: true };
         }
     }
-    function scanManualRefillV2ReplayBoundary_ACU(chat, currentIsolationKey, maxMessageIndex) {
-        if (!Array.isArray(chat) || maxMessageIndex < 0) {
-            return { hasCurrentIsolationV2: false, otherIsolationKeys: [] };
-        }
-        const otherIsolationKeys = new Set();
-        const boundary = Math.min(maxMessageIndex, chat.length - 1);
-        let hasCurrentIsolationV2 = false;
-        for (let i = 0; i <= boundary; i += 1) {
-            const message = chat[i];
-            if (!message || message.is_user)
-                continue;
-            const isolatedData = message.TavernDB_ACU_IsolatedData;
-            if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData))
-                continue;
-            for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
-                if (!isV2TagData_ACU(tagData))
-                    continue;
-                if (isolationKey === currentIsolationKey) {
-                    hasCurrentIsolationV2 = true;
-                }
-                else {
-                    otherIsolationKeys.add(isolationKey);
-                }
-            }
-        }
-        return { hasCurrentIsolationV2, otherIsolationKeys: [...otherIsolationKeys] };
-    }
     function collectManualRefillRollbackMessageIndices_ACU(chat, currentIsolationKey, contextScopeIndices) {
         const indices = new Set(contextScopeIndices);
         for (let i = 0; i < chat.length; i += 1) {
@@ -75319,24 +75206,6 @@ $CONTENT
                 indices.add(i);
         }
         return [...indices].sort((a, b) => a - b);
-    }
-    async function ensureManualRefillV2ReplayBoundary_ACU(chat, currentIsolationKey, maxMessageIndex) {
-        const boundary = scanManualRefillV2ReplayBoundary_ACU(chat, currentIsolationKey, maxMessageIndex);
-        if (!boundary.hasCurrentIsolationV2) {
-            if (boundary.otherIsolationKeys.length > 0) {
-                return { success: false, code: 'isolation_mismatch', error: `手动重填中止：目标前存在其他 isolationKey 的 V2 数据（${boundary.otherIsolationKeys.join(', ')}），当前 isolationKey 不匹配。` };
-            }
-            return { success: true };
-        }
-        try {
-            const replayedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, { maxMessageIndex });
-            if (replayedData)
-                return { success: true };
-            return { success: false, code: 'no_full_checkpoint_replayable', error: '手动重填中止：找不到可用 full checkpoint，无法安全回放到重填起点前。' };
-        }
-        catch (error) {
-            return { success: false, code: 'replay_failed', error: error?.message || '手动重填中止：V2 数据回放失败，无法安全回放到重填起点前。' };
-        }
     }
     function buildGuideOrTemplateMergeBase_ACU(batchNumber) {
         const batchIsoKey = getCurrentIsolationKey_ACU();
@@ -76955,11 +76824,10 @@ $CONTENT
     async function orchestrateManualUpdate_ACU(targetKeys, processBatch, refreshData, options = {}) {
         let manualRefillSessionSnapshot = null;
         let manualRefillRollbackAttempted = false;
-        let manualRefillRequiresFinalSnapshot = false;
         let committedBucketCount = 0;
+        // 手动重填总是先清空范围内选中表的 checkpoint 与增量，因此本次会话在收尾时
+        // 必然需要补写完整单表 checkpoint；失败时一律回滚到会话前快照。
         const rollbackManualRefillSession = async () => {
-            if (!manualRefillRequiresFinalSnapshot && committedBucketCount > 0)
-                return undefined;
             if (!manualRefillSessionSnapshot || manualRefillRollbackAttempted)
                 return undefined;
             manualRefillRollbackAttempted = true;
@@ -76977,15 +76845,6 @@ $CONTENT
         };
         const failManualRefillSession = async (failureError) => {
             const rollbackError = await rollbackManualRefillSession();
-            if (!rollbackError && (!manualRefillRequiresFinalSnapshot && committedBucketCount > 0)) {
-                try {
-                    await loadAllChatMessages_ACU();
-                    await refreshData();
-                }
-                catch (refreshError) {
-                    logWarn_ACU('[Manual Refill] 已提交 bucket 后刷新运行时数据失败:', refreshError);
-                }
-            }
             return {
                 success: false,
                 error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError,
@@ -77054,76 +76913,30 @@ $CONTENT
             });
             const groupKeys = Object.keys(updateGroups);
             const manualRefillEnabled = options.clearBeforeUpdate === true;
-            // 手动填表在清理本次范围内的回放增量后，基底解析完全沿用自动填表语义
-            // （逐 bucket 取 bucketFirstMessageIndex - 1），不再注入手动专属基底边界。
+            // 手动填表先无条件清空本次范围内选中表的 checkpoint 与增量，再完全沿用自动填表语义
+            // （逐 bucket 取 bucketFirstMessageIndex - 1）解析基底。初始基线保持原位，不做前移。
             if (manualRefillEnabled) {
                 const currentIsolationKey = getCurrentIsolationKey_ACU();
                 const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
                 manualRefillSessionSnapshot = captureManualRefillSessionSnapshot_ACU(rollbackMessageIndices);
-                const initialBaseline = buildGuideOrTemplateMergeBase_ACU(0);
-                if (!initialBaseline.data) {
-                    return await failManualRefillSession(initialBaseline.error || '手动重填无法从当前表格指导或模板构造临时基底。');
+                try {
+                    await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
                 }
-                const baselineResult = await ensureManualRefillInitialBaseline_ACU({
-                    isolationKey: currentIsolationKey,
-                    targetMessageIndex: contextScopeIndices[0],
-                    data: initialBaseline.data,
-                    save: true,
-                });
-                if (!baselineResult.success) {
-                    return await failManualRefillSession(baselineResult.error || '手动重填临时基底建立失败。');
+                catch (error) {
+                    logError_ACU('[Manual Refill] 清理本次范围内选中表旧数据失败:', error);
+                    const rollbackError = await rollbackManualRefillSession();
+                    const failureError = error?.message || '手动重填清理本次范围内选中表旧数据失败。';
+                    return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
                 }
-                if (baselineResult.changed) {
-                    logDebug_ACU(`[Manual Refill] 已将 initial baseline 从 AI 楼层 #${baselineResult.movedFromMessageIndex} 前移到重填边界 #${baselineResult.targetMessageIndex}。`);
+                logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
+                try {
+                    await reloadStorageProvider();
                 }
-                const replayBoundaryCheck = await ensureManualRefillV2ReplayBoundary_ACU(liveChat, currentIsolationKey, contextScopeIndices[0]);
-                if (replayBoundaryCheck.success === false) {
-                    if (replayBoundaryCheck.code !== 'no_full_checkpoint_replayable') {
-                        return await failManualRefillSession(replayBoundaryCheck.error);
-                    }
-                    if (options.confirmBoundaryReset !== true) {
-                        const rollbackError = await rollbackManualRefillSession();
-                        if (rollbackError) {
-                            return { success: false, error: `${replayBoundaryCheck.error}；临时基底回滚失败：${rollbackError}` };
-                        }
-                        return {
-                            success: false,
-                            requiresUserConfirmation: {
-                                reason: 'manual_refill_replace_sheet_baseline',
-                                replayErrorCode: replayBoundaryCheck.code,
-                                message: replayBoundaryCheck.error,
-                                contextScopeIndices: [...contextScopeIndices],
-                                targetSheetKeys: [...targetKeys],
-                            },
-                        };
-                    }
-                    try {
-                        // 重填起点之前没有可回放的目标表基底时，bounded merge base 只能是指导表/模板。
-                        // 模板只能服务本轮 prompt，绝不能提前写成 sheet_full；它会在重入时整表覆盖历史。
-                        await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
-                    }
-                    catch (error) {
-                        logError_ACU('[Manual Refill] 确认后清理选中表旧数据失败:', error);
-                        const rollbackError = await rollbackManualRefillSession();
-                        const failureError = error?.message || '手动重填确认后清理选中表旧数据失败。';
-                        return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-                    }
-                    manualRefillRequiresFinalSnapshot = true;
-                    logWarn_ACU(`[Manual Refill] ${replayBoundaryCheck.error} 用户已确认手动重填，已清理本次范围内选中表旧数据；将在全部重填成功后提交完整单表 checkpoint。`);
-                }
-                else {
-                    logDebug_ACU('[Manual Refill] 可回放重填不再预清理完整范围；每个 bucket 将在自身严格提交中替换对应历史增量。');
-                }
-                if (manualRefillRequiresFinalSnapshot) {
-                    try {
-                        await reloadStorageProvider();
-                    }
-                    catch (error) {
-                        logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
-                        const rollbackError = await rollbackManualRefillSession();
-                        const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
-                        return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-                    }
+                catch (error) {
+                    logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
+                    const rollbackError = await rollbackManualRefillSession();
+                    const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
+                    return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
                 }
             }
             _set_isAutoUpdatingCard_ACU$1(true);
@@ -77174,7 +76987,8 @@ $CONTENT
                 try {
                     const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
                         onProgress: options.onProgress,
-                        replaceExistingIncremental: manualRefillEnabled && !manualRefillRequiresFinalSnapshot,
+                        // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
+                        replaceExistingIncremental: false,
                     });
                     committedBucketCount += chunkResult.committedBucketCount;
                     if (!chunkResult.success) {
@@ -77207,7 +77021,7 @@ $CONTENT
             if (wasStoppedByUser_ACU$1) {
                 return await failManualRefillSession('手动更新已终止。');
             }
-            if (manualRefillRequiresFinalSnapshot) {
+            if (manualRefillEnabled) {
                 const completedData = getRuntimeTableDataSnapshot_ACU();
                 if (!completedData) {
                     const rollbackError = await rollbackManualRefillSession();
@@ -80542,13 +80356,12 @@ $CONTENT
             const selectedSheetSummary = buildLegacySelectedSheetSummary_ACU(targetKeys);
             const checkpointFloorsLabel = buildLegacyCheckpointFloorsLabel_ACU();
             const manualRefillRangeLabel = buildLegacyManualRefillRangeLabel_ACU();
-            // 弹出确认框：手动填表将使用事务式重填，失败不会改动聊天记录中的旧数据
+            // 弹出确认框：手动填表会先删除范围内选中表的 checkpoint 与增量，再重新填写
             const confirmed = await showCustomConfirm_ACU('手动填表确认', `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel}\n本次重填范围：${manualRefillRangeLabel}\n选中表：${selectedSheetSummary}\n\n` +
-                '系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表。\n' +
-                '常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹，并在全部成功后写入手动重填进度记录。\n' +
-                '如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认；只有你在第二次确认中授权后，才会替换本次范围内选中表的旧 checkpoint 基底并写入新的单表 checkpoint。\n' +
+                '高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n' +
+                '如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n' +
                 '保留边界 checkpoint 会按 AI 回复楼层计数，在达到保留窗口和 20 个 AI 楼层缓冲后自动滚动建立。\n' +
-                '取消、失败、终止或从中断处继续时，都不会清空本次重填范围之外的聊天记录表格数据，也不会在未二次确认时替换 checkpoint 基底。', { confirmLabel: '确认并继续', cancelLabel: '取消' });
+                '范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或终止时会回滚到本次操作前的状态。', { confirmLabel: '确认并继续', cancelLabel: '取消' });
             if (!confirmed) {
                 logDebug_ACU('[更新流程] 用户取消了手动填表确认框');
                 showToastr_ACU('info', '已取消手动填表。');
@@ -80577,7 +80390,7 @@ $CONTENT
                     }
                 },
             });
-            let result = await orchestrateManualUpdate_ACU(targetKeys, 
+            const result = await orchestrateManualUpdate_ACU(targetKeys, 
             // processBatch 回调保留给兼容路径；当前手动填表主路径由 service grouped helper 执行。
             async (indices, batchMode, batchOptions) => {
                 return processUpdates_ACU(indices, batchMode, batchOptions);
@@ -80591,27 +80404,6 @@ $CONTENT
                 clearBeforeUpdate: true,
                 onProgress: event => handleProgressEvent(event, false, manualProgressToast),
             });
-            if (!result.success && result.requiresUserConfirmation) {
-                const request = result.requiresUserConfirmation;
-                const dangerConfirmed = await showCustomConfirm_ACU('破坏性手动重填确认', `${request.message}\n\n` +
-                    `高风险操作：确认后会在一次提交中删除本次重填范围内选中表的旧表基底，并写入新的单表 checkpoint，随后才继续本次手动填表。\n` +
-                    `目标表：${request.targetSheetKeys.join('、')}\n` +
-                    `目标消息索引：${request.contextScopeIndices.join('、')}\n\n` +
-                    '范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除。\n' +
-                    '此操作不可撤销。取消将不会执行基底替换，不会写入新的单表 checkpoint，也不会继续本次手动填表。', { confirmLabel: '我已了解风险，继续执行', cancelLabel: '取消' });
-                if (!dangerConfirmed) {
-                    clearLoadingToast(manualProgressToast);
-                    manualProgressToast = null;
-                    showToastr_ACU('info', '已取消破坏性基底替换。');
-                    return;
-                }
-                updateLoadingToastMessage(manualProgressToast, '已确认破坏性基底替换，继续手动填表。');
-                result = await orchestrateManualUpdate_ACU(targetKeys, async (indices, batchMode, batchOptions) => {
-                    return processUpdates_ACU(indices, batchMode, batchOptions);
-                }, async () => {
-                    await refreshMergedDataAndNotifyWithUI_ACU();
-                }, { clearBeforeUpdate: true, confirmBoundaryReset: true, onProgress: event => handleProgressEvent(event, false, manualProgressToast) });
-            }
             clearLoadingToast(manualProgressToast);
             manualProgressToast = null;
             // UI：根据返回值显示 toast
@@ -130157,11 +129949,11 @@ Expected function or array of functions, received type ${typeof value}.`
             manualUpdateBusy.value = true;
             const confirmed = await dialogStore.confirm({
                 title: '执行手动填表',
-                message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n系统会先在 service 层做重填边界检查，并在内存中按当前上下文和批处理设置准备重填当前选中的表。\n常规路径只会在确认可回放边界后清理本次范围内选中表的 V2 增量日志与 revision 指纹，并在全部成功后写入手动重填进度记录。\n如果边界检查确认重填起点前没有可回放 checkpoint，系统会停止并弹出第二次破坏性确认；只有你在第二次确认中授权后，才会替换本次范围内选中表的旧 checkpoint 基底并写入新的单表 checkpoint。\n\n取消、失败、终止或从中断处继续时，不会清理本次重填范围之外的聊天记录表格数据，也不会在未二次确认时替换 checkpoint 基底。`,
+                message: `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel.value}\n本次重填范围：${manualRefillRangeLabel.value}\n选中表：${selectedSheetSummary.value}\n\n高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n如果被删除的 checkpoint 是这些表唯一的数据基线，此前楼层的表格数据将无法恢复。\n\n范围外的 checkpoint、范围外聊天记录的表格数据和未选中的表不会被删除。执行失败或终止时会回滚到本次操作前的状态。`,
                 dangerMessage: checkpointRiskMessage.value || undefined,
                 confirmLabel: '确认并继续',
                 cancelLabel: '取消',
-                confirmVariant: checkpointRiskMessage.value ? 'danger' : undefined,
+                confirmVariant: 'danger',
             });
             if (!confirmed) {
                 manualUpdateBusy.value = false;
@@ -130189,32 +129981,13 @@ Expected function or array of functions, received type ${typeof value}.`
             };
             const runProcessBatch = (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options, (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, new AbortController(), progressContext, handleProgress));
             try {
-                const executeManualUpdate = async (confirmBoundaryReset) => {
-                    const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
-                    try {
-                        return await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, { clearBeforeUpdate, confirmBoundaryReset, onProgress: handleProgress });
-                    }
-                    finally {
-                        restoreAutoUpdateSettings();
-                    }
-                };
-                let result = await executeManualUpdate(false);
-                if (!result.success && result.requiresUserConfirmation) {
-                    const request = result.requiresUserConfirmation;
-                    const dangerConfirmed = await dialogStore.confirm({
-                        title: '破坏性手动重填确认',
-                        message: `${request.message}\n\n高风险操作：确认后会在一次提交中删除本次重填范围内选中表的旧表基底，并写入新的单表 checkpoint，随后才继续本次手动填表。\n目标表：${request.targetSheetKeys.join('、')}\n目标消息索引：${request.contextScopeIndices.join('、')}\n\n范围外 checkpoint、范围外聊天记录表格数据和未选中的表不会被删除。`,
-                        dangerMessage: '此操作不可撤销。取消将不会执行基底替换，不会写入新的单表 checkpoint，也不会继续本次手动填表。',
-                        confirmLabel: '我已了解风险，继续执行',
-                        cancelLabel: '取消',
-                        confirmVariant: 'danger',
-                    });
-                    if (!dangerConfirmed) {
-                        finishToast('info', '已取消破坏性基底替换。');
-                        return;
-                    }
-                    notifyProgress('已确认破坏性基底替换，继续手动填表。');
-                    result = await executeManualUpdate(true);
+                const restoreAutoUpdateSettings = applyManualSettingsForOrchestrator();
+                let result;
+                try {
+                    result = await orchestrateManualUpdate_ACU(targetManualTableKeys, runProcessBatch, async () => { await refreshMergedDataAndNotify_ACU(); }, { clearBeforeUpdate, onProgress: handleProgress });
+                }
+                finally {
+                    restoreAutoUpdateSettings();
                 }
                 finishToast(result.success ? (result.checkpointWarning ? 'warning' : 'success') : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'), result.success
                     ? `${result.autoMergeTriggered

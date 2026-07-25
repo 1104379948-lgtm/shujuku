@@ -6,7 +6,7 @@
 
 import { isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
 import { callCustomOpenAI_ACU } from '../ai/prompt-builder';
-import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualRefillInitialBaseline_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
+import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
@@ -103,21 +103,10 @@ export interface BatchUpdateResult {
     error?: string;
 }
 
-type ManualRefillBoundaryErrorCode_ACU = 'no_full_checkpoint_replayable' | 'isolation_mismatch' | 'replay_failed';
-
-export interface ManualRefillRequiresUserConfirmation_ACU {
-    reason: 'manual_refill_replace_sheet_baseline';
-    replayErrorCode: ManualRefillBoundaryErrorCode_ACU;
-    message: string;
-    contextScopeIndices: number[];
-    targetSheetKeys: string[];
-}
-
 /** orchestrateManualUpdate 的返回值 */
 export interface ManualUpdateResult {
     success: boolean;
     error?: string;
-    requiresUserConfirmation?: ManualRefillRequiresUserConfirmation_ACU;
     /** 是否触发了自动合并 */
     autoMergeTriggered?: boolean;
     autoMergeSuccess?: boolean;
@@ -511,38 +500,6 @@ async function loadV2ReplayMergeBase_ACU(
     }
 }
 
-function scanManualRefillV2ReplayBoundary_ACU(
-    chat: any[],
-    currentIsolationKey: string,
-    maxMessageIndex: number,
-): { hasCurrentIsolationV2: boolean; otherIsolationKeys: string[] } {
-    if (!Array.isArray(chat) || maxMessageIndex < 0) {
-        return { hasCurrentIsolationV2: false, otherIsolationKeys: [] };
-    }
-
-    const otherIsolationKeys = new Set<string>();
-    const boundary = Math.min(maxMessageIndex, chat.length - 1);
-    let hasCurrentIsolationV2 = false;
-
-    for (let i = 0; i <= boundary; i += 1) {
-        const message = chat[i];
-        if (!message || message.is_user) continue;
-        const isolatedData = message.TavernDB_ACU_IsolatedData;
-        if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData)) continue;
-
-        for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
-            if (!isV2TagData_ACU(tagData)) continue;
-            if (isolationKey === currentIsolationKey) {
-                hasCurrentIsolationV2 = true;
-            } else {
-                otherIsolationKeys.add(isolationKey);
-            }
-        }
-    }
-
-    return { hasCurrentIsolationV2, otherIsolationKeys: [...otherIsolationKeys] };
-}
-
 function collectManualRefillRollbackMessageIndices_ACU(
     chat: any[],
     currentIsolationKey: string,
@@ -557,28 +514,6 @@ function collectManualRefillRollbackMessageIndices_ACU(
         if (tagData.storageFrame.checkpoint?.kind === 'full') indices.add(i);
     }
     return [...indices].sort((a, b) => a - b);
-}
-
-async function ensureManualRefillV2ReplayBoundary_ACU(
-    chat: any[],
-    currentIsolationKey: string,
-    maxMessageIndex: number,
-): Promise<{ success: true } | { success: false; code: ManualRefillBoundaryErrorCode_ACU; error: string }> {
-    const boundary = scanManualRefillV2ReplayBoundary_ACU(chat, currentIsolationKey, maxMessageIndex);
-    if (!boundary.hasCurrentIsolationV2) {
-        if (boundary.otherIsolationKeys.length > 0) {
-            return { success: false, code: 'isolation_mismatch', error: `手动重填中止：目标前存在其他 isolationKey 的 V2 数据（${boundary.otherIsolationKeys.join(', ')}），当前 isolationKey 不匹配。` };
-        }
-        return { success: true };
-    }
-
-    try {
-        const replayedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, { maxMessageIndex });
-        if (replayedData) return { success: true };
-        return { success: false, code: 'no_full_checkpoint_replayable', error: '手动重填中止：找不到可用 full checkpoint，无法安全回放到重填起点前。' };
-    } catch (error: any) {
-        return { success: false, code: 'replay_failed', error: error?.message || '手动重填中止：V2 数据回放失败，无法安全回放到重填起点前。' };
-    }
 }
 
 function buildGuideOrTemplateMergeBase_ACU(batchNumber: number): { data: Record<string, any> | null; error: string | null } {
@@ -2419,16 +2354,15 @@ export async function orchestrateManualUpdate_ACU(
     refreshData: () => Promise<void>,
     options: {
         clearBeforeUpdate?: boolean;
-        confirmBoundaryReset?: boolean;
         onProgress?: (event: CardUpdateProgressEvent) => void;
     } = {},
 ): Promise<ManualUpdateResult> {
     let manualRefillSessionSnapshot: ReturnType<typeof captureManualRefillSessionSnapshot_ACU> | null = null;
     let manualRefillRollbackAttempted = false;
-    let manualRefillRequiresFinalSnapshot = false;
     let committedBucketCount = 0;
+    // 手动重填总是先清空范围内选中表的 checkpoint 与增量，因此本次会话在收尾时
+    // 必然需要补写完整单表 checkpoint；失败时一律回滚到会话前快照。
     const rollbackManualRefillSession = async (): Promise<string | undefined> => {
-        if (!manualRefillRequiresFinalSnapshot && committedBucketCount > 0) return undefined;
         if (!manualRefillSessionSnapshot || manualRefillRollbackAttempted) return undefined;
         manualRefillRollbackAttempted = true;
         try {
@@ -2448,14 +2382,6 @@ export async function orchestrateManualUpdate_ACU(
     };
     const failManualRefillSession = async (failureError: string): Promise<ManualUpdateResult> => {
         const rollbackError = await rollbackManualRefillSession();
-        if (!rollbackError && (!manualRefillRequiresFinalSnapshot && committedBucketCount > 0)) {
-            try {
-                await loadAllChatMessages_ACU();
-                await refreshData();
-            } catch (refreshError) {
-                logWarn_ACU('[Manual Refill] 已提交 bucket 后刷新运行时数据失败:', refreshError);
-            }
-        }
         return {
             success: false,
             error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError,
@@ -2536,78 +2462,30 @@ export async function orchestrateManualUpdate_ACU(
         const groupKeys = Object.keys(updateGroups);
 
         const manualRefillEnabled = options.clearBeforeUpdate === true;
-        // 手动填表在清理本次范围内的回放增量后，基底解析完全沿用自动填表语义
-        // （逐 bucket 取 bucketFirstMessageIndex - 1），不再注入手动专属基底边界。
+        // 手动填表先无条件清空本次范围内选中表的 checkpoint 与增量，再完全沿用自动填表语义
+        // （逐 bucket 取 bucketFirstMessageIndex - 1）解析基底。初始基线保持原位，不做前移。
         if (manualRefillEnabled) {
             const currentIsolationKey = getCurrentIsolationKey_ACU();
             const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
             manualRefillSessionSnapshot = captureManualRefillSessionSnapshot_ACU(rollbackMessageIndices);
 
-            const initialBaseline = buildGuideOrTemplateMergeBase_ACU(0);
-            if (!initialBaseline.data) {
-                return await failManualRefillSession(initialBaseline.error || '手动重填无法从当前表格指导或模板构造临时基底。');
+            try {
+                await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
+            } catch (error: any) {
+                logError_ACU('[Manual Refill] 清理本次范围内选中表旧数据失败:', error);
+                const rollbackError = await rollbackManualRefillSession();
+                const failureError = error?.message || '手动重填清理本次范围内选中表旧数据失败。';
+                return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
             }
-            const baselineResult = await ensureManualRefillInitialBaseline_ACU({
-                isolationKey: currentIsolationKey,
-                targetMessageIndex: contextScopeIndices[0],
-                data: initialBaseline.data,
-                save: true,
-            });
-            if (!baselineResult.success) {
-                return await failManualRefillSession(baselineResult.error || '手动重填临时基底建立失败。');
-            }
-            if (baselineResult.changed) {
-                logDebug_ACU(`[Manual Refill] 已将 initial baseline 从 AI 楼层 #${baselineResult.movedFromMessageIndex} 前移到重填边界 #${baselineResult.targetMessageIndex}。`);
-            }
+            logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
 
-            const replayBoundaryCheck = await ensureManualRefillV2ReplayBoundary_ACU(liveChat, currentIsolationKey, contextScopeIndices[0]);
-            if (replayBoundaryCheck.success === false) {
-                if (replayBoundaryCheck.code !== 'no_full_checkpoint_replayable') {
-                    return await failManualRefillSession(replayBoundaryCheck.error);
-                }
-
-                if (options.confirmBoundaryReset !== true) {
-                    const rollbackError = await rollbackManualRefillSession();
-                    if (rollbackError) {
-                        return { success: false, error: `${replayBoundaryCheck.error}；临时基底回滚失败：${rollbackError}` };
-                    }
-                    return {
-                        success: false,
-                        requiresUserConfirmation: {
-                            reason: 'manual_refill_replace_sheet_baseline',
-                            replayErrorCode: replayBoundaryCheck.code,
-                            message: replayBoundaryCheck.error,
-                            contextScopeIndices: [...contextScopeIndices],
-                            targetSheetKeys: [...targetKeys],
-                        },
-                    };
-                }
-
-                try {
-                    // 重填起点之前没有可回放的目标表基底时，bounded merge base 只能是指导表/模板。
-                    // 模板只能服务本轮 prompt，绝不能提前写成 sheet_full；它会在重入时整表覆盖历史。
-                    await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
-                } catch (error: any) {
-                    logError_ACU('[Manual Refill] 确认后清理选中表旧数据失败:', error);
-                    const rollbackError = await rollbackManualRefillSession();
-                    const failureError = error?.message || '手动重填确认后清理选中表旧数据失败。';
-                    return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-                }
-                manualRefillRequiresFinalSnapshot = true;
-                logWarn_ACU(`[Manual Refill] ${replayBoundaryCheck.error} 用户已确认手动重填，已清理本次范围内选中表旧数据；将在全部重填成功后提交完整单表 checkpoint。`);
-            } else {
-                logDebug_ACU('[Manual Refill] 可回放重填不再预清理完整范围；每个 bucket 将在自身严格提交中替换对应历史增量。');
-            }
-
-            if (manualRefillRequiresFinalSnapshot) {
-                try {
-                    await reloadStorageProvider();
-                } catch (error: any) {
-                    logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
-                    const rollbackError = await rollbackManualRefillSession();
-                    const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
-                    return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
-                }
+            try {
+                await reloadStorageProvider();
+            } catch (error: any) {
+                logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
+                const rollbackError = await rollbackManualRefillSession();
+                const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
+                return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
             }
         }
 
@@ -2660,7 +2538,8 @@ export async function orchestrateManualUpdate_ACU(
             try {
                 const chunkResult = await processGroupedRuntimeChunk_ACU(groupedChunk, 'manual_independent', {
                     onProgress: options.onProgress,
-                    replaceExistingIncremental: manualRefillEnabled && !manualRefillRequiresFinalSnapshot,
+                    // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
+                    replaceExistingIncremental: false,
                 });
                 committedBucketCount += chunkResult.committedBucketCount;
                 if (!chunkResult.success) {
@@ -2698,7 +2577,7 @@ export async function orchestrateManualUpdate_ACU(
             return await failManualRefillSession('手动更新已终止。');
         }
 
-        if (manualRefillRequiresFinalSnapshot) {
+        if (manualRefillEnabled) {
             const completedData = getRuntimeTableDataSnapshot_ACU();
             if (!completedData) {
                 const rollbackError = await rollbackManualRefillSession();
