@@ -1031,6 +1031,47 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(count).toBe(2);
     expect(chat[2].TavernDB_ACU_Data).toBeDefined(); // 第3层不在范围内
   });
+  it('mode=all 全范围删除时清理挂在 chat[0] 的旧版表头清单', async () => {
+    const chat: any[] = [
+      { is_user: true, TavernDB_ACU_TableHeaderGuide: JSON.stringify({ tags: { '': { sheet_0: {} }, tag_B: { sheet_1: {} } } }) },
+      { is_user: false, TavernDB_ACU_Data: { sheet_0: {} } },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const count = await deleteLocalDataInChatCore_ACU('all');
+    expect(count).toBeGreaterThan(0);
+    // 旧版表头清单与 AI 楼层无关，不会被按楼层删除覆盖到，必须显式清理。
+    expect(chat[0].TavernDB_ACU_TableHeaderGuide).toBeUndefined();
+  });
+
+  it('mode=current 只删旧版表头清单里当前隔离标识的分组', async () => {
+    mockSettings.dataIsolationEnabled = true;
+    mockSettings.dataIsolationCode = 'tag_A';
+    mockGetCurrentIsolationKey.mockReturnValue('tag_A');
+    const chat: any[] = [
+      { is_user: true, TavernDB_ACU_TableHeaderGuide: JSON.stringify({ tags: { tag_A: { sheet_0: {} }, tag_B: { sheet_1: {} } } }) },
+      { is_user: false, TavernDB_ACU_IsolatedData: { tag_A: { independentData: {} } } },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    await deleteLocalDataInChatCore_ACU('current');
+    const remaining = JSON.parse(chat[0].TavernDB_ACU_TableHeaderGuide);
+    expect(remaining.tags.tag_A).toBeUndefined();
+    expect(remaining.tags.tag_B).toBeDefined();
+  });
+
+  it('指定局部楼层范围时不动旧版表头清单', async () => {
+    const guide = JSON.stringify({ tags: { '': { sheet_0: {} } } });
+    const chat: any[] = [
+      { is_user: false, TavernDB_ACU_Data: {}, TavernDB_ACU_TableHeaderGuide: guide },
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    await deleteLocalDataInChatCore_ACU('all', 1, 2);
+    // 局部删除不得误删仍被范围外楼层依赖的兼容指导数据。
+    expect(chat[0].TavernDB_ACU_TableHeaderGuide).toBe(guide);
+  });
+
+
 });
 
 // ═══ clearTableDataAtFloors_ACU ═══

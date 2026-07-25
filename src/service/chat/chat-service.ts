@@ -25,6 +25,7 @@ import { settings_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } fr
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
 import { clearTableFieldsForIsolation_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
+import { LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../table/table-history';
 import { deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
@@ -1077,6 +1078,53 @@ function collectAllSheetDataFromMessage_ACU(
 }
 
 /**
+ * 清理旧版“表头清单”（TavernDB_ACU_TableHeaderGuide）。
+ *
+ * 该字段固定挂在 chat[0]，按隔离键分组存储，与 AI 楼层无关，
+ * 因此不会被“按楼层遍历 AI 消息”的删除逻辑覆盖到。
+ *
+ * mode='all' 整个字段删除；mode='current' 只删当前隔离键，
+ * 所有隔离键都清空后再删整个字段。
+ */
+function clearLegacyTableHeaderGuide_ACU(chat: any[], mode: 'current' | 'all', isolationKey: string): boolean {
+    const first = Array.isArray(chat) && chat.length > 0 ? chat[0] : null;
+    if (!first) return false;
+    const raw = first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
+    if (raw === undefined || raw === null || raw === '') return false;
+
+    if (mode === 'all') {
+        delete first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
+        logDebug_ACU('[数据删除] 已清理旧版表头清单（全部隔离标识）。');
+        return true;
+    }
+
+    let legacyObj: any = null;
+    if (typeof raw === 'string') {
+        try { legacyObj = JSON.parse(raw); } catch { legacyObj = null; }
+    } else {
+        legacyObj = raw;
+    }
+    // 无法解析或不含 tags 分组时不做部分删除，避免误删其他隔离标识的数据。
+    if (!legacyObj || typeof legacyObj !== 'object' || Array.isArray(legacyObj)) return false;
+    const tags = legacyObj.tags;
+    if (!tags || typeof tags !== 'object' || Array.isArray(tags)) return false;
+    if (!Object.prototype.hasOwnProperty.call(tags, isolationKey)) return false;
+
+    delete tags[isolationKey];
+    if (Object.keys(tags).length === 0) {
+        delete first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
+    } else {
+        legacyObj.tags = tags;
+        first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU] = typeof raw === 'string'
+            ? JSON.stringify(legacyObj)
+            : legacyObj;
+    }
+    logDebug_ACU(`[数据删除] 已清理旧版表头清单（隔离标识: ${isolationKey || '无标签'}）。`);
+    return true;
+}
+
+
+/**
  * 删除聊天记录中的本地数据（核心业务逻辑）
  * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
  * 
@@ -1183,6 +1231,14 @@ async function deleteLocalDataInChatCoreInner_ACU(
                 deletedCount++;
             }
         }
+    }
+
+    // 旧版“表头清单”固定挂在 chat[0]，与楼层范围无关，因此只在删除覆盖完整范围时清理，
+    // 避免局部删除误删仍被其他楼层依赖的兼容指导数据。
+    const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
+        && (endFloor === null || endFloor >= aiMessageIndices.length);
+    if (isFullRangeDeletion && clearLegacyTableHeaderGuide_ACU(chat, mode, currentIsolationKey)) {
+        deletedCount++;
     }
 
     if (deletedCount > 0) {
