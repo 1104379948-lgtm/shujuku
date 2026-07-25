@@ -39738,8 +39738,13 @@ $CONTENT
                     // reveal 目标集合：包括显式 reveal change，以及"introduction 但历史存在(active 无)"自动转 reveal 的 sheetKey。
                     const revealDataBySheet = new Map();
                     for (const change of requestedChanges.filter(item => item.kind === 'introduction')) {
+                        // 已被 hide 的表不算“仍活跃”：hide 的语义就是把该表从 active state 移除。
+                        // 若把 hide checkpoint 也当作活跃，重新切回带该表的模板时会永远走不到 reveal 分支，
+                        // 而被误判成“重复引入”直接拒绝。
+                        const existingSheetCheckpoint = (frame.perSheetCheckpoints || {})[change.sheetKey];
+                        const checkpointMarksHidden = existingSheetCheckpoint?.timeline?.kind === 'sheet_hide';
                         const activeHas = Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey)
-                            || Object.prototype.hasOwnProperty.call(frame.perSheetCheckpoints || {}, change.sheetKey);
+                            || (!!existingSheetCheckpoint && !checkpointMarksHidden);
                         const historyHas = historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, change.sheetKey);
                         if (activeHas) {
                             // 仍活跃：既非全新，也非可恢复的隐藏表 → 保持 introduction 冲突防覆盖语义。
@@ -39753,6 +39758,13 @@ $CONTENT
                             if (revealSource) {
                                 // 能定位到可信历史可见数据 → 曾被隐藏的表，reveal 恢复"离开时最新状态"（语义1）。
                                 revealDataBySheet.set(change.sheetKey, revealSource);
+                                continue;
+                            }
+                            // bounded replay 粒度是楼层：同一楼内 hide 的表无法靠"更早楼层"找回可见状态。
+                            // 此时改用本 frame hide checkpoint 的 data —— 它就是该表被隐藏前的完整状态，
+                            // 是可信来源（由 hide 提交时的 locateRevealSourceSheetData_ACU 写入），不是臆造。
+                            if (checkpointMarksHidden && isObjectRecord_ACU$1(existingSheetCheckpoint?.data)) {
+                                revealDataBySheet.set(change.sheetKey, deepClone_ACU$1(existingSheetCheckpoint.data));
                                 continue;
                             }
                             // 定位不到可信数据（含历史畸形、无法证伪）→ 保持 introduction 保守拒绝，绝不基于损坏历史覆盖。

@@ -1732,6 +1732,37 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(mocks.setGuide).not.toHaveBeenCalled();
     expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
   });
+  it('同一楼 hide 过的表重新引入时自动转 reveal，恢复隐藏前数据（切回多表模板不再报错）', async () => {
+    // 复现：切多表模板（introduce）→ 切回默认（hide）→ 再切回多表模板。
+    // hide checkpoint 的语义是“该表已不活跃”，不能被当成“仍活跃”而拒绝重新引入。
+    const hiddenData = { ...sheetB, uid: 'sheet_hidden', name: '主角装备表', content: [['row_id', 'value'], ['1', '隐藏前的数据']] };
+    const message = seedFrame({
+      logEntries: [],
+      perSheetCheckpoints: {
+        sheet_hidden: {
+          kind: 'sheet_full', createdAt: 10, reason: 'schema_change', sheetKey: 'sheet_hidden',
+          data: hiddenData,
+          timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 1 },
+        },
+      },
+    });
+    // active replay state 里该表不存在（已隐藏）。
+    mocks.loadReplayState.mockResolvedValue(message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_hidden', sheetData: hiddenData }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_hidden: { name: '主角装备表' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    expect(revived?.timeline?.kind).toBe('sheet_reveal');
+    expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '隐藏前的数据']]);
+  });
+
+
 
   it('replay state 已存在同名 sheet 但 target frame 无 shard 时拒绝 introduction 且零写入', async () => {
     const message = seedFrame({ logEntries: [], perSheetCheckpoints: {} });
