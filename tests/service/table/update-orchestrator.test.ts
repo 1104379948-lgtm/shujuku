@@ -2999,6 +2999,40 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
+  it('SQL 模式下模板范围外的表连 SQL 一起屏蔽，不执行也不写增量', async () => {
+    // 回归：若只收窄 keysToSave 而仍执行 SQL，会在运行时改动范围外的表
+    // 并写出挂在缺表 checkpoint 上的孤立增量，回放时报 no such table。
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const inventoryDDL = `CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);`;
+    const questDDL = `CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);`;
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
+      sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: inventoryDDL }, content: [['row_id', 'value'], ['1', 'base-a']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_1: { uid: 'quest_log', name: '表B', sourceData: { ddl: questDDL }, content: [['row_id', 'value'], ['1', 'base-b']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    const responses = [
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (2, 'sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO quest_log VALUES (2, 'sql-b');</tableEdit>", tableEditText: "INSERT INTO quest_log VALUES (2, 'sql-b');", job: { groupKey: 'b', groupId: 2, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+    ];
+    // 模板范围只声明 sheet_0。
+    mockResolveTemplateScope.mockReturnValue({ sheetKeys: new Set(['sheet_0']), sheets: {} } as any);
+    try {
+      mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+      const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+      expect(result.success).toBe(true);
+      const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+      // 只剩 sheet_0 的增量；范围外的 sheet_1 既不执行也不写入。
+      expect(savePayload.operations.map((op: any) => op.sheetKey)).toEqual(['sheet_0']);
+      expect(savePayload.operations.some((op: any) => op.sheetKey === 'sheet_1')).toBe(false);
+    } finally {
+      mockResolveTemplateScope.mockReturnValue(null as any);
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
+
   it('SQL 模式下混合 SQL/非 SQL 响应直接失败，不退化为快照写入', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(isSqliteMode).mockReturnValue(true);

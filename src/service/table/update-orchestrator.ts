@@ -901,8 +901,19 @@ export async function applyUnifiedGroupFillResponses_ACU(
     if (allResponsesAreRuntimeSql) {
         const operations: TableMutationOperationV2_ACU[] = [];
         const sqlTexts: string[] = [];
+        // 与 sqlTexts 一一对应的 response，避免屏蔽后按索引取值错位。
+        const sqlResponses: typeof sortedResponses = [];
+        // 模板只起指导作用：范围外的表连 SQL 一起屏蔽。
+        // 只屏蔽写入而仍执行 SQL，会在运行时改动范围外的表并产生无法回放的孤立增量。
+        const sqlScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+        const sqlScopedKeys = (keys: readonly string[]) => filterSheetKeysByTemplateScope_ACU(keys, sqlScope);
 
         for (const response of sortedResponses) {
+            const scopedTargets = sqlScopedKeys(response.job.targetSheetKeys || []);
+            if ((response.job.targetSheetKeys || []).length > 0 && scopedTargets.length === 0) {
+                logDebug_ACU(`[TemplateScope] group ${response.job.groupKey} 的目标表不在模板范围内，已屏蔽其 SQL。`);
+                continue;
+            }
             let sqlText: string;
             try {
                 sqlText = rebindSqlMutationTableIdentifiers_ACU([response.tableEditText || ''], baseSnapshot as any)[0];
@@ -926,6 +937,13 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 }
             }
             sqlTexts.push(sqlText);
+            sqlResponses.push(response);
+        }
+
+        if (sqlTexts.length === 0) {
+            // 全部目标表都在模板范围外：无需执行也无需提交，避免写出空 entry。
+            logDebug_ACU('[TemplateScope] 本次 SQL 填表的目标表全部在模板范围外，已跳过提交。');
+            return { success: true, modifiedKeys: [], tableData: baseSnapshot as any };
         }
 
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
@@ -993,7 +1011,9 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 options.saveTargetIndex,
             );
             if (hasCheckpointAnchor) {
-                sortedResponses.forEach((response, index) => {
+                // 只遍历实际执行过的 SQL（范围外的表已在收集阶段整条屏蔽），
+                // 因此 sqlResponses 与 sqlTexts 一一对应，不会错位。
+                sqlResponses.forEach((response, index) => {
                     const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
                     if (operationBuild.success === false) {
                         throw new Error(`统一提交失败：group ${response.job.groupKey} ${operationBuild.error}`);
@@ -1127,7 +1147,14 @@ export async function applyUnifiedGroupFillResponses_ACU(
         );
         let effectiveOperations: TableMutationOperationV2_ACU[] = [];
         if (hasCheckpointAnchor) {
-            effectiveOperations = [...operations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')];
+            // operations 必须与 keysToSave 用同一份模板范围：若为范围外的表写增量，
+            // 而 checkpoint 又不含该表，回放时会建不出表并以 no such table 失败。
+            const scopedOperations = operations.filter(operation => {
+                const sheetKey = (operation as any)?.sheetKey;
+                if (typeof sheetKey !== 'string' || !sheetKey.startsWith('sheet_')) return true;
+                return scopedKeys([sheetKey]).length > 0;
+            });
+            effectiveOperations = [...scopedOperations, ...buildSheetReplaceOperationsFromData_ACU(workingTableData, keysToSave, 'system')];
         } else {
             // 本次写入将成为初始 full checkpoint，afterData 快照已包含全部结果；
             // 记录日志便于区分“按设计走 checkpoint”与“锚点判定异常导致数据未落增量”。
