@@ -475,7 +475,7 @@ function mergeGuideStructureIntoBaseData_ACU(data: Record<string, any>): Record<
 async function loadV2ReplayMergeBase_ACU(
     batchNumber: number,
     options: { maxMessageIndex?: number } = {},
-): Promise<{ data: Record<string, any> | null; attempted: boolean }> {
+): Promise<{ data: Record<string, any> | null; attempted: boolean; failed?: string }> {
     const chat = getChatArray_ACU();
     if (!Array.isArray(chat) || chat.length === 0) return { data: null, attempted: false };
 
@@ -496,8 +496,12 @@ async function loadV2ReplayMergeBase_ACU(
         logDebug_ACU(`[Batch ${batchNumber}] Using V2 replay state as merge base (${scope}).`);
         return { data: mergedData, attempted: true };
     } catch (error) {
-        logWarn_ACU(`[Batch ${batchNumber}] V2 replay merge base failed; fallback guarded by scope.`, error);
-        return { data: null, attempted: true };
+        // 回放异常与「边界内确实没有数据」必须区分开。
+        // 回放坏掉时若退化成空模板基底，AI 会以为表是空的并生成 INSERT，
+        // 写下的增量与真实基底同 row_id 冲突（UNIQUE constraint failed），坏数据继续扩散。
+        const message = error instanceof Error ? error.message : String(error);
+        logError_ACU(`[Batch ${batchNumber}] V2 replay merge base failed; 已中止本批填表以避免写出冲突增量。`, error);
+        return { data: null, attempted: true, failed: message };
     }
 }
 
@@ -539,6 +543,14 @@ export async function buildBatchMergeBase_ACU(
         if (hasBoundedScope) {
             const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options);
             if (v2ReplayResult.data) return { data: v2ReplayResult.data, error: null };
+            if (v2ReplayResult.failed) {
+                // 回放坏了：绝不能退化为空基底去填表，否则 AI 会按空表生成 INSERT，
+                // 与真实基底的同 row_id 冲突，把损坏继续放大。
+                return {
+                    data: null,
+                    error: `历史表格数据回放失败，已中止填表以避免写出冲突增量：${v2ReplayResult.failed}`,
+                };
+            }
             // 有历史边界时不能让 SQLite latest runtime 越过 maxMessageIndex；
             // 若当前聊天已进入 V2 replay 语义但边界内无可用基底，同样不能退回最新 runtime，
             // 否则会把目标范围之后的未来表格状态带回 prompt。只有非 SQLite 且未命中 V2 replay
@@ -556,6 +568,12 @@ export async function buildBatchMergeBase_ACU(
 
         const v2ReplayResult = await loadV2ReplayMergeBase_ACU(batchNumber, options);
         if (v2ReplayResult.data) return { data: v2ReplayResult.data, error: null };
+        if (v2ReplayResult.failed) {
+            return {
+                data: null,
+                error: `历史表格数据回放失败，已中止填表以避免写出冲突增量：${v2ReplayResult.failed}`,
+            };
+        }
 
         // 指定了历史边界时，若当前聊天是 V2 但边界前没有可重放 checkpoint，不能退回“最新运行时快照”，
         // 否则会把目标楼之后的表格数据喂给本批次；此时应按空指导表/模板从零开始。
