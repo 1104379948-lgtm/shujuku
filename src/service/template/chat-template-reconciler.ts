@@ -375,6 +375,29 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
     }
   }
 
+  // 列改名后 canonical 不再相等，靠 columnAliases 的历史显示名声明认回同一列，
+  // 使数据继续继承。这是显式声明驱动，不做启发式推断：
+  // 一个别名必须唯一命中一个未匹配的旧列，否则宁可不继承，也不把无关字段混进来。
+  const aliasCanonicalToPhysical = buildColumnAliasIndex_ACU(before, template);
+  for (const target of targetEntries) {
+    if (matchedTargetCanonical.has(target.canonical)) continue;
+    const aliasCanonicals = aliasCanonicalToPhysical.get(target.physical.toLowerCase());
+    if (!aliasCanonicals) continue;
+    const candidates = [...new Set(aliasCanonicals)]
+      .map(alias => beforeByCanonical.get(alias))
+      .filter((entry): entry is typeof beforeEntries[number] => !!entry && !matchedBeforeCanonical.has(entry.canonical));
+    const unique = [...new Map(candidates.map(entry => [entry.canonical, entry])).values()];
+    if (unique.length !== 1) continue;
+    const source = unique[0];
+    matchedBeforeCanonical.add(source.canonical);
+    matchedTargetCanonical.add(target.canonical);
+    targetSourceByCanonical.set(target.canonical, source);
+    inheritedColumns.push(target.header);
+    if (source.physical !== target.physical) {
+      mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
+    }
+  }
+
   const hiddenEntries = beforeEntries.filter(column => !matchedBeforeCanonical.has(column.canonical));
   const hiddenColumns = hiddenEntries.map(column => column.header);
   const addedColumns = targetEntries.filter(column => !matchedTargetCanonical.has(column.canonical)).map(column => column.header);
@@ -438,6 +461,22 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
     .map(name => candidatePhysical.get(name.toLowerCase())!);
   if (previousHidden.length > 0 || hiddenPhysicalColumns.length > 0) sheet.sourceData.hiddenPhysicalColumns = hiddenPhysicalColumns;
   else delete sheet.sourceData.hiddenPhysicalColumns;
+  // 记下本次发生的显示名变更，使后续切换仍能顺着别名链认回同一列。
+  const renamedColumns = targetEntries
+    .map(target => {
+      const source = targetSourceByCanonical.get(target.canonical);
+      if (!source || source.canonical === target.canonical) return null;
+      const physicalName = source.physical;
+      return { physicalName, previousHeader: source.header, nextHeader: target.header };
+    })
+    .filter((entry): entry is { physicalName: string; previousHeader: string; nextHeader: string } => !!entry);
+  accumulateColumnAliases_ACU(
+    sheet,
+    before,
+    template,
+    renamedColumns,
+    new Set([...effectiveTargetColumns, ...retainedHiddenColumns].map(column => column.sqlName.toLowerCase())),
+  );
   delete sheet.seedRows;
   const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
   const beforeProjection = clone_ACU(before); delete beforeProjection.seedRows;
@@ -464,6 +503,79 @@ function renamePhysicalColumn_ACU(
   }
   return { ...column, sqlName: nextSqlName, normalizedDefinition: `${nextSqlName}${remainder}` };
 }
+
+/**
+ * 汇总旧表与模板声明的 columnAliases，得到 physical column name(lowercase) → canonical 历史显示名列表。
+ * 两侧都参与：模板作者可声明“新列对应哪个旧名”，旧表则携带历史累积的别名。
+ */
+function buildColumnAliasIndex_ACU(before: Sheet_ACU, template: Sheet_ACU): Map<string, string[]> {
+  const index = new Map<string, string[]>();
+  const absorb = (sheet: Sheet_ACU): void => {
+    const raw = (sheet.sourceData as Record<string, any> | undefined)?.columnAliases;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    for (const [physicalName, aliases] of Object.entries(raw)) {
+      const key = String(physicalName || '').trim().toLowerCase();
+      if (!key || !Array.isArray(aliases)) continue;
+      const canonicals = (aliases as unknown[])
+        .map(alias => canonicalizeDisplayName_ACU(alias))
+        .filter(Boolean);
+      if (canonicals.length === 0) continue;
+      index.set(key, [...(index.get(key) || []), ...canonicals]);
+    }
+  };
+  absorb(before);
+  absorb(template);
+  return index;
+}
+
+/**
+ * 累积列别名：已确认同一身份但显示名变了的列，把旧显示名记入该物理列的别名。
+ * 仅保留当前 DDL 中仍存在的物理列，避免别名无限膨胀。
+ */
+function accumulateColumnAliases_ACU(
+  sheet: Sheet_ACU,
+  before: Sheet_ACU,
+  template: Sheet_ACU,
+  renamed: Array<{ physicalName: string; previousHeader: string; nextHeader: string }>,
+  livePhysicalNames: Set<string>,
+): void {
+  const merged = new Map<string, string[]>();
+  const absorb = (source: Sheet_ACU): void => {
+    const raw = (source.sourceData as Record<string, any> | undefined)?.columnAliases;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    for (const [physicalName, aliases] of Object.entries(raw)) {
+      const key = String(physicalName || '').trim();
+      if (!key || !Array.isArray(aliases)) continue;
+      merged.set(key, [
+        ...(merged.get(key) || []),
+        ...(aliases as unknown[]).map(alias => String(alias || '')).filter(Boolean),
+      ]);
+    }
+  };
+  absorb(before);
+  absorb(template);
+  for (const entry of renamed) {
+    merged.set(entry.physicalName, [
+      ...(merged.get(entry.physicalName) || []),
+      entry.previousHeader,
+      entry.nextHeader,
+    ]);
+  }
+
+  const normalized: Record<string, string[]> = {};
+  for (const [physicalName, aliases] of merged) {
+    if (!livePhysicalNames.has(physicalName.toLowerCase())) continue;
+    // 保留该物理列用过的全部历史显示名（含变更前后两侧），别名链才不会在
+    // 「A→B 之后再 B→A」这类往复改名中断开。当前显示名一并留下是有意的：
+    // 它是下一次协调时 before 侧的名字，必须能被查到。
+    const unique = [...new Set(aliases.map(alias => alias.trim()).filter(Boolean))];
+    if (unique.length > 0) normalized[physicalName] = unique;
+  }
+
+  if (Object.keys(normalized).length > 0) (sheet.sourceData as Record<string, any>).columnAliases = normalized;
+  else delete (sheet.sourceData as Record<string, any>).columnAliases;
+}
+
 
 
 function buildRetainedColumnDDL_ACU(before: Sheet_ACU, template: Sheet_ACU, targetColumns: ReturnType<typeof parseDDLColumnInfos_ACU>, targetHeaders: string[], retainedColumns: ReturnType<typeof parseDDLColumnInfos_ACU>, retainedHeaders: string[]): string {

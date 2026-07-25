@@ -64,6 +64,78 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(accepted.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' })]);
   });
 
+  it('模板声明 columnAliases 时，列改名仍能继承数据', async () => {
+    const baseline = state({
+      sheet_g: sheet('sheet_g', '表', ['row_id', '上轮场景时间'],
+        'row_id INTEGER PRIMARY KEY,\n  last_round_time TEXT -- 上轮场景时间', [['1', 'T0']]),
+    });
+    // 新模板把显示名改成「前一轮时间」，并声明它的旧名。
+    const template = state({
+      sheet_g2: sheet('sheet_g2', '表', ['row_id', '前一轮时间'],
+        'row_id INTEGER PRIMARY KEY,\n  last_round_time TEXT -- 前一轮时间'),
+    });
+    template.sheet_g2.sourceData.columnAliases = { last_round_time: ['上轮场景时间'] };
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    // 数据跟着新显示名继承过来，没有变成空值。
+    expect(plan.candidateData.sheet_g.content).toEqual([['row_id', '前一轮时间'], ['1', 'T0']]);
+    // 旧列没有被降级成隐藏列。
+    expect(plan.candidateData.sheet_g.sourceData.hiddenPhysicalColumns || []).toEqual([]);
+    expect(plan.audit[0].inheritedColumns).toContain('前一轮时间');
+  });
+
+  it('改名后自动累积别名，再改一次仍能顺别名链继承', async () => {
+    const baseline = state({
+      sheet_g: sheet('sheet_g', '表', ['row_id', '上轮场景时间'],
+        'row_id INTEGER PRIMARY KEY,\n  last_round_time TEXT -- 上轮场景时间', [['1', 'T0']]),
+    });
+    const template1 = state({
+      sheet_g2: sheet('sheet_g2', '表', ['row_id', '前一轮时间'],
+        'row_id INTEGER PRIMARY KEY,\n  last_round_time TEXT -- 前一轮时间'),
+    });
+    template1.sheet_g2.sourceData.columnAliases = { last_round_time: ['上轮场景时间'] };
+
+    const first = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template1, destructiveChangeConfirmed: false });
+    expect(first.blockers).toEqual([]);
+    // 数据已按声明继承，且旧显示名被累积进该物理列的别名。
+    expect(first.candidateData.sheet_g.content).toEqual([['row_id', '前一轮时间'], ['1', 'T0']]);
+    expect(first.candidateData.sheet_g.sourceData.columnAliases.last_round_time).toContain('上轮场景时间');
+
+    // 第二次改名：无需再次声明，靠累积的别名链认回。
+    const template2 = state({
+      sheet_g3: sheet('sheet_g3', '表', ['row_id', '上轮场景时间'],
+        'row_id INTEGER PRIMARY KEY,\n  last_round_time TEXT -- 上轮场景时间'),
+    });
+    const second = await reconcileChatTemplate_ACU({
+      baselineData: first.candidateData,
+      templateData: template2,
+      destructiveChangeConfirmed: false,
+    });
+    expect(second.blockers).toEqual([]);
+    expect(second.candidateData.sheet_g.content).toEqual([['row_id', '上轮场景时间'], ['1', 'T0']]);
+  });
+
+  it('没有别名声明时不猜：列改名仍按新增列处理，旧列隐藏保留', async () => {
+    const baseline = state({
+      sheet_g: sheet('sheet_g', '表', ['row_id', '上轮场景时间'],
+        'row_id INTEGER PRIMARY KEY,\n  last_round_time TEXT -- 上轮场景时间', [['1', 'T0']]),
+    });
+    const template = state({
+      sheet_g2: sheet('sheet_g2', '表', ['row_id', '无关新列'],
+        'row_id INTEGER PRIMARY KEY,\n  unrelated TEXT -- 无关新列'),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    // 新列为空，旧列作为隐藏列保留原值——不把两列混为一谈。
+    expect(plan.candidateData.sheet_g.content).toEqual([['row_id', '无关新列', '上轮场景时间'], ['1', null, 'T0']]);
+    expect(plan.candidateData.sheet_g.sourceData.hiddenPhysicalColumns).toEqual(['last_round_time']);
+  });
+
+
   it('canonical 相同但模板物理列名不同时，沁用既有物理列名，不随模板改名', async () => {
     // 列身份由 canonical 显示名判定；物理列名一旦确立就不能变。
     // 否则历史 log 里按旧物理名书写的 SQL 回放时会撞 "has no column named ..."。
