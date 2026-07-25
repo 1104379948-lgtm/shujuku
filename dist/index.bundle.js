@@ -39608,6 +39608,10 @@ $CONTENT
                     const templateSnapshot = deepClone_ACU$1(options.templateSource);
                     await assertValidInitialTemplateSnapshot_ACU(templateSnapshot, options.guideData);
                     for (const change of requestedChanges) {
+                        // hide 的语义就是把该表从活跃模板中移除，因此它不会出现在新的 templateSource
+                        // 快照里；这里要求快照包含它会让「隐藏表 + 无 checkpoint」的切换直接失败。
+                        if (change.kind === 'hide')
+                            continue;
                         const snapshotSheet = templateSnapshot[change.sheetKey];
                         if (!isObjectRecord_ACU$1(snapshotSheet) || !Array.isArray(snapshotSheet.content)) {
                             throw new Error(`预填表模板提交的 templateSource 缺少变更 Sheet：${change.sheetKey}。`);

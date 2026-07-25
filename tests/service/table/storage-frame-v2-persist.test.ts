@@ -938,6 +938,40 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
+  it('pristine 聊天提交 hide 变更时不要求 templateSource 包含被隐藏表', async () => {
+    // 复现：无数据（无 full checkpoint）的聊天切模板，reconciler 会为模板中缺失的
+    // 旧表产出 hide 变更，同时把它从 candidateData（即 templateSource）删除。
+    // hide 的语义就是该表不再活跃，因此不能要求快照里还包含它。
+    const message = { is_user: false } as any;
+    mocks.chat.push(message);
+    const templateSource = { mate: { type: 'acu' }, sheet_a: sheetA };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [
+        { kind: 'hide', sheetKey: 'sheet_b', sheetData: sheetB },
+        {
+          kind: 'operations',
+          sheetKey: 'sheet_a',
+          targetSheetData: sheetA,
+          operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+        },
+      ],
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource,
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit', messageIndex: 0 });
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.checkpoint).toMatchObject({ kind: 'full', reason: 'init' });
+    // 被隐藏的表不进新初始基线。
+    expect(frame.checkpoint.data.sheet_b).toBeUndefined();
+    expect(frame.checkpoint.data.sheet_a.content).toEqual([['row_id', 'value']]);
+  });
+
+
 
   it('显式 baseRevision 在事务进入前透传，且 stale plan 在任何模板副作用前被拒绝', async () => {
     const message = seedFrame({ logEntries: [] });
