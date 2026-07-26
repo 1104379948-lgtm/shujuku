@@ -3,6 +3,8 @@ import { clearVectorIndexTempCache_ACU, deleteVectorIndexCacheByIndex_ACU } from
 import { clearSummaryVectorHotCache_ACU, deleteSummaryVectorHotCacheByIndex_ACU } from '../../data/storage/vector-index-hot-cache';
 import { getLatestSummaryVectorIndexSnapshotState_ACU } from './summary-vector-index-state-service';
 import { loadSummaryVectorIndexChunksFromManifest_ACU } from './summary-vector-index-storage-service';
+import { clearSummaryVectorIndexLayerFromChat_ACU } from './summary-vector-index-chat-service';
+import { enqueueSummaryVectorIndexFlush_ACU } from './summary-vector-index-flush-queue';
 
 export interface SummaryVectorIndexCachePreloadResult_ACU {
     success: boolean;
@@ -36,21 +38,35 @@ function normalizeErrorMessage_ACU(error: unknown): string {
 export function isMissingExternalVectorFileError_ACU(message: string): boolean {
     const text = String(message || '').toLowerCase();
     const isVectorFileReadFailure = text.includes('交火向量索引分片读取失败')
-        || text.includes('交火向量索引内容块读取失败');
-    return isVectorFileReadFailure
-        && (text.includes('404') || text.includes('not found') || text.includes('读取失败'));
+        || text.includes('交火向量索引内容块读取失败')
+        || text.includes('交火向量单文件快照读取失败');
+    return isVectorFileReadFailure && /读取失败\s+404(?:\s*:|\b)/.test(text);
+}
+
+export interface ClearMissingSummaryVectorIndexResult_ACU {
+    chatStateCleared: boolean;
+    cacheCleared: boolean;
 }
 
 export async function clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU(params: {
     messageIndex: number;
     isolationKey: string;
     indexId: string;
-}): Promise<boolean> {
-    void params.messageIndex;
-    void params.isolationKey;
-    await deleteVectorIndexCacheByIndex_ACU(params.indexId);
-    await deleteSummaryVectorHotCacheByIndex_ACU(params.indexId);
-    return false;
+}): Promise<ClearMissingSummaryVectorIndexResult_ACU> {
+    const chatStateCleared = await clearSummaryVectorIndexLayerFromChat_ACU(params);
+    const cacheResults = await Promise.allSettled([
+        deleteVectorIndexCacheByIndex_ACU(params.indexId),
+        deleteSummaryVectorHotCacheByIndex_ACU(params.indexId),
+    ]);
+    cacheResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+            logWarn_ACU(`[交火向量索引] 失效指针已删除，但${index === 0 ? '临时' : '热'}缓存清理失败，将继续重建:`, result.reason);
+        }
+    });
+    return {
+        chatStateCleared,
+        cacheCleared: cacheResults.every((result) => result.status === 'fulfilled'),
+    };
 }
 
 export async function clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU(params: {
@@ -118,22 +134,51 @@ export async function preloadSummaryVectorIndexCacheForCurrentChat_ACU(): Promis
     } catch (error) {
         const message = normalizeErrorMessage_ACU(error);
         if (isMissingExternalVectorFileError_ACU(message)) {
-            const chatStateCleared = latestLayer
-                ? await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
-                    messageIndex: latestLayer.messageIndex,
-                    isolationKey: latestLayer.isolationKey,
-                    indexId: manifest.indexId,
+            let chatStateCleared = false;
+            let cacheCleared = false;
+            try {
+                const clearResult = latestLayer && manifest.indexId
+                    ? await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
+                        messageIndex: latestLayer.messageIndex,
+                        isolationKey: latestLayer.isolationKey,
+                        indexId: manifest.indexId,
+                    })
+                    : { chatStateCleared: false, cacheCleared: false };
+                chatStateCleared = clearResult.chatStateCleared;
+                cacheCleared = clearResult.cacheCleared;
+            } catch (clearError) {
+                logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，但严格删除失效索引指针失败:', clearError);
+                return { success: false, skipped: true, reason: 'external_files_missing_state_clear_save_failed', chunkCount: 0, indexId: manifest.indexId, error: normalizeErrorMessage_ACU(clearError), cacheCleared: false, chatStateCleared: false };
+            }
+            const queued = chatStateCleared
+                ? await enqueueSummaryVectorIndexFlush_ACU({
+                    targetMessageIndex: latestLayer?.messageIndex,
+                    isolationKey: latestLayer?.isolationKey,
+                    sourceTableKey: manifest.sourceTableKey,
+                    mode: 'sync',
+                    debounceMs: 0,
+                    reason: 'self_heal_external_files_missing',
                 })
-                : false;
-            logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，已清空对应缓存并保留聊天索引状态:', message);
+                : { queued: false, reason: 'chat_state_clear_failed' };
+            if (chatStateCleared && queued.queued) {
+                logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，已删除失效索引指针并入队重建:', message);
+            } else if (chatStateCleared) {
+                logWarn_ACU(`[交火向量索引] 当前聊天外置向量文件缺失，已删除失效索引指针，但重建入队失败：reason=${queued.reason || 'unknown'}`, message);
+            } else {
+                logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，但失效索引指针未能安全删除；拒绝盲目重建:', message);
+            }
             return {
                 success: true,
                 skipped: true,
-                reason: 'external_files_missing_cache_cleared_state_retained',
+                reason: !chatStateCleared
+                    ? 'external_files_missing_state_clear_failed'
+                    : queued.queued
+                    ? 'external_files_missing_state_cleared_rebuild_queued'
+                    : 'external_files_missing_state_cleared_rebuild_rejected',
                 chunkCount: 0,
                 indexId: manifest.indexId,
                 error: message,
-                cacheCleared: true,
+                cacheCleared,
                 chatStateCleared,
             };
         }

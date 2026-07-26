@@ -96308,6 +96308,87 @@ $CONTENT
         return result.finalMessage;
     }
 
+    function getCurrentSummaryVectorIndexSourceTableKey_ACU() {
+        const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+            ? currentJsonTableData_ACU
+            : null;
+        if (!tables)
+            return 'summary';
+        return Object.keys(tables).find((key) => {
+            const table = tables[key];
+            return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
+        }) || 'summary';
+    }
+    async function clearSummaryVectorIndexLayerFromChat_ACU(params) {
+        const chat = getChatArray_ACU();
+        const message = Array.isArray(chat) ? chat[params.messageIndex] : null;
+        if (!message || message.is_user)
+            return false;
+        const nextIsolatedData = cloneIsolatedData_ACU(message);
+        const tagData = nextIsolatedData[params.isolationKey];
+        if (!tagData || typeof tagData !== 'object')
+            return false;
+        const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
+        if (!manifest || String(manifest.indexId || '') !== String(params.indexId || ''))
+            return false;
+        const previousIsolatedData = {
+            exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
+            value: message.TavernDB_ACU_IsolatedData,
+        };
+        assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+        try {
+            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+            writeIsolatedTagData_ACU(message, params.isolationKey, tagData);
+            await saveChatToHostStrict_ACU();
+            return true;
+        }
+        catch (error) {
+            if (previousIsolatedData.exists)
+                message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
+            else
+                delete message.TavernDB_ACU_IsolatedData;
+            throw error;
+        }
+    }
+    async function deleteCurrentSummaryVectorIndexFromChat_ACU() {
+        const snapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
+        const chat = getChatArray_ACU();
+        const scopeHints = new Map();
+        let changed = false;
+        if (snapshot?.layers?.length) {
+            for (const layer of snapshot.layers) {
+                const message = chat[layer.messageIndex];
+                if (!message || message.is_user)
+                    continue;
+                const tagData = readIsolatedTagData_ACU(message, layer.isolationKey);
+                if (!tagData)
+                    continue;
+                const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
+                if (manifest) {
+                    const hint = {
+                        chatKey: manifest.chatKey || currentChatFileIdentifier_ACU,
+                        isolationKey: manifest.isolationKey || layer.isolationKey,
+                        sourceTableKey: manifest.sourceTableKey || getCurrentSummaryVectorIndexSourceTableKey_ACU(),
+                    };
+                    scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
+                }
+                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
+                changed = true;
+            }
+        }
+        if (changed) {
+            await saveChatToHost_ACU();
+        }
+        const scopeHintList = Array.from(scopeHints.values());
+        for (const hint of scopeHintList) {
+            await deleteSummaryVectorHotCacheByScope_ACU(hint);
+            await clearSummaryVectorFlushTasksByScope_ACU(hint);
+        }
+        const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: scopeHintList });
+        return changed || gcResult.deletedPaths.length > 0 || gcResult.failedDeletes.length > 0;
+    }
+
     async function clearAllSummaryVectorIndexCaches_ACU() {
         await Promise.all([
             clearVectorIndexTempCache_ACU(),
@@ -96330,16 +96411,25 @@ $CONTENT
     function isMissingExternalVectorFileError_ACU(message) {
         const text = String(message || '').toLowerCase();
         const isVectorFileReadFailure = text.includes('交火向量索引分片读取失败')
-            || text.includes('交火向量索引内容块读取失败');
-        return isVectorFileReadFailure
-            && (text.includes('404') || text.includes('not found') || text.includes('读取失败'));
+            || text.includes('交火向量索引内容块读取失败')
+            || text.includes('交火向量单文件快照读取失败');
+        return isVectorFileReadFailure && /读取失败\s+404(?:\s*:|\b)/.test(text);
     }
     async function clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU(params) {
-        void params.messageIndex;
-        void params.isolationKey;
-        await deleteVectorIndexCacheByIndex_ACU(params.indexId);
-        await deleteSummaryVectorHotCacheByIndex_ACU(params.indexId);
-        return false;
+        const chatStateCleared = await clearSummaryVectorIndexLayerFromChat_ACU(params);
+        const cacheResults = await Promise.allSettled([
+            deleteVectorIndexCacheByIndex_ACU(params.indexId),
+            deleteSummaryVectorHotCacheByIndex_ACU(params.indexId),
+        ]);
+        cacheResults.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                logWarn_ACU(`[交火向量索引] 失效指针已删除，但${index === 0 ? '临时' : '热'}缓存清理失败，将继续重建:`, result.reason);
+            }
+        });
+        return {
+            chatStateCleared,
+            cacheCleared: cacheResults.every((result) => result.status === 'fulfilled'),
+        };
     }
     async function clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU(params) {
         void params.messageIndex;
@@ -96399,22 +96489,54 @@ $CONTENT
         catch (error) {
             const message = normalizeErrorMessage_ACU(error);
             if (isMissingExternalVectorFileError_ACU(message)) {
-                const chatStateCleared = latestLayer
-                    ? await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
-                        messageIndex: latestLayer.messageIndex,
-                        isolationKey: latestLayer.isolationKey,
-                        indexId: manifest.indexId,
+                let chatStateCleared = false;
+                let cacheCleared = false;
+                try {
+                    const clearResult = latestLayer && manifest.indexId
+                        ? await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
+                            messageIndex: latestLayer.messageIndex,
+                            isolationKey: latestLayer.isolationKey,
+                            indexId: manifest.indexId,
+                        })
+                        : { chatStateCleared: false, cacheCleared: false };
+                    chatStateCleared = clearResult.chatStateCleared;
+                    cacheCleared = clearResult.cacheCleared;
+                }
+                catch (clearError) {
+                    logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，但严格删除失效索引指针失败:', clearError);
+                    return { success: false, skipped: true, reason: 'external_files_missing_state_clear_save_failed', chunkCount: 0, indexId: manifest.indexId, error: normalizeErrorMessage_ACU(clearError), cacheCleared: false, chatStateCleared: false };
+                }
+                const queued = chatStateCleared
+                    ? await enqueueSummaryVectorIndexFlush_ACU({
+                        targetMessageIndex: latestLayer?.messageIndex,
+                        isolationKey: latestLayer?.isolationKey,
+                        sourceTableKey: manifest.sourceTableKey,
+                        mode: 'sync',
+                        debounceMs: 0,
+                        reason: 'self_heal_external_files_missing',
                     })
-                    : false;
-                logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，已清空对应缓存并保留聊天索引状态:', message);
+                    : { queued: false, reason: 'chat_state_clear_failed' };
+                if (chatStateCleared && queued.queued) {
+                    logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，已删除失效索引指针并入队重建:', message);
+                }
+                else if (chatStateCleared) {
+                    logWarn_ACU(`[交火向量索引] 当前聊天外置向量文件缺失，已删除失效索引指针，但重建入队失败：reason=${queued.reason || 'unknown'}`, message);
+                }
+                else {
+                    logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，但失效索引指针未能安全删除；拒绝盲目重建:', message);
+                }
                 return {
                     success: true,
                     skipped: true,
-                    reason: 'external_files_missing_cache_cleared_state_retained',
+                    reason: !chatStateCleared
+                        ? 'external_files_missing_state_clear_failed'
+                        : queued.queued
+                            ? 'external_files_missing_state_cleared_rebuild_queued'
+                            : 'external_files_missing_state_cleared_rebuild_rejected',
                     chunkCount: 0,
                     indexId: manifest.indexId,
                     error: message,
-                    cacheCleared: true,
+                    cacheCleared,
                     chatStateCleared,
                 };
             }
@@ -96807,9 +96929,11 @@ $CONTENT
         const manifestPath = normalizeText_ACU(manifest.manifestFile);
         return !!manifestPath && manifest.rowsFile === manifestPath && manifest.tombstoneFile === manifestPath;
     }
-    async function enqueueSummaryVectorIndexRebuild_ACU(layer, reason) {
+    async function enqueueSummaryVectorIndexRebuild_ACU(layer, reason, manifest = layer?.summaryVectorIndexState?.manifest) {
         const queued = await enqueueSummaryVectorIndexFlush_ACU({
             targetMessageIndex: layer?.messageIndex,
+            isolationKey: layer?.isolationKey,
+            sourceTableKey: manifest?.sourceTableKey,
             mode: 'sync',
             debounceMs: 0,
             reason,
@@ -96817,17 +96941,19 @@ $CONTENT
         if (queued.queued && queued.scopeKey) {
             markSummaryVectorIndexDirtyForRealign_ACU(queued.scopeKey, reason);
             logSummaryVectorIndexIdentityEvent_ACU('debug', 'rebuild', 'enqueued', {
-                manifest: layer?.summaryVectorIndexState?.manifest,
+                manifest,
                 scopeFingerprint: queued.scopeKey,
             });
+            return true;
         }
         if (!queued.queued) {
             logSummaryVectorIndexIdentityEvent_ACU('warn', 'rebuild', 'enqueue_rejected', {
-                manifest: layer?.summaryVectorIndexState?.manifest,
+                manifest,
                 error: queued.reason || 'unknown',
             });
             logWarn_ACU(`[交火模式纪要索引] 已标记索引待重建，但 flush 入队失败：reason=${queued.reason || 'unknown'}`);
         }
+        return false;
     }
     async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params) {
         const manifest = params.state.manifest || null;
@@ -96965,11 +97091,11 @@ $CONTENT
         }
         const liveRows = buildLiveSummaryVectorRows_ACU();
         let staleRealignQueued = false;
-        const enqueueStaleRealignIfNeeded_ACU = async () => {
+        const enqueueStaleRealignIfNeeded_ACU = async (manifest) => {
             if (staleRealignQueued)
                 return;
             staleRealignQueued = true;
-            await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'runtime_stale_rows');
+            await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'runtime_stale_rows', manifest);
         };
         const activeRowKeys = new Set(state.manifest?.snapshot?.activeRowKeys || []);
         let rows = Array.isArray(state.rows)
@@ -96977,8 +97103,7 @@ $CONTENT
             : [];
         const reconciledRows = filterRowsByLiveSummaryTable_ACU(rows, liveRows);
         rows = reconciledRows.rows;
-        if (reconciledRows.changed)
-            await enqueueStaleRealignIfNeeded_ACU();
+        let staleRealignNeeded = reconciledRows.changed;
         let chunks = Array.isArray(state.chunks) ? state.chunks : [];
         if (state.manifest) {
             try {
@@ -96987,15 +97112,32 @@ $CONTENT
             catch (error) {
                 const message = error instanceof Error ? error.message : String(error || '未知错误');
                 if (isMissingExternalVectorFileError_ACU(message)) {
-                    if (latestLayer && state.manifest.indexId) {
-                        await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
-                            messageIndex: latestLayer.messageIndex,
-                            isolationKey: latestLayer.isolationKey,
-                            indexId: state.manifest.indexId,
-                        });
+                    let chatStateCleared = false;
+                    try {
+                        if (latestLayer && state.manifest.indexId) {
+                            const clearResult = await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
+                                messageIndex: latestLayer.messageIndex,
+                                isolationKey: latestLayer.isolationKey,
+                                indexId: state.manifest.indexId,
+                            });
+                            chatStateCleared = clearResult.chatStateCleared;
+                        }
                     }
-                    logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，已清空缓存并保留聊天索引指针，跳过本次发送前注入:', message);
-                    return { success: false, skipped: true, reason: 'external_vector_files_missing' };
+                    catch (clearError) {
+                        logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，但严格删除失效索引指针失败:', clearError);
+                        return { success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_save_failed' };
+                    }
+                    if (!chatStateCleared) {
+                        logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，但失效索引指针未能安全删除；拒绝盲目重建:', message);
+                        return { success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_failed' };
+                    }
+                    const rebuildQueued = await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_external_files_missing', state.manifest);
+                    logWarn_ACU(rebuildQueued
+                        ? '[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针并入队重建，跳过本次发送前注入:'
+                        : '[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针，但重建入队失败:', message);
+                    return { success: false, skipped: true, reason: rebuildQueued
+                            ? 'external_vector_files_missing_rebuild_queued'
+                            : 'external_vector_files_missing_rebuild_rejected' };
                 }
                 if (isInvalidExternalVectorFileError_ACU(message)) {
                     const alignedState = await tryRealignSummaryVectorIndexPointerFromDisk_ACU({ state, latestLayer, liveRows });
@@ -97015,7 +97157,7 @@ $CONTENT
                                     indexId: alignedState.manifest.indexId,
                                 });
                             }
-                            await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch');
+                            await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch', alignedState.manifest);
                             return { success: false, skipped: true, reason: 'vector_index_realign_reload_failed' };
                         }
                     }
@@ -97027,7 +97169,7 @@ $CONTENT
                                 indexId: state.manifest.indexId,
                             });
                         }
-                        await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch');
+                        await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch', state.manifest);
                         logWarn_ACU('[交火模式纪要索引] 外置向量文件校验失败，指针对齐不可用，已清空缓存并入队重建:', message);
                         return { success: false, skipped: true, reason: 'vector_index_corrupted_rebuild_queued' };
                     }
@@ -97039,8 +97181,9 @@ $CONTENT
         }
         const reconciledChunks = filterChunksByLiveSummaryTable_ACU(chunks, liveRows);
         chunks = reconciledChunks.chunks;
-        if (reconciledChunks.changed)
-            await enqueueStaleRealignIfNeeded_ACU();
+        staleRealignNeeded = staleRealignNeeded || reconciledChunks.changed;
+        if (staleRealignNeeded)
+            await enqueueStaleRealignIfNeeded_ACU(state.manifest);
         if (rows.length < config.summaryIndexKeywordMinRows) {
             return { success: false, skipped: true, reason: 'below_min_rows' };
         }
@@ -136652,56 +136795,6 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             return error;
         });
-    }
-
-    function getCurrentSummaryVectorIndexSourceTableKey_ACU() {
-        const tables = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
-            ? currentJsonTableData_ACU
-            : null;
-        if (!tables)
-            return 'summary';
-        return Object.keys(tables).find((key) => {
-            const table = tables[key];
-            return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
-        }) || 'summary';
-    }
-    async function deleteCurrentSummaryVectorIndexFromChat_ACU() {
-        const snapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
-        const chat = getChatArray_ACU();
-        const scopeHints = new Map();
-        let changed = false;
-        if (snapshot?.layers?.length) {
-            for (const layer of snapshot.layers) {
-                const message = chat[layer.messageIndex];
-                if (!message || message.is_user)
-                    continue;
-                const tagData = readIsolatedTagData_ACU(message, layer.isolationKey);
-                if (!tagData)
-                    continue;
-                const manifest = tagData.summaryVectorIndexManifest || tagData.summaryVectorIndexState?.manifest || null;
-                if (manifest) {
-                    const hint = {
-                        chatKey: manifest.chatKey || currentChatFileIdentifier_ACU,
-                        isolationKey: manifest.isolationKey || layer.isolationKey,
-                        sourceTableKey: manifest.sourceTableKey || getCurrentSummaryVectorIndexSourceTableKey_ACU(),
-                    };
-                    scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
-                }
-                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
-                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
-                changed = true;
-            }
-        }
-        if (changed) {
-            await saveChatToHost_ACU();
-        }
-        const scopeHintList = Array.from(scopeHints.values());
-        for (const hint of scopeHintList) {
-            await deleteSummaryVectorHotCacheByScope_ACU(hint);
-            await clearSummaryVectorFlushTasksByScope_ACU(hint);
-        }
-        const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({ scopeHints: scopeHintList });
-        return changed || gcResult.deletedPaths.length > 0 || gcResult.failedDeletes.length > 0;
     }
 
     /**

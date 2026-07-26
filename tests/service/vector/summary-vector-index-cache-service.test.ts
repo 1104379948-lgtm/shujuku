@@ -1,0 +1,123 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const h = vi.hoisted(() => ({
+  clearLayer: vi.fn(),
+  deleteTemp: vi.fn(),
+  deleteHot: vi.fn(),
+  loadChunks: vi.fn(),
+  enqueueFlush: vi.fn(),
+  snapshot: null as any,
+}));
+
+vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
+vi.mock('../../../src/data/storage/vector-index-temp-cache', () => ({
+  clearVectorIndexTempCache_ACU: vi.fn(),
+  deleteVectorIndexCacheByIndex_ACU: (...args: any[]) => h.deleteTemp(...args),
+}));
+vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
+  clearSummaryVectorHotCache_ACU: vi.fn(),
+  deleteSummaryVectorHotCacheByIndex_ACU: (...args: any[]) => h.deleteHot(...args),
+}));
+vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
+  getLatestSummaryVectorIndexSnapshotState_ACU: () => h.snapshot,
+}));
+vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
+  loadSummaryVectorIndexChunksFromManifest_ACU: (...args: any[]) => h.loadChunks(...args),
+}));
+vi.mock('../../../src/service/vector/summary-vector-index-chat-service', () => ({
+  clearSummaryVectorIndexLayerFromChat_ACU: (...args: any[]) => h.clearLayer(...args),
+}));
+vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
+  enqueueSummaryVectorIndexFlush_ACU: (...args: any[]) => h.enqueueFlush(...args),
+}));
+
+import {
+  clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU,
+  isMissingExternalVectorFileError_ACU,
+  preloadSummaryVectorIndexCacheForCurrentChat_ACU,
+} from '../../../src/service/vector/summary-vector-index-cache-service';
+
+describe('summary vector missing external file recovery helpers', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    h.clearLayer.mockResolvedValue(true);
+    h.deleteTemp.mockResolvedValue(undefined);
+    h.deleteHot.mockResolvedValue(undefined);
+    h.loadChunks.mockResolvedValue([]);
+    h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope' });
+    h.snapshot = null;
+  });
+
+  it.each([
+    '交火向量单文件快照读取失败: file 读取失败 404: Not Found',
+    '交火向量索引分片读取失败: file 读取失败 404: Not Found',
+    '交火向量索引内容块读取失败: file 读取失败 404: Not Found',
+  ])('只识别 reader 明确返回的 404: %s', (message) => {
+    expect(isMissingExternalVectorFileError_ACU(message)).toBe(true);
+  });
+
+  it.each([
+    '交火向量单文件快照读取失败: file404 Failed to fetch',
+    '交火向量单文件快照读取失败: file 读取失败 500: Internal Server Error',
+    '交火向量单文件快照读取失败: file Not Found',
+    '普通业务 not found',
+  ])('拒绝非明确 404 的删除判定: %s', (message) => {
+    expect(isMissingExternalVectorFileError_ACU(message)).toBe(false);
+  });
+
+  it('指针提交成功后缓存清理失败仍返回已安全删除', async () => {
+    h.deleteTemp.mockRejectedValue(new Error('temp cache down'));
+    h.deleteHot.mockRejectedValue(new Error('hot cache down'));
+
+    await expect(clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
+      messageIndex: 2,
+      isolationKey: 'alpha',
+      indexId: 'idx-missing',
+    })).resolves.toEqual({ chatStateCleared: true, cacheCleared: false });
+
+    expect(h.clearLayer).toHaveBeenCalledWith({ messageIndex: 2, isolationKey: 'alpha', indexId: 'idx-missing' });
+    expect(h.deleteTemp).toHaveBeenCalledWith('idx-missing');
+    expect(h.deleteHot).toHaveBeenCalledWith('idx-missing');
+  });
+
+  it('预热时严格删除抛错会返回稳定原因且不入队', async () => {
+    const manifest = { status: 'ready', indexId: 'idx', sourceTableKey: 'summary-source' };
+    h.snapshot = {
+      summaryVectorIndexState: { manifest },
+      layers: [{ messageIndex: 1, isolationKey: 'iso-source' }],
+    };
+    h.loadChunks.mockRejectedValue(new Error('交火向量单文件快照读取失败: file 读取失败 404: Not Found'));
+    h.clearLayer.mockRejectedValue(new Error('save failed'));
+
+    await expect(preloadSummaryVectorIndexCacheForCurrentChat_ACU()).resolves.toMatchObject({
+      success: false,
+      skipped: true,
+      reason: 'external_files_missing_state_clear_save_failed',
+      cacheCleared: false,
+      chatStateCleared: false,
+    });
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
+  });
+
+  it('预热时缓存清理失败仍入队，并准确报告 cacheCleared=false', async () => {
+    const manifest = { status: 'ready', indexId: 'idx', sourceTableKey: 'summary-source' };
+    h.snapshot = {
+      summaryVectorIndexState: { manifest },
+      layers: [{ messageIndex: 1, isolationKey: 'iso-source' }],
+    };
+    h.loadChunks.mockRejectedValue(new Error('交火向量单文件快照读取失败: file 读取失败 404: Not Found'));
+    h.deleteTemp.mockRejectedValue(new Error('temp cache down'));
+
+    await expect(preloadSummaryVectorIndexCacheForCurrentChat_ACU()).resolves.toMatchObject({
+      reason: 'external_files_missing_state_cleared_rebuild_queued',
+      cacheCleared: false,
+      chatStateCleared: true,
+    });
+    expect(h.enqueueFlush).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageIndex: 1,
+      isolationKey: 'iso-source',
+      sourceTableKey: 'summary-source',
+      reason: 'self_heal_external_files_missing',
+    }));
+  });
+});

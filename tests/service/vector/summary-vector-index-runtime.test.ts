@@ -10,6 +10,13 @@ const h = vi.hoisted(() => ({
   callAI: vi.fn(),
   setEntries: vi.fn(),
   createEntries: vi.fn(),
+  loadChunks: vi.fn(),
+  clearMissing: vi.fn(),
+  enqueueFlush: vi.fn(),
+  missingError: false,
+  invalidError: false,
+  summaryTable: null as any,
+  preparedRows: [] as any[],
 }));
 
 vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
@@ -31,16 +38,26 @@ vi.mock('../../../src/service/vector/vector-memory-config', () => ({
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
   getLatestSummaryVectorIndexSnapshotState_ACU: () => ({
-    summaryVectorIndexState: { rows: h.rows, chunks: h.chunks, manifest: { indexId: 'idx', snapshot: { activeRowKeys: h.rows.map((r) => r.rowKey) } } },
-    layers: [{ messageIndex: 0, isolationKey: '', summaryVectorIndexState: {} }],
+    summaryVectorIndexState: { rows: h.rows, chunks: h.chunks, manifest: { indexId: 'idx', sourceTableKey: 'summary-source', snapshot: { activeRowKeys: h.rows.map((r) => r.rowKey) } } },
+    layers: [{ messageIndex: 0, isolationKey: 'iso-source', summaryVectorIndexState: { manifest: { indexId: 'idx', sourceTableKey: 'summary-source' } } }],
   }),
 }));
-vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({ loadSummaryVectorIndexChunksFromManifest_ACU: async () => h.chunks }));
+vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () => ({
+  findSummaryTable_ACU: () => h.summaryTable,
+  buildPreparedRows_ACU: () => h.preparedRows,
+}));
+vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
+  loadSummaryVectorIndexChunksFromManifest_ACU: (...a: any[]) => h.loadChunks(...a),
+  logSummaryVectorIndexIdentityEvent_ACU: vi.fn(),
+}));
 vi.mock('../../../src/service/vector/summary-vector-index-cache-service', () => ({
   clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU: vi.fn(),
-  clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU: vi.fn(),
-  isInvalidExternalVectorFileError_ACU: () => false,
-  isMissingExternalVectorFileError_ACU: () => false,
+  clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU: (...a: any[]) => h.clearMissing(...a),
+  isInvalidExternalVectorFileError_ACU: () => h.invalidError,
+  isMissingExternalVectorFileError_ACU: () => h.missingError,
+}));
+vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
+  enqueueSummaryVectorIndexFlush_ACU: (...a: any[]) => h.enqueueFlush(...a),
 }));
 
 import { processSummaryVectorIndexBeforeGeneration_ACU } from '../../../src/service/vector/summary-vector-index-runtime';
@@ -121,6 +138,13 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.createEmbeddings.mockResolvedValue([{ index: 0, embedding: [1, 0] }]);
     h.createEntries.mockResolvedValue(undefined);
     h.setEntries.mockResolvedValue(undefined);
+    h.loadChunks.mockImplementation(async () => h.chunks);
+    h.clearMissing.mockResolvedValue(true);
+    h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
+    h.missingError = false;
+    h.invalidError = false;
+    h.summaryTable = null;
+    h.preparedRows = [];
     vi.stubGlobal('fetch', vi.fn());
     setFixture_ACU();
   });
@@ -194,5 +218,64 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     expect(result.success).toBe(true);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(createdContent_ACU()).toContain('old sparse summary');
+  });
+});
+
+describe('processSummaryVectorIndexBeforeGeneration_ACU missing snapshot recovery', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    h.chat = [{ is_user: false, mes: 'assistant' } as any];
+    h.rows = [row_ACU('r1', 1, 'summary')];
+    h.chunks = [];
+    h.config = defaultConfig_ACU();
+    h.loadChunks.mockRejectedValue(new Error('交火向量单文件快照读取失败: missing 读取失败 404: Not Found'));
+    h.clearMissing.mockResolvedValue({ chatStateCleared: true, cacheCleared: true });
+    h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
+    h.missingError = true;
+    h.invalidError = false;
+    h.summaryTable = null;
+    h.preparedRows = [];
+  });
+
+  it('删除匹配的失效指针后立即入队重建', async () => {
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-one', source: 'missing-test' });
+
+    expect(h.clearMissing).toHaveBeenCalledWith({ messageIndex: 0, isolationKey: 'iso-source', indexId: 'idx' });
+    expect(h.enqueueFlush).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageIndex: 0,
+      isolationKey: 'iso-source',
+      sourceTableKey: 'summary-source',
+      mode: 'sync',
+      debounceMs: 0,
+      reason: 'self_heal_external_files_missing',
+    }));
+    expect(result).toMatchObject({ success: false, skipped: true, reason: 'external_vector_files_missing_rebuild_queued' });
+  });
+
+  it('失效指针未安全删除时拒绝盲目重建', async () => {
+    h.clearMissing.mockResolvedValue({ chatStateCleared: false, cacheCleared: true });
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-two', source: 'missing-test' });
+
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_failed' });
+  });
+
+  it('实时行已变化但严格删除失败时不会提前入队 stale rebuild', async () => {
+    h.summaryTable = { summaryKey: 'summary-source', table: {} };
+    h.preparedRows = [{ rowKey: 'different-row', sourceFingerprint: 'new' }];
+    h.clearMissing.mockResolvedValue({ chatStateCleared: false, cacheCleared: true });
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-three', source: 'missing-test' });
+
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ reason: 'external_vector_files_missing_state_clear_failed' });
+  });
+
+  it('严格保存抛错时返回稳定原因且不入队', async () => {
+    h.clearMissing.mockRejectedValue(new Error('save failed'));
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-four', source: 'missing-test' });
+
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_save_failed' });
   });
 });

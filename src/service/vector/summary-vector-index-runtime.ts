@@ -338,9 +338,15 @@ function isSingleFileSnapshotManifest_ACU(manifest: ChatSummaryVectorIndexManife
     return !!manifestPath && manifest.rowsFile === manifestPath && manifest.tombstoneFile === manifestPath;
 }
 
-async function enqueueSummaryVectorIndexRebuild_ACU(layer: SummaryVectorIndexSnapshotLayer_ACU | null, reason: string): Promise<void> {
+async function enqueueSummaryVectorIndexRebuild_ACU(
+    layer: SummaryVectorIndexSnapshotLayer_ACU | null,
+    reason: string,
+    manifest: ChatSummaryVectorIndexManifest_ACU | null | undefined = layer?.summaryVectorIndexState?.manifest,
+): Promise<boolean> {
     const queued = await enqueueSummaryVectorIndexFlush_ACU({
         targetMessageIndex: layer?.messageIndex,
+        isolationKey: layer?.isolationKey,
+        sourceTableKey: manifest?.sourceTableKey,
         mode: 'sync',
         debounceMs: 0,
         reason,
@@ -348,17 +354,19 @@ async function enqueueSummaryVectorIndexRebuild_ACU(layer: SummaryVectorIndexSna
     if (queued.queued && queued.scopeKey) {
         markSummaryVectorIndexDirtyForRealign_ACU(queued.scopeKey, reason);
         logSummaryVectorIndexIdentityEvent_ACU('debug', 'rebuild', 'enqueued', {
-            manifest: layer?.summaryVectorIndexState?.manifest,
+            manifest,
             scopeFingerprint: queued.scopeKey,
         });
+        return true;
     }
     if (!queued.queued) {
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'rebuild', 'enqueue_rejected', {
-            manifest: layer?.summaryVectorIndexState?.manifest,
+            manifest,
             error: queued.reason || 'unknown',
         });
         logWarn_ACU(`[交火模式纪要索引] 已标记索引待重建，但 flush 入队失败：reason=${queued.reason || 'unknown'}`);
     }
+    return false;
 }
 
 async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
@@ -501,10 +509,10 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     }
     const liveRows = buildLiveSummaryVectorRows_ACU();
     let staleRealignQueued = false;
-    const enqueueStaleRealignIfNeeded_ACU = async (): Promise<void> => {
+    const enqueueStaleRealignIfNeeded_ACU = async (manifest?: ChatSummaryVectorIndexManifest_ACU | null): Promise<void> => {
         if (staleRealignQueued) return;
         staleRealignQueued = true;
-        await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'runtime_stale_rows');
+        await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'runtime_stale_rows', manifest);
     };
     const activeRowKeys = new Set(state.manifest?.snapshot?.activeRowKeys || []);
     let rows: ChatSummaryVectorIndexRow_ACU[] = Array.isArray(state.rows)
@@ -512,7 +520,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         : [];
     const reconciledRows = filterRowsByLiveSummaryTable_ACU(rows, liveRows);
     rows = reconciledRows.rows;
-    if (reconciledRows.changed) await enqueueStaleRealignIfNeeded_ACU();
+    let staleRealignNeeded = reconciledRows.changed;
     let chunks: ChatSummaryVectorIndexChunk_ACU[] = Array.isArray(state.chunks) ? state.chunks : [];
     if (state.manifest) {
         try {
@@ -520,15 +528,31 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error || '未知错误');
             if (isMissingExternalVectorFileError_ACU(message)) {
-                if (latestLayer && state.manifest.indexId) {
-                    await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
-                        messageIndex: latestLayer.messageIndex,
-                        isolationKey: latestLayer.isolationKey,
-                        indexId: state.manifest.indexId,
-                    });
+                let chatStateCleared = false;
+                try {
+                    if (latestLayer && state.manifest.indexId) {
+                        const clearResult = await clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU({
+                            messageIndex: latestLayer.messageIndex,
+                            isolationKey: latestLayer.isolationKey,
+                            indexId: state.manifest.indexId,
+                        });
+                        chatStateCleared = clearResult.chatStateCleared;
+                    }
+                } catch (clearError) {
+                    logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，但严格删除失效索引指针失败:', clearError);
+                    return { success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_save_failed' };
                 }
-                logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，已清空缓存并保留聊天索引指针，跳过本次发送前注入:', message);
-                return { success: false, skipped: true, reason: 'external_vector_files_missing' };
+                if (!chatStateCleared) {
+                    logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，但失效索引指针未能安全删除；拒绝盲目重建:', message);
+                    return { success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_failed' };
+                }
+                const rebuildQueued = await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_external_files_missing', state.manifest);
+                logWarn_ACU(rebuildQueued
+                    ? '[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针并入队重建，跳过本次发送前注入:'
+                    : '[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针，但重建入队失败:', message);
+                return { success: false, skipped: true, reason: rebuildQueued
+                    ? 'external_vector_files_missing_rebuild_queued'
+                    : 'external_vector_files_missing_rebuild_rejected' };
             }
             if (isInvalidExternalVectorFileError_ACU(message)) {
                 const alignedState = await tryRealignSummaryVectorIndexPointerFromDisk_ACU({ state, latestLayer, liveRows });
@@ -547,7 +571,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
                                 indexId: alignedState.manifest.indexId,
                             });
                         }
-                        await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch');
+                        await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch', alignedState.manifest);
                         return { success: false, skipped: true, reason: 'vector_index_realign_reload_failed' };
                     }
                 } else {
@@ -558,7 +582,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
                             indexId: state.manifest.indexId,
                         });
                     }
-                    await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch');
+                    await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch', state.manifest);
                     logWarn_ACU('[交火模式纪要索引] 外置向量文件校验失败，指针对齐不可用，已清空缓存并入队重建:', message);
                     return { success: false, skipped: true, reason: 'vector_index_corrupted_rebuild_queued' };
                 }
@@ -569,7 +593,8 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     }
     const reconciledChunks = filterChunksByLiveSummaryTable_ACU(chunks, liveRows);
     chunks = reconciledChunks.chunks;
-    if (reconciledChunks.changed) await enqueueStaleRealignIfNeeded_ACU();
+    staleRealignNeeded = staleRealignNeeded || reconciledChunks.changed;
+    if (staleRealignNeeded) await enqueueStaleRealignIfNeeded_ACU(state.manifest);
     if (rows.length < config.summaryIndexKeywordMinRows) {
         return { success: false, skipped: true, reason: 'below_min_rows' };
     }
