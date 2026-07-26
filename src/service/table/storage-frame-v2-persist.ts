@@ -1006,6 +1006,11 @@ async function persistTableMutationLogV2Core_ACU(
   const filledSheetKeys = normalizeKeys_ACU(options.filledSheetKeys, afterData);
   const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
   const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index);
+  // 「本次是否首次初始化」必须看整个聊天，而不是只看目标楼层之前。
+  // 对更早楼层填表（追平/重填）时，锚点可能位于更晚的楼层；
+  // 只看之前会误判为首次初始化，从而又写一个 init full checkpoint，
+  // 于是聊天里出现两个初始基线，回放只认最后一个，前面楼层的数据全部失效。
+  const hasCheckpointAnywhere = hasAnyV2Checkpoint_ACU(chat, isolationKey);
   const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey, target.index);
   const operations = normalizeOperations_ACU(options.operations, afterData, options.source, hasExistingCheckpoint);
   const effectiveChangedSheetKeys = candidateChangedSheetKeys;
@@ -1023,7 +1028,14 @@ async function persistTableMutationLogV2Core_ACU(
   }
   const initialCheckpointReason: TableCheckpointV2_ACU['reason'] = options.checkpointReason
     || (hasExistingV2Frame ? 'migration' : 'init');
-  const shouldCheckpoint = !hasExistingCheckpoint
+  // 填表类写入只有在整个聊天都没有 full checkpoint 时才写初始 checkpoint；
+  // 否则本楼即使前面没有锚点，也只应追加增量，绝不能再造一个初始基线
+  // （回放只认最后一个 full checkpoint，多出来的基线会让它之前的所有增量失效）。
+  //
+  // import 例外：导入历史数据本就需要给被导入的楼层自建基线，
+  // 这一行为由既有用例锁定，不在此处收紧。
+  const blocksInitialCheckpoint = options.source === 'import' ? hasExistingCheckpoint : hasCheckpointAnywhere;
+  const shouldCheckpoint = !blocksInitialCheckpoint
     && !isManualRefillProgressOnly
     && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
   if (shouldCheckpoint && operations.length > 0) {

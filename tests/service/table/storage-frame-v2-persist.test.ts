@@ -938,6 +938,47 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
+  it('更晚楼层已有 full checkpoint 时，对更早楼层填表不再写第二个初始基线', async () => {
+    // 回归：锚点判定若只看目标楼层之前，对更早楼层追平/重填时会误判为首次初始化，
+    // 又写一个 init full checkpoint。回放只认最后一个 full checkpoint，
+    // 于是它之前的所有增量全部失效，表现为“只有最后一层有数据”。
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const earlyMessage = { is_user: false } as any;
+    const laterCheckpointMessage = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 2, reason: 'init', data: { mate: { type: 'acu' }, sheet_a: sheetA } },
+            logEntries: [],
+          },
+        },
+      },
+    } as any;
+    mocks.chat.splice(0, mocks.chat.length, earlyMessage, laterCheckpointMessage);
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', 'x']] } } as any,
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'x'] }] as any,
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.saved).toBe(true);
+    const frame = earlyMessage.TavernDB_ACU_IsolatedData[''].storageFrame;
+    // 绝不能在更早楼层再造一个 full checkpoint。
+    expect(frame.checkpoint).toBeUndefined();
+    // 只追加增量。
+    expect(frame.logEntries).toHaveLength(1);
+  });
+
+
   it('目标表在本楼未被任何 checkpoint 锚定时，先补写 per-sheet checkpoint 再追加增量', async () => {
     // 复现：先用旧模板填过表，切到新模板（新增表/列，rebase 落在最新楼层），
     // 再对更早楼层追平。那些楼的 full checkpoint 不含新表，直接写增量会产出

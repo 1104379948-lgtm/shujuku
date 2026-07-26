@@ -38747,6 +38747,11 @@ $CONTENT
         const filledSheetKeys = normalizeKeys_ACU(options.filledSheetKeys, afterData);
         const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
         const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index);
+        // 「本次是否首次初始化」必须看整个聊天，而不是只看目标楼层之前。
+        // 对更早楼层填表（追平/重填）时，锚点可能位于更晚的楼层；
+        // 只看之前会误判为首次初始化，从而又写一个 init full checkpoint，
+        // 于是聊天里出现两个初始基线，回放只认最后一个，前面楼层的数据全部失效。
+        const hasCheckpointAnywhere = hasAnyV2Checkpoint_ACU(chat, isolationKey);
         const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey, target.index);
         const operations = normalizeOperations_ACU(options.operations, afterData, options.source, hasExistingCheckpoint);
         const effectiveChangedSheetKeys = candidateChangedSheetKeys;
@@ -38764,7 +38769,14 @@ $CONTENT
         }
         const initialCheckpointReason = options.checkpointReason
             || (hasExistingV2Frame ? 'migration' : 'init');
-        const shouldCheckpoint = !hasExistingCheckpoint
+        // 填表类写入只有在整个聊天都没有 full checkpoint 时才写初始 checkpoint；
+        // 否则本楼即使前面没有锚点，也只应追加增量，绝不能再造一个初始基线
+        // （回放只认最后一个 full checkpoint，多出来的基线会让它之前的所有增量失效）。
+        //
+        // import 例外：导入历史数据本就需要给被导入的楼层自建基线，
+        // 这一行为由既有用例锁定，不在此处收紧。
+        const blocksInitialCheckpoint = options.source === 'import' ? hasExistingCheckpoint : hasCheckpointAnywhere;
+        const shouldCheckpoint = !blocksInitialCheckpoint
             && !isManualRefillProgressOnly
             && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
         if (shouldCheckpoint && operations.length > 0) {
@@ -64323,6 +64335,60 @@ $CONTENT
         return result;
     }
     /**
+     * 清理旧版“表头清单”（TavernDB_ACU_TableHeaderGuide）。
+     *
+     * 该字段固定挂在 chat[0]，按隔离键分组存储，与 AI 楼层无关，
+     * 因此不会被“按楼层遍历 AI 消息”的删除逻辑覆盖到。
+     *
+     * mode='all' 整个字段删除；mode='current' 只删当前隔离键，
+     * 所有隔离键都清空后再删整个字段。
+     */
+    function clearLegacyTableHeaderGuide_ACU(chat, mode, isolationKey) {
+        const first = Array.isArray(chat) && chat.length > 0 ? chat[0] : null;
+        if (!first)
+            return false;
+        const raw = first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
+        if (raw === undefined || raw === null || raw === '')
+            return false;
+        if (mode === 'all') {
+            delete first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
+            logDebug_ACU('[数据删除] 已清理旧版表头清单（全部隔离标识）。');
+            return true;
+        }
+        let legacyObj = null;
+        if (typeof raw === 'string') {
+            try {
+                legacyObj = JSON.parse(raw);
+            }
+            catch {
+                legacyObj = null;
+            }
+        }
+        else {
+            legacyObj = raw;
+        }
+        // 无法解析或不含 tags 分组时不做部分删除，避免误删其他隔离标识的数据。
+        if (!legacyObj || typeof legacyObj !== 'object' || Array.isArray(legacyObj))
+            return false;
+        const tags = legacyObj.tags;
+        if (!tags || typeof tags !== 'object' || Array.isArray(tags))
+            return false;
+        if (!Object.prototype.hasOwnProperty.call(tags, isolationKey))
+            return false;
+        delete tags[isolationKey];
+        if (Object.keys(tags).length === 0) {
+            delete first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU];
+        }
+        else {
+            legacyObj.tags = tags;
+            first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU] = typeof raw === 'string'
+                ? JSON.stringify(legacyObj)
+                : legacyObj;
+        }
+        logDebug_ACU(`[数据删除] 已清理旧版表头清单（隔离标识: ${isolationKey || '无标签'}）。`);
+        return true;
+    }
+    /**
      * 删除聊天记录中的本地数据（核心业务逻辑）
      * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
      *
@@ -64419,6 +64485,13 @@ $CONTENT
                     deletedCount++;
                 }
             }
+        }
+        // 旧版“表头清单”固定挂在 chat[0]，与楼层范围无关，因此只在删除覆盖完整范围时清理，
+        // 避免局部删除误删仍被其他楼层依赖的兼容指导数据。
+        const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
+            && (endFloor === null || endFloor >= aiMessageIndices.length);
+        if (isFullRangeDeletion && clearLegacyTableHeaderGuide_ACU(chat, mode, currentIsolationKey)) {
+            deletedCount++;
         }
         if (deletedCount > 0) {
             await saveChatToHost_ACU();
