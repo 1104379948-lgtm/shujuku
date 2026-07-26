@@ -370,7 +370,7 @@ describe('parseAndApplyTableEdits_ACU — DSL 分支', () => {
     expect(content.length).toBe(4); // 表头 + 原2行 + 新1行
   });
 
-  it('删除中间行后插入使用最小未占用 row_id，并保留 0 和 false 单元格', () => {
+  it('删除中间行后插入使用最大 row_id 加一，并保留 0 和 false 单元格', () => {
     mockCurrentJsonTableData.sheet_0.content = [
       ['row_id', 'item_name', 'quantity'],
       ['1', '铁剑', '3'],
@@ -388,7 +388,7 @@ describe('parseAndApplyTableEdits_ACU — DSL 分支', () => {
       ['row_id', 'item_name', 'quantity'],
       ['1', '铁剑', '3'],
       ['3', '盾牌', '1'],
-      ['2', 0, false],
+      ['4', 0, false],
     ]);
   });
 

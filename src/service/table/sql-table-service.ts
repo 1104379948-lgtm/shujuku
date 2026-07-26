@@ -34,6 +34,8 @@ import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
+import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
   workingData?: TableDataObject_ACU;
@@ -200,6 +202,20 @@ function isSqlMutationKeyword_ACU(token: SqlMutationIdentifierToken_ACU | undefi
   return !!token && token.quote === null && token.value.toUpperCase() === keyword;
 }
 
+function getSqlMutationActionIndex_ACU(tokens: SqlMutationIdentifierToken_ACU[]): number {
+  const first = tokens[0];
+  if (!first) throw new Error('SQL 语句为空或缺少可验证的写入动作。');
+  if (!isSqlMutationKeyword_ACU(first, 'WITH')) return 0;
+  const actionIndex = tokens.findIndex((token, index) => index > 0 && token.depth === 0 && (
+    isSqlMutationKeyword_ACU(token, 'INSERT')
+    || isSqlMutationKeyword_ACU(token, 'REPLACE')
+    || isSqlMutationKeyword_ACU(token, 'UPDATE')
+    || isSqlMutationKeyword_ACU(token, 'DELETE')
+  ));
+  if (actionIndex < 0) throw new Error('WITH SQL 缺少可验证的写入语句。');
+  return actionIndex;
+}
+
 function getQualifiedSqlIdentifierTail_ACU(
   statement: string,
   tokens: SqlMutationIdentifierToken_ACU[],
@@ -218,19 +234,8 @@ function getQualifiedSqlIdentifierTail_ACU(
 }
 
 function getSqlMutationTargetToken_ACU(statement: string, tokens: SqlMutationIdentifierToken_ACU[]): SqlMutationIdentifierToken_ACU {
-  const first = tokens[0];
-  const actionIndex = isSqlMutationKeyword_ACU(first, 'WITH')
-    ? tokens.findIndex((token, index) => index > 0 && token.depth === 0 && (
-      isSqlMutationKeyword_ACU(token, 'INSERT')
-      || isSqlMutationKeyword_ACU(token, 'REPLACE')
-      || isSqlMutationKeyword_ACU(token, 'UPDATE')
-      || isSqlMutationKeyword_ACU(token, 'DELETE')
-    ))
-    : 0;
+  const actionIndex = getSqlMutationActionIndex_ACU(tokens);
   const action = tokens[actionIndex];
-  if (actionIndex < 0) {
-    throw new Error('WITH SQL 缺少可验证的写入语句。');
-  }
   if (isSqlMutationKeyword_ACU(action, 'INSERT') || isSqlMutationKeyword_ACU(action, 'REPLACE')) {
     let index = actionIndex + 1;
     if (isSqlMutationKeyword_ACU(action, 'INSERT') && isSqlMutationKeyword_ACU(tokens[index], 'OR')) {
@@ -264,7 +269,7 @@ function getSqlMutationTargetToken_ACU(statement: string, tokens: SqlMutationIde
     if (!isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'FROM') || !target) throw new Error('DELETE SQL 缺少可验证的目标表。');
     return target;
   }
-  throw new Error(`不支持安全重绑定的 SQL 语句类型：${action?.value || first?.value || 'empty'}。`);
+  throw new Error(`不支持安全重绑定的 SQL 语句类型：${action?.value || 'empty'}。`);
 }
 
 function collectSqlMutationTableReferenceTokens_ACU(
@@ -397,6 +402,138 @@ function resolveCurrentChatTemplateForAliases_ACU(): TableDataObject_ACU | null 
     logWarn_ACU(`[SqlTableService] rebind 别名模板解析失败，仅用运行时快照: ${e?.message || e}`);
     return null;
   }
+}
+
+function splitTopLevelSqlList_ACU(value: string, context: string): string[] {
+  const items: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (quote) {
+      if (char === quote) {
+        if (value[index + 1] === quote) index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth < 0) throw new Error(`${context} 的括号不匹配。`);
+    } else if (char === ',' && depth === 0) {
+      const item = value.slice(start, index).trim();
+      if (!item) throw new Error(`${context} 包含空项。`);
+      items.push(item);
+      start = index + 1;
+    }
+  }
+  if (quote || depth !== 0) throw new Error(`${context} 的字符串或括号未闭合。`);
+  const item = value.slice(start).trim();
+  if (!item) throw new Error(`${context} 包含空项。`);
+  items.push(item);
+  return items;
+}
+
+function findSqlClosingParen_ACU(value: string, openingIndex: number, context: string): number {
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let index = openingIndex; index < value.length; index += 1) {
+    const char = value[index];
+    if (quote) {
+      if (char === quote) {
+        if (value[index + 1] === quote) index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') quote = char;
+    else if (char === '(') depth += 1;
+    else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+      if (depth < 0) break;
+    }
+  }
+  throw new Error(`${context} 的括号未闭合。`);
+}
+
+function buildRowIdReservationsByRuntimeTable_ACU(tableData: TableDataObject_ACU): Map<string, Set<string>> {
+  const reservations = new Map<string, Set<string>>();
+  for (const [sheetKey, value] of Object.entries(tableData || {})) {
+    if (!sheetKey.startsWith('sheet_')) continue;
+    const content = (value as any)?.content;
+    reservations.set(getPhysicalTableNameForSheet_ACU(tableData, sheetKey).toLowerCase(), createStableRowIdReservation_ACU(
+      Array.isArray(content) ? content.slice(1) : [],
+    ));
+  }
+  return reservations;
+}
+
+/**
+ * Makes every AI-authored INSERT self-describing before execution and V2 logging.
+ * The accepted subset is deliberately narrow: INSERT INTO known_table (business columns)
+ * VALUES (...)[, (...)] only. A heuristic SQL rewrite here would be worse than rejection.
+ */
+export function materializeSystemRowIdsForSqlInserts_ACU(
+  statements: string[],
+  tableData: TableDataObject_ACU,
+): string[] {
+  const reservations = buildRowIdReservationsByRuntimeTable_ACU(tableData);
+  return statements.map((statement, statementIndex) => {
+    const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
+    const actionIndex = getSqlMutationActionIndex_ACU(tokens);
+    const action = tokens[actionIndex];
+    if (!isSqlMutationKeyword_ACU(action, 'INSERT')) return statement;
+    if (actionIndex !== 0 || isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR')) {
+      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条不支持 WITH 或 INSERT OR 语法；请使用标准 INSERT INTO ... (列名) VALUES (...).`);
+    }
+    const target = getSqlMutationTargetToken_ACU(statement, tokens);
+    const reservation = reservations.get(target.value.toLowerCase());
+    if (!reservation) {
+      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条无法识别目标表：${target.value}。`);
+    }
+    const suffix = statement.slice(target.end).trim();
+    if (!suffix.startsWith('(')) {
+      if (/^SELECT\b/i.test(suffix)) {
+        throw new Error(`AI INSERT 第 ${statementIndex + 1} 条不支持 INSERT SELECT；请改为显式业务列的 VALUES 插入。`);
+      }
+      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条必须显式列出业务列，系统才能分配 row_id。`);
+    }
+    const columnsEnd = findSqlClosingParen_ACU(suffix, 0, `AI INSERT 第 ${statementIndex + 1} 条列清单`);
+    const columns = splitTopLevelSqlList_ACU(suffix.slice(1, columnsEnd), `AI INSERT 第 ${statementIndex + 1} 条列清单`);
+    const normalizedColumns = columns.map(column => column.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase());
+    if (normalizedColumns.some(column => !/^[a-z_][a-z0-9_$]*$/i.test(column))) {
+      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条的列名无法安全解析。`);
+    }
+    if (new Set(normalizedColumns).size !== normalizedColumns.length) {
+      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条的列名重复。`);
+    }
+    if (normalizedColumns.includes('row_id')) {
+      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条不得提供 row_id；该身份由系统分配。`);
+    }
+    const valuesText = suffix.slice(columnsEnd + 1).trim();
+    if (!/^VALUES\b/i.test(valuesText)) {
+      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条只支持 VALUES 插入；不支持 INSERT SELECT。`);
+    }
+    const tupleText = valuesText.slice('VALUES'.length).trim();
+    const tuples = splitTopLevelSqlList_ACU(tupleText, `AI INSERT 第 ${statementIndex + 1} 条 VALUES`);
+    const materializedTuples = tuples.map((tuple, tupleIndex) => {
+      if (!tuple.startsWith('(') || findSqlClosingParen_ACU(tuple, 0, `AI INSERT 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 个 VALUES`) !== tuple.length - 1) {
+        throw new Error(`AI INSERT 第 ${statementIndex + 1} 条只支持括号包裹的 VALUES 行。`);
+      }
+      const values = splitTopLevelSqlList_ACU(tuple.slice(1, -1), `AI INSERT 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 个 VALUES`);
+      if (values.length !== columns.length) {
+        throw new Error(`AI INSERT 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 行的值数量与列数量不一致。`);
+      }
+      return `(${allocateStableRowId_ACU(reservation)}, ${tuple.slice(1, -1).trim()})`;
+    });
+    return `${statement.slice(0, target.end)} (row_id, ${columns.join(', ')}) VALUES ${materializedTuples.join(', ')}`;
+  });
 }
 
 /**
@@ -1318,15 +1455,20 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
     }
 
     const snapshotCopy = JSON.parse(JSON.stringify(tableData || {})) as TableDataObject_ACU;
-    const statements = rebindSqlMutationTableIdentifiers_ACU(
+    const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(
       rawStatements.map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt))),
       snapshotCopy,
     );
+    const statements = materializeSystemRowIdsForSqlInserts_ACU(reboundStatements, snapshotCopy);
     await engine.init();
     syncBridge.loadFromTableData(snapshotCopy, { strict: true });
     engine.runBatch(statements);
 
     const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy));
+    const normalization = normalizeCanonicalTableRows_ACU(workingData);
+    if (normalization.errors.length > 0 || normalization.removedRows.length > 0) {
+      throw new Error(`SQL 执行后行标识不合法：${formatCanonicalRowIssues_ACU([...normalization.errors, ...normalization.removedRows])}`);
+    }
     const modifiedTableNames = extractTableNamesFromStatements(statements);
     const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
     const operationBuild = buildSqlSheetBatchOperations_ACU(statements, workingData, {

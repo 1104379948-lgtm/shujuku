@@ -86,7 +86,7 @@ describe('visualizer-data-ops V2 replay save', () => {
 
     const result = await applyVisualizerPendingDataOps_ACU(draft);
 
-    expect(result).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '1' } });
+    expect(result).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '2' } });
     // First load is the write base; second is post-save runtime refresh.
     expect(mocks.replay).toHaveBeenCalled();
     expect(mocks.transaction).toHaveBeenCalledWith(expect.objectContaining({ reason: 'visualizer_save_v2_replay' }), expect.any(Function));
@@ -96,10 +96,54 @@ describe('visualizer-data-ops V2 replay save', () => {
       expect.objectContaining({ targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [expect.objectContaining({ kind: 'row_upsert', rowId: '1', cells: ['1', 'new-a'] })] }),
       expect.objectContaining({ targetMessageIndex: 3, changedSheetKeys: ['sheet_b'], operations: expect.arrayContaining([
         expect.objectContaining({ kind: 'row_delete', rowId: '1' }),
-        expect.objectContaining({ kind: 'row_upsert', rowId: '1', cells: ['1', 'new-b'] }),
+        expect.objectContaining({ kind: 'row_upsert', rowId: '2', cells: ['2', 'new-b'] }),
       ]) }),
     ]));
     expect(JSON.stringify(persistOptions.targets)).not.toContain('sql_batch');
+  });
+
+  it('新增行使用每表最大稳定身份加一，不复用删除后的空洞', async () => {
+    mocks.data.sheet_a.content = [['row_id', 'value'], ['1', 'old-a'], ['3', 'old-c']];
+    mocks.replayData = JSON.parse(JSON.stringify(mocks.data));
+    const draft = state();
+    draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a']);
+    recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+
+    const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+    expect(result).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '4' } });
+    expect(mocks.persist.mock.calls[0][0].afterData.sheet_a.content).toEqual([
+      ['row_id', 'value'], ['1', 'old-a'], ['3', 'old-c'], ['4', 'new-a'],
+    ]);
+  });
+
+  it('同一批次向同一表插入多行时连续保留稳定身份', async () => {
+    mocks.data.sheet_a.content = [['row_id', 'value'], ['1', 'old-a'], ['3', 'old-c']];
+    mocks.replayData = JSON.parse(JSON.stringify(mocks.data));
+    const draft = state();
+    draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a'], ['__acu_vis_tmp_row_y', 'new-b']);
+    recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+    recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_y');
+
+    const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+    expect(result).toEqual({ success: true, changed: true, insertedRowIds: { __acu_vis_tmp_row_x: '4', __acu_vis_tmp_row_y: '5' } });
+    expect(mocks.persist.mock.calls[0][0].afterData.sheet_a.content).toEqual([
+      ['row_id', 'value'], ['1', 'old-a'], ['3', 'old-c'], ['4', 'new-a'], ['5', 'new-b'],
+    ]);
+  });
+
+  it('稳定身份达到安全整数上限时拒绝新增而不持久化', async () => {
+    mocks.data.sheet_a.content = [['row_id', 'value'], [String(Number.MAX_SAFE_INTEGER), 'limit']];
+    mocks.replayData = JSON.parse(JSON.stringify(mocks.data));
+    const draft = state();
+    draft.tempData.sheet_a.content.push(['__acu_vis_tmp_row_x', 'new-a']);
+    recordVisualizerRowInsert_ACU(draft, 'sheet_a', '__acu_vis_tmp_row_x');
+
+    const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+    expect(result).toEqual({ success: false, changed: false, error: expect.stringContaining('正安全整数上限') });
+    expect(mocks.persist).not.toHaveBeenCalled();
   });
 
   it('以 V2 replay 为 afterData 基底，忽略 runtime seedRows 漂移，并把 update cells 回写为持久化形态', async () => {

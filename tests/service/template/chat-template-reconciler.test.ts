@@ -565,7 +565,7 @@ describe('reconcileChatTemplate_ACU', () => {
     ]);
   });
 
-  it('模板已显式给出 row_id 时保留原值，只为缺失行分配', async () => {
+  it('模板已显式给出 row_id 时保留原值，并从当前最大身份后为缺失行分配', async () => {
     const templateSheet = sheet('sheet_new', '系统规则表', ['row_id', 'rule_name'],
       'row_id INTEGER PRIMARY KEY, rule_name TEXT', [
         ['5', '已有ID'],
@@ -577,7 +577,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.candidateData.sheet_new.content).toEqual([
       ['row_id', 'rule_name'],
       ['5', '已有ID'],
-      ['1', '待分配'],
+      ['6', '待分配'],
     ]);
   });
 

@@ -1442,7 +1442,7 @@ describe('parseReadableToJson_ACU', () => {
     });
   });
 
-  it('重建 Markdown 表格时使用稳定 allocator，不按新数组长度复用已占用身份', () => {
+  it('重建 Markdown 表格时使用稳定 allocator，从历史最大 row_id 后继续分配', () => {
     Object.defineProperty(stateManager, 'currentJsonTableData_ACU', {
       value: {
         sheet_0: {
@@ -1458,8 +1458,8 @@ describe('parseReadableToJson_ACU', () => {
 
     expect(result?.sheet_0.content).toEqual([
       ['row_id', '物品名称'],
-      ['2', '魔法杖'],
-      ['4', '药水'],
+      ['4', '魔法杖'],
+      ['5', '药水'],
     ]);
     Object.defineProperty(stateManager, 'currentJsonTableData_ACU', {
       value: null, writable: true, configurable: true,

@@ -265,6 +265,9 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result).not.toBeNull();
     expect(result!.tableDataText).toContain('SQL 编辑格式说明');
     expect(result!.tableDataText).toContain('INSERT INTO');
+    expect(result!.tableDataText).toContain('INSERT 必须显式列出业务列，不得包含 row_id');
+    expect(result!.tableDataText).toContain('row_id 由系统在执行前分配稳定身份');
+    expect(result!.tableDataText).not.toContain('row_id 值为当前表最大 row_id + 1');
     expect(result!.tableDataText).toContain('UNIQUE 约束');
     expect(result!.tableDataText).toContain('表达式更新');
   });

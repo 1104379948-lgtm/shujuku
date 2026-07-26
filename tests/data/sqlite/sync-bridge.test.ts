@@ -404,7 +404,7 @@ describe('SyncBridge', () => {
       expect(engine.getTableNames()).not.toContain('sheet_broken');
     });
 
-    it('同一快照内重复 row_id 时保留最后一行且不让整表从导出结果消失', () => {
+    it('strict hydrate 在同一快照内 row_id 重复时 fail closed，不覆盖既有行', () => {
       const duplicatedRowSheet = makeSheet({
         content: [
           ['row_id', '物品名称', '数量', '描述'],
@@ -415,17 +415,8 @@ describe('SyncBridge', () => {
       const data = makeTableData({ sheet_0: duplicatedRowSheet });
       const tableName = getRuntimeTableName(data, 'sheet_0');
 
-      expect(() => bridge.loadFromTableData(data)).not.toThrow();
-      expect(engine.query(`SELECT item_name, quantity, description FROM ${tableName} ORDER BY row_id;`).values).toEqual([
-        ['新快照行', 9, '后续消息覆盖'],
-      ]);
-
-      const exported = bridge.exportToTableData(makeMate());
-      expect(Object.keys(exported).filter(k => k.startsWith('sheet_'))).toEqual(['sheet_0']);
-      expect((exported.sheet_0 as Sheet_ACU).content).toEqual([
-        ['row_id', '物品名称', '数量', '描述'],
-        ['1', '新快照行', '9', '后续消息覆盖'],
-      ]);
+      expect(() => bridge.loadFromTableData(data, { strict: true })).toThrow('duplicate_row_id');
+      expect(engine.getTableNames()).not.toContain(tableName);
     });
   });
 

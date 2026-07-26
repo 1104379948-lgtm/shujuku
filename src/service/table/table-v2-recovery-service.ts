@@ -3,12 +3,13 @@ import { cloneIsolatedData_ACU, readIsolatedTagData_ACU } from '../../data/repos
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder';
-import { auditTableDataForUpgrade_ACU } from './table-data-upgrade-audit';
-import { repairTableDataFromAudit_ACU } from './table-data-repair';
+import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
+import { repairTableDataFromAudit_ACU, type UpgradeIdRemap_ACU } from './table-data-repair';
 import { getCurrentStorageMode } from './storage-mode';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from './table-storage-strategy';
-import type { TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
+import { loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
+import type { TableMutationOperationV2_ACU, TablePatchV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
 type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace';
@@ -95,6 +96,69 @@ function hasLaterReplayArtifacts_ACU(
   return frames.some(item => item.messageIndex > sourceMessageIndex && hasAnyReplayArtifacts_ACU(item.frame));
 }
 
+function canonicalRowId_ACU(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const rowId = String(value).trim();
+  return rowId || null;
+}
+function buildRemappedRowIdKeys_ACU(idRemap: UpgradeIdRemap_ACU[]): Set<string> {
+  const keys = new Set<string>();
+  for (const remap of idRemap) {
+    const rowId = canonicalRowId_ACU(remap.previousRowId);
+    if (rowId) keys.add(`${remap.sheetKey}\u0000${rowId}`);
+  }
+  return keys;
+}
+function operationReferencesRemappedRowId_ACU(
+  operation: TableMutationOperationV2_ACU | TablePatchV2_ACU,
+  remappedRowIdKeys: Set<string>,
+): string | null {
+  if (operation.kind === 'row_upsert' || operation.kind === 'row_delete') {
+    const rowId = canonicalRowId_ACU(operation.rowId);
+    return rowId && remappedRowIdKeys.has(`${operation.sheetKey}\u0000${rowId}`) ? rowId : null;
+  }
+  const referencesBoundRemappedRowId = (statements: string[], params: unknown[][] | undefined, sheetKey?: string): string | null => {
+    for (let index = 0; index < statements.length; index += 1) {
+      if (!/\brow_id\b/i.test(statements[index] || '')) continue;
+      for (const value of params?.[index] || []) {
+        const rowId = canonicalRowId_ACU(value);
+        if (!rowId) continue;
+        if (sheetKey) {
+          if (remappedRowIdKeys.has(`${sheetKey}\u0000${rowId}`)) return rowId;
+        } else if ([...remappedRowIdKeys].some(key => key.endsWith(`\u0000${rowId}`))) {
+          return rowId;
+        }
+      }
+    }
+    return null;
+  };
+  if (operation.kind === 'sql_sheet_batch') {
+    return referencesBoundRemappedRowId(operation.statements, operation.params, operation.sheetKey);
+  }
+  if (operation.kind === 'sql_batch') {
+    return referencesBoundRemappedRowId(operation.statements, operation.params);
+  }
+  return null;
+}
+function findAmbiguousRowIdReference_ACU(
+  frames: Array<{ messageIndex: number; frame: TableStorageFrameV2_ACU }>,
+  sourceMessageIndex: number,
+  idRemap: UpgradeIdRemap_ACU[],
+): string | null {
+  const remappedRowIdKeys = buildRemappedRowIdKeys_ACU(idRemap);
+  if (remappedRowIdKeys.size === 0) return null;
+  for (const item of frames) {
+    if (item.messageIndex < sourceMessageIndex) continue;
+    for (const entry of item.frame.logEntries || []) {
+      for (const operation of [...(entry.operations || []), ...(entry.patches || [])]) {
+        const rowId = operationReferencesRemappedRowId_ACU(operation, remappedRowIdKeys);
+        if (rowId) return `messageIndex=${item.messageIndex}、seq=${entry.seq} 的 ${operation.kind} 引用了重映射前的 row_id=${rowId}`;
+      }
+    }
+  }
+  return null;
+}
+
 function hasSamePlanScope_ACU(left: RecoveryPlan_ACU, right: RecoveryPlan_ACU): boolean {
   return left.chat === right.chat
     && left.chatKey === right.chatKey
@@ -150,12 +214,20 @@ function buildRecoveredCandidateChat_ACU(plan: RecoveryPlan_ACU): any[] {
   sourceMessage.TavernDB_ACU_IsolatedData = isolatedData;
   return candidateChat;
 }
-function repairCandidate_ACU(data: unknown): { candidateData: TableDataObject_ACU | null; status: 'clean' | 'repairable' | 'requires_confirmation' | 'unrecoverable' } {
+async function validateRecoveredCandidateReplay_ACU(plan: RecoveryPlan_ACU, candidateChat: any[]): Promise<void> {
+  const replayedData = await loadTableStateFromFramesV2_ACU(candidateChat, plan.isolationKey, { updateRuntimeState: false });
+  if (!replayedData) throw new Error('恢复候选未产生可回放表数据。');
+  if (getTableDataFingerprint_ACU(replayedData) !== getTableDataFingerprint_ACU(plan.candidateData)) {
+    throw new Error('恢复候选 replay 结果与修复数据不一致。');
+  }
+}
+function repairCandidate_ACU(data: unknown): { candidateData: TableDataObject_ACU | null; idRemap: UpgradeIdRemap_ACU[]; status: 'clean' | 'repairable' | 'requires_confirmation' | 'unrecoverable' } {
   const audit = auditTableDataForUpgrade_ACU(data);
-  if (audit.status !== 'repairable') return { candidateData: null, status: audit.status };
+  if (audit.status !== 'repairable') return { candidateData: null, idRemap: [], status: audit.status };
   const repair = repairTableDataFromAudit_ACU(audit);
   return {
     candidateData: repair.requiresConfirmation ? null : repair.candidateData as TableDataObject_ACU,
+    idRemap: repair.idRemap,
     status: audit.status,
   };
 }
@@ -171,10 +243,16 @@ function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): V2RecoveryDi
   if (frames.length === 0) return { summary: { status: 'unrecoverable_no_base', isolationKey, requiresConfirmation: false, message: '当前隔离标识不存在 V2 storage frame。' } };
   const latestFull = [...frames].reverse().find(item => item.frame.checkpoint?.kind === 'full');
   if (latestFull?.frame.checkpoint) {
-    if (hasReplayArtifactsAfterCheckpoint_ACU(latestFull.frame) || hasLaterReplayArtifacts_ACU(frames, latestFull.messageIndex)) return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '坏 full checkpoint 之后仍存在 V2 replay artifact；无法证明替换不会截断数据，拒绝自动恢复。' } };
     const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
     if (repair.status === 'clean') return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '最新 full checkpoint 已通过完整性审计，无需恢复。' } };
     if (!repair.candidateData) return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '最新 full checkpoint 不可无损自动修复；请先导出原始 frame。' } };
+    if (hasReplayArtifactsAfterCheckpoint_ACU(latestFull.frame) || hasLaterReplayArtifacts_ACU(frames, latestFull.messageIndex)) {
+      const ambiguity = findAmbiguousRowIdReference_ACU(frames, latestFull.messageIndex, repair.idRemap);
+      const message = ambiguity
+        ? `重复 row_id 修复会改变后续引用的语义：${ambiguity}；拒绝猜测。`
+        : '坏 full checkpoint 之后仍存在 V2 replay artifact；无法证明替换不会截断数据，拒绝自动恢复。';
+      return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message } };
+    }
     const summary: V2RecoverySummary_ACU = { status: 'recoverable_repaired_checkpoint', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '已生成 full 修复候选。' };
     return { summary, plan: { ...summary, kind: 'repaired_full_checkpoint', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(latestFull.frame), candidateData: repair.candidateData } };
   }
@@ -235,6 +313,11 @@ export async function commitPreparedV2Recovery_ACU(
     candidateChat = buildRecoveredCandidateChat_ACU(plan);
   } catch (error) {
     return failure(`恢复候选构造失败：${getErrorMessage_ACU(error)}`);
+  }
+  try {
+    await validateRecoveredCandidateReplay_ACU(plan, candidateChat);
+  } catch (error) {
+    return failure(`恢复候选 replay 校验失败，未保存任何更改：${getErrorMessage_ACU(error)}`);
   }
 
   return runTableWriteTransaction_ACU({

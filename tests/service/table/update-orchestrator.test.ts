@@ -2224,13 +2224,13 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
       callCount++;
       if (callCount === 1) {
-        return '<tableEdit>INSERT INTO invalid_table VALUES (1);</tableEdit>';
+        return '<tableEdit>UPDATE invalid_table SET value = 1 WHERE row_id = 1;</tableEdit>';
       }
       if (callCount === 2) {
         expect(dynamicContent.tableDataText).toContain('SQL_ERROR_FEEDBACK');
         expect(dynamicContent.tableDataText).toContain('no such table');
         expect(dynamicContent.tableDataText).toContain('SQL执行错误，请修正后重新输出');
-        return '<tableEdit>INSERT INTO test VALUES (1);</tableEdit>';
+        return '<tableEdit>DELETE FROM test WHERE row_id = 1;</tableEdit>';
       }
       return '<tableEdit>ok</tableEdit>';
     });
@@ -2305,9 +2305,9 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
       callCount++;
       capturedTableDataTexts.push(dynamicContent.tableDataText);
-      if (callCount === 1) return '<tableEdit>INSERT INTO missing VALUES (1);</tableEdit>';
+      if (callCount === 1) return '<tableEdit>INSERT INTO missing (value) VALUES (1);</tableEdit>';
       if (callCount === 2) return '<tableEdit>INSERT INTO t (missing_col) VALUES (1);</tableEdit>';
-      return '<tableEdit>INSERT INTO t VALUES (1);</tableEdit>';
+      return '<tableEdit>DELETE FROM t WHERE row_id = 1;</tableEdit>';
     });
 
     mockCheckIfFirstTimeInit.mockResolvedValue(false);
@@ -2325,7 +2325,7 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     expect(callCount).toBe(3);
 
     // 第二次调用时应包含第一次的错误信息
-    expect(capturedTableDataTexts[1]).toContain('no such table');
+    expect(capturedTableDataTexts[1]).toContain('无法识别目标表');
     // 第三次调用时应包含第二次的错误信息（替换了第一次的）
     expect(capturedTableDataTexts[2]).toContain('missing_col');
     // 第三次不应包含第一次的错误信息（被替换了）
@@ -2333,6 +2333,53 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
 
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
+
+ it('SQL 直接 provider 路径在执行与 V2 operation 中使用系统物化的 row_id', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+
+    const snapshot = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'test',
+        name: '测试表',
+        sourceData: { ddl: 'CREATE TABLE test (row_id INTEGER PRIMARY KEY, col1 TEXT NOT NULL);' },
+        content: [['row_id', 'col1'], ['1', '旧值']],
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    mockCurrentJsonTableData = structuredClone(snapshot);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(structuredClone(snapshot));
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
+    mockCallCustomOpenAI.mockResolvedValue("<tableEdit>INSERT INTO test (col1) VALUES ('新值');</tableEdit>");
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    mockSaveIndependentTable.mockResolvedValue({ saved: true });
+
+    try {
+      const result = await executeCardUpdateCore_ACU(
+        [{ is_user: false, mes: 'AI回复' }],
+        0, false, 'auto_standard', false,
+        ['sheet_0'], null, new AbortController(),
+      );
+
+      expect(result.success, result.error).toBe(true);
+      const persistPayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+      expect(persistPayload.tableData.sheet_0.content).toEqual([
+        ['row_id', 'col1'], ['1', '旧值'], ['2', '新值'],
+      ]);
+      expect(persistPayload.operations).toEqual([{
+        kind: 'sql_sheet_batch',
+        sheetKey: 'sheet_0',
+        statements: ["INSERT INTO ceshibiao (row_id, col1) VALUES (2, '新值')"],
+        tableName: 'ceshibiao',
+        reason: 'system',
+      }]);
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -3033,8 +3080,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_1: { uid: 'quest_log', name: '表B', sourceData: { ddl: questDDL }, content: [['row_id', 'value'], ['1', 'base-b']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO quest_log VALUES (2, 'sql-b');</tableEdit>", tableEditText: "INSERT INTO quest_log VALUES (2, 'sql-b');", job: { groupKey: 'b', groupId: 2, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (2, 'sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO quest_log (value) VALUES ('sql-b');</tableEdit>", tableEditText: "INSERT INTO quest_log (value) VALUES ('sql-b');", job: { groupKey: 'b', groupId: 2, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory (value) VALUES ('sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
 
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
@@ -3050,8 +3097,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'base-a'], ['2', 'sql-a']]);
     expect(mockCurrentJsonTableData.sheet_1.content).toEqual([['row_id', 'value'], ['1', 'base-b'], ['2', 'sql-b']]);
     expect(mockPersistTablesToChatMessage.mock.calls[0][0].operations).toEqual([
-      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["INSERT INTO biaoa VALUES (2, 'sql-a')"], tableName: 'biaoa', reason: 'system' },
-      { kind: 'sql_sheet_batch', sheetKey: 'sheet_1', statements: ["INSERT INTO biaob VALUES (2, 'sql-b')"], tableName: 'biaob', reason: 'system' },
+      { kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ["INSERT INTO biaoa (row_id, value) VALUES (2, 'sql-a')"], tableName: 'biaoa', reason: 'system' },
+      { kind: 'sql_sheet_batch', sheetKey: 'sheet_1', statements: ["INSERT INTO biaob (row_id, value) VALUES (2, 'sql-b')"], tableName: 'biaob', reason: 'system' },
     ]);
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
@@ -3069,8 +3116,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_1: { uid: 'quest_log', name: '表B', sourceData: { ddl: questDDL }, content: [['row_id', 'value'], ['1', 'base-b']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (2, 'sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO quest_log VALUES (2, 'sql-b');</tableEdit>", tableEditText: "INSERT INTO quest_log VALUES (2, 'sql-b');", job: { groupKey: 'b', groupId: 2, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory (value) VALUES ('sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO quest_log (value) VALUES ('sql-b');</tableEdit>", tableEditText: "INSERT INTO quest_log (value) VALUES ('sql-b');", job: { groupKey: 'b', groupId: 2, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
     // 模板范围只声明 sheet_0。
     mockResolveTemplateScope.mockReturnValue({ sheetKeys: new Set(['sheet_0']), sheets: {} } as any);
@@ -3101,7 +3148,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_1: { uid: 'quest_log', name: '表B', sourceData: { ddl: questDDL }, content: [['row_id', 'value'], ['1', 'base-b']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (2, 'sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory (value) VALUES ('sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
       { success: true, attempt: 1, aiResponse: '<tableEdit>insertRow(1,{"0":"dsl-b"})</tableEdit>', tableEditText: 'insertRow(1,{"0":"dsl-b"})', job: { groupKey: 'b', groupId: 2, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
 
@@ -3142,7 +3189,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
-  it('SQL 模式下模板基础数据与 AI INSERT 主键冲突时返回真实 SQL 错误且不保存', async () => {
+  it('SQL 模式拒绝 AI 显式 row_id，且不保存', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const { getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
@@ -3160,16 +3207,14 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (1, 'sql-conflict');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (1, 'sql-conflict');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (row_id, value) VALUES (1, 'sql-conflict');</tableEdit>", tableEditText: "INSERT INTO inventory (row_id, value) VALUES (1, 'sql-conflict');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
 
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
     const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
 
     expect(result.success).toBe(false);
-    const normalizedError = String(result.error).toLowerCase();
-    expect(normalizedError).toContain('group a');
-    expect(normalizedError).toMatch(/unique|constraint|primary/);
+    expect(result.error).toContain('不得提供 row_id');
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
@@ -3296,7 +3341,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (2, 'sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory (value) VALUES ('sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
 
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
@@ -3308,7 +3353,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     const savePayload = mockPersistTablesToChatMessage.mock.calls[0][0];
     expect(savePayload.targetSheetKeys).toEqual(['sheet_0', 'sheet_1']);
-    expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', 'value'], ['2', 'sql-a']]);
+    expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'sql-a']]);
     expect(savePayload.tableData.sheet_1.content).toEqual([['row_id', 'value'], ['1', 'tpl-b']]);
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
@@ -3331,7 +3376,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (2, 'sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory (value) VALUES ('sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
 
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
@@ -3365,7 +3410,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_1: { uid: 'quest_log', name: '表B', sourceData: { ddl: 'CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value'], ['9', 'existing-b']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (2, 'sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory (value) VALUES ('sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
 
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
@@ -3399,7 +3444,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory VALUES (2, 'sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>", tableEditText: "INSERT INTO inventory (value) VALUES ('sql-a');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
 
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
@@ -3776,8 +3821,8 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     } as any);
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(vi.mocked(parseTableTemplateJson_ACU).getMockImplementation()?.() || {}));
     mockCallCustomOpenAI
-      .mockResolvedValueOnce("<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>")
-      .mockResolvedValueOnce("<tableEdit>INSERT INTO quest_log VALUES (2, 'sql-b');</tableEdit>");
+      .mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>")
+      .mockResolvedValueOnce("<tableEdit>INSERT INTO quest_log (value) VALUES ('sql-b');</tableEdit>");
 
     const result = await processGroupedRuntimeChunk_ACU([
       { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
@@ -3810,9 +3855,9 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     mockPrepareAIInput.mockImplementation(async () => ({ tableDataText: '模拟数据' }));
     mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
       capturedTableDataTexts.push(dynamicContent.tableDataText);
-      if (mockCallCustomOpenAI.mock.calls.length === 1) return "<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>";
+      if (mockCallCustomOpenAI.mock.calls.length === 1) return "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>";
       if (mockCallCustomOpenAI.mock.calls.length === 2) return '<tableEdit>insertRow(1,{"0":"dsl-b"})</tableEdit>';
-      return "<tableEdit>INSERT INTO quest_log VALUES (2, 'sql-b');</tableEdit>";
+      return "<tableEdit>INSERT INTO quest_log (value) VALUES ('sql-b');</tableEdit>";
     });
 
     const result = await processGroupedRuntimeChunk_ACU([
@@ -4071,7 +4116,7 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     mockCurrentJsonTableData = {
       sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: inventoryDDL }, content: [['row_id', 'value'], ['1', 'base-a']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
     } as any;
-    mockCallCustomOpenAI.mockResolvedValueOnce("<tableEdit>INSERT INTO inventory VALUES (2, 'sql-a');</tableEdit>");
+    mockCallCustomOpenAI.mockResolvedValueOnce("<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>");
 
     const legacyProcessBatch = vi.fn().mockResolvedValue({ success: true });
     const refreshData = vi.fn().mockResolvedValue(undefined);

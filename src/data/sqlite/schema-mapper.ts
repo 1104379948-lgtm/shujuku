@@ -257,11 +257,9 @@ export function generateInserts(sheet: Sheet_ACU, tableName?: string, plan?: She
       values.push(escapeValue(normalizedVal));
     }
 
-    // generateInserts 只用于把 JSON 快照灌入 SQLite。若同一快照内 row_id 重复，
-    // 应按快照合并语义让后出现的行覆盖旧行，而不是让整张表加载失败后从导出结果中消失。
-    statements.push(
-      `INSERT OR REPLACE INTO ${sanitizeIdentifier(tblName)} (${columnNames.map(sanitizeIdentifier).join(', ')}) VALUES (${values.join(', ')});`
-    );
+    // Snapshot row_id is a persistent identity. Duplicates must fail instead of
+    // overwriting an earlier row and silently losing historical data.
+    statements.push(`INSERT INTO ${sanitizeIdentifier(tblName)} (${columnNames.map(sanitizeIdentifier).join(', ')}) VALUES (${values.join(', ')});`);
   }
 
   return statements;

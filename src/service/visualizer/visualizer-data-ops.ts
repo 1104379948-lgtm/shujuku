@@ -8,6 +8,7 @@ import { reloadStorageProvider } from '../table/table-storage-strategy';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { isSqliteMode } from '../table/storage-mode';
 import type { TableMutationOperationV2_ACU, TableWriteConflictUnitV2_ACU } from '../table/storage-frame-v2-types';
+import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 
 const TEMP_ROW_ID_PREFIX_ACU = '__acu_vis_tmp_row_';
 
@@ -205,7 +206,7 @@ function toPersistedCells_ACU(cells: any[]): (string | null)[] {
     return cells.map(value => value === null ? null : String(value ?? ''));
 }
 
-function buildInsertCells_ACU(state: any, sheetKey: string, clientRowId: string, runtimeSheet: any): (string | null)[] | null {
+function buildInsertCells_ACU(state: any, sheetKey: string, clientRowId: string, runtimeSheet: any, reservedRowIds: Set<string>): (string | null)[] | null {
     const tempSheet = getSheetByKey_ACU(state?.tempData, sheetKey);
     const tempContent = Array.isArray(tempSheet?.content) ? tempSheet.content : [];
     const tempRow = tempContent.find((row: any[], index: number) => index > 0 && Array.isArray(row) && String(row[0] ?? '') === clientRowId);
@@ -215,12 +216,7 @@ function buildInsertCells_ACU(state: any, sheetKey: string, clientRowId: string,
     assertValidPersistedRowIds_ACU(runtimeSheet, sheetKey, '新增行');
     if (tempRow.length !== headers.length) throw new Error(`新增行失败：表 ${sheetKey} 的临时行与表头长度不一致。`);
     const cells = toPersistedCells_ACU(tempRow);
-    const usedIds = new Set<string>((runtimeSheet?.content || []).slice(1).map((row: any[]) => String(row?.[0] ?? '')));
-    const highestNumericId = Math.max(0, ...[...usedIds].map(rowId => Number(rowId)));
-    if (highestNumericId >= Number.MAX_SAFE_INTEGER) {
-        throw new Error(`新增行失败：表 ${sheetKey} 的行标识已达到安全整数上限。`);
-    }
-    cells[0] = String(highestNumericId + 1);
+    cells[0] = allocateStableRowId_ACU(reservedRowIds);
     return cells;
 }
 
@@ -290,6 +286,13 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
                 operations.push(operation);
                 operationsBySheet.set(sheetKey, operations);
             };
+            const rowIdReservationsBySheet = new Map<string, Set<string>>();
+            for (const op of Object.values(pending.insertsByClientRowId)) {
+                if (rowIdReservationsBySheet.has(op.sheetKey)) continue;
+                const sheet = data[op.sheetKey];
+                if (!sheet || !Array.isArray(sheet.content)) throw new Error(`新增行失败：表 ${op.sheetKey} 在运行时不存在。`);
+                rowIdReservationsBySheet.set(op.sheetKey, createStableRowIdReservation_ACU(sheet.content.slice(1)));
+            }
 
             for (const op of Object.values(pending.deletesByRow)) {
                 const sheet = data[op.sheetKey];
@@ -323,7 +326,9 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
             for (const op of Object.values(pending.insertsByClientRowId)) {
                 const sheet = data[op.sheetKey];
                 if (!sheet || !Array.isArray(sheet.content)) throw new Error(`新增行失败：表 ${op.sheetKey} 在运行时不存在。`);
-                const cells = buildInsertCells_ACU(state, op.sheetKey, op.clientRowId, sheet);
+                const reservedRowIds = rowIdReservationsBySheet.get(op.sheetKey);
+                if (!reservedRowIds) throw new Error(`新增行失败：表 ${op.sheetKey} 缺少 row_id 分配保留区。`);
+                const cells = buildInsertCells_ACU(state, op.sheetKey, op.clientRowId, sheet, reservedRowIds);
                 if (!cells) throw new Error(`新增行失败：表 ${op.sheetKey} 的临时行已丢失或表头无效。`);
                 sheet.content.push(cells);
                 const rowId = String(cells[0]);

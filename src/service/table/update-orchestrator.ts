@@ -48,7 +48,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, materializeSystemRowIdsForSqlInserts_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from './sql-table-service';
 import { hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -939,7 +939,11 @@ export async function applyUnifiedGroupFillResponses_ACU(
             }
             let sqlText: string;
             try {
-                sqlText = rebindSqlMutationTableIdentifiers_ACU([response.tableEditText || ''], baseSnapshot as any)[0];
+                const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(
+                    normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''),
+                    baseSnapshot as any,
+                );
+                sqlText = reboundStatements.join(';\n');
             } catch (error: any) {
                 return {
                     success: false,
@@ -961,6 +965,25 @@ export async function applyUnifiedGroupFillResponses_ACU(
             }
             sqlTexts.push(sqlText);
             sqlResponses.push(response);
+        }
+
+        try {
+            const statementCounts = sqlTexts.map(sqlText => normalizeSqlStatementsForRuntimeLog_ACU(sqlText).length);
+            const materializedStatements = materializeSystemRowIdsForSqlInserts_ACU(
+                sqlTexts.flatMap(sqlText => normalizeSqlStatementsForRuntimeLog_ACU(sqlText)),
+                baseSnapshot as any,
+            );
+            let cursor = 0;
+            statementCounts.forEach((count, index) => {
+                sqlTexts[index] = materializedStatements.slice(cursor, cursor + count).join(';\n');
+                cursor += count;
+            });
+        } catch (error: any) {
+            return {
+                success: false,
+                modifiedKeys: [],
+                error: `统一提交失败：AI SQL 行身份分配失败。${error?.message || String(error)}`,
+            };
         }
 
         if (sqlTexts.length === 0) {
@@ -1684,7 +1707,14 @@ export async function executeCardUpdateCore_ACU(
                         skipChatSave: isImportMode,
                     }, async () => {
                         const provider = await ensureStorageProviderReady_ACU();
-                        const runtimeSqlText = rebindSqlMutationTableIdentifiers_ACU([collectResult.tableEditText || ''], rawBaseSnapshot as any)[0];
+                        const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(
+                            normalizeSqlStatementsForRuntimeLog_ACU(collectResult.tableEditText || ''),
+                            rawBaseSnapshot as any,
+                        );
+                        const runtimeSqlText = materializeSystemRowIdsForSqlInserts_ACU(
+                            reboundStatements,
+                            rawBaseSnapshot as any,
+                        ).join(';\n');
                         let parseResult: any;
                         try {
                             parseResult = provider.applyEdits(runtimeSqlText, updateMode);

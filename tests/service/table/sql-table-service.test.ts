@@ -109,6 +109,7 @@ import {
   applySqlEditsToTableDataSnapshot_ACU,
   assertNoHiddenPhysicalColumnMutations_ACU,
   buildSqlSheetBatchOperations_ACU,
+  materializeSystemRowIdsForSqlInserts_ACU,
   rebindSqlMutationTableIdentifiers_ACU,
   SqlTableService,
   splitSqlStatements,
@@ -363,7 +364,7 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
 
   it('基于显式快照应用 SQL，返回 workingData 且不污染输入快照与全局状态', async () => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
-    const result = await applySqlEditsToTableDataSnapshot_ACU("UPDATE inventory SET quantity = 9 WHERE row_id = 1; INSERT INTO inventory VALUES (2, '治疗药水', 5);", inputSnapshot);
+    const result = await applySqlEditsToTableDataSnapshot_ACU("UPDATE inventory SET quantity = 9 WHERE row_id = 1; INSERT INTO inventory (item_name, quantity) VALUES ('治疗药水', 5);", inputSnapshot);
 
     expect(result.success).toBe(true);
     expect(result.modifiedKeys).toEqual(['sheet_0']);
@@ -400,7 +401,7 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
   it('严格单表日志模式下返回 sql_sheet_batch 而不是旧 sql_batch', async () => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
     const result = await applySqlEditsToTableDataSnapshot_ACU(
-      "UPDATE inventory SET quantity = 9 WHERE row_id = 1; INSERT INTO inventory VALUES (2, '治疗药水', 5);",
+      "UPDATE inventory SET quantity = 9 WHERE row_id = 1; INSERT INTO inventory (item_name, quantity) VALUES ('治疗药水', 5);",
       inputSnapshot,
       'auto_standard',
       { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
@@ -412,7 +413,7 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
       sheetKey: 'sheet_0',
       statements: [
         'UPDATE beibaowupinbiao SET quantity = 9 WHERE row_id = 1',
-        "INSERT INTO beibaowupinbiao VALUES (2, '治疗药水', 5)",
+        "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '治疗药水', 5)",
       ],
       tableName: 'beibaowupinbiao',
       reason: 'system',
@@ -439,7 +440,7 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     }]);
   });
 
-  it('跨 Sheet 引用但写入目标可识别时记录为 sql_sheet_batch', async () => {
+  it('拒绝 INSERT SELECT，避免将不可确定的 row_id 写入 V2 日志', async () => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
     inputSnapshot.sheet_1 = {
       uid: 'quest_log',
@@ -458,15 +459,35 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
       { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
     );
 
-    expect(result.success).toBe(true);
-    expect(result.operations).toEqual([{
-      kind: 'sql_sheet_batch',
-      sheetKey: 'sheet_0',
-      statements: ['INSERT INTO beibaowupinbiao SELECT row_id, item_name, quantity FROM renwubiao'],
-      tableName: 'beibaowupinbiao',
-      reason: 'system',
-    }]);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('不支持 INSERT SELECT');
     expect(inputSnapshot.sheet_0.content).toEqual([['row_id', 'item_name', 'quantity'], ['1', '铁剑', '3']]);
+  });
+
+  it('为同一批 INSERT 按当前最大 row_id 连续分配，并持久化具体身份', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.content.push(['3', '盾牌', '1']);
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      "INSERT INTO inventory (item_name, quantity) VALUES ('药水', 5), ('卷轴', 2);",
+      inputSnapshot,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.workingData?.sheet_0.content.slice(1).map((row: any[]) => row[0])).toEqual(['1', '3', '4', '5']);
+    expect((result.operations?.[0] as any).statements).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (4, '药水', 5), (5, '卷轴', 2)",
+    ]);
+  });
+
+  it('拒绝 AI 显式 row_id 与无列清单 INSERT', () => {
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ["INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5)"],
+      snapshotTableData,
+    )).toThrow('不得提供 row_id');
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU(
+      ["INSERT INTO beibaowupinbiao VALUES (2, '药水', 5)"],
+      snapshotTableData,
+    )).toThrow('必须显式列出业务列');
   });
 });
 

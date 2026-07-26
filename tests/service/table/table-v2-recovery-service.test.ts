@@ -28,6 +28,7 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
 
 import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU, scanV2IsolationDiagnostics_ACU } from '../../../src/service/table/table-v2-recovery-service';
 import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import * as storageFrameV2Replay from '../../../src/service/table/storage-frame-v2-replay';
 
 function data(rows: any[][] = [['1', '铁剑']]) {
   return { mate: { type: 'acu', version: 1 }, sheet_0: { uid: 'inventory', name: '背包', content: [['row_id', '名称'], ...rows], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 } } as any;
@@ -95,6 +96,54 @@ describe('table-v2-recovery-service', () => {
     await expect(loadTableStateFromFramesV2_ACU(h.chat, '', { updateRuntimeState: false })).resolves.toBeTruthy();
   });
 
+  it('后续 operation 引用被重复身份修复重映射的 row_id 时拒绝猜测', () => {
+    const source = frame({ kind: 'full', createdAt: 1, reason: 'init', data: data([['1', '铁剑'], [' 1 ', '副本']]) });
+    h.chat = chatWithFrame(source);
+    h.chat.push({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: frame(undefined, [{
+            seq: 1, entryId: 'ambiguous-row-id', createdAt: 2, source: 'system', targetMessageIndex: 1, aiFloor: 1,
+            filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+            operations: [{ kind: 'row_delete', sheetKey: 'sheet_0', rowId: '1' }],
+          }]),
+        },
+      },
+    });
+
+    expect(prepareV2Recovery_ACU()).toMatchObject({
+      status: 'unrecoverable',
+      message: expect.stringContaining('重复 row_id 修复会改变后续引用的语义'),
+    });
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+  it('后续 SQL operation 绑定被重映射的 row_id 时拒绝猜测', () => {
+    const source = frame({ kind: 'full', createdAt: 1, reason: 'init', data: data([['1', '铁剑'], [' 1 ', '副本']]) });
+    h.chat = chatWithFrame(source);
+    h.chat.push({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: frame(undefined, [{
+            seq: 1, entryId: 'ambiguous-sql-row-id', createdAt: 2, source: 'system', targetMessageIndex: 1, aiFloor: 1,
+            filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+            operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: ['DELETE FROM inventory WHERE row_id = ?'], params: [['1']] }],
+          }]),
+        },
+      },
+    });
+
+    expect(prepareV2Recovery_ACU()).toMatchObject({
+      status: 'unrecoverable',
+      message: expect.stringContaining('重复 row_id 修复会改变后续引用的语义'),
+    });
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
   it('孤立 data_replace 需要明确确认，未确认时零写入零保存', async () => {
     const source = frame(undefined, [{ seq: 1, entryId: 'replace', createdAt: 1, source: 'import', targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [], operations: [{ kind: 'data_replace', data: data(), reason: 'import' }] }]);
     h.chat = chatWithFrame(source);
@@ -123,6 +172,25 @@ describe('table-v2-recovery-service', () => {
 
     await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toEqual({ status: 'committed', planId: prepared.planId });
     expect(h.save).toHaveBeenCalledTimes(2);
+  });
+
+  it('恢复候选 replay 校验失败时不保存且不改写 live chat', async () => {
+    const source = frame({ kind: 'full', createdAt: 1, reason: 'init', data: data([['1', '铁剑'], [' 1 ', '副本']]) });
+    h.chat = chatWithFrame(source);
+    const before = structuredClone(h.chat);
+    const prepared = prepareV2Recovery_ACU();
+    const replaySpy = vi.spyOn(storageFrameV2Replay, 'loadTableStateFromFramesV2_ACU').mockRejectedValueOnce(new Error('candidate replay failed'));
+
+    try {
+      await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toMatchObject({
+        status: 'commit_failed_rolled_back', error: expect.stringContaining('候选 replay 校验失败'),
+      });
+      expect(h.chat).toEqual(before);
+      expect(h.save).not.toHaveBeenCalled();
+      expect(h.reload).not.toHaveBeenCalled();
+    } finally {
+      replaySpy.mockRestore();
+    }
   });
 
   it('SQLite 恢复保存后重载 provider', async () => {

@@ -14,6 +14,7 @@ vi.mock('../../../src/shared/utils', async () => {
 
 import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU } from '../../../src/service/table/table-schema-migration';
+import { applySqlEditsToTableDataSnapshot_ACU } from '../../../src/service/table/sql-table-service';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
 
 function makeCheckpointData() {
@@ -251,6 +252,92 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       ['1', '钢剑'],
       ['2', '药水'],
     ]);
+  });
+
+  it('已物化的 SQL INSERT 回放与实时快照一致，删除中间 ID 后仍保留 max + 1 身份', async () => {
+    const baseSnapshot = makeCheckpointData();
+    baseSnapshot.sheet_0.content = [
+      ['row_id', 'name'],
+      ['1', '铁剑'],
+      ['3', '盾牌'],
+    ];
+    const liveResult = await applySqlEditsToTableDataSnapshot_ACU(
+      "INSERT INTO inventory (name) VALUES ('药水');",
+      baseSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+
+    expect(liveResult.success).toBe(true);
+    expect(liveResult.workingData?.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '铁剑'],
+      ['3', '盾牌'],
+      ['4', '药水'],
+    ]);
+    expect(liveResult.operations).toEqual([{
+      kind: 'sql_sheet_batch',
+      sheetKey: 'sheet_0',
+      statements: ["INSERT INTO inventory (row_id, name) VALUES (4, '药水')"],
+      tableName: 'inventory',
+      reason: 'system',
+    }]);
+
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: baseSnapshot,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'materialized-row-id-replay', createdAt: 2,
+              source: 'auto_fill', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: liveResult.operations,
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
+      .resolves.toEqual(liveResult.workingData);
+  });
+
+  it('legacy 显式 row_id SQL operation 保持历史指定身份', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData(),
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'legacy-explicit-row-id', createdAt: 2,
+              source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',
+                statements: ["INSERT INTO inventory (row_id, name) VALUES (10, '旧日志行')"],
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toMatchObject({
+      sheet_0: expect.objectContaining({ content: [['row_id', 'name'], ['1', '铁剑'], ['10', '旧日志行']] }),
+    });
   });
 
   it('宽松映射历史 DDL 表名、sheetKey 与 sql_sheet_batch tableName 到当前 runtime 表名', async () => {
@@ -843,7 +930,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     });
   });
 
-  it('DSL 删除中间行后插入使用最小未占用 row_id，且保留 0 和 false', async () => {
+  it('DSL 删除中间行后插入使用最大 row_id + 1，且保留 0 和 false', async () => {
     const checkpointData = makeCheckpointData();
     checkpointData.sheet_0.content = [
       ['row_id', 'name', 'enabled'],
@@ -870,7 +957,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     }];
 
     await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toMatchObject({
-      sheet_0: expect.objectContaining({ content: [['row_id', 'name', 'enabled'], ['1', '铁剑', true], ['3', '盾牌', true], ['2', 0, false]] }),
+      sheet_0: expect.objectContaining({ content: [['row_id', 'name', 'enabled'], ['1', '铁剑', true], ['3', '盾牌', true], ['4', 0, false]] }),
     });
   });
 
