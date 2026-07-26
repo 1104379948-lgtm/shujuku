@@ -34,9 +34,11 @@ export interface TableReplayResultV2_ACU {
 export interface LoadTableStateFromFramesV2Options_ACU {
   maxMessageIndex?: number;
   updateRuntimeState?: boolean;
+  throwOnRecoveryRequired?: boolean;
   /**
    * 默认关闭，保留无锚点 artifacts 返回 null 的 fail-closed 契约。
    * 开启后只允许从有效模板建立 header-only 临时基线，且仍拒绝孤立 data_replace。
+   * 写入编排器应同时开启 throwOnRecoveryRequired，避免把待确认恢复误当成空表。
    */
   allowTemporaryTemplateBaseline?: boolean;
 }
@@ -778,7 +780,9 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
       return null;
     }
     if (hasOrphanDataReplace_ACU(frameRefs)) {
-      logWarn_ACU('[V2 Replay] 无锚点 artifacts 包含 data_replace，必须通过显式恢复确认，拒绝使用临时模板基线。');
+      const message = '[V2 Replay] 无锚点 artifacts 包含 data_replace，必须通过显式恢复确认，拒绝使用临时模板基线。';
+      logWarn_ACU(message);
+      if (options.throwOnRecoveryRequired) throw new Error(`${message} 请先在数据管理中执行 V2 恢复诊断并确认恢复。`);
       return null;
     }
     const temporaryBaseline = resolveTemporaryTemplateBaseline_ACU(chat, isolationKey);

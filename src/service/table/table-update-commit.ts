@@ -29,6 +29,8 @@ export interface TableUpdateCommitPersistOverride_ACU {
   strictSave?: boolean;
 }
 
+export type TableUpdateCommitErrorCategory_ACU = 'model' | 'infrastructure' | 'precondition';
+
 export interface TableUpdateCommitApplyResult_ACU<T> {
   success: boolean;
   value?: T;
@@ -36,6 +38,7 @@ export interface TableUpdateCommitApplyResult_ACU<T> {
   mutationResult?: SqlMutationResult;
   persist?: TableUpdateCommitPersistOverride_ACU;
   error?: string;
+  errorCategory?: TableUpdateCommitErrorCategory_ACU;
 }
 
 export interface RunTableUpdateCommitOptions_ACU {
@@ -66,6 +69,14 @@ export interface RunTableUpdateCommitResult_ACU<T> {
   saved?: boolean;
   messageIndex?: number;
   error?: string;
+  errorCategory?: TableUpdateCommitErrorCategory_ACU;
+}
+
+class TableUpdateCommitError_ACU extends Error {
+  constructor(message: string, readonly category: TableUpdateCommitErrorCategory_ACU) {
+    super(message);
+    this.name = 'TableUpdateCommitError';
+  }
 }
 
 function cloneTableData_ACU(data: TableDataObject_ACU): TableDataObject_ACU {
@@ -115,7 +126,11 @@ export async function runTableUpdateCommit_ACU<T>(
   try {
     const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
     if (!migration.success) {
-      return { success: false, error: migration.error || '旧存储迁移失败，已阻止本次写入。' };
+      return {
+        success: false,
+        error: migration.error || '旧存储迁移失败，已阻止本次写入。',
+        errorCategory: 'infrastructure',
+      };
     }
     if (migration.migrated) {
       await reloadStorageProvider();
@@ -133,7 +148,7 @@ export async function runTableUpdateCommit_ACU<T>(
       return transactionContext.runCommit(async () => {
         const applied = await apply({ transactionContext, workingData });
         if (!applied.success || !applied.tableData) {
-          throw new Error(applied.error || `${options.reason}: update apply failed`);
+          throw new TableUpdateCommitError_ACU(applied.error || `${options.reason}: update apply failed`, applied.errorCategory || 'infrastructure');
         }
 
         let saved = true;
@@ -168,7 +183,7 @@ export async function runTableUpdateCommit_ACU<T>(
           if (!saveResult.saved) {
             logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update, reload runtime before releasing lock: ${saveResult.error || 'unknown error'}`);
             await reloadStorageProvider();
-            throw new Error(saveResult.error || `${options.reason}: persist failed`);
+            throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, 'infrastructure');
           }
         }
 
@@ -186,7 +201,11 @@ export async function runTableUpdateCommit_ACU<T>(
   } catch (error: any) {
     const message = error?.message || String(error);
     logError_ACU(`[TableUpdateCommit] ${options.reason} failed:`, error);
-    return { success: false, error: message };
+    return {
+      success: false,
+      error: message,
+      errorCategory: error instanceof TableUpdateCommitError_ACU ? error.category : 'infrastructure',
+    };
   }
 }
 

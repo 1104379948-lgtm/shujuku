@@ -1067,6 +1067,12 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       allowTemporaryTemplateBaseline: true,
     })).resolves.toBeNull();
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('data_replace'));
+
+    await expect(loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      allowTemporaryTemplateBaseline: true,
+      throwOnRecoveryRequired: true,
+    })).rejects.toThrow('请先在数据管理中执行 V2 恢复诊断并确认恢复');
   });
 
   it('无 full checkpoint 时拒绝从 data_replace/log-only 恢复不完整数据', async () => {

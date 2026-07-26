@@ -57,7 +57,11 @@ describe('runTableUpdateCommit_ACU migration gate', () => {
 
     const result = await runTableUpdateCommit_ACU(options('test_mixed_gate'), apply);
 
-    expect(result).toEqual({ success: false, error: 'mixed storage evidence insufficient' });
+    expect(result).toEqual({
+      success: false,
+      error: 'mixed storage evidence insufficient',
+      errorCategory: 'infrastructure',
+    });
     expect(apply).not.toHaveBeenCalled();
     expect(mocks.transaction).not.toHaveBeenCalled();
     expect(mocks.persist).not.toHaveBeenCalled();
@@ -72,7 +76,11 @@ describe('runTableUpdateCommit_ACU migration gate', () => {
       mapValue: () => 'unreachable',
     });
 
-    expect(result).toEqual({ success: false, error: 'mixed storage evidence insufficient' });
+    expect(result).toEqual({
+      success: false,
+      error: 'mixed storage evidence insufficient',
+      errorCategory: 'infrastructure',
+    });
     expect(mocks.transaction).not.toHaveBeenCalled();
     expect(mocks.ensureProvider).not.toHaveBeenCalled();
     expect(mocks.persist).not.toHaveBeenCalled();

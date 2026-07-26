@@ -545,6 +545,9 @@ describe('assertNoHiddenPhysicalColumnMutations_ACU', () => {
   });
 
   it.each([
+    'REPLACE INTO inventory (item_name, quantity) VALUES (\'药水\', 1)',
+    'INSERT OR REPLACE INTO inventory (item_name, quantity) VALUES (\'药水\', 1)',
+    'WITH payload AS (SELECT 1) REPLACE INTO inventory (item_name, quantity) VALUES (\'药水\', 1)',
     'ALTER TABLE inventory DROP COLUMN legacy_note',
     'CREATE TABLE another_table (id INTEGER)',
     'DROP TABLE inventory',
@@ -552,7 +555,7 @@ describe('assertNoHiddenPhysicalColumnMutations_ACU', () => {
     'COMMIT',
   ])('对 AI SQL 的非 mutation 语句 fail closed：%s', statement => {
     expect(() => assertNoHiddenPhysicalColumnMutations_ACU([statement], tableData))
-      .toThrow('不支持安全重绑定的 SQL 语句类型');
+      .toThrow('SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句');
   });
 
   it('拒绝多语句中位于后续语句的隐藏列引用', () => {

@@ -463,6 +463,34 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
     expect(result!.tableDataText).not.toContain('全局值');
   });
 
+  it('SQLite prompt 明确标注 DDL 仅用于结构参考并禁止复制 CREATE', async () => {
+    mockIsSqliteMode = true;
+    mockSettings.strictJsonTableFillEnabled = true;
+    mockCurrentJsonTableData = {
+      sheet_0: {
+        uid: 'inventory',
+        name: '背包表',
+        sourceData: {
+          ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);',
+        },
+        content: [['row_id', 'item_name'], ['1', '铁剑']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    };
+
+    const result = await prepareAIInput_ACU([], 'standard', ['sheet_0'], {
+      tableData: mockCurrentJsonTableData,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).toContain('CREATE TABLE');
+    expect(result!.tableDataText).toContain('上方 CREATE TABLE 仅用于说明表结构');
+    expect(result!.tableDataText).toContain('严禁复制或输出 CREATE、ALTER、DROP、SELECT');
+    expect(result!.tableDataText).toContain('仅使用 INSERT INTO / UPDATE / DELETE FROM 数据变更语句');
+  });
+
   it('原生 prompt 使用 physical 投影隐藏历史列并保持右侧可见列对齐', async () => {
     const result = await prepareAIInput_ACU([], 'standard', null, {
       tableData: {

@@ -579,6 +579,44 @@ describe('buildBatchMergeBase_ACU', () => {
     }
   });
 
+  it('写入编排遇到无锚点 data_replace 时阻断，不退回模板空基底', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    try {
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      vi.mocked(getChatArray_ACU).mockReturnValue([{
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              logEntries: [{
+                seq: 1,
+                entryId: 'orphan-data-replace',
+                createdAt: 1,
+                source: 'import',
+                targetMessageIndex: 0,
+                aiFloor: 1,
+                filledSheetKeys: ['sheet_0'],
+                changedSheetKeys: ['sheet_0'],
+                groupKeys: [],
+                operations: [{ kind: 'data_replace', reason: 'import', data: { sheet_0: { content: [['row_id'], ['1']] } } }],
+              }],
+            },
+          },
+        },
+      }]);
+
+      const result = await buildBatchMergeBase_ACU(1, { maxMessageIndex: 0 });
+
+      expect(result.data).toBeNull();
+      expect(result.error).toContain('请先在数据管理中执行 V2 恢复诊断并确认恢复');
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
   it('非 SQLite 有界基底且未进入 V2 replay 时保留 runtime snapshot fallback', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
@@ -1595,7 +1633,7 @@ describe('orchestrateManualUpdate_ACU', () => {
       mate: { type: 'acu' },
       sheet_0: { name: '测试表A', updateConfig: { groupId: 0 }, content: [['row_id', '值A']] },
     });
-    vi.mocked(getChatArray_ACU).mockReturnValue([
+    const chat = [
       {
         is_user: false,
         mes: 'AI回复1',
@@ -1638,7 +1676,12 @@ describe('orchestrateManualUpdate_ACU', () => {
           },
         },
       },
-    ]);
+    ];
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    mockClearManualRefillSheetDataInRange.mockImplementationOnce(async () => {
+      chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries = [];
+      return 1;
+    });
     mockSettings.maxConcurrentGroups = 1;
     mockSettings.autoUpdateThreshold = 0;
     mockSettings.updateBatchSize = 1;
@@ -2635,6 +2678,72 @@ describe('collectGroupFillResponse_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
+  it('模型 SQL 输出错误会脱敏注入下一次重试 prompt', async () => {
+    vi.useFakeTimers();
+    try {
+      const job: any = createJob();
+      job.baseSnapshot = {
+        sheet_0: {
+          uid: 'inventory',
+          name: '背包表',
+          sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);' },
+          content: [['row_id', 'item_name'], ['1', '铁剑']],
+        },
+      };
+      const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
+      mockCallCustomOpenAI
+        .mockResolvedValueOnce('<tableEdit>CREATE TABLE leaked (id INTEGER);</tableEdit>')
+        .mockImplementationOnce(async (dynamicContent: any) => {
+          expect(dynamicContent.tableDataText).toContain('SQL_ERROR_FEEDBACK');
+          expect(dynamicContent.tableDataText).toContain('SQLite 填表仅允许 INSERT、UPDATE、DELETE');
+          return "<tableEdit>UPDATE inventory SET item_name = '药水' WHERE row_id = 1;</tableEdit>";
+        });
+
+      const resultPromise = collectGroupFillResponse_ACU(job);
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(result.success).toBe(true);
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('基础设施错误立即失败，不进入模型 prompt，WARN 不暴露原始 groupKey 且限制错误长度', async () => {
+    vi.useFakeTimers();
+    try {
+      const { logWarn_ACU } = await import('../../../src/shared/utils');
+      const job: any = createJob();
+      job.groupKey = `sensitive-preset-${'x'.repeat(1200)}`;
+      const infrastructureError = `401 https://internal.example/token?secret=abc ${'y'.repeat(1200)}`;
+      const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
+      mockCallCustomOpenAI.mockRejectedValueOnce(new Error(infrastructureError));
+
+      const resultPromise = collectGroupFillResponse_ACU(job);
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(result.success).toBe(false);
+      expect(result.errorCategory).toBe('infrastructure');
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+      const warning = String(vi.mocked(logWarn_ACU).mock.calls[0]?.[0] || '');
+      expect(warning).toContain('groupId=0,batch=1,targets=1');
+      expect(warning).not.toContain('sensitive-preset');
+      expect(warning).not.toContain('internal.example');
+      expect(warning).not.toContain('secret=abc');
+      expect(warning.length).toBeLessThan(900);
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('SQLite AI 响应引用隐藏物理列时在 collect 阶段拒绝并进入重试错误', async () => {
     const job: any = createJob();
     job.baseSnapshot = {
@@ -2666,6 +2775,9 @@ describe('collectGroupFillResponse_ACU', () => {
   });
 
   it.each([
+    "REPLACE INTO inventory (item_name) VALUES ('药水')",
+    "INSERT OR REPLACE INTO inventory (item_name) VALUES ('药水')",
+    "WITH payload AS (SELECT 1) REPLACE INTO inventory (item_name) VALUES ('药水')",
     'SELECT legacy_note FROM inventory',
     'PRAGMA table_info(inventory)',
     'COMMIT',
@@ -2694,7 +2806,7 @@ describe('collectGroupFillResponse_ACU', () => {
     const result = await collectGroupFillResponse_ACU(job);
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('不支持安全重绑定的 SQL 语句类型');
+    expect(result.error).toContain('SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句');
     expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
@@ -3157,7 +3269,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('禁止混合 SQL/非 SQL');
-    expect(result.error).toContain('b');
+    expect(result.error).toContain('groupId=2');
+    expect(result.error).not.toContain('group b');
     expect(mockApplySqlEditsToTableDataSnapshot).not.toHaveBeenCalled();
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
@@ -3180,12 +3293,46 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('group a SQL 执行失败');
+    expect(result.error).toContain('groupId=1,batch=1,targets=1 SQL 执行失败');
     expect(result.error).toContain('missing_col');
+    expect(result.error).not.toContain('group a');
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
     expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
     expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'base-a']]);
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
+  it.each([
+    "REPLACE INTO inventory (value) VALUES ('replace-a')",
+    "INSERT OR REPLACE INTO inventory (value) VALUES ('replace-b')",
+    "WITH payload AS (SELECT 1) REPLACE INTO inventory (value) VALUES ('replace-c')",
+  ])('SQL 统一执行边界绕过 collect 时仍拒绝 REPLACE：%s', async statement => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory',
+        name: '表A',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' },
+        content: [['row_id', 'value'], ['1', 'base-a']],
+      },
+    } as any;
+    const responses = [{
+      success: true,
+      attempt: 1,
+      aiResponse: `<tableEdit>${statement}</tableEdit>`,
+      tableEditText: statement,
+      job: { groupKey: 'sensitive-group', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
+    }];
+
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+    expect(result).toMatchObject({ success: false, errorCategory: 'model' });
+    expect(result.error).toContain('SQLite 填表仅允许 INSERT、UPDATE、DELETE');
+    expect(result.error).not.toContain('sensitive-group');
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
@@ -3900,7 +4047,7 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
-  it('统一提交失败后会把错误反馈注入下一轮 prompt 并重试成功', async () => {
+  it('持久化失败属于基础设施错误，不进入下一轮 prompt 或再次调用 AI', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: true }, { is_user: false, mes: 'AI回复' }]);
@@ -3918,18 +4065,18 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     });
 
     mockPersistTablesToChatMessage
-      .mockResolvedValueOnce({ saved: false, error: 'group group_a 解析或应用失败' })
-      .mockResolvedValueOnce({ saved: true, messageIndex: 1 });
+      .mockResolvedValueOnce({ saved: false, error: '401 https://internal.example/save?token=secret-token' });
 
     const result = await processGroupedRuntimeChunk_ACU([
       { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
     ], 'manual_independent');
 
-    expect(result.success).toBe(true);
-    expect(capturedTableDataTexts).toHaveLength(2);
-    expect(capturedTableDataTexts[1]).toContain('UNIFIED_GROUP_ERROR_FEEDBACK');
-    expect(capturedTableDataTexts[1]).toContain('group group_a 解析或应用失败');
-    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(false);
+    expect(capturedTableDataTexts).toEqual(['模拟数据']);
+    expect(result.error).not.toContain('internal.example');
+    expect(result.error).not.toContain('secret-token');
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
   });
 
   it('统一提交持续失败到耗尽重试时整 bucket 失败且不落盘', async () => {

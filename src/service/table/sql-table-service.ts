@@ -269,7 +269,7 @@ function getSqlMutationTargetToken_ACU(statement: string, tokens: SqlMutationIde
     if (!isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'FROM') || !target) throw new Error('DELETE SQL 缺少可验证的目标表。');
     return target;
   }
-  throw new Error(`不支持安全重绑定的 SQL 语句类型：${action?.value || 'empty'}。`);
+  throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 CREATE、ALTER、DROP、事务或查询语句。`);
 }
 
 function collectSqlMutationTableReferenceTokens_ACU(
@@ -558,8 +558,21 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
     }
   }
 
-  for (const statement of statements) {
+  for (const [statementIndex, statement] of statements.entries()) {
     const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
+    const actionIndex = getSqlMutationActionIndex_ACU(tokens);
+    const action = tokens[actionIndex];
+    const actionKeyword = action?.quote === null ? action.value.toUpperCase() : '';
+    if (!new Set(['INSERT', 'UPDATE', 'DELETE']).has(actionKeyword)) {
+      throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 REPLACE、CREATE、ALTER、DROP、事务或查询语句。`);
+    }
+    if (
+      (actionKeyword === 'INSERT' || actionKeyword === 'UPDATE')
+      && isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR')
+      && isSqlMutationKeyword_ACU(tokens[actionIndex + 2], 'REPLACE')
+    ) {
+      throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句；AI SQL 第 ${statementIndex + 1} 条禁止使用 ${actionKeyword} OR REPLACE，REPLACE 可能删除旧行并绕过系统 row_id 分配。`);
+    }
     const target = getSqlMutationTargetToken_ACU(statement, tokens);
     const resolved = sheetsByAlias.get(target.value.toLowerCase());
     if (resolved === undefined) continue;
@@ -572,8 +585,7 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
       throw new Error(`SQL mutation 不允许引用隐藏物理列：${[...new Set(hiddenReferences.map(token => token.value))].join('、')}。`);
     }
 
-    const first = tokens[0];
-    const isInsert = isSqlMutationKeyword_ACU(first, 'INSERT') || isSqlMutationKeyword_ACU(first, 'REPLACE');
+    const isInsert = actionIndex === 0 && actionKeyword === 'INSERT';
     if (isInsert) {
       const targetIndex = tokens.indexOf(target);
       const clauseIndex = tokens.findIndex((token, index) => index > targetIndex
@@ -583,7 +595,7 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
       const beforeClause = clauseIndex === -1 ? tokens.slice(targetIndex + 1) : tokens.slice(targetIndex + 1, clauseIndex);
       const columnTokens = beforeClause.filter(token => token.depth === target.depth + 1);
       if (columnTokens.length === 0) {
-        throw new Error(`存在隐藏物理列时，INSERT/REPLACE 必须显式列出可见目标列：${target.value}。`);
+        throw new Error(`存在隐藏物理列时，INSERT 必须显式列出可见目标列：${target.value}。`);
       }
     }
   }
