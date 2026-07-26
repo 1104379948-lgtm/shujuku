@@ -345,7 +345,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       });
 
       if (strategy.mode === 'v2') {
-          let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey) as Record<string, any> | null;
+          let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, {
+              allowTemporaryTemplateBaseline: true,
+          }) as Record<string, any> | null;
           const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
           if (mergedData && hasUsableSheetGuide_ACU(sheetGuideData)) {
               mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);

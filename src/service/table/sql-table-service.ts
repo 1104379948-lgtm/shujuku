@@ -801,9 +801,13 @@ export class SqlTableService implements ITableStorageProvider {
     const userParams: ((string | number | null)[] | undefined)[] = [];
     (Array.isArray(sqlTexts) ? sqlTexts : []).forEach((sqlText, index) => {
       const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-      normalizedStatements.forEach(statement => {
+      const runtimeStatements = rebindSqlMutationTableIdentifiers_ACU(
+        normalizedStatements,
+        (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
+      );
+      runtimeStatements.forEach(statement => {
         userStatements.push(statement);
-        userParams.push(normalizedStatements.length === 1 ? paramsList?.[index] : undefined);
+        userParams.push(runtimeStatements.length === 1 ? paramsList?.[index] : undefined);
       });
     });
     if (userStatements.length === 0) {
@@ -876,7 +880,11 @@ export class SqlTableService implements ITableStorageProvider {
 
       // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
       const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
-      const result = this.engine.run(normalizedSql, params);
+      const runtimeSql = rebindSqlMutationTableIdentifiers_ACU(
+        [normalizedSql],
+        (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
+      )[0];
+      const result = this.engine.run(runtimeSql, params);
       this._syncToJson();
       return { changes: result.changes, errors: [] };
     } catch (e: any) {

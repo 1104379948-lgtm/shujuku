@@ -12,7 +12,7 @@ vi.mock('../../../src/shared/utils', async () => {
   return { ...actual, logWarn_ACU: mockLogWarn };
 });
 
-import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU } from '../../../src/service/table/table-schema-migration';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
 
@@ -905,6 +905,81 @@ describe('loadTableStateFromFramesV2_ACU', () => {
 
     await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toBeNull();
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('无锚点 V2 replay artifacts'));
+  });
+
+  it('显式开启时使用当前聊天模板 header-only 基线回放无锚点 sql_sheet_batch', async () => {
+    const template = makeCheckpointData();
+    template.sheet_0.content.push(['99', '模板示例行']);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_ScopedConfig: {
+        version: 1,
+        template: {
+          '': { mode: 'chat_override', isolationKey: '', templateStr: JSON.stringify(template) },
+        },
+      },
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1,
+              entryId: 'orphan-sql-sheet-batch',
+              createdAt: 1,
+              source: 'manual_crud',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: [],
+              changedSheetKeys: ['sheet_0'],
+              groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch',
+                sheetKey: 'sheet_0',
+                tableName: 'inventory',
+                statements: ['INSERT INTO inventory (row_id, name) VALUES (?, ?)'],
+                params: [[1, '孤立日志数据']],
+                reason: 'system',
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toBeNull();
+
+    const detailed = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      allowTemporaryTemplateBaseline: true,
+    });
+
+    expect(detailed?.baseKind).toBe('temporary_template_baseline');
+    expect(detailed?.data.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '孤立日志数据'],
+    ]);
+    expect(detailed?.data.sheet_0.content).not.toContainEqual(['99', '模板示例行']);
+  });
+
+  it('临时模板基线不绕过 orphan data_replace 显式确认', async () => {
+    const template = makeCheckpointData();
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_ScopedConfig: {
+        version: 1,
+        template: { '': { mode: 'chat_override', isolationKey: '', templateStr: JSON.stringify(template) } },
+      },
+      TavernDB_ACU_IsolatedData: {
+        '': { _acu_storage_version: 2, storageFrame: structuredClone(orphanV2FrameFixture) },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false,
+      allowTemporaryTemplateBaseline: true,
+    })).resolves.toBeNull();
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('data_replace'));
   });
 
   it('无 full checkpoint 时拒绝从 data_replace/log-only 恢复不完整数据', async () => {

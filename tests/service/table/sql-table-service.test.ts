@@ -834,6 +834,100 @@ describe('SqlTableService', () => {
       expect(result.appliedEdits).toBe(2);
     });
 
+    it('部分运行时快照补建其它模板表后，applyEdits 会在 provider 边界重绑定 DDL 表名', async () => {
+      const partialData = JSON.parse(JSON.stringify(testTableData));
+      const templateData = {
+        ...JSON.parse(JSON.stringify(testTableData)),
+        sheet_1: {
+          uid: 'story_chronicle',
+          name: 'storychronicle',
+          sourceData: {
+            ddl: 'CREATE TABLE story_chronicle (row_id INTEGER PRIMARY KEY, title TEXT NOT NULL);',
+          },
+          content: [['row_id', 'title']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 1,
+        },
+      };
+      mockGetCurrentChatTemplateScopeState.mockReturnValue({
+        mode: 'chat_override',
+        templateStr: JSON.stringify(templateData),
+      });
+      await service.loadFromData(partialData);
+
+      const result = service.applyEdits("INSERT INTO story_chronicle (row_id, title) VALUES (1, '归家之拥');");
+
+      expect(result.success).toBe(true);
+      expect(result.modifiedKeys).toContain('sheet_1');
+      expect(service.executeQuery('SELECT title FROM storychronicle WHERE row_id = 1').values).toEqual([['归家之拥']]);
+    });
+
+    it('批量提交中已有表与模板新表混合写入时，每条语句都在 provider 边界完成重绑定', async () => {
+      const partialData = JSON.parse(JSON.stringify(testTableData));
+      const templateData = {
+        ...JSON.parse(JSON.stringify(testTableData)),
+        sheet_1: {
+          uid: 'story_chronicle',
+          name: 'storychronicle',
+          sourceData: {
+            ddl: 'CREATE TABLE story_chronicle (row_id INTEGER PRIMARY KEY, title TEXT NOT NULL);',
+          },
+          content: [['row_id', 'title']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 1,
+        },
+      };
+      mockGetCurrentChatTemplateScopeState.mockReturnValue({
+        mode: 'chat_override',
+        templateStr: JSON.stringify(templateData),
+      });
+      await service.loadFromData(partialData);
+
+      const result = service.applyEditsBatch([
+        "INSERT INTO inventory VALUES (3, '魔法书', 1);",
+        "INSERT INTO story_chronicle (row_id, title) VALUES (1, '归家之拥');",
+      ]);
+
+      expect(result.success).toBe(true);
+      expect(result.appliedEdits).toBe(2);
+      expect(result.modifiedKeys).toEqual(expect.arrayContaining(['sheet_0', 'sheet_1']));
+      expect(service.executeQuery('SELECT item_name FROM inventory WHERE row_id = 3').values).toEqual([['魔法书']]);
+      expect(service.executeQuery('SELECT title FROM storychronicle WHERE row_id = 1').values).toEqual([['归家之拥']]);
+    });
+
+    it('部分运行时快照补建其它模板表后，executeMutation 同样重绑定 DDL 表名', async () => {
+      const partialData = JSON.parse(JSON.stringify(testTableData));
+      const templateData = {
+        ...JSON.parse(JSON.stringify(testTableData)),
+        sheet_1: {
+          uid: 'history_summary',
+          name: 'historysummary',
+          sourceData: {
+            ddl: 'CREATE TABLE lishijiyaobiao (row_id INTEGER PRIMARY KEY, summary TEXT NOT NULL);',
+          },
+          content: [['row_id', 'summary']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 1,
+        },
+      };
+      mockGetCurrentChatTemplateScopeState.mockReturnValue({
+        mode: 'chat_override',
+        templateStr: JSON.stringify(templateData),
+      });
+      await service.loadFromData(partialData);
+
+      const result = service.executeMutation(
+        "INSERT INTO lishijiyaobiao (row_id, summary) VALUES (?, ?)",
+        [1, '玄关重逢'],
+      );
+
+      expect(result).toEqual({ changes: 1, errors: [] });
+      expect(service.executeQuery('SELECT summary FROM historysummary WHERE row_id = 1').values).toEqual([['玄关重逢']]);
+    });
+
     it('同一组 SQL 修改多张表时，后续表失败会回滚前面表的写入', async () => {
       const weaponDDL = `CREATE TABLE weapon_log (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);`;
       const questDDL = `CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);`;

@@ -19,6 +19,11 @@ vi.mock('../../../src/shared/utils', () => ({
   logError_ACU: vi.fn(),
   hashUserInput_ACU: vi.fn((text: string) => text ? 'mock-ddl-digest' : ''),
   isSummaryOrOutlineTable_ACU: vi.fn(() => false),
+  stripSeedRowsFromTemplate_ACU: vi.fn((data: any) => {
+    const cloned = JSON.parse(JSON.stringify(data));
+    Object.keys(cloned || {}).filter(key => key.startsWith('sheet_')).forEach(key => { cloned[key].content = [cloned[key].content?.[0] || ['row_id']]; });
+    return cloned;
+  }),
   parseTableTemplateJson_ACU: vi.fn(() => ({
     mate: { type: 'acu' },
     sheet_0: { name: '测试表', updateConfig: { groupId: 0 } },
@@ -128,6 +133,17 @@ vi.mock('../../../src/service/worldbook/injection-engine-state', () => ({
 
 vi.mock('../../../src/service/template/chat-scope', () => ({
   getChatSheetGuideDataForIsolationKey_ACU: vi.fn(() => null),
+  getCurrentChatTemplateScopeState_ACU: vi.fn(() => null),
+  getGlobalTemplateSnapshotForCurrentProfile_ACU: vi.fn(() => ({
+    templateObj: {
+      mate: { type: 'acu' },
+      sheet_0: { uid: 'sheet_0', name: '测试表', sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0, content: [['row_id', '值']] },
+    },
+  })),
+  sanitizeTemplateSnapshotForChat_ACU: vi.fn((source: any) => source ? {
+    templateObj: JSON.parse(JSON.stringify(source)),
+    templateStr: JSON.stringify(source),
+  } : null),
   // 模板范围默认「未知」→ 不过滤，保持既有用例语义（这些用例不验证模板范围）。
   resolveTemplateScope_ACU: (...args: any[]) => mockResolveTemplateScope(...args),
   filterSheetKeysByTemplateScope_ACU: (keys: string[], scope: any) => (scope ? keys.filter((k: string) => scope.sheetKeys.has(k)) : [...keys]),
@@ -2877,6 +2893,47 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(savePayload.operations).toEqual([]);
     // afterData 仍然是填表后的完整快照，checkpoint 不会丢数据。
     expect(savePayload.tableData.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a'], ['2', '来自A']]);
+  });
+
+  it('非 SQL 路径存在可临时回放的 orphan artifacts 时保留本次 operations 供 persist 升级校验', async () => {
+    mockChatArrayForSeedStage.length = 0;
+    mockChatArrayForSeedStage.push(
+      {
+        is_user: false,
+        mes: 'AI orphan',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              headRevision: '1:orphan',
+              logEntries: [{
+                seq: 1, entryId: 'orphan-row', createdAt: 1, source: 'auto_fill', targetMessageIndex: 0, aiFloor: 1,
+                filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', 'base-a'] }],
+              }],
+            },
+          },
+        },
+      } as any,
+      { is_user: true, mes: '用户' } as any,
+      { is_user: false, mes: 'AI2' } as any,
+      { is_user: false, mes: 'AI3' } as any,
+    );
+    const baseSnapshot = {
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    };
+    const responses = [
+      { success: true, attempt: 1, aiResponse: '<tableEdit>sheet_0</tableEdit>', tableEditText: 'sheet_0', job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+    ];
+
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+    expect(result.success).toBe(true);
+    expect(mockPersistTablesToChatMessage.mock.calls[0][0].operations).toEqual([
+      { kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: expect.objectContaining({ content: [['row_id', '值'], ['1', 'base-a'], ['2', '来自A']] }), reason: 'system' },
+    ]);
   });
 
   it('锚点存在时恢复增量提交，仍然生成 sheet_replace operations', async () => {

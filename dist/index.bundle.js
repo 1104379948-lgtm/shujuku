@@ -36756,6 +36756,32 @@ $CONTENT
                 || hasHeadRevisionArtifact;
         });
     }
+    function hasUnanchoredReplayArtifactsForChatV2_ACU(chatArg, isolationKey, options = {}) {
+        const chat = Array.isArray(chatArg) ? chatArg : [];
+        const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
+            .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
+        return hasUnanchoredReplayArtifacts_ACU(frameRefs);
+    }
+    function hasOrphanDataReplace_ACU(frameRefs) {
+        return frameRefs.some(({ frame }) => (frame.logEntries || []).some(entry => (entry.operations || []).some(operation => operation?.kind === 'data_replace')));
+    }
+    function resolveTemporaryTemplateBaseline_ACU(chat, isolationKey) {
+        const scopeState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey });
+        const globalSnapshot = scopeState ? null : getGlobalTemplateSnapshotForCurrentProfile_ACU();
+        const effectiveTemplate = scopeState?.templateStr || scopeState?.templateObj
+            || globalSnapshot?.templateObj || globalSnapshot?.templateStr;
+        const snapshot = sanitizeTemplateSnapshotForChat_ACU(effectiveTemplate || null);
+        if (!snapshot?.templateObj)
+            return null;
+        const headerOnly = stripSeedRowsFromTemplate_ACU(deepClone_ACU$4(snapshot.templateObj));
+        if (!headerOnly || typeof headerOnly !== 'object' || Array.isArray(headerOnly))
+            return null;
+        if (!Object.keys(headerOnly).some(key => key.startsWith('sheet_')))
+            return null;
+        const state = headerOnly;
+        normalizeReplayState_ACU(state, 'temporary template baseline');
+        return state;
+    }
     function applyEventToScheduleSummary_ACU(summary, event, aiFloor) {
         if (!event)
             return;
@@ -37375,7 +37401,7 @@ $CONTENT
         }
         return summary;
     }
-    async function loadTableStateFromFramesV2_ACU(chatArg, isolationKeyArg, options = {}) {
+    async function loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options = {}) {
         const chat = chatArg || getChatArray_ACU();
         if (!Array.isArray(chat) || chat.length === 0)
             return null;
@@ -37383,18 +37409,38 @@ $CONTENT
         const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
             .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
         const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+        const hasUnanchoredArtifacts = hasUnanchoredReplayArtifacts_ACU(frameRefs);
+        let baseKind = 'full_checkpoint';
+        let state;
+        let replayStartMessageIndex;
         if (!checkpointRef?.frame.checkpoint) {
-            if (hasUnanchoredReplayArtifacts_ACU(frameRefs)) {
+            if (!hasUnanchoredArtifacts)
+                return null;
+            if (!options.allowTemporaryTemplateBaseline) {
                 logWarn_ACU('[V2 Replay] 未找到 full checkpoint，检测到无锚点 V2 replay artifacts，拒绝恢复不完整 V2 表格数据。');
+                return null;
             }
-            return null;
+            if (hasOrphanDataReplace_ACU(frameRefs)) {
+                logWarn_ACU('[V2 Replay] 无锚点 artifacts 包含 data_replace，必须通过显式恢复确认，拒绝使用临时模板基线。');
+                return null;
+            }
+            const temporaryBaseline = resolveTemporaryTemplateBaseline_ACU(chat, isolationKey);
+            if (!temporaryBaseline) {
+                logWarn_ACU('[V2 Replay] 无锚点 artifacts 缺少同聊天同隔离域的有效模板，拒绝建立临时基线。');
+                return null;
+            }
+            state = temporaryBaseline;
+            baseKind = 'temporary_template_baseline';
+            replayStartMessageIndex = frameRefs[0]?.messageIndex ?? 0;
+            logWarn_ACU('[V2 Replay] 未找到 full checkpoint，正使用当前聊天模板的 header-only 临时基线回放；该状态不是持久化锚点。');
         }
-        const checkpoint = checkpointRef.frame.checkpoint;
-        const state = deepClone_ACU$4(checkpoint.data);
-        normalizeReplayState_ACU(state, 'full checkpoint');
-        const replayStartMessageIndex = checkpointRef.messageIndex;
-        if (options.updateRuntimeState !== false) {
-            replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
+        else {
+            const checkpoint = checkpointRef.frame.checkpoint;
+            state = deepClone_ACU$4(checkpoint.data);
+            normalizeReplayState_ACU(state, 'full checkpoint');
+            replayStartMessageIndex = checkpointRef.messageIndex;
+            if (options.updateRuntimeState !== false)
+                replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
         }
         const runtime = {
             engine: new SqliteEngine(),
@@ -37461,11 +37507,15 @@ $CONTENT
             }
             if (runtime.loaded)
                 exportSqlReplayRuntime_ACU(runtime, state);
-            return state;
+            return { data: state, baseKind };
         }
         finally {
             runtime.engine.dispose();
         }
+    }
+    async function loadTableStateFromFramesV2_ACU(chatArg, isolationKeyArg, options = {}) {
+        const result = await loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options);
+        return result?.data ?? null;
     }
     async function validateCurrentChatTableRecovery_ACU(options = {}) {
         const chat = options.chat || getChatArray_ACU();
@@ -38054,6 +38104,154 @@ $CONTENT
         return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
     }
 
+    function isRecord_ACU$3(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+    function fingerprint_ACU(value) {
+        const text = JSON.stringify(value, (_key, item) => {
+            if (!isRecord_ACU$3(item))
+                return item;
+            return Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {});
+        });
+        let hash = 2166136261;
+        for (let index = 0; index < text.length; index += 1) {
+            hash ^= text.charCodeAt(index);
+            hash = Math.imul(hash, 16777619);
+        }
+        return `fnv1a:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+    }
+    function canonicalId_ACU(value) {
+        if (value === null || value === undefined)
+            return null;
+        const id = String(value).trim();
+        return id || null;
+    }
+    function addIssue_ACU(result, issue, plan) {
+        result.issues.push(issue);
+        if (plan)
+            result.repairPlan.push(plan);
+    }
+    function inspectRows_ACU(result, sheetKey, rows, pool, headerLength, ids) {
+        rows.forEach((row, offset) => {
+            const rowIndex = pool === 'content' ? offset + 1 : offset;
+            if (!Array.isArray(row)) {
+                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
+                return;
+            }
+            const rowId = canonicalId_ACU(row[0]);
+            if (!rowId)
+                addIssue_ACU(result, { code: 'upgrade_empty_row_id', sheetKey, rowIndex, rowPool: pool, message: '行缺少稳定 row_id' }, { action: 'assign_row_id', sheetKey, rowIndex, rowPool: pool });
+            else {
+                if (row[0] !== rowId)
+                    result.repairPlan.push({ action: 'normalize_row_id', sheetKey, rowIndex, rowPool: pool });
+                const existing = ids.get(rowId);
+                if (existing) {
+                    const code = existing.pool === pool ? 'upgrade_duplicate_row_id' : 'upgrade_seed_pool_conflict';
+                    const message = existing.pool === pool
+                        ? 'row_id 在同一行集中重复'
+                        : 'row_id 同时存在于 content 与 seedRows 中';
+                    addIssue_ACU(result, { code, sheetKey, rowIndex, rowPool: pool, rowId, message }, { action: 'assign_row_id', sheetKey, rowIndex, rowPool: pool });
+                }
+                else
+                    ids.set(rowId, { pool, rowIndex });
+            }
+            if (row.length < headerLength)
+                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行短于表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
+            if (row.length > headerLength)
+                addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行超出表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
+        });
+    }
+    function inspectRowsWithoutIds_ACU(result, sheetKey, rows, pool, expectedWidth) {
+        rows.forEach((row, offset) => {
+            const rowIndex = pool === 'content' ? offset + 1 : offset;
+            if (!Array.isArray(row)) {
+                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
+            }
+            else if (row.length < expectedWidth) {
+                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行短于业务表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
+            }
+            else if (row.length > expectedWidth) {
+                addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, message: '行超出业务表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
+            }
+        });
+    }
+    function determineHeaderRepair_ACU(result, sheetKey, sheet) {
+        const content = sheet.content;
+        if (!Array.isArray(content) || !Array.isArray(content[0]) || content[0].length === 0) {
+            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '缺少可识别表头，无法安全推导 row_id 位置' });
+            return null;
+        }
+        const header = content[0];
+        const firstHeader = String(header[0] ?? '').trim();
+        if (firstHeader === 'row_id')
+            return { header, insertsRowId: false };
+        if (!firstHeader || /^(id|rowid|row_id)$/i.test(firstHeader) || firstHeader === '行号') {
+            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '身份列表头可确定地规范化为 row_id' }, { action: 'rename_header', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
+            return { header: ['row_id', ...header.slice(1)], insertsRowId: false };
+        }
+        const ddl = isRecord_ACU$3(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
+        const ddlText = typeof ddl === 'string' ? ddl : '';
+        const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
+        const ddlHasLeadingRowId = ddlColumns[0]?.sqlName.toLowerCase() === 'row_id' && ddlColumns.length === header.length + 1;
+        const headerMatchesDdlWithoutRowId = ddlHasLeadingRowId && header.every((value, index) => {
+            const headerValue = String(value ?? '').trim();
+            const ddlColumn = ddlColumns[index + 1];
+            return !!headerValue && !!ddlColumn && (ddlColumn.sqlName === headerValue || ddlColumn.comment === headerValue);
+        });
+        if (headerMatchesDdlWithoutRowId) {
+            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: 'DDL 证明当前业务表头缺少 row_id 列，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
+            return { header: ['row_id', ...header], insertsRowId: true };
+        }
+        addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无法依据 DDL 安全判定应改名还是插入 row_id' });
+        return null;
+    }
+    function getTableDataFingerprint_ACU(data) {
+        return fingerprint_ACU(data);
+    }
+    function auditTableDataForUpgrade_ACU(data) {
+        const result = { status: 'clean', issues: [], repairPlan: [], dataFingerprintBefore: fingerprint_ACU(data), sourceData: data };
+        if (!isRecord_ACU$3(data)) {
+            addIssue_ACU(result, { code: 'upgrade_invalid_data', message: '表格数据不是对象' });
+            result.status = 'unrecoverable';
+            return result;
+        }
+        const sheets = Object.entries(data).filter(([key]) => key.startsWith('sheet_'));
+        if (sheets.length === 0) {
+            addIssue_ACU(result, { code: 'upgrade_missing_sheet', message: '表格数据不含 sheet_*' });
+            result.status = 'unrecoverable';
+            return result;
+        }
+        for (const [sheetKey, rawSheet] of sheets) {
+            if (!isRecord_ACU$3(rawSheet)) {
+                addIssue_ACU(result, { code: 'upgrade_invalid_data', sheetKey, message: 'sheet 不是对象' });
+                continue;
+            }
+            const headerState = determineHeaderRepair_ACU(result, sheetKey, rawSheet);
+            if (!headerState)
+                continue;
+            const content = Array.isArray(rawSheet.content) ? rawSheet.content : [];
+            const seedRows = Array.isArray(rawSheet.seedRows) ? rawSheet.seedRows : [];
+            const ids = new Map();
+            if (headerState.insertsRowId) {
+                const expectedBusinessWidth = headerState.header.length - 1;
+                inspectRowsWithoutIds_ACU(result, sheetKey, content.slice(1), 'content', expectedBusinessWidth);
+                inspectRowsWithoutIds_ACU(result, sheetKey, seedRows, 'seedRows', expectedBusinessWidth);
+                content.slice(1).forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset + 1, rowPool: 'content' }));
+                seedRows.forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset, rowPool: 'seedRows' }));
+                continue;
+            }
+            inspectRows_ACU(result, sheetKey, content.slice(1), 'content', headerState.header.length, ids);
+            inspectRows_ACU(result, sheetKey, seedRows, 'seedRows', headerState.header.length, ids);
+        }
+        if (result.issues.some(issue => issue.code === 'upgrade_invalid_data' || issue.code === 'upgrade_missing_sheet'))
+            result.status = 'unrecoverable';
+        else if (result.issues.some(issue => issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells'))
+            result.status = 'requires_confirmation';
+        else if (result.issues.length > 0)
+            result.status = 'repairable';
+        return result;
+    }
+
     function safeJsonByteLength_ACU(value) {
         try {
             return new TextEncoder().encode(JSON.stringify(value)).length;
@@ -38209,6 +38407,30 @@ $CONTENT
             const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
             return isV2TagData_ACU(tagData);
         });
+    }
+    function getLatestV2FrameMessageIndex_ACU(chat, isolationKey) {
+        for (let index = chat.length - 1; index >= 0; index -= 1) {
+            const tagData = chat[index]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            if (isV2TagData_ACU(tagData))
+                return index;
+        }
+        return -1;
+    }
+    function projectReplayComparableData_ACU(data) {
+        const projected = deepClone_ACU$1(data);
+        for (const [key, value] of Object.entries(projected)) {
+            if (!key.startsWith('sheet_') || !isObjectRecord_ACU$1(value))
+                continue;
+            delete value.seedRows;
+        }
+        return projected;
+    }
+    async function verifyTemporaryBaselineUpgrade_ACU(replayData, operations, afterData) {
+        const expected = deepClone_ACU$1(replayData);
+        for (const operation of operations)
+            await applyTableOperationV2_ACU(expected, operation);
+        return getTableDataFingerprint_ACU(projectReplayComparableData_ACU(expected))
+            === getTableDataFingerprint_ACU(projectReplayComparableData_ACU(afterData));
     }
     function getLatestTableStorageHeadRevisionV2_ACU(chat, isolationKey) {
         if (!Array.isArray(chat) || chat.length === 0)
@@ -38758,6 +38980,38 @@ $CONTENT
         const hasMetadataOnlyFillEvent = filledSheetKeys.length > 0 || (Array.isArray(options.groupKeys) && options.groupKeys.length > 0);
         const hasManualRefillProgress = !!options.manualRefillProgress;
         const isManualRefillProgressOnly = operations.length === 0 && !hasMetadataOnlyFillEvent && hasManualRefillProgress;
+        const latestV2FrameMessageIndex = getLatestV2FrameMessageIndex_ACU(chat, isolationKey);
+        const hasUnanchoredArtifacts = !hasCheckpointAnywhere
+            && hasUnanchoredReplayArtifactsForChatV2_ACU(chat, isolationKey);
+        let temporaryBaselineUpgrade = null;
+        if (hasUnanchoredArtifacts && !isManualRefillProgressOnly) {
+            if (target.index < latestV2FrameMessageIndex) {
+                return {
+                    saved: false,
+                    error: `V2 临时基线升级必须写在最后一个无锚点 artifact 之后：target=${target.index}, latestArtifact=${latestV2FrameMessageIndex}。`,
+                };
+            }
+            const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                maxMessageIndex: target.index,
+                updateRuntimeState: false,
+                allowTemporaryTemplateBaseline: true,
+            });
+            if (!replay || replay.baseKind !== 'temporary_template_baseline') {
+                return { saved: false, error: 'V2 无锚点 artifacts 无法从当前聊天模板建立安全临时基线，已拒绝自动升级。' };
+            }
+            if (!await verifyTemporaryBaselineUpgrade_ACU(replay.data, operations, afterData)) {
+                return { saved: false, error: 'V2 临时基线回放与本次 afterData 不一致，已拒绝建立 full checkpoint。' };
+            }
+            const sourceTagData = latestV2FrameMessageIndex >= 0
+                ? readIsolatedTagData_ACU(chat[latestV2FrameMessageIndex], isolationKey)
+                : null;
+            if (isV2TagData_ACU(sourceTagData)) {
+                temporaryBaselineUpgrade = {
+                    sourceMessageIndex: latestV2FrameMessageIndex,
+                    storageFrame: deepClone_ACU$1(sourceTagData.storageFrame),
+                };
+            }
+        }
         if (!manualRefillProgressIsValidForIntroductionHistory_ACU(options.manualRefillProgress)) {
             return { saved: false, error: 'V2 manualRefillProgress 格式无效，已拒绝写入。' };
         }
@@ -38767,8 +39021,9 @@ $CONTENT
                 error: 'V2 manualRefillProgress-only write requires an existing full checkpoint anchor.',
             };
         }
-        const initialCheckpointReason = options.checkpointReason
-            || (hasExistingV2Frame ? 'migration' : 'init');
+        const initialCheckpointReason = temporaryBaselineUpgrade
+            ? 'integrity_repair'
+            : (options.checkpointReason || (hasExistingV2Frame ? 'migration' : 'init'));
         // 同一隔离键下同一时刻只能存在一个 full checkpoint。
         //
         // 只要整个聊天已经有 full checkpoint，本次写入就只能追加增量，
@@ -38779,10 +39034,16 @@ $CONTENT
         // 同一张表的差异只是列，新增列按空处理，不需要另立基线。
         const shouldCheckpoint = !hasCheckpointAnywhere
             && !isManualRefillProgressOnly
-            && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
-        if (shouldCheckpoint && operations.length > 0) {
+            && (temporaryBaselineUpgrade !== null
+                || initialCheckpointReason === 'init'
+                || initialCheckpointReason === 'migration');
+        if (shouldCheckpoint && operations.length > 0 && !temporaryBaselineUpgrade) {
             return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
         }
+        const targetExistingTagData = cloneIsolatedData_ACU(target.message)?.[isolationKey];
+        const targetExistingFrame = isV2TagData_ACU(targetExistingTagData)
+            ? deepClone_ACU$1(targetExistingTagData.storageFrame)
+            : null;
         const isolatedData = cloneIsolatedData_ACU(target.message);
         const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
         const replacementIsolatedDataByMessageIndex = new Map();
@@ -38842,6 +39103,19 @@ $CONTENT
             frame.checkpoint = checkpointResult.checkpoint;
             frame.headRevision = checkpointRevision;
             frame.logEntries = [];
+            if (temporaryBaselineUpgrade) {
+                const recoveryBackup = {
+                    version: 1,
+                    createdAt: now,
+                    recoveryKind: 'temporary_template_baseline_upgrade',
+                    sourceMessageIndex: temporaryBaselineUpgrade.sourceMessageIndex,
+                    storageFrame: targetExistingFrame || temporaryBaselineUpgrade.storageFrame,
+                };
+                const tagData = isolatedData[isolationKey];
+                if (tagData && typeof tagData === 'object' && !Array.isArray(tagData)) {
+                    tagData.recoveryBackup = recoveryBackup;
+                }
+            }
             logDebug_ACU(`[V2 Persist] 写入 full checkpoint: messageIndex=${target.index}, revision=${checkpointRevision}, sheets=${Object.keys(afterData).filter(k => k.startsWith('sheet_')).length}`);
         }
         else if (shouldAppendLogEntry) {
@@ -38959,7 +39233,8 @@ $CONTENT
                 enabled: settings_ACU.dataIsolationEnabled,
                 code: settings_ACU.dataIsolationCode,
             });
-            if (options.strictSave || replacement) {
+            // 临时基线升级会替换 orphan frame、清空日志并写 recoveryBackup，必须确认宿主真实落盘。
+            if (options.strictSave || replacement || temporaryBaselineUpgrade) {
                 await saveChatToHostStrict_ACU();
             }
             else {
@@ -40096,154 +40371,6 @@ $CONTENT
         if (options.assumeCommitLock)
             return persistTableSheetCheckpointV2Core_ACU(options);
         return options.transactionContext.runCommit(() => persistTableSheetCheckpointV2Core_ACU(options), []);
-    }
-
-    function isRecord_ACU$3(value) {
-        return value !== null && typeof value === 'object' && !Array.isArray(value);
-    }
-    function fingerprint_ACU(value) {
-        const text = JSON.stringify(value, (_key, item) => {
-            if (!isRecord_ACU$3(item))
-                return item;
-            return Object.keys(item).sort().reduce((out, key) => { out[key] = item[key]; return out; }, {});
-        });
-        let hash = 2166136261;
-        for (let index = 0; index < text.length; index += 1) {
-            hash ^= text.charCodeAt(index);
-            hash = Math.imul(hash, 16777619);
-        }
-        return `fnv1a:${(hash >>> 0).toString(16).padStart(8, '0')}`;
-    }
-    function canonicalId_ACU(value) {
-        if (value === null || value === undefined)
-            return null;
-        const id = String(value).trim();
-        return id || null;
-    }
-    function addIssue_ACU(result, issue, plan) {
-        result.issues.push(issue);
-        if (plan)
-            result.repairPlan.push(plan);
-    }
-    function inspectRows_ACU(result, sheetKey, rows, pool, headerLength, ids) {
-        rows.forEach((row, offset) => {
-            const rowIndex = pool === 'content' ? offset + 1 : offset;
-            if (!Array.isArray(row)) {
-                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
-                return;
-            }
-            const rowId = canonicalId_ACU(row[0]);
-            if (!rowId)
-                addIssue_ACU(result, { code: 'upgrade_empty_row_id', sheetKey, rowIndex, rowPool: pool, message: '行缺少稳定 row_id' }, { action: 'assign_row_id', sheetKey, rowIndex, rowPool: pool });
-            else {
-                if (row[0] !== rowId)
-                    result.repairPlan.push({ action: 'normalize_row_id', sheetKey, rowIndex, rowPool: pool });
-                const existing = ids.get(rowId);
-                if (existing) {
-                    const code = existing.pool === pool ? 'upgrade_duplicate_row_id' : 'upgrade_seed_pool_conflict';
-                    const message = existing.pool === pool
-                        ? 'row_id 在同一行集中重复'
-                        : 'row_id 同时存在于 content 与 seedRows 中';
-                    addIssue_ACU(result, { code, sheetKey, rowIndex, rowPool: pool, rowId, message }, { action: 'assign_row_id', sheetKey, rowIndex, rowPool: pool });
-                }
-                else
-                    ids.set(rowId, { pool, rowIndex });
-            }
-            if (row.length < headerLength)
-                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行短于表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
-            if (row.length > headerLength)
-                addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行超出表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
-        });
-    }
-    function inspectRowsWithoutIds_ACU(result, sheetKey, rows, pool, expectedWidth) {
-        rows.forEach((row, offset) => {
-            const rowIndex = pool === 'content' ? offset + 1 : offset;
-            if (!Array.isArray(row)) {
-                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
-            }
-            else if (row.length < expectedWidth) {
-                addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行短于业务表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
-            }
-            else if (row.length > expectedWidth) {
-                addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, message: '行超出业务表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
-            }
-        });
-    }
-    function determineHeaderRepair_ACU(result, sheetKey, sheet) {
-        const content = sheet.content;
-        if (!Array.isArray(content) || !Array.isArray(content[0]) || content[0].length === 0) {
-            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '缺少可识别表头，无法安全推导 row_id 位置' });
-            return null;
-        }
-        const header = content[0];
-        const firstHeader = String(header[0] ?? '').trim();
-        if (firstHeader === 'row_id')
-            return { header, insertsRowId: false };
-        if (!firstHeader || /^(id|rowid|row_id)$/i.test(firstHeader) || firstHeader === '行号') {
-            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '身份列表头可确定地规范化为 row_id' }, { action: 'rename_header', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
-            return { header: ['row_id', ...header.slice(1)], insertsRowId: false };
-        }
-        const ddl = isRecord_ACU$3(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
-        const ddlText = typeof ddl === 'string' ? ddl : '';
-        const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
-        const ddlHasLeadingRowId = ddlColumns[0]?.sqlName.toLowerCase() === 'row_id' && ddlColumns.length === header.length + 1;
-        const headerMatchesDdlWithoutRowId = ddlHasLeadingRowId && header.every((value, index) => {
-            const headerValue = String(value ?? '').trim();
-            const ddlColumn = ddlColumns[index + 1];
-            return !!headerValue && !!ddlColumn && (ddlColumn.sqlName === headerValue || ddlColumn.comment === headerValue);
-        });
-        if (headerMatchesDdlWithoutRowId) {
-            addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: 'DDL 证明当前业务表头缺少 row_id 列，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
-            return { header: ['row_id', ...header], insertsRowId: true };
-        }
-        addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无法依据 DDL 安全判定应改名还是插入 row_id' });
-        return null;
-    }
-    function getTableDataFingerprint_ACU(data) {
-        return fingerprint_ACU(data);
-    }
-    function auditTableDataForUpgrade_ACU(data) {
-        const result = { status: 'clean', issues: [], repairPlan: [], dataFingerprintBefore: fingerprint_ACU(data), sourceData: data };
-        if (!isRecord_ACU$3(data)) {
-            addIssue_ACU(result, { code: 'upgrade_invalid_data', message: '表格数据不是对象' });
-            result.status = 'unrecoverable';
-            return result;
-        }
-        const sheets = Object.entries(data).filter(([key]) => key.startsWith('sheet_'));
-        if (sheets.length === 0) {
-            addIssue_ACU(result, { code: 'upgrade_missing_sheet', message: '表格数据不含 sheet_*' });
-            result.status = 'unrecoverable';
-            return result;
-        }
-        for (const [sheetKey, rawSheet] of sheets) {
-            if (!isRecord_ACU$3(rawSheet)) {
-                addIssue_ACU(result, { code: 'upgrade_invalid_data', sheetKey, message: 'sheet 不是对象' });
-                continue;
-            }
-            const headerState = determineHeaderRepair_ACU(result, sheetKey, rawSheet);
-            if (!headerState)
-                continue;
-            const content = Array.isArray(rawSheet.content) ? rawSheet.content : [];
-            const seedRows = Array.isArray(rawSheet.seedRows) ? rawSheet.seedRows : [];
-            const ids = new Map();
-            if (headerState.insertsRowId) {
-                const expectedBusinessWidth = headerState.header.length - 1;
-                inspectRowsWithoutIds_ACU(result, sheetKey, content.slice(1), 'content', expectedBusinessWidth);
-                inspectRowsWithoutIds_ACU(result, sheetKey, seedRows, 'seedRows', expectedBusinessWidth);
-                content.slice(1).forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset + 1, rowPool: 'content' }));
-                seedRows.forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset, rowPool: 'seedRows' }));
-                continue;
-            }
-            inspectRows_ACU(result, sheetKey, content.slice(1), 'content', headerState.header.length, ids);
-            inspectRows_ACU(result, sheetKey, seedRows, 'seedRows', headerState.header.length, ids);
-        }
-        if (result.issues.some(issue => issue.code === 'upgrade_invalid_data' || issue.code === 'upgrade_missing_sheet'))
-            result.status = 'unrecoverable';
-        else if (result.issues.some(issue => issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells'))
-            result.status = 'requires_confirmation';
-        else if (result.issues.length > 0)
-            result.status = 'repairable';
-        return result;
     }
 
     const LOCATION_ORDER = [
@@ -45013,7 +45140,9 @@ $CONTENT
             code: settings_ACU.dataIsolationCode,
         });
         if (strategy.mode === 'v2') {
-            let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey);
+            let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, {
+                allowTemporaryTemplateBaseline: true,
+            });
             const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
             if (mergedData && hasUsableSheetGuide_ACU(sheetGuideData)) {
                 mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);
@@ -46385,9 +46514,10 @@ $CONTENT
             const userParams = [];
             (Array.isArray(sqlTexts) ? sqlTexts : []).forEach((sqlText, index) => {
                 const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-                normalizedStatements.forEach(statement => {
+                const runtimeStatements = rebindSqlMutationTableIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }));
+                runtimeStatements.forEach(statement => {
                     userStatements.push(statement);
-                    userParams.push(normalizedStatements.length === 1 ? paramsList?.[index] : undefined);
+                    userParams.push(runtimeStatements.length === 1 ? paramsList?.[index] : undefined);
                 });
             });
             if (userStatements.length === 0) {
@@ -46449,7 +46579,8 @@ $CONTENT
                 }
                 // 对 SQL 做规范化：结构字符兼容化 + 受约束字段值规范化
                 const normalizedSql = normalizeStatementValues(normalizeSqlStructure(sql));
-                const result = this.engine.run(normalizedSql, params);
+                const runtimeSql = rebindSqlMutationTableIdentifiers_ACU([normalizedSql], (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }))[0];
+                const result = this.engine.run(runtimeSql, params);
                 this._syncToJson();
                 return { changes: result.changes, errors: [] };
             }
@@ -75525,14 +75656,19 @@ $CONTENT
         if (strategy.mode !== 'v2')
             return { data: null, attempted: false };
         try {
-            const replayedData = await loadTableStateFromFramesV2_ACU(chat, isolationKey, options);
-            const cloned = cloneTableDataSnapshot_ACU(replayedData);
+            const replayResult = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                ...options,
+                updateRuntimeState: false,
+                allowTemporaryTemplateBaseline: true,
+            });
+            const cloned = cloneTableDataSnapshot_ACU(replayResult?.data);
             if (!hasUsableRuntimeTableData_ACU(cloned))
                 return { data: null, attempted: true };
             const mergedData = mergeGuideStructureIntoBaseData_ACU(cloned);
             _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(mergedData)));
             const scope = Number.isInteger(options.maxMessageIndex) ? `<=${options.maxMessageIndex}` : 'latest';
-            logDebug_ACU(`[Batch ${batchNumber}] Using V2 replay state as merge base (${scope}).`);
+            const baseKind = replayResult?.baseKind === 'temporary_template_baseline' ? 'temporary-template' : 'checkpoint';
+            logDebug_ACU(`[Batch ${batchNumber}] Using V2 replay state as merge base (${scope}, base=${baseKind}).`);
             return { data: mergedData, attempted: true };
         }
         catch (error) {
@@ -76020,9 +76156,15 @@ $CONTENT
                     : scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
                 const keysToTrack = scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
                 // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始
-                // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations。
-                const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex);
-                if (hasCheckpointAnchor) {
+                // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations；但若已存在
+                // 可由模板临时基线回放的 orphan artifacts，则必须保留本次 operations，供 persist
+                // 层校验 replay + operations === afterData 后升级为 integrity_repair checkpoint。
+                const persistChat = getChatArray_ACU() || [];
+                const persistIsolationKey = getCurrentIsolationKey_ACU();
+                const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(persistChat, persistIsolationKey, options.saveTargetIndex);
+                const hasTemporaryReplayArtifacts = !hasCheckpointAnchor
+                    && hasUnanchoredReplayArtifactsForChatV2_ACU(persistChat, persistIsolationKey, { maxMessageIndex: options.saveTargetIndex });
+                if (hasCheckpointAnchor || hasTemporaryReplayArtifacts) {
                     // 只遍历实际执行过的 SQL（范围外的表已在收集阶段整条屏蔽），
                     // 因此 sqlResponses 与 sqlTexts 一一对应，不会错位。
                     sqlResponses.forEach((response, index) => {
@@ -76139,11 +76281,16 @@ $CONTENT
                 .filter(sheetKey => scopedKeys([sheetKey]).length > 0)
                 .sort();
             // 目标楼层前没有 full checkpoint 锚点时，本次写入会被 persist 层当作初始
-            // full checkpoint；该形态只接受 afterData 快照，附带 operations 会被拒绝。
-            // 判定必须与 persist 层的 hasExistingCheckpoint 保持同一判据。
-            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(getChatArray_ACU() || [], getCurrentIsolationKey_ACU(), options.saveTargetIndex);
+            // full checkpoint；pristine 场景只接受 afterData 快照。若已有可临时回放的
+            // orphan artifacts，则必须保留本次 operations，由 persist 验证
+            // temporary replay + operations === afterData 后升级为 integrity_repair checkpoint。
+            const persistChat = getChatArray_ACU() || [];
+            const persistIsolationKey = getCurrentIsolationKey_ACU();
+            const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(persistChat, persistIsolationKey, options.saveTargetIndex);
+            const hasTemporaryReplayArtifacts = !hasCheckpointAnchor
+                && hasUnanchoredReplayArtifactsForChatV2_ACU(persistChat, persistIsolationKey, { maxMessageIndex: options.saveTargetIndex });
             let effectiveOperations = [];
-            if (hasCheckpointAnchor) {
+            if (hasCheckpointAnchor || hasTemporaryReplayArtifacts) {
                 // operations 必须与 keysToSave 用同一份模板范围：若为范围外的表写增量，
                 // 而 checkpoint 又不含该表，回放时会建不出表并以 no such table 失败。
                 const scopedOperations = operations.filter(operation => {

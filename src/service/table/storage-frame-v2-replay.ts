@@ -1,14 +1,14 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getCurrentIsolationKey_ACU, independentTableStates_ACU } from '../runtime/state-manager';
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/models/table-data';
-import { logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { logError_ACU, logWarn_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../data/sqlite/sync-bridge';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TablePatchV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
-import { ensureStableRowIdsForSeedRows_ACU, getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
+import { ensureStableRowIdsForSeedRows_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, getSortedSheetKeys_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
@@ -23,6 +23,23 @@ interface V2FrameRef_ACU {
 }
 
 export type TableScheduleSummaryV2_ACU = NonNullable<TableCheckpointV2_ACU['scheduleSummary']>;
+
+export type TableReplayBaseKindV2_ACU = 'full_checkpoint' | 'temporary_template_baseline';
+
+export interface TableReplayResultV2_ACU {
+  data: TableDataObject_ACU;
+  baseKind: TableReplayBaseKindV2_ACU;
+}
+
+export interface LoadTableStateFromFramesV2Options_ACU {
+  maxMessageIndex?: number;
+  updateRuntimeState?: boolean;
+  /**
+   * 默认关闭，保留无锚点 artifacts 返回 null 的 fail-closed 契约。
+   * 开启后只允许从有效模板建立 header-only 临时基线，且仍拒绝孤立 data_replace。
+   */
+  allowTemporaryTemplateBaseline?: boolean;
+}
 
 function deepClone_ACU<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
@@ -65,6 +82,39 @@ function hasUnanchoredReplayArtifacts_ACU(frameRefs: V2FrameRef_ACU[]): boolean 
       || persistedFrame.manualRefillProgress !== undefined
       || hasHeadRevisionArtifact;
   });
+}
+
+export function hasUnanchoredReplayArtifactsForChatV2_ACU(
+  chatArg: any[] | null | undefined,
+  isolationKey: string,
+  options: { maxMessageIndex?: number } = {},
+): boolean {
+  const chat = Array.isArray(chatArg) ? chatArg : [];
+  const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
+    .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
+  return hasUnanchoredReplayArtifacts_ACU(frameRefs);
+}
+
+function hasOrphanDataReplace_ACU(frameRefs: V2FrameRef_ACU[]): boolean {
+  return frameRefs.some(({ frame }) => (frame.logEntries || []).some(entry =>
+    (entry.operations || []).some(operation => operation?.kind === 'data_replace')));
+}
+
+function resolveTemporaryTemplateBaseline_ACU(chat: any[], isolationKey: string): TableDataObject_ACU | null {
+  const scopeState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey });
+  const globalSnapshot = scopeState ? null : getGlobalTemplateSnapshotForCurrentProfile_ACU();
+  const effectiveTemplate = scopeState?.templateStr || scopeState?.templateObj
+    || globalSnapshot?.templateObj || globalSnapshot?.templateStr;
+  const snapshot = sanitizeTemplateSnapshotForChat_ACU(effectiveTemplate || null);
+  if (!snapshot?.templateObj) return null;
+
+  const headerOnly = stripSeedRowsFromTemplate_ACU(deepClone_ACU(snapshot.templateObj));
+  if (!headerOnly || typeof headerOnly !== 'object' || Array.isArray(headerOnly)) return null;
+  if (!Object.keys(headerOnly).some(key => key.startsWith('sheet_'))) return null;
+
+  const state = headerOnly as TableDataObject_ACU;
+  normalizeReplayState_ACU(state, 'temporary template baseline');
+  return state;
 }
 
 function applyEventToScheduleSummary_ACU(
@@ -704,11 +754,11 @@ export function collectScheduleSummaryFromFramesV2_ACU(
   return summary;
 }
 
-export async function loadTableStateFromFramesV2_ACU(
+export async function loadTableStateFromFramesV2Detailed_ACU(
   chatArg?: any[],
   isolationKeyArg?: string,
-  options: { maxMessageIndex?: number; updateRuntimeState?: boolean } = {},
-): Promise<TableDataObject_ACU | null> {
+  options: LoadTableStateFromFramesV2Options_ACU = {},
+): Promise<TableReplayResultV2_ACU | null> {
   const chat = chatArg || getChatArray_ACU();
   if (!Array.isArray(chat) || chat.length === 0) return null;
 
@@ -716,20 +766,36 @@ export async function loadTableStateFromFramesV2_ACU(
   const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
     .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
   const checkpointRef = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
+  const hasUnanchoredArtifacts = hasUnanchoredReplayArtifacts_ACU(frameRefs);
+  let baseKind: TableReplayBaseKindV2_ACU = 'full_checkpoint';
+  let state: TableDataObject_ACU;
+  let replayStartMessageIndex: number;
 
   if (!checkpointRef?.frame.checkpoint) {
-    if (hasUnanchoredReplayArtifacts_ACU(frameRefs)) {
+    if (!hasUnanchoredArtifacts) return null;
+    if (!options.allowTemporaryTemplateBaseline) {
       logWarn_ACU('[V2 Replay] 未找到 full checkpoint，检测到无锚点 V2 replay artifacts，拒绝恢复不完整 V2 表格数据。');
+      return null;
     }
-    return null;
-  }
-
-  const checkpoint = checkpointRef.frame.checkpoint;
-  const state: TableDataObject_ACU = deepClone_ACU(checkpoint.data);
-  normalizeReplayState_ACU(state, 'full checkpoint');
-  const replayStartMessageIndex = checkpointRef.messageIndex;
-  if (options.updateRuntimeState !== false) {
-    replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
+    if (hasOrphanDataReplace_ACU(frameRefs)) {
+      logWarn_ACU('[V2 Replay] 无锚点 artifacts 包含 data_replace，必须通过显式恢复确认，拒绝使用临时模板基线。');
+      return null;
+    }
+    const temporaryBaseline = resolveTemporaryTemplateBaseline_ACU(chat, isolationKey);
+    if (!temporaryBaseline) {
+      logWarn_ACU('[V2 Replay] 无锚点 artifacts 缺少同聊天同隔离域的有效模板，拒绝建立临时基线。');
+      return null;
+    }
+    state = temporaryBaseline;
+    baseKind = 'temporary_template_baseline';
+    replayStartMessageIndex = frameRefs[0]?.messageIndex ?? 0;
+    logWarn_ACU('[V2 Replay] 未找到 full checkpoint，正使用当前聊天模板的 header-only 临时基线回放；该状态不是持久化锚点。');
+  } else {
+    const checkpoint = checkpointRef.frame.checkpoint;
+    state = deepClone_ACU(checkpoint.data);
+    normalizeReplayState_ACU(state, 'full checkpoint');
+    replayStartMessageIndex = checkpointRef.messageIndex;
+    if (options.updateRuntimeState !== false) replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
   }
 
   const runtime: SqlReplayRuntime_ACU = {
@@ -797,10 +863,19 @@ export async function loadTableStateFromFramesV2_ACU(
     }
 
     if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
-    return state;
+    return { data: state, baseKind };
   } finally {
     runtime.engine.dispose();
   }
+}
+
+export async function loadTableStateFromFramesV2_ACU(
+  chatArg?: any[],
+  isolationKeyArg?: string,
+  options: LoadTableStateFromFramesV2Options_ACU = {},
+): Promise<TableDataObject_ACU | null> {
+  const result = await loadTableStateFromFramesV2Detailed_ACU(chatArg, isolationKeyArg, options);
+  return result?.data ?? null;
 }
 
 export async function validateCurrentChatTableRecovery_ACU(

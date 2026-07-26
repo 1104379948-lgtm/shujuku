@@ -49,7 +49,7 @@ import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '.
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
 import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from './sql-table-service';
-import { loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
+import { hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transaction';
@@ -487,13 +487,18 @@ async function loadV2ReplayMergeBase_ACU(
     if (strategy.mode !== 'v2') return { data: null, attempted: false };
 
     try {
-        const replayedData = await loadTableStateFromFramesV2_ACU(chat, isolationKey, options);
-        const cloned = cloneTableDataSnapshot_ACU(replayedData as any);
+        const replayResult = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+            ...options,
+            updateRuntimeState: false,
+            allowTemporaryTemplateBaseline: true,
+        });
+        const cloned = cloneTableDataSnapshot_ACU(replayResult?.data as any);
         if (!hasUsableRuntimeTableData_ACU(cloned)) return { data: null, attempted: true };
         const mergedData = mergeGuideStructureIntoBaseData_ACU(cloned as Record<string, any>);
         _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(mergedData)));
         const scope = Number.isInteger(options.maxMessageIndex) ? `<=${options.maxMessageIndex}` : 'latest';
-        logDebug_ACU(`[Batch ${batchNumber}] Using V2 replay state as merge base (${scope}).`);
+        const baseKind = replayResult?.baseKind === 'temporary_template_baseline' ? 'temporary-template' : 'checkpoint';
+        logDebug_ACU(`[Batch ${batchNumber}] Using V2 replay state as merge base (${scope}, base=${baseKind}).`);
         return { data: mergedData, attempted: true };
     } catch (error) {
         // 回放异常与「边界内确实没有数据」必须区分开。
@@ -1022,13 +1027,19 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 : scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
             const keysToTrack = scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
             // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始
-            // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations。
+            // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations；但若已存在
+            // 可由模板临时基线回放的 orphan artifacts，则必须保留本次 operations，供 persist
+            // 层校验 replay + operations === afterData 后升级为 integrity_repair checkpoint。
+            const persistChat = getChatArray_ACU() || [];
+            const persistIsolationKey = getCurrentIsolationKey_ACU();
             const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
-                getChatArray_ACU() || [],
-                getCurrentIsolationKey_ACU(),
+                persistChat,
+                persistIsolationKey,
                 options.saveTargetIndex,
             );
-            if (hasCheckpointAnchor) {
+            const hasTemporaryReplayArtifacts = !hasCheckpointAnchor
+                && hasUnanchoredReplayArtifactsForChatV2_ACU(persistChat, persistIsolationKey, { maxMessageIndex: options.saveTargetIndex });
+            if (hasCheckpointAnchor || hasTemporaryReplayArtifacts) {
                 // 只遍历实际执行过的 SQL（范围外的表已在收集阶段整条屏蔽），
                 // 因此 sqlResponses 与 sqlTexts 一一对应，不会错位。
                 sqlResponses.forEach((response, index) => {
@@ -1156,15 +1167,20 @@ export async function applyUnifiedGroupFillResponses_ACU(
             .filter(sheetKey => scopedKeys([sheetKey]).length > 0)
             .sort();
         // 目标楼层前没有 full checkpoint 锚点时，本次写入会被 persist 层当作初始
-        // full checkpoint；该形态只接受 afterData 快照，附带 operations 会被拒绝。
-        // 判定必须与 persist 层的 hasExistingCheckpoint 保持同一判据。
+        // full checkpoint；pristine 场景只接受 afterData 快照。若已有可临时回放的
+        // orphan artifacts，则必须保留本次 operations，由 persist 验证
+        // temporary replay + operations === afterData 后升级为 integrity_repair checkpoint。
+        const persistChat = getChatArray_ACU() || [];
+        const persistIsolationKey = getCurrentIsolationKey_ACU();
         const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
-            getChatArray_ACU() || [],
-            getCurrentIsolationKey_ACU(),
+            persistChat,
+            persistIsolationKey,
             options.saveTargetIndex,
         );
+        const hasTemporaryReplayArtifacts = !hasCheckpointAnchor
+            && hasUnanchoredReplayArtifactsForChatV2_ACU(persistChat, persistIsolationKey, { maxMessageIndex: options.saveTargetIndex });
         let effectiveOperations: TableMutationOperationV2_ACU[] = [];
-        if (hasCheckpointAnchor) {
+        if (hasCheckpointAnchor || hasTemporaryReplayArtifacts) {
             // operations 必须与 keysToSave 用同一份模板范围：若为范围外的表写增量，
             // 而 checkpoint 又不含该表，回放时会建不出表并以 no such table 失败。
             const scopedOperations = operations.filter(operation => {

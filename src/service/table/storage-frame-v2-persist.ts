@@ -6,14 +6,15 @@ import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
-import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU } from './storage-frame-v2-types';
+import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { hasLegacyTopLevelTableData_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
-import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from './storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, collectScheduleSummaryFromFramesV2_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU } from '../../data/sqlite/schema-mapper';
 import { hydrateTableDataStrict_ACU } from './sqlite-template-validation';
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from './canonical-checkpoint-builder';
+import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 
 export interface TableCheckpointGenerationConfig_ACU {
   maxEntriesAfterCheckpoint: number;
@@ -392,6 +393,34 @@ function hasAnyV2Frame_ACU(chat: any[], isolationKey: string, maxMessageIndex = 
     const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
     return isV2TagData_ACU(tagData);
   });
+}
+
+function getLatestV2FrameMessageIndex_ACU(chat: any[], isolationKey: string): number {
+  for (let index = chat.length - 1; index >= 0; index -= 1) {
+    const tagData = chat[index]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    if (isV2TagData_ACU(tagData)) return index;
+  }
+  return -1;
+}
+
+function projectReplayComparableData_ACU(data: TableDataObject_ACU): TableDataObject_ACU {
+  const projected = deepClone_ACU(data);
+  for (const [key, value] of Object.entries(projected)) {
+    if (!key.startsWith('sheet_') || !isObjectRecord_ACU(value)) continue;
+    delete (value as Record<string, any>).seedRows;
+  }
+  return projected;
+}
+
+async function verifyTemporaryBaselineUpgrade_ACU(
+  replayData: TableDataObject_ACU,
+  operations: TableMutationOperationV2_ACU[],
+  afterData: TableDataObject_ACU,
+): Promise<boolean> {
+  const expected = deepClone_ACU(replayData);
+  for (const operation of operations) await applyTableOperationV2_ACU(expected, operation);
+  return getTableDataFingerprint_ACU(projectReplayComparableData_ACU(expected))
+    === getTableDataFingerprint_ACU(projectReplayComparableData_ACU(afterData));
 }
 
 export function getLatestTableStorageHeadRevisionV2_ACU(chat: any[] | null | undefined, isolationKey: string): string | null {
@@ -1017,6 +1046,38 @@ async function persistTableMutationLogV2Core_ACU(
   const hasMetadataOnlyFillEvent = filledSheetKeys.length > 0 || (Array.isArray(options.groupKeys) && options.groupKeys.length > 0);
   const hasManualRefillProgress = !!options.manualRefillProgress;
   const isManualRefillProgressOnly = operations.length === 0 && !hasMetadataOnlyFillEvent && hasManualRefillProgress;
+  const latestV2FrameMessageIndex = getLatestV2FrameMessageIndex_ACU(chat, isolationKey);
+  const hasUnanchoredArtifacts = !hasCheckpointAnywhere
+    && hasUnanchoredReplayArtifactsForChatV2_ACU(chat, isolationKey);
+  let temporaryBaselineUpgrade: { sourceMessageIndex: number; storageFrame: TableStorageFrameV2_ACU } | null = null;
+  if (hasUnanchoredArtifacts && !isManualRefillProgressOnly) {
+    if (target.index < latestV2FrameMessageIndex) {
+      return {
+        saved: false,
+        error: `V2 临时基线升级必须写在最后一个无锚点 artifact 之后：target=${target.index}, latestArtifact=${latestV2FrameMessageIndex}。`,
+      };
+    }
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+      maxMessageIndex: target.index,
+      updateRuntimeState: false,
+      allowTemporaryTemplateBaseline: true,
+    });
+    if (!replay || replay.baseKind !== 'temporary_template_baseline') {
+      return { saved: false, error: 'V2 无锚点 artifacts 无法从当前聊天模板建立安全临时基线，已拒绝自动升级。' };
+    }
+    if (!await verifyTemporaryBaselineUpgrade_ACU(replay.data, operations, afterData)) {
+      return { saved: false, error: 'V2 临时基线回放与本次 afterData 不一致，已拒绝建立 full checkpoint。' };
+    }
+    const sourceTagData = latestV2FrameMessageIndex >= 0
+      ? readIsolatedTagData_ACU(chat[latestV2FrameMessageIndex], isolationKey)
+      : null;
+    if (isV2TagData_ACU(sourceTagData)) {
+      temporaryBaselineUpgrade = {
+        sourceMessageIndex: latestV2FrameMessageIndex,
+        storageFrame: deepClone_ACU(sourceTagData.storageFrame),
+      };
+    }
+  }
   if (!manualRefillProgressIsValidForIntroductionHistory_ACU(options.manualRefillProgress)) {
     return { saved: false, error: 'V2 manualRefillProgress 格式无效，已拒绝写入。' };
   }
@@ -1026,8 +1087,9 @@ async function persistTableMutationLogV2Core_ACU(
       error: 'V2 manualRefillProgress-only write requires an existing full checkpoint anchor.',
     };
   }
-  const initialCheckpointReason: TableCheckpointV2_ACU['reason'] = options.checkpointReason
-    || (hasExistingV2Frame ? 'migration' : 'init');
+  const initialCheckpointReason: TableCheckpointV2_ACU['reason'] = temporaryBaselineUpgrade
+    ? 'integrity_repair'
+    : (options.checkpointReason || (hasExistingV2Frame ? 'migration' : 'init'));
   // 同一隔离键下同一时刻只能存在一个 full checkpoint。
   //
   // 只要整个聊天已经有 full checkpoint，本次写入就只能追加增量，
@@ -1038,11 +1100,17 @@ async function persistTableMutationLogV2Core_ACU(
   // 同一张表的差异只是列，新增列按空处理，不需要另立基线。
   const shouldCheckpoint = !hasCheckpointAnywhere
     && !isManualRefillProgressOnly
-    && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
-  if (shouldCheckpoint && operations.length > 0) {
+    && (temporaryBaselineUpgrade !== null
+      || initialCheckpointReason === 'init'
+      || initialCheckpointReason === 'migration');
+  if (shouldCheckpoint && operations.length > 0 && !temporaryBaselineUpgrade) {
     return { saved: false, error: 'V2 初始 full checkpoint 不接受 operations；请仅提交 afterData 快照。' };
   }
 
+  const targetExistingTagData = cloneIsolatedData_ACU(target.message)?.[isolationKey];
+  const targetExistingFrame = isV2TagData_ACU(targetExistingTagData)
+    ? deepClone_ACU(targetExistingTagData.storageFrame)
+    : null;
   const isolatedData = cloneIsolatedData_ACU(target.message) as Record<string, any>;
   const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
   const replacementIsolatedDataByMessageIndex = new Map<number, Record<string, any>>();
@@ -1114,6 +1182,19 @@ async function persistTableMutationLogV2Core_ACU(
     frame.checkpoint = checkpointResult.checkpoint;
     frame.headRevision = checkpointRevision;
     frame.logEntries = [];
+    if (temporaryBaselineUpgrade) {
+      const recoveryBackup: TableV2RecoveryBackup_ACU = {
+        version: 1,
+        createdAt: now,
+        recoveryKind: 'temporary_template_baseline_upgrade',
+        sourceMessageIndex: temporaryBaselineUpgrade.sourceMessageIndex,
+        storageFrame: targetExistingFrame || temporaryBaselineUpgrade.storageFrame,
+      };
+      const tagData = isolatedData[isolationKey];
+      if (tagData && typeof tagData === 'object' && !Array.isArray(tagData)) {
+        tagData.recoveryBackup = recoveryBackup;
+      }
+    }
     logDebug_ACU(`[V2 Persist] 写入 full checkpoint: messageIndex=${target.index}, revision=${checkpointRevision}, sheets=${Object.keys(afterData).filter(k => k.startsWith('sheet_')).length}`);
   } else if (shouldAppendLogEntry) {
     // 目标表必须在本楼的回放起点里已存在，否则这条增量永远无法回放（no such table）。
@@ -1234,7 +1315,8 @@ async function persistTableMutationLogV2Core_ACU(
       enabled: settings_ACU.dataIsolationEnabled,
       code: settings_ACU.dataIsolationCode,
     });
-    if (options.strictSave || replacement) {
+    // 临时基线升级会替换 orphan frame、清空日志并写 recoveryBackup，必须确认宿主真实落盘。
+    if (options.strictSave || replacement || temporaryBaselineUpgrade) {
       await saveChatToHostStrict_ACU();
     } else {
       await saveChatToHost_ACU();
