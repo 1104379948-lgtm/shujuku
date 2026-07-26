@@ -38769,14 +38769,15 @@ $CONTENT
         }
         const initialCheckpointReason = options.checkpointReason
             || (hasExistingV2Frame ? 'migration' : 'init');
-        // 填表类写入只有在整个聊天都没有 full checkpoint 时才写初始 checkpoint；
-        // 否则本楼即使前面没有锚点，也只应追加增量，绝不能再造一个初始基线
-        // （回放只认最后一个 full checkpoint，多出来的基线会让它之前的所有增量失效）。
+        // 同一隔离键下同一时刻只能存在一个 full checkpoint。
         //
-        // import 例外：导入历史数据本就需要给被导入的楼层自建基线，
-        // 这一行为由既有用例锁定，不在此处收紧。
-        const blocksInitialCheckpoint = options.source === 'import' ? hasExistingCheckpoint : hasCheckpointAnywhere;
-        const shouldCheckpoint = !blocksInitialCheckpoint
+        // 只要整个聊天已经有 full checkpoint，本次写入就只能追加增量，
+        // 即使目标楼层在那个 checkpoint 之前也一样。回放只认最后一个 full checkpoint，
+        // 多出来的基线会让它之前的所有增量失效（表现为「只有最后一层有数据」）。
+        //
+        // 这条对所有 source 一致：导入只可能带来「现有没有的表」，
+        // 同一张表的差异只是列，新增列按空处理，不需要另立基线。
+        const shouldCheckpoint = !hasCheckpointAnywhere
             && !isManualRefillProgressOnly
             && (initialCheckpointReason === 'init' || initialCheckpointReason === 'migration');
         if (shouldCheckpoint && operations.length > 0) {

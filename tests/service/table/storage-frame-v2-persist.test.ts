@@ -1475,10 +1475,11 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(historicalImport.saved).toBe(true);
-    expect(historicalImportMessage.TavernDB_ACU_IsolatedData[''].storageFrame).toMatchObject({
-      checkpoint: { kind: 'full', reason: 'init', data: afterData },
-      logEntries: [],
-    });
+    // 同一隔离键下同一时刻只能有一个 full checkpoint：
+    // 更晚楼层已有基线时，往更早楼层导入不得再新建一个初始基线，
+    // 否则回放只认最后一个 full checkpoint，它之前的增量全部失效。
+    expect(historicalImportMessage.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
+    expect(historicalImportMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
     expect(futureCheckpointMessage.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data).toEqual({
       mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB,
     });
