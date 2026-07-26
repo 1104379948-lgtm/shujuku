@@ -45,6 +45,14 @@ export interface ApplyEditsResult {
   error?: string;
 }
 
+/** SQLite 原子行身份分配与批量执行结果。 */
+export interface ApplyEditsWithRowIdMaterializationResult_ACU extends ApplyEditsResult {
+  /** 与输入 editsList 一一对应的、实际执行并用于 V2 记录的 SQL。 */
+  materializedSqlTexts: string[];
+  /** 执行完成后从 SQLite 严格导出的真实运行时数据。 */
+  tableData: TableDataObject_ACU;
+}
+
 /**
  * 统一的表格存储提供者接口
  *
@@ -122,6 +130,15 @@ export interface ITableStorageProvider {
    * sqlite 模式必须把所有 SQL 放进同一个运行时事务；native 可不实现。
    */
   applyEditsBatch?(editsList: string[], updateMode?: string, paramsList?: (string | number | null)[][]): ApplyEditsResult;
+
+  /**
+   * 在 provider 内原子完成模板建表、空表补种、系统 row_id 分配和批量执行。
+   * 仅 SQLite provider 实现；调用方不得在 provider 外预分配 row_id。
+   */
+  applyEditsWithSystemRowIds?(
+    editsList: string[],
+    updateMode?: string,
+  ): ApplyEditsWithRowIdMaterializationResult_ACU;
 
   /** 创建运行时快照，用于提交失败或重试前回滚。sqlite 返回二进制 DB 快照；native 可不实现。 */
   createRuntimeSnapshot?(): unknown;

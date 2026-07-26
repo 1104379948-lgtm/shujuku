@@ -111,6 +111,7 @@ import {
   buildSqlSheetBatchOperations_ACU,
   materializeSystemRowIdsForSqlInserts_ACU,
   rebindSqlMutationTableIdentifiers_ACU,
+  SqlRuntimeSnapshotError_ACU,
   SqlTableService,
   splitSqlStatements,
   extractTableNamesFromStatements,
@@ -479,11 +480,32 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     ]);
   });
 
-  it('拒绝 AI 显式 row_id 与无列清单 INSERT', () => {
+  it('静默忽略 AI 显式 row_id，并按系统保留序列重新分配', () => {
+    const result = materializeSystemRowIdsForSqlInserts_ACU([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (999, '药水', 5)",
+      "INSERT INTO beibaowupinbiao (item_name, row_id, quantity) VALUES ('卷轴', 888, 2), ('盾牌', 777, 1)",
+      "INSERT INTO beibaowupinbiao (item_name, quantity, \"ROW_ID\") VALUES ('钥匙', 1, 666)",
+    ], snapshotTableData);
+
+    expect(result).toEqual([
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5)",
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (3, '卷轴', 2), (4, '盾牌', 1)",
+      "INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (5, '钥匙', 1)",
+    ]);
+    expect(result.join('\n')).not.toContain('999');
+    expect(result.join('\n')).not.toContain('888');
+    expect(result.join('\n')).not.toContain('777');
+    expect(result.join('\n')).not.toContain('666');
+  });
+
+  it('显式 row_id 是唯一列时拒绝无业务内容的 INSERT', () => {
     expect(() => materializeSystemRowIdsForSqlInserts_ACU(
-      ["INSERT INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (2, '药水', 5)"],
+      ['INSERT INTO beibaowupinbiao (row_id) VALUES (999)'],
       snapshotTableData,
-    )).toThrow('不得提供 row_id');
+    )).toThrow('剔除 row_id 后没有业务列');
+  });
+
+  it('无列清单 INSERT 仍然 fail closed', () => {
     expect(() => materializeSystemRowIdsForSqlInserts_ACU(
       ["INSERT INTO beibaowupinbiao VALUES (2, '药水', 5)"],
       snapshotTableData,
@@ -1081,6 +1103,64 @@ describe('SqlTableService', () => {
       // 验证回滚：表仍为空（reseed 被回滚）
       const queryResult = service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory');
       expect(queryResult.values[0][0]).toBe(0);
+    });
+  });
+
+  describe('applyEditsWithSystemRowIds', () => {
+    beforeEach(async () => {
+      mockMergeAll.mockResolvedValue(JSON.parse(JSON.stringify(testTableData)));
+      await service.loadFromChat();
+      service.applyEdits('DELETE FROM inventory;');
+      mockGetEffectiveSeedRows.mockReturnValue([
+        ['1', '铁剑', '3'],
+      ]);
+    });
+
+    it('空表补种与 AI row_id 分配在同一批次内避开冲突', () => {
+      const result = service.applyEditsWithSystemRowIds([
+        "INSERT INTO inventory (row_id, item_name, quantity) VALUES (999, '魔法书', 1);",
+        "INSERT INTO inventory (row_id, item_name, quantity) VALUES (888, '卷轴', 2);",
+      ]);
+
+      expect(result.success).toBe(true);
+      expect(result.appliedEdits).toBe(2);
+      expect(result.materializedSqlTexts).toHaveLength(2);
+      expect(result.materializedSqlTexts[0]).toContain("VALUES (2, '魔法书', 1)");
+      expect(result.materializedSqlTexts[0]).not.toContain('999');
+      expect(result.materializedSqlTexts[1]).toContain("VALUES (3, '卷轴', 2)");
+      expect(result.materializedSqlTexts[1]).not.toContain('888');
+
+      const queryResult = service.executeQuery('SELECT row_id, item_name FROM inventory ORDER BY row_id');
+      expect(queryResult.values).toEqual([
+        [1, '铁剑'],
+        [2, '魔法书'],
+        [3, '卷轴'],
+      ]);
+      expect(result.tableData.sheet_0.content).toEqual([
+        ['row_id', 'item_name', 'quantity'],
+        ['1', '铁剑', '3'],
+        ['2', '魔法书', '1'],
+        ['3', '卷轴', '2'],
+      ]);
+    });
+
+    it('提交前 finalize 严格导出失败时回滚补种与 AI SQL', () => {
+      const syncBridge = (service as any).syncBridge;
+      const originalExport = syncBridge.exportToTableData.bind(syncBridge);
+      const exportSpy = vi.spyOn(syncBridge, 'exportToTableData');
+      exportSpy
+        .mockImplementationOnce((mate: any) => originalExport(mate))
+        .mockImplementationOnce(() => { throw new Error('export boom'); });
+
+      expect(() => service.applyEditsWithSystemRowIds([
+        "INSERT INTO inventory (row_id, item_name, quantity) VALUES (999, '不应写入', 1);",
+      ])).toThrow(SqlRuntimeSnapshotError_ACU);
+
+      exportSpy.mockRestore();
+      expect(service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory').values[0][0]).toBe(0);
+      expect(service.getCurrentData()?.sheet_0.content).toEqual([
+        ['row_id', 'item_name', 'quantity'],
+      ]);
     });
   });
 

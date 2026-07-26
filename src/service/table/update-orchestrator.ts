@@ -48,7 +48,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, materializeSystemRowIdsForSqlInserts_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
 import { hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -1051,26 +1051,6 @@ export async function applyUnifiedGroupFillResponses_ACU(
             sqlResponses.push(response);
         }
 
-        try {
-            const statementCounts = sqlTexts.map(sqlText => normalizeSqlStatementsForRuntimeLog_ACU(sqlText).length);
-            const materializedStatements = materializeSystemRowIdsForSqlInserts_ACU(
-                sqlTexts.flatMap(sqlText => normalizeSqlStatementsForRuntimeLog_ACU(sqlText)),
-                baseSnapshot as any,
-            );
-            let cursor = 0;
-            statementCounts.forEach((count, index) => {
-                sqlTexts[index] = materializedStatements.slice(cursor, cursor + count).join(';\n');
-                cursor += count;
-            });
-        } catch (error: any) {
-            return {
-                success: false,
-                modifiedKeys: [],
-                error: `统一提交失败：AI SQL 行身份分配失败。${sanitizeRetryFeedback_ACU(error?.message || String(error))}`,
-                errorCategory: 'model',
-            };
-        }
-
         if (sqlTexts.length === 0) {
             // 全部目标表都在模板范围外：无需执行也无需提交，避免写出空 entry。
             logDebug_ACU('[TemplateScope] 本次 SQL 填表的目标表全部在模板范围外，已跳过提交。');
@@ -1094,20 +1074,29 @@ export async function applyUnifiedGroupFillResponses_ACU(
             skipChatSave: options.isImportMode,
         }, async () => {
             const provider = await ensureStorageProviderReady_ACU();
+            if (typeof provider.applyEditsWithSystemRowIds !== 'function') {
+                return {
+                    success: false,
+                    error: '统一提交失败：SQLite provider 不支持原子 row_id 分配。',
+                    errorCategory: 'infrastructure' as const,
+                };
+            }
             let parseResult: any;
             try {
-                parseResult = typeof provider.applyEditsBatch === 'function'
-                    ? provider.applyEditsBatch(sqlTexts, options.updateMode)
-                    : provider.applyEdits(sqlTexts.join('\n'), options.updateMode);
+                parseResult = provider.applyEditsWithSystemRowIds(sqlTexts, options.updateMode);
+                sqlTexts.splice(0, sqlTexts.length, ...parseResult.materializedSqlTexts);
             } catch (error: any) {
                 const rawErrorMessage = error?.message || String(error);
+                const isInfrastructureError = error instanceof SqlRuntimeSnapshotError_ACU;
                 const failedGroupKey = findSqlFailureGroupKey_ACU(sqlTexts, sortedResponses, rawErrorMessage);
                 return {
                     success: false,
-                    error: failedGroupKey
+                    error: error instanceof SqlRowIdMaterializationError_ACU
+                        ? `统一提交失败：AI SQL 行身份分配失败。${sanitizeRetryFeedback_ACU(rawErrorMessage)}`
+                        : failedGroupKey
                         ? `统一提交失败：${formatResponseGroupReference_ACU(sortedResponses.find(response => response.job.groupKey === failedGroupKey) || sortedResponses[0])} SQL 执行失败。${sanitizeRetryFeedback_ACU(rawErrorMessage)}`
                         : `统一提交失败：SQL 执行失败。${sanitizeRetryFeedback_ACU(rawErrorMessage)}`,
-                    errorCategory: 'model',
+                    errorCategory: isInfrastructureError ? 'infrastructure' as const : 'model' as const,
                 };
             }
             if (!parseResult?.success) {
@@ -1118,7 +1107,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 };
             }
 
-            const runtimeData = provider.getCurrentData() || currentJsonTableData_ACU || baseSnapshot;
+            const runtimeData = parseResult.tableData;
             operations.length = 0;
             const parsedModifiedKeys: string[] = Array.isArray(parseResult.modifiedKeys)
                 ? parseResult.modifiedKeys.filter((key: unknown): key is string => typeof key === 'string')
@@ -1825,28 +1814,22 @@ export async function executeCardUpdateCore_ACU(
                         skipChatSave: isImportMode,
                     }, async () => {
                         const provider = await ensureStorageProviderReady_ACU();
-                        let runtimeSqlText: string;
-                        try {
-                            const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(
-                                normalizeSqlStatementsForRuntimeLog_ACU(collectResult.tableEditText || ''),
-                                rawBaseSnapshot as any,
-                            );
-                            runtimeSqlText = materializeSystemRowIdsForSqlInserts_ACU(
-                                reboundStatements,
-                                rawBaseSnapshot as any,
-                            ).join(';\n');
-                        } catch (error: any) {
+                        if (typeof provider.applyEditsWithSystemRowIds !== 'function') {
                             return {
                                 success: false,
-                                error: sanitizeRetryFeedback_ACU(error?.message || String(error)),
-                                errorCategory: 'model' as const,
+                                error: 'SQLite provider 不支持原子 row_id 分配。',
+                                errorCategory: 'infrastructure' as const,
                             };
                         }
                         let parseResult: any;
                         try {
-                            parseResult = provider.applyEdits(runtimeSqlText, updateMode);
+                            parseResult = provider.applyEditsWithSystemRowIds(
+                                [collectResult.tableEditText || ''],
+                                updateMode,
+                            );
                         } catch (error: any) {
-                            return { success: false, error: sanitizeRetryFeedback_ACU(error?.message || String(error)), errorCategory: 'model' as const };
+                            const errorCategory = error instanceof SqlRuntimeSnapshotError_ACU ? 'infrastructure' as const : 'model' as const;
+                            return { success: false, error: sanitizeRetryFeedback_ACU(error?.message || String(error)), errorCategory };
                         }
                         const parseSuccess = !!parseResult?.success;
                         const parsedKeys: string[] = Array.isArray(parseResult?.modifiedKeys) ? parseResult.modifiedKeys : [];
@@ -1854,7 +1837,8 @@ export async function executeCardUpdateCore_ACU(
                             return { success: false, error: sanitizeRetryFeedback_ACU(parseResult?.error || '解析或应用AI更新时出错'), errorCategory: 'model' as const };
                         }
 
-                        const runtimeData = (provider.getCurrentData() || currentJsonTableData_ACU || rawBaseSnapshot) as Record<string, any>;
+                        const runtimeSqlText = parseResult.materializedSqlTexts[0] || '';
+                        const runtimeData = parseResult.tableData as Record<string, any>;
                         const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(runtimeSqlText, runtimeData, targetSheetKeys);
                         if (operationBuild.success === false) {
                             return { success: false, error: sanitizeRetryFeedback_ACU(operationBuild.error), errorCategory: 'model' as const };

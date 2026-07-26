@@ -95,22 +95,26 @@ export class SyncBridge {
       throw new Error('SyncBridge: SqliteEngine 未初始化');
     }
 
-    // 创建元数据表
-    const normalization = normalizeCanonicalTableRows_ACU(data);
-    if (normalization.errors.length > 0) {
-      const message = `[SyncBridge] snapshot 行标识不合法：${formatCanonicalRowIssues_ACU(normalization.errors)}`;
-      if (options.strict) throw new Error(message);
+    // strict hydrate 必须在副本上校验，失败时不得清洗或改写调用方快照。
+    const workingData = options.strict ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : data;
+    const normalization = normalizeCanonicalTableRows_ACU(workingData);
+    const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+    if (canonicalIssues.length > 0) {
+      const message = `[SyncBridge] snapshot 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
+      if (options.strict) {
+        throw new Error(message);
+      }
       logWarn_ACU(message);
     }
     this.engine.run(META_TABLE_DDL);
     this._ensureMetaSchema();
 
     // 遍历所有 sheet
-    const sheetKeys = Object.keys(data).filter(k => k.startsWith('sheet_'));
-    const physicalTableNames = resolvePhysicalTableNames_ACU(data);
+    const sheetKeys = Object.keys(workingData).filter(k => k.startsWith('sheet_'));
+    const physicalTableNames = resolvePhysicalTableNames_ACU(workingData);
     logDebug_ACU(`[SyncBridge] 开始加载 ${sheetKeys.length} 张表到 SQLite`);
     for (const key of sheetKeys) {
-      const sheet = data[key] as Sheet_ACU;
+      const sheet = workingData[key] as Sheet_ACU;
       if (!sheet || !Array.isArray(sheet.content)) continue;
 
       try {
@@ -135,7 +139,10 @@ export class SyncBridge {
    * @param originalMate 原始的 mate 对象（SQLite 不存储 mate，需要外部传入）
    * @returns 完整的 TableDataObject
    */
-  exportToTableData(originalMate: Mate_ACU): TableDataObject_ACU {
+  exportToTableData(
+    originalMate: Mate_ACU,
+    options: { strict?: boolean } = {},
+  ): TableDataObject_ACU {
     if (!this.engine.isReady) {
       throw new Error('SyncBridge: SqliteEngine 未初始化');
     }
@@ -143,7 +150,7 @@ export class SyncBridge {
     const result: TableDataObject_ACU = { mate: originalMate };
 
     // 读取元数据
-    const metaMap = this._loadAllMeta();
+    const metaMap = this._loadAllMeta(options.strict === true);
 
     // 遍历所有用户表
     const tableNames = this.engine.getTableNames();
@@ -151,19 +158,28 @@ export class SyncBridge {
     for (const tableName of tableNames) {
       // 查找对应的元数据
       const meta = this._findMetaByTableName(metaMap, tableName);
-      if (!meta) continue;
+      if (!meta) {
+        if (options.strict) throw new Error(`[SyncBridge] 用户表 ${tableName} 缺少可识别的元数据。`);
+        continue;
+      }
 
       try {
         const sheet = this._exportSheet(tableName, meta);
         result[meta.sheetKey] = sheet;
       } catch (e: any) {
+        if (options.strict) {
+          throw new Error(`[SyncBridge] 导出表 ${tableName} 失败: ${e?.message || String(e)}`);
+        }
         logError_ACU(`[SyncBridge] 导出表 ${tableName} 失败:`, e?.message || e);
       }
     }
 
     const normalization = normalizeCanonicalTableRows_ACU(result);
-    if (normalization.errors.length > 0) {
-      logWarn_ACU(`[SyncBridge] 导出结果存在无法自动合并的行标识问题：${formatCanonicalRowIssues_ACU(normalization.errors)}`);
+    const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+    if (canonicalIssues.length > 0) {
+      const message = `[SyncBridge] 导出结果存在行标识问题：${formatCanonicalRowIssues_ACU(canonicalIssues)}`;
+      if (options.strict) throw new Error(message);
+      logWarn_ACU(message);
     }
     return result;
   }
@@ -301,7 +317,7 @@ export class SyncBridge {
   }
 
   /** 读取所有元数据 */
-  private _loadAllMeta(): Map<string, SheetMeta> {
+  private _loadAllMeta(strict = false): Map<string, SheetMeta> {
     const map = new Map<string, SheetMeta>();
     try {
       const result = this.engine.query(`SELECT * FROM ${META_TABLE_NAME};`);
@@ -325,7 +341,8 @@ export class SyncBridge {
             : undefined,
         });
       }
-    } catch (_) {
+    } catch (error) {
+      if (strict) throw error;
       // 元数据表不存在时返回空 map
     }
     return map;

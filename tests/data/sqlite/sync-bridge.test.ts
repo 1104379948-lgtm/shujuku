@@ -418,6 +418,34 @@ describe('SyncBridge', () => {
       expect(() => bridge.loadFromTableData(data, { strict: true })).toThrow('duplicate_row_id');
       expect(engine.getTableNames()).not.toContain(tableName);
     });
+
+    it('strict hydrate 拒绝空 row_id 且不修改调用方快照', () => {
+      const invalidSheet = makeSheet({
+        content: [
+          ['row_id', '物品名称', '数量', '描述'],
+          ['', '无身份行', '1', '不得静默删除'],
+        ],
+      });
+      const data = makeTableData({ sheet_0: invalidSheet });
+      const before = structuredClone(data);
+      const tableName = getRuntimeTableName(data, 'sheet_0');
+
+      expect(() => bridge.loadFromTableData(data, { strict: true })).toThrow('empty_row_id');
+      expect(data).toEqual(before);
+      expect(engine.getTableNames()).not.toContain(tableName);
+    });
+
+    it('strict hydrate 拒绝 seedRows 空 row_id 且不修改调用方快照', () => {
+      const invalidSheet = makeSheet() as Sheet_ACU & { seedRows?: unknown[][] };
+      invalidSheet.seedRows = [['', '无身份种子行', '1', '不得静默删除']];
+      const data = makeTableData({ sheet_0: invalidSheet });
+      const before = structuredClone(data);
+      const tableName = getRuntimeTableName(data, 'sheet_0');
+
+      expect(() => bridge.loadFromTableData(data, { strict: true })).toThrow('empty_row_id');
+      expect(data).toEqual(before);
+      expect(engine.getTableNames()).not.toContain(tableName);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -487,6 +515,29 @@ describe('SyncBridge', () => {
     it('引擎未初始化时抛出错误', () => {
       engine.dispose();
       expect(() => bridge.exportToTableData(makeMate())).toThrow('未初始化');
+    });
+
+    it('strict 模式下用户表缺失元数据时 fail closed', () => {
+      bridge.loadFromTableData(makeTableData({ sheet_0: makeSheet() }));
+      engine.run('CREATE TABLE orphan_table (row_id INTEGER PRIMARY KEY, value TEXT);');
+
+      expect(() => bridge.exportToTableData(makeMate(), { strict: true }))
+        .toThrow('缺少可识别的元数据');
+    });
+
+    it('strict 模式下单表导出失败时向上抛出', () => {
+      const originalData = makeTableData({ sheet_0: makeSheet() });
+      const tableName = getRuntimeTableName(originalData, 'sheet_0');
+      bridge.loadFromTableData(originalData);
+      const originalQuery = engine.query.bind(engine);
+      const querySpy = vi.spyOn(engine, 'query').mockImplementation((sql: string, params?: any, options?: any) => {
+        if (sql === `SELECT * FROM ${tableName};`) throw new Error('sheet export boom');
+        return originalQuery(sql, params, options);
+      });
+
+      expect(() => bridge.exportToTableData(makeMate(), { strict: true }))
+        .toThrow('sheet export boom');
+      querySpy.mockRestore();
     });
   });
 

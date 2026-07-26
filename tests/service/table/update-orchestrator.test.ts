@@ -3336,7 +3336,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
-  it('SQL 模式拒绝 AI 显式 row_id，且不保存', async () => {
+  it('SQL 模式静默忽略 AI 显式 row_id，并使用系统身份保存', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     const { getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU } = await import('../../../src/service/template/chat-scope');
@@ -3354,18 +3354,20 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
     } as any;
     const responses = [
-      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (row_id, value) VALUES (1, 'sql-conflict');</tableEdit>", tableEditText: "INSERT INTO inventory (row_id, value) VALUES (1, 'sql-conflict');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
+      { success: true, attempt: 1, aiResponse: "<tableEdit>INSERT INTO inventory (row_id, value) VALUES (999, 'sql-conflict');</tableEdit>", tableEditText: "INSERT INTO inventory (row_id, value) VALUES (999, 'sql-conflict');", job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false } },
     ];
 
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
     const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
 
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('不得提供 row_id');
+    expect(result.success).toBe(true);
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
-    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
-    expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
-    expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    const persistArgs = mockPersistTablesToChatMessage.mock.calls[0]?.[0];
+    expect(persistArgs?.tableData?.sheet_0?.content).toContainEqual(['2', 'sql-conflict']);
+    expect(persistArgs?.tableData?.sheet_0?.content.flat()).not.toContain('999');
+    expect((persistArgs?.operations?.[0] as any)?.statements?.[0]).toContain("(row_id, value) VALUES (2, 'sql-conflict')");
+    expect((persistArgs?.operations?.[0] as any)?.statements?.[0]).not.toContain('999');
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 

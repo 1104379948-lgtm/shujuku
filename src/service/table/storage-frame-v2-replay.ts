@@ -279,10 +279,13 @@ interface SqlReplayRuntime_ACU {
 }
 
 function normalizeReplayState_ACU(state: TableDataObject_ACU, context: string): void {
-  const normalization = normalizeCanonicalTableRows_ACU(state);
-  if (normalization.errors.length > 0) {
-    throw new Error(`[V2 Replay] ${context} 行标识不合法：${formatCanonicalRowIssues_ACU(normalization.errors)}`);
+  const candidate = deepClone_ACU(state);
+  const normalization = normalizeCanonicalTableRows_ACU(candidate);
+  const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+  if (canonicalIssues.length > 0) {
+    throw new Error(`[V2 Replay] ${context} 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`);
   }
+  replaceState_ACU(state, candidate);
 }
 
 async function ensureSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): Promise<void> {
@@ -295,7 +298,7 @@ async function ensureSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: 
 
 function getExportedSqlReplayRuntimeState_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): TableDataObject_ACU {
   if (!runtime.loaded) return deepClone_ACU(state);
-  const next = runtime.syncBridge.exportToTableData((state.mate || { type: 'acu', version: 1 }) as Mate_ACU);
+  const next = runtime.syncBridge.exportToTableData((state.mate || { type: 'acu', version: 1 }) as Mate_ACU, { strict: true });
   normalizeReplayState_ACU(next, 'SQL 导出结果');
   return next;
 }
@@ -307,9 +310,44 @@ function exportSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableD
 
 async function reloadSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): Promise<void> {
   if (!runtime.loaded) return;
-  runtime.engine.dispose();
-  runtime.loaded = false;
-  await ensureSqlReplayRuntime_ACU(runtime, state);
+  const nextEngine = new SqliteEngine();
+  const nextRuntime: SqlReplayRuntime_ACU = {
+    engine: nextEngine,
+    syncBridge: new SyncBridge(nextEngine),
+    loaded: false,
+  };
+  try {
+    await ensureSqlReplayRuntime_ACU(nextRuntime, state);
+  } catch (error) {
+    nextEngine.dispose();
+    throw error;
+  }
+
+  const previousEngine = runtime.engine;
+  runtime.engine = nextRuntime.engine;
+  runtime.syncBridge = nextRuntime.syncBridge;
+  runtime.loaded = true;
+  previousEngine.dispose();
+}
+
+function buildReplayCandidate_ACU(
+  runtime: SqlReplayRuntime_ACU | null,
+  state: TableDataObject_ACU,
+): TableDataObject_ACU {
+  return runtime?.loaded
+    ? getExportedSqlReplayRuntimeState_ACU(runtime, state)
+    : deepClone_ACU(state);
+}
+
+async function commitReplayCandidate_ACU(
+  runtime: SqlReplayRuntime_ACU | null,
+  state: TableDataObject_ACU,
+  candidate: TableDataObject_ACU,
+  context: string,
+): Promise<void> {
+  normalizeReplayState_ACU(candidate, context);
+  if (runtime?.loaded) await reloadSqlReplayRuntime_ACU(runtime, candidate);
+  replaceState_ACU(state, candidate);
 }
 
 async function applySheetCheckpointsForReplay_ACU(
@@ -318,18 +356,17 @@ async function applySheetCheckpointsForReplay_ACU(
   runtime: SqlReplayRuntime_ACU,
 ): Promise<void> {
   if (checkpoints.length === 0) return;
-  if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
+  const candidate = buildReplayCandidate_ACU(runtime, state);
   for (const checkpoint of checkpoints) {
     if (checkpoint.timeline?.kind === 'sheet_hide') {
       // hide：从 active replay state 移除该表的可见性（数据仍留存于 checkpoint.data 供后续 reveal）。
-      delete state[checkpoint.sheetKey];
+      delete candidate[checkpoint.sheetKey];
     } else {
       // introduction / rebase / reveal：用 checkpoint.data 整表写入 replay state。
-      state[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
+      candidate[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
     }
   }
-  normalizeReplayState_ACU(state, '单表 checkpoint');
-  if (runtime.loaded) await reloadSqlReplayRuntime_ACU(runtime, state);
+  await commitReplayCandidate_ACU(runtime, state, candidate, '单表 checkpoint');
 }
 
 function buildReplaySqlTableAliases_ACU(
@@ -650,10 +687,8 @@ export async function applyTableOperationV2_ACU(
 
   try {
     if (operation.kind === 'data_replace') {
-      if (effectiveRuntime?.loaded) exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-      replaceState_ACU(state, operation.data);
-      normalizeReplayState_ACU(state, 'data_replace');
-      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+      const candidate = deepClone_ACU(operation.data);
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace');
       return;
     }
     if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
@@ -663,39 +698,30 @@ export async function applyTableOperationV2_ACU(
       return;
     }
     if (operation.kind === 'sheet_schema_migrate') {
-      const sourceState = effectiveRuntime?.loaded
-        ? getExportedSqlReplayRuntimeState_ACU(effectiveRuntime, state)
-        : state;
+      const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state);
       const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
-      normalizeReplayState_ACU(candidate, 'sheet_schema_migrate');
-      if (effectiveRuntime?.loaded) {
-        await reloadSqlReplayRuntime_ACU(effectiveRuntime, candidate);
-      }
-      replaceState_ACU(state, candidate);
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate');
       return;
     }
     if (operation.kind === 'sheet_replace') {
-      if (effectiveRuntime?.loaded) exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-      state[operation.sheetKey] = deepClone_ACU(operation.sheet);
-      normalizeReplayState_ACU(state, 'sheet_replace');
-      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
+      candidate[operation.sheetKey] = deepClone_ACU(operation.sheet);
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace');
       return;
     }
     if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
       if (operation.kind === 'meta_update') {
         assertMetaUpdateDoesNotChangeDdl_ACU(operation);
       }
-      if (effectiveRuntime?.loaded) exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-      applyTablePatchV2_ACU(state, operation);
-      normalizeReplayState_ACU(state, operation.kind);
-      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
+      applyTablePatchV2_ACU(candidate, operation);
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind);
       return;
     }
     if (operation.kind === 'table_edit_dsl') {
-      if (effectiveRuntime?.loaded) exportSqlReplayRuntime_ACU(effectiveRuntime, state);
-      applyTableEditDslOperationV2_ACU(state, operation.text);
-      normalizeReplayState_ACU(state, 'table_edit_dsl');
-      if (effectiveRuntime?.loaded) await reloadSqlReplayRuntime_ACU(effectiveRuntime, state);
+      const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
+      applyTableEditDslOperationV2_ACU(candidate, operation.text);
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl');
       return;
     }
 
@@ -847,13 +873,12 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
               }
             }
           } else {
-            if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
+            const candidate = buildReplayCandidate_ACU(runtime, state);
             // 兼容旧版 derived patch log；新 V2 不再写 patches。
             for (const patch of entry.patches || []) {
-              applyTablePatchV2_ACU(state, patch);
+              applyTablePatchV2_ACU(candidate, patch);
             }
-            normalizeReplayState_ACU(state, 'legacy patches');
-            if (runtime.loaded) await reloadSqlReplayRuntime_ACU(runtime, state);
+            await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches');
           }
           if (options.updateRuntimeState !== false) {
             replayEventForState_ACU(entry, ref.aiFloor);

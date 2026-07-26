@@ -1132,6 +1132,30 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(chat).toEqual(before);
   });
 
+  it('坏 full checkpoint 含空 row_id 时 fail closed 且不清洗持久化 frame', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.content.push(['', '无身份行']);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+    const before = structuredClone(chat);
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
+      .rejects.toThrow('full checkpoint 行标识不合法');
+
+    expect(chat).toEqual(before);
+  });
+
   it('bounded replay 范围早于首个 V2 frame 时返回空基底但不误报无锚点历史', async () => {
     const chat = [
       { is_user: false, mes: '早期普通 AI 消息' },
@@ -2463,6 +2487,70 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     await expect(applyTableOperationV2_ACU(state, invalidOperation as any, loadedRuntime as any)).rejects.toThrow('contractVersion');
     expect(state).toEqual(original);
     expect(loadedRuntime.loaded).toBe(true);
+  });
+
+  it('非法 data_replace 失败后不修改输入 state', async () => {
+    const state = makeCheckpointData();
+    const original = structuredClone(state);
+    const invalidData = makeCheckpointData();
+    invalidData.sheet_0.content.push(['', '无身份行']);
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'data_replace',
+      data: invalidData,
+      reason: 'system',
+    } as any)).rejects.toThrow('data_replace 行标识不合法');
+
+    expect(state).toEqual(original);
+  });
+
+  it('非法 sheet_replace 失败后不修改输入 state', async () => {
+    const state = makeCheckpointData();
+    const original = structuredClone(state);
+    const invalidSheet = {
+      ...structuredClone(state.sheet_0),
+      content: [['row_id', 'name'], ['', '无身份行']],
+    };
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'sheet_replace',
+      sheetKey: 'sheet_0',
+      sheet: invalidSheet,
+      reason: 'system',
+    } as any)).rejects.toThrow('sheet_replace 行标识不合法');
+
+    expect(state).toEqual(original);
+  });
+
+  it('已加载 runtime 的候选 hydrate 失败时保留旧 runtime 与输入 state', async () => {
+    const state = makeCheckpointData();
+    const original = structuredClone(state);
+    const oldDispose = vi.fn();
+    const exported = structuredClone(state);
+    const loadedRuntime = {
+      loaded: true,
+      engine: { dispose: oldDispose },
+      syncBridge: {
+        exportToTableData: () => structuredClone(exported),
+      },
+    };
+    const invalidSheet = {
+      ...structuredClone(state.sheet_0),
+      sourceData: { ddl: 'CREATE TABLE broken ( INVALID SYNTAX;' },
+    };
+
+    await expect(applyTableOperationV2_ACU(state, {
+      kind: 'sheet_replace',
+      sheetKey: 'sheet_0',
+      sheet: invalidSheet,
+      reason: 'system',
+    } as any, loadedRuntime as any)).rejects.toThrow();
+
+    expect(state).toEqual(original);
+    expect(loadedRuntime.loaded).toBe(true);
+    expect(oldDispose).not.toHaveBeenCalled();
+    expect(loadedRuntime.engine).toEqual({ dispose: oldDispose });
+    expect(loadedRuntime.syncBridge.exportToTableData()).toEqual(exported);
   });
 
   it('legacy meta_update 携带 sourceData.ddl 时明确拒绝，并且不推进 entry tracking 或提交 state', async () => {

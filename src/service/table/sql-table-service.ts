@@ -12,6 +12,7 @@ import type {
   ITableStorageProvider,
   SqlQueryResult,
   SqlMutationResult,
+  ApplyEditsWithRowIdMaterializationResult_ACU,
   ApplyEditsResult,
   SqlQueryExecutionOptions_ACU,
 } from '../../shared/table-storage-provider';
@@ -35,7 +36,6 @@ import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_AC
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
-import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
   workingData?: TableDataObject_ACU;
@@ -462,7 +462,10 @@ function findSqlClosingParen_ACU(value: string, openingIndex: number, context: s
   throw new Error(`${context} 的括号未闭合。`);
 }
 
-function buildRowIdReservationsByRuntimeTable_ACU(tableData: TableDataObject_ACU): Map<string, Set<string>> {
+function buildRowIdReservationsByRuntimeTable_ACU(
+  tableData: TableDataObject_ACU,
+  additionalReservations?: Map<string, Set<string>>,
+): Map<string, Set<string>> {
   const reservations = new Map<string, Set<string>>();
   for (const [sheetKey, value] of Object.entries(tableData || {})) {
     if (!sheetKey.startsWith('sheet_')) continue;
@@ -471,7 +474,26 @@ function buildRowIdReservationsByRuntimeTable_ACU(tableData: TableDataObject_ACU
       Array.isArray(content) ? content.slice(1) : [],
     ));
   }
+  for (const [tableName, rowIds] of additionalReservations || []) {
+    const reservation = reservations.get(tableName.toLowerCase()) || new Set<string>();
+    for (const rowId of rowIds) reservation.add(rowId);
+    reservations.set(tableName.toLowerCase(), reservation);
+  }
   return reservations;
+}
+
+export class SqlRowIdMaterializationError_ACU extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SqlRowIdMaterializationError_ACU';
+  }
+}
+
+export class SqlRuntimeSnapshotError_ACU extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SqlRuntimeSnapshotError_ACU';
+  }
 }
 
 /**
@@ -482,8 +504,9 @@ function buildRowIdReservationsByRuntimeTable_ACU(tableData: TableDataObject_ACU
 export function materializeSystemRowIdsForSqlInserts_ACU(
   statements: string[],
   tableData: TableDataObject_ACU,
+  additionalReservations?: Map<string, Set<string>>,
 ): string[] {
-  const reservations = buildRowIdReservationsByRuntimeTable_ACU(tableData);
+  const reservations = buildRowIdReservationsByRuntimeTable_ACU(tableData, additionalReservations);
   return statements.map((statement, statementIndex) => {
     const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
     const actionIndex = getSqlMutationActionIndex_ACU(tokens);
@@ -505,16 +528,18 @@ export function materializeSystemRowIdsForSqlInserts_ACU(
       throw new Error(`AI INSERT 第 ${statementIndex + 1} 条必须显式列出业务列，系统才能分配 row_id。`);
     }
     const columnsEnd = findSqlClosingParen_ACU(suffix, 0, `AI INSERT 第 ${statementIndex + 1} 条列清单`);
-    const columns = splitTopLevelSqlList_ACU(suffix.slice(1, columnsEnd), `AI INSERT 第 ${statementIndex + 1} 条列清单`);
-    const normalizedColumns = columns.map(column => column.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase());
+    const inputColumns = splitTopLevelSqlList_ACU(suffix.slice(1, columnsEnd), `AI INSERT 第 ${statementIndex + 1} 条列清单`);
+    const normalizedColumns = inputColumns.map(column => column.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase());
     if (normalizedColumns.some(column => !/^[a-z_][a-z0-9_$]*$/i.test(column))) {
       throw new Error(`AI INSERT 第 ${statementIndex + 1} 条的列名无法安全解析。`);
     }
     if (new Set(normalizedColumns).size !== normalizedColumns.length) {
       throw new Error(`AI INSERT 第 ${statementIndex + 1} 条的列名重复。`);
     }
-    if (normalizedColumns.includes('row_id')) {
-      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条不得提供 row_id；该身份由系统分配。`);
+    const suppliedRowIdIndex = normalizedColumns.indexOf('row_id');
+    const businessColumns = inputColumns.filter((_, index) => index !== suppliedRowIdIndex);
+    if (businessColumns.length === 0) {
+      throw new Error(`AI INSERT 第 ${statementIndex + 1} 条剔除 row_id 后没有业务列，无法执行插入。`);
     }
     const valuesText = suffix.slice(columnsEnd + 1).trim();
     if (!/^VALUES\b/i.test(valuesText)) {
@@ -527,12 +552,13 @@ export function materializeSystemRowIdsForSqlInserts_ACU(
         throw new Error(`AI INSERT 第 ${statementIndex + 1} 条只支持括号包裹的 VALUES 行。`);
       }
       const values = splitTopLevelSqlList_ACU(tuple.slice(1, -1), `AI INSERT 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 个 VALUES`);
-      if (values.length !== columns.length) {
+      if (values.length !== inputColumns.length) {
         throw new Error(`AI INSERT 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 行的值数量与列数量不一致。`);
       }
-      return `(${allocateStableRowId_ACU(reservation)}, ${tuple.slice(1, -1).trim()})`;
+      const businessValues = values.filter((_, index) => index !== suppliedRowIdIndex);
+      return `(${allocateStableRowId_ACU(reservation)}, ${businessValues.join(', ')})`;
     });
-    return `${statement.slice(0, target.end)} (row_id, ${columns.join(', ')}) VALUES ${materializedTuples.join(', ')}`;
+    return `${statement.slice(0, target.end)} (row_id, ${businessColumns.join(', ')}) VALUES ${materializedTuples.join(', ')}`;
   });
 }
 
@@ -991,6 +1017,76 @@ export class SqlTableService implements ITableStorageProvider {
     }
   }
 
+  applyEditsWithSystemRowIds(
+    sqlTexts: string[],
+    _updateMode?: string,
+  ): ApplyEditsWithRowIdMaterializationResult_ACU {
+    this._ensureInitialized();
+    this._ensureTablesFromTemplate();
+
+    const normalizedGroups = (Array.isArray(sqlTexts) ? sqlTexts : []).map(sqlText => {
+      const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
+      return rebindSqlMutationTableIdentifiers_ACU(
+        normalizedStatements,
+        (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
+      );
+    });
+    const userStatements = normalizedGroups.flat();
+    if (userStatements.length === 0) {
+      return {
+        success: true,
+        modifiedKeys: [],
+        appliedEdits: 0,
+        materializedSqlTexts: normalizedGroups.map(() => ''),
+        tableData: this._exportCurrentDataStrict(),
+      };
+    }
+
+    const reseedPlan = this._collectReseedPlanForEmptyTables();
+    const runtimeData = this._exportCurrentDataStrict();
+    let materializedStatements: string[];
+    try {
+      materializedStatements = materializeSystemRowIdsForSqlInserts_ACU(
+        userStatements,
+        runtimeData,
+        reseedPlan.rowIdsByTable,
+      );
+    } catch (error: any) {
+      throw new SqlRowIdMaterializationError_ACU(error?.message || String(error));
+    }
+
+    const materializedSqlTexts: string[] = [];
+    let cursor = 0;
+    for (const group of normalizedGroups) {
+      materializedSqlTexts.push(materializedStatements.slice(cursor, cursor + group.length).join(';\n'));
+      cursor += group.length;
+    }
+
+    const statements = [...reseedPlan.inserts, ...materializedStatements];
+    try {
+      const result = this.engine.runBatchWithFinalize(
+        statements,
+        statements.map((): undefined => undefined),
+        () => this._exportCurrentDataStrict(),
+      );
+      const tableData = result.finalizeResult!;
+      _set_currentJsonTableData_ACU(tableData);
+      const modifiedTables = extractTableNamesFromStatements(statements);
+      const modifiedKeys = this._tableNamesToSheetKeys(modifiedTables);
+      logDebug_ACU(`[SqlTableService] 系统 row_id 批量执行成功: ${statements.length} 条语句, ${result.totalChanges} 行受影响`);
+      return {
+        success: true,
+        modifiedKeys,
+        appliedEdits: materializedStatements.length,
+        materializedSqlTexts,
+        tableData,
+      };
+    } catch (e: any) {
+      logError_ACU(`[SqlTableService] 系统 row_id 批量执行失败: ${e?.message || String(e)}`);
+      throw e;
+    }
+  }
+
   /**
    * 执行 SQL 查询（SELECT）
    *
@@ -1129,11 +1225,28 @@ export class SqlTableService implements ITableStorageProvider {
    * @returns 需要前置执行的 INSERT 语句数组（可能为空）
    */
   private _collectReseedInsertsForEmptyTables(): string[] {
+    return this._collectReseedPlanForEmptyTables().inserts;
+  }
+
+  private _exportCurrentDataStrict(): TableDataObject_ACU {
+    try {
+      const mate = (currentJsonTableData_ACU?.mate as Mate_ACU) || DEFAULT_MATE_ACU;
+      return this.syncBridge.exportToTableData(mate, { strict: true });
+    } catch (error: any) {
+      throw new SqlRuntimeSnapshotError_ACU(error?.message || String(error));
+    }
+  }
+
+  private _collectReseedPlanForEmptyTables(): {
+    inserts: string[];
+    rowIdsByTable: Map<string, Set<string>>;
+  } {
     const inserts: string[] = [];
-    if (!currentJsonTableData_ACU) return inserts;
+    const rowIdsByTable = new Map<string, Set<string>>();
+    if (!currentJsonTableData_ACU) return { inserts, rowIdsByTable };
 
     const sheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
-    if (sheetKeys.length === 0) return inserts;
+    if (sheetKeys.length === 0) return { inserts, rowIdsByTable };
 
     for (const sheetKey of sheetKeys) {
       try {
@@ -1173,6 +1286,10 @@ export class SqlTableService implements ITableStorageProvider {
 
         const sheetInserts = generateInserts(tempSheet as any, tableName);
         if (sheetInserts.length > 0) {
+          rowIdsByTable.set(
+            tableName.toLowerCase(),
+            createStableRowIdReservation_ACU(stableContent.slice(1)),
+          );
           inserts.push(...sheetInserts);
           logDebug_ACU(`[SqlTableService] 空表 ${sheetKey} (${tableName}) 补回 ${sheetInserts.length} 行 seedRows`);
         }
@@ -1185,7 +1302,7 @@ export class SqlTableService implements ITableStorageProvider {
     if (inserts.length > 0) {
       logDebug_ACU(`[SqlTableService] 共收集 ${inserts.length} 条 seedRows reseed INSERT 语句`);
     }
-    return inserts;
+    return { inserts, rowIdsByTable };
   }
 
   /** 从 TableDataObject 中提取所有 DDL，构建全局 NameMapper */
@@ -1417,7 +1534,7 @@ export async function applyParameterizedSqlMutationToTableDataSnapshot_ACU(
     await engine.init();
     syncBridge.loadFromTableData(snapshotCopy, { strict: true });
     const result = engine.run(runtimeSql, params);
-    const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy));
+    const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy), { strict: true });
     const modifiedTableNames = extractTableNamesFromStatements([runtimeSql]);
     const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
     const normalizedParams = Array.isArray(params) && params.length > 0 ? params.map(value => value ?? null) : undefined;
@@ -1476,11 +1593,7 @@ export async function applySqlEditsToTableDataSnapshot_ACU(
     syncBridge.loadFromTableData(snapshotCopy, { strict: true });
     engine.runBatch(statements);
 
-    const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy));
-    const normalization = normalizeCanonicalTableRows_ACU(workingData);
-    if (normalization.errors.length > 0 || normalization.removedRows.length > 0) {
-      throw new Error(`SQL 执行后行标识不合法：${formatCanonicalRowIssues_ACU([...normalization.errors, ...normalization.removedRows])}`);
-    }
+    const workingData = syncBridge.exportToTableData(resolveSnapshotMate_ACU(snapshotCopy), { strict: true });
     const modifiedTableNames = extractTableNamesFromStatements(statements);
     const modifiedKeys = mapSqlTableNamesToSheetKeys_ACU(workingData, modifiedTableNames);
     const operationBuild = buildSqlSheetBatchOperations_ACU(statements, workingData, {
