@@ -1,11 +1,11 @@
 import type { ChatSummaryVectorIndexChunk_ACU, ChatSummaryVectorIndexManifest_ACU } from '../../service/vector/summary-vector-index-types';
 
 const DB_NAME_ACU = 'TavernDB_ACU_VectorHotCache';
-const DB_VERSION_ACU = 2;
+const DB_VERSION_ACU = 3;
 const STORE_NAME_ACU = 'chunks';
 const FLUSH_TASK_STORE_NAME_ACU = 'flushTasks';
 
-export type SummaryVectorIndexFlushTaskStatus_ACU = 'dirty' | 'queued' | 'flushing' | 'ready' | 'failed_retryable' | 'failed_terminal';
+export type SummaryVectorIndexFlushTaskStatus_ACU = 'dirty' | 'queued' | 'flushing' | 'ready' | 'failed_retryable' | 'failed_terminal' | 'invalidated';
 export type SummaryVectorIndexFlushTaskMode_ACU = 'append' | 'sync';
 
 export interface VectorIndexHotCacheScope_ACU {
@@ -29,6 +29,7 @@ export interface SummaryVectorIndexFlushTaskRecord_ACU {
     isolationKey: string;
     sourceTableKey: string;
     targetMessageIndex?: number;
+    generation: number;
     mode: SummaryVectorIndexFlushTaskMode_ACU;
     status: SummaryVectorIndexFlushTaskStatus_ACU;
     requestedAt: number;
@@ -46,6 +47,7 @@ export interface SummaryVectorIndexFlushTaskUpsert_ACU {
     isolationKey: string;
     sourceTableKey: string;
     targetMessageIndex?: number;
+    generation?: number;
     mode: SummaryVectorIndexFlushTaskMode_ACU;
     status: SummaryVectorIndexFlushTaskStatus_ACU;
     requestedAt?: number;
@@ -484,6 +486,7 @@ function normalizeFlushTaskStatus_ACU(status: any): SummaryVectorIndexFlushTaskS
         || status === 'ready'
         || status === 'failed_retryable'
         || status === 'failed_terminal'
+        || status === 'invalidated'
         ? status
         : 'dirty';
 }
@@ -499,6 +502,7 @@ function cloneFlushTask_ACU(task: SummaryVectorIndexFlushTaskRecord_ACU): Summar
         isolationKey: normalizeKeyPart_ACU(task.isolationKey),
         sourceTableKey: normalizeKeyPart_ACU(task.sourceTableKey),
         ...(Number.isFinite(Number(task.targetMessageIndex)) ? { targetMessageIndex: Number(task.targetMessageIndex) } : {}),
+        generation: Math.max(0, Number(task.generation) || 0),
         mode: normalizeFlushTaskMode_ACU(task.mode),
         status: normalizeFlushTaskStatus_ACU(task.status),
         requestedAt: Math.max(0, Number(task.requestedAt) || 0),
@@ -528,6 +532,12 @@ export async function upsertSummaryVectorFlushTask_ACU(input: SummaryVectorIndex
             getRequest.onsuccess = () => {
                 const previous = getRequest.result ? cloneFlushTask_ACU(getRequest.result) : null;
                 const previousAttemptCount = previous?.attemptCount || 0;
+                const requestedGeneration = Math.max(0, Number(input.generation) || 0);
+                if (previous && requestedGeneration < previous.generation) {
+                    // 旧 runner 的 finally/catch 不得覆盖已入队的新代次，也不得复活失效墓碑。
+                    nextRecord = previous;
+                    return;
+                }
                 const nextStatus = normalizeFlushTaskStatus_ACU(input.status);
                 nextRecord = {
                     scopeKey,
@@ -535,6 +545,7 @@ export async function upsertSummaryVectorFlushTask_ACU(input: SummaryVectorIndex
                     isolationKey,
                     sourceTableKey,
                     ...(Number.isFinite(Number(input.targetMessageIndex)) ? { targetMessageIndex: Number(input.targetMessageIndex) } : previous?.targetMessageIndex != null ? { targetMessageIndex: previous.targetMessageIndex } : {}),
+                    generation: Math.max(previous?.generation || 0, requestedGeneration),
                     mode: normalizeFlushTaskMode_ACU(input.mode),
                     status: nextStatus,
                     requestedAt: Math.max(0, Number(input.requestedAt ?? previous?.requestedAt ?? now) || now),
@@ -562,23 +573,106 @@ export async function upsertSummaryVectorFlushTask_ACU(input: SummaryVectorIndex
     }
 }
 
+export async function invalidateSummaryVectorFlushTaskStrict_ACU(input: {
+    scopeKey: string;
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+}): Promise<SummaryVectorIndexFlushTaskRecord_ACU> {
+    const scopeKey = normalizeKeyPart_ACU(input.scopeKey);
+    const chatKey = normalizeKeyPart_ACU(input.chatKey);
+    const isolationKey = normalizeKeyPart_ACU(input.isolationKey);
+    const sourceTableKey = normalizeKeyPart_ACU(input.sourceTableKey);
+    if (!scopeKey || !chatKey || !sourceTableKey) {
+        throw new Error('持久化交火向量 flush 失效墓碑失败：scope 不完整');
+    }
+    const db = await openDb_ACU();
+    const record = await new Promise<SummaryVectorIndexFlushTaskRecord_ACU>((resolve, reject) => {
+        const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
+        const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+        const request = store.get(scopeKey) as IDBRequest<SummaryVectorIndexFlushTaskRecord_ACU | undefined>;
+        let nextRecord: SummaryVectorIndexFlushTaskRecord_ACU | null = null;
+        request.onsuccess = () => {
+            const previous = request.result ? cloneFlushTask_ACU(request.result) : null;
+            const now = Date.now();
+            nextRecord = {
+                scopeKey,
+                chatKey,
+                isolationKey,
+                sourceTableKey,
+                ...(previous?.targetMessageIndex != null ? { targetMessageIndex: previous.targetMessageIndex } : {}),
+                generation: (previous?.generation || 0) + 1,
+                mode: previous?.mode || 'sync',
+                status: 'invalidated',
+                requestedAt: previous?.requestedAt || now,
+                debounceUntil: previous?.debounceUntil || now,
+                attemptCount: previous?.attemptCount || 0,
+                ...(previous?.lastAttemptAt ? { lastAttemptAt: previous.lastAttemptAt } : {}),
+                ...(previous?.lastSuccessAt ? { lastSuccessAt: previous.lastSuccessAt } : {}),
+                lastError: 'flush_scope_invalidated',
+                updatedAt: now,
+            };
+            store.put(nextRecord);
+        };
+        request.onerror = () => reject(request.error || new Error('读取交火向量 flush task 以写入失效墓碑失败'));
+        tx.oncomplete = () => {
+            db.close();
+            if (!nextRecord) reject(new Error('持久化交火向量 flush 失效墓碑失败：记录未生成'));
+            else resolve(cloneFlushTask_ACU(nextRecord));
+        };
+        tx.onerror = () => { db.close(); reject(tx.error || new Error('持久化交火向量 flush 失效墓碑事务失败')); };
+        tx.onabort = () => { db.close(); reject(tx.error || new Error('持久化交火向量 flush 失效墓碑事务已中止')); };
+    });
+    const verified = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+    if (!verified || verified.status !== 'invalidated' || verified.generation !== record.generation) {
+        throw new Error(`持久化交火向量 flush 失效墓碑后校验失败：scope=${scopeKey}`);
+    }
+    return verified;
+}
+
+export async function assertSummaryVectorFlushGenerationCurrent_ACU(scopeKey: string, expectedGeneration: number): Promise<void> {
+    const task = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+    if (!task || task.status === 'invalidated' || task.generation !== expectedGeneration) {
+        throw new SummaryVectorFlushGenerationInvalidatedError_ACU(scopeKey, expectedGeneration, task?.generation);
+    }
+}
+
+export class SummaryVectorFlushGenerationInvalidatedError_ACU extends Error {
+    constructor(public readonly scopeKey: string, public readonly expectedGeneration: number, public readonly actualGeneration?: number) {
+        super(`交火向量 flush 代次已失效：scope=${scopeKey}, expected=${expectedGeneration}, actual=${actualGeneration ?? 'missing'}`);
+        this.name = 'SummaryVectorFlushGenerationInvalidatedError_ACU';
+    }
+}
+
+export async function getSummaryVectorFlushTaskStrict_ACU(scopeKey: string): Promise<SummaryVectorIndexFlushTaskRecord_ACU | null> {
+    const normalizedScopeKey = normalizeKeyPart_ACU(scopeKey);
+    if (!normalizedScopeKey) throw new Error('读取交火向量 flush task 失败：scopeKey 为空');
+    const db = await openDb_ACU();
+    return await new Promise((resolve, reject) => {
+        const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readonly');
+        const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+        const request = store.get(normalizedScopeKey) as IDBRequest<SummaryVectorIndexFlushTaskRecord_ACU | undefined>;
+        let result: SummaryVectorIndexFlushTaskRecord_ACU | null = null;
+        request.onsuccess = () => { result = request.result ? cloneFlushTask_ACU(request.result) : null; };
+        request.onerror = () => reject(request.error || new Error('读取交火向量 flush task 失败'));
+        tx.oncomplete = () => {
+            db.close();
+            resolve(result);
+        };
+        tx.onerror = () => {
+            db.close();
+            reject(tx.error || new Error('读取交火向量 flush task 事务失败'));
+        };
+        tx.onabort = () => {
+            db.close();
+            reject(tx.error || new Error('读取交火向量 flush task 事务已中止'));
+        };
+    });
+}
+
 export async function getSummaryVectorFlushTask_ACU(scopeKey: string): Promise<SummaryVectorIndexFlushTaskRecord_ACU | null> {
     try {
-        const normalizedScopeKey = normalizeKeyPart_ACU(scopeKey);
-        if (!normalizedScopeKey) return null;
-        const db = await openDb_ACU();
-        return await new Promise((resolve, reject) => {
-            const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readonly');
-            const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
-            const request = store.get(normalizedScopeKey) as IDBRequest<SummaryVectorIndexFlushTaskRecord_ACU | undefined>;
-            request.onsuccess = () => resolve(request.result ? cloneFlushTask_ACU(request.result) : null);
-            request.onerror = () => reject(request.error || new Error('读取交火向量 flush task 失败'));
-            tx.oncomplete = () => db.close();
-            tx.onerror = () => {
-                db.close();
-                reject(tx.error || new Error('读取交火向量 flush task 事务失败'));
-            };
-        });
+        return await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
     } catch {
         return null;
     }
@@ -621,23 +715,86 @@ export async function listSummaryVectorFlushTasks_ACU(scope?: VectorIndexHotCach
     }
 }
 
+export async function deleteSummaryVectorFlushTaskStrict_ACU(scopeKey: string): Promise<void> {
+    const normalizedScopeKey = normalizeKeyPart_ACU(scopeKey);
+    if (!normalizedScopeKey) throw new Error('删除交火向量 flush task 失败：scopeKey 为空');
+    const db = await openDb_ACU();
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
+        const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+        const request = store.delete(normalizedScopeKey);
+        request.onerror = () => reject(request.error || new Error('删除交火向量 flush task 失败'));
+        tx.oncomplete = () => {
+            db.close();
+            resolve();
+        };
+        tx.onerror = () => {
+            db.close();
+            reject(tx.error || new Error('删除交火向量 flush task 事务失败'));
+        };
+        tx.onabort = () => {
+            db.close();
+            reject(tx.error || new Error('删除交火向量 flush task 事务已中止'));
+        };
+    });
+    if (await getSummaryVectorFlushTaskStrict_ACU(normalizedScopeKey)) {
+        throw new Error(`删除交火向量 flush task 后校验失败：scope=${normalizedScopeKey}`);
+    }
+}
+
+/**
+ * 仅将仍属于指定 generation 且处于 flushing 的任务标记为 ready。
+ * 不删除记录，避免旧 runner 删除 generation 历史后让并发 enqueue 发生 ABA 回退。
+ */
+export async function markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU(scopeKey: string, expectedGeneration: number): Promise<boolean> {
+    const normalizedScopeKey = normalizeKeyPart_ACU(scopeKey);
+    const normalizedGeneration = Math.max(0, Number(expectedGeneration) || 0);
+    if (!normalizedScopeKey) throw new Error('按代次完成交火向量 flush task 失败：scopeKey 为空');
+    const db = await openDb_ACU();
+    const completed = await new Promise<boolean>((resolve, reject) => {
+        const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
+        const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+        const getRequest = store.get(normalizedScopeKey) as IDBRequest<SummaryVectorIndexFlushTaskRecord_ACU | undefined>;
+        let shouldComplete = false;
+        getRequest.onsuccess = () => {
+            const current = getRequest.result ? cloneFlushTask_ACU(getRequest.result) : null;
+            shouldComplete = !!current
+                && current.generation === normalizedGeneration
+                && current.status === 'flushing';
+            if (shouldComplete && current) {
+                const now = Date.now();
+                store.put({
+                    ...current,
+                    status: 'ready',
+                    lastSuccessAt: now,
+                    updatedAt: now,
+                });
+            }
+        };
+        getRequest.onerror = () => reject(getRequest.error || new Error('按代次完成交火向量 flush task 读取失败'));
+        tx.oncomplete = () => {
+            db.close();
+            resolve(shouldComplete);
+        };
+        tx.onerror = () => {
+            db.close();
+            reject(tx.error || new Error('按代次完成交火向量 flush task 事务失败'));
+        };
+        tx.onabort = () => {
+            db.close();
+            reject(tx.error || new Error('按代次完成交火向量 flush task 事务已中止'));
+        };
+    });
+    const verified = await getSummaryVectorFlushTaskStrict_ACU(normalizedScopeKey);
+    if (completed && (!verified || verified.generation !== normalizedGeneration || verified.status !== 'ready')) {
+        throw new Error(`按代次完成交火向量 flush task 后校验失败：scope=${normalizedScopeKey}`);
+    }
+    return completed;
+}
+
 export async function deleteSummaryVectorFlushTask_ACU(scopeKey: string): Promise<void> {
     try {
-        const normalizedScopeKey = normalizeKeyPart_ACU(scopeKey);
-        if (!normalizedScopeKey) return;
-        const db = await openDb_ACU();
-        await new Promise<void>((resolve, reject) => {
-            const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
-            const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
-            const request = store.delete(normalizedScopeKey);
-            request.onsuccess = () => resolve();
-            request.onerror = () => reject(request.error || new Error('删除交火向量 flush task 失败'));
-            tx.oncomplete = () => db.close();
-            tx.onerror = () => {
-                db.close();
-                reject(tx.error || new Error('删除交火向量 flush task 事务失败'));
-            };
-        });
+        await deleteSummaryVectorFlushTaskStrict_ACU(scopeKey);
     } catch {}
 }
 

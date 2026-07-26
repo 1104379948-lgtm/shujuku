@@ -2,8 +2,13 @@ import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../ru
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import {
     deleteSummaryVectorFlushTask_ACU,
+    deleteSummaryVectorFlushTaskStrict_ACU,
     getSummaryVectorFlushTask_ACU,
+    getSummaryVectorFlushTaskStrict_ACU,
+    invalidateSummaryVectorFlushTaskStrict_ACU,
     listSummaryVectorFlushTasks_ACU,
+    markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU,
+    SummaryVectorFlushGenerationInvalidatedError_ACU,
     upsertSummaryVectorFlushTask_ACU,
     type SummaryVectorIndexFlushTaskMode_ACU,
     type SummaryVectorIndexFlushTaskRecord_ACU,
@@ -96,6 +101,7 @@ async function markFlushTaskFailure_ACU(task: SummaryVectorIndexFlushTaskRecord_
         isolationKey: task.isolationKey,
         sourceTableKey: task.sourceTableKey,
         targetMessageIndex: task.targetMessageIndex,
+        generation: task.generation,
         mode: task.mode,
         status: terminal ? 'failed_terminal' : 'failed_retryable',
         requestedAt: task.requestedAt,
@@ -120,6 +126,21 @@ function scheduleFlushTaskTimer_ACU(task: SummaryVectorIndexFlushTaskRecord_ACU)
     summaryVectorFlushTimers_ACU.set(task.scopeKey, timer);
 }
 
+async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey: string, completedGeneration: number): Promise<void> {
+    const current = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+    if (!current
+        || current.generation === completedGeneration
+        || current.status === 'invalidated'
+        || current.status === 'ready'
+        || current.status === 'failed_terminal') {
+        return;
+    }
+    if (current.status === 'queued' || current.status === 'dirty' || current.status === 'failed_retryable') {
+        scheduleFlushTaskTimer_ACU(current);
+        logDebug_ACU(`[交火向量索引] 旧 flush 完成后已接力调度新 generation：scope=${scopeKey}, generation=${current.generation}`);
+    }
+}
+
 export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorIndexFlushQueueOptions_ACU = {}): Promise<SummaryVectorIndexFlushQueueResult_ACU> {
     const selectedSummary = findSummaryTable_ACU();
     const sourceTableKey = normalizeKeyPart_ACU(options.sourceTableKey || selectedSummary?.summaryKey);
@@ -140,12 +161,19 @@ export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorI
         ? Math.max(0, rawDebounceMs)
         : SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU;
     const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
+    const existingTask = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+    // flushing 表示旧 runner 已捕获当前 generation。新的写入必须进入下一代，
+    // 否则旧 runner 成功收尾会与新任务共享 generation，无法安全区分归属。
+    const generation = existingTask?.status === 'invalidated' || existingTask?.status === 'flushing'
+        ? existingTask.generation + 1
+        : existingTask?.generation;
     const task = await upsertSummaryVectorFlushTask_ACU({
         scopeKey,
         chatKey,
         isolationKey,
         sourceTableKey,
         targetMessageIndex: options.targetMessageIndex,
+        generation,
         mode: options.mode === 'append' ? 'append' : 'sync',
         status: 'queued',
         requestedAt: now,
@@ -162,6 +190,8 @@ export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorI
 export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Promise<SummaryVectorIndexFlushNowResult_ACU> {
     const task = await getSummaryVectorFlushTask_ACU(scopeKey);
     if (!task) return { success: true, skipped: true, reason: 'flush_task_not_found' };
+    if (task.status === 'invalidated') return { success: true, skipped: true, reason: 'flush_scope_invalidated' };
+    const expectedGeneration = Math.max(0, Number(task.generation) || 0);
     if (summaryVectorFlushRunning_ACU.has(task.scopeKey)) {
         return { success: true, skipped: true, reason: 'flush_already_running' };
     }
@@ -213,6 +243,7 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
             targetMessageIndex: task.targetMessageIndex,
             mode: task.mode,
             status: 'flushing',
+            generation: expectedGeneration,
             requestedAt: task.requestedAt,
             debounceUntil: task.debounceUntil,
         });
@@ -225,10 +256,15 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
             force: true,
             isolationKey: task.isolationKey,
             sourceTableKey: task.sourceTableKey,
+            expectedFlushScopeKey: task.scopeKey,
+            expectedFlushGeneration: expectedGeneration,
         });
+        if (result.skipped && result.reason === 'flush_scope_invalidated') {
+            return { success: true, skipped: true, reason: 'flush_scope_invalidated', result };
+        }
         if (result.success) {
-            await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
-            if (shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result)) {
+            const completed = await markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU(task.scopeKey, expectedGeneration);
+            if (completed && shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result)) {
                 clearSummaryVectorIndexDirtyForRealign_ACU(task.scopeKey);
             }
             logDebug_ACU(`[交火向量索引] 防抖 flush 完成：scope=${task.scopeKey}, skipped=${result.skipped}, reason=${result.reason || ''}`);
@@ -240,12 +276,40 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
         return { success: false, reason: result.reason, result, error };
     } catch (error) {
         const message = normalizeErrorMessage_ACU(error);
+        if (error instanceof SummaryVectorFlushGenerationInvalidatedError_ACU) return { success: true, skipped: true, reason: 'flush_scope_invalidated' };
         await markFlushTaskFailure_ACU(task, message, false);
         logWarn_ACU('[交火向量索引] 防抖 flush 异常:', message);
         return { success: false, reason: 'flush_exception', error: message };
     } finally {
         summaryVectorFlushRunning_ACU.delete(task.scopeKey);
+        await resumeQueuedFlushTaskAfterRunner_ACU(task.scopeKey, expectedGeneration);
     }
+}
+
+/**
+ * 持久化失效当前 scope 的 flush task，并同步取消内存定时器。
+ * 墓碑携带单调 generation；旧 runner 在真正发布聊天 pointer 前必须校验代次。
+ */
+export async function clearSummaryVectorIndexFlushQueueForCurrentScope_ACU(params: {
+    isolationKey: string;
+    sourceTableKey: string;
+}): Promise<number> {
+    const chatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
+    const isolationKey = normalizeKeyPart_ACU(params.isolationKey);
+    const sourceTableKey = normalizeKeyPart_ACU(params.sourceTableKey);
+    if (!chatKey) throw new Error('清理交火向量 flush 队列失败：当前聊天标识为空');
+    if (!sourceTableKey) throw new Error('清理交火向量 flush 队列失败：纪要表标识为空');
+
+    const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
+    clearFlushTimer_ACU(scopeKey);
+    const tombstone = await invalidateSummaryVectorFlushTaskStrict_ACU({
+        scopeKey,
+        chatKey,
+        isolationKey,
+        sourceTableKey,
+    });
+    logDebug_ACU(`[交火向量索引] 已持久化 flush 失效墓碑：scope=${scopeKey}, generation=${tombstone.generation}`);
+    return 1;
 }
 
 export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): Promise<number> {
@@ -265,6 +329,7 @@ export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): P
     let purgedLegacy = 0;
     const now = Date.now();
     for (const task of tasks) {
+        if (task.status === 'invalidated') continue;
         // 启动期主动清理身份不完整的旧版 task：
         // list 已按三元字段过滤到当前 active scope，但更早版本的 scopeKey 算法可能与当前不一致，
         // 保留只会成为长期告警噪音；dirty state 会由后续正常写路径重新入队。

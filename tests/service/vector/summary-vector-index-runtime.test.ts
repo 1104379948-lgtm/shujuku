@@ -237,19 +237,17 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU missing snapshot recover
     h.preparedRows = [];
   });
 
-  it('删除匹配的失效指针后立即入队重建', async () => {
+  it('删除匹配的失效指针后交给 UI 走普通即时重建路径', async () => {
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-one', source: 'missing-test' });
 
-    expect(h.clearMissing).toHaveBeenCalledWith({ messageIndex: 0, isolationKey: 'iso-source', indexId: 'idx' });
-    expect(h.enqueueFlush).toHaveBeenCalledWith(expect.objectContaining({
-      targetMessageIndex: 0,
+    expect(h.clearMissing).toHaveBeenCalledWith({
+      messageIndex: 0,
       isolationKey: 'iso-source',
+      indexId: 'idx',
       sourceTableKey: 'summary-source',
-      mode: 'sync',
-      debounceMs: 0,
-      reason: 'self_heal_external_files_missing',
-    }));
-    expect(result).toMatchObject({ success: false, skipped: true, reason: 'external_vector_files_missing_rebuild_queued' });
+    });
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, skipped: true, reason: 'external_vector_files_missing_rebuild_required' });
   });
 
   it('失效指针未安全删除时拒绝盲目重建', async () => {

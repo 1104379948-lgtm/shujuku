@@ -17,10 +17,9 @@ import { updateImportStatusUI_ACU, handleTxtImportAndSplit_ACU } from '../compon
 import { clearImportLocalStorage_ACU, clearImportedEntries_ACU, deleteImportedEntries_ACU, handleInjectImportedTxtSelected_ACU } from '../triggers/import-process';
 import { importCombinedSettings_ACU } from '../triggers/admin-ui';
 import { applyTemplateScopeForCurrentChat_ACU, getDataIsolationHistory_ACU, removeDataIsolationHistory_ACU, switchIsolationProfile_ACU, persistCurrentTemplatePresetName_ACU, setSummaryVectorIndexMode_ACU } from '../../service/settings/settings-service';
-import { deleteAllGeneratedEntries_ACU, updateReadableLorebookEntry_ACU } from '../../service/worldbook/pipeline';
+import { deleteAllGeneratedEntries_ACU } from '../../service/worldbook/pipeline';
 import { refreshMergedDataAndNotifyWithUI_ACU, refreshPresetUIAfterSwitch_ACU } from '../components/pipeline-ui-helpers';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
-import { runTableUpdateCommit_ACU } from '../../service/table/table-update-commit';
 import { getTemplatePreset_ACU, applyChatTemplateSnapshotWithReconciliation_ACU, applyTemplatePresetToCurrent_ACU, applyTemplateSnapshotToScope_ACU, deleteTemplatePreset_ACU, ensureUniqueTemplatePresetName_ACU, normalizeTemplateForPresetSave_ACU, parseImportedTemplateData_ACU, resolveActiveTemplatePresetName_ACU, upsertTemplatePreset_ACU } from '../../service/template/template-preset-service';
 import { getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../../service/template/chat-scope';
 import { loadTemplatePresetSelect_ACU } from '../components/template-preset-ui';
@@ -34,7 +33,7 @@ import { populateImportWorldbookTargetSelector_ACU } from '../components/worldbo
 import { saveApiConfig_ACU, clearApiConfig_ACU, fetchModelsAndConnect_ACU, loadApiPreset_ACU, saveApiPreset_ACU, deleteApiPreset_ACU, saveCustomCharCardPrompt_ACU, saveImportSplitSize_ACU, resetDefaultCharCardPrompt_ACU, updateCustomApiInputsState_ACU, refreshApiPresetSelectors_ACU } from '../triggers/settings-ui-sync';
 import { handleImportSelectAll_ACU, handleImportSelectNone_ACU } from '../components/table-selector';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU, getLatestSummaryVectorIndexSnapshotState_ACU, assignSummaryVectorIndexStateToTagData_ACU } from '../../service/vector/summary-vector-index-state-service';
-import { archiveSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-archive-service';
+import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-rebuild-service';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
 import { syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
 import {
@@ -46,7 +45,7 @@ import {
 } from '../../service/vector/summary-vector-index-storage-service';
 import { clearVectorIndexTempCache_ACU } from '../../data/storage/vector-index-temp-cache';
 import { clearSummaryVectorFlushTasksByScope_ACU, clearSummaryVectorHotCache_ACU, deleteSummaryVectorHotCacheByScope_ACU } from '../../data/storage/vector-index-hot-cache';
-import { getChatArray_ACU, getLastMessageIndex_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../service/chat/chat-service';
+import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../service/chat/chat-service';
 import { cloneIsolatedData_ACU, readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import {
     buildLegacyVectorIndexSingleSnapshotFilePath_ACU,
@@ -387,44 +386,9 @@ export async function bindDataEvents_ACU(): Promise<void> {
           $buildVectorIndexNowButton_ACU.off('click.acu_vector_index_archive').on('click.acu_vector_index_archive', async () => {
               $buildVectorIndexNowButton_ACU.prop('disabled', true).text('正在重建交火索引快照...');
               try {
-                  if (!currentJsonTableData_ACU) {
-                      await loadOrCreateJsonTableFromChatHistory_ACU();
-                  }
-                  if (!currentJsonTableData_ACU) {
-                      showToastr_ACU('warning', '数据库未加载，无法重建交火索引快照。');
-                      return;
-                  }
-                  const summaryKey = Object.keys(currentJsonTableData_ACU).find((key) => {
-                      const table = currentJsonTableData_ACU?.[key];
-                      const name = String(table?.name || '');
-                      return name === '纪要表' || name === '总结表' || name === '总体大纲' || name.includes('纪要') || name.includes('总结');
-                  });
-                  if (summaryKey) {
-                      const writeSet = [{ kind: 'sheet' as const, sheetKey: summaryKey }];
-                      await runTableUpdateCommit_ACU<null>({
-                          source: 'system',
-                          reason: 'vector_index_rebuild_snapshot',
-                          isolationKey: getCurrentIsolationKey_ACU(),
-                          writeSet,
-                          revisionWriteSet: writeSet,
-                          initialData: currentJsonTableData_ACU as any,
-                          targetMessageIndex: getLastMessageIndex_ACU(),
-                          targetSheetKeys: [summaryKey],
-                          updateGroupKeys: null,
-                          trackingSheetKeys: [],
-                          trackAsUpdate: false,
-                          operations: [{ kind: 'sheet_replace', sheetKey: summaryKey, sheet: (currentJsonTableData_ACU as any)[summaryKey], reason: 'system' }],
-                      }, () => ({
-                          success: true,
-                          value: null,
-                          tableData: currentJsonTableData_ACU as any,
-                          mutationResult: { changes: 1, errors: [] },
-                      }));
-                  }
-                  const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
+                  const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
                   await refreshVectorIndexStatsPanel_ACU();
                   if (result.success && !result.skipped) {
-                      await updateReadableLorebookEntry_ACU(true);
                       try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
                       showToastr_ACU('success', `交火索引快照重建完成：${result.indexedRowCount || 0} 行，${result.chunkCount || 0} 个 chunks。`);
                       return;

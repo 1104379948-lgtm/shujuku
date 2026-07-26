@@ -15,6 +15,8 @@ const {
   mockSaveChatToHostStrict,
   mockAbortSummaryVectorIndexSnapshotPublication,
   mockFinalizeSummaryVectorIndexSnapshotPublication,
+  mockAssertFlushGeneration,
+  MockGenerationInvalidatedError,
   mockDeleteSummaryVectorIndexExternal,
   mockIsLegacySummaryVectorIndexManifest,
   mockLogSummaryVectorIndexIdentityEvent,
@@ -34,6 +36,8 @@ const {
     mockSaveChatToHostStrict: vi.fn().mockResolvedValue(undefined),
     mockAbortSummaryVectorIndexSnapshotPublication: vi.fn(),
     mockFinalizeSummaryVectorIndexSnapshotPublication: vi.fn(),
+    mockAssertFlushGeneration: vi.fn(),
+    MockGenerationInvalidatedError: class SummaryVectorFlushGenerationInvalidatedError_ACU extends Error {},
     mockDeleteSummaryVectorIndexExternal: vi.fn(),
     mockIsLegacySummaryVectorIndexManifest: vi.fn(() => false),
     mockLogSummaryVectorIndexIdentityEvent: vi.fn(),
@@ -63,6 +67,11 @@ vi.mock('../../../src/data/gateways/vector-embedding-gateway', () => ({
 
 
 const persistedChunksByIndexId = new Map<string, any[]>();
+
+vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
+  assertSummaryVectorFlushGenerationCurrent_ACU: (...args: any[]) => mockAssertFlushGeneration(...args),
+  SummaryVectorFlushGenerationInvalidatedError_ACU: MockGenerationInvalidatedError,
+}));
 
 vi.mock('../../../src/service/vector/vector-memory-config', () => ({
   getEffectiveSummaryVectorIndexConfig_ACU: vi.fn(() => ({
@@ -174,6 +183,7 @@ describe('summary-vector-index-archive-service pending 归档', () => {
         uploadedFiles: [{ role: 'manifest', path: `v2-path-${indexId}`, byteSize: 1, checksum: 'checksum', createdAt: '', updatedAt: '', status: 'ready' }],
       };
     });
+    mockAssertFlushGeneration.mockResolvedValue(undefined);
   });
 
 
@@ -263,6 +273,25 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     ]);
     expect(mockSaveChatToHostStrict.mock.invocationCallOrder[0])
       .toBeLessThan(mockFinalizeSummaryVectorIndexSnapshotPublication.mock.invocationCallOrder[0]);
+  });
+
+  it('flush generation 在 durable publish 前失效时回滚 pending 快照且不保存聊天 pointer', async () => {
+    mockAssertFlushGeneration.mockRejectedValueOnce(new MockGenerationInvalidatedError('invalidated'));
+
+    const result = await archiveSummaryVectorIndexNow_ACU({
+      targetMessageIndex: 0,
+      force: true,
+      expectedFlushScopeKey: 'flush-scope',
+      expectedFlushGeneration: 7,
+    });
+
+    expect(result).toMatchObject({ success: false, skipped: true, reason: 'flush_scope_invalidated', errors: [] });
+    expect(mockAssertFlushGeneration).toHaveBeenCalledWith('flush-scope', 7);
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+    expect(mockFinalizeSummaryVectorIndexSnapshotPublication).not.toHaveBeenCalled();
+    expect(mockAbortSummaryVectorIndexSnapshotPublication).toHaveBeenCalledWith([
+      expect.objectContaining({ path: 'v2-path-idx-1' }),
+    ]);
   });
 
   it('聊天保存失败时不 finalize，保持 pending-publish 保护', async () => {

@@ -92,6 +92,12 @@ async function mountVectorIndexPage(opts: {
     return { success: applied.success !== false, value: applied.value, tableData: applied.tableData, saved: true };
   });
   const updateLorebook = vi.fn(async () => true);
+  const rebuildNow = vi.fn(async () => {
+    await runTableUpdateCommit({}, async () => ({ success: true, value: null, tableData: {}, mutationResult: { changes: 1, errors: [] } }));
+    const result = await archiveSummary({ mode: 'sync' });
+    if (result.success && !result.skipped) await updateLorebook();
+    return result;
+  });
   const getLastIndex = vi.fn(() => 5);
   const clearCache = vi.fn(async () => undefined);
   const deleteIndex = vi.fn(async () => true);
@@ -143,6 +149,9 @@ async function mountVectorIndexPage(opts: {
     archiveSummaryVectorIndexNow_ACU: archiveSummary,
     migrateLegacySummaryVectorIndexToContentAddressed_ACU: migrateLegacy,
   }));
+  vi.doMock('../../../src/service/vector/summary-vector-index-rebuild-service', () => ({
+    rebuildCurrentSummaryVectorIndexNow_ACU: rebuildNow,
+  }));
   vi.doMock('../../../src/service/table/table-service', () => ({
     loadOrCreateJsonTableFromChatHistory_ACU: loadOrCreate,
     saveIndependentTableToChatHistory_ACU: saveIndependent,
@@ -187,6 +196,7 @@ async function mountVectorIndexPage(opts: {
     settings,
     config,
     saveSettings,
+    rebuildNow,
     archiveSummary,
     migrateLegacy,
     inspectHealth,

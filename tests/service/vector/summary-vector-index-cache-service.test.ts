@@ -4,8 +4,8 @@ const h = vi.hoisted(() => ({
   clearLayer: vi.fn(),
   deleteTemp: vi.fn(),
   deleteHot: vi.fn(),
+  clearFlush: vi.fn(),
   loadChunks: vi.fn(),
-  enqueueFlush: vi.fn(),
   snapshot: null as any,
 }));
 
@@ -18,6 +18,9 @@ vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
   clearSummaryVectorHotCache_ACU: vi.fn(),
   deleteSummaryVectorHotCacheByIndex_ACU: (...args: any[]) => h.deleteHot(...args),
 }));
+vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
+  clearSummaryVectorIndexFlushQueueForCurrentScope_ACU: (...args: any[]) => h.clearFlush(...args),
+}));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
   getLatestSummaryVectorIndexSnapshotState_ACU: () => h.snapshot,
 }));
@@ -26,9 +29,6 @@ vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () =
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-chat-service', () => ({
   clearSummaryVectorIndexLayerFromChat_ACU: (...args: any[]) => h.clearLayer(...args),
-}));
-vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
-  enqueueSummaryVectorIndexFlush_ACU: (...args: any[]) => h.enqueueFlush(...args),
 }));
 
 import {
@@ -43,8 +43,8 @@ describe('summary vector missing external file recovery helpers', () => {
     h.clearLayer.mockResolvedValue(true);
     h.deleteTemp.mockResolvedValue(undefined);
     h.deleteHot.mockResolvedValue(undefined);
+    h.clearFlush.mockResolvedValue(2);
     h.loadChunks.mockResolvedValue([]);
-    h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope' });
     h.snapshot = null;
   });
 
@@ -73,9 +73,11 @@ describe('summary vector missing external file recovery helpers', () => {
       messageIndex: 2,
       isolationKey: 'alpha',
       indexId: 'idx-missing',
-    })).resolves.toEqual({ chatStateCleared: true, cacheCleared: false });
+      sourceTableKey: 'summary-source',
+    })).resolves.toEqual({ chatStateCleared: true, cacheCleared: false, flushTaskCountCleared: 2 });
 
     expect(h.clearLayer).toHaveBeenCalledWith({ messageIndex: 2, isolationKey: 'alpha', indexId: 'idx-missing' });
+    expect(h.clearFlush).toHaveBeenCalledWith({ isolationKey: 'alpha', sourceTableKey: 'summary-source' });
     expect(h.deleteTemp).toHaveBeenCalledWith('idx-missing');
     expect(h.deleteHot).toHaveBeenCalledWith('idx-missing');
   });
@@ -96,10 +98,9 @@ describe('summary vector missing external file recovery helpers', () => {
       cacheCleared: false,
       chatStateCleared: false,
     });
-    expect(h.enqueueFlush).not.toHaveBeenCalled();
   });
 
-  it('预热时缓存清理失败仍入队，并准确报告 cacheCleared=false', async () => {
+  it('预热删除失效指针后不走 flush 队列，并准确报告等待普通即时重建', async () => {
     const manifest = { status: 'ready', indexId: 'idx', sourceTableKey: 'summary-source' };
     h.snapshot = {
       summaryVectorIndexState: { manifest },
@@ -109,15 +110,10 @@ describe('summary vector missing external file recovery helpers', () => {
     h.deleteTemp.mockRejectedValue(new Error('temp cache down'));
 
     await expect(preloadSummaryVectorIndexCacheForCurrentChat_ACU()).resolves.toMatchObject({
-      reason: 'external_files_missing_state_cleared_rebuild_queued',
+      reason: 'external_files_missing_state_cleared_rebuild_required',
       cacheCleared: false,
       chatStateCleared: true,
     });
-    expect(h.enqueueFlush).toHaveBeenCalledWith(expect.objectContaining({
-      targetMessageIndex: 1,
-      isolationKey: 'iso-source',
-      sourceTableKey: 'summary-source',
-      reason: 'self_heal_external_files_missing',
-    }));
+    expect(h.clearFlush).toHaveBeenCalledWith({ isolationKey: 'iso-source', sourceTableKey: 'summary-source' });
   });
 });

@@ -4,7 +4,7 @@
  * 边界：
  * - 读写权威配置：globalMeta_ACU.vectorMemoryConfigGlobal 通过
  *   getCurrentVectorMemoryConfig_ACU / updateGlobalVectorMemoryConfigFields_ACU 操作。
- * - 立即构建（buildNow）：编排 loadOrCreate + saveIndependent + archiveSummaryVectorIndexNow。
+ * - 立即构建（buildNow）：调用 service 层统一的普通即时重建链路。
  * - Vue 组件只读写本 composable 暴露的 ref / form / 方法。
  */
 import { computed, reactive, ref } from 'vue';
@@ -16,9 +16,9 @@ import {
 } from '../../service/vector/vector-memory-config';
 import { saveSettings_ACU } from '../../service/settings/settings-service';
 import {
-  archiveSummaryVectorIndexNow_ACU,
   migrateLegacySummaryVectorIndexToContentAddressed_ACU,
 } from '../../service/vector/summary-vector-index-archive-service';
+import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-rebuild-service';
 import {
   getLatestSummaryVectorIndexSnapshotState_ACU,
 } from '../../service/vector/summary-vector-index-state-service';
@@ -28,12 +28,7 @@ import {
 } from '../../service/vector/summary-vector-index-storage-service';
 import { clearAllSummaryVectorIndexCaches_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { deleteCurrentSummaryVectorIndexFromChat_ACU } from '../../service/vector/summary-vector-index-chat-service';
-import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
-import { runTableUpdateCommit_ACU } from '../../service/table/table-update-commit';
-import { getLastMessageIndex_ACU } from '../../service/chat/chat-service';
-import { updateReadableLorebookEntry_ACU } from '../../service/worldbook/pipeline';
 import { defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
-import { currentJsonTableData_ACU } from '../../service/runtime/state-manager';
 import type {
   SummaryVectorIndexHealthReport_ACU,
   SummaryVectorIndexStats_ACU,
@@ -531,55 +526,14 @@ export function useVectorIndexConfig() {
     }
   }
 
-  function findSummaryTableKey(): string | null {
-    const data = currentJsonTableData_ACU;
-    if (!data) return null;
-    return Object.keys(data).find((key) => {
-      const table = (data as any)?.[key];
-      const name = String(table?.name || '');
-      return name === '纪要表' || name === '总结表' || name === '总体大纲'
-        || name.includes('纪要') || name.includes('总结');
-    }) || null;
-  }
-
   async function buildNow(): Promise<void> {
     if (buildBusy.value) return;
     buildBusy.value = true;
     progressToastId = null;
     notifyProgress('正在重建交火索引快照...');
     try {
-      if (!currentJsonTableData_ACU) {
-        await loadOrCreateJsonTableFromChatHistory_ACU();
-      }
-      if (!currentJsonTableData_ACU) {
-        notify('warning', '数据库未加载，无法重建交火索引快照。', { muteable: false });
-        return;
-      }
-      const summaryKey = findSummaryTableKey();
-      if (summaryKey) {
-        const writeSet = [{ kind: 'sheet' as const, sheetKey: summaryKey }];
-        await runTableUpdateCommit_ACU<null>({
-          source: 'system',
-          reason: 'vector_index_v2_rebuild_snapshot',
-          writeSet,
-          revisionWriteSet: writeSet,
-          initialData: currentJsonTableData_ACU as any,
-          targetMessageIndex: getLastMessageIndex_ACU(),
-          targetSheetKeys: [summaryKey],
-          updateGroupKeys: null,
-          trackingSheetKeys: [],
-          trackAsUpdate: false,
-          operations: [{ kind: 'sheet_replace', sheetKey: summaryKey, sheet: (currentJsonTableData_ACU as any)[summaryKey], reason: 'system' }],
-        }, () => ({
-          success: true,
-          value: null,
-          tableData: currentJsonTableData_ACU as any,
-          mutationResult: { changes: 1, errors: [] },
-        }));
-      }
-      const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
+      const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
       if (result.success && !result.skipped) {
-        try { await updateReadableLorebookEntry_ACU(true); } catch { /* non-fatal */ }
         notify('success', `交火索引快照重建完成：${result.indexedRowCount || 0} 行，${result.chunkCount || 0} 个 chunks。`, { muteable: false });
         await refreshIndexStatus(false);
         return;

@@ -61331,7 +61331,7 @@ $CONTENT
     }
 
     const DB_NAME_ACU = 'TavernDB_ACU_VectorHotCache';
-    const DB_VERSION_ACU = 2;
+    const DB_VERSION_ACU = 3;
     const STORE_NAME_ACU = 'chunks';
     const FLUSH_TASK_STORE_NAME_ACU = 'flushTasks';
     function isIdbAvailable_ACU() {
@@ -61745,6 +61745,7 @@ $CONTENT
             || status === 'ready'
             || status === 'failed_retryable'
             || status === 'failed_terminal'
+            || status === 'invalidated'
             ? status
             : 'dirty';
     }
@@ -61758,6 +61759,7 @@ $CONTENT
             isolationKey: normalizeKeyPart_ACU$1(task.isolationKey),
             sourceTableKey: normalizeKeyPart_ACU$1(task.sourceTableKey),
             ...(Number.isFinite(Number(task.targetMessageIndex)) ? { targetMessageIndex: Number(task.targetMessageIndex) } : {}),
+            generation: Math.max(0, Number(task.generation) || 0),
             mode: normalizeFlushTaskMode_ACU(task.mode),
             status: normalizeFlushTaskStatus_ACU(task.status),
             requestedAt: Math.max(0, Number(task.requestedAt) || 0),
@@ -61787,6 +61789,12 @@ $CONTENT
                 getRequest.onsuccess = () => {
                     const previous = getRequest.result ? cloneFlushTask_ACU(getRequest.result) : null;
                     const previousAttemptCount = previous?.attemptCount || 0;
+                    const requestedGeneration = Math.max(0, Number(input.generation) || 0);
+                    if (previous && requestedGeneration < previous.generation) {
+                        // 旧 runner 的 finally/catch 不得覆盖已入队的新代次，也不得复活失效墓碑。
+                        nextRecord = previous;
+                        return;
+                    }
                     const nextStatus = normalizeFlushTaskStatus_ACU(input.status);
                     nextRecord = {
                         scopeKey,
@@ -61794,6 +61802,7 @@ $CONTENT
                         isolationKey,
                         sourceTableKey,
                         ...(Number.isFinite(Number(input.targetMessageIndex)) ? { targetMessageIndex: Number(input.targetMessageIndex) } : previous?.targetMessageIndex != null ? { targetMessageIndex: previous.targetMessageIndex } : {}),
+                        generation: Math.max(previous?.generation || 0, requestedGeneration),
                         mode: normalizeFlushTaskMode_ACU(input.mode),
                         status: nextStatus,
                         requestedAt: Math.max(0, Number(input.requestedAt ?? previous?.requestedAt ?? now) || now),
@@ -61821,24 +61830,103 @@ $CONTENT
             return null;
         }
     }
+    async function invalidateSummaryVectorFlushTaskStrict_ACU(input) {
+        const scopeKey = normalizeKeyPart_ACU$1(input.scopeKey);
+        const chatKey = normalizeKeyPart_ACU$1(input.chatKey);
+        const isolationKey = normalizeKeyPart_ACU$1(input.isolationKey);
+        const sourceTableKey = normalizeKeyPart_ACU$1(input.sourceTableKey);
+        if (!scopeKey || !chatKey || !sourceTableKey) {
+            throw new Error('持久化交火向量 flush 失效墓碑失败：scope 不完整');
+        }
+        const db = await openDb_ACU();
+        const record = await new Promise((resolve, reject) => {
+            const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
+            const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+            const request = store.get(scopeKey);
+            let nextRecord = null;
+            request.onsuccess = () => {
+                const previous = request.result ? cloneFlushTask_ACU(request.result) : null;
+                const now = Date.now();
+                nextRecord = {
+                    scopeKey,
+                    chatKey,
+                    isolationKey,
+                    sourceTableKey,
+                    ...(previous?.targetMessageIndex != null ? { targetMessageIndex: previous.targetMessageIndex } : {}),
+                    generation: (previous?.generation || 0) + 1,
+                    mode: previous?.mode || 'sync',
+                    status: 'invalidated',
+                    requestedAt: previous?.requestedAt || now,
+                    debounceUntil: previous?.debounceUntil || now,
+                    attemptCount: previous?.attemptCount || 0,
+                    ...(previous?.lastAttemptAt ? { lastAttemptAt: previous.lastAttemptAt } : {}),
+                    ...(previous?.lastSuccessAt ? { lastSuccessAt: previous.lastSuccessAt } : {}),
+                    lastError: 'flush_scope_invalidated',
+                    updatedAt: now,
+                };
+                store.put(nextRecord);
+            };
+            request.onerror = () => reject(request.error || new Error('读取交火向量 flush task 以写入失效墓碑失败'));
+            tx.oncomplete = () => {
+                db.close();
+                if (!nextRecord)
+                    reject(new Error('持久化交火向量 flush 失效墓碑失败：记录未生成'));
+                else
+                    resolve(cloneFlushTask_ACU(nextRecord));
+            };
+            tx.onerror = () => { db.close(); reject(tx.error || new Error('持久化交火向量 flush 失效墓碑事务失败')); };
+            tx.onabort = () => { db.close(); reject(tx.error || new Error('持久化交火向量 flush 失效墓碑事务已中止')); };
+        });
+        const verified = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+        if (!verified || verified.status !== 'invalidated' || verified.generation !== record.generation) {
+            throw new Error(`持久化交火向量 flush 失效墓碑后校验失败：scope=${scopeKey}`);
+        }
+        return verified;
+    }
+    async function assertSummaryVectorFlushGenerationCurrent_ACU(scopeKey, expectedGeneration) {
+        const task = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+        if (!task || task.status === 'invalidated' || task.generation !== expectedGeneration) {
+            throw new SummaryVectorFlushGenerationInvalidatedError_ACU(scopeKey, expectedGeneration, task?.generation);
+        }
+    }
+    class SummaryVectorFlushGenerationInvalidatedError_ACU extends Error {
+        constructor(scopeKey, expectedGeneration, actualGeneration) {
+            super(`交火向量 flush 代次已失效：scope=${scopeKey}, expected=${expectedGeneration}, actual=${actualGeneration ?? 'missing'}`);
+            this.scopeKey = scopeKey;
+            this.expectedGeneration = expectedGeneration;
+            this.actualGeneration = actualGeneration;
+            this.name = 'SummaryVectorFlushGenerationInvalidatedError_ACU';
+        }
+    }
+    async function getSummaryVectorFlushTaskStrict_ACU(scopeKey) {
+        const normalizedScopeKey = normalizeKeyPart_ACU$1(scopeKey);
+        if (!normalizedScopeKey)
+            throw new Error('读取交火向量 flush task 失败：scopeKey 为空');
+        const db = await openDb_ACU();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readonly');
+            const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+            const request = store.get(normalizedScopeKey);
+            let result = null;
+            request.onsuccess = () => { result = request.result ? cloneFlushTask_ACU(request.result) : null; };
+            request.onerror = () => reject(request.error || new Error('读取交火向量 flush task 失败'));
+            tx.oncomplete = () => {
+                db.close();
+                resolve(result);
+            };
+            tx.onerror = () => {
+                db.close();
+                reject(tx.error || new Error('读取交火向量 flush task 事务失败'));
+            };
+            tx.onabort = () => {
+                db.close();
+                reject(tx.error || new Error('读取交火向量 flush task 事务已中止'));
+            };
+        });
+    }
     async function getSummaryVectorFlushTask_ACU(scopeKey) {
         try {
-            const normalizedScopeKey = normalizeKeyPart_ACU$1(scopeKey);
-            if (!normalizedScopeKey)
-                return null;
-            const db = await openDb_ACU();
-            return await new Promise((resolve, reject) => {
-                const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readonly');
-                const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
-                const request = store.get(normalizedScopeKey);
-                request.onsuccess = () => resolve(request.result ? cloneFlushTask_ACU(request.result) : null);
-                request.onerror = () => reject(request.error || new Error('读取交火向量 flush task 失败'));
-                tx.oncomplete = () => db.close();
-                tx.onerror = () => {
-                    db.close();
-                    reject(tx.error || new Error('读取交火向量 flush task 事务失败'));
-                };
-            });
+            return await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
         }
         catch {
             return null;
@@ -61882,24 +61970,86 @@ $CONTENT
             return [];
         }
     }
+    async function deleteSummaryVectorFlushTaskStrict_ACU(scopeKey) {
+        const normalizedScopeKey = normalizeKeyPart_ACU$1(scopeKey);
+        if (!normalizedScopeKey)
+            throw new Error('删除交火向量 flush task 失败：scopeKey 为空');
+        const db = await openDb_ACU();
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
+            const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+            const request = store.delete(normalizedScopeKey);
+            request.onerror = () => reject(request.error || new Error('删除交火向量 flush task 失败'));
+            tx.oncomplete = () => {
+                db.close();
+                resolve();
+            };
+            tx.onerror = () => {
+                db.close();
+                reject(tx.error || new Error('删除交火向量 flush task 事务失败'));
+            };
+            tx.onabort = () => {
+                db.close();
+                reject(tx.error || new Error('删除交火向量 flush task 事务已中止'));
+            };
+        });
+        if (await getSummaryVectorFlushTaskStrict_ACU(normalizedScopeKey)) {
+            throw new Error(`删除交火向量 flush task 后校验失败：scope=${normalizedScopeKey}`);
+        }
+    }
+    /**
+     * 仅将仍属于指定 generation 且处于 flushing 的任务标记为 ready。
+     * 不删除记录，避免旧 runner 删除 generation 历史后让并发 enqueue 发生 ABA 回退。
+     */
+    async function markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU(scopeKey, expectedGeneration) {
+        const normalizedScopeKey = normalizeKeyPart_ACU$1(scopeKey);
+        const normalizedGeneration = Math.max(0, Number(expectedGeneration) || 0);
+        if (!normalizedScopeKey)
+            throw new Error('按代次完成交火向量 flush task 失败：scopeKey 为空');
+        const db = await openDb_ACU();
+        const completed = await new Promise((resolve, reject) => {
+            const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
+            const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+            const getRequest = store.get(normalizedScopeKey);
+            let shouldComplete = false;
+            getRequest.onsuccess = () => {
+                const current = getRequest.result ? cloneFlushTask_ACU(getRequest.result) : null;
+                shouldComplete = !!current
+                    && current.generation === normalizedGeneration
+                    && current.status === 'flushing';
+                if (shouldComplete && current) {
+                    const now = Date.now();
+                    store.put({
+                        ...current,
+                        status: 'ready',
+                        lastSuccessAt: now,
+                        updatedAt: now,
+                    });
+                }
+            };
+            getRequest.onerror = () => reject(getRequest.error || new Error('按代次完成交火向量 flush task 读取失败'));
+            tx.oncomplete = () => {
+                db.close();
+                resolve(shouldComplete);
+            };
+            tx.onerror = () => {
+                db.close();
+                reject(tx.error || new Error('按代次完成交火向量 flush task 事务失败'));
+            };
+            tx.onabort = () => {
+                db.close();
+                reject(tx.error || new Error('按代次完成交火向量 flush task 事务已中止'));
+            };
+        });
+        const verified = await getSummaryVectorFlushTaskStrict_ACU(normalizedScopeKey);
+        if (completed && (!verified || verified.generation !== normalizedGeneration || verified.status !== 'ready')) {
+            throw new Error(`按代次完成交火向量 flush task 后校验失败：scope=${normalizedScopeKey}`);
+        }
+        return completed;
+    }
     async function deleteSummaryVectorFlushTask_ACU(scopeKey) {
         try {
-            const normalizedScopeKey = normalizeKeyPart_ACU$1(scopeKey);
-            if (!normalizedScopeKey)
-                return;
-            const db = await openDb_ACU();
-            await new Promise((resolve, reject) => {
-                const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
-                const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
-                const request = store.delete(normalizedScopeKey);
-                request.onsuccess = () => resolve();
-                request.onerror = () => reject(request.error || new Error('删除交火向量 flush task 失败'));
-                tx.oncomplete = () => db.close();
-                tx.onerror = () => {
-                    db.close();
-                    reject(tx.error || new Error('删除交火向量 flush task 事务失败'));
-                };
-            });
+            await deleteSummaryVectorFlushTaskStrict_ACU(scopeKey);
         }
         catch { }
     }
@@ -74398,6 +74548,8 @@ $CONTENT
                 indexedAt: pending.indexedAt,
                 skippedRowCount: pending.skippedRowCount,
                 mode: pending.mode,
+                expectedFlushScopeKey: pending.expectedFlushScopeKey,
+                expectedFlushGeneration: pending.expectedFlushGeneration,
                 saveChatAfterWrite: true,
             });
             logDebug_ACU(`[纪要向量索引] 防抖归档完成：scope=${scopeKey}, rows=${pending.finalRows.length}, chunks=${pending.finalChunks.length}`);
@@ -75013,6 +75165,9 @@ $CONTENT
             if (shouldWriteLegacyCompat) {
                 writeLegacyCompatData_ACU(message, nextTagData.independentData || {}, nextTagData.modifiedKeys || [], nextTagData.updateGroupKeys || [], { legacyConfirmed: true });
             }
+            if (options.expectedFlushScopeKey && options.expectedFlushGeneration != null) {
+                await assertSummaryVectorFlushGenerationCurrent_ACU(options.expectedFlushScopeKey, options.expectedFlushGeneration);
+            }
             await saveChatToHostStrict_ACU();
             await finalizeSummaryVectorIndexSnapshotPublication_ACU(uploadedFiles);
         }
@@ -75478,6 +75633,8 @@ $CONTENT
                     indexedAt,
                     skippedRowCount: prepared.skippedRowCount,
                     mode: archiveMode,
+                    expectedFlushScopeKey: options.expectedFlushScopeKey,
+                    expectedFlushGeneration: options.expectedFlushGeneration,
                 });
                 scheduleDebouncedVectorIndexPersist_ACU(scopeKey);
                 logDebug_ACU(`[纪要向量索引] 向量化完成，已存入待归档队列：scope=${scopeKey}, rows=${finalResult.rows.length}, chunks=${finalResult.chunks.length}`);
@@ -75508,6 +75665,8 @@ $CONTENT
                 skippedRowCount: prepared.skippedRowCount,
                 mode: archiveMode,
                 isolationKey,
+                expectedFlushScopeKey: options.expectedFlushScopeKey,
+                expectedFlushGeneration: options.expectedFlushGeneration,
                 saveChatAfterWrite: true,
             });
             return buildResult_ACU({
@@ -75523,6 +75682,16 @@ $CONTENT
         }
         catch (error) {
             logWarn_ACU('[纪要向量索引] 归档失败，未修改纪要表原条目:', error);
+            if (error instanceof SummaryVectorFlushGenerationInvalidatedError_ACU) {
+                return buildResult_ACU({
+                    success: false,
+                    skipped: true,
+                    summaryKey: selectedSummary.summaryKey,
+                    messageIndex: targetMessageIndex,
+                    reason: 'flush_scope_invalidated',
+                    errors: [],
+                });
+            }
             return buildResult_ACU({
                 success: false,
                 skipped: false,
@@ -75614,6 +75783,7 @@ $CONTENT
             isolationKey: task.isolationKey,
             sourceTableKey: task.sourceTableKey,
             targetMessageIndex: task.targetMessageIndex,
+            generation: task.generation,
             mode: task.mode,
             status: terminal ? 'failed_terminal' : 'failed_retryable',
             requestedAt: task.requestedAt,
@@ -75636,6 +75806,20 @@ $CONTENT
         }, delay);
         summaryVectorFlushTimers_ACU.set(task.scopeKey, timer);
     }
+    async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey, completedGeneration) {
+        const current = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+        if (!current
+            || current.generation === completedGeneration
+            || current.status === 'invalidated'
+            || current.status === 'ready'
+            || current.status === 'failed_terminal') {
+            return;
+        }
+        if (current.status === 'queued' || current.status === 'dirty' || current.status === 'failed_retryable') {
+            scheduleFlushTaskTimer_ACU(current);
+            logDebug_ACU(`[交火向量索引] 旧 flush 完成后已接力调度新 generation：scope=${scopeKey}, generation=${current.generation}`);
+        }
+    }
     async function enqueueSummaryVectorIndexFlush_ACU(options = {}) {
         const selectedSummary = findSummaryTable_ACU();
         const sourceTableKey = normalizeKeyPart_ACU(options.sourceTableKey || selectedSummary?.summaryKey);
@@ -75655,12 +75839,19 @@ $CONTENT
             ? Math.max(0, rawDebounceMs)
             : SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU;
         const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
+        const existingTask = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+        // flushing 表示旧 runner 已捕获当前 generation。新的写入必须进入下一代，
+        // 否则旧 runner 成功收尾会与新任务共享 generation，无法安全区分归属。
+        const generation = existingTask?.status === 'invalidated' || existingTask?.status === 'flushing'
+            ? existingTask.generation + 1
+            : existingTask?.generation;
         const task = await upsertSummaryVectorFlushTask_ACU({
             scopeKey,
             chatKey,
             isolationKey,
             sourceTableKey,
             targetMessageIndex: options.targetMessageIndex,
+            generation,
             mode: options.mode === 'append' ? 'append' : 'sync',
             status: 'queued',
             requestedAt: now,
@@ -75677,6 +75868,9 @@ $CONTENT
         const task = await getSummaryVectorFlushTask_ACU(scopeKey);
         if (!task)
             return { success: true, skipped: true, reason: 'flush_task_not_found' };
+        if (task.status === 'invalidated')
+            return { success: true, skipped: true, reason: 'flush_scope_invalidated' };
+        const expectedGeneration = Math.max(0, Number(task.generation) || 0);
         if (summaryVectorFlushRunning_ACU.has(task.scopeKey)) {
             return { success: true, skipped: true, reason: 'flush_already_running' };
         }
@@ -75725,6 +75919,7 @@ $CONTENT
                 targetMessageIndex: task.targetMessageIndex,
                 mode: task.mode,
                 status: 'flushing',
+                generation: expectedGeneration,
                 requestedAt: task.requestedAt,
                 debounceUntil: task.debounceUntil,
             });
@@ -75737,10 +75932,15 @@ $CONTENT
                 force: true,
                 isolationKey: task.isolationKey,
                 sourceTableKey: task.sourceTableKey,
+                expectedFlushScopeKey: task.scopeKey,
+                expectedFlushGeneration: expectedGeneration,
             });
+            if (result.skipped && result.reason === 'flush_scope_invalidated') {
+                return { success: true, skipped: true, reason: 'flush_scope_invalidated', result };
+            }
             if (result.success) {
-                await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
-                if (shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result)) {
+                const completed = await markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU(task.scopeKey, expectedGeneration);
+                if (completed && shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result)) {
                     clearSummaryVectorIndexDirtyForRealign_ACU(task.scopeKey);
                 }
                 logDebug_ACU(`[交火向量索引] 防抖 flush 完成：scope=${task.scopeKey}, skipped=${result.skipped}, reason=${result.reason || ''}`);
@@ -75753,13 +75953,39 @@ $CONTENT
         }
         catch (error) {
             const message = normalizeErrorMessage_ACU$1(error);
+            if (error instanceof SummaryVectorFlushGenerationInvalidatedError_ACU)
+                return { success: true, skipped: true, reason: 'flush_scope_invalidated' };
             await markFlushTaskFailure_ACU(task, message, false);
             logWarn_ACU('[交火向量索引] 防抖 flush 异常:', message);
             return { success: false, reason: 'flush_exception', error: message };
         }
         finally {
             summaryVectorFlushRunning_ACU.delete(task.scopeKey);
+            await resumeQueuedFlushTaskAfterRunner_ACU(task.scopeKey, expectedGeneration);
         }
+    }
+    /**
+     * 持久化失效当前 scope 的 flush task，并同步取消内存定时器。
+     * 墓碑携带单调 generation；旧 runner 在真正发布聊天 pointer 前必须校验代次。
+     */
+    async function clearSummaryVectorIndexFlushQueueForCurrentScope_ACU(params) {
+        const chatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
+        const isolationKey = normalizeKeyPart_ACU(params.isolationKey);
+        const sourceTableKey = normalizeKeyPart_ACU(params.sourceTableKey);
+        if (!chatKey)
+            throw new Error('清理交火向量 flush 队列失败：当前聊天标识为空');
+        if (!sourceTableKey)
+            throw new Error('清理交火向量 flush 队列失败：纪要表标识为空');
+        const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
+        clearFlushTimer_ACU(scopeKey);
+        const tombstone = await invalidateSummaryVectorFlushTaskStrict_ACU({
+            scopeKey,
+            chatKey,
+            isolationKey,
+            sourceTableKey,
+        });
+        logDebug_ACU(`[交火向量索引] 已持久化 flush 失效墓碑：scope=${scopeKey}, generation=${tombstone.generation}`);
+        return 1;
     }
     async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU() {
         const chatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
@@ -75780,6 +76006,8 @@ $CONTENT
         let purgedLegacy = 0;
         const now = Date.now();
         for (const task of tasks) {
+            if (task.status === 'invalidated')
+                continue;
             // 启动期主动清理身份不完整的旧版 task：
             // list 已按三元字段过滤到当前 active scope，但更早版本的 scopeKey 算法可能与当前不一致，
             // 保留只会成为长期告警噪音；dirty state 会由后续正常写路径重新入队。
@@ -88826,6 +89054,55 @@ $CONTENT
         }
     }
 
+    /**
+     * 立即重建当前聊天的交火纪要索引。
+     * 这是“立即构建交火纪要索引”按钮与索引自愈共用的普通构建链路。
+     */
+    async function rebuildCurrentSummaryVectorIndexNow_ACU() {
+        if (!currentJsonTableData_ACU) {
+            await loadOrCreateJsonTableFromChatHistory_ACU();
+        }
+        if (!currentJsonTableData_ACU) {
+            throw new Error('数据库未加载，无法重建交火索引快照。');
+        }
+        const selectedSummary = findSummaryTable_ACU();
+        if (selectedSummary) {
+            const { summaryKey, table } = selectedSummary;
+            const writeSet = [{ kind: 'sheet', sheetKey: summaryKey }];
+            const commit = await runTableUpdateCommit_ACU({
+                source: 'system',
+                reason: 'vector_index_rebuild_snapshot',
+                writeSet,
+                revisionWriteSet: writeSet,
+                initialData: currentJsonTableData_ACU,
+                targetMessageIndex: getLastMessageIndex_ACU(),
+                targetSheetKeys: [summaryKey],
+                updateGroupKeys: null,
+                trackingSheetKeys: [],
+                trackAsUpdate: false,
+                operations: [{ kind: 'sheet_replace', sheetKey: summaryKey, sheet: table, reason: 'system' }],
+            }, () => ({
+                success: true,
+                value: null,
+                tableData: currentJsonTableData_ACU,
+                mutationResult: { changes: 1, errors: [] },
+            }));
+            if (!commit.success || commit.saved === false) {
+                throw new Error(commit.error || '纪要表快照提交失败。');
+            }
+        }
+        const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
+        if (result.success && !result.skipped) {
+            try {
+                await updateReadableLorebookEntry_ACU(true);
+            }
+            catch {
+                // 索引已经 durable publish；世界书刷新失败不应把已完成构建报告为失败。
+            }
+        }
+        return result;
+    }
+
     // popup-bindings-data.ts
     // 数据管理标签页事件绑定（数据隔离 + 外部导入 + 模板预设 + 数据管理按钮）
     function formatBytes_ACU(bytes) {
@@ -89165,44 +89442,9 @@ $CONTENT
             $buildVectorIndexNowButton_ACU.off('click.acu_vector_index_archive').on('click.acu_vector_index_archive', async () => {
                 $buildVectorIndexNowButton_ACU.prop('disabled', true).text('正在重建交火索引快照...');
                 try {
-                    if (!currentJsonTableData_ACU) {
-                        await loadOrCreateJsonTableFromChatHistory_ACU();
-                    }
-                    if (!currentJsonTableData_ACU) {
-                        showToastr_ACU('warning', '数据库未加载，无法重建交火索引快照。');
-                        return;
-                    }
-                    const summaryKey = Object.keys(currentJsonTableData_ACU).find((key) => {
-                        const table = currentJsonTableData_ACU?.[key];
-                        const name = String(table?.name || '');
-                        return name === '纪要表' || name === '总结表' || name === '总体大纲' || name.includes('纪要') || name.includes('总结');
-                    });
-                    if (summaryKey) {
-                        const writeSet = [{ kind: 'sheet', sheetKey: summaryKey }];
-                        await runTableUpdateCommit_ACU({
-                            source: 'system',
-                            reason: 'vector_index_rebuild_snapshot',
-                            isolationKey: getCurrentIsolationKey_ACU(),
-                            writeSet,
-                            revisionWriteSet: writeSet,
-                            initialData: currentJsonTableData_ACU,
-                            targetMessageIndex: getLastMessageIndex_ACU(),
-                            targetSheetKeys: [summaryKey],
-                            updateGroupKeys: null,
-                            trackingSheetKeys: [],
-                            trackAsUpdate: false,
-                            operations: [{ kind: 'sheet_replace', sheetKey: summaryKey, sheet: currentJsonTableData_ACU[summaryKey], reason: 'system' }],
-                        }, () => ({
-                            success: true,
-                            value: null,
-                            tableData: currentJsonTableData_ACU,
-                            mutationResult: { changes: 1, errors: [] },
-                        }));
-                    }
-                    const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
+                    const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
                     await refreshVectorIndexStatsPanel_ACU();
                     if (result.success && !result.skipped) {
-                        await updateReadableLorebookEntry_ACU(true);
                         try {
                             topLevelWindow_ACU.AutoCardUpdaterAPI?._notifyTableUpdate?.();
                         }
@@ -96637,7 +96879,17 @@ $CONTENT
         return isVectorFileReadFailure && /读取失败\s+404(?:\s*:|\b)/.test(text);
     }
     async function clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU(params) {
-        const chatStateCleared = await clearSummaryVectorIndexLayerFromChat_ACU(params);
+        // 先持久化失效墓碑，再删除聊天 pointer。两者无法跨存储原子提交时，
+        // 这个顺序保证任何失败都不会留下“pointer 已删但旧 flush 可在重启后复活”的状态。
+        const flushTaskCountCleared = await clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({
+            isolationKey: params.isolationKey,
+            sourceTableKey: params.sourceTableKey,
+        });
+        const chatStateCleared = await clearSummaryVectorIndexLayerFromChat_ACU({
+            messageIndex: params.messageIndex,
+            isolationKey: params.isolationKey,
+            indexId: params.indexId,
+        });
         const cacheResults = await Promise.allSettled([
             deleteVectorIndexCacheByIndex_ACU(params.indexId),
             deleteSummaryVectorHotCacheByIndex_ACU(params.indexId),
@@ -96650,6 +96902,7 @@ $CONTENT
         return {
             chatStateCleared,
             cacheCleared: cacheResults.every((result) => result.status === 'fulfilled'),
+            flushTaskCountCleared,
         };
     }
     async function clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU(params) {
@@ -96718,8 +96971,9 @@ $CONTENT
                             messageIndex: latestLayer.messageIndex,
                             isolationKey: latestLayer.isolationKey,
                             indexId: manifest.indexId,
+                            sourceTableKey: manifest.sourceTableKey,
                         })
-                        : { chatStateCleared: false, cacheCleared: false };
+                        : { chatStateCleared: false, cacheCleared: false, flushTaskCountCleared: 0 };
                     chatStateCleared = clearResult.chatStateCleared;
                     cacheCleared = clearResult.cacheCleared;
                 }
@@ -96727,33 +96981,15 @@ $CONTENT
                     logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，但严格删除失效索引指针失败:', clearError);
                     return { success: false, skipped: true, reason: 'external_files_missing_state_clear_save_failed', chunkCount: 0, indexId: manifest.indexId, error: normalizeErrorMessage_ACU(clearError), cacheCleared: false, chatStateCleared: false };
                 }
-                const queued = chatStateCleared
-                    ? await enqueueSummaryVectorIndexFlush_ACU({
-                        targetMessageIndex: latestLayer?.messageIndex,
-                        isolationKey: latestLayer?.isolationKey,
-                        sourceTableKey: manifest.sourceTableKey,
-                        mode: 'sync',
-                        debounceMs: 0,
-                        reason: 'self_heal_external_files_missing',
-                    })
-                    : { queued: false, reason: 'chat_state_clear_failed' };
-                if (chatStateCleared && queued.queued) {
-                    logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，已删除失效索引指针并入队重建:', message);
-                }
-                else if (chatStateCleared) {
-                    logWarn_ACU(`[交火向量索引] 当前聊天外置向量文件缺失，已删除失效索引指针，但重建入队失败：reason=${queued.reason || 'unknown'}`, message);
-                }
-                else {
-                    logWarn_ACU('[交火向量索引] 当前聊天外置向量文件缺失，但失效索引指针未能安全删除；拒绝盲目重建:', message);
-                }
+                logWarn_ACU(chatStateCleared
+                    ? '[交火向量索引] 当前聊天外置向量文件缺失，已删除失效索引指针；交由 UI 走“立即构建”普通路径重建:'
+                    : '[交火向量索引] 当前聊天外置向量文件缺失，但失效索引指针未能安全删除；拒绝盲目重建:', message);
                 return {
                     success: true,
                     skipped: true,
                     reason: !chatStateCleared
                         ? 'external_files_missing_state_clear_failed'
-                        : queued.queued
-                            ? 'external_files_missing_state_cleared_rebuild_queued'
-                            : 'external_files_missing_state_cleared_rebuild_rejected',
+                        : 'external_files_missing_state_cleared_rebuild_required',
                     chunkCount: 0,
                     indexId: manifest.indexId,
                     error: message,
@@ -97340,6 +97576,7 @@ $CONTENT
                                 messageIndex: latestLayer.messageIndex,
                                 isolationKey: latestLayer.isolationKey,
                                 indexId: state.manifest.indexId,
+                                sourceTableKey: state.manifest.sourceTableKey,
                             });
                             chatStateCleared = clearResult.chatStateCleared;
                         }
@@ -97352,13 +97589,8 @@ $CONTENT
                         logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，但失效索引指针未能安全删除；拒绝盲目重建:', message);
                         return { success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_failed' };
                     }
-                    const rebuildQueued = await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_external_files_missing', state.manifest);
-                    logWarn_ACU(rebuildQueued
-                        ? '[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针并入队重建，跳过本次发送前注入:'
-                        : '[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针，但重建入队失败:', message);
-                    return { success: false, skipped: true, reason: rebuildQueued
-                            ? 'external_vector_files_missing_rebuild_queued'
-                            : 'external_vector_files_missing_rebuild_rejected' };
+                    logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针；交由 UI 走“立即构建”普通路径重建:', message);
+                    return { success: false, skipped: true, reason: 'external_vector_files_missing_rebuild_required' };
                 }
                 if (isInvalidExternalVectorFileError_ACU(message)) {
                     const alignedState = await tryRealignSummaryVectorIndexPointerFromDisk_ACU({ state, latestLayer, liveRows });
@@ -97500,6 +97732,10 @@ $CONTENT
      * 负责：交火发送前召回过程的进度 toast 与结果提示。
      * 不负责：关键词生成、向量召回、rerank、世界书覆盖等业务逻辑。
      */
+    const SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU = new Set([
+        'external_vector_files_missing_rebuild_required',
+        'external_files_missing_state_cleared_rebuild_required',
+    ]);
     function clearToastElement_ACU($toast) {
         try {
             if ($toast)
@@ -97516,6 +97752,39 @@ $CONTENT
         if (!result || result.skipped)
             return false;
         return result.success === true && Number(result.injectedCount || 0) > 0;
+    }
+    function shouldRebuildSummaryVectorIndexWithUI_ACU(reason) {
+        return SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU.has(String(reason || ''));
+    }
+    /** 复用“立即构建交火纪要索引”的普通业务链路，并提供阻塞式进度提示。 */
+    async function rebuildCurrentSummaryVectorIndexWithUI_ACU() {
+        const $toast = showToastr_ACU('info', '正在重建交火索引快照...', {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
+            closeButton: false,
+            progressBar: false,
+            acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
+        });
+        try {
+            const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
+            if (result.success && !result.skipped) {
+                showToastr_ACU('success', `交火索引快照重建完成：${result.indexedRowCount || 0} 行，${result.chunkCount || 0} 个 chunks。`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK });
+                return result;
+            }
+            const reason = result.errors?.length
+                ? result.errors.join('；')
+                : (result.reason || '无可重建内容');
+            showToastr_ACU(result.success ? 'info' : 'error', `交火索引快照未完成：${reason}`);
+            return result;
+        }
+        catch (error) {
+            showToastr_ACU('error', `交火索引快照重建失败：${error?.message || '未知错误'}`);
+            throw error;
+        }
+        finally {
+            clearToastElement_ACU($toast);
+        }
     }
     /**
      * 包装交火发送前处理，显示“正在召回记忆”进度提示。
@@ -97536,19 +97805,28 @@ $CONTENT
             toastClass: 'toast acu-toast acu-toast--info',
             acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
         });
+        let result;
         try {
-            const result = await processSummaryVectorIndexBeforeGeneration_ACU(options);
+            result = await processSummaryVectorIndexBeforeGeneration_ACU(options);
             if (shouldShowSummaryVectorResultToast_ACU(result)) {
                 showToastr_ACU('success', `交火记忆召回完成，已覆盖纪要索引 ${result.injectedCount || 0} 条。`, '交火召回完成', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK });
             }
             else {
                 logDebug_ACU(`[交火模式纪要索引] UI 包装完成：success=${result?.success === true}, skipped=${result?.skipped === true}, reason=${result?.reason || 'none'}`);
             }
-            return result;
         }
         finally {
             clearToastElement_ACU($toast);
         }
+        if (shouldRebuildSummaryVectorIndexWithUI_ACU(result.reason)) {
+            try {
+                await rebuildCurrentSummaryVectorIndexWithUI_ACU();
+            }
+            catch (error) {
+                logDebug_ACU(`[交火模式纪要索引] 失效索引已删除，但普通重建路径执行失败；继续原始生成：${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        return result;
     }
 
     // init.ts — 初始化编排（presentation 层：负责事件绑定、UI 初始化、模块串联）
@@ -97774,15 +98052,28 @@ $CONTENT
                         // 注意：必须放在 refreshMergedDataAndNotifyWithUI_ACU 之后，否则可能读取到旧聊天的 manifest。
                         const vectorCacheResult = await preloadSummaryVectorIndexCacheForCurrentChat_ACU();
                         logDebug_ACU(`[交火向量索引] CHAT_CHANGED 缓存预热结果：success=${vectorCacheResult.success}, skipped=${vectorCacheResult.skipped === true}, reason=${vectorCacheResult.reason || 'none'}, chunks=${vectorCacheResult.chunkCount}, indexId=${vectorCacheResult.indexId || 'none'}`);
-                        try {
-                            const restoredFlushCount = await restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU();
-                            if (restoredFlushCount > 0) {
-                                logDebug_ACU(`[交火向量索引] CHAT_CHANGED 已恢复防抖归档队列：count=${restoredFlushCount}`);
+                        if (shouldRebuildSummaryVectorIndexWithUI_ACU(vectorCacheResult.reason)) {
+                            try {
+                                await rebuildCurrentSummaryVectorIndexWithUI_ACU();
+                            }
+                            catch (rebuildError) {
+                                logWarn_ACU('[交火向量索引] 失效索引已删除，但普通重建路径执行失败:', rebuildError);
                             }
                         }
-                        catch (restoreFlushError) {
-                            logWarn_ACU('[交火向量索引] CHAT_CHANGED 恢复防抖归档队列失败:', restoreFlushError);
+                        const shouldRestoreFlushQueue = !String(vectorCacheResult.reason || '').startsWith('external_files_missing_state_clear');
+                        if (!shouldRestoreFlushQueue) {
+                            logWarn_ACU(`[交火向量索引] CHAT_CHANGED 跳过 flush 队列恢复：missing-file 状态清理未完成或已进入重建恢复，reason=${vectorCacheResult.reason || 'unknown'}`);
                         }
+                        if (shouldRestoreFlushQueue)
+                            try {
+                                const restoredFlushCount = await restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU();
+                                if (restoredFlushCount > 0) {
+                                    logDebug_ACU(`[交火向量索引] CHAT_CHANGED 已恢复防抖归档队列：count=${restoredFlushCount}`);
+                                }
+                            }
+                            catch (restoreFlushError) {
+                                logWarn_ACU('[交火向量索引] CHAT_CHANGED 恢复防抖归档队列失败:', restoreFlushError);
+                            }
                         // [新增] 再次强制刷新状态显示，确保UI同步
                         if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
                             updateCardUpdateStatusDisplay_ACU();
@@ -137090,7 +137381,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * 边界：
      * - 读写权威配置：globalMeta_ACU.vectorMemoryConfigGlobal 通过
      *   getCurrentVectorMemoryConfig_ACU / updateGlobalVectorMemoryConfigFields_ACU 操作。
-     * - 立即构建（buildNow）：编排 loadOrCreate + saveIndependent + archiveSummaryVectorIndexNow。
+     * - 立即构建（buildNow）：调用 service 层统一的普通即时重建链路。
      * - Vue 组件只读写本 composable 暴露的 ref / form / 方法。
      */
     function getDefaultVectorMemoryConfigForV2() {
@@ -137503,17 +137794,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 maintenanceBusy.value = false;
             }
         }
-        function findSummaryTableKey() {
-            const data = currentJsonTableData_ACU;
-            if (!data)
-                return null;
-            return Object.keys(data).find((key) => {
-                const table = data?.[key];
-                const name = String(table?.name || '');
-                return name === '纪要表' || name === '总结表' || name === '总体大纲'
-                    || name.includes('纪要') || name.includes('总结');
-            }) || null;
-        }
         async function buildNow() {
             if (buildBusy.value)
                 return;
@@ -137521,41 +137801,8 @@ Expected function or array of functions, received type ${typeof value}.`
             progressToastId = null;
             notifyProgress('正在重建交火索引快照...');
             try {
-                if (!currentJsonTableData_ACU) {
-                    await loadOrCreateJsonTableFromChatHistory_ACU();
-                }
-                if (!currentJsonTableData_ACU) {
-                    notify('warning', '数据库未加载，无法重建交火索引快照。', { muteable: false });
-                    return;
-                }
-                const summaryKey = findSummaryTableKey();
-                if (summaryKey) {
-                    const writeSet = [{ kind: 'sheet', sheetKey: summaryKey }];
-                    await runTableUpdateCommit_ACU({
-                        source: 'system',
-                        reason: 'vector_index_v2_rebuild_snapshot',
-                        writeSet,
-                        revisionWriteSet: writeSet,
-                        initialData: currentJsonTableData_ACU,
-                        targetMessageIndex: getLastMessageIndex_ACU(),
-                        targetSheetKeys: [summaryKey],
-                        updateGroupKeys: null,
-                        trackingSheetKeys: [],
-                        trackAsUpdate: false,
-                        operations: [{ kind: 'sheet_replace', sheetKey: summaryKey, sheet: currentJsonTableData_ACU[summaryKey], reason: 'system' }],
-                    }, () => ({
-                        success: true,
-                        value: null,
-                        tableData: currentJsonTableData_ACU,
-                        mutationResult: { changes: 1, errors: [] },
-                    }));
-                }
-                const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
+                const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
                 if (result.success && !result.skipped) {
-                    try {
-                        await updateReadableLorebookEntry_ACU(true);
-                    }
-                    catch { /* non-fatal */ }
                     notify('success', `交火索引快照重建完成：${result.indexedRowCount || 0} 行，${result.chunkCount || 0} 个 chunks。`, { muteable: false });
                     await refreshIndexStatus(false);
                     return;

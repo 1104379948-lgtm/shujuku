@@ -1,14 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
+  GenerationInvalidatedError: class SummaryVectorFlushGenerationInvalidatedError_ACU extends Error {},
   chatKey: 'chat-a',
   isolationKey: 'iso-a',
   summaryKey: 'summary-a',
   task: null as any,
   upsert: vi.fn(),
   get: vi.fn(),
+  getStrict: vi.fn(),
+  markReadyIfGenerationMatches: vi.fn(),
   list: vi.fn(),
+  invalidate: vi.fn(),
   remove: vi.fn(),
+  removeStrict: vi.fn(),
   archive: vi.fn(),
   logIdentityEvent: vi.fn(),
 }));
@@ -19,9 +24,14 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
 }));
 vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
 vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
+  SummaryVectorFlushGenerationInvalidatedError_ACU: h.GenerationInvalidatedError,
   deleteSummaryVectorFlushTask_ACU: (...args: any[]) => h.remove(...args),
+  markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU: (...args: any[]) => h.markReadyIfGenerationMatches(...args),
+  deleteSummaryVectorFlushTaskStrict_ACU: (...args: any[]) => h.removeStrict(...args),
   getSummaryVectorFlushTask_ACU: (...args: any[]) => h.get(...args),
+  getSummaryVectorFlushTaskStrict_ACU: (...args: any[]) => h.getStrict(...args),
   listSummaryVectorFlushTasks_ACU: (...args: any[]) => h.list(...args),
+  invalidateSummaryVectorFlushTaskStrict_ACU: (...args: any[]) => h.invalidate(...args),
   upsertSummaryVectorFlushTask_ACU: (...args: any[]) => h.upsert(...args),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () => ({
@@ -35,6 +45,8 @@ vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () =
 
 import {
   buildSummaryVectorIndexFlushScopeKey_ACU,
+  clearSummaryVectorIndexFlushQueueForCurrentScope_ACU,
+  enqueueSummaryVectorIndexFlush_ACU,
   flushSummaryVectorIndexTaskNow_ACU,
   restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU,
 } from '../../../src/service/vector/summary-vector-index-flush-queue';
@@ -51,11 +63,18 @@ function task(scopeKey: string, overrides: any = {}) {
 describe('summary-vector-index flush queue scope', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useFakeTimers();
     h.chatKey = 'chat-a'; h.isolationKey = 'iso-a'; h.summaryKey = 'summary-a';
     h.get.mockImplementation(async () => h.task);
+    h.getStrict.mockImplementation(async () => h.task);
     h.upsert.mockImplementation(async (input: any) => ({ ...input, attemptCount: 0, updatedAt: Date.now() }));
-    h.list.mockResolvedValue([]); h.remove.mockResolvedValue(undefined);
+    h.list.mockResolvedValue([]); h.remove.mockResolvedValue(undefined); h.markReadyIfGenerationMatches.mockResolvedValue(true); h.removeStrict.mockResolvedValue(undefined);
+    h.invalidate.mockImplementation(async (input: any) => ({ ...task(input.scopeKey), ...input, status: 'invalidated', generation: 1 }));
     h.archive.mockResolvedValue({ success: true, skipped: false, errors: [] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('三元 scope 彼此独立，成功 flush 只清理自身 dirty state', async () => {
@@ -126,8 +145,139 @@ describe('summary-vector-index flush queue scope', () => {
     );
   });
 
+  it('即时重建前持久化当前 scope 的失效墓碑，后续 restore 不会重复调度', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    h.list.mockResolvedValue([]);
+
+    await expect(clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({
+      isolationKey: 'iso-a',
+      sourceTableKey: 'summary-a',
+    })).resolves.toBe(1);
+
+    expect(h.invalidate).toHaveBeenCalledWith({ scopeKey: scope, chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary-a' });
+    await expect(restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU()).resolves.toBe(0);
+  });
+
+  it('archive 返回 generation 取消结果时不标记 retryable failure', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    h.archive.mockResolvedValueOnce({ success: false, skipped: true, reason: 'flush_scope_invalidated', errors: [] });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({ success: true, skipped: true, reason: 'flush_scope_invalidated' });
+    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ expectedFlushScopeKey: scope, expectedFlushGeneration: 0 }));
+    expect(h.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('默认 isolation 只失效 canonical default scope，不使用通配查询', async () => {
+    const defaultScope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', '', 'summary-a');
+    await clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({ isolationKey: '', sourceTableKey: 'summary-a' });
+
+    expect(h.invalidate).toHaveBeenCalledWith(expect.objectContaining({ scopeKey: defaultScope, isolationKey: '' }));
+    expect(h.list).not.toHaveBeenCalled();
+    expect(h.removeStrict).not.toHaveBeenCalled();
+  });
+
   it('恢复只查询当前 active 三元 scope', async () => {
     await expect(restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU()).resolves.toBe(0);
     expect(h.list).toHaveBeenCalledWith({ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary-a' });
+  });
+
+  it('新 enqueue 仅以更高 generation 替换墓碑，不能复活旧 runner', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.getStrict.mockResolvedValue(task(scope, { status: 'invalidated', generation: 4 }));
+    h.upsert.mockImplementation(async (input: any) => ({ ...task(scope), ...input, generation: input.generation, status: 'queued' }));
+
+    await expect(enqueueSummaryVectorIndexFlush_ACU({ debounceMs: 100, isolationKey: 'iso-a', sourceTableKey: 'summary-a' }))
+      .resolves.toMatchObject({ queued: true, scopeKey: scope });
+
+    expect(h.upsert).toHaveBeenCalledWith(expect.objectContaining({ scopeKey: scope, generation: 5, status: 'queued' }));
+  });
+
+  it('旧 runner 已进入 flushing 时新 enqueue 使用下一 generation，避免共享收尾归属', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.getStrict.mockResolvedValue(task(scope, { status: 'flushing', generation: 4 }));
+    h.upsert.mockImplementation(async (input: any) => ({ ...task(scope), ...input, generation: input.generation, status: 'queued' }));
+
+    await expect(enqueueSummaryVectorIndexFlush_ACU({ debounceMs: 100, isolationKey: 'iso-a', sourceTableKey: 'summary-a' }))
+      .resolves.toMatchObject({ queued: true, scopeKey: scope });
+
+    expect(h.upsert).toHaveBeenCalledWith(expect.objectContaining({ scopeKey: scope, generation: 5, status: 'queued' }));
+  });
+
+  it('真实 timer 触发后在 archive 发布前校验捕获的 generation', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope, { generation: 0, debounceUntil: Date.now() + 100 });
+    h.upsert.mockImplementation(async (input: any) => {
+      h.task = { ...h.task, ...input, generation: input.generation ?? h.task?.generation ?? 0, attemptCount: 0, updatedAt: Date.now() };
+      return h.task;
+    });
+    h.get.mockImplementation(async () => h.task);
+
+    await enqueueSummaryVectorIndexFlush_ACU({ debounceMs: 100, isolationKey: 'iso-a', sourceTableKey: 'summary-a' });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({
+      expectedFlushScopeKey: scope,
+      expectedFlushGeneration: 0,
+    }));
+    expect(h.markReadyIfGenerationMatches).toHaveBeenCalledWith(scope, 0);
+    expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  it('旧 runner 成功收尾不会覆盖新 generation 的任务或墓碑', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope, { generation: 0 });
+    h.archive.mockResolvedValueOnce({ success: true, skipped: false, errors: [] });
+    h.markReadyIfGenerationMatches.mockResolvedValueOnce(false);
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({ success: true });
+    expect(h.markReadyIfGenerationMatches).toHaveBeenCalledWith(scope, 0);
+    expect(h.remove).not.toHaveBeenCalled();
+  });
+
+  it('新 generation timer 在旧 runner 期间命中 running 时，旧 runner 结束后会接力重调度', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    const oldTask = task(scope, { generation: 0, status: 'flushing' });
+    const nextTask = task(scope, { generation: 1, status: 'queued', debounceUntil: Date.now() });
+    h.task = oldTask;
+    let releaseOldArchive!: () => void;
+    h.archive
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { releaseOldArchive = resolve; }))
+      .mockResolvedValueOnce({ success: true, skipped: false, errors: [] });
+    h.getStrict.mockImplementation(async () => h.task);
+    h.upsert.mockImplementation(async (input: any) => {
+      if (input.status === 'queued' && input.generation === 1) h.task = { ...nextTask, ...input };
+      return { ...h.task, ...input, attemptCount: 0, updatedAt: Date.now() };
+    });
+    h.markReadyIfGenerationMatches
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+
+    const oldRunner = flushSummaryVectorIndexTaskNow_ACU(scope);
+    for (let attempt = 0; attempt < 10 && !releaseOldArchive; attempt += 1) await Promise.resolve();
+    expect(releaseOldArchive).toBeTypeOf('function');
+
+    await enqueueSummaryVectorIndexFlush_ACU({ debounceMs: 0, isolationKey: 'iso-a', sourceTableKey: 'summary-a' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.archive).toHaveBeenCalledTimes(1);
+
+    releaseOldArchive();
+    await oldRunner;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.archive).toHaveBeenCalledTimes(2);
+    expect(h.archive.mock.calls[1][0]).toMatchObject({ expectedFlushScopeKey: scope, expectedFlushGeneration: 1 });
+    expect(isSummaryVectorIndexDirtyForRealign_ACU(scope)).toBe(false);
+  });
+
+  it('timer 已触发后会把捕获 generation 传入 archive 的发布前校验', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope, { generation: 0, debounceUntil: Date.now() + 100 });
+    h.upsert.mockImplementation(async (input: any) => ({ ...h.task, ...input, generation: 0 }));
+    await enqueueSummaryVectorIndexFlush_ACU({ debounceMs: 100, isolationKey: 'iso-a', sourceTableKey: 'summary-a' });
+    await vi.advanceTimersByTimeAsync(100);
+    await clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({ isolationKey: 'iso-a', sourceTableKey: 'summary-a' });
+    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ expectedFlushScopeKey: scope, expectedFlushGeneration: 0 }));
   });
 });

@@ -535,6 +535,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
                             messageIndex: latestLayer.messageIndex,
                             isolationKey: latestLayer.isolationKey,
                             indexId: state.manifest.indexId,
+                            sourceTableKey: state.manifest.sourceTableKey,
                         });
                         chatStateCleared = clearResult.chatStateCleared;
                     }
@@ -546,13 +547,8 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
                     logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，但失效索引指针未能安全删除；拒绝盲目重建:', message);
                     return { success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_failed' };
                 }
-                const rebuildQueued = await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_external_files_missing', state.manifest);
-                logWarn_ACU(rebuildQueued
-                    ? '[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针并入队重建，跳过本次发送前注入:'
-                    : '[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针，但重建入队失败:', message);
-                return { success: false, skipped: true, reason: rebuildQueued
-                    ? 'external_vector_files_missing_rebuild_queued'
-                    : 'external_vector_files_missing_rebuild_rejected' };
+                logWarn_ACU('[交火模式纪要索引] 外置向量文件缺失，已删除失效索引指针；交由 UI 走“立即构建”普通路径重建:', message);
+                return { success: false, skipped: true, reason: 'external_vector_files_missing_rebuild_required' };
             }
             if (isInvalidExternalVectorFileError_ACU(message)) {
                 const alignedState = await tryRealignSummaryVectorIndexPointerFromDisk_ACU({ state, latestLayer, liveRows });

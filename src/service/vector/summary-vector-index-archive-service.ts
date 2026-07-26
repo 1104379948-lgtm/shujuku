@@ -12,6 +12,10 @@ import type {
     ChatSummaryVectorIndexState_ACU,
 } from '../../data/models/chat-message-data';
 import type { SummaryVectorIndexExternalFileRef_ACU } from './summary-vector-index-types';
+import {
+    assertSummaryVectorFlushGenerationCurrent_ACU,
+    SummaryVectorFlushGenerationInvalidatedError_ACU,
+} from '../../data/storage/vector-index-hot-cache';
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
 import type { VectorEmbeddingResult_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
@@ -61,6 +65,10 @@ export type SummaryVectorIndexArchiveOptions_ACU = {
     isolationKey?: string;
     /** Flush 恢复时必须使用入队时捕获的纪要表。 */
     sourceTableKey?: string;
+    /** Flush runner 捕获的 canonical scope；仅 flush 队列路径传入。 */
+    expectedFlushScopeKey?: string;
+    /** Flush runner 捕获的持久化代次；发布聊天 pointer 前必须严格校验。 */
+    expectedFlushGeneration?: number;
 };
 
 export interface SummaryVectorIndexArchiveResult_ACU {
@@ -117,6 +125,8 @@ interface SummaryVectorIndexPendingArchive_ACU {
     indexedAt: string;
     skippedRowCount: number;
     mode: SummaryVectorIndexArchiveMode_ACU;
+    expectedFlushScopeKey?: string;
+    expectedFlushGeneration?: number;
 }
 
 const pendingVectorIndexArchives_ACU = new Map<string, SummaryVectorIndexPendingArchive_ACU>();
@@ -158,6 +168,8 @@ async function persistPendingVectorIndexArchive_ACU(scopeKey: string): Promise<v
             indexedAt: pending.indexedAt,
             skippedRowCount: pending.skippedRowCount,
             mode: pending.mode,
+            expectedFlushScopeKey: pending.expectedFlushScopeKey,
+            expectedFlushGeneration: pending.expectedFlushGeneration,
             saveChatAfterWrite: true,
         });
         logDebug_ACU(`[纪要向量索引] 防抖归档完成：scope=${scopeKey}, rows=${pending.finalRows.length}, chunks=${pending.finalChunks.length}`);
@@ -715,6 +727,8 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     mode: SummaryVectorIndexArchiveMode_ACU;
     isolationKey: string;
     saveChatAfterWrite?: boolean;
+    expectedFlushScopeKey?: string;
+    expectedFlushGeneration?: number;
 }): Promise<void> {
     const message = options.chat[options.targetMessageIndex];
     if (!message || message.is_user) return;
@@ -862,6 +876,12 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
                 nextTagData.modifiedKeys || [],
                 nextTagData.updateGroupKeys || [],
                 { legacyConfirmed: true },
+            );
+        }
+        if (options.expectedFlushScopeKey && options.expectedFlushGeneration != null) {
+            await assertSummaryVectorFlushGenerationCurrent_ACU(
+                options.expectedFlushScopeKey,
+                options.expectedFlushGeneration,
             );
         }
         await saveChatToHostStrict_ACU();
@@ -1367,6 +1387,8 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 indexedAt,
                 skippedRowCount: prepared.skippedRowCount,
                 mode: archiveMode,
+                expectedFlushScopeKey: options.expectedFlushScopeKey,
+                expectedFlushGeneration: options.expectedFlushGeneration,
             });
             scheduleDebouncedVectorIndexPersist_ACU(scopeKey);
             logDebug_ACU(`[纪要向量索引] 向量化完成，已存入待归档队列：scope=${scopeKey}, rows=${finalResult.rows.length}, chunks=${finalResult.chunks.length}`);
@@ -1398,6 +1420,8 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
             skippedRowCount: prepared.skippedRowCount,
             mode: archiveMode,
             isolationKey,
+            expectedFlushScopeKey: options.expectedFlushScopeKey,
+            expectedFlushGeneration: options.expectedFlushGeneration,
             saveChatAfterWrite: true,
         });
 
@@ -1413,6 +1437,16 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         });
     } catch (error: any) {
         logWarn_ACU('[纪要向量索引] 归档失败，未修改纪要表原条目:', error);
+        if (error instanceof SummaryVectorFlushGenerationInvalidatedError_ACU) {
+            return buildResult_ACU({
+                success: false,
+                skipped: true,
+                summaryKey: selectedSummary.summaryKey,
+                messageIndex: targetMessageIndex,
+                reason: 'flush_scope_invalidated',
+                errors: [],
+            });
+        }
         return buildResult_ACU({
             success: false,
             skipped: false,

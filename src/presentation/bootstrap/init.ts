@@ -24,7 +24,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-d
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync';
 import { enterLoopRetryFlow_ACU, onLoopGenerationEnded_ACU, stopAutoLoop_ACU } from '../triggers/auto-loop';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
-import { processSummaryVectorIndexBeforeGenerationWithUI_ACU } from '../components/summary-vector-index-ui';
+import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
 import { markSummaryVectorIndexDirtyForRealign_ACU } from '../../service/vector/summary-vector-index-realign-state';
@@ -285,7 +285,20 @@ export   function mainInitialize_ACU() {
             // 注意：必须放在 refreshMergedDataAndNotifyWithUI_ACU 之后，否则可能读取到旧聊天的 manifest。
             const vectorCacheResult = await preloadSummaryVectorIndexCacheForCurrentChat_ACU();
             logDebug_ACU(`[交火向量索引] CHAT_CHANGED 缓存预热结果：success=${vectorCacheResult.success}, skipped=${vectorCacheResult.skipped === true}, reason=${vectorCacheResult.reason || 'none'}, chunks=${vectorCacheResult.chunkCount}, indexId=${vectorCacheResult.indexId || 'none'}`);
-            try {
+            if (shouldRebuildSummaryVectorIndexWithUI_ACU(vectorCacheResult.reason)) {
+                try {
+                    await rebuildCurrentSummaryVectorIndexWithUI_ACU();
+                } catch (rebuildError) {
+                    logWarn_ACU('[交火向量索引] 失效索引已删除，但普通重建路径执行失败:', rebuildError);
+                }
+            }
+            const shouldRestoreFlushQueue = !String(vectorCacheResult.reason || '').startsWith('external_files_missing_state_clear');
+            if (!shouldRestoreFlushQueue) {
+                logWarn_ACU(
+                    `[交火向量索引] CHAT_CHANGED 跳过 flush 队列恢复：missing-file 状态清理未完成或已进入重建恢复，reason=${vectorCacheResult.reason || 'unknown'}`,
+                );
+            }
+            if (shouldRestoreFlushQueue) try {
                 const restoredFlushCount = await restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU();
                 if (restoredFlushCount > 0) {
                     logDebug_ACU(`[交火向量索引] CHAT_CHANGED 已恢复防抖归档队列：count=${restoredFlushCount}`);
