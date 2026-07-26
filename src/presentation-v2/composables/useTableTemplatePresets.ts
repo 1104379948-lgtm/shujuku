@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue';
+import { computed, getCurrentScope, onScopeDispose, ref } from 'vue';
 import {
   applyTemplateSnapshotToScope_ACU,
   applyTemplatePresetToCurrent_ACU,
@@ -22,8 +22,6 @@ import {
 } from '../../service/template/chat-scope';
 import { deleteLocalDataInChatCore_ACU } from '../../service/chat/chat-service';
 import { settings_ACU } from '../../service/runtime/state-manager';
-import { isSqliteMode } from '../../service/table/storage-mode';
-import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU, sanitizeFilenameComponent_ACU } from '../../shared/template-preset-utils';
 import { deriveTemplatePresetNameForImport_ACU } from '../../shared/template-preset-utils';
@@ -117,6 +115,9 @@ function resolveGuideDataForPresetSelection(selection: { kind: ChatPresetSelecti
 }
 
 export function useTableTemplatePresets() {
+  const templateOperationController = new AbortController();
+  if (getCurrentScope()) onScopeDispose(() => templateOperationController.abort());
+
   const dialogStore = useDialogStore();
   const toast = useToastStore();
   const busy = ref(false);
@@ -281,10 +282,13 @@ export function useTableTemplatePresets() {
         persistChatScope: true,
         chatSelectionSource: selection.kind,
         destructiveChangeConfirmed,
+        signal: templateOperationController.signal,
       }));
       if (!result) throw new Error('当前聊天模板预设切换失败。');
       if (result.saved === false) throw new Error(result.error || '当前聊天模板预设切换失败。');
-      if (isSqliteMode()) await reloadStorageProvider();
+      if (result.postCommitWarning) {
+        toast.warning(result.postCommitWarning, { muteable: false, durationMs: 6000 });
+      }
       message.value = null;
     });
   }
@@ -325,14 +329,16 @@ export function useTableTemplatePresets() {
         persistChatScope: true,
         registerChatPresetEntry: false,
         destructiveChangeConfirmed,
+        signal: templateOperationController.signal,
       }));
       if (!result) throw new Error('历史模板归档恢复失败。');
       if ('saved' in result && result.saved === false) {
         throw new Error('error' in result && typeof result.error === 'string' ? result.error : '历史模板归档恢复失败。');
       }
-      if (isSqliteMode()) await reloadStorageProvider();
       message.value = null;
-      toast.success('已恢复历史模板归档。', { muteable: false });
+      const warning = 'postCommitWarning' in result && typeof result.postCommitWarning === 'string' ? result.postCommitWarning : '';
+      if (warning) toast.warning(warning, { muteable: false, durationMs: 6000 });
+      else toast.success('已恢复历史模板归档。', { muteable: false });
     });
   }
 
@@ -451,13 +457,17 @@ export function useTableTemplatePresets() {
         presetName: finalName,
         registerChatPresetEntry: false,
         destructiveChangeConfirmed,
+        signal: templateOperationController.signal,
       }));
       if (!result) throw new Error('导入模板切换到当前聊天失败。');
       if (result.saved === false) throw new Error(result.error || '导入模板切换到当前聊天失败。');
       if (!upsertTemplatePreset_ACU(finalName, prepared.templateStr)) throw new Error('模板已应用，但保存到预设库失败。');
-      if (isSqliteMode()) await reloadStorageProvider();
       message.value = null;
-      toast.success(`模板已保存并切换为「${finalName}」。`, { muteable: false });
+      if (result.postCommitWarning) {
+        toast.warning(result.postCommitWarning, { muteable: false, durationMs: 6000 });
+      } else {
+        toast.success(`模板已保存并切换为「${finalName}」。`, { muteable: false });
+      }
     });
   }
 

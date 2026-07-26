@@ -51,6 +51,81 @@ describe('table-data-upgrade-audit', () => {
     expect(result.overflowCells).toEqual([{ sheetKey: 'sheet_0', rowPool: 'content', rowIndex: 2, cells: ['不可丢失'] }]);
   });
 
+  it('短行缺少 NOT NULL 且无默认值的业务列时禁止自动猜值', () => {
+    const source = data(
+      [['row_id', '当前地点', '当前主要地区'], ['1', '新宿']],
+      undefined,
+      'CREATE TABLE global_state (\n  row_id INTEGER PRIMARY KEY,\n  current_location TEXT NOT NULL, -- 当前地点\n  current_major_region TEXT NOT NULL -- 当前主要地区\n);',
+    );
+
+    const audit = auditTableDataForUpgrade_ACU(source);
+    const result = repairTableDataFromAudit_ACU(audit);
+
+    expect(audit.status).toBe('requires_confirmation');
+    expect(audit.issues).toContainEqual(expect.objectContaining({
+      code: 'upgrade_required_business_cell_missing', sheetKey: 'sheet_0', rowIndex: 1,
+    }));
+    expect(result.requiresConfirmation).toBe(true);
+  });
+
+  it('缺少 row_id 的中文业务表头仍审计 content 与 seedRows 的 NOT NULL 缺口', () => {
+    const source = data(
+      [['当前地点', '当前主要地区'], ['新宿']],
+      [['大阪']],
+      'CREATE TABLE global_state (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  current_location TEXT NOT NULL, -- 当前地点\n  current_major_region TEXT NOT NULL -- 当前主要地区\n);',
+    );
+
+    const audit = auditTableDataForUpgrade_ACU(source);
+
+    expect(audit.status).toBe('requires_confirmation');
+    expect(audit.repairPlan).toContainEqual(expect.objectContaining({ action: 'insert_row_id_column', sheetKey: 'sheet_0' }));
+    expect(audit.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'upgrade_required_business_cell_missing', rowPool: 'content', rowIndex: 1 }),
+      expect.objectContaining({ code: 'upgrade_required_business_cell_missing', rowPool: 'seedRows', rowIndex: 0 }),
+    ]));
+  });
+
+  it('quoted 且大小写不同的物理列名仍能命中 NOT NULL 审计', () => {
+    const source = data(
+      [['row_id', 'item_name'], ['1']],
+      undefined,
+      'CREATE TABLE inventory (\n  "ROW_ID" INTEGER PRIMARY KEY,\n  "Item_Name" TEXT NOT NULL\n);',
+    );
+
+    const audit = auditTableDataForUpgrade_ACU(source);
+
+    expect(audit.status).toBe('requires_confirmation');
+    expect(audit.issues).toContainEqual(expect.objectContaining({
+      code: 'upgrade_required_business_cell_missing', rowIndex: 1,
+    }));
+  });
+
+  it('缺少 row_id 时接受 quoted 物理列名并插入身份列', () => {
+    const source = data(
+      [['item_name'], ['铁剑']],
+      undefined,
+      'CREATE TABLE inventory (\n  `ROW_ID` INTEGER PRIMARY KEY,\n  [Item_Name] TEXT\n);',
+    );
+
+    const result = repairTableDataFromAudit_ACU(auditTableDataForUpgrade_ACU(source));
+
+    expect(result.status).toBe('repairable');
+    expect((result.candidateData as any).sheet_0.content).toEqual([['row_id', 'item_name'], ['1', '铁剑']]);
+  });
+
+  it('重复中文注释导致 NOT NULL 列映射歧义时要求确认', () => {
+    const source = data(
+      [['row_id', '备注', '备注'], ['1', '甲']],
+      undefined,
+      'CREATE TABLE notes (\n  row_id INTEGER PRIMARY KEY,\n  first_note TEXT NOT NULL, -- 备注\n  second_note TEXT NOT NULL -- 备注\n);',
+    );
+
+    const audit = auditTableDataForUpgrade_ACU(source);
+
+    expect(audit.status).toBe('requires_confirmation');
+    expect(audit.issues).toContainEqual(expect.objectContaining({ code: 'upgrade_required_mapping_ambiguous' }));
+  });
+
   it('检测 content 与 seedRows 的跨池 row_id 冲突并重映射 seedRows', () => {
     const source = data([['row_id', 'name'], ['1', '铁剑']], [['1', '预置盾牌']]);
     const result = repairTableDataFromAudit_ACU(auditTableDataForUpgrade_ACU(source));

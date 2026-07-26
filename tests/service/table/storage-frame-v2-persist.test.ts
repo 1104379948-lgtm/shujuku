@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   guideContainer: null as any,
   setGuide: vi.fn(() => true),
   runTransaction: vi.fn(),
+  chatIdentity: 'chat-a',
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -65,8 +66,9 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', async importOrigin
   loadTableStateFromFramesV2Detailed_ACU: mocks.loadReplayDetailed,
 }));
 vi.mock('../../../src/data/storage/chat-history', () => ({
-  getChatScopedConfigContainer_ACU: vi.fn(() => mocks.scopeContainer),
-  getChatSheetGuideContainer_ACU: vi.fn(() => mocks.guideContainer),
+  getActiveChatStorageIdentity_ACU: vi.fn(() => mocks.chatIdentity),
+  peekChatScopedConfigContainer_ACU: vi.fn(() => mocks.scopeContainer),
+  peekChatSheetGuideContainer_ACU: vi.fn(() => mocks.guideContainer),
   setChatScopedConfigContainer_ACU: vi.fn((_chat: any[], value: any) => { mocks.scopeContainer = value; }),
   setChatSheetGuideContainer_ACU: vi.fn((_chat: any[], value: any) => { mocks.guideContainer = value; }),
 }));
@@ -808,6 +810,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     mocks.collectSummary.mockClear();
     mocks.settings.dataIsolationEnabled = false;
     mocks.settings.dataIsolationCode = '';
+    mocks.chatIdentity = 'chat-a';
     mocks.scopeContainer = { version: 1, template: { '': { old: true } } };
     mocks.guideContainer = { version: 1, tags: { '': { data: { sheet_old: {} } } } };
     mocks.loadReplayState.mockReset();
@@ -852,6 +855,46 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       }));
       expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
       expect(message.TavernDB_ACU_IsolatedData).toBeUndefined();
+    });
+
+    it('事务锁内目标聊天身份变化时拒绝 scope-only 提交', async () => {
+      const message = { is_user: false } as any;
+      mocks.chat.push(message);
+      mocks.chatIdentity = 'chat-b';
+
+      const result = await commitCurrentFloorTemplateScopeOnly_ACU({
+        baselineData: scopeOnlyData,
+        candidateData: JSON.parse(JSON.stringify(scopeOnlyData)),
+        guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+        templateSource: scopeOnlyData,
+        expectedChatIdentity: 'chat-a',
+        expectedFirstMessage: message,
+      });
+
+      expect(result).toMatchObject({ saved: false, error: expect.stringContaining('目标聊天已切换') });
+      expect(mocks.setGuide).not.toHaveBeenCalled();
+      expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    });
+
+    it('事务锁内收到取消信号时拒绝 scope-only 提交', async () => {
+      const message = { is_user: false } as any;
+      mocks.chat.push(message);
+      const controller = new AbortController();
+      controller.abort();
+
+      const result = await commitCurrentFloorTemplateScopeOnly_ACU({
+        baselineData: scopeOnlyData,
+        candidateData: JSON.parse(JSON.stringify(scopeOnlyData)),
+        guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+        templateSource: scopeOnlyData,
+        expectedChatIdentity: 'chat-a',
+        expectedFirstMessage: message,
+        signal: controller.signal,
+      });
+
+      expect(result).toMatchObject({ saved: false, error: expect.stringContaining('已取消') });
+      expect(mocks.setGuide).not.toHaveBeenCalled();
+      expect(mocks.saveChatStrict).not.toHaveBeenCalled();
     });
 
     it('持久化 Sheet 投影不一致时拒绝，且不进入事务或保存', async () => {
@@ -908,6 +951,75 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       expect(mocks.scopeContainer).toEqual(originalScope);
       expect(mocks.guideContainer).toEqual(originalGuide);
     });
+  });
+
+  it('structural commit 在异步 replay 期间取消时不修改 frame、guide 或保存', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const frameBefore = JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData));
+    const guideBefore = JSON.parse(JSON.stringify(mocks.guideContainer));
+    const scopeBefore = JSON.parse(JSON.stringify(mocks.scopeContainer));
+    const controller = new AbortController();
+    let resolveReplay!: (value: any) => void;
+    mocks.loadReplayState.mockImplementationOnce(() => new Promise(resolve => { resolveReplay = resolve; }));
+
+    const pending = commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{
+        kind: 'operations', sheetKey: 'sheet_a', targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      deletedSheetKeys: ['sheet_b'],
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA },
+      expectedChatIdentity: 'chat-a',
+      expectedFirstMessage: message,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(mocks.loadReplayState).toHaveBeenCalled());
+    controller.abort();
+    resolveReplay({ mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB });
+    const result = await pending;
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('已取消') });
+    expect(message.TavernDB_ACU_IsolatedData).toEqual(frameBefore);
+    expect(mocks.guideContainer).toEqual(guideBefore);
+    expect(mocks.scopeContainer).toEqual(scopeBefore);
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+  });
+
+  it('structural commit 在异步 replay 期间切换聊天时不修改目标聊天或保存', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const frameBefore = JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData));
+    const guideBefore = JSON.parse(JSON.stringify(mocks.guideContainer));
+    const scopeBefore = JSON.parse(JSON.stringify(mocks.scopeContainer));
+    let resolveReplay!: (value: any) => void;
+    mocks.loadReplayState.mockImplementationOnce(() => new Promise(resolve => { resolveReplay = resolve; }));
+
+    const pending = commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{
+        kind: 'operations', sheetKey: 'sheet_a', targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      deletedSheetKeys: ['sheet_b'],
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA },
+      expectedChatIdentity: 'chat-a',
+      expectedFirstMessage: message,
+    });
+    await vi.waitFor(() => expect(mocks.loadReplayState).toHaveBeenCalled());
+    mocks.chat.splice(0, mocks.chat.length, { is_user: false, switched: true });
+    mocks.chatIdentity = 'chat-b';
+    resolveReplay({ mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB });
+    const result = await pending;
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('目标聊天已切换') });
+    expect(message.TavernDB_ACU_IsolatedData).toEqual(frameBefore);
+    expect(mocks.guideContainer).toEqual(guideBefore);
+    expect(mocks.scopeContainer).toEqual(scopeBefore);
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
   });
 
   it('pristine 聊天保存完整模板快照时创建 header-only V2 checkpoint 与 sheet checkpoints', async () => {

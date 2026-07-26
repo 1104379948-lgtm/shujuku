@@ -41,25 +41,39 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                     save: true,
                     persistChatScope: normalizedScope === 'chat',
                 });
-                if (result) {
+                const saved = !!result && (!(typeof result === 'object' && 'saved' in result) || result.saved !== false);
+                if (saved) {
                     refreshPresetUIAfterSwitch_ACU({
                         templateGlobalSelectName: normalizedScope === 'global' ? name : null,
                         keepTemplateGlobalValue: normalizedScope !== 'global',
                     });
+                    const runtimeReady = typeof result === 'object' && 'runtimeReady' in result
+                        ? result.runtimeReady !== false
+                        : undefined;
+                    const postCommitWarning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
+                        ? result.postCommitWarning
+                        : undefined;
                     return {
                         success: true,
                         scope: normalizedScope,
                         message: `${normalizedScope === 'global' ? '全局模板预设' : '当前聊天模板预设'}已切换：${displayName}`,
+                        ...(runtimeReady === undefined ? {} : { runtimeReady }),
+                        ...(postCommitWarning ? { warning: postCommitWarning, postCommitWarning } : {}),
                     };
                 }
+                const error = typeof result === 'object' && result && 'error' in result && typeof result.error === 'string'
+                    ? result.error
+                    : '';
                 return {
                     success: false,
                     scope: normalizedScope,
-                    message: `${normalizedScope === 'global' ? '全局模板预设' : '当前聊天模板预设'}切换失败：${displayName}`,
+                    message: error || `${normalizedScope === 'global' ? '全局模板预设' : '当前聊天模板预设'}切换失败：${displayName}`,
+                    ...(error ? { error } : {}),
                 };
             } catch (e) {
                 logError_ACU('switchTemplatePreset failed:', e);
-                return { success: false, message: `模板预设切换失败：${e.message}` };
+                const error = e?.message || String(e);
+                return { success: false, scope: normalizeTemplateOperationScope_ACU(options?.scope || 'global'), message: `模板预设切换失败：${error}`, error };
             }
         },
 
@@ -117,25 +131,34 @@ export function createTemplatePresetApi(ctx: ApiGroupContext): Record<string, Fu
                     presetName: normalizedPresetName,
                 });
                 if (!applied.saved) {
+                    const error = applied.error || '无法应用到当前聊天。';
                     return {
                         success: false,
                         scope: normalizedScope,
-                        message: `模板导入失败：${applied.error || '无法应用到当前聊天。'}`,
+                        message: `模板导入失败：${error}`,
+                        error,
                     };
                 }
 
                 logDebug_ACU(`[API] importTemplateFromData: 模板已成功导入到当前聊天。`);
                 refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
+                const postCommitWarning = 'postCommitWarning' in applied && typeof applied.postCommitWarning === 'string'
+                    ? applied.postCommitWarning
+                    : undefined;
+                const runtimeReady = 'runtimeReady' in applied ? applied.runtimeReady !== false : true;
                 return {
                     success: true,
                     scope: normalizedScope,
-                    message: `模板已成功导入到当前聊天${normalizedPresetName ? `（预设名：${normalizedPresetName}）` : ''}！`,
+                    message: postCommitWarning || `模板已成功导入到当前聊天${normalizedPresetName ? `（预设名：${normalizedPresetName}）` : ''}！`,
                     presetName: normalizedPresetName || undefined,
+                    runtimeReady,
+                    ...(postCommitWarning ? { warning: postCommitWarning, postCommitWarning } : {}),
                 };
 
             } catch (e) {
                 logError_ACU('importTemplateFromData failed:', e);
-                return { success: false, message: `导入失败: ${e.message}` };
+                const error = e?.message || String(e);
+                return { success: false, scope: normalizeTemplateOperationScope_ACU(options?.scope || 'global'), message: `导入失败: ${error}`, error };
             }
         },
 

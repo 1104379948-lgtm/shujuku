@@ -8,6 +8,8 @@ export type UpgradeAuditIssueCode_ACU =
   | 'upgrade_empty_row_id'
   | 'upgrade_duplicate_row_id'
   | 'upgrade_row_width_mismatch'
+  | 'upgrade_required_mapping_ambiguous'
+  | 'upgrade_required_business_cell_missing'
   | 'upgrade_overflow_cells'
   | 'upgrade_seed_pool_conflict';
 export type UpgradeRepairAction_ACU = 'rename_header' | 'insert_row_id_column' | 'normalize_row_id' | 'assign_row_id' | 'pad_row' | 'preserve_overflow';
@@ -60,7 +62,74 @@ function addIssue_ACU(result: UpgradeAuditResult_ACU, issue: UpgradeAuditIssue_A
   result.issues.push(issue);
   if (plan) result.repairPlan.push(plan);
 }
-function inspectRows_ACU(result: UpgradeAuditResult_ACU, sheetKey: string, rows: unknown[], pool: 'content' | 'seedRows', headerLength: number, ids: Map<string, { pool: 'content' | 'seedRows'; rowIndex: number }>): void {
+function canonicalPhysicalName_ACU(value: unknown): string {
+  const normalized = String(value ?? '').trim();
+  if ((normalized.startsWith('"') && normalized.endsWith('"'))
+    || (normalized.startsWith('`') && normalized.endsWith('`'))
+    || (normalized.startsWith('[') && normalized.endsWith(']'))) {
+    return normalized.slice(1, -1).trim().toLowerCase();
+  }
+  return normalized.toLowerCase();
+}
+function headerMatchesColumn_ACU(headerValue: unknown, sqlName: string, comment: string | null): boolean {
+  const value = String(headerValue ?? '').trim();
+  return !!value && (canonicalPhysicalName_ACU(value) === canonicalPhysicalName_ACU(sqlName) || (!!comment && value === comment));
+}
+function resolveRequiredHeaderIndexes_ACU(result: UpgradeAuditResult_ACU, sheetKey: string, sheet: RecordValue, header: unknown[], omitLeadingRowId = false): Map<number, string> {
+  const ddl = isRecord_ACU(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
+  if (!ddl) return new Map();
+  const ddlColumns = parseDDLColumnInfos_ACU(ddl).slice(omitLeadingRowId ? 1 : 0);
+  const required = new Map<number, string>();
+  const assignRequiredIndex = (headerIndex: number, sqlName: string) => {
+    const canonicalName = canonicalPhysicalName_ACU(sqlName);
+    const existing = required.get(headerIndex);
+    if (existing && existing !== canonicalName) {
+      addIssue_ACU(result, {
+        code: 'upgrade_required_mapping_ambiguous', sheetKey, rowIndex: 0,
+        message: `表头第 ${headerIndex + 1} 列同时映射到 NOT NULL 业务列「${existing}」与「${canonicalName}」，无法安全确定列位置`,
+      });
+      return;
+    }
+    required.set(headerIndex, canonicalName);
+  };
+  // 按索引映射只有在每个表头都只命中对应 DDL 列时才算“可证明”；重复中文注释不能靠顺序猜。
+  const positionalMappingIsProven = ddlColumns.length === header.length
+    && ddlColumns.every((column, index) => {
+      if (!headerMatchesColumn_ACU(header[index], column.sqlName, column.comment)) return false;
+      const matchedDdlColumns = ddlColumns.filter(candidate => headerMatchesColumn_ACU(header[index], candidate.sqlName, candidate.comment));
+      return matchedDdlColumns.length === 1;
+    });
+  for (const column of ddlColumns) {
+    // row_id 的空值、重复与跨池冲突由专用身份审计负责，不能再伪装成业务列缺失。
+    if (canonicalPhysicalName_ACU(column.sqlName) === 'row_id') continue;
+    if (!column.isNotNull || column.hasDefault || column.isPrimaryKey) continue;
+    if (positionalMappingIsProven) {
+      assignRequiredIndex(column.index - (omitLeadingRowId ? 1 : 0), column.sqlName);
+      continue;
+    }
+    const physicalMatches = header
+      .map((value, index) => ({ value: canonicalPhysicalName_ACU(value), index }))
+      .filter(item => item.value === canonicalPhysicalName_ACU(column.sqlName));
+    const commentMatches = column.comment
+      ? header.map((value, index) => ({ value: String(value ?? '').trim(), index })).filter(item => item.value === column.comment)
+      : [];
+    const matches = physicalMatches.length > 0 ? physicalMatches : commentMatches;
+    if (matches.length === 1) {
+      assignRequiredIndex(matches[0].index, column.sqlName);
+      continue;
+    }
+    addIssue_ACU(result, {
+      code: 'upgrade_required_mapping_ambiguous',
+      sheetKey,
+      rowIndex: 0,
+      message: matches.length > 1
+        ? `NOT NULL 业务列「${canonicalPhysicalName_ACU(column.sqlName)}」匹配到多个表头，无法安全确定列位置`
+        : `NOT NULL 业务列「${canonicalPhysicalName_ACU(column.sqlName)}」无法映射到表头，不能跳过必填审计`,
+    });
+  }
+  return required;
+}
+function inspectRows_ACU(result: UpgradeAuditResult_ACU, sheetKey: string, rows: unknown[], pool: 'content' | 'seedRows', headerLength: number, ids: Map<string, { pool: 'content' | 'seedRows'; rowIndex: number }>, requiredHeaderIndexes: Map<number, string>): void {
   rows.forEach((row, offset) => {
     const rowIndex = pool === 'content' ? offset + 1 : offset;
     if (!Array.isArray(row)) {
@@ -80,11 +149,21 @@ function inspectRows_ACU(result: UpgradeAuditResult_ACU, sheetKey: string, rows:
         addIssue_ACU(result, { code, sheetKey, rowIndex, rowPool: pool, rowId, message }, { action: 'assign_row_id', sheetKey, rowIndex, rowPool: pool });
       } else ids.set(rowId, { pool, rowIndex });
     }
-    if (row.length < headerLength) addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行短于表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
+    if (row.length < headerLength) {
+      addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行短于表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
+    }
+    for (const [headerIndex, sqlName] of requiredHeaderIndexes) {
+      if (headerIndex < row.length && row[headerIndex] !== null && row[headerIndex] !== undefined) continue;
+      addIssue_ACU(result, {
+        code: 'upgrade_required_business_cell_missing', sheetKey, rowIndex, rowPool: pool,
+        rowId: rowId || undefined,
+        message: `缺少 NOT NULL 且无默认值的业务列「${sqlName}」，不能猜测填充值`,
+      });
+    }
     if (row.length > headerLength) addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行超出表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
   });
 }
-function inspectRowsWithoutIds_ACU(result: UpgradeAuditResult_ACU, sheetKey: string, rows: unknown[], pool: 'content' | 'seedRows', expectedWidth: number): void {
+function inspectRowsWithoutIds_ACU(result: UpgradeAuditResult_ACU, sheetKey: string, rows: unknown[], pool: 'content' | 'seedRows', expectedWidth: number, requiredHeaderIndexes: Map<number, string>): void {
   rows.forEach((row, offset) => {
     const rowIndex = pool === 'content' ? offset + 1 : offset;
     if (!Array.isArray(row)) {
@@ -93,6 +172,14 @@ function inspectRowsWithoutIds_ACU(result: UpgradeAuditResult_ACU, sheetKey: str
       addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行短于业务表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
     } else if (row.length > expectedWidth) {
       addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, message: '行超出业务表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
+    }
+    if (!Array.isArray(row)) return;
+    for (const [headerIndex, sqlName] of requiredHeaderIndexes) {
+      if (headerIndex < row.length && row[headerIndex] !== null && row[headerIndex] !== undefined) continue;
+      addIssue_ACU(result, {
+        code: 'upgrade_required_business_cell_missing', sheetKey, rowIndex, rowPool: pool,
+        message: `缺少 NOT NULL 且无默认值的业务列「${sqlName}」，不能猜测填充值`,
+      });
     }
   });
 }
@@ -106,7 +193,7 @@ function determineHeaderRepair_ACU(result: UpgradeAuditResult_ACU, sheetKey: str
   }
   const header = content[0];
   const firstHeader = String(header[0] ?? '').trim();
-  if (firstHeader === 'row_id') return { header, insertsRowId: false };
+  if (canonicalPhysicalName_ACU(firstHeader) === 'row_id') return { header, insertsRowId: false };
   if (!firstHeader || /^(id|rowid|row_id)$/i.test(firstHeader) || firstHeader === '行号') {
     addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '身份列表头可确定地规范化为 row_id' }, { action: 'rename_header', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
     return { header: ['row_id', ...header.slice(1)], insertsRowId: false };
@@ -114,11 +201,11 @@ function determineHeaderRepair_ACU(result: UpgradeAuditResult_ACU, sheetKey: str
   const ddl = isRecord_ACU(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
   const ddlText = typeof ddl === 'string' ? ddl : '';
   const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
-  const ddlHasLeadingRowId = ddlColumns[0]?.sqlName.toLowerCase() === 'row_id' && ddlColumns.length === header.length + 1;
+  // 只有 DDL 明确多出首列 row_id，且其余列按顺序与业务表头对应，才允许自动插入身份列。
+  const ddlHasLeadingRowId = canonicalPhysicalName_ACU(ddlColumns[0]?.sqlName) === 'row_id' && ddlColumns.length === header.length + 1;
   const headerMatchesDdlWithoutRowId = ddlHasLeadingRowId && header.every((value, index) => {
-    const headerValue = String(value ?? '').trim();
     const ddlColumn = ddlColumns[index + 1];
-    return !!headerValue && !!ddlColumn && (ddlColumn.sqlName === headerValue || ddlColumn.comment === headerValue);
+    return !!ddlColumn && headerMatchesColumn_ACU(value, ddlColumn.sqlName, ddlColumn.comment);
   });
   if (headerMatchesDdlWithoutRowId) {
     addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: 'DDL 证明当前业务表头缺少 row_id 列，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
@@ -156,18 +243,21 @@ export function auditTableDataForUpgrade_ACU(data: unknown): UpgradeAuditResult_
     const seedRows = Array.isArray(rawSheet.seedRows) ? rawSheet.seedRows : [];
     const ids = new Map<string, { pool: 'content' | 'seedRows'; rowIndex: number }>();
     if (headerState.insertsRowId) {
+      // 此时行内尚无 row_id；宽度与 NOT NULL 业务列必须按原业务表头独立审计。
       const expectedBusinessWidth = headerState.header.length - 1;
-      inspectRowsWithoutIds_ACU(result, sheetKey, content.slice(1), 'content', expectedBusinessWidth);
-      inspectRowsWithoutIds_ACU(result, sheetKey, seedRows, 'seedRows', expectedBusinessWidth);
+      const requiredHeaderIndexes = resolveRequiredHeaderIndexes_ACU(result, sheetKey, rawSheet, headerState.header.slice(1), true);
+      inspectRowsWithoutIds_ACU(result, sheetKey, content.slice(1), 'content', expectedBusinessWidth, requiredHeaderIndexes);
+      inspectRowsWithoutIds_ACU(result, sheetKey, seedRows, 'seedRows', expectedBusinessWidth, requiredHeaderIndexes);
       content.slice(1).forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset + 1, rowPool: 'content' }));
       seedRows.forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset, rowPool: 'seedRows' }));
       continue;
     }
-    inspectRows_ACU(result, sheetKey, content.slice(1), 'content', headerState.header.length, ids);
-    inspectRows_ACU(result, sheetKey, seedRows, 'seedRows', headerState.header.length, ids);
+    const requiredHeaderIndexes = resolveRequiredHeaderIndexes_ACU(result, sheetKey, rawSheet, headerState.header);
+    inspectRows_ACU(result, sheetKey, content.slice(1), 'content', headerState.header.length, ids, requiredHeaderIndexes);
+    inspectRows_ACU(result, sheetKey, seedRows, 'seedRows', headerState.header.length, ids, requiredHeaderIndexes);
   }
   if (result.issues.some(issue => issue.code === 'upgrade_invalid_data' || issue.code === 'upgrade_missing_sheet')) result.status = 'unrecoverable';
-  else if (result.issues.some(issue => issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells')) result.status = 'requires_confirmation';
+  else if (result.issues.some(issue => issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells' || issue.code === 'upgrade_required_mapping_ambiguous' || issue.code === 'upgrade_required_business_cell_missing')) result.status = 'requires_confirmation';
   else if (result.issues.length > 0) result.status = 'repairable';
   return result;
 }

@@ -13,7 +13,8 @@ import { saveCurrentProfileTemplate_ACU } from '../../data/repositories/profile-
 import { persistCurrentTemplatePresetName_ACU, saveSettings_ACU } from '../settings/settings-service';
 import { applyTemplateScopeForCurrentChat_ACU } from '../settings/settings-service';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
-import { saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
+import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
+import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { buildChatSheetGuideDataFromData_ACU, buildChatSheetGuideDataFromTemplateObj_ACU, buildChatTemplateScopeStateFromCurrent_ACU, clearChatSheetGuideDataForIsolationKey_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, listChatTemplatePresetEntries_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, normalizeTemplateScopeMode_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU, setCurrentChatTemplateScopeState_ACU } from '../template/chat-scope';
 import { refreshMergedDataAndNotify_ACU } from '../worldbook/pipeline';
 import { safeJsonParse_ACU, safeJsonStringify_ACU } from '../../shared/json-helpers';
@@ -25,7 +26,8 @@ import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeO
 import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 import { isSqliteMode } from '../table/storage-mode';
-import { reloadStorageProvider } from '../table/table-storage-strategy';
+import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../table/table-storage-strategy';
+import { abortableDelay } from '../../shared/abortable-delay';
 
 // ═══ 预设存储 CRUD（内部辅助） ═══
 
@@ -302,7 +304,7 @@ export function persistTemplateScopeSelectionState_ACU(presetName: string, { sou
 
 // ═══ 模板应用（纯业务逻辑，不做 UI 刷新） ═══
 
-export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { scope = 'global', source = 'ui', presetName = '', save = true, persistChatScope = null as boolean | null, registerChatPresetEntry = null as boolean | null, destructiveChangeConfirmed = false } = {}) {
+export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { scope = 'global', source = 'ui', presetName = '', save = true, persistChatScope = null as boolean | null, registerChatPresetEntry = null as boolean | null, destructiveChangeConfirmed = false, signal = undefined as AbortSignal | undefined } = {}) {
     const normalizedScope = normalizeTemplateOperationScope_ACU(scope);
     const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateSource);
     if (!snapshot?.templateStr || !snapshot?.templateObj) return false;
@@ -312,6 +314,7 @@ export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { sc
             source,
             presetName,
             destructiveChangeConfirmed,
+            signal,
         });
     }
 
@@ -346,6 +349,56 @@ export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { sc
     };
 }
 
+type ChatStorageWaitResult_ACU =
+    | { status: 'ready'; identity: string }
+    | { status: 'switched' }
+    | { status: 'aborted' }
+    | { status: 'timeout' };
+
+function getChatContextSnapshot_ACU() {
+    const chat = getChatArray_ACU();
+    return {
+        chat,
+        firstMessage: Array.isArray(chat) ? chat[0] : undefined,
+        identity: getActiveChatStorageIdentity_ACU(chat),
+    };
+}
+
+function chatContextMatches_ACU(expectedIdentity: string, expectedFirstMessage: unknown): boolean {
+    const current = getChatContextSnapshot_ACU();
+    if (expectedFirstMessage && current.firstMessage !== expectedFirstMessage) return false;
+    return !expectedIdentity || current.identity === expectedIdentity;
+}
+
+async function waitForActiveChatStorageContext_ACU({
+    expectedIdentity,
+    expectedFirstMessage,
+    signal,
+    timeoutMs = 3000,
+    pollIntervalMs = 100,
+}: {
+    expectedIdentity: string;
+    expectedFirstMessage: unknown;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+}): Promise<ChatStorageWaitResult_ACU> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+        if (signal?.aborted) return { status: 'aborted' };
+        const current = getChatContextSnapshot_ACU();
+        if (expectedFirstMessage && current.firstMessage !== expectedFirstMessage) return { status: 'switched' };
+        if (expectedIdentity && current.identity && current.identity !== expectedIdentity) return { status: 'switched' };
+        if (current.identity) return { status: 'ready', identity: current.identity };
+        await abortableDelay(pollIntervalMs, signal);
+    }
+    if (signal?.aborted) return { status: 'aborted' };
+    const current = getChatContextSnapshot_ACU();
+    if (expectedFirstMessage && current.firstMessage !== expectedFirstMessage) return { status: 'switched' };
+    if (expectedIdentity && current.identity && current.identity !== expectedIdentity) return { status: 'switched' };
+    return current.identity ? { status: 'ready', identity: current.identity } : { status: 'timeout' };
+}
+
 /**
  * Applies a chat template through the only V2 template commit entrypoint.  Do not
  * replace this with scope-only writes: doing so discards the replay/transaction
@@ -355,19 +408,34 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
     source = 'ui',
     presetName = '',
     destructiveChangeConfirmed = false,
+    signal,
 }: {
     source?: string;
     presetName?: string;
     destructiveChangeConfirmed?: boolean;
+    signal?: AbortSignal;
 } = {}) {
     const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateData);
     if (!snapshot?.templateObj) return { saved: false, error: '模板结构无效，无法生成聊天模板提交。' };
+
+    const entryContext = getChatContextSnapshot_ACU();
+    if (!entryContext.firstMessage) {
+        return { saved: false, error: '当前没有可绑定的目标聊天，已取消模板提交。' };
+    }
+    const chatStorageWait = await waitForActiveChatStorageContext_ACU({ expectedIdentity: entryContext.identity, expectedFirstMessage: entryContext.firstMessage, signal });
+    if (chatStorageWait.status === 'switched') return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
+    if (chatStorageWait.status === 'aborted') return { saved: false, error: '模板提交已取消。' };
+    if (chatStorageWait.status === 'timeout') return { saved: false, error: '当前聊天元数据尚未就绪，请等待聊天加载完成后重试。' };
+    const targetChatIdentity = chatStorageWait.identity;
 
     const isolationKey = getCurrentIsolationKey_ACU();
     // Capture before any asynchronous replay/planning work. "all" is deliberate:
     // a template import can match, introduce, or delete sheets only after planning.
     const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
     let baselineData: any = null;
+    if (!chatContextMatches_ACU(targetChatIdentity, entryContext.firstMessage)) {
+        return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
+    }
     try {
         baselineData = await loadTableStateFromFramesV2_ACU(undefined, isolationKey, { updateRuntimeState: false });
     } catch (error) {
@@ -398,6 +466,10 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
     });
     if (!guideData) return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
 
+    if (signal?.aborted) return { saved: false, error: '模板提交已取消。' };
+    if (!chatContextMatches_ACU(targetChatIdentity, entryContext.firstMessage)) {
+        return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
+    }
     const hasStructuralChanges = plan.sheetChanges.length > 0 || plan.deletedSheetKeys.length > 0;
     const committed = hasStructuralChanges
         ? await commitCurrentFloorTemplateChanges_ACU({
@@ -411,6 +483,9 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
             source,
             reason: 'chat_template_reconciliation',
             baseRevision,
+            expectedChatIdentity: targetChatIdentity,
+            expectedFirstMessage: entryContext.firstMessage,
+            signal,
         })
         : await commitCurrentFloorTemplateScopeOnly_ACU({
             isolationKey,
@@ -421,6 +496,9 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
             presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
             source,
             reason: 'chat_template_reconciliation',
+            expectedChatIdentity: targetChatIdentity,
+            expectedFirstMessage: entryContext.firstMessage,
+            signal,
         });
     if (!committed.saved) return { ...committed, blockers: plan.blockers, audit: plan.audit };
 
@@ -428,18 +506,33 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
     applyTemplateScopeForCurrentChat_ACU();
     // checkpoint 已落盘，但 SQLite runtime 仍是切换前的旧快照。
     // 必须按 checkpoint 重建 runtime，否则新引入表自带的数据在编辑器/查询里读不到（显示 0 行）。
+    const postCommitWarnings: string[] = [];
     if (isSqliteMode()) {
         try {
             await reloadStorageProvider();
+            if (didSqliteFallbackAfterReload_ACU('sqlite')) {
+                throw new Error('SQLite 运行时重载后已回退到原生模式。');
+            }
         } catch (error) {
+            postCommitWarnings.push(`模板已保存，但 SQLite 运行时重建失败：${error instanceof Error ? error.message : String(error)}`);
             logWarn_ACU('[TemplateScope] 聊天模板提交成功，但 SQLite 运行时重建失败:', error);
         }
     }
-    try { await refreshMergedDataAndNotify_ACU(); } catch (error) { logWarn_ACU('[TemplateScope] 聊天模板提交成功，但运行时刷新失败:', error); }
-    return { ...committed, audit: plan.audit };
+    try {
+        await refreshMergedDataAndNotify_ACU();
+    } catch (error) {
+        postCommitWarnings.push(`模板已保存，但运行时数据刷新失败：${error instanceof Error ? error.message : String(error)}`);
+        logWarn_ACU('[TemplateScope] 聊天模板提交成功，但运行时刷新失败:', error);
+    }
+    const postCommitWarning = postCommitWarnings.join('；');
+    return {
+        ...committed,
+        audit: plan.audit,
+        ...(postCommitWarning ? { runtimeReady: false, postCommitWarning } : { runtimeReady: true }),
+    };
 }
 
-export async function applyTemplatePresetToCurrent_ACU(presetName: string, { source = 'ui', updateGlobal = true, save = true, persistChatScope = undefined as boolean | undefined, chatSelectionSource = 'auto' as 'auto' | 'snapshot' | 'global', destructiveChangeConfirmed = false } = {}) {
+export async function applyTemplatePresetToCurrent_ACU(presetName: string, { source = 'ui', updateGlobal = true, save = true, persistChatScope = undefined as boolean | undefined, chatSelectionSource = 'auto' as 'auto' | 'snapshot' | 'global', destructiveChangeConfirmed = false, signal = undefined as AbortSignal | undefined } = {}) {
     const _persistChatScope = persistChatScope ?? !updateGlobal;
     const name = normalizeTemplatePresetSelectionValue_ACU(presetName);
     const isDefaultPreset = isDefaultTemplatePresetSelection_ACU(name);
@@ -460,6 +553,7 @@ export async function applyTemplatePresetToCurrent_ACU(presetName: string, { sou
             presetName: name,
             registerChatPresetEntry: false,
             destructiveChangeConfirmed,
+            signal,
         });
         if (!applied || typeof applied !== 'object' || !('saved' in applied) || !applied.saved) return applied || false;
         return {

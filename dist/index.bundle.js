@@ -3554,14 +3554,17 @@ $CONTENT
         }
         return '';
     }
-    function hasActiveChatContext_ACU(chat) {
+    function getActiveChatStorageIdentity_ACU(chat) {
         if (!getChatFirstLayerMessageLocal_ACU(chat))
-            return false;
+            return '';
         const api = SillyTavern_API_ACU;
         if (api && (typeof api.getCurrentChatId === 'function' || Object.prototype.hasOwnProperty.call(api, 'chatId'))) {
-            return !!getActiveChatId_ACU();
+            return getActiveChatId_ACU();
         }
-        return true;
+        return '__host_without_chat_id__';
+    }
+    function hasActiveChatContext_ACU(chat) {
+        return !!getActiveChatStorageIdentity_ACU(chat);
     }
     function getChatMetadataOwnerField_ACU(field) {
         return `${field}__chatId`;
@@ -3675,7 +3678,7 @@ $CONTENT
      * @param chat SillyTavern 聊天数组
      * @returns 解析后的配置对象，或 null
      */
-    function getChatScopedConfigContainer_ACU(chat) {
+    function readChatScopedConfigContainer_ACU(chat, persistLegacyMerge) {
         if (!hasActiveChatContext_ACU(chat))
             return null;
         const rawMetadataContainer = readContainer_ACU(getChatMetadata_ACU()?.[CHAT_SCOPED_CONFIG_FIELD_ACU]);
@@ -3685,9 +3688,16 @@ $CONTENT
             ? rawMetadataContainer
             : null;
         const merged = mergeLegacyScopedConfigIntoMetadata_ACU(metadataContainer, legacyContainer);
-        if (merged.changed && merged.container)
+        if (persistLegacyMerge && merged.changed && merged.container)
             writeChatMetadataField_ACU(CHAT_SCOPED_CONFIG_FIELD_ACU, merged.container);
         return merged.container;
+    }
+    function getChatScopedConfigContainer_ACU(chat) {
+        return readChatScopedConfigContainer_ACU(chat, true);
+    }
+    /** 事务快照专用纯读取：合并 legacy 槽位但绝不回写 chatMetadata。 */
+    function peekChatScopedConfigContainer_ACU(chat) {
+        return readChatScopedConfigContainer_ACU(chat, false);
     }
     /**
      * 规范化作用域配置容器（确保 version 字段存在且合法）
@@ -3710,7 +3720,7 @@ $CONTENT
      * @param chat SillyTavern 聊天数组
      * @returns 解析后的 guide 对象，或 null
      */
-    function getChatSheetGuideContainer_ACU(chat) {
+    function readChatSheetGuideContainer_ACU(chat, persistLegacyMerge) {
         if (!hasActiveChatContext_ACU(chat))
             return null;
         const rawMetadataContainer = readContainer_ACU(getChatMetadata_ACU()?.[CHAT_SHEET_GUIDE_FIELD_ACU]);
@@ -3720,9 +3730,16 @@ $CONTENT
             ? rawMetadataContainer
             : null;
         const merged = mergeLegacyGuideIntoMetadata_ACU(metadataContainer, legacyContainer);
-        if (merged.changed && merged.container)
+        if (persistLegacyMerge && merged.changed && merged.container)
             writeChatMetadataField_ACU(CHAT_SHEET_GUIDE_FIELD_ACU, merged.container);
         return merged.container;
+    }
+    function getChatSheetGuideContainer_ACU(chat) {
+        return readChatSheetGuideContainer_ACU(chat, true);
+    }
+    /** 事务快照专用纯读取：合并 legacy 槽位但绝不回写 chatMetadata。 */
+    function peekChatSheetGuideContainer_ACU(chat) {
+        return readChatSheetGuideContainer_ACU(chat, false);
     }
     function setChatScopedConfigContainer_ACU(chat, container) {
         if (!hasActiveChatContext_ACU(chat))
@@ -38203,7 +38220,78 @@ $CONTENT
         if (plan)
             result.repairPlan.push(plan);
     }
-    function inspectRows_ACU(result, sheetKey, rows, pool, headerLength, ids) {
+    function canonicalPhysicalName_ACU(value) {
+        const normalized = String(value ?? '').trim();
+        if ((normalized.startsWith('"') && normalized.endsWith('"'))
+            || (normalized.startsWith('`') && normalized.endsWith('`'))
+            || (normalized.startsWith('[') && normalized.endsWith(']'))) {
+            return normalized.slice(1, -1).trim().toLowerCase();
+        }
+        return normalized.toLowerCase();
+    }
+    function headerMatchesColumn_ACU(headerValue, sqlName, comment) {
+        const value = String(headerValue ?? '').trim();
+        return !!value && (canonicalPhysicalName_ACU(value) === canonicalPhysicalName_ACU(sqlName) || (!!comment && value === comment));
+    }
+    function resolveRequiredHeaderIndexes_ACU(result, sheetKey, sheet, header, omitLeadingRowId = false) {
+        const ddl = isRecord_ACU$3(sheet.sourceData) && typeof sheet.sourceData.ddl === 'string' ? sheet.sourceData.ddl : '';
+        if (!ddl)
+            return new Map();
+        const ddlColumns = parseDDLColumnInfos_ACU(ddl).slice(omitLeadingRowId ? 1 : 0);
+        const required = new Map();
+        const assignRequiredIndex = (headerIndex, sqlName) => {
+            const canonicalName = canonicalPhysicalName_ACU(sqlName);
+            const existing = required.get(headerIndex);
+            if (existing && existing !== canonicalName) {
+                addIssue_ACU(result, {
+                    code: 'upgrade_required_mapping_ambiguous', sheetKey, rowIndex: 0,
+                    message: `表头第 ${headerIndex + 1} 列同时映射到 NOT NULL 业务列「${existing}」与「${canonicalName}」，无法安全确定列位置`,
+                });
+                return;
+            }
+            required.set(headerIndex, canonicalName);
+        };
+        // 按索引映射只有在每个表头都只命中对应 DDL 列时才算“可证明”；重复中文注释不能靠顺序猜。
+        const positionalMappingIsProven = ddlColumns.length === header.length
+            && ddlColumns.every((column, index) => {
+                if (!headerMatchesColumn_ACU(header[index], column.sqlName, column.comment))
+                    return false;
+                const matchedDdlColumns = ddlColumns.filter(candidate => headerMatchesColumn_ACU(header[index], candidate.sqlName, candidate.comment));
+                return matchedDdlColumns.length === 1;
+            });
+        for (const column of ddlColumns) {
+            // row_id 的空值、重复与跨池冲突由专用身份审计负责，不能再伪装成业务列缺失。
+            if (canonicalPhysicalName_ACU(column.sqlName) === 'row_id')
+                continue;
+            if (!column.isNotNull || column.hasDefault || column.isPrimaryKey)
+                continue;
+            if (positionalMappingIsProven) {
+                assignRequiredIndex(column.index - (omitLeadingRowId ? 1 : 0), column.sqlName);
+                continue;
+            }
+            const physicalMatches = header
+                .map((value, index) => ({ value: canonicalPhysicalName_ACU(value), index }))
+                .filter(item => item.value === canonicalPhysicalName_ACU(column.sqlName));
+            const commentMatches = column.comment
+                ? header.map((value, index) => ({ value: String(value ?? '').trim(), index })).filter(item => item.value === column.comment)
+                : [];
+            const matches = physicalMatches.length > 0 ? physicalMatches : commentMatches;
+            if (matches.length === 1) {
+                assignRequiredIndex(matches[0].index, column.sqlName);
+                continue;
+            }
+            addIssue_ACU(result, {
+                code: 'upgrade_required_mapping_ambiguous',
+                sheetKey,
+                rowIndex: 0,
+                message: matches.length > 1
+                    ? `NOT NULL 业务列「${canonicalPhysicalName_ACU(column.sqlName)}」匹配到多个表头，无法安全确定列位置`
+                    : `NOT NULL 业务列「${canonicalPhysicalName_ACU(column.sqlName)}」无法映射到表头，不能跳过必填审计`,
+            });
+        }
+        return required;
+    }
+    function inspectRows_ACU(result, sheetKey, rows, pool, headerLength, ids, requiredHeaderIndexes) {
         rows.forEach((row, offset) => {
             const rowIndex = pool === 'content' ? offset + 1 : offset;
             if (!Array.isArray(row)) {
@@ -38227,13 +38315,23 @@ $CONTENT
                 else
                     ids.set(rowId, { pool, rowIndex });
             }
-            if (row.length < headerLength)
+            if (row.length < headerLength) {
                 addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行短于表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
+            }
+            for (const [headerIndex, sqlName] of requiredHeaderIndexes) {
+                if (headerIndex < row.length && row[headerIndex] !== null && row[headerIndex] !== undefined)
+                    continue;
+                addIssue_ACU(result, {
+                    code: 'upgrade_required_business_cell_missing', sheetKey, rowIndex, rowPool: pool,
+                    rowId: rowId || undefined,
+                    message: `缺少 NOT NULL 且无默认值的业务列「${sqlName}」，不能猜测填充值`,
+                });
+            }
             if (row.length > headerLength)
                 addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, rowId: rowId || undefined, message: '行超出表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
         });
     }
-    function inspectRowsWithoutIds_ACU(result, sheetKey, rows, pool, expectedWidth) {
+    function inspectRowsWithoutIds_ACU(result, sheetKey, rows, pool, expectedWidth, requiredHeaderIndexes) {
         rows.forEach((row, offset) => {
             const rowIndex = pool === 'content' ? offset + 1 : offset;
             if (!Array.isArray(row)) {
@@ -38245,6 +38343,16 @@ $CONTENT
             else if (row.length > expectedWidth) {
                 addIssue_ACU(result, { code: 'upgrade_overflow_cells', sheetKey, rowIndex, rowPool: pool, message: '行超出业务表头，必须保留原值并等待确认' }, { action: 'preserve_overflow', sheetKey, rowIndex, rowPool: pool });
             }
+            if (!Array.isArray(row))
+                return;
+            for (const [headerIndex, sqlName] of requiredHeaderIndexes) {
+                if (headerIndex < row.length && row[headerIndex] !== null && row[headerIndex] !== undefined)
+                    continue;
+                addIssue_ACU(result, {
+                    code: 'upgrade_required_business_cell_missing', sheetKey, rowIndex, rowPool: pool,
+                    message: `缺少 NOT NULL 且无默认值的业务列「${sqlName}」，不能猜测填充值`,
+                });
+            }
         });
     }
     function determineHeaderRepair_ACU(result, sheetKey, sheet) {
@@ -38255,7 +38363,7 @@ $CONTENT
         }
         const header = content[0];
         const firstHeader = String(header[0] ?? '').trim();
-        if (firstHeader === 'row_id')
+        if (canonicalPhysicalName_ACU(firstHeader) === 'row_id')
             return { header, insertsRowId: false };
         if (!firstHeader || /^(id|rowid|row_id)$/i.test(firstHeader) || firstHeader === '行号') {
             addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '身份列表头可确定地规范化为 row_id' }, { action: 'rename_header', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
@@ -38264,11 +38372,11 @@ $CONTENT
         const ddl = isRecord_ACU$3(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
         const ddlText = typeof ddl === 'string' ? ddl : '';
         const ddlColumns = ddlText ? parseDDLColumnInfos_ACU(ddlText) : [];
-        const ddlHasLeadingRowId = ddlColumns[0]?.sqlName.toLowerCase() === 'row_id' && ddlColumns.length === header.length + 1;
+        // 只有 DDL 明确多出首列 row_id，且其余列按顺序与业务表头对应，才允许自动插入身份列。
+        const ddlHasLeadingRowId = canonicalPhysicalName_ACU(ddlColumns[0]?.sqlName) === 'row_id' && ddlColumns.length === header.length + 1;
         const headerMatchesDdlWithoutRowId = ddlHasLeadingRowId && header.every((value, index) => {
-            const headerValue = String(value ?? '').trim();
             const ddlColumn = ddlColumns[index + 1];
-            return !!headerValue && !!ddlColumn && (ddlColumn.sqlName === headerValue || ddlColumn.comment === headerValue);
+            return !!ddlColumn && headerMatchesColumn_ACU(value, ddlColumn.sqlName, ddlColumn.comment);
         });
         if (headerMatchesDdlWithoutRowId) {
             addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: 'DDL 证明当前业务表头缺少 row_id 列，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
@@ -38305,25 +38413,41 @@ $CONTENT
             const seedRows = Array.isArray(rawSheet.seedRows) ? rawSheet.seedRows : [];
             const ids = new Map();
             if (headerState.insertsRowId) {
+                // 此时行内尚无 row_id；宽度与 NOT NULL 业务列必须按原业务表头独立审计。
                 const expectedBusinessWidth = headerState.header.length - 1;
-                inspectRowsWithoutIds_ACU(result, sheetKey, content.slice(1), 'content', expectedBusinessWidth);
-                inspectRowsWithoutIds_ACU(result, sheetKey, seedRows, 'seedRows', expectedBusinessWidth);
+                const requiredHeaderIndexes = resolveRequiredHeaderIndexes_ACU(result, sheetKey, rawSheet, headerState.header.slice(1), true);
+                inspectRowsWithoutIds_ACU(result, sheetKey, content.slice(1), 'content', expectedBusinessWidth, requiredHeaderIndexes);
+                inspectRowsWithoutIds_ACU(result, sheetKey, seedRows, 'seedRows', expectedBusinessWidth, requiredHeaderIndexes);
                 content.slice(1).forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset + 1, rowPool: 'content' }));
                 seedRows.forEach((_row, offset) => result.repairPlan.push({ action: 'assign_row_id', sheetKey, rowIndex: offset, rowPool: 'seedRows' }));
                 continue;
             }
-            inspectRows_ACU(result, sheetKey, content.slice(1), 'content', headerState.header.length, ids);
-            inspectRows_ACU(result, sheetKey, seedRows, 'seedRows', headerState.header.length, ids);
+            const requiredHeaderIndexes = resolveRequiredHeaderIndexes_ACU(result, sheetKey, rawSheet, headerState.header);
+            inspectRows_ACU(result, sheetKey, content.slice(1), 'content', headerState.header.length, ids, requiredHeaderIndexes);
+            inspectRows_ACU(result, sheetKey, seedRows, 'seedRows', headerState.header.length, ids, requiredHeaderIndexes);
         }
         if (result.issues.some(issue => issue.code === 'upgrade_invalid_data' || issue.code === 'upgrade_missing_sheet'))
             result.status = 'unrecoverable';
-        else if (result.issues.some(issue => issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells'))
+        else if (result.issues.some(issue => issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells' || issue.code === 'upgrade_required_mapping_ambiguous' || issue.code === 'upgrade_required_business_cell_missing'))
             result.status = 'requires_confirmation';
         else if (result.issues.length > 0)
             result.status = 'repairable';
         return result;
     }
 
+    function assertTemplateCommitChatContext_ACU(expectedChat, options) {
+        if (options.signal?.aborted)
+            throw new Error('模板提交已取消。');
+        const activeChat = getChatArray_ACU();
+        if (!Array.isArray(activeChat) || activeChat.length === 0)
+            throw new Error('目标聊天已切换，已取消模板提交。');
+        if (options.expectedFirstMessage && (expectedChat[0] !== options.expectedFirstMessage || activeChat[0] !== options.expectedFirstMessage)) {
+            throw new Error('目标聊天已切换，已取消模板提交。');
+        }
+        if (options.expectedChatIdentity && getActiveChatStorageIdentity_ACU(activeChat) !== options.expectedChatIdentity) {
+            throw new Error('目标聊天已切换，已取消模板提交。');
+        }
+    }
     function safeJsonByteLength_ACU(value) {
         try {
             return new TextEncoder().encode(JSON.stringify(value)).length;
@@ -39770,9 +39894,11 @@ $CONTENT
                 const chat = getChatArray_ACU();
                 if (!Array.isArray(chat) || chat.length === 0)
                     throw new Error('chat history is empty');
+                assertTemplateCommitChatContext_ACU(chat, options);
                 transactionContext.assertFresh?.('commitCurrentFloorTemplateScopeOnly:before_commit');
-                const previousScopeContainer = cloneOptionalJson_ACU(getChatScopedConfigContainer_ACU(chat));
-                const previousGuideContainer = cloneOptionalJson_ACU(getChatSheetGuideContainer_ACU(chat));
+                assertTemplateCommitChatContext_ACU(chat, options);
+                const previousScopeContainer = cloneOptionalJson_ACU(peekChatScopedConfigContainer_ACU(chat));
+                const previousGuideContainer = cloneOptionalJson_ACU(peekChatSheetGuideContainer_ACU(chat));
                 try {
                     const guideUpdated = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, options.guideData, {
                         reason: options.reason || 'chat_template_scope_only',
@@ -40012,6 +40138,7 @@ $CONTENT
                 if (!Array.isArray(chat) || chat.length === 0) {
                     throw new Error('chat history is empty');
                 }
+                assertTemplateCommitChatContext_ACU(chat, options);
                 const latestAiTarget = findTargetAiMessage_ACU(chat, undefined);
                 const target = findTargetAiMessage_ACU(chat, options.targetMessageIndex);
                 if (!latestAiTarget || !target) {
@@ -40038,6 +40165,7 @@ $CONTENT
                     throw new Error(`V2 当前楼层模板提交目标早于最近 full checkpoint：targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}。`);
                 }
                 transactionContext.assertFresh?.('commitCurrentFloorTemplateChanges:before_commit');
+                assertTemplateCommitChatContext_ACU(chat, options);
                 if (chat[target.index] !== target.message || target.message.is_user) {
                     throw new Error('target AI message changed before template commit; abort stale table write.');
                 }
@@ -40050,6 +40178,7 @@ $CONTENT
                     }
                     const templateSnapshot = deepClone_ACU$1(options.templateSource);
                     await assertValidInitialTemplateSnapshot_ACU(templateSnapshot, options.guideData);
+                    assertTemplateCommitChatContext_ACU(chat, options);
                     for (const change of requestedChanges) {
                         // hide 的语义就是把该表从活跃模板中移除，因此它不会出现在新的 templateSource
                         // 快照里；这里要求快照包含它会让「隐藏表 + 无 checkpoint」的切换直接失败。
@@ -40073,8 +40202,8 @@ $CONTENT
                             throw new Error(`预填表模板提交的 templateSource 与目标 Sheet 不一致：${change.sheetKey}。`);
                         }
                     }
-                    const previousScopeContainer = cloneOptionalJson_ACU(getChatScopedConfigContainer_ACU(chat));
-                    const previousGuideContainer = cloneOptionalJson_ACU(getChatSheetGuideContainer_ACU(chat));
+                    const previousScopeContainer = cloneOptionalJson_ACU(peekChatScopedConfigContainer_ACU(chat));
+                    const previousGuideContainer = cloneOptionalJson_ACU(peekChatSheetGuideContainer_ACU(chat));
                     const messageSnapshots = snapshotTemplateDeleteMessages_ACU(chat, true);
                     try {
                         const checkpointData = deepClone_ACU$1(templateSnapshot);
@@ -40128,6 +40257,7 @@ $CONTENT
                         });
                         if (!guideUpdated)
                             throw new Error('预填表模板提交无法原子写入 guideData 与 template scope。');
+                        assertTemplateCommitChatContext_ACU(chat, options);
                         await saveChatToHostStrict_ACU();
                         return { saved: true, mode: 'v2_commit', messageIndex: target.index, checkpoints: initialSheetCheckpoints, removedNullRowCount: 0 };
                     }
@@ -40149,11 +40279,12 @@ $CONTENT
                     throw new Error('当前楼层模板提交要求目标 AI 楼层已存在合法 V2 storage frame；请先完成既有迁移。');
                 }
                 const messageSnapshots = snapshotTemplateDeleteMessages_ACU(chat, deletedSheetKeys.length > 0);
-                const previousScopeContainer = cloneOptionalJson_ACU(getChatScopedConfigContainer_ACU(chat));
-                const previousGuideContainer = cloneOptionalJson_ACU(getChatSheetGuideContainer_ACU(chat));
+                const previousScopeContainer = cloneOptionalJson_ACU(peekChatScopedConfigContainer_ACU(chat));
+                const previousGuideContainer = cloneOptionalJson_ACU(peekChatSheetGuideContainer_ACU(chat));
                 let primarySaveAttempted = false;
+                let sharedStateMutated = false;
+                let purgedMessageCount = 0;
                 try {
-                    const purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count), 0);
                     const introductionSheets = new Map();
                     const rebaseSheets = new Map();
                     const revealSheets = new Map();
@@ -40202,6 +40333,7 @@ $CONTENT
                         throw new Error('目标 V2 storage frame 在模板提交准备期间发生变化。');
                     }
                     const activeReplayState = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index, updateRuntimeState: false });
+                    assertTemplateCommitChatContext_ACU(chat, options);
                     if (!activeReplayState) {
                         throw new Error('V2 当前楼层模板提交无法解析 active full checkpoint replay state。');
                     }
@@ -40229,6 +40361,7 @@ $CONTENT
                             // (2) 历史 frame 畸形/无法证伪（`cannot disprove`）——此时并非真的曾有该表，
                             // 不能凭损坏历史臆造 reveal 数据。二者的区分依据：能否 bounded replay 定位到可信数据。
                             const revealSource = await locateRevealSourceSheetData_ACU(chat, isolationKey, target.index, change.sheetKey);
+                            assertTemplateCommitChatContext_ACU(chat, options);
                             if (revealSource) {
                                 // 能定位到可信历史可见数据 → 曾被隐藏的表，reveal 恢复"离开时最新状态"（语义1）。
                                 revealDataBySheet.set(change.sheetKey, revealSource);
@@ -40334,6 +40467,7 @@ $CONTENT
                             throw new Error(`V2 sheet hide 不能与删除同一 sheetKey 组合：${sheetKey}。`);
                         }
                         const hideSource = await locateRevealSourceSheetData_ACU(chat, isolationKey, target.index, sheetKey);
+                        assertTemplateCommitChatContext_ACU(chat, options);
                         if (!hideSource) {
                             throw new Error(`V2 sheet hide 无法定位待隐藏表的当前数据：sheetKey=${sheetKey}。`);
                         }
@@ -40383,6 +40517,10 @@ $CONTENT
                             writeSet,
                         };
                     })();
+                    // 所有异步准备完成后，在第一次内存写入前重新核验当前活动聊天与取消状态。
+                    assertTemplateCommitChatContext_ACU(chat, options);
+                    sharedStateMutated = true;
+                    purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count), 0);
                     frame.perSheetCheckpoints = {
                         ...(frame.perSheetCheckpoints || {}),
                         ...Object.fromEntries(checkpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
@@ -40390,6 +40528,10 @@ $CONTENT
                     if (entryOptions)
                         appendMutationLogEntry_ACU(frame, entryOptions);
                     target.message.TavernDB_ACU_IsolatedData = isolatedData;
+                    // isolatedData 在异步准备前已克隆；重新挂回目标消息后必须同步应用删除，
+                    // 否则会把刚刚从真实消息清理掉的目标 frame 旧快照覆盖回来。
+                    if (deletedSheetKeys.length > 0)
+                        purgeSheetKeysFromMessage_ACU(target.message, deletedSheetKeys);
                     writeMessageIdentity_ACU(target.message, {
                         enabled: settings_ACU.dataIsolationEnabled,
                         code: settings_ACU.dataIsolationCode,
@@ -40404,6 +40546,7 @@ $CONTENT
                     });
                     if (!guideUpdated)
                         throw new Error('当前楼层模板提交无法写入 guideData。');
+                    assertTemplateCommitChatContext_ACU(chat, options);
                     primarySaveAttempted = true;
                     await saveChatToHostStrict_ACU();
                     logDebug_ACU(`[V2 Persist] 当前楼层模板提交完成: messageIndex=${target.index}, checkpoints=${checkpoints.length}, operations=${operations.length}, isolationKey=${isolationKey}`);
@@ -40417,9 +40560,11 @@ $CONTENT
                     };
                 }
                 catch (error) {
-                    restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
-                    setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
-                    setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
+                    if (sharedStateMutated) {
+                        restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
+                        setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
+                        setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
+                    }
                     if (primarySaveAttempted) {
                         try {
                             await saveChatToHostStrict_ACU();
@@ -44344,6 +44489,45 @@ $CONTENT
     }
 
     /**
+     * shared/abortable-delay.ts
+     * 可被 AbortSignal 中断的延时等待工具函数
+     *
+     * AbortSignal / setTimeout / Promise 均为 Web 标准 API，不涉及 DOM 节点操作，
+     * 放在 shared 层供所有层级使用。
+     */
+    /**
+     * 等待指定毫秒数，期间若 signal 被 abort 则立即 resolve（不 reject）。
+     * @param ms      延时毫秒数
+     * @param signal  可选的 AbortSignal，为空时退化为普通 setTimeout
+     */
+    function abortableDelay(ms, signal) {
+        return new Promise(resolve => {
+            if (signal?.aborted) {
+                resolve();
+                return;
+            }
+            let timer = null;
+            const done = () => {
+                if (timer !== null) {
+                    clearTimeout(timer);
+                    timer = null;
+                }
+                if (signal) {
+                    try {
+                        signal.removeEventListener('abort', done);
+                    }
+                    catch (_) { /* noop */ }
+                }
+                resolve();
+            };
+            timer = setTimeout(done, ms);
+            if (signal) {
+                signal.addEventListener('abort', done, { once: true });
+            }
+        });
+    }
+
+    /**
      * service/template/template-preset-service.ts — 模板预设业务逻辑
      *
      * 从 presentation/components/template-preset-ui.ts 真正搬入的纯数据/逻辑函数。
@@ -44618,7 +44802,7 @@ $CONTENT
         return normalizedPresetName;
     }
     // ═══ 模板应用（纯业务逻辑，不做 UI 刷新） ═══
-    async function applyTemplateSnapshotToScope_ACU(templateSource, { scope = 'global', source = 'ui', presetName = '', save = true, persistChatScope = null, registerChatPresetEntry = null, destructiveChangeConfirmed = false } = {}) {
+    async function applyTemplateSnapshotToScope_ACU(templateSource, { scope = 'global', source = 'ui', presetName = '', save = true, persistChatScope = null, registerChatPresetEntry = null, destructiveChangeConfirmed = false, signal = undefined } = {}) {
         const normalizedScope = normalizeTemplateOperationScope_ACU(scope);
         const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateSource);
         if (!snapshot?.templateStr || !snapshot?.templateObj)
@@ -44628,6 +44812,7 @@ $CONTENT
                 source,
                 presetName,
                 destructiveChangeConfirmed,
+                signal,
             });
         }
         const normalizedPresetName = normalizeTemplatePresetSelectionValue_ACU(presetName);
@@ -44661,20 +44846,72 @@ $CONTENT
             templateObj: snapshot.templateObj,
         };
     }
+    function getChatContextSnapshot_ACU() {
+        const chat = getChatArray_ACU();
+        return {
+            chat,
+            firstMessage: Array.isArray(chat) ? chat[0] : undefined,
+            identity: getActiveChatStorageIdentity_ACU(chat),
+        };
+    }
+    function chatContextMatches_ACU(expectedIdentity, expectedFirstMessage) {
+        const current = getChatContextSnapshot_ACU();
+        if (expectedFirstMessage && current.firstMessage !== expectedFirstMessage)
+            return false;
+        return !expectedIdentity || current.identity === expectedIdentity;
+    }
+    async function waitForActiveChatStorageContext_ACU({ expectedIdentity, expectedFirstMessage, signal, timeoutMs = 3000, pollIntervalMs = 100, }) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() <= deadline) {
+            if (signal?.aborted)
+                return { status: 'aborted' };
+            const current = getChatContextSnapshot_ACU();
+            if (expectedFirstMessage && current.firstMessage !== expectedFirstMessage)
+                return { status: 'switched' };
+            if (expectedIdentity && current.identity && current.identity !== expectedIdentity)
+                return { status: 'switched' };
+            if (current.identity)
+                return { status: 'ready', identity: current.identity };
+            await abortableDelay(pollIntervalMs, signal);
+        }
+        if (signal?.aborted)
+            return { status: 'aborted' };
+        const current = getChatContextSnapshot_ACU();
+        if (expectedFirstMessage && current.firstMessage !== expectedFirstMessage)
+            return { status: 'switched' };
+        if (expectedIdentity && current.identity && current.identity !== expectedIdentity)
+            return { status: 'switched' };
+        return current.identity ? { status: 'ready', identity: current.identity } : { status: 'timeout' };
+    }
     /**
      * Applies a chat template through the only V2 template commit entrypoint.  Do not
      * replace this with scope-only writes: doing so discards the replay/transaction
      * contract and silently bypasses schema migration and destructive-change checks.
      */
-    async function applyChatTemplateSnapshotWithReconciliation_ACU(templateData, { source = 'ui', presetName = '', destructiveChangeConfirmed = false, } = {}) {
+    async function applyChatTemplateSnapshotWithReconciliation_ACU(templateData, { source = 'ui', presetName = '', destructiveChangeConfirmed = false, signal, } = {}) {
         const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateData);
         if (!snapshot?.templateObj)
             return { saved: false, error: '模板结构无效，无法生成聊天模板提交。' };
+        const entryContext = getChatContextSnapshot_ACU();
+        if (!entryContext.firstMessage) {
+            return { saved: false, error: '当前没有可绑定的目标聊天，已取消模板提交。' };
+        }
+        const chatStorageWait = await waitForActiveChatStorageContext_ACU({ expectedIdentity: entryContext.identity, expectedFirstMessage: entryContext.firstMessage, signal });
+        if (chatStorageWait.status === 'switched')
+            return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
+        if (chatStorageWait.status === 'aborted')
+            return { saved: false, error: '模板提交已取消。' };
+        if (chatStorageWait.status === 'timeout')
+            return { saved: false, error: '当前聊天元数据尚未就绪，请等待聊天加载完成后重试。' };
+        const targetChatIdentity = chatStorageWait.identity;
         const isolationKey = getCurrentIsolationKey_ACU();
         // Capture before any asynchronous replay/planning work. "all" is deliberate:
         // a template import can match, introduce, or delete sheets only after planning.
         const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
         let baselineData = null;
+        if (!chatContextMatches_ACU(targetChatIdentity, entryContext.firstMessage)) {
+            return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
+        }
         try {
             baselineData = await loadTableStateFromFramesV2_ACU(undefined, isolationKey, { updateRuntimeState: false });
         }
@@ -44706,6 +44943,11 @@ $CONTENT
         });
         if (!guideData)
             return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
+        if (signal?.aborted)
+            return { saved: false, error: '模板提交已取消。' };
+        if (!chatContextMatches_ACU(targetChatIdentity, entryContext.firstMessage)) {
+            return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
+        }
         const hasStructuralChanges = plan.sheetChanges.length > 0 || plan.deletedSheetKeys.length > 0;
         const committed = hasStructuralChanges
             ? await commitCurrentFloorTemplateChanges_ACU({
@@ -44719,6 +44961,9 @@ $CONTENT
                 source,
                 reason: 'chat_template_reconciliation',
                 baseRevision,
+                expectedChatIdentity: targetChatIdentity,
+                expectedFirstMessage: entryContext.firstMessage,
+                signal,
             })
             : await commitCurrentFloorTemplateScopeOnly_ACU({
                 isolationKey,
@@ -44729,6 +44974,9 @@ $CONTENT
                 presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
                 source,
                 reason: 'chat_template_reconciliation',
+                expectedChatIdentity: targetChatIdentity,
+                expectedFirstMessage: entryContext.firstMessage,
+                signal,
             });
         if (!committed.saved)
             return { ...committed, blockers: plan.blockers, audit: plan.audit };
@@ -44736,11 +44984,16 @@ $CONTENT
         applyTemplateScopeForCurrentChat_ACU();
         // checkpoint 已落盘，但 SQLite runtime 仍是切换前的旧快照。
         // 必须按 checkpoint 重建 runtime，否则新引入表自带的数据在编辑器/查询里读不到（显示 0 行）。
+        const postCommitWarnings = [];
         if (isSqliteMode()) {
             try {
                 await reloadStorageProvider();
+                if (didSqliteFallbackAfterReload_ACU('sqlite')) {
+                    throw new Error('SQLite 运行时重载后已回退到原生模式。');
+                }
             }
             catch (error) {
+                postCommitWarnings.push(`模板已保存，但 SQLite 运行时重建失败：${error instanceof Error ? error.message : String(error)}`);
                 logWarn_ACU('[TemplateScope] 聊天模板提交成功，但 SQLite 运行时重建失败:', error);
             }
         }
@@ -44748,11 +45001,17 @@ $CONTENT
             await refreshMergedDataAndNotify_ACU();
         }
         catch (error) {
+            postCommitWarnings.push(`模板已保存，但运行时数据刷新失败：${error instanceof Error ? error.message : String(error)}`);
             logWarn_ACU('[TemplateScope] 聊天模板提交成功，但运行时刷新失败:', error);
         }
-        return { ...committed, audit: plan.audit };
+        const postCommitWarning = postCommitWarnings.join('；');
+        return {
+            ...committed,
+            audit: plan.audit,
+            ...(postCommitWarning ? { runtimeReady: false, postCommitWarning } : { runtimeReady: true }),
+        };
     }
-    async function applyTemplatePresetToCurrent_ACU(presetName, { source = 'ui', updateGlobal = true, save = true, persistChatScope = undefined, chatSelectionSource = 'auto', destructiveChangeConfirmed = false } = {}) {
+    async function applyTemplatePresetToCurrent_ACU(presetName, { source = 'ui', updateGlobal = true, save = true, persistChatScope = undefined, chatSelectionSource = 'auto', destructiveChangeConfirmed = false, signal = undefined } = {}) {
         const _persistChatScope = persistChatScope ?? !updateGlobal;
         const name = normalizeTemplatePresetSelectionValue_ACU(presetName);
         const isDefaultPreset = isDefaultTemplatePresetSelection_ACU(name);
@@ -44773,6 +45032,7 @@ $CONTENT
                 presetName: name,
                 registerChatPresetEntry: false,
                 destructiveChangeConfirmed,
+                signal,
             });
             if (!applied || typeof applied !== 'object' || !('saved' in applied) || !applied.saved)
                 return applied || false;
@@ -54750,45 +55010,6 @@ $CONTENT
             return [finalDirectiveWithoutTags.trim(), rawFallbackText].filter(Boolean).join('\n');
         }
         return [baseDirective, rawFallbackText].filter(Boolean).join('\n');
-    }
-
-    /**
-     * shared/abortable-delay.ts
-     * 可被 AbortSignal 中断的延时等待工具函数
-     *
-     * AbortSignal / setTimeout / Promise 均为 Web 标准 API，不涉及 DOM 节点操作，
-     * 放在 shared 层供所有层级使用。
-     */
-    /**
-     * 等待指定毫秒数，期间若 signal 被 abort 则立即 resolve（不 reject）。
-     * @param ms      延时毫秒数
-     * @param signal  可选的 AbortSignal，为空时退化为普通 setTimeout
-     */
-    function abortableDelay(ms, signal) {
-        return new Promise(resolve => {
-            if (signal?.aborted) {
-                resolve();
-                return;
-            }
-            let timer = null;
-            const done = () => {
-                if (timer !== null) {
-                    clearTimeout(timer);
-                    timer = null;
-                }
-                if (signal) {
-                    try {
-                        signal.removeEventListener('abort', done);
-                    }
-                    catch (_) { /* noop */ }
-                }
-                resolve();
-            };
-            timer = setTimeout(done, ms);
-            if (signal) {
-                signal.addEventListener('abort', done, { once: true });
-            }
-        });
     }
 
     function normalizeId_ACU(value) {
@@ -67364,7 +67585,7 @@ $CONTENT
                     best = { ts, seedRows: sr };
                 }
             };
-            const scopedContainer = getChatScopedConfigContainer_ACU(chat);
+            const scopedContainer = peekChatScopedConfigContainer_ACU(chat);
             const scopedTemplateSlots = scopedContainer?.template;
             if (scopedTemplateSlots && typeof scopedTemplateSlots === 'object' && !Array.isArray(scopedTemplateSlots)) {
                 Object.keys(scopedTemplateSlots).forEach((tagKey) => {
@@ -67377,7 +67598,7 @@ $CONTENT
             if (best) {
                 return JSON.parse(JSON.stringify(best.seedRows));
             }
-            const container = getChatSheetGuideContainer_ACU(chat);
+            const container = peekChatSheetGuideContainer_ACU(chat);
             const tags = container?.tags;
             if (!tags || typeof tags !== 'object')
                 return null;
@@ -88431,12 +88652,17 @@ $CONTENT
                 save: true,
                 persistChatScope: normalizedScope === 'chat',
             });
-            if (!result) {
+            if (!result || (typeof result === 'object' && 'saved' in result && result.saved === false)) {
                 throw new Error('应用默认模板快照失败。');
             }
             if (showToast) {
                 if (normalizedScope === 'chat') {
-                    showToastr_ACU('success', '当前聊天模板已恢复为默认值！仅影响当前聊天，不会改动全局模板。');
+                    const warning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
+                        ? result.postCommitWarning
+                        : '';
+                    showToastr_ACU(warning ? 'warning' : 'success', warning || '当前聊天模板已恢复为默认值！仅影响当前聊天，不会改动全局模板。', {
+                        acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT,
+                    });
                 }
                 else {
                     showToastr_ACU('success', '全局模板已恢复为默认值！模板已更新，但不会影响当前聊天记录的本地数据。');
@@ -88513,14 +88739,11 @@ $CONTENT
                         if (!applied.saved) {
                             throw new Error(applied.error || '模板已解析，但应用到当前聊天失败。');
                         }
-                        try {
-                            await refreshMergedDataAndNotifyWithUI_ACU();
-                        }
-                        catch (e) { }
                         refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
-                        showToastr_ACU('success', `当前聊天模板快照已导入${derivedPresetName ? `（预设名：${derivedPresetName}）` : ''}。`, {
-                            acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                        });
+                        const warning = 'postCommitWarning' in applied && typeof applied.postCommitWarning === 'string'
+                            ? applied.postCommitWarning
+                            : '';
+                        showToastr_ACU(warning ? 'warning' : 'success', warning || `当前聊天模板快照已导入${derivedPresetName ? `（预设名：${derivedPresetName}）` : ''}。`, { acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT });
                         logDebug_ACU(`[TemplateScope] Template imported to chat scope: ${derivedPresetName}.`);
                     }
                 }
@@ -89345,15 +89568,12 @@ $CONTENT
                 showToastr_ACU('error', error, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
                 return false;
             }
-            try {
-                await refreshMergedDataAndNotifyWithUI_ACU();
-            }
-            catch (e) { }
             refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
             if (showToast) {
-                showToastr_ACU('success', `当前聊天预设已保存${resolvedPresetName ? `（预设名：${resolvedPresetName}）` : '（默认预设）'}；后续在此聊天再次保存会直接覆盖同名聊天预设。`, {
-                    acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                });
+                const warning = typeof applied === 'object' && 'postCommitWarning' in applied && typeof applied.postCommitWarning === 'string'
+                    ? applied.postCommitWarning
+                    : '';
+                showToastr_ACU(warning ? 'warning' : 'success', warning || `当前聊天预设已保存${resolvedPresetName ? `（预设名：${resolvedPresetName}）` : '（默认预设）'}；后续在此聊天再次保存会直接覆盖同名聊天预设。`, { acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT });
             }
             return true;
         };
@@ -89414,9 +89634,15 @@ $CONTENT
                     persistChatScope: true,
                     destructiveChangeConfirmed,
                 }));
-                if (result) {
+                if (result && (!(typeof result === 'object' && 'saved' in result) || result.saved !== false)) {
                     refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
-                    if (result.mode === 'chat_override') {
+                    const warning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
+                        ? result.postCommitWarning
+                        : '';
+                    if (warning) {
+                        showToastr_ACU('warning', warning, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                    }
+                    else if (result.mode === 'chat_override') {
                         showToastr_ACU('success', `当前聊天已切换到本地模板预设：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
                     }
                     else {
@@ -89644,14 +89870,9 @@ $CONTENT
                         if (!applied.saved) {
                             throw new Error(applied.error || '模板结构无效，无法生成当前聊天模板预设。');
                         }
-                        try {
-                            await refreshMergedDataAndNotifyWithUI_ACU();
-                        }
-                        catch (e) { }
                         refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
-                        showToastr_ACU('success', `当前聊天模板预设已导入${presetName ? `（预设名：${presetName}）` : ''}；同名聊天预设会直接覆盖。`, {
-                            acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                        });
+                        const warning = typeof applied.postCommitWarning === 'string' ? applied.postCommitWarning : '';
+                        showToastr_ACU(warning ? 'warning' : 'success', warning || `当前聊天模板预设已导入${presetName ? `（预设名：${presetName}）` : ''}；同名聊天预设会直接覆盖。`, { acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT });
                     }
                     catch (error) {
                         logError_ACU('[TemplateScope] 导入当前聊天模板预设失败:', error);
@@ -99299,26 +99520,40 @@ $CONTENT
                         save: true,
                         persistChatScope: normalizedScope === 'chat',
                     });
-                    if (result) {
+                    const saved = !!result && (!(typeof result === 'object' && 'saved' in result) || result.saved !== false);
+                    if (saved) {
                         refreshPresetUIAfterSwitch_ACU({
                             templateGlobalSelectName: normalizedScope === 'global' ? name : null,
                             keepTemplateGlobalValue: normalizedScope !== 'global',
                         });
+                        const runtimeReady = typeof result === 'object' && 'runtimeReady' in result
+                            ? result.runtimeReady !== false
+                            : undefined;
+                        const postCommitWarning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
+                            ? result.postCommitWarning
+                            : undefined;
                         return {
                             success: true,
                             scope: normalizedScope,
                             message: `${normalizedScope === 'global' ? '全局模板预设' : '当前聊天模板预设'}已切换：${displayName}`,
+                            ...(runtimeReady === undefined ? {} : { runtimeReady }),
+                            ...(postCommitWarning ? { warning: postCommitWarning, postCommitWarning } : {}),
                         };
                     }
+                    const error = typeof result === 'object' && result && 'error' in result && typeof result.error === 'string'
+                        ? result.error
+                        : '';
                     return {
                         success: false,
                         scope: normalizedScope,
-                        message: `${normalizedScope === 'global' ? '全局模板预设' : '当前聊天模板预设'}切换失败：${displayName}`,
+                        message: error || `${normalizedScope === 'global' ? '全局模板预设' : '当前聊天模板预设'}切换失败：${displayName}`,
+                        ...(error ? { error } : {}),
                     };
                 }
                 catch (e) {
                     logError_ACU('switchTemplatePreset failed:', e);
-                    return { success: false, message: `模板预设切换失败：${e.message}` };
+                    const error = e?.message || String(e);
+                    return { success: false, scope: normalizeTemplateOperationScope_ACU(options?.scope || 'global'), message: `模板预设切换失败：${error}`, error };
                 }
             },
             injectTemplatePresetToCurrentChat: async function (presetName) {
@@ -99371,24 +99606,33 @@ $CONTENT
                         presetName: normalizedPresetName,
                     });
                     if (!applied.saved) {
+                        const error = applied.error || '无法应用到当前聊天。';
                         return {
                             success: false,
                             scope: normalizedScope,
-                            message: `模板导入失败：${applied.error || '无法应用到当前聊天。'}`,
+                            message: `模板导入失败：${error}`,
+                            error,
                         };
                     }
                     logDebug_ACU(`[API] importTemplateFromData: 模板已成功导入到当前聊天。`);
                     refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
+                    const postCommitWarning = 'postCommitWarning' in applied && typeof applied.postCommitWarning === 'string'
+                        ? applied.postCommitWarning
+                        : undefined;
+                    const runtimeReady = 'runtimeReady' in applied ? applied.runtimeReady !== false : true;
                     return {
                         success: true,
                         scope: normalizedScope,
-                        message: `模板已成功导入到当前聊天${normalizedPresetName ? `（预设名：${normalizedPresetName}）` : ''}！`,
+                        message: postCommitWarning || `模板已成功导入到当前聊天${normalizedPresetName ? `（预设名：${normalizedPresetName}）` : ''}！`,
                         presetName: normalizedPresetName || undefined,
+                        runtimeReady,
+                        ...(postCommitWarning ? { warning: postCommitWarning, postCommitWarning } : {}),
                     };
                 }
                 catch (e) {
                     logError_ACU('importTemplateFromData failed:', e);
-                    return { success: false, message: `导入失败: ${e.message}` };
+                    const error = e?.message || String(e);
+                    return { success: false, scope: normalizeTemplateOperationScope_ACU(options?.scope || 'global'), message: `导入失败: ${error}`, error };
                 }
             },
             getTableTemplate: function (options = {}) {
@@ -128347,7 +128591,23 @@ Expected function or array of functions, received type ${typeof value}.`
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
     }
+    function getTemplateApplyError_ACU(result, fallback) {
+        if (!result)
+            return fallback;
+        if (typeof result === 'object' && result.saved === false) {
+            return typeof result.error === 'string' && result.error ? result.error : fallback;
+        }
+        return '';
+    }
+    function getTemplateApplyWarning_ACU(result) {
+        return result && typeof result === 'object' && typeof result.postCommitWarning === 'string'
+            ? result.postCommitWarning
+            : '';
+    }
     function useTablePresetManagement() {
+        const templateOperationController = new AbortController();
+        if (getCurrentScope())
+            onScopeDispose(() => templateOperationController.abort());
         const dialogStore = useDialogStore();
         const toast = useToastStore();
         const drawerView = ref('closed');
@@ -128405,9 +128665,16 @@ Expected function or array of functions, received type ${typeof value}.`
                     updateGlobal: false,
                     save: true,
                     persistChatScope: true,
+                    signal: templateOperationController.signal,
                 });
-                if (!result)
-                    throw new Error('切换到目标预设失败。');
+                const applyError = getTemplateApplyError_ACU(result, '切换到目标预设失败。');
+                if (applyError)
+                    throw new Error(applyError);
+                const warning = getTemplateApplyWarning_ACU(result);
+                if (warning) {
+                    toast.warning(warning, { muteable: false, durationMs: 6000 });
+                    return;
+                }
                 const opened = await openVisualizerSurface_ACU({ source: 'v2-shell' });
                 if (!opened)
                     throw new Error('可视化编辑器加载失败。');
@@ -128445,8 +128712,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 const normalized = normalizeTemplatePresetSelectionValue_ACU(name);
                 const wasGlobalDefault = defaultPresetName.value === normalized;
                 const wasActive = normalizeTemplatePresetSelectionValue_ACU(resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true })) === normalized;
-                if (!deleteTemplatePreset_ACU(name))
-                    throw new Error('删除失败或预设不存在。');
                 if (wasGlobalDefault) {
                     const globalResult = await applyTemplatePresetToCurrent_ACU('', {
                         source: 'v2_table_drawer_delete_default_fallback',
@@ -128454,8 +128719,9 @@ Expected function or array of functions, received type ${typeof value}.`
                         save: true,
                         persistChatScope: false,
                     });
-                    if (!globalResult)
-                        throw new Error('预设已删除，但全局默认回退失败。');
+                    const globalError = getTemplateApplyError_ACU(globalResult, '全局默认回退失败，未删除预设。');
+                    if (globalError)
+                        throw new Error(globalError);
                 }
                 if (wasActive) {
                     const chatResult = await applyTemplatePresetToCurrent_ACU('', {
@@ -128463,10 +128729,19 @@ Expected function or array of functions, received type ${typeof value}.`
                         updateGlobal: false,
                         save: true,
                         persistChatScope: true,
+                        signal: templateOperationController.signal,
                     });
-                    if (!chatResult)
-                        throw new Error('预设已删除，但当前聊天回退失败。');
+                    const chatError = getTemplateApplyError_ACU(chatResult, '当前聊天回退失败，未删除预设。');
+                    if (chatError)
+                        throw new Error(chatError);
+                    const warning = getTemplateApplyWarning_ACU(chatResult);
+                    if (warning) {
+                        toast.warning(warning, { muteable: false, durationMs: 6000 });
+                        return;
+                    }
                 }
+                if (!deleteTemplatePreset_ACU(name))
+                    throw new Error('删除失败或预设不存在。');
                 toast.success(`已删除全局模板预设「${name}」。`);
             });
         }
@@ -128670,6 +128945,9 @@ Expected function or array of functions, received type ${typeof value}.`
         return buildChatSheetGuideDataFromTemplateObj_ACU(templateObj, { stripSeedRows: false });
     }
     function useTableTemplatePresets() {
+        const templateOperationController = new AbortController();
+        if (getCurrentScope())
+            onScopeDispose(() => templateOperationController.abort());
         const dialogStore = useDialogStore();
         const toast = useToastStore();
         const busy = ref(false);
@@ -128812,13 +129090,15 @@ Expected function or array of functions, received type ${typeof value}.`
                     persistChatScope: true,
                     chatSelectionSource: selection.kind,
                     destructiveChangeConfirmed,
+                    signal: templateOperationController.signal,
                 }));
                 if (!result)
                     throw new Error('当前聊天模板预设切换失败。');
                 if (result.saved === false)
                     throw new Error(result.error || '当前聊天模板预设切换失败。');
-                if (isSqliteMode())
-                    await reloadStorageProvider();
+                if (result.postCommitWarning) {
+                    toast.warning(result.postCommitWarning, { muteable: false, durationMs: 6000 });
+                }
                 message.value = null;
             });
         }
@@ -128858,16 +129138,19 @@ Expected function or array of functions, received type ${typeof value}.`
                     persistChatScope: true,
                     registerChatPresetEntry: false,
                     destructiveChangeConfirmed,
+                    signal: templateOperationController.signal,
                 }));
                 if (!result)
                     throw new Error('历史模板归档恢复失败。');
                 if ('saved' in result && result.saved === false) {
                     throw new Error('error' in result && typeof result.error === 'string' ? result.error : '历史模板归档恢复失败。');
                 }
-                if (isSqliteMode())
-                    await reloadStorageProvider();
                 message.value = null;
-                toast.success('已恢复历史模板归档。', { muteable: false });
+                const warning = 'postCommitWarning' in result && typeof result.postCommitWarning === 'string' ? result.postCommitWarning : '';
+                if (warning)
+                    toast.warning(warning, { muteable: false, durationMs: 6000 });
+                else
+                    toast.success('已恢复历史模板归档。', { muteable: false });
             });
         }
         async function saveGlobalAs() {
@@ -128995,6 +129278,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     presetName: finalName,
                     registerChatPresetEntry: false,
                     destructiveChangeConfirmed,
+                    signal: templateOperationController.signal,
                 }));
                 if (!result)
                     throw new Error('导入模板切换到当前聊天失败。');
@@ -129002,10 +129286,13 @@ Expected function or array of functions, received type ${typeof value}.`
                     throw new Error(result.error || '导入模板切换到当前聊天失败。');
                 if (!upsertTemplatePreset_ACU(finalName, prepared.templateStr))
                     throw new Error('模板已应用，但保存到预设库失败。');
-                if (isSqliteMode())
-                    await reloadStorageProvider();
                 message.value = null;
-                toast.success(`模板已保存并切换为「${finalName}」。`, { muteable: false });
+                if (result.postCommitWarning) {
+                    toast.warning(result.postCommitWarning, { muteable: false, durationMs: 6000 });
+                }
+                else {
+                    toast.success(`模板已保存并切换为「${finalName}」。`, { muteable: false });
+                }
             });
         }
         function exportTemplate(scope) {
@@ -138289,8 +138576,8 @@ Expected function or array of functions, received type ${typeof value}.`
             if (typeof provider.replaceAllData !== 'function')
                 throw new Error('当前表格存储不支持 Checkpoint 数据恢复。');
             messageSnapshots = captureMessageSnapshots_ACU(chat);
-            oldScopeContainer = cloneJson_ACU(getChatScopedConfigContainer_ACU(chat));
-            oldGuideContainer = cloneJson_ACU(getChatSheetGuideContainer_ACU(chat));
+            oldScopeContainer = cloneJson_ACU(peekChatScopedConfigContainer_ACU(chat));
+            oldGuideContainer = cloneJson_ACU(peekChatSheetGuideContainer_ACU(chat));
         }
         catch (error) {
             return { success: false, error: error?.message || 'Checkpoint 恢复预检失败。' };

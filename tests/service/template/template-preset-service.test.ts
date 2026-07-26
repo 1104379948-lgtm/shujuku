@@ -4,11 +4,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockStore, mockSettings } = vi.hoisted(() => {
+const { mockStore, mockSettings, mockChat } = vi.hoisted(() => {
   const mockStore: any = {};
   return {
     mockStore,
     mockSettings: { templatePresetName: '', dataIsolationEnabled: false } as any,
+    mockChat: [{ is_user: false }] as any[],
   };
 });
 
@@ -54,7 +55,11 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
+  getChatArray_ACU: vi.fn(() => mockChat),
   saveChatToHost_ACU: vi.fn(),
+}));
+vi.mock('../../../src/data/storage/chat-history', () => ({
+  getActiveChatStorageIdentity_ACU: vi.fn(() => 'chat-a'),
 }));
 
 vi.mock('../../../src/service/template/chat-scope', () => ({
@@ -115,6 +120,7 @@ vi.mock('../../../src/service/table/storage-mode', () => ({
 }));
 vi.mock('../../../src/service/table/table-storage-strategy', () => ({
   reloadStorageProvider: vi.fn(),
+  didSqliteFallbackAfterReload_ACU: vi.fn(() => false),
 }));
 
 import {
@@ -145,7 +151,9 @@ import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU }
 import { buildDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
 import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-template-reconciler';
 import { isSqliteMode } from '../../../src/service/table/storage-mode';
-import { reloadStorageProvider } from '../../../src/service/table/table-storage-strategy';
+import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../../../src/service/table/table-storage-strategy';
+import { getActiveChatStorageIdentity_ACU } from '../../../src/data/storage/chat-history';
+import { refreshMergedDataAndNotify_ACU } from '../../../src/service/worldbook/pipeline';
 import {
   commitCurrentFloorTemplateChanges_ACU,
   commitCurrentFloorTemplateScopeOnly_ACU,
@@ -156,6 +164,9 @@ beforeEach(() => {
   // 清空 mockStore
   Object.keys(mockStore).forEach(k => delete mockStore[k]);
   vi.clearAllMocks();
+  mockChat.splice(0, mockChat.length, { is_user: false });
+  vi.mocked(getActiveChatStorageIdentity_ACU).mockReturnValue('chat-a');
+  vi.mocked(didSqliteFallbackAfterReload_ACU).mockReturnValue(false);
 });
 
 // ═══ CRUD ═══
@@ -578,7 +589,7 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
     expect(reloadStorageProvider).not.toHaveBeenCalled();
   });
 
-  it('runtime 重建失败不推翻已保存的提交结果', async () => {
+  it('runtime 重建失败保留已保存事实并返回后置告警', async () => {
     vi.mocked(isSqliteMode).mockReturnValue(true);
     vi.mocked(reloadStorageProvider).mockRejectedValueOnce(new Error('reload boom'));
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
@@ -588,7 +599,90 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
 
     const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
 
-    expect(result).toMatchObject({ saved: true });
+    expect(result).toMatchObject({ saved: true, runtimeReady: false, postCommitWarning: expect.stringContaining('reload boom') });
+  });
+
+  it('runtime 重载静默回退到 native 时返回后置告警', async () => {
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    vi.mocked(didSqliteFallbackAfterReload_ACU).mockReturnValueOnce(true);
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_live', sheetData: candidate.sheet_live }], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'v2_commit' } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(result).toMatchObject({ saved: true, runtimeReady: false, postCommitWarning: expect.stringContaining('回退到原生模式') });
+  });
+
+  it('入口没有可绑定聊天时立即拒绝，不等待随后出现的任意聊天', async () => {
+    mockChat.splice(0, mockChat.length);
+    vi.mocked(getActiveChatStorageIdentity_ACU).mockReturnValue('');
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('没有可绑定的目标聊天') });
+    expect(loadTableStateFromFramesV2_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
+  });
+
+  it('提交后的运行时数据刷新失败时保留保存事实并返回告警', async () => {
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+    vi.mocked(refreshMergedDataAndNotify_ACU).mockRejectedValueOnce(new Error('refresh boom'));
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_live', sheetData: candidate.sheet_live }], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'v2_commit' } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(result).toMatchObject({ saved: true, runtimeReady: false, postCommitWarning: expect.stringContaining('refresh boom') });
+  });
+
+  it('等待期间目标聊天切换时立即拒绝且不提交', async () => {
+    vi.useFakeTimers();
+    vi.mocked(getActiveChatStorageIdentity_ACU).mockReturnValue('');
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+
+    const pending = applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+    mockChat.splice(0, mockChat.length, { is_user: false, switched: true });
+    await vi.advanceTimersByTimeAsync(100);
+    const result = await pending;
+    vi.useRealTimers();
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('目标聊天已切换') });
+    expect(loadTableStateFromFramesV2_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+  });
+
+  it('组件取消等待时立即拒绝且不提交', async () => {
+    vi.mocked(getActiveChatStorageIdentity_ACU).mockReturnValue('');
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    const controller = new AbortController();
+
+    const pending = applyChatTemplateSnapshotWithReconciliation_ACU(candidate, { signal: controller.signal });
+    controller.abort();
+    const result = await pending;
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('已取消') });
+    expect(loadTableStateFromFramesV2_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+  });
+
+  it('聊天存储上下文未就绪时在提交前拒绝', async () => {
+    vi.useFakeTimers();
+    vi.mocked(getActiveChatStorageIdentity_ACU).mockReturnValue('');
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    const pending = applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+    await vi.advanceTimersByTimeAsync(3200);
+    const result = await pending;
+    vi.useRealTimers();
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('聊天元数据尚未就绪') });
+    expect(loadTableStateFromFramesV2_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
   });
 });
 

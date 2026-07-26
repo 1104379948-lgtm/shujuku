@@ -818,12 +818,16 @@ export async function bindDataEvents_ACU(): Promise<void> {
                 showToastr_ACU('error', error, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
                 return false;
             }
-            try { await refreshMergedDataAndNotifyWithUI_ACU(); } catch (e) {}
             refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
             if (showToast) {
-                showToastr_ACU('success', `当前聊天预设已保存${resolvedPresetName ? `（预设名：${resolvedPresetName}）` : '（默认预设）'}；后续在此聊天再次保存会直接覆盖同名聊天预设。`, {
-                    acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                });
+                const warning = typeof applied === 'object' && 'postCommitWarning' in applied && typeof applied.postCommitWarning === 'string'
+                    ? applied.postCommitWarning
+                    : '';
+                showToastr_ACU(
+                    warning ? 'warning' : 'success',
+                    warning || `当前聊天预设已保存${resolvedPresetName ? `（预设名：${resolvedPresetName}）` : '（默认预设）'}；后续在此聊天再次保存会直接覆盖同名聊天预设。`,
+                    { acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT },
+                );
             }
             return true;
         };
@@ -887,9 +891,14 @@ export async function bindDataEvents_ACU(): Promise<void> {
                     persistChatScope: true,
                     destructiveChangeConfirmed,
                 }));
-                if (result) {
+                if (result && (!(typeof result === 'object' && 'saved' in result) || result.saved !== false)) {
                     refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
-                    if ((result as any).mode === 'chat_override') {
+                    const warning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
+                        ? result.postCommitWarning
+                        : '';
+                    if (warning) {
+                        showToastr_ACU('warning', warning, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR });
+                    } else if ((result as any).mode === 'chat_override') {
                         showToastr_ACU('success', `当前聊天已切换到本地模板预设：${displayName}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
                     } else {
                         showToastr_ACU('success', `当前聊天已切换到引用预设：${displayName}；当前聊天尚未生成本地快照。`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT });
@@ -1102,11 +1111,13 @@ export async function bindDataEvents_ACU(): Promise<void> {
                         if (!applied.saved) {
                             throw new Error(applied.error || '模板结构无效，无法生成当前聊天模板预设。');
                         }
-                        try { await refreshMergedDataAndNotifyWithUI_ACU(); } catch (e) {}
                         refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
-                        showToastr_ACU('success', `当前聊天模板预设已导入${presetName ? `（预设名：${presetName}）` : ''}；同名聊天预设会直接覆盖。`, {
-                            acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                        });
+                        const warning = typeof applied.postCommitWarning === 'string' ? applied.postCommitWarning : '';
+                        showToastr_ACU(
+                            warning ? 'warning' : 'success',
+                            warning || `当前聊天模板预设已导入${presetName ? `（预设名：${presetName}）` : ''}；同名聊天预设会直接覆盖。`,
+                            { acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT },
+                        );
                     } catch (error) {
                         logError_ACU('[TemplateScope] 导入当前聊天模板预设失败:', error);
                         showToastr_ACU('error', `导入当前聊天模板预设失败: ${error.message}`, { acuToastCategory: ACU_TOAST_CATEGORY_ACU.ERROR, timeOut: 10000 });

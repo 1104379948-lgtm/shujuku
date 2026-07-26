@@ -13,7 +13,7 @@ async function importComposable() {
   let activeMode = 'inherit_global';
   let archiveEntries: any[] = [];
   const applyTemplateSnapshotToScope_ACU = vi.fn(async () => ({ saved: true, presetName: selectedChat }));
-  const applyTemplatePresetToCurrent_ACU = vi.fn(async () => ({ presetName: selectedChat }));
+  const applyTemplatePresetToCurrent_ACU = vi.fn(async () => ({ saved: true, presetName: selectedChat }));
   const resolveTemplateForExport_ACU = vi.fn(() => ({ jsonData: { sheet_1: {} }, fromPresetName: selectedChat || '默认预设' }));
   const ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU = vi.fn(async () => ({ success: true, dataWasReset: false }));
 
@@ -209,6 +209,20 @@ describe('useTableTemplatePresets', () => {
         registerChatPresetEntry: false,
       }),
     );
+  });
+
+  it('模板已保存但 SQLite 重建失败时显示警告而不是成功提示', async () => {
+    const { useTableTemplatePresets, toast, applyTemplatePresetToCurrent_ACU } = await importComposable();
+    const presets = useTableTemplatePresets();
+    applyTemplatePresetToCurrent_ACU.mockResolvedValueOnce({
+      saved: true,
+      runtimeReady: false,
+      postCommitWarning: '模板已保存，但 SQLite 运行时重建失败。',
+    });
+
+    await presets.selectChatPreset('chat-A');
+
+    expect(toast.items.at(-1)).toMatchObject({ kind: 'warning', text: '模板已保存，但 SQLite 运行时重建失败。' });
   });
 
   it('操作失败时保留局部错误并显示短 toast', async () => {

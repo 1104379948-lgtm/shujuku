@@ -1,6 +1,6 @@
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { hashUserInput_ACU, logDebug_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
-import { getChatScopedConfigContainer_ACU, getChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
+import { peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getChatArray_ACU, clearAllAiTableDataForCheckpointRestore_ACU, cleanupCheckpointVectorIndexManifestsAfterCommit_ACU } from '../chat/chat-service';
 import { getCurrentIsolationKey_ACU } from '../runtime/state-manager';
@@ -311,8 +311,8 @@ export async function restoreTableCheckpointToLatestAi_ACU(parsed: TableCheckpoi
     }
     if (typeof provider.replaceAllData !== 'function') throw new Error('当前表格存储不支持 Checkpoint 数据恢复。');
     messageSnapshots = captureMessageSnapshots_ACU(chat);
-    oldScopeContainer = cloneJson_ACU(getChatScopedConfigContainer_ACU(chat));
-    oldGuideContainer = cloneJson_ACU(getChatSheetGuideContainer_ACU(chat));
+    oldScopeContainer = cloneJson_ACU(peekChatScopedConfigContainer_ACU(chat));
+    oldGuideContainer = cloneJson_ACU(peekChatSheetGuideContainer_ACU(chat));
   } catch (error: any) {
     return { success: false, error: error?.message || 'Checkpoint 恢复预检失败。' };
   }

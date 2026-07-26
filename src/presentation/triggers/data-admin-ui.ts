@@ -345,13 +345,18 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
             save: true,
             persistChatScope: normalizedScope === 'chat',
         });
-        if (!result) {
+        if (!result || (typeof result === 'object' && 'saved' in result && result.saved === false)) {
             throw new Error('应用默认模板快照失败。');
         }
 
         if (showToast) {
             if (normalizedScope === 'chat') {
-                showToastr_ACU('success', '当前聊天模板已恢复为默认值！仅影响当前聊天，不会改动全局模板。');
+                const warning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
+                    ? result.postCommitWarning
+                    : '';
+                showToastr_ACU(warning ? 'warning' : 'success', warning || '当前聊天模板已恢复为默认值！仅影响当前聊天，不会改动全局模板。', {
+                    acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT,
+                });
             } else {
                 showToastr_ACU('success', '全局模板已恢复为默认值！模板已更新，但不会影响当前聊天记录的本地数据。');
             }
@@ -427,11 +432,15 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
                         throw new Error(applied.error || '模板已解析，但应用到当前聊天失败。');
                     }
 
-                    try { await refreshMergedDataAndNotifyWithUI_ACU(); } catch (e) {}
                     refreshPresetUIAfterSwitch_ACU({ keepTemplateGlobalValue: true });
-                    showToastr_ACU('success', `当前聊天模板快照已导入${derivedPresetName ? `（预设名：${derivedPresetName}）` : ''}。`, {
-                        acuToastCategory: ACU_TOAST_CATEGORY_ACU.IMPORT,
-                    });
+                    const warning = 'postCommitWarning' in applied && typeof applied.postCommitWarning === 'string'
+                        ? applied.postCommitWarning
+                        : '';
+                    showToastr_ACU(
+                        warning ? 'warning' : 'success',
+                        warning || `当前聊天模板快照已导入${derivedPresetName ? `（预设名：${derivedPresetName}）` : ''}。`,
+                        { acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT },
+                    );
                     logDebug_ACU(`[TemplateScope] Template imported to chat scope: ${derivedPresetName}.`);
                 }
             } catch (error) {
