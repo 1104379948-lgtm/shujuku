@@ -42,7 +42,7 @@
                     class="acu-v2-data-mgmt-page__history-fill"
                     size="sm"
                     :title="`填入历史标识：${code}`"
-                    :disabled="!!flow.busyAction.value"
+                    :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value"
                     @click="selectHistory(code)"
                   >
                     <span class="acu-v2-data-mgmt-page__history-code">{{
@@ -60,7 +60,7 @@
                     variant="danger"
                     :title="`删除历史标识：${code}`"
                     :aria-label="`删除历史标识：${code}`"
-                    :disabled="!!flow.busyAction.value"
+                    :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value"
                     @click="onRemoveHistory(code)"
                   />
                 </div>
@@ -73,6 +73,7 @@
 
           <div class="acu-v2-data-mgmt-page__actions">
             <AcuButton
+              :disabled="runtimeDiagnostic.busy.value"
               :loading="flow.busyAction.value === 'delete-isolation-entries'"
               @click="onDeleteCurrentIsolationEntries"
             >
@@ -80,6 +81,7 @@
             </AcuButton>
             <AcuButton
               variant="primary"
+              :disabled="runtimeDiagnostic.busy.value"
               :loading="flow.busyAction.value === 'apply-isolation'"
               @click="onApplyIsolation"
             >
@@ -97,7 +99,7 @@
               variant="primary"
               block
               accept=".json,application/json"
-              :disabled="!!flow.busyAction.value"
+              :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value"
               @file="flow.importCombinedSettings"
             >
               <i class="fa-solid fa-download"></i>
@@ -105,7 +107,7 @@
             </AcuFileButton>
             <AcuButton
               block
-              :disabled="!!flow.busyAction.value"
+              :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value"
               @click="flow.exportCombinedSettings"
             >
               <i class="fa-solid fa-upload"></i>
@@ -113,7 +115,7 @@
             </AcuButton>
             <AcuButton
               block
-              :disabled="!!flow.busyAction.value"
+              :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value"
               @click="flow.exportJsonData"
             >
               <i class="fa-solid fa-upload"></i>
@@ -121,6 +123,7 @@
             </AcuButton>
             <AcuButton
               block
+              :disabled="runtimeDiagnostic.busy.value"
               :loading="flow.busyAction.value === 'override-latest'"
               @click="onOverrideLatestLayer"
             >
@@ -135,13 +138,13 @@
               全局模板和聊天正文不变。
             </p>
             <div class="acu-v2-data-mgmt-page__checkpoint-actions">
-              <AcuButton block :disabled="!!flow.busyAction.value" @click="flow.exportTableCheckpoint">
+              <AcuButton block :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value" @click="flow.exportTableCheckpoint">
                 导出 Checkpoint
               </AcuButton>
               <AcuFileButton
                 block
                 accept=".json,application/json"
-                :disabled="!!flow.busyAction.value"
+                :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value"
                 @file="onImportTableCheckpoint"
               >
                 导入 Checkpoint
@@ -159,12 +162,13 @@
               可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。
             </p>
             <div class="acu-v2-data-mgmt-page__checkpoint-actions">
-              <AcuButton block :loading="flow.busyAction.value === 'export-mixed-storage-snapshots'" @click="flow.exportMixedStorageSnapshots">
+              <AcuButton block :disabled="runtimeDiagnostic.busy.value" :loading="flow.busyAction.value === 'export-mixed-storage-snapshots'" @click="flow.exportMixedStorageSnapshots">
                 导出 legacy/V2 快照
               </AcuButton>
               <AcuButton
                 v-if="flow.mixedStorageDecision.value.allowedActions.includes('keep_v2')"
                 block
+                :disabled="runtimeDiagnostic.busy.value"
                 :loading="flow.busyAction.value === 'commit-mixed-storage-keep_v2'"
                 @click="onCommitMixedStorageDecision('keep_v2')"
               >
@@ -173,6 +177,7 @@
               <AcuButton
                 v-if="flow.mixedStorageDecision.value.allowedActions.includes('commit_merge_candidate')"
                 block
+                :disabled="runtimeDiagnostic.busy.value"
                 :loading="flow.busyAction.value === 'commit-mixed-storage-commit_merge_candidate'"
                 @click="onCommitMixedStorageDecision('commit_merge_candidate')"
               >
@@ -191,13 +196,14 @@
               恢复仅使用服务端冻结候选，不会从页面读取或提交可编辑表格数据。
             </p>
             <div class="acu-v2-data-mgmt-page__checkpoint-actions">
-              <AcuButton block :disabled="!!flow.busyAction.value" @click="flow.exportV2RecoveryBackups">
+              <AcuButton block :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value" @click="flow.exportV2RecoveryBackups">
                 导出已保存的原始 frame 备份
               </AcuButton>
               <AcuButton
                 v-if="flow.v2RecoverySummary.value.status === 'recoverable_repaired_checkpoint'"
                 block
                 variant="danger"
+                :disabled="runtimeDiagnostic.busy.value"
                 :loading="flow.busyAction.value === 'commit-v2-recovery'"
                 @click="onCommitV2Recovery(false)"
               >
@@ -207,6 +213,7 @@
                 v-if="flow.v2RecoverySummary.value.status === 'recoverable_orphan_data_replace'"
                 block
                 variant="danger"
+                :disabled="runtimeDiagnostic.busy.value"
                 :loading="flow.busyAction.value === 'commit-v2-recovery'"
                 @click="onCommitV2Recovery(true)"
               >
@@ -229,11 +236,39 @@
               </div>
             </div>
           </section>
+          <section
+            class="acu-v2-data-mgmt-page__checkpoint-section acu-v2-data-mgmt-page__sqlite-runtime-section"
+            aria-labelledby="acu-sqlite-runtime-title"
+          >
+            <h3 id="acu-sqlite-runtime-title" class="acu-v2-data-mgmt-page__section-title">
+              {{ dataMgmtCopy.panels.backup.sqliteRuntime.title }}
+            </h3>
+            <p class="acu-v2-data-mgmt-page__meta">{{ dataMgmtCopy.panels.backup.sqliteRuntime.description }}</p>
+            <dl class="acu-v2-data-mgmt-page__runtime-health" data-testid="sqlite-runtime-health">
+              <div><dt>{{ dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.status }}</dt><dd>{{ runtimeDiagnostic.health.value.status }}</dd></div>
+              <div><dt>{{ dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.expectedMode }}</dt><dd>{{ runtimeDiagnostic.health.value.expectedMode }}</dd></div>
+              <div><dt>{{ dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.activeMode }}</dt><dd>{{ runtimeDiagnostic.health.value.activeMode || dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable }}</dd></div>
+              <div><dt>{{ dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.source }}</dt><dd>{{ runtimeDiagnostic.health.value.source || dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable }}</dd></div>
+              <div><dt>{{ dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.loadToken }}</dt><dd>{{ runtimeDiagnostic.health.value.loadToken }}</dd></div>
+              <div><dt>{{ dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.failureCode }}</dt><dd>{{ runtimeDiagnostic.health.value.failureCode || dataMgmtCopy.panels.backup.sqliteRuntime.healthSnapshot.unavailable }}</dd></div>
+            </dl>
+            <div v-if="runtimeDiagnostic.isVisible.value" class="acu-v2-data-mgmt-page__checkpoint-actions">
+              <AcuButton
+                block
+                variant="primary"
+                :disabled="!!flow.busyAction.value"
+                :loading="runtimeDiagnostic.busy.value"
+                @click="onReloadSqliteRuntime"
+              >
+                {{ dataMgmtCopy.panels.backup.sqliteRuntime.reloadLabel }}
+              </AcuButton>
+            </div>
+          </section>
           <div class="acu-v2-data-mgmt-page__checkpoint-actions">
-            <AcuButton block :loading="flow.busyAction.value === 'scan-v2-isolation-diagnostics'" @click="flow.scanV2IsolationDiagnostics">
+            <AcuButton block :disabled="runtimeDiagnostic.busy.value" :loading="flow.busyAction.value === 'scan-v2-isolation-diagnostics'" @click="flow.scanV2IsolationDiagnostics">
               扫描全部 V2 隔离域
             </AcuButton>
-            <AcuButton block :loading="flow.busyAction.value === 'prepare-v2-recovery'" @click="flow.prepareV2Recovery">
+            <AcuButton block :disabled="runtimeDiagnostic.busy.value" :loading="flow.busyAction.value === 'prepare-v2-recovery'" @click="flow.prepareV2Recovery">
               诊断 V2 数据恢复
             </AcuButton>
           </div>
@@ -264,6 +299,7 @@
                   type="number"
                   :min="0"
                   :step="1"
+                  :disabled="runtimeDiagnostic.busy.value"
                   :model-value="flow.retainRecentLayers.value"
                   @change="flow.setRetainRecentLayers($event)"
                 />
@@ -319,6 +355,7 @@
           >
             <AcuButton
               block
+              :disabled="runtimeDiagnostic.busy.value"
               :loading="flow.busyAction.value === 'delete-current-local'"
               @click="onDeleteLocalData('current')"
             >
@@ -327,6 +364,7 @@
             <AcuButton
               block
               variant="danger"
+              :disabled="runtimeDiagnostic.busy.value"
               :loading="flow.busyAction.value === 'delete-all-local'"
               @click="onDeleteLocalData('all')"
             >
@@ -334,6 +372,7 @@
             </AcuButton>
             <AcuButton
               block
+              :disabled="runtimeDiagnostic.busy.value"
               :loading="flow.busyAction.value === 'reset-defaults'"
               @click="onResetAllDefaults"
             >
@@ -358,6 +397,7 @@ import AcuMessage from "../components/_lib/AcuMessage.vue";
 import AcuPanel from "../components/_lib/AcuPanel.vue";
 import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
+import { useSqliteRuntimeDiagnostic } from "../composables/useSqliteRuntimeDiagnostic";
 import {
   useDataManagement,
   type ResetDefaultsCleanupKey,
@@ -407,6 +447,7 @@ const resetDefaultsCleanupOptions: Array<{
 
 const dialogStore = useDialogStore();
 const flow = useDataManagement();
+const runtimeDiagnostic = useSqliteRuntimeDiagnostic();
 const historyExpanded = ref(false);
 
 const isolationCodeHint = computed(
@@ -418,18 +459,21 @@ const historyMetaLabel = computed(
 );
 
 function selectHistory(value: string): void {
-  if (value) flow.isolationCode.value = value;
+  if (value && !runtimeDiagnostic.busy.value) flow.isolationCode.value = value;
 }
 
 async function onApplyIsolation(): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   await flow.applyIsolation();
 }
 
 async function onRemoveHistory(code: string): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   await flow.removeHistory(code);
 }
 
 async function onDeleteCurrentIsolationEntries(): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   const confirmed = await dialogStore.confirm({
     title: "删除注入条目",
     message:
@@ -439,10 +483,12 @@ async function onDeleteCurrentIsolationEntries(): Promise<void> {
   });
   if (!confirmed)
     return;
+  if (runtimeDiagnostic.busy.value) return;
   void flow.deleteCurrentIsolationEntries();
 }
 
 async function onOverrideLatestLayer(): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   const confirmed = await dialogStore.confirm({
     title: "覆盖最新层数据",
     message:
@@ -452,10 +498,12 @@ async function onOverrideLatestLayer(): Promise<void> {
   });
   if (!confirmed)
     return;
+  if (runtimeDiagnostic.busy.value) return;
   void flow.overrideLatestLayerWithTemplate();
 }
 
 async function onImportTableCheckpoint(file: File): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   const checkpoint = await flow.parseTableCheckpoint(file);
   if (!checkpoint) return;
   const sourceStorageMode = checkpoint.source.storageMode;
@@ -470,10 +518,12 @@ async function onImportTableCheckpoint(file: File): Promise<void> {
     confirmVariant: "danger",
   });
   if (!confirmed) return;
+  if (runtimeDiagnostic.busy.value) return;
   void flow.restoreTableCheckpoint(checkpoint);
 }
 
 async function onDeleteLocalData(mode: "current" | "all"): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   const message =
     mode === "all"
       ? `删除当前聊天中 ${flow.rangeLabel.value} 的所有标识数据库数据？此操作不可恢复。`
@@ -495,10 +545,12 @@ async function onDeleteLocalData(mode: "current" | "all"): Promise<void> {
     }))
   )
     return;
+  if (runtimeDiagnostic.busy.value) return;
   void flow.deleteLocalData(mode);
 }
 
 async function onCommitMixedStorageDecision(action: MixedStorageCommitAction_ACU): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   const isMerge = action === 'commit_merge_candidate';
   const confirmed = await dialogStore.confirm({
     title: isMerge ? '提交混合存储合并候选' : '保留 V2 数据并清理 legacy',
@@ -518,10 +570,12 @@ async function onCommitMixedStorageDecision(action: MixedStorageCommitAction_ACU
     });
     if (!secondConfirmed) return;
   }
+  if (runtimeDiagnostic.busy.value) return;
   void flow.commitMixedStorageDecision(action);
 }
 
 async function onCommitV2Recovery(confirmOrphanDataReplace: boolean): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   const isOrphan = confirmOrphanDataReplace;
   const confirmed = await dialogStore.confirm({
     title: isOrphan ? '确认无锚点 data_replace 恢复' : '应用 V2 Checkpoint 修复',
@@ -541,10 +595,26 @@ async function onCommitV2Recovery(confirmOrphanDataReplace: boolean): Promise<vo
     });
     if (!secondConfirmed) return;
   }
+  if (runtimeDiagnostic.busy.value) return;
   void flow.commitV2Recovery(isOrphan);
 }
 
+async function onReloadSqliteRuntime(): Promise<void> {
+  if (runtimeDiagnostic.busy.value || flow.busyAction.value) return;
+  const confirmed = await dialogStore.confirm({
+    title: "重新初始化当前聊天 SQLite 运行时",
+    message:
+      "这只会重建当前聊天的 SQLite 内存数据库，不会修改聊天正文、Checkpoint、模板或世界书。确认继续？",
+    confirmLabel: "重新初始化运行时",
+    confirmVariant: "primary",
+  });
+  if (!confirmed) return;
+  if (runtimeDiagnostic.busy.value || flow.busyAction.value) return;
+  await runtimeDiagnostic.reload();
+}
+
 async function onResetAllDefaults(): Promise<void> {
+  if (runtimeDiagnostic.busy.value) return;
   const selected = await dialogStore.selectMany<ResetDefaultsCleanupKey>({
     title: "恢复默认配置",
     message:
@@ -555,6 +625,7 @@ async function onResetAllDefaults(): Promise<void> {
     requireNonEmpty: true,
   });
   if (!selected) return;
+  if (runtimeDiagnostic.busy.value) return;
 
   const selectedSet = new Set(selected);
   const cleanup: ResetDefaultsCleanupOptions = {
@@ -569,6 +640,7 @@ async function onResetAllDefaults(): Promise<void> {
 
 function refreshAll(): void {
   flow.refresh();
+  runtimeDiagnostic.refresh();
   historyExpanded.value = false;
 }
 
@@ -715,6 +787,33 @@ watch(useChatChangedTick(), refreshAll);
   border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));
 }
 
+.acu-v2-data-mgmt-page__runtime-health {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0 0;
+}
+
+.acu-v2-data-mgmt-page__runtime-health > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--acu-border);
+  border-radius: var(--acu-radius-sm);
+  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);
+}
+
+.acu-v2-data-mgmt-page__runtime-health dt {
+  color: var(--acu-text-3);
+  font-size: var(--acu-font-size-caption, 11px);
+}
+
+.acu-v2-data-mgmt-page__runtime-health dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--acu-text-1);
+  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);
+}
+
 .acu-v2-data-mgmt-page__checkpoint-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -746,6 +845,9 @@ watch(useChatChangedTick(), refreshAll);
     grid-template-columns: 1fr;
   }
   .acu-v2-data-mgmt-page__checkpoint-actions {
+    grid-template-columns: 1fr;
+  }
+  .acu-v2-data-mgmt-page__runtime-health {
     grid-template-columns: 1fr;
   }
 }

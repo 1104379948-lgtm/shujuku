@@ -5,7 +5,7 @@
 
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../../../service/runtime/state-manager';
-import { ensureStorageProviderReady_ACU, getStorageProvider } from '../../../service/table/table-storage-strategy';
+import { ensureStorageProviderReady_ACU, getStorageProvider, getStorageRuntimeHealth_ACU, isStorageRuntimeReadyForSyncRead_ACU } from '../../../service/table/table-storage-strategy';
 import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
 import { parseDDLTableName } from '../../../shared/ddl-utils';
 import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity';
@@ -464,6 +464,19 @@ function buildRawSqlWriteSet_ACU(options: SqlMutationOptions_ACU): TableWriteCon
         : [{ kind: 'all' as const }];
 }
 
+/**
+ * 对外只读 SQL API 仍是同步契约，不能在这里异步 hydrate 并返回半初始化数据库。
+ * 因此只接受已完整发布的 runtime；调用者可显式走重载/诊断入口恢复。
+ */
+function executeReadyReadQuery_ACU(sql: string, params?: SqlParam_ACU[]): { result: SqlQueryResult; sql: string } {
+    if (!isStorageRuntimeReadyForSyncRead_ACU()) {
+        const health = getStorageRuntimeHealth_ACU();
+        throw new Error(`SQL runtime 未就绪: status=${health.status}, expected=${health.expectedMode}, active=${health.activeMode || 'none'}, code=${health.failureCode || 'none'}`);
+    }
+    const translatedSql = getNameMapper().translateSql(sql);
+    return { result: getStorageProvider().executeQuery(translatedSql, params), sql: translatedSql };
+}
+
 export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
     return {
         executeSqlQuery: function(sqlOrOptions: any, params?: any, options?: any): PublicSqlQueryResult_ACU | null {
@@ -476,7 +489,8 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 const limit = normalizeLimit_ACU(optionSource?.limit);
                 const offset = normalizeOffset_ACU(optionSource?.offset);
                 const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
-                return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), { sql: query.sql, limit, offset });
+                const executed = executeReadyReadQuery_ACU(query.sql, query.params);
+                return toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql, limit, offset });
             } catch (error) {
                 logError_ACU('executeSqlQuery failed:', error);
                 return null;
@@ -493,7 +507,8 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 const limit = normalizeLimit_ACU(optionSource?.limit);
                 const offset = normalizeOffset_ACU(optionSource?.offset);
                 const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
-                return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), { sql: query.sql, limit, offset });
+                const executed = executeReadyReadQuery_ACU(query.sql, query.params);
+                return toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql, limit, offset });
             } catch (error) {
                 logError_ACU('querySql failed:', error);
                 return null;
@@ -506,8 +521,9 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     throw new Error('queryTableRows: options must be an object.');
                 }
                 const query = buildQueryTableRowsSql_ACU(options);
-                return toPublicSqlQueryResult_ACU(getStorageProvider().executeQuery(query.sql, query.params), {
-                    sql: query.sql,
+                const executed = executeReadyReadQuery_ACU(query.sql, query.params);
+                return toPublicSqlQueryResult_ACU(executed.result, {
+                    sql: executed.sql,
                     limit: query.limit,
                     offset: query.offset,
                 });
@@ -635,10 +651,10 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
             try {
                 const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSql');
                 if (isSqlReadStatement_ACU(args.sql)) {
-                    const queryResult = getStorageProvider().executeQuery(args.sql, args.params);
+                    const executed = executeReadyReadQuery_ACU(args.sql, args.params);
                     return {
                         type: 'query',
-                        result: toPublicSqlQueryResult_ACU(queryResult, { sql: args.sql }),
+                        result: toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql }),
                     };
                 }
 

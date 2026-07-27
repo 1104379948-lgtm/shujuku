@@ -320,7 +320,7 @@ export async function commitPreparedV2Recovery_ACU(
     return failure(`恢复候选 replay 校验失败，未保存任何更改：${getErrorMessage_ACU(error)}`);
   }
 
-  return runTableWriteTransaction_ACU({
+  const commitResult = await runTableWriteTransaction_ACU<V2RecoveryCommitResult_ACU>({
     source: 'system',
     reason: 'v2_integrity_recovery',
     isolationKey: plan.isolationKey,
@@ -349,23 +349,28 @@ export async function commitPreparedV2Recovery_ACU(
         }
 
         plans_ACU.delete(planId);
-        const expectedStorageMode = getCurrentStorageMode();
-        try {
-          if (!currentScopeMatches_ACU(plan)) throw new Error('宿主保存后恢复计划作用域已变化。');
-          if (expectedStorageMode === 'sqlite') {
-            await reloadStorageProvider();
-            if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {
-              throw new Error('SQLite 运行时重载后已静默回退到 native provider。');
-            }
-          }
-          if (!currentScopeMatches_ACU(plan)) throw new Error('宿主保存后运行时重载期间恢复计划作用域已变化。');
-          return { status: 'committed', planId };
-        } catch (error) {
-          return { status: 'committed_postcondition_failed', planId, error: getErrorMessage_ACU(error) };
+        if (!currentScopeMatches_ACU(plan)) {
+          return failure('宿主保存后恢复计划作用域已变化。');
         }
+        return { status: 'committed', planId };
       });
     } catch (error) {
       return failure(getErrorMessage_ACU(error));
     }
   });
+  if (commitResult.status !== 'committed') return commitResult;
+
+  const expectedStorageMode = getCurrentStorageMode();
+  try {
+    if (expectedStorageMode === 'sqlite') {
+      await reloadStorageProvider();
+      if (didSqliteFallbackAfterReload_ACU(expectedStorageMode)) {
+        throw new Error('SQLite 运行时重载后已静默回退到 native provider。');
+      }
+    }
+    if (!currentScopeMatches_ACU(plan)) throw new Error('宿主保存后运行时重载期间恢复计划作用域已变化。');
+    return commitResult;
+  } catch (error) {
+    return { status: 'committed_postcondition_failed', planId, error: getErrorMessage_ACU(error) };
+  }
 }

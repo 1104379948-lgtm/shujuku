@@ -987,6 +987,7 @@ export class SqlTableService implements ITableStorageProvider {
         const runtimeSeedData = this._buildInitialRuntimeTableData_ACU(runtimeSeedSource);
         if (runtimeSeedData) {
           this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true, allowRuntimeDdlFallback: true });
+          this._validateRuntimeSchema_ACU(runtimeSeedData);
           _set_currentJsonTableData_ACU(runtimeSeedData);
           this._buildNameMapper(runtimeSeedData);
           this._initialized = true;
@@ -1005,6 +1006,7 @@ export class SqlTableService implements ITableStorageProvider {
       }
 
       this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU, { strict: true, allowRuntimeDdlFallback: true });
+      this._validateRuntimeSchema_ACU(mergedData as TableDataObject_ACU);
       _set_currentJsonTableData_ACU(mergedData as TableDataObject_ACU);
       this._buildNameMapper(mergedData as TableDataObject_ACU);
       this._initialized = true;
@@ -1443,6 +1445,29 @@ export class SqlTableService implements ITableStorageProvider {
       logDebug_ACU(`[SqlTableService] 共收集 ${inserts.length} 条 seedRows reseed INSERT 语句`);
     }
     return { inserts, rowIdsByTable };
+  }
+
+  /**
+   * hydrate 成功不等于 runtime 可用：必须确认当前数据对应的物理表和有效列都已真正落入 SQLite。
+   * 这里不修复、不建表；缺表/缺列说明 hydrate 或模板契约已损坏，应在发布 ready 前 fail-closed。
+   */
+  private _validateRuntimeSchema_ACU(data: TableDataObject_ACU): void {
+    const actualTables = new Set(this.engine.getTableNames());
+    for (const key of Object.keys(data).filter(key => key.startsWith('sheet_'))) {
+      const sheet = (data as any)[key];
+      if (!sheet || typeof sheet !== 'object') continue;
+      const runtimeTableName = getPhysicalTableNameForSheet_ACU(data, key);
+      if (!actualTables.has(runtimeTableName)) {
+        throw new Error(`schema_missing_table: ${key} (${runtimeTableName}) 未在 SQLite runtime 中创建。`);
+      }
+      const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key, runtimeTableName);
+      const actualColumns = new Set(this.engine.getTableInfo(runtimeTableName).map(column => column.name));
+      for (const mapping of effectiveDDL.columnMap.mappings) {
+        if (!actualColumns.has(mapping.sqlName)) {
+          throw new Error(`schema_missing_column: ${key} (${runtimeTableName}).${mapping.sqlName} 未在 SQLite runtime 中创建。`);
+        }
+      }
+    }
   }
 
   /** 从 TableDataObject 中提取所有 DDL，构建全局 NameMapper */

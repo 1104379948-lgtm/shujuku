@@ -62,7 +62,7 @@ function createSettings() {
   } as any;
 }
 
-async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedDecision: any = null) {
+async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedDecision: any = null, sqliteMode = false, pendingReload = false) {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
@@ -109,6 +109,23 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     { isolationKey: 'beta', status: 'unrecoverable_no_base', requiresConfirmation: false, message: 'beta has no base', isCurrentIsolation: false },
   ]);
   const commitV2Recovery = vi.fn(async () => ({ status: 'committed', planId: 'recovery-plan' }));
+  const runtimeHealth = {
+    status: 'ready' as const,
+    expectedMode: sqliteMode ? 'sqlite' as const : 'native' as const,
+    activeMode: sqliteMode ? 'sqlite' as const : 'native' as const,
+    source: 'merged' as const,
+    loadToken: 7,
+    error: 'token=secret; ddl=private',
+  };
+  const getRuntimeHealth = vi.fn(() => ({ ...runtimeHealth }));
+  const reloadStorageProvider = vi.fn(async () => {
+    if (pendingReload) return new Promise<never>(() => {});
+    return {
+      ok: true,
+      degraded: false,
+      source: 'merged' as const,
+    };
+  });
   const chat = [
     {
       is_user: true,
@@ -224,8 +241,12 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     }),
   }));
   vi.doMock('../../../src/service/table/storage-mode', () => ({
-    isSqliteMode: () => false,
+    isSqliteMode: () => sqliteMode,
     getCurrentStorageMode: () => settings.storageMode,
+  }));
+  vi.doMock('../../../src/service/table/table-storage-strategy', () => ({
+    getStorageRuntimeHealth_ACU: getRuntimeHealth,
+    reloadStorageProvider,
   }));
   vi.doMock('../../../src/service/table/table-checkpoint-transfer', () => ({
     buildCurrentTableCheckpoint_ACU: buildCheckpoint,
@@ -273,6 +294,9 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     prepareV2Recovery,
     scanV2IsolationDiagnostics,
     commitV2Recovery,
+    runtimeHealth,
+    getRuntimeHealth,
+    reloadStorageProvider,
   };
 }
 
@@ -317,6 +341,8 @@ describe('DataMgmtPage', () => {
     expect(text).toContain('备份与恢复');
     expect(text).toContain('删除与清理');
     expect(text).toContain('删除当前标识注入条目');
+    expect(text).toContain('SQLite 运行时诊断');
+    expect(text).toContain('加载序号');
     expect(text).not.toContain('交火模式索引管理');
     expect(text).not.toContain('删除当前交火索引');
     expect(text).not.toContain('清空临时缓存');
@@ -334,6 +360,78 @@ describe('DataMgmtPage', () => {
 
     expect(labels).toEqual(['删除当前标识注入条目', '保存并应用']);
 
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('SQLite 模式下只在确认后重新初始化运行时，且状态卡不展示错误原文', async () => {
+    const { mount, reloadStorageProvider } = await mountDataMgmtPage('chat-data', null, true);
+    const section = document.querySelector<HTMLElement>('.acu-v2-data-mgmt-page__sqlite-runtime-section')!;
+    const button = Array.from(section.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('重新初始化当前聊天 SQLite 运行时'));
+
+    expect(section.textContent).toContain('状态');
+    expect(section.textContent).toContain('期望模式');
+    expect(section.textContent).toContain('实际模式');
+    expect(section.textContent).toContain('加载来源');
+    expect(section.textContent).toContain('加载序号');
+    expect(section.textContent).toContain('失败代码');
+    expect(button).toBeDefined();
+    button!.click();
+    await Promise.resolve();
+    expect(reloadStorageProvider).not.toHaveBeenCalled();
+    expect(document.querySelector('.acu-dialog-layer')?.textContent).toContain('不会修改聊天正文、Checkpoint、模板或世界书');
+    await clickDialogButton('重新初始化运行时');
+
+    expect(reloadStorageProvider).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('.acu-v2-toast--success')?.textContent).toContain('已重新初始化');
+    expect(section.textContent).not.toContain('token=secret');
+    expect(section.textContent).not.toContain('ddl=private');
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('native 模式保留脱敏状态卡但不提供 SQLite 重初始化按钮', async () => {
+    const { mount } = await mountDataMgmtPage();
+    const section = document.querySelector<HTMLElement>('.acu-v2-data-mgmt-page__sqlite-runtime-section')!;
+
+    expect(section).not.toBeNull();
+    expect(section.textContent).toContain('状态');
+    expect(section.querySelector('button')).toBeNull();
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('SQLite runtime 重初始化进行时会禁用同页持久化恢复操作', async () => {
+    const { mount, reloadStorageProvider } = await mountDataMgmtPage('chat-data', null, true, true);
+    const runtimeSection = document.querySelector<HTMLElement>('.acu-v2-data-mgmt-page__sqlite-runtime-section')!;
+    const reloadButton = Array.from(runtimeSection.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('重新初始化当前聊天 SQLite 运行时'))!;
+
+    reloadButton.click();
+    await clickDialogButton('重新初始化运行时');
+
+    expect(reloadStorageProvider).toHaveBeenCalledTimes(1);
+    expect(reloadButton.disabled).toBe(true);
+    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'))?.disabled).toBe(true);
+    expect(Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('保存并应用'))?.disabled).toBe(true);
+    const retainInput = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="number"]'))
+      .find(input => input.closest('.acu-form-row')?.textContent?.includes('保留数据层数'));
+    expect(retainInput?.disabled).toBe(true);
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('聊天切换 tick 到达时立即刷新 SQLite runtime 健康快照', async () => {
+    const { mount, runtimeHealth } = await mountDataMgmtPage('chat-data', null, true);
+    const { useChatChangedTick } = await import('../../../src/presentation-v2/composables/useChatChangedListener');
+    const section = document.querySelector<HTMLElement>('.acu-v2-data-mgmt-page__sqlite-runtime-section')!;
+
+    expect(section.textContent).toContain('7');
+    runtimeHealth.loadToken = 8;
+    useChatChangedTick().value += 1;
+    await Promise.resolve();
+
+    expect(section.textContent).toContain('8');
+    expect(section.textContent).not.toContain('token=secret');
     mount.__resetAcuV2MountForTests();
   });
 
@@ -396,7 +494,7 @@ describe('DataMgmtPage', () => {
     expect(isolationPanel?.textContent || '').toContain('当前正在使用：alpha');
     expect(backupPanel?.querySelector('.acu-stats')).toBeNull();
     expect(cleanupPanel?.querySelector('.acu-stats')).toBeNull();
-    expect(backupPanel?.querySelector('.acu-v2-data-mgmt-page__meta')).toBeNull();
+    expect(backupPanel?.querySelector('.acu-v2-data-mgmt-page__meta')?.textContent).toContain('脱敏健康快照');
     expect(cleanupPanel?.querySelector('.acu-v2-data-mgmt-page__meta')?.textContent).toContain('当前聊天 2 个 AI 楼层');
 
     mount.__resetAcuV2MountForTests();

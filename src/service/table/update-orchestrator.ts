@@ -728,6 +728,18 @@ export async function collectGroupFillResponse_ACU(
         templateScope: job.templateScope,
         sqlApplyScope: job.sqlApplyScope,
     });
+    if (dynamicContent && typeof dynamicContent === 'object' && dynamicContent.ok === false) {
+        const failure = dynamicContent as { failureCode?: string; message?: string };
+        const error = `无法准备AI输入（${failure.failureCode || 'provider_load_failed'}）：${failure.message || 'SQLite 运行时未就绪。'}`;
+        return {
+            job,
+            success: false,
+            attempt: 0,
+            error,
+            rawError: error,
+            errorCategory: 'infrastructure',
+        };
+    }
     if (!dynamicContent) {
         return {
             job,
@@ -2854,6 +2866,16 @@ export async function orchestrateManualUpdate_ACU(
             const rollbackMessageIndices = collectManualRefillRollbackMessageIndices_ACU(liveChat, currentIsolationKey, contextScopeIndices);
             manualRefillSessionSnapshot = captureManualRefillSessionSnapshot_ACU(rollbackMessageIndices);
 
+            // 重填会先删除持久化增量，不能在 SQLite runtime 尚未 ready 时进入破坏性阶段。
+            // native 路径没有 SQLite 后置条件，保持既有行为。
+            if (isSqliteMode()) {
+                try {
+                    await ensureStorageProviderReady_ACU();
+                } catch (error: any) {
+                    return { success: false, error: `SQLite 运行时未就绪，已阻止重填：${error?.message || String(error)}` };
+                }
+            }
+
             try {
                 await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
             } catch (error: any) {
@@ -2865,7 +2887,10 @@ export async function orchestrateManualUpdate_ACU(
             logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
 
             try {
-                await reloadStorageProvider();
+                const reloadResult = await reloadStorageProvider();
+                if (!reloadResult.ok) {
+                    throw new Error(`SQLite runtime 重载未完成: ${reloadResult.failureCode || 'unknown'}${reloadResult.error ? ` (${reloadResult.error})` : ''}`);
+                }
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理后刷新运行时快照失败:', error);
                 const rollbackError = await rollbackManualRefillSession();

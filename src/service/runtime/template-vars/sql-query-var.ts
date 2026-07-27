@@ -11,8 +11,8 @@
  *   {[sql "SELECT 列名 FROM 表名 WHERE 条件"]}
  */
 
-import { getStorageProvider } from '../../table/table-storage-strategy';
-import { getNameMapper } from './name-mapper';
+import { getStorageProvider, getStorageRuntimeHealth_ACU, isStorageRuntimeReadyForSyncRead_ACU } from '../../table/table-storage-strategy';
+import { getGlobalNameMapperStatus_ACU, getNameMapper } from './name-mapper';
 import { isSqliteMode } from '../../table/storage-mode';
 import { logDebug_ACU, logWarn_ACU, logError_ACU } from '../../../shared/utils';
 
@@ -22,6 +22,34 @@ import { logDebug_ACU, logWarn_ACU, logError_ACU } from '../../../shared/utils';
 
 /** 模块级变量存储（每次 replaceDbSqlVariables 调用时重置） */
 let _dbSqlVars: Record<string, string | number> = {};
+let lastBlockedQueryKey_ACU = '';
+
+/**
+ * 模板渲染是同步路径，绝不能为了一个 SELECT 在这里创建未 hydrate 的 SQLite provider。
+ * 未就绪时 fail-closed，避免中文展示名被空 NameMapper 原样下发给 SQLite。
+ */
+function isTemplateQueryRuntimeReady_ACU(source: string): boolean {
+  if (!isStorageRuntimeReadyForSyncRead_ACU()) {
+    const health = getStorageRuntimeHealth_ACU();
+    const key = `${health.loadToken}:${health.status}:${source}`;
+    if (lastBlockedQueryKey_ACU !== key) {
+      lastBlockedQueryKey_ACU = key;
+      logWarn_ACU(`[SQL][readiness] 运行时未就绪，已跳过${source}查询: status=${health.status}, expected=${health.expectedMode}, active=${health.activeMode || 'none'}, code=${health.failureCode || 'none'}`);
+    }
+    return false;
+  }
+  const mapperStatus = getGlobalNameMapperStatus_ACU();
+  if (!mapperStatus.ready) {
+    const health = getStorageRuntimeHealth_ACU();
+    const key = `${health.loadToken}:mapper:${source}`;
+    if (lastBlockedQueryKey_ACU !== key) {
+      lastBlockedQueryKey_ACU = key;
+      logWarn_ACU(`[SQL][readiness] NameMapper 未就绪，已跳过${source}查询。`);
+    }
+    return false;
+  }
+  return true;
+}
 
 /** 获取变量值（供外部条件求值使用） */
 export function getDbSqlVariable(name: string): string | number | null {
@@ -461,6 +489,10 @@ export class TableQueryBuilder {
   }
 
   private _executeQuery(sql: string): { columns: string[]; values: any[][] } {
+    if (!isTemplateQueryRuntimeReady_ACU('ORM')) {
+      if (this.options.throwOnQueryError === true) throw new Error('orm_runtime_not_ready');
+      return { columns: [], values: [] };
+    }
     try {
       const provider = getStorageProvider();
       const result = provider.executeQuery(sql, undefined, {
@@ -517,6 +549,7 @@ function execExpr(expression: string): string | number | null {
       logWarn_ACU('[db.expr] 空表达式');
       return null;
     }
+    if (!isTemplateQueryRuntimeReady_ACU('db.expr')) return null;
     const mapper = getNameMapper();
     const translatedExpr = mapper.translateSql(expression.trim());
     const sql = `SELECT ${translatedExpr}`;
@@ -547,6 +580,7 @@ function execRand(min: number, max: number): number {
       return 0;
     }
     if (lo > hi) { const tmp = lo; lo = hi; hi = tmp; }
+    if (!isTemplateQueryRuntimeReady_ACU('db.rand')) return 0;
     const range = hi - lo + 1;
     const provider = getStorageProvider();
     const result = provider.executeQuery(`SELECT ABS(RANDOM()) % ${range} + ${lo}`);
@@ -584,6 +618,7 @@ function execCalc(expression: string): number | null {
       logWarn_ACU(`[db.calc] 表达式包含未定义变量: ${expression}`);
       return null;
     }
+    if (!isTemplateQueryRuntimeReady_ACU('db.calc')) return null;
     const provider = getStorageProvider();
     const result = provider.executeQuery(`SELECT ${processed}`);
     if (result.values.length === 0) return null;
@@ -671,6 +706,7 @@ export function evaluateOrmExpression(expr: string): string {
   try {
     const trimmed = expr.trim();
     if (!trimmed) return '';
+    if (!isTemplateQueryRuntimeReady_ACU('ORM')) return '';
 
     // 确保表达式以 db. 开头
     const fullExpr = trimmed.startsWith('db.') ? trimmed : 'db.' + trimmed;
@@ -712,6 +748,10 @@ export function evaluateRawSqlExpression(expr: string, options: RawSqlEvaluation
 
     if (!trimmed) {
       logWarn_ACU('[SQL] 空的 SQL 表达式');
+      return '';
+    }
+    if (!isTemplateQueryRuntimeReady_ACU('SQL')) {
+      if (options.throwOnError === true) throw new Error('sql_runtime_not_ready');
       return '';
     }
 
@@ -761,6 +801,8 @@ export function replaceDbSqlVariables(content: string): string {
   if (!content || typeof content !== 'string') return content || '';
   if (!isSqliteMode()) return content;
 
+  if (!isTemplateQueryRuntimeReady_ACU('模板变量')) return content;
+
   // 每轮处理开始时重置变量存储
   clearDbSqlVariables();
 
@@ -792,6 +834,7 @@ export function replaceDbSqlVariables(content: string): string {
  */
 export function evaluateDbCondition(expression: string): boolean {
   if (!isSqliteMode()) return false;
+  if (!isTemplateQueryRuntimeReady_ACU('<if db>')) return false;
 
   try {
     const trimmed = expression.trim();
@@ -819,6 +862,7 @@ export function evaluateDbCondition(expression: string): boolean {
  */
 export function evaluateSqlCondition(expression: string): boolean {
   if (!isSqliteMode()) return false;
+  if (!isTemplateQueryRuntimeReady_ACU('<if sql>')) return false;
 
   try {
     // 直接传入 SQL 表达式，不需要包引号

@@ -31,6 +31,13 @@ vi.mock('../../../../src/service/table/storage-mode', () => ({
 
 // mock table-storage-strategy
 vi.mock('../../../../src/service/table/table-storage-strategy', () => ({
+  isStorageRuntimeReadyForSyncRead_ACU: vi.fn(() => true),
+  getStorageRuntimeHealth_ACU: vi.fn(() => ({
+    status: 'ready',
+    expectedMode: 'sqlite',
+    activeMode: 'sqlite',
+    loadToken: 1,
+  })),
   getStorageProvider: vi.fn(() => ({
     mode: 'sqlite' as const,
     executeQuery: (sql: string, params?: any[], options?: { suppressErrorLog?: boolean }) => {
@@ -72,6 +79,7 @@ vi.mock('../../../../src/service/runtime/template-vars/name-mapper', async (impo
   return {
     ...original,
     getNameMapper: vi.fn(() => _mapper),
+    getGlobalNameMapperStatus_ACU: vi.fn(() => ({ ready: true, tableCount: 2 })),
   };
 });
 

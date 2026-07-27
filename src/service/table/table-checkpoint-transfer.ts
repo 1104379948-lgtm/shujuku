@@ -244,7 +244,7 @@ async function runCheckpointDerivedRefresh_ACU(
   };
 
   await runDerivedStep('模板作用域应用失败', () => { applyTemplateScopeForCurrentChat_ACU(); });
-  if (isSqliteMode()) await runDerivedStep('SQLite 运行时重载失败', () => reloadStorageProvider());
+  if (isSqliteMode()) await runDerivedStep('SQLite 运行时重载失败', async () => { await reloadStorageProvider(); });
   await runDerivedStep('旧世界书条目清理触发失败', () => deleteAllGeneratedEntries_ACU());
   await runDerivedStep('聊天运行时与世界书刷新失败', async () => { await refreshMergedDataAndNotify_ACU(); });
 

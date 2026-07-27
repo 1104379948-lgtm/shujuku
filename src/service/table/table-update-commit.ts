@@ -138,6 +138,7 @@ export async function runTableUpdateCommit_ACU<T>(
   options: RunTableUpdateCommitOptions_ACU,
   apply: (context: TableUpdateCommitApplyContext_ACU) => Promise<TableUpdateCommitApplyResult_ACU<T>> | TableUpdateCommitApplyResult_ACU<T>,
 ): Promise<RunTableUpdateCommitResult_ACU<T>> {
+  let requiresRuntimeReload = false;
   try {
     assertExpectedCommitScope_ACU(options, '提交前');
     const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
@@ -201,8 +202,8 @@ export async function runTableUpdateCommit_ACU<T>(
           saved = saveResult.saved;
           messageIndex = saveResult.messageIndex;
           if (!saveResult.saved) {
-            logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update, reload runtime before releasing lock: ${saveResult.error || 'unknown error'}`);
-            await reloadStorageProvider();
+            logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update; reload after releasing transaction locks: ${saveResult.error || 'unknown error'}`);
+            requiresRuntimeReload = true;
             throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, 'infrastructure');
           }
         }
@@ -219,6 +220,13 @@ export async function runTableUpdateCommit_ACU<T>(
       }, () => commitRevisionWriteSet);
     });
   } catch (error: any) {
+    if (requiresRuntimeReload) {
+      try {
+        await reloadStorageProvider();
+      } catch (reloadError) {
+        logError_ACU(`[TableUpdateCommit] ${options.reason} failed to reload runtime after persistence failure:`, reloadError);
+      }
+    }
     const message = error?.message || String(error);
     logError_ACU(`[TableUpdateCommit] ${options.reason} failed:`, error);
     return {

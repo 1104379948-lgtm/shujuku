@@ -15,13 +15,43 @@ import { resolvePreTakeoverWorldbookSnapshot_ACU } from '../../agent/agent-world
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../../shared/utils';
 import { applyContextTagFilters_ACU } from '../../runtime/helpers-remaining';
 import { isSqliteMode } from '../../table/storage-mode';
-import { ensureStorageProviderReady_ACU } from '../../table/table-storage-strategy';
+import { ensureStorageProviderReady_ACU, getStorageRuntimeHealth_ACU } from '../../table/table-storage-strategy';
 import { resolveEffectiveDDL, type EffectiveDDLColumnMap_ACU } from '../../../data/sqlite/schema-mapper';
 import { getSheetColumnProjection_ACU, projectSheetDDLForVisibleColumns_ACU, projectSheetRowToVisibleColumns_ACU } from '../../../shared/ddl-utils';
 import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity';
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
 
-  async function resolvePromptSourceTableData_ACU(options: any, sqlMode: boolean) {
+  export interface PrepareAIInputFailure_ACU {
+    ok: false;
+    failureCode: string;
+    message: string;
+    retryable: boolean;
+  }
+
+  function createPromptRuntimeFailure_ACU(
+    failureCode: string,
+    message: string,
+    retryable: boolean,
+  ): PrepareAIInputFailure_ACU {
+    return { ok: false, failureCode, message, retryable };
+  }
+
+  function getPromptRuntimeFailureFromHealth_ACU(): PrepareAIInputFailure_ACU {
+    const health = getStorageRuntimeHealth_ACU();
+    if (health.status === 'loading') {
+      return createPromptRuntimeFailure_ACU('runtime_loading', 'SQLite 运行时正在加载，请等待加载完成后重试。', true);
+    }
+    if (health.failureCode === 'provider_fallback' || health.activeMode === 'native') {
+      return createPromptRuntimeFailure_ACU('provider_fallback', 'SQLite 运行时加载失败，当前未使用 SQLite 数据库。', false);
+    }
+    return createPromptRuntimeFailure_ACU(
+      health.failureCode || 'provider_load_failed',
+      'SQLite 运行时未就绪，已阻止准备 AI 输入。',
+      health.status === 'idle',
+    );
+  }
+
+  async function resolvePromptSourceTableData_ACU(options: any, sqlMode: boolean): Promise<any | PrepareAIInputFailure_ACU> {
     if (!sqlMode) {
         return options?.tableData || currentJsonTableData_ACU;
     }
@@ -29,13 +59,19 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
     try {
         const provider = await ensureStorageProviderReady_ACU();
         if (provider.mode !== 'sqlite') {
-            logError_ACU(`prepareAIInput_ACU: SQLite mode expected runtime DB provider, got ${provider.mode}.`);
-            return null;
+            logError_ACU('prepareAIInput_ACU: SQLite mode expected a SQLite runtime provider.');
+            return createPromptRuntimeFailure_ACU('provider_fallback', 'SQLite 运行时加载失败，当前未使用 SQLite 数据库。', false);
         }
-        return provider.getCurrentData();
+        const runtimeData = provider.getCurrentData();
+        if (!runtimeData) {
+            logError_ACU('prepareAIInput_ACU: SQLite runtime exported no table data.');
+            return createPromptRuntimeFailure_ACU('runtime_export_null', 'SQLite 运行时未导出可用表格数据。', true);
+        }
+        return runtimeData;
     } catch (e) {
-        logError_ACU('prepareAIInput_ACU: 无法从 SQLite 运行时 DB 获取权威表格数据。', e);
-        return null;
+        const failure = getPromptRuntimeFailureFromHealth_ACU();
+        logError_ACU(`prepareAIInput_ACU: SQLite runtime unavailable (${failure.failureCode}).`, e);
+        return failure;
     }
   }
 
@@ -47,6 +83,9 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
   ) {
     const sqlMode = isSqliteMode();
     const sourceTableData = await resolvePromptSourceTableData_ACU(options, sqlMode);
+    if (sourceTableData && typeof sourceTableData === 'object' && sourceTableData.ok === false) {
+        return sourceTableData;
+    }
     if (!sourceTableData) {
         logError_ACU(sqlMode
             ? 'prepareAIInput_ACU: Cannot prepare AI input, SQLite runtime DB data is null.'

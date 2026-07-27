@@ -21,6 +21,13 @@ const mocks = vi.hoisted(() => ({
   getChineseColumnName: vi.fn((_tableName: string, columnName: string) => columnName),
   getChineseTableName: vi.fn((tableName: string) => tableName),
   getStorageProvider: vi.fn(),
+  isStorageRuntimeReadyForSyncRead: vi.fn(() => true),
+  getStorageRuntimeHealth: vi.fn(() => ({
+    status: 'ready',
+    expectedMode: 'sqlite',
+    activeMode: 'sqlite',
+    loadToken: 1,
+  })),
   runTableUpdateApplyWithScopeLock: vi.fn(async (_scopeKey: string, task: () => Promise<unknown>) => task()),
   reloadStorageProvider: vi.fn().mockResolvedValue(undefined),
   ensureStorageProviderReady: vi.fn().mockResolvedValue({
@@ -59,6 +66,8 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
   getStorageProvider: mocks.getStorageProvider,
   reloadStorageProvider: mocks.reloadStorageProvider,
   ensureStorageProviderReady_ACU: mocks.ensureStorageProviderReady,
+  isStorageRuntimeReadyForSyncRead_ACU: mocks.isStorageRuntimeReadyForSyncRead,
+  getStorageRuntimeHealth_ACU: mocks.getStorageRuntimeHealth,
 }));
 
 function createBareProvider_ACU() {
@@ -223,24 +232,32 @@ describe('createSqlApi', () => {
     expect(mocks.executeQuery).not.toHaveBeenCalled();
   });
 
-  it('当前只读 SQL 绕过 readiness 并直接使用裸 provider，作为 P5 生命周期修复基线', () => {
+  it('只读 SQL 在 runtime ready 时执行查询', () => {
     const result = api.executeSqlQuery('SELECT * FROM inventory');
 
     expect(result).toEqual({ columns: ['id'], values: [[1]], rowCount: 1, rows: [{ id: 1 }], sql: 'SELECT * FROM inventory', offset: 0 });
     expect(mocks.getStorageProvider).toHaveBeenCalledOnce();
-    expect(mocks.ensureStorageProviderReady).not.toHaveBeenCalled();
+    expect(mocks.isStorageRuntimeReadyForSyncRead).toHaveBeenCalledOnce();
     expect(mocks.executeQuery).toHaveBeenCalledWith('SELECT * FROM inventory', undefined);
   });
 
-  it('当前 raw SQL 不调用 NameMapper，中文表列名会原样进入 provider，作为 P6 翻译修复基线', () => {
+  it('只读 SQL 会翻译中文表列名后执行', () => {
     const sql = "SELECT 物品名称 FROM 背包物品表 WHERE 物品名称 = '铁剑'";
 
     const result = api.executeSqlQuery(sql);
 
-    expect(result).toEqual(expect.objectContaining({ sql }));
-    expect(mocks.getNameMapper).not.toHaveBeenCalled();
-    expect(mocks.translateSql).not.toHaveBeenCalled();
-    expect(mocks.executeQuery).toHaveBeenCalledWith(sql, undefined);
+    expect(result).toEqual(expect.objectContaining({ sql: "SELECT item_name FROM inventory WHERE item_name = '铁剑'" }));
+    expect(mocks.getNameMapper).toHaveBeenCalled();
+    expect(mocks.translateSql).toHaveBeenCalledWith(sql);
+    expect(mocks.executeQuery).toHaveBeenCalledWith("SELECT item_name FROM inventory WHERE item_name = '铁剑'", undefined);
+  });
+
+  it('runtime 未就绪时拒绝只读 SQL，且不触发 provider 懒查询', () => {
+    mocks.isStorageRuntimeReadyForSyncRead.mockReturnValueOnce(false);
+    mocks.getStorageRuntimeHealth.mockReturnValueOnce({ status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', loadToken: 2, failureCode: 'provider_fallback' });
+
+    expect(api.executeSqlQuery('SELECT * FROM inventory')).toBeNull();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
   });
 
   it('executeSqlMutation 将唯一 DDL alias 重绑定为 runtime SQL，并记录 sql_sheet_batch', async () => {

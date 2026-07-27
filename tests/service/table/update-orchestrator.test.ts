@@ -78,7 +78,8 @@ const mockParseAndApplyTableEdits = vi.fn();
 const mockParseAndApplyTableEditsToData = vi.fn();
 const mockApplySqlEditsToTableDataSnapshot = vi.fn();
 const mockPrepareAIInput = vi.fn();
-const mockReloadStorageProvider = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const mockReloadStorageProvider = vi.hoisted(() => vi.fn().mockResolvedValue({ ok: true, degraded: false, source: 'merged' }));
+const mockEnsureStorageProviderReady = vi.hoisted(() => vi.fn().mockResolvedValue({ mode: 'sqlite', isReady: () => true }));
 const mockResolveTemplateScope = vi.hoisted(() => vi.fn(() => null as any));
 
 vi.mock('../../../src/service/ai/prompt-builder', () => ({
@@ -215,6 +216,7 @@ vi.mock('../../../src/service/table/table-storage-strategy', async (importOrigin
   return {
     ...actual,
     reloadStorageProvider: (...args: any[]) => mockReloadStorageProvider(...args),
+    ensureStorageProviderReady_ACU: (...args: any[]) => mockEnsureStorageProviderReady(...args),
   };
 });
 
@@ -286,7 +288,16 @@ beforeEach(() => {
   mockCommitManualRefillSheetSnapshot.mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 });
   mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
   mockPurgeSheetKeysFromChatHistoryHard.mockResolvedValue({ changed: true, changedCount: 1 });
-  mockReloadStorageProvider.mockResolvedValue(undefined);
+  mockReloadStorageProvider.mockResolvedValue({ ok: true, degraded: false, source: 'merged' });
+  mockEnsureStorageProviderReady.mockImplementation(async () => {
+    const { SqlTableService } = await vi.importActual<typeof import('../../../src/service/table/sql-table-service')>(
+      '../../../src/service/table/sql-table-service',
+    );
+    const provider = new SqlTableService();
+    const loadResult = await provider.loadFromData(JSON.parse(JSON.stringify(mockCurrentJsonTableData || {})));
+    if (loadResult.error || !provider.isReady()) throw new Error(`测试 SQLite runtime 初始化失败：${loadResult.error || 'unknown'}`);
+    return provider;
+  });
   mockEnsureLegacyStorageMigratedBeforeWrite.mockReset().mockResolvedValue({ success: true, migrated: false });
 });
 
@@ -1416,11 +1427,14 @@ describe('orchestrateManualUpdate_ACU', () => {
     mockCurrentJsonTableData = {
       sheet_0: { name: '纪要表', updateConfig: {}, content: [['row_id', '事件'], ['old', '清理前旧 chronicle']] },
     };
+    // 本例验证清理后的 reload 编排，不会进入 SQL 提交；数据夹具也没有可 hydrate 的 DDL。
+    // 因此只提供 readiness 通过的 provider stub，避免把无关的 schema 校验混入该行为测试。
+    mockEnsureStorageProviderReady.mockResolvedValue({ mode: 'sqlite', isReady: () => true });
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
 
     const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
 
-    expect(result.success).toBe(true);
+    expect(result.success, result.error).toBe(true);
     expect(clearManualRefillSheetDataInRange_ACU).toHaveBeenCalledTimes(1);
     expect(mockReloadStorageProvider).toHaveBeenCalled();
     expect(clearManualRefillIncrementalDataInRange_ACU).not.toHaveBeenCalled();
@@ -2644,6 +2658,27 @@ describe('collectGroupFillResponse_ACU', () => {
     expect(mockSaveIndependentTable).not.toHaveBeenCalled();
     expect(mockRunTableUpdateApplyWithScopeLock).not.toHaveBeenCalled();
     expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
+  });
+
+  it('AI 输入准备返回 SQLite failure code 时不调用 AI 且保留可操作原因', async () => {
+    const job = createJob();
+    mockPrepareAIInput.mockResolvedValue({
+      ok: false,
+      failureCode: 'provider_fallback',
+      message: 'SQLite 运行时加载失败，当前未使用 SQLite 数据库。',
+      retryable: false,
+    });
+
+    const result = await collectGroupFillResponse_ACU(job);
+
+    expect(result).toMatchObject({
+      success: false,
+      attempt: 0,
+      errorCategory: 'infrastructure',
+    });
+    expect(result.error).toContain('provider_fallback');
+    expect(result.error).toContain('SQLite 运行时加载失败');
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
   });
 
   it('AI 响应缺少完整 tableEdit 标签时按重试次数失败', async () => {

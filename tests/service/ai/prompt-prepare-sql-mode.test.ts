@@ -58,13 +58,18 @@ vi.mock('../../../src/service/table/storage-mode', () => ({
   isSqliteMode: vi.fn(() => mockIsSqliteMode),
 }));
 
+const mockEnsureStorageProviderReady = vi.fn();
+const mockGetStorageRuntimeHealth = vi.fn(() => ({
+  status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', loadToken: 1,
+}));
 const mockRuntimeProvider = {
   mode: 'sqlite',
   isReady: vi.fn(() => true),
   getCurrentData: vi.fn(() => mockCurrentJsonTableData),
 };
 vi.mock('../../../src/service/table/table-storage-strategy', () => ({
-  ensureStorageProviderReady_ACU: vi.fn(() => Promise.resolve(mockRuntimeProvider)),
+  ensureStorageProviderReady_ACU: (...args: any[]) => mockEnsureStorageProviderReady(...args),
+  getStorageRuntimeHealth_ACU: () => mockGetStorageRuntimeHealth(),
 }));
 
 import { formatTableForSqliteMode, prepareAIInput_ACU } from '../../../src/service/ai/prompt-builder/prompt-prepare';
@@ -80,6 +85,10 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     mockGetEffectiveSeedRows.mockReturnValue([]);
     mockRuntimeProvider.mode = 'sqlite';
     mockRuntimeProvider.getCurrentData.mockImplementation(() => mockCurrentJsonTableData);
+    mockEnsureStorageProviderReady.mockReset().mockResolvedValue(mockRuntimeProvider);
+    mockGetStorageRuntimeHealth.mockReturnValue({
+      status: 'ready', expectedMode: 'sqlite', activeMode: 'sqlite', loadToken: 1,
+    });
     mockIsSqliteMode = true;
     mockSettings = {
       tableContextExtractTags: '',
@@ -89,10 +98,53 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     };
   });
 
-  it('currentJsonTableData 为 null 时返回 null', async () => {
+  it('currentJsonTableData 为 null 时返回 runtime_export_null', async () => {
     mockCurrentJsonTableData = null;
-    const result = await prepareAIInput_ACU([], 'standard');
-    expect(result).toBeNull();
+    await expect(prepareAIInput_ACU([], 'standard')).resolves.toEqual({
+      ok: false,
+      failureCode: 'runtime_export_null',
+      message: 'SQLite 运行时未导出可用表格数据。',
+      retryable: true,
+    });
+  });
+
+  it('SQLite runtime loading 时返回可操作的 failure code', async () => {
+    mockEnsureStorageProviderReady.mockRejectedValueOnce(new Error('runtime pending'));
+    mockGetStorageRuntimeHealth.mockReturnValueOnce({
+      status: 'loading', expectedMode: 'sqlite', activeMode: null, loadToken: 2,
+    });
+
+    await expect(prepareAIInput_ACU([], 'standard')).resolves.toEqual({
+      ok: false,
+      failureCode: 'runtime_loading',
+      message: 'SQLite 运行时正在加载，请等待加载完成后重试。',
+      retryable: true,
+    });
+  });
+
+  it('SQLite fallback 到 native 时返回 provider_fallback 而不是笼统 null', async () => {
+    mockEnsureStorageProviderReady.mockRejectedValueOnce(new Error('provider fallback'));
+    mockGetStorageRuntimeHealth.mockReturnValueOnce({
+      status: 'degraded', expectedMode: 'sqlite', activeMode: 'native', loadToken: 2, failureCode: 'provider_fallback',
+    });
+
+    await expect(prepareAIInput_ACU([], 'standard')).resolves.toEqual({
+      ok: false,
+      failureCode: 'provider_fallback',
+      message: 'SQLite 运行时加载失败，当前未使用 SQLite 数据库。',
+      retryable: false,
+    });
+  });
+
+  it('SQLite provider 导出空数据时返回 runtime_export_null', async () => {
+    mockCurrentJsonTableData = null;
+
+    await expect(prepareAIInput_ACU([], 'standard')).resolves.toEqual({
+      ok: false,
+      failureCode: 'runtime_export_null',
+      message: 'SQLite 运行时未导出可用表格数据。',
+      retryable: true,
+    });
   });
 
   it('有 DDL 的表走 SQL 格式化路径', async () => {
