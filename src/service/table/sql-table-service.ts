@@ -27,7 +27,7 @@ import {
 } from '../runtime/state-manager';
 import { mergeAllIndependentTables_ACU } from '../runtime/helpers-data-merge';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
-import { disposeGlobalNameMapper, ensureGlobalNameMapperForDDLs_ACU } from '../runtime/template-vars/name-mapper';
+import { disposeGlobalNameMapper, ensureGlobalNameMapperForDDLs_ACU, markGlobalNameMapperEmptySchema_ACU } from '../runtime/template-vars/name-mapper';
 import { parseDDLTableName, generateDDL, generateInserts, resolveEffectiveDDL } from '../../data/sqlite/schema-mapper';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
@@ -1000,6 +1000,9 @@ export class SqlTableService implements ITableStorageProvider {
         }
 
         logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
+        // runtime 没有任何表可映射。显式标记空 schema，避免同步读门禁把它
+        // 误判成「mapper 意外丢失」并按异常反复告警。
+        markGlobalNameMapperEmptySchema_ACU();
         this._initialized = true;
         this._existingTableSet = undefined;
         return { loaded: false, source: 'empty' };

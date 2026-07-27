@@ -46236,6 +46236,16 @@ $CONTENT
     let _globalNameMapper = null;
     /** 当前 mapper 对应的有效 DDL 集合签名；null 表示尚未绑定到任何 runtime schema。 */
     let _globalNameMapperSchemaSignature = null;
+    /**
+     * mapper 与 runtime schema 的绑定状态。
+     * unbound: 未绑定任何 runtime schema，映射不可信。
+     * empty_schema: runtime 引擎已就绪但尚未建立任何表，没有可映射的 schema。
+     * bound: 已绑定当前 runtime 的有效 DDL 集合。
+     *
+     * 不能用「实例是否存在」判断就绪：getNameMapper() 会懒建空实例，
+     * 那样会让透传映射被误判为可用。
+     */
+    let _globalNameMapperBinding_ACU = 'unbound';
     function buildDDLMapSignature_ACU(ddlMap) {
         return [...ddlMap.entries()]
             .map(([tableName, ddl]) => [String(tableName || '').trim(), String(ddl || '').trim()])
@@ -46263,6 +46273,7 @@ $CONTENT
     function buildGlobalNameMapper(ddlMap) {
         _globalNameMapperSchemaSignature = buildDDLMapSignature_ACU(ddlMap);
         _globalNameMapper = NameMapper.fromDDLs(ddlMap);
+        _globalNameMapperBinding_ACU = _globalNameMapperSchemaSignature ? 'bound' : 'empty_schema';
         logDebug_ACU(`[NameMapper] 全局映射器已构建: ${_globalNameMapper.tableCount} 张表`);
     }
     /**
@@ -46271,10 +46282,19 @@ $CONTENT
      */
     function ensureGlobalNameMapperForDDLs_ACU(ddlMap) {
         const nextSignature = buildDDLMapSignature_ACU(ddlMap);
-        if (!_globalNameMapper || _globalNameMapperSchemaSignature !== nextSignature) {
+        if (_globalNameMapperBinding_ACU === 'unbound' || _globalNameMapperSchemaSignature !== nextSignature) {
             buildGlobalNameMapper(ddlMap);
         }
         return _globalNameMapper;
+    }
+    /**
+     * 标记 runtime 引擎已就绪但尚未建立任何表（新聊天首次填表前的正常状态）。
+     * 与「mapper 意外丢失」区分：后者说明活跃 runtime 有表却没有可信映射，属于异常。
+     */
+    function markGlobalNameMapperEmptySchema_ACU() {
+        _globalNameMapper = new NameMapper();
+        _globalNameMapperSchemaSignature = '';
+        _globalNameMapperBinding_ACU = 'empty_schema';
     }
     /**
      * 解析运行时有效 DDL（包括缺失或无效 DDL 的 fallback）。
@@ -46285,14 +46305,15 @@ $CONTENT
     }
     /** 当前全局 mapper 是否精确对应给定的有效 DDL 集合。 */
     function isGlobalNameMapperCurrentForDDLs_ACU(ddlMap) {
-        return _globalNameMapper !== null
+        return _globalNameMapperBinding_ACU !== 'unbound'
             && _globalNameMapperSchemaSignature === buildDDLMapSignature_ACU(ddlMap);
     }
     /** 供诊断使用；不暴露 DDL 内容，避免日志泄漏模板。 */
     function getGlobalNameMapperStatus_ACU() {
         return {
-            ready: _globalNameMapper !== null,
+            ready: _globalNameMapperBinding_ACU === 'bound',
             tableCount: _globalNameMapper?.tableCount ?? 0,
+            binding: _globalNameMapperBinding_ACU,
         };
     }
     /**
@@ -46301,6 +46322,7 @@ $CONTENT
     function disposeGlobalNameMapper() {
         _globalNameMapper = null;
         _globalNameMapperSchemaSignature = null;
+        _globalNameMapperBinding_ACU = 'unbound';
     }
     /**
      * 中英文名称双向映射器
@@ -47348,6 +47370,9 @@ $CONTENT
                         return { loaded: hasSeedRows, source: hasSeedRows ? 'initialized' : 'empty' };
                     }
                     logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
+                    // runtime 没有任何表可映射。显式标记空 schema，避免同步读门禁把它
+                    // 误判成「mapper 意外丢失」并按异常反复告警。
+                    markGlobalNameMapperEmptySchema_ACU();
                     this._initialized = true;
                     this._existingTableSet = undefined;
                     return { loaded: false, source: 'empty' };
@@ -48447,10 +48472,17 @@ $CONTENT
         const mapperStatus = getGlobalNameMapperStatus_ACU();
         if (!mapperStatus.ready) {
             const health = getStorageRuntimeHealth_ACU();
-            const key = `${health.loadToken}:mapper:${source}`;
+            const key = `${health.loadToken}:mapper:${mapperStatus.binding}:${source}`;
             if (lastBlockedQueryKey_ACU !== key) {
                 lastBlockedQueryKey_ACU = key;
-                logWarn_ACU(`[SQL][readiness] NameMapper 未就绪，已跳过${source}查询。`);
+                if (mapperStatus.binding === 'empty_schema') {
+                    // 新聊天首次填表前 runtime 就是空的，没有表可查。这是预期状态，
+                    // 不能按异常反复 WARN，否则会掩盖真正的 mapper 丢失。
+                    logDebug_ACU(`[SQL][readiness] 运行时尚无表结构，已跳过${source}查询。`);
+                }
+                else {
+                    logWarn_ACU(`[SQL][readiness] NameMapper 未就绪，已跳过${source}查询。`);
+                }
             }
             return false;
         }

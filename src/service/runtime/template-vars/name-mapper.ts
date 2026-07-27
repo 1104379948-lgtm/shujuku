@@ -21,6 +21,16 @@ import type { Sheet_ACU } from '../../../shared/models/table-data';
 let _globalNameMapper: NameMapper | null = null;
 /** 当前 mapper 对应的有效 DDL 集合签名；null 表示尚未绑定到任何 runtime schema。 */
 let _globalNameMapperSchemaSignature: string | null = null;
+/**
+ * mapper 与 runtime schema 的绑定状态。
+ * unbound: 未绑定任何 runtime schema，映射不可信。
+ * empty_schema: runtime 引擎已就绪但尚未建立任何表，没有可映射的 schema。
+ * bound: 已绑定当前 runtime 的有效 DDL 集合。
+ *
+ * 不能用「实例是否存在」判断就绪：getNameMapper() 会懒建空实例，
+ * 那样会让透传映射被误判为可用。
+ */
+let _globalNameMapperBinding_ACU: 'unbound' | 'empty_schema' | 'bound' = 'unbound';
 
 function buildDDLMapSignature_ACU(ddlMap: Map<string, string>): string {
   return [...ddlMap.entries()]
@@ -51,6 +61,7 @@ export function getNameMapper(): NameMapper {
 export function buildGlobalNameMapper(ddlMap: Map<string, string>): void {
   _globalNameMapperSchemaSignature = buildDDLMapSignature_ACU(ddlMap);
   _globalNameMapper = NameMapper.fromDDLs(ddlMap);
+  _globalNameMapperBinding_ACU = _globalNameMapperSchemaSignature ? 'bound' : 'empty_schema';
   logDebug_ACU(`[NameMapper] 全局映射器已构建: ${_globalNameMapper.tableCount} 张表`);
 }
 
@@ -60,10 +71,20 @@ export function buildGlobalNameMapper(ddlMap: Map<string, string>): void {
  */
 export function ensureGlobalNameMapperForDDLs_ACU(ddlMap: Map<string, string>): NameMapper {
   const nextSignature = buildDDLMapSignature_ACU(ddlMap);
-  if (!_globalNameMapper || _globalNameMapperSchemaSignature !== nextSignature) {
+  if (_globalNameMapperBinding_ACU === 'unbound' || _globalNameMapperSchemaSignature !== nextSignature) {
     buildGlobalNameMapper(ddlMap);
   }
   return _globalNameMapper!;
+}
+
+/**
+ * 标记 runtime 引擎已就绪但尚未建立任何表（新聊天首次填表前的正常状态）。
+ * 与「mapper 意外丢失」区分：后者说明活跃 runtime 有表却没有可信映射，属于异常。
+ */
+export function markGlobalNameMapperEmptySchema_ACU(): void {
+  _globalNameMapper = new NameMapper();
+  _globalNameMapperSchemaSignature = '';
+  _globalNameMapperBinding_ACU = 'empty_schema';
 }
 
 /**
@@ -80,15 +101,20 @@ export function resolveRuntimeEffectiveDDL_ACU(
 
 /** 当前全局 mapper 是否精确对应给定的有效 DDL 集合。 */
 export function isGlobalNameMapperCurrentForDDLs_ACU(ddlMap: Map<string, string>): boolean {
-  return _globalNameMapper !== null
+  return _globalNameMapperBinding_ACU !== 'unbound'
     && _globalNameMapperSchemaSignature === buildDDLMapSignature_ACU(ddlMap);
 }
 
 /** 供诊断使用；不暴露 DDL 内容，避免日志泄漏模板。 */
-export function getGlobalNameMapperStatus_ACU(): { ready: boolean; tableCount: number } {
+export function getGlobalNameMapperStatus_ACU(): {
+  ready: boolean;
+  tableCount: number;
+  binding: 'unbound' | 'empty_schema' | 'bound';
+} {
   return {
-    ready: _globalNameMapper !== null,
+    ready: _globalNameMapperBinding_ACU === 'bound',
     tableCount: _globalNameMapper?.tableCount ?? 0,
+    binding: _globalNameMapperBinding_ACU,
   };
 }
 
@@ -98,6 +124,7 @@ export function getGlobalNameMapperStatus_ACU(): { ready: boolean; tableCount: n
 export function disposeGlobalNameMapper(): void {
   _globalNameMapper = null;
   _globalNameMapperSchemaSignature = null;
+  _globalNameMapperBinding_ACU = 'unbound';
 }
 
 /**

@@ -73,13 +73,18 @@ const CHARACTERS_DDL = `CREATE TABLE characters ( -- 重要人物表
 );`;
 
 let _mapper: NameMapper;
+let _mapperStatus: { ready: boolean; tableCount: number; binding: 'unbound' | 'empty_schema' | 'bound' } = {
+  ready: true,
+  tableCount: 2,
+  binding: 'bound',
+};
 
 vi.mock('../../../../src/service/runtime/template-vars/name-mapper', async (importOriginal) => {
   const original = await importOriginal<typeof import('../../../../src/service/runtime/template-vars/name-mapper')>();
   return {
     ...original,
     getNameMapper: vi.fn(() => _mapper),
-    getGlobalNameMapperStatus_ACU: vi.fn(() => ({ ready: true, tableCount: 2 })),
+    getGlobalNameMapperStatus_ACU: vi.fn(() => _mapperStatus),
   };
 });
 
@@ -93,7 +98,7 @@ import {
   evaluateSqlCondition,
 } from '../../../../src/service/runtime/template-vars/sql-query-var';
 import { renderAgentReadOnlyQueryTemplates_ACU } from '../../../../src/service/runtime/template-vars/agent-read-only-template-render';
-import { logError_ACU, logWarn_ACU } from '../../../../src/shared/utils';
+import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../../src/shared/utils';
 
 // ═══════════════════════════════════════════════════════════════
 // 测试套件
@@ -102,6 +107,8 @@ describe('sql-query-var', () => {
   beforeEach(() => {
     vi.mocked(logWarn_ACU).mockClear();
     vi.mocked(logError_ACU).mockClear();
+    vi.mocked(logDebug_ACU).mockClear();
+    _mapperStatus = { ready: true, tableCount: 2, binding: 'bound' };
   });
 
   beforeAll(async () => {
@@ -1205,4 +1212,36 @@ describe('sql-query-var', () => {
       expect(evaluateSqlCondition('SELECT COUNT(*) FROM inventory')).toBe(false);
     });
   });
+
+  // ═══════════════════════════════════════════════════════════════
+  // NameMapper 就绪门禁
+  // ═══════════════════════════════════════════════════════════════
+  describe('NameMapper 就绪门禁', () => {
+    it('runtime 尚无表结构时按 debug 记录，不产生 WARN', () => {
+      _mapperStatus = { ready: false, tableCount: 0, binding: 'empty_schema' };
+      const content = "你有 {[db.背包物品表.where('物品名称', '铁剑').get('数量')]} 把铁剑";
+
+      expect(replaceDbSqlVariables(content)).toBe(content);
+      expect(vi.mocked(logWarn_ACU)).not.toHaveBeenCalled();
+      expect(vi.mocked(logDebug_ACU).mock.calls.some(([message]) => String(message).includes('运行时尚无表结构'))).toBe(true);
+    });
+
+    it('mapper 意外丢失时仍按 WARN 上报', () => {
+      _mapperStatus = { ready: false, tableCount: 0, binding: 'unbound' };
+
+      expect(evaluateDbCondition("db.背包物品表.count() > 0")).toBe(false);
+      expect(vi.mocked(logWarn_ACU).mock.calls.some(([message]) => String(message).includes('NameMapper 未就绪'))).toBe(true);
+    });
+
+    it('空 schema 与 mapper 丢失分别去重，不会互相压掉对方告警', () => {
+      _mapperStatus = { ready: false, tableCount: 0, binding: 'empty_schema' };
+      expect(evaluateDbCondition("db.背包物品表.count() > 0")).toBe(false);
+      expect(vi.mocked(logWarn_ACU)).not.toHaveBeenCalled();
+
+      _mapperStatus = { ready: false, tableCount: 0, binding: 'unbound' };
+      expect(evaluateDbCondition("db.背包物品表.count() > 0")).toBe(false);
+      expect(vi.mocked(logWarn_ACU).mock.calls.some(([message]) => String(message).includes('NameMapper 未就绪'))).toBe(true);
+    });
+  });
+
 });

@@ -55,13 +55,15 @@ vi.mock('../../../src/service/runtime/helpers-data-merge', () => ({
 }));
 
 // mock name-mapper
-const { mockEnsureGlobalNameMapper, mockDisposeGlobalNameMapper } = vi.hoisted(() => ({
+const { mockEnsureGlobalNameMapper, mockDisposeGlobalNameMapper, mockMarkGlobalNameMapperEmptySchema } = vi.hoisted(() => ({
   mockEnsureGlobalNameMapper: vi.fn(),
   mockDisposeGlobalNameMapper: vi.fn(),
+  mockMarkGlobalNameMapperEmptySchema: vi.fn(),
 }));
 vi.mock('../../../src/service/runtime/template-vars/name-mapper', () => ({
   ensureGlobalNameMapperForDDLs_ACU: mockEnsureGlobalNameMapper,
   disposeGlobalNameMapper: mockDisposeGlobalNameMapper,
+  markGlobalNameMapperEmptySchema_ACU: mockMarkGlobalNameMapperEmptySchema,
 }));
 
 // mock chat-scope（getEffectiveSeedRowsForSheet_ACU + getCurrentChatTemplateScopeState_ACU）
@@ -722,6 +724,7 @@ describe('SqlTableService', () => {
     mockCurrentJsonTableData = null;
     mockEnsureGlobalNameMapper.mockReturnValue(undefined);
     mockDisposeGlobalNameMapper.mockReturnValue(undefined);
+    mockMarkGlobalNameMapperEmptySchema.mockReturnValue(undefined);
     // 重置 mock 返回值，防止测试之间的状态泄漏
     mockGetEffectiveSeedRows.mockReturnValue([]);
     mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
@@ -764,6 +767,20 @@ describe('SqlTableService', () => {
       expect(result.loaded).toBe(false);
       expect(result.source).toBe('empty');
     });
+
+    it('无数据且无可解析模板时标记空 schema，不留下未绑定的 mapper', async () => {
+      mockMergeAll.mockResolvedValue(null);
+
+      const result = await service.loadFromChat();
+
+      // runtime 已就绪但没有任何表。必须显式标记空 schema，
+      // 否则同步读门禁会把正常的新聊天误报成 mapper 意外丢失。
+      expect(result.source).toBe('empty');
+      expect(service.isReady()).toBe(true);
+      expect(mockMarkGlobalNameMapperEmptySchema).toHaveBeenCalledTimes(1);
+      expect(mockEnsureGlobalNameMapper).not.toHaveBeenCalled();
+    });
+
 
     it('首个用户消息后、首个真实 AI 回复前将模板 seedRows 写入运行时 SQLite，支持首次 SQL 读取', async () => {
       mockShouldUseInitialSeedRows.mockReturnValue(true);

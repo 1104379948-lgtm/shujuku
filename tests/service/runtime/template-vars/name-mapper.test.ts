@@ -11,7 +11,15 @@ vi.mock('../../../../src/shared/utils', () => ({
   logError_ACU: vi.fn(),
 }));
 
-import { NameMapper } from '../../../../src/service/runtime/template-vars/name-mapper';
+import {
+  NameMapper,
+  disposeGlobalNameMapper,
+  ensureGlobalNameMapperForDDLs_ACU,
+  getGlobalNameMapperStatus_ACU,
+  getNameMapper,
+  isGlobalNameMapperCurrentForDDLs_ACU,
+  markGlobalNameMapperEmptySchema_ACU,
+} from '../../../../src/service/runtime/template-vars/name-mapper';
 
 // ═══════════════════════════════════════════════════════════════
 // 测试用 DDL
@@ -220,3 +228,51 @@ describe('NameMapper', () => {
     });
   });
 });
+
+describe('全局 NameMapper 绑定状态', () => {
+  beforeEach(() => {
+    disposeGlobalNameMapper();
+  });
+
+  it('dispose 后为 unbound，且 getNameMapper 懒建实例不会让其变就绪', () => {
+    expect(getGlobalNameMapperStatus_ACU()).toEqual({ ready: false, tableCount: 0, binding: 'unbound' });
+
+    // 懒建的空实例只用于透传，不代表已绑定 runtime schema。
+    getNameMapper();
+    expect(getGlobalNameMapperStatus_ACU().ready).toBe(false);
+    expect(getGlobalNameMapperStatus_ACU().binding).toBe('unbound');
+  });
+
+  it('标记空 schema 后与 unbound 可区分，但仍不视为就绪', () => {
+    markGlobalNameMapperEmptySchema_ACU();
+    expect(getGlobalNameMapperStatus_ACU()).toEqual({ ready: false, tableCount: 0, binding: 'empty_schema' });
+  });
+
+  it('绑定有效 DDL 后进入 bound 并报告表数量', () => {
+    const ddlMap = new Map<string, string>([
+      ['inventory', INVENTORY_DDL],
+      ['characters', CHARACTERS_DDL],
+    ]);
+    ensureGlobalNameMapperForDDLs_ACU(ddlMap);
+
+    expect(getGlobalNameMapperStatus_ACU()).toEqual({ ready: true, tableCount: 2, binding: 'bound' });
+    expect(isGlobalNameMapperCurrentForDDLs_ACU(ddlMap)).toBe(true);
+  });
+
+  it('空 DDL 集合构建出的 mapper 记为 empty_schema，不冒充就绪', () => {
+    ensureGlobalNameMapperForDDLs_ACU(new Map());
+    expect(getGlobalNameMapperStatus_ACU().binding).toBe('empty_schema');
+    expect(getGlobalNameMapperStatus_ACU().ready).toBe(false);
+  });
+
+  it('empty_schema 之后拿到真实 DDL 会重建为 bound', () => {
+    markGlobalNameMapperEmptySchema_ACU();
+    const ddlMap = new Map<string, string>([['inventory', INVENTORY_DDL]]);
+
+    ensureGlobalNameMapperForDDLs_ACU(ddlMap);
+
+    expect(getGlobalNameMapperStatus_ACU().binding).toBe('bound');
+    expect(getNameMapper().resolveTableName('背包物品表')).toBe('inventory');
+  });
+});
+

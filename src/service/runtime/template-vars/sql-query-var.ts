@@ -41,10 +41,16 @@ function isTemplateQueryRuntimeReady_ACU(source: string): boolean {
   const mapperStatus = getGlobalNameMapperStatus_ACU();
   if (!mapperStatus.ready) {
     const health = getStorageRuntimeHealth_ACU();
-    const key = `${health.loadToken}:mapper:${source}`;
+    const key = `${health.loadToken}:mapper:${mapperStatus.binding}:${source}`;
     if (lastBlockedQueryKey_ACU !== key) {
       lastBlockedQueryKey_ACU = key;
-      logWarn_ACU(`[SQL][readiness] NameMapper 未就绪，已跳过${source}查询。`);
+      if (mapperStatus.binding === 'empty_schema') {
+        // 新聊天首次填表前 runtime 就是空的，没有表可查。这是预期状态，
+        // 不能按异常反复 WARN，否则会掩盖真正的 mapper 丢失。
+        logDebug_ACU(`[SQL][readiness] 运行时尚无表结构，已跳过${source}查询。`);
+      } else {
+        logWarn_ACU(`[SQL][readiness] NameMapper 未就绪，已跳过${source}查询。`);
+      }
     }
     return false;
   }
