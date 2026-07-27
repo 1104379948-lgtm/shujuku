@@ -7,7 +7,7 @@ import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manag
 import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
 import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
-import { hasLegacyTopLevelTableData_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
+import { hasLegacyTopLevelTableData_ACU, hasV2TableHistoryEvidence_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
 import { applyTableOperationV2_ACU, collectScheduleSummaryFromFramesV2_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
@@ -672,8 +672,7 @@ function recordContainsSheet_ACU(value: unknown, sheetKey: string): boolean {
 }
 
 function hasV2HistoryMarker_ACU(tagData: unknown): boolean {
-  return isObjectRecord_ACU(tagData)
-    && (tagData._acu_storage_version === 2 || tagData.storageFrame?.version === 2);
+  return hasV2TableHistoryEvidence_ACU(tagData);
 }
 
 const CHECKPOINT_REASONS_FOR_INTRODUCTION_HISTORY_ACU = new Set([

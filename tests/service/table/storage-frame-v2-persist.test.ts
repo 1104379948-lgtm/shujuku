@@ -42,6 +42,18 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mocks.settings,
 }));
 vi.mock('../../../src/service/table/storage-strategy-resolver', () => ({
+  hasV2TableHistoryEvidence_ACU: vi.fn((tagData: any) => {
+    if (!tagData || typeof tagData !== 'object' || Array.isArray(tagData)) return false;
+    if (tagData._acu_storage_version === 2) return true;
+    const frame = tagData.storageFrame;
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false;
+    return frame.version === 2
+      || frame.checkpoint !== undefined
+      || frame.perSheetCheckpoints !== undefined
+      || (Array.isArray(frame.logEntries) && frame.logEntries.length > 0)
+      || frame.manualRefillProgress !== undefined
+      || (frame.headRevision !== undefined && frame.headRevision !== null && (typeof frame.headRevision !== 'string' || frame.headRevision.length > 0));
+  }),
   isV2TagData_ACU: vi.fn((tagData: any) => tagData?.storageFrame?.version === 2 && Array.isArray(tagData.storageFrame.logEntries)),
   isLegacyV1TagData_ACU: vi.fn((tagData: any) => {
     if (!tagData || typeof tagData !== 'object' || Array.isArray(tagData)) return false;
@@ -1054,6 +1066,43 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
+
+  it.each([
+    ['full checkpoint', { checkpoint: { kind: 'full', data: { mate: { type: 'acu' } } } }],
+    ['per-sheet checkpoint', { perSheetCheckpoints: { sheet_a: { kind: 'sheet_full', data: sheetA } } }],
+    ['non-empty log', { logEntries: [{ seq: 1 }] }],
+    ['head revision', { headRevision: 'checkpoint:orphan' }],
+    ['manual refill progress', { manualRefillProgress: { status: 'in_progress' } }],
+  ])('缺失版本标记但残留 %s 时拒绝创建新的 pristine checkpoint', async (_label, storageFrame) => {
+    const message = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: { '': { storageFrame } },
+    } as any;
+    const isolatedDataBefore = JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData));
+    const scopeBefore = JSON.parse(JSON.stringify(mocks.scopeContainer));
+    const guideBefore = JSON.parse(JSON.stringify(mocks.guideContainer));
+    mocks.chat.push(message);
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('V2 存储痕迹') });
+    expect(message.TavernDB_ACU_IsolatedData).toEqual(isolatedDataBefore);
+    expect(mocks.scopeContainer).toEqual(scopeBefore);
+    expect(mocks.guideContainer).toEqual(guideBefore);
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+  });
+
   it('更晚楼层已有 full checkpoint 时，对更早楼层填表不再写第二个初始基线', async () => {
     // 回归：锚点判定若只看目标楼层之前，对更早楼层追平/重填时会误判为首次初始化，
     // 又写一个 init full checkpoint。回放只认最后一个 full checkpoint，

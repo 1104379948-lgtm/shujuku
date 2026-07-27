@@ -21,9 +21,11 @@ import { safeJsonParse_ACU, safeJsonStringify_ACU } from '../../shared/json-help
 import { ensureSheetOrderNumbers_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { buildDefaultExportConfig_ACU, ensureExportConfigDefaults_ACU } from '../worldbook/injection-engine';
 import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from './template-import-validator';
+import { allocateStableSheetKeys_ACU } from '../../shared/sheet-identity';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
 import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
+import { resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 import { isSqliteMode } from '../table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../table/table-storage-strategy';
@@ -400,6 +402,40 @@ async function waitForActiveChatStorageContext_ACU({
 }
 
 /**
+ * A pristine chat has no persisted sheet identity to preserve. Rebuild every sheet key from
+ * its display name before the first checkpoint so legacy/random template keys do not become
+ * permanent identities for a newly created or fully-cleared chat.
+ */
+function rekeyTemplateForPristineChat_ACU(templateData: Record<string, any>): Record<string, any> {
+    const sheetEntries = Object.entries(templateData).filter(([key]) => key.startsWith('sheet_'));
+    const malformedSheetKey = sheetEntries.find(([, sheet]) => !sheet || typeof sheet !== 'object' || Array.isArray(sheet))?.[0];
+    if (malformedSheetKey) {
+        throw new Error(`无法为无数据聊天重新分配稳定表 key：模板表结构无效：${malformedSheetKey}`);
+    }
+    const allocation = allocateStableSheetKeys_ACU(sheetEntries.map(([, sheet]: [string, any]) => sheet.name));
+    if (allocation.diagnostics.length > 0 || allocation.keys.some(key => !key)) {
+        const details = allocation.diagnostics.map(item => `${item.code}: ${item.originalName || '(空表名)'}`).join('；');
+        throw new Error(`无法为无数据聊天重新分配稳定表 key${details ? `：${details}` : '。'}`);
+    }
+
+    const keyMap = new Map<string, string>();
+    sheetEntries.forEach(([oldKey], index) => keyMap.set(oldKey, allocation.keys[index]!));
+    const result: Record<string, any> = {};
+    for (const [key, value] of Object.entries(templateData)) {
+        if (!key.startsWith('sheet_')) {
+            result[key] = JSON.parse(JSON.stringify(value));
+            continue;
+        }
+        const nextKey = keyMap.get(key);
+        if (!nextKey) continue;
+        const nextSheet = JSON.parse(JSON.stringify(value));
+        nextSheet.uid = nextKey;
+        result[nextKey] = nextSheet;
+    }
+    return result;
+}
+
+/**
  * Applies a chat template through the only V2 template commit entrypoint.  Do not
  * replace this with scope-only writes: doing so discards the replay/transaction
  * contract and silently bypasses schema migration and destructive-change checks.
@@ -427,8 +463,26 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
     if (chatStorageWait.status === 'aborted') return { saved: false, error: '模板提交已取消。' };
     if (chatStorageWait.status === 'timeout') return { saved: false, error: '当前聊天元数据尚未就绪，请等待聊天加载完成后重试。' };
     const targetChatIdentity = chatStorageWait.identity;
+    const readyContext = getChatContextSnapshot_ACU();
+    if (readyContext.firstMessage !== entryContext.firstMessage || readyContext.identity !== targetChatIdentity) {
+        return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
+    }
 
     const isolationKey = getCurrentIsolationKey_ACU();
+    const storageStrategy = resolveTableStorageStrategy_ACU(readyContext.chat, isolationKey, {
+        enabled: settings_ACU.dataIsolationEnabled,
+        code: settings_ACU.dataIsolationCode,
+    });
+    let targetTemplateData = snapshot.templateObj;
+    let pristineChat = false;
+    if (storageStrategy.mode === 'empty') {
+        try {
+            targetTemplateData = rekeyTemplateForPristineChat_ACU(snapshot.templateObj);
+            pristineChat = true;
+        } catch (error) {
+            return { saved: false, error: error instanceof Error ? error.message : String(error) };
+        }
+    }
     // Capture before any asynchronous replay/planning work. "all" is deliberate:
     // a template import can match, introduce, or delete sheets only after planning.
     const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
@@ -441,7 +495,9 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
     } catch (error) {
         return { saved: false, error: `无法读取当前聊天 V2 replay 基线：${error instanceof Error ? error.message : String(error)}` };
     }
-    if (!baselineData || typeof baselineData !== 'object') {
+    if (pristineChat) {
+        baselineData = { mate: JSON.parse(JSON.stringify(targetTemplateData.mate || { type: 'chatSheets', version: 1 })) };
+    } else if (!baselineData || typeof baselineData !== 'object') {
         baselineData = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
             ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
             : { mate: { type: 'chatSheets', version: 1 } };
@@ -451,7 +507,7 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
     try {
         plan = await reconcileChatTemplate_ACU({
             baselineData,
-            templateData: snapshot.templateObj,
+            templateData: targetTemplateData,
             destructiveChangeConfirmed,
         });
     } catch (error) {
@@ -461,8 +517,8 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
         return { saved: false, blockers: plan.blockers, error: plan.blockers.join('；') };
     }
     const guideData = buildChatSheetGuideDataFromData_ACU(plan.candidateData, {
-        preserveSeedRowsFromGuideData: getChatSheetGuideDataForIsolationKey_ACU(isolationKey),
-        seedRowsFromTemplateObj: snapshot.templateObj,
+        preserveSeedRowsFromGuideData: pristineChat ? null : getChatSheetGuideDataForIsolationKey_ACU(isolationKey),
+        seedRowsFromTemplateObj: targetTemplateData,
     });
     if (!guideData) return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
 

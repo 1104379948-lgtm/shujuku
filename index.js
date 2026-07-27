@@ -7841,6 +7841,32 @@ $CONTENT
     function hasNonEmptyStringArray_ACU(value) {
         return Array.isArray(value) && value.some(item => typeof item === 'string' && item.startsWith('sheet_'));
     }
+    /**
+     * Detects persisted V2 table evidence, including damaged slots whose version markers were lost.
+     * Vector-index-only metadata is deliberately excluded: it does not establish a sheet identity.
+     */
+    function hasV2TableHistoryEvidence_ACU(tagData) {
+        if (!isObjectRecord_ACU$2(tagData))
+            return false;
+        if (tagData._acu_storage_version === 2)
+            return true;
+        const frame = tagData.storageFrame;
+        if (!isObjectRecord_ACU$2(frame))
+            return false;
+        if (frame.version === 2)
+            return true;
+        if (frame.checkpoint !== undefined)
+            return true;
+        if (frame.perSheetCheckpoints !== undefined)
+            return true;
+        if (Array.isArray(frame.logEntries) && frame.logEntries.length > 0)
+            return true;
+        if (frame.manualRefillProgress !== undefined)
+            return true;
+        return frame.headRevision !== undefined
+            && frame.headRevision !== null
+            && (typeof frame.headRevision !== 'string' || frame.headRevision.length > 0);
+    }
     function isV2TagData_ACU(tagData) {
         if (!isObjectRecord_ACU$2(tagData))
             return false;
@@ -7887,6 +7913,7 @@ $CONTENT
             return { mode: 'empty' };
         }
         let hasV2 = false;
+        let hasV2Marker = false;
         let hasLegacy = false;
         const legacyReasons = new Set();
         for (let i = 0; i < chat.length; i += 1) {
@@ -7895,6 +7922,11 @@ $CONTENT
                 continue;
             const tagData = readIsolatedTagData_ACU(message, isolationKey);
             if (tagData) {
+                // A malformed/partial V2 slot is still persisted table-history evidence. Treating it as
+                // empty would allow callers to enter pristine initialization and reassign stable keys.
+                // Downstream replay/commit owns structural validation and must fail closed instead.
+                if (hasV2TableHistoryEvidence_ACU(tagData))
+                    hasV2Marker = true;
                 if (isV2TagData_ACU(tagData)) {
                     hasV2 = true;
                 }
@@ -7915,7 +7947,7 @@ $CONTENT
                 warning: hasV2 ? 'mixed legacy-v1 and v2 data detected; legacy-v1 wins' : undefined,
             };
         }
-        if (hasV2) {
+        if (hasV2 || hasV2Marker) {
             return { mode: 'v2' };
         }
         return { mode: 'empty' };
@@ -34622,6 +34654,151 @@ $CONTENT
             };
         });
     }
+    function parseSafePositiveInteger_ACU(value) {
+        if (!/^\d+$/.test(value))
+            return null;
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
+    }
+    /** Extracts actual CHECK expressions while ignoring literals and comments. */
+    function extractDDLCheckExpressions_ACU(definition) {
+        const expressions = [];
+        const value = String(definition || '');
+        let quote = null;
+        let inLineComment = false;
+        let inBlockComment = false;
+        for (let index = 0; index < value.length; index += 1) {
+            const char = value[index];
+            if (inLineComment) {
+                if (char === '\n')
+                    inLineComment = false;
+                continue;
+            }
+            if (inBlockComment) {
+                if (char === '*' && value[index + 1] === '/') {
+                    inBlockComment = false;
+                    index += 1;
+                }
+                continue;
+            }
+            if (quote) {
+                if (quote === '[') {
+                    if (char === ']')
+                        quote = null;
+                }
+                else if (char === quote) {
+                    if (value[index + 1] === quote)
+                        index += 1;
+                    else
+                        quote = null;
+                }
+                continue;
+            }
+            if (char === '-' && value[index + 1] === '-') {
+                inLineComment = true;
+                index += 1;
+                continue;
+            }
+            if (char === '/' && value[index + 1] === '*') {
+                inBlockComment = true;
+                index += 1;
+                continue;
+            }
+            if (char === "'" || char === '"' || char === '`' || char === '[') {
+                quote = char;
+                continue;
+            }
+            if (value.slice(index, index + 5).toUpperCase() !== 'CHECK'
+                || /[A-Za-z0-9_$]/.test(value[index - 1] || '')
+                || /[A-Za-z0-9_$]/.test(value[index + 5] || ''))
+                continue;
+            let openingIndex = index + 5;
+            while (/\s/.test(value[openingIndex] || ''))
+                openingIndex += 1;
+            if (value[openingIndex] !== '(')
+                continue;
+            let depth = 1;
+            let expression = '';
+            let expressionQuote = null;
+            for (let cursor = openingIndex + 1; cursor < value.length; cursor += 1) {
+                const current = value[cursor];
+                expression += current;
+                if (expressionQuote) {
+                    if (expressionQuote === '[') {
+                        if (current === ']')
+                            expressionQuote = null;
+                    }
+                    else if (current === expressionQuote) {
+                        if (value[cursor + 1] === expressionQuote) {
+                            expression += value[cursor + 1];
+                            cursor += 1;
+                        }
+                        else
+                            expressionQuote = null;
+                    }
+                    continue;
+                }
+                if (current === "'" || current === '"' || current === '`' || current === '[') {
+                    expressionQuote = current;
+                }
+                else if (current === '(') {
+                    depth += 1;
+                }
+                else if (current === ')' && --depth === 0) {
+                    expressions.push(expression.slice(0, -1));
+                    index = cursor;
+                    break;
+                }
+            }
+        }
+        return expressions;
+    }
+    /**
+     * Returns the bounded, explicit row_id REPLACE contract declared by a sheet.
+     *
+     * This intentionally recognizes only a tiny DDL subset.  A false negative
+     * leaves the normal stable-row-id path in place; a false positive would let
+     * REPLACE bypass that path, which would be considerably worse.
+     */
+    function getFixedRowIdReplaceContract_ACU(sheet) {
+        const ddl = String(sheet?.sourceData?.ddl || '');
+        const tableName = parseDDLTableName(ddl);
+        if (!tableName || !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(tableName))
+            return null;
+        const rowIdColumn = parseDDLColumnInfos_ACU(ddl).find(column => column.sqlName.toLowerCase() === 'row_id');
+        if (!rowIdColumn?.isPrimaryKey || rowIdColumn.declaredType?.toUpperCase() !== 'INTEGER')
+            return null;
+        const identifier = '(?:row_id|"row_id"|`row_id`|\\[row_id\\])';
+        const expressions = [rowIdColumn.normalizedDefinition, ...parseDDLTableConstraints_ACU(ddl)].flatMap(extractDDLCheckExpressions_ACU);
+        let lower = null;
+        let upper = null;
+        const constrain = (nextLower, nextUpper) => {
+            lower = lower === null ? nextLower : Math.max(lower, nextLower);
+            upper = upper === null ? nextUpper : Math.min(upper, nextUpper);
+            return lower <= upper;
+        };
+        for (const expression of expressions) {
+            const normalized = stripSqlLineComments_ACU(expression).replace(/\s+/g, ' ').trim();
+            const between = normalized.match(new RegExp(`^${identifier}\\s+BETWEEN\\s+(\\d+)\\s+AND\\s+(\\d+)$`, 'i'));
+            const equals = normalized.match(new RegExp(`^${identifier}\\s*=\\s*(\\d+)$`, 'i'));
+            const bounds = normalized.match(new RegExp(`^${identifier}\\s*>=\\s*(\\d+)\\s+AND\\s*${identifier}\\s*<=\\s*(\\d+)$`, 'i'))
+                || normalized.match(new RegExp(`^${identifier}\\s*<=\\s*(\\d+)\\s+AND\\s*${identifier}\\s*>=\\s*(\\d+)$`, 'i'));
+            const values = between || equals || bounds;
+            if (!values)
+                continue;
+            const first = parseSafePositiveInteger_ACU(values[1]);
+            const second = parseSafePositiveInteger_ACU(values[2] || values[1]);
+            if (first === null || second === null)
+                return null;
+            const nextLower = bounds && normalized.indexOf('<=') < normalized.indexOf('>=') ? second : first;
+            const nextUpper = bounds && normalized.indexOf('<=') < normalized.indexOf('>=') ? first : second;
+            if (!constrain(nextLower, nextUpper))
+                return null;
+        }
+        if (lower === null || upper === null)
+            return null;
+        return { tableName, minRowId: lower, maxRowId: upper };
+    }
     /**
      * Resolves the persisted physical-column visibility contract without changing
      * the sheet's schema or row layout. Consumers must keep sourceIndex when they
@@ -38893,8 +39070,7 @@ $CONTENT
         return isObjectRecord_ACU$1(value) && Object.prototype.hasOwnProperty.call(value, sheetKey);
     }
     function hasV2HistoryMarker_ACU(tagData) {
-        return isObjectRecord_ACU$1(tagData)
-            && (tagData._acu_storage_version === 2 || tagData.storageFrame?.version === 2);
+        return hasV2TableHistoryEvidence_ACU(tagData);
     }
     const CHECKPOINT_REASONS_FOR_INTRODUCTION_HISTORY_ACU = new Set([
         'init', 'periodic', 'manual', 'schema_change', 'compaction', 'import', 'migration', 'integrity_repair',
@@ -44956,6 +45132,39 @@ $CONTENT
         return current.identity ? { status: 'ready', identity: current.identity } : { status: 'timeout' };
     }
     /**
+     * A pristine chat has no persisted sheet identity to preserve. Rebuild every sheet key from
+     * its display name before the first checkpoint so legacy/random template keys do not become
+     * permanent identities for a newly created or fully-cleared chat.
+     */
+    function rekeyTemplateForPristineChat_ACU(templateData) {
+        const sheetEntries = Object.entries(templateData).filter(([key]) => key.startsWith('sheet_'));
+        const malformedSheetKey = sheetEntries.find(([, sheet]) => !sheet || typeof sheet !== 'object' || Array.isArray(sheet))?.[0];
+        if (malformedSheetKey) {
+            throw new Error(`无法为无数据聊天重新分配稳定表 key：模板表结构无效：${malformedSheetKey}`);
+        }
+        const allocation = allocateStableSheetKeys_ACU(sheetEntries.map(([, sheet]) => sheet.name));
+        if (allocation.diagnostics.length > 0 || allocation.keys.some(key => !key)) {
+            const details = allocation.diagnostics.map(item => `${item.code}: ${item.originalName || '(空表名)'}`).join('；');
+            throw new Error(`无法为无数据聊天重新分配稳定表 key${details ? `：${details}` : '。'}`);
+        }
+        const keyMap = new Map();
+        sheetEntries.forEach(([oldKey], index) => keyMap.set(oldKey, allocation.keys[index]));
+        const result = {};
+        for (const [key, value] of Object.entries(templateData)) {
+            if (!key.startsWith('sheet_')) {
+                result[key] = JSON.parse(JSON.stringify(value));
+                continue;
+            }
+            const nextKey = keyMap.get(key);
+            if (!nextKey)
+                continue;
+            const nextSheet = JSON.parse(JSON.stringify(value));
+            nextSheet.uid = nextKey;
+            result[nextKey] = nextSheet;
+        }
+        return result;
+    }
+    /**
      * Applies a chat template through the only V2 template commit entrypoint.  Do not
      * replace this with scope-only writes: doing so discards the replay/transaction
      * contract and silently bypasses schema migration and destructive-change checks.
@@ -44976,7 +45185,26 @@ $CONTENT
         if (chatStorageWait.status === 'timeout')
             return { saved: false, error: '当前聊天元数据尚未就绪，请等待聊天加载完成后重试。' };
         const targetChatIdentity = chatStorageWait.identity;
+        const readyContext = getChatContextSnapshot_ACU();
+        if (readyContext.firstMessage !== entryContext.firstMessage || readyContext.identity !== targetChatIdentity) {
+            return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
+        }
         const isolationKey = getCurrentIsolationKey_ACU();
+        const storageStrategy = resolveTableStorageStrategy_ACU(readyContext.chat, isolationKey, {
+            enabled: settings_ACU.dataIsolationEnabled,
+            code: settings_ACU.dataIsolationCode,
+        });
+        let targetTemplateData = snapshot.templateObj;
+        let pristineChat = false;
+        if (storageStrategy.mode === 'empty') {
+            try {
+                targetTemplateData = rekeyTemplateForPristineChat_ACU(snapshot.templateObj);
+                pristineChat = true;
+            }
+            catch (error) {
+                return { saved: false, error: error instanceof Error ? error.message : String(error) };
+            }
+        }
         // Capture before any asynchronous replay/planning work. "all" is deliberate:
         // a template import can match, introduce, or delete sheets only after planning.
         const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
@@ -44990,7 +45218,10 @@ $CONTENT
         catch (error) {
             return { saved: false, error: `无法读取当前聊天 V2 replay 基线：${error instanceof Error ? error.message : String(error)}` };
         }
-        if (!baselineData || typeof baselineData !== 'object') {
+        if (pristineChat) {
+            baselineData = { mate: JSON.parse(JSON.stringify(targetTemplateData.mate || { type: 'chatSheets', version: 1 })) };
+        }
+        else if (!baselineData || typeof baselineData !== 'object') {
             baselineData = currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
                 ? JSON.parse(JSON.stringify(currentJsonTableData_ACU))
                 : { mate: { type: 'chatSheets', version: 1 } };
@@ -44999,7 +45230,7 @@ $CONTENT
         try {
             plan = await reconcileChatTemplate_ACU({
                 baselineData,
-                templateData: snapshot.templateObj,
+                templateData: targetTemplateData,
                 destructiveChangeConfirmed,
             });
         }
@@ -45010,8 +45241,8 @@ $CONTENT
             return { saved: false, blockers: plan.blockers, error: plan.blockers.join('；') };
         }
         const guideData = buildChatSheetGuideDataFromData_ACU(plan.candidateData, {
-            preserveSeedRowsFromGuideData: getChatSheetGuideDataForIsolationKey_ACU(isolationKey),
-            seedRowsFromTemplateObj: snapshot.templateObj,
+            preserveSeedRowsFromGuideData: pristineChat ? null : getChatSheetGuideDataForIsolationKey_ACU(isolationKey),
+            seedRowsFromTemplateObj: targetTemplateData,
         });
         if (!guideData)
             return { saved: false, error: '无法为协调后的模板生成聊天指导表。' };
@@ -46689,6 +46920,77 @@ $CONTENT
         }
         return reservations;
     }
+    function resolveFixedRowIdReplaceContractForTarget_ACU(tableData, targetTableName) {
+        const normalizedTarget = targetTableName.toLowerCase();
+        const matches = [];
+        for (const [sheetKey, value] of Object.entries(tableData || {})) {
+            if (!sheetKey.startsWith('sheet_'))
+                continue;
+            const sheet = value;
+            const contract = getFixedRowIdReplaceContract_ACU(sheet);
+            if (!contract)
+                continue;
+            const physicalName = getPhysicalTableNameForSheet_ACU(tableData, sheetKey).toLowerCase();
+            if (physicalName === normalizedTarget || contract.tableName.toLowerCase() === normalizedTarget)
+                matches.push(contract);
+        }
+        return matches.length === 1 ? matches[0] : null;
+    }
+    function isTopLevelInsertOrReplace_ACU(tokens) {
+        const actionIndex = getSqlMutationActionIndex_ACU(tokens);
+        return actionIndex === 0
+            && isSqlMutationKeyword_ACU(tokens[actionIndex], 'INSERT')
+            && isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR')
+            && isSqlMutationKeyword_ACU(tokens[actionIndex + 2], 'REPLACE');
+    }
+    /**
+     * Validates the intentionally tiny REPLACE subset used by bounded slot tables.
+     * It is shared by collect-time and execution-time guards so the two boundaries
+     * cannot disagree about what will be persisted and replayed.
+     */
+    function assertFixedRowIdReplaceStatement_ACU(statement, statementIndex, contract) {
+        const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
+        if (!isTopLevelInsertOrReplace_ACU(tokens)) {
+            throw new Error(`AI SQL 第 ${statementIndex + 1} 条仅允许固定槽位表使用顶层 INSERT OR REPLACE INTO。`);
+        }
+        const target = getSqlMutationTargetToken_ACU(statement, tokens);
+        const suffix = statement.slice(target.end).trim();
+        if (!suffix.startsWith('(')) {
+            throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条必须显式列出包含 row_id 的列清单。`);
+        }
+        const columnsEnd = findSqlClosingParen_ACU(suffix, 0, `固定槽位 REPLACE 第 ${statementIndex + 1} 条列清单`);
+        const inputColumns = splitTopLevelSqlList_ACU(suffix.slice(1, columnsEnd), `固定槽位 REPLACE 第 ${statementIndex + 1} 条列清单`);
+        const normalizedColumns = inputColumns.map(column => column.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase());
+        if (normalizedColumns.some(column => !/^[a-z_][a-z0-9_$]*$/i.test(column)) || new Set(normalizedColumns).size !== normalizedColumns.length) {
+            throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条的列名无法安全解析。`);
+        }
+        const rowIdIndex = normalizedColumns.indexOf('row_id');
+        if (rowIdIndex < 0) {
+            throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条必须显式提供 row_id 槽位。`);
+        }
+        const valuesText = suffix.slice(columnsEnd + 1).trim();
+        if (!/^VALUES\b/i.test(valuesText)) {
+            throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条只支持 VALUES，不支持 INSERT SELECT。`);
+        }
+        const tuples = splitTopLevelSqlList_ACU(valuesText.slice('VALUES'.length).trim().replace(/;$/, '').trim(), `固定槽位 REPLACE 第 ${statementIndex + 1} 条 VALUES`);
+        for (const [tupleIndex, tuple] of tuples.entries()) {
+            if (!tuple.startsWith('(') || findSqlClosingParen_ACU(tuple, 0, `固定槽位 REPLACE 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 个 VALUES`) !== tuple.length - 1) {
+                throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条只支持括号包裹的 VALUES 行。`);
+            }
+            const values = splitTopLevelSqlList_ACU(tuple.slice(1, -1), `固定槽位 REPLACE 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 个 VALUES`);
+            if (values.length !== inputColumns.length) {
+                throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 行的值数量与列数量不一致。`);
+            }
+            const rowIdText = values[rowIdIndex].trim();
+            if (!/^\d+$/.test(rowIdText)) {
+                throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条的 row_id 必须是整数常量。`);
+            }
+            const rowId = Number(rowIdText);
+            if (!Number.isSafeInteger(rowId) || rowId < contract.minRowId || rowId > contract.maxRowId) {
+                throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条的 row_id=${rowIdText} 超出允许范围 ${contract.minRowId}..${contract.maxRowId}。`);
+            }
+        }
+    }
     class SqlRowIdMaterializationError_ACU extends Error {
         constructor(message) {
             super(message);
@@ -46714,6 +47016,15 @@ $CONTENT
             const action = tokens[actionIndex];
             if (!isSqlMutationKeyword_ACU(action, 'INSERT'))
                 return statement;
+            if (isTopLevelInsertOrReplace_ACU(tokens)) {
+                const target = getSqlMutationTargetToken_ACU(statement, tokens);
+                const contract = resolveFixedRowIdReplaceContractForTarget_ACU(tableData, target.value);
+                if (!contract) {
+                    throw new Error(`AI SQL 第 ${statementIndex + 1} 条禁止使用 INSERT OR REPLACE；只有声明固定 row_id 槽位 REPLACE 契约的表可以使用。`);
+                }
+                assertFixedRowIdReplaceStatement_ACU(statement, statementIndex, contract);
+                return statement;
+            }
             if (actionIndex !== 0 || isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR')) {
                 throw new Error(`AI INSERT 第 ${statementIndex + 1} 条不支持 WITH 或 INSERT OR 语法；请使用标准 INSERT INTO ... (列名) VALUES (...).`);
             }
@@ -46792,17 +47103,19 @@ $CONTENT
             if (!new Set(['INSERT', 'UPDATE', 'DELETE']).has(actionKeyword)) {
                 throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 REPLACE、CREATE、ALTER、DROP、事务或查询语句。`);
             }
-            if ((actionKeyword === 'INSERT' || actionKeyword === 'UPDATE')
-                && isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR')
-                && isSqlMutationKeyword_ACU(tokens[actionIndex + 2], 'REPLACE')) {
-                throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句；AI SQL 第 ${statementIndex + 1} 条禁止使用 ${actionKeyword} OR REPLACE，REPLACE 可能删除旧行并绕过系统 row_id 分配。`);
-            }
             const target = getSqlMutationTargetToken_ACU(statement, tokens);
             const resolved = sheetsByAlias.get(target.value.toLowerCase());
             if (resolved === undefined)
                 continue;
             if (resolved === null)
                 throw new Error(`无法唯一解析隐藏列保护的 SQL 目标表：${target.value}。`);
+            if (isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR') && isSqlMutationKeyword_ACU(tokens[actionIndex + 2], 'REPLACE')) {
+                const contract = getFixedRowIdReplaceContract_ACU(resolved.sheet);
+                if (actionKeyword !== 'INSERT' || !contract) {
+                    throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句；仅固定 row_id 槽位表可使用 INSERT OR REPLACE。AI SQL 第 ${statementIndex + 1} 条禁止使用 ${actionKeyword} OR REPLACE。`);
+                }
+                assertFixedRowIdReplaceStatement_ACU(statement, statementIndex, contract);
+            }
             const hidden = new Set(getSheetColumnProjection_ACU(resolved.sheet).hiddenPhysicalColumns.map(name => name.toLowerCase()));
             if (hidden.size === 0)
                 continue;
@@ -95900,8 +96213,8 @@ $CONTENT
                     #${POPUP_ID_ACU} .toggle-switch input:checked + .slider:before { transform: translateY(-50%) translateX(20px); }
 
                     /* 提示词编辑器 */
-                    #${POPUP_ID_ACU} .prompt-segment { 
-                        margin-bottom: 12px; 
+                    #${POPUP_ID_ACU} .prompt-segment {
+                        margin-bottom: 12px;
                         border: 1px solid var(--acu-border);
                         background: var(--acu-bg-2);
                         padding: 12px;
@@ -95909,7 +96222,7 @@ $CONTENT
                     }
                     #${POPUP_ID_ACU} .prompt-segment-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
                     #${POPUP_ID_ACU} .prompt-segment-role { width: 120px !important; flex-grow: 0; }
-                    #${POPUP_ID_ACU} .prompt-segment-delete-btn { 
+                    #${POPUP_ID_ACU} .prompt-segment-delete-btn {
                         width: 28px; height: 28px; padding: 0;
                         border-radius: 999px;
                         border: 1px solid rgba(255, 107, 107, 0.35);
@@ -95918,7 +96231,7 @@ $CONTENT
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn { 
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn {
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -95954,7 +96267,7 @@ $CONTENT
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn { 
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn {
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -95990,7 +96303,7 @@ $CONTENT
                         max-height: 220px;
                         overflow: auto;
                     }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item { 
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item {
                         padding: 8px 10px;
                         border-radius: 6px;
                         cursor: pointer;
@@ -96001,7 +96314,7 @@ $CONTENT
                         border: 1px solid transparent;
                     }
                     #${POPUP_ID_ACU} .qrf_worldbook_list_item:hover { background: var(--acu-bg-2); color: var(--acu-text-1); }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected { 
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected {
                         background: rgba(37, 99, 235, 0.08);
                         border-color: rgba(37, 99, 235, 0.25);
                         color: var(--acu-accent);
@@ -96019,7 +96332,7 @@ $CONTENT
                         color: var(--acu-text-3);
                         text-align: left;
                     }
-                    
+
                     /* 底部状态栏：独立成条，居中不“歪” */
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-status-message {
                         margin: 12px 0 0 0;
@@ -96031,7 +96344,7 @@ $CONTENT
                         background: var(--acu-bg-2);
                         color: var(--acu-text-2);
                         }
-                        
+
                     /* 状态显示 */
                         #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-card-update-status-display {
                         padding: 10px 12px;
@@ -96041,7 +96354,7 @@ $CONTENT
                         color: var(--acu-text-2);
                         }
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-total-messages-display { color: var(--acu-text-3); font-size: 12px; }
-                        
+
                     /* 表格 */
                     #${POPUP_ID_ACU} table { width: 100%; border-collapse: collapse; }
                     #${POPUP_ID_ACU} table th { color: var(--acu-text-3); font-weight: 600; font-size: 12px; }
@@ -96053,7 +96366,7 @@ $CONTENT
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-track { background: transparent; border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb { background: var(--acu-border-2); border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb:hover { background: var(--acu-text-3); }
-                        
+
                     /* Toast 终止按钮（剧情推进） */
                     #toast-container .qrf-abort-btn {
                         margin-left: 8px;
@@ -96288,7 +96601,7 @@ $CONTENT
                             line-height: 1.35 !important;
                         }
                     }
-                    
+
                     /* ═══ 手机横屏/小平板 (≤768px) ═══ */
                     @media screen and (max-width: 768px) {
                         #${POPUP_ID_ACU} {
@@ -96342,7 +96655,7 @@ $CONTENT
                             justify-content: flex-start !important;
                         }
                     }
-                    
+
                     /* ═══ 手机竖屏 (≤520px) ═══ */
                     @media screen and (max-width: 520px) {
                         #${POPUP_ID_ACU} {
@@ -96420,7 +96733,7 @@ $CONTENT
                             font-size: 0.9em;
                             height: 36px;
                         }
-                        
+
                         /* 移动端：按钮自然宽度flex-wrap */
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
@@ -96429,11 +96742,11 @@ $CONTENT
                             padding: 6px 12px !important;
                         }
                     }
-                    
+
                     /* ═══ 极窄屏 (≤420px) ═══ */
                     @media screen and (max-width: 420px) {
-                        #${POPUP_ID_ACU} { 
-                            padding: 4px; 
+                        #${POPUP_ID_ACU} {
+                            padding: 4px;
                             padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 4px; margin-top: 4px; min-height: 0; }
@@ -96445,12 +96758,12 @@ $CONTENT
                         #${POPUP_ID_ACU} .acu-tabs-nav { padding: 3px; gap: 2px; flex-shrink: 0; border-radius: 16px; }
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 4px 8px !important; font-size: 10px !important; }
                         #${POPUP_ID_ACU} label { font-size: 10px; margin-bottom: 3px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
-                            padding: 6px 8px !important; 
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
+                            padding: 6px 8px !important;
                             border-radius: 6px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
-                            padding: 5px 8px !important; 
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
+                            padding: 5px 8px !important;
                             min-height: 28px !important;
                             font-size: 11px !important;
                             border-radius: 6px !important;
@@ -96468,11 +96781,11 @@ $CONTENT
                             border-radius: 6px !important;
                         }
                     }
-                    
+
                     /* ═══ 超小屏 (≤360px) ═══ */
                     @media screen and (max-width: 360px) {
-                        #${POPUP_ID_ACU} { 
-                            padding: 3px; 
+                        #${POPUP_ID_ACU} {
+                            padding: 3px;
                             padding-bottom: calc(3px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 3px; margin-top: 3px; min-height: 0; }
@@ -96486,13 +96799,13 @@ $CONTENT
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 3px 6px !important; font-size: 10px !important; border-radius: 12px !important; }
                         #${POPUP_ID_ACU} .acu-tab-button::after { display: none !important; }
                         #${POPUP_ID_ACU} label { font-size: 9px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
-                            padding: 5px 6px !important; 
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
+                            padding: 5px 6px !important;
                             font-size: 14px !important;
                             border-radius: 5px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
-                            padding: 4px 6px !important; 
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
+                            padding: 4px 6px !important;
                             min-height: 26px !important;
                             font-size: 10px !important;
                             border-radius: 5px !important;
@@ -96502,8 +96815,8 @@ $CONTENT
                             gap: 3px !important;
                         }
                         #${POPUP_ID_ACU} .checkbox-group label { font-size: 9px !important; line-height: 1.2 !important; }
-                        #${POPUP_ID_ACU} input[type="checkbox"] { 
-                            width: 15px !important; 
+                        #${POPUP_ID_ACU} input[type="checkbox"] {
+                            width: 15px !important;
                             height: 15px !important;
                             min-width: 15px !important;
                             min-height: 15px !important;
@@ -96583,7 +96896,7 @@ $CONTENT
                         color: #dc2626;
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn .fa-solid { opacity: 0.92; }
-                    
+
                     /* 超极小屏幕 (≤320px) */
                     @media screen and (max-width: 320px) {
                         #${POPUP_ID_ACU} {
@@ -96668,18 +96981,18 @@ $CONTENT
         }).join('');
         return `
         <div class="acu-theme-selector" style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select" 
+            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select"
                     style="padding: 4px 8px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-control-bg, #ffffff) !important; color: var(--acu-text-1, #1a2332) !important; font-size: 12px !important; cursor: pointer !important; max-width: 140px !important; font-family: inherit !important;"
                     title="切换界面主题">
                 ${options}
             </select>
             <div class="acu-theme-actions" style="display: flex; gap: 4px;">
-                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import" 
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import"
                         style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导入自定义主题">
                     <i class="fa-solid fa-upload" style="font-size: 11px;"></i>
                 </button>
-                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export" 
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export"
                         style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导出当前主题模板（完整可编辑版）">
                     <i class="fa-solid fa-download" style="font-size: 11px;"></i>
