@@ -18,6 +18,7 @@ import {
   resolveEffectiveDDL,
 } from '../../../src/data/sqlite/schema-mapper';
 import {
+  getFixedRowIdReplaceContract_ACU,
   getSheetColumnProjection_ACU,
   parseDDLTableSuffix_ACU,
   parseDDLSafeDefaultLiteral_ACU,
@@ -256,6 +257,59 @@ describe('parseDDLColumnInfos_ACU', () => {
   it('DEFAULT 后的约束不属于 defaultExpression', () => {
     const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, score INTEGER DEFAULT 0 NOT NULL CHECK(score >= 0));';
     expect(parseDDLColumnInfos_ACU(ddl)[1]).toMatchObject({ hasDefault: true, defaultExpression: '0' });
+  });
+});
+
+describe('getFixedRowIdReplaceContract_ACU', () => {
+  it('仅根据 row_id PRIMARY KEY 与内联 CHECK 识别固定槽位域', () => {
+    const sheet = makeSheet({
+      sourceData: {
+        note: '', initNode: '', deleteNode: '', updateNode: '',
+        insertNode: '禁止 INSERT OR REPLACE INTO options。',
+        ddl: 'CREATE TABLE options (row_id INTEGER PRIMARY KEY CHECK(row_id BETWEEN 1 AND 5), value TEXT NOT NULL);',
+      },
+    });
+
+    expect(getFixedRowIdReplaceContract_ACU(sheet)).toEqual({ tableName: 'options', minRowId: 1, maxRowId: 5 });
+  });
+
+  it('支持表级单槽位 CHECK，且不依赖 insertNode 的自由文本', () => {
+    const oneSlot = makeSheet({
+      sourceData: {
+        note: '', initNode: '', deleteNode: '', updateNode: '',
+        insertNode: '禁止 INSERT OR REPLACE INTO global_state。',
+        ddl: 'CREATE TABLE global_state (row_id INTEGER PRIMARY KEY, value TEXT, CHECK(row_id = 1));',
+      },
+    });
+    const misleadingInsertNode = makeSheet({
+      sourceData: { ...oneSlot.sourceData, insertNode: '示例字符串：INSERT OR REPLACE INTO other_table (row_id) VALUES (99)。' },
+    });
+
+    expect(getFixedRowIdReplaceContract_ACU(oneSlot)).toEqual({ tableName: 'global_state', minRowId: 1, maxRowId: 1 });
+    expect(getFixedRowIdReplaceContract_ACU(misleadingInsertNode)).toEqual({ tableName: 'global_state', minRowId: 1, maxRowId: 1 });
+  });
+
+  it.each([
+    ['含 OR 的含糊域', 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT, CHECK(row_id = 1 OR row_id = 2));'],
+    ['其他列约束', 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value INTEGER CHECK(value BETWEEN 1 AND 5));'],
+    ['其他列字符串内的伪 CHECK', "CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT DEFAULT 'CHECK(row_id BETWEEN 1 AND 5)');"],
+    ['其他列块注释内的伪 CHECK', 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT /* CHECK(row_id BETWEEN 1 AND 5) */);'],
+    ['带引号 row_id 标识符', 'CREATE TABLE inventory ("row_id" INTEGER PRIMARY KEY CHECK("row_id" BETWEEN 1 AND 5), value TEXT);'],
+    ['TEXT 主键', 'CREATE TABLE inventory (row_id TEXT PRIMARY KEY CHECK(row_id BETWEEN 1 AND 5), value TEXT);'],
+    ['INT 主键', 'CREATE TABLE inventory (row_id INT PRIMARY KEY CHECK(row_id BETWEEN 1 AND 5), value TEXT);'],
+    ['BIGINT 主键', 'CREATE TABLE inventory (row_id BIGINT PRIMARY KEY CHECK(row_id BETWEEN 1 AND 5), value TEXT);'],
+    ['无声明类型主键', 'CREATE TABLE inventory (row_id PRIMARY KEY CHECK(row_id BETWEEN 1 AND 5), value TEXT);'],
+    ['矛盾范围', 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY CHECK(row_id BETWEEN 3 AND 2), value TEXT);'],
+  ])('拒绝%s', (_name, ddl) => {
+    const sheet = makeSheet({
+      sourceData: {
+        note: '', initNode: '', deleteNode: '', updateNode: '',
+        insertNode: 'INSERT OR REPLACE INTO inventory (row_id, value) VALUES (1, \'误导\');',
+        ddl,
+      },
+    });
+
+    expect(getFixedRowIdReplaceContract_ACU(sheet)).toBeNull();
   });
 });
 

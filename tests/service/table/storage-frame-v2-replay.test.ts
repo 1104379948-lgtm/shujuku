@@ -16,6 +16,8 @@ import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummar
 import { buildSheetSchemaMigrationOperation_ACU } from '../../../src/service/table/table-schema-migration';
 import { applySqlEditsToTableDataSnapshot_ACU } from '../../../src/service/table/sql-table-service';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
+import { _set_SillyTavern_API_ACU, SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import { persistTableMutationLogV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
 
 function makeCheckpointData() {
   return {
@@ -307,6 +309,126 @@ describe('loadTableStateFromFramesV2_ACU', () => {
 
     await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
       .resolves.toEqual(liveResult.workingData);
+  });
+
+  it('固定槽位 INSERT OR REPLACE 实时执行后原样持久化并由 V2 replay 覆盖相同 row_id', async () => {
+    const baseSnapshot = makeCheckpointData();
+    baseSnapshot.sheet_0.sourceData = {
+      ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY CHECK(row_id BETWEEN 1 AND 2), name TEXT NOT NULL);',
+      insertNode: "后续填表使用 INSERT OR REPLACE INTO inventory (row_id, name) VALUES (1, '...')。",
+    };
+    baseSnapshot.sheet_0.content = [
+      ['row_id', 'name'],
+      ['1', '旧槽位一'],
+      ['2', '旧槽位二'],
+    ];
+    const liveResult = await applySqlEditsToTableDataSnapshot_ACU(
+      "INSERT OR REPLACE INTO inventory (row_id, name) VALUES (1, '新槽位一');",
+      baseSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+
+    expect(liveResult.success).toBe(true);
+    expect(liveResult.operations).toEqual([{
+      kind: 'sql_sheet_batch',
+      sheetKey: 'sheet_0',
+      statements: ["INSERT OR REPLACE INTO inventory (row_id, name) VALUES (1, '新槽位一')"],
+      tableName: 'inventory',
+      reason: 'system',
+    }]);
+
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: baseSnapshot,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [{
+              seq: 1, entryId: 'fixed-slot-replace-replay', createdAt: 2,
+              source: 'auto_fill', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: liveResult.operations,
+            }],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
+      .resolves.toEqual(liveResult.workingData);
+  });
+
+  it('固定槽位 INSERT OR REPLACE 经真实 V2 persist 写入后仍与实时快照一致', async () => {
+    const baseSnapshot = makeCheckpointData();
+    baseSnapshot.sheet_0.sourceData = {
+      ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY CHECK(row_id BETWEEN 1 AND 2), name TEXT NOT NULL);',
+      insertNode: '禁止 INSERT OR REPLACE；该字段不参与固定槽位契约。',
+    };
+    baseSnapshot.sheet_0.content = [
+      ['row_id', 'name'],
+      ['1', '旧槽位一'],
+      ['2', '旧槽位二'],
+    ];
+    const liveResult = await applySqlEditsToTableDataSnapshot_ACU(
+      "INSERT OR REPLACE INTO inventory (row_id, name) VALUES (1, '新槽位一');",
+      baseSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+    expect(liveResult.success).toBe(true);
+    expect(liveResult.workingData).toBeDefined();
+    expect(liveResult.operations).toEqual([{
+      kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',
+      statements: ["INSERT OR REPLACE INTO inventory (row_id, name) VALUES (1, '新槽位一')"],
+    }]);
+
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'init', data: baseSnapshot,
+              event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+    const previousHostApi = SillyTavern_API_ACU;
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat: async () => undefined } as any);
+      const persisted = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: 0,
+        source: 'auto_fill',
+        afterData: liveResult.workingData!,
+        filledSheetKeys: ['sheet_0'],
+        candidateChangedSheetKeys: ['sheet_0'],
+        operations: liveResult.operations,
+        transactionContext: {
+          baseRevision: 'test-fixed-slot-replace',
+          writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+          assertFresh: () => undefined,
+          runCommit: async (task: () => Promise<any>) => task(),
+        },
+      });
+
+      expect(persisted.saved).toBe(true);
+      expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual(liveResult.operations);
+      await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
+        .resolves.toEqual(liveResult.workingData);
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+    }
   });
 
   it('legacy 显式 row_id SQL operation 保持历史指定身份', async () => {

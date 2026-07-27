@@ -499,6 +499,59 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     expect(result.join('\n')).not.toContain('666');
   });
 
+  it('固定 row_id 槽位表保留受契约约束的 INSERT OR REPLACE，并将实际 SQL 写入单表 operation', async () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.sourceData.ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY CHECK(row_id BETWEEN 1 AND 2), item_name TEXT NOT NULL, quantity INTEGER DEFAULT 1);';
+    inputSnapshot.sheet_0.sourceData.insertNode = '禁止 INSERT OR REPLACE；该字段不参与固定槽位契约。';
+    inputSnapshot.sheet_0.content = [
+      ['row_id', 'item_name', 'quantity'],
+      ['1', '旧物品', '1'],
+      ['2', '旧卷轴', '2'],
+    ];
+    const sql = "INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1, '新物品', 9), (2, '新卷轴', 8);";
+
+    expect(materializeSystemRowIdsForSqlInserts_ACU([sql], inputSnapshot)).toEqual([sql]);
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([sql], inputSnapshot)).not.toThrow();
+
+    const result = await applySqlEditsToTableDataSnapshot_ACU(
+      sql,
+      inputSnapshot,
+      'auto_standard',
+      { targetSheetKeys: ['sheet_0'], requireSheetScopedOperations: true, allowSingleTargetFallback: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.workingData?.sheet_0.content).toEqual([
+      ['row_id', 'item_name', 'quantity'],
+      ['1', '新物品', '9'],
+      ['2', '新卷轴', '8'],
+    ]);
+    expect(result.operations).toEqual([{
+      kind: 'sql_sheet_batch', sheetKey: 'sheet_0', statements: [sql.replace('inventory', 'beibaowupinbiao').replace(/;$/, '')],
+      tableName: 'beibaowupinbiao', reason: 'system',
+    }]);
+  });
+
+  it.each([
+    ["INSERT OR REPLACE INTO inventory (item_name, quantity) VALUES ('药水', 1)", '必须显式提供 row_id 槽位'],
+    ["INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (3, '药水', 1)", '超出允许范围 1..2'],
+    ["INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1 + 0, '药水', 1)", '必须是整数常量'],
+  ])('固定槽位 REPLACE 拒绝不安全输入：%s', (sql, message) => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.sourceData.ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY CHECK(row_id BETWEEN 1 AND 2), item_name TEXT NOT NULL, quantity INTEGER DEFAULT 1);';
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU([sql], inputSnapshot)).toThrow(message);
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([sql], inputSnapshot)).toThrow(message);
+  });
+
+  it('普通稳定身份表即使 insertNode 出现 REPLACE 文字也保持 fail closed', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
+    inputSnapshot.sheet_0.sourceData.insertNode = "示例：INSERT OR REPLACE INTO inventory (row_id, item_name) VALUES (1, '误导')。";
+    const sql = "INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1, '药水', 1)";
+
+    expect(() => materializeSystemRowIdsForSqlInserts_ACU([sql], inputSnapshot)).toThrow('只有声明固定 row_id 槽位 REPLACE 契约的表可以使用');
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([sql], inputSnapshot)).toThrow('仅固定 row_id 槽位表可使用 INSERT OR REPLACE');
+  });
+
   it('显式 row_id 是唯一列时拒绝无业务内容的 INSERT', () => {
     expect(() => materializeSystemRowIdsForSqlInserts_ACU(
       ['INSERT INTO beibaowupinbiao (row_id) VALUES (999)'],
