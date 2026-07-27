@@ -1,5 +1,5 @@
 import { getLastMessageIndex_ACU } from '../chat/chat-service';
-import { currentJsonTableData_ACU } from '../runtime/state-manager';
+import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../table/table-service';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
@@ -8,6 +8,7 @@ import {
     findSummaryTable_ACU,
     type SummaryVectorIndexArchiveResult_ACU,
 } from './summary-vector-index-archive-service';
+import { clearSummaryVectorIndexFlushQueueForCurrentScope_ACU } from './summary-vector-index-flush-queue';
 
 /**
  * 立即重建当前聊天的交火纪要索引。
@@ -46,6 +47,11 @@ export async function rebuildCurrentSummaryVectorIndexNow_ACU(): Promise<Summary
         if (!commit.success || commit.saved === false) {
             throw new Error(commit.error || '纪要表快照提交失败。');
         }
+        // 手动/自愈重建必须取代同 scope 下已排队或正在等待发布的旧 flush。
+        // tombstone 与 archive 共享 FIFO mutation lock；旧 runner 会在 durable publish 前被 generation fence 拒绝。
+        await clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({
+            isolationKey: getCurrentIsolationKey_ACU(), sourceTableKey: summaryKey,
+        });
     }
 
     const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });

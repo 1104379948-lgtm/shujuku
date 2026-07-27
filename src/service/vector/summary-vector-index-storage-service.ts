@@ -50,7 +50,7 @@ import type {
     SummaryVectorIndexTombstone_ACU,
 } from './summary-vector-index-types';
 import { SUMMARY_VECTOR_INDEX_MANIFEST_VERSION_ACU } from './summary-vector-index-types';
-import { getAggregatedSummaryVectorIndexSnapshot_ACU } from './summary-vector-index-state-service';
+import { getAllSummaryVectorIndexSnapshotLayers_ACU } from './summary-vector-index-state-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU } from './vector-memory-config';
 
 const DEFAULT_SHARD_CHUNK_LIMIT_ACU = 128;
@@ -734,6 +734,7 @@ function collectManifestReachableFiles_ACU(
         seen.add(path);
         reachableFiles.push({
             path,
+            references: [{ messageIndex: context.messageIndex, isolationKey: context.isolationKey }],
             role: file.role,
             expectedIdentity,
             manifest,
@@ -789,21 +790,37 @@ function buildReachableFileIdentityKey_ACU(file: SummaryVectorIndexReachableFile
 }
 
 export async function collectSummaryVectorIndexReachability_ACU(): Promise<SummaryVectorIndexReachabilityReport_ACU> {
-    const snapshot = await (async () => getAggregatedSummaryVectorIndexSnapshot_ACU())();
+    const layers = getAllSummaryVectorIndexSnapshotLayers_ACU();
     const chatKey = normalizeChatKey_ACU();
     const reachabilityByIdentity = new Map<string, SummaryVectorIndexReachableFile_ACU>();
     let manifestCount = 0;
-    if (snapshot?.layers?.length) {
-        snapshot.layers.forEach((layer) => {
-            const manifest = layer.summaryVectorIndexState?.manifest || layer.tagData?.summaryVectorIndexManifest || null;
-            if (!manifest) return;
+    layers.forEach((layer) => {
+        // state.manifest 与 standalone manifest 都是持久化引用。正常 writer 会令二者一致，
+        // 但历史中断或外部污染导致不一致时，GC 必须保护两者，不能擅自挑一份当权威。
+        const manifests = [
+            layer.summaryVectorIndexState?.manifest,
+            layer.tagData?.summaryVectorIndexManifest,
+        ].filter((manifest): manifest is ChatSummaryVectorIndexManifest_ACU => !!manifest);
+        manifests.forEach((manifest) => {
             manifestCount += 1;
             collectManifestReachableFiles_ACU(manifest, {
                 messageIndex: layer.messageIndex,
                 isolationKey: layer.isolationKey,
-            }).forEach((file) => reachabilityByIdentity.set(buildReachableFileIdentityKey_ACU(file), file));
+            }).forEach((file) => {
+                const identityKey = buildReachableFileIdentityKey_ACU(file);
+                const existing = reachabilityByIdentity.get(identityKey);
+                if (!existing) {
+                    reachabilityByIdentity.set(identityKey, file);
+                    return;
+                }
+                const references = [...(existing.references || [{ messageIndex: existing.messageIndex, isolationKey: existing.isolationKey }])];
+                (file.references || []).forEach((reference) => {
+                    if (!references.some((item) => item.messageIndex === reference.messageIndex && item.isolationKey === reference.isolationKey)) references.push(reference);
+                });
+                existing.references = references;
+            });
         });
-    }
+    });
     const reachableFiles = Array.from(reachabilityByIdentity.values());
     return {
         chatKey,

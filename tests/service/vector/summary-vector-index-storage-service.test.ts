@@ -22,7 +22,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   getCurrentIsolationKey_ACU: () => h.isolationKey,
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
-  getAggregatedSummaryVectorIndexSnapshot_ACU: () => h.snapshot.value,
+  getAllSummaryVectorIndexSnapshotLayers_ACU: () => h.snapshot.value?.layers || [],
 }));
 vi.mock('../../../src/shared/utils', () => ({
   hashUserInput_ACU: (value: string) => `hash-${value}`,
@@ -61,6 +61,7 @@ vi.mock('../../../src/service/vector/vector-memory-config', () => ({
 
 import {
   abortSummaryVectorIndexSnapshotPublication_ACU,
+  collectSummaryVectorIndexReachability_ACU,
   cleanupUnreachableSummaryVectorIndexFiles_ACU,
   finalizeSummaryVectorIndexSnapshotPublication_ACU,
   inspectSummaryVectorIndexHealth_ACU,
@@ -301,6 +302,73 @@ describe('summary-vector-index-storage-service 安全 GC', () => {
     h.unregister.mockResolvedValue(undefined);
     h.snapshot.value = null;
     h.flush.mockResolvedValue({ total: 0, dirty: 0, queued: 0, flushing: 0, failedRetryable: 0, failedTerminal: 0, lastError: '' });
+  });
+
+  it('可达性覆盖全部隔离槽，并保留同一身份的多楼层引用证据', async () => {
+    const first = manifest_ACU();
+    const second = {
+      ...manifest_ACU(),
+      indexId: 'snap-b',
+      isolationKey: 'iso-b',
+      storageIdentity: { layoutVersion: 2, scopeFingerprint: 'scope:chat-a|iso-b|summary', writeGeneration: 'write-b', revision: 1 },
+      snapshot: { ...manifest_ACU().snapshot, revision: 1 },
+    };
+    second.manifestFile = 'TavernDB_ACU_vector_v2_scope:chat-a|iso-b|summary_snap-b_write-b_snapshot';
+    second.rowsFile = second.manifestFile;
+    second.tombstoneFile = second.manifestFile;
+    h.snapshot.value = {
+      layers: [
+        { messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest: first }, tagData: {} },
+        { messageIndex: 1, isolationKey: 'iso-b', summaryVectorIndexState: { manifest: second }, tagData: {} },
+        { messageIndex: 2, isolationKey: 'iso-a', summaryVectorIndexState: { manifest: first }, tagData: {} },
+      ],
+    };
+
+    const report = await collectSummaryVectorIndexReachability_ACU();
+
+    expect(report.manifestCount).toBe(3);
+    expect(report.reachablePaths).toEqual(expect.arrayContaining([first.manifestFile, second.manifestFile]));
+    const firstFile = report.reachableFiles.find(file => file.path === first.manifestFile);
+    expect(firstFile?.references).toEqual(expect.arrayContaining([
+      { messageIndex: 0, isolationKey: 'iso-a' },
+      { messageIndex: 2, isolationKey: 'iso-a' },
+    ]));
+  });
+
+  it('同一 tag slot 的 state 与 standalone manifest 不一致时，GC 必须保护两份持久化引用', async () => {
+    const stateManifest = manifest_ACU();
+    const standaloneManifest = {
+      ...manifest_ACU(),
+      indexId: 'standalone-index',
+      storageIdentity: { layoutVersion: 2, scopeFingerprint: 'scope:chat-a|iso-a|summary', writeGeneration: 'write-standalone', revision: 4 },
+      snapshot: { ...manifest_ACU().snapshot, revision: 4 },
+    };
+    standaloneManifest.manifestFile = 'TavernDB_ACU_vector_v2_scope:chat-a|iso-a|summary_standalone-index_write-standalone_snapshot';
+    standaloneManifest.rowsFile = standaloneManifest.manifestFile;
+    standaloneManifest.tombstoneFile = standaloneManifest.manifestFile;
+    h.snapshot.value = {
+      layers: [{
+        messageIndex: 0,
+        isolationKey: 'iso-a',
+        summaryVectorIndexState: { manifest: stateManifest },
+        tagData: { summaryVectorIndexManifest: standaloneManifest },
+      }],
+    };
+    h.registry.mockResolvedValue({ files: [
+      { path: stateManifest.manifestFile, createdAt: '2020-01-01T00:00:00.000Z' },
+      { path: standaloneManifest.manifestFile, createdAt: '2020-01-01T00:00:00.000Z' },
+    ] });
+
+    const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+      scopeHints: [{ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary' }],
+    });
+
+    expect(result.deletedPaths).toEqual([]);
+    expect(result.blockedByReachability).toEqual(expect.arrayContaining([
+      stateManifest.manifestFile,
+      standaloneManifest.manifestFile,
+    ]));
+    expect(h.remove).not.toHaveBeenCalled();
   });
 
   it('legacy 路径即使位于待清理 scope 也必须 quarantine，不能按前缀直接删除', async () => {

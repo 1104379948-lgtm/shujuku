@@ -7046,6 +7046,13 @@ $CONTENT
     // 读取类
     // ════════════════════════════════════════════════════════════════
     /**
+     * 读取消息上的完整隔离标签容器。
+     * 返回原始容器引用；调用方如需修改必须先克隆，避免绕过仓储写入契约。
+     */
+    function readIsolatedDataContainer_ACU(msg) {
+        return parseIsolatedDataField(msg);
+    }
+    /**
      * 从消息读取指定隔离标签的 IsolationTagData。
      * 统一处理 IsolatedData 字段的 string/object 两种格式。
      *
@@ -7054,7 +7061,7 @@ $CONTENT
      * @returns 标签数据，或 null（不存在时）
      */
     function readIsolatedTagData_ACU(msg, isolationKey) {
-        const container = parseIsolatedDataField(msg);
+        const container = readIsolatedDataContainer_ACU(msg);
         if (!container)
             return null;
         const tagData = container[isolationKey];
@@ -60389,6 +60396,29 @@ $CONTENT
         return report;
     }
 
+    function normalizeScopePart_ACU(value, fallback) {
+        const normalized = String(value ?? '').trim();
+        return normalized || fallback;
+    }
+    /**
+     * Vector-index persistence identity is independent from the chat tag slot key.
+     * Empty runtime isolation is the canonical default vector scope.
+     */
+    function normalizeSummaryVectorIsolationKey_ACU(value) {
+        return normalizeScopePart_ACU(value, 'default');
+    }
+    function normalizeSummaryVectorIndexScope_ACU(parts) {
+        return {
+            chatKey: normalizeScopePart_ACU(parts.chatKey, 'current-chat'),
+            isolationKey: normalizeSummaryVectorIsolationKey_ACU(parts.isolationKey),
+            sourceTableKey: normalizeScopePart_ACU(parts.sourceTableKey, 'summary'),
+        };
+    }
+    function serializeSummaryVectorIndexScope_ACU(parts) {
+        const scope = normalizeSummaryVectorIndexScope_ACU(parts);
+        return JSON.stringify([scope.chatKey, scope.isolationKey, scope.sourceTableKey]);
+    }
+
     class TableUpdateCommitError_ACU extends Error {
         constructor(message, category) {
             super(message);
@@ -60814,29 +60844,6 @@ $CONTENT
             hasAnyData: latestDataMessageIndex !== -1,
             hasTrackedUpdate: lastTrackedUpdateAiFloor > 0,
         };
-    }
-
-    function normalizeScopePart_ACU(value, fallback) {
-        const normalized = String(value ?? '').trim();
-        return normalized || fallback;
-    }
-    /**
-     * Vector-index persistence identity is independent from the chat tag slot key.
-     * Empty runtime isolation is the canonical default vector scope.
-     */
-    function normalizeSummaryVectorIsolationKey_ACU(value) {
-        return normalizeScopePart_ACU(value, 'default');
-    }
-    function normalizeSummaryVectorIndexScope_ACU(parts) {
-        return {
-            chatKey: normalizeScopePart_ACU(parts.chatKey, 'current-chat'),
-            isolationKey: normalizeSummaryVectorIsolationKey_ACU(parts.isolationKey),
-            sourceTableKey: normalizeScopePart_ACU(parts.sourceTableKey, 'summary'),
-        };
-    }
-    function serializeSummaryVectorIndexScope_ACU(parts) {
-        const scope = normalizeSummaryVectorIndexScope_ACU(parts);
-        return JSON.stringify([scope.chatKey, scope.isolationKey, scope.sourceTableKey]);
     }
 
     const SUMMARY_VECTOR_INDEX_MANIFEST_VERSION_ACU = 1;
@@ -62748,6 +62755,7 @@ $CONTENT
             seen.add(path);
             reachableFiles.push({
                 path,
+                references: [{ messageIndex: context.messageIndex, isolationKey: context.isolationKey }],
                 role: file.role,
                 expectedIdentity,
                 manifest,
@@ -62801,22 +62809,38 @@ $CONTENT
         ]);
     }
     async function collectSummaryVectorIndexReachability_ACU() {
-        const snapshot = await (async () => getAggregatedSummaryVectorIndexSnapshot_ACU())();
+        const layers = getAllSummaryVectorIndexSnapshotLayers_ACU();
         const chatKey = normalizeChatKey_ACU();
         const reachabilityByIdentity = new Map();
         let manifestCount = 0;
-        if (snapshot?.layers?.length) {
-            snapshot.layers.forEach((layer) => {
-                const manifest = layer.summaryVectorIndexState?.manifest || layer.tagData?.summaryVectorIndexManifest || null;
-                if (!manifest)
-                    return;
+        layers.forEach((layer) => {
+            // state.manifest 与 standalone manifest 都是持久化引用。正常 writer 会令二者一致，
+            // 但历史中断或外部污染导致不一致时，GC 必须保护两者，不能擅自挑一份当权威。
+            const manifests = [
+                layer.summaryVectorIndexState?.manifest,
+                layer.tagData?.summaryVectorIndexManifest,
+            ].filter((manifest) => !!manifest);
+            manifests.forEach((manifest) => {
                 manifestCount += 1;
                 collectManifestReachableFiles_ACU(manifest, {
                     messageIndex: layer.messageIndex,
                     isolationKey: layer.isolationKey,
-                }).forEach((file) => reachabilityByIdentity.set(buildReachableFileIdentityKey_ACU(file), file));
+                }).forEach((file) => {
+                    const identityKey = buildReachableFileIdentityKey_ACU(file);
+                    const existing = reachabilityByIdentity.get(identityKey);
+                    if (!existing) {
+                        reachabilityByIdentity.set(identityKey, file);
+                        return;
+                    }
+                    const references = [...(existing.references || [{ messageIndex: existing.messageIndex, isolationKey: existing.isolationKey }])];
+                    (file.references || []).forEach((reference) => {
+                        if (!references.some((item) => item.messageIndex === reference.messageIndex && item.isolationKey === reference.isolationKey))
+                            references.push(reference);
+                    });
+                    existing.references = references;
+                });
             });
-        }
+        });
         const reachableFiles = Array.from(reachabilityByIdentity.values());
         return {
             chatKey,
@@ -64556,24 +64580,33 @@ $CONTENT
             msg.qrf_plot_preset ||
             msg.qrf_plot_tasks);
     }
-    async function deleteVectorIndexManifestsFromMessage_ACU(msg) {
+    function collectVectorIndexGcScopesFromMessage_ACU(msg, scopeHints) {
         if (!msg || typeof msg !== 'object')
             return 0;
-        const isolatedData = msg.TavernDB_ACU_IsolatedData;
-        if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData))
+        const isolatedData = readIsolatedDataContainer_ACU(msg);
+        if (!isolatedData)
             return 0;
-        let deletedCount = 0;
-        for (const isolationKey of Object.keys(isolatedData)) {
-            try {
-                if (await deleteVectorIndexManifestFromTagData_ACU(isolatedData[isolationKey])) {
-                    deletedCount++;
-                }
+        let manifestCount = 0;
+        for (const [tagSlotIsolationKey, tagData] of Object.entries(isolatedData)) {
+            const state = readSummaryVectorIndexStateFromTagData_ACU(tagData);
+            const manifest = state?.manifest || null;
+            if (!manifest)
+                continue;
+            const isolationKey = normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey || tagSlotIsolationKey);
+            const sourceTableKey = String(manifest.sourceTableKey || state?.sourceTableKey || '').trim();
+            if (!sourceTableKey) {
+                logWarn_ACU(`[数据清理] 交火向量 manifest 缺少 sourceTableKey，已跳过自动物理清理：indexId=${manifest.indexId || ''}`);
+                continue;
             }
-            catch (error) {
-                logWarn_ACU(`[数据清理] 删除隔离标签 ${isolationKey} 的交火向量索引外置文件失败:`, error);
-            }
+            const hint = {
+                chatKey: String(manifest.chatKey || currentChatFileIdentifier_ACU || '').trim(),
+                isolationKey,
+                sourceTableKey,
+            };
+            scopeHints.set(`${hint.chatKey}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
+            manifestCount += 1;
         }
-        return deletedCount;
+        return manifestCount;
     }
     function tableListContainsSummaryOrOutline_ACU(targetSheetKeys) {
         if (!Array.isArray(targetSheetKeys) || targetSheetKeys.length === 0)
@@ -64865,6 +64898,104 @@ $CONTENT
             return ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(chat, boundary, options);
         });
     }
+    function getBoundaryVectorPointerRevision_ACU(manifest) {
+        const storageRevision = Number(manifest.storageIdentity?.revision || 0);
+        const snapshotRevision = Number(manifest.snapshot?.revision || 0);
+        if (storageRevision > 0 && snapshotRevision > 0 && storageRevision !== snapshotRevision) {
+            throw new Error(`边界向量指针身份不一致：indexId=${manifest.indexId}, storageRevision=${storageRevision}, snapshotRevision=${snapshotRevision}`);
+        }
+        return Math.max(storageRevision, snapshotRevision, 0);
+    }
+    function compareBoundaryVectorPointerCandidate_ACU(left, right) {
+        const revisionDiff = getBoundaryVectorPointerRevision_ACU(left.manifest) - getBoundaryVectorPointerRevision_ACU(right.manifest);
+        if (revisionDiff !== 0)
+            return revisionDiff;
+        const leftTime = Date.parse(String(left.manifest.updatedAt || left.manifest.indexedAt || ''));
+        const rightTime = Date.parse(String(right.manifest.updatedAt || right.manifest.indexedAt || ''));
+        const timeDiff = (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0);
+        if (timeDiff !== 0)
+            return timeDiff;
+        return left.messageIndex - right.messageIndex;
+    }
+    function relocateLatestSummaryVectorPointerToBoundary_ACU(chat, boundaryAnchorIndex, isolationKey) {
+        const candidatesBySourceTable = new Map();
+        const canonicalIsolationKey = normalizeSummaryVectorIsolationKey_ACU(isolationKey);
+        for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
+            const message = chat[messageIndex];
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            const state = readSummaryVectorIndexStateFromTagData_ACU(tagData);
+            const manifests = [state?.manifest, tagData?.summaryVectorIndexManifest]
+                .filter((manifest) => !!manifest);
+            const seenManifestIdentities = new Set();
+            for (const manifest of manifests) {
+                const identityKey = JSON.stringify([
+                    manifest.indexId,
+                    manifest.manifestFile,
+                    manifest.storageIdentity?.writeGeneration,
+                    manifest.storageIdentity?.revision ?? manifest.snapshot?.revision,
+                ]);
+                if (seenManifestIdentities.has(identityKey))
+                    continue;
+                seenManifestIdentities.add(identityKey);
+                if (!state)
+                    continue;
+                if (manifest.status !== 'ready') {
+                    if (messageIndex < boundaryAnchorIndex) {
+                        throw new Error(`边界向量指针不可迁移：indexId=${manifest.indexId}, status=${manifest.status}`);
+                    }
+                    continue;
+                }
+                if (normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey) !== canonicalIsolationKey) {
+                    throw new Error(`边界向量指针 scope 不匹配：tagSlot=${isolationKey || '(default)'}, manifestIsolation=${manifest.isolationKey || '(empty)'}, indexId=${manifest.indexId}`);
+                }
+                getBoundaryVectorPointerRevision_ACU(manifest);
+                const sourceTableKey = String(manifest.sourceTableKey || state.sourceTableKey || '').trim();
+                if (!sourceTableKey)
+                    throw new Error(`边界向量指针缺少 sourceTableKey：indexId=${manifest.indexId}`);
+                const candidates = candidatesBySourceTable.get(sourceTableKey) || [];
+                candidates.push({ messageIndex, state: { ...state, manifest }, manifest });
+                candidatesBySourceTable.set(sourceTableKey, candidates);
+            }
+        }
+        const relocations = Array.from(candidatesBySourceTable.values())
+            .map((candidates) => {
+            const highestRevision = Math.max(...candidates.map((candidate) => getBoundaryVectorPointerRevision_ACU(candidate.manifest)));
+            const newestCandidates = candidates.filter((candidate) => getBoundaryVectorPointerRevision_ACU(candidate.manifest) === highestRevision);
+            const v2IdentityKeys = new Set(newestCandidates
+                .filter((candidate) => !!candidate.manifest.storageIdentity)
+                .map((candidate) => JSON.stringify([
+                candidate.manifest.indexId,
+                candidate.manifest.manifestFile,
+                candidate.manifest.storageIdentity?.writeGeneration,
+            ])));
+            if (v2IdentityKeys.size > 1) {
+                throw new Error(`边界向量指针存在同 scope 同 revision 的多个 immutable generation，拒绝猜测迁移：sourceTableKey=${newestCandidates[0].manifest.sourceTableKey}, revision=${highestRevision}`);
+            }
+            return newestCandidates.reduce((latest, candidate) => (compareBoundaryVectorPointerCandidate_ACU(candidate, latest) > 0 ? candidate : latest));
+        })
+            .filter((candidate) => candidate.messageIndex < boundaryAnchorIndex);
+        if (relocations.length === 0)
+            return false;
+        if (relocations.length > 1) {
+            throw new Error(`边界向量指针存在多个待迁移 sourceTableKey，单一 tag slot 无法安全承载：isolationKey=${isolationKey || '(default)'}`);
+        }
+        const candidate = relocations[0];
+        const anchorMessage = chat[boundaryAnchorIndex];
+        const anchorContainer = readIsolatedDataContainer_ACU(anchorMessage);
+        const anchorTagData = anchorContainer?.[isolationKey];
+        if (!anchorTagData || typeof anchorTagData !== 'object') {
+            throw new Error(`边界向量指针迁移失败：anchor 缺少 isolationKey=[${isolationKey || '无标签'}] 的 tag slot`);
+        }
+        const anchorState = readSummaryVectorIndexStateFromTagData_ACU(anchorTagData);
+        if (anchorState?.manifest && anchorState.manifest.sourceTableKey !== candidate.manifest.sourceTableKey) {
+            throw new Error(`边界向量指针迁移会覆盖其他 sourceTableKey：anchor=${anchorState.manifest.sourceTableKey}, candidate=${candidate.manifest.sourceTableKey}`);
+        }
+        assignSummaryVectorIndexStateToTagData_ACU(anchorTagData, candidate.state, candidate.manifest);
+        logDebug_ACU(`[V2 Compaction] 已将交火向量 immutable pointer 迁移到边界楼层 #${boundaryAnchorIndex}：isolationKey=[${isolationKey || '无标签'}], indexId=${candidate.manifest.indexId}`);
+        return true;
+    }
     async function writeV2BoundaryCheckpointBeforePurge_ACU(chat, boundaryAnchorIndex) {
         if (boundaryAnchorIndex < 0 || !chat[boundaryAnchorIndex] || chat[boundaryAnchorIndex].is_user) {
             throw new Error(`边界 checkpoint 写入失败：boundaryAnchorIndex=${boundaryAnchorIndex} 不是有效 AI 楼层。`);
@@ -64879,8 +65010,11 @@ $CONTENT
             const strategy = resolveTableStorageStrategy_ACU(chat, isolationKey, isolationConfig);
             if (strategy.mode !== 'v2')
                 continue;
+            const pointerRelocated = relocateLatestSummaryVectorPointerToBoundary_ACU(chat, boundaryAnchorIndex, isolationKey);
+            if (pointerRelocated)
+                changed = true;
             if (hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, boundaryAnchorIndex)) {
-                logDebug_ACU(`[V2 Compaction] AI 保留边界楼层 #${boundaryAnchorIndex} 已存在 isolationKey=[${isolationKey || '无标签'}] 的 compaction full checkpoint，跳过重建。`);
+                logDebug_ACU(`[V2 Compaction] AI 保留边界楼层 #${boundaryAnchorIndex} 已存在 isolationKey=[${isolationKey || '无标签'}] 的 compaction full checkpoint，跳过 frame 重建。`);
                 continue;
             }
             let data;
@@ -64915,8 +65049,7 @@ $CONTENT
                 logEntries: [],
             };
             anchorMsg.TavernDB_ACU_IsolatedData[isolationKey] = {
-                ...(existingTagData?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTagData.summaryVectorIndexState } : {}),
-                ...(existingTagData?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existingTagData.summaryVectorIndexManifest } : {}),
+                ...(existingTagData || {}),
                 storageFrame: frame,
                 _acu_storage_version: 2,
             };
@@ -65130,6 +65263,7 @@ $CONTENT
                 }
                 logDebug_ACU(`[数据清理] 检测到 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）仅存在于待清理楼层，将写入边界保留楼层 #${anchorIndex} 作为兜底...`);
                 const anchorMsg = chat[anchorIndex];
+                const anchorSnapshot = messageFieldSnapshot_ACU(anchorMsg);
                 // 初始化 IsolatedData 容器
                 if (!anchorMsg.TavernDB_ACU_IsolatedData || typeof anchorMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(anchorMsg.TavernDB_ACU_IsolatedData)) {
                     anchorMsg.TavernDB_ACU_IsolatedData = {};
@@ -65162,13 +65296,15 @@ $CONTENT
                     anchorTagData._acu_storage_mode = 'checkpoint';
                     anchorTagData._acu_storage_version = 1;
                 }
-                // 立即持久化兜底数据，再继续删除循环
+                // 兜底数据必须先严格持久化；失败时不能继续破坏性删除旧楼层。
                 try {
-                    await saveChatToHost_ACU();
-                    logDebug_ACU(`[数据清理] 已将 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）的兜底数据写入楼层 #${anchorIndex}，聊天已保存。`);
+                    await saveChatToHostStrict_ACU();
+                    logDebug_ACU(`[数据清理] 已将 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）的兜底数据写入楼层 #${anchorIndex}，聊天已严格保存。`);
                 }
                 catch (e) {
-                    logWarn_ACU('[数据清理] 写入兜底数据失败，继续清理流程:', e);
+                    restoreMessageFieldSnapshot_ACU(anchorMsg, anchorSnapshot);
+                    logError_ACU('[数据清理] 兜底数据严格保存失败，已回滚并中止清理:', e);
+                    return;
                 }
             }
             else {
@@ -65191,12 +65327,20 @@ $CONTENT
             'qrf_plot_preset',
             'qrf_plot_tasks'
         ];
+        const purgeSnapshots = new Map();
+        const purgedFieldDescriptors = new Map();
+        const vectorGcScopes = new Map();
         let purgedVectorManifestCount = 0;
         for (const idx of indicesToPurge) {
             const msg = chat[idx];
             if (!msg)
                 continue;
-            purgedVectorManifestCount += await deleteVectorIndexManifestsFromMessage_ACU(msg);
+            purgeSnapshots.set(idx, messageFieldSnapshot_ACU(msg));
+            purgedFieldDescriptors.set(idx, new Map(keysToDelete.map((key) => [
+                key,
+                Object.getOwnPropertyDescriptor(msg, key),
+            ])));
+            purgedVectorManifestCount += collectVectorIndexGcScopesFromMessage_ACU(msg, vectorGcScopes);
             let modified = false;
             for (const key of keysToDelete) {
                 if (Object.prototype.hasOwnProperty.call(msg, key)) {
@@ -65210,11 +65354,38 @@ $CONTENT
         }
         if (purgedCount > 0) {
             try {
-                await saveChatToHost_ACU();
-                logDebug_ACU(`[数据清理] 已清理 ${purgedCount} 层消息的本地数据，已删除 ${purgedVectorManifestCount} 组交火向量索引外置文件引用，聊天记录已保存。`);
+                await saveChatToHostStrict_ACU();
+                logDebug_ACU(`[数据清理] 已严格保存 ${purgedCount} 层消息的本地数据清理，已移除 ${purgedVectorManifestCount} 组交火向量索引引用。`);
             }
             catch (e) {
-                logError_ACU('[数据清理] 保存聊天记录失败:', e);
+                purgeSnapshots.forEach((snapshot, messageIndex) => {
+                    restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot);
+                    purgedFieldDescriptors.get(messageIndex)?.forEach((descriptor, key) => {
+                        if (descriptor) {
+                            Object.defineProperty(chat[messageIndex], key, descriptor);
+                        }
+                        else {
+                            delete chat[messageIndex][key];
+                        }
+                    });
+                });
+                logError_ACU('[数据清理] 清理后的严格保存失败，已回滚且不执行外置向量 GC:', e);
+                return;
+            }
+            if (vectorGcScopes.size > 0) {
+                try {
+                    const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+                        scopeHints: Array.from(vectorGcScopes.values()),
+                    });
+                    if (gcResult.failedDeletes.length > 0) {
+                        logWarn_ACU(`[数据清理] 交火向量 GC 有 ${gcResult.failedDeletes.length} 个删除失败；聊天引用已提交，将在后续清理重试。`);
+                    }
+                    logDebug_ACU(`[数据清理] 交火向量 GC 完成：deleted=${gcResult.deletedPaths.length}, retained=${gcResult.retainedPaths.length}, manifests=${purgedVectorManifestCount}`);
+                }
+                catch (error) {
+                    // 聊天引用已经 durable，不能为 best-effort GC 回滚已提交的删除。
+                    logWarn_ACU('[数据清理] 交火向量 GC 执行异常；聊天引用已提交，将在后续清理重试:', error);
+                }
             }
         }
         else {
@@ -66282,7 +66453,7 @@ $CONTENT
         }
         tagData.summaryVectorIndexState = nextState;
     }
-    function readLayerState_ACU(tagData) {
+    function readSummaryVectorIndexStateFromTagData_ACU(tagData) {
         if (!tagData)
             return null;
         const state = cloneSummaryVectorIndexState_ACU$1(tagData.summaryVectorIndexState);
@@ -66312,6 +66483,32 @@ $CONTENT
         }
         return state;
     }
+    /**
+     * 枚举聊天中全部 tag slot 的向量索引层。
+     *
+     * 这里返回的是聊天槽位 isolationKey（默认槽可能是空字符串），而 manifest 内
+     * isolationKey 是外置存储 canonical scope（默认值为 default）。两者不得混用。
+     */
+    function getAllSummaryVectorIndexSnapshotLayers_ACU() {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0)
+            return [];
+        const layers = [];
+        chat.forEach((message, messageIndex) => {
+            if (!message || message.is_user)
+                return;
+            const isolatedData = readIsolatedDataContainer_ACU(message);
+            if (!isolatedData)
+                return;
+            Object.entries(isolatedData).forEach(([isolationKey, tagData]) => {
+                const state = readSummaryVectorIndexStateFromTagData_ACU(tagData);
+                if (!state)
+                    return;
+                layers.push({ messageIndex, isolationKey, summaryVectorIndexState: state, tagData });
+            });
+        });
+        return layers;
+    }
     function getAggregatedSummaryVectorIndexSnapshot_ACU() {
         const chat = getChatArray_ACU();
         if (!Array.isArray(chat) || chat.length === 0)
@@ -66326,7 +66523,7 @@ $CONTENT
             if (!message || message.is_user)
                 return;
             const tagData = readIsolatedTagData_ACU(message, isolationKey);
-            const state = readLayerState_ACU(tagData);
+            const state = readSummaryVectorIndexStateFromTagData_ACU(tagData);
             if (!state)
                 return;
             layers.push({ messageIndex, isolationKey, summaryVectorIndexState: state, tagData });
@@ -66365,7 +66562,7 @@ $CONTENT
             if (!message || message.is_user)
                 continue;
             const tagData = readIsolatedTagData_ACU(message, isolationKey);
-            const state = readLayerState_ACU(tagData);
+            const state = readSummaryVectorIndexStateFromTagData_ACU(tagData);
             if (!state)
                 continue;
             const activeRowKeys = new Set(state.manifest?.snapshot?.activeRowKeys || []);
@@ -89356,6 +89553,11 @@ $CONTENT
             if (!commit.success || commit.saved === false) {
                 throw new Error(commit.error || '纪要表快照提交失败。');
             }
+            // 手动/自愈重建必须取代同 scope 下已排队或正在等待发布的旧 flush。
+            // tombstone 与 archive 共享 FIFO mutation lock；旧 runner 会在 durable publish 前被 generation fence 拒绝。
+            await clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({
+                isolationKey: getCurrentIsolationKey_ACU(), sourceTableKey: summaryKey,
+            });
         }
         const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
         if (result.success && !result.skipped) {
@@ -97637,6 +97839,7 @@ $CONTENT
     function filterRowsByLiveSummaryTable_ACU(rows, live) {
         if (!live)
             return { rows, changed: false };
+        const indexedRowKeys = new Set(rows.map((row) => row.rowKey).filter(Boolean));
         const filtered = rows.filter((row) => {
             const liveRow = live.byRowKey.get(row.rowKey);
             if (!liveRow)
@@ -97645,7 +97848,11 @@ $CONTENT
                 return false;
             return true;
         });
-        return { rows: filtered, changed: filtered.length !== rows.length };
+        const liveHasUnindexedRows = live.rows.some((row) => !indexedRowKeys.has(row.rowKey));
+        return {
+            rows: filtered,
+            changed: filtered.length !== rows.length || liveHasUnindexedRows,
+        };
     }
     function filterChunksByLiveSummaryTable_ACU(chunks, live) {
         if (!live)
@@ -97669,50 +97876,97 @@ $CONTENT
         const manifestPath = normalizeText_ACU(manifest.manifestFile);
         return !!manifestPath && manifest.rowsFile === manifestPath && manifest.tombstoneFile === manifestPath;
     }
-    async function enqueueSummaryVectorIndexRebuild_ACU(layer, reason, manifest = layer?.summaryVectorIndexState?.manifest) {
-        const queued = await enqueueSummaryVectorIndexFlush_ACU({
-            targetMessageIndex: layer?.messageIndex,
-            isolationKey: layer?.isolationKey,
-            sourceTableKey: manifest?.sourceTableKey,
-            mode: 'sync',
-            debounceMs: 0,
-            reason,
+    async function selectRealignSnapshotFromDisk_ACU(manifest) {
+        const currentPath = normalizeText_ACU(manifest.manifestFile || manifest.files?.[0]?.path);
+        const isV2 = !!manifest.storageIdentity;
+        const currentStorageRevision = Number(manifest.storageIdentity?.revision || 0);
+        const currentSnapshotRevision = Number(manifest.snapshot?.revision || 0);
+        if (isV2 && (!Number.isInteger(currentStorageRevision) || currentStorageRevision < 1
+            || currentStorageRevision !== currentSnapshotRevision)) {
+            return null;
+        }
+        const currentRevision = isV2 ? currentStorageRevision : currentSnapshotRevision;
+        const expectedScope = normalizeSummaryVectorIndexScope_ACU({
+            chatKey: manifest.chatKey,
+            isolationKey: manifest.isolationKey,
+            sourceTableKey: manifest.sourceTableKey,
         });
-        if (queued.queued && queued.scopeKey) {
-            markSummaryVectorIndexDirtyForRealign_ACU(queued.scopeKey, reason);
-            logSummaryVectorIndexIdentityEvent_ACU('debug', 'rebuild', 'enqueued', {
-                manifest,
-                scopeFingerprint: queued.scopeKey,
-            });
-            return true;
+        let registeredFiles = [{ path: currentPath }];
+        if (isV2) {
+            try {
+                const registry = await loadVectorIndexRegistry_ACU();
+                registeredFiles = Array.isArray(registry.files)
+                    ? registry.files.filter((file) => file?.publicationState === 'published')
+                    : [];
+            }
+            catch {
+                return null;
+            }
         }
-        if (!queued.queued) {
-            logSummaryVectorIndexIdentityEvent_ACU('warn', 'rebuild', 'enqueue_rejected', {
-                manifest,
-                error: queued.reason || 'unknown',
-            });
-            logWarn_ACU(`[交火模式纪要索引] 已标记索引待重建，但 flush 入队失败：reason=${queued.reason || 'unknown'}`);
+        const candidates = [];
+        for (const file of registeredFiles) {
+            const path = normalizeText_ACU(file?.path);
+            if (!path)
+                continue;
+            try {
+                const loaded = await readVectorIndexJsonFile_ACU(path);
+                const blob = loaded.data;
+                const diskManifest = blob?.manifest;
+                if (!loaded.ok || !blob || blob.schema !== 'single_file_snapshot' || !diskManifest || diskManifest.status !== 'ready')
+                    continue;
+                const diskScope = normalizeSummaryVectorIndexScope_ACU({
+                    chatKey: diskManifest.chatKey,
+                    isolationKey: diskManifest.isolationKey,
+                    sourceTableKey: diskManifest.sourceTableKey,
+                });
+                if (diskScope.chatKey !== expectedScope.chatKey
+                    || diskScope.isolationKey !== expectedScope.isolationKey
+                    || diskScope.sourceTableKey !== expectedScope.sourceTableKey)
+                    continue;
+                if (isV2 && (diskManifest.chatKey !== expectedScope.chatKey
+                    || diskManifest.isolationKey !== expectedScope.isolationKey
+                    || diskManifest.sourceTableKey !== expectedScope.sourceTableKey
+                    || !blob.storageIdentity))
+                    continue;
+                validateSingleFileSnapshotIdentity_ACU(diskManifest, blob, path);
+                const revision = Number(diskManifest.storageIdentity?.revision ?? diskManifest.snapshot?.revision);
+                const writeGeneration = normalizeText_ACU(diskManifest.storageIdentity?.writeGeneration);
+                if (!Number.isInteger(revision) || revision < 1 || revision < currentRevision || (isV2 && !writeGeneration))
+                    continue;
+                candidates.push({ path, blob, revision, writeGeneration });
+            }
+            catch {
+                // 单个 registry 对象不可信时继续审阅同 scope 的其他 published 候选。
+            }
         }
-        return false;
+        if (candidates.length === 0)
+            return null;
+        const newestRevision = Math.max(...candidates.map((candidate) => candidate.revision));
+        const newestCandidates = candidates.filter((candidate) => candidate.revision === newestRevision);
+        if (newestCandidates.length !== 1) {
+            logWarn_ACU('[交火模式纪要索引] realign 拒绝同 canonical scope、同 revision 的多个 writeGeneration 候选:', {
+                scope: expectedScope,
+                revision: newestRevision,
+                paths: newestCandidates.map((candidate) => candidate.path),
+            });
+            return null;
+        }
+        return newestCandidates[0];
     }
     async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params) {
         const manifest = params.state.manifest || null;
         if (!manifest || !isSingleFileSnapshotManifest_ACU(manifest))
             return null;
-        const snapshotPath = normalizeText_ACU(manifest.manifestFile || manifest.files?.[0]?.path);
-        if (!snapshotPath)
-            return null;
-        const loaded = await readVectorIndexJsonFile_ACU(snapshotPath);
-        if (!loaded.ok || !loaded.data || typeof loaded.data !== 'object') {
+        const selected = await selectRealignSnapshotFromDisk_ACU(manifest);
+        if (!selected) {
             logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'reader_unreadable', {
                 manifest,
-                path: snapshotPath,
-                error: loaded.error || snapshotPath,
+                path: normalizeText_ACU(manifest.manifestFile || manifest.files?.[0]?.path),
             });
-            logWarn_ACU('[交火模式纪要索引] single_file_snapshot 指针对齐读取失败:', loaded.error || snapshotPath);
+            logWarn_ACU('[交火模式纪要索引] 未找到可验证且不回退 revision 的 single_file_snapshot 对齐候选。');
             return null;
         }
-        const blob = loaded.data;
+        const { path: snapshotPath, blob } = selected;
         const blobManifest = blob.manifest;
         if (blob.schema !== 'single_file_snapshot' || !blobManifest || blobManifest.snapshot?.mode !== 'single_file_snapshot') {
             logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'snapshot_shape_rejected', {
@@ -97821,9 +98075,24 @@ $CONTENT
         if (!layer || !message)
             return null;
         const nextTagData = { ...(readIsolatedTagData_ACU(message, layer.isolationKey) || layer.tagData || {}) };
+        const previousIsolatedData = {
+            exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
+            value: message.TavernDB_ACU_IsolatedData,
+        };
         assignSummaryVectorIndexStateToTagData_ACU(nextTagData, alignedState, alignedManifest);
-        writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
-        await saveChatToHost_ACU();
+        try {
+            writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
+            await saveChatToHostStrict_ACU();
+        }
+        catch (error) {
+            if (previousIsolatedData.exists)
+                message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
+            else
+                delete message.TavernDB_ACU_IsolatedData;
+            logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'strict_save_failed', { manifest: alignedManifest, path: snapshotPath, error });
+            logWarn_ACU('[交火模式纪要索引] 磁盘 pointer 对齐严格保存失败，已回滚内存状态:', error);
+            return null;
+        }
         logSummaryVectorIndexIdentityEvent_ACU('debug', 'realign', 'accepted', { manifest: alignedManifest, path: snapshotPath });
         logWarn_ACU(`[交火模式纪要索引] 已从 single_file_snapshot 磁盘文件对齐索引指针：indexId=${alignedManifest.indexId}, revision=${diskRevision}`);
         return alignedState;
@@ -97857,13 +98126,6 @@ $CONTENT
             return { success: false, skipped: true, reason: 'no_index_state' };
         }
         const liveRows = buildLiveSummaryVectorRows_ACU();
-        let staleRealignQueued = false;
-        const enqueueStaleRealignIfNeeded_ACU = async (manifest) => {
-            if (staleRealignQueued)
-                return;
-            staleRealignQueued = true;
-            await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'runtime_stale_rows', manifest);
-        };
         const activeRowKeys = new Set(state.manifest?.snapshot?.activeRowKeys || []);
         let rows = Array.isArray(state.rows)
             ? state.rows.filter((row) => row.status !== 'removed' && (activeRowKeys.size === 0 || activeRowKeys.has(row.rowKey)))
@@ -97961,8 +98223,10 @@ $CONTENT
         const reconciledChunks = filterChunksByLiveSummaryTable_ACU(chunks, liveRows);
         chunks = reconciledChunks.chunks;
         staleRealignNeeded = staleRealignNeeded || reconciledChunks.changed;
-        if (staleRealignNeeded)
-            await enqueueStaleRealignIfNeeded_ACU(state.manifest);
+        if (staleRealignNeeded) {
+            logWarn_ACU('[交火模式纪要索引] 实时纪要表与现有索引不一致；停止使用旧快照并交由 UI 走“立即构建”普通路径重建。');
+            return { success: false, skipped: true, reason: 'runtime_stale_rows_rebuild_required' };
+        }
         if (rows.length < config.summaryIndexKeywordMinRows) {
             return { success: false, skipped: true, reason: 'below_min_rows' };
         }
@@ -98061,7 +98325,9 @@ $CONTENT
     const SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU = new Set([
         'external_vector_files_missing_rebuild_required',
         'external_files_missing_state_cleared_rebuild_required',
+        'external_files_identity_invalid_rebuild_required',
         'external_vector_identity_invalid_rebuild_required',
+        'runtime_stale_rows_rebuild_required',
     ]);
     function clearToastElement_ACU($toast) {
         try {

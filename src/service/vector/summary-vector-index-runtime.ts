@@ -1,7 +1,7 @@
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
-import { saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
+import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
-import { readVectorIndexJsonFile_ACU } from '../../data/storage/vector-index-st-files-storage';
+import { loadVectorIndexRegistry_ACU, readVectorIndexJsonFile_ACU } from '../../data/storage/vector-index-st-files-storage';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import { getChatArray_ACU } from '../chat/chat-service';
@@ -49,8 +49,6 @@ import {
     findSummaryTable_ACU,
     type SummaryVectorArchivePreparedRow_ACU,
 } from './summary-vector-index-archive-service';
-import { enqueueSummaryVectorIndexFlush_ACU } from './summary-vector-index-flush-queue';
-import { markSummaryVectorIndexDirtyForRealign_ACU } from './summary-vector-index-realign-state';
 
 interface SummaryVectorIndexRuntimeOptions_ACU {
     userInput?: string;
@@ -308,13 +306,18 @@ function filterRowsByLiveSummaryTable_ACU(
     live: LiveSummaryVectorRows_ACU | null,
 ): { rows: ChatSummaryVectorIndexRow_ACU[]; changed: boolean } {
     if (!live) return { rows, changed: false };
+    const indexedRowKeys = new Set(rows.map((row) => row.rowKey).filter(Boolean));
     const filtered = rows.filter((row) => {
         const liveRow = live.byRowKey.get(row.rowKey);
         if (!liveRow) return false;
         if (row.sourceFingerprint && liveRow.sourceFingerprint && row.sourceFingerprint !== liveRow.sourceFingerprint) return false;
         return true;
     });
-    return { rows: filtered, changed: filtered.length !== rows.length };
+    const liveHasUnindexedRows = live.rows.some((row) => !indexedRowKeys.has(row.rowKey));
+    return {
+        rows: filtered,
+        changed: filtered.length !== rows.length || liveHasUnindexedRows,
+    };
 }
 
 function filterChunksByLiveSummaryTable_ACU(
@@ -339,35 +342,78 @@ function isSingleFileSnapshotManifest_ACU(manifest: ChatSummaryVectorIndexManife
     return !!manifestPath && manifest.rowsFile === manifestPath && manifest.tombstoneFile === manifestPath;
 }
 
-async function enqueueSummaryVectorIndexRebuild_ACU(
-    layer: SummaryVectorIndexSnapshotLayer_ACU | null,
-    reason: string,
-    manifest: ChatSummaryVectorIndexManifest_ACU | null | undefined = layer?.summaryVectorIndexState?.manifest,
-): Promise<boolean> {
-    const queued = await enqueueSummaryVectorIndexFlush_ACU({
-        targetMessageIndex: layer?.messageIndex,
-        isolationKey: layer?.isolationKey,
-        sourceTableKey: manifest?.sourceTableKey,
-        mode: 'sync',
-        debounceMs: 0,
-        reason,
+async function selectRealignSnapshotFromDisk_ACU(manifest: ChatSummaryVectorIndexManifest_ACU): Promise<{
+    path: string;
+    blob: VectorIndexSingleSnapshotBlob_ACU;
+} | null> {
+    const currentPath = normalizeText_ACU(manifest.manifestFile || manifest.files?.[0]?.path);
+    const isV2 = !!manifest.storageIdentity;
+    const currentStorageRevision = Number(manifest.storageIdentity?.revision || 0);
+    const currentSnapshotRevision = Number(manifest.snapshot?.revision || 0);
+    if (isV2 && (!Number.isInteger(currentStorageRevision) || currentStorageRevision < 1
+        || currentStorageRevision !== currentSnapshotRevision)) {
+        return null;
+    }
+    const currentRevision = isV2 ? currentStorageRevision : currentSnapshotRevision;
+    const expectedScope = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: manifest.chatKey,
+        isolationKey: manifest.isolationKey,
+        sourceTableKey: manifest.sourceTableKey,
     });
-    if (queued.queued && queued.scopeKey) {
-        markSummaryVectorIndexDirtyForRealign_ACU(queued.scopeKey, reason);
-        logSummaryVectorIndexIdentityEvent_ACU('debug', 'rebuild', 'enqueued', {
-            manifest,
-            scopeFingerprint: queued.scopeKey,
-        });
-        return true;
+    let registeredFiles: Array<{ path?: string; publicationState?: string }> = [{ path: currentPath }];
+    if (isV2) {
+        try {
+            const registry = await loadVectorIndexRegistry_ACU();
+            registeredFiles = Array.isArray(registry.files)
+                ? registry.files.filter((file) => file?.publicationState === 'published')
+                : [];
+        } catch {
+            return null;
+        }
     }
-    if (!queued.queued) {
-        logSummaryVectorIndexIdentityEvent_ACU('warn', 'rebuild', 'enqueue_rejected', {
-            manifest,
-            error: queued.reason || 'unknown',
-        });
-        logWarn_ACU(`[交火模式纪要索引] 已标记索引待重建，但 flush 入队失败：reason=${queued.reason || 'unknown'}`);
+    const candidates: Array<{ path: string; blob: VectorIndexSingleSnapshotBlob_ACU; revision: number; writeGeneration: string }> = [];
+
+    for (const file of registeredFiles) {
+        const path = normalizeText_ACU(file?.path);
+        if (!path) continue;
+        try {
+            const loaded = await readVectorIndexJsonFile_ACU<VectorIndexSingleSnapshotBlob_ACU>(path);
+            const blob = loaded.data;
+            const diskManifest = blob?.manifest;
+            if (!loaded.ok || !blob || blob.schema !== 'single_file_snapshot' || !diskManifest || diskManifest.status !== 'ready') continue;
+            const diskScope = normalizeSummaryVectorIndexScope_ACU({
+                chatKey: diskManifest.chatKey,
+                isolationKey: diskManifest.isolationKey,
+                sourceTableKey: diskManifest.sourceTableKey,
+            });
+            if (diskScope.chatKey !== expectedScope.chatKey
+                || diskScope.isolationKey !== expectedScope.isolationKey
+                || diskScope.sourceTableKey !== expectedScope.sourceTableKey) continue;
+            if (isV2 && (diskManifest.chatKey !== expectedScope.chatKey
+                || diskManifest.isolationKey !== expectedScope.isolationKey
+                || diskManifest.sourceTableKey !== expectedScope.sourceTableKey
+                || !blob.storageIdentity)) continue;
+            validateSingleFileSnapshotIdentity_ACU(diskManifest, blob, path);
+            const revision = Number(diskManifest.storageIdentity?.revision ?? diskManifest.snapshot?.revision);
+            const writeGeneration = normalizeText_ACU(diskManifest.storageIdentity?.writeGeneration);
+            if (!Number.isInteger(revision) || revision < 1 || revision < currentRevision || (isV2 && !writeGeneration)) continue;
+            candidates.push({ path, blob, revision, writeGeneration });
+        } catch {
+            // 单个 registry 对象不可信时继续审阅同 scope 的其他 published 候选。
+        }
     }
-    return false;
+    if (candidates.length === 0) return null;
+    const newestRevision = Math.max(...candidates.map((candidate) => candidate.revision));
+    const newestCandidates = candidates.filter((candidate) => candidate.revision === newestRevision);
+    if (newestCandidates.length !== 1) {
+        logWarn_ACU('[交火模式纪要索引] realign 拒绝同 canonical scope、同 revision 的多个 writeGeneration 候选:', {
+            scope: expectedScope,
+            revision: newestRevision,
+            paths: newestCandidates.map((candidate) => candidate.path),
+        });
+        return null;
+    }
+    return newestCandidates[0];
 }
 
 async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
@@ -377,19 +423,16 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
 }): Promise<ChatSummaryVectorIndexState_ACU | null> {
     const manifest = params.state.manifest || null;
     if (!manifest || !isSingleFileSnapshotManifest_ACU(manifest)) return null;
-    const snapshotPath = normalizeText_ACU(manifest.manifestFile || manifest.files?.[0]?.path);
-    if (!snapshotPath) return null;
-    const loaded = await readVectorIndexJsonFile_ACU<VectorIndexSingleSnapshotBlob_ACU>(snapshotPath);
-    if (!loaded.ok || !loaded.data || typeof loaded.data !== 'object') {
+    const selected = await selectRealignSnapshotFromDisk_ACU(manifest);
+    if (!selected) {
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'reader_unreadable', {
             manifest,
-            path: snapshotPath,
-            error: loaded.error || snapshotPath,
+            path: normalizeText_ACU(manifest.manifestFile || manifest.files?.[0]?.path),
         });
-        logWarn_ACU('[交火模式纪要索引] single_file_snapshot 指针对齐读取失败:', loaded.error || snapshotPath);
+        logWarn_ACU('[交火模式纪要索引] 未找到可验证且不回退 revision 的 single_file_snapshot 对齐候选。');
         return null;
     }
-    const blob = loaded.data;
+    const { path: snapshotPath, blob } = selected;
     const blobManifest = blob.manifest;
     if (blob.schema !== 'single_file_snapshot' || !blobManifest || blobManifest.snapshot?.mode !== 'single_file_snapshot') {
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'snapshot_shape_rejected', {
@@ -496,9 +539,21 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
     const message = layer ? chat[layer.messageIndex] : null;
     if (!layer || !message) return null;
     const nextTagData = { ...(readIsolatedTagData_ACU(message, layer.isolationKey) || layer.tagData || {}) } as any;
+    const previousIsolatedData = {
+        exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
+        value: message.TavernDB_ACU_IsolatedData,
+    };
     assignSummaryVectorIndexStateToTagData_ACU(nextTagData, alignedState, alignedManifest);
-    writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
-    await saveChatToHost_ACU();
+    try {
+        writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
+        await saveChatToHostStrict_ACU();
+    } catch (error) {
+        if (previousIsolatedData.exists) message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;
+        else delete message.TavernDB_ACU_IsolatedData;
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'strict_save_failed', { manifest: alignedManifest, path: snapshotPath, error });
+        logWarn_ACU('[交火模式纪要索引] 磁盘 pointer 对齐严格保存失败，已回滚内存状态:', error);
+        return null;
+    }
     logSummaryVectorIndexIdentityEvent_ACU('debug', 'realign', 'accepted', { manifest: alignedManifest, path: snapshotPath });
     logWarn_ACU(`[交火模式纪要索引] 已从 single_file_snapshot 磁盘文件对齐索引指针：indexId=${alignedManifest.indexId}, revision=${diskRevision}`);
     return alignedState;
@@ -536,12 +591,6 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         return { success: false, skipped: true, reason: 'no_index_state' };
     }
     const liveRows = buildLiveSummaryVectorRows_ACU();
-    let staleRealignQueued = false;
-    const enqueueStaleRealignIfNeeded_ACU = async (manifest?: ChatSummaryVectorIndexManifest_ACU | null): Promise<void> => {
-        if (staleRealignQueued) return;
-        staleRealignQueued = true;
-        await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'runtime_stale_rows', manifest);
-    };
     const activeRowKeys = new Set(state.manifest?.snapshot?.activeRowKeys || []);
     let rows: ChatSummaryVectorIndexRow_ACU[] = Array.isArray(state.rows)
         ? state.rows.filter((row: ChatSummaryVectorIndexRow_ACU) => row.status !== 'removed' && (activeRowKeys.size === 0 || activeRowKeys.has(row.rowKey)))
@@ -633,7 +682,10 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     const reconciledChunks = filterChunksByLiveSummaryTable_ACU(chunks, liveRows);
     chunks = reconciledChunks.chunks;
     staleRealignNeeded = staleRealignNeeded || reconciledChunks.changed;
-    if (staleRealignNeeded) await enqueueStaleRealignIfNeeded_ACU(state.manifest);
+    if (staleRealignNeeded) {
+        logWarn_ACU('[交火模式纪要索引] 实时纪要表与现有索引不一致；停止使用旧快照并交由 UI 走“立即构建”普通路径重建。');
+        return { success: false, skipped: true, reason: 'runtime_stale_rows_rebuild_required' };
+    }
     if (rows.length < config.summaryIndexKeywordMinRows) {
         return { success: false, skipped: true, reason: 'below_min_rows' };
     }

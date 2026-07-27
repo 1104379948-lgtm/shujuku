@@ -339,6 +339,11 @@ export interface SummaryVectorIndexStats_ACU {
 export interface SummaryVectorIndexReachableFile_ACU {
     path: string;
     role?: SummaryVectorIndexExternalFileRole_ACU;
+    /**
+     * 同一物理对象可能被多个聊天楼层或 tag slot 引用。首个引用仍保留在
+     * messageIndex/isolationKey，完整引用集用于诊断与 purge 安全审计。
+     */
+    references?: Array<{ messageIndex: number; isolationKey: string }>;
     expectedIdentity: SummaryVectorIndexExpectedFileIdentity_ACU;
     manifest: ChatSummaryVectorIndexManifest_ACU;
     indexId?: string;

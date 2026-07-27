@@ -18,10 +18,26 @@ const h = vi.hoisted(() => ({
   invalidError: false,
   summaryTable: null as any,
   preparedRows: [] as any[],
+  snapshot: null as any,
+  registry: [] as any[],
+  readSnapshot: vi.fn(),
+  validateSnapshot: vi.fn(),
+  saveChatStrict: vi.fn(),
+  tagData: null as any,
+  writeTagData: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
 vi.mock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => h.chat }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({ saveChatToHostStrict_ACU: (...a: any[]) => h.saveChatStrict(...a) }));
+vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
+  readIsolatedTagData_ACU: () => h.tagData,
+  writeIsolatedTagData_ACU: (...a: any[]) => h.writeTagData(...a),
+}));
+vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
+  loadVectorIndexRegistry_ACU: async () => ({ files: h.registry }),
+  readVectorIndexJsonFile_ACU: (...a: any[]) => h.readSnapshot(...a),
+}));
 vi.mock('../../../src/service/ai/api-call', () => ({callAIWithPreset_ACU: (...a: any[]) => h.callAI(...a) }));
 vi.mock('../../../src/data/gateways/vector-embedding-gateway', () => ({ createEmbeddings_ACU: (...a: any[]) => h.createEmbeddings(...a) }));
 vi.mock('../../../src/service/settings/settings-readers', () => ({ getCurrentWorldbookConfig_ACU: () => ({ zeroTkOccupyMode: false, summaryVectorIndexModeEnabled: true }) }));
@@ -38,10 +54,11 @@ vi.mock('../../../src/service/vector/vector-memory-config', () => ({
   validateSummaryVectorIndexConfig_ACU: () => ({ valid: true, errors: [] }),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
-  getLatestSummaryVectorIndexSnapshotState_ACU: () => ({
+  getLatestSummaryVectorIndexSnapshotState_ACU: () => h.snapshot || ({
     summaryVectorIndexState: { rows: h.rows, chunks: h.chunks, manifest: { indexId: 'idx', sourceTableKey: 'summary-source', snapshot: { activeRowKeys: h.rows.map((r) => r.rowKey) } } },
     layers: [{ messageIndex: 0, isolationKey: 'iso-source', summaryVectorIndexState: { manifest: { indexId: 'idx', sourceTableKey: 'summary-source' } } }],
   }),
+  assignSummaryVectorIndexStateToTagData_ACU: (tagData: any, state: any, manifest: any) => { tagData.summaryVectorIndexState = state; tagData.summaryVectorIndexManifest = manifest; },
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () => ({
   findSummaryTable_ACU: () => h.summaryTable,
@@ -50,6 +67,7 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
   loadSummaryVectorIndexChunksFromManifest_ACU: (...a: any[]) => h.loadChunks(...a),
   logSummaryVectorIndexIdentityEvent_ACU: vi.fn(),
+  validateSingleFileSnapshotIdentity_ACU: (...a: any[]) => h.validateSnapshot(...a),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-cache-service', () => ({
   clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU: (...a: any[]) => h.clearInvalid(...a),
@@ -147,6 +165,13 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.invalidError = false;
     h.summaryTable = null;
     h.preparedRows = [];
+    h.snapshot = null;
+    h.registry = [];
+    h.readSnapshot.mockReset();
+    h.validateSnapshot.mockReset();
+    h.saveChatStrict.mockResolvedValue(undefined);
+    h.tagData = {};
+    h.writeTagData.mockReset();
     vi.stubGlobal('fetch', vi.fn());
     setFixture_ACU();
   });
@@ -208,6 +233,41 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     const content = createdContent_ACU();
     expect(content).toContain('old sparse summary');
     expect(content).toContain('recent fixed summary');
+  });
+
+  it('实时纪要表纯新增行时同样判定索引过期，不使用缺行的旧索引', async () => {
+    h.summaryTable = { summaryKey: 'summary-source', table: {} };
+    h.preparedRows = [
+      ...h.rows.map((row: any) => ({ rowKey: row.rowKey })),
+      { rowKey: 'new-row', sourceFingerprint: 'new-row-fingerprint' },
+    ];
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'stale-runtime-added-row' });
+
+    expect(result).toMatchObject({
+      success: false,
+      skipped: true,
+      reason: 'runtime_stale_rows_rebuild_required',
+    });
+    expect(h.createEmbeddings).not.toHaveBeenCalled();
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
+  });
+
+  it('实时纪要表与索引不一致时交由 UI 走立即构建入口，不再绕过普通重建链路入队', async () => {
+    h.summaryTable = { summaryKey: 'summary-source', table: {} };
+    h.preparedRows = [
+      { rowKey: 'dense', sourceFingerprint: 'changed-dense' },
+      { rowKey: 'recent', sourceFingerprint: 'changed-recent' },
+    ];
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'secret relic', source: 'stale-runtime' });
+
+    expect(result).toMatchObject({
+      success: false,
+      skipped: true,
+      reason: 'runtime_stale_rows_rebuild_required',
+    });
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
   });
 
   it('rerank 失败时回退到原候选排序并继续写入世界书', async () => {
@@ -281,6 +341,42 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU missing snapshot recover
   });
 });
 
+function realignManifest_ACU(overrides: Record<string, any> = {}): any {
+  const base = {
+    indexId: 'idx-current',
+    status: 'ready',
+    chatKey: 'chat-a',
+    isolationKey: 'iso-a',
+    sourceTableKey: 'summary-source',
+    sourceTableName: '纪要表',
+    embeddingModel: 'model',
+    dimension: 2,
+    manifestFile: 'v2-current',
+    rowsFile: 'v2-current',
+    tombstoneFile: 'v2-current',
+    snapshot: { mode: 'single_file_snapshot', revision: 3, activeRowKeys: [], activeChunkIds: [], parentIndexIds: [], removedRowKeys: [], replacedRowKeys: [], batchIds: [] },
+    storageIdentity: { layoutVersion: 2, scopeFingerprint: 'scope:chat-a|iso-a|summary-source', writeGeneration: 'generation-current', revision: 3 },
+  };
+  return { ...base, ...overrides };
+}
+
+function realignBlob_ACU(manifest: any): any {
+  return {
+    schema: 'single_file_snapshot',
+    indexId: manifest.indexId,
+    chatKey: manifest.chatKey,
+    isolationKey: manifest.isolationKey,
+    sourceTableKey: manifest.sourceTableKey,
+    sourceTableName: manifest.sourceTableName,
+    embeddingModel: manifest.embeddingModel,
+    dimension: manifest.dimension,
+    manifest,
+    storageIdentity: manifest.storageIdentity,
+    rows: [],
+    chunks: [],
+  };
+}
+
 describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recovery', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -295,6 +391,13 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
     h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
     h.summaryTable = null;
     h.preparedRows = [];
+    h.snapshot = null;
+    h.registry = [];
+    h.readSnapshot.mockReset();
+    h.validateSnapshot.mockReset();
+    h.saveChatStrict.mockResolvedValue(undefined);
+    h.tagData = {};
+    h.writeTagData.mockReset();
   });
 
   it('严格删除身份无效 pointer 后交由 UI 普通重建，不再入 flush 队列', async () => {
@@ -316,5 +419,117 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
     await expect(processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-invalid-2', source: 'invalid-test' }))
       .resolves.toMatchObject({ success: false, skipped: true, reason: 'external_vector_identity_invalid_state_clear_failed' });
     expect(h.enqueueFlush).not.toHaveBeenCalled();
+  });
+
+  it('从同 canonical scope 的 published 更高 revision 磁盘 pointer 对齐，registry 顺序不构成权威', async () => {
+    const current = realignManifest_ACU();
+    const disk = realignManifest_ACU({
+      indexId: 'idx-newer',
+      manifestFile: 'v2-newer',
+      rowsFile: 'v2-newer',
+      tombstoneFile: 'v2-newer',
+      snapshot: { ...current.snapshot, revision: 4 },
+      storageIdentity: { ...current.storageIdentity, writeGeneration: 'generation-newer', revision: 4 },
+    });
+    h.chat = [{ is_user: false, mes: 'assistant' } as any];
+    h.snapshot = {
+      summaryVectorIndexState: { rows: [], chunks: [], manifest: current },
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest: current } }],
+    };
+    h.registry = [{ path: 'v2-newer', publicationState: 'published' }];
+    h.readSnapshot.mockResolvedValue({ ok: true, data: realignBlob_ACU(disk) });
+    h.loadChunks.mockRejectedValueOnce(new Error('交火向量单文件快照身份不匹配: stale pointer'));
+    h.loadChunks.mockResolvedValueOnce([]);
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-newer', source: 'realign-test' });
+
+    expect(h.readSnapshot).toHaveBeenCalledWith('v2-newer');
+    expect(h.writeTagData).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({
+      summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-newer' }) }),
+    }));
+    expect(h.saveChatStrict).toHaveBeenCalledTimes(1);
+    expect(h.clearInvalid).not.toHaveBeenCalled();
+    expect(result.reason).toBe('below_min_rows');
+  });
+
+  it('realign 的严格保存失败时恢复消息原字段，不接受未 durable 的磁盘 pointer', async () => {
+    const current = realignManifest_ACU();
+    const disk = realignManifest_ACU({
+      indexId: 'idx-newer', manifestFile: 'v2-newer', rowsFile: 'v2-newer', tombstoneFile: 'v2-newer',
+      snapshot: { ...current.snapshot, revision: 4 },
+      storageIdentity: { ...current.storageIdentity, writeGeneration: 'generation-newer', revision: 4 },
+    });
+    const originalIsolatedData = JSON.stringify({ 'iso-a': { preserved: true } });
+    h.chat = [{ is_user: false, mes: 'assistant', TavernDB_ACU_IsolatedData: originalIsolatedData } as any];
+    h.snapshot = {
+      summaryVectorIndexState: { rows: [], chunks: [], manifest: current },
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest: current } }],
+    };
+    h.registry = [{ path: 'v2-newer', publicationState: 'published' }];
+    h.readSnapshot.mockResolvedValue({ ok: true, data: realignBlob_ACU(disk) });
+    h.loadChunks.mockRejectedValueOnce(new Error('交火向量单文件快照身份不匹配: stale pointer'));
+    h.saveChatStrict.mockRejectedValueOnce(new Error('host save failed'));
+    h.writeTagData.mockImplementation((message: any, isolationKey: string, tagData: any) => {
+      message.TavernDB_ACU_IsolatedData = { [isolationKey]: tagData };
+    });
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-save-failure', source: 'realign-test' });
+
+    expect(h.saveChatStrict).toHaveBeenCalledTimes(1);
+    expect(h.chat[0].TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+    expect(h.clearInvalid).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe('external_vector_identity_invalid_rebuild_required');
+  });
+
+  it('拒绝 published 磁盘候选的 revision 回退，不写回更旧 pointer', async () => {
+    const current = realignManifest_ACU();
+    const stale = realignManifest_ACU({
+      indexId: 'idx-stale',
+      manifestFile: 'v2-stale',
+      rowsFile: 'v2-stale',
+      tombstoneFile: 'v2-stale',
+      snapshot: { ...current.snapshot, revision: 2 },
+      storageIdentity: { ...current.storageIdentity, writeGeneration: 'generation-stale', revision: 2 },
+    });
+    h.snapshot = {
+      summaryVectorIndexState: { rows: [], chunks: [], manifest: current },
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest: current } }],
+    };
+    h.registry = [{ path: 'v2-stale', publicationState: 'published' }];
+    h.readSnapshot.mockResolvedValue({ ok: true, data: realignBlob_ACU(stale) });
+
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-stale', source: 'realign-test' });
+
+    expect(h.writeTagData).not.toHaveBeenCalled();
+    expect(h.saveChatStrict).not.toHaveBeenCalled();
+    expect(h.clearInvalid).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe('external_vector_identity_invalid_rebuild_required');
+  });
+
+  it('拒绝同 scope 同 revision 的多个 published writeGeneration，不能靠 registry 顺序猜测', async () => {
+    const current = realignManifest_ACU();
+    const first = realignManifest_ACU({
+      indexId: 'idx-duplicate-a', manifestFile: 'v2-duplicate-a', rowsFile: 'v2-duplicate-a', tombstoneFile: 'v2-duplicate-a',
+      storageIdentity: { ...current.storageIdentity, writeGeneration: 'generation-a' },
+    });
+    const second = realignManifest_ACU({
+      indexId: 'idx-duplicate-b', manifestFile: 'v2-duplicate-b', rowsFile: 'v2-duplicate-b', tombstoneFile: 'v2-duplicate-b',
+      storageIdentity: { ...current.storageIdentity, writeGeneration: 'generation-b' },
+    });
+    h.snapshot = {
+      summaryVectorIndexState: { rows: [], chunks: [], manifest: current },
+      layers: [{ messageIndex: 0, isolationKey: 'iso-a', summaryVectorIndexState: { manifest: current } }],
+    };
+    h.registry = [
+      { path: 'v2-duplicate-b', publicationState: 'published' },
+      { path: 'v2-duplicate-a', publicationState: 'published' },
+    ];
+    h.readSnapshot.mockImplementation(async (path: string) => ({ ok: true, data: realignBlob_ACU(path === 'v2-duplicate-a' ? first : second) }));
+
+    await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-duplicate', source: 'realign-test' });
+
+    expect(h.writeTagData).not.toHaveBeenCalled();
+    expect(h.saveChatStrict).not.toHaveBeenCalled();
+    expect(h.clearInvalid).toHaveBeenCalledTimes(1);
   });
 });

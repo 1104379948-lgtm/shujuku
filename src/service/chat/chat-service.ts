@@ -21,15 +21,17 @@ export {
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU, setChatMessages_ACU, emitMessageUpdated_ACU } from '../../data/gateways/chat-gateway';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } from '../../shared/utils';
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
-import { settings_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
+import { settings_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
-import { clearTableFieldsForIsolation_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { clearTableFieldsForIsolation_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
 import { LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
+import { normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../table/table-history';
-import { deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
-import { assignSummaryVectorIndexStateToTagData_ACU } from '../vector/summary-vector-index-state-service';
+import { cleanupUnreachableSummaryVectorIndexFiles_ACU, deleteSummaryVectorIndexExternal_ACU } from '../vector/summary-vector-index-storage-service';
+import { assignSummaryVectorIndexStateToTagData_ACU, readSummaryVectorIndexStateFromTagData_ACU } from '../vector/summary-vector-index-state-service';
+import type { ChatSummaryVectorIndexManifest_ACU, ChatSummaryVectorIndexState_ACU, SummaryVectorIndexSafeGcScopeHint_ACU } from '../vector/summary-vector-index-types';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
@@ -212,22 +214,34 @@ function messageHasLocalLayerData_ACU(msg: any): boolean {
     );
 }
 
-async function deleteVectorIndexManifestsFromMessage_ACU(msg: any): Promise<number> {
+function collectVectorIndexGcScopesFromMessage_ACU(
+    msg: any,
+    scopeHints: Map<string, SummaryVectorIndexSafeGcScopeHint_ACU>,
+): number {
     if (!msg || typeof msg !== 'object') return 0;
-    const isolatedData = msg.TavernDB_ACU_IsolatedData;
-    if (!isolatedData || typeof isolatedData !== 'object' || Array.isArray(isolatedData)) return 0;
+    const isolatedData = readIsolatedDataContainer_ACU(msg);
+    if (!isolatedData) return 0;
 
-    let deletedCount = 0;
-    for (const isolationKey of Object.keys(isolatedData)) {
-        try {
-            if (await deleteVectorIndexManifestFromTagData_ACU(isolatedData[isolationKey])) {
-                deletedCount++;
-            }
-        } catch (error) {
-            logWarn_ACU(`[数据清理] 删除隔离标签 ${isolationKey} 的交火向量索引外置文件失败:`, error);
+    let manifestCount = 0;
+    for (const [tagSlotIsolationKey, tagData] of Object.entries(isolatedData)) {
+        const state = readSummaryVectorIndexStateFromTagData_ACU(tagData);
+        const manifest = state?.manifest || null;
+        if (!manifest) continue;
+        const isolationKey = normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey || tagSlotIsolationKey);
+        const sourceTableKey = String(manifest.sourceTableKey || state?.sourceTableKey || '').trim();
+        if (!sourceTableKey) {
+            logWarn_ACU(`[数据清理] 交火向量 manifest 缺少 sourceTableKey，已跳过自动物理清理：indexId=${manifest.indexId || ''}`);
+            continue;
         }
+        const hint = {
+            chatKey: String(manifest.chatKey || currentChatFileIdentifier_ACU || '').trim(),
+            isolationKey,
+            sourceTableKey,
+        };
+        scopeHints.set(`${hint.chatKey}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
+        manifestCount += 1;
     }
-    return deletedCount;
+    return manifestCount;
 }
 
 function tableListContainsSummaryOrOutline_ACU(targetSheetKeys: string[]): boolean {
@@ -531,6 +545,117 @@ export async function ensureV2BoundaryCheckpointForRetainedBuffer_ACU(
 }
 
 
+interface BoundaryVectorPointerCandidate_ACU {
+    messageIndex: number;
+    state: ChatSummaryVectorIndexState_ACU;
+    manifest: ChatSummaryVectorIndexManifest_ACU;
+}
+
+function getBoundaryVectorPointerRevision_ACU(manifest: ChatSummaryVectorIndexManifest_ACU): number {
+    const storageRevision = Number(manifest.storageIdentity?.revision || 0);
+    const snapshotRevision = Number(manifest.snapshot?.revision || 0);
+    if (storageRevision > 0 && snapshotRevision > 0 && storageRevision !== snapshotRevision) {
+        throw new Error(`边界向量指针身份不一致：indexId=${manifest.indexId}, storageRevision=${storageRevision}, snapshotRevision=${snapshotRevision}`);
+    }
+    return Math.max(storageRevision, snapshotRevision, 0);
+}
+
+function compareBoundaryVectorPointerCandidate_ACU(
+    left: BoundaryVectorPointerCandidate_ACU,
+    right: BoundaryVectorPointerCandidate_ACU,
+): number {
+    const revisionDiff = getBoundaryVectorPointerRevision_ACU(left.manifest) - getBoundaryVectorPointerRevision_ACU(right.manifest);
+    if (revisionDiff !== 0) return revisionDiff;
+    const leftTime = Date.parse(String(left.manifest.updatedAt || left.manifest.indexedAt || ''));
+    const rightTime = Date.parse(String(right.manifest.updatedAt || right.manifest.indexedAt || ''));
+    const timeDiff = (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0);
+    if (timeDiff !== 0) return timeDiff;
+    return left.messageIndex - right.messageIndex;
+}
+
+function relocateLatestSummaryVectorPointerToBoundary_ACU(
+    chat: any[],
+    boundaryAnchorIndex: number,
+    isolationKey: string,
+): boolean {
+    const candidatesBySourceTable = new Map<string, BoundaryVectorPointerCandidate_ACU[]>();
+    const canonicalIsolationKey = normalizeSummaryVectorIsolationKey_ACU(isolationKey);
+    for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
+        const message = chat[messageIndex];
+        if (!message || message.is_user) continue;
+        const tagData = readIsolatedTagData_ACU(message, isolationKey);
+        const state = readSummaryVectorIndexStateFromTagData_ACU(tagData);
+        const manifests = [state?.manifest, tagData?.summaryVectorIndexManifest]
+            .filter((manifest): manifest is ChatSummaryVectorIndexManifest_ACU => !!manifest);
+        const seenManifestIdentities = new Set<string>();
+        for (const manifest of manifests) {
+            const identityKey = JSON.stringify([
+                manifest.indexId,
+                manifest.manifestFile,
+                manifest.storageIdentity?.writeGeneration,
+                manifest.storageIdentity?.revision ?? manifest.snapshot?.revision,
+            ]);
+            if (seenManifestIdentities.has(identityKey)) continue;
+            seenManifestIdentities.add(identityKey);
+            if (!state) continue;
+            if (manifest.status !== 'ready') {
+                if (messageIndex < boundaryAnchorIndex) {
+                    throw new Error(`边界向量指针不可迁移：indexId=${manifest.indexId}, status=${manifest.status}`);
+                }
+                continue;
+            }
+            if (normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey) !== canonicalIsolationKey) {
+                throw new Error(`边界向量指针 scope 不匹配：tagSlot=${isolationKey || '(default)'}, manifestIsolation=${manifest.isolationKey || '(empty)'}, indexId=${manifest.indexId}`);
+            }
+            getBoundaryVectorPointerRevision_ACU(manifest);
+            const sourceTableKey = String(manifest.sourceTableKey || state.sourceTableKey || '').trim();
+            if (!sourceTableKey) throw new Error(`边界向量指针缺少 sourceTableKey：indexId=${manifest.indexId}`);
+            const candidates = candidatesBySourceTable.get(sourceTableKey) || [];
+            candidates.push({ messageIndex, state: { ...state, manifest }, manifest });
+            candidatesBySourceTable.set(sourceTableKey, candidates);
+        }
+    }
+
+    const relocations = Array.from(candidatesBySourceTable.values())
+        .map((candidates) => {
+            const highestRevision = Math.max(...candidates.map((candidate) => getBoundaryVectorPointerRevision_ACU(candidate.manifest)));
+            const newestCandidates = candidates.filter((candidate) => getBoundaryVectorPointerRevision_ACU(candidate.manifest) === highestRevision);
+            const v2IdentityKeys = new Set(newestCandidates
+                .filter((candidate) => !!candidate.manifest.storageIdentity)
+                .map((candidate) => JSON.stringify([
+                    candidate.manifest.indexId,
+                    candidate.manifest.manifestFile,
+                    candidate.manifest.storageIdentity?.writeGeneration,
+                ])));
+            if (v2IdentityKeys.size > 1) {
+                throw new Error(`边界向量指针存在同 scope 同 revision 的多个 immutable generation，拒绝猜测迁移：sourceTableKey=${newestCandidates[0].manifest.sourceTableKey}, revision=${highestRevision}`);
+            }
+            return newestCandidates.reduce((latest, candidate) => (
+                compareBoundaryVectorPointerCandidate_ACU(candidate, latest) > 0 ? candidate : latest
+            ));
+        })
+        .filter((candidate) => candidate.messageIndex < boundaryAnchorIndex);
+    if (relocations.length === 0) return false;
+    if (relocations.length > 1) {
+        throw new Error(`边界向量指针存在多个待迁移 sourceTableKey，单一 tag slot 无法安全承载：isolationKey=${isolationKey || '(default)'}`);
+    }
+
+    const candidate = relocations[0];
+    const anchorMessage = chat[boundaryAnchorIndex];
+    const anchorContainer = readIsolatedDataContainer_ACU(anchorMessage);
+    const anchorTagData = anchorContainer?.[isolationKey];
+    if (!anchorTagData || typeof anchorTagData !== 'object') {
+        throw new Error(`边界向量指针迁移失败：anchor 缺少 isolationKey=[${isolationKey || '无标签'}] 的 tag slot`);
+    }
+    const anchorState = readSummaryVectorIndexStateFromTagData_ACU(anchorTagData);
+    if (anchorState?.manifest && anchorState.manifest.sourceTableKey !== candidate.manifest.sourceTableKey) {
+        throw new Error(`边界向量指针迁移会覆盖其他 sourceTableKey：anchor=${anchorState.manifest.sourceTableKey}, candidate=${candidate.manifest.sourceTableKey}`);
+    }
+    assignSummaryVectorIndexStateToTagData_ACU(anchorTagData, candidate.state, candidate.manifest);
+    logDebug_ACU(`[V2 Compaction] 已将交火向量 immutable pointer 迁移到边界楼层 #${boundaryAnchorIndex}：isolationKey=[${isolationKey || '无标签'}], indexId=${candidate.manifest.indexId}`);
+    return true;
+}
+
 async function writeV2BoundaryCheckpointBeforePurge_ACU(
     chat: any[],
     boundaryAnchorIndex: number,
@@ -550,8 +675,10 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         const strategy = resolveTableStorageStrategy_ACU(chat, isolationKey, isolationConfig);
         if (strategy.mode !== 'v2') continue;
 
+        const pointerRelocated = relocateLatestSummaryVectorPointerToBoundary_ACU(chat, boundaryAnchorIndex, isolationKey);
+        if (pointerRelocated) changed = true;
         if (hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, boundaryAnchorIndex)) {
-            logDebug_ACU(`[V2 Compaction] AI 保留边界楼层 #${boundaryAnchorIndex} 已存在 isolationKey=[${isolationKey || '无标签'}] 的 compaction full checkpoint，跳过重建。`);
+            logDebug_ACU(`[V2 Compaction] AI 保留边界楼层 #${boundaryAnchorIndex} 已存在 isolationKey=[${isolationKey || '无标签'}] 的 compaction full checkpoint，跳过 frame 重建。`);
             continue;
         }
 
@@ -589,8 +716,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         };
 
         anchorMsg.TavernDB_ACU_IsolatedData[isolationKey] = {
-            ...(existingTagData?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTagData.summaryVectorIndexState } : {}),
-            ...(existingTagData?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existingTagData.summaryVectorIndexManifest } : {}),
+            ...(existingTagData || {}),
             storageFrame: frame,
             _acu_storage_version: 2,
         };
@@ -838,6 +964,7 @@ async function purgeOldLayerDataCore_ACU() {
             logDebug_ACU(`[数据清理] 检测到 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）仅存在于待清理楼层，将写入边界保留楼层 #${anchorIndex} 作为兜底...`);
 
             const anchorMsg = chat[anchorIndex];
+            const anchorSnapshot = messageFieldSnapshot_ACU(anchorMsg);
 
             // 初始化 IsolatedData 容器
             if (!anchorMsg.TavernDB_ACU_IsolatedData || typeof anchorMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(anchorMsg.TavernDB_ACU_IsolatedData)) {
@@ -876,12 +1003,14 @@ async function purgeOldLayerDataCore_ACU() {
                 anchorTagData._acu_storage_version = 1;
             }
 
-            // 立即持久化兜底数据，再继续删除循环
+            // 兜底数据必须先严格持久化；失败时不能继续破坏性删除旧楼层。
             try {
-                await saveChatToHost_ACU();
-                logDebug_ACU(`[数据清理] 已将 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）的兜底数据写入楼层 #${anchorIndex}，聊天已保存。`);
+                await saveChatToHostStrict_ACU();
+                logDebug_ACU(`[数据清理] 已将 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）的兜底数据写入楼层 #${anchorIndex}，聊天已严格保存。`);
             } catch (e) {
-                logWarn_ACU('[数据清理] 写入兜底数据失败，继续清理流程:', e);
+                restoreMessageFieldSnapshot_ACU(anchorMsg, anchorSnapshot);
+                logError_ACU('[数据清理] 兜底数据严格保存失败，已回滚并中止清理:', e);
+                return;
             }
         } else {
             logDebug_ACU('[数据清理] 未检测到需要兜底的表数据。');
@@ -904,12 +1033,19 @@ async function purgeOldLayerDataCore_ACU() {
         'qrf_plot_tasks'
     ];
 
+    const purgeSnapshots = new Map<number, ReturnType<typeof messageFieldSnapshot_ACU>>();
+    const purgedFieldDescriptors = new Map<number, Map<string, PropertyDescriptor | undefined>>();
+    const vectorGcScopes = new Map<string, SummaryVectorIndexSafeGcScopeHint_ACU>();
     let purgedVectorManifestCount = 0;
     for (const idx of indicesToPurge) {
         const msg = chat[idx];
         if (!msg) continue;
-
-        purgedVectorManifestCount += await deleteVectorIndexManifestsFromMessage_ACU(msg);
+        purgeSnapshots.set(idx, messageFieldSnapshot_ACU(msg));
+        purgedFieldDescriptors.set(idx, new Map(keysToDelete.map((key) => [
+            key,
+            Object.getOwnPropertyDescriptor(msg, key),
+        ])));
+        purgedVectorManifestCount += collectVectorIndexGcScopesFromMessage_ACU(msg, vectorGcScopes);
 
         let modified = false;
         for (const key of keysToDelete) {
@@ -926,10 +1062,35 @@ async function purgeOldLayerDataCore_ACU() {
 
     if (purgedCount > 0) {
         try {
-            await saveChatToHost_ACU();
-            logDebug_ACU(`[数据清理] 已清理 ${purgedCount} 层消息的本地数据，已删除 ${purgedVectorManifestCount} 组交火向量索引外置文件引用，聊天记录已保存。`);
+            await saveChatToHostStrict_ACU();
+            logDebug_ACU(`[数据清理] 已严格保存 ${purgedCount} 层消息的本地数据清理，已移除 ${purgedVectorManifestCount} 组交火向量索引引用。`);
         } catch (e) {
-            logError_ACU('[数据清理] 保存聊天记录失败:', e);
+            purgeSnapshots.forEach((snapshot, messageIndex) => {
+                restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot);
+                purgedFieldDescriptors.get(messageIndex)?.forEach((descriptor, key) => {
+                    if (descriptor) {
+                        Object.defineProperty(chat[messageIndex], key, descriptor);
+                    } else {
+                        delete chat[messageIndex][key];
+                    }
+                });
+            });
+            logError_ACU('[数据清理] 清理后的严格保存失败，已回滚且不执行外置向量 GC:', e);
+            return;
+        }
+        if (vectorGcScopes.size > 0) {
+            try {
+                const gcResult = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
+                    scopeHints: Array.from(vectorGcScopes.values()),
+                });
+                if (gcResult.failedDeletes.length > 0) {
+                    logWarn_ACU(`[数据清理] 交火向量 GC 有 ${gcResult.failedDeletes.length} 个删除失败；聊天引用已提交，将在后续清理重试。`);
+                }
+                logDebug_ACU(`[数据清理] 交火向量 GC 完成：deleted=${gcResult.deletedPaths.length}, retained=${gcResult.retainedPaths.length}, manifests=${purgedVectorManifestCount}`);
+            } catch (error) {
+                // 聊天引用已经 durable，不能为 best-effort GC 回滚已提交的删除。
+                logWarn_ACU('[数据清理] 交火向量 GC 执行异常；聊天引用已提交，将在后续清理重试:', error);
+            }
         }
     } else {
         logDebug_ACU('[数据清理] 目标楼层中未发现需要清理的数据字段。');
