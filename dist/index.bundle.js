@@ -40418,13 +40418,17 @@ $CONTENT
                     throw new Error('target AI message changed before template commit; abort stale table write.');
                 }
                 if (storageState.kind === 'pristine_without_checkpoint') {
-                    if (deletedSheetKeys.length > 0) {
-                        throw new Error('预填表模板提交不支持删除历史 Sheet；当前聊天不存在可清理的 V2 checkpoint。');
-                    }
                     if (!isObjectRecord_ACU$1(options.templateSource)) {
                         throw new Error('预填表模板提交必须提供完整有效的 templateSource。');
                     }
                     const templateSnapshot = deepClone_ACU$1(options.templateSource);
+                    // 这条分支不做增量删除：checkpoint 完全由 templateSource 重建，且此时没有任何
+                    // 历史楼层数据需要回溯清理。因此删除只要求「被删表确实已不在新快照里」，
+                    // 快照仍保留该表说明调用方状态不一致，必须拒绝而不是静默放行。
+                    const staleDeletedSheetKeys = deletedSheetKeys.filter(sheetKey => sheetKey in templateSnapshot);
+                    if (staleDeletedSheetKeys.length > 0) {
+                        throw new Error(`预填表模板提交的 templateSource 仍包含已删除 Sheet：${staleDeletedSheetKeys.join(', ')}。`);
+                    }
                     await assertValidInitialTemplateSnapshot_ACU(templateSnapshot, options.guideData);
                     assertTemplateCommitChatContext_ACU(chat, options);
                     for (const change of requestedChanges) {

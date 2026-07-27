@@ -1067,6 +1067,63 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
 
+  it('pristine 聊天删表时按 templateSource 重建基线，不再拒绕删除', async () => {
+    // 回归：pristine 分支的 checkpoint 完全由 templateSource 重建，没有历史楼层需要回溯清理，
+    // 因此新聊天删表必须能走通；旧守卫无条件拒绕，使首次填表前删表完全不可用。
+    const message = { is_user: false } as any;
+    mocks.chat.push(message);
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      deletedSheetKeys: ['sheet_b'],
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA },
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit', messageIndex: 0 });
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    // 被删表既不进新 checkpoint，也不会留下 per-sheet 基线。
+    expect(Object.keys(frame.checkpoint.data).filter(key => key.startsWith('sheet_'))).toEqual(['sheet_a']);
+    expect(frame.perSheetCheckpoints.sheet_b).toBeUndefined();
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+  });
+
+  it('pristine 删表但 templateSource 仍保留该表时 fail-loud，不静默放行', async () => {
+    const message = { is_user: false } as any;
+    const scopeBefore = JSON.parse(JSON.stringify(mocks.scopeContainer));
+    const guideBefore = JSON.parse(JSON.stringify(mocks.guideContainer));
+    mocks.chat.push(message);
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      deletedSheetKeys: ['sheet_b'],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('仍包含已删除 Sheet') });
+    expect(message.TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(mocks.scopeContainer).toEqual(scopeBefore);
+    expect(mocks.guideContainer).toEqual(guideBefore);
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+  });
+
+
   it.each([
     ['full checkpoint', { checkpoint: { kind: 'full', data: { mate: { type: 'acu' } } } }],
     ['per-sheet checkpoint', { perSheetCheckpoints: { sheet_a: { kind: 'sheet_full', data: sheetA } } }],
