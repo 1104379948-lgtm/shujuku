@@ -55,6 +55,22 @@
 
   // --- [SQL 版默认填表提示词] ---
   // SQLite 模式下使用，mainSlot A 改为 SQL 编辑指令格式
+  // [spv8.8] INSERT OR REPLACE 规则行单独抽出：一次性提示词刷新需要把这两行从内容中剥离，
+  // 才能识别出「仍停留在旧默认值」的用户提示词，避免误覆盖用户自定义内容。
+  const SQL_REPLACE_RULE_LINES_ACU = [
+    "- 禁止使用 INSERT OR REPLACE / REPLACE INTO：它会删除旧行并复用 row_id，破坏行身份的稳定性。改写已有行请用 UPDATE ... WHERE 定位。",
+    "- 唯一例外：某张表的注释中带有 `-- REPLACE:` 说明时，该表为固定 row_id 槽位表，允许 INSERT OR REPLACE INTO ... (row_id, 业务列) VALUES (...)，且 row_id 必须是该说明给出范围内的整数常量。",
+  ];
+
+  export function stripSqlReplaceRuleLines_ACU(content) {
+    if (typeof content !== 'string') return content;
+    let next = content;
+    for (const line of SQL_REPLACE_RULE_LINES_ACU) {
+      next = next.split(`\n${line}`).join('');
+    }
+    return next;
+  }
+
   export const DEFAULT_CHAR_CARD_PROMPT_SQL_ACU = DEFAULT_CHAR_CARD_PROMPT_ACU.map(segment => {
     if (segment.mainSlot === 'A' || segment.isMain) {
       return {
@@ -98,6 +114,8 @@ DELETE FROM table_name WHERE row_id = 2;
 - 多行插入：INSERT INTO t (col1, col2) VALUES ('值1', '值2'), ('值3', '值4');
 - INSERT 必须显式列出业务列，但不得包含 row_id；系统会在执行前分配稳定 row_id。
 - 禁止计算 MAX(row_id)、使用 row_id 子查询，或在 INSERT 中手写 row_id 值。
+- 禁止使用 INSERT OR REPLACE / REPLACE INTO：它会删除旧行并复用 row_id，破坏行身份的稳定性。改写已有行请用 UPDATE ... WHERE 定位。
+- 唯一例外：某张表的注释中带有 \`-- REPLACE:\` 说明时，该表为固定 row_id 槽位表，允许 INSERT OR REPLACE INTO ... (row_id, 业务列) VALUES (...)，且 row_id 必须是该说明给出范围内的整数常量。
 
 ### UPDATE（更新已有行）
 - 所有 UPDATE 必须带 WHERE 条件，禁止无条件更新

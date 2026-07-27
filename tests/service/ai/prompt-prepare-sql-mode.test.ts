@@ -360,6 +360,44 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result!.tableDataText).not.toContain('row_id 值为当前表最大 row_id + 1');
     expect(result!.tableDataText).toContain('UNIQUE 约束');
     expect(result!.tableDataText).toContain('表达式更新');
+    expect(result!.tableDataText).toContain('禁止使用 INSERT OR REPLACE / REPLACE INTO');
+    expect(result!.tableDataText).toContain('固定 row_id 槽位表可使用 INSERT OR REPLACE');
+  });
+
+  it('固定 row_id 槽位表在提示词中声明 REPLACE 许可与 row_id 范围', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: {
+        name: '鉴定建议表',
+        sourceData: {
+          ddl: 'CREATE TABLE advice (row_id INTEGER PRIMARY KEY CHECK (row_id BETWEEN 1 AND 5), advice TEXT);',
+        },
+        content: [['row_id', 'advice'], ['1', '先鉴定']],
+        updateConfig: {},
+      },
+    };
+
+    const result = await prepareAIInput_ACU([], 'standard');
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).toContain('-- REPLACE: 本表为固定 row_id 槽位表');
+    expect(result!.tableDataText).toContain('row_id 必须是 1..5 范围内的整数常量');
+  });
+
+  it('非固定槽位表不声明 REPLACE 许可', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: {
+        name: '背包物品表',
+        sourceData: {
+          ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);',
+        },
+        content: [['row_id', 'item_name'], ['1', '铁剑']],
+        updateConfig: {},
+      },
+    };
+
+    const result = await prepareAIInput_ACU([], 'standard');
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).not.toContain('-- REPLACE: 本表为固定 row_id 槽位表');
+    expect(result!.tableDataText).toContain('禁止使用 INSERT OR REPLACE / REPLACE INTO');
   });
 
   it('非 SQL 模式下不追加 SQL 编辑格式说明', async () => {

@@ -130,6 +130,7 @@ vi.mock('../../../src/shared/defaults-json.js', () => ({
   DEFAULT_BUILTIN_PLOT_PRESETS_ACU: [{ name: '时间召回', _acuBuiltinPresetId: 'time-recall', _acuBuiltinPresetVersion: 'test' }],
   DEFAULT_CHAR_CARD_PROMPT_ACU: [{ role: 'USER', content: '默认提示词' }],
   DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU: [{ role: 'USER', content: '默认 strict json 提示词' }],
+  DEFAULT_CHAR_CARD_PROMPT_SQL_ACU: [{ role: 'USER', content: '默认 sql 提示词\n- 新增 REPLACE 规则行' }],
   DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU: [{ role: 'USER', content: '默认 sql strict json 提示词' }],
   DEFAULT_MERGE_SUMMARY_PROMPT_ACU: '默认合并提示词',
   DEFAULT_PLOT_SETTINGS_ACU: { enabled: false },
@@ -137,6 +138,8 @@ vi.mock('../../../src/shared/defaults-json.js', () => ({
   ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU: JSON.stringify(DEFAULT_TEMPLATE_STR_ACU),
   get TABLE_TEMPLATE_ACU() { return '{"mate":{"type":"chatSheets","version":1}}'; },
   _set_TABLE_TEMPLATE_ACU: mockSetTableTemplate,
+  stripSqlReplaceRuleLines_ACU: (content: any) =>
+    typeof content === 'string' ? content.split('\n- 新增 REPLACE 规则行').join('') : content,
 }));
 
 vi.mock('../../../src/shared/defaults', () => ({
@@ -144,6 +147,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   DEFAULT_AUTO_UPDATE_THRESHOLD_ACU: 3,
   DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 500,
   TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU: 'test-table-defaults-refresh',
+  TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU: 'test-prompt-defaults-refresh',
   VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
   SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU: 'spv3.6.10-v2-writer-force-enable',
   defaultWorldbookConfig_ACU: {
@@ -305,6 +309,8 @@ beforeEach(() => {
   mockSettings.plotPresetBindings = {};
   mockSettings.currentTemplatePresetName = '';
   mockSettings.tableTemplateDefaultsRefreshVersion = '';
+  mockSettings.tableFillPromptDefaultsRefreshVersion = '';
+  mockSettings.strictJsonSqlCharCardPrompt = [];
   mockSettings.maxConcurrentGroups = 1;
   mockSettings.zeroTkOccupyModeDefault = false;
   mockSettings.characterSettings = {};
@@ -660,5 +666,40 @@ describe('loadSettings_ACU', () => {
     expect(mockWriteProfileTemplate).not.toHaveBeenCalledWith('', NEW_DEFAULT_TEMPLATE_STR_ACU);
     expect(mockSetTableTemplate).not.toHaveBeenCalledWith(NEW_DEFAULT_TEMPLATE_STR_ACU);
     expect(mockSettings.tableTemplateDefaultsRefreshVersion).toBe('test-table-defaults-refresh');
+  });
+
+  it('一次性提示词刷新会把旧默认提示词覆盖为最新默认值', () => {
+    mockReadProfileSettings.mockReturnValue({
+      charCardPrompt: [{ role: 'USER', content: '默认 sql 提示词', enabled: false }],
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.charCardPrompt[0].content).toBe('默认 sql 提示词\n- 新增 REPLACE 规则行');
+    // 用户可调字段不得被刷新重置
+    expect(mockSettings.charCardPrompt[0].enabled).toBe(false);
+    expect(mockSettings.tableFillPromptDefaultsRefreshVersion).toBe('test-prompt-defaults-refresh');
+  });
+
+  it('一次性提示词刷新不覆盖用户自定义提示词，仅记录版本', () => {
+    mockReadProfileSettings.mockReturnValue({
+      charCardPrompt: [{ role: 'USER', content: '我自己写的提示词' }],
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.charCardPrompt[0].content).toBe('我自己写的提示词');
+    expect(mockSettings.tableFillPromptDefaultsRefreshVersion).toBe('test-prompt-defaults-refresh');
+  });
+
+  it('已记录提示词刷新版本时不再改写提示词', () => {
+    mockReadProfileSettings.mockReturnValue({
+      tableFillPromptDefaultsRefreshVersion: 'test-prompt-defaults-refresh',
+      charCardPrompt: [{ role: 'USER', content: '默认 sql 提示词' }],
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.charCardPrompt[0].content).toBe('默认 sql 提示词');
   });
 });

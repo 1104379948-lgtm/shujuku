@@ -1312,6 +1312,21 @@
     ];
     // --- [SQL 版默认填表提示词] ---
     // SQLite 模式下使用，mainSlot A 改为 SQL 编辑指令格式
+    // [spv8.8] INSERT OR REPLACE 规则行单独抽出：一次性提示词刷新需要把这两行从内容中剥离，
+    // 才能识别出「仍停留在旧默认值」的用户提示词，避免误覆盖用户自定义内容。
+    const SQL_REPLACE_RULE_LINES_ACU = [
+        "- 禁止使用 INSERT OR REPLACE / REPLACE INTO：它会删除旧行并复用 row_id，破坏行身份的稳定性。改写已有行请用 UPDATE ... WHERE 定位。",
+        "- 唯一例外：某张表的注释中带有 `-- REPLACE:` 说明时，该表为固定 row_id 槽位表，允许 INSERT OR REPLACE INTO ... (row_id, 业务列) VALUES (...)，且 row_id 必须是该说明给出范围内的整数常量。",
+    ];
+    function stripSqlReplaceRuleLines_ACU(content) {
+        if (typeof content !== 'string')
+            return content;
+        let next = content;
+        for (const line of SQL_REPLACE_RULE_LINES_ACU) {
+            next = next.split(`\n${line}`).join('');
+        }
+        return next;
+    }
     const DEFAULT_CHAR_CARD_PROMPT_SQL_ACU = DEFAULT_CHAR_CARD_PROMPT_ACU.map(segment => {
         if (segment.mainSlot === 'A' || segment.isMain) {
             return {
@@ -1355,6 +1370,8 @@ DELETE FROM table_name WHERE row_id = 2;
 - 多行插入：INSERT INTO t (col1, col2) VALUES ('值1', '值2'), ('值3', '值4');
 - INSERT 必须显式列出业务列，但不得包含 row_id；系统会在执行前分配稳定 row_id。
 - 禁止计算 MAX(row_id)、使用 row_id 子查询，或在 INSERT 中手写 row_id 值。
+- 禁止使用 INSERT OR REPLACE / REPLACE INTO：它会删除旧行并复用 row_id，破坏行身份的稳定性。改写已有行请用 UPDATE ... WHERE 定位。
+- 唯一例外：某张表的注释中带有 \`-- REPLACE:\` 说明时，该表为固定 row_id 槽位表，允许 INSERT OR REPLACE INTO ... (row_id, 业务列) VALUES (...)，且 row_id 必须是该说明给出范围内的整数常量。
 
 ### UPDATE（更新已有行）
 - 所有 UPDATE 必须带 WHERE 条件，禁止无条件更新
@@ -3933,6 +3950,9 @@ $CONTENT
     // V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，
     // 迁移执行一次后写入 marker，之后用户仍可再次手动关闭并被永久保留。
     const SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU = 'spv3.6.10-v2-writer-force-enable';
+    // 填表提示词一次性刷新：补充 INSERT OR REPLACE 规则与固定 row_id 槽位表许可。
+    // 只覆盖仍停留在旧默认值的提示词；用户自定义内容必须保留。
+    const TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU = 'spv8.8-sql-replace-rule';
     // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
     const defaultVectorMemoryConfig_ACU = {
         enabled: false,
@@ -54081,10 +54101,10 @@ $CONTENT
         // SQLite 模式下追加 SQL 编辑格式兜底说明（Q17 确认：$0 自带格式说明）
         if (isSqliteMode() && tableDataText) {
             if (settings_ACU.strictJsonTableFillEnabled === true) {
-                tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在响应 JSON 的 sql 字符串中仅使用 INSERT INTO / UPDATE / DELETE FROM 数据变更语句\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
+                tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在响应 JSON 的 sql 字符串中仅使用 INSERT INTO / UPDATE / DELETE FROM 数据变更语句\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- 禁止使用 INSERT OR REPLACE / REPLACE INTO；改写已有行请用 UPDATE ... WHERE 定位\n-- 例外：仅带 \`-- REPLACE:\` 说明的固定 row_id 槽位表可使用 INSERT OR REPLACE，且必须按该说明给出范围内的 row_id 整数常量\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
             }
             else {
-                tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在 <tableEdit> 标签内仅使用 INSERT INTO / UPDATE / DELETE FROM 数据变更语句\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
+                tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在 <tableEdit> 标签内仅使用 INSERT INTO / UPDATE / DELETE FROM 数据变更语句\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- 禁止使用 INSERT OR REPLACE / REPLACE INTO；改写已有行请用 UPDATE ... WHERE 定位\n-- 例外：仅带 \`-- REPLACE:\` 说明的固定 row_id 槽位表可使用 INSERT OR REPLACE，且必须按该说明给出范围内的 row_id 整数常量\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
             }
         }
         return {
@@ -54151,6 +54171,12 @@ $CONTENT
                 text += `-- UPDATE: ${table.sourceData.updateNode}\n`;
             if (table.sourceData.deleteNode)
                 text += `-- DELETE: ${table.sourceData.deleteNode}\n`;
+        }
+        // 固定 row_id 槽位表是唯一允许 INSERT OR REPLACE 的场景。不在提示词里声明许可与范围，
+        // 模型只能盲猜，执行期才被 fail-closed 拒绝并触发无效重试。
+        const replaceContract = getFixedRowIdReplaceContract_ACU(table);
+        if (replaceContract) {
+            text += `-- REPLACE: 本表为固定 row_id 槽位表，允许 INSERT OR REPLACE INTO ... (row_id, 业务列) VALUES (...)；row_id 必须是 ${replaceContract.minRowId}..${replaceContract.maxRowId} 范围内的整数常量\n`;
         }
         // 获取有效数据行
         const allRows = table.content.slice(1);
@@ -71255,6 +71281,7 @@ $CONTENT
         settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
         settingsStorageReadyForSave_ACU = true;
         refreshDefaultTableTemplateOnce_ACU(activeCode);
+        refreshTableFillPromptDefaultsOnce_ACU();
         if (shouldPersistSettingsAfterLoad_ACU) {
             saveGlobalMeta_ACU();
             persistSettingsToStorage_ACU(settings_ACU, activeCode);
@@ -71408,6 +71435,56 @@ $CONTENT
             logWarn_ACU('[模板默认值] 默认表格模板一次性刷新失败:', error);
         }
     }
+    /**
+     * [spv8.8] 一次性把填表提示词刷新到含 INSERT OR REPLACE 规则的最新默认值。
+     *
+     * 只在「剥离 REPLACE 规则行后与旧默认值逐段完全一致」时覆盖，也就是仅覆盖仍停留在默认值的用户；
+     * 任何自定义过的提示词都保持原样，只写 marker。覆盖时只替换 content，
+     * enabled/role 等用户可调字段原样保留。
+     */
+    function refreshTableFillPromptDefaultsOnce_ACU() {
+        try {
+            if (!settings_ACU || typeof settings_ACU !== 'object')
+                return;
+            if (settings_ACU.tableFillPromptDefaultsRefreshVersion === TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU)
+                return;
+            const targets = [
+                { key: 'charCardPrompt', latest: DEFAULT_CHAR_CARD_PROMPT_SQL_ACU },
+                { key: 'strictJsonSqlCharCardPrompt', latest: DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU },
+            ];
+            const refreshedKeys = [];
+            for (const { key, latest } of targets) {
+                const stored = settings_ACU[key];
+                if (!Array.isArray(stored) || !Array.isArray(latest) || stored.length !== latest.length)
+                    continue;
+                // 剥离 REPLACE 规则行后比较：旧默认值与新默认值在此视角下等价，
+                // 用户改过任何一个字就会不等，从而被跳过。
+                const isStockDefault = stored.every((segment, index) => {
+                    const storedContent = typeof segment?.content === 'string' ? segment.content : '';
+                    const latestContent = typeof latest[index]?.content === 'string' ? latest[index].content : '';
+                    return stripSqlReplaceRuleLines_ACU(storedContent) === stripSqlReplaceRuleLines_ACU(latestContent);
+                });
+                if (!isStockDefault)
+                    continue;
+                const alreadyLatest = stored.every((segment, index) => segment?.content === latest[index]?.content);
+                if (alreadyLatest)
+                    continue;
+                stored.forEach((segment, index) => {
+                    if (segment && typeof segment === 'object')
+                        segment.content = latest[index]?.content;
+                });
+                refreshedKeys.push(key);
+            }
+            settings_ACU.tableFillPromptDefaultsRefreshVersion = TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU;
+            saveSettings_ACU();
+            logDebug_ACU(refreshedKeys.length > 0
+                ? `[填表提示词] 已一次性刷新默认提示词 (${refreshedKeys.join(', ')}) 并记录版本: ${TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU}`
+                : `[填表提示词] 提示词已自定义或已是最新，仅记录版本: ${TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU}`);
+        }
+        catch (error) {
+            logWarn_ACU('[填表提示词] 默认提示词一次性刷新失败:', error);
+        }
+    }
     function buildDefaultSettings_ACU() {
         return {
             apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0 },
@@ -71440,6 +71517,7 @@ $CONTENT
             plotPresetBindings: {}, // [剧情推进] 按聊天记录绑定剧情推进预设
             currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
             tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
+            tableFillPromptDefaultsRefreshVersion: '', // [填表提示词] 默认填表提示词一次性刷新版本
             // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
             tableContextExtractTags: '',
             tableContextExtractRules: [],
