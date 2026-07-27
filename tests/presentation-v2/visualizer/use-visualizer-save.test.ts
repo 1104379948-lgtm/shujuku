@@ -326,7 +326,7 @@ describe('useVisualizerSave', () => {
       persistChatScope: false,
     }));
     expect(serviceMock.runTableUpdateCommit_ACU).not.toHaveBeenCalled();
-    expect(store.dirty).toBe(false);
+    expect(store.dirty).toBe(true);
     expect(store.lastSavedTarget).toBe('template-global');
   });
 
@@ -590,6 +590,109 @@ describe('useVisualizerSave', () => {
     expect(store.lastSavedTarget).toBeNull();
     expect(store.dirty).toBe(true);
     expect(store.isSaving).toBe(false);
+  });
+
+  it('删列保存经确认后以同一候选快照二次预检并仅提交一次', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet(),
+    }, ['sheet_test_vz2']);
+    store.currentSheet.content = [['row_id', '姓名'], ['1', 'A']];
+    store.currentSheet.sourceData.ddl = `CREATE TABLE sheet_test_vz2 (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  col_1 TEXT -- 姓名
+);`;
+    const destructiveIssue = {
+      code: 'DESTRUCTIVE_COLUMN_DROP_CONFIRMATION_REQUIRED',
+      sheetKey: 'sheet_test_vz2',
+      tableName: '角色状态',
+      droppedColumns: [{ physicalName: 'col_2', displayHeader: '状态', index: 2 }],
+      affectedRowCount: 1,
+      message: '删除状态需要显式确认。',
+    };
+    const migration = {
+      kind: 'sheet_schema_migrate', contractVersion: 1, sheetKey: 'sheet_test_vz2',
+      migrationPolicy: { destructiveChangeConfirmed: true },
+    };
+    serviceMock.preflightSchemaMigrations_ACU
+      .mockResolvedValueOnce({ changedSheetKeys: ['sheet_test_vz2'], blockers: ['sheet_test_vz2: 删除状态需要显式确认。'], issues: [destructiveIssue], operations: [] })
+      .mockResolvedValueOnce({ changedSheetKeys: ['sheet_test_vz2'], blockers: [], issues: [], operations: [migration] });
+    const confirmDestructiveSchemaChange = vi.fn(async () => true);
+
+    const saved = await useVisualizerSave({ confirmDestructiveSchemaChange }).saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(confirmDestructiveSchemaChange).toHaveBeenCalledWith({
+      sheets: [{
+        sheetKey: 'sheet_test_vz2', tableName: '角色状态',
+        droppedColumns: [{ physicalName: 'col_2', displayHeader: '状态', index: 2 }], affectedRowCount: 1,
+      }],
+    });
+    expect(serviceMock.preflightSchemaMigrations_ACU).toHaveBeenNthCalledWith(1, expect.objectContaining({ destructiveChangeConfirmed: false }));
+    expect(serviceMock.preflightSchemaMigrations_ACU).toHaveBeenNthCalledWith(2, expect.objectContaining({ destructiveChangeConfirmed: true }));
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledTimes(1);
+  });
+
+  it('取消删列保存确认时没有提交或后置副作用', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({ mate: { type: 'chatSheets', version: 1 }, sheet_test_vz2: sheet() }, ['sheet_test_vz2']);
+    store.currentSheet.content = [['row_id', '姓名'], ['1', 'A']];
+    store.currentSheet.sourceData.ddl = `CREATE TABLE sheet_test_vz2 (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  col_1 TEXT -- 姓名
+);`;
+    store.setDirty(true);
+    serviceMock.preflightSchemaMigrations_ACU.mockResolvedValueOnce({
+      changedSheetKeys: ['sheet_test_vz2'],
+      blockers: ['sheet_test_vz2: 删除状态需要显式确认。'],
+      issues: [{
+        code: 'DESTRUCTIVE_COLUMN_DROP_CONFIRMATION_REQUIRED', sheetKey: 'sheet_test_vz2', tableName: '角色状态',
+        droppedColumns: [{ physicalName: 'col_2', displayHeader: '状态', index: 2 }], affectedRowCount: 1, message: '删除状态需要显式确认。',
+      }],
+      operations: [],
+    });
+
+    const saved = await useVisualizerSave({ confirmDestructiveSchemaChange: vi.fn(async () => false) }).saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.preflightSchemaMigrations_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.applyTemplateScopeForCurrentChat_ACU).not.toHaveBeenCalled();
+    expect(runtimeMock._set_currentJsonTableData_ACU).not.toHaveBeenCalled();
+    expect(store.dirty).toBe(true);
+  });
+
+  it('危险确认期间草稿变化时拒绝陈旧提交', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({ mate: { type: 'chatSheets', version: 1 }, sheet_test_vz2: sheet() }, ['sheet_test_vz2']);
+    store.currentSheet.content = [['row_id', '姓名'], ['1', 'A']];
+    store.currentSheet.sourceData.ddl = `CREATE TABLE sheet_test_vz2 (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  col_1 TEXT -- 姓名
+);`;
+    store.setDirty(true);
+    serviceMock.preflightSchemaMigrations_ACU.mockResolvedValueOnce({
+      changedSheetKeys: ['sheet_test_vz2'], blockers: ['sheet_test_vz2: 删除状态需要显式确认。'], operations: [],
+      issues: [{ code: 'DESTRUCTIVE_COLUMN_DROP_CONFIRMATION_REQUIRED', sheetKey: 'sheet_test_vz2', tableName: '角色状态', droppedColumns: [{ physicalName: 'col_2', displayHeader: '状态', index: 2 }], affectedRowCount: 1, message: '删除状态需要显式确认。' }],
+    });
+    const confirmDestructiveSchemaChange = vi.fn(async () => {
+      store.currentSheet.name = '确认期间变更';
+      return true;
+    });
+
+    const saved = await useVisualizerSave({ confirmDestructiveSchemaChange }).saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.preflightSchemaMigrations_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(toastMock.warning).toHaveBeenCalledWith('模板结构在危险确认期间已变化；请重新保存。', { muteable: false });
   });
 
   it('schema migration preflight 期间模板变化时不提交陈旧 checkpoint', async () => {

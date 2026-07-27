@@ -1,5 +1,11 @@
 import { computed } from 'vue';
-import { getSheetColumnProjection_ACU, validateDDLTextAgainstHeaders_ACU, parseDDLColumnNames, updateDDLColumnComment } from '../../../shared/ddl-utils';
+import {
+  getSheetColumnProjection_ACU,
+  validateDDLTextAgainstHeaders_ACU,
+  parseDDLColumnNames,
+  removeDDLColumnAtIndex_ACU,
+  updateDDLColumnComment,
+} from '../../../shared/ddl-utils';
 import { isSummaryOrOutlineTable_ACU } from '../../../shared/utils';
 import { settings_ACU } from '../../../service/runtime/state-manager';
 import {
@@ -238,11 +244,35 @@ export function useVisualizerConfigEditing() {
   }
 
   function deleteColumn(index: number): void {
-    withSheet(sheet => {
-      const content = ensureSheetContent(sheet);
-      const targetIndex = Math.trunc(index) + 1;
-      if (targetIndex < 1 || targetIndex >= content[0].length) return;
-      content.forEach((row: any) => {
+    const sheet = currentSheet.value;
+    if (!sheet) return;
+    assertVisualizerDataOpsEditable_ACU(visualizer);
+    const content = ensureSheetContent(sheet);
+    const targetIndex = Math.trunc(index) + 1;
+    if (targetIndex < 1 || targetIndex >= content[0].length) return;
+
+    let nextDDL: string | null = null;
+    if (isSqliteMode() && String(sheet.sourceData?.ddl || '').trim()) {
+      const currentValidation = validateDDLTextAgainstHeaders_ACU(sheet.sourceData.ddl, content[0]);
+      if (!currentValidation.valid) {
+        toastStore.error(`删除列已拒绝：当前 DDL 与表头不一致：${currentValidation.message}`, { muteable: false });
+        return;
+      }
+      try {
+        nextDDL = removeDDLColumnAtIndex_ACU(sheet.sourceData.ddl, targetIndex);
+      } catch (error: any) {
+        toastStore.error(`删除列已拒绝：${error?.message || String(error)}`, { muteable: false });
+        return;
+      }
+    }
+
+    withSheet(current => {
+      const currentContent = ensureSheetContent(current);
+      if (nextDDL !== null) {
+        if (!current.sourceData || typeof current.sourceData !== 'object') current.sourceData = {};
+        current.sourceData.ddl = nextDDL;
+      }
+      currentContent.forEach((row: any) => {
         if (Array.isArray(row)) row.splice(targetIndex, 1);
       });
     });

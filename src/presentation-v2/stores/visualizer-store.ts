@@ -391,6 +391,12 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.lastSavedAt = Date.now();
       this.setDirty(false);
     },
+    recordGlobalTemplateSaved(): void {
+      this.lastSavedTarget = 'template-global';
+      this.lastSavedAt = Date.now();
+      // A global preset write is not a current-chat schema commit. Keep the
+      // chat baseline and dirty state so that an explicit chat save remains required.
+    },
     markTemplateSavedWithPendingLocks(): void {
       this.templateBaseData = cloneData(this.tempData);
       this.templateBaseSheetOrder = [...this.sheetOrder];

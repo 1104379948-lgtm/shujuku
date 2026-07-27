@@ -691,6 +691,69 @@ export function getDDLColumnNameByIndex(ddl: string, index: number): string | nu
 }
 
 /**
+ * Removes one business-column definition from a CREATE TABLE statement without
+ * regenerating the surrounding schema. Ambiguous or dependent definitions fail
+ * closed: callers must leave the editor draft untouched on error.
+ */
+export function removeDDLColumnAtIndex_ACU(ddl: string, sourceIndex: number): string {
+  const value = String(ddl || '');
+  const targetIndex = Math.trunc(Number(sourceIndex));
+  const bounds = findCreateTableDefinitionBounds_ACU(value);
+  if (!bounds) throw new Error('无法解析 CREATE TABLE 语句，不能安全删除列。');
+  const columns = parseDDLColumnInfos_ACU(value);
+  if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= columns.length) {
+    throw new Error('目标列不在可解析的 DDL 列定义中。');
+  }
+  const target = columns[targetIndex];
+  if (!target || target.sqlName.toLowerCase() === 'row_id') throw new Error('row_id 不允许删除。');
+
+  const body = value.slice(bounds.openingIndex + 1, bounds.closingIndex);
+  const hasTableConstraint = splitColumnDefinitions(body).some(definition =>
+    /^(?:PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|CONSTRAINT)\b/i.test(stripSqlLineComments_ACU(definition).trim()),
+  );
+  if (hasTableConstraint) throw new Error('DDL 含表级约束，不能安全自动删除列。');
+  const lines = body.split('\n');
+  const columnLines = lines.map((line, index) => {
+    const withoutLineComment = stripSqlLineComments_ACU(line).trim();
+    const name = withoutLineComment.match(/^([^\s,()]+)/)?.[1];
+    return name ? { index, name } : null;
+  }).filter((item): item is { index: number; name: string } => item !== null);
+  if (columnLines.length !== columns.length) {
+    throw new Error('DDL 含多行列定义或表级约束，不能安全自动删除列。');
+  }
+  const targetName = canonicalSqlIdentifier_ACU(target.sqlName);
+  const targetLinePosition = columnLines.findIndex(item => canonicalSqlIdentifier_ACU(item.name) === targetName);
+  if (targetLinePosition < 0) throw new Error(`无法定位 DDL 列定义「${target.sqlName}」。`);
+  const targetLine = lines[columnLines[targetLinePosition].index];
+  if (/\b(?:PRIMARY\s+KEY|UNIQUE|REFERENCES|CHECK|CONSTRAINT)\b/i.test(stripSqlLineComments_ACU(targetLine))) {
+    throw new Error(`列「${target.sqlName}」带有约束，不能安全自动删除。`);
+  }
+
+  // This transformer deliberately accepts only one-column-per-line DDL. That
+  // lets it remove exactly one original line, preserving every other byte of
+  // authored column definitions (including block comments and defaults).
+  if (targetLinePosition === columnLines.length - 1 && targetLinePosition > 0) {
+    const previousLineIndex = columnLines[targetLinePosition - 1].index;
+    lines[previousLineIndex] = lines[previousLineIndex].replace(/,(\s*(?:--.*)?)$/, '$1');
+  }
+  lines.splice(columnLines[targetLinePosition].index, 1);
+  const next = `${value.slice(0, bounds.openingIndex + 1)}${lines.join('\n')}${value.slice(bounds.closingIndex)}`;
+  const validation = validateDDLTextAgainstHeaders_ACU(next, columns
+    .filter((_, index) => index !== targetIndex)
+    .map(column => column.sqlName.toLowerCase() === 'row_id' ? 'row_id' : (column.comment || column.sqlName)));
+  if (!validation.valid) throw new Error(`删除列后的 DDL 非法：${validation.message}`);
+  return next;
+}
+
+function canonicalSqlIdentifier_ACU(value: string): string {
+  const raw = String(value || '').trim();
+  if (raw.startsWith('"') && raw.endsWith('"')) return raw.slice(1, -1).replace(/""/g, '"').toLowerCase();
+  if (raw.startsWith('`') && raw.endsWith('`')) return raw.slice(1, -1).replace(/``/g, '`').toLowerCase();
+  if (raw.startsWith('[') && raw.endsWith(']')) return raw.slice(1, -1).replace(/]]/g, ']').toLowerCase();
+  return raw.toLowerCase();
+}
+
+/**
  * 更新 DDL 中指定列的注释（中文名）
  * 按行扫描 DDL，找到指定列名的行，替换其 `-- 注释` 部分。
  * 如果该行没有注释，则在行尾添加 `-- 新注释`。

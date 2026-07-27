@@ -17,7 +17,14 @@ import {
   parseDDLColumnInfos_ACU,
   resolveEffectiveDDL,
 } from '../../../src/data/sqlite/schema-mapper';
-import { getSheetColumnProjection_ACU, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, projectSheetDDLForVisibleColumns_ACU, projectSheetRowToVisibleColumns_ACU } from '../../../src/shared/ddl-utils';
+import {
+  getSheetColumnProjection_ACU,
+  parseDDLTableSuffix_ACU,
+  parseDDLSafeDefaultLiteral_ACU,
+  projectSheetDDLForVisibleColumns_ACU,
+  projectSheetRowToVisibleColumns_ACU,
+  removeDDLColumnAtIndex_ACU,
+} from '../../../src/shared/ddl-utils';
 import type { Sheet_ACU } from '../../../src/shared/models/table-data';
 
 // ═══════════════════════════════════════════════════════════════
@@ -899,5 +906,64 @@ describe('validateDDLAgainstHeaders', () => {
     const result = validateDDLAgainstHeaders(ddl, ['row_id', '姓名', '年龄']);
     expect(result.valid).toBe(false);
     expect(result.mismatches.some(m => m.includes('第 1 列不匹配'))).toBe(true);
+  });
+});
+
+describe('removeDDLColumnAtIndex_ACU', () => {
+  it('精确移除目标列并保留其他原始列定义、块注释与 suffix', () => {
+    const ddl = `CREATE TABLE inventory (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  keep TEXT /* 业务兼容说明 */ DEFAULT 'x', -- 保留列
+  obsolete TEXT -- 删除列
+) STRICT;`;
+
+    const result = removeDDLColumnAtIndex_ACU(ddl, 2);
+
+    expect(result).toContain("keep TEXT /* 业务兼容说明 */ DEFAULT 'x' -- 保留列");
+    expect(result).not.toContain("keep TEXT /* 业务兼容说明 */ DEFAULT 'x', -- 保留列");
+    expect(result).toContain(') STRICT;');
+    expect(result).not.toContain('obsolete TEXT');
+  });
+
+  it('删除末尾业务列时移除前一列分隔逗号并保留注释', () => {
+    const ddl = `CREATE TABLE inventory (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  keep TEXT, -- 保留列
+  obsolete TEXT -- 删除列
+);`;
+
+    const result = removeDDLColumnAtIndex_ACU(ddl, 2);
+
+    expect(result).toContain('keep TEXT -- 保留列');
+    expect(result).not.toContain('keep TEXT, -- 保留列');
+  });
+
+  it('目标列被表级约束以无引号名称引用时 fail closed', () => {
+    const ddl = `CREATE TABLE inventory (
+  row_id INTEGER PRIMARY KEY,
+  "note" TEXT,
+  CONSTRAINT note_required CHECK(note IS NOT NULL)
+);`;
+
+    expect(() => removeDDLColumnAtIndex_ACU(ddl, 1)).toThrow('表级约束');
+  });
+
+  it('表级约束与普通列同一物理行时仍 fail closed', () => {
+    const ddl = `CREATE TABLE inventory (
+  row_id INTEGER PRIMARY KEY,
+  "note" TEXT,
+  keep TEXT, CONSTRAINT note_required CHECK(note IS NOT NULL)
+);`;
+
+    expect(() => removeDDLColumnAtIndex_ACU(ddl, 1)).toThrow('表级约束');
+  });
+
+  it('拒绝 row_id、内联约束和无法按行精确删除的 DDL', () => {
+    expect(() => removeDDLColumnAtIndex_ACU('CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);', 0)).toThrow('row_id');
+    expect(() => removeDDLColumnAtIndex_ACU(`CREATE TABLE inventory (
+  row_id INTEGER PRIMARY KEY,
+  name TEXT UNIQUE
+);`, 1)).toThrow('带有约束');
+    expect(() => removeDDLColumnAtIndex_ACU('CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT, obsolete TEXT);', 2)).toThrow('多行列定义或表级约束');
   });
 });

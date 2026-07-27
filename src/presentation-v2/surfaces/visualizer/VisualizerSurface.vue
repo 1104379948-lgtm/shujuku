@@ -546,6 +546,20 @@ const save = useVisualizerSave({
       confirmVariant: "primary",
     });
   },
+  confirmDestructiveSchemaChange(summary) {
+    const details = summary.sheets.map(sheet => {
+      const columns = sheet.droppedColumns
+        .map(column => `「${column.displayHeader}」`)
+        .join("、");
+      return `表「${sheet.tableName}」将删除 ${columns}（影响 ${sheet.affectedRowCount} 行历史数据）`;
+    }).join("；");
+    return openConfirmDialog({
+      title: "确认保存并永久删除列数据",
+      message: `${details}。这会把当前聊天中这些列的历史值从本次模板提交后的结构中移除，不能直接恢复；如需恢复只能依赖提交前备份或 checkpoint。确认仅适用于当前草稿快照，草稿变化后必须重新确认。`,
+      confirmLabel: "确认删除并保存",
+      confirmVariant: "danger",
+    });
+  },
 });
 
 const modes: Array<{ value: "data" | "config" | "assistant"; label: string }> =

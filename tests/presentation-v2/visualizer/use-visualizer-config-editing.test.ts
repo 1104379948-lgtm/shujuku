@@ -88,7 +88,7 @@ describe('useVisualizerConfigEditing', () => {
     expect(store.dirty).toBe(true);
   });
 
-  it('新增和删除列会同步所有数据行', async () => {
+  it('新增列会同步所有数据行', async () => {
     const store = await loadSheet();
     const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
     const config = useVisualizerConfigEditing();
@@ -96,10 +96,42 @@ describe('useVisualizerConfigEditing', () => {
     config.addColumn('品质');
     expect(store.currentSheet.content[0]).toEqual([null, '旧物品', '数量', '品质']);
     expect(store.currentSheet.content[1]).toEqual([null, '苹果', '2', null]);
+  });
+
+  it('删除 SQLite 业务列时原子同步 DDL、表头和所有数据行', async () => {
+    const store = await loadSheet();
+    const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
+    const config = useVisualizerConfigEditing();
 
     config.deleteColumn(1);
-    expect(store.currentSheet.content[0]).toEqual([null, '旧物品', '品质']);
-    expect(store.currentSheet.content[1]).toEqual([null, '苹果', null]);
+    expect(store.currentSheet.content[0]).toEqual([null, '旧物品']);
+    expect(store.currentSheet.content[1]).toEqual([null, '苹果']);
+    expect(store.currentSheet.sourceData.ddl).toContain('item_name TEXT -- 旧物品');
+    expect(store.currentSheet.sourceData.ddl).not.toContain('quantity INTEGER');
+  });
+
+  it('DDL 已不一致或目标列受约束时拒绝删除且草稿不变', async () => {
+    const store = await loadSheet();
+    const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
+    const config = useVisualizerConfigEditing();
+
+    store.currentSheet.content[0].push('草稿列');
+    const beforeMismatch = JSON.stringify(store.tempData);
+    config.deleteColumn(1);
+
+    expect(JSON.stringify(store.tempData)).toBe(beforeMismatch);
+    expect(store.currentSheet.content[0]).toEqual([null, '旧物品', '数量', '草稿列']);
+    store.currentSheet.content = [[null, '旧物品', '数量'], [null, '苹果', '2']];
+    store.currentSheet.sourceData.ddl = `CREATE TABLE inventory (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  item_name TEXT, -- 旧物品
+  quantity INTEGER UNIQUE -- 数量
+);`;
+    const beforeUnique = JSON.stringify(store.tempData);
+
+    config.deleteColumn(1);
+
+    expect(JSON.stringify(store.tempData)).toBe(beforeUnique);
   });
 
   it('全局注入配置作为模板级草稿写入 mate.globalInjectionConfig', async () => {

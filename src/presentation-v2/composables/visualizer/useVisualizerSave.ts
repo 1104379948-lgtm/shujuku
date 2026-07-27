@@ -70,6 +70,16 @@ import { useVisualizerStore, type VisualizerLockDraft, type VisualizerSaveTarget
 export interface VisualizerSaveInteractions {
   requestGlobalPresetName?: (defaultName: string) => string | null | Promise<string | null>;
   confirmOverwriteGlobalPreset?: (presetName: string) => boolean | Promise<boolean>;
+  confirmDestructiveSchemaChange?: (summary: VisualizerDestructiveSchemaChangeSummary) => boolean | Promise<boolean>;
+}
+
+export interface VisualizerDestructiveSchemaChangeSummary {
+  sheets: Array<{
+    sheetKey: string;
+    tableName: string;
+    droppedColumns: Array<{ physicalName: string; displayHeader: string; index: number }>;
+    affectedRowCount: number;
+  }>;
 }
 
 type GlobalTemplateSaveResult =
@@ -516,13 +526,54 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
           pendingLockChanges: cloneData(visualizer.pendingLockChanges),
           lockDirty: visualizer.lockDirty,
         };
-        const preflight = await preflightSchemaMigrations_ACU({
+        let preflight = await preflightSchemaMigrations_ACU({
           baselineData: visualizer.templateBaseData as any,
           candidateData: orderedData as any,
+          destructiveChangeConfirmed: false,
         });
         if (preflight.blockers.length > 0) {
-          toastStore.error(`模板结构未通过 schema migration preflight：${preflight.blockers.join('；')}`, { muteable: false });
-          return false;
+          const confirmationIssues = preflight.issues || [];
+          const onlyDestructiveDropConfirmation = confirmationIssues.length > 0
+            && confirmationIssues.length === preflight.blockers.length
+            && confirmationIssues.every(issue => issue.code === 'DESTRUCTIVE_COLUMN_DROP_CONFIRMATION_REQUIRED');
+          if (!onlyDestructiveDropConfirmation) {
+            toastStore.error(`模板结构未通过 schema migration preflight：${preflight.blockers.join('；')}`, { muteable: false });
+            return false;
+          }
+          const confirmed = interactions.confirmDestructiveSchemaChange
+            ? await interactions.confirmDestructiveSchemaChange({
+              sheets: confirmationIssues.map(issue => ({
+                sheetKey: issue.sheetKey,
+                tableName: issue.tableName,
+                droppedColumns: issue.droppedColumns.map(column => ({ ...column })),
+                affectedRowCount: issue.affectedRowCount,
+              })),
+            })
+            : false;
+          if (!confirmed) return false;
+          const currentConfirmationSnapshot = {
+            tempData: cloneData(visualizer.tempData),
+            sheetOrder: [...visualizer.sheetOrder],
+            templateBaseData: cloneData(visualizer.templateBaseData),
+            templateBaseSheetOrder: [...visualizer.templateBaseSheetOrder],
+            deletedSheetKeys: [...visualizer.deletedSheetKeys],
+            tableLockDrafts: cloneData(visualizer.tableLockDrafts),
+            pendingLockChanges: cloneData(visualizer.pendingLockChanges),
+            lockDirty: visualizer.lockDirty,
+          };
+          if (!sameTemplateValue_ACU(preflightSnapshot, currentConfirmationSnapshot)) {
+            toastStore.warning('模板结构在危险确认期间已变化；请重新保存。', { muteable: false });
+            return false;
+          }
+          preflight = await preflightSchemaMigrations_ACU({
+            baselineData: visualizer.templateBaseData as any,
+            candidateData: orderedData as any,
+            destructiveChangeConfirmed: true,
+          });
+          if (preflight.blockers.length > 0) {
+            toastStore.error(`模板结构未通过已确认 schema migration preflight：${preflight.blockers.join('；')}`, { muteable: false });
+            return false;
+          }
         }
         const operationKeys = preflight.operations.map(operation => String(operation?.sheetKey || ''));
         const preflightChangedKeys = [...preflight.changedSheetKeys].sort();
@@ -694,7 +745,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       saveLockDrafts(visualizer.tableLockDrafts);
       if (isSqliteMode()) await reloadStorageProvider();
       await refreshMergedDataAndNotify_ACU();
-      visualizer.markSaved('template-global');
+      visualizer.recordGlobalTemplateSaved();
       if (globalTemplateResult.status === 'saved') {
         toastStore.success(`模板/结构已保存到全局预设：${globalTemplateResult.presetName}。`, { muteable: false });
       } else {
