@@ -1,4 +1,5 @@
 import type { ChatSummaryVectorIndexChunk_ACU, ChatSummaryVectorIndexManifest_ACU } from '../../service/vector/summary-vector-index-types';
+import { normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 
 const DB_NAME_ACU = 'TavernDB_ACU_VectorHotCache';
 const DB_VERSION_ACU = 3;
@@ -155,7 +156,7 @@ function isSingleFileSnapshotManifest_ACU(manifest: ChatSummaryVectorIndexManife
 function isRecordCompatible_ACU(record: VectorIndexHotCacheChunkRecord_ACU | null | undefined, manifest: ChatSummaryVectorIndexManifest_ACU, ref: ReturnType<typeof getActiveChunkRefs_ACU>[number]): boolean {
     if (!record?.chunk) return false;
     if (record.chatKey !== normalizeKeyPart_ACU(manifest.chatKey)) return false;
-    if (record.isolationKey !== normalizeKeyPart_ACU(manifest.isolationKey)) return false;
+    if (record.isolationKey !== normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey)) return false;
     if (record.sourceTableKey !== normalizeKeyPart_ACU(manifest.sourceTableKey)) return false;
     if (record.indexId !== normalizeKeyPart_ACU(manifest.indexId)) return false;
     if (record.checkpointId !== getManifestCheckpointId_ACU(manifest)) return false;
@@ -194,7 +195,7 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
                     const record: VectorIndexHotCacheChunkRecord_ACU = {
                         key: buildRecordKey_ACU(manifest.indexId, chunkId, chunkKey),
                         chatKey: normalizeKeyPart_ACU(manifest.chatKey),
-                        isolationKey: normalizeKeyPart_ACU(manifest.isolationKey),
+                        isolationKey: normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey),
                         sourceTableKey: normalizeKeyPart_ACU(manifest.sourceTableKey),
                         indexId: normalizeKeyPart_ACU(manifest.indexId),
                         checkpointId: getManifestCheckpointId_ACU(manifest),
@@ -241,7 +242,7 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
                 const record: VectorIndexHotCacheChunkRecord_ACU = {
                     key: buildRecordKey_ACU(manifest.indexId, ref.chunkId, chunkKey),
                     chatKey: normalizeKeyPart_ACU(manifest.chatKey),
-                    isolationKey: normalizeKeyPart_ACU(manifest.isolationKey),
+                    isolationKey: normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey),
                     sourceTableKey: normalizeKeyPart_ACU(manifest.sourceTableKey),
                     indexId: normalizeKeyPart_ACU(manifest.indexId),
                     checkpointId: getManifestCheckpointId_ACU(manifest),
@@ -283,7 +284,7 @@ export async function getSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
             const targetIndexId = normalizeKeyPart_ACU(manifest.indexId);
             const targetCheckpointId = getManifestCheckpointId_ACU(manifest);
             const targetChatKey = normalizeKeyPart_ACU(manifest.chatKey);
-            const targetIsolationKey = normalizeKeyPart_ACU(manifest.isolationKey);
+            const targetIsolationKey = normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey);
             const targetSourceTableKey = normalizeKeyPart_ACU(manifest.sourceTableKey);
             const db = await openDb_ACU();
             const records = await new Promise<Array<VectorIndexHotCacheChunkRecord_ACU>>((resolve, reject) => {
@@ -499,6 +500,8 @@ function cloneFlushTask_ACU(task: SummaryVectorIndexFlushTaskRecord_ACU): Summar
     return {
         scopeKey: normalizeKeyPart_ACU(task.scopeKey),
         chatKey: normalizeKeyPart_ACU(task.chatKey),
+        // 读取旧 task 时必须保留原始空槽，以便 flush queue 完成一次性迁移；
+        // 所有新写入仍在 upsert/invalidate 边界 canonicalize 为 default。
         isolationKey: normalizeKeyPart_ACU(task.isolationKey),
         sourceTableKey: normalizeKeyPart_ACU(task.sourceTableKey),
         ...(Number.isFinite(Number(task.targetMessageIndex)) ? { targetMessageIndex: Number(task.targetMessageIndex) } : {}),
@@ -519,7 +522,7 @@ export async function upsertSummaryVectorFlushTask_ACU(input: SummaryVectorIndex
     try {
         const scopeKey = normalizeKeyPart_ACU(input.scopeKey);
         const chatKey = normalizeKeyPart_ACU(input.chatKey);
-        const isolationKey = normalizeKeyPart_ACU(input.isolationKey);
+        const isolationKey = normalizeSummaryVectorIsolationKey_ACU(input.isolationKey);
         const sourceTableKey = normalizeKeyPart_ACU(input.sourceTableKey);
         if (!scopeKey || !chatKey) return null;
         const now = Date.now();
@@ -581,7 +584,7 @@ export async function invalidateSummaryVectorFlushTaskStrict_ACU(input: {
 }): Promise<SummaryVectorIndexFlushTaskRecord_ACU> {
     const scopeKey = normalizeKeyPart_ACU(input.scopeKey);
     const chatKey = normalizeKeyPart_ACU(input.chatKey);
-    const isolationKey = normalizeKeyPart_ACU(input.isolationKey);
+    const isolationKey = normalizeSummaryVectorIsolationKey_ACU(input.isolationKey);
     const sourceTableKey = normalizeKeyPart_ACU(input.sourceTableKey);
     if (!scopeKey || !chatKey || !sourceTableKey) {
         throw new Error('持久化交火向量 flush 失效墓碑失败：scope 不完整');
@@ -632,7 +635,7 @@ export async function invalidateSummaryVectorFlushTaskStrict_ACU(input: {
 
 export async function assertSummaryVectorFlushGenerationCurrent_ACU(scopeKey: string, expectedGeneration: number): Promise<void> {
     const task = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
-    if (!task || task.status === 'invalidated' || task.generation !== expectedGeneration) {
+    if (!task || task.status !== 'flushing' || task.generation !== expectedGeneration) {
         throw new SummaryVectorFlushGenerationInvalidatedError_ACU(scopeKey, expectedGeneration, task?.generation);
     }
 }
@@ -642,6 +645,144 @@ export class SummaryVectorFlushGenerationInvalidatedError_ACU extends Error {
         super(`交火向量 flush 代次已失效：scope=${scopeKey}, expected=${expectedGeneration}, actual=${actualGeneration ?? 'missing'}`);
         this.name = 'SummaryVectorFlushGenerationInvalidatedError_ACU';
     }
+}
+
+export type SummaryVectorFlushTaskLegacyReconciliationOutcome_ACU =
+    | 'migrated'
+    | 'canonical_retained'
+    | 'legacy_retained'
+    | 'quarantined'
+    | 'not_found';
+
+export interface SummaryVectorFlushTaskLegacyReconciliationResult_ACU {
+    outcome: SummaryVectorFlushTaskLegacyReconciliationOutcome_ACU;
+    task: SummaryVectorIndexFlushTaskRecord_ACU | null;
+}
+
+function getFlushTaskReconciliationPriority_ACU(task: SummaryVectorIndexFlushTaskRecord_ACU): number {
+    // 同 generation 下，未完成状态优先，避免把仍待归档的 dirty state 静默输给 ready 记录。
+    if (task.status === 'flushing') return 6;
+    if (task.status === 'queued') return 5;
+    if (task.status === 'dirty') return 4;
+    if (task.status === 'failed_retryable') return 3;
+    if (task.status === 'invalidated') return 2;
+    if (task.status === 'ready') return 1;
+    return 0;
+}
+
+/**
+ * 将历史空 isolation task 一次性归并到 canonical scope。整个裁决在同一 IndexedDB
+ * 事务内完成，避免“先复制再删除”在崩溃窗口中丢失仍待持久化的 dirty state。
+ */
+export async function reconcileLegacySummaryVectorFlushTaskStrict_ACU(input: {
+    legacyScopeKey: string;
+    canonicalScopeKey: string;
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+}): Promise<SummaryVectorFlushTaskLegacyReconciliationResult_ACU> {
+    const legacyScopeKey = normalizeKeyPart_ACU(input.legacyScopeKey);
+    const canonicalScopeKey = normalizeKeyPart_ACU(input.canonicalScopeKey);
+    const chatKey = normalizeKeyPart_ACU(input.chatKey);
+    const isolationKey = normalizeSummaryVectorIsolationKey_ACU(input.isolationKey);
+    const sourceTableKey = normalizeKeyPart_ACU(input.sourceTableKey);
+    if (!legacyScopeKey || !canonicalScopeKey || !chatKey || !sourceTableKey) {
+        throw new Error('迁移旧版交火向量 flush task 失败：scope 不完整');
+    }
+    if (legacyScopeKey === canonicalScopeKey) {
+        const db = await openDb_ACU();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
+            const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+            const request = store.get(canonicalScopeKey) as IDBRequest<SummaryVectorIndexFlushTaskRecord_ACU | undefined>;
+            let result: SummaryVectorFlushTaskLegacyReconciliationResult_ACU = { outcome: 'not_found', task: null };
+            request.onsuccess = () => {
+                const existing = request.result ? cloneFlushTask_ACU(request.result) : null;
+                if (!existing) return;
+                const migrated = { ...existing, scopeKey: canonicalScopeKey, chatKey, isolationKey, sourceTableKey };
+                store.put(migrated);
+                result = {
+                    outcome: String(existing.isolationKey || '').trim() ? 'canonical_retained' : 'migrated',
+                    task: migrated,
+                };
+            };
+            request.onerror = () => reject(request.error || new Error('读取同 key 旧版交火向量 flush task 失败'));
+            tx.oncomplete = () => { db.close(); resolve(result); };
+            tx.onerror = () => { db.close(); reject(tx.error || new Error('迁移同 key 旧版交火向量 flush task 事务失败')); };
+            tx.onabort = () => { db.close(); reject(tx.error || new Error('迁移同 key 旧版交火向量 flush task 事务已中止')); };
+        });
+    }
+
+    const db = await openDb_ACU();
+    return await new Promise((resolve, reject) => {
+        const tx = db.transaction(FLUSH_TASK_STORE_NAME_ACU, 'readwrite');
+        const store = tx.objectStore(FLUSH_TASK_STORE_NAME_ACU);
+        const legacyRequest = store.get(legacyScopeKey) as IDBRequest<SummaryVectorIndexFlushTaskRecord_ACU | undefined>;
+        const canonicalRequest = store.get(canonicalScopeKey) as IDBRequest<SummaryVectorIndexFlushTaskRecord_ACU | undefined>;
+        let legacy: SummaryVectorIndexFlushTaskRecord_ACU | null = null;
+        let canonical: SummaryVectorIndexFlushTaskRecord_ACU | null = null;
+        let result: SummaryVectorFlushTaskLegacyReconciliationResult_ACU | null = null;
+        let processed = false;
+        let legacyLoaded = false;
+        let canonicalLoaded = false;
+        const process = () => {
+            if (processed || !legacyLoaded || !canonicalLoaded) return;
+            processed = true;
+            legacy = legacyRequest.result ? cloneFlushTask_ACU(legacyRequest.result) : null;
+            canonical = canonicalRequest.result ? cloneFlushTask_ACU(canonicalRequest.result) : null;
+            if (!legacy) {
+                result = { outcome: canonical ? 'canonical_retained' : 'not_found', task: canonical };
+                return;
+            }
+            if (!canonical) {
+                const migrated = { ...legacy, scopeKey: canonicalScopeKey, chatKey, isolationKey, sourceTableKey };
+                store.put(migrated);
+                store.delete(legacyScopeKey);
+                result = { outcome: 'migrated', task: migrated };
+                return;
+            }
+            if (legacy.status === 'flushing' && canonical.status === 'flushing') {
+                const error = 'flush_legacy_scope_conflict_quarantined';
+                const quarantinedLegacy = { ...legacy, status: 'failed_terminal' as const, lastError: error, updatedAt: Date.now() };
+                const quarantinedCanonical = { ...canonical, status: 'failed_terminal' as const, lastError: error, updatedAt: Date.now() };
+                store.put(quarantinedLegacy);
+                store.put(quarantinedCanonical);
+                result = { outcome: 'quarantined', task: quarantinedCanonical };
+                return;
+            }
+            const legacyWins = legacy.generation > canonical.generation
+                || (legacy.generation === canonical.generation && (
+                    getFlushTaskReconciliationPriority_ACU(legacy) > getFlushTaskReconciliationPriority_ACU(canonical)
+                    || (getFlushTaskReconciliationPriority_ACU(legacy) === getFlushTaskReconciliationPriority_ACU(canonical)
+                        && legacy.updatedAt > canonical.updatedAt)
+                ));
+            if (legacyWins) {
+                const migrated = { ...legacy, scopeKey: canonicalScopeKey, chatKey, isolationKey, sourceTableKey };
+                store.put(migrated);
+                store.delete(legacyScopeKey);
+                result = { outcome: 'legacy_retained', task: migrated };
+            } else {
+                store.delete(legacyScopeKey);
+                result = { outcome: 'canonical_retained', task: canonical };
+            }
+        };
+        legacyRequest.onsuccess = () => {
+            legacyLoaded = true;
+            process();
+        };
+        canonicalRequest.onsuccess = () => {
+            canonicalLoaded = true;
+            process();
+        };
+        legacyRequest.onerror = () => reject(legacyRequest.error || new Error('读取旧版交火向量 flush task 失败'));
+        canonicalRequest.onerror = () => reject(canonicalRequest.error || new Error('读取 canonical 交火向量 flush task 失败'));
+        tx.oncomplete = () => {
+            db.close();
+            resolve(result || { outcome: 'not_found', task: null });
+        };
+        tx.onerror = () => { db.close(); reject(tx.error || new Error('迁移旧版交火向量 flush task 事务失败')); };
+        tx.onabort = () => { db.close(); reject(tx.error || new Error('迁移旧版交火向量 flush task 事务已中止')); };
+    });
 }
 
 export async function getSummaryVectorFlushTaskStrict_ACU(scopeKey: string): Promise<SummaryVectorIndexFlushTaskRecord_ACU | null> {
@@ -681,7 +822,7 @@ export async function getSummaryVectorFlushTask_ACU(scopeKey: string): Promise<S
 export async function listSummaryVectorFlushTasks_ACU(scope?: VectorIndexHotCacheScope_ACU): Promise<SummaryVectorIndexFlushTaskRecord_ACU[]> {
     try {
         const chatKey = normalizeKeyPart_ACU(scope?.chatKey);
-        const isolationKey = normalizeKeyPart_ACU(scope?.isolationKey);
+        const isolationKey = scope?.isolationKey == null ? '' : normalizeSummaryVectorIsolationKey_ACU(scope.isolationKey);
         const sourceTableKey = normalizeKeyPart_ACU(scope?.sourceTableKey);
         const db = await openDb_ACU();
         return await new Promise((resolve, reject) => {
@@ -693,8 +834,11 @@ export async function listSummaryVectorFlushTasks_ACU(scope?: VectorIndexHotCach
                 const cursor = request.result;
                 if (cursor) {
                     const record = cloneFlushTask_ACU(cursor.value as SummaryVectorIndexFlushTaskRecord_ACU);
+                    const recordIsolationKey = normalizeSummaryVectorIsolationKey_ACU(record.isolationKey);
                     const matches = (!chatKey || record.chatKey === chatKey)
-                        && (!isolationKey || record.isolationKey === isolationKey)
+                        // 旧的空 isolation task 属于 canonical default scope，必须被列出后迁移，
+                        // 不能因过滤条件而永久藏在 IndexedDB 中。
+                        && (!isolationKey || recordIsolationKey === isolationKey)
                         && (!sourceTableKey || record.sourceTableKey === sourceTableKey);
                     if (matches) records.push(record);
                     cursor.continue();

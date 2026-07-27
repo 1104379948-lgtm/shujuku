@@ -4,7 +4,13 @@ import { clearSummaryVectorHotCache_ACU, deleteSummaryVectorHotCacheByIndex_ACU 
 import { getLatestSummaryVectorIndexSnapshotState_ACU } from './summary-vector-index-state-service';
 import { loadSummaryVectorIndexChunksFromManifest_ACU } from './summary-vector-index-storage-service';
 import { clearSummaryVectorIndexLayerFromChat_ACU } from './summary-vector-index-chat-service';
-import { clearSummaryVectorIndexFlushQueueForCurrentScope_ACU } from './summary-vector-index-flush-queue';
+import {
+    clearSummaryVectorIndexFlushQueueForCurrentScopeUnlocked_ACU,
+    resolveCurrentSummaryVectorFlushScope_ACU,
+} from './summary-vector-index-flush-queue';
+import {
+    runSummaryVectorIndexArchiveScopeMutationExclusive_ACU,
+} from './summary-vector-index-archive-service';
 
 export interface SummaryVectorIndexCachePreloadResult_ACU {
     success: boolean;
@@ -55,43 +61,50 @@ export async function clearLatestSummaryVectorIndexStateForMissingExternalFiles_
     indexId: string;
     sourceTableKey: string;
 }): Promise<ClearMissingSummaryVectorIndexResult_ACU> {
-    // 先持久化失效墓碑，再删除聊天 pointer。两者无法跨存储原子提交时，
-    // 这个顺序保证任何失败都不会留下“pointer 已删但旧 flush 可在重启后复活”的状态。
-    const flushTaskCountCleared = await clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({
-        isolationKey: params.isolationKey,
-        sourceTableKey: params.sourceTableKey,
-    });
-    const chatStateCleared = await clearSummaryVectorIndexLayerFromChat_ACU({
-        messageIndex: params.messageIndex,
-        isolationKey: params.isolationKey,
-        indexId: params.indexId,
-    });
-    const cacheResults = await Promise.allSettled([
-        deleteVectorIndexCacheByIndex_ACU(params.indexId),
-        deleteSummaryVectorHotCacheByIndex_ACU(params.indexId),
-    ]);
-    cacheResults.forEach((result, index) => {
-        if (result.status === 'rejected') {
-            logWarn_ACU(`[交火向量索引] 失效指针已删除，但${index === 0 ? '临时' : '热'}缓存清理失败，将继续重建:`, result.reason);
-        }
-    });
-    return {
-        chatStateCleared,
-        cacheCleared: cacheResults.every((result) => result.status === 'fulfilled'),
-        flushTaskCountCleared,
-    };
+    return clearLatestSummaryVectorIndexStateUnderScopeLock_ACU(params, '外置文件缺失');
 }
 
 export async function clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU(params: {
     messageIndex: number;
     isolationKey: string;
     indexId: string;
-}): Promise<boolean> {
-    void params.messageIndex;
-    void params.isolationKey;
-    await deleteVectorIndexCacheByIndex_ACU(params.indexId);
-    await deleteSummaryVectorHotCacheByIndex_ACU(params.indexId);
-    return false;
+    sourceTableKey: string;
+}): Promise<ClearMissingSummaryVectorIndexResult_ACU> {
+    return clearLatestSummaryVectorIndexStateUnderScopeLock_ACU(params, '身份无效');
+}
+
+async function clearLatestSummaryVectorIndexStateUnderScopeLock_ACU(
+    params: { messageIndex: number; isolationKey: string; indexId: string; sourceTableKey: string },
+    reason: string,
+): Promise<ClearMissingSummaryVectorIndexResult_ACU> {
+    const flushScope = resolveCurrentSummaryVectorFlushScope_ACU({
+        isolationKey: params.isolationKey,
+        sourceTableKey: params.sourceTableKey,
+    });
+    return runSummaryVectorIndexArchiveScopeMutationExclusive_ACU(flushScope.scopeKey, async () => {
+        // 先持久化失效墓碑，再删除聊天 pointer。该临界区与归档 publish 共用 scope lock，
+        // 因此 tombstone 不会在 generation 校验和 durable save 之间插入。
+        const flushTaskCountCleared = await clearSummaryVectorIndexFlushQueueForCurrentScopeUnlocked_ACU(flushScope);
+        const chatStateCleared = await clearSummaryVectorIndexLayerFromChat_ACU({
+            messageIndex: params.messageIndex,
+            isolationKey: params.isolationKey,
+            indexId: params.indexId,
+        });
+        const cacheResults = await Promise.allSettled([
+            deleteVectorIndexCacheByIndex_ACU(params.indexId),
+            deleteSummaryVectorHotCacheByIndex_ACU(params.indexId),
+        ]);
+        cacheResults.forEach((result, index) => {
+            if (result.status === 'rejected') {
+                logWarn_ACU(`[交火向量索引] ${reason} pointer 已删除，但${index === 0 ? '临时' : '热'}缓存清理失败，将继续重建:`, result.reason);
+            }
+        });
+        return {
+            chatStateCleared,
+            cacheCleared: cacheResults.every((result) => result.status === 'fulfilled'),
+            flushTaskCountCleared,
+        };
+    });
 }
 
 export function isInvalidExternalVectorFileError_ACU(message: string): boolean {
@@ -181,23 +194,37 @@ export async function preloadSummaryVectorIndexCacheForCurrentChat_ACU(): Promis
             };
         }
         if (isInvalidExternalVectorFileError_ACU(message)) {
-            const chatStateCleared = latestLayer
-                ? await clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU({
-                    messageIndex: latestLayer.messageIndex,
-                    isolationKey: latestLayer.isolationKey,
-                    indexId: manifest.indexId,
-                })
-                : false;
-            logWarn_ACU('[交火向量索引] 当前聊天外置向量文件校验失败，已清空对应缓存并保留聊天索引状态:', message);
+            let clearResult: ClearMissingSummaryVectorIndexResult_ACU = {
+                chatStateCleared: false,
+                cacheCleared: false,
+                flushTaskCountCleared: 0,
+            };
+            try {
+                if (latestLayer) {
+                    clearResult = await clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU({
+                        messageIndex: latestLayer.messageIndex,
+                        isolationKey: latestLayer.isolationKey,
+                        indexId: manifest.indexId,
+                        sourceTableKey: manifest.sourceTableKey,
+                    });
+                }
+            } catch (clearError) {
+                return { success: false, skipped: true, reason: 'external_files_invalid_state_clear_save_failed', chunkCount: 0, indexId: manifest.indexId, error: normalizeErrorMessage_ACU(clearError), cacheCleared: false, chatStateCleared: false };
+            }
+            logWarn_ACU(clearResult.chatStateCleared
+                ? '[交火向量索引] 当前聊天外置向量文件身份校验失败，已删除失效指针；交由 UI 从源表重建:'
+                : '[交火向量索引] 当前聊天外置向量文件身份校验失败，但失效指针未能安全删除；拒绝盲目重建:', message);
             return {
-                success: true,
+                success: clearResult.chatStateCleared,
                 skipped: true,
-                reason: 'external_files_invalid_cache_cleared_state_retained',
+                reason: clearResult.chatStateCleared
+                    ? 'external_files_identity_invalid_rebuild_required'
+                    : 'external_files_identity_invalid_state_clear_failed',
                 chunkCount: 0,
                 indexId: manifest.indexId,
                 error: message,
-                cacheCleared: true,
-                chatStateCleared,
+                cacheCleared: clearResult.cacheCleared,
+                chatStateCleared: clearResult.chatStateCleared,
             };
         }
         logWarn_ACU('[交火向量索引] 当前聊天向量缓存预热失败:', message);

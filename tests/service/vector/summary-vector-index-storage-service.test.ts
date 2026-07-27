@@ -14,11 +14,12 @@ const h = vi.hoisted(() => ({
   logWarn: vi.fn(),
   config: { value: { summaryIndexRollingDeltaEnabled: false } as any },
   snapshot: { value: null as any },
+  isolationKey: 'iso-a',
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   currentChatFileIdentifier_ACU: 'chat-a',
-  getCurrentIsolationKey_ACU: () => 'iso-a',
+  getCurrentIsolationKey_ACU: () => h.isolationKey,
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
   getAggregatedSummaryVectorIndexSnapshot_ACU: () => h.snapshot.value,
@@ -239,6 +240,22 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
       .rejects.toThrow(/field=isolationKey expected=default actual=/);
+    expect(h.putHot).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['blob 顶层前后空白', ' default ', 'default'],
+    ['blob 内嵌 manifest 前后空白', 'default', ' default '],
+  ])('V2 拒绝 canonical 等价但原始值非 canonical 的 isolationKey：%s', async (_caseName, blobIsolationKey, embeddedIsolationKey) => {
+    const manifest = manifest_ACU();
+    manifest.isolationKey = 'default';
+    const blob = blob_ACU(manifest);
+    blob.isolationKey = blobIsolationKey;
+    blob.manifest.isolationKey = embeddedIsolationKey;
+    h.read.mockResolvedValue({ ok: true, data: blob });
+
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
+      .rejects.toThrow('交火向量单文件快照身份不匹配');
     expect(h.putHot).not.toHaveBeenCalled();
   });
 
@@ -583,6 +600,7 @@ describe('summary-vector-index-storage-service V2 单文件写入', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    h.isolationKey = 'iso-a';
     h.config.value = { summaryIndexRollingDeltaEnabled: false, summaryIndexV2WriteEnabled: true };
     h.getHot.mockResolvedValue(null);
     h.register.mockResolvedValue(undefined);
@@ -615,6 +633,28 @@ describe('summary-vector-index-storage-service V2 单文件写入', () => {
     expect(first.manifest.files).toHaveLength(1);
     expect(h.register).toHaveBeenCalledTimes(2);
     random.mockRestore();
+  });
+
+  it('运行时默认隔离域为空时，V2 path、manifest、blob 与内嵌 manifest 均写入 canonical default', async () => {
+    h.isolationKey = '';
+    const blobs = new Map<string, any>();
+    h.upload.mockImplementation(async (params: any) => {
+      blobs.set(params.path, params.data);
+      return { ok: true, ref: { role: params.role, path: params.path, byteSize: 1, checksum: `sha:${JSON.stringify(params.data).length}`, createdAt: '', updatedAt: '', status: 'ready' } };
+    });
+    h.read.mockImplementation(async (path: string) => ({ ok: true, data: blobs.get(path) }));
+
+    const input = options();
+    delete (input as any).isolationKey;
+    const persisted = await persistSummaryVectorIndexSnapshot_ACU(input as any);
+    const blob = blobs.get(persisted.manifest.manifestFile);
+
+    expect(persisted.manifest.isolationKey).toBe('default');
+    expect(blob.isolationKey).toBe('default');
+    expect(blob.manifest.isolationKey).toBe('default');
+    expect(persisted.manifest.storageIdentity?.scopeFingerprint).toBe('scope:chat-a|default|summary');
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(persisted.manifest, { preferExternalFiles: true }))
+      .resolves.toMatchObject([{ chunkId: 'chunk-a' }]);
   });
 
   it('滚动增量开关开启时仍走不可变 V2 单文件发布路径，不写 legacy rolling 对象', async () => {

@@ -3,6 +3,7 @@ import { saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
 import { readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { readVectorIndexJsonFile_ACU } from '../../data/storage/vector-index-st-files-storage';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import { getChatArray_ACU } from '../chat/chat-service';
 import { callAIWithPreset_ACU } from '../ai/api-call';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
@@ -397,6 +398,26 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
         });
         return null;
     }
+    // V2 object identity is immutable. A raw empty key whose canonical scope is
+    // default is a known malformed write, not a legacy record that may be repointed.
+    const blobScope = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: blob.chatKey,
+        isolationKey: blob.isolationKey,
+        sourceTableKey: blob.sourceTableKey,
+    });
+    const embeddedScope = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: blobManifest.chatKey,
+        isolationKey: blobManifest.isolationKey,
+        sourceTableKey: blobManifest.sourceTableKey,
+    });
+    if (blob.storageIdentity && (blob.isolationKey !== blobScope.isolationKey || blobManifest.isolationKey !== embeddedScope.isolationKey)) {
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'noncanonical_scope_rejected', {
+            manifest: blobManifest,
+            path: snapshotPath,
+            error: 'V2 单文件快照包含非 canonical isolationKey；拒绝将非 canonical 对象写回聊天指针。',
+        });
+        return null;
+    }
     try {
         // realign 是写 pointer 的自愈入口，不能维护一套缩水校验；必须复用正式 reader 契约。
         validateSingleFileSnapshotIdentity_ACU(blobManifest, blob, snapshotPath);
@@ -409,10 +430,17 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
         logWarn_ACU('[交火模式纪要索引] single_file_snapshot 指针对齐身份校验失败，拒绝 repoint:', error);
         return null;
     }
-    const scopeMatches = normalizeText_ACU(blobManifest.sourceTableKey) === normalizeText_ACU(manifest.sourceTableKey)
-        && normalizeText_ACU(blobManifest.chatKey) === normalizeText_ACU(manifest.chatKey)
-        && normalizeText_ACU(blobManifest.isolationKey) === normalizeText_ACU(manifest.isolationKey)
-        && (!params.latestLayer || normalizeText_ACU(blobManifest.isolationKey) === normalizeText_ACU(params.latestLayer.isolationKey))
+    const isV2 = !!blob.storageIdentity;
+    const scopeMatches = (isV2
+        ? blobManifest.sourceTableKey === manifest.sourceTableKey
+            && blobManifest.chatKey === manifest.chatKey
+            && blobManifest.isolationKey === manifest.isolationKey
+        : normalizeText_ACU(blobManifest.sourceTableKey) === normalizeText_ACU(manifest.sourceTableKey)
+            && normalizeText_ACU(blobManifest.chatKey) === normalizeText_ACU(manifest.chatKey)
+            && normalizeSummaryVectorIsolationKey_ACU(blobManifest.isolationKey) === normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey))
+        && (!params.latestLayer || (isV2
+            ? blobManifest.isolationKey === normalizeSummaryVectorIsolationKey_ACU(params.latestLayer.isolationKey)
+            : normalizeSummaryVectorIsolationKey_ACU(blobManifest.isolationKey) === normalizeSummaryVectorIsolationKey_ACU(params.latestLayer.isolationKey)))
         && (!params.liveRows || normalizeText_ACU(blob.sourceTableKey) === params.liveRows.summaryKey);
     if (!scopeMatches) {
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'realign', 'scope_mismatch', { manifest: blobManifest, path: snapshotPath });
@@ -551,36 +579,51 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
                 return { success: false, skipped: true, reason: 'external_vector_files_missing_rebuild_required' };
             }
             if (isInvalidExternalVectorFileError_ACU(message)) {
+                let invalidManifest = state.manifest;
                 const alignedState = await tryRealignSummaryVectorIndexPointerFromDisk_ACU({ state, latestLayer, liveRows });
+                let realignReloadFailed = false;
                 if (alignedState?.manifest) {
                     state = alignedState;
                     rows = Array.isArray(alignedState.rows) ? alignedState.rows : [];
+                    invalidManifest = alignedState.manifest;
                     try {
                         chunks = await loadSummaryVectorIndexChunksFromManifest_ACU(alignedState.manifest);
                     } catch (realignLoadError) {
                         const realignMessage = realignLoadError instanceof Error ? realignLoadError.message : String(realignLoadError || '未知错误');
-                        logWarn_ACU('[交火模式纪要索引] 指针对齐后重新加载外置向量仍失败，转入重建队列:', realignMessage);
-                        if (latestLayer && alignedState.manifest.indexId) {
-                            await clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU({
-                                messageIndex: latestLayer.messageIndex,
-                                isolationKey: latestLayer.isolationKey,
-                                indexId: alignedState.manifest.indexId,
-                            });
-                        }
-                        await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch', alignedState.manifest);
-                        return { success: false, skipped: true, reason: 'vector_index_realign_reload_failed' };
+                        logWarn_ACU('[交火模式纪要索引] 指针对齐后重新加载外置向量仍失败，删除失效指针并交由 UI 重建:', realignMessage);
+                        realignReloadFailed = true;
                     }
+                }
+                if (alignedState?.manifest && !realignReloadFailed) {
+                    // 对齐后的正式 reader 已通过，继续正常召回；不得再清除刚写回的 pointer。
                 } else {
-                    if (latestLayer && state.manifest.indexId) {
-                        await clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU({
+                try {
+                    let clearResult = null;
+                    if (latestLayer && invalidManifest?.indexId) {
+                        clearResult = await clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU({
                             messageIndex: latestLayer.messageIndex,
                             isolationKey: latestLayer.isolationKey,
-                            indexId: state.manifest.indexId,
+                            indexId: invalidManifest.indexId,
+                            sourceTableKey: invalidManifest.sourceTableKey,
                         });
                     }
-                    await enqueueSummaryVectorIndexRebuild_ACU(latestLayer, 'self_heal_identity_mismatch', state.manifest);
-                    logWarn_ACU('[交火模式纪要索引] 外置向量文件校验失败，指针对齐不可用，已清空缓存并入队重建:', message);
-                    return { success: false, skipped: true, reason: 'vector_index_corrupted_rebuild_queued' };
+                    if (!clearResult?.chatStateCleared) {
+                        logWarn_ACU('[交火模式纪要索引] 外置向量文件身份校验失败，但失效索引指针未能安全删除；拒绝盲目重建:', message);
+                        return { success: false, skipped: true, reason: 'external_vector_identity_invalid_state_clear_failed' };
+                    }
+                    logSummaryVectorIndexIdentityEvent_ACU('warn', 'rebuild', 'invalid_pointer_cleared', {
+                        manifest: invalidManifest,
+                        error: message,
+                    });
+                    return { success: false, skipped: true, reason: 'external_vector_identity_invalid_rebuild_required' };
+                } catch (clearError) {
+                    logSummaryVectorIndexIdentityEvent_ACU('warn', 'rebuild', 'invalid_pointer_clear_failed', {
+                        manifest: invalidManifest,
+                        error: clearError,
+                    });
+                    logWarn_ACU('[交火模式纪要索引] 外置向量文件身份校验失败，严格删除失效索引指针失败:', clearError);
+                    return { success: false, skipped: true, reason: 'external_vector_identity_invalid_state_clear_save_failed' };
+                }
                 }
             } else {
                 throw error;

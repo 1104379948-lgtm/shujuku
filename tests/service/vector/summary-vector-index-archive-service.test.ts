@@ -248,6 +248,23 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     expect(mockReadIsolatedTagData).toHaveBeenCalledWith(mockChat[0], 'runtime-isolation');
   });
 
+  it('默认 tag 槽为空时，持久化 identity 使用 default 但不迁移聊天容器槽位', async () => {
+    mockIsolationKeyRef.value = '';
+    mockChat[0].TavernDB_ACU_IsolatedData = {
+      '': { independentData: {}, modifiedKeys: [], updateGroupKeys: [] },
+    };
+
+    const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+
+    expect(result.success).toBe(true);
+    expect(mockPersistSummaryVectorIndexSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      isolationKey: 'default',
+      sourceTableKey: 'sheet_summary',
+    }));
+    expect(mockReadIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '');
+    expect(mockWriteIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '', expect.any(Object));
+  });
+
   it('拒绝未激活 isolation 的归档，不能将当前表数据写入其他 scope', async () => {
     const result = await archiveSummaryVectorIndexNow_ACU({
       targetMessageIndex: 0,
@@ -292,6 +309,24 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     expect(mockAbortSummaryVectorIndexSnapshotPublication).toHaveBeenCalledWith([
       expect.objectContaining({ path: 'v2-path-idx-1' }),
     ]);
+  });
+
+  it('flush generation 在同一 scope publish 临界区内只在 durable save 前校验，避免 save 后伪回滚 durable pointer', async () => {
+    const result = await archiveSummaryVectorIndexNow_ACU({
+      targetMessageIndex: 0,
+      force: true,
+      expectedFlushScopeKey: 'flush-scope',
+      expectedFlushGeneration: 7,
+    });
+
+    expect(result).toMatchObject({ success: true, skipped: false });
+    expect(mockAssertFlushGeneration).toHaveBeenCalledTimes(1);
+    expect(mockAssertFlushGeneration).toHaveBeenCalledWith('flush-scope', 7);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeSummaryVectorIndexSnapshotPublication).toHaveBeenCalledWith([
+      expect.objectContaining({ path: 'v2-path-idx-1' }),
+    ]);
+    expect(mockAbortSummaryVectorIndexSnapshotPublication).not.toHaveBeenCalled();
   });
 
   it('聊天保存失败时不 finalize，保持 pending-publish 保护', async () => {
@@ -375,6 +410,40 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     expect(mockAbortSummaryVectorIndexSnapshotPublication).not.toHaveBeenCalled();
     expect(mockDeleteSummaryVectorIndexExternal).not.toHaveBeenCalled();
     expect(mockChat[0].TavernDB_ACU_IsolatedData['runtime-isolation'].summaryVectorIndexManifest.indexId).toBe('idx-1');
+  });
+
+  it('legacy migration 保留默认空 tag 槽，同时将 V2 持久化 identity 写为 canonical default', async () => {
+    mockIsolationKeyRef.value = '';
+    const legacyManifest = {
+      indexId: 'legacy-index', chatKey: 'test-chat', isolationKey: '',
+      sourceTableKey: 'sheet_summary', sourceTableName: '纪要表', snapshotMessageId: 'legacy-message',
+      embeddingModel: 'test-model', dimension: 2, rowCount: 1, chunkCount: 1, skippedRowCount: 0,
+      snapshot: { revision: 1, activeRowKeys: ['legacy-row'], activeChunkIds: ['legacy-chunk'] },
+    };
+    mockChat[0].TavernDB_ACU_IsolatedData = {
+      '': {
+        independentData: {}, modifiedKeys: [], updateGroupKeys: [], summaryVectorIndexManifest: legacyManifest,
+        summaryVectorIndexState: {
+          version: 1, backend: 'st-files', status: 'ready', indexId: legacyManifest.indexId,
+          snapshotMessageId: legacyManifest.snapshotMessageId, sourceTableKey: legacyManifest.sourceTableKey,
+          sourceTableName: legacyManifest.sourceTableName, indexedAt: '2020-01-01T00:00:00.000Z',
+          rowCount: 1, chunkCount: 1, skippedRowCount: 0,
+          rows: [{ rowKey: 'legacy-row', rowId: '1', rowOrder: 0, summary: '旧纪要', indexCode: 'L-1', vectorSourceText: '旧纪要', chunkIds: ['legacy-chunk'] }],
+          chunks: [{ chunkId: 'legacy-chunk', rowKey: 'legacy-row', rowOrder: 0, sequence: 0, text: '旧纪要', vector: [1, 2] }],
+          manifest: legacyManifest,
+        },
+      },
+    };
+    persistedChunksByIndexId.set(legacyManifest.indexId, [{ chunkId: 'legacy-chunk', rowKey: 'legacy-row', rowOrder: 0, sequence: 0, text: '旧纪要', vector: [1, 2] }]);
+    mockIsLegacySummaryVectorIndexManifest.mockReturnValue(true);
+
+    await expect(migrateLegacySummaryVectorIndexToContentAddressed_ACU()).resolves.toMatchObject({ success: true });
+
+    expect(mockPersistSummaryVectorIndexSnapshot).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: 'default' }));
+    expect(mockReadIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '');
+    expect(mockWriteIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '', expect.any(Object));
+    expect(mockChat[0].TavernDB_ACU_IsolatedData[''].summaryVectorIndexManifest.indexId).toBe('idx-1');
+    expect(mockChat[0].TavernDB_ACU_IsolatedData.default).toBeUndefined();
   });
 
   it('legacy migration 在没有可迁移 rows 或 chunks 时拒绝，且不改 pointer 或删除旧对象', async () => {
@@ -532,6 +601,26 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     });
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
     expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(mockDeleteSummaryVectorIndexExternal).not.toHaveBeenCalled();
+  });
+
+  it('空纪要表清理同样受 flush generation fence 保护，不允许旧 runner 删除新 pointer', async () => {
+    mockCurrentJsonTableDataRef.value.sheet_summary.content = [['row_id', '时间跨度', '地点', '概要', '编码索引']];
+    const manifest = { indexId: 'old-index', files: [{ path: 'old-path' }] };
+    mockChat[0].TavernDB_ACU_IsolatedData = {
+      'runtime-isolation': { independentData: {}, modifiedKeys: [], updateGroupKeys: [], summaryVectorIndexManifest: manifest },
+    };
+    mockAssertFlushGeneration.mockRejectedValueOnce(new MockGenerationInvalidatedError('generation superseded'));
+
+    await expect(archiveSummaryVectorIndexNow_ACU({
+      targetMessageIndex: 0,
+      mode: 'sync',
+      expectedFlushScopeKey: 'flush-scope',
+      expectedFlushGeneration: 7,
+    })).resolves.toMatchObject({ success: false, reason: 'summary_vector_index_clear_failed' });
+
+    expect(mockAssertFlushGeneration).toHaveBeenCalledWith('flush-scope', 7);
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
     expect(mockDeleteSummaryVectorIndexExternal).not.toHaveBeenCalled();
   });
 

@@ -11,11 +11,13 @@ const h = vi.hoisted(() => ({
   getStrict: vi.fn(),
   markReadyIfGenerationMatches: vi.fn(),
   list: vi.fn(),
+  reconcileLegacy: vi.fn(),
   invalidate: vi.fn(),
   remove: vi.fn(),
   removeStrict: vi.fn(),
   archive: vi.fn(),
   logIdentityEvent: vi.fn(),
+  runScopeMutation: vi.fn(),
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
@@ -31,6 +33,7 @@ vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
   getSummaryVectorFlushTask_ACU: (...args: any[]) => h.get(...args),
   getSummaryVectorFlushTaskStrict_ACU: (...args: any[]) => h.getStrict(...args),
   listSummaryVectorFlushTasks_ACU: (...args: any[]) => h.list(...args),
+  reconcileLegacySummaryVectorFlushTaskStrict_ACU: (...args: any[]) => h.reconcileLegacy(...args),
   invalidateSummaryVectorFlushTaskStrict_ACU: (...args: any[]) => h.invalidate(...args),
   upsertSummaryVectorFlushTask_ACU: (...args: any[]) => h.upsert(...args),
 }));
@@ -38,6 +41,7 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
   buildSummaryVectorIndexArchiveScopeKey_ACU: (parts: any) => JSON.stringify([parts.chatKey || 'current-chat', parts.isolationKey || 'default', parts.sourceTableKey || 'summary']),
   findSummaryTable_ACU: () => h.summaryKey ? { summaryKey: h.summaryKey, table: {} } : null,
   archiveSummaryVectorIndexNow_ACU: (...args: any[]) => h.archive(...args),
+  runSummaryVectorIndexArchiveScopeMutationExclusive_ACU: (...args: any[]) => h.runScopeMutation(...args),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
   logSummaryVectorIndexIdentityEvent_ACU: (...args: any[]) => h.logIdentityEvent(...args),
@@ -69,8 +73,10 @@ describe('summary-vector-index flush queue scope', () => {
     h.getStrict.mockImplementation(async () => h.task);
     h.upsert.mockImplementation(async (input: any) => ({ ...input, attemptCount: 0, updatedAt: Date.now() }));
     h.list.mockResolvedValue([]); h.remove.mockResolvedValue(undefined); h.markReadyIfGenerationMatches.mockResolvedValue(true); h.removeStrict.mockResolvedValue(undefined);
+    h.reconcileLegacy.mockResolvedValue({ outcome: 'migrated', task: null });
     h.invalidate.mockImplementation(async (input: any) => ({ ...task(input.scopeKey), ...input, status: 'invalidated', generation: 1 }));
     h.archive.mockResolvedValue({ success: true, skipped: false, errors: [] });
+    h.runScopeMutation.mockImplementation(async (_scopeKey: string, operation: () => Promise<any>) => operation());
   });
 
   afterEach(() => {
@@ -103,21 +109,59 @@ describe('summary-vector-index flush queue scope', () => {
     clearSummaryVectorIndexDirtyForRealign_ACU(scopeB);
   });
 
-  it('自动清理旧版缺少可验证三元 scope 的任务，不执行 archive', async () => {
+  it('默认空槽 legacy task 迁移到 canonical scope 后继续执行，不静默丢失 dirty state', async () => {
+    h.isolationKey = '';
     h.task = task('flush::chat-a', { isolationKey: '' });
+    const canonicalScope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'default', 'summary-a');
+    h.reconcileLegacy.mockResolvedValueOnce({ outcome: 'migrated', task: task(canonicalScope, { isolationKey: 'default' }) });
+    h.get.mockImplementation(async (scopeKey: string) => scopeKey === canonicalScope
+      ? task(canonicalScope, { isolationKey: 'default' })
+      : h.task);
+    h.getStrict.mockImplementation(async (scopeKey: string) => scopeKey === canonicalScope ? task(canonicalScope, { isolationKey: 'default' }) : h.task);
+
     await expect(flushSummaryVectorIndexTaskNow_ACU('flush::chat-a')).resolves.toMatchObject({
       success: true,
-      skipped: true,
-      reason: 'flush_legacy_scope_purged',
     });
-    expect(h.archive).not.toHaveBeenCalled();
-    expect(h.remove).toHaveBeenCalledWith('flush::chat-a');
+    expect(h.reconcileLegacy).toHaveBeenCalledWith(expect.objectContaining({
+      legacyScopeKey: 'flush::chat-a',
+      canonicalScopeKey: canonicalScope,
+      isolationKey: 'default',
+    }));
+    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: 'default' }));
     expect(h.logIdentityEvent).toHaveBeenCalledWith(
       'debug',
       'flush',
-      'legacy_scope_purged',
-      expect.objectContaining({ scopeFingerprint: 'flush::chat-a' }),
+      'legacy_scope_migrated',
+      expect.objectContaining({ scopeFingerprint: canonicalScope }),
     );
+  });
+
+  it('canonical scopeKey 但 isolation 字段为空的 legacy task 原地迁移，保留待归档状态', async () => {
+    h.isolationKey = '';
+    const canonicalScope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'default', 'summary-a');
+    h.task = task(canonicalScope, { isolationKey: '', status: 'queued', generation: 8 });
+    let readCount = 0;
+    h.get.mockImplementation(async () => {
+      readCount += 1;
+      return readCount === 1
+        ? h.task
+        : task(canonicalScope, { isolationKey: 'default', status: 'queued', generation: 8 });
+    });
+    h.reconcileLegacy.mockResolvedValueOnce({
+      outcome: 'migrated',
+      task: task(canonicalScope, { isolationKey: 'default', status: 'queued', generation: 8 }),
+    });
+    h.getStrict.mockImplementation(async () => task(canonicalScope, { isolationKey: 'default', status: 'queued', generation: 8 }));
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(canonicalScope)).resolves.toMatchObject({ success: true });
+
+    expect(h.reconcileLegacy).toHaveBeenCalledWith(expect.objectContaining({
+      legacyScopeKey: canonicalScope,
+      canonicalScopeKey: canonicalScope,
+      isolationKey: 'default',
+    }));
+    expect(h.remove).not.toHaveBeenCalled();
+    expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: 'default', expectedFlushGeneration: 8 }));
   });
 
   it('执行时 active isolation 漂移会拒绝任务，不执行 archive', async () => {
@@ -169,11 +213,11 @@ describe('summary-vector-index flush queue scope', () => {
     expect(h.upsert).toHaveBeenCalledTimes(1);
   });
 
-  it('默认 isolation 只失效 canonical default scope，不使用通配查询', async () => {
+  it('默认 isolation 只失效 canonical default scope，并将 task 字段写为 default', async () => {
     const defaultScope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', '', 'summary-a');
     await clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({ isolationKey: '', sourceTableKey: 'summary-a' });
 
-    expect(h.invalidate).toHaveBeenCalledWith(expect.objectContaining({ scopeKey: defaultScope, isolationKey: '' }));
+    expect(h.invalidate).toHaveBeenCalledWith(expect.objectContaining({ scopeKey: defaultScope, isolationKey: 'default' }));
     expect(h.list).not.toHaveBeenCalled();
     expect(h.removeStrict).not.toHaveBeenCalled();
   });
@@ -181,6 +225,32 @@ describe('summary-vector-index flush queue scope', () => {
   it('恢复只查询当前 active 三元 scope', async () => {
     await expect(restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU()).resolves.toBe(0);
     expect(h.list).toHaveBeenCalledWith({ chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary-a' });
+  });
+
+  it('restore 遇到 legacy 空槽与 canonical task 并存时按裁决结果只调度一个 canonical task', async () => {
+    h.isolationKey = '';
+    const canonicalScope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'default', 'summary-a');
+    const legacyTask = task('flush::chat-a', { isolationKey: '', generation: 4 });
+    const canonicalTask = task(canonicalScope, { isolationKey: 'default', generation: 5 });
+    h.list.mockResolvedValue([legacyTask, canonicalTask]);
+    h.reconcileLegacy.mockResolvedValueOnce({ outcome: 'canonical_retained', task: canonicalTask });
+
+    await expect(restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU()).resolves.toBe(1);
+
+    expect(h.reconcileLegacy).toHaveBeenCalledWith(expect.objectContaining({
+      legacyScopeKey: 'flush::chat-a', canonicalScopeKey: canonicalScope,
+    }));
+    expect(h.archive).not.toHaveBeenCalled();
+  });
+
+  it('双 flushing legacy/canonical 冲突进入 quarantine，不执行任一 archive', async () => {
+    h.isolationKey = '';
+    const canonicalScope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'default', 'summary-a');
+    h.task = task('flush::chat-a', { isolationKey: '', status: 'flushing' });
+    h.reconcileLegacy.mockResolvedValueOnce({ outcome: 'quarantined', task: task(canonicalScope, { isolationKey: 'default', status: 'failed_terminal' }) });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU('flush::chat-a')).resolves.toMatchObject({ reason: 'flush_legacy_scope_quarantined' });
+    expect(h.archive).not.toHaveBeenCalled();
   });
 
   it('新 enqueue 仅以更高 generation 替换墓碑，不能复活旧 runner', async () => {
@@ -238,7 +308,7 @@ describe('summary-vector-index flush queue scope', () => {
 
   it('新 generation timer 在旧 runner 期间命中 running 时，旧 runner 结束后会接力重调度', async () => {
     const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
-    const oldTask = task(scope, { generation: 0, status: 'flushing' });
+    const oldTask = task(scope, { generation: 0, status: 'queued' });
     const nextTask = task(scope, { generation: 1, status: 'queued', debounceUntil: Date.now() });
     h.task = oldTask;
     let releaseOldArchive!: () => void;
@@ -248,6 +318,7 @@ describe('summary-vector-index flush queue scope', () => {
     h.getStrict.mockImplementation(async () => h.task);
     h.upsert.mockImplementation(async (input: any) => {
       if (input.status === 'queued' && input.generation === 1) h.task = { ...nextTask, ...input };
+      else if (input.status === 'flushing' && input.generation === 0) h.task = { ...oldTask, ...input };
       return { ...h.task, ...input, attemptCount: 0, updatedAt: Date.now() };
     });
     h.markReadyIfGenerationMatches

@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   createEntries: vi.fn(),
   loadChunks: vi.fn(),
   clearMissing: vi.fn(),
+  clearInvalid: vi.fn(),
   enqueueFlush: vi.fn(),
   missingError: false,
   invalidError: false,
@@ -51,7 +52,7 @@ vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () =
   logSummaryVectorIndexIdentityEvent_ACU: vi.fn(),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-cache-service', () => ({
-  clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU: vi.fn(),
+  clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU: (...a: any[]) => h.clearInvalid(...a),
   clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU: (...a: any[]) => h.clearMissing(...a),
   isInvalidExternalVectorFileError_ACU: () => h.invalidError,
   isMissingExternalVectorFileError_ACU: () => h.missingError,
@@ -140,6 +141,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.setEntries.mockResolvedValue(undefined);
     h.loadChunks.mockImplementation(async () => h.chunks);
     h.clearMissing.mockResolvedValue(true);
+    h.clearInvalid.mockResolvedValue({ chatStateCleared: true, cacheCleared: true, flushTaskCountCleared: 1 });
     h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
     h.missingError = false;
     h.invalidError = false;
@@ -233,6 +235,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU missing snapshot recover
     h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
     h.missingError = true;
     h.invalidError = false;
+    h.clearInvalid.mockResolvedValue({ chatStateCleared: true, cacheCleared: true, flushTaskCountCleared: 1 });
     h.summaryTable = null;
     h.preparedRows = [];
   });
@@ -275,5 +278,43 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU missing snapshot recover
 
     expect(h.enqueueFlush).not.toHaveBeenCalled();
     expect(result).toMatchObject({ success: false, skipped: true, reason: 'external_vector_files_missing_state_clear_save_failed' });
+  });
+});
+
+describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recovery', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    h.chat = [{ is_user: false, mes: 'assistant' } as any];
+    h.rows = [row_ACU('r1', 1, 'summary')];
+    h.chunks = [];
+    h.config = defaultConfig_ACU();
+    h.loadChunks.mockRejectedValue(new Error('交火向量单文件快照身份不匹配: path field=isolationKey expected=default actual='));
+    h.missingError = false;
+    h.invalidError = true;
+    h.clearInvalid.mockResolvedValue({ chatStateCleared: true, cacheCleared: true, flushTaskCountCleared: 1 });
+    h.enqueueFlush.mockResolvedValue({ queued: true, scopeKey: 'scope', debounceUntil: Date.now() });
+    h.summaryTable = null;
+    h.preparedRows = [];
+  });
+
+  it('严格删除身份无效 pointer 后交由 UI 普通重建，不再入 flush 队列', async () => {
+    const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-invalid', source: 'invalid-test' });
+
+    expect(h.clearInvalid).toHaveBeenCalledWith({
+      messageIndex: 0,
+      isolationKey: 'iso-source',
+      indexId: 'idx',
+      sourceTableKey: 'summary-source',
+    });
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, skipped: true, reason: 'external_vector_identity_invalid_rebuild_required' });
+  });
+
+  it('身份无效 pointer 未安全删除时拒绝盲目重建', async () => {
+    h.clearInvalid.mockResolvedValue({ chatStateCleared: false, cacheCleared: true, flushTaskCountCleared: 1 });
+
+    await expect(processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-invalid-2', source: 'invalid-test' }))
+      .resolves.toMatchObject({ success: false, skipped: true, reason: 'external_vector_identity_invalid_state_clear_failed' });
+    expect(h.enqueueFlush).not.toHaveBeenCalled();
   });
 });

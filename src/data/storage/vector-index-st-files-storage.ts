@@ -1,5 +1,6 @@
 import { SillyTavern_API_ACU } from '../../shared/host-api';
 import { logWarn_ACU } from '../../shared/utils';
+import { normalizeSummaryVectorIndexScope_ACU } from '../../shared/summary-vector-index-scope';
 import type {
     SummaryVectorIndexExternalFileRef_ACU,
     SummaryVectorIndexExternalFileRole_ACU,
@@ -68,8 +69,9 @@ export function buildVectorIndexFileName_ACU(parts: {
     role: SummaryVectorIndexExternalFileRole_ACU;
     shardId?: string;
 }): string {
-    const chatKey = normalizeFileNamePart_ACU(parts.chatKey);
-    const isolationKey = normalizeFileNamePart_ACU(parts.isolationKey || 'default');
+    const scope = normalizeSummaryVectorIndexScope_ACU(parts);
+    const chatKey = normalizeFileNamePart_ACU(scope.chatKey);
+    const isolationKey = normalizeFileNamePart_ACU(scope.isolationKey);
     const indexId = normalizeFileNamePart_ACU(parts.indexId);
     const role = normalizeFileNamePart_ACU(parts.role);
     const shardId = parts.shardId ? `_${normalizeFileNamePart_ACU(parts.shardId)}` : '';
@@ -81,11 +83,12 @@ export function buildVectorIndexStableDirectory_ACU(parts: {
     isolationKey: string;
     sourceTableKey: string;
 }): string {
+    const scope = normalizeSummaryVectorIndexScope_ACU(parts);
     return [
         'TavernDB_ACU_vector',
-        normalizePathSegment_ACU(parts.chatKey),
-        normalizePathSegment_ACU(parts.isolationKey || 'default'),
-        normalizePathSegment_ACU(parts.sourceTableKey || 'summary'),
+        normalizePathSegment_ACU(scope.chatKey),
+        normalizePathSegment_ACU(scope.isolationKey),
+        normalizePathSegment_ACU(scope.sourceTableKey),
     ].join('_');
 }
 
@@ -133,11 +136,8 @@ export function buildVectorIndexSingleSnapshotV2ScopeToken_ACU(parts: {
     isolationKey: string;
     sourceTableKey: string;
 }): string {
-    const scopeJson = JSON.stringify([
-        String(parts.chatKey || 'current-chat'),
-        String(parts.isolationKey || 'default'),
-        String(parts.sourceTableKey || 'summary'),
-    ]);
+    const scope = normalizeSummaryVectorIndexScope_ACU(parts);
+    const scopeJson = JSON.stringify([scope.chatKey, scope.isolationKey, scope.sourceTableKey]);
     const bytes = new TextEncoder().encode(scopeJson);
     let binary = '';
     bytes.forEach((byte) => {

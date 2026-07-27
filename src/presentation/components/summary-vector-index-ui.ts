@@ -15,6 +15,7 @@ import { showToastr_ACU } from '../theme/toast';
 const SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU = new Set([
   'external_vector_files_missing_rebuild_required',
   'external_files_missing_state_cleared_rebuild_required',
+  'external_vector_identity_invalid_rebuild_required',
 ]);
 
 function clearToastElement_ACU($toast: JQuery<HTMLElement> | null) {

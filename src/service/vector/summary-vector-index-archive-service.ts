@@ -45,6 +45,7 @@ import {
     persistSummaryVectorIndexSnapshot_ACU,
 } from './summary-vector-index-storage-service';
 import { hashUserInput_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { normalizeSummaryVectorIndexScope_ACU, serializeSummaryVectorIndexScope_ACU } from '../../shared/summary-vector-index-scope';
 
 type SummaryVectorIndexArchiveMode_ACU = 'append' | 'sync';
 
@@ -63,6 +64,8 @@ export type SummaryVectorIndexArchiveOptions_ACU = {
     vectorizeOnly?: boolean;
     /** Flush 恢复时必须使用入队时捕获的 scope，不能在执行时静默漂移到当前 isolation。 */
     isolationKey?: string;
+    /** 聊天隔离容器的真实槽位；它与 V2 持久化 identity 的 canonical isolationKey 不同。 */
+    tagIsolationKey?: string;
     /** Flush 恢复时必须使用入队时捕获的纪要表。 */
     sourceTableKey?: string;
     /** Flush runner 捕获的 canonical scope；仅 flush 队列路径传入。 */
@@ -101,7 +104,6 @@ export interface SummaryVectorArchivePreparedRow_ACU {
 }
 
 const summaryVectorIndexArchiveLocks_ACU = new Map<string, Promise<void>>();
-const summaryVectorIndexArchivePendingTasks_ACU = new Map<string, Promise<any>>();
 
 // ============================================================
 // 向量化→防抖归档 pipeline（参考 Engram 数据层 hook 触发模式）
@@ -120,6 +122,7 @@ interface SummaryVectorIndexPendingArchive_ACU {
     targetMessageIndex: number;
     snapshotMessageId: string;
     isolationKey: string;
+    tagIsolationKey: string;
     sourceTableKey: string;
     sourceTableName: string;
     indexedAt: string;
@@ -151,9 +154,10 @@ async function persistPendingVectorIndexArchive_ACU(scopeKey: string): Promise<v
     }
     pendingVectorIndexArchives_ACU.delete(scopeKey);
     try {
-        const latestAggregatedSnapshot = await hydrateAggregatedSummaryVectorIndexSnapshot_ACU(getAggregatedSummaryVectorIndexSnapshot_ACU());
         logDebug_ACU(`[纪要向量索引] 防抖归档开始：scope=${scopeKey}, rows=${pending.finalRows.length}, chunks=${pending.finalChunks.length}`);
-        await writeSummaryVectorIndexCheckpoint_ACU({
+        await runSummaryVectorIndexScopeExclusive_ACU(scopeKey, async () => {
+            const latestAggregatedSnapshot = await hydrateAggregatedSummaryVectorIndexSnapshot_ACU(getAggregatedSummaryVectorIndexSnapshot_ACU());
+            await writeSummaryVectorIndexCheckpoint_ACU({
             chat: pending.chat,
             aggregatedSnapshot: latestAggregatedSnapshot || pending.aggregatedSnapshot,
             embeddingModel: pending.embeddingModel,
@@ -163,6 +167,7 @@ async function persistPendingVectorIndexArchive_ACU(scopeKey: string): Promise<v
             targetMessageIndex: pending.targetMessageIndex,
             snapshotMessageId: pending.snapshotMessageId,
             isolationKey: pending.isolationKey,
+            tagIsolationKey: pending.tagIsolationKey,
             sourceTableKey: pending.sourceTableKey,
             sourceTableName: pending.sourceTableName,
             indexedAt: pending.indexedAt,
@@ -171,6 +176,7 @@ async function persistPendingVectorIndexArchive_ACU(scopeKey: string): Promise<v
             expectedFlushScopeKey: pending.expectedFlushScopeKey,
             expectedFlushGeneration: pending.expectedFlushGeneration,
             saveChatAfterWrite: true,
+            });
         });
         logDebug_ACU(`[纪要向量索引] 防抖归档完成：scope=${scopeKey}, rows=${pending.finalRows.length}, chunks=${pending.finalChunks.length}`);
     } catch (error) {
@@ -192,62 +198,48 @@ export function buildSummaryVectorIndexArchiveScopeKey_ACU(parts: {
     isolationKey: string;
     sourceTableKey: string;
 }): string {
-    return JSON.stringify([
-        String(parts.chatKey || 'current-chat'),
-        String(parts.isolationKey || 'default'),
-        String(parts.sourceTableKey || 'summary'),
-    ]);
+    return serializeSummaryVectorIndexScope_ACU(parts);
 }
 
 async function runSummaryVectorIndexArchiveWithScopeLock_ACU<T>(
     scopeKey: string,
     task: () => Promise<T>,
 ): Promise<T> {
-    const active = summaryVectorIndexArchiveLocks_ACU.get(scopeKey);
-    if (active) {
-        const existingPending = summaryVectorIndexArchivePendingTasks_ACU.get(scopeKey) as Promise<T> | undefined;
-        if (existingPending) {
-            logDebug_ACU(`[纪要向量索引] 同一 scope 已有归档任务和合并补跑任务，复用 pending：${scopeKey}`);
-            return existingPending;
-        }
+    return runSummaryVectorIndexScopeExclusive_ACU(scopeKey, task);
+}
 
-        const pending = (async (): Promise<T> => {
-            logDebug_ACU(`[纪要向量索引] 同一 scope 已有归档任务运行，合并后续请求为一次补跑：${scopeKey}`);
-            await active.catch((error) => {
-                logWarn_ACU('[纪要向量索引] 前序归档任务失败，继续执行合并补跑任务:', error);
-            });
-            logDebug_ACU(`[纪要向量索引] scope 合并补跑开始，重新读取最新状态后执行：${scopeKey}`);
-            return await runSummaryVectorIndexArchiveWithScopeLock_ACU(scopeKey, task);
-        })();
-        summaryVectorIndexArchivePendingTasks_ACU.set(scopeKey, pending);
-        void pending.then(
-            () => {
-                if (summaryVectorIndexArchivePendingTasks_ACU.get(scopeKey) === pending) {
-                    summaryVectorIndexArchivePendingTasks_ACU.delete(scopeKey);
-                }
-            },
-            () => {
-                if (summaryVectorIndexArchivePendingTasks_ACU.get(scopeKey) === pending) {
-                    summaryVectorIndexArchivePendingTasks_ACU.delete(scopeKey);
-                }
-            },
-        );
-        return pending;
-    }
-
+function runSummaryVectorIndexScopeExclusive_ACU<T>(scopeKey: string, task: () => Promise<T>): Promise<T> {
+    const previous = summaryVectorIndexArchiveLocks_ACU.get(scopeKey) || Promise.resolve();
     let releaseLock!: () => void;
     const current = new Promise<void>((resolve) => {
         releaseLock = resolve;
     });
+    // 必须在 await previous 前登记 current，才能形成不可穿透的 FIFO 链。
     summaryVectorIndexArchiveLocks_ACU.set(scopeKey, current);
-    try {
-        return await task();
-    } finally {
-        releaseLock();
-        if (summaryVectorIndexArchiveLocks_ACU.get(scopeKey) === current) {
-            summaryVectorIndexArchiveLocks_ACU.delete(scopeKey);
+    return (async () => {
+        await previous.catch((error) => {
+            logWarn_ACU('[纪要向量索引] 前序 scope 操作失败，继续执行后续操作:', error);
+        });
+        try {
+            return await task();
+        } finally {
+            releaseLock();
+            if (summaryVectorIndexArchiveLocks_ACU.get(scopeKey) === current) {
+                summaryVectorIndexArchiveLocks_ACU.delete(scopeKey);
+            }
         }
-    }
+    })();
+}
+
+/**
+ * 为非归档 mutation 保留同一 scope 的串行边界。
+ * 与归档入口的“合并补跑”不同，清理/失效操作绝不能被合并为一次归档。
+ */
+export async function runSummaryVectorIndexArchiveScopeMutationExclusive_ACU<T>(
+    scopeKey: string,
+    task: () => Promise<T>,
+): Promise<T> {
+    return runSummaryVectorIndexScopeExclusive_ACU(scopeKey, task);
 }
 
 function buildResult_ACU(partial: Partial<SummaryVectorIndexArchiveResult_ACU> = {}): SummaryVectorIndexArchiveResult_ACU {
@@ -726,6 +718,7 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     skippedRowCount: number;
     mode: SummaryVectorIndexArchiveMode_ACU;
     isolationKey: string;
+    tagIsolationKey: string;
     saveChatAfterWrite?: boolean;
     expectedFlushScopeKey?: string;
     expectedFlushGeneration?: number;
@@ -800,8 +793,8 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
         indexedAt: options.indexedAt,
         skippedRowCount: options.skippedRowCount,
     });
-    const isolationKey = options.isolationKey;
-    const existingTagData = readIsolatedTagData_ACU(message, isolationKey) || {
+    const tagIsolationKey = options.tagIsolationKey;
+    const existingTagData = readIsolatedTagData_ACU(message, tagIsolationKey) || {
         independentData: {},
         modifiedKeys: [],
         updateGroupKeys: [],
@@ -831,7 +824,7 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
         const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
         const persisted = await persistSummaryVectorIndexSnapshot_ACU({
             chatKey: currentChatFileIdentifier_ACU,
-            isolationKey,
+            isolationKey: options.isolationKey,
             previousManifest,
             rows: nextState.rows,
             chunks: nextChunks,
@@ -858,9 +851,9 @@ async function writeSummaryVectorIndexCheckpoint_ACU(options: {
     }
     publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
     try {
-        nextIsolatedData[isolationKey] = nextTagData;
+        nextIsolatedData[tagIsolationKey] = nextTagData;
         message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-        writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
+        writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
         const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
         if (anchorForMessage?.anchor) {
             persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
@@ -903,6 +896,8 @@ async function clearSummaryVectorIndexCheckpoint_ACU(params: {
     chat: any[];
     targetMessageIndex: number;
     isolationKey: string;
+    expectedFlushScopeKey?: string;
+    expectedFlushGeneration?: number;
 }): Promise<boolean> {
     const message = params.chat?.[params.targetMessageIndex];
     if (!message || message.is_user) return false;
@@ -932,6 +927,12 @@ async function clearSummaryVectorIndexCheckpoint_ACU(params: {
     assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
     const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
     try {
+        if (params.expectedFlushScopeKey && params.expectedFlushGeneration != null) {
+            await assertSummaryVectorFlushGenerationCurrent_ACU(
+                params.expectedFlushScopeKey,
+                params.expectedFlushGeneration,
+            );
+        }
         nextIsolatedData[isolationKey] = nextTagData;
         message.TavernDB_ACU_IsolatedData = nextIsolatedData;
         writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
@@ -1044,8 +1045,11 @@ export async function migrateLegacySummaryVectorIndexToContentAddressed_ACU(opti
         });
     }
 
-    const isolationKey = latestLayer.isolationKey || getCurrentIsolationKey_ACU();
-    const existingTagData = readIsolatedTagData_ACU(message, isolationKey) || {
+    // 聊天容器槽与 V2 持久化 identity 不是同一个概念：空槽必须保留，
+    // 但新 V2 对象必须使用 canonical default identity。
+    const tagIsolationKey = latestLayer.isolationKey;
+    const isolationKey = normalizeSummaryVectorIndexScope_ACU({ isolationKey: tagIsolationKey }).isolationKey;
+    const existingTagData = readIsolatedTagData_ACU(message, tagIsolationKey) || {
         independentData: {},
         modifiedKeys: [],
         updateGroupKeys: [],
@@ -1093,9 +1097,9 @@ export async function migrateLegacySummaryVectorIndexToContentAddressed_ACU(opti
     assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
     const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
     try {
-        nextIsolatedData[isolationKey] = nextTagData;
+        nextIsolatedData[tagIsolationKey] = nextTagData;
         message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-        writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
+        writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
         writeMessageIdentity_ACU(message, {
             enabled: settings_ACU.dataIsolationEnabled,
             code: settings_ACU.dataIsolationCode,
@@ -1151,11 +1155,16 @@ export async function archiveSummaryVectorIndexNow_ACU(options: SummaryVectorInd
         });
     }
 
-    const activeIsolationKey = getCurrentIsolationKey_ACU();
-    if (options.isolationKey && options.isolationKey !== activeIsolationKey) {
+    const activeTagIsolationKey = getCurrentIsolationKey_ACU();
+    const activeIsolationKey = normalizeSummaryVectorIndexScope_ACU({ isolationKey: activeTagIsolationKey }).isolationKey;
+    const requestedIsolationKey = options.isolationKey == null
+        ? activeIsolationKey
+        : normalizeSummaryVectorIndexScope_ACU({ isolationKey: options.isolationKey }).isolationKey;
+    if (requestedIsolationKey !== activeIsolationKey) {
         return buildResult_ACU({ success: false, reason: 'archive_scope_not_active', errors: ['归档只能处理当前激活的 isolation scope。'] });
     }
-    const isolationKey = options.isolationKey || activeIsolationKey;
+    const isolationKey = requestedIsolationKey;
+    const tagIsolationKey = options.tagIsolationKey ?? activeTagIsolationKey;
     const selectedSummary = findSummaryTable_ACU(options.sourceTableKey);
     if (!selectedSummary) {
         return buildResult_ACU({
@@ -1192,6 +1201,7 @@ export async function archiveSummaryVectorIndexNow_ACU(options: SummaryVectorInd
     return runSummaryVectorIndexArchiveWithScopeLock_ACU(archiveScopeKey, () => archiveSummaryVectorIndexNowUnlocked_ACU({
         ...options,
         isolationKey,
+        tagIsolationKey,
         sourceTableKey: selectedSummary.summaryKey,
     }));
 }
@@ -1207,11 +1217,16 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         });
     }
 
-    const activeIsolationKey = getCurrentIsolationKey_ACU();
-    if (options.isolationKey && options.isolationKey !== activeIsolationKey) {
+    const activeTagIsolationKey = getCurrentIsolationKey_ACU();
+    const activeIsolationKey = normalizeSummaryVectorIndexScope_ACU({ isolationKey: activeTagIsolationKey }).isolationKey;
+    const requestedIsolationKey = options.isolationKey == null
+        ? activeIsolationKey
+        : normalizeSummaryVectorIndexScope_ACU({ isolationKey: options.isolationKey }).isolationKey;
+    if (requestedIsolationKey !== activeIsolationKey) {
         return buildResult_ACU({ success: false, reason: 'archive_scope_not_active', errors: ['归档只能处理当前激活的 isolation scope。'] });
     }
-    const isolationKey = options.isolationKey || activeIsolationKey;
+    const isolationKey = requestedIsolationKey;
+    const tagIsolationKey = options.tagIsolationKey ?? activeTagIsolationKey;
     const selectedSummary = findSummaryTable_ACU(options.sourceTableKey);
     if (!selectedSummary) {
         return buildResult_ACU({
@@ -1267,7 +1282,9 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 const cleared = await clearSummaryVectorIndexCheckpoint_ACU({
                     chat,
                     targetMessageIndex,
-                    isolationKey,
+                    isolationKey: tagIsolationKey,
+                    expectedFlushScopeKey: options.expectedFlushScopeKey,
+                    expectedFlushGeneration: options.expectedFlushGeneration,
                 });
                 return buildResult_ACU({
                     success: true,
@@ -1382,6 +1399,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 targetMessageIndex,
                 snapshotMessageId,
                 isolationKey,
+                tagIsolationKey,
                 sourceTableKey: selectedSummary.summaryKey,
                 sourceTableName,
                 indexedAt,
@@ -1420,6 +1438,7 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
             skippedRowCount: prepared.skippedRowCount,
             mode: archiveMode,
             isolationKey,
+            tagIsolationKey,
             expectedFlushScopeKey: options.expectedFlushScopeKey,
             expectedFlushGeneration: options.expectedFlushGeneration,
             saveChatAfterWrite: true,

@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   clearFlush: vi.fn(),
   loadChunks: vi.fn(),
   snapshot: null as any,
+  buildScope: vi.fn(),
+  runExclusive: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
@@ -19,7 +21,13 @@ vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
   deleteSummaryVectorHotCacheByIndex_ACU: (...args: any[]) => h.deleteHot(...args),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({
-  clearSummaryVectorIndexFlushQueueForCurrentScope_ACU: (...args: any[]) => h.clearFlush(...args),
+  clearSummaryVectorIndexFlushQueueForCurrentScopeUnlocked_ACU: (...args: any[]) => h.clearFlush(...args),
+  resolveCurrentSummaryVectorFlushScope_ACU: (params: any) => ({
+    scopeKey: JSON.stringify({ chatKey: 'chat-a', isolationKey: params.isolationKey, sourceTableKey: params.sourceTableKey }),
+    chatKey: 'chat-a',
+    isolationKey: params.isolationKey,
+    sourceTableKey: params.sourceTableKey,
+  }),
 }));
 vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
   getLatestSummaryVectorIndexSnapshotState_ACU: () => h.snapshot,
@@ -30,12 +38,19 @@ vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () =
 vi.mock('../../../src/service/vector/summary-vector-index-chat-service', () => ({
   clearSummaryVectorIndexLayerFromChat_ACU: (...args: any[]) => h.clearLayer(...args),
 }));
+vi.mock('../../../src/service/runtime/state-manager', () => ({ currentChatFileIdentifier_ACU: 'chat-a' }));
+vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () => ({
+  buildSummaryVectorIndexArchiveScopeKey_ACU: (...args: any[]) => h.buildScope(...args),
+  runSummaryVectorIndexArchiveScopeMutationExclusive_ACU: (...args: any[]) => h.runExclusive(...args),
+}));
 
 import {
+  clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU,
   clearLatestSummaryVectorIndexStateForMissingExternalFiles_ACU,
   isMissingExternalVectorFileError_ACU,
   preloadSummaryVectorIndexCacheForCurrentChat_ACU,
 } from '../../../src/service/vector/summary-vector-index-cache-service';
+
 
 describe('summary vector missing external file recovery helpers', () => {
   beforeEach(() => {
@@ -46,6 +61,8 @@ describe('summary vector missing external file recovery helpers', () => {
     h.clearFlush.mockResolvedValue(2);
     h.loadChunks.mockResolvedValue([]);
     h.snapshot = null;
+    h.buildScope.mockImplementation((scope: any) => JSON.stringify(scope));
+    h.runExclusive.mockImplementation(async (_scope: string, task: () => Promise<any>) => task());
   });
 
   it.each([
@@ -77,9 +94,17 @@ describe('summary vector missing external file recovery helpers', () => {
     })).resolves.toEqual({ chatStateCleared: true, cacheCleared: false, flushTaskCountCleared: 2 });
 
     expect(h.clearLayer).toHaveBeenCalledWith({ messageIndex: 2, isolationKey: 'alpha', indexId: 'idx-missing' });
-    expect(h.clearFlush).toHaveBeenCalledWith({ isolationKey: 'alpha', sourceTableKey: 'summary-source' });
+    expect(h.clearFlush).toHaveBeenCalledWith(expect.objectContaining({
+      chatKey: 'chat-a',
+      isolationKey: 'alpha',
+      sourceTableKey: 'summary-source',
+    }));
     expect(h.deleteTemp).toHaveBeenCalledWith('idx-missing');
     expect(h.deleteHot).toHaveBeenCalledWith('idx-missing');
+    expect(h.runExclusive).toHaveBeenCalledWith(
+      JSON.stringify({ chatKey: 'chat-a', isolationKey: 'alpha', sourceTableKey: 'summary-source' }),
+      expect.any(Function),
+    );
   });
 
   it('预热时严格删除抛错会返回稳定原因且不入队', async () => {
@@ -114,6 +139,55 @@ describe('summary vector missing external file recovery helpers', () => {
       cacheCleared: false,
       chatStateCleared: true,
     });
-    expect(h.clearFlush).toHaveBeenCalledWith({ isolationKey: 'iso-source', sourceTableKey: 'summary-source' });
+    expect(h.clearFlush).toHaveBeenCalledWith(expect.objectContaining({
+      chatKey: 'chat-a',
+      isolationKey: 'iso-source',
+      sourceTableKey: 'summary-source',
+    }));
+  });
+});
+describe('summary vector invalid external file recovery', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    h.clearLayer.mockResolvedValue(true);
+    h.deleteTemp.mockResolvedValue(undefined);
+    h.deleteHot.mockResolvedValue(undefined);
+    h.clearFlush.mockResolvedValue(1);
+    h.loadChunks.mockResolvedValue([]);
+    h.snapshot = null;
+  });
+
+  it('身份校验失败也必须先删除 pointer，再清理缓存', async () => {
+    await expect(clearLatestSummaryVectorIndexStateForInvalidExternalFiles_ACU({
+      messageIndex: 2,
+      isolationKey: 'alpha',
+      indexId: 'idx-invalid',
+      sourceTableKey: 'summary-source',
+    })).resolves.toEqual({ chatStateCleared: true, cacheCleared: true, flushTaskCountCleared: 1 });
+
+    expect(h.clearFlush).toHaveBeenCalledWith(expect.objectContaining({
+      chatKey: 'chat-a',
+      isolationKey: 'alpha',
+      sourceTableKey: 'summary-source',
+    }));
+    expect(h.clearLayer).toHaveBeenCalledWith({ messageIndex: 2, isolationKey: 'alpha', indexId: 'idx-invalid' });
+    expect(h.deleteTemp).toHaveBeenCalledWith('idx-invalid');
+    expect(h.deleteHot).toHaveBeenCalledWith('idx-invalid');
+  });
+
+  it('预热发现 identity mismatch 后返回普通重建原因', async () => {
+    const manifest = { status: 'ready', indexId: 'idx-invalid', sourceTableKey: 'summary-source' };
+    h.snapshot = {
+      summaryVectorIndexState: { manifest },
+      layers: [{ messageIndex: 1, isolationKey: 'iso-source' }],
+    };
+    h.loadChunks.mockRejectedValue(new Error('交火向量单文件快照身份不匹配: snapshot field=isolationKey expected=default actual='));
+
+    await expect(preloadSummaryVectorIndexCacheForCurrentChat_ACU()).resolves.toMatchObject({
+      success: true,
+      skipped: true,
+      reason: 'external_files_identity_invalid_rebuild_required',
+      chatStateCleared: true,
+    });
   });
 });

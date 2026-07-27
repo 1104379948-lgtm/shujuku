@@ -61,6 +61,15 @@ describe('summary vector index UI recovery', () => {
     expect(h.remove).toHaveBeenCalledTimes(2);
   });
 
+
+  it('身份无效快照已安全删除时同样触发一次普通重建', async () => {
+    h.process.mockResolvedValue({ success: false, skipped: true, reason: 'external_vector_identity_invalid_rebuild_required' });
+
+    await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
+
+    expect(h.rebuild).toHaveBeenCalledTimes(1);
+  });
+
   it('普通跳过原因不触发重建', async () => {
     h.process.mockResolvedValue({ success: false, skipped: true, reason: 'below_min_rows' });
 

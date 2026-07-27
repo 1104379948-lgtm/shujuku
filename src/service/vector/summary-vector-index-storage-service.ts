@@ -1,5 +1,6 @@
 import { getCurrentIsolationKey_ACU, currentChatFileIdentifier_ACU } from '../runtime/state-manager';
 import { hashUserInput_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import {
     buildVectorIndexFileName_ACU,
     buildVectorIndexSingleSnapshotV2ScopeToken_ACU,
@@ -621,7 +622,13 @@ export function normalizeSummaryVectorIndexManifestForRead_ACU(
         status: manifest.status || 'ready',
         indexId: String(manifest.indexId || ''),
         chatKey: String(manifest.chatKey || currentChatFileIdentifier_ACU || 'current-chat'),
-        isolationKey: String(manifest.isolationKey || getCurrentIsolationKey_ACU() || 'default'),
+        // 仅把真正缺失的默认域补齐。不要 trim 或大小写折叠已存身份：
+        // legacy/V2 validator 仍需能识别空白和大小写漂移，而不是被 reader 静默修复。
+        isolationKey: manifest.storageIdentity
+            ? String(manifest.isolationKey ?? '')
+            : manifest.isolationKey === '' || manifest.isolationKey == null
+                ? normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey == null ? getCurrentIsolationKey_ACU() : manifest.isolationKey)
+                : String(manifest.isolationKey),
         snapshotMessageId: String(manifest.snapshotMessageId || ''),
         sourceTableKey: String(manifest.sourceTableKey || 'summary'),
         sourceTableName: String(manifest.sourceTableName || '纪要表'),
@@ -976,7 +983,7 @@ export async function deleteSummaryVectorIndexExternalByScope_ACU(options: {
     sourceTableKey?: string;
 } = {}): Promise<string[]> {
     const chatKey = normalizeChatKey_ACU(options.chatKey);
-    const isolationKey = options.isolationKey || getCurrentIsolationKey_ACU();
+    const isolationKey = normalizeSummaryVectorIsolationKey_ACU(options.isolationKey || getCurrentIsolationKey_ACU());
     const sourceTableKey = options.sourceTableKey || 'summary';
     const result = await cleanupUnreachableSummaryVectorIndexFiles_ACU({
         scopeHints: [{ chatKey, isolationKey, sourceTableKey }],
@@ -1341,7 +1348,7 @@ export async function persistSummaryVectorIndexExternal_ACU(
     options: PersistSummaryVectorIndexExternalOptions_ACU,
 ): Promise<PersistSummaryVectorIndexExternalResult_ACU> {
     const chatKey = normalizeChatKey_ACU(options.chatKey);
-    const isolationKey = options.isolationKey || getCurrentIsolationKey_ACU();
+    const isolationKey = normalizeSummaryVectorIsolationKey_ACU(options.isolationKey || getCurrentIsolationKey_ACU());
     const indexedAt = options.indexedAt || new Date().toISOString();
     const indexId = buildIndexId_ACU({ chatKey, isolationKey, sourceTableKey: options.sourceTableKey, snapshotMessageId: options.snapshotMessageId, indexedAt });
     const rows = normalizeRows_ACU(options.rows);
@@ -1461,12 +1468,19 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
     options: PersistSummaryVectorIndexSnapshotOptions_ACU,
 ): Promise<PersistSummaryVectorIndexExternalResult_ACU> {
     const summaryVectorIndexConfig = getEffectiveSummaryVectorIndexConfig_ACU();
-    const chatKey = normalizeChatKey_ACU(options.chatKey);
-    const isolationKey = options.isolationKey || getCurrentIsolationKey_ACU();
+    // V2 身份在写入开始时冻结为唯一 canonical 三元组；后续不得重新解释 runtime scope。
+    const scope = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: options.chatKey || currentChatFileIdentifier_ACU,
+        isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
+        sourceTableKey: options.sourceTableKey,
+    });
+    const chatKey = scope.chatKey;
+    const isolationKey = scope.isolationKey;
+    const sourceTableKey = scope.sourceTableKey;
     const scopeFingerprint = buildVectorIndexSingleSnapshotV2ScopeToken_ACU({
         chatKey,
         isolationKey,
-        sourceTableKey: options.sourceTableKey,
+        sourceTableKey,
     });
     if (summaryVectorIndexConfig.summaryIndexV2WriteEnabled === false) {
         logSummaryVectorIndexIdentityEvent_ACU('warn', 'persist', 'rejected_writer_disabled', { scopeFingerprint });
@@ -1481,7 +1495,7 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
     }
     const indexedAt = options.indexedAt || new Date().toISOString();
     const snapshotRevision = Math.max(1, Math.floor(Number(options.snapshotRevision) || 0) + 1);
-    const indexId = buildVersionedSnapshotIndexId_ACU({ chatKey, isolationKey, sourceTableKey: options.sourceTableKey, snapshotRevision });
+    const indexId = buildVersionedSnapshotIndexId_ACU({ chatKey, isolationKey, sourceTableKey, snapshotRevision });
     const rows = normalizeRows_ACU(options.rows);
     const allChunks = normalizeChunks_ACU(options.chunks);
     const activeRowKeys = Array.from(new Set(options.activeRowKeys?.length ? options.activeRowKeys : rows.map((row) => row.rowKey)));
@@ -1544,13 +1558,13 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         revision: snapshotRevision,
     };
     const snapshotPath = buildVectorIndexSingleSnapshotV2FilePath_ACU({
-        chatKey, isolationKey, sourceTableKey: options.sourceTableKey, indexId, writeGeneration,
+        chatKey, isolationKey, sourceTableKey, indexId, writeGeneration,
     });
     const checkpoint = {
         version: SUMMARY_VECTOR_INDEX_MANIFEST_VERSION_ACU,
         checkpointId: `checkpoint_${hashUserInput_ACU(`${indexId}\n${options.snapshotMessageId}\n${indexedAt}`)}`,
         manifestKey: indexId,
-        sourceTableKey: options.sourceTableKey,
+        sourceTableKey,
         snapshotMessageId: options.snapshotMessageId,
         rowCount: rowsWithShardIds.length,
         chunkCount: chunks.length,
@@ -1565,7 +1579,7 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         chatKey,
         isolationKey,
         snapshotMessageId: options.snapshotMessageId,
-        sourceTableKey: options.sourceTableKey,
+        sourceTableKey,
         sourceTableName: options.sourceTableName,
         indexedAt,
         updatedAt: indexedAt,
@@ -1603,7 +1617,7 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         indexId,
         chatKey,
         isolationKey,
-        sourceTableKey: options.sourceTableKey,
+        sourceTableKey,
         sourceTableName: options.sourceTableName,
         snapshotMessageId: options.snapshotMessageId,
         embeddingModel: options.embeddingModel,
@@ -1658,13 +1672,17 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
         files: [written.ref],
         externalTotalBytes: written.ref.byteSize,
     };
+    logSummaryVectorIndexIdentityEvent_ACU('debug', 'persist', 'canonical_scope_written', {
+        manifest: finalManifest,
+        path: snapshotPath,
+    });
     const state: ChatSummaryVectorIndexState_ACU = {
         version: SUMMARY_VECTOR_INDEX_MANIFEST_VERSION_ACU,
         backend: 'st-files',
         status: 'ready',
         indexId,
         snapshotMessageId: options.snapshotMessageId,
-        sourceTableKey: options.sourceTableKey,
+        sourceTableKey,
         sourceTableName: options.sourceTableName,
         indexedAt,
         rowCount: rowsWithShardIds.length,
@@ -1909,6 +1927,10 @@ export function validateSingleFileSnapshotIdentity_ACU(
     if (!expectedIdentity || !actualIdentity) {
         throw new Error(`交火向量单文件快照 V2 身份元数据不完整: ${snapshotPath} expectedLayout=${expectedIdentity?.layoutVersion || 'legacy'} actualLayout=${actualIdentity?.layoutVersion || 'legacy'}`);
     }
+    if (String(manifest.isolationKey ?? '') !== normalizeSummaryVectorIsolationKey_ACU(manifest.isolationKey)
+        || String(blob.isolationKey ?? '') !== normalizeSummaryVectorIsolationKey_ACU(blob.isolationKey)) {
+        throw new Error(`交火向量单文件快照身份不匹配: ${snapshotPath} field=isolationKey V2 对象必须保存 canonical 值`);
+    }
     if (!manifest.snapshot) {
         throw new Error(`交火向量单文件快照 V2 manifest 缺少 snapshot 元数据: ${snapshotPath}`);
     }
@@ -1937,6 +1959,9 @@ export function validateSingleFileSnapshotIdentity_ACU(
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'blob.manifest.indexId', manifest.indexId, embeddedManifest.indexId);
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'blob.manifest.chatKey', manifest.chatKey, embeddedManifest.chatKey);
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'blob.manifest.isolationKey', manifest.isolationKey, embeddedManifest.isolationKey);
+    if (String(embeddedManifest.isolationKey ?? '') !== normalizeSummaryVectorIsolationKey_ACU(embeddedManifest.isolationKey)) {
+        throw new Error(`交火向量单文件快照身份不匹配: ${snapshotPath} field=blob.manifest.isolationKey V2 对象必须保存 canonical 值`);
+    }
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'blob.manifest.sourceTableKey', manifest.sourceTableKey, embeddedManifest.sourceTableKey);
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'blob.manifest.embeddingModel', manifest.embeddingModel, embeddedManifest.embeddingModel);
     assertSingleSnapshotFieldMatches_ACU(snapshotPath, 'blob.manifest.dimension', manifest.dimension, embeddedManifest.dimension);

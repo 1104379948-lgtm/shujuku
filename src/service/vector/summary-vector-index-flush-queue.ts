@@ -7,6 +7,7 @@ import {
     getSummaryVectorFlushTaskStrict_ACU,
     invalidateSummaryVectorFlushTaskStrict_ACU,
     listSummaryVectorFlushTasks_ACU,
+    reconcileLegacySummaryVectorFlushTaskStrict_ACU,
     markSummaryVectorFlushTaskReadyIfGenerationMatchesStrict_ACU,
     SummaryVectorFlushGenerationInvalidatedError_ACU,
     upsertSummaryVectorFlushTask_ACU,
@@ -17,10 +18,12 @@ import {
     archiveSummaryVectorIndexNow_ACU,
     buildSummaryVectorIndexArchiveScopeKey_ACU,
     findSummaryTable_ACU,
+    runSummaryVectorIndexArchiveScopeMutationExclusive_ACU,
     type SummaryVectorIndexArchiveResult_ACU,
 } from './summary-vector-index-archive-service';
 import { clearSummaryVectorIndexDirtyForRealign_ACU } from './summary-vector-index-realign-state';
 import { logSummaryVectorIndexIdentityEvent_ACU } from './summary-vector-index-storage-service';
+import { normalizeSummaryVectorIndexScope_ACU } from '../../shared/summary-vector-index-scope';
 
 const SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU = 2500;
 const SUMMARY_VECTOR_INDEX_FLUSHING_STALE_MS_ACU = 60_000;
@@ -52,21 +55,15 @@ export interface SummaryVectorIndexFlushNowResult_ACU {
     error?: string;
 }
 
-function normalizeKeyPart_ACU(value: any): string {
-    return String(value || '').trim();
-}
-
 /** 与 archive lock、realign state 复用同一三元 canonical scope。 */
 export function buildSummaryVectorIndexFlushScopeKey_ACU(
     chatKey: string,
     isolationKey: string,
     sourceTableKey: string,
 ): string {
-    return buildSummaryVectorIndexArchiveScopeKey_ACU({
-        chatKey: normalizeKeyPart_ACU(chatKey) || 'current-chat',
-        isolationKey: normalizeKeyPart_ACU(isolationKey) || 'default',
-        sourceTableKey: normalizeKeyPart_ACU(sourceTableKey) || 'summary',
-    });
+    return buildSummaryVectorIndexArchiveScopeKey_ACU(
+        normalizeSummaryVectorIndexScope_ACU({ chatKey, isolationKey, sourceTableKey }),
+    );
 }
 
 function normalizeErrorMessage_ACU(error: unknown): string {
@@ -78,6 +75,40 @@ function normalizeErrorMessage_ACU(error: unknown): string {
     } catch {
         return String(error || '未知错误');
     }
+}
+
+function isLegacyDefaultFlushTask_ACU(
+    task: SummaryVectorIndexFlushTaskRecord_ACU,
+    scope: { chatKey: string; isolationKey: string; sourceTableKey: string },
+    canonicalScopeKey: string,
+): boolean {
+    return !String(task.isolationKey || '').trim()
+        && task.chatKey === scope.chatKey
+        && task.sourceTableKey === scope.sourceTableKey
+        && scope.isolationKey === 'default';
+}
+
+async function reconcileLegacyDefaultFlushTask_ACU(
+    task: SummaryVectorIndexFlushTaskRecord_ACU,
+    scope: { chatKey: string; isolationKey: string; sourceTableKey: string },
+    canonicalScopeKey: string,
+): Promise<SummaryVectorIndexFlushTaskRecord_ACU | null> {
+    clearFlushTimer_ACU(task.scopeKey);
+    const reconciliation = await reconcileLegacySummaryVectorFlushTaskStrict_ACU({
+        legacyScopeKey: task.scopeKey,
+        canonicalScopeKey,
+        ...scope,
+    });
+    logSummaryVectorIndexIdentityEvent_ACU(
+        reconciliation.outcome === 'quarantined' ? 'warn' : 'debug',
+        'flush',
+        reconciliation.outcome === 'quarantined' ? 'legacy_scope_conflict_quarantined' : 'legacy_scope_migrated',
+        {
+            scopeFingerprint: canonicalScopeKey,
+            error: `legacy=${task.scopeKey}; outcome=${reconciliation.outcome}`,
+        },
+    );
+    return reconciliation.task;
 }
 
 function shouldClearSummaryVectorIndexDirtyAfterFlush_ACU(result: SummaryVectorIndexArchiveResult_ACU): boolean {
@@ -143,15 +174,24 @@ async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey: string, completedG
 
 export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorIndexFlushQueueOptions_ACU = {}): Promise<SummaryVectorIndexFlushQueueResult_ACU> {
     const selectedSummary = findSummaryTable_ACU();
-    const sourceTableKey = normalizeKeyPart_ACU(options.sourceTableKey || selectedSummary?.summaryKey);
-    const isolationKey = normalizeKeyPart_ACU(options.isolationKey || getCurrentIsolationKey_ACU());
-    if (!selectedSummary?.summaryKey || !sourceTableKey || sourceTableKey !== normalizeKeyPart_ACU(selectedSummary.summaryKey)) {
-        return { queued: false, skipped: true, reason: 'summary_table_not_found' };
-    }
-    const chatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
-    if (!chatKey) {
+    const rawChatKey = String(currentChatFileIdentifier_ACU || '').trim();
+    if (!rawChatKey) {
         return { queued: false, skipped: true, reason: 'flush_scope_unresolved' };
     }
+    const activeScope = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: rawChatKey,
+        isolationKey: getCurrentIsolationKey_ACU(),
+        sourceTableKey: selectedSummary?.summaryKey,
+    });
+    const scope = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: rawChatKey,
+        isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
+        sourceTableKey: options.sourceTableKey ?? selectedSummary?.summaryKey,
+    });
+    if (!selectedSummary?.summaryKey || scope.sourceTableKey !== activeScope.sourceTableKey) {
+        return { queued: false, skipped: true, reason: 'summary_table_not_found' };
+    }
+    const { chatKey, isolationKey, sourceTableKey } = scope;
 
     const now = Date.now();
     const rawDebounceMs = options.debounceMs == null
@@ -161,52 +201,74 @@ export async function enqueueSummaryVectorIndexFlush_ACU(options: SummaryVectorI
         ? Math.max(0, rawDebounceMs)
         : SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU;
     const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
-    const existingTask = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
-    // flushing 表示旧 runner 已捕获当前 generation。新的写入必须进入下一代，
-    // 否则旧 runner 成功收尾会与新任务共享 generation，无法安全区分归属。
-    const generation = existingTask?.status === 'invalidated' || existingTask?.status === 'flushing'
-        ? existingTask.generation + 1
-        : existingTask?.generation;
-    const task = await upsertSummaryVectorFlushTask_ACU({
-        scopeKey,
-        chatKey,
-        isolationKey,
-        sourceTableKey,
-        targetMessageIndex: options.targetMessageIndex,
-        generation,
-        mode: options.mode === 'append' ? 'append' : 'sync',
-        status: 'queued',
-        requestedAt: now,
-        debounceUntil: now + debounceMs,
+    return runSummaryVectorIndexArchiveScopeMutationExclusive_ACU(scopeKey, async () => {
+        const existingTask = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
+        // flushing 表示旧 runner 已捕获当前 generation。新的写入必须进入下一代，
+        // 否则旧 runner 成功收尾会与新任务共享 generation，无法安全区分归属。
+        const generation = existingTask?.status === 'invalidated' || existingTask?.status === 'flushing'
+            ? existingTask.generation + 1
+            : existingTask?.generation;
+        const task = await upsertSummaryVectorFlushTask_ACU({
+            scopeKey,
+            chatKey,
+            isolationKey,
+            sourceTableKey,
+            targetMessageIndex: options.targetMessageIndex,
+            generation,
+            mode: options.mode === 'append' ? 'append' : 'sync',
+            status: 'queued',
+            requestedAt: now,
+            debounceUntil: now + debounceMs,
+        });
+        if (!task) {
+            return { queued: false, skipped: true, reason: 'flush_task_persist_failed', scopeKey };
+        }
+        scheduleFlushTaskTimer_ACU(task);
+        logDebug_ACU(`[交火向量索引] 已加入防抖 flush 队列：scope=${scopeKey}, mode=${task.mode}, debounceMs=${debounceMs}, reason=${options.reason || ''}`);
+        return { queued: true, scopeKey, debounceUntil: task.debounceUntil };
     });
-    if (!task) {
-        return { queued: false, skipped: true, reason: 'flush_task_persist_failed', scopeKey };
-    }
-    scheduleFlushTaskTimer_ACU(task);
-    logDebug_ACU(`[交火向量索引] 已加入防抖 flush 队列：scope=${scopeKey}, mode=${task.mode}, debounceMs=${debounceMs}, reason=${options.reason || ''}`);
-    return { queued: true, scopeKey, debounceUntil: task.debounceUntil };
 }
 
 export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Promise<SummaryVectorIndexFlushNowResult_ACU> {
-    const task = await getSummaryVectorFlushTask_ACU(scopeKey);
+    let task = await getSummaryVectorFlushTask_ACU(scopeKey);
     if (!task) return { success: true, skipped: true, reason: 'flush_task_not_found' };
     if (task.status === 'invalidated') return { success: true, skipped: true, reason: 'flush_scope_invalidated' };
-    const expectedGeneration = Math.max(0, Number(task.generation) || 0);
+    let expectedGeneration = Math.max(0, Number(task.generation) || 0);
     if (summaryVectorFlushRunning_ACU.has(task.scopeKey)) {
         return { success: true, skipped: true, reason: 'flush_already_running' };
     }
 
-    const activeChatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
+    const activeScope = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: currentChatFileIdentifier_ACU,
+        isolationKey: getCurrentIsolationKey_ACU(),
+        sourceTableKey: findSummaryTable_ACU()?.summaryKey,
+    });
+    const activeChatKey = activeScope.chatKey;
     if (task.chatKey !== activeChatKey) {
         const message = `flush scope 与当前聊天上下文不一致：task=${task.chatKey}, active=${activeChatKey}`;
         await markFlushTaskFailure_ACU(task, message, false);
         logWarn_ACU('[交火向量索引] 跳过防抖 flush，当前上下文不匹配:', message);
         return { success: false, reason: 'flush_scope_mismatch', error: message };
     }
-    const expectedScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(task.chatKey, task.isolationKey, task.sourceTableKey);
-    if (!task.isolationKey || task.scopeKey !== expectedScopeKey) {
-        // legacy scope：老版本代码遗留、无法通过当前三元 canonical 校验的任务。
-        // 保留只会永远命中告警噪音；直接删除即可，dirty state 由后续正常写路径重建。
+    const taskScope = normalizeSummaryVectorIndexScope_ACU(task);
+    const expectedScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(taskScope.chatKey, taskScope.isolationKey, taskScope.sourceTableKey);
+    const canonicalActiveScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(
+        activeScope.chatKey,
+        activeScope.isolationKey,
+        activeScope.sourceTableKey,
+    );
+    if (isLegacyDefaultFlushTask_ACU(task, activeScope, canonicalActiveScopeKey)) {
+        const reconciled = await reconcileLegacyDefaultFlushTask_ACU(task, activeScope, canonicalActiveScopeKey);
+        if (!reconciled || reconciled.status === 'failed_terminal') {
+            return { success: true, skipped: true, reason: 'flush_legacy_scope_quarantined' };
+        }
+        return flushSummaryVectorIndexTaskNow_ACU(canonicalActiveScopeKey);
+    }
+    if (task.chatKey !== taskScope.chatKey
+        || task.isolationKey !== taskScope.isolationKey
+        || task.sourceTableKey !== taskScope.sourceTableKey
+        || task.scopeKey !== expectedScopeKey) {
+        // 除了可安全派生的默认空槽 task 外，其他旧格式没有足够身份字段可证明归属。
         const message = `旧版 flush task 缺少可验证三元 scope，已从队列中清理：task=${task.scopeKey}`;
         clearFlushTimer_ACU(task.scopeKey);
         await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
@@ -217,7 +279,7 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
         logDebug_ACU('[交火向量索引] 已清理身份不完整的旧版 flush task:', message);
         return { success: true, skipped: true, reason: 'flush_legacy_scope_purged' };
     }
-    const activeIsolationKey = normalizeKeyPart_ACU(getCurrentIsolationKey_ACU());
+    const activeIsolationKey = activeScope.isolationKey;
     if (task.isolationKey !== activeIsolationKey) {
         const message = `flush isolation 与当前上下文不一致：task=${task.isolationKey}, active=${activeIsolationKey}`;
         await markFlushTaskFailure_ACU(task, message, false);
@@ -225,28 +287,42 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
     }
 
     const selectedSummary = findSummaryTable_ACU();
-    if (!selectedSummary?.summaryKey || normalizeKeyPart_ACU(selectedSummary.summaryKey) !== task.sourceTableKey) {
+    if (!selectedSummary?.summaryKey || normalizeSummaryVectorIndexScope_ACU({ sourceTableKey: selectedSummary.summaryKey }).sourceTableKey !== task.sourceTableKey) {
         const message = `flush scope 对应纪要表不可用：sourceTableKey=${task.sourceTableKey}`;
         await markFlushTaskFailure_ACU(task, message, false);
         logWarn_ACU('[交火向量索引] 跳过防抖 flush，纪要表不可用:', message);
         return { success: false, reason: 'summary_table_not_found_for_flush', error: message };
     }
 
+    // claim 必须和 enqueue 使用同一 scope 边界；否则 enqueue 可在读取 queued 和
+    // durable 写入 flushing 之间插入，两个请求共享 generation 后旧 runner 会吞掉新写入。
+    const claimedTask = await runSummaryVectorIndexArchiveScopeMutationExclusive_ACU(task.scopeKey, async () => {
+        const current = await getSummaryVectorFlushTaskStrict_ACU(task.scopeKey);
+        const currentGeneration = Math.max(0, Number(current?.generation) || 0);
+        if (!current
+            || currentGeneration !== expectedGeneration
+            || (current.status !== 'queued' && current.status !== 'dirty' && current.status !== 'failed_retryable')) {
+            return null;
+        }
+        return upsertSummaryVectorFlushTask_ACU({
+            scopeKey: current.scopeKey,
+            chatKey: current.chatKey,
+            isolationKey: current.isolationKey,
+            sourceTableKey: current.sourceTableKey,
+            targetMessageIndex: current.targetMessageIndex,
+            mode: current.mode,
+            status: 'flushing',
+            generation: currentGeneration,
+            requestedAt: current.requestedAt,
+            debounceUntil: current.debounceUntil,
+        });
+    });
+    if (!claimedTask) return { success: true, skipped: true, reason: 'flush_claim_superseded' };
+    task = claimedTask;
+    expectedGeneration = task.generation;
     summaryVectorFlushRunning_ACU.add(task.scopeKey);
     clearFlushTimer_ACU(task.scopeKey);
     try {
-        await upsertSummaryVectorFlushTask_ACU({
-            scopeKey: task.scopeKey,
-            chatKey: task.chatKey,
-            isolationKey: task.isolationKey,
-            sourceTableKey: task.sourceTableKey,
-            targetMessageIndex: task.targetMessageIndex,
-            mode: task.mode,
-            status: 'flushing',
-            generation: expectedGeneration,
-            requestedAt: task.requestedAt,
-            debounceUntil: task.debounceUntil,
-        });
         // [spv3.6.9] force=true：填表完成后必须强制写入外部文件，跳过"无变更"检测
         // 因为填表后数据已变化，但 fingerprint 比对可能误判为无变更
         const result = await archiveSummaryVectorIndexNow_ACU({
@@ -287,38 +363,68 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
 }
 
 /**
- * 持久化失效当前 scope 的 flush task，并同步取消内存定时器。
+ * 持久化失效当前 scope 的 flush task，并同步取消内存定时器。公开入口自行获取
+ * scope mutation lock，避免未来调用方绕过 publish/invalidation 串行协议。
  * 墓碑携带单调 generation；旧 runner 在真正发布聊天 pointer 前必须校验代次。
  */
 export async function clearSummaryVectorIndexFlushQueueForCurrentScope_ACU(params: {
     isolationKey: string;
     sourceTableKey: string;
 }): Promise<number> {
-    const chatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
-    const isolationKey = normalizeKeyPart_ACU(params.isolationKey);
-    const sourceTableKey = normalizeKeyPart_ACU(params.sourceTableKey);
-    if (!chatKey) throw new Error('清理交火向量 flush 队列失败：当前聊天标识为空');
-    if (!sourceTableKey) throw new Error('清理交火向量 flush 队列失败：纪要表标识为空');
+    const scope = resolveCurrentSummaryVectorFlushScope_ACU(params);
+    return runSummaryVectorIndexArchiveScopeMutationExclusive_ACU(
+        scope.scopeKey,
+        () => clearSummaryVectorIndexFlushQueueForCurrentScopeUnlocked_ACU(scope),
+    );
+}
 
-    const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
-    clearFlushTimer_ACU(scopeKey);
-    const tombstone = await invalidateSummaryVectorFlushTaskStrict_ACU({
-        scopeKey,
-        chatKey,
-        isolationKey,
-        sourceTableKey,
-    });
-    logDebug_ACU(`[交火向量索引] 已持久化 flush 失效墓碑：scope=${scopeKey}, generation=${tombstone.generation}`);
+/** 仅供已持有同一 scope mutation lock 的恢复路径调用。 */
+export async function clearSummaryVectorIndexFlushQueueForCurrentScopeUnlocked_ACU(scope: {
+    scopeKey: string;
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+}): Promise<number> {
+    clearFlushTimer_ACU(scope.scopeKey);
+    const tombstone = await invalidateSummaryVectorFlushTaskStrict_ACU(scope);
+    logDebug_ACU(`[交火向量索引] 已持久化 flush 失效墓碑：scope=${scope.scopeKey}, generation=${tombstone.generation}`);
     return 1;
 }
 
+export function resolveCurrentSummaryVectorFlushScope_ACU(params: {
+    isolationKey: string;
+    sourceTableKey: string;
+}): {
+    scopeKey: string;
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+} {
+    const rawChatKey = String(currentChatFileIdentifier_ACU || '').trim();
+    const rawSourceTableKey = String(params.sourceTableKey || '').trim();
+    if (!rawChatKey) throw new Error('清理交火向量 flush 队列失败：当前聊天标识为空');
+    if (!rawSourceTableKey) throw new Error('清理交火向量 flush 队列失败：纪要表标识为空');
+    const { chatKey, isolationKey, sourceTableKey } = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: rawChatKey,
+        isolationKey: params.isolationKey,
+        sourceTableKey: rawSourceTableKey,
+    });
+
+    const scopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
+    return { scopeKey, chatKey, isolationKey, sourceTableKey };
+}
+
 export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): Promise<number> {
-    const chatKey = normalizeKeyPart_ACU(currentChatFileIdentifier_ACU);
-    if (!chatKey) return 0;
-    const isolationKey = normalizeKeyPart_ACU(getCurrentIsolationKey_ACU());
+    const rawChatKey = String(currentChatFileIdentifier_ACU || '').trim();
+    if (!rawChatKey) return 0;
     const selectedSummary = findSummaryTable_ACU();
-    const sourceTableKey = normalizeKeyPart_ACU(selectedSummary?.summaryKey);
-    if (!sourceTableKey) return 0;
+    const rawSourceTableKey = String(selectedSummary?.summaryKey || '').trim();
+    if (!rawSourceTableKey) return 0;
+    const { chatKey, isolationKey, sourceTableKey } = normalizeSummaryVectorIndexScope_ACU({
+        chatKey: rawChatKey,
+        isolationKey: getCurrentIsolationKey_ACU(),
+        sourceTableKey: rawSourceTableKey,
+    });
     const tasks = await listSummaryVectorFlushTasks_ACU({
         chatKey,
         isolationKey,
@@ -327,12 +433,23 @@ export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): P
     const activeScopeKey = buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey);
     let restored = 0;
     let purgedLegacy = 0;
+    const scheduledScopeKeys = new Set<string>();
     const now = Date.now();
     for (const task of tasks) {
         if (task.status === 'invalidated') continue;
-        // 启动期主动清理身份不完整的旧版 task：
-        // list 已按三元字段过滤到当前 active scope，但更早版本的 scopeKey 算法可能与当前不一致，
-        // 保留只会成为长期告警噪音；dirty state 会由后续正常写路径重新入队。
+        if (isLegacyDefaultFlushTask_ACU(task, { chatKey, isolationKey, sourceTableKey }, activeScopeKey)) {
+            const reconciled = await reconcileLegacyDefaultFlushTask_ACU(task, { chatKey, isolationKey, sourceTableKey }, activeScopeKey);
+            if (!reconciled || reconciled.status === 'failed_terminal' || reconciled.status === 'invalidated') continue;
+            if (scheduledScopeKeys.has(reconciled.scopeKey)) continue;
+            if (reconciled.status === 'ready') {
+                scheduledScopeKeys.add(reconciled.scopeKey);
+                continue;
+            }
+            scheduleFlushTaskTimer_ACU(reconciled);
+            scheduledScopeKeys.add(reconciled.scopeKey);
+            restored += 1;
+            continue;
+        }
         if (!task.isolationKey || task.scopeKey !== activeScopeKey) {
             clearFlushTimer_ACU(task.scopeKey);
             await deleteSummaryVectorFlushTask_ACU(task.scopeKey);
@@ -353,7 +470,9 @@ export async function restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU(): P
             }
             continue;
         }
+        if (scheduledScopeKeys.has(task.scopeKey)) continue;
         scheduleFlushTaskTimer_ACU(task);
+        scheduledScopeKeys.add(task.scopeKey);
         restored += 1;
     }
     if (restored > 0) {
