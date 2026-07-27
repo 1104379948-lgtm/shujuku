@@ -10,6 +10,7 @@
 
 import type {
   ITableStorageProvider,
+  SqlTableApplyScope_ACU,
   SqlQueryResult,
   SqlMutationResult,
   ApplyEditsWithRowIdMaterializationResult_ACU,
@@ -402,6 +403,51 @@ function resolveCurrentChatTemplateForAliases_ACU(): TableDataObject_ACU | null 
     logWarn_ACU(`[SqlTableService] rebind 别名模板解析失败，仅用运行时快照: ${e?.message || e}`);
     return null;
   }
+}
+
+function resolveChatTemplateData_ACU(
+  options: { chat?: any[]; isolationKey?: string; stripSeedRows?: boolean } = {},
+): TableDataObject_ACU | null {
+  const stripSeedRows = options.stripSeedRows !== false;
+  const scopeState = getCurrentChatTemplateScopeState_ACU({
+    ...(options.chat ? { chat: options.chat } : {}),
+    ...(options.isolationKey !== undefined ? { isolationKey: options.isolationKey } : {}),
+  });
+  let templateStr: string | null = null;
+  if (scopeState?.mode === 'chat_override' && scopeState.templateStr) {
+    templateStr = scopeState.templateStr;
+  } else if (scopeState?.mode === 'preset_link' && scopeState.presetName) {
+    templateStr = getTemplatePreset_ACU(scopeState.presetName)?.templateStr || null;
+  }
+  if (templateStr) {
+    const parsed = safeJsonParse_ACU(templateStr, null);
+    if (parsed && typeof parsed === 'object') {
+      const cloned = JSON.parse(JSON.stringify(parsed));
+      return (stripSeedRows ? stripSeedRowsFromTemplate_ACU(cloned) : cloned) as TableDataObject_ACU;
+    }
+  }
+  const globalTemplate = parseTableTemplateJson_ACU({ stripSeedRows });
+  return globalTemplate && typeof globalTemplate === 'object'
+    ? JSON.parse(JSON.stringify(globalTemplate)) as TableDataObject_ACU
+    : null;
+}
+
+/** 在 AI 请求前捕获建表与别名解析所需的不可变模板快照。 */
+export function captureSqlTableApplyScope_ACU(options: {
+  chat: any[];
+  isolationKey: string;
+}): SqlTableApplyScope_ACU {
+  const templateData = resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
+  const templateDataWithRows = resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
+  if (!templateData || !templateDataWithRows) {
+    throw new Error(`[SqlTableService] 无法捕获提交模板上下文 (isolationKey=${options.isolationKey || 'default'})。`);
+  }
+  assertNoPhysicalTableNameCollision_ACU(templateData);
+  return {
+    isolationKey: options.isolationKey,
+    templateData,
+    templateDataWithRows,
+  };
 }
 
 function splitTopLevelSqlList_ACU(value: string, context: string): string[] {
@@ -1020,15 +1066,17 @@ export class SqlTableService implements ITableStorageProvider {
   applyEditsWithSystemRowIds(
     sqlTexts: string[],
     _updateMode?: string,
+    scope?: SqlTableApplyScope_ACU,
   ): ApplyEditsWithRowIdMaterializationResult_ACU {
     this._ensureInitialized();
-    this._ensureTablesFromTemplate();
+    this._ensureTablesFromTemplate(scope);
 
     const normalizedGroups = (Array.isArray(sqlTexts) ? sqlTexts : []).map(sqlText => {
       const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
       return rebindSqlMutationTableIdentifiers_ACU(
         normalizedStatements,
         (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
+        scope?.templateData,
       );
     });
     const userStatements = normalizedGroups.flat();
@@ -1042,7 +1090,7 @@ export class SqlTableService implements ITableStorageProvider {
       };
     }
 
-    const reseedPlan = this._collectReseedPlanForEmptyTables();
+    const reseedPlan = this._collectReseedPlanForEmptyTables(scope);
     const runtimeData = this._exportCurrentDataStrict();
     let materializedStatements: string[];
     try {
@@ -1237,13 +1285,15 @@ export class SqlTableService implements ITableStorageProvider {
     }
   }
 
-  private _collectReseedPlanForEmptyTables(): {
+  private _collectReseedPlanForEmptyTables(scope?: SqlTableApplyScope_ACU): {
     inserts: string[];
     rowIdsByTable: Map<string, Set<string>>;
   } {
     const inserts: string[] = [];
     const rowIdsByTable = new Map<string, Set<string>>();
     if (!currentJsonTableData_ACU) return { inserts, rowIdsByTable };
+    const identitySource = scope?.templateData || currentJsonTableData_ACU;
+    const seedSource = scope?.templateDataWithRows;
 
     const sheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
     if (sheetKeys.length === 0) return { inserts, rowIdsByTable };
@@ -1253,7 +1303,7 @@ export class SqlTableService implements ITableStorageProvider {
         const sheet = (currentJsonTableData_ACU as any)[sheetKey];
         if (!sheet?.sourceData?.ddl) continue;
 
-        const tableName = getPhysicalTableNameForSheet_ACU(currentJsonTableData_ACU, sheetKey);
+        const tableName = getPhysicalTableNameForSheet_ACU((identitySource as any)?.[sheetKey] ? identitySource : currentJsonTableData_ACU, sheetKey);
 
         const existingTables = this._existingTableSet ??= new Set(this.engine.getTableNames());
         // 检查表是否存在且为空
@@ -1263,8 +1313,11 @@ export class SqlTableService implements ITableStorageProvider {
         const cnt = countResult?.values?.[0]?.[0];
         if (cnt !== 0) continue; // 非空表，跳过
 
-        // 获取 seedRows
-        const seedRows = getEffectiveSeedRowsForSheet_ACU(sheetKey, { allowTemplateFallback: true });
+        // AI 提交链显式携带请求前模板时，补种也必须来自同一快照，不能在 await 后重新读取当前模板。
+        const capturedRows = (seedSource as any)?.[sheetKey]?.content;
+        const seedRows = Array.isArray(capturedRows) && capturedRows.length > 1
+          ? capturedRows.slice(1)
+          : getEffectiveSeedRowsForSheet_ACU(sheetKey, { allowTemplateFallback: true });
         if (!Array.isArray(seedRows) || seedRows.length === 0) continue;
 
         // 构造临时 Sheet 对象用于 generateInserts
@@ -1378,12 +1431,12 @@ export class SqlTableService implements ITableStorageProvider {
    * 1. currentJsonTableData_ACU 中的 sourceData.ddl（可能来自指导表，包含用户在可视化编辑器中的修改）
    * 2. 当前聊天模板中的 sourceData.ddl（fallback）
    */
-  private _ensureTablesFromTemplate(): void {
+  private _ensureTablesFromTemplate(scope?: SqlTableApplyScope_ACU): void {
     const existingTables = new Set(this.engine.getTableNames());
 
     // [修复] 优先从当前聊天模板预设获取模板，而不是依赖全局变量 TABLE_TEMPLATE_ACU
     // 这样确保建表时只使用当前聊天模板预设的内容，不会混入全局模板的表
-    const templateData = this._resolveCurrentChatTemplate();
+    const templateData = scope?.templateData || this._resolveCurrentChatTemplate();
     if (!templateData) {
       if (existingTables.size > 0) return;
       throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
@@ -1424,7 +1477,7 @@ export class SqlTableService implements ITableStorageProvider {
     // 建表用的 templateData 已被 stripSeedRows 剥掉数据行，需要一份保留数据行的模板，
     // 用来还原「模板自带数据」的表。作者在模板里写了数据就代表要保留这个格式，
     // 不能只在「首次填表」时才生效（shouldUseInitialSeedRows_ACU 的限定）。
-    const templateWithRows = this._resolveCurrentChatTemplate(false);
+    const templateWithRows = scope?.templateDataWithRows || this._resolveCurrentChatTemplate(false);
     for (const [key, sheet] of Object.entries(missingSheets)) {
       const sheetCopy = JSON.parse(JSON.stringify(sheet));
 

@@ -282,6 +282,7 @@ export interface TableWriteTransactionContext_ACU {
 export interface RunTableWriteTransactionOptions_ACU {
   source: TableWriteTransactionSource_ACU;
   reason: string;
+  chatKey?: string;
   isolationKey?: string;
   writeSet: TableWriteConflictUnitV2_ACU[];
   maintenanceMode?: TableWriteMaintenanceMode_ACU;
@@ -410,7 +411,7 @@ export async function runTableWriteTransaction_ACU<T>(
   options: RunTableWriteTransactionOptions_ACU,
   task: (ctx: TableWriteTransactionContext_ACU, workingData: TableDataObject_ACU | null) => Promise<T> | T,
 ): Promise<T> {
-  const chatKey = normalizeScopePart_ACU(currentChatFileIdentifier_ACU, 'current-chat');
+  const chatKey = normalizeScopePart_ACU(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
   const isolationKey = normalizeScopePart_ACU(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
   const writeSet = normalizeTableWriteSet_ACU(options.writeSet);
   const maintenanceMode = options.maintenanceMode || 'shared';

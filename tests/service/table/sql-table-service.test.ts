@@ -109,6 +109,7 @@ import {
   applySqlEditsToTableDataSnapshot_ACU,
   assertNoHiddenPhysicalColumnMutations_ACU,
   buildSqlSheetBatchOperations_ACU,
+  captureSqlTableApplyScope_ACU,
   materializeSystemRowIdsForSqlInserts_ACU,
   rebindSqlMutationTableIdentifiers_ACU,
   SqlRuntimeSnapshotError_ACU,
@@ -1142,6 +1143,62 @@ describe('SqlTableService', () => {
         ['2', '魔法书', '1'],
         ['3', '卷轴', '2'],
       ]);
+    });
+
+    it('AI 等待期间切换聊天模板后，提交仍使用请求前捕获的建表与别名快照', () => {
+      const originalChat = [{ mes: 'chat-a' }];
+      const switchedChat = [{ mes: 'chat-b' }];
+      const originalTemplate = {
+        mate: { type: 'acu', version: 1 },
+        sheet_memory: {
+          uid: 'memory_summary',
+          name: '记忆概要表',
+          sourceData: {
+            ddl: 'CREATE TABLE memory_summary (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);',
+          },
+          content: [['row_id', 'value']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 1,
+        },
+      } as any;
+      const switchedTemplate = {
+        mate: { type: 'acu', version: 1 },
+        sheet_other: {
+          uid: 'other_table',
+          name: '其他表',
+          sourceData: {
+            ddl: 'CREATE TABLE other_table (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);',
+          },
+          content: [['row_id', 'value']],
+          updateConfig: {},
+          exportConfig: {},
+          orderNo: 1,
+        },
+      } as any;
+      mockGetCurrentChatTemplateScopeState.mockImplementation(({ chat }: any = {}) => ({
+        mode: 'chat_override',
+        templateStr: JSON.stringify(chat === originalChat ? originalTemplate : switchedTemplate),
+      }));
+
+      const capturedScope = captureSqlTableApplyScope_ACU({ chat: originalChat, isolationKey: 'scope-a' });
+      // 模拟 AI await 期间全局聊天已切到 chat-b。若提交仍走隐式全局 fallback，
+      // memory_summary 不会建表，下面的 INSERT 会以 no such table 失败。
+      mockGetCurrentChatTemplateScopeState.mockImplementation(() => ({
+        mode: 'chat_override',
+        templateStr: JSON.stringify(switchedTemplate),
+      }));
+
+      const result = service.applyEditsWithSystemRowIds([
+        "INSERT INTO memory_summary (value) VALUES ('请求前模板仍生效');",
+      ], 'auto_standard', capturedScope);
+
+      expect(result.success).toBe(true);
+      expect(result.materializedSqlTexts[0]).toContain('jiyigaiyaobiao');
+      expect(service.executeQuery('SELECT value FROM jiyigaiyaobiao').values).toContainEqual(['请求前模板仍生效']);
+      expect(() => service.executeQuery('SELECT * FROM qitabiao')).toThrow();
+      expect(mockGetCurrentChatTemplateScopeState).toHaveBeenCalledWith({ chat: originalChat, isolationKey: 'scope-a' });
+      expect(switchedChat).toEqual([{ mes: 'chat-b' }]);
     });
 
     it('提交前 finalize 严格导出失败时回滚补种与 AI SQL', () => {

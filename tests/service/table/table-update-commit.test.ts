@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   persist: vi.fn(),
   ensureProvider: vi.fn(),
   setCurrentData: vi.fn(),
+  currentChatKey: 'chat-a',
+  currentIsolationKey: 'scope-a',
 }));
 
 vi.mock('../../../src/shared/utils', () => ({
@@ -14,8 +16,9 @@ vi.mock('../../../src/shared/utils', () => ({
   logWarn_ACU: vi.fn(),
 }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
+  get currentChatFileIdentifier_ACU() { return mocks.currentChatKey; },
   currentJsonTableData_ACU: null,
-  getCurrentIsolationKey_ACU: () => '',
+  getCurrentIsolationKey_ACU: () => mocks.currentIsolationKey,
   _set_currentJsonTableData_ACU: mocks.setCurrentData,
 }));
 vi.mock('../../../src/service/table/table-service', () => ({
@@ -44,6 +47,8 @@ function options(reason: string) {
 
 describe('runTableUpdateCommit_ACU migration gate', () => {
   beforeEach(() => {
+    mocks.currentChatKey = 'chat-a';
+    mocks.currentIsolationKey = 'scope-a';
     mocks.migration.mockReset().mockResolvedValue({ success: false, error: 'mixed storage evidence insufficient' });
     mocks.reload.mockReset();
     mocks.transaction.mockReset();
@@ -84,6 +89,31 @@ describe('runTableUpdateCommit_ACU migration gate', () => {
     expect(mocks.transaction).not.toHaveBeenCalled();
     expect(mocks.ensureProvider).not.toHaveBeenCalled();
     expect(mocks.persist).not.toHaveBeenCalled();
+  });
+
+  it('AI 等待期间切换聊天后 fail-loud，禁止进入事务与 apply', async () => {
+    const apply = vi.fn();
+    mocks.migration.mockImplementation(async () => {
+      mocks.currentChatKey = 'chat-b';
+      mocks.currentIsolationKey = 'scope-b';
+      return { success: true, migrated: false };
+    });
+
+    const result = await runTableUpdateCommit_ACU({
+      ...options('test_scope_switch_guard'),
+      chatKey: 'chat-a',
+      isolationKey: 'scope-a',
+    }, apply);
+
+    expect(result).toMatchObject({
+      success: false,
+      errorCategory: 'precondition',
+      error: expect.stringContaining('聊天或隔离标识已切换'),
+    });
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+    expect(mocks.persist).not.toHaveBeenCalled();
+    expect(mocks.setCurrentData).not.toHaveBeenCalled();
   });
 
   it('persist 前只读拒绝空 row_id，且不会调用持久化或修复数据', async () => {

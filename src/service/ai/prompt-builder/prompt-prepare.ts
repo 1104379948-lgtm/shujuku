@@ -5,6 +5,8 @@
  */
 import { manualExtraHint_ACU } from '../../runtime/state-manager';
 import { currentJsonTableData_ACU, settings_ACU } from '../../runtime/state-manager';
+import type { TemplateScope_ACU } from '../../template/chat-scope';
+import type { SqlTableApplyScope_ACU } from '../../../shared/table-storage-provider';
 import { getUserName_ACU } from '../../../data/gateways/host-state-gateway';
 import { attachSeedRowsToCurrentDataFromGuide_ACU, ensureChatSheetGuideSeeded_ACU, getEffectiveSeedRowsForSheet_ACU, getSortedSheetKeys_ACU, filterSheetKeysByTemplateScope_ACU, projectSheetForTemplateScope_ACU, resolveTemplateScope_ACU } from '../../template/chat-scope';
 import { getCombinedWorldbookContent_ACU, getWorldBooks_ACU } from '../../worldbook/pipeline';
@@ -37,7 +39,12 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
     }
   }
 
-  export async function prepareAIInput_ACU(messages: any[], updateMode = 'standard', targetSheetKeys: string[] | null = null, options: any = {}) {
+  export async function prepareAIInput_ACU(
+    messages: any[],
+    updateMode = 'standard',
+    targetSheetKeys: string[] | null = null,
+    options: { tableData?: any; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU } = {},
+  ) {
     const sqlMode = isSqliteMode();
     const sourceTableData = await resolvePromptSourceTableData_ACU(options, sqlMode);
     if (!sourceTableData) {
@@ -77,7 +84,9 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
     let _seedRowsTablesUsed_ACU: string[] = [];
     // 模板只起指导作用：只有模板声明的表参与 prompt。
     // 范围未知（解析失败）时不过滤，避免把所有表判成不参与。
-    const templateScope = resolveTemplateScope_ACU(options?.isolationKey);
+    const templateScope = Object.prototype.hasOwnProperty.call(options, 'templateScope')
+        ? options.templateScope ?? null
+        : resolveTemplateScope_ACU(options.isolationKey);
     const tableIndexes = filterSheetKeysByTemplateScope_ACU(getSortedSheetKeys_ACU(workingTableData), templateScope);
     tableIndexes.forEach((sheetKey, tableIndex) => {
         const rawTable = workingTableData[sheetKey];
@@ -112,9 +121,13 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
 
         // SQLite 模式：输出 DDL + 注释数据格式；数据只来自运行时 DB，不再从模板 seedRows 兜底。
         if (sqlMode) {
+            // 物理表名必须与提交阶段使用同一请求前模板快照解析；运行时数据可能仍保留旧模板显示名。
+            const runtimeNameSource = options.sqlApplyScope?.templateData?.[sheetKey]
+                ? options.sqlApplyScope.templateData
+                : workingTableData;
             tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, {
                 allowSeedRowsFallback: false,
-                runtimeTableName: resolveRuntimeTableNameForPrompt_ACU(workingTableData, sheetKey),
+                runtimeTableName: resolveRuntimeTableNameForPrompt_ACU(runtimeNameSource, sheetKey),
             });
             return;
         }

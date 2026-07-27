@@ -53,6 +53,15 @@ export interface ApplyEditsWithRowIdMaterializationResult_ACU extends ApplyEdits
   tableData: TableDataObject_ACU;
 }
 
+/** AI 请求发起前捕获的 SQLite 模板上下文。提交阶段不得重新读取当前聊天模板。 */
+export interface SqlTableApplyScope_ACU {
+  readonly isolationKey: string;
+  /** 去除模板数据行后的建表/别名权威快照。 */
+  readonly templateData: TableDataObject_ACU;
+  /** 保留作者数据行的模板快照，仅供首次建表补种。 */
+  readonly templateDataWithRows: TableDataObject_ACU;
+}
+
 /**
  * 统一的表格存储提供者接口
  *
@@ -138,6 +147,7 @@ export interface ITableStorageProvider {
   applyEditsWithSystemRowIds?(
     editsList: string[],
     updateMode?: string,
+    scope?: SqlTableApplyScope_ACU,
   ): ApplyEditsWithRowIdMaterializationResult_ACU;
 
   /** 创建运行时快照，用于提交失败或重试前回滚。sqlite 返回二进制 DB 快照；native 可不实现。 */

@@ -123,6 +123,44 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result!.tableDataText).toContain('-- 当前数据');
   });
 
+  it('显式 sqlApplyScope 存在时，prompt 物理表名使用请求前模板快照而不是当前运行时显示名', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: {
+        uid: 'inventory',
+        name: '切换后模板表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value'], ['1', '运行时数据']],
+        updateConfig: {},
+      },
+    };
+    const requestTemplate = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory',
+        name: '请求前模板表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+
+    const result = await prepareAIInput_ACU([], 'standard', null, {
+      templateScope: { sheetKeys: new Set(['sheet_0']), sheets: { sheet_0: requestTemplate.sheet_0 } },
+      sqlApplyScope: {
+        isolationKey: 'scope-a',
+        templateData: requestTemplate,
+        templateDataWithRows: requestTemplate,
+      },
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).toContain('CREATE TABLE qingqiuqianmubanbiao');
+    expect(result!.tableDataText).not.toContain('CREATE TABLE qiehuanhoumubanbiao');
+    expect(result!.tableDataText).toContain('运行时数据');
+  });
+
   it('无 DDL 的表在 SQLite 模式下使用 effective fallback DDL，且不使用 seedRows', async () => {
     mockGetEffectiveSeedRows.mockReturnValue([['9', '不应出现', '999']]);
     mockCurrentJsonTableData = {

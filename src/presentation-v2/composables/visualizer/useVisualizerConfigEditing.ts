@@ -221,7 +221,7 @@ export function useVisualizerConfigEditing() {
       const headerIndex = Math.trunc(index) + 1;
       if (headerIndex < 1) return;
       content[0][headerIndex] = stringValue(value);
-      if (isSqliteMode() && sheet.sourceData?.ddl) {
+      if (String(sheet.sourceData?.ddl || '').trim()) {
         const ddlColumns = parseDDLColumnNames(sheet.sourceData.ddl);
         const ddlColumn = ddlColumns[headerIndex];
         if (ddlColumn && ddlColumn.toLowerCase() !== 'row_id') {
@@ -252,7 +252,7 @@ export function useVisualizerConfigEditing() {
     if (targetIndex < 1 || targetIndex >= content[0].length) return;
 
     let nextDDL: string | null = null;
-    if (isSqliteMode() && String(sheet.sourceData?.ddl || '').trim()) {
+    if (String(sheet.sourceData?.ddl || '').trim()) {
       const currentValidation = validateDDLTextAgainstHeaders_ACU(sheet.sourceData.ddl, content[0]);
       if (!currentValidation.valid) {
         toastStore.error(`删除列已拒绝：当前 DDL 与表头不一致：${currentValidation.message}`, { muteable: false });

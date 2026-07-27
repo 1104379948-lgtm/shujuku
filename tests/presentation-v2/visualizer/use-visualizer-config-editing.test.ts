@@ -11,6 +11,10 @@ const runtimeMock = vi.hoisted(() => ({
   },
 }));
 
+const storageModeMock = vi.hoisted(() => ({
+  sqliteMode: true,
+}));
+
 const saveSettingsMock = vi.hoisted(() => ({
   saveSettings_ACU: vi.fn(() => ({ saved: true, storageType: 'memory' })),
 }));
@@ -33,7 +37,7 @@ const helperMock = vi.hoisted(() => ({
 vi.mock('../../../src/service/runtime/state-manager', () => runtimeMock);
 vi.mock('../../../src/service/settings/settings-service', () => saveSettingsMock);
 vi.mock('../../../src/service/table/storage-mode', () => ({
-  isSqliteMode: () => true,
+  isSqliteMode: () => storageModeMock.sqliteMode,
 }));
 vi.mock('../../../src/service/runtime/helpers-remaining', () => helperMock);
 vi.mock('../../../src/presentation-v2/stores/toast-store', () => ({
@@ -48,6 +52,7 @@ describe('useVisualizerConfigEditing', () => {
     setActivePinia(createPinia());
     runtimeMock.settings_ACU.apiPresets = [{ name: 'alpha' }, { name: 'beta' }];
     runtimeMock.settings_ACU.tableApiPresetOverridesByName = {};
+    storageModeMock.sqliteMode = true;
     vi.clearAllMocks();
   });
 
@@ -88,6 +93,19 @@ describe('useVisualizerConfigEditing', () => {
     expect(store.dirty).toBe(true);
   });
 
+  it('存在显式 DDL 时不受当前存储模式影响，改名仍同步 DDL 注释', async () => {
+    const store = await loadSheet();
+    const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
+    const config = useVisualizerConfigEditing();
+    storageModeMock.sqliteMode = false;
+
+    config.updateHeader(0, '物品名');
+
+    expect(store.currentSheet.content[0][1]).toBe('物品名');
+    expect(store.currentSheet.sourceData.ddl).toContain('item_name TEXT, -- 物品名');
+    expect(store.dirty).toBe(true);
+  });
+
   it('新增列会同步所有数据行', async () => {
     const store = await loadSheet();
     const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
@@ -108,6 +126,20 @@ describe('useVisualizerConfigEditing', () => {
     expect(store.currentSheet.content[1]).toEqual([null, '苹果']);
     expect(store.currentSheet.sourceData.ddl).toContain('item_name TEXT -- 旧物品');
     expect(store.currentSheet.sourceData.ddl).not.toContain('quantity INTEGER');
+  });
+
+  it('存在显式 DDL 时不受当前存储模式影响，删除仍同步 DDL、表头和数据行', async () => {
+    const store = await loadSheet();
+    const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
+    const config = useVisualizerConfigEditing();
+    storageModeMock.sqliteMode = false;
+
+    config.deleteColumn(0);
+
+    expect(store.currentSheet.content[0]).toEqual([null, '数量']);
+    expect(store.currentSheet.content[1]).toEqual([null, '2']);
+    expect(store.currentSheet.sourceData.ddl).not.toContain('item_name TEXT');
+    expect(store.currentSheet.sourceData.ddl).toContain('quantity INTEGER -- 数量');
   });
 
   it('DDL 已不一致或目标列受约束时拒绝删除且草稿不变', async () => {

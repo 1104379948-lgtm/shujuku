@@ -38017,7 +38017,7 @@ $CONTENT
         }
     }
     async function runTableWriteTransaction_ACU(options, task) {
-        const chatKey = normalizeScopePart_ACU$1(currentChatFileIdentifier_ACU, 'current-chat');
+        const chatKey = normalizeScopePart_ACU$1(options.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
         const isolationKey = normalizeScopePart_ACU$1(options.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
         const writeSet = normalizeTableWriteSet_ACU(options.writeSet);
         const maintenanceMode = options.maintenanceMode || 'shared';
@@ -46563,6 +46563,45 @@ $CONTENT
             return null;
         }
     }
+    function resolveChatTemplateData_ACU(options = {}) {
+        const stripSeedRows = options.stripSeedRows !== false;
+        const scopeState = getCurrentChatTemplateScopeState_ACU({
+            ...(options.chat ? { chat: options.chat } : {}),
+            ...(options.isolationKey !== undefined ? { isolationKey: options.isolationKey } : {}),
+        });
+        let templateStr = null;
+        if (scopeState?.mode === 'chat_override' && scopeState.templateStr) {
+            templateStr = scopeState.templateStr;
+        }
+        else if (scopeState?.mode === 'preset_link' && scopeState.presetName) {
+            templateStr = getTemplatePreset_ACU(scopeState.presetName)?.templateStr || null;
+        }
+        if (templateStr) {
+            const parsed = safeJsonParse_ACU(templateStr, null);
+            if (parsed && typeof parsed === 'object') {
+                const cloned = JSON.parse(JSON.stringify(parsed));
+                return (stripSeedRows ? stripSeedRowsFromTemplate_ACU(cloned) : cloned);
+            }
+        }
+        const globalTemplate = parseTableTemplateJson_ACU({ stripSeedRows });
+        return globalTemplate && typeof globalTemplate === 'object'
+            ? JSON.parse(JSON.stringify(globalTemplate))
+            : null;
+    }
+    /** 在 AI 请求前捕获建表与别名解析所需的不可变模板快照。 */
+    function captureSqlTableApplyScope_ACU(options) {
+        const templateData = resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
+        const templateDataWithRows = resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
+        if (!templateData || !templateDataWithRows) {
+            throw new Error(`[SqlTableService] 无法捕获提交模板上下文 (isolationKey=${options.isolationKey || 'default'})。`);
+        }
+        assertNoPhysicalTableNameCollision_ACU(templateData);
+        return {
+            isolationKey: options.isolationKey,
+            templateData,
+            templateDataWithRows,
+        };
+    }
     function splitTopLevelSqlList_ACU(value, context) {
         const items = [];
         let start = 0;
@@ -47127,12 +47166,12 @@ $CONTENT
                 throw e;
             }
         }
-        applyEditsWithSystemRowIds(sqlTexts, _updateMode) {
+        applyEditsWithSystemRowIds(sqlTexts, _updateMode, scope) {
             this._ensureInitialized();
-            this._ensureTablesFromTemplate();
+            this._ensureTablesFromTemplate(scope);
             const normalizedGroups = (Array.isArray(sqlTexts) ? sqlTexts : []).map(sqlText => {
                 const normalizedStatements = normalizeSqlStatementsForRuntimeLog_ACU(sqlText);
-                return rebindSqlMutationTableIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }));
+                return rebindSqlMutationTableIdentifiers_ACU(normalizedStatements, (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }), scope?.templateData);
             });
             const userStatements = normalizedGroups.flat();
             if (userStatements.length === 0) {
@@ -47144,7 +47183,7 @@ $CONTENT
                     tableData: this._exportCurrentDataStrict(),
                 };
             }
-            const reseedPlan = this._collectReseedPlanForEmptyTables();
+            const reseedPlan = this._collectReseedPlanForEmptyTables(scope);
             const runtimeData = this._exportCurrentDataStrict();
             let materializedStatements;
             try {
@@ -47323,11 +47362,13 @@ $CONTENT
                 throw new SqlRuntimeSnapshotError_ACU(error?.message || String(error));
             }
         }
-        _collectReseedPlanForEmptyTables() {
+        _collectReseedPlanForEmptyTables(scope) {
             const inserts = [];
             const rowIdsByTable = new Map();
             if (!currentJsonTableData_ACU)
                 return { inserts, rowIdsByTable };
+            const identitySource = scope?.templateData || currentJsonTableData_ACU;
+            const seedSource = scope?.templateDataWithRows;
             const sheetKeys = Object.keys(currentJsonTableData_ACU).filter(k => k.startsWith('sheet_'));
             if (sheetKeys.length === 0)
                 return { inserts, rowIdsByTable };
@@ -47336,7 +47377,7 @@ $CONTENT
                     const sheet = currentJsonTableData_ACU[sheetKey];
                     if (!sheet?.sourceData?.ddl)
                         continue;
-                    const tableName = getPhysicalTableNameForSheet_ACU(currentJsonTableData_ACU, sheetKey);
+                    const tableName = getPhysicalTableNameForSheet_ACU(identitySource?.[sheetKey] ? identitySource : currentJsonTableData_ACU, sheetKey);
                     const existingTables = this._existingTableSet ?? (this._existingTableSet = new Set(this.engine.getTableNames()));
                     // 检查表是否存在且为空
                     if (!existingTables.has(tableName))
@@ -47345,8 +47386,11 @@ $CONTENT
                     const cnt = countResult?.values?.[0]?.[0];
                     if (cnt !== 0)
                         continue; // 非空表，跳过
-                    // 获取 seedRows
-                    const seedRows = getEffectiveSeedRowsForSheet_ACU(sheetKey, { allowTemplateFallback: true });
+                    // AI 提交链显式携带请求前模板时，补种也必须来自同一快照，不能在 await 后重新读取当前模板。
+                    const capturedRows = seedSource?.[sheetKey]?.content;
+                    const seedRows = Array.isArray(capturedRows) && capturedRows.length > 1
+                        ? capturedRows.slice(1)
+                        : getEffectiveSeedRowsForSheet_ACU(sheetKey, { allowTemplateFallback: true });
                     if (!Array.isArray(seedRows) || seedRows.length === 0)
                         continue;
                     // 构造临时 Sheet 对象用于 generateInserts
@@ -47457,11 +47501,11 @@ $CONTENT
          * 1. currentJsonTableData_ACU 中的 sourceData.ddl（可能来自指导表，包含用户在可视化编辑器中的修改）
          * 2. 当前聊天模板中的 sourceData.ddl（fallback）
          */
-        _ensureTablesFromTemplate() {
+        _ensureTablesFromTemplate(scope) {
             const existingTables = new Set(this.engine.getTableNames());
             // [修复] 优先从当前聊天模板预设获取模板，而不是依赖全局变量 TABLE_TEMPLATE_ACU
             // 这样确保建表时只使用当前聊天模板预设的内容，不会混入全局模板的表
-            const templateData = this._resolveCurrentChatTemplate();
+            const templateData = scope?.templateData || this._resolveCurrentChatTemplate();
             if (!templateData) {
                 if (existingTables.size > 0)
                     return;
@@ -47498,7 +47542,7 @@ $CONTENT
             // 建表用的 templateData 已被 stripSeedRows 剥掉数据行，需要一份保留数据行的模板，
             // 用来还原「模板自带数据」的表。作者在模板里写了数据就代表要保留这个格式，
             // 不能只在「首次填表」时才生效（shouldUseInitialSeedRows_ACU 的限定）。
-            const templateWithRows = this._resolveCurrentChatTemplate(false);
+            const templateWithRows = scope?.templateDataWithRows || this._resolveCurrentChatTemplate(false);
             for (const [key, sheet] of Object.entries(missingSheets)) {
                 const sheetCopy = JSON.parse(JSON.stringify(sheet));
                 // content 只有表头时补数据：模板作者自带的数据行优先，其次才是 guide/seedRows。
@@ -53288,7 +53332,9 @@ $CONTENT
         let _seedRowsTablesUsed_ACU = [];
         // 模板只起指导作用：只有模板声明的表参与 prompt。
         // 范围未知（解析失败）时不过滤，避免把所有表判成不参与。
-        const templateScope = resolveTemplateScope_ACU(options?.isolationKey);
+        const templateScope = Object.prototype.hasOwnProperty.call(options, 'templateScope')
+            ? options.templateScope ?? null
+            : resolveTemplateScope_ACU(options.isolationKey);
         const tableIndexes = filterSheetKeysByTemplateScope_ACU(getSortedSheetKeys_ACU(workingTableData), templateScope);
         tableIndexes.forEach((sheetKey, tableIndex) => {
             const rawTable = workingTableData[sheetKey];
@@ -53321,9 +53367,13 @@ $CONTENT
             }
             // SQLite 模式：输出 DDL + 注释数据格式；数据只来自运行时 DB，不再从模板 seedRows 兜底。
             if (sqlMode) {
+                // 物理表名必须与提交阶段使用同一请求前模板快照解析；运行时数据可能仍保留旧模板显示名。
+                const runtimeNameSource = options.sqlApplyScope?.templateData?.[sheetKey]
+                    ? options.sqlApplyScope.templateData
+                    : workingTableData;
                 tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, {
                     allowSeedRowsFallback: false,
-                    runtimeTableName: resolveRuntimeTableNameForPrompt_ACU(workingTableData, sheetKey),
+                    runtimeTableName: resolveRuntimeTableNameForPrompt_ACU(runtimeNameSource, sheetKey),
                 });
                 return;
             }
@@ -60530,8 +60580,20 @@ $CONTENT
             }
         }
     }
+    function assertExpectedCommitScope_ACU(options, phase) {
+        if (options.chatKey === undefined && options.isolationKey === undefined)
+            return;
+        const currentChatKey = String(currentChatFileIdentifier_ACU || 'current-chat');
+        const expectedChatKey = String(options.chatKey ?? currentChatKey);
+        const currentIsolationKey = String(getCurrentIsolationKey_ACU() || '');
+        const expectedIsolationKey = String(options.isolationKey ?? currentIsolationKey);
+        if (currentChatKey !== expectedChatKey || currentIsolationKey !== expectedIsolationKey) {
+            throw new TableUpdateCommitError_ACU(`[TableUpdateCommit] ${options.reason}: ${phase} 检测到聊天或隔离标识已切换，已拒绝提交。请在当前聊天重新执行填表。`, 'precondition');
+        }
+    }
     async function runTableUpdateCommit_ACU(options, apply) {
         try {
+            assertExpectedCommitScope_ACU(options, '提交前');
             const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
             if (!migration.success) {
                 return {
@@ -60543,9 +60605,11 @@ $CONTENT
             if (migration.migrated) {
                 await reloadStorageProvider();
             }
+            assertExpectedCommitScope_ACU(options, '迁移后');
             return await runTableWriteTransaction_ACU({
                 source: options.source,
                 reason: options.reason,
+                chatKey: options.chatKey,
                 isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
                 writeSet: options.writeSet,
                 baseRevision: options.baseRevision,
@@ -60553,6 +60617,7 @@ $CONTENT
             }, async (transactionContext, workingData) => {
                 let commitRevisionWriteSet = options.revisionWriteSet;
                 return transactionContext.runCommit(async () => {
+                    assertExpectedCommitScope_ACU(options, '应用前');
                     const applied = await apply({ transactionContext, workingData });
                     if (!applied.success || !applied.tableData) {
                         throw new TableUpdateCommitError_ACU(applied.error || `${options.reason}: update apply failed`, applied.errorCategory || 'infrastructure');
@@ -60565,6 +60630,7 @@ $CONTENT
                     const operations = persistOptions.operations ?? options.operations;
                     commitRevisionWriteSet = revisionWriteSet;
                     if (!options.skipChatSave) {
+                        assertExpectedCommitScope_ACU(options, '持久化前');
                         assertPersistableRowIdentities_ACU(applied.tableData, options.reason);
                         const saveResult = await persistTablesToChatMessage_ACU({
                             targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
@@ -76696,6 +76762,32 @@ $CONTENT
         const preset = overrides[normalizedName];
         return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
     }
+    function buildTemplateScopeFromData_ACU(data) {
+        if (!data || typeof data !== 'object')
+            return null;
+        const sheetKeys = new Set();
+        const sheets = {};
+        Object.keys(data).forEach(sheetKey => {
+            if (!sheetKey.startsWith('sheet_') || !data[sheetKey] || typeof data[sheetKey] !== 'object')
+                return;
+            sheetKeys.add(sheetKey);
+            sheets[sheetKey] = data[sheetKey];
+        });
+        return sheetKeys.size > 0 ? { sheetKeys, sheets } : null;
+    }
+    function captureFillExecutionScope_ACU() {
+        const chatKey = String(currentChatFileIdentifier_ACU || 'current-chat');
+        const isolationKey = getCurrentIsolationKey_ACU();
+        const liveChat = getChatArray_ACU() || [];
+        const chatSnapshot = JSON.parse(JSON.stringify(liveChat));
+        const sqlApplyScope = isSqliteMode()
+            ? captureSqlTableApplyScope_ACU({ chat: liveChat, isolationKey })
+            : undefined;
+        const templateScope = sqlApplyScope
+            ? buildTemplateScopeFromData_ACU(sqlApplyScope.templateData)
+            : resolveTemplateScope_ACU(isolationKey);
+        return { chatKey, isolationKey, chatSnapshot, templateScope, sqlApplyScope };
+    }
     const SQL_ERROR_MARKER_ACU = '\n\n<!-- SQL_ERROR_FEEDBACK -->\n';
     const UNIFIED_GROUP_ERROR_MARKER_ACU = '\n\n<!-- UNIFIED_GROUP_ERROR_FEEDBACK -->\n';
     const MAX_RETRY_FEEDBACK_LENGTH_ACU = 500;
@@ -77140,6 +77232,9 @@ $CONTENT
             tableData: job.baseSnapshot,
             excludeImportTaggedWorldbookEntries: job.isImportMode === true && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
             agentGreenlights: Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [],
+            isolationKey: job.isolationKey,
+            templateScope: job.templateScope,
+            sqlApplyScope: job.sqlApplyScope,
         });
         if (!dynamicContent) {
             return {
@@ -77400,6 +77495,18 @@ $CONTENT
             return { success: false, modifiedKeys: [], error: '统一提交失败：baseSnapshot 无效。', errorCategory: 'precondition' };
         }
         const sortedResponses = sortGroupFillResponses_ACU(responses);
+        const firstJob = sortedResponses[0]?.job;
+        const capturedChatKey = options.chatKey ?? firstJob?.chatKey;
+        const capturedIsolationKey = options.isolationKey ?? firstJob?.isolationKey ?? getCurrentIsolationKey_ACU();
+        const capturedChat = options.chatSnapshot ?? firstJob?.chatSnapshot ?? getChatArray_ACU() ?? [];
+        const capturedSqlApplyScope = options.sqlApplyScope ?? firstJob?.sqlApplyScope;
+        const capturedTemplateScope = options.templateScope !== undefined
+            ? options.templateScope
+            : firstJob?.templateScope !== undefined
+                ? firstJob.templateScope
+                : capturedSqlApplyScope
+                    ? buildTemplateScopeFromData_ACU(capturedSqlApplyScope.templateData)
+                    : resolveTemplateScope_ACU(capturedIsolationKey);
         const seenTargetSheetKeys = new Set();
         const allTargetSheetKeySet = new Set();
         for (const response of sortedResponses) {
@@ -77442,7 +77549,7 @@ $CONTENT
             const sqlResponses = [];
             // 模板只起指导作用：范围外的表连 SQL 一起屏蔽。
             // 只屏蔽写入而仍执行 SQL，会在运行时改动范围外的表并产生无法回放的孤立增量。
-            const sqlScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+            const sqlScope = capturedTemplateScope;
             const sqlScopedKeys = (keys) => filterSheetKeysByTemplateScope_ACU(keys, sqlScope);
             for (const response of sortedResponses) {
                 const scopedTargets = sqlScopedKeys(response.job.targetSheetKeys || []);
@@ -77452,7 +77559,7 @@ $CONTENT
                 }
                 let sqlText;
                 try {
-                    const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''), baseSnapshot);
+                    const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''), baseSnapshot, capturedSqlApplyScope?.templateData);
                     // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                     assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
                     sqlText = reboundStatements.join(';\n');
@@ -77489,7 +77596,8 @@ $CONTENT
             const commitResult = await runTableUpdateCommit_ACU({
                 source: 'group_fill',
                 reason: 'applyUnifiedGroupFillResponses:runtime_sql',
-                isolationKey: getCurrentIsolationKey_ACU(),
+                chatKey: capturedChatKey,
+                isolationKey: capturedIsolationKey,
                 writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
                 baseRevision: options.baseRevision,
                 initialData: baseSnapshot,
@@ -77512,7 +77620,7 @@ $CONTENT
                 }
                 let parseResult;
                 try {
-                    parseResult = provider.applyEditsWithSystemRowIds(sqlTexts, options.updateMode);
+                    parseResult = provider.applyEditsWithSystemRowIds(sqlTexts, options.updateMode, capturedSqlApplyScope);
                     sqlTexts.splice(0, sqlTexts.length, ...parseResult.materializedSqlTexts);
                 }
                 catch (error) {
@@ -77544,7 +77652,7 @@ $CONTENT
                 const modifiedKeys = Array.from(new Set(parsedModifiedKeys)).sort();
                 const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
                 // 模板只起指导作用：快照只覆盖模板声明的表；范围外的表保持休眠。
-                const snapshotScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+                const snapshotScope = capturedTemplateScope;
                 const scopedKeys = (keys) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
                 const allRuntimeSheetKeys = scopedKeys(getSortedSheetKeys_ACU(runtimeData));
                 const initializedKeys = [...allTargetSheetKeySet]
@@ -77558,8 +77666,8 @@ $CONTENT
                 // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations；但若已存在
                 // 可由模板临时基线回放的 orphan artifacts，则必须保留本次 operations，供 persist
                 // 层校验 replay + operations === afterData 后升级为 integrity_repair checkpoint。
-                const persistChat = getChatArray_ACU() || [];
-                const persistIsolationKey = getCurrentIsolationKey_ACU();
+                const persistChat = capturedChat;
+                const persistIsolationKey = capturedIsolationKey;
                 const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(persistChat, persistIsolationKey, options.saveTargetIndex);
                 const hasTemporaryReplayArtifacts = !hasCheckpointAnchor
                     && hasUnanchoredReplayArtifactsForChatV2_ACU(persistChat, persistIsolationKey, { maxMessageIndex: options.saveTargetIndex });
@@ -77679,7 +77787,7 @@ $CONTENT
             const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
             // 模板只起指导作用：快照只覆盖模板声明的表。
             // 模板范围外的表保持休眠，其数据留在更早的帧与保留边界 checkpoint 中，不被覆盖也不被删除。
-            const snapshotScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+            const snapshotScope = capturedTemplateScope;
             const scopedKeys = (keys) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
             const allUnifiedSheetKeys = scopedKeys(getSortedSheetKeys_ACU(workingTableData));
             const initializedKeys = [...initializedSheetKeys].sort();
@@ -77695,8 +77803,8 @@ $CONTENT
             // full checkpoint；pristine 场景只接受 afterData 快照。若已有可临时回放的
             // orphan artifacts，则必须保留本次 operations，由 persist 验证
             // temporary replay + operations === afterData 后升级为 integrity_repair checkpoint。
-            const persistChat = getChatArray_ACU() || [];
-            const persistIsolationKey = getCurrentIsolationKey_ACU();
+            const persistChat = capturedChat;
+            const persistIsolationKey = capturedIsolationKey;
             const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(persistChat, persistIsolationKey, options.saveTargetIndex);
             const hasTemporaryReplayArtifacts = !hasCheckpointAnchor
                 && hasUnanchoredReplayArtifactsForChatV2_ACU(persistChat, persistIsolationKey, { maxMessageIndex: options.saveTargetIndex });
@@ -77722,7 +77830,8 @@ $CONTENT
             const commitResult = await runTableUpdateCommit_ACU({
                 source: 'group_fill',
                 reason: 'applyUnifiedGroupFillResponses:snapshot',
-                isolationKey: getCurrentIsolationKey_ACU(),
+                chatKey: capturedChatKey,
+                isolationKey: capturedIsolationKey,
                 writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
                 revisionWriteSet,
                 baseRevision: options.baseRevision,
@@ -77773,12 +77882,13 @@ $CONTENT
         if (migration.migrated) {
             await reloadStorageProvider();
         }
-        const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
+        const executionScope = captureFillExecutionScope_ACU();
+        const templateForLookup = executionScope.sqlApplyScope?.templateData || parseTableTemplateJson_ACU({ stripSeedRows: true });
         const failedGroups = new Set();
         let firstError;
         // 模板只起指导作用：只有模板声明的表参与填表。
         // 范围未知时不过滤，避免把所有表判成不参与导致数据写不进去。
-        const templateScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+        const templateScope = executionScope.templateScope;
         const scopedGroups = groups
             .map(group => {
             const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(group.sheetKeys || [], templateScope);
@@ -77856,7 +77966,7 @@ $CONTENT
                     aborted = true;
                     break;
                 }
-                const chatHistory = getChatArray_ACU();
+                const chatHistory = executionScope.chatSnapshot;
                 const bucketFirstMessageIndex = Math.min(...bucket.plannedJobs.map(job => job.firstMessageIndexOfBatch));
                 const explicitMergeBaseBounds = [...new Set(bucket.plannedJobs
                         .map(job => job.group.mergeBaseMaxMessageIndex)
@@ -77879,7 +77989,7 @@ $CONTENT
                 _set_currentJsonTableData_ACU(mergedBatchData);
                 const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
                 const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
-                const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(buildWriteSetForSheetKeys_ACU(bucketSheetKeys, baseSnapshot));
+                const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(buildWriteSetForSheetKeys_ACU(bucketSheetKeys, baseSnapshot), { chatKey: executionScope.chatKey, isolationKey: executionScope.isolationKey });
                 const jobs = [];
                 for (const plannedJob of bucket.plannedJobs) {
                     const isAutoUpdateMode = mode && mode.startsWith('auto');
@@ -77915,6 +78025,11 @@ $CONTENT
                         baseSnapshot,
                         baseRevision,
                         isImportMode: options.isImportMode === true,
+                        chatKey: executionScope.chatKey,
+                        isolationKey: executionScope.isolationKey,
+                        chatSnapshot: executionScope.chatSnapshot,
+                        templateScope: executionScope.templateScope,
+                        sqlApplyScope: executionScope.sqlApplyScope,
                     });
                 }
                 if (jobs.length === 0) {
@@ -78010,6 +78125,11 @@ $CONTENT
                     } : {}),
                     syncAfterCommit: options.syncAfterCommit,
                     baseRevision,
+                    chatKey: executionScope.chatKey,
+                    isolationKey: executionScope.isolationKey,
+                    chatSnapshot: executionScope.chatSnapshot,
+                    templateScope: executionScope.templateScope,
+                    sqlApplyScope: executionScope.sqlApplyScope,
                 });
                 if (applyResult.success) {
                     const nextCommittedBucketCount = committedBucketCount + 1;
@@ -78090,12 +78210,13 @@ $CONTENT
         let success = false;
         let modifiedKeys = [];
         const maxRetries = settings_ACU.tableMaxRetries || 3;
+        const executionScope = captureFillExecutionScope_ACU();
         try {
             let lastSqlError = null;
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
                 try {
                     const rawBaseSnapshot = getRuntimeTableDataSnapshot_ACU(progressContext?.batchBaseSnapshot || null) || {};
-                    const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(buildWriteSetForSheetKeys_ACU(targetSheetKeys, rawBaseSnapshot));
+                    const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(buildWriteSetForSheetKeys_ACU(targetSheetKeys, rawBaseSnapshot), { chatKey: executionScope.chatKey, isolationKey: executionScope.isolationKey });
                     const collectResult = await collectGroupFillResponse_ACU({
                         groupKey: `legacy_execute_${saveTargetIndex}`,
                         groupId: 0,
@@ -78108,6 +78229,11 @@ $CONTENT
                         baseSnapshot: rawBaseSnapshot,
                         baseRevision,
                         isImportMode,
+                        chatKey: executionScope.chatKey,
+                        isolationKey: executionScope.isolationKey,
+                        chatSnapshot: executionScope.chatSnapshot,
+                        templateScope: executionScope.templateScope,
+                        sqlApplyScope: executionScope.sqlApplyScope,
                     }, { lastSqlError }, effectiveAbortController, { onProgress: emitProgress, maxRetriesOverride: 1 });
                     if (collectResult.aborted) {
                         return { success: false, modifiedKeys: [], aborted: true };
@@ -78125,7 +78251,8 @@ $CONTENT
                         const commitResult = await runTableUpdateCommit_ACU({
                             source: 'group_fill',
                             reason: 'executeCardUpdateCore',
-                            isolationKey: getCurrentIsolationKey_ACU(),
+                            chatKey: executionScope.chatKey,
+                            isolationKey: executionScope.isolationKey,
                             writeSet,
                             baseRevision,
                             initialData: rawBaseSnapshot,
@@ -78146,7 +78273,7 @@ $CONTENT
                             }
                             let parseResult;
                             try {
-                                parseResult = provider.applyEditsWithSystemRowIds([collectResult.tableEditText || ''], updateMode);
+                                parseResult = provider.applyEditsWithSystemRowIds([collectResult.tableEditText || ''], updateMode, executionScope.sqlApplyScope);
                             }
                             catch (error) {
                                 const errorCategory = error instanceof SqlRuntimeSnapshotError_ACU ? 'infrastructure' : 'model';
@@ -78190,7 +78317,7 @@ $CONTENT
                             let keysToActuallySave = keysToPersist;
                             if (isFirstTimeInit) {
                                 keysToActuallySave = allSheetKeys;
-                                const fullTemplate = parseTableTemplateJson_ACU({ stripSeedRows: false });
+                                const fullTemplate = executionScope.sqlApplyScope?.templateDataWithRows || parseTableTemplateJson_ACU({ stripSeedRows: false });
                                 if (fullTemplate) {
                                     allSheetKeys.forEach(sheetKey => {
                                         if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {
@@ -78250,7 +78377,8 @@ $CONTENT
                     const updateOutcome = await runTableUpdateCommit_ACU({
                         source: 'group_fill',
                         reason: 'executeCardUpdateCore:snapshot',
-                        isolationKey: getCurrentIsolationKey_ACU(),
+                        chatKey: executionScope.chatKey,
+                        isolationKey: executionScope.isolationKey,
                         writeSet,
                         baseRevision,
                         initialData: rawBaseSnapshot,
@@ -78302,7 +78430,7 @@ $CONTENT
                         let keysToActuallySave = keysToPersist;
                         if (isFirstTimeInit) {
                             keysToActuallySave = allSheetKeys;
-                            const fullTemplate = parseTableTemplateJson_ACU({ stripSeedRows: false });
+                            const fullTemplate = executionScope.sqlApplyScope?.templateDataWithRows || parseTableTemplateJson_ACU({ stripSeedRows: false });
                             if (fullTemplate) {
                                 allSheetKeys.forEach(sheetKey => {
                                     if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {
@@ -144574,7 +144702,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (headerIndex < 1)
                     return;
                 content[0][headerIndex] = stringValue(value);
-                if (isSqliteMode() && sheet.sourceData?.ddl) {
+                if (String(sheet.sourceData?.ddl || '').trim()) {
                     const ddlColumns = parseDDLColumnNames(sheet.sourceData.ddl);
                     const ddlColumn = ddlColumns[headerIndex];
                     if (ddlColumn && ddlColumn.toLowerCase() !== 'row_id') {
@@ -144606,7 +144734,7 @@ Expected function or array of functions, received type ${typeof value}.`
             if (targetIndex < 1 || targetIndex >= content[0].length)
                 return;
             let nextDDL = null;
-            if (isSqliteMode() && String(sheet.sourceData?.ddl || '').trim()) {
+            if (String(sheet.sourceData?.ddl || '').trim()) {
                 const currentValidation = validateDDLTextAgainstHeaders_ACU(sheet.sourceData.ddl, content[0]);
                 if (!currentValidation.valid) {
                     toastStore.error(`删除列已拒绝：当前 DDL 与表头不一致：${currentValidation.message}`, { muteable: false });

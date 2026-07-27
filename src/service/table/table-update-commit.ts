@@ -1,7 +1,7 @@
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import type { SqlMutationResult } from '../../shared/table-storage-provider';
 import { logError_ACU, logWarn_ACU } from '../../shared/utils';
-import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
+import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { ensureLegacyStorageMigratedBeforeWrite_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { ensureStorageProviderReady_ACU, reloadStorageProvider } from './table-storage-strategy';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
@@ -44,6 +44,7 @@ export interface TableUpdateCommitApplyResult_ACU<T> {
 export interface RunTableUpdateCommitOptions_ACU {
   source: TableMutationSourceV2_ACU;
   reason: string;
+  chatKey?: string;
   writeSet: TableWriteConflictUnitV2_ACU[];
   revisionWriteSet?: TableWriteConflictUnitV2_ACU[];
   isolationKey?: string;
@@ -119,11 +120,26 @@ function assertPersistableRowIdentities_ACU(data: TableDataObject_ACU, reason: s
   }
 }
 
+function assertExpectedCommitScope_ACU(options: RunTableUpdateCommitOptions_ACU, phase: string): void {
+  if (options.chatKey === undefined && options.isolationKey === undefined) return;
+  const currentChatKey = String(currentChatFileIdentifier_ACU || 'current-chat');
+  const expectedChatKey = String(options.chatKey ?? currentChatKey);
+  const currentIsolationKey = String(getCurrentIsolationKey_ACU() || '');
+  const expectedIsolationKey = String(options.isolationKey ?? currentIsolationKey);
+  if (currentChatKey !== expectedChatKey || currentIsolationKey !== expectedIsolationKey) {
+    throw new TableUpdateCommitError_ACU(
+      `[TableUpdateCommit] ${options.reason}: ${phase} 检测到聊天或隔离标识已切换，已拒绝提交。请在当前聊天重新执行填表。`,
+      'precondition',
+    );
+  }
+}
+
 export async function runTableUpdateCommit_ACU<T>(
   options: RunTableUpdateCommitOptions_ACU,
   apply: (context: TableUpdateCommitApplyContext_ACU) => Promise<TableUpdateCommitApplyResult_ACU<T>> | TableUpdateCommitApplyResult_ACU<T>,
 ): Promise<RunTableUpdateCommitResult_ACU<T>> {
   try {
+    assertExpectedCommitScope_ACU(options, '提交前');
     const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
     if (!migration.success) {
       return {
@@ -135,10 +151,12 @@ export async function runTableUpdateCommit_ACU<T>(
     if (migration.migrated) {
       await reloadStorageProvider();
     }
+    assertExpectedCommitScope_ACU(options, '迁移后');
 
     return await runTableWriteTransaction_ACU({
       source: options.source,
       reason: options.reason,
+      chatKey: options.chatKey,
       isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
       writeSet: options.writeSet,
       baseRevision: options.baseRevision,
@@ -146,6 +164,7 @@ export async function runTableUpdateCommit_ACU<T>(
     }, async (transactionContext, workingData) => {
       let commitRevisionWriteSet = options.revisionWriteSet;
       return transactionContext.runCommit(async () => {
+        assertExpectedCommitScope_ACU(options, '应用前');
         const applied = await apply({ transactionContext, workingData });
         if (!applied.success || !applied.tableData) {
           throw new TableUpdateCommitError_ACU(applied.error || `${options.reason}: update apply failed`, applied.errorCategory || 'infrastructure');
@@ -159,6 +178,7 @@ export async function runTableUpdateCommit_ACU<T>(
         const operations = persistOptions.operations ?? options.operations;
         commitRevisionWriteSet = revisionWriteSet;
         if (!options.skipChatSave) {
+          assertExpectedCommitScope_ACU(options, '持久化前');
           assertPersistableRowIdentities_ACU(applied.tableData, options.reason);
           const saveResult = await persistTablesToChatMessage_ACU({
             targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,

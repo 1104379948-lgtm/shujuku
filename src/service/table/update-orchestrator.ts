@@ -4,18 +4,20 @@
  * service 层不驱动 UI，只返回结果/状态，presentation 层根据返回值自行决定 UI 操作。
  */
 
-import { isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
+import { currentChatFileIdentifier_ACU, isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
 import { callCustomOpenAI_ACU } from '../ai/prompt-builder';
 import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU, resolveTemplateScope_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
+import type { TemplateScope_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../vector/summary-vector-index-flush-queue';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
+import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 
@@ -48,7 +50,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
 import { hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -136,6 +138,12 @@ export interface GroupFillJob_ACU {
     baseSnapshot: Record<string, any>;
     baseRevision?: string | null;
     isImportMode?: boolean;
+    /** AI 请求发起前锁定的提交作用域；后续不得重新读取全局当前聊天。 */
+    chatKey?: string;
+    isolationKey?: string;
+    chatSnapshot?: any[];
+    templateScope?: TemplateScope_ACU;
+    sqlApplyScope?: SqlTableApplyScope_ACU;
 }
 
 export interface GroupFillResponse_ACU {
@@ -155,6 +163,40 @@ export interface UnifiedApplyAttempt_ACU {
     responseCount: number;
     attempt: number;
     error?: string;
+}
+
+interface FillExecutionScope_ACU {
+    chatKey: string;
+    isolationKey: string;
+    chatSnapshot: any[];
+    templateScope: TemplateScope_ACU;
+    sqlApplyScope?: SqlTableApplyScope_ACU;
+}
+
+function buildTemplateScopeFromData_ACU(data: Record<string, any> | null | undefined): TemplateScope_ACU {
+    if (!data || typeof data !== 'object') return null;
+    const sheetKeys = new Set<string>();
+    const sheets: Record<string, any> = {};
+    Object.keys(data).forEach(sheetKey => {
+        if (!sheetKey.startsWith('sheet_') || !data[sheetKey] || typeof data[sheetKey] !== 'object') return;
+        sheetKeys.add(sheetKey);
+        sheets[sheetKey] = data[sheetKey];
+    });
+    return sheetKeys.size > 0 ? { sheetKeys, sheets } : null;
+}
+
+function captureFillExecutionScope_ACU(): FillExecutionScope_ACU {
+    const chatKey = String(currentChatFileIdentifier_ACU || 'current-chat');
+    const isolationKey = getCurrentIsolationKey_ACU();
+    const liveChat = getChatArray_ACU() || [];
+    const chatSnapshot = JSON.parse(JSON.stringify(liveChat));
+    const sqlApplyScope = isSqliteMode()
+        ? captureSqlTableApplyScope_ACU({ chat: liveChat, isolationKey })
+        : undefined;
+    const templateScope = sqlApplyScope
+        ? buildTemplateScopeFromData_ACU(sqlApplyScope.templateData)
+        : resolveTemplateScope_ACU(isolationKey);
+    return { chatKey, isolationKey, chatSnapshot, templateScope, sqlApplyScope };
 }
 
 interface ManualRuntimeUpdateGroup_ACU {
@@ -682,6 +724,9 @@ export async function collectGroupFillResponse_ACU(
         tableData: job.baseSnapshot,
         excludeImportTaggedWorldbookEntries: job.isImportMode === true && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
         agentGreenlights: Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [],
+        isolationKey: job.isolationKey,
+        templateScope: job.templateScope,
+        sqlApplyScope: job.sqlApplyScope,
     });
     if (!dynamicContent) {
         return {
@@ -947,6 +992,11 @@ export async function applyUnifiedGroupFillResponses_ACU(
         saveTargetIndex: number;
         updateMode: string;
         isImportMode: boolean;
+        chatKey?: string;
+        isolationKey?: string;
+        chatSnapshot?: any[];
+        templateScope?: TemplateScope_ACU;
+        sqlApplyScope?: SqlTableApplyScope_ACU;
         replaceExistingIncremental?: { targetMessageIndices: number[]; targetSheetKeys: string[] };
         manualRefillProgress?: ManualRefillProgressV2_ACU;
         syncAfterCommit?: boolean;
@@ -961,6 +1011,18 @@ export async function applyUnifiedGroupFillResponses_ACU(
     }
 
     const sortedResponses = sortGroupFillResponses_ACU(responses);
+    const firstJob = sortedResponses[0]?.job;
+    const capturedChatKey = options.chatKey ?? firstJob?.chatKey;
+    const capturedIsolationKey = options.isolationKey ?? firstJob?.isolationKey ?? getCurrentIsolationKey_ACU();
+    const capturedChat = options.chatSnapshot ?? firstJob?.chatSnapshot ?? getChatArray_ACU() ?? [];
+    const capturedSqlApplyScope = options.sqlApplyScope ?? firstJob?.sqlApplyScope;
+    const capturedTemplateScope = options.templateScope !== undefined
+        ? options.templateScope
+        : firstJob?.templateScope !== undefined
+        ? firstJob.templateScope
+        : capturedSqlApplyScope
+        ? buildTemplateScopeFromData_ACU(capturedSqlApplyScope.templateData)
+        : resolveTemplateScope_ACU(capturedIsolationKey);
 
     const seenTargetSheetKeys = new Set<string>();
     const allTargetSheetKeySet = new Set<string>();
@@ -1008,7 +1070,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
         const sqlResponses: typeof sortedResponses = [];
         // 模板只起指导作用：范围外的表连 SQL 一起屏蔽。
         // 只屏蔽写入而仍执行 SQL，会在运行时改动范围外的表并产生无法回放的孤立增量。
-        const sqlScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+        const sqlScope = capturedTemplateScope;
         const sqlScopedKeys = (keys: readonly string[]) => filterSheetKeysByTemplateScope_ACU(keys, sqlScope);
 
         for (const response of sortedResponses) {
@@ -1022,6 +1084,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(
                     normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''),
                     baseSnapshot as any,
+                    capturedSqlApplyScope?.templateData,
                 );
                 // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                 assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
@@ -1060,7 +1123,8 @@ export async function applyUnifiedGroupFillResponses_ACU(
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
             source: 'group_fill',
             reason: 'applyUnifiedGroupFillResponses:runtime_sql',
-            isolationKey: getCurrentIsolationKey_ACU(),
+            chatKey: capturedChatKey,
+            isolationKey: capturedIsolationKey,
             writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
             baseRevision: options.baseRevision,
             initialData: baseSnapshot as any,
@@ -1083,7 +1147,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
             }
             let parseResult: any;
             try {
-                parseResult = provider.applyEditsWithSystemRowIds(sqlTexts, options.updateMode);
+                parseResult = provider.applyEditsWithSystemRowIds(sqlTexts, options.updateMode, capturedSqlApplyScope);
                 sqlTexts.splice(0, sqlTexts.length, ...parseResult.materializedSqlTexts);
             } catch (error: any) {
                 const rawErrorMessage = error?.message || String(error);
@@ -1115,7 +1179,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
             const modifiedKeys: string[] = Array.from(new Set<string>(parsedModifiedKeys)).sort();
             const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
             // 模板只起指导作用：快照只覆盖模板声明的表；范围外的表保持休眠。
-            const snapshotScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+            const snapshotScope = capturedTemplateScope;
             const scopedKeys = (keys: readonly string[]) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
             const allRuntimeSheetKeys: string[] = scopedKeys(getSortedSheetKeys_ACU(runtimeData));
             const initializedKeys = [...allTargetSheetKeySet]
@@ -1129,8 +1193,8 @@ export async function applyUnifiedGroupFillResponses_ACU(
             // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations；但若已存在
             // 可由模板临时基线回放的 orphan artifacts，则必须保留本次 operations，供 persist
             // 层校验 replay + operations === afterData 后升级为 integrity_repair checkpoint。
-            const persistChat = getChatArray_ACU() || [];
-            const persistIsolationKey = getCurrentIsolationKey_ACU();
+            const persistChat = capturedChat;
+            const persistIsolationKey = capturedIsolationKey;
             const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
                 persistChat,
                 persistIsolationKey,
@@ -1265,7 +1329,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
         const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
         // 模板只起指导作用：快照只覆盖模板声明的表。
         // 模板范围外的表保持休眠，其数据留在更早的帧与保留边界 checkpoint 中，不被覆盖也不被删除。
-        const snapshotScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+        const snapshotScope = capturedTemplateScope;
         const scopedKeys = (keys: readonly string[]) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
         const allUnifiedSheetKeys = scopedKeys(getSortedSheetKeys_ACU(workingTableData));
         const initializedKeys = [...initializedSheetKeys].sort();
@@ -1281,8 +1345,8 @@ export async function applyUnifiedGroupFillResponses_ACU(
         // full checkpoint；pristine 场景只接受 afterData 快照。若已有可临时回放的
         // orphan artifacts，则必须保留本次 operations，由 persist 验证
         // temporary replay + operations === afterData 后升级为 integrity_repair checkpoint。
-        const persistChat = getChatArray_ACU() || [];
-        const persistIsolationKey = getCurrentIsolationKey_ACU();
+        const persistChat = capturedChat;
+        const persistIsolationKey = capturedIsolationKey;
         const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
             persistChat,
             persistIsolationKey,
@@ -1312,7 +1376,8 @@ export async function applyUnifiedGroupFillResponses_ACU(
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
             source: 'group_fill',
             reason: 'applyUnifiedGroupFillResponses:snapshot',
-            isolationKey: getCurrentIsolationKey_ACU(),
+            chatKey: capturedChatKey,
+            isolationKey: capturedIsolationKey,
             writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
             revisionWriteSet,
             baseRevision: options.baseRevision,
@@ -1391,12 +1456,13 @@ export async function processGroupedRuntimeChunk_ACU(
         await reloadStorageProvider();
     }
 
-    const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
+    const executionScope = captureFillExecutionScope_ACU();
+    const templateForLookup = executionScope.sqlApplyScope?.templateData || parseTableTemplateJson_ACU({ stripSeedRows: true });
     const failedGroups = new Set<string>();
     let firstError: string | undefined;
     // 模板只起指导作用：只有模板声明的表参与填表。
     // 范围未知时不过滤，避免把所有表判成不参与导致数据写不进去。
-    const templateScope = resolveTemplateScope_ACU(getCurrentIsolationKey_ACU());
+    const templateScope = executionScope.templateScope;
     const scopedGroups = groups
         .map(group => {
             const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(group.sheetKeys || [], templateScope);
@@ -1483,7 +1549,7 @@ export async function processGroupedRuntimeChunk_ACU(
                 aborted = true;
                 break;
             }
-            const chatHistory = getChatArray_ACU();
+            const chatHistory = executionScope.chatSnapshot;
             const bucketFirstMessageIndex = Math.min(...bucket.plannedJobs.map(job => job.firstMessageIndexOfBatch));
             const explicitMergeBaseBounds = [...new Set(
                 bucket.plannedJobs
@@ -1513,7 +1579,10 @@ export async function processGroupedRuntimeChunk_ACU(
             _set_currentJsonTableData_ACU(mergedBatchData);
             const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
             const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
-            const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(buildWriteSetForSheetKeys_ACU(bucketSheetKeys, baseSnapshot));
+            const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
+                buildWriteSetForSheetKeys_ACU(bucketSheetKeys, baseSnapshot),
+                { chatKey: executionScope.chatKey, isolationKey: executionScope.isolationKey },
+            );
 
             const jobs: GroupFillJob_ACU[] = [];
             for (const plannedJob of bucket.plannedJobs) {
@@ -1552,6 +1621,11 @@ export async function processGroupedRuntimeChunk_ACU(
                     baseSnapshot,
                     baseRevision,
                     isImportMode: options.isImportMode === true,
+                    chatKey: executionScope.chatKey,
+                    isolationKey: executionScope.isolationKey,
+                    chatSnapshot: executionScope.chatSnapshot,
+                    templateScope: executionScope.templateScope,
+                    sqlApplyScope: executionScope.sqlApplyScope,
                 });
             }
 
@@ -1663,6 +1737,11 @@ export async function processGroupedRuntimeChunk_ACU(
                 } : {}),
                 syncAfterCommit: options.syncAfterCommit,
                 baseRevision,
+                chatKey: executionScope.chatKey,
+                isolationKey: executionScope.isolationKey,
+                chatSnapshot: executionScope.chatSnapshot,
+                templateScope: executionScope.templateScope,
+                sqlApplyScope: executionScope.sqlApplyScope,
             });
             if (applyResult.success) {
                 const nextCommittedBucketCount = committedBucketCount + 1;
@@ -1758,6 +1837,7 @@ export async function executeCardUpdateCore_ACU(
     let success = false;
     let modifiedKeys: string[] = [];
     const maxRetries = settings_ACU.tableMaxRetries || 3;
+    const executionScope = captureFillExecutionScope_ACU();
 
     try {
         let lastSqlError: string | null = null;
@@ -1765,7 +1845,10 @@ export async function executeCardUpdateCore_ACU(
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 const rawBaseSnapshot = getRuntimeTableDataSnapshot_ACU(progressContext?.batchBaseSnapshot || null) || {};
-                const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(buildWriteSetForSheetKeys_ACU(targetSheetKeys, rawBaseSnapshot));
+                const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
+                    buildWriteSetForSheetKeys_ACU(targetSheetKeys, rawBaseSnapshot),
+                    { chatKey: executionScope.chatKey, isolationKey: executionScope.isolationKey },
+                );
                 const collectResult = await collectGroupFillResponse_ACU({
                     groupKey: `legacy_execute_${saveTargetIndex}`,
                     groupId: 0,
@@ -1778,6 +1861,11 @@ export async function executeCardUpdateCore_ACU(
                     baseSnapshot: rawBaseSnapshot,
                     baseRevision,
                     isImportMode,
+                    chatKey: executionScope.chatKey,
+                    isolationKey: executionScope.isolationKey,
+                    chatSnapshot: executionScope.chatSnapshot,
+                    templateScope: executionScope.templateScope,
+                    sqlApplyScope: executionScope.sqlApplyScope,
                 }, { lastSqlError }, effectiveAbortController, { onProgress: emitProgress, maxRetriesOverride: 1 });
 
                 if (collectResult.aborted) {
@@ -1802,7 +1890,8 @@ export async function executeCardUpdateCore_ACU(
                     const commitResult = await runTableUpdateCommit_ACU<CardUpdateResult>({
                         source: 'group_fill',
                         reason: 'executeCardUpdateCore',
-                        isolationKey: getCurrentIsolationKey_ACU(),
+                        chatKey: executionScope.chatKey,
+                        isolationKey: executionScope.isolationKey,
                         writeSet,
                         baseRevision,
                         initialData: rawBaseSnapshot as any,
@@ -1826,6 +1915,7 @@ export async function executeCardUpdateCore_ACU(
                             parseResult = provider.applyEditsWithSystemRowIds(
                                 [collectResult.tableEditText || ''],
                                 updateMode,
+                                executionScope.sqlApplyScope,
                             );
                         } catch (error: any) {
                             const errorCategory = error instanceof SqlRuntimeSnapshotError_ACU ? 'infrastructure' as const : 'model' as const;
@@ -1873,7 +1963,7 @@ export async function executeCardUpdateCore_ACU(
                         let keysToActuallySave = keysToPersist;
                         if (isFirstTimeInit) {
                             keysToActuallySave = allSheetKeys;
-                            const fullTemplate = parseTableTemplateJson_ACU({ stripSeedRows: false });
+                            const fullTemplate = executionScope.sqlApplyScope?.templateDataWithRows || parseTableTemplateJson_ACU({ stripSeedRows: false });
                             if (fullTemplate) {
                                 allSheetKeys.forEach(sheetKey => {
                                     if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {
@@ -1937,7 +2027,8 @@ export async function executeCardUpdateCore_ACU(
                 const updateOutcome = await runTableUpdateCommit_ACU<CardUpdateResult>({
                     source: 'group_fill',
                     reason: 'executeCardUpdateCore:snapshot',
-                    isolationKey: getCurrentIsolationKey_ACU(),
+                    chatKey: executionScope.chatKey,
+                    isolationKey: executionScope.isolationKey,
                     writeSet,
                     baseRevision,
                     initialData: rawBaseSnapshot as any,
@@ -1996,7 +2087,7 @@ export async function executeCardUpdateCore_ACU(
                     if (isFirstTimeInit) {
                         keysToActuallySave = allSheetKeys;
 
-                        const fullTemplate = parseTableTemplateJson_ACU({ stripSeedRows: false });
+                        const fullTemplate = executionScope.sqlApplyScope?.templateDataWithRows || parseTableTemplateJson_ACU({ stripSeedRows: false });
                         if (fullTemplate) {
                             allSheetKeys.forEach(sheetKey => {
                                 if (!keysToPersist.includes(sheetKey) && fullTemplate[sheetKey]) {

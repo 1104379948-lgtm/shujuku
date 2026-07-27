@@ -29,6 +29,7 @@ let mockCurrentJsonTableData: any = null;
 let mockSettings: any = { dataIsolationEnabled: false, dataIsolationCode: '' };
 
 vi.mock('../../src/service/runtime/state-manager', () => ({
+  currentChatFileIdentifier_ACU: 'chat-a',
   get currentJsonTableData_ACU() { return mockCurrentJsonTableData; },
   get settings_ACU() { return mockSettings; },
   getCurrentIsolationKey_ACU: vi.fn(() => ''),
