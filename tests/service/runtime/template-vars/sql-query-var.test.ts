@@ -97,6 +97,7 @@ import {
   evaluateDbCondition,
   evaluateSqlCondition,
 } from '../../../../src/service/runtime/template-vars/sql-query-var';
+import { _set_currentJsonTableData_ACU } from '../../../../src/service/runtime/state-manager';
 import { renderAgentReadOnlyQueryTemplates_ACU } from '../../../../src/service/runtime/template-vars/agent-read-only-template-render';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../../src/shared/utils';
 
@@ -129,6 +130,8 @@ describe('sql-query-var', () => {
       "INSERT INTO characters VALUES (2, '角色B', 30, '死亡');",
       "INSERT INTO characters VALUES (3, '角色C', 20, '存活');",
     ]);
+    _engine.run('CREATE TABLE jiyaobiao (row_id INTEGER PRIMARY KEY, content TEXT);');
+    _engine.run("INSERT INTO jiyaobiao VALUES (1, '记录A');");
 
     // 构建 NameMapper
     const ddlMap = new Map<string, string>();
@@ -138,6 +141,7 @@ describe('sql-query-var', () => {
   });
 
   afterAll(() => {
+    _set_currentJsonTableData_ACU(null);
     _engine.dispose();
   });
 
@@ -616,6 +620,22 @@ describe('sql-query-var', () => {
     it('支持中文名翻译', () => {
       const result = evaluateRawSqlExpression('sql "SELECT 数量 FROM 背包物品表 WHERE 物品名称 = \'铁剑\'"');
       expect(result).toBe('3');
+    });
+
+    it('兼容 DDL 原始表名与显示列名到拼音物理标识符', () => {
+      _set_currentJsonTableData_ACU({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'sheet_0',
+          name: '纪要表',
+          sourceData: { ddl: 'CREATE TABLE chronicle (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  content TEXT -- 内容\n);' },
+          content: [['row_id', '内容'], ['1', '记录A']],
+        },
+      } as any);
+
+      expect(evaluateRawSqlExpression('sql "SELECT 内容 FROM chronicle"')).toBe('记录A');
+      expect(evaluateSqlCondition("SELECT 1 FROM chronicle WHERE 内容 = '记录A'")).toBe(true);
+      _set_currentJsonTableData_ACU(null);
     });
 
     it('多行单列结果用换行分隔', () => {
@@ -1108,6 +1128,23 @@ describe('sql-query-var', () => {
       expect(result).toMatchObject({ content: '总数: 9', tagCount: 1, executedCount: 1, rejectedCount: 0 });
       expect(querySpy.mock.calls.length - before).toBe(1);
       querySpy.mockRestore();
+    });
+
+    it('通过代理只读标签兼容原始 DDL 表名与显示列名', () => {
+      _set_currentJsonTableData_ACU({
+        mate: { type: 'acu', version: 1 },
+        sheet_0: {
+          uid: 'sheet_0',
+          name: '纪要表',
+          sourceData: { ddl: 'CREATE TABLE chronicle (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  content TEXT -- 内容\n);' },
+          content: [['row_id', '内容'], ['1', '记录A']],
+        },
+      } as any);
+
+      const result = renderAgentReadOnlyQueryTemplates_ACU('{[sql "SELECT 内容 FROM chronicle"]}');
+
+      expect(result).toMatchObject({ content: '记录A', executedCount: 1, rejectedCount: 0 });
+      _set_currentJsonTableData_ACU(null);
     });
 
     it('executes allowlisted ORM chains without evaluating arbitrary JavaScript', () => {

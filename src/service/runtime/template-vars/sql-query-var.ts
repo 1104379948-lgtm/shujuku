@@ -12,9 +12,11 @@
  */
 
 import { getStorageProvider, getStorageRuntimeHealth_ACU, isStorageRuntimeReadyForSyncRead_ACU } from '../../table/table-storage-strategy';
+import { currentJsonTableData_ACU } from '../state-manager';
 import { getGlobalNameMapperStatus_ACU, getNameMapper } from './name-mapper';
 import { isSqliteMode } from '../../table/storage-mode';
 import { logDebug_ACU, logWarn_ACU, logError_ACU } from '../../../shared/utils';
+import { resolveReadQuerySql_ACU } from '../../../shared/sql-read-resolver';
 
 // ═══════════════════════════════════════════════════════════════
 // 变量系统 — 存储 {[db...as X]} / {[sql...as X]} 的结果
@@ -23,6 +25,11 @@ import { logDebug_ACU, logWarn_ACU, logError_ACU } from '../../../shared/utils';
 /** 模块级变量存储（每次 replaceDbSqlVariables 调用时重置） */
 let _dbSqlVars: Record<string, string | number> = {};
 let lastBlockedQueryKey_ACU = '';
+
+function resolveTemplateReadSql_ACU(sql: string): string {
+  const mapper = getNameMapper();
+  return resolveReadQuerySql_ACU(sql, currentJsonTableData_ACU as any, mapper.translateSql.bind(mapper)).sql;
+}
 
 /**
  * 模板渲染是同步路径，绝不能为了一个 SELECT 在这里创建未 hydrate 的 SQLite provider。
@@ -394,8 +401,7 @@ export class TableQueryBuilder {
    * 语法：db.背包物品表.where('类别', '武器').value("SUM(数量) * 2")
    */
   value(expression: string): string | number | null {
-    const mapper = getNameMapper();
-    const translatedExpr = mapper.translateSql(expression);
+    const translatedExpr = resolveTemplateReadSql_ACU(expression);
     const sql = this._buildSelect(translatedExpr);
     const result = this._executeQuery(sql);
     if (result.values.length === 0) return null;
@@ -556,8 +562,7 @@ function execExpr(expression: string): string | number | null {
       return null;
     }
     if (!isTemplateQueryRuntimeReady_ACU('db.expr')) return null;
-    const mapper = getNameMapper();
-    const translatedExpr = mapper.translateSql(expression.trim());
+    const translatedExpr = resolveTemplateReadSql_ACU(expression.trim());
     const sql = `SELECT ${translatedExpr}`;
     const provider = getStorageProvider();
     const result = provider.executeQuery(sql);
@@ -762,8 +767,7 @@ export function evaluateRawSqlExpression(expr: string, options: RawSqlEvaluation
     }
 
     // 通过 NameMapper 翻译中文名
-    const mapper = getNameMapper();
-    const translatedSql = mapper.translateSql(trimmed);
+    const translatedSql = resolveTemplateReadSql_ACU(trimmed);
 
     // 执行查询
     const provider = getStorageProvider();
@@ -874,8 +878,7 @@ export function evaluateSqlCondition(expression: string): boolean {
     // 直接传入 SQL 表达式，不需要包引号
     // evaluateRawSqlExpression 内部会处理 "sql " 前缀和引号剥离
     // 但这里的 expression 来自 <if sql="...">，本身就是纯 SQL，直接执行即可
-    const mapper = getNameMapper();
-    const translatedSql = mapper.translateSql(expression.trim());
+    const translatedSql = resolveTemplateReadSql_ACU(expression.trim());
     const provider = getStorageProvider();
     const result = provider.executeQuery(translatedSql);
     if (result.values.length === 0) return false;

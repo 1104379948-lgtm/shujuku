@@ -1,10 +1,13 @@
 export type SqlTableAliasMap_ACU = ReadonlyMap<string, string>;
+export type SqlColumnAliasMap_ACU = ReadonlyMap<string, ReadonlyMap<string, string>>;
+
+export interface SqlReadRebindResult_ACU { sql: string; tableRebindCount: number; columnRebindCount: number; }
 
 type Quote_ACU = '"' | '`' | '[' | null;
 interface Token_ACU { start: number; end: number; value: string; quote: Quote_ACU; depth: number; commaBefore: boolean; }
 
-function wordStart(char: string): boolean { return /^[A-Za-z_]$/.test(char); }
-function wordPart(char: string): boolean { return /^[A-Za-z0-9_$]$/.test(char); }
+function wordStart(char: string): boolean { return /^[A-Za-z_\u0080-\uFFFF]$/.test(char); }
+function wordPart(char: string): boolean { return /^[A-Za-z0-9_$\u0080-\uFFFF]$/.test(char); }
 function keyword(token: Token_ACU | undefined, value: string): boolean {
   return !!token && token.quote === null && token.value.toUpperCase() === value;
 }
@@ -163,4 +166,172 @@ export function rebindSqlMutationTableReferences_ACU(
       throw error;
     }
   });
+}
+
+interface ReadScope_ACU {
+  start: number;
+  end: number;
+  depth: number;
+  tables: Set<string>;
+  aliases: Map<string, string>;
+  qualifiers: Map<string, string>;
+  tableTokens: Token_ACU[];
+}
+
+const READ_SCOPE_TERMINATORS_ACU = new Set(['UNION', 'EXCEPT', 'INTERSECT']);
+const READ_FROM_TERMINATORS_ACU = new Set(['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW']);
+const READ_ALIAS_STOP_WORDS_ACU = new Set(['ON', 'USING', 'JOIN', 'LEFT', 'RIGHT', 'FULL', 'INNER', 'CROSS', 'NATURAL', 'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW']);
+const READ_COLUMN_KEYWORDS_ACU = new Set(['SELECT', 'FROM', 'JOIN', 'AS', 'ON', 'WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'EXCEPT', 'INTERSECT', 'WITH', 'RECURSIVE', 'DISTINCT', 'BY', 'AND', 'OR', 'NOT', 'IN', 'IS', 'NULL', 'LIKE', 'BETWEEN', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'ASC', 'DESC', 'COLLATE', 'USING']);
+
+function isFunctionCall_ACU(sql: string, values: Token_ACU[], index: number): boolean {
+  const token = values[index];
+  return !!token && /^\s*\(/.test(sql.slice(token.end));
+}
+
+function findReadScope_ACU(scopes: ReadScope_ACU[], values: Token_ACU[], index: number): ReadScope_ACU | undefined {
+  const token = values[index];
+  return scopes
+    .filter(scope => index >= scope.start && index < scope.end && token.depth >= scope.depth)
+    .sort((left, right) => right.depth - left.depth || right.start - left.start)[0];
+}
+
+function collectReadScopes_ACU(
+  sql: string,
+  values: Token_ACU[],
+  normalizedTables: ReadonlyMap<string, string>,
+  onTableReference?: (alias: string) => void,
+): ReadScope_ACU[] {
+  const cte = cteScopes(values);
+  const scopes: ReadScope_ACU[] = [];
+  for (let index = 0; index < values.length; index += 1) {
+    const select = values[index];
+    if (!keyword(select, 'SELECT')) continue;
+    let end = values.length;
+    for (let cursor = index + 1; cursor < values.length; cursor += 1) {
+      const token = values[cursor];
+      if (token.depth < select.depth || (token.depth === select.depth && READ_SCOPE_TERMINATORS_ACU.has(token.value.toUpperCase()))) {
+        end = cursor;
+        break;
+      }
+    }
+    scopes.push({ start: index, end, depth: select.depth, tables: new Set(), aliases: new Map(), qualifiers: new Map(), tableTokens: [] });
+  }
+
+  for (const scope of scopes) {
+    let inFrom = false;
+    const addSource = (sourceIndex: number): void => {
+      const source = values[sourceIndex];
+      if (!source || source.depth !== scope.depth || isFunctionCall_ACU(sql, values, sourceIndex) || isCteReference(values, source, cte)) return;
+      const tail = qualifiedTail(sql, values, sourceIndex);
+      if (!tail || tail.depth !== scope.depth) return;
+      onTableReference?.(tail.value.toLowerCase());
+      const physicalName = normalizedTables.get(tail.value.toLowerCase());
+      if (!physicalName) return;
+      scope.tables.add(physicalName);
+      scope.tableTokens.push(tail);
+      let cursor = values.indexOf(tail) + 1;
+      const next = values[cursor];
+      let alias: Token_ACU | undefined;
+      if (keyword(next, 'AS')) alias = values[cursor + 1]?.depth === scope.depth ? values[cursor + 1] : undefined;
+      else if (next?.depth === scope.depth && !READ_ALIAS_STOP_WORDS_ACU.has(next.value.toUpperCase()) && !next.commaBefore) alias = next;
+      if (alias) scope.aliases.set(alias.value.toLowerCase(), physicalName);
+      else {
+        scope.aliases.set(tail.value.toLowerCase(), physicalName);
+        scope.qualifiers.set(tail.value.toLowerCase(), physicalName);
+      }
+    };
+    for (let index = scope.start + 1; index < scope.end; index += 1) {
+      const token = values[index];
+      if (token.depth !== scope.depth) continue;
+      const value = token.value.toUpperCase();
+      if (READ_FROM_TERMINATORS_ACU.has(value)) inFrom = false;
+      if (value === 'FROM') {
+        inFrom = true;
+        addSource(index + 1);
+      } else if (value === 'JOIN') {
+        addSource(index + 1);
+      } else if (inFrom && token.commaBefore) {
+        addSource(index);
+      }
+    }
+  }
+  return scopes;
+}
+
+/**
+ * Rebinds SELECT-family table and unambiguous column identifiers without using
+ * broad string replacement. The caller supplies aliases from the active schema.
+ */
+export function rebindSqlReadIdentifiers_ACU(
+  sql: string,
+  tableAliases: SqlTableAliasMap_ACU,
+  columnAliases: SqlColumnAliasMap_ACU = new Map(),
+  options: { lenient?: boolean; onTableReference?: (alias: string) => void; onColumnReference?: (alias: string, tableNames: readonly string[]) => void } = {},
+): SqlReadRebindResult_ACU {
+  const normalizedTables = new Map<string, string>();
+  for (const [alias, physicalName] of tableAliases) {
+    normalizedTables.set(decodeSqlIdentifier_ACU(alias).toLowerCase(), physicalName);
+  }
+  try {
+    const values = tokens(sql);
+    const scopes = collectReadScopes_ACU(sql, values, normalizedTables, options.onTableReference);
+    const replacements = new Map<number, { token: Token_ACU; value: string; kind: 'table' | 'column' }>();
+    for (const scope of scopes) {
+      for (const token of scope.tableTokens) {
+        const value = normalizedTables.get(token.value.toLowerCase());
+        if (value) replacements.set(token.start, { token, value, kind: 'table' });
+      }
+    }
+    for (let index = 0; index < values.length - 1; index += 1) {
+      const token = values[index];
+      const next = values[index + 1];
+      if (token.depth !== next.depth || !/^\s*\.\s*$/.test(sql.slice(token.end, next.start))) continue;
+      const scope = findReadScope_ACU(scopes, values, index);
+      const value = scope?.qualifiers.get(token.value.toLowerCase());
+      if (value) replacements.set(token.start, { token, value, kind: 'table' });
+    }
+
+    for (let index = 0; index < values.length; index += 1) {
+      const token = values[index];
+      const previous = values[index - 1];
+      const next = values[index + 1];
+      if (replacements.has(token.start)
+        || (previous && previous.depth === token.depth && keyword(previous, 'AS'))
+        || (next && next.depth === token.depth && /^\s*\.\s*$/.test(sql.slice(token.end, next.start)))
+        || isFunctionCall_ACU(sql, values, index)
+        || token.quote === null && READ_COLUMN_KEYWORDS_ACU.has(token.value.toUpperCase())) continue;
+      const scope = findReadScope_ACU(scopes, values, index);
+      if (!scope) continue;
+      const key = token.value.toLowerCase();
+      const candidates = new Set<string>();
+      const qualifier = previous && previous.depth === token.depth && /^\s*\.\s*$/.test(sql.slice(previous.end, token.start))
+        ? previous : undefined;
+      const tableNames = qualifier
+        ? [scope.aliases.get(qualifier.value.toLowerCase())].filter((value): value is string => !!value)
+        : [...scope.tables];
+      options.onColumnReference?.(key, tableNames);
+      for (const tableName of tableNames) {
+        const columns = columnAliases.get(tableName);
+        const value = columns?.get(key);
+        if (value) candidates.add(value);
+      }
+      if (candidates.size === 1) {
+        const [value] = candidates;
+        if (value !== token.value) replacements.set(token.start, { token, value, kind: 'column' });
+      }
+    }
+
+    let result = sql;
+    let tableRebindCount = 0;
+    let columnRebindCount = 0;
+    for (const { token, value, kind } of [...replacements.values()].sort((left, right) => right.token.start - left.token.start)) {
+      result = `${result.slice(0, token.start)}${format(value, token.quote)}${result.slice(token.end)}`;
+      if (kind === 'table') tableRebindCount += 1;
+      else columnRebindCount += 1;
+    }
+    return { sql: result, tableRebindCount, columnRebindCount };
+  } catch (error) {
+    if (options.lenient) return { sql, tableRebindCount: 0, columnRebindCount: 0 };
+    throw error;
+  }
 }

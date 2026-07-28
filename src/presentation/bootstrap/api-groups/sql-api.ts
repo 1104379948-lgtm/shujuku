@@ -13,6 +13,7 @@ import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '..
 import { buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
 import type { TableWriteConflictUnitV2_ACU } from '../../../service/table/storage-frame-v2-types';
 import type { SqlMutationResult, SqlQueryResult } from '../../../shared/table-storage-provider';
+import { resolveReadQuerySql_ACU, type ReadQueryResolveResult_ACU } from '../../../shared/sql-read-resolver';
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import type { ApiGroupContext } from './callback-api';
 
@@ -52,6 +53,13 @@ export type PublicSqlBatchResult_ACU = PublicSqlMutationResult_ACU & {
     success: boolean;
     modifiedKeys: string[];
     appliedEdits: number;
+};
+
+export type PublicSqlReadError_ACU = {
+    method: 'executeSqlQuery' | 'querySql' | 'queryTableRows' | 'executeSql';
+    code: 'runtime_not_ready' | 'alias_conflict' | 'table_not_found' | 'column_not_resolved' | 'sql_error' | 'read_only_violation';
+    message: string;
+    at: number;
 };
 
 function isPlainObjectArg_ACU(value: any): value is Record<string, any> {
@@ -468,18 +476,56 @@ function buildRawSqlWriteSet_ACU(options: SqlMutationOptions_ACU): TableWriteCon
  * 对外只读 SQL API 仍是同步契约，不能在这里异步 hydrate 并返回半初始化数据库。
  * 因此只接受已完整发布的 runtime；调用者可显式走重载/诊断入口恢复。
  */
+function resolveReadSqlForCurrentData_ACU(sql: string): ReadQueryResolveResult_ACU {
+    const mapper = getNameMapper();
+    return resolveReadQuerySql_ACU(sql, currentJsonTableData_ACU as any, mapper.translateSql.bind(mapper));
+}
+
 function executeReadyReadQuery_ACU(sql: string, params?: SqlParam_ACU[]): { result: SqlQueryResult; sql: string } {
     if (!isStorageRuntimeReadyForSyncRead_ACU()) {
         const health = getStorageRuntimeHealth_ACU();
         throw new Error(`SQL runtime 未就绪: status=${health.status}, expected=${health.expectedMode}, active=${health.activeMode || 'none'}, code=${health.failureCode || 'none'}`);
     }
-    const translatedSql = getNameMapper().translateSql(sql);
-    return { result: getStorageProvider().executeQuery(translatedSql, params), sql: translatedSql };
+    return { result: getStorageProvider().executeQuery(sql, params), sql };
 }
 
 export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
+    let lastReadError: PublicSqlReadError_ACU | null = null;
+    const captureReadError = (
+        method: PublicSqlReadError_ACU['method'],
+        error: unknown,
+        resolved?: ReadQueryResolveResult_ACU,
+    ): void => {
+        const message = error instanceof Error ? error.message : String(error);
+        const hasRelevantAliasConflict = (resolved?.conflicts?.length || 0) > 0 && /no such table|no such column/i.test(message);
+        const code: PublicSqlReadError_ACU['code'] = /runtime 未就绪/i.test(message)
+            ? 'runtime_not_ready'
+            : /only SELECT\/PRAGMA\/EXPLAIN\/WITH/i.test(message)
+                ? 'read_only_violation'
+                : hasRelevantAliasConflict
+                    ? 'alias_conflict'
+                    : /no such table/i.test(message)
+                        ? 'table_not_found'
+                        : /no such column/i.test(message)
+                            ? 'column_not_resolved'
+                            : 'sql_error';
+        lastReadError = { method, code, message, at: Date.now() };
+        logError_ACU(`[${method}] read query failed`, {
+            code,
+            message,
+            sql: resolved?.sql.slice(0, 500),
+            tableRebindCount: resolved?.tableRebindCount || 0,
+            columnRebindCount: resolved?.columnRebindCount || 0,
+            conflicts: resolved?.conflicts || [],
+            runtime: getStorageRuntimeHealth_ACU(),
+        });
+    };
     return {
+        getLastSqlApiError: function(): PublicSqlReadError_ACU | null {
+            return lastReadError ? { ...lastReadError } : null;
+        },
         executeSqlQuery: function(sqlOrOptions: any, params?: any, options?: any): PublicSqlQueryResult_ACU | null {
+            let resolved: ReadQueryResolveResult_ACU | undefined;
             try {
                 const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSqlQuery');
                 if (!isSqlReadStatement_ACU(args.sql)) {
@@ -488,16 +534,18 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 const optionSource = isPlainObjectArg_ACU(sqlOrOptions) ? sqlOrOptions : (isPlainObjectArg_ACU(options) ? options : null);
                 const limit = normalizeLimit_ACU(optionSource?.limit);
                 const offset = normalizeOffset_ACU(optionSource?.offset);
-                const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
+                resolved = resolveReadSqlForCurrentData_ACU(args.sql);
+                const query = buildLimitedReadSql_ACU(resolved.sql, args.params, limit, offset);
                 const executed = executeReadyReadQuery_ACU(query.sql, query.params);
                 return toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql, limit, offset });
             } catch (error) {
-                logError_ACU('executeSqlQuery failed:', error);
+                captureReadError('executeSqlQuery', error, resolved);
                 return null;
             }
         },
 
         querySql: function(sqlOrOptions: any, params?: any, options?: any): PublicSqlQueryResult_ACU | null {
+            let resolved: ReadQueryResolveResult_ACU | undefined;
             try {
                 const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'querySql');
                 if (!isSqlReadStatement_ACU(args.sql)) {
@@ -506,29 +554,32 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 const optionSource = isPlainObjectArg_ACU(sqlOrOptions) ? sqlOrOptions : (isPlainObjectArg_ACU(options) ? options : null);
                 const limit = normalizeLimit_ACU(optionSource?.limit);
                 const offset = normalizeOffset_ACU(optionSource?.offset);
-                const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
+                resolved = resolveReadSqlForCurrentData_ACU(args.sql);
+                const query = buildLimitedReadSql_ACU(resolved.sql, args.params, limit, offset);
                 const executed = executeReadyReadQuery_ACU(query.sql, query.params);
                 return toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql, limit, offset });
             } catch (error) {
-                logError_ACU('querySql failed:', error);
+                captureReadError('querySql', error, resolved);
                 return null;
             }
         },
 
         queryTableRows: function(options: any = {}): PublicSqlQueryResult_ACU | null {
+            let resolved: ReadQueryResolveResult_ACU | undefined;
             try {
                 if (!isPlainObjectArg_ACU(options)) {
                     throw new Error('queryTableRows: options must be an object.');
                 }
                 const query = buildQueryTableRowsSql_ACU(options);
-                const executed = executeReadyReadQuery_ACU(query.sql, query.params);
+                resolved = resolveReadSqlForCurrentData_ACU(query.sql);
+                const executed = executeReadyReadQuery_ACU(resolved.sql, query.params);
                 return toPublicSqlQueryResult_ACU(executed.result, {
                     sql: executed.sql,
                     limit: query.limit,
                     offset: query.offset,
                 });
             } catch (error) {
-                logError_ACU('queryTableRows failed:', error);
+                captureReadError('queryTableRows', error, resolved);
                 return null;
             }
         },
@@ -648,10 +699,14 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
         },
 
         executeSql: async function(sqlOrOptions: any, params?: any, options?: any): Promise<PublicSqlExecutionResult_ACU | null> {
+            let resolved: ReadQueryResolveResult_ACU | undefined;
+            let isReadAttempt = false;
             try {
                 const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSql');
                 if (isSqlReadStatement_ACU(args.sql)) {
-                    const executed = executeReadyReadQuery_ACU(args.sql, args.params);
+                    isReadAttempt = true;
+                    resolved = resolveReadSqlForCurrentData_ACU(args.sql);
+                    const executed = executeReadyReadQuery_ACU(resolved.sql, args.params);
                     return {
                         type: 'query',
                         result: toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql }),
@@ -662,7 +717,8 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                 const result = await this.executeSqlMutation(writeArgs);
                 return { type: 'mutation', result };
             } catch (error) {
-                logError_ACU('executeSql failed:', error);
+                if (isReadAttempt) captureReadError('executeSql', error, resolved);
+                else logError_ACU('executeSql failed:', error);
                 return null;
             }
         },

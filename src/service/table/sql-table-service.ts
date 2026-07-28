@@ -42,6 +42,7 @@ import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
+import { buildSheetTableAliasMap_ACU } from '../../shared/sql-read-resolver';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 
 export interface SnapshotSqlApplyResult_ACU extends ApplyEditsResult {
@@ -347,41 +348,17 @@ export function rebindSqlMutationTableIdentifiers_ACU(
   tableData: TableDataObject_ACU,
   supplementalData?: TableDataObject_ACU | Record<string, unknown> | null,
 ): string[] {
-  const aliases = new Map<string, string>();
-  const conflicts = new Set<string>();
-  const addAlias = (alias: unknown, physicalName: string): void => {
-    const normalized = String(alias || '').trim().toLowerCase();
-    if (!normalized) return;
-    if (conflicts.has(normalized)) return;
-    const existing = aliases.get(normalized);
-    if (existing && existing !== physicalName) {
-      aliases.delete(normalized);
-      conflicts.add(normalized);
-      return;
-    }
-    aliases.set(normalized, physicalName);
-  };
   // 建表权威是模板（_ensureTablesFromTemplate），运行时快照在新卡首次填表时还没有该表。
   // 未显式传入补充源时默认取当前聊天模板，保证别名覆盖与实际建表一致。
   const templateSource = supplementalData === undefined
     ? resolveCurrentChatTemplateForAliases_ACU()
     : supplementalData;
-  // 先模板，后运行时快照：快照代表当前真实结构，同名别名冲突时以其为准。
-  for (const source of [templateSource, tableData]) {
-    if (!source || typeof source !== 'object') continue;
-    let physicalNames: Map<string, string>;
-    try {
-      physicalNames = resolvePhysicalTableNames_ACU(source);
-    } catch (e: any) {
-      // 该来源存在拼音冲突时跳过它，交由另一来源兜底；冲突本身由启动自检负责上报。
-      logWarn_ACU(`[SqlTableService] 别名来源存在物理名冲突，已跳过: ${e?.message || e}`);
-      continue;
-    }
-    for (const [sheetKey, physicalName] of physicalNames) {
-      const sheet = (source as Record<string, any>)[sheetKey];
-      [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName].forEach(alias => addAlias(alias, physicalName));
-    }
-  }
+  // Generation keeps its narrower DDL/physical-name contract, while conflict
+  // arbitration is shared with the read path to prevent semantic drift.
+  const { aliases } = buildSheetTableAliasMap_ACU(
+    [templateSource, tableData],
+    { includeExtendedAliases: false, skipInvalidSources: true },
+  );
   return rebindSqlMutationTableReferences_ACU(statements, aliases);
 }
 

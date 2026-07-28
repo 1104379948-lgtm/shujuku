@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
   persistTablesToChatMessage: vi.fn().mockResolvedValue({ saved: true, messageIndex: 3 }),
   getCurrentData: vi.fn(() => ({ mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } })),
   getNameMapper: vi.fn(),
-  translateSql: vi.fn((sql: string) => sql.replaceAll('背包物品表', 'inventory').replaceAll('物品名称', 'item_name')),
+  translateSql: vi.fn((sql: string) => sql.replaceAll('背包物品表', 'inventory').replaceAll('物品名称', 'item_name').replaceAll('内容', 'content')),
   resolveColumnName: vi.fn((_tableName: string, columnName: string) => columnName),
   getChineseColumnName: vi.fn((_tableName: string, columnName: string) => columnName),
   getChineseTableName: vi.fn((tableName: string) => tableName),
@@ -218,6 +218,22 @@ describe('createSqlApi', () => {
     expect(mocks.executeQuery).toHaveBeenCalledWith('SELECT `row_id` FROM `jiyaobiao` LIMIT ? OFFSET ?', [20, 0]);
   });
 
+  it('executeSqlQuery 将原始 DDL 表名和显示列名重绑定到拼音物理标识符', () => {
+    mockCurrentJsonTableData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        name: '纪要表',
+        sourceData: { ddl: 'CREATE TABLE chronicle (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  content TEXT -- 内容\n);' },
+        content: [['row_id', '内容'], ['1', '记录']],
+      },
+    };
+
+    const result = api.executeSqlQuery('SELECT 内容 FROM chronicle WHERE 内容 = ?', ['记录']);
+
+    expect(result).not.toBeNull();
+    expect(mocks.executeQuery).toHaveBeenCalledWith('SELECT content FROM jiyaobiao WHERE content = ?', ['记录']);
+  });
+
   it('querySql 拒绝写语句', () => {
     const result = api.querySql('UPDATE t SET name = 1');
 
@@ -248,7 +264,8 @@ describe('createSqlApi', () => {
 
     expect(result).toEqual(expect.objectContaining({ sql: "SELECT item_name FROM inventory WHERE item_name = '铁剑'" }));
     expect(mocks.getNameMapper).toHaveBeenCalled();
-    expect(mocks.translateSql).toHaveBeenCalledWith(sql);
+    expect(mocks.translateSql).toHaveBeenCalledOnce();
+    expect(mocks.translateSql.mock.calls[0][0]).toContain('__ACU_SQL_PROTECTED_0__');
     expect(mocks.executeQuery).toHaveBeenCalledWith("SELECT item_name FROM inventory WHERE item_name = '铁剑'", undefined);
   });
 
@@ -258,6 +275,43 @@ describe('createSqlApi', () => {
 
     expect(api.executeSqlQuery('SELECT * FROM inventory')).toBeNull();
     expect(mocks.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it('保留只读失败契约，并公开结构化最后错误', () => {
+    mocks.executeQuery.mockImplementationOnce(() => { throw new Error('no such table: missing_table'); });
+
+    expect(api.querySql('SELECT * FROM missing_table')).toBeNull();
+    expect(api.getLastSqlApiError()).toEqual(expect.objectContaining({
+      method: 'querySql',
+      code: 'table_not_found',
+      message: 'no such table: missing_table',
+    }));
+  });
+
+  it('无关 schema 别名冲突不掩盖缺失表错误', () => {
+    mockCurrentJsonTableData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'sheet_0',
+        name: 'Alpha',
+        sourceData: { ddl: 'CREATE TABLE legacy (row_id INTEGER PRIMARY KEY);' },
+        content: [['row_id'], ['1']],
+      },
+      sheet_1: {
+        uid: 'sheet_1',
+        name: 'Legacy',
+        sourceData: { ddl: 'CREATE TABLE other (row_id INTEGER PRIMARY KEY);' },
+        content: [['row_id'], ['1']],
+      },
+    };
+    mocks.executeQuery.mockImplementationOnce(() => { throw new Error('no such table: missing_table'); });
+
+    expect(api.querySql('SELECT * FROM missing_table')).toBeNull();
+    expect(api.getLastSqlApiError()).toEqual(expect.objectContaining({
+      method: 'querySql',
+      code: 'table_not_found',
+      message: 'no such table: missing_table',
+    }));
   });
 
   it('executeSqlMutation 将唯一 DDL alias 重绑定为 runtime SQL，并记录 sql_sheet_batch', async () => {

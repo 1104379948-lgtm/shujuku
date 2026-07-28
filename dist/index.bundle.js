@@ -36795,8 +36795,8 @@ $CONTENT
         return candidate;
     }
 
-    function wordStart(char) { return /^[A-Za-z_]$/.test(char); }
-    function wordPart(char) { return /^[A-Za-z0-9_$]$/.test(char); }
+    function wordStart(char) { return /^[A-Za-z_\u0080-\uFFFF]$/.test(char); }
+    function wordPart(char) { return /^[A-Za-z0-9_$\u0080-\uFFFF]$/.test(char); }
     function keyword(token, value) {
         return !!token && token.quote === null && token.value.toUpperCase() === value;
     }
@@ -37035,6 +37035,168 @@ $CONTENT
                 throw error;
             }
         });
+    }
+    const READ_SCOPE_TERMINATORS_ACU = new Set(['UNION', 'EXCEPT', 'INTERSECT']);
+    const READ_FROM_TERMINATORS_ACU = new Set(['WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW']);
+    const READ_ALIAS_STOP_WORDS_ACU = new Set(['ON', 'USING', 'JOIN', 'LEFT', 'RIGHT', 'FULL', 'INNER', 'CROSS', 'NATURAL', 'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'UNION', 'EXCEPT', 'INTERSECT', 'WINDOW']);
+    const READ_COLUMN_KEYWORDS_ACU = new Set(['SELECT', 'FROM', 'JOIN', 'AS', 'ON', 'WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'EXCEPT', 'INTERSECT', 'WITH', 'RECURSIVE', 'DISTINCT', 'BY', 'AND', 'OR', 'NOT', 'IN', 'IS', 'NULL', 'LIKE', 'BETWEEN', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'ASC', 'DESC', 'COLLATE', 'USING']);
+    function isFunctionCall_ACU(sql, values, index) {
+        const token = values[index];
+        return !!token && /^\s*\(/.test(sql.slice(token.end));
+    }
+    function findReadScope_ACU(scopes, values, index) {
+        const token = values[index];
+        return scopes
+            .filter(scope => index >= scope.start && index < scope.end && token.depth >= scope.depth)
+            .sort((left, right) => right.depth - left.depth || right.start - left.start)[0];
+    }
+    function collectReadScopes_ACU(sql, values, normalizedTables, onTableReference) {
+        const cte = cteScopes(values);
+        const scopes = [];
+        for (let index = 0; index < values.length; index += 1) {
+            const select = values[index];
+            if (!keyword(select, 'SELECT'))
+                continue;
+            let end = values.length;
+            for (let cursor = index + 1; cursor < values.length; cursor += 1) {
+                const token = values[cursor];
+                if (token.depth < select.depth || (token.depth === select.depth && READ_SCOPE_TERMINATORS_ACU.has(token.value.toUpperCase()))) {
+                    end = cursor;
+                    break;
+                }
+            }
+            scopes.push({ start: index, end, depth: select.depth, tables: new Set(), aliases: new Map(), qualifiers: new Map(), tableTokens: [] });
+        }
+        for (const scope of scopes) {
+            let inFrom = false;
+            const addSource = (sourceIndex) => {
+                const source = values[sourceIndex];
+                if (!source || source.depth !== scope.depth || isFunctionCall_ACU(sql, values, sourceIndex) || isCteReference(values, source, cte))
+                    return;
+                const tail = qualifiedTail(sql, values, sourceIndex);
+                if (!tail || tail.depth !== scope.depth)
+                    return;
+                onTableReference?.(tail.value.toLowerCase());
+                const physicalName = normalizedTables.get(tail.value.toLowerCase());
+                if (!physicalName)
+                    return;
+                scope.tables.add(physicalName);
+                scope.tableTokens.push(tail);
+                let cursor = values.indexOf(tail) + 1;
+                const next = values[cursor];
+                let alias;
+                if (keyword(next, 'AS'))
+                    alias = values[cursor + 1]?.depth === scope.depth ? values[cursor + 1] : undefined;
+                else if (next?.depth === scope.depth && !READ_ALIAS_STOP_WORDS_ACU.has(next.value.toUpperCase()) && !next.commaBefore)
+                    alias = next;
+                if (alias)
+                    scope.aliases.set(alias.value.toLowerCase(), physicalName);
+                else {
+                    scope.aliases.set(tail.value.toLowerCase(), physicalName);
+                    scope.qualifiers.set(tail.value.toLowerCase(), physicalName);
+                }
+            };
+            for (let index = scope.start + 1; index < scope.end; index += 1) {
+                const token = values[index];
+                if (token.depth !== scope.depth)
+                    continue;
+                const value = token.value.toUpperCase();
+                if (READ_FROM_TERMINATORS_ACU.has(value))
+                    inFrom = false;
+                if (value === 'FROM') {
+                    inFrom = true;
+                    addSource(index + 1);
+                }
+                else if (value === 'JOIN') {
+                    addSource(index + 1);
+                }
+                else if (inFrom && token.commaBefore) {
+                    addSource(index);
+                }
+            }
+        }
+        return scopes;
+    }
+    /**
+     * Rebinds SELECT-family table and unambiguous column identifiers without using
+     * broad string replacement. The caller supplies aliases from the active schema.
+     */
+    function rebindSqlReadIdentifiers_ACU(sql, tableAliases, columnAliases = new Map(), options = {}) {
+        const normalizedTables = new Map();
+        for (const [alias, physicalName] of tableAliases) {
+            normalizedTables.set(decodeSqlIdentifier_ACU(alias).toLowerCase(), physicalName);
+        }
+        try {
+            const values = tokens(sql);
+            const scopes = collectReadScopes_ACU(sql, values, normalizedTables, options.onTableReference);
+            const replacements = new Map();
+            for (const scope of scopes) {
+                for (const token of scope.tableTokens) {
+                    const value = normalizedTables.get(token.value.toLowerCase());
+                    if (value)
+                        replacements.set(token.start, { token, value, kind: 'table' });
+                }
+            }
+            for (let index = 0; index < values.length - 1; index += 1) {
+                const token = values[index];
+                const next = values[index + 1];
+                if (token.depth !== next.depth || !/^\s*\.\s*$/.test(sql.slice(token.end, next.start)))
+                    continue;
+                const scope = findReadScope_ACU(scopes, values, index);
+                const value = scope?.qualifiers.get(token.value.toLowerCase());
+                if (value)
+                    replacements.set(token.start, { token, value, kind: 'table' });
+            }
+            for (let index = 0; index < values.length; index += 1) {
+                const token = values[index];
+                const previous = values[index - 1];
+                const next = values[index + 1];
+                if (replacements.has(token.start)
+                    || (previous && previous.depth === token.depth && keyword(previous, 'AS'))
+                    || (next && next.depth === token.depth && /^\s*\.\s*$/.test(sql.slice(token.end, next.start)))
+                    || isFunctionCall_ACU(sql, values, index)
+                    || token.quote === null && READ_COLUMN_KEYWORDS_ACU.has(token.value.toUpperCase()))
+                    continue;
+                const scope = findReadScope_ACU(scopes, values, index);
+                if (!scope)
+                    continue;
+                const key = token.value.toLowerCase();
+                const candidates = new Set();
+                const qualifier = previous && previous.depth === token.depth && /^\s*\.\s*$/.test(sql.slice(previous.end, token.start))
+                    ? previous : undefined;
+                const tableNames = qualifier
+                    ? [scope.aliases.get(qualifier.value.toLowerCase())].filter((value) => !!value)
+                    : [...scope.tables];
+                options.onColumnReference?.(key, tableNames);
+                for (const tableName of tableNames) {
+                    const columns = columnAliases.get(tableName);
+                    const value = columns?.get(key);
+                    if (value)
+                        candidates.add(value);
+                }
+                if (candidates.size === 1) {
+                    const [value] = candidates;
+                    if (value !== token.value)
+                        replacements.set(token.start, { token, value, kind: 'column' });
+                }
+            }
+            let result = sql;
+            let tableRebindCount = 0;
+            let columnRebindCount = 0;
+            for (const { token, value, kind } of [...replacements.values()].sort((left, right) => right.token.start - left.token.start)) {
+                result = `${result.slice(0, token.start)}${format(value, token.quote)}${result.slice(token.end)}`;
+                if (kind === 'table')
+                    tableRebindCount += 1;
+                else
+                    columnRebindCount += 1;
+            }
+            return { sql: result, tableRebindCount, columnRebindCount };
+        }
+        catch (error) {
+            if (options.lenient)
+                return { sql, tableRebindCount: 0, columnRebindCount: 0 };
+            throw error;
+        }
     }
 
     function deepClone_ACU$4(value) {
@@ -46566,6 +46728,295 @@ $CONTENT
         }
     }
 
+    function addAlias_ACU(aliases, conflicts, alias, physicalName) {
+        const key = String(alias || '').trim().toLowerCase();
+        if (!key || conflicts.has(key))
+            return;
+        const existing = aliases.get(key);
+        if (existing && existing !== physicalName) {
+            aliases.delete(key);
+            conflicts.add(key);
+            return;
+        }
+        aliases.set(key, physicalName);
+    }
+    /** Builds the shared, conflict-safe table alias registry used by SQL readers and writers. */
+    function buildSheetTableAliasMap_ACU(sources, options = {}) {
+        const aliases = new Map();
+        const conflicts = new Set();
+        for (const source of sources) {
+            if (!source || typeof source !== 'object')
+                continue;
+            let physicalNames;
+            try {
+                physicalNames = resolvePhysicalTableNames_ACU(source);
+            }
+            catch (error) {
+                if (options.skipInvalidSources)
+                    continue;
+                throw error;
+            }
+            for (const [sheetKey, physicalName] of physicalNames) {
+                const sheet = source[sheetKey];
+                const sourceAliases = [parseDDLTableName(String(sheet?.sourceData?.ddl || '')), physicalName];
+                if (options.includeExtendedAliases !== false) {
+                    sourceAliases.push(sheetKey, sheet?.uid, sheet?.name);
+                }
+                sourceAliases.forEach(alias => addAlias_ACU(aliases, conflicts, alias, physicalName));
+            }
+        }
+        return { aliases, conflicts };
+    }
+    /** Builds table-scoped column aliases without guessing ambiguous fallback DDL columns. */
+    function buildSheetColumnAliasMap_ACU(sources) {
+        const aliases = new Map();
+        const conflicts = new Map();
+        for (const source of sources) {
+            if (!source || typeof source !== 'object')
+                continue;
+            for (const [sheetKey, value] of Object.entries(source)) {
+                if (!sheetKey.startsWith('sheet_') || !value || typeof value !== 'object')
+                    continue;
+                const sheet = value;
+                const physicalName = getPhysicalTableNameForSheet_ACU(source, sheetKey);
+                const columns = aliases.get(physicalName) || new Map();
+                const resolved = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, physicalName);
+                const columnConflicts = conflicts.get(physicalName) || new Set();
+                for (const mapping of resolved.columnMap.mappings) {
+                    columns.set(String(mapping.sqlName).toLowerCase(), mapping.sqlName);
+                    columns.set(String(mapping.displayName).toLowerCase(), mapping.sqlName);
+                }
+                if (resolved.source !== 'explicit' && resolved.originalDDL) {
+                    const claimedTargets = new Map();
+                    const rejectedTargets = new Set();
+                    const fallbackAliases = new Map();
+                    for (const column of parseDDLColumnInfos_ACU(resolved.originalDDL)) {
+                        const sourceKey = column.sqlName.toLowerCase();
+                        const matched = resolved.columnMap.mappings.filter(mapping => (mapping.displayName === column.sqlName || mapping.displayName === column.comment));
+                        if (matched.length !== 1) {
+                            columnConflicts.add(sourceKey);
+                            continue;
+                        }
+                        const target = matched[0].sqlName;
+                        const targetKey = target.toLowerCase();
+                        if (rejectedTargets.has(targetKey)) {
+                            columnConflicts.add(sourceKey);
+                            continue;
+                        }
+                        const claimedSource = claimedTargets.get(targetKey);
+                        if (!claimedSource || claimedSource === sourceKey) {
+                            claimedTargets.set(targetKey, sourceKey);
+                            fallbackAliases.set(sourceKey, target);
+                            continue;
+                        }
+                        fallbackAliases.delete(claimedSource);
+                        fallbackAliases.delete(sourceKey);
+                        columnConflicts.add(claimedSource);
+                        columnConflicts.add(sourceKey);
+                        claimedTargets.delete(targetKey);
+                        rejectedTargets.add(targetKey);
+                    }
+                    for (const [source, target] of fallbackAliases)
+                        columns.set(source, target);
+                }
+                aliases.set(physicalName, columns);
+                if (columnConflicts.size > 0)
+                    conflicts.set(physicalName, columnConflicts);
+            }
+        }
+        return { aliases, conflicts };
+    }
+    function isSqlWordStart_ACU(char) {
+        return /^[A-Za-z_\u0080-\uFFFF]$/.test(char);
+    }
+    function isSqlWordPart_ACU(char) {
+        return /^[A-Za-z0-9_$\u0080-\uFFFF]$/.test(char);
+    }
+    function protectImplicitSelectAliases_ACU(masked, mask) {
+        const selectScopes = [];
+        let depth = 0;
+        for (let index = 0; index < masked.length;) {
+            if (masked[index] === '(') {
+                depth += 1;
+                index += 1;
+                continue;
+            }
+            if (masked[index] === ')') {
+                depth = Math.max(0, depth - 1);
+                index += 1;
+                continue;
+            }
+            if (!isSqlWordStart_ACU(masked[index])) {
+                index += 1;
+                continue;
+            }
+            const start = index;
+            index += 1;
+            while (index < masked.length && isSqlWordPart_ACU(masked[index]))
+                index += 1;
+            if (masked.slice(start, index).toUpperCase() === 'SELECT')
+                selectScopes.push({ start: index, depth });
+        }
+        const aliases = new Map();
+        const stopWords = new Set(['END', 'ASC', 'DESC', 'NULLS', 'FIRST', 'LAST', 'COLLATE']);
+        const projectionTerminators = new Set(['FROM', 'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'WINDOW', 'UNION', 'EXCEPT', 'INTERSECT']);
+        const projectionModifiers = new Set(['DISTINCT', 'ALL']);
+        const operandPrefixes = /(?:\b(?:AND|OR|IN|IS|LIKE|GLOB|MATCH|REGEXP|BETWEEN|ESCAPE|COLLATE)\s*|[+*/%<>=|&~-]\s*)$/i;
+        const recordProjectionAlias = (start, end) => {
+            while (end > start && /\s/.test(masked[end - 1]))
+                end -= 1;
+            let aliasStart = end;
+            while (aliasStart > start && isSqlWordPart_ACU(masked[aliasStart - 1]))
+                aliasStart -= 1;
+            if (aliasStart === end || !isSqlWordStart_ACU(masked[aliasStart]) || aliasStart === start || !/\s/.test(masked[aliasStart - 1]))
+                return;
+            const alias = masked.slice(aliasStart, end);
+            if (stopWords.has(alias.toUpperCase()) || /^__ACU_SQL_PROTECTED_\d+__$/.test(alias))
+                return;
+            const expression = masked.slice(start, aliasStart).trim();
+            const expressionWithoutModifiers = expression.replace(/^(?:DISTINCT|ALL)\s+/i, '').trim();
+            if (!expressionWithoutModifiers || projectionModifiers.has(expression.toUpperCase()) || operandPrefixes.test(expressionWithoutModifiers))
+                return;
+            aliases.set(aliasStart, end);
+        };
+        for (const scope of selectScopes) {
+            let projectionStart = scope.start;
+            let currentDepth = scope.depth;
+            let projectionClosed = false;
+            for (let index = scope.start; index < masked.length;) {
+                const char = masked[index];
+                if (char === '(') {
+                    currentDepth += 1;
+                    index += 1;
+                    continue;
+                }
+                if (char === ')') {
+                    if (currentDepth === scope.depth) {
+                        recordProjectionAlias(projectionStart, index);
+                        projectionClosed = true;
+                        break;
+                    }
+                    if (currentDepth < scope.depth)
+                        break;
+                    currentDepth = Math.max(0, currentDepth - 1);
+                    index += 1;
+                    continue;
+                }
+                if (currentDepth === scope.depth && char === ',') {
+                    recordProjectionAlias(projectionStart, index);
+                    projectionStart = index + 1;
+                    index += 1;
+                    continue;
+                }
+                if (!isSqlWordStart_ACU(char)) {
+                    index += 1;
+                    continue;
+                }
+                const start = index;
+                index += 1;
+                while (index < masked.length && isSqlWordPart_ACU(masked[index]))
+                    index += 1;
+                if (currentDepth === scope.depth && projectionTerminators.has(masked.slice(start, index).toUpperCase())) {
+                    recordProjectionAlias(projectionStart, start);
+                    projectionClosed = true;
+                    break;
+                }
+            }
+            if (!projectionClosed)
+                recordProjectionAlias(projectionStart, masked.length);
+        }
+        let result = masked;
+        for (const [start, end] of [...aliases.entries()].sort(([left], [right]) => right - left)) {
+            result = `${result.slice(0, start)}${mask(result.slice(start, end))}${result.slice(end)}`;
+        }
+        return result;
+    }
+    function translateLegacyReadSqlSafely_ACU(sql, translateSql) {
+        const protectedParts = [];
+        let masked = '';
+        let index = 0;
+        const mask = (value) => {
+            const marker = `__ACU_SQL_PROTECTED_${protectedParts.length}__`;
+            protectedParts.push(value);
+            return marker;
+        };
+        while (index < sql.length) {
+            const char = sql[index];
+            const next = sql[index + 1];
+            if (char === '-' && next === '-') {
+                const lineFeed = sql.indexOf('\n', index + 2);
+                const carriageReturn = sql.indexOf('\r', index + 2);
+                const stop = [lineFeed, carriageReturn].filter(value => value >= 0).sort((left, right) => left - right)[0] ?? sql.length;
+                masked += mask(sql.slice(index, stop));
+                index = stop;
+                continue;
+            }
+            if (char === '/' && next === '*') {
+                const end = sql.indexOf('*/', index + 2);
+                const stop = end < 0 ? sql.length : end + 2;
+                masked += mask(sql.slice(index, stop));
+                index = stop;
+                continue;
+            }
+            if (char === "'" || char === '"' || char === '`' || char === '[') {
+                const close = char === '[' ? ']' : char;
+                let cursor = index + 1;
+                while (cursor < sql.length) {
+                    if (sql[cursor] !== close)
+                        cursor += 1;
+                    else if (sql[cursor + 1] === close)
+                        cursor += 2;
+                    else {
+                        cursor += 1;
+                        break;
+                    }
+                }
+                masked += mask(sql.slice(index, cursor));
+                index = cursor;
+                continue;
+            }
+            masked += char;
+            index += 1;
+        }
+        // NameMapper predates token rebind and performs broad replacement. Protect
+        // output aliases before invoking it so a presentation-only name cannot turn
+        // into a physical column merely because no table/column token was rebound.
+        const identifier = '[A-Za-z_\\u0080-\\uFFFF][A-Za-z0-9_$\\u0080-\\uFFFF]*';
+        const protectedAliases = masked
+            .replace(new RegExp(`(\\bAS\\s+)(${identifier})`, 'gi'), (_match, prefix, alias) => `${prefix}${mask(alias)}`);
+        const protectedOutputAliases = protectImplicitSelectAliases_ACU(protectedAliases, mask);
+        const translated = translateSql(protectedOutputAliases);
+        return translated.replace(/__ACU_SQL_PROTECTED_(\d+)__/g, (_match, value) => protectedParts[Number(value)] || '');
+    }
+    function resolveReadQuerySql_ACU(sql, tableData, translateSql) {
+        // PRAGMA arguments are SQLite grammar rather than SELECT identifiers.
+        // Do not run a broad legacy translation over them.
+        if (/^\s*PRAGMA\b/i.test(sql))
+            return { sql, tableRebindCount: 0, columnRebindCount: 0 };
+        if (!tableData)
+            return { sql: translateLegacyReadSqlSafely_ACU(sql, translateSql), tableRebindCount: 0, columnRebindCount: 0 };
+        const { aliases: tableAliases, conflicts: tableConflicts } = buildSheetTableAliasMap_ACU([tableData]);
+        const { aliases: columnAliases, conflicts: columnConflicts } = buildSheetColumnAliasMap_ACU([tableData]);
+        const referencedTableAliases = new Set();
+        const referencedColumnConflicts = new Set();
+        const rebound = rebindSqlReadIdentifiers_ACU(sql, tableAliases, columnAliases, {
+            lenient: true,
+            onTableReference: alias => referencedTableAliases.add(alias),
+            onColumnReference: (alias, tableNames) => {
+                if (tableNames.some(tableName => columnConflicts.get(tableName)?.has(alias)))
+                    referencedColumnConflicts.add(alias);
+            },
+        });
+        const referencedTableConflicts = [...tableConflicts].filter(conflict => referencedTableAliases.has(conflict));
+        return {
+            ...rebound,
+            sql: translateLegacyReadSqlSafely_ACU(rebound.sql, translateSql),
+            tableConflicts: referencedTableConflicts,
+            columnConflicts: [...referencedColumnConflicts],
+            conflicts: [...referencedTableConflicts, ...referencedColumnConflicts],
+        };
+    }
+
     /**
      * service/table/sql-table-service.ts — SQLite 模式的 ITableStorageProvider 实现
      *
@@ -46834,45 +47285,14 @@ $CONTENT
      * 因此额外接收 supplementalData（通常为当前聊天模板）参与别名解析。
      */
     function rebindSqlMutationTableIdentifiers_ACU(statements, tableData, supplementalData) {
-        const aliases = new Map();
-        const conflicts = new Set();
-        const addAlias = (alias, physicalName) => {
-            const normalized = String(alias || '').trim().toLowerCase();
-            if (!normalized)
-                return;
-            if (conflicts.has(normalized))
-                return;
-            const existing = aliases.get(normalized);
-            if (existing && existing !== physicalName) {
-                aliases.delete(normalized);
-                conflicts.add(normalized);
-                return;
-            }
-            aliases.set(normalized, physicalName);
-        };
         // 建表权威是模板（_ensureTablesFromTemplate），运行时快照在新卡首次填表时还没有该表。
         // 未显式传入补充源时默认取当前聊天模板，保证别名覆盖与实际建表一致。
         const templateSource = supplementalData === undefined
             ? resolveCurrentChatTemplateForAliases_ACU()
             : supplementalData;
-        // 先模板，后运行时快照：快照代表当前真实结构，同名别名冲突时以其为准。
-        for (const source of [templateSource, tableData]) {
-            if (!source || typeof source !== 'object')
-                continue;
-            let physicalNames;
-            try {
-                physicalNames = resolvePhysicalTableNames_ACU(source);
-            }
-            catch (e) {
-                // 该来源存在拼音冲突时跳过它，交由另一来源兜底；冲突本身由启动自检负责上报。
-                logWarn_ACU(`[SqlTableService] 别名来源存在物理名冲突，已跳过: ${e?.message || e}`);
-                continue;
-            }
-            for (const [sheetKey, physicalName] of physicalNames) {
-                const sheet = source[sheetKey];
-                [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName].forEach(alias => addAlias(alias, physicalName));
-            }
-        }
+        // Generation keeps its narrower DDL/physical-name contract, while conflict
+        // arbitration is shared with the read path to prevent semantic drift.
+        const { aliases } = buildSheetTableAliasMap_ACU([templateSource, tableData], { includeExtendedAliases: false, skipInvalidSources: true });
         return rebindSqlMutationTableReferences_ACU(statements, aliases);
     }
     /**
@@ -48531,6 +48951,10 @@ $CONTENT
     /** 模块级变量存储（每次 replaceDbSqlVariables 调用时重置） */
     let _dbSqlVars = {};
     let lastBlockedQueryKey_ACU = '';
+    function resolveTemplateReadSql_ACU(sql) {
+        const mapper = getNameMapper();
+        return resolveReadQuerySql_ACU(sql, currentJsonTableData_ACU, mapper.translateSql.bind(mapper)).sql;
+    }
     /**
      * 模板渲染是同步路径，绝不能为了一个 SELECT 在这里创建未 hydrate 的 SQLite provider。
      * 未就绪时 fail-closed，避免中文展示名被空 NameMapper 原样下发给 SQLite。
@@ -48861,8 +49285,7 @@ $CONTENT
          * 语法：db.背包物品表.where('类别', '武器').value("SUM(数量) * 2")
          */
         value(expression) {
-            const mapper = getNameMapper();
-            const translatedExpr = mapper.translateSql(expression);
+            const translatedExpr = resolveTemplateReadSql_ACU(expression);
             const sql = this._buildSelect(translatedExpr);
             const result = this._executeQuery(sql);
             if (result.values.length === 0)
@@ -49021,8 +49444,7 @@ $CONTENT
             }
             if (!isTemplateQueryRuntimeReady_ACU('db.expr'))
                 return null;
-            const mapper = getNameMapper();
-            const translatedExpr = mapper.translateSql(expression.trim());
+            const translatedExpr = resolveTemplateReadSql_ACU(expression.trim());
             const sql = `SELECT ${translatedExpr}`;
             const provider = getStorageProvider();
             const result = provider.executeQuery(sql);
@@ -49227,8 +49649,7 @@ $CONTENT
                 return '';
             }
             // 通过 NameMapper 翻译中文名
-            const mapper = getNameMapper();
-            const translatedSql = mapper.translateSql(trimmed);
+            const translatedSql = resolveTemplateReadSql_ACU(trimmed);
             // 执行查询
             const provider = getStorageProvider();
             const result = provider.executeQuery(translatedSql, undefined, {
@@ -49334,8 +49755,7 @@ $CONTENT
             // 直接传入 SQL 表达式，不需要包引号
             // evaluateRawSqlExpression 内部会处理 "sql " 前缀和引号剥离
             // 但这里的 expression 来自 <if sql="...">，本身就是纯 SQL，直接执行即可
-            const mapper = getNameMapper();
-            const translatedSql = mapper.translateSql(expression.trim());
+            const translatedSql = resolveTemplateReadSql_ACU(expression.trim());
             const provider = getStorageProvider();
             const result = provider.executeQuery(translatedSql);
             if (result.values.length === 0)
@@ -51492,7 +51912,8 @@ $CONTENT
                     if (rawSql === null)
                         throw new Error('query_tag_not_supported');
                     const before = validateReadOnlySql_ACU(rawSql);
-                    const translated = getNameMapper().translateSql(rawSql);
+                    const mapper = getNameMapper();
+                    const translated = resolveReadQuerySql_ACU(rawSql, currentJsonTableData_ACU, mapper.translateSql.bind(mapper)).sql;
                     const after = validateReadOnlySql_ACU(translated);
                     if (!before.valid || !after.valid)
                         throw new Error(before.reason || after.reason || 'sql_not_allowed');
@@ -83295,7 +83716,7 @@ $CONTENT
      * 批处理更新：presentation 层调用 service 层，根据返回值显示 toast
      */
     async function processUpdates_ACU(indicesToUpdate, mode = 'auto', options = {}) {
-        const result = await processUpdatesBatch_ACU(indicesToUpdate, mode, options, 
+        const result = await processUpdatesBatch_ACU(indicesToUpdate, mode, options,
         // executeUpdate 回调：创建 AbortController 并调用 presentation 层的 proceedWithCardUpdate
         async (messagesToUse, saveTargetIndex, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext) => {
             return proceedWithCardUpdate_ACU(messagesToUse, '', saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext);
@@ -83367,15 +83788,15 @@ $CONTENT
                     }
                 },
             });
-            const result = await orchestrateManualUpdate_ACU(targetKeys, 
+            const result = await orchestrateManualUpdate_ACU(targetKeys,
             // processBatch 回调保留给兼容路径；当前手动填表主路径由 service grouped helper 执行。
             async (indices, batchMode, batchOptions) => {
                 return processUpdates_ACU(indices, batchMode, batchOptions);
-            }, 
+            },
             // refreshData 回调（纯数据刷新 + UI 刷新）
             async () => {
                 await refreshMergedDataAndNotifyWithUI_ACU();
-            }, 
+            },
             // [新增] 传入用户确认后的预清空选项
             {
                 clearBeforeUpdate: true,
@@ -93648,17 +94069,50 @@ $CONTENT
      * 对外只读 SQL API 仍是同步契约，不能在这里异步 hydrate 并返回半初始化数据库。
      * 因此只接受已完整发布的 runtime；调用者可显式走重载/诊断入口恢复。
      */
+    function resolveReadSqlForCurrentData_ACU(sql) {
+        const mapper = getNameMapper();
+        return resolveReadQuerySql_ACU(sql, currentJsonTableData_ACU, mapper.translateSql.bind(mapper));
+    }
     function executeReadyReadQuery_ACU(sql, params) {
         if (!isStorageRuntimeReadyForSyncRead_ACU()) {
             const health = getStorageRuntimeHealth_ACU();
             throw new Error(`SQL runtime 未就绪: status=${health.status}, expected=${health.expectedMode}, active=${health.activeMode || 'none'}, code=${health.failureCode || 'none'}`);
         }
-        const translatedSql = getNameMapper().translateSql(sql);
-        return { result: getStorageProvider().executeQuery(translatedSql, params), sql: translatedSql };
+        return { result: getStorageProvider().executeQuery(sql, params), sql };
     }
     function createSqlApi(ctx) {
+        let lastReadError = null;
+        const captureReadError = (method, error, resolved) => {
+            const message = error instanceof Error ? error.message : String(error);
+            const hasRelevantAliasConflict = (resolved?.conflicts?.length || 0) > 0 && /no such table|no such column/i.test(message);
+            const code = /runtime 未就绪/i.test(message)
+                ? 'runtime_not_ready'
+                : /only SELECT\/PRAGMA\/EXPLAIN\/WITH/i.test(message)
+                    ? 'read_only_violation'
+                    : hasRelevantAliasConflict
+                        ? 'alias_conflict'
+                        : /no such table/i.test(message)
+                            ? 'table_not_found'
+                            : /no such column/i.test(message)
+                                ? 'column_not_resolved'
+                                : 'sql_error';
+            lastReadError = { method, code, message, at: Date.now() };
+            logError_ACU(`[${method}] read query failed`, {
+                code,
+                message,
+                sql: resolved?.sql.slice(0, 500),
+                tableRebindCount: resolved?.tableRebindCount || 0,
+                columnRebindCount: resolved?.columnRebindCount || 0,
+                conflicts: resolved?.conflicts || [],
+                runtime: getStorageRuntimeHealth_ACU(),
+            });
+        };
         return {
+            getLastSqlApiError: function () {
+                return lastReadError ? { ...lastReadError } : null;
+            },
             executeSqlQuery: function (sqlOrOptions, params, options) {
+                let resolved;
                 try {
                     const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSqlQuery');
                     if (!isSqlReadStatement_ACU(args.sql)) {
@@ -93667,16 +94121,18 @@ $CONTENT
                     const optionSource = isPlainObjectArg_ACU$1(sqlOrOptions) ? sqlOrOptions : (isPlainObjectArg_ACU$1(options) ? options : null);
                     const limit = normalizeLimit_ACU(optionSource?.limit);
                     const offset = normalizeOffset_ACU(optionSource?.offset);
-                    const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
+                    resolved = resolveReadSqlForCurrentData_ACU(args.sql);
+                    const query = buildLimitedReadSql_ACU(resolved.sql, args.params, limit, offset);
                     const executed = executeReadyReadQuery_ACU(query.sql, query.params);
                     return toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql, limit, offset });
                 }
                 catch (error) {
-                    logError_ACU('executeSqlQuery failed:', error);
+                    captureReadError('executeSqlQuery', error, resolved);
                     return null;
                 }
             },
             querySql: function (sqlOrOptions, params, options) {
+                let resolved;
                 try {
                     const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'querySql');
                     if (!isSqlReadStatement_ACU(args.sql)) {
@@ -93685,22 +94141,25 @@ $CONTENT
                     const optionSource = isPlainObjectArg_ACU$1(sqlOrOptions) ? sqlOrOptions : (isPlainObjectArg_ACU$1(options) ? options : null);
                     const limit = normalizeLimit_ACU(optionSource?.limit);
                     const offset = normalizeOffset_ACU(optionSource?.offset);
-                    const query = buildLimitedReadSql_ACU(args.sql, args.params, limit, offset);
+                    resolved = resolveReadSqlForCurrentData_ACU(args.sql);
+                    const query = buildLimitedReadSql_ACU(resolved.sql, args.params, limit, offset);
                     const executed = executeReadyReadQuery_ACU(query.sql, query.params);
                     return toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql, limit, offset });
                 }
                 catch (error) {
-                    logError_ACU('querySql failed:', error);
+                    captureReadError('querySql', error, resolved);
                     return null;
                 }
             },
             queryTableRows: function (options = {}) {
+                let resolved;
                 try {
                     if (!isPlainObjectArg_ACU$1(options)) {
                         throw new Error('queryTableRows: options must be an object.');
                     }
                     const query = buildQueryTableRowsSql_ACU(options);
-                    const executed = executeReadyReadQuery_ACU(query.sql, query.params);
+                    resolved = resolveReadSqlForCurrentData_ACU(query.sql);
+                    const executed = executeReadyReadQuery_ACU(resolved.sql, query.params);
                     return toPublicSqlQueryResult_ACU(executed.result, {
                         sql: executed.sql,
                         limit: query.limit,
@@ -93708,7 +94167,7 @@ $CONTENT
                     });
                 }
                 catch (error) {
-                    logError_ACU('queryTableRows failed:', error);
+                    captureReadError('queryTableRows', error, resolved);
                     return null;
                 }
             },
@@ -93820,10 +94279,14 @@ $CONTENT
                 }
             },
             executeSql: async function (sqlOrOptions, params, options) {
+                let resolved;
+                let isReadAttempt = false;
                 try {
                     const args = parseSqlArgs_ACU(sqlOrOptions, params, options, 'executeSql');
                     if (isSqlReadStatement_ACU(args.sql)) {
-                        const executed = executeReadyReadQuery_ACU(args.sql, args.params);
+                        isReadAttempt = true;
+                        resolved = resolveReadSqlForCurrentData_ACU(args.sql);
+                        const executed = executeReadyReadQuery_ACU(resolved.sql, args.params);
                         return {
                             type: 'query',
                             result: toPublicSqlQueryResult_ACU(executed.result, { sql: executed.sql }),
@@ -93834,7 +94297,10 @@ $CONTENT
                     return { type: 'mutation', result };
                 }
                 catch (error) {
-                    logError_ACU('executeSql failed:', error);
+                    if (isReadAttempt)
+                        captureReadError('executeSql', error, resolved);
+                    else
+                        logError_ACU('executeSql failed:', error);
                     return null;
                 }
             },
@@ -96711,8 +97177,8 @@ $CONTENT
                     #${POPUP_ID_ACU} .toggle-switch input:checked + .slider:before { transform: translateY(-50%) translateX(20px); }
 
                     /* 提示词编辑器 */
-                    #${POPUP_ID_ACU} .prompt-segment {
-                        margin-bottom: 12px;
+                    #${POPUP_ID_ACU} .prompt-segment { 
+                        margin-bottom: 12px; 
                         border: 1px solid var(--acu-border);
                         background: var(--acu-bg-2);
                         padding: 12px;
@@ -96720,7 +97186,7 @@ $CONTENT
                     }
                     #${POPUP_ID_ACU} .prompt-segment-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
                     #${POPUP_ID_ACU} .prompt-segment-role { width: 120px !important; flex-grow: 0; }
-                    #${POPUP_ID_ACU} .prompt-segment-delete-btn {
+                    #${POPUP_ID_ACU} .prompt-segment-delete-btn { 
                         width: 28px; height: 28px; padding: 0;
                         border-radius: 999px;
                         border: 1px solid rgba(255, 107, 107, 0.35);
@@ -96729,7 +97195,7 @@ $CONTENT
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn {
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn { 
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -96765,7 +97231,7 @@ $CONTENT
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn {
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn { 
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -96801,7 +97267,7 @@ $CONTENT
                         max-height: 220px;
                         overflow: auto;
                     }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item {
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item { 
                         padding: 8px 10px;
                         border-radius: 6px;
                         cursor: pointer;
@@ -96812,7 +97278,7 @@ $CONTENT
                         border: 1px solid transparent;
                     }
                     #${POPUP_ID_ACU} .qrf_worldbook_list_item:hover { background: var(--acu-bg-2); color: var(--acu-text-1); }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected {
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected { 
                         background: rgba(37, 99, 235, 0.08);
                         border-color: rgba(37, 99, 235, 0.25);
                         color: var(--acu-accent);
@@ -96830,7 +97296,7 @@ $CONTENT
                         color: var(--acu-text-3);
                         text-align: left;
                     }
-
+                    
                     /* 底部状态栏：独立成条，居中不“歪” */
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-status-message {
                         margin: 12px 0 0 0;
@@ -96842,7 +97308,7 @@ $CONTENT
                         background: var(--acu-bg-2);
                         color: var(--acu-text-2);
                         }
-
+                        
                     /* 状态显示 */
                         #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-card-update-status-display {
                         padding: 10px 12px;
@@ -96852,7 +97318,7 @@ $CONTENT
                         color: var(--acu-text-2);
                         }
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-total-messages-display { color: var(--acu-text-3); font-size: 12px; }
-
+                        
                     /* 表格 */
                     #${POPUP_ID_ACU} table { width: 100%; border-collapse: collapse; }
                     #${POPUP_ID_ACU} table th { color: var(--acu-text-3); font-weight: 600; font-size: 12px; }
@@ -96864,7 +97330,7 @@ $CONTENT
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-track { background: transparent; border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb { background: var(--acu-border-2); border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb:hover { background: var(--acu-text-3); }
-
+                        
                     /* Toast 终止按钮（剧情推进） */
                     #toast-container .qrf-abort-btn {
                         margin-left: 8px;
@@ -97099,7 +97565,7 @@ $CONTENT
                             line-height: 1.35 !important;
                         }
                     }
-
+                    
                     /* ═══ 手机横屏/小平板 (≤768px) ═══ */
                     @media screen and (max-width: 768px) {
                         #${POPUP_ID_ACU} {
@@ -97153,7 +97619,7 @@ $CONTENT
                             justify-content: flex-start !important;
                         }
                     }
-
+                    
                     /* ═══ 手机竖屏 (≤520px) ═══ */
                     @media screen and (max-width: 520px) {
                         #${POPUP_ID_ACU} {
@@ -97231,7 +97697,7 @@ $CONTENT
                             font-size: 0.9em;
                             height: 36px;
                         }
-
+                        
                         /* 移动端：按钮自然宽度flex-wrap */
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
@@ -97240,11 +97706,11 @@ $CONTENT
                             padding: 6px 12px !important;
                         }
                     }
-
+                    
                     /* ═══ 极窄屏 (≤420px) ═══ */
                     @media screen and (max-width: 420px) {
-                        #${POPUP_ID_ACU} {
-                            padding: 4px;
+                        #${POPUP_ID_ACU} { 
+                            padding: 4px; 
                             padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 4px; margin-top: 4px; min-height: 0; }
@@ -97256,12 +97722,12 @@ $CONTENT
                         #${POPUP_ID_ACU} .acu-tabs-nav { padding: 3px; gap: 2px; flex-shrink: 0; border-radius: 16px; }
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 4px 8px !important; font-size: 10px !important; }
                         #${POPUP_ID_ACU} label { font-size: 10px; margin-bottom: 3px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
-                            padding: 6px 8px !important;
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
+                            padding: 6px 8px !important; 
                             border-radius: 6px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
-                            padding: 5px 8px !important;
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
+                            padding: 5px 8px !important; 
                             min-height: 28px !important;
                             font-size: 11px !important;
                             border-radius: 6px !important;
@@ -97279,11 +97745,11 @@ $CONTENT
                             border-radius: 6px !important;
                         }
                     }
-
+                    
                     /* ═══ 超小屏 (≤360px) ═══ */
                     @media screen and (max-width: 360px) {
-                        #${POPUP_ID_ACU} {
-                            padding: 3px;
+                        #${POPUP_ID_ACU} { 
+                            padding: 3px; 
                             padding-bottom: calc(3px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 3px; margin-top: 3px; min-height: 0; }
@@ -97297,13 +97763,13 @@ $CONTENT
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 3px 6px !important; font-size: 10px !important; border-radius: 12px !important; }
                         #${POPUP_ID_ACU} .acu-tab-button::after { display: none !important; }
                         #${POPUP_ID_ACU} label { font-size: 9px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
-                            padding: 5px 6px !important;
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
+                            padding: 5px 6px !important; 
                             font-size: 14px !important;
                             border-radius: 5px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
-                            padding: 4px 6px !important;
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
+                            padding: 4px 6px !important; 
                             min-height: 26px !important;
                             font-size: 10px !important;
                             border-radius: 5px !important;
@@ -97313,8 +97779,8 @@ $CONTENT
                             gap: 3px !important;
                         }
                         #${POPUP_ID_ACU} .checkbox-group label { font-size: 9px !important; line-height: 1.2 !important; }
-                        #${POPUP_ID_ACU} input[type="checkbox"] {
-                            width: 15px !important;
+                        #${POPUP_ID_ACU} input[type="checkbox"] { 
+                            width: 15px !important; 
                             height: 15px !important;
                             min-width: 15px !important;
                             min-height: 15px !important;
@@ -97394,7 +97860,7 @@ $CONTENT
                         color: #dc2626;
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn .fa-solid { opacity: 0.92; }
-
+                    
                     /* 超极小屏幕 (≤320px) */
                     @media screen and (max-width: 320px) {
                         #${POPUP_ID_ACU} {
@@ -97479,18 +97945,18 @@ $CONTENT
         }).join('');
         return `
         <div class="acu-theme-selector" style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select"
+            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select" 
                     style="padding: 4px 8px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-control-bg, #ffffff) !important; color: var(--acu-text-1, #1a2332) !important; font-size: 12px !important; cursor: pointer !important; max-width: 140px !important; font-family: inherit !important;"
                     title="切换界面主题">
                 ${options}
             </select>
             <div class="acu-theme-actions" style="display: flex; gap: 4px;">
-                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import"
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import" 
                         style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导入自定义主题">
                     <i class="fa-solid fa-upload" style="font-size: 11px;"></i>
                 </button>
-                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export"
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export" 
                         style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导出当前主题模板（完整可编辑版）">
                     <i class="fa-solid fa-download" style="font-size: 11px;"></i>

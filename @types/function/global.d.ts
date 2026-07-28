@@ -59,6 +59,12 @@ type AutoCardUpdaterSqlBatchResult = AutoCardUpdaterSqlMutationResult & {
 type AutoCardUpdaterSqlExecutionResult =
     | { type: 'query'; result: AutoCardUpdaterSqlQueryResult }
     | { type: 'mutation'; result: AutoCardUpdaterSqlMutationResult };
+type AutoCardUpdaterSqlReadError = {
+    method: 'executeSqlQuery' | 'querySql' | 'queryTableRows' | 'executeSql';
+    code: 'runtime_not_ready' | 'alias_conflict' | 'table_not_found' | 'column_not_resolved' | 'sql_error' | 'read_only_violation';
+    message: string;
+    at: number;
+};
 
 interface AutoCardUpdaterAPI {
     registerTableUpdateCallback(callback: Function): void;
@@ -182,6 +188,7 @@ interface AutoCardUpdaterAPI {
     executeSqlMutation(sqlOrOptions: any, params?: any, options?: any): Promise<AutoCardUpdaterSqlMutationResult>;
     executeSqlBatch(sqlOrOptions: any, options?: any): Promise<AutoCardUpdaterSqlBatchResult>;
     executeSql(sqlOrOptions: any, params?: any, options?: any): Promise<AutoCardUpdaterSqlExecutionResult | null>;
+    getLastSqlApiError(): AutoCardUpdaterSqlReadError | null;
 }
 
 interface Window {
