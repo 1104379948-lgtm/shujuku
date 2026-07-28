@@ -2078,11 +2078,41 @@ $CONTENT
     }
 
     /**
+     * v2-ui-state — 新 UI localStorage 根状态的共享常量。
+     */
+    const ACU_V2_STORAGE_KEY = 'acu_v2_ui_state';
+    const ACU_V2_DEV_OPTIONS_SECTION_KEY = 'devOptions';
+    const LEGACY_UI_MENU_VISIBLE_KEY = 'legacyUiMenuVisible';
+    const WARN_LOG_ENABLED_KEY = 'warnLogEnabled';
+    /**
+     * 在 Vue/Pinia 尚未挂载时读取 WARN 日志开关，保证启动阶段也遵守持久化设置。
+     */
+    function readWarnLogEnabled() {
+        try {
+            if (typeof window === 'undefined' || !window.localStorage)
+                return false;
+            const raw = window.localStorage.getItem(ACU_V2_STORAGE_KEY);
+            if (!raw)
+                return false;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object')
+                return false;
+            const devOptions = parsed[ACU_V2_DEV_OPTIONS_SECTION_KEY];
+            if (!devOptions || typeof devOptions !== 'object')
+                return false;
+            return devOptions[WARN_LOG_ENABLED_KEY] === true;
+        }
+        catch {
+            return false;
+        }
+    }
+
+    /**
      * shared/log-buffer.ts — 日志缓冲区
      *
      * 零 DOM 依赖的内存日志存储。
-     * logDebug_ACU / logWarn_ACU / logError_ACU 每次调用时将日志写入此缓冲区，
-     * presentation 层通过 subscribe 实时接收新日志并渲染到 UI。
+     * Error 始终写入；Debug / Warn 仅在对应采集开关开启时写入。
+     * presentation 层通过 subscribe 实时接收已写入的新日志并渲染到 UI。
      */
     // ═══════════════════════════════════════════════════════════════
     // 常量
@@ -2104,6 +2134,8 @@ $CONTENT
     const _knownTags = new Set();
     /** debug 级别日志是否写入缓冲区（默认关闭，减少性能开销） */
     let _debugLogEnabled = false;
+    /** warn 级别日志是否写入缓冲区（默认关闭，用户显式开启后才采集） */
+    let _warnLogEnabled = readWarnLogEnabled();
     // ═══════════════════════════════════════════════════════════════
     // 公共 API
     // ═══════════════════════════════════════════════════════════════
@@ -2204,13 +2236,28 @@ $CONTENT
         return _debugLogEnabled;
     }
     /**
+     * 设置 warn 级别日志是否启用。
+     * logWarn_ACU 复用此状态控制 console.warn，pushLog 复用此状态控制缓冲写入与订阅通知。
+     */
+    function setWarnLogEnabled(enabled) {
+        _warnLogEnabled = enabled;
+    }
+    /**
+     * 获取 warn 级别日志是否启用
+     */
+    function isWarnLogEnabled() {
+        return _warnLogEnabled;
+    }
+    /**
      * 推送一条日志到缓冲区
      * 由 logDebug_ACU / logWarn_ACU / logError_ACU 调用
-     * 当 debug 日志禁用时，debug 级别的日志会被跳过
+     * 当对应日志级别禁用时，debug / warn 日志会被跳过
      */
     function pushLog(level, args) {
-        // debug 级别日志禁用时直接跳过，避免性能开销
+        // 可选日志级别禁用时直接跳过，避免噪声与不必要的序列化开销
         if (level === 'debug' && !_debugLogEnabled)
+            return;
+        if (level === 'warn' && !_warnLogEnabled)
             return;
         const tag = extractTag(args);
         _knownTags.add(tag);
@@ -2291,6 +2338,7 @@ $CONTENT
         _subscribers.clear();
         _knownTags.clear();
         _debugLogEnabled = false;
+        _warnLogEnabled = false;
     }
 
     /**
@@ -2496,6 +2544,8 @@ $CONTENT
         pushLog('error', [`[${SCRIPT_ID_PREFIX_ACU}]`, ...args]);
     }
     function logWarn_ACU(...args) {
+        if (!isWarnLogEnabled())
+            return;
         console.warn(`[${SCRIPT_ID_PREFIX_ACU}]`, ...args);
         pushLog('warn', [`[${SCRIPT_ID_PREFIX_ACU}]`, ...args]);
     }
@@ -57329,7 +57379,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "spv8.7.3" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "1.1.0" || 'unknown';
     /**
      * 核心优化逻辑（纯 service 层：读数据→业务决策→写数据→构造返回值）。
      */
@@ -97353,13 +97403,6 @@ $CONTENT
     }
 
     /**
-     * v2-ui-state — 新 UI localStorage 根状态的共享常量。
-     */
-    const ACU_V2_STORAGE_KEY = 'acu_v2_ui_state';
-    const ACU_V2_DEV_OPTIONS_SECTION_KEY = 'devOptions';
-    const LEGACY_UI_MENU_VISIBLE_KEY = 'legacyUiMenuVisible';
-
-    /**
      * legacy-ui-menu-entry — 旧 UI 菜单入口的显示状态。
      *
      * 旧入口点击行为仍由 presentation/bootstrap/startup.ts 负责；这里仅提供跨层共享的
@@ -126730,6 +126773,7 @@ Expected function or array of functions, received type ${typeof value}.`
      *   是否显示。开关 UI 在开发者一级页内；与总开关相互独立。
      * - vectorIndexAdvanced：交火模式页中的"召回参数"与"归档与分块"面板是否显示。
      * - legacyUiMenuVisible：SillyTavern 扩展菜单中的旧 UI 入口是否显示，默认隐藏。
+     * - warnLogEnabled：WARN 日志是否输出并写入运行日志，默认关闭。
      *
      * 新 UI 自有持久化，物理隔离于 settings_ACU。
      */
@@ -126741,6 +126785,7 @@ Expected function or array of functions, received type ${typeof value}.`
             plotAdvanced: raw.plotAdvanced === true,
             vectorIndexAdvanced: raw.vectorIndexAdvanced === true,
             legacyUiMenuVisible: raw.legacyUiMenuVisible === true,
+            warnLogEnabled: raw.warnLogEnabled === true,
         };
     }
     function persist$2(state) {
@@ -126749,10 +126794,15 @@ Expected function or array of functions, received type ${typeof value}.`
             plotAdvanced: state.plotAdvanced,
             vectorIndexAdvanced: state.vectorIndexAdvanced,
             legacyUiMenuVisible: state.legacyUiMenuVisible,
+            warnLogEnabled: state.warnLogEnabled,
         });
     }
     const useDevOptionsStore = defineStore('acu-v2-dev-options', {
-        state: () => loadFromStorage$1(),
+        state: () => {
+            const state = loadFromStorage$1();
+            setWarnLogEnabled(state.warnLogEnabled);
+            return state;
+        },
         actions: {
             setDeveloperOptionsEnabled(enabled) {
                 this.developerOptionsEnabled = !!enabled;
@@ -126771,13 +126821,20 @@ Expected function or array of functions, received type ${typeof value}.`
                 persist$2(this.$state);
                 applyLegacyUiMenuVisibility(this.legacyUiMenuVisible);
             },
+            setWarnLogEnabled(enabled) {
+                this.warnLogEnabled = !!enabled;
+                setWarnLogEnabled(this.warnLogEnabled);
+                persist$2(this.$state);
+            },
             refresh() {
                 const next = loadFromStorage$1();
                 this.developerOptionsEnabled = next.developerOptionsEnabled;
                 this.plotAdvanced = next.plotAdvanced;
                 this.vectorIndexAdvanced = next.vectorIndexAdvanced;
                 this.legacyUiMenuVisible = next.legacyUiMenuVisible;
+                this.warnLogEnabled = next.warnLogEnabled;
                 applyLegacyUiMenuVisibility(this.legacyUiMenuVisible);
+                setWarnLogEnabled(this.warnLogEnabled);
             },
         },
     });
@@ -126789,7 +126846,7 @@ Expected function or array of functions, received type ${typeof value}.`
      */
     function useDevOptions() {
         const store = useDevOptionsStore();
-        const { developerOptionsEnabled, plotAdvanced, vectorIndexAdvanced, legacyUiMenuVisible } = storeToRefs(store);
+        const { developerOptionsEnabled, plotAdvanced, vectorIndexAdvanced, legacyUiMenuVisible, warnLogEnabled, } = storeToRefs(store);
         return {
             developerOptionsEnabled,
             setDeveloperOptionsEnabled: (enabled) => store.setDeveloperOptionsEnabled(enabled),
@@ -126799,6 +126856,8 @@ Expected function or array of functions, received type ${typeof value}.`
             setVectorIndexAdvanced: (enabled) => store.setVectorIndexAdvanced(enabled),
             legacyUiMenuVisible,
             setLegacyUiMenuVisible: (enabled) => store.setLegacyUiMenuVisible(enabled),
+            warnLogEnabled,
+            setWarnLogEnabled: (enabled) => store.setWarnLogEnabled(enabled),
             refresh: () => store.refresh(),
         };
     }
@@ -143580,6 +143639,7 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     function useLogViewer() {
         const toast = useToastStore();
+        const { warnLogEnabled, setWarnLogEnabled } = useDevOptions();
         const logs = ref([]);
         const knownTags = ref([]);
         const totalCount = ref(0);
@@ -143618,6 +143678,7 @@ Expected function or array of functions, received type ${typeof value}.`
             return '实时更新中';
         });
         const debugLabel = computed(() => (debugLogEnabled.value ? 'Debug 采集中' : 'Debug 未采集'));
+        const warnLabel = computed(() => (warnLogEnabled.value ? 'Warn 采集中' : 'Warn 未采集'));
         function refresh() {
             logs.value = getAllLogs();
             knownTags.value = getKnownTags();
@@ -143657,6 +143718,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 toast.info('已开始采集 Debug 日志；排查完成后建议关闭。');
             else
                 toast.success('已停止采集 Debug 日志。');
+        }
+        function setWarnCollection(enabled) {
+            setWarnLogEnabled(enabled);
+            message.value = null;
+            if (enabled)
+                toast.info('已开始采集 Warn 日志；排查完成后建议关闭。');
+            else
+                toast.success('已停止采集 Warn 日志。');
         }
         function exportFiltered() {
             const exportData = filteredLogs.value.map(entry => ({
@@ -143701,16 +143770,19 @@ Expected function or array of functions, received type ${typeof value}.`
             paused,
             autoScroll,
             debugLogEnabled,
+            warnLogEnabled,
             message,
             totalCount,
             filteredCount,
             pendingCount,
             statusLabel,
             debugLabel,
+            warnLabel,
             refresh,
             setPaused,
             clearAll,
             setDebugCollection,
+            setWarnCollection,
             exportFiltered,
         };
     }
@@ -143790,8 +143862,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-advanced-tools-page[data-v-4d17c628] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-advanced-tools-page__sql-panel[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__log-panel[data-v-4d17c628] {\r\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__quick-actions[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__log-actions[data-v-4d17c628] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-textarea[data-v-4d17c628] {\r\n  font-family: var(--acu-font-mono);\r\n  min-height: 210px;\r\n  white-space: pre;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-4d17c628] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  align-items: center;\r\n  justify-content: flex-end;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-4d17c628] {\r\n  margin-left: auto;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.5;\n}\n.acu-v2-advanced-tools-page__sql-status--success[data-v-4d17c628] {\r\n  color: var(--acu-success);\n}\n.acu-v2-advanced-tools-page__sql-status--warning[data-v-4d17c628] {\r\n  color: var(--acu-warning);\n}\n.acu-v2-advanced-tools-page__sql-status--error[data-v-4d17c628] {\r\n  color: var(--acu-danger);\n}\n.acu-v2-advanced-tools-page__sql-result-section[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__sql-history-section[data-v-4d17c628] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-advanced-tools-page__sql-history-section[data-v-4d17c628] {\r\n  padding-top: 12px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-v2-advanced-tools-page__section-title[data-v-4d17c628] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 600;\r\n  line-height: 1.35;\n}\n.acu-v2-advanced-tools-page__empty[data-v-4d17c628] {\r\n  min-height: 96px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: center;\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__empty--compact[data-v-4d17c628] {\r\n  min-height: 72px;\n}\n.acu-v2-advanced-tools-page__empty--log[data-v-4d17c628] {\r\n  min-height: 180px;\r\n  border: 0;\n}\n.acu-v2-advanced-tools-page__sql-table-wrap[data-v-4d17c628] {\r\n  max-height: 330px;\r\n  overflow: auto;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-result-table[data-v-4d17c628] {\r\n  width: 100%;\r\n  border-collapse: collapse;\r\n  font-family: var(--acu-font-mono);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__sql-result-table td[data-v-4d17c628] {\r\n  max-width: 300px;\r\n  padding: 7px 10px;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  text-align: left;\r\n  white-space: nowrap;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-4d17c628] {\r\n  position: sticky;\r\n  top: 0;\r\n  z-index: 1;\r\n  background: var(--acu-bg-1);\r\n  color: var(--acu-text-1);\r\n  font-weight: 600;\n}\n.acu-v2-advanced-tools-page__sql-result-table tbody tr[data-v-4d17c628]:nth-child(even) {\r\n  background: color-mix(in srgb, var(--acu-text-3) 5%, transparent);\n}\n.acu-v2-advanced-tools-page__cell-null[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__empty-cell[data-v-4d17c628] {\r\n  color: var(--acu-text-3);\r\n  font-style: italic;\n}\n.acu-v2-advanced-tools-page__sql-result-meta[data-v-4d17c628] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: right;\n}\n.acu-v2-advanced-tools-page__sql-error[data-v-4d17c628] {\r\n  margin: 0;\r\n  min-height: 96px;\r\n  padding: 12px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-danger) 8%, transparent);\r\n  color: var(--acu-danger);\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\r\n  font-family: var(--acu-font-mono);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-4d17c628] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\r\n  align-items: stretch;\n}\n.acu-v2-advanced-tools-page__keyword-row[data-v-4d17c628] {\r\n  grid-column: 1 / -1;\n}\n.acu-v2-advanced-tools-page__log-control-row[data-v-4d17c628] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-4d17c628] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 10px 14px;\r\n  align-items: center;\r\n  justify-content: space-between;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-4d17c628] {\r\n  width: max-content;\r\n  max-width: 100%;\r\n  display: grid;\r\n  grid-template-columns: max-content max-content;\r\n  gap: 10px 18px;\r\n  align-items: center;\r\n  justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-4d17c628] .acu-toggle {\r\n  width: max-content;\r\n  max-width: none;\r\n  min-width: max-content;\r\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-4d17c628] .acu-toggle__label {\r\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__hint[data-v-4d17c628] {\r\n  max-width: 100%;\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__log-list[data-v-4d17c628] {\r\n  overflow: auto;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-4d17c628] {\r\n  max-height: 230px;\n}\n.acu-v2-advanced-tools-page__log-list[data-v-4d17c628] {\r\n  min-height: 360px;\r\n  max-height: 58vh;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__log-row[data-v-4d17c628] {\r\n  min-width: 0;\r\n  display: grid;\r\n  gap: 8px;\r\n  align-items: baseline;\r\n  padding: 7px 10px;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-4d17c628] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: stretch;\r\n  gap: 6px;\r\n  padding-block: 9px;\r\n  border: 0;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  background: transparent;\r\n  color: inherit;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  text-align: left;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-advanced-tools-page__log-row[data-v-4d17c628] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: stretch;\r\n  gap: 6px;\r\n  padding-block: 9px;\n}\n.acu-v2-advanced-tools-page__log-meta[data-v-4d17c628] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 6px 8px;\r\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-history-meta[data-v-4d17c628] {\r\n  flex-wrap: nowrap;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-4d17c628]:last-child,\r\n.acu-v2-advanced-tools-page__log-row[data-v-4d17c628]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-advanced-tools-page__sql-history-item--failure[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__log-row--error[data-v-4d17c628] {\r\n  background: color-mix(in srgb, var(--acu-danger) 7%, transparent);\n}\n.acu-v2-advanced-tools-page__log-row--warn[data-v-4d17c628] {\r\n  background: color-mix(in srgb, var(--acu-warning) 6%, transparent);\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-4d17c628]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-4d17c628]:focus-visible {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\r\n  outline: none;\n}\n.acu-v2-advanced-tools-page__log-time[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__log-tag[data-v-4d17c628],\r\n.acu-v2-advanced-tools-page__log-message[data-v-4d17c628] {\r\n  min-width: 0;\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-advanced-tools-page__log-time[data-v-4d17c628] {\r\n  color: var(--acu-text-3);\r\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__log-tag[data-v-4d17c628] {\r\n  flex: 1 1 180px;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  color: var(--acu-text-2);\n}\n.acu-v2-advanced-tools-page__log-message[data-v-4d17c628] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\r\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__log-body[data-v-4d17c628] {\r\n  display: block;\r\n  width: 100%;\n}\n@media (max-width: 1080px) {\n.acu-v2-advanced-tools-page[data-v-4d17c628] {\r\n    padding: 14px;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-4d17c628] {\r\n    justify-content: stretch;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-4d17c628] {\r\n    width: 100%;\r\n    margin-left: 0;\r\n    text-align: right;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-4d17c628] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-4d17c628] {\r\n    align-items: stretch;\r\n    flex-direction: column;\r\n    justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-4d17c628] {\r\n    align-self: flex-start;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-4d17c628],\r\n  .acu-v2-advanced-tools-page__log-row[data-v-4d17c628] {\r\n    padding-inline: 9px;\n}\n}\r\n", "src/presentation-v2/pages/AdvancedToolsPage.vue#style-0-4d17c628");
-    var AdvancedToolsPage_vue_vue_type_style_index_0_scoped_4d17c628_lang = null;
+    injectSfcStyle("\n.acu-v2-advanced-tools-page[data-v-e9e14f38] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-advanced-tools-page__sql-panel[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-panel[data-v-e9e14f38] {\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__quick-actions[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-actions[data-v-e9e14f38] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-textarea[data-v-e9e14f38] {\n  font-family: var(--acu-font-mono);\n  min-height: 210px;\n  white-space: pre;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-e9e14f38] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  align-items: center;\n  justify-content: flex-end;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-e9e14f38] {\n  margin-left: auto;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n}\n.acu-v2-advanced-tools-page__sql-status--success[data-v-e9e14f38] {\n  color: var(--acu-success);\n}\n.acu-v2-advanced-tools-page__sql-status--warning[data-v-e9e14f38] {\n  color: var(--acu-warning);\n}\n.acu-v2-advanced-tools-page__sql-status--error[data-v-e9e14f38] {\n  color: var(--acu-danger);\n}\n.acu-v2-advanced-tools-page__sql-result-section[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__sql-history-section[data-v-e9e14f38] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n}\n.acu-v2-advanced-tools-page__sql-history-section[data-v-e9e14f38] {\n  padding-top: 12px;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-v2-advanced-tools-page__section-title[data-v-e9e14f38] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-advanced-tools-page__empty[data-v-e9e14f38] {\n  min-height: 96px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  text-align: center;\n  border: 0;\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: 0;\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__empty--compact[data-v-e9e14f38] {\n  min-height: 72px;\n}\n.acu-v2-advanced-tools-page__empty--log[data-v-e9e14f38] {\n  min-height: 180px;\n  border: 0;\n}\n.acu-v2-advanced-tools-page__sql-table-wrap[data-v-e9e14f38] {\n  max-height: 330px;\n  overflow: auto;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-result-table[data-v-e9e14f38] {\n  width: 100%;\n  border-collapse: collapse;\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__sql-result-table td[data-v-e9e14f38] {\n  max-width: 300px;\n  padding: 7px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-e9e14f38] {\n  position: sticky;\n  top: 0;\n  z-index: 1;\n  background: var(--acu-bg-1);\n  color: var(--acu-text-1);\n  font-weight: 600;\n}\n.acu-v2-advanced-tools-page__sql-result-table tbody tr[data-v-e9e14f38]:nth-child(even) {\n  background: color-mix(in srgb, var(--acu-text-3) 5%, transparent);\n}\n.acu-v2-advanced-tools-page__cell-null[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__empty-cell[data-v-e9e14f38] {\n  color: var(--acu-text-3);\n  font-style: italic;\n}\n.acu-v2-advanced-tools-page__sql-result-meta[data-v-e9e14f38] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  text-align: right;\n}\n.acu-v2-advanced-tools-page__sql-error[data-v-e9e14f38] {\n  margin: 0;\n  min-height: 96px;\n  padding: 12px;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-danger) 8%, transparent);\n  color: var(--acu-danger);\n  white-space: pre-wrap;\n  word-break: break-word;\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-e9e14f38] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n  align-items: stretch;\n}\n.acu-v2-advanced-tools-page__keyword-row[data-v-e9e14f38] {\n  grid-column: 1 / -1;\n}\n.acu-v2-advanced-tools-page__log-control-row[data-v-e9e14f38] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-e9e14f38] {\n  min-width: 0;\n  display: flex;\n  flex-wrap: wrap;\n  gap: 10px 14px;\n  align-items: center;\n  justify-content: space-between;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-e9e14f38] {\n  width: max-content;\n  max-width: 100%;\n  display: grid;\n  grid-template-columns: max-content max-content;\n  gap: 10px 18px;\n  align-items: center;\n  justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-e9e14f38] .acu-toggle {\n  width: max-content;\n  max-width: none;\n  min-width: max-content;\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-e9e14f38] .acu-toggle__label {\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__hint[data-v-e9e14f38] {\n  max-width: 100%;\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n  overflow-wrap: anywhere;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-list[data-v-e9e14f38] {\n  overflow: auto;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-e9e14f38] {\n  max-height: 230px;\n}\n.acu-v2-advanced-tools-page__log-list[data-v-e9e14f38] {\n  min-height: 360px;\n  max-height: 58vh;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-row[data-v-e9e14f38] {\n  min-width: 0;\n  display: grid;\n  gap: 8px;\n  align-items: baseline;\n  padding: 7px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-e9e14f38] {\n  display: flex;\n  flex-direction: column;\n  align-items: stretch;\n  gap: 6px;\n  padding-block: 9px;\n  border: 0;\n  border-bottom: 1px solid var(--acu-border-2);\n  background: transparent;\n  color: inherit;\n  cursor: pointer;\n  font: inherit;\n  text-align: left;\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-advanced-tools-page__log-row[data-v-e9e14f38] {\n  display: flex;\n  flex-direction: column;\n  align-items: stretch;\n  gap: 6px;\n  padding-block: 9px;\n}\n.acu-v2-advanced-tools-page__log-meta[data-v-e9e14f38] {\n  min-width: 0;\n  display: flex;\n  flex-wrap: wrap;\n  gap: 6px 8px;\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-history-meta[data-v-e9e14f38] {\n  flex-wrap: nowrap;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-e9e14f38]:last-child,\n.acu-v2-advanced-tools-page__log-row[data-v-e9e14f38]:last-child {\n  border-bottom: 0;\n}\n.acu-v2-advanced-tools-page__sql-history-item--failure[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-row--error[data-v-e9e14f38] {\n  background: color-mix(in srgb, var(--acu-danger) 7%, transparent);\n}\n.acu-v2-advanced-tools-page__log-row--warn[data-v-e9e14f38] {\n  background: color-mix(in srgb, var(--acu-warning) 6%, transparent);\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-e9e14f38]:hover {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-e9e14f38]:focus-visible {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n  outline: none;\n}\n.acu-v2-advanced-tools-page__log-time[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-tag[data-v-e9e14f38],\n.acu-v2-advanced-tools-page__log-message[data-v-e9e14f38] {\n  min-width: 0;\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-advanced-tools-page__log-time[data-v-e9e14f38] {\n  color: var(--acu-text-3);\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__log-tag[data-v-e9e14f38] {\n  flex: 1 1 180px;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  color: var(--acu-text-2);\n}\n.acu-v2-advanced-tools-page__log-message[data-v-e9e14f38] {\n  margin: 0;\n  color: var(--acu-text-1);\n  white-space: pre-wrap;\n  word-break: break-word;\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__log-body[data-v-e9e14f38] {\n  display: block;\n  width: 100%;\n}\n@media (max-width: 1080px) {\n.acu-v2-advanced-tools-page[data-v-e9e14f38] {\n    padding: 14px;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-e9e14f38] {\n    justify-content: stretch;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-e9e14f38] {\n    width: 100%;\n    margin-left: 0;\n    text-align: right;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-e9e14f38] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-e9e14f38] {\n    align-items: stretch;\n    flex-direction: column;\n    justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-e9e14f38] {\n    align-self: flex-start;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-e9e14f38],\n  .acu-v2-advanced-tools-page__log-row[data-v-e9e14f38] {\n    padding-inline: 9px;\n}\n}\n", "src/presentation-v2/pages/AdvancedToolsPage.vue#style-0-e9e14f38");
+    var AdvancedToolsPage_vue_vue_type_style_index_0_scoped_e9e14f38_lang = null;
 
     const _hoisted_1$b = { class: "acu-v2-advanced-tools-page" };
     const _hoisted_2$a = {
@@ -144097,21 +144169,32 @@ Expected function or array of functions, received type ${typeof value}.`
 			title: $setup.advancedToolsCopy.panels.logs.title,
 			description: $setup.advancedToolsCopy.panels.logs.description
 		}, {
-			actions: withCtx(() => [createVNode($setup["AcuBadge"], { variant: $setup.logFlow.paused.value ? "warning" : "success" }, {
-				default: withCtx(() => [createTextVNode(
-					toDisplayString($setup.logFlow.statusLabel.value),
-					1
-					/* TEXT */
-				)]),
-				_: 1
-			}, 8, ["variant"]), createVNode($setup["AcuBadge"], { variant: $setup.logFlow.debugLogEnabled.value ? "accent" : "neutral" }, {
-				default: withCtx(() => [createTextVNode(
-					toDisplayString($setup.logFlow.debugLabel.value),
-					1
-					/* TEXT */
-				)]),
-				_: 1
-			}, 8, ["variant"])]),
+			actions: withCtx(() => [
+				createVNode($setup["AcuBadge"], { variant: $setup.logFlow.paused.value ? "warning" : "success" }, {
+					default: withCtx(() => [createTextVNode(
+						toDisplayString($setup.logFlow.statusLabel.value),
+						1
+						/* TEXT */
+					)]),
+					_: 1
+				}, 8, ["variant"]),
+				createVNode($setup["AcuBadge"], { variant: $setup.logFlow.debugLogEnabled.value ? "accent" : "neutral" }, {
+					default: withCtx(() => [createTextVNode(
+						toDisplayString($setup.logFlow.debugLabel.value),
+						1
+						/* TEXT */
+					)]),
+					_: 1
+				}, 8, ["variant"]),
+				createVNode($setup["AcuBadge"], { variant: $setup.logFlow.warnLogEnabled.value ? "warning" : "neutral" }, {
+					default: withCtx(() => [createTextVNode(
+						toDisplayString($setup.logFlow.warnLabel.value),
+						1
+						/* TEXT */
+					)]),
+					_: 1
+				}, 8, ["variant"])
+			]),
 			default: withCtx(() => [
 				createBaseVNode("div", _hoisted_18$3, [
 					createVNode($setup["AcuFormRow"], null, {
@@ -144193,15 +144276,23 @@ Expected function or array of functions, received type ${typeof value}.`
 						)])]),
 						_: 1
 					}, 8, ["disabled", "onClick"])
-				]), createBaseVNode("div", _hoisted_22$1, [createVNode($setup["AcuToggle"], {
-					"model-value": $setup.logFlow.autoScroll.value,
-					label: "自动滚动",
-					"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.logFlow.autoScroll.value = $event)
-				}, null, 8, ["model-value"]), createVNode($setup["AcuToggle"], {
-					"model-value": $setup.logFlow.debugLogEnabled.value,
-					label: "Debug",
-					"onUpdate:modelValue": $setup.logFlow.setDebugCollection
-				}, null, 8, ["model-value", "onUpdate:modelValue"])])]), createBaseVNode(
+				]), createBaseVNode("div", _hoisted_22$1, [
+					createVNode($setup["AcuToggle"], {
+						"model-value": $setup.logFlow.autoScroll.value,
+						label: "自动滚动",
+						"onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => $setup.logFlow.autoScroll.value = $event)
+					}, null, 8, ["model-value"]),
+					createVNode($setup["AcuToggle"], {
+						"model-value": $setup.logFlow.warnLogEnabled.value,
+						label: "Warn",
+						"onUpdate:modelValue": $setup.logFlow.setWarnCollection
+					}, null, 8, ["model-value", "onUpdate:modelValue"]),
+					createVNode($setup["AcuToggle"], {
+						"model-value": $setup.logFlow.debugLogEnabled.value,
+						label: "Debug",
+						"onUpdate:modelValue": $setup.logFlow.setDebugCollection
+					}, null, 8, ["model-value", "onUpdate:modelValue"])
+				])]), createBaseVNode(
 					"p",
 					_hoisted_23$1,
 					" 最多保留最近 2000 条；当前显示 " + toDisplayString($setup.logFlow.filteredCount.value) + " / " + toDisplayString($setup.logFlow.totalCount.value) + " 条。" + toDisplayString($setup.logFlow.pendingCount.value ? `${$setup.logFlow.pendingCount.value} 条暂停期间新增日志等待显示。` : "没有暂停期间积压的日志。"),
@@ -144267,7 +144358,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		_: 1
 	})]);
     }
-    var AdvancedToolsPage = /*#__PURE__*/ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-4d17c628"]]);
+    var AdvancedToolsPage = /*#__PURE__*/ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-e9e14f38"]]);
 
     const developerCopy = {
         panels: {
