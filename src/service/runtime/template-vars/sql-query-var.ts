@@ -17,6 +17,7 @@ import { getGlobalNameMapperStatus_ACU, getNameMapper } from './name-mapper';
 import { isSqliteMode } from '../../table/storage-mode';
 import { logDebug_ACU, logWarn_ACU, logError_ACU } from '../../../shared/utils';
 import { resolveReadQuerySql_ACU } from '../../../shared/sql-read-resolver';
+import { resolveCurrentRuntimeReadSql_ACU } from '../read-query-resolver';
 
 // ═══════════════════════════════════════════════════════════════
 // 变量系统 — 存储 {[db...as X]} / {[sql...as X]} 的结果
@@ -507,13 +508,14 @@ export class TableQueryBuilder {
     }
     try {
       const provider = getStorageProvider();
-      const result = provider.executeQuery(sql, undefined, {
+      const executableSql = resolveCurrentRuntimeReadSql_ACU(sql).sql;
+      const result = provider.executeQuery(executableSql, undefined, {
         suppressErrorLog: this.options.suppressQueryErrorLog === true,
       });
       return { columns: result.columns, values: result.values };
     } catch (e: any) {
       if (this.options.throwOnQueryError === true) throw new Error('orm_query_execution_failed');
-      logWarn_ACU(`[ORM] 查询执行失败: ${sql} → ${e?.message}`);
+      logWarn_ACU('[ORM] 查询执行失败: orm_query_execution_failed');
       return { columns: [], values: [] };
     }
   }

@@ -5,7 +5,7 @@
  * 策略：用真实 SqliteEngine 作为后端，mock getStorageProvider 返回一个
  * 包装了真实引擎的 provider，这样 ORM 查询能真正执行 SQL。
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { SqliteEngine } from '../../../../src/data/sqlite/sqlite-engine';
 
 // ═══════════════════════════════════════════════════════════════
@@ -38,6 +38,7 @@ vi.mock('../../../../src/service/table/table-storage-strategy', () => ({
     activeMode: 'sqlite',
     loadToken: 1,
   })),
+  getActiveStorageProvider: vi.fn(() => null),
   getStorageProvider: vi.fn(() => ({
     mode: 'sqlite' as const,
     executeQuery: (sql: string, params?: any[], options?: { suppressErrorLog?: boolean }) => {
@@ -71,6 +72,24 @@ const CHARACTERS_DDL = `CREATE TABLE characters ( -- 重要人物表
   age INTEGER, -- 年龄
   status TEXT DEFAULT '存活' -- 状态
 );`;
+
+// DDL 原始名、sheet key、uid 与显示名均不同，故意不在 DDL 首行添加显示名注释。
+// 旧 NameMapper 无法识别该表，只有运行时共享 resolver 能安全绑定到 zabiao。
+const MISC_DDL = `CREATE TABLE legacy_misc (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  old_title TEXT, -- 名称
+  old_description TEXT -- 描述
+);`;
+
+const MISC_TABLE_DATA = {
+  mate: { type: 'acu', version: 1 },
+  sheet_misc: {
+    uid: 'misc_uid',
+    name: '杂表',
+    sourceData: { ddl: MISC_DDL },
+    content: [['row_id', '名称', '描述'], ['1', '已探索地点概览', '这里是描述']],
+  },
+};
 
 let _mapper: NameMapper;
 let _mapperStatus: { ready: boolean; tableCount: number; binding: 'unbound' | 'empty_schema' | 'bound' } = {
@@ -112,6 +131,10 @@ describe('sql-query-var', () => {
     _mapperStatus = { ready: true, tableCount: 2, binding: 'bound' };
   });
 
+  afterEach(() => {
+    _set_currentJsonTableData_ACU(null);
+  });
+
   beforeAll(async () => {
     // 初始化真实引擎
     _engine = new SqliteEngine();
@@ -132,6 +155,8 @@ describe('sql-query-var', () => {
     ]);
     _engine.run('CREATE TABLE jiyaobiao (row_id INTEGER PRIMARY KEY, content TEXT);');
     _engine.run("INSERT INTO jiyaobiao VALUES (1, '记录A');");
+    _engine.run('CREATE TABLE zabiao (row_id INTEGER PRIMARY KEY, old_title TEXT, old_description TEXT);');
+    _engine.run("INSERT INTO zabiao VALUES (1, '已探索地点概览', '这里是描述');");
 
     // 构建 NameMapper
     const ddlMap = new Map<string, string>();
@@ -160,6 +185,43 @@ describe('sql-query-var', () => {
         const builder = new TableQueryBuilder('背包物品表');
         const result = builder.where('物品名称', '不存在').get('数量');
         expect(result).toBeNull();
+      });
+    });
+
+    describe('运行时共享别名解析', () => {
+      beforeEach(() => {
+        _set_currentJsonTableData_ACU(MISC_TABLE_DATA as any);
+      });
+
+      it('显示表名和显示列名在旧 NameMapper 无法识别时仍读取正确行', () => {
+        expect(new TableQueryBuilder('杂表')
+          .where('名称', '已探索地点概览')
+          .get('描述'))
+          .toBe('这里是描述');
+      });
+
+      it.each(['legacy_misc', 'sheet_misc', 'misc_uid', 'zabiao'])(
+        '支持表标识符形态 %s',
+        tableName => {
+          expect(new TableQueryBuilder(tableName)
+            .where('名称', '已探索地点概览')
+            .get('描述'))
+            .toBe('这里是描述');
+        },
+      );
+
+      it('ORM 表达式、模板变量和条件求值共享同一结果', () => {
+        const expression = "db.杂表.where('名称', '已探索地点概览').get('描述')";
+
+        expect(evaluateOrmExpression(expression)).toBe('这里是描述');
+        expect(replaceDbSqlVariables(`{[${expression}]}`)).toBe('这里是描述');
+        expect(evaluateDbCondition("db.杂表.where('名称', '已探索地点概览').exists()")).toBe(true);
+      });
+
+      it('Agent ORM renderer 复用相同的只读解析路径', () => {
+        expect(renderAgentReadOnlyQueryTemplates_ACU(
+          "{[db.杂表.where('名称', '已探索地点概览').get('描述')]}",
+        )).toMatchObject({ content: '这里是描述', executedCount: 1, rejectedCount: 0 });
       });
     });
 

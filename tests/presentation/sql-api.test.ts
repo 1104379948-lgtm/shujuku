@@ -105,6 +105,16 @@ vi.mock('../../src/service/runtime/template-vars/name-mapper', () => ({
   getNameMapper: mocks.getNameMapper,
 }));
 
+vi.mock('../../src/service/runtime/read-query-resolver', async () => {
+  const { resolveReadQuerySql_ACU } = await import('../../src/shared/sql-read-resolver');
+  return {
+    resolveCurrentRuntimeReadSql_ACU: (sql: string) => {
+      const mapper = mocks.getNameMapper();
+      return resolveReadQuerySql_ACU(sql, mockCurrentJsonTableData, mapper.translateSql.bind(mapper));
+    },
+  };
+});
+
 vi.mock('../../src/service/table/table-update-queue', () => ({
   buildTableUpdateApplyScopeKey_ACU: vi.fn((parts: any) => `${parts.chatKey}::${parts.isolationKey}::${parts.targetMessageIndex}`),
   runTableUpdateApplyWithScopeLock_ACU: mocks.runTableUpdateApplyWithScopeLock,
@@ -216,6 +226,54 @@ describe('createSqlApi', () => {
     api.queryTableRows({ tableName: 'chronicle', columns: ['row_id'], limit: 20, offset: 0 });
 
     expect(mocks.executeQuery).toHaveBeenCalledWith('SELECT `row_id` FROM `jiyaobiao` LIMIT ? OFFSET ?', [20, 0]);
+  });
+
+  it('queryTableRows 通过 uid 定位表，并接受显示列名与物理列名混用', () => {
+    mockCurrentJsonTableData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_misc: {
+        uid: 'misc_uid',
+        name: '杂表',
+        sourceData: {
+          ddl: 'CREATE TABLE legacy_misc (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  old_title TEXT, -- 名称\n  old_description TEXT -- 描述\n);',
+        },
+        content: [['row_id', '名称', '描述'], ['1', '已探索地点概览', '这里是描述']],
+      },
+    };
+
+    api.queryTableRows({
+      tableName: 'misc_uid',
+      columns: ['old_description'],
+      where: { 名称: '已探索地点概览' },
+      orderBy: { column: '描述', direction: 'DESC' },
+      limit: 20,
+      offset: 0,
+    });
+
+    expect(mocks.executeQuery).toHaveBeenCalledWith(
+      'SELECT `old_description` FROM `zabiao` WHERE `old_title` = ? ORDER BY `old_description` DESC LIMIT ? OFFSET ?',
+      ['已探索地点概览', 20, 0],
+    );
+  });
+
+  it('queryTableRows 遇到重复表别名时 fail-closed 并记录 alias_conflict', () => {
+    mockCurrentJsonTableData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_a: {
+        uid: 'a_uid', name: '甲表',
+        sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' },
+        content: [['row_id'], ['1']],
+      },
+      sheet_b: {
+        uid: 'b_uid', name: '乙表',
+        sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' },
+        content: [['row_id'], ['1']],
+      },
+    };
+
+    expect(api.queryTableRows({ tableName: 'shared_legacy', columns: ['row_id'] })).toBeNull();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(api.getLastSqlApiError()).toMatchObject({ method: 'queryTableRows', code: 'alias_conflict' });
   });
 
   it('executeSqlQuery 将原始 DDL 表名和显示列名重绑定到拼音物理标识符', () => {

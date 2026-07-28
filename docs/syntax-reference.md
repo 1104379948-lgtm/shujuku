@@ -650,6 +650,10 @@ await API.insertRow('背包物品表', { 名称: '新手剑', 数量: 1, 类型:
 你身上有 3 把铁剑。
 ```
 
+ORM 会在执行完整只读 SQL 前按当前 SQLite runtime 的 schema 重绑定标识符。因此表名可使用显示名、原始 DDL `CREATE TABLE` 名、sheetKey、uid 或运行时物理名；列名可使用显示名、物理列名，以及无歧义的原始 DDL 列名。别名冲突时不会猜测目标，查询会保守失败。
+
+这套规则同样适用于模板原生只读 SQL、对外只读 SQL API 和两代 SQL 控制台。控制台仅将单条只读 `SELECT`、`WITH ... SELECT`、允许的 `PRAGMA` 与 `EXPLAIN` 送入查询路径；`WITH` 包装的写语句和多语句不会绕过写入提交流程。
+
 底层实现是一个 `Proxy`：`db.背包物品表` 返回一个 `TableQueryBuilder`，后续所有方法是链式调用，最后由**终结方法**决定输出形式。
 
 #### 2.1.1 查询构建方法（返回 `TableQueryBuilder`，可继续链式）
@@ -686,7 +690,7 @@ await API.insertRow('背包物品表', { 名称: '新手剑', 数量: 1, 类型:
 | `.sum('列')` / `.avg('列')` / `.max('列')` / `.min('列')` | `number` | 聚合函数 |
 | `.exists()` | `boolean` | 是否存在至少一行 |
 | `.value('SQL表达式')` | `string \| number \| null` | 在当前 WHERE 上下文里跑自定义 `SELECT <表达式>`，见下方示例 |
-| `.toSQL()` | `string` | 生成的 SQL（调试用） |
+| `.toSQL()` | `string` | 构建阶段的 SQL（调试用）；不保证已按当前 runtime schema 重绑定，也不应直接作为 provider 执行输入 |
 
 #### 2.1.3 常见链式示例（每个都附执行结果）
 
@@ -797,10 +801,10 @@ row_id: 2, 时间跨度: 2024-03-10 起, 地点: 北境·雪原, 纪要: 遭遇�
 
 #### 2.1.4 中英文名的自由混用
 
-- 中文表名、中文列名会通过 **NameMapper**（由 DDL 注释自动构建）翻译为英文名
+- 中文表名、中文列名会先经 **NameMapper** 兼容翻译，并在执行边界由当前 runtime schema 的共享解析器最终重绑定
 - `db.背包物品表` 和 `db.inventory` 等价
 - `.where('物品名称', ...)` 和 `.where('item_name', ...)` 等价
-- 长名称优先替换，字符串字面量被占位符保护，**不会误伤 `where('姓名','背包物品表里的神秘道具')` 这种字符串值**
+- 字符串值、SQL 字面量、注释、CTE 名和 SELECT 输出别名不会作为表/列标识符重绑定
 
 示例：
 ```

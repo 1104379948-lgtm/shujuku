@@ -1133,19 +1133,23 @@ console.log(jsonString);
 
 ## 原生 SQL 标识符解析
 
-`executeSqlQuery`、`querySql` 与 `executeSql` 的只读分支会在 SQLite 执行前，将已知表的用户可见标识符重绑定为运行时物理标识符；查询返回值契约不变，解析或执行失败仍返回 `null`。
+`executeSqlQuery`、`querySql`、`executeSql` 的只读分支及 `queryTableRows` 会在 SQLite 执行前，将已知表的用户可见标识符重绑定为运行时物理标识符；查询返回值契约不变，解析或执行失败仍返回 `null`。
 
 ### 表名
 
-只读 SQL 可以使用同一张表的运行时物理表名、原始 `CREATE TABLE` 表名、sheet 显示名、sheetKey 或 uid。若一个别名对应多张表，系统会移除该别名而不是猜测目标，随后由 SQLite 报告实际错误。
+只读 SQL 可以使用同一张表的运行时物理表名、原始 `CREATE TABLE` 表名、sheet 显示名、sheetKey 或 uid。若一个别名对应多张表，系统会移除该别名而不是猜测目标。
 
 ### 列名与安全边界
 
 显式 DDL 的原始列名就是物理列名。fallback DDL 下，显示列名确定映射到运行时列名；原始 DDL 列名只有能与表头唯一对应时才映射，存在歧义或多个原始列竞争同一运行时列时保持原文，绝不按列序猜测。列名在单表查询、或可由 `tableAlias.column` 唯一归属的 JOIN 中会被重绑定；多表裸列存在歧义时保持原文。字符串字面量、`--`/`/* */` 注释、CTE 名、派生表别名以及显式或隐式的 SELECT 输出别名不会作为物理对象改写。`PRAGMA` 参数原样透传。
 
+### `queryTableRows(options)` 的别名契约
+
+`options.tableName`、`options.table` 或 `options.sheetKey` 支持物理表名、原始 DDL 表名、显示名、sheetKey 与 uid；`columns`、`where` 和 `orderBy` 的列名支持显示名、物理列名及无歧义的 fallback 原始 DDL 列名。表或列别名存在冲突时，方法返回 `null`，不会按表/列出现顺序选取目标。该方法仍使用绑定参数传递条件值，`limit`/`offset` 与排序方向白名单的既有约束不变。
+
 ### 失败诊断
 
-只读 API 的失败返回值仍为 `null`。可调用 `getLastSqlApiError()` 获取最近一次只读失败的 `{ method, code, message, at }`；`code` 区分运行时未就绪、别名冲突、表不存在、列未解析、只读违规和其他 SQL 错误。只有本次 SQL 实际引用的表或列别名冲突才会归类为 `alias_conflict`；无关 schema 冲突不会掩盖实际的缺表或缺列错误。
+只读 API 的失败返回值仍为 `null`。可调用 `getLastSqlApiError()` 获取最近一次只读失败的 `{ method, code, message, at }`；`code` 区分运行时未就绪、别名冲突、表不存在、列未解析、只读违规和其他 SQL 错误。只有本次 SQL 实际引用的表或列别名冲突才会归类为 `alias_conflict`；无关 schema 冲突不会掩盖实际的缺表或缺列错误。同步读取仅使用 runtime 已发布的 schema 快照；provider 发布前会验证 schema，未就绪 runtime 不会被读取路径懒初始化。
 
 写入 SQL 仍只接受既有写路径支持的表名形态；不要把只读查询的扩展表名兼容性误当成写入契约。
 

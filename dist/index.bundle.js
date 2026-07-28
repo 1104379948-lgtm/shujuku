@@ -48934,6 +48934,22 @@ $CONTENT
     }
 
     /**
+     * Resolves user-facing read SQL against the published runtime schema.
+     *
+     * ITableStorageProvider#getCurrentData() is intentionally not called here: the
+     * SQLite implementation exports the engine and writes currentJsonTableData_ACU
+     * as a side effect. Calling it from a read resolver would both mutate global
+     * state and erase the very mismatch this boundary is meant to diagnose. Runtime
+     * publication validates schema before marking the provider ready, so the
+     * published snapshot is the only side-effect-free canonical source available to
+     * synchronous read callers.
+     */
+    function resolveCurrentRuntimeReadSql_ACU(sql) {
+        const mapper = getNameMapper();
+        return resolveReadQuerySql_ACU(sql, currentJsonTableData_ACU, mapper.translateSql.bind(mapper));
+    }
+
+    /**
      * service/runtime/template-vars/sql-query-var.ts
      * SQL 查询模板变量 — ORM 风格查询构建器 + 原生 SQL 兜底 + 值替换
      *
@@ -49384,7 +49400,8 @@ $CONTENT
             }
             try {
                 const provider = getStorageProvider();
-                const result = provider.executeQuery(sql, undefined, {
+                const executableSql = resolveCurrentRuntimeReadSql_ACU(sql).sql;
+                const result = provider.executeQuery(executableSql, undefined, {
                     suppressErrorLog: this.options.suppressQueryErrorLog === true,
                 });
                 return { columns: result.columns, values: result.values };
@@ -49392,7 +49409,7 @@ $CONTENT
             catch (e) {
                 if (this.options.throwOnQueryError === true)
                     throw new Error('orm_query_execution_failed');
-                logWarn_ACU(`[ORM] 查询执行失败: ${sql} → ${e?.message}`);
+                logWarn_ACU('[ORM] 查询执行失败: orm_query_execution_failed');
                 return { columns: [], values: [] };
             }
         }
@@ -51683,6 +51700,10 @@ $CONTENT
         if (/^(?:SELECT\b|WITH\b)/i.test(normalized))
             return { valid: true };
         return { valid: false, reason: 'statement_not_read_only' };
+    }
+    /** Shared read-path classifier. Callers that need a diagnostic should use validateReadOnlySql_ACU directly. */
+    function isReadOnlySqlStatement_ACU(sql) {
+        return validateReadOnlySql_ACU(sql).valid;
     }
 
     const ORM_CHAIN_METHODS_ACU = new Set([
@@ -93936,65 +93957,47 @@ $CONTENT
             params: [...(params || []), limit, offset],
         };
     }
-    function getEnglishTableName_ACU(tableData, sheetKey) {
-        return getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
-    }
     function findQueryTargetSheet_ACU(tableNameOrSheetKey) {
         const tableData = currentJsonTableData_ACU;
         const input = String(tableNameOrSheetKey || '').trim();
         if (!tableData || !input)
             return null;
-        if (input.startsWith('sheet_') && tableData[input]) {
-            const sheet = tableData[input];
-            return { sheet, sheetKey: input, englishTableName: getEnglishTableName_ACU(tableData, input) };
-        }
-        const mapper = getNameMapper();
-        const maybeChineseName = mapper.getChineseTableName(input);
-        for (const sheetKey of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
-            const sheet = tableData[sheetKey];
-            const english = getEnglishTableName_ACU(tableData, sheetKey);
-            if (sheet?.name === input || sheet?.name === maybeChineseName || english === input) {
-                return { sheet, sheetKey, englishTableName: english };
-            }
-        }
-        // 旧 DDL 内的表名只作为 sheet 定位别名；多个 sheet 复用同一别名时不能猜测。
-        const ddlAliasMatches = [];
-        for (const sheetKey of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
-            const sheet = tableData[sheetKey];
-            const ddlTableName = parseDDLTableName(String(sheet?.sourceData?.ddl || ''));
-            if (ddlTableName === input) {
-                ddlAliasMatches.push({ sheet, sheetKey });
-            }
-        }
-        if (ddlAliasMatches.length === 1) {
-            const [{ sheet, sheetKey }] = ddlAliasMatches;
-            return { sheet, sheetKey, englishTableName: getEnglishTableName_ACU(tableData, sheetKey) };
-        }
-        return null;
+        const { aliases, conflicts } = buildSheetTableAliasMap_ACU([tableData], { skipInvalidSources: true });
+        const normalized = input.toLowerCase();
+        if (conflicts.has(normalized))
+            throw new Error(`queryTableRows: ambiguous table alias ${input}.`);
+        const englishTableName = aliases.get(normalized);
+        if (!englishTableName)
+            return null;
+        const sheetKey = [...resolvePhysicalTableNames_ACU(tableData)]
+            .find(([, physicalName]) => physicalName === englishTableName)?.[0];
+        if (!sheetKey || !tableData[sheetKey])
+            return null;
+        return { sheet: tableData[sheetKey], sheetKey, englishTableName };
     }
-    function resolveQueryColumn_ACU(englishTableName, sheet, column) {
+    function resolveQueryColumn_ACU(englishTableName, column) {
         const raw = String(column || '').trim();
         if (!raw)
             throw new Error('queryTableRows: column must not be empty.');
         if (raw === '*')
             return raw;
-        if (raw === 'row_id')
-            return raw;
-        const mapper = getNameMapper();
-        const english = mapper.resolveColumnName(englishTableName, raw);
-        const chinese = mapper.getChineseColumnName(englishTableName, english);
-        const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0].map((item) => String(item)) : [];
-        if (headers.length > 0 && !headers.includes(raw) && !headers.includes(chinese) && !headers.includes(english)) {
-            throw new Error(`queryTableRows: unknown column ${raw}.`);
+        const tableData = currentJsonTableData_ACU;
+        const { aliases, conflicts } = buildSheetColumnAliasMap_ACU([tableData]);
+        const normalized = raw.toLowerCase();
+        if (conflicts.get(englishTableName)?.has(normalized)) {
+            throw new Error(`queryTableRows: ambiguous column alias ${raw}.`);
         }
-        return english;
+        const resolved = aliases.get(englishTableName)?.get(normalized);
+        if (!resolved)
+            throw new Error(`queryTableRows: unknown column ${raw}.`);
+        return resolved;
     }
-    function buildWhereClause_ACU(englishTableName, sheet, where, params) {
+    function buildWhereClause_ACU(englishTableName, where, params) {
         if (!where || typeof where !== 'object' || Array.isArray(where))
             return '';
         const clauses = [];
         for (const [column, value] of Object.entries(where)) {
-            const sqlColumn = quoteIdentifier_ACU(resolveQueryColumn_ACU(englishTableName, sheet, column));
+            const sqlColumn = quoteIdentifier_ACU(resolveQueryColumn_ACU(englishTableName, column));
             if (Array.isArray(value)) {
                 if (value.length === 0) {
                     clauses.push('1 = 0');
@@ -94013,7 +94016,7 @@ $CONTENT
         }
         return clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
     }
-    function buildOrderClause_ACU(englishTableName, sheet, orderBy) {
+    function buildOrderClause_ACU(englishTableName, orderBy) {
         if (!orderBy)
             return '';
         const items = Array.isArray(orderBy) ? orderBy : [orderBy];
@@ -94021,7 +94024,7 @@ $CONTENT
             const column = typeof item === 'string' ? item : item?.column;
             const directionRaw = typeof item === 'string' ? 'ASC' : String(item?.direction || 'ASC').toUpperCase();
             const direction = directionRaw === 'DESC' ? 'DESC' : 'ASC';
-            return `${quoteIdentifier_ACU(resolveQueryColumn_ACU(englishTableName, sheet, column))} ${direction}`;
+            return `${quoteIdentifier_ACU(resolveQueryColumn_ACU(englishTableName, column))} ${direction}`;
         });
         return parts.length > 0 ? ` ORDER BY ${parts.join(', ')}` : '';
     }
@@ -94033,10 +94036,10 @@ $CONTENT
         const columnsInput = Array.isArray(options.columns) && options.columns.length > 0 ? options.columns : ['*'];
         const columns = columnsInput.includes('*')
             ? '*'
-            : columnsInput.map((column) => quoteIdentifier_ACU(resolveQueryColumn_ACU(target.englishTableName, target.sheet, String(column)))).join(', ');
+            : columnsInput.map((column) => quoteIdentifier_ACU(resolveQueryColumn_ACU(target.englishTableName, String(column)))).join(', ');
         const params = [];
-        const where = buildWhereClause_ACU(target.englishTableName, target.sheet, options.where, params);
-        const order = buildOrderClause_ACU(target.englishTableName, target.sheet, options.orderBy || options.order);
+        const where = buildWhereClause_ACU(target.englishTableName, options.where, params);
+        const order = buildOrderClause_ACU(target.englishTableName, options.orderBy || options.order);
         const limit = normalizeLimit_ACU(options.limit, 100) ?? 100;
         const offset = normalizeOffset_ACU(options.offset);
         const sql = `SELECT ${columns} FROM ${quoteIdentifier_ACU(target.englishTableName)}${where}${order} LIMIT ? OFFSET ?`;
@@ -94070,8 +94073,7 @@ $CONTENT
      * 因此只接受已完整发布的 runtime；调用者可显式走重载/诊断入口恢复。
      */
     function resolveReadSqlForCurrentData_ACU(sql) {
-        const mapper = getNameMapper();
-        return resolveReadQuerySql_ACU(sql, currentJsonTableData_ACU, mapper.translateSql.bind(mapper));
+        return resolveCurrentRuntimeReadSql_ACU(sql);
     }
     function executeReadyReadQuery_ACU(sql, params) {
         if (!isStorageRuntimeReadyForSyncRead_ACU()) {
@@ -94089,13 +94091,17 @@ $CONTENT
                 ? 'runtime_not_ready'
                 : /only SELECT\/PRAGMA\/EXPLAIN\/WITH/i.test(message)
                     ? 'read_only_violation'
-                    : hasRelevantAliasConflict
+                    : /ambiguous (?:table|column) alias/i.test(message)
                         ? 'alias_conflict'
-                        : /no such table/i.test(message)
-                            ? 'table_not_found'
-                            : /no such column/i.test(message)
-                                ? 'column_not_resolved'
-                                : 'sql_error';
+                        : /queryTableRows: unknown column/i.test(message)
+                            ? 'column_not_resolved'
+                            : hasRelevantAliasConflict
+                                ? 'alias_conflict'
+                                : /no such table/i.test(message)
+                                    ? 'table_not_found'
+                                    : /no such column/i.test(message)
+                                        ? 'column_not_resolved'
+                                        : 'sql_error';
             lastReadError = { method, code, message, at: Date.now() };
             logError_ACU(`[${method}] read query failed`, {
                 code,
@@ -94428,7 +94434,7 @@ $CONTENT
      * 判断 SQL 是否为查询语句（SELECT/PRAGMA/EXPLAIN）
      */
     function isSelectQuery(sql) {
-        return /^\s*(SELECT|PRAGMA|EXPLAIN)/i.test(sql);
+        return isReadOnlySqlStatement_ACU(sql);
     }
     /**
      * 执行 SQL 并渲染结果
@@ -94440,7 +94446,7 @@ $CONTENT
             const isSelect = isSelectQuery(sql);
             if (isSelect) {
                 // SELECT 查询
-                const result = provider.executeQuery(sql);
+                const result = provider.executeQuery(resolveCurrentRuntimeReadSql_ACU(sql).sql);
                 const elapsed = (performance.now() - startTime).toFixed(1);
                 // 记录历史
                 addHistory$1(sql, true);
@@ -104797,7 +104803,7 @@ $CONTENT
         {
             sourceFile: 'syntax-reference (1).md',
             section: '二、值替换变量（仅 SQLite 模式）/ 2.1 ORM 查询',
-            content: joinLines_ACU('## 二、值替换变量（仅 SQLite 模式）', '', '> 以下全部语法**只在 SQLite 模式生效**，原生模式下标签会原样保留。原因：它们都走 SQLite 引擎的 `executeQuery()`，原生模式下没有这个引擎。', '', '### 2.1 ORM 查询：`{[db.表名.方法链]}`', '', '```', '你身上有 {[db.背包物品表.where(\'物品名称\', \'铁剑\').get(\'数量\')]} 把铁剑。', '```', '', '→ **执行结果**：', '```', '你身上有 3 把铁剑。', '```', '', '底层实现是一个 `Proxy`：`db.背包物品表` 返回一个 `TableQueryBuilder`，后续所有方法是链式调用，最后由**终结方法**决定输出形式。', '', '#### 2.1.1 查询构建方法（返回 `TableQueryBuilder`，可继续链式）', '', '| 方法 | SQL 等价 | 示例 |', '|------|---------|------|', '| `.where(\'列\', \'值\')` | `列 = \'值\'` | `.where(\'姓名\', \'艾莉\')` |', '| `.where(\'列\', \'>\', 数值)` | `列 > 数值`（`>` `>=` `<` `<=` `!=` `=`） | `.where(\'数量\', \'>\', 2)` |', '| `.orWhere(\'列\', \'值\')` | 把当前 AND 组封存为一个 OR 分支，开新的 AND 组 | 见下方 OR 示例 |', '| `.whereIn(\'列\', [值...])` | `列 IN (...)`（空数组 → 永假） | `.whereIn(\'类别\', [\'武器\',\'消耗品\'])` |', '| `.whereLike(\'列\', \'模式\')` | `列 LIKE \'模式\'`（`%` 任意字符，`_` 单字符） | `.whereLike(\'物品名称\', \'%药水%\')` |', '| `.orderBy(\'列\', \'ASC\')` | `ORDER BY 列 ASC`（或 `\'DESC\'`） | `.orderBy(\'数量\', \'DESC\')` |', '| `.limit(数量)` | `LIMIT n` | `.limit(5)` |', '| `.offset(数量)` | `OFFSET n`（需配合 `limit`，内部若无 `limit` 会补 `LIMIT -1`） | `.limit(10).offset(20)` |', '', '#### 2.1.2 终结方法（返回具体值，结束链式）', '', '| 方法 | 返回类型 | 说明 |', '|------|---------|------|', '| `.get(\'列\')` | `string | number | null` | 第一行指定列的值 |', '| `.first()` | `Record<string,any> | null` | 第一行所有列组成的对象 |', '| `.list(\'列\')` | `Array<string|number>` | 某列所有行的值 |', '| `.all()` | `Array<Record<string,any>>` | 所有行所有列 |', '| `.count()` | `number` | `COUNT(*)` |', '| `.sum(\'列\')` / `.avg(\'列\')` / `.max(\'列\')` / `.min(\'列\')` | `number` | 聚合函数 |', '| `.exists()` | `boolean` | 是否存在至少一行 |', '| `.value(\'SQL表达式\')` | `string | number | null` | 在当前 WHERE 上下文里跑自定义 `SELECT <表达式>`，见下方示例 |', '| `.toSQL()` | `string` | 生成的 SQL（调试用） |'),
+            content: joinLines_ACU('## 二、值替换变量（仅 SQLite 模式）', '', '> 以下全部语法**只在 SQLite 模式生效**，原生模式下标签会原样保留。原因：它们都走 SQLite 引擎的 `executeQuery()`，原生模式下没有这个引擎。', '', '### 2.1 ORM 查询：`{[db.表名.方法链]}`', '', '```', '你身上有 {[db.背包物品表.where(\'物品名称\', \'铁剑\').get(\'数量\')]} 把铁剑。', '```', '', '→ **执行结果**：', '```', '你身上有 3 把铁剑。', '```', '', '底层实现是一个 `Proxy`：`db.背包物品表` 返回一个 `TableQueryBuilder`，后续所有方法是链式调用，最后由**终结方法**决定输出形式。', '', 'ORM 会在完整只读 SQL 执行前根据当前 SQLite runtime schema 重绑定表和列标识符。表名可使用显示名、原始 DDL 表名、sheetKey、uid 或物理名；列名可使用显示名、物理名和无歧义的原始 DDL 列名。冲突不会按顺序猜测。', '', '#### 2.1.1 查询构建方法（返回 `TableQueryBuilder`，可继续链式）', '', '| 方法 | SQL 等价 | 示例 |', '|------|---------|------|', '| `.where(\'列\', \'值\')` | `列 = \'值\'` | `.where(\'姓名\', \'艾莉\')` |', '| `.where(\'列\', \'>\', 数值)` | `列 > 数值`（`>` `>=` `<` `<=` `!=` `=`） | `.where(\'数量\', \'>\', 2)` |', '| `.orWhere(\'列\', \'值\')` | 把当前 AND 组封存为一个 OR 分支，开新的 AND 组 | 见下方 OR 示例 |', '| `.whereIn(\'列\', [值...])` | `列 IN (...)`（空数组 → 永假） | `.whereIn(\'类别\', [\'武器\',\'消耗品\'])` |', '| `.whereLike(\'列\', \'模式\')` | `列 LIKE \'模式\'`（`%` 任意字符，`_` 单字符） | `.whereLike(\'物品名称\', \'%药水%\')` |', '| `.orderBy(\'列\', \'ASC\')` | `ORDER BY 列 ASC`（或 `\'DESC\'`） | `.orderBy(\'数量\', \'DESC\')` |', '| `.limit(数量)` | `LIMIT n` | `.limit(5)` |', '| `.offset(数量)` | `OFFSET n`（需配合 `limit`，内部若无 `limit` 会补 `LIMIT -1`） | `.limit(10).offset(20)` |', '', '#### 2.1.2 终结方法（返回具体值，结束链式）', '', '| 方法 | 返回类型 | 说明 |', '|------|---------|------|', '| `.get(\'列\')` | `string | number | null` | 第一行指定列的值 |', '| `.first()` | `Record<string,any> | null` | 第一行所有列组成的对象 |', '| `.list(\'列\')` | `Array<string|number>` | 某列所有行的值 |', '| `.all()` | `Array<Record<string,any>>` | 所有行所有列 |', '| `.count()` | `number` | `COUNT(*)` |', '| `.sum(\'列\')` / `.avg(\'列\')` / `.max(\'列\')` / `.min(\'列\')` | `number` | 聚合函数 |', '| `.exists()` | `boolean` | 是否存在至少一行 |', '| `.value(\'SQL表达式\')` | `string | number | null` | 在当前 WHERE 上下文里跑自定义 `SELECT <表达式>`，见下方示例 |', '| `.toSQL()` | `string` | 构建阶段 SQL（调试用），不保证已按当前 runtime schema 重绑定 |'),
         },
         {
             sourceFile: 'syntax-reference (1).md',
@@ -144297,7 +144303,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const SQL_CONSOLE_MAX_HISTORY = 50;
     const sqlHistory = ref([]);
     function isSqlConsoleQuery(sql) {
-        return /^\s*(SELECT|PRAGMA|EXPLAIN)/i.test(sql);
+        return isReadOnlySqlStatement_ACU(sql);
     }
     function emptyResult() {
         return {
@@ -144383,7 +144389,7 @@ Expected function or array of functions, received type ${typeof value}.`
             try {
                 const provider = await ensureStorageProviderReady_ACU();
                 if (isSqlConsoleQuery(sql)) {
-                    const queryResult = provider.executeQuery(sql);
+                    const queryResult = provider.executeQuery(resolveCurrentRuntimeReadSql_ACU(sql).sql);
                     const elapsedMs = (performance.now() - startTime).toFixed(1);
                     result.value = {
                         ...emptyResult(),

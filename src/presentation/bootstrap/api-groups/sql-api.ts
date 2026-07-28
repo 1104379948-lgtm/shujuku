@@ -6,14 +6,13 @@
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../../../service/runtime/state-manager';
 import { ensureStorageProviderReady_ACU, getStorageProvider, getStorageRuntimeHealth_ACU, isStorageRuntimeReadyForSyncRead_ACU } from '../../../service/table/table-storage-strategy';
-import { getNameMapper } from '../../../service/runtime/template-vars/name-mapper';
-import { parseDDLTableName } from '../../../shared/ddl-utils';
-import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity';
+import { resolvePhysicalTableNames_ACU } from '../../../shared/sheet-identity';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
 import { buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
 import type { TableWriteConflictUnitV2_ACU } from '../../../service/table/storage-frame-v2-types';
 import type { SqlMutationResult, SqlQueryResult } from '../../../shared/table-storage-provider';
-import { resolveReadQuerySql_ACU, type ReadQueryResolveResult_ACU } from '../../../shared/sql-read-resolver';
+import { buildSheetColumnAliasMap_ACU, buildSheetTableAliasMap_ACU, type ReadQueryResolveResult_ACU } from '../../../shared/sql-read-resolver';
+import { resolveCurrentRuntimeReadSql_ACU } from '../../../service/runtime/read-query-resolver';
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import type { ApiGroupContext } from './callback-api';
 
@@ -340,67 +339,41 @@ function buildLimitedReadSql_ACU(sql: string, params: SqlParam_ACU[] | undefined
     };
 }
 
-function getEnglishTableName_ACU(tableData: Record<string, any>, sheetKey: string): string {
-    return getPhysicalTableNameForSheet_ACU(tableData, sheetKey);
-}
-
 function findQueryTargetSheet_ACU(tableNameOrSheetKey: string): { sheet: any; sheetKey: string; englishTableName: string } | null {
     const tableData = currentJsonTableData_ACU as Record<string, any> | null;
     const input = String(tableNameOrSheetKey || '').trim();
     if (!tableData || !input) return null;
-
-    if (input.startsWith('sheet_') && tableData[input]) {
-        const sheet = tableData[input];
-        return { sheet, sheetKey: input, englishTableName: getEnglishTableName_ACU(tableData, input) };
-    }
-
-    const mapper = getNameMapper();
-    const maybeChineseName = mapper.getChineseTableName(input);
-    for (const sheetKey of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
-        const sheet = tableData[sheetKey];
-        const english = getEnglishTableName_ACU(tableData, sheetKey);
-        if (sheet?.name === input || sheet?.name === maybeChineseName || english === input) {
-            return { sheet, sheetKey, englishTableName: english };
-        }
-    }
-
-    // 旧 DDL 内的表名只作为 sheet 定位别名；多个 sheet 复用同一别名时不能猜测。
-    const ddlAliasMatches: Array<{ sheet: any; sheetKey: string }> = [];
-    for (const sheetKey of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
-        const sheet = tableData[sheetKey];
-        const ddlTableName = parseDDLTableName(String(sheet?.sourceData?.ddl || ''));
-        if (ddlTableName === input) {
-            ddlAliasMatches.push({ sheet, sheetKey });
-        }
-    }
-    if (ddlAliasMatches.length === 1) {
-        const [{ sheet, sheetKey }] = ddlAliasMatches;
-        return { sheet, sheetKey, englishTableName: getEnglishTableName_ACU(tableData, sheetKey) };
-    }
-
-    return null;
+    const { aliases, conflicts } = buildSheetTableAliasMap_ACU([tableData], { skipInvalidSources: true });
+    const normalized = input.toLowerCase();
+    if (conflicts.has(normalized)) throw new Error(`queryTableRows: ambiguous table alias ${input}.`);
+    const englishTableName = aliases.get(normalized);
+    if (!englishTableName) return null;
+    const sheetKey = [...resolvePhysicalTableNames_ACU(tableData)]
+        .find(([, physicalName]) => physicalName === englishTableName)?.[0];
+    if (!sheetKey || !tableData[sheetKey]) return null;
+    return { sheet: tableData[sheetKey], sheetKey, englishTableName };
 }
 
-function resolveQueryColumn_ACU(englishTableName: string, sheet: any, column: string): string {
+function resolveQueryColumn_ACU(englishTableName: string, column: string): string {
     const raw = String(column || '').trim();
     if (!raw) throw new Error('queryTableRows: column must not be empty.');
     if (raw === '*') return raw;
-    if (raw === 'row_id') return raw;
-    const mapper = getNameMapper();
-    const english = mapper.resolveColumnName(englishTableName, raw);
-    const chinese = mapper.getChineseColumnName(englishTableName, english);
-    const headers = Array.isArray(sheet?.content?.[0]) ? sheet.content[0].map((item: any) => String(item)) : [];
-    if (headers.length > 0 && !headers.includes(raw) && !headers.includes(chinese) && !headers.includes(english)) {
-        throw new Error(`queryTableRows: unknown column ${raw}.`);
+    const tableData = currentJsonTableData_ACU as Record<string, any> | null;
+    const { aliases, conflicts } = buildSheetColumnAliasMap_ACU([tableData]);
+    const normalized = raw.toLowerCase();
+    if (conflicts.get(englishTableName)?.has(normalized)) {
+        throw new Error(`queryTableRows: ambiguous column alias ${raw}.`);
     }
-    return english;
+    const resolved = aliases.get(englishTableName)?.get(normalized);
+    if (!resolved) throw new Error(`queryTableRows: unknown column ${raw}.`);
+    return resolved;
 }
 
-function buildWhereClause_ACU(englishTableName: string, sheet: any, where: any, params: SqlParam_ACU[]): string {
+function buildWhereClause_ACU(englishTableName: string, where: any, params: SqlParam_ACU[]): string {
     if (!where || typeof where !== 'object' || Array.isArray(where)) return '';
     const clauses: string[] = [];
     for (const [column, value] of Object.entries(where)) {
-        const sqlColumn = quoteIdentifier_ACU(resolveQueryColumn_ACU(englishTableName, sheet, column));
+        const sqlColumn = quoteIdentifier_ACU(resolveQueryColumn_ACU(englishTableName, column));
         if (Array.isArray(value)) {
             if (value.length === 0) {
                 clauses.push('1 = 0');
@@ -418,14 +391,14 @@ function buildWhereClause_ACU(englishTableName: string, sheet: any, where: any, 
     return clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
 }
 
-function buildOrderClause_ACU(englishTableName: string, sheet: any, orderBy: any): string {
+function buildOrderClause_ACU(englishTableName: string, orderBy: any): string {
     if (!orderBy) return '';
     const items = Array.isArray(orderBy) ? orderBy : [orderBy];
     const parts = items.map(item => {
         const column = typeof item === 'string' ? item : item?.column;
         const directionRaw = typeof item === 'string' ? 'ASC' : String(item?.direction || 'ASC').toUpperCase();
         const direction = directionRaw === 'DESC' ? 'DESC' : 'ASC';
-        return `${quoteIdentifier_ACU(resolveQueryColumn_ACU(englishTableName, sheet, column))} ${direction}`;
+        return `${quoteIdentifier_ACU(resolveQueryColumn_ACU(englishTableName, column))} ${direction}`;
     });
     return parts.length > 0 ? ` ORDER BY ${parts.join(', ')}` : '';
 }
@@ -438,10 +411,10 @@ function buildQueryTableRowsSql_ACU(options: Record<string, any>): { sql: string
     const columnsInput = Array.isArray(options.columns) && options.columns.length > 0 ? options.columns : ['*'];
     const columns = columnsInput.includes('*')
         ? '*'
-        : columnsInput.map((column: any) => quoteIdentifier_ACU(resolveQueryColumn_ACU(target.englishTableName, target.sheet, String(column)))).join(', ');
+        : columnsInput.map((column: any) => quoteIdentifier_ACU(resolveQueryColumn_ACU(target.englishTableName, String(column)))).join(', ');
     const params: SqlParam_ACU[] = [];
-    const where = buildWhereClause_ACU(target.englishTableName, target.sheet, options.where, params);
-    const order = buildOrderClause_ACU(target.englishTableName, target.sheet, options.orderBy || options.order);
+    const where = buildWhereClause_ACU(target.englishTableName, options.where, params);
+    const order = buildOrderClause_ACU(target.englishTableName, options.orderBy || options.order);
     const limit = normalizeLimit_ACU(options.limit, 100) ?? 100;
     const offset = normalizeOffset_ACU(options.offset);
     const sql = `SELECT ${columns} FROM ${quoteIdentifier_ACU(target.englishTableName)}${where}${order} LIMIT ? OFFSET ?`;
@@ -477,8 +450,7 @@ function buildRawSqlWriteSet_ACU(options: SqlMutationOptions_ACU): TableWriteCon
  * 因此只接受已完整发布的 runtime；调用者可显式走重载/诊断入口恢复。
  */
 function resolveReadSqlForCurrentData_ACU(sql: string): ReadQueryResolveResult_ACU {
-    const mapper = getNameMapper();
-    return resolveReadQuerySql_ACU(sql, currentJsonTableData_ACU as any, mapper.translateSql.bind(mapper));
+    return resolveCurrentRuntimeReadSql_ACU(sql);
 }
 
 function executeReadyReadQuery_ACU(sql: string, params?: SqlParam_ACU[]): { result: SqlQueryResult; sql: string } {
@@ -502,6 +474,10 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
             ? 'runtime_not_ready'
             : /only SELECT\/PRAGMA\/EXPLAIN\/WITH/i.test(message)
                 ? 'read_only_violation'
+                : /ambiguous (?:table|column) alias/i.test(message)
+                    ? 'alias_conflict'
+                    : /queryTableRows: unknown column/i.test(message)
+                        ? 'column_not_resolved'
                 : hasRelevantAliasConflict
                     ? 'alias_conflict'
                     : /no such table/i.test(message)
