@@ -5,6 +5,7 @@
  * 策略：mock 全局状态 + mock provider，测试 SQL 生成的正确性和边界条件
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterEach } from 'vitest';
 
 // ═══════════════════════════════════════════════════════════════
 // Mock 设置
@@ -97,6 +98,9 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
     createRuntimeSnapshot: mockCreateRuntimeSnapshot,
     restoreRuntimeSnapshot: mockRestoreRuntimeSnapshot,
   })),
+  // CRUD 的 mapper 同步必须经活跃 provider 的 owner-aware 刷新；
+  // 这里默认无活跃 SQLite provider，走无所有权兼容刷新分支。
+  getActiveStorageProvider: vi.fn(() => null),
   ensureStorageProviderReady_ACU: mockEnsureStorageProviderReady,
   reloadStorageProvider: mockReloadStorageProvider,
 }));
@@ -112,6 +116,21 @@ vi.mock('../../src/service/table/table-service', () => ({
   persistTablesToChatMessage_ACU: mockPersistTablesToChatMessage,
   saveIndependentTableToChatHistory_ACU: vi.fn().mockResolvedValue({ saved: true }),
 }));
+
+// 保留真实 NameMapper 行为，只监视无所有权兼容入口是否被调用。
+const { mockEnsureGlobalNameMapperForDDLs } = vi.hoisted(() => ({
+  mockEnsureGlobalNameMapperForDDLs: vi.fn(),
+}));
+vi.mock('../../src/service/runtime/template-vars/name-mapper', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../src/service/runtime/template-vars/name-mapper')>();
+  return {
+    ...original,
+    ensureGlobalNameMapperForDDLs_ACU: (ddlMap: Map<string, string>) => {
+      mockEnsureGlobalNameMapperForDDLs(ddlMap);
+      return original.ensureGlobalNameMapperForDDLs_ACU(ddlMap);
+    },
+  };
+});
 
 vi.mock('../../src/service/table/table-write-transaction', () => ({
   captureTableRuntimeRevisionForWriteSet_ACU: vi.fn(() => 'runtime-rev-head'),
@@ -146,6 +165,7 @@ import {
 } from '../../src/presentation/bootstrap/api-groups/table-crud-api';
 import { resolveTableHistoryStateFromChat_ACU } from '../../src/service/table/table-history';
 import { SillyTavern_API_ACU } from '../../src/shared/host-api';
+import { getActiveStorageProvider } from '../../src/service/table/table-storage-strategy';
 
 // ═══════════════════════════════════════════════════════════════
 // quoteIdentifier
@@ -186,6 +206,7 @@ describe('quoteIdentifier', () => {
 describe('findTargetSheet', () => {
   beforeEach(() => {
     mockCurrentJsonTableData = null;
+    mockEnsureGlobalNameMapperForDDLs.mockClear();
   });
 
   it('找到匹配的表', () => {
@@ -218,6 +239,45 @@ describe('findTargetSheet', () => {
     };
     const result = findTargetSheet('背包物品表');
     expect(result!.sheetKey).toBe('sheet_0');
+  });
+
+  describe('活跃 SQLite runtime 的 owner-aware 映射刷新', () => {
+    const tableData = {
+      sheet_0: { name: '背包物品表', content: [['row_id', 'item']] },
+    };
+
+    afterEach(() => {
+      vi.mocked(getActiveStorageProvider).mockReturnValue(null as any);
+    });
+
+    it('存在活跃 SQLite runtime 时经其刷新映射，不走无所有权兼容入口', () => {
+      mockCurrentJsonTableData = tableData;
+      const refreshNameMapperForData_ACU = vi.fn(() => true);
+      vi.mocked(getActiveStorageProvider).mockReturnValue({ mode: 'sqlite', refreshNameMapperForData_ACU } as any);
+
+      const result = findTargetSheet('背包物品表');
+
+      expect(result!.sheetKey).toBe('sheet_0');
+      expect(refreshNameMapperForData_ACU).toHaveBeenCalledWith(tableData);
+      expect(mockEnsureGlobalNameMapperForDDLs).not.toHaveBeenCalled();
+    });
+
+    it('活跃 SQLite runtime 发布被拒时 fail-closed，不得带着不同源映射解析表名', () => {
+      mockCurrentJsonTableData = tableData;
+      const refreshNameMapperForData_ACU = vi.fn(() => false);
+      vi.mocked(getActiveStorageProvider).mockReturnValue({ mode: 'sqlite', refreshNameMapperForData_ACU } as any);
+
+      expect(findTargetSheet('背包物品表')).toBeNull();
+      expect(mockEnsureGlobalNameMapperForDDLs).not.toHaveBeenCalled();
+    });
+
+    it('活跃 SQLite runtime 缺少 owner-aware 刷新能力时同样 fail-closed', () => {
+      mockCurrentJsonTableData = tableData;
+      vi.mocked(getActiveStorageProvider).mockReturnValue({ mode: 'sqlite' } as any);
+
+      expect(findTargetSheet('背包物品表')).toBeNull();
+      expect(mockEnsureGlobalNameMapperForDDLs).not.toHaveBeenCalled();
+    });
   });
 });
 

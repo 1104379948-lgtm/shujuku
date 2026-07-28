@@ -5626,6 +5626,41 @@ $CONTENT
         return !!(TavernHelper_API_ACU && typeof TavernHelper_API_ACU.getLorebookEntries === 'function' && typeof TavernHelper_API_ACU.setLorebookEntries === 'function');
     }
     // ═══ 条目 CRUD ═══
+    const LOREBOOK_NAME_IGNORABLE_CHARS_ACU = /[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
+    /**
+     * 仅用于世界书名称比对，不可替代宿主保存的原始名称。
+     * 兼容复制粘贴常见的全角字符、组合字符、不可见控制字符与异常空白。
+     */
+    function normalizeLorebookNameForMatch_ACU(value) {
+        return String(value ?? '')
+            .normalize('NFKC')
+            .replace(LOREBOOK_NAME_IGNORABLE_CHARS_ACU, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+    function getLorebookListItemName_ACU(item) {
+        if (item && typeof item === 'object')
+            return String(item.name ?? '').trim();
+        return String(item ?? '').trim();
+    }
+    /**
+     * 将配置/绑定中的名称解析为宿主列表里的真实名称。
+     * 多个名称归一化后冲突时拒绝猜测，避免读写到错误世界书。
+     */
+    function resolveLorebookNameFromList_ACU(requestedName, bookList) {
+        const requested = String(requestedName ?? '').trim();
+        if (!requested || !Array.isArray(bookList))
+            return null;
+        const availableNames = bookList.map(getLorebookListItemName_ACU).filter(Boolean);
+        const exactMatch = availableNames.find(name => name === requested);
+        if (exactMatch)
+            return exactMatch;
+        const matchKey = normalizeLorebookNameForMatch_ACU(requested);
+        if (!matchKey)
+            return null;
+        const normalizedMatches = availableNames.filter(name => normalizeLorebookNameForMatch_ACU(name) === matchKey);
+        return normalizedMatches.length === 1 ? normalizedMatches[0] : null;
+    }
     /**
      * 获取指定世界书的所有条目
      * @param bookName 世界书名称
@@ -5636,7 +5671,50 @@ $CONTENT
             logWarn_ACU('[WorldbookGateway] getLorebookEntries 不可用，返回空数组');
             return [];
         }
-        return await TavernHelper_API_ACU.getLorebookEntries(bookName);
+        try {
+            return await TavernHelper_API_ACU.getLorebookEntries(bookName);
+        }
+        catch (error) {
+            if (!isLorebookNotFoundError_ACU(error))
+                throw error;
+            let resolvedName = null;
+            try {
+                resolvedName = resolveLorebookNameFromList_ACU(bookName, await listLorebooks_ACU());
+            }
+            catch {
+                // 名称恢复是补救路径；列表读取失败时必须保留原始宿主错误。
+            }
+            if (!resolvedName || resolvedName === bookName)
+                throw error;
+            logWarn_ACU('[WorldbookGateway] 世界书名称存在 Unicode 或不可见字符差异，使用宿主真实名称重试读取。', {
+                phase: 'resolve_lorebook_name',
+                requestedName: bookName,
+                resolvedName,
+            });
+            try {
+                return await TavernHelper_API_ACU.getLorebookEntries(resolvedName);
+            }
+            catch (retryError) {
+                // 保留第一次宿主 not-found 错误的分类与堆栈，同时附带恢复失败证据。
+                // 直接抛 retryError 会让调用方误以为首次故障就是网络/权限问题。
+                try {
+                    Object.defineProperties(error, {
+                        lorebookResolvedName: { value: resolvedName, configurable: true },
+                        lorebookRetryError: { value: retryError, configurable: true },
+                    });
+                }
+                catch {
+                    // 极少数不可扩展错误对象无法附加诊断；输出脱敏结构化日志并保留原始错误。
+                    logWarn_ACU('[WorldbookGateway] 世界书真实名称重试失败，原始错误对象不可扩展。', {
+                        phase: 'retry_resolved_lorebook_name',
+                        requestedName: bookName,
+                        resolvedName,
+                        error: { category: 'read_failed' },
+                    });
+                }
+                throw error;
+            }
+        }
     }
     function isLorebookNotFoundError_ACU(error) {
         if (!error || error?.name === 'AbortError' || error?.message === 'TaskAbortedByUser') {
@@ -46147,6 +46225,37 @@ $CONTENT
      */
     /** 全局 NameMapper 单例 */
     let _globalNameMapper = null;
+    /**
+     * 当前映射的发布者身份。
+     *
+     * 全局 mapper 是单例，但 SQLite runtime 会在切聊/重载时创建新的 provider 实例，
+     * 并且存在「新实例已发布 → 旧实例才被销毁」的置换顺序。没有所有权时，
+     * 旧实例的迟到清理会把新实例刚发布的映射清成 unbound，
+     * 于是依赖中英文名映射的 SQL/ORM 全部退化为中文标识符直传。
+     */
+    let _globalNameMapperOwner_ACU = null;
+    let _nameMapperOwnerSequence_ACU = 0;
+    /** 类型层品牌，阻止调用方用普通对象字面量满足凭证类型。 */
+    const NAME_MAPPER_OWNER_BRAND_ACU = Symbol('acu.name-mapper.owner');
+    /**
+     * 运行时真实性登记。
+     *
+     * 仅检查品牌属性是不够的：调用方拿到任意真实凭证后，可通过
+     * Object.getOwnPropertySymbols() 取得该 Symbol 并复制到伪造对象上。
+     * 因此发布权必须由「本模块是否签发过该对象」决定，而不是对象长什么样。
+     */
+    const _issuedNameMapperOwners_ACU = new WeakSet();
+    /** 为一个 runtime 实例创建唯一且不可复用的发布凭证。 */
+    function createNameMapperOwnerToken_ACU(label) {
+        _nameMapperOwnerSequence_ACU += 1;
+        const token = Object.freeze({
+            [NAME_MAPPER_OWNER_BRAND_ACU]: true,
+            id: _nameMapperOwnerSequence_ACU,
+            label: String(label || 'runtime'),
+        });
+        _issuedNameMapperOwners_ACU.add(token);
+        return token;
+    }
     /** 当前 mapper 对应的有效 DDL 集合签名；null 表示尚未绑定到任何 runtime schema。 */
     let _globalNameMapperSchemaSignature = null;
     /**
@@ -46177,37 +46286,91 @@ $CONTENT
         }
         return _globalNameMapper;
     }
-    /**
-     * 从所有表的 DDL 构建全局 NameMapper
-     * 在 SQLite 加载完成后调用
-     *
-     * @param ddlMap runtime 物理表名 → 有效 DDL 的映射
-     */
-    function buildGlobalNameMapper(ddlMap) {
-        _globalNameMapperSchemaSignature = buildDDLMapSignature_ACU(ddlMap);
-        _globalNameMapper = NameMapper.fromDDLs(ddlMap);
-        _globalNameMapperBinding_ACU = _globalNameMapperSchemaSignature ? 'bound' : 'empty_schema';
-        logDebug_ACU(`[NameMapper] 全局映射器已构建: ${_globalNameMapper.tableCount} 张表`);
+    /** 运行时校验发布凭证：只承认本模块签发过的对象实例。 */
+    function isNameMapperOwnerToken_ACU(owner) {
+        return !!owner && typeof owner === 'object' && _issuedNameMapperOwners_ACU.has(owner);
+    }
+    /** 更旧的 runtime 实例不得覆盖更新实例已经发布的映射。 */
+    function canPublishWithOwner_ACU(owner) {
+        if (!isNameMapperOwnerToken_ACU(owner))
+            return false;
+        return !_globalNameMapperOwner_ACU || owner.id >= _globalNameMapperOwner_ACU.id;
+    }
+    function applyGlobalNameMapper_ACU(mapper, signature, owner) {
+        _globalNameMapper = mapper;
+        _globalNameMapperSchemaSignature = signature;
+        _globalNameMapperBinding_ACU = signature ? 'bound' : 'empty_schema';
+        _globalNameMapperOwner_ACU = owner;
     }
     /**
-     * 仅当 mapper 尚未绑定当前有效 schema 时重建。
-     * 不能用 tableCount 判断就绪：不同模板可能拥有相同数量的表但列映射已经变化。
+     * 以 runtime 实例身份发布当前有效 DDL 集合对应的映射。
+     *
+     * @returns 是否实际发布；false 表示存在更新的发布者，本次调用被丢弃。
      */
-    function ensureGlobalNameMapperForDDLs_ACU(ddlMap) {
-        const nextSignature = buildDDLMapSignature_ACU(ddlMap);
-        if (_globalNameMapperBinding_ACU === 'unbound' || _globalNameMapperSchemaSignature !== nextSignature) {
-            buildGlobalNameMapper(ddlMap);
+    function publishGlobalNameMapperForDDLs_ACU(ddlMap, owner) {
+        if (!canPublishWithOwner_ACU(owner)) {
+            logDebug_ACU('[NameMapper] 已存在更新的发布者，丢弃陈旧 runtime 的映射发布。');
+            return false;
         }
-        return _globalNameMapper;
+        const nextSignature = buildDDLMapSignature_ACU(ddlMap);
+        if (_globalNameMapperOwner_ACU === owner
+            && _globalNameMapperBinding_ACU !== 'unbound'
+            && _globalNameMapperSchemaSignature === nextSignature) {
+            return true;
+        }
+        applyGlobalNameMapper_ACU(NameMapper.fromDDLs(ddlMap), nextSignature, owner);
+        logDebug_ACU(`[NameMapper] 全局映射器已发布: ${_globalNameMapper.tableCount} 张表`);
+        return true;
     }
     /**
      * 标记 runtime 引擎已就绪但尚未建立任何表（新聊天首次填表前的正常状态）。
      * 与「mapper 意外丢失」区分：后者说明活跃 runtime 有表却没有可信映射，属于异常。
+     *
+     * @returns 是否实际发布；false 表示存在更新的发布者，本次调用被丢弃。
      */
-    function markGlobalNameMapperEmptySchema_ACU() {
-        _globalNameMapper = new NameMapper();
-        _globalNameMapperSchemaSignature = '';
-        _globalNameMapperBinding_ACU = 'empty_schema';
+    function publishGlobalNameMapperEmptySchema_ACU(owner) {
+        if (!canPublishWithOwner_ACU(owner)) {
+            logDebug_ACU('[NameMapper] 已存在更新的发布者，丢弃陈旧 runtime 的空 schema 标记。');
+            return false;
+        }
+        applyGlobalNameMapper_ACU(new NameMapper(), '', owner);
+        return true;
+    }
+    /**
+     * 以 runtime 实例身份释放映射。
+     * 只有当前发布者才能把全局状态清成 unbound；已被置换的旧实例调用时为 no-op。
+     *
+     * @returns 是否实际释放。
+     */
+    function releaseGlobalNameMapperForOwner_ACU(owner) {
+        if (!isNameMapperOwnerToken_ACU(owner) || _globalNameMapperOwner_ACU !== owner)
+            return false;
+        disposeGlobalNameMapper();
+        return true;
+    }
+    /**
+     * 仅当 mapper 尚未绑定当前有效 schema 时重建。
+     * 不能用 tableCount 判断就绪：不同模板可能拥有相同数量的表但列映射已经变化。
+     *
+     * 这是无所有权的兼容入口：它只能刷新尚无 runtime 持有的映射。
+     * 任何 owned 状态（含 empty_schema）都不得由它改写，否则会出现
+     * 「owner 是 A、内容却来自别处」的脱节，并让 A 的释放清掉不属于它的映射。
+     * 活跃 runtime 需要按新 schema 刷新时，走 provider 自身的 owner-aware 发布。
+     */
+    function ensureGlobalNameMapperForDDLs_ACU(ddlMap) {
+        const nextSignature = buildDDLMapSignature_ACU(ddlMap);
+        if (_globalNameMapperBinding_ACU !== 'unbound' && _globalNameMapperSchemaSignature === nextSignature) {
+            return _globalNameMapper;
+        }
+        if (_globalNameMapperOwner_ACU) {
+            logWarn_ACU('[NameMapper] 当前映射由活跃 runtime 持有，已拒绝无所有权刷新；请通过 provider 的 owner-aware 刷新发布新 schema。');
+            return getNameMapper();
+        }
+        _globalNameMapper = NameMapper.fromDDLs(ddlMap);
+        _globalNameMapperSchemaSignature = nextSignature;
+        _globalNameMapperBinding_ACU = nextSignature ? 'bound' : 'empty_schema';
+        logDebug_ACU(`[NameMapper] 全局映射器已刷新: ${_globalNameMapper.tableCount} 张表`);
+        return _globalNameMapper;
     }
     /**
      * 解析运行时有效 DDL（包括缺失或无效 DDL 的 fallback）。
@@ -46229,13 +46392,23 @@ $CONTENT
             binding: _globalNameMapperBinding_ACU,
         };
     }
+    /** 发布所有权诊断；只暴露标签与序号，不返回凭证对象本身。 */
+    function getGlobalNameMapperOwnershipSnapshot_ACU() {
+        return {
+            binding: _globalNameMapperBinding_ACU,
+            ownerLabel: _globalNameMapperOwner_ACU?.label ?? null,
+            ownerId: _globalNameMapperOwner_ACU?.id ?? null,
+        };
+    }
     /**
-     * 销毁全局 NameMapper
+     * 无条件销毁全局 NameMapper 并清除发布所有权。
+     * 仅用于测试隔离与明确的顶层全局复位；runtime 生命周期请使用 owner-aware 释放。
      */
     function disposeGlobalNameMapper() {
         _globalNameMapper = null;
         _globalNameMapperSchemaSignature = null;
         _globalNameMapperBinding_ACU = 'unbound';
+        _globalNameMapperOwner_ACU = null;
     }
     /**
      * 中英文名称双向映射器
@@ -47101,9 +47274,18 @@ $CONTENT
             this._initialized = false;
             this.engine = new SqliteEngine();
             this.syncBridge = new SyncBridge(this.engine);
+            this.nameMapperOwner_ACU = createNameMapperOwnerToken_ACU('sql-table-service');
         }
         isReady() {
             return this._initialized && this.engine.isReady;
+        }
+        /**
+         * 以本实例身份按给定 canonical 快照刷新映射。
+         * 外部 CRUD 与回滚路径不持有发布凭证，必须经活跃 provider 刷新，
+         * 否则会出现「owner 是本实例、内容却由无所有权入口改写」的脱节。
+         */
+        refreshNameMapperForData_ACU(data) {
+            return this._buildNameMapper(data);
         }
         createRuntimeSnapshot() {
             if (!this._initialized || !this.engine.isReady)
@@ -47113,14 +47295,26 @@ $CONTENT
         async restoreRuntimeSnapshot(snapshot) {
             if (!(snapshot instanceof Uint8Array))
                 throw new Error('SQLite 运行时快照无效，无法恢复。');
-            disposeGlobalNameMapper();
+            // 失败时要撤回本实例写入的共享 canonical 视图，避免半成功状态污染其他读者。
+            const previousJsonView = currentJsonTableData_ACU;
+            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
             await this.engine.loadFromBinary(snapshot);
-            this._initialized = true;
             this._existingTableSet = undefined;
-            this._syncToJson();
-            if (currentJsonTableData_ACU) {
-                this._buildNameMapper(currentJsonTableData_ACU);
+            // 映射必须基于「刚从恢复后 engine 成功导出」的视图构建。
+            // 导出失败时残留的旧 JSON 与新 engine 不同源，绝不能拿它发布映射。
+            // ownView 只能取自本次真实写入的返回值：读取全局值会把其他实例在
+            // loadFromBinary 等待期间发布的视图误认成本实例的写入。
+            const restoredView = this._syncToJson();
+            if (!restoredView) {
+                this._initialized = false;
+                throw new Error('sqlite_snapshot_restore_failed: 快照恢复后无法导出 canonical 视图。');
             }
+            if (!this._buildNameMapper(restoredView)) {
+                this._initialized = false;
+                this._revertOwnJsonView_ACU(restoredView, previousJsonView);
+                throw new Error('name_mapper_publish_rejected: 快照恢复后未能发布中英文名映射。');
+            }
+            this._initialized = true;
         }
         /**
          * 从聊天消息加载表格数据到 SQLite
@@ -47189,7 +47383,9 @@ $CONTENT
                         this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true, allowRuntimeDdlFallback: true });
                         this._validateRuntimeSchema_ACU(runtimeSeedData);
                         _set_currentJsonTableData_ACU(runtimeSeedData);
-                        this._buildNameMapper(runtimeSeedData);
+                        if (!this._buildNameMapper(runtimeSeedData)) {
+                            throw new Error('name_mapper_publish_rejected: 未能发布当前 runtime 的中英文名映射。');
+                        }
                         this._initialized = true;
                         this._existingTableSet = undefined;
                         const hasSeedRows = Object.keys(runtimeSeedData)
@@ -47201,7 +47397,9 @@ $CONTENT
                     logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
                     // runtime 没有任何表可映射。显式标记空 schema，避免同步读门禁把它
                     // 误判成「mapper 意外丢失」并按异常反复告警。
-                    markGlobalNameMapperEmptySchema_ACU();
+                    if (!publishGlobalNameMapperEmptySchema_ACU(this.nameMapperOwner_ACU)) {
+                        throw new Error('name_mapper_publish_rejected: 未能发布空 schema 标记。');
+                    }
                     this._initialized = true;
                     this._existingTableSet = undefined;
                     return { loaded: false, source: 'empty' };
@@ -47209,7 +47407,9 @@ $CONTENT
                 this.syncBridge.loadFromTableData(mergedData, { strict: true, allowRuntimeDdlFallback: true });
                 this._validateRuntimeSchema_ACU(mergedData);
                 _set_currentJsonTableData_ACU(mergedData);
-                this._buildNameMapper(mergedData);
+                if (!this._buildNameMapper(mergedData)) {
+                    throw new Error('name_mapper_publish_rejected: 未能发布当前 runtime 的中英文名映射。');
+                }
                 this._initialized = true;
                 this._existingTableSet = undefined;
                 logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
@@ -47232,16 +47432,22 @@ $CONTENT
             return { saved: false, error: message };
         }
         async replaceAllData(data) {
+            // 替换失败不得把本实例数据永久留在共享 canonical 视图里。
+            const previousJsonView = currentJsonTableData_ACU;
+            let ownJsonView = null;
             try {
                 const cloned = JSON.parse(JSON.stringify(data || {}));
-                disposeGlobalNameMapper();
+                releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
                 this.engine.dispose();
                 this.engine = new SqliteEngine();
                 this.syncBridge = new SyncBridge(this.engine);
                 await this.engine.init();
                 this.syncBridge.loadFromTableData(cloned, { strict: true });
                 _set_currentJsonTableData_ACU(cloned);
-                this._buildNameMapper(cloned);
+                ownJsonView = cloned;
+                if (!this._buildNameMapper(cloned)) {
+                    throw new Error('name_mapper_publish_rejected: 未能发布替换后 runtime 的中英文名映射。');
+                }
                 this._initialized = true;
                 this._existingTableSet = undefined;
                 const modifiedKeys = Object.keys(cloned).filter(key => key.startsWith('sheet_'));
@@ -47250,7 +47456,11 @@ $CONTENT
             }
             catch (e) {
                 const message = e?.message || String(e);
-                disposeGlobalNameMapper();
+                // 替换失败后本实例没有可信 runtime；不得保留旧的 initialized 标志冒充可用。
+                this._initialized = false;
+                this._existingTableSet = undefined;
+                this._revertOwnJsonView_ACU(ownJsonView, previousJsonView);
+                releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
                 logError_ACU(`[SqlTableService] 运行时全量替换失败: ${message}`);
                 return { success: false, modifiedKeys: [], appliedEdits: 0, error: message };
             }
@@ -47262,7 +47472,7 @@ $CONTENT
             this._initialized = false;
             this._existingTableSet = undefined;
             _set_currentJsonTableData_ACU(null);
-            disposeGlobalNameMapper();
+            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
         }
         /**
          * 获取当前运行时的完整表格数据
@@ -47436,7 +47646,9 @@ $CONTENT
          */
         dispose() {
             this.engine.dispose();
-            disposeGlobalNameMapper();
+            // 本实例可能已被更新的 runtime 置换。只释放自己发布的映射，
+            // 否则会把新 runtime 刚发布的 schema 映射清成 unbound。
+            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
             this._initialized = false;
             this._existingTableSet = undefined;
             logDebug_ACU('[SqlTableService] SQLite 引擎已销毁');
@@ -47444,11 +47656,23 @@ $CONTENT
         // ═══════════════════════════════════════════════════════════════
         // 内部方法
         // ═══════════════════════════════════════════════════════════════
+        /**
+         * 撤回本实例写入共享 canonical 视图的内容。
+         *
+         * 只有当共享视图仍是本实例写入的那一份时才回退：等待期间其他实例可能已经
+         * 合法发布了新视图，无条件写回旧值会把它们的更新覆盖掉。
+         */
+        _revertOwnJsonView_ACU(ownView, previousView) {
+            if (!ownView || currentJsonTableData_ACU !== ownView)
+                return;
+            _set_currentJsonTableData_ACU(previousView);
+        }
         /** 重置本实例的 SQLite runtime；不触碰调用方持有的 canonical JSON 快照。 */
         _resetRuntimeForLoad_ACU() {
             // 新 runtime 在成功 hydrate 前没有可证明匹配的 schema；保留旧 mapper
             // 会让并发/重载后的外部 CRUD 把展示列解析到上一份 SQLite schema。
-            disposeGlobalNameMapper();
+            // 只撤销本实例发布的映射：其他实例的映射由其自身生命周期负责。
+            releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
             this.engine.dispose();
             this.engine = new SqliteEngine();
             this.syncBridge = new SyncBridge(this.engine);
@@ -47617,7 +47841,12 @@ $CONTENT
                 }
             }
         }
-        /** 从 TableDataObject 中提取所有 DDL，构建全局 NameMapper */
+        /**
+         * 从 TableDataObject 中提取所有 DDL，以本实例身份发布全局 NameMapper。
+         *
+         * @returns 是否已发布可信映射。false 表示本实例不得对外宣称 ready：
+         * 没有可信映射时中文表名/列名会被原样下发给 SQLite。
+         */
         _buildNameMapper(data) {
             try {
                 const ddlMap = new Map();
@@ -47633,21 +47862,31 @@ $CONTENT
                     const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key, runtimeTableName).effectiveDDL;
                     ddlMap.set(runtimeTableName, effectiveDDL);
                 }
-                ensureGlobalNameMapperForDDLs_ACU(ddlMap);
+                return publishGlobalNameMapperForDDLs_ACU(ddlMap, this.nameMapperOwner_ACU);
             }
             catch (e) {
                 logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${e?.message}`);
+                return false;
             }
         }
-        /** 同步 SQLite → JSON 视图 */
+        /**
+         * 同步 SQLite → JSON 视图。
+         *
+         * @returns 本次实际写入共享视图的对象；导出失败时返回 null。
+         * 多数调用点把它当尽力而为的视图刷新，但快照恢复必须据此判断能否发布映射，
+         * 并据此确认「共享视图是否由本次调用写入」。不能改为读取全局值反推所有权：
+         * 等待期间其他实例可能已经发布了自己的视图。
+         */
         _syncToJson() {
             try {
                 const mate = currentJsonTableData_ACU?.mate || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
                 const exportedData = this.syncBridge.exportToTableData(mate);
                 _set_currentJsonTableData_ACU(exportedData);
+                return exportedData;
             }
             catch (e) {
                 logError_ACU(`[SqlTableService] syncToJson 失败: ${e?.message}`);
+                return null;
             }
         }
         /** 将 SQL 表名映射为 sheetKey */
@@ -47723,7 +47962,9 @@ $CONTENT
             if (Object.keys(missingSheets).length === 0) {
                 // 不能因物理表已存在就跳过映射同步：删楼回滚/模板切换可重建
                 // SQLite runtime，却不会制造缺表；此时外部 CRUD 仍需当前 schema 的列映射。
-                this._buildNameMapper(currentJsonTableData_ACU || templateData);
+                if (!this._buildNameMapper(currentJsonTableData_ACU || templateData)) {
+                    throw new Error('name_mapper_publish_rejected: 未能发布当前 schema 的中英文名映射，已阻止后续写入。');
+                }
                 return;
             }
             logDebug_ACU(`[SqlTableService] 发现 ${Object.keys(missingSheets).length} 张缺失表，按需建表: ${Object.keys(missingSheets).join(', ')}`);
@@ -47771,7 +48012,9 @@ $CONTENT
             else {
                 _set_currentJsonTableData_ACU(templateData);
             }
-            this._buildNameMapper(currentJsonTableData_ACU || templateData);
+            if (!this._buildNameMapper(currentJsonTableData_ACU || templateData)) {
+                throw new Error('name_mapper_publish_rejected: 建表后未能发布中英文名映射，已阻止后续写入。');
+            }
             logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
         }
         /**
@@ -48116,6 +48359,9 @@ $CONTENT
             logError_ACU(`[StorageStrategy] 初始化失败: ${error}`);
             if (mode === 'sqlite') {
                 logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
+                // 未被提交为 active 的候选必须销毁：它可能已持有全局 NameMapper 发布权，
+                // 不释放会让 fallback 后的映射仍归属一个不再存在的 SQLite runtime。
+                nextProvider?.dispose();
                 replaceActiveProvider_ACU(createProvider('native'));
                 setRuntimeHealth_ACU({ status: 'degraded', expectedMode: mode, activeMode: 'native', failureCode: 'provider_fallback', error });
                 return { ok: false, degraded: true, failureCode: 'provider_fallback', error };
@@ -58871,9 +59117,13 @@ $CONTENT
         }
         else if (options.validationPolicy === 'validate_list') {
             try {
-                const availableBookNames = new Set(await getStrictLorebookAvailableBookNames_ACU(options.context));
-                baseResult.invalidBookNames = requestedBookNames.filter(name => !availableBookNames.has(name));
-                requestedBookNames = requestedBookNames.filter(name => availableBookNames.has(name));
+                const availableBookNames = await getStrictLorebookAvailableBookNames_ACU(options.context);
+                const resolvedNames = requestedBookNames.map(name => ({
+                    requested: name,
+                    resolved: resolveLorebookNameFromList_ACU(name, availableBookNames),
+                }));
+                baseResult.invalidBookNames = resolvedNames.filter(item => !item.resolved).map(item => item.requested);
+                requestedBookNames = [...new Set(resolvedNames.map(item => item.resolved).filter((name) => !!name))];
                 if (baseResult.invalidBookNames.length > 0)
                     return { ...baseResult, status: 'invalid_selection' };
             }
@@ -58908,7 +59158,8 @@ $CONTENT
             : { ...baseResult, status: 'success' };
     }
     async function getLorebookEntriesByNames_ACU(bookNames = []) {
-        let uniqueNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).map((name) => String(name || '').trim()).filter(Boolean))];
+        const uniqueNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).map((name) => String(name || '').trim()).filter(Boolean))];
+        let readTargets = uniqueNames.map(requestedName => ({ requestedName, hostName: requestedName }));
         const entriesMap = {};
         const canUseTavernHelper = isWorldbookApiAvailable_ACU();
         let fallbackBooks = null;
@@ -58918,19 +59169,18 @@ $CONTENT
             const availableBooks = await listLorebooks_ACU();
             const availableBookNames = normalizeWorldbookListNames_ACU(availableBooks);
             if (availableBookNames.length > 0) {
-                const availableBookNameSet = new Set(availableBookNames);
-                const filtered = uniqueNames.filter(name => {
-                    if (availableBookNameSet.has(name))
-                        return true;
+                readTargets = readTargets.flatMap(target => {
+                    const resolvedName = resolveLorebookNameFromList_ACU(target.requestedName, availableBookNames);
+                    if (resolvedName)
+                        return [{ ...target, hostName: resolvedName }];
                     logDebug_ACU('[Worldbook] 世界书不在当前可用列表中，跳过读取。', {
                         phase: 'read_entries',
                         reason: 'not_in_available_list',
-                        bookName: name,
+                        bookName: target.requestedName,
                     });
-                    entriesMap[name] = []; // 为不存在的书返回空数组，保持接口一致
-                    return false;
+                    entriesMap[target.requestedName] = []; // 为不存在的书返回空数组，保持接口一致
+                    return [];
                 });
-                uniqueNames = filtered;
             }
         }
         catch (_e) {
@@ -58939,26 +59189,32 @@ $CONTENT
         if (!canUseTavernHelper) {
             fallbackBooks = await getWorldBooks_ACU$1();
         }
-        for (const name of uniqueNames) {
+        for (const target of readTargets) {
+            const { requestedName } = target;
             try {
                 let entries = [];
+                let hostName = target.hostName;
                 if (canUseTavernHelper) {
-                    entries = await getLorebookEntries_ACU(name);
+                    entries = await getLorebookEntries_ACU(hostName);
                 }
                 else if (Array.isArray(fallbackBooks)) {
-                    const matchedBook = fallbackBooks.find((book) => book?.name === name);
+                    const fallbackName = resolveLorebookNameFromList_ACU(hostName, fallbackBooks);
+                    if (fallbackName)
+                        hostName = fallbackName;
+                    const matchedBook = fallbackBooks.find((book) => book?.name === hostName);
                     entries = matchedBook?.entries || [];
                 }
-                entriesMap[name] = Array.isArray(entries) ? entries.map((entry) => ({ ...entry, book: name })) : [];
+                // 返回键保留调用方请求名称以兼容现有接口；条目 book 使用真实宿主名称。
+                entriesMap[requestedName] = Array.isArray(entries) ? entries.map((entry) => ({ ...entry, book: hostName })) : [];
             }
             catch {
                 logWarn_ACU('[Worldbook] 获取世界书条目失败，忽略该书并继续。', {
                     phase: 'read_entries',
                     attempt: 1,
-                    bookName: name,
+                    bookName: requestedName,
                     error: { category: 'read_failed' },
                 });
-                entriesMap[name] = [];
+                entriesMap[requestedName] = [];
             }
         }
         return entriesMap;
@@ -59431,11 +59687,12 @@ $CONTENT
         // 验证不通过时静默返回 null，不输出警告（避免用户看到无意义的重复警告）
         if (lorebookName) {
             try {
-                const availableBooks = await listLorebooks_ACU();
-                if (!availableBooks.includes(lorebookName)) {
+                const resolvedLorebookName = resolveLorebookNameFromList_ACU(lorebookName, await listLorebooks_ACU());
+                if (!resolvedLorebookName) {
                     logDebug_ACU(`[Worldbook] 注入目标世界书 "${lorebookName}" 不存在于可用列表中，静默跳过。`);
                     return null;
                 }
+                lorebookName = resolvedLorebookName;
             }
             catch (e) {
                 // 验证失败时静默降级，不打扰用户
@@ -66087,6 +66344,74 @@ $CONTENT
         return true;
     }
     /**
+     * 全范围清空时保留每个隔离域最早的 init checkpoint 结构锚点。
+     *
+     * 行数据、增量、调度状态和后续 frame 仍会被删除；这里只留下 header-only full checkpoint，
+     * 避免后续模板切换把老聊天误判为 pristine，并在最新楼层重新创建“初始基线”。
+     */
+    function collectInitialCheckpointSlotsForFullDeletion_ACU(chat, mode, currentIsolationKey) {
+        const preservedByIsolationKey = new Map();
+        for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
+            const message = chat[messageIndex];
+            if (!message || message.is_user)
+                continue;
+            const isolatedData = readIsolatedDataContainer_ACU(message);
+            if (!isolatedData)
+                continue;
+            for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
+                if (mode === 'current' && isolationKey !== currentIsolationKey)
+                    continue;
+                if (preservedByIsolationKey.has(isolationKey) || !isV2TagData_ACU(tagData))
+                    continue;
+                const checkpoint = tagData.storageFrame.checkpoint;
+                if (checkpoint?.kind !== 'full' || checkpoint.reason !== 'init' || !checkpoint.data || typeof checkpoint.data !== 'object')
+                    continue;
+                const checkpointData = JSON.parse(JSON.stringify(checkpoint.data));
+                const sheetKeys = Object.keys(checkpointData).filter(key => key.startsWith('sheet_'));
+                if (sheetKeys.length === 0)
+                    continue;
+                for (const sheetKey of sheetKeys) {
+                    const sanitizedSheet = sanitizeSheetForStorage_ACU(checkpointData[sheetKey]);
+                    if (!sanitizedSheet || typeof sanitizedSheet !== 'object' || !Array.isArray(sanitizedSheet.content?.[0])) {
+                        delete checkpointData[sheetKey];
+                        continue;
+                    }
+                    sanitizedSheet.content = [JSON.parse(JSON.stringify(sanitizedSheet.content[0]))];
+                    // sanitizeSheetForStorage_ACU 已按持久化白名单剥离 seedRows 等运行时载荷。
+                    checkpointData[sheetKey] = sanitizedSheet;
+                }
+                if (!Object.keys(checkpointData).some(key => key.startsWith('sheet_')))
+                    continue;
+                const preservedCheckpoint = {
+                    kind: 'full',
+                    createdAt: checkpoint.createdAt,
+                    reason: 'init',
+                    data: checkpointData,
+                    event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+                };
+                if (!validateCanonicalCheckpoint_ACU(preservedCheckpoint, {
+                    messageIndex,
+                    isolationKey,
+                    reason: 'deleteLocalDataInChat',
+                }).valid)
+                    continue;
+                preservedByIsolationKey.set(isolationKey, {
+                    messageIndex,
+                    isolationKey,
+                    tagData: {
+                        _acu_storage_version: 2,
+                        storageFrame: {
+                            version: 2,
+                            checkpoint: preservedCheckpoint,
+                            logEntries: [],
+                        },
+                    },
+                });
+            }
+        }
+        return [...preservedByIsolationKey.values()];
+    }
+    /**
      * 删除聊天记录中的本地数据（核心业务逻辑）
      * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
      *
@@ -66113,6 +66438,10 @@ $CONTENT
         const endAiIndex = endFloor ? Math.min(aiMessageIndices.length - 1, endFloor - 1) : aiMessageIndices.length - 1;
         // 获取要处理的AI消息的物理索引
         const targetIndices = aiMessageIndices.slice(startAiIndex, endAiIndex + 1);
+        const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
+            && (endFloor === null || endFloor >= aiMessageIndices.length);
+        const preservedInitialCheckpoints = isFullRangeDeletion
+            ? collectInitialCheckpointSlotsForFullDeletion_ACU(chat, mode, currentIsolationKey) : [];
         for (const physicalIndex of targetIndices) {
             const msg = chat[physicalIndex];
             let shouldDelete = false;
@@ -66184,10 +66513,42 @@ $CONTENT
                 }
             }
         }
+        // “删除全部数据”清空行数据和增量历史，但保留原始 init 的 header-only 锚点。
+        // 否则下一次切模板会把该聊天误判为 pristine，并在最新楼层新建“初始基线”。
+        const latestAiMessageIndex = aiMessageIndices[aiMessageIndices.length - 1];
+        for (const preserved of preservedInitialCheckpoints) {
+            const anchorMessage = chat[preserved.messageIndex];
+            if (!anchorMessage || anchorMessage.is_user)
+                continue;
+            const anchorIsolatedData = readIsolatedDataContainer_ACU(anchorMessage) || {};
+            anchorIsolatedData[preserved.isolationKey] = preserved.tagData;
+            anchorMessage.TavernDB_ACU_IsolatedData = anchorIsolatedData;
+            // 既有 checkpoint 分支要求当前最新 AI 楼层有合法 V2 frame，模板 rebase/introduction
+            // 也必须落在该数据边界。清空后补一个无日志空 frame，不携带任何表数据。
+            const boundaryMessage = chat[latestAiMessageIndex];
+            if (boundaryMessage && !boundaryMessage.is_user && latestAiMessageIndex !== preserved.messageIndex) {
+                const boundaryIsolatedData = readIsolatedDataContainer_ACU(boundaryMessage) || {};
+                boundaryIsolatedData[preserved.isolationKey] = {
+                    _acu_storage_version: 2,
+                    storageFrame: { version: 2, logEntries: [] },
+                };
+                boundaryMessage.TavernDB_ACU_IsolatedData = boundaryIsolatedData;
+            }
+            if (mode === 'current') {
+                writeMessageIdentity_ACU(anchorMessage, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+                if (boundaryMessage && latestAiMessageIndex !== preserved.messageIndex) {
+                    writeMessageIdentity_ACU(boundaryMessage, {
+                        enabled: settings_ACU.dataIsolationEnabled,
+                        code: settings_ACU.dataIsolationCode,
+                    });
+                }
+            }
+        }
         // 旧版“表头清单”固定挂在 chat[0]，与楼层范围无关，因此只在删除覆盖完整范围时清理，
         // 避免局部删除误删仍被其他楼层依赖的兼容指导数据。
-        const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
-            && (endFloor === null || endFloor >= aiMessageIndices.length);
         if (isFullRangeDeletion && clearLegacyTableHeaderGuide_ACU(chat, mode, currentIsolationKey)) {
             deletedCount++;
         }
@@ -99988,8 +100349,29 @@ $CONTENT
      * CRUD 入口需要以本次 canonical JSON 视图为准同步 mapper。
      * 回滚和 provider 重载可以发生在 SqlTableService 的常规 hydrate 生命周期之外，
      * 不能让 getNameMapper() 的惰性空实例把中文展示列直接当 SQLite 物理列。
+     *
+     * 映射由活跃 provider 持有发布权。优先请其按本次快照刷新，保证 owner、内容与
+     * schema 出自同一次发布。
+     *
+     * @returns 是否已取得与本次快照一致的可信映射。false 时调用方必须 fail-closed：
+     * 继续解析会把中文展示名当成 SQLite 物理名下发。
      */
     function ensureNameMapperForTableData_ACU(tableData) {
+        const activeProvider = getActiveStorageProvider();
+        if (activeProvider?.mode === 'sqlite') {
+            // 活跃 SQLite runtime 持有发布权，只能由它刷新。缺少该能力或发布被更新
+            // runtime 拒绝时，都说明拿不到与本次快照同源的映射，必须 fail-closed。
+            if (typeof activeProvider.refreshNameMapperForData_ACU !== 'function') {
+                logWarn_ACU('[TableCRUD] 活跃 SQLite runtime 不支持 owner-aware 映射刷新，已拒绝本次表名解析。');
+                return false;
+            }
+            if (!activeProvider.refreshNameMapperForData_ACU(tableData)) {
+                logWarn_ACU('[TableCRUD] 活跃 SQLite runtime 未能发布本次快照的映射，已拒绝本次表名解析。');
+                return false;
+            }
+            return true;
+        }
+        // 无活跃 SQLite runtime 时才需要自行推导 DDL 走兼容刷新。
         const ddlMap = new Map();
         for (const [sheetKey, sheet] of Object.entries(tableData || {})) {
             if (!sheetKey.startsWith('sheet_') || !sheet || typeof sheet !== 'object')
@@ -99999,6 +100381,7 @@ $CONTENT
             ddlMap.set(runtimeTableName, ddl);
         }
         ensureGlobalNameMapperForDDLs_ACU(ddlMap);
+        return true;
     }
     /**
      * 查找指定表格的目标 sheet 和 sheetKey
@@ -100008,7 +100391,8 @@ $CONTENT
     function findTargetSheetInData_ACU(tableData, tableName) {
         if (!tableData)
             return null;
-        ensureNameMapperForTableData_ACU(tableData);
+        if (!ensureNameMapperForTableData_ACU(tableData))
+            return null;
         // 路径 1：按 sheet.name（中文显示名）直接匹配
         for (const sheetKey in tableData) {
             if (!sheetKey.startsWith('sheet_'))

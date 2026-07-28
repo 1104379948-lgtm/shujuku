@@ -21,6 +21,7 @@ import { getLatestTableAppendMessageIndexFromChat_ACU } from '../../../service/t
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
+import { getActiveStorageProvider } from '../../../service/table/table-storage-strategy';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
 
 /**
@@ -35,8 +36,29 @@ function getEnglishTableName(tableData: Record<string, any>, sheetKey: string): 
  * CRUD 入口需要以本次 canonical JSON 视图为准同步 mapper。
  * 回滚和 provider 重载可以发生在 SqlTableService 的常规 hydrate 生命周期之外，
  * 不能让 getNameMapper() 的惰性空实例把中文展示列直接当 SQLite 物理列。
+ *
+ * 映射由活跃 provider 持有发布权。优先请其按本次快照刷新，保证 owner、内容与
+ * schema 出自同一次发布。
+ *
+ * @returns 是否已取得与本次快照一致的可信映射。false 时调用方必须 fail-closed：
+ * 继续解析会把中文展示名当成 SQLite 物理名下发。
  */
-function ensureNameMapperForTableData_ACU(tableData: Record<string, any>): void {
+function ensureNameMapperForTableData_ACU(tableData: Record<string, any>): boolean {
+    const activeProvider = getActiveStorageProvider();
+    if (activeProvider?.mode === 'sqlite') {
+        // 活跃 SQLite runtime 持有发布权，只能由它刷新。缺少该能力或发布被更新
+        // runtime 拒绝时，都说明拿不到与本次快照同源的映射，必须 fail-closed。
+        if (typeof activeProvider.refreshNameMapperForData_ACU !== 'function') {
+            logWarn_ACU('[TableCRUD] 活跃 SQLite runtime 不支持 owner-aware 映射刷新，已拒绝本次表名解析。');
+            return false;
+        }
+        if (!activeProvider.refreshNameMapperForData_ACU(tableData as any)) {
+            logWarn_ACU('[TableCRUD] 活跃 SQLite runtime 未能发布本次快照的映射，已拒绝本次表名解析。');
+            return false;
+        }
+        return true;
+    }
+    // 无活跃 SQLite runtime 时才需要自行推导 DDL 走兼容刷新。
     const ddlMap = new Map<string, string>();
     for (const [sheetKey, sheet] of Object.entries(tableData || {})) {
         if (!sheetKey.startsWith('sheet_') || !sheet || typeof sheet !== 'object') continue;
@@ -49,6 +71,7 @@ function ensureNameMapperForTableData_ACU(tableData: Record<string, any>): void 
         ddlMap.set(runtimeTableName, ddl);
     }
     ensureGlobalNameMapperForDDLs_ACU(ddlMap);
+    return true;
 }
 
 /**
@@ -61,7 +84,7 @@ function findTargetSheetInData_ACU(
     tableName: string,
 ): { sheet: any; sheetKey: string; englishTableName: string } | null {
     if (!tableData) return null;
-    ensureNameMapperForTableData_ACU(tableData);
+    if (!ensureNameMapperForTableData_ACU(tableData)) return null;
 
     // 路径 1：按 sheet.name（中文显示名）直接匹配
     for (const sheetKey in tableData) {

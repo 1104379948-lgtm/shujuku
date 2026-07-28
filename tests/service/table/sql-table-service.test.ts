@@ -55,15 +55,17 @@ vi.mock('../../../src/service/runtime/helpers-data-merge', () => ({
 }));
 
 // mock name-mapper
-const { mockEnsureGlobalNameMapper, mockDisposeGlobalNameMapper, mockMarkGlobalNameMapperEmptySchema } = vi.hoisted(() => ({
-  mockEnsureGlobalNameMapper: vi.fn(),
-  mockDisposeGlobalNameMapper: vi.fn(),
-  mockMarkGlobalNameMapperEmptySchema: vi.fn(),
+const { mockPublishGlobalNameMapper, mockReleaseGlobalNameMapper, mockPublishGlobalNameMapperEmptySchema, mockCreateNameMapperOwnerToken } = vi.hoisted(() => ({
+  mockPublishGlobalNameMapper: vi.fn(() => true),
+  mockReleaseGlobalNameMapper: vi.fn(() => true),
+  mockPublishGlobalNameMapperEmptySchema: vi.fn(() => true),
+  mockCreateNameMapperOwnerToken: vi.fn((label: string) => ({ id: 1, label })),
 }));
 vi.mock('../../../src/service/runtime/template-vars/name-mapper', () => ({
-  ensureGlobalNameMapperForDDLs_ACU: mockEnsureGlobalNameMapper,
-  disposeGlobalNameMapper: mockDisposeGlobalNameMapper,
-  markGlobalNameMapperEmptySchema_ACU: mockMarkGlobalNameMapperEmptySchema,
+  createNameMapperOwnerToken_ACU: mockCreateNameMapperOwnerToken,
+  publishGlobalNameMapperForDDLs_ACU: mockPublishGlobalNameMapper,
+  publishGlobalNameMapperEmptySchema_ACU: mockPublishGlobalNameMapperEmptySchema,
+  releaseGlobalNameMapperForOwner_ACU: mockReleaseGlobalNameMapper,
 }));
 
 // mock chat-scope（getEffectiveSeedRowsForSheet_ACU + getCurrentChatTemplateScopeState_ACU）
@@ -767,9 +769,9 @@ describe('SqlTableService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCurrentJsonTableData = null;
-    mockEnsureGlobalNameMapper.mockReturnValue(undefined);
-    mockDisposeGlobalNameMapper.mockReturnValue(undefined);
-    mockMarkGlobalNameMapperEmptySchema.mockReturnValue(undefined);
+    mockPublishGlobalNameMapper.mockReturnValue(true);
+    mockReleaseGlobalNameMapper.mockReturnValue(true);
+    mockPublishGlobalNameMapperEmptySchema.mockReturnValue(true);
     // 重置 mock 返回值，防止测试之间的状态泄漏
     mockGetEffectiveSeedRows.mockReturnValue([]);
     mockGetCurrentChatTemplateScopeState.mockReturnValue(null);
@@ -822,8 +824,8 @@ describe('SqlTableService', () => {
       // 否则同步读门禁会把正常的新聊天误报成 mapper 意外丢失。
       expect(result.source).toBe('empty');
       expect(service.isReady()).toBe(true);
-      expect(mockMarkGlobalNameMapperEmptySchema).toHaveBeenCalledTimes(1);
-      expect(mockEnsureGlobalNameMapper).not.toHaveBeenCalled();
+      expect(mockPublishGlobalNameMapperEmptySchema).toHaveBeenCalledTimes(1);
+      expect(mockPublishGlobalNameMapper).not.toHaveBeenCalled();
     });
 
 
@@ -951,8 +953,31 @@ describe('SqlTableService', () => {
 
       await service.loadFromData(canonicalData);
 
-      expect(mockDisposeGlobalNameMapper).toHaveBeenCalledBefore(mockEnsureGlobalNameMapper);
-      expect(mockEnsureGlobalNameMapper).toHaveBeenLastCalledWith(expect.any(Map));
+      expect(mockReleaseGlobalNameMapper).toHaveBeenCalledBefore(mockPublishGlobalNameMapper);
+      expect(mockPublishGlobalNameMapper).toHaveBeenLastCalledWith(expect.any(Map), expect.anything());
+    });
+
+    it('映射发布被更新 runtime 拒绝时，hydrate 必须失败而不是宣称就绪', async () => {
+      mockPublishGlobalNameMapper.mockReturnValue(false);
+      const canonicalData = JSON.parse(JSON.stringify(testTableData));
+
+      const result = await service.loadFromData(canonicalData);
+
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('name_mapper_publish_rejected');
+      // 没有可信映射时中文表名/列名会被原样下发给 SQLite，绝不能对外 ready。
+      expect(service.isReady()).toBe(false);
+    });
+
+    it('空 schema 标记被拒绝时同样不得宣称就绪', async () => {
+      mockPublishGlobalNameMapperEmptySchema.mockReturnValue(false);
+      mockMergeAll.mockResolvedValue(null);
+
+      const result = await service.loadFromData(null);
+
+      expect(result.loaded).toBe(false);
+      expect(result.error).toContain('name_mapper_publish_rejected');
+      expect(service.isReady()).toBe(false);
     });
 
     it('加载后可以执行查询', async () => {
@@ -1917,7 +1942,7 @@ describe('SqlTableService', () => {
       await service.loadFromChat();
       service.clearRuntimeData();
       expect(service.isReady()).toBe(false);
-      expect(mockDisposeGlobalNameMapper).toHaveBeenCalled();
+      expect(mockReleaseGlobalNameMapper).toHaveBeenCalled();
       expect(service.getCurrentData()).toBeNull();
       expect(() => service.executeQuery('SELECT 1')).toThrow('SQLite 引擎未初始化');
       const replaced = await service.replaceAllData(JSON.parse(JSON.stringify(testTableData)));
@@ -1953,7 +1978,7 @@ describe('SqlTableService', () => {
       await service.loadFromChat();
       service.dispose();
       expect(() => service.executeQuery('SELECT 1')).toThrow();
-      expect(mockDisposeGlobalNameMapper).toHaveBeenCalled();
+      expect(mockReleaseGlobalNameMapper).toHaveBeenCalled();
     });
 
     it('多次 dispose 不抛出', async () => {

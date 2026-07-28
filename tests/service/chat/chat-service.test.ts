@@ -23,7 +23,14 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockGetCurrentIsolationKey: vi.fn(() => ''),
   mockGetLastOptimizationBase: vi.fn(() => null),
   mockSetLastOptimizationBase: vi.fn(),
-  mockSanitizeSheet: vi.fn((sheet: any) => sheet),
+  mockSanitizeSheet: vi.fn((sheet: any) => {
+    if (!sheet || typeof sheet !== 'object') return sheet;
+    const out: any = {};
+    for (const key of ['uid', 'name', 'sourceData', 'content', 'updateConfig', 'exportConfig', 'orderNo']) {
+      if (sheet[key] !== undefined) out[key] = JSON.parse(JSON.stringify(sheet[key]));
+    }
+    return out;
+  }),
   mockPersistTablesToChatMessage: vi.fn(),
   mockRunTableUpdateCommit: vi.fn(),
   mockRunTableWriteTransaction: vi.fn(),
@@ -1225,6 +1232,60 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(count).toBe(2);
     expect(chat[1].TavernDB_ACU_Data).toBeUndefined();
     expect(chat[2].TavernDB_ACU_Data).toBeUndefined();
+  });
+
+  it('全范围清空后保留最早 init 的 header-only 锚点，并在最新 AI 楼层保留空 V2 边界', async () => {
+    const initialSheet = {
+      uid: 'sheet_0',
+      name: '物品表',
+      content: [['row_id', '物品名'], ['1', '剑']],
+      seedRows: [['2', '会复活的数据']],
+    };
+    const chat: any[] = [
+      { is_user: true },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full', createdAt: 1, reason: 'init',
+                data: { mate: { type: 'acu' }, sheet_0: initialSheet },
+              },
+              perSheetCheckpoints: {
+                sheet_0: { kind: 'sheet_full', createdAt: 2, reason: 'manual', sheetKey: 'sheet_0', data: initialSheet },
+              },
+              logEntries: [{ seq: 1, operations: [{ kind: 'row_upsert' }] }],
+            },
+          },
+        },
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: { version: 2, logEntries: [{ seq: 2, operations: [{ kind: 'row_upsert' }] }] },
+          },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const count = await deleteLocalDataInChatCore_ACU('all');
+
+    expect(count).toBe(2);
+    const anchorFrame = chat[1].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(anchorFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'init' });
+    expect(anchorFrame.checkpoint.data.sheet_0.content).toEqual([['row_id', '物品名']]);
+    expect(anchorFrame.checkpoint.data.sheet_0.seedRows).toBeUndefined();
+    expect(anchorFrame.checkpoint.event).toEqual({ filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] });
+    expect(anchorFrame.perSheetCheckpoints).toBeUndefined();
+    expect(anchorFrame.logEntries).toEqual([]);
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame).toEqual({ version: 2, logEntries: [] });
+    expect(mockSaveChatToHost).toHaveBeenCalledOnce();
   });
 
   it('空聊天记录返回 0', async () => {

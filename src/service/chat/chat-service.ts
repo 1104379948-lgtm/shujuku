@@ -37,6 +37,7 @@ import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU 
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableStorageFrameV2_ACU } from '../table/storage-frame-v2-types';
 import type { Sheet_ACU } from '../../shared/models/table-data';
+import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
 
 // ─── 业务逻辑函数（从 presentation 层搬迁） ───
 
@@ -1284,6 +1285,82 @@ function clearLegacyTableHeaderGuide_ACU(chat: any[], mode: 'current' | 'all', i
     return true;
 }
 
+type PreservedInitialCheckpointSlot_ACU = {
+    messageIndex: number;
+    isolationKey: string;
+    tagData: Record<string, any>;
+};
+
+/**
+ * 全范围清空时保留每个隔离域最早的 init checkpoint 结构锚点。
+ *
+ * 行数据、增量、调度状态和后续 frame 仍会被删除；这里只留下 header-only full checkpoint，
+ * 避免后续模板切换把老聊天误判为 pristine，并在最新楼层重新创建“初始基线”。
+ */
+function collectInitialCheckpointSlotsForFullDeletion_ACU(
+    chat: any[],
+    mode: 'current' | 'all',
+    currentIsolationKey: string,
+): PreservedInitialCheckpointSlot_ACU[] {
+    const preservedByIsolationKey = new Map<string, PreservedInitialCheckpointSlot_ACU>();
+    for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
+        const message = chat[messageIndex];
+        if (!message || message.is_user) continue;
+        const isolatedData = readIsolatedDataContainer_ACU(message);
+        if (!isolatedData) continue;
+
+        for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
+            if (mode === 'current' && isolationKey !== currentIsolationKey) continue;
+            if (preservedByIsolationKey.has(isolationKey) || !isV2TagData_ACU(tagData)) continue;
+            const checkpoint = tagData.storageFrame.checkpoint;
+            if (checkpoint?.kind !== 'full' || checkpoint.reason !== 'init' || !checkpoint.data || typeof checkpoint.data !== 'object') continue;
+
+            const checkpointData = JSON.parse(JSON.stringify(checkpoint.data));
+            const sheetKeys = Object.keys(checkpointData).filter(key => key.startsWith('sheet_'));
+            if (sheetKeys.length === 0) continue;
+            for (const sheetKey of sheetKeys) {
+                const sanitizedSheet = sanitizeSheetForStorage_ACU(checkpointData[sheetKey]);
+                if (!sanitizedSheet || typeof sanitizedSheet !== 'object' || !Array.isArray(sanitizedSheet.content?.[0])) {
+                    delete checkpointData[sheetKey];
+                    continue;
+                }
+                sanitizedSheet.content = [JSON.parse(JSON.stringify(sanitizedSheet.content[0]))];
+                // sanitizeSheetForStorage_ACU 已按持久化白名单剥离 seedRows 等运行时载荷。
+                checkpointData[sheetKey] = sanitizedSheet;
+            }
+            if (!Object.keys(checkpointData).some(key => key.startsWith('sheet_'))) continue;
+
+            const preservedCheckpoint = {
+                kind: 'full' as const,
+                createdAt: checkpoint.createdAt,
+                reason: 'init' as const,
+                data: checkpointData,
+                event: { filledSheetKeys: [] as string[], changedSheetKeys: [] as string[], groupKeys: [] as string[] },
+            };
+            if (!validateCanonicalCheckpoint_ACU(preservedCheckpoint, {
+                messageIndex,
+                isolationKey,
+                reason: 'deleteLocalDataInChat',
+            }).valid) continue;
+
+            preservedByIsolationKey.set(isolationKey, {
+                messageIndex,
+                isolationKey,
+                tagData: {
+                    _acu_storage_version: 2,
+                    storageFrame: {
+                        version: 2,
+                        checkpoint: preservedCheckpoint,
+                        logEntries: [],
+                    },
+                },
+            });
+        }
+    }
+    return [...preservedByIsolationKey.values()];
+}
+
+
 
 /**
  * 删除聊天记录中的本地数据（核心业务逻辑）
@@ -1321,6 +1398,10 @@ async function deleteLocalDataInChatCoreInner_ACU(
 
     // 获取要处理的AI消息的物理索引
     const targetIndices = aiMessageIndices.slice(startAiIndex, endAiIndex + 1);
+    const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
+        && (endFloor === null || endFloor >= aiMessageIndices.length);
+    const preservedInitialCheckpoints = isFullRangeDeletion
+        ? collectInitialCheckpointSlotsForFullDeletion_ACU(chat, mode, currentIsolationKey) : [];
 
     for (const physicalIndex of targetIndices) {
         const msg = chat[physicalIndex];
@@ -1394,10 +1475,43 @@ async function deleteLocalDataInChatCoreInner_ACU(
         }
     }
 
+    // “删除全部数据”清空行数据和增量历史，但保留原始 init 的 header-only 锚点。
+    // 否则下一次切模板会把该聊天误判为 pristine，并在最新楼层新建“初始基线”。
+    const latestAiMessageIndex = aiMessageIndices[aiMessageIndices.length - 1];
+    for (const preserved of preservedInitialCheckpoints) {
+        const anchorMessage = chat[preserved.messageIndex];
+        if (!anchorMessage || anchorMessage.is_user) continue;
+        const anchorIsolatedData = readIsolatedDataContainer_ACU(anchorMessage) || {};
+        anchorIsolatedData[preserved.isolationKey] = preserved.tagData as any;
+        anchorMessage.TavernDB_ACU_IsolatedData = anchorIsolatedData;
+
+        // 既有 checkpoint 分支要求当前最新 AI 楼层有合法 V2 frame，模板 rebase/introduction
+        // 也必须落在该数据边界。清空后补一个无日志空 frame，不携带任何表数据。
+        const boundaryMessage = chat[latestAiMessageIndex];
+        if (boundaryMessage && !boundaryMessage.is_user && latestAiMessageIndex !== preserved.messageIndex) {
+            const boundaryIsolatedData = readIsolatedDataContainer_ACU(boundaryMessage) || {};
+            boundaryIsolatedData[preserved.isolationKey] = {
+                _acu_storage_version: 2,
+                storageFrame: { version: 2, logEntries: [] },
+            } as any;
+            boundaryMessage.TavernDB_ACU_IsolatedData = boundaryIsolatedData;
+        }
+        if (mode === 'current') {
+            writeMessageIdentity_ACU(anchorMessage, {
+                enabled: settings_ACU.dataIsolationEnabled,
+                code: settings_ACU.dataIsolationCode,
+            });
+            if (boundaryMessage && latestAiMessageIndex !== preserved.messageIndex) {
+                writeMessageIdentity_ACU(boundaryMessage, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+            }
+        }
+    }
+
     // 旧版“表头清单”固定挂在 chat[0]，与楼层范围无关，因此只在删除覆盖完整范围时清理，
     // 避免局部删除误删仍被其他楼层依赖的兼容指导数据。
-    const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
-        && (endFloor === null || endFloor >= aiMessageIndices.length);
     if (isFullRangeDeletion && clearLegacyTableHeaderGuide_ACU(chat, mode, currentIsolationKey)) {
         deletedCount++;
     }

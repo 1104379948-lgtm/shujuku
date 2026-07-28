@@ -266,6 +266,19 @@ describe('table-storage-strategy', () => {
       expect(getCurrentProviderMode()).toBe('native');
     });
 
+    it('SQLite 初始化异常时销毁未提交的候选，避免其继续持有全局映射发布权', async () => {
+      mockStorageMode = 'sqlite';
+      sqliteLoadShouldThrow = new Error('WASM 加载失败');
+
+      await initStorageProvider();
+
+      const sqliteCandidate = allCreatedProviders.find(provider => provider.mode === 'sqlite');
+      expect(sqliteCandidate).toBeDefined();
+      // 恰好一次：候选既不能泄漏，也不能被重复销毁。
+      expect(sqliteCandidate!.dispose).toHaveBeenCalledTimes(1);
+      expect(getCurrentProviderMode()).toBe('native');
+    });
+
     it('销毁旧实例后创建新实例', async () => {
       mockStorageMode = 'native';
       await initStorageProvider();

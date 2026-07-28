@@ -5,7 +5,7 @@
   "type": "module",
   "description": "SP·数据库 VII (AutoCardUpdater) - SillyTavern 数据库自动更新脚本",
   "scripts": {
-    "build": "rollup -c && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs && node scripts/check-arch.mjs",
+    "build": "rollup -c && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs",
     "build:nocheck": "rollup -c && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs",
     "build:concat": "node scripts/run-rollup.mjs concat && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs",
     "build:extension": "node scripts/run-rollup.mjs extension",

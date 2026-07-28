@@ -27,7 +27,13 @@ import {
 } from '../runtime/state-manager';
 import { mergeAllIndependentTables_ACU } from '../runtime/helpers-data-merge';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
-import { disposeGlobalNameMapper, ensureGlobalNameMapperForDDLs_ACU, markGlobalNameMapperEmptySchema_ACU } from '../runtime/template-vars/name-mapper';
+import {
+  createNameMapperOwnerToken_ACU,
+  publishGlobalNameMapperEmptySchema_ACU,
+  publishGlobalNameMapperForDDLs_ACU,
+  releaseGlobalNameMapperForOwner_ACU,
+  type NameMapperOwnerToken_ACU,
+} from '../runtime/template-vars/name-mapper';
 import { parseDDLTableName, generateDDL, generateInserts, resolveEffectiveDDL } from '../../data/sqlite/schema-mapper';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
 import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU, getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
@@ -794,14 +800,31 @@ export class SqlTableService implements ITableStorageProvider {
   private syncBridge: SyncBridge;
   private _initialized = false;
   private _existingTableSet?: Set<string>;
+  /**
+   * 本实例的全局 NameMapper 发布凭证。
+   *
+   * 切聊/重载会出现「新实例已发布映射 → 旧实例才 dispose」的置换顺序，
+   * 因此清理必须按所有权判定，否则旧实例会把新 runtime 的映射清成 unbound。
+   */
+  private readonly nameMapperOwner_ACU: NameMapperOwnerToken_ACU;
 
   constructor() {
     this.engine = new SqliteEngine();
     this.syncBridge = new SyncBridge(this.engine);
+    this.nameMapperOwner_ACU = createNameMapperOwnerToken_ACU('sql-table-service');
   }
 
   isReady(): boolean {
     return this._initialized && this.engine.isReady;
+  }
+
+  /**
+   * 以本实例身份按给定 canonical 快照刷新映射。
+   * 外部 CRUD 与回滚路径不持有发布凭证，必须经活跃 provider 刷新，
+   * 否则会出现「owner 是本实例、内容却由无所有权入口改写」的脱节。
+   */
+  refreshNameMapperForData_ACU(data: TableDataObject_ACU): boolean {
+    return this._buildNameMapper(data);
   }
 
   createRuntimeSnapshot(): Uint8Array | null {
@@ -811,14 +834,26 @@ export class SqlTableService implements ITableStorageProvider {
 
   async restoreRuntimeSnapshot(snapshot: unknown): Promise<void> {
     if (!(snapshot instanceof Uint8Array)) throw new Error('SQLite 运行时快照无效，无法恢复。');
-    disposeGlobalNameMapper();
+    // 失败时要撤回本实例写入的共享 canonical 视图，避免半成功状态污染其他读者。
+    const previousJsonView = currentJsonTableData_ACU as TableDataObject_ACU | null;
+    releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
     await this.engine.loadFromBinary(snapshot);
-    this._initialized = true;
     this._existingTableSet = undefined;
-    this._syncToJson();
-    if (currentJsonTableData_ACU) {
-      this._buildNameMapper(currentJsonTableData_ACU as TableDataObject_ACU);
+    // 映射必须基于「刚从恢复后 engine 成功导出」的视图构建。
+    // 导出失败时残留的旧 JSON 与新 engine 不同源，绝不能拿它发布映射。
+    // ownView 只能取自本次真实写入的返回值：读取全局值会把其他实例在
+    // loadFromBinary 等待期间发布的视图误认成本实例的写入。
+    const restoredView = this._syncToJson();
+    if (!restoredView) {
+      this._initialized = false;
+      throw new Error('sqlite_snapshot_restore_failed: 快照恢复后无法导出 canonical 视图。');
     }
+    if (!this._buildNameMapper(restoredView)) {
+      this._initialized = false;
+      this._revertOwnJsonView_ACU(restoredView, previousJsonView);
+      throw new Error('name_mapper_publish_rejected: 快照恢复后未能发布中英文名映射。');
+    }
+    this._initialized = true;
   }
 
   /**
@@ -896,7 +931,9 @@ export class SqlTableService implements ITableStorageProvider {
           this.syncBridge.loadFromTableData(runtimeSeedData, { strict: true, allowRuntimeDdlFallback: true });
           this._validateRuntimeSchema_ACU(runtimeSeedData);
           _set_currentJsonTableData_ACU(runtimeSeedData);
-          this._buildNameMapper(runtimeSeedData);
+          if (!this._buildNameMapper(runtimeSeedData)) {
+            throw new Error('name_mapper_publish_rejected: 未能发布当前 runtime 的中英文名映射。');
+          }
           this._initialized = true;
           this._existingTableSet = undefined;
           const hasSeedRows = Object.keys(runtimeSeedData)
@@ -909,7 +946,9 @@ export class SqlTableService implements ITableStorageProvider {
         logDebug_ACU('[SqlTableService] 没有找到表格数据，引擎已就绪，等待第一次填表时从模板建表');
         // runtime 没有任何表可映射。显式标记空 schema，避免同步读门禁把它
         // 误判成「mapper 意外丢失」并按异常反复告警。
-        markGlobalNameMapperEmptySchema_ACU();
+        if (!publishGlobalNameMapperEmptySchema_ACU(this.nameMapperOwner_ACU)) {
+          throw new Error('name_mapper_publish_rejected: 未能发布空 schema 标记。');
+        }
         this._initialized = true;
         this._existingTableSet = undefined;
         return { loaded: false, source: 'empty' };
@@ -918,7 +957,9 @@ export class SqlTableService implements ITableStorageProvider {
       this.syncBridge.loadFromTableData(mergedData as TableDataObject_ACU, { strict: true, allowRuntimeDdlFallback: true });
       this._validateRuntimeSchema_ACU(mergedData as TableDataObject_ACU);
       _set_currentJsonTableData_ACU(mergedData as TableDataObject_ACU);
-      this._buildNameMapper(mergedData as TableDataObject_ACU);
+      if (!this._buildNameMapper(mergedData as TableDataObject_ACU)) {
+        throw new Error('name_mapper_publish_rejected: 未能发布当前 runtime 的中英文名映射。');
+      }
       this._initialized = true;
       this._existingTableSet = undefined;
       logDebug_ACU('[SqlTableService] SQLite 数据库加载完成');
@@ -947,16 +988,22 @@ export class SqlTableService implements ITableStorageProvider {
   }
 
   async replaceAllData(data: TableDataObject_ACU): Promise<ApplyEditsResult> {
+    // 替换失败不得把本实例数据永久留在共享 canonical 视图里。
+    const previousJsonView = currentJsonTableData_ACU as TableDataObject_ACU | null;
+    let ownJsonView: TableDataObject_ACU | null = null;
     try {
       const cloned = JSON.parse(JSON.stringify(data || {})) as TableDataObject_ACU;
-      disposeGlobalNameMapper();
+      releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
       this.engine.dispose();
       this.engine = new SqliteEngine();
       this.syncBridge = new SyncBridge(this.engine);
       await this.engine.init();
       this.syncBridge.loadFromTableData(cloned, { strict: true });
       _set_currentJsonTableData_ACU(cloned);
-      this._buildNameMapper(cloned);
+      ownJsonView = cloned;
+      if (!this._buildNameMapper(cloned)) {
+        throw new Error('name_mapper_publish_rejected: 未能发布替换后 runtime 的中英文名映射。');
+      }
       this._initialized = true;
       this._existingTableSet = undefined;
       const modifiedKeys = Object.keys(cloned).filter(key => key.startsWith('sheet_'));
@@ -964,7 +1011,11 @@ export class SqlTableService implements ITableStorageProvider {
       return { success: true, modifiedKeys, appliedEdits: modifiedKeys.length };
     } catch (e: any) {
       const message = e?.message || String(e);
-      disposeGlobalNameMapper();
+      // 替换失败后本实例没有可信 runtime；不得保留旧的 initialized 标志冒充可用。
+      this._initialized = false;
+      this._existingTableSet = undefined;
+      this._revertOwnJsonView_ACU(ownJsonView, previousJsonView);
+      releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
       logError_ACU(`[SqlTableService] 运行时全量替换失败: ${message}`);
       return { success: false, modifiedKeys: [], appliedEdits: 0, error: message };
     }
@@ -977,7 +1028,7 @@ export class SqlTableService implements ITableStorageProvider {
     this._initialized = false;
     this._existingTableSet = undefined;
     _set_currentJsonTableData_ACU(null);
-    disposeGlobalNameMapper();
+    releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
   }
 
   /**
@@ -1191,7 +1242,9 @@ export class SqlTableService implements ITableStorageProvider {
    */
   dispose(): void {
     this.engine.dispose();
-    disposeGlobalNameMapper();
+    // 本实例可能已被更新的 runtime 置换。只释放自己发布的映射，
+    // 否则会把新 runtime 刚发布的 schema 映射清成 unbound。
+    releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
     this._initialized = false;
     this._existingTableSet = undefined;
     logDebug_ACU('[SqlTableService] SQLite 引擎已销毁');
@@ -1201,11 +1254,27 @@ export class SqlTableService implements ITableStorageProvider {
   // 内部方法
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * 撤回本实例写入共享 canonical 视图的内容。
+   *
+   * 只有当共享视图仍是本实例写入的那一份时才回退：等待期间其他实例可能已经
+   * 合法发布了新视图，无条件写回旧值会把它们的更新覆盖掉。
+   */
+  private _revertOwnJsonView_ACU(
+    ownView: TableDataObject_ACU | null,
+    previousView: TableDataObject_ACU | null,
+  ): void {
+    if (!ownView || currentJsonTableData_ACU !== ownView) return;
+    _set_currentJsonTableData_ACU(previousView);
+  }
+
+
   /** 重置本实例的 SQLite runtime；不触碰调用方持有的 canonical JSON 快照。 */
   private _resetRuntimeForLoad_ACU(): void {
     // 新 runtime 在成功 hydrate 前没有可证明匹配的 schema；保留旧 mapper
     // 会让并发/重载后的外部 CRUD 把展示列解析到上一份 SQLite schema。
-    disposeGlobalNameMapper();
+    // 只撤销本实例发布的映射：其他实例的映射由其自身生命周期负责。
+    releaseGlobalNameMapperForOwner_ACU(this.nameMapperOwner_ACU);
     this.engine.dispose();
     this.engine = new SqliteEngine();
     this.syncBridge = new SyncBridge(this.engine);
@@ -1380,8 +1449,13 @@ export class SqlTableService implements ITableStorageProvider {
     }
   }
 
-  /** 从 TableDataObject 中提取所有 DDL，构建全局 NameMapper */
-  private _buildNameMapper(data: TableDataObject_ACU): void {
+  /**
+   * 从 TableDataObject 中提取所有 DDL，以本实例身份发布全局 NameMapper。
+   *
+   * @returns 是否已发布可信映射。false 表示本实例不得对外宣称 ready：
+   * 没有可信映射时中文表名/列名会被原样下发给 SQLite。
+   */
+  private _buildNameMapper(data: TableDataObject_ACU): boolean {
     try {
       const ddlMap = new Map<string, string>();
       for (const [key, value] of Object.entries(data)) {
@@ -1394,20 +1468,30 @@ export class SqlTableService implements ITableStorageProvider {
         const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || key, runtimeTableName).effectiveDDL;
         ddlMap.set(runtimeTableName, effectiveDDL);
       }
-      ensureGlobalNameMapperForDDLs_ACU(ddlMap);
+      return publishGlobalNameMapperForDDLs_ACU(ddlMap, this.nameMapperOwner_ACU);
     } catch (e: any) {
       logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${e?.message}`);
+      return false;
     }
   }
 
-  /** 同步 SQLite → JSON 视图 */
-  private _syncToJson(): void {
+  /**
+   * 同步 SQLite → JSON 视图。
+   *
+   * @returns 本次实际写入共享视图的对象；导出失败时返回 null。
+   * 多数调用点把它当尽力而为的视图刷新，但快照恢复必须据此判断能否发布映射，
+   * 并据此确认「共享视图是否由本次调用写入」。不能改为读取全局值反推所有权：
+   * 等待期间其他实例可能已经发布了自己的视图。
+   */
+  private _syncToJson(): TableDataObject_ACU | null {
     try {
       const mate = (currentJsonTableData_ACU?.mate as Mate_ACU) || { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } };
       const exportedData = this.syncBridge.exportToTableData(mate);
       _set_currentJsonTableData_ACU(exportedData);
+      return exportedData;
     } catch (e: any) {
       logError_ACU(`[SqlTableService] syncToJson 失败: ${e?.message}`);
+      return null;
     }
   }
 
@@ -1486,7 +1570,9 @@ export class SqlTableService implements ITableStorageProvider {
     if (Object.keys(missingSheets).length === 0) {
       // 不能因物理表已存在就跳过映射同步：删楼回滚/模板切换可重建
       // SQLite runtime，却不会制造缺表；此时外部 CRUD 仍需当前 schema 的列映射。
-      this._buildNameMapper(currentJsonTableData_ACU || templateData);
+      if (!this._buildNameMapper(currentJsonTableData_ACU || templateData)) {
+        throw new Error('name_mapper_publish_rejected: 未能发布当前 schema 的中英文名映射，已阻止后续写入。');
+      }
       return;
     }
 
@@ -1537,7 +1623,9 @@ export class SqlTableService implements ITableStorageProvider {
     } else {
       _set_currentJsonTableData_ACU(templateData);
     }
-    this._buildNameMapper(currentJsonTableData_ACU || templateData);
+    if (!this._buildNameMapper(currentJsonTableData_ACU || templateData)) {
+      throw new Error('name_mapper_publish_rejected: 建表后未能发布中英文名映射，已阻止后续写入。');
+    }
 
     logDebug_ACU(`[SqlTableService] 按需建表完成，当前共 ${this.engine.getTableNames().length} 张表`);
   }

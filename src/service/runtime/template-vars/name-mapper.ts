@@ -19,6 +19,51 @@ import type { Sheet_ACU } from '../../../shared/models/table-data';
 
 /** 全局 NameMapper 单例 */
 let _globalNameMapper: NameMapper | null = null;
+/**
+ * 当前映射的发布者身份。
+ *
+ * 全局 mapper 是单例，但 SQLite runtime 会在切聊/重载时创建新的 provider 实例，
+ * 并且存在「新实例已发布 → 旧实例才被销毁」的置换顺序。没有所有权时，
+ * 旧实例的迟到清理会把新实例刚发布的映射清成 unbound，
+ * 于是依赖中英文名映射的 SQL/ORM 全部退化为中文标识符直传。
+ */
+let _globalNameMapperOwner_ACU: NameMapperOwnerToken_ACU | null = null;
+let _nameMapperOwnerSequence_ACU = 0;
+
+/** 类型层品牌，阻止调用方用普通对象字面量满足凭证类型。 */
+const NAME_MAPPER_OWNER_BRAND_ACU: unique symbol = Symbol('acu.name-mapper.owner');
+
+/**
+ * 运行时真实性登记。
+ *
+ * 仅检查品牌属性是不够的：调用方拿到任意真实凭证后，可通过
+ * Object.getOwnPropertySymbols() 取得该 Symbol 并复制到伪造对象上。
+ * 因此发布权必须由「本模块是否签发过该对象」决定，而不是对象长什么样。
+ */
+const _issuedNameMapperOwners_ACU = new WeakSet<object>();
+
+/**
+ * 不透明的映射发布凭证。
+ * id 单调递增，因此「更晚创建的 runtime 实例」天然拥有更高的发布优先级；
+ * 凭证带模块私有品牌，调用方无法自行构造，也不能靠拼一个更大的 id 抢占发布权。
+ */
+export interface NameMapperOwnerToken_ACU {
+  readonly [NAME_MAPPER_OWNER_BRAND_ACU]: true;
+  readonly id: number;
+  readonly label: string;
+}
+
+/** 为一个 runtime 实例创建唯一且不可复用的发布凭证。 */
+export function createNameMapperOwnerToken_ACU(label: string): NameMapperOwnerToken_ACU {
+  _nameMapperOwnerSequence_ACU += 1;
+  const token = Object.freeze({
+    [NAME_MAPPER_OWNER_BRAND_ACU]: true as const,
+    id: _nameMapperOwnerSequence_ACU,
+    label: String(label || 'runtime'),
+  });
+  _issuedNameMapperOwners_ACU.add(token);
+  return token;
+}
 /** 当前 mapper 对应的有效 DDL 集合签名；null 表示尚未绑定到任何 runtime schema。 */
 let _globalNameMapperSchemaSignature: string | null = null;
 /**
@@ -52,39 +97,102 @@ export function getNameMapper(): NameMapper {
   return _globalNameMapper;
 }
 
-/**
- * 从所有表的 DDL 构建全局 NameMapper
- * 在 SQLite 加载完成后调用
- *
- * @param ddlMap runtime 物理表名 → 有效 DDL 的映射
- */
-export function buildGlobalNameMapper(ddlMap: Map<string, string>): void {
-  _globalNameMapperSchemaSignature = buildDDLMapSignature_ACU(ddlMap);
-  _globalNameMapper = NameMapper.fromDDLs(ddlMap);
-  _globalNameMapperBinding_ACU = _globalNameMapperSchemaSignature ? 'bound' : 'empty_schema';
-  logDebug_ACU(`[NameMapper] 全局映射器已构建: ${_globalNameMapper.tableCount} 张表`);
+/** 运行时校验发布凭证：只承认本模块签发过的对象实例。 */
+function isNameMapperOwnerToken_ACU(owner: unknown): owner is NameMapperOwnerToken_ACU {
+  return !!owner && typeof owner === 'object' && _issuedNameMapperOwners_ACU.has(owner);
+}
+
+/** 更旧的 runtime 实例不得覆盖更新实例已经发布的映射。 */
+function canPublishWithOwner_ACU(owner: NameMapperOwnerToken_ACU): boolean {
+  if (!isNameMapperOwnerToken_ACU(owner)) return false;
+  return !_globalNameMapperOwner_ACU || owner.id >= _globalNameMapperOwner_ACU.id;
+}
+
+function applyGlobalNameMapper_ACU(
+  mapper: NameMapper,
+  signature: string,
+  owner: NameMapperOwnerToken_ACU,
+): void {
+  _globalNameMapper = mapper;
+  _globalNameMapperSchemaSignature = signature;
+  _globalNameMapperBinding_ACU = signature ? 'bound' : 'empty_schema';
+  _globalNameMapperOwner_ACU = owner;
 }
 
 /**
- * 仅当 mapper 尚未绑定当前有效 schema 时重建。
- * 不能用 tableCount 判断就绪：不同模板可能拥有相同数量的表但列映射已经变化。
+ * 以 runtime 实例身份发布当前有效 DDL 集合对应的映射。
+ *
+ * @returns 是否实际发布；false 表示存在更新的发布者，本次调用被丢弃。
  */
-export function ensureGlobalNameMapperForDDLs_ACU(ddlMap: Map<string, string>): NameMapper {
-  const nextSignature = buildDDLMapSignature_ACU(ddlMap);
-  if (_globalNameMapperBinding_ACU === 'unbound' || _globalNameMapperSchemaSignature !== nextSignature) {
-    buildGlobalNameMapper(ddlMap);
+export function publishGlobalNameMapperForDDLs_ACU(
+  ddlMap: Map<string, string>,
+  owner: NameMapperOwnerToken_ACU,
+): boolean {
+  if (!canPublishWithOwner_ACU(owner)) {
+    logDebug_ACU('[NameMapper] 已存在更新的发布者，丢弃陈旧 runtime 的映射发布。');
+    return false;
   }
-  return _globalNameMapper!;
+  const nextSignature = buildDDLMapSignature_ACU(ddlMap);
+  if (_globalNameMapperOwner_ACU === owner
+    && _globalNameMapperBinding_ACU !== 'unbound'
+    && _globalNameMapperSchemaSignature === nextSignature) {
+    return true;
+  }
+  applyGlobalNameMapper_ACU(NameMapper.fromDDLs(ddlMap), nextSignature, owner);
+  logDebug_ACU(`[NameMapper] 全局映射器已发布: ${_globalNameMapper!.tableCount} 张表`);
+  return true;
 }
 
 /**
  * 标记 runtime 引擎已就绪但尚未建立任何表（新聊天首次填表前的正常状态）。
  * 与「mapper 意外丢失」区分：后者说明活跃 runtime 有表却没有可信映射，属于异常。
+ *
+ * @returns 是否实际发布；false 表示存在更新的发布者，本次调用被丢弃。
  */
-export function markGlobalNameMapperEmptySchema_ACU(): void {
-  _globalNameMapper = new NameMapper();
-  _globalNameMapperSchemaSignature = '';
-  _globalNameMapperBinding_ACU = 'empty_schema';
+export function publishGlobalNameMapperEmptySchema_ACU(owner: NameMapperOwnerToken_ACU): boolean {
+  if (!canPublishWithOwner_ACU(owner)) {
+    logDebug_ACU('[NameMapper] 已存在更新的发布者，丢弃陈旧 runtime 的空 schema 标记。');
+    return false;
+  }
+  applyGlobalNameMapper_ACU(new NameMapper(), '', owner);
+  return true;
+}
+
+/**
+ * 以 runtime 实例身份释放映射。
+ * 只有当前发布者才能把全局状态清成 unbound；已被置换的旧实例调用时为 no-op。
+ *
+ * @returns 是否实际释放。
+ */
+export function releaseGlobalNameMapperForOwner_ACU(owner: NameMapperOwnerToken_ACU): boolean {
+  if (!isNameMapperOwnerToken_ACU(owner) || _globalNameMapperOwner_ACU !== owner) return false;
+  disposeGlobalNameMapper();
+  return true;
+}
+
+/**
+ * 仅当 mapper 尚未绑定当前有效 schema 时重建。
+ * 不能用 tableCount 判断就绪：不同模板可能拥有相同数量的表但列映射已经变化。
+ *
+ * 这是无所有权的兼容入口：它只能刷新尚无 runtime 持有的映射。
+ * 任何 owned 状态（含 empty_schema）都不得由它改写，否则会出现
+ * 「owner 是 A、内容却来自别处」的脱节，并让 A 的释放清掉不属于它的映射。
+ * 活跃 runtime 需要按新 schema 刷新时，走 provider 自身的 owner-aware 发布。
+ */
+export function ensureGlobalNameMapperForDDLs_ACU(ddlMap: Map<string, string>): NameMapper {
+  const nextSignature = buildDDLMapSignature_ACU(ddlMap);
+  if (_globalNameMapperBinding_ACU !== 'unbound' && _globalNameMapperSchemaSignature === nextSignature) {
+    return _globalNameMapper!;
+  }
+  if (_globalNameMapperOwner_ACU) {
+    logWarn_ACU('[NameMapper] 当前映射由活跃 runtime 持有，已拒绝无所有权刷新；请通过 provider 的 owner-aware 刷新发布新 schema。');
+    return getNameMapper();
+  }
+  _globalNameMapper = NameMapper.fromDDLs(ddlMap);
+  _globalNameMapperSchemaSignature = nextSignature;
+  _globalNameMapperBinding_ACU = nextSignature ? 'bound' : 'empty_schema';
+  logDebug_ACU(`[NameMapper] 全局映射器已刷新: ${_globalNameMapper.tableCount} 张表`);
+  return _globalNameMapper!;
 }
 
 /**
@@ -118,13 +226,28 @@ export function getGlobalNameMapperStatus_ACU(): {
   };
 }
 
+/** 发布所有权诊断；只暴露标签与序号，不返回凭证对象本身。 */
+export function getGlobalNameMapperOwnershipSnapshot_ACU(): {
+  binding: 'unbound' | 'empty_schema' | 'bound';
+  ownerLabel: string | null;
+  ownerId: number | null;
+} {
+  return {
+    binding: _globalNameMapperBinding_ACU,
+    ownerLabel: _globalNameMapperOwner_ACU?.label ?? null,
+    ownerId: _globalNameMapperOwner_ACU?.id ?? null,
+  };
+}
+
 /**
- * 销毁全局 NameMapper
+ * 无条件销毁全局 NameMapper 并清除发布所有权。
+ * 仅用于测试隔离与明确的顶层全局复位；runtime 生命周期请使用 owner-aware 释放。
  */
 export function disposeGlobalNameMapper(): void {
   _globalNameMapper = null;
   _globalNameMapperSchemaSignature = null;
   _globalNameMapperBinding_ACU = 'unbound';
+  _globalNameMapperOwner_ACU = null;
 }
 
 /**

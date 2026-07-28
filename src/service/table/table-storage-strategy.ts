@@ -169,6 +169,9 @@ async function initializeStorageProvider_ACU(mode: StorageMode, epoch: number): 
     logError_ACU(`[StorageStrategy] 初始化失败: ${error}`);
     if (mode === 'sqlite') {
       logError_ACU('[StorageStrategy] SQLite 初始化异常，fallback 到原生模式');
+      // 未被提交为 active 的候选必须销毁：它可能已持有全局 NameMapper 发布权，
+      // 不释放会让 fallback 后的映射仍归属一个不再存在的 SQLite runtime。
+      nextProvider?.dispose();
       replaceActiveProvider_ACU(createProvider('native'));
       setRuntimeHealth_ACU({ status: 'degraded', expectedMode: mode, activeMode: 'native', failureCode: 'provider_fallback', error });
       return { ok: false, degraded: true, failureCode: 'provider_fallback', error };

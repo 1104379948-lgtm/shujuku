@@ -157,6 +157,15 @@ export interface ITableStorageProvider {
   restoreRuntimeSnapshot?(snapshot: unknown): Promise<void>;
 
   /**
+   * 按给定 canonical 快照刷新本 provider 发布的中英文名映射。
+   * 供 provider 常规 hydrate 之外的入口（回滚、外部 CRUD）在活跃 runtime 上同步映射，
+   * 使映射的所有权、内容与 schema 始终来自同一次合法发布。native 可不实现。
+   *
+   * @returns 是否已发布可信映射。
+   */
+  refreshNameMapperForData_ACU?(data: TableDataObject_ACU): boolean;
+
+  /**
    * 精确清空运行时表格状态，不读取聊天记录也不创建模板数据。
    * 失败补偿依赖此方法恢复“旧运行时为空”的状态，因此所有 provider 必须实现。
    */

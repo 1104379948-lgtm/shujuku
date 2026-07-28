@@ -1,7 +1,7 @@
 import type { AgentWorldbookControlSnapshot_ACU, AgentWorldbookControlSnapshotEntry_ACU } from '../../shared/models/agent-worldbook-model';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU, _set_allChatMessages_ACU} from '../runtime/state-manager';
-import { getLorebookEntries_ACU as gwGetLorebookEntries_ACU, setLorebookEntries_ACU as gwSetLorebookEntries_ACU, createLorebookEntries_ACU as gwCreateLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU } from '../../data/gateways/worldbook-gateway';
+import { getLorebookEntries_ACU as gwGetLorebookEntries_ACU, setLorebookEntries_ACU as gwSetLorebookEntries_ACU, createLorebookEntries_ACU as gwCreateLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
 import { getCharLorebooks_ACU, getChatMessages_ACU } from '../../data/gateways/character-gateway';
 import { getChatLength_ACU } from '../../data/gateways/chat-gateway';
 import { saveSettings_ACU } from '../settings/settings-service';
@@ -918,9 +918,13 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
     }
   } else if (options.validationPolicy === 'validate_list') {
     try {
-      const availableBookNames = new Set(await getStrictLorebookAvailableBookNames_ACU(options.context));
-      baseResult.invalidBookNames = requestedBookNames.filter(name => !availableBookNames.has(name));
-      requestedBookNames = requestedBookNames.filter(name => availableBookNames.has(name));
+      const availableBookNames = await getStrictLorebookAvailableBookNames_ACU(options.context);
+      const resolvedNames = requestedBookNames.map(name => ({
+        requested: name,
+        resolved: resolveLorebookNameFromList_ACU(name, availableBookNames),
+      }));
+      baseResult.invalidBookNames = resolvedNames.filter(item => !item.resolved).map(item => item.requested);
+      requestedBookNames = [...new Set(resolvedNames.map(item => item.resolved).filter((name): name is string => !!name))];
       if (baseResult.invalidBookNames.length > 0) return { ...baseResult, status: 'invalid_selection' };
     } catch {
       const failureStatus = getStrictLorebookContextStatus_ACU(options.context);
@@ -956,7 +960,8 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
 
 
 export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) {
-      let uniqueNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).map((name: string) => String(name || '').trim()).filter(Boolean))];
+      const uniqueNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).map((name: string) => String(name || '').trim()).filter(Boolean))];
+      let readTargets = uniqueNames.map(requestedName => ({ requestedName, hostName: requestedName }));
       const entriesMap: Record<string, any[]> = {};
       const canUseTavernHelper = isWorldbookApiAvailable_ACU();
       let fallbackBooks = null;
@@ -967,18 +972,17 @@ export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) 
           const availableBooks = await listLorebooks_ACU();
           const availableBookNames = normalizeWorldbookListNames_ACU(availableBooks);
           if (availableBookNames.length > 0) {
-              const availableBookNameSet = new Set(availableBookNames);
-              const filtered = uniqueNames.filter(name => {
-                  if (availableBookNameSet.has(name)) return true;
+              readTargets = readTargets.flatMap(target => {
+                  const resolvedName = resolveLorebookNameFromList_ACU(target.requestedName, availableBookNames);
+                  if (resolvedName) return [{ ...target, hostName: resolvedName }];
                   logDebug_ACU('[Worldbook] 世界书不在当前可用列表中，跳过读取。', {
                       phase: 'read_entries',
                       reason: 'not_in_available_list',
-                      bookName: name,
+                      bookName: target.requestedName,
                   });
-                  entriesMap[name] = []; // 为不存在的书返回空数组，保持接口一致
-                  return false;
+                  entriesMap[target.requestedName] = []; // 为不存在的书返回空数组，保持接口一致
+                  return [];
               });
-              uniqueNames = filtered;
           }
       } catch (_e) {
           // listLorebooks_ACU 失败时降级为不过滤，让下方原有的 try-catch 兜底
@@ -988,24 +992,29 @@ export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) 
           fallbackBooks = await gwGetWorldBooks_ACU();
       }
 
-      for (const name of uniqueNames) {
+      for (const target of readTargets) {
+          const { requestedName } = target;
           try {
               let entries = [];
+              let hostName = target.hostName;
               if (canUseTavernHelper) {
-                  entries = await gwGetLorebookEntries_ACU(name);
+                  entries = await gwGetLorebookEntries_ACU(hostName);
               } else if (Array.isArray(fallbackBooks)) {
-                  const matchedBook = fallbackBooks.find((book: any) => book?.name === name);
+                  const fallbackName = resolveLorebookNameFromList_ACU(hostName, fallbackBooks);
+                  if (fallbackName) hostName = fallbackName;
+                  const matchedBook = fallbackBooks.find((book: any) => book?.name === hostName);
                   entries = (matchedBook as any)?.entries || [];
               }
-              entriesMap[name] = Array.isArray(entries) ? entries.map((entry: any) => ({ ...entry, book: name })) : [];
+              // 返回键保留调用方请求名称以兼容现有接口；条目 book 使用真实宿主名称。
+              entriesMap[requestedName] = Array.isArray(entries) ? entries.map((entry: any) => ({ ...entry, book: hostName })) : [];
           } catch {
               logWarn_ACU('[Worldbook] 获取世界书条目失败，忽略该书并继续。', {
                   phase: 'read_entries',
                   attempt: 1,
-                  bookName: name,
+                  bookName: requestedName,
                   error: { category: 'read_failed' },
               });
-              entriesMap[name] = [];
+              entriesMap[requestedName] = [];
           }
       }
       return entriesMap;
