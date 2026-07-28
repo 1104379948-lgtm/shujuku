@@ -280,6 +280,16 @@ describe('extractTableNamesFromStatements', () => {
     expect(result).toEqual(['inventory']);
   });
 
+  it.each([
+    ["REPLACE INTO inventory VALUES (1, '铁剑', 3)", 'inventory'],
+    ["REPLACE INTO inventory (row_id, value) VALUES (1, 'INSERT INTO quest_log')", 'inventory'],
+    ["REPLACE INTO inventory (row_id, value) VALUES (1, 'x') /* INSERT INTO quest_log */", 'inventory'],
+    ["INSERT OR REPLACE INTO inventory (row_id, value) VALUES (1, 'UPDATE quest_log SET value = 1')", 'inventory'],
+    ["REPLACE INTO main.inventory (row_id, value) VALUES (1, 'x')", 'inventory'],
+  ])('使用 mutation token 提取真实目标表：%s', (sql, expected) => {
+    expect(extractTableNamesFromStatements([sql])).toEqual([expected]);
+  });
+
   it('提取 UPDATE 的表名', () => {
     const result = extractTableNamesFromStatements(["UPDATE inventory SET quantity = 5 WHERE row_id = 1"]);
     expect(result).toEqual(['inventory']);
@@ -501,10 +511,9 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     expect(result.join('\n')).not.toContain('666');
   });
 
-  it('固定 row_id 槽位表保留受契约约束的 INSERT OR REPLACE，并将实际 SQL 写入单表 operation', async () => {
+  it('普通表保留 INSERT OR REPLACE 原生语义，并将实际 SQL 写入单表 operation', async () => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
-    inputSnapshot.sheet_0.sourceData.ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY CHECK(row_id BETWEEN 1 AND 2), item_name TEXT NOT NULL, quantity INTEGER DEFAULT 1);';
-    inputSnapshot.sheet_0.sourceData.insertNode = '禁止 INSERT OR REPLACE；该字段不参与固定槽位契约。';
+    inputSnapshot.sheet_0.sourceData.ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT NOT NULL, quantity INTEGER DEFAULT 1);';
     inputSnapshot.sheet_0.content = [
       ['row_id', 'item_name', 'quantity'],
       ['1', '旧物品', '1'],
@@ -534,24 +543,55 @@ describe('applySqlEditsToTableDataSnapshot_ACU', () => {
     }]);
   });
 
-  it.each([
-    ["INSERT OR REPLACE INTO inventory (item_name, quantity) VALUES ('药水', 1)", '必须显式提供 row_id 槽位'],
-    ["INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (3, '药水', 1)", '超出允许范围 1..2'],
-    ["INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1 + 0, '药水', 1)", '必须是整数常量'],
-  ])('固定槽位 REPLACE 拒绝不安全输入：%s', (sql, message) => {
+  it('REPLACE INTO 执行后返回 modifiedKeys 并生成单表 operation', async () => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
-    inputSnapshot.sheet_0.sourceData.ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY CHECK(row_id BETWEEN 1 AND 2), item_name TEXT NOT NULL, quantity INTEGER DEFAULT 1);';
-    expect(() => materializeSystemRowIdsForSqlInserts_ACU([sql], inputSnapshot)).toThrow(message);
-    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([sql], inputSnapshot)).toThrow(message);
+    inputSnapshot.sheet_1 = {
+      uid: 'quest_log',
+      name: '任务表',
+      sourceData: { ddl: 'CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, value TEXT);' },
+      content: [['row_id', 'value'], ['1', '旧任务']],
+    };
+    inputSnapshot.sheet_0.content = [
+      ['row_id', 'item_name', 'quantity'],
+      ['1', '旧物品', '1'],
+    ];
+    const sql = "REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1, 'INSERT INTO quest_log', 9);";
+
+    const result = await applySqlEditsToTableDataSnapshot_ACU(sql, inputSnapshot);
+
+    expect(result.success).toBe(true);
+    expect(result.modifiedKeys).toEqual(['sheet_0']);
+    expect(result.workingData?.sheet_0.content).toEqual([
+      ['row_id', 'item_name', 'quantity'],
+      ['1', 'INSERT INTO quest_log', '9'],
+    ]);
+    expect(result.workingData?.sheet_1.content).toEqual([['row_id', 'value'], ['1', '旧任务']]);
+    expect(result.operations).toEqual([{
+      kind: 'sql_sheet_batch',
+      sheetKey: 'sheet_0',
+      statements: ["REPLACE INTO beibaowupinbiao (row_id, item_name, quantity) VALUES (1, 'INSERT INTO quest_log', 9)"],
+      tableName: 'beibaowupinbiao',
+      reason: 'system',
+    }]);
   });
 
-  it('普通稳定身份表即使 insertNode 出现 REPLACE 文字也保持 fail closed', () => {
+  it.each([
+    "INSERT OR REPLACE INTO inventory (item_name, quantity) VALUES ('药水', 1)",
+    "INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (3, '药水', 1)",
+    "INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1 + 0, '药水', 1)",
+    "REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1, '药水', 1)",
+  ])('REPLACE 语句不再受固定槽位契约限制：%s', sql => {
     const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
-    inputSnapshot.sheet_0.sourceData.insertNode = "示例：INSERT OR REPLACE INTO inventory (row_id, item_name) VALUES (1, '误导')。";
+    expect(materializeSystemRowIdsForSqlInserts_ACU([sql], inputSnapshot)).toEqual([sql]);
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([sql], inputSnapshot)).not.toThrow();
+  });
+
+  it('普通稳定身份表允许 INSERT OR REPLACE', () => {
+    const inputSnapshot = JSON.parse(JSON.stringify(snapshotTableData));
     const sql = "INSERT OR REPLACE INTO inventory (row_id, item_name, quantity) VALUES (1, '药水', 1)";
 
-    expect(() => materializeSystemRowIdsForSqlInserts_ACU([sql], inputSnapshot)).toThrow('只有声明固定 row_id 槽位 REPLACE 契约的表可以使用');
-    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([sql], inputSnapshot)).toThrow('仅固定 row_id 槽位表可使用 INSERT OR REPLACE');
+    expect(materializeSystemRowIdsForSqlInserts_ACU([sql], inputSnapshot)).toEqual([sql]);
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([sql], inputSnapshot)).not.toThrow();
   });
 
   it('显式 row_id 是唯一列时拒绝无业务内容的 INSERT', () => {
@@ -626,6 +666,11 @@ describe('assertNoHiddenPhysicalColumnMutations_ACU', () => {
     'REPLACE INTO inventory (item_name, quantity) VALUES (\'药水\', 1)',
     'INSERT OR REPLACE INTO inventory (item_name, quantity) VALUES (\'药水\', 1)',
     'WITH payload AS (SELECT 1) REPLACE INTO inventory (item_name, quantity) VALUES (\'药水\', 1)',
+  ])('允许 REPLACE 数据变更语句：%s', statement => {
+    expect(() => assertNoHiddenPhysicalColumnMutations_ACU([statement], tableData)).not.toThrow();
+  });
+
+  it.each([
     'ALTER TABLE inventory DROP COLUMN legacy_note',
     'CREATE TABLE another_table (id INTEGER)',
     'DROP TABLE inventory',
@@ -633,7 +678,7 @@ describe('assertNoHiddenPhysicalColumnMutations_ACU', () => {
     'COMMIT',
   ])('对 AI SQL 的非 mutation 语句 fail closed：%s', statement => {
     expect(() => assertNoHiddenPhysicalColumnMutations_ACU([statement], tableData))
-      .toThrow('SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句');
+      .toThrow('SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE 数据变更语句');
   });
 
   it('拒绝多语句中位于后续语句的隐藏列引用', () => {

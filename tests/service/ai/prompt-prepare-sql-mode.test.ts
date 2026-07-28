@@ -355,16 +355,17 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result).not.toBeNull();
     expect(result!.tableDataText).toContain('SQL 编辑格式说明');
     expect(result!.tableDataText).toContain('INSERT INTO');
-    expect(result!.tableDataText).toContain('INSERT 必须显式列出业务列，不得包含 row_id');
+    expect(result!.tableDataText).toContain('INSERT OR REPLACE INTO');
+    expect(result!.tableDataText).toContain('REPLACE INTO');
+    expect(result!.tableDataText).toContain('普通 INSERT 必须显式列出业务列，不得包含 row_id');
     expect(result!.tableDataText).toContain('row_id 由系统在执行前分配稳定身份');
     expect(result!.tableDataText).not.toContain('row_id 值为当前表最大 row_id + 1');
     expect(result!.tableDataText).toContain('UNIQUE 约束');
     expect(result!.tableDataText).toContain('表达式更新');
-    expect(result!.tableDataText).toContain('禁止使用 INSERT OR REPLACE / REPLACE INTO');
-    expect(result!.tableDataText).toContain('固定 row_id 槽位表可使用 INSERT OR REPLACE');
+    expect(result!.tableDataText).toContain('按 SQLite 原生整行替换语义执行');
   });
 
-  it('固定 row_id 槽位表在提示词中声明 REPLACE 许可与 row_id 范围', async () => {
+  it('固定 row_id 约束不再生成专用 REPLACE 许可注释', async () => {
     mockCurrentJsonTableData = {
       sheet_0: {
         name: '鉴定建议表',
@@ -378,11 +379,10 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
 
     const result = await prepareAIInput_ACU([], 'standard');
     expect(result).not.toBeNull();
-    expect(result!.tableDataText).toContain('-- REPLACE: 本表为固定 row_id 槽位表');
-    expect(result!.tableDataText).toContain('row_id 必须是 1..5 范围内的整数常量');
+    expect(result!.tableDataText).not.toContain('-- REPLACE:');
   });
 
-  it('非固定槽位表不声明 REPLACE 许可', async () => {
+  it('普通表同样声明 REPLACE 原生语义而不生成专用许可注释', async () => {
     mockCurrentJsonTableData = {
       sheet_0: {
         name: '背包物品表',
@@ -396,8 +396,8 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
 
     const result = await prepareAIInput_ACU([], 'standard');
     expect(result).not.toBeNull();
-    expect(result!.tableDataText).not.toContain('-- REPLACE: 本表为固定 row_id 槽位表');
-    expect(result!.tableDataText).toContain('禁止使用 INSERT OR REPLACE / REPLACE INTO');
+    expect(result!.tableDataText).not.toContain('-- REPLACE:');
+    expect(result!.tableDataText).toContain('按 SQLite 原生整行替换语义执行');
   });
 
   it('非 SQL 模式下不追加 SQL 编辑格式说明', async () => {

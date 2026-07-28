@@ -2732,7 +2732,7 @@ describe('collectGroupFillResponse_ACU', () => {
         .mockResolvedValueOnce('<tableEdit>CREATE TABLE leaked (id INTEGER);</tableEdit>')
         .mockImplementationOnce(async (dynamicContent: any) => {
           expect(dynamicContent.tableDataText).toContain('SQL_ERROR_FEEDBACK');
-          expect(dynamicContent.tableDataText).toContain('SQLite 填表仅允许 INSERT、UPDATE、DELETE');
+          expect(dynamicContent.tableDataText).toContain('SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE');
           return "<tableEdit>UPDATE inventory SET item_name = '药水' WHERE row_id = 1;</tableEdit>";
         });
 
@@ -2810,9 +2810,6 @@ describe('collectGroupFillResponse_ACU', () => {
   });
 
   it.each([
-    "REPLACE INTO inventory (item_name) VALUES ('药水')",
-    "INSERT OR REPLACE INTO inventory (item_name) VALUES ('药水')",
-    "WITH payload AS (SELECT 1) REPLACE INTO inventory (item_name) VALUES ('药水')",
     'SELECT legacy_note FROM inventory',
     'PRAGMA table_info(inventory)',
     'COMMIT',
@@ -2841,7 +2838,37 @@ describe('collectGroupFillResponse_ACU', () => {
     const result = await collectGroupFillResponse_ACU(job);
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句');
+    expect(result.error).toContain('SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE 数据变更语句');
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
+  it.each([
+    "REPLACE INTO inventory (item_name) VALUES ('药水')",
+    "INSERT OR REPLACE INTO inventory (row_id, item_name) VALUES (1, '药水')",
+    "WITH payload AS (SELECT 1) REPLACE INTO inventory (item_name) VALUES ('药水')",
+  ])('SQLite AI 响应在 collect 阶段允许 REPLACE：%s', async statement => {
+    const job: any = createJob();
+    job.baseSnapshot = {
+      sheet_0: {
+        uid: 'inventory',
+        name: '背包表',
+        sourceData: {
+          ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);',
+        },
+        content: [['row_id', '名称'], ['1', '铁剑']],
+      },
+    };
+    mockSettings.tableMaxRetries = 1;
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '投影后的数据' });
+    mockCallCustomOpenAI.mockResolvedValue(`<tableEdit>${statement}</tableEdit>`);
+
+    const result = await collectGroupFillResponse_ACU(job);
+
+    expect(result.success).toBe(true);
+    expect(result.tableEditText).toBe(statement);
     expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
@@ -3338,20 +3365,18 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
-  it.each([
-    "REPLACE INTO inventory (value) VALUES ('replace-a')",
-    "INSERT OR REPLACE INTO inventory (value) VALUES ('replace-b')",
-    "WITH payload AS (SELECT 1) REPLACE INTO inventory (value) VALUES ('replace-c')",
-  ])('SQL 统一执行边界绕过 collect 时仍拒绝 REPLACE：%s', async statement => {
+  it('SQL 统一执行边界允许 INSERT OR REPLACE 覆盖已有行', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(isSqliteMode).mockReturnValue(true);
+    const statement = "INSERT OR REPLACE INTO inventory (row_id, value) VALUES (1, 'replace-a')";
     const baseSnapshot = {
-      mate: { type: 'acu', version: 1 },
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
       sheet_0: {
         uid: 'inventory',
         name: '表A',
         sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' },
         content: [['row_id', 'value'], ['1', 'base-a']],
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
       },
     } as any;
     const responses = [{
@@ -3362,12 +3387,12 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
       job: { groupKey: 'sensitive-group', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
     }];
 
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
     const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
 
-    expect(result).toMatchObject({ success: false, errorCategory: 'model' });
-    expect(result.error).toContain('SQLite 填表仅允许 INSERT、UPDATE、DELETE');
-    expect(result.error).not.toContain('sensitive-group');
-    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.tableData?.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'replace-a']]);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalled();
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 

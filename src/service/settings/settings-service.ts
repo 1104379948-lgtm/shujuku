@@ -7,8 +7,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normalizeIsolationCode_ACU } from '../../shared/data-constants';
-import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU, stripSqlReplaceRuleLines_ACU} from '../../shared/defaults-json.js';
-import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
+import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
+import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -591,7 +591,7 @@ export   function loadSettings_ACU() {
 
       settingsStorageReadyForSave_ACU = true;
       refreshDefaultTableTemplateOnce_ACU(activeCode);
-      refreshTableFillPromptDefaultsOnce_ACU();
+      forceDefaultTableFillPromptsOnce_ACU();
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();
           persistSettingsToStorage_ACU(settings_ACU, activeCode);
@@ -743,51 +743,24 @@ function refreshDefaultTableTemplateOnce_ACU(activeCode: string) {
   }
 
 /**
- * [spv8.8] 一次性把填表提示词刷新到含 INSERT OR REPLACE 规则的最新默认值。
- *
- * 只在「剥离 REPLACE 规则行后与旧默认值逐段完全一致」时覆盖，也就是仅覆盖仍停留在默认值的用户；
- * 任何自定义过的提示词都保持原样，只写 marker。覆盖时只替换 content，
- * enabled/role 等用户可调字段原样保留。
+ * [spv8.9.2] 一次性强制恢复全部填表提示词为当前版本默认值。
+ * marker 写入后不再执行，用户后续仍可正常自定义。
  */
-function refreshTableFillPromptDefaultsOnce_ACU() {
+function forceDefaultTableFillPromptsOnce_ACU() {
       try {
           if (!settings_ACU || typeof settings_ACU !== 'object') return;
-          if (settings_ACU.tableFillPromptDefaultsRefreshVersion === TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU) return;
+          if (settings_ACU.tableFillPromptForceDefaultVersion === TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU) return;
 
-          const targets: Array<{ key: string; latest: any[] }> = [
-              { key: 'charCardPrompt', latest: DEFAULT_CHAR_CARD_PROMPT_SQL_ACU as any[] },
-              { key: 'strictJsonSqlCharCardPrompt', latest: DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU as any[] },
-          ];
-
-          const refreshedKeys: string[] = [];
-          for (const { key, latest } of targets) {
-              const stored = settings_ACU[key];
-              if (!Array.isArray(stored) || !Array.isArray(latest) || stored.length !== latest.length) continue;
-              // 剥离 REPLACE 规则行后比较：旧默认值与新默认值在此视角下等价，
-              // 用户改过任何一个字就会不等，从而被跳过。
-              const isStockDefault = stored.every((segment: any, index: number) => {
-                  const storedContent = typeof segment?.content === 'string' ? segment.content : '';
-                  const latestContent = typeof latest[index]?.content === 'string' ? latest[index].content : '';
-                  return stripSqlReplaceRuleLines_ACU(storedContent) === stripSqlReplaceRuleLines_ACU(latestContent);
-              });
-              if (!isStockDefault) continue;
-
-              const alreadyLatest = stored.every((segment: any, index: number) => segment?.content === latest[index]?.content);
-              if (alreadyLatest) continue;
-
-              stored.forEach((segment: any, index: number) => {
-                  if (segment && typeof segment === 'object') segment.content = latest[index]?.content;
-              });
-              refreshedKeys.push(key);
-          }
-
-          settings_ACU.tableFillPromptDefaultsRefreshVersion = TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU;
+          settings_ACU.charCardPrompt = cloneDefaultValue_ACU(
+              settings_ACU.storageMode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU,
+          );
+          settings_ACU.strictJsonCharCardPrompt = cloneDefaultValue_ACU(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU);
+          settings_ACU.strictJsonSqlCharCardPrompt = cloneDefaultValue_ACU(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU);
+          settings_ACU.tableFillPromptForceDefaultVersion = TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU;
           saveSettings_ACU();
-          logDebug_ACU(refreshedKeys.length > 0
-              ? `[填表提示词] 已一次性刷新默认提示词 (${refreshedKeys.join(', ')}) 并记录版本: ${TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU}`
-              : `[填表提示词] 提示词已自定义或已是最新，仅记录版本: ${TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU}`);
+          logDebug_ACU(`[填表提示词] 已一次性强制恢复默认提示词并记录版本: ${TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU}`);
       } catch (error) {
-          logWarn_ACU('[填表提示词] 默认提示词一次性刷新失败:', error);
+          logWarn_ACU('[填表提示词] 一次性强制恢复默认提示词失败:', error);
       }
   }
 
@@ -824,7 +797,7 @@ export   function buildDefaultSettings_ACU() {
           plotPresetBindings: {}, // [剧情推进] 按聊天记录绑定剧情推进预设
           currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
           tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
-          tableFillPromptDefaultsRefreshVersion: '', // [填表提示词] 默认填表提示词一次性刷新版本
+          tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
           // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
           tableContextExtractTags: '',
           tableContextExtractRules: [] as any[],

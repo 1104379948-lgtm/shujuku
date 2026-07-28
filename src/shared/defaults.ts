@@ -179,9 +179,8 @@ export const TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU = 'spv2.1.3-table-templ
 // V2 writer 一次性强制开启迁移：无论用户此前是否显式关闭，
 // 迁移执行一次后写入 marker，之后用户仍可再次手动关闭并被永久保留。
 export const SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU = 'spv3.6.10-v2-writer-force-enable';
-// 填表提示词一次性刷新：补充 INSERT OR REPLACE 规则与固定 row_id 槽位表许可。
-// 只覆盖仍停留在旧默认值的提示词；用户自定义内容必须保留。
-export const TABLE_FILL_PROMPT_DEFAULTS_REFRESH_VERSION_ACU = 'spv8.8-sql-replace-rule';
+// 一次性强制恢复填表默认提示词；执行后用户仍可继续自定义。
+export const TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.2-force-default-table-fill-prompt';
 
 
 // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---

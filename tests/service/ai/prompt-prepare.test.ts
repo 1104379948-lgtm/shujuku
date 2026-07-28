@@ -488,7 +488,8 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
     expect(result!.tableDataText).toContain('CREATE TABLE');
     expect(result!.tableDataText).toContain('上方 CREATE TABLE 仅用于说明表结构');
     expect(result!.tableDataText).toContain('严禁复制或输出 CREATE、ALTER、DROP、SELECT');
-    expect(result!.tableDataText).toContain('仅使用 INSERT INTO / UPDATE / DELETE FROM 数据变更语句');
+    expect(result!.tableDataText).toContain('仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句');
+    expect(result!.tableDataText).toContain('按 SQLite 原生整行替换语义执行');
   });
 
   it('原生 prompt 使用 physical 投影隐藏历史列并保持右侧可见列对齐', async () => {

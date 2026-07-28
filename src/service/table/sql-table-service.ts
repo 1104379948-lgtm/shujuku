@@ -34,7 +34,7 @@ import { ensureStableRowIdsForSheetContent_ACU, getEffectiveSeedRowsForSheet_ACU
 import { getTemplatePreset_ACU } from '../template/template-preset-service';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { assertNoPhysicalTableNameCollision_ACU, getPhysicalTableNameForSheet_ACU, PhysicalTableNameCollisionError_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
-import { getFixedRowIdReplaceContract_ACU, getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
+import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 
@@ -270,7 +270,7 @@ function getSqlMutationTargetToken_ACU(statement: string, tokens: SqlMutationIde
     if (!isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'FROM') || !target) throw new Error('DELETE SQL 缺少可验证的目标表。');
     return target;
   }
-  throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 CREATE、ALTER、DROP、事务或查询语句。`);
+  throw new Error(`SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 CREATE、ALTER、DROP、事务或查询语句。`);
 }
 
 function collectSqlMutationTableReferenceTokens_ACU(
@@ -528,84 +528,6 @@ function buildRowIdReservationsByRuntimeTable_ACU(
   return reservations;
 }
 
-function resolveFixedRowIdReplaceContractForTarget_ACU(
-  tableData: TableDataObject_ACU,
-  targetTableName: string,
-): ReturnType<typeof getFixedRowIdReplaceContract_ACU> {
-  const normalizedTarget = targetTableName.toLowerCase();
-  const matches: ReturnType<typeof getFixedRowIdReplaceContract_ACU>[] = [];
-  for (const [sheetKey, value] of Object.entries(tableData || {})) {
-    if (!sheetKey.startsWith('sheet_')) continue;
-    const sheet = value as any;
-    const contract = getFixedRowIdReplaceContract_ACU(sheet);
-    if (!contract) continue;
-    const physicalName = getPhysicalTableNameForSheet_ACU(tableData, sheetKey).toLowerCase();
-    if (physicalName === normalizedTarget || contract.tableName.toLowerCase() === normalizedTarget) matches.push(contract);
-  }
-  return matches.length === 1 ? matches[0] : null;
-}
-
-function isTopLevelInsertOrReplace_ACU(tokens: SqlMutationIdentifierToken_ACU[]): boolean {
-  const actionIndex = getSqlMutationActionIndex_ACU(tokens);
-  return actionIndex === 0
-    && isSqlMutationKeyword_ACU(tokens[actionIndex], 'INSERT')
-    && isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR')
-    && isSqlMutationKeyword_ACU(tokens[actionIndex + 2], 'REPLACE');
-}
-
-/**
- * Validates the intentionally tiny REPLACE subset used by bounded slot tables.
- * It is shared by collect-time and execution-time guards so the two boundaries
- * cannot disagree about what will be persisted and replayed.
- */
-function assertFixedRowIdReplaceStatement_ACU(
-  statement: string,
-  statementIndex: number,
-  contract: NonNullable<ReturnType<typeof getFixedRowIdReplaceContract_ACU>>,
-): void {
-  const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
-  if (!isTopLevelInsertOrReplace_ACU(tokens)) {
-    throw new Error(`AI SQL 第 ${statementIndex + 1} 条仅允许固定槽位表使用顶层 INSERT OR REPLACE INTO。`);
-  }
-  const target = getSqlMutationTargetToken_ACU(statement, tokens);
-  const suffix = statement.slice(target.end).trim();
-  if (!suffix.startsWith('(')) {
-    throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条必须显式列出包含 row_id 的列清单。`);
-  }
-  const columnsEnd = findSqlClosingParen_ACU(suffix, 0, `固定槽位 REPLACE 第 ${statementIndex + 1} 条列清单`);
-  const inputColumns = splitTopLevelSqlList_ACU(suffix.slice(1, columnsEnd), `固定槽位 REPLACE 第 ${statementIndex + 1} 条列清单`);
-  const normalizedColumns = inputColumns.map(column => column.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase());
-  if (normalizedColumns.some(column => !/^[a-z_][a-z0-9_$]*$/i.test(column)) || new Set(normalizedColumns).size !== normalizedColumns.length) {
-    throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条的列名无法安全解析。`);
-  }
-  const rowIdIndex = normalizedColumns.indexOf('row_id');
-  if (rowIdIndex < 0) {
-    throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条必须显式提供 row_id 槽位。`);
-  }
-  const valuesText = suffix.slice(columnsEnd + 1).trim();
-  if (!/^VALUES\b/i.test(valuesText)) {
-    throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条只支持 VALUES，不支持 INSERT SELECT。`);
-  }
-  const tuples = splitTopLevelSqlList_ACU(valuesText.slice('VALUES'.length).trim().replace(/;$/, '').trim(), `固定槽位 REPLACE 第 ${statementIndex + 1} 条 VALUES`);
-  for (const [tupleIndex, tuple] of tuples.entries()) {
-    if (!tuple.startsWith('(') || findSqlClosingParen_ACU(tuple, 0, `固定槽位 REPLACE 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 个 VALUES`) !== tuple.length - 1) {
-      throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条只支持括号包裹的 VALUES 行。`);
-    }
-    const values = splitTopLevelSqlList_ACU(tuple.slice(1, -1), `固定槽位 REPLACE 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 个 VALUES`);
-    if (values.length !== inputColumns.length) {
-      throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条第 ${tupleIndex + 1} 行的值数量与列数量不一致。`);
-    }
-    const rowIdText = values[rowIdIndex].trim();
-    if (!/^\d+$/.test(rowIdText)) {
-      throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条的 row_id 必须是整数常量。`);
-    }
-    const rowId = Number(rowIdText);
-    if (!Number.isSafeInteger(rowId) || rowId < contract.minRowId || rowId > contract.maxRowId) {
-      throw new Error(`固定槽位 REPLACE 第 ${statementIndex + 1} 条的 row_id=${rowIdText} 超出允许范围 ${contract.minRowId}..${contract.maxRowId}。`);
-    }
-  }
-}
-
 export class SqlRowIdMaterializationError_ACU extends Error {
   constructor(message: string) {
     super(message);
@@ -621,9 +543,8 @@ export class SqlRuntimeSnapshotError_ACU extends Error {
 }
 
 /**
- * Makes every AI-authored INSERT self-describing before execution and V2 logging.
- * The accepted subset is deliberately narrow: INSERT INTO known_table (business columns)
- * VALUES (...)[, (...)] only. A heuristic SQL rewrite here would be worse than rejection.
+ * Makes ordinary AI-authored INSERT statements self-describing before execution and V2 logging.
+ * SQLite REPLACE forms retain their native semantics and are persisted unchanged.
  */
 export function materializeSystemRowIdsForSqlInserts_ACU(
   statements: string[],
@@ -635,16 +556,9 @@ export function materializeSystemRowIdsForSqlInserts_ACU(
     const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
     const actionIndex = getSqlMutationActionIndex_ACU(tokens);
     const action = tokens[actionIndex];
+    if (isSqlMutationKeyword_ACU(action, 'REPLACE')) return statement;
     if (!isSqlMutationKeyword_ACU(action, 'INSERT')) return statement;
-    if (isTopLevelInsertOrReplace_ACU(tokens)) {
-      const target = getSqlMutationTargetToken_ACU(statement, tokens);
-      const contract = resolveFixedRowIdReplaceContractForTarget_ACU(tableData, target.value);
-      if (!contract) {
-        throw new Error(`AI SQL 第 ${statementIndex + 1} 条禁止使用 INSERT OR REPLACE；只有声明固定 row_id 槽位 REPLACE 契约的表可以使用。`);
-      }
-      assertFixedRowIdReplaceStatement_ACU(statement, statementIndex, contract);
-      return statement;
-    }
+    if (isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR') && isSqlMutationKeyword_ACU(tokens[actionIndex + 2], 'REPLACE')) return statement;
     if (actionIndex !== 0 || isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR')) {
       throw new Error(`AI INSERT 第 ${statementIndex + 1} 条不支持 WITH 或 INSERT OR 语法；请使用标准 INSERT INTO ... (列名) VALUES (...).`);
     }
@@ -717,25 +631,18 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
     }
   }
 
-  for (const [statementIndex, statement] of statements.entries()) {
+  for (const statement of statements) {
     const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
     const actionIndex = getSqlMutationActionIndex_ACU(tokens);
     const action = tokens[actionIndex];
     const actionKeyword = action?.quote === null ? action.value.toUpperCase() : '';
-    if (!new Set(['INSERT', 'UPDATE', 'DELETE']).has(actionKeyword)) {
-      throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 REPLACE、CREATE、ALTER、DROP、事务或查询语句。`);
+    if (!new Set(['INSERT', 'REPLACE', 'UPDATE', 'DELETE']).has(actionKeyword)) {
+      throw new Error(`SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 CREATE、ALTER、DROP、事务或查询语句。`);
     }
     const target = getSqlMutationTargetToken_ACU(statement, tokens);
     const resolved = sheetsByAlias.get(target.value.toLowerCase());
     if (resolved === undefined) continue;
     if (resolved === null) throw new Error(`无法唯一解析隐藏列保护的 SQL 目标表：${target.value}。`);
-    if (isSqlMutationKeyword_ACU(tokens[actionIndex + 1], 'OR') && isSqlMutationKeyword_ACU(tokens[actionIndex + 2], 'REPLACE')) {
-      const contract = getFixedRowIdReplaceContract_ACU(resolved.sheet);
-      if (actionKeyword !== 'INSERT' || !contract) {
-        throw new Error(`SQLite 填表仅允许 INSERT、UPDATE、DELETE 数据变更语句；仅固定 row_id 槽位表可使用 INSERT OR REPLACE。AI SQL 第 ${statementIndex + 1} 条禁止使用 ${actionKeyword} OR REPLACE。`);
-      }
-      assertFixedRowIdReplaceStatement_ACU(statement, statementIndex, contract);
-    }
     const hidden = new Set(getSheetColumnProjection_ACU(resolved.sheet).hiddenPhysicalColumns.map(name => name.toLowerCase()));
     if (hidden.size === 0) continue;
 
@@ -744,7 +651,7 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
       throw new Error(`SQL mutation 不允许引用隐藏物理列：${[...new Set(hiddenReferences.map(token => token.value))].join('、')}。`);
     }
 
-    const isInsert = actionIndex === 0 && actionKeyword === 'INSERT';
+    const isInsert = actionKeyword === 'INSERT' || actionKeyword === 'REPLACE';
     if (isInsert) {
       const targetIndex = tokens.indexOf(target);
       const clauseIndex = tokens.findIndex((token, index) => index > targetIndex
@@ -754,7 +661,7 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
       const beforeClause = clauseIndex === -1 ? tokens.slice(targetIndex + 1) : tokens.slice(targetIndex + 1, clauseIndex);
       const columnTokens = beforeClause.filter(token => token.depth === target.depth + 1);
       if (columnTokens.length === 0) {
-        throw new Error(`存在隐藏物理列时，INSERT 必须显式列出可见目标列：${target.value}。`);
+        throw new Error(`存在隐藏物理列时，INSERT/REPLACE 必须显式列出可见目标列：${target.value}。`);
       }
     }
   }
@@ -1839,27 +1746,27 @@ export function splitSqlStatements(sql: string): string[] {
 
 
 /**
- * 从 SQL 语句中提取表名（简单正则匹配）
- * 支持 INSERT INTO、UPDATE、DELETE FROM、ALTER TABLE
+ * 从 SQL 语句中提取实际 mutation 目标表。
+ * 复用执行边界的 tokenizer，避免字符串、注释或 schema 前缀误导归属。
  */
 export function extractTableNamesFromStatements(statements: string[]): string[] {
   const tableNames = new Set<string>();
-  const ident = '(?:`([^`]+)`|"([^"]+)"|\\[([^\\]]+)\\]|([A-Za-z_][A-Za-z0-9_]*))';
-  const patterns = [
-    new RegExp(`\\bINSERT\\s+(?:OR\\s+\\w+\\s+)?INTO\\s+${ident}`, 'i'),
-    new RegExp(`\\bUPDATE\\s+(?:OR\\s+\\w+\\s+)?${ident}`, 'i'),
-    new RegExp(`\\bDELETE\\s+FROM\\s+${ident}`, 'i'),
-    new RegExp(`\\bALTER\\s+TABLE\\s+${ident}`, 'i'),
-  ];
 
   for (const stmt of statements) {
-    for (const pattern of patterns) {
-      const match = stmt.match(pattern);
-      if (match) {
-        const tableName = match.slice(1).find(Boolean);
-        if (tableName) tableNames.add(tableName);
-        break;
+    if (typeof stmt !== 'string' || !stmt.trim()) continue;
+    try {
+      const tokens = tokenizeSqlMutationIdentifiers_ACU(stmt);
+      const first = tokens[0];
+      if (isSqlMutationKeyword_ACU(first, 'ALTER') && isSqlMutationKeyword_ACU(tokens[1], 'TABLE')) {
+        const target = getQualifiedSqlIdentifierTail_ACU(stmt, tokens, 2);
+        if (target) tableNames.add(target.value);
+        continue;
       }
+
+      const target = getSqlMutationTargetToken_ACU(stmt, tokens);
+      tableNames.add(target.value);
+    } catch {
+      // 本函数只负责归属提取；非法 SQL 由 collect/执行边界给出确定错误。
     }
   }
 
