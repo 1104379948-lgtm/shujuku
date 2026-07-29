@@ -6,6 +6,7 @@
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../../../service/runtime/state-manager';
 import { ensureStorageProviderReady_ACU, getStorageProvider, getStorageRuntimeHealth_ACU, isStorageRuntimeReadyForSyncRead_ACU } from '../../../service/table/table-storage-strategy';
+import { isSqliteMode } from '../../../service/table/storage-mode';
 import { resolvePhysicalTableNames_ACU } from '../../../shared/sheet-identity';
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
 import { buildSqlSheetBatchOperations_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements } from '../../../service/table/sql-table-service';
@@ -60,6 +61,37 @@ export type PublicSqlReadError_ACU = {
     message: string;
     at: number;
 };
+
+export const RUNTIME_GATED_SQL_READ_METHODS_ACU = [
+    'executeSqlQuery',
+    'querySql',
+    'queryTableRows',
+] as const;
+
+/**
+ * 全局 SQL 读取能力只在 SQLite runtime 完整发布后可见。
+ * 使用 getter 而不是启动时复制函数，确保聊天切换、重载期间会重新隐藏，ready 后自动恢复。
+ */
+export function installRuntimeGatedSqlReadApi_ACU(
+    target: Record<string, any>,
+    sqlApi: Record<string, Function>,
+): void {
+    for (const methodName of RUNTIME_GATED_SQL_READ_METHODS_ACU) {
+        const method = sqlApi[methodName];
+        if (typeof method !== 'function') {
+            throw new Error(`[SQL API] 缺少运行时门控方法: ${methodName}`);
+        }
+        Object.defineProperty(target, methodName, {
+            configurable: false,
+            enumerable: true,
+            get(): Function | undefined {
+                return isSqliteMode() && isStorageRuntimeReadyForSyncRead_ACU()
+                    ? method
+                    : undefined;
+            },
+        });
+    }
+}
 
 function isPlainObjectArg_ACU(value: any): value is Record<string, any> {
     return value !== null && typeof value === 'object' && !Array.isArray(value);

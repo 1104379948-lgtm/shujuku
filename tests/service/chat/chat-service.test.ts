@@ -628,6 +628,63 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
+  it('将兼容 replay 已重映射的旧 row_id 固化到边界 checkpoint，并无损降级旧 init 锚点', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const legacyData = {
+      sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑'], [' 1 ', '旧副本']] },
+    };
+    const repairedData = {
+      sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑'], ['2', '旧副本']] },
+    };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          storageFrame: {
+            version: 2,
+            ...(index === 0
+              ? {
+                  checkpoint: {
+                    kind: 'full', createdAt: 1, reason: 'init', data: structuredClone(legacyData),
+                  },
+                }
+              : {}),
+            logEntries: [],
+          },
+          _acu_storage_version: 2,
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2.mockResolvedValueOnce(structuredClone(repairedData));
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    expect(chat[23].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toEqual(expect.objectContaining({
+      kind: 'full',
+      reason: 'compaction',
+      data: repairedData,
+    }));
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0]).toMatchObject({
+      operations: [{ kind: 'data_replace', data: legacyData, reason: 'checkpoint_fallback' }],
+    });
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+  });
+
+  it('边界 replay 结果仍含重复 row_id 时拒绝保存并回滚 anchor', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const chat = Array.from({ length: 25 }, () => ({ is_user: false, TavernDB_ACU_IsolatedData: { '': { storageFrame: { version: 2, logEntries: [] }, _acu_storage_version: 2 } } }));
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2.mockResolvedValueOnce({ sheet_0: { content: [['row_id'], ['1'], ['1']] } });
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toMatchObject({ success: false, changed: false, failedIsolationKey: '', error: expect.stringContaining('未满足 canonical 契约') });
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
   it('retainRecentLayers=100 且 30 个 AI 楼层时不触发边界 rotate', async () => {
     mockSettings.retainRecentLayers = 100;
     const chat = Array.from({ length: 30 }, (_, index) => ({

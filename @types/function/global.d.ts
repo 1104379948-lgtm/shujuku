@@ -182,9 +182,9 @@ interface AutoCardUpdaterAPI {
     deleteWorldbookEntrySkillMeta(bookName: any, uid: any): Promise<AutoCardUpdaterApiResult>;
     clearAgentWorldbookSkillMetas(bookNames?: string[]): Promise<AutoCardUpdaterApiResult>;
 
-    executeSqlQuery(sqlOrOptions: any, params?: any, options?: any): AutoCardUpdaterSqlQueryResult | null;
-    querySql(sqlOrOptions: any, params?: any, options?: any): AutoCardUpdaterSqlQueryResult | null;
-    queryTableRows(options: { sheetKey?: string; tableName?: string; table?: string; columns?: string[]; where?: Record<string, any>; orderBy?: any; order?: any; limit?: number; offset?: number }): AutoCardUpdaterSqlQueryResult | null;
+    executeSqlQuery?(sqlOrOptions: any, params?: any, options?: any): AutoCardUpdaterSqlQueryResult | null;
+    querySql?(sqlOrOptions: any, params?: any, options?: any): AutoCardUpdaterSqlQueryResult | null;
+    queryTableRows?(options: { sheetKey?: string; tableName?: string; table?: string; columns?: string[]; where?: Record<string, any>; orderBy?: any; order?: any; limit?: number; offset?: number }): AutoCardUpdaterSqlQueryResult | null;
     executeSqlMutation(sqlOrOptions: any, params?: any, options?: any): Promise<AutoCardUpdaterSqlMutationResult>;
     executeSqlBatch(sqlOrOptions: any, options?: any): Promise<AutoCardUpdaterSqlBatchResult>;
     executeSql(sqlOrOptions: any, params?: any, options?: any): Promise<AutoCardUpdaterSqlExecutionResult | null>;

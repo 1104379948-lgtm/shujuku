@@ -1133,7 +1133,9 @@ console.log(jsonString);
 
 ## 原生 SQL 标识符解析
 
-`executeSqlQuery`、`querySql`、`executeSql` 的只读分支及 `queryTableRows` 会在 SQLite 执行前，将已知表的用户可见标识符重绑定为运行时物理标识符；查询返回值契约不变，解析或执行失败仍返回 `null`。
+`executeSqlQuery`、`querySql` 和 `queryTableRows` 只在 SQLite 模式且当前 runtime 完整进入 `ready` 后发布到 `AutoCardUpdaterAPI`。原生模式、启动初始化、聊天切换及数据库重载期间，这三个属性为 `undefined`；外部调用方必须在每次查询前检查函数是否存在，并在暂不可用时稍后重试。
+
+这些方法以及 `executeSql` 的只读分支会在 SQLite 执行前，将已知表的用户可见标识符重绑定为运行时物理标识符；查询返回值契约不变，解析或执行失败仍返回 `null`。
 
 ### 表名
 
@@ -1149,7 +1151,7 @@ console.log(jsonString);
 
 ### 失败诊断
 
-只读 API 的失败返回值仍为 `null`。可调用 `getLastSqlApiError()` 获取最近一次只读失败的 `{ method, code, message, at }`；`code` 区分运行时未就绪、别名冲突、表不存在、列未解析、只读违规和其他 SQL 错误。只有本次 SQL 实际引用的表或列别名冲突才会归类为 `alias_conflict`；无关 schema 冲突不会掩盖实际的缺表或缺列错误。同步读取仅使用 runtime 已发布的 schema 快照；provider 发布前会验证 schema，未就绪 runtime 不会被读取路径懒初始化。
+已发布的只读 API 在解析或执行失败时仍返回 `null`。可调用 `getLastSqlApiError()` 获取最近一次只读失败的 `{ method, code, message, at }`；`code` 区分别名冲突、表不存在、列未解析、只读违规和其他 SQL 错误。运行时尚未发布时不会调用查询函数，因此也不会新增一次 `runtime_not_ready` 错误。只有本次 SQL 实际引用的表或列别名冲突才会归类为 `alias_conflict`；无关 schema 冲突不会掩盖实际的缺表或缺列错误。同步读取仅使用 runtime 已发布的 schema 快照；provider 发布前会验证 schema，未就绪 runtime 不会被读取路径懒初始化。
 
 写入 SQL 仍只接受既有写路径支持的表名形态；不要把只读查询的扩展表名兼容性误当成写入契约。
 

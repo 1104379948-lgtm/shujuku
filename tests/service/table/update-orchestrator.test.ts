@@ -2993,6 +2993,36 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(baseSnapshot.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a']]);
     expect(baseSnapshot.sheet_1.content).toEqual([['row_id', '值'], ['1', 'base-b']]);
   });
+  it('规范化后的空模板首次填表可通过 snapshot 提交', async () => {
+    const baseSnapshot = {
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值']] },
+    };
+    const responses = [{
+      success: true,
+      attempt: 1,
+      aiResponse: '<tableEdit>sheet_0</tableEdit>',
+      tableEditText: 'sheet_0',
+      job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
+    }];
+    mockParseAndApplyTableEditsToData.mockImplementationOnce((_aiResponse: string, tableData: any) => {
+      tableData.sheet_0.content.push(['1', '首次填充']);
+      return { success: true, modifiedKeys: ['sheet_0'], appliedEdits: 1 };
+    });
+
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, {
+      saveTargetIndex: 3,
+      updateMode: 'auto_standard',
+      isImportMode: false,
+    });
+
+    expect(result).toMatchObject({ success: true, modifiedKeys: ['sheet_0'] });
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      tableData: expect.objectContaining({
+        sheet_0: expect.objectContaining({ content: [['row_id', '值'], ['1', '首次填充']] }),
+      }),
+    }));
+  });
   it('存在 full checkpoint 时新表不得清空 operations', async () => {
     // 回归：锚点判定一旦按目标表内容反推（要求 checkpoint 承载全部/部分目标表），
     // 只要本次涉及一张 checkpoint 里还没有的新表就会被误判为无锚点，

@@ -185,6 +185,43 @@ function inspectRowsWithoutIds_ACU(result: UpgradeAuditResult_ACU, sheetKey: str
 }
 
 
+function headerOnlyRowIdNormalizationAction_ACU(sheet: RecordValue): 'rename' | 'insert' | null {
+  const content = sheet.content;
+  if (!Array.isArray(content) || content.length !== 1 || !Array.isArray(content[0]) || content[0].length === 0) return null;
+  // A business-only header is unambiguous only when no row exists in either pool.
+  // Do not treat malformed seedRows as empty: that would silently shift data later.
+  if (sheet.seedRows !== undefined && (!Array.isArray(sheet.seedRows) || sheet.seedRows.length > 0)) return null;
+  const header = content[0];
+  const firstHeader = String(header[0] ?? '').trim();
+  if (canonicalPhysicalName_ACU(firstHeader) === 'row_id') return null;
+  // A misplaced identity column is not an empty-template shortcut. Inserting
+  // another row_id would conceal a malformed schema and create duplicate names.
+  if (header.slice(1).some(value => canonicalPhysicalName_ACU(value) === 'row_id')) return null;
+  return !firstHeader || /^(id|rowid|row_id)$/i.test(firstHeader) || firstHeader === '行号'
+    ? 'rename'
+    : 'insert';
+}
+
+/**
+ * Pure, lossless normalization for an externally supplied header-only template.
+ * It deliberately does not touch populated tables or malformed seed pools.
+ */
+export function normalizeHeaderOnlyRowIdColumns_ACU<T>(data: T): T {
+  if (!isRecord_ACU(data)) return data;
+  let normalized: RecordValue | null = null;
+  for (const [sheetKey, sheet] of Object.entries(data)) {
+    if (!sheetKey.startsWith('sheet_') || !isRecord_ACU(sheet)) continue;
+    const action = headerOnlyRowIdNormalizationAction_ACU(sheet);
+    if (!action) continue;
+    const content = sheet.content as unknown[][];
+    const header = content[0];
+    const nextHeader = action === 'rename' ? ['row_id', ...header.slice(1)] : ['row_id', ...header];
+    if (!normalized) normalized = { ...data };
+    normalized[sheetKey] = { ...sheet, content: [nextHeader] };
+  }
+  return (normalized || data) as T;
+}
+
 function determineHeaderRepair_ACU(result: UpgradeAuditResult_ACU, sheetKey: string, sheet: RecordValue): { header: unknown[]; insertsRowId: boolean } | null {
   const content = sheet.content;
   if (!Array.isArray(content) || !Array.isArray(content[0]) || content[0].length === 0) {
@@ -197,6 +234,10 @@ function determineHeaderRepair_ACU(result: UpgradeAuditResult_ACU, sheetKey: str
   if (!firstHeader || /^(id|rowid|row_id)$/i.test(firstHeader) || firstHeader === '行号') {
     addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '身份列表头可确定地规范化为 row_id' }, { action: 'rename_header', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
     return { header: ['row_id', ...header.slice(1)], insertsRowId: false };
+  }
+  if (headerOnlyRowIdNormalizationAction_ACU(sheet) === 'insert') {
+    addIssue_ACU(result, { code: 'upgrade_invalid_header', sheetKey, rowIndex: 0, message: '无数据模板缺少 row_id，可在首列插入' }, { action: 'insert_row_id_column', sheetKey, rowIndex: 0, targetHeader: 'row_id' });
+    return { header: ['row_id', ...header], insertsRowId: true };
   }
   const ddl = isRecord_ACU(sheet.sourceData) ? sheet.sourceData.ddl : undefined;
   const ddlText = typeof ddl === 'string' ? ddl : '';

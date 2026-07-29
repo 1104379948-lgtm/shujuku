@@ -2,6 +2,7 @@ import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '
 import { cloneIsolatedData_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
+import type { StorageMode } from '../../shared/table-storage-provider';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
@@ -133,6 +134,8 @@ export interface CommitCurrentFloorTemplateChangesOptions_ACU {
   expectedChatIdentity?: string;
   expectedFirstMessage?: unknown;
   signal?: AbortSignal;
+  /** native 只校验 canonical JSON；sqlite 额外执行 DDL 与 strict hydrate 门禁。 */
+  storageMode?: StorageMode;
 }
 
 export interface CommitCurrentFloorTemplateChangesResult_ACU {
@@ -1880,6 +1883,7 @@ function assertValidTemplateMetaUpdate_ACU(operation: Record<string, any>, sheet
 async function assertValidInitialTemplateSnapshot_ACU(
   data: Record<string, any>,
   guideData: Record<string, any>,
+  storageMode: StorageMode,
 ): Promise<void> {
   const mate = data.mate;
   if (!isPlainObjectRecord_ACU(mate) || typeof mate.type !== 'string' || mate.type.length === 0) {
@@ -1920,23 +1924,27 @@ async function assertValidInitialTemplateSnapshot_ACU(
     if (sheet.content.length === 0 || sheet.content[0].length === 0 || sheet.content[0][0] !== 'row_id') {
       throw new Error(`V2 首次模板提交的 templateSource Sheet 缺少 row_id 表头：${sheetKey}。`);
     }
-    if (!String(sheet.sourceData.ddl || '').trim()) {
-      sheet.sourceData.ddl = generateDDL(sheet as Sheet_ACU, sheet.uid || sheetKey);
-    }
-    const ddlValidation = validateDDLTextAgainstHeaders_ACU(sheet.sourceData.ddl, sheet.content[0]);
-    if (!ddlValidation.valid) {
-      throw new Error(`V2 首次模板提交的 templateSource Sheet DDL 无法 strict hydrate：${sheetKey}：${ddlValidation.message}`);
-    }
-    try {
-      createSheetInsertPlan(sheet as Sheet_ACU);
-    } catch (error: any) {
-      throw new Error(`V2 首次模板提交的 templateSource Sheet 无法 hydrate：${sheetKey}：${error?.message || String(error)}`);
+    if (storageMode === 'sqlite') {
+      if (!String(sheet.sourceData.ddl || '').trim()) {
+        sheet.sourceData.ddl = generateDDL(sheet as Sheet_ACU, sheet.uid || sheetKey);
+      }
+      const ddlValidation = validateDDLTextAgainstHeaders_ACU(sheet.sourceData.ddl, sheet.content[0]);
+      if (!ddlValidation.valid) {
+        throw new Error(`V2 首次模板提交的 templateSource Sheet DDL 无法 strict hydrate：${sheetKey}：${ddlValidation.message}`);
+      }
+      try {
+        createSheetInsertPlan(sheet as Sheet_ACU);
+      } catch (error: any) {
+        throw new Error(`V2 首次模板提交的 templateSource Sheet 无法 hydrate：${sheetKey}：${error?.message || String(error)}`);
+      }
     }
   }
-  try {
-    await hydrateTableDataStrict_ACU(data);
-  } catch (error: any) {
-    throw new Error(`V2 首次模板提交的完整 templateSource 无法通过 SQLite strict hydrate：${error?.message || String(error)}`);
+  if (storageMode === 'sqlite') {
+    try {
+      await hydrateTableDataStrict_ACU(data);
+    } catch (error: any) {
+      throw new Error(`V2 首次模板提交的完整 templateSource 无法通过 SQLite strict hydrate：${error?.message || String(error)}`);
+    }
   }
 }
 
@@ -2051,6 +2059,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     return { saved: false, error: error?.message || String(error) };
   }
   const sheetKeys = [...new Set([...requestedChanges.map(change => change.sheetKey), ...deletedSheetKeys])];
+  const storageMode = options.storageMode === 'native' ? 'native' : 'sqlite';
   const createdAt = options.createdAt ?? Date.now();
   if (!Number.isFinite(createdAt) || createdAt < 0) {
     return { saved: false, error: '当前楼层模板提交 requires a finite non-negative createdAt.' };
@@ -2118,7 +2127,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       if (staleDeletedSheetKeys.length > 0) {
         throw new Error(`预填表模板提交的 templateSource 仍包含已删除 Sheet：${staleDeletedSheetKeys.join(', ')}。`);
       }
-      await assertValidInitialTemplateSnapshot_ACU(templateSnapshot, options.guideData);
+      await assertValidInitialTemplateSnapshot_ACU(templateSnapshot, options.guideData, storageMode);
       assertTemplateCommitChatContext_ACU(chat, options);
       for (const change of requestedChanges) {
         // hide 的语义就是把该表从活跃模板中移除，因此它不会出现在新的 templateSource
@@ -2133,9 +2142,11 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         if (expectedNormalization.errors.length > 0) {
           throw new Error(`预填表模板提交目标 Sheet 行标识不合法：${formatCanonicalRowIssues_ACU(expectedNormalization.errors)}`);
         }
-        if (!expectedSheet.sourceData || typeof expectedSheet.sourceData !== 'object') expectedSheet.sourceData = {} as any;
-        if (!String(expectedSheet.sourceData.ddl || '').trim()) {
-          expectedSheet.sourceData.ddl = generateDDL(expectedSheet, expectedSheet.uid || change.sheetKey);
+        if (storageMode === 'sqlite') {
+          if (!expectedSheet.sourceData || typeof expectedSheet.sourceData !== 'object') expectedSheet.sourceData = {} as any;
+          if (!String(expectedSheet.sourceData.ddl || '').trim()) {
+            expectedSheet.sourceData.ddl = generateDDL(expectedSheet, expectedSheet.uid || change.sheetKey);
+          }
         }
         if (canonicalJson_ACU(templateSheetPersistentProjection_ACU(snapshotSheet as Sheet_ACU)) !== canonicalJson_ACU(templateSheetPersistentProjection_ACU(expectedSheet))) {
           throw new Error(`预填表模板提交的 templateSource 与目标 Sheet 不一致：${change.sheetKey}。`);
@@ -2249,15 +2260,17 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       if (!Array.isArray(headers) || headers[0] !== 'row_id') {
         throw new Error(`V2 当前楼层模板提交缺少 row_id 表头：${change.sheetKey}。`);
       }
-      if (!targetSheetData.sourceData || typeof targetSheetData.sourceData !== 'object') targetSheetData.sourceData = {} as any;
-      if (!String(targetSheetData.sourceData.ddl || '').trim()) {
-        targetSheetData.sourceData.ddl = generateDDL(targetSheetData, targetSheetData.uid || change.sheetKey);
+      if (storageMode === 'sqlite') {
+        if (!targetSheetData.sourceData || typeof targetSheetData.sourceData !== 'object') targetSheetData.sourceData = {} as any;
+        if (!String(targetSheetData.sourceData.ddl || '').trim()) {
+          targetSheetData.sourceData.ddl = generateDDL(targetSheetData, targetSheetData.uid || change.sheetKey);
+        }
+        const ddlValidation = validateDDLTextAgainstHeaders_ACU(targetSheetData.sourceData.ddl, headers);
+        if (!ddlValidation.valid) {
+          throw new Error(`V2 当前楼层模板提交 DDL 无法 strict hydrate：${change.sheetKey}：${ddlValidation.message}`);
+        }
+        createSheetInsertPlan(targetSheetData);
       }
-      const ddlValidation = validateDDLTextAgainstHeaders_ACU(targetSheetData.sourceData.ddl, headers);
-      if (!ddlValidation.valid) {
-        throw new Error(`V2 当前楼层模板提交 DDL 无法 strict hydrate：${change.sheetKey}：${ddlValidation.message}`);
-      }
-      createSheetInsertPlan(targetSheetData);
       if (change.kind === 'introduction') introductionSheets.set(change.sheetKey, targetSheetData);
       else if (change.kind === 'rebase') rebaseSheets.set(change.sheetKey, targetSheetData);
       else if (change.kind === 'reveal') revealSheets.set(change.sheetKey, targetSheetData);

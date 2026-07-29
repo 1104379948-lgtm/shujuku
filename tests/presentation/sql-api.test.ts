@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   getChineseColumnName: vi.fn((_tableName: string, columnName: string) => columnName),
   getChineseTableName: vi.fn((tableName: string) => tableName),
   getStorageProvider: vi.fn(),
+  isSqliteMode: vi.fn(() => true),
   isStorageRuntimeReadyForSyncRead: vi.fn(() => true),
   getStorageRuntimeHealth: vi.fn(() => ({
     status: 'ready',
@@ -68,6 +69,10 @@ vi.mock('../../src/service/table/table-storage-strategy', () => ({
   ensureStorageProviderReady_ACU: mocks.ensureStorageProviderReady,
   isStorageRuntimeReadyForSyncRead_ACU: mocks.isStorageRuntimeReadyForSyncRead,
   getStorageRuntimeHealth_ACU: mocks.getStorageRuntimeHealth,
+}));
+
+vi.mock('../../src/service/table/storage-mode', () => ({
+  isSqliteMode: mocks.isSqliteMode,
 }));
 
 function createBareProvider_ACU() {
@@ -125,7 +130,7 @@ vi.mock('../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: mocks.runTableWriteTransaction,
 }));
 
-import { createSqlApi, isSqlReadStatement_ACU } from '../../src/presentation/bootstrap/api-groups/sql-api';
+import { createSqlApi, installRuntimeGatedSqlReadApi_ACU, isSqlReadStatement_ACU } from '../../src/presentation/bootstrap/api-groups/sql-api';
 
 describe('isSqlReadStatement_ACU', () => {
   it('识别查询类 SQL', () => {
@@ -155,6 +160,8 @@ describe('createSqlApi', () => {
   beforeEach(() => {
     mockCurrentJsonTableData = { mate: { type: 'acu', version: 1 }, sheet_0: { name: 'T', content: [['row_id'], ['1']] } };
     vi.clearAllMocks();
+    mocks.isSqliteMode.mockReturnValue(true);
+    mocks.isStorageRuntimeReadyForSyncRead.mockReturnValue(true);
     mocks.getStorageProvider.mockImplementation(createBareProvider_ACU);
     mocks.getNameMapper.mockReturnValue({
       translateSql: mocks.translateSql,
@@ -192,6 +199,36 @@ describe('createSqlApi', () => {
       runCommit: async (commitTask: any) => commitTask(),
     }));
     api = createSqlApi(ctx);
+  });
+
+  it('全局只读 SQL 方法仅在 SQLite runtime ready 后可见', () => {
+    const publishedApi: Record<string, any> = { ...api };
+    installRuntimeGatedSqlReadApi_ACU(publishedApi, api);
+
+    mocks.isSqliteMode.mockReturnValue(false);
+    expect(publishedApi.querySql).toBeUndefined();
+    expect(publishedApi.executeSqlQuery).toBeUndefined();
+    expect(publishedApi.queryTableRows).toBeUndefined();
+
+    mocks.isSqliteMode.mockReturnValue(true);
+    mocks.isStorageRuntimeReadyForSyncRead.mockReturnValue(false);
+    expect(publishedApi.querySql).toBeUndefined();
+
+    mocks.isStorageRuntimeReadyForSyncRead.mockReturnValue(true);
+    expect(publishedApi.querySql).toBe(api.querySql);
+    expect(publishedApi.executeSqlQuery).toBe(api.executeSqlQuery);
+    expect(publishedApi.queryTableRows).toBe(api.queryTableRows);
+  });
+
+  it('聊天切换或重载导致 runtime 失去 ready 时会重新隐藏只读 SQL 方法', () => {
+    const publishedApi: Record<string, any> = { ...api };
+    installRuntimeGatedSqlReadApi_ACU(publishedApi, api);
+
+    expect(typeof publishedApi.querySql).toBe('function');
+    mocks.isStorageRuntimeReadyForSyncRead.mockReturnValue(false);
+    expect(publishedApi.querySql).toBeUndefined();
+    mocks.isStorageRuntimeReadyForSyncRead.mockReturnValue(true);
+    expect(typeof publishedApi.querySql).toBe('function');
   });
 
   it('executeSqlQuery 调用 provider.executeQuery 并返回对象行', () => {

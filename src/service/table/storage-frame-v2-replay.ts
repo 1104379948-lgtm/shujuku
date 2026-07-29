@@ -15,6 +15,8 @@ import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration
 import { getPhysicalTableNameForSheet_ACU } from '../../shared/sheet-identity';
 import { parseDDLTableName } from '../../shared/ddl-utils';
 import { decodeSqlIdentifier_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
+import { auditTableDataForUpgrade_ACU } from './table-data-upgrade-audit';
+import { repairTableDataFromAudit_ACU } from './table-data-repair';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -286,6 +288,46 @@ function normalizeReplayState_ACU(state: TableDataObject_ACU, context: string): 
     throw new Error(`[V2 Replay] ${context} 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`);
   }
   replaceState_ACU(state, candidate);
+}
+
+function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU): void {
+  const probe = deepClone_ACU(state);
+  const normalization = normalizeCanonicalTableRows_ACU(probe);
+  const nonDuplicateErrors = normalization.errors.filter(issue => issue.reason !== 'duplicate_row_id');
+  if (normalization.removedRows.length > 0 || nonDuplicateErrors.length > 0) {
+    normalizeReplayState_ACU(state, 'full checkpoint');
+    return;
+  }
+
+  const audit = auditTableDataForUpgrade_ACU(state);
+  const duplicateIssues = audit.issues.filter(issue => (
+    issue.code === 'upgrade_duplicate_row_id'
+    || issue.code === 'upgrade_seed_pool_conflict'
+  ));
+  const unsupportedIssues = audit.issues.filter(issue => (
+    issue.code !== 'upgrade_duplicate_row_id'
+    && issue.code !== 'upgrade_seed_pool_conflict'
+  ));
+  if (audit.status === 'clean' && normalization.errors.length === 0) {
+    replaceState_ACU(state, probe);
+    return;
+  }
+  if (audit.status !== 'repairable' || duplicateIssues.length === 0 || unsupportedIssues.length > 0) {
+    normalizeReplayState_ACU(state, 'full checkpoint');
+    return;
+  }
+  const repair = repairTableDataFromAudit_ACU(audit);
+  if (repair.requiresConfirmation || !repair.candidateData || typeof repair.candidateData !== 'object') {
+    normalizeReplayState_ACU(state, 'full checkpoint');
+    return;
+  }
+  const candidate = repair.candidateData as TableDataObject_ACU;
+  normalizeReplayState_ACU(candidate, 'legacy duplicate row_id repair');
+  replaceState_ACU(state, candidate);
+  const affectedSheetKeys = [...new Set(repair.idRemap.map(remap => remap.sheetKey))];
+  logWarn_ACU(
+    `[V2 Replay] 旧 full checkpoint 含重复 row_id，已在内存副本中保留全部行并重映射 ${repair.idRemap.length} 行：${affectedSheetKeys.join(', ')}。原 storage frame 未修改。`,
+  );
 }
 
 async function ensureSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): Promise<void> {
@@ -823,7 +865,7 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
   } else {
     const checkpoint = checkpointRef.frame.checkpoint;
     state = deepClone_ACU(checkpoint.data);
-    normalizeReplayState_ACU(state, 'full checkpoint');
+    normalizeLegacyDuplicateCheckpointState_ACU(state);
     replayStartMessageIndex = checkpointRef.messageIndex;
     if (options.updateRuntimeState !== false) replayCheckpointSchedule_ACU(checkpoint, checkpointRef.aiFloor);
   }

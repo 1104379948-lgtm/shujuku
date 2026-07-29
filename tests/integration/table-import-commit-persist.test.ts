@@ -74,4 +74,19 @@ describe('P3 import → commit → V2 persist', () => {
     expect(secondFrame.logEntries[0]).toMatchObject({ source: 'import', operations: [{ kind: 'data_replace', reason: 'import', data: data('second') }] });
     expect(h.strictSave).toHaveBeenCalledTimes(2);
   });
+
+  it('首次导入只有业务表头的空模板时，持久化 canonical 表头且不制造数据行', async () => {
+    const template = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { uid: 's0', name: 'P3', sourceData: {}, content: [['value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    };
+
+    expect(await importTableJsonThroughCommit_ACU(JSON.stringify(template))).toMatchObject({ success: true, persisted: true });
+
+    const checkpointData = h.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data;
+    expect(checkpointData.sheet_0.content).toEqual([['row_id', 'value']]);
+    expect(h.provider.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      sheet_0: expect.objectContaining({ content: [['row_id', 'value']] }),
+    }));
+  });
 });

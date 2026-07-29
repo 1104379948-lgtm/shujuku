@@ -667,6 +667,41 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.candidateData.sheet_legacy.seedRows).toBeUndefined();
   });
 
+  it('原生模式导入无 DDL 模板时不执行 SQLite 门禁', async () => {
+    const nativeTemplate = sheet('sheet_new', '全局数据表', ['row_id', '地点'], 'row_id INTEGER PRIMARY KEY, location TEXT', []);
+    nativeTemplate.sourceData = {};
+
+    const plan = await reconcileChatTemplate_ACU({
+      baselineData: state({}),
+      templateData: state({ sheet_new: nativeTemplate }),
+      destructiveChangeConfirmed: false,
+      storageMode: 'native',
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_new.content).toEqual([['row_id', '地点']]);
+    expect(plan.candidateData.sheet_new.sourceData).toEqual({});
+    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' })]);
+  });
+
+  it('原生模式匹配旧表时只按表头继承，不解析错误 DDL', async () => {
+    const baselineSheet = sheet('sheet_live', '全局数据表', ['row_id', '地点', '旧列'], 'row_id INTEGER PRIMARY KEY, location TEXT, old_value TEXT', [['1', '御苑', '历史']]);
+    baselineSheet.sourceData.ddl = 'not sql';
+    const templateSheet = sheet('sheet_imported', '全局数据表', ['row_id', '地点', '新列'], 'row_id INTEGER PRIMARY KEY, location TEXT, new_value TEXT', []);
+    templateSheet.sourceData.ddl = '';
+
+    const plan = await reconcileChatTemplate_ACU({
+      baselineData: state({ sheet_live: baselineSheet }),
+      templateData: state({ sheet_imported: templateSheet }),
+      destructiveChangeConfirmed: false,
+      storageMode: 'native',
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_live.content).toEqual([['row_id', '地点', '新列'], ['1', '御苑', null]]);
+    expect(plan.audit[0]).toMatchObject({ inheritedColumns: ['地点'], addedColumns: ['新列'], deletedColumns: ['旧列'] });
+  });
+
 
   it('仅 introduction 的 DDL 与表头不一致时，完整 replay candidate hydrate 必须阻断', async () => {
     const invalidTemplate = sheet('sheet_new', '新表', ['row_id', '显示名称'], 'row_id INTEGER PRIMARY KEY, physical_name TEXT', []);

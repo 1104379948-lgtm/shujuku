@@ -109,6 +109,39 @@ describe('importTableJsonThroughCommit_ACU', () => {
     expect(result).toEqual(expect.objectContaining({ success: true, tableData: expectedCandidate }));
   });
 
+  it('无数据业务表头自动补 row_id，并以同一候选数据预检、提交和替换 runtime', async () => {
+    const importedData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { name: '背包', content: [['物品', '数量']] },
+    };
+    const expectedCandidate = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { name: '背包', content: [['row_id', '物品', '数量']] },
+    };
+
+    const result = await importTableJsonThroughCommit_ACU(JSON.stringify(importedData));
+
+    expect(result).toEqual(expect.objectContaining({ success: true, tableData: expectedCandidate }));
+    expect(mocks.validateSqliteTemplateDataStrict).toHaveBeenCalledWith(expectedCandidate);
+    const [, apply] = mocks.runTableUpdateCommit.mock.calls[0];
+    expect((await apply()).tableData).toEqual(expectedCandidate);
+    expect(mocks.replaceAllData).toHaveBeenCalledWith(expectedCandidate);
+    expect(importedData.sheet_0.content).toEqual([['物品', '数量']]);
+  });
+
+  it('有种子行的业务表头不走空模板补列捷径', async () => {
+    const importedData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { name: '背包', content: [['物品']], seedRows: [['铁剑']] },
+    };
+
+    const result = await importTableJsonThroughCommit_ACU(JSON.stringify(importedData));
+
+    expect(result).toMatchObject({ failureStage: 'preflight', auditStatus: 'requires_confirmation' });
+    expect(mocks.runTableUpdateCommit).not.toHaveBeenCalled();
+    expect(mocks.replaceAllData).not.toHaveBeenCalled();
+  });
+
   it('删除楼层/备份恢复模式只恢复运行时，不写新的持久化事件', async () => {
     const importedData = {
       mate: { type: 'acu', version: 1 },

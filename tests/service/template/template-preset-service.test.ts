@@ -122,6 +122,7 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
 }));
 vi.mock('../../../src/service/table/storage-mode', () => ({
   isSqliteMode: vi.fn(() => true),
+  getCurrentStorageMode: vi.fn(() => 'sqlite'),
 }));
 vi.mock('../../../src/service/table/table-storage-strategy', () => ({
   reloadStorageProvider: vi.fn(),
@@ -155,7 +156,7 @@ import { parseTableTemplateJson_ACU } from '../../../src/shared/utils';
 import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from '../../../src/service/template/template-import-validator';
 import { buildDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
 import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-template-reconciler';
-import { isSqliteMode } from '../../../src/service/table/storage-mode';
+import { getCurrentStorageMode, isSqliteMode } from '../../../src/service/table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../../../src/service/table/table-storage-strategy';
 import { getActiveChatStorageIdentity_ACU } from '../../../src/data/storage/chat-history';
 import { refreshMergedDataAndNotify_ACU } from '../../../src/service/worldbook/pipeline';
@@ -173,6 +174,7 @@ beforeEach(() => {
   mockChat.splice(0, mockChat.length, { is_user: false });
   mockChatState.current = mockChat;
   vi.mocked(getActiveChatStorageIdentity_ACU).mockReturnValue('chat-a');
+  vi.mocked(getCurrentStorageMode).mockReturnValue('sqlite');
   vi.mocked(didSqliteFallbackAfterReload_ACU).mockReturnValue(false);
   vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' });
 });
@@ -354,6 +356,33 @@ describe('parseImportedTemplateData_ACU', () => {
     expect(result).toHaveProperty('snapshot');
     expect(result).toHaveProperty('templateObj');
     expect(result).toHaveProperty('templateStr');
+  });
+  it('无数据业务表头会在严格校验前补齐 row_id，且快照使用规范化结果', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_legacy_random: { uid: 'sheet_legacy_random', name: '表1', content: [['名称']], sourceData: {} },
+    };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value),
+      templateObj: value,
+    }));
+
+    const result = parseImportedTemplateData_ACU(template);
+
+    expect(result.templateObj.sheet_legacy_random.content).toEqual([['row_id', '名称']]);
+    expect(vi.mocked(sanitizeTemplateSnapshotForChat_ACU)).toHaveBeenCalledWith(expect.objectContaining({
+      sheet_legacy_random: expect.objectContaining({ content: [['row_id', '名称']] }),
+    }));
+    expect(template.sheet_legacy_random.content).toEqual([['名称']]);
+  });
+  it('有数据的缺失 row_id 模板仍由严格校验拒绝', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_legacy_random: { uid: 'sheet_legacy_random', name: '表1', content: [['名称'], ['铁剑']], sourceData: {} },
+    };
+
+    expect(() => parseImportedTemplateData_ACU(template)).toThrow(TemplateImportValidationError_ACU);
+    expect(sanitizeTemplateSnapshotForChat_ACU).not.toHaveBeenCalled();
   });
   it('无效 JSON 抛出错误', () => {
     expect(() => parseImportedTemplateData_ACU('not json')).toThrow('JSON解析错误');
@@ -717,9 +746,11 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
 
     const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate, { source: 'test', presetName: '预设A' });
 
-    expect(reconcileChatTemplate_ACU).toHaveBeenCalledWith(expect.objectContaining({ baselineData: expect.objectContaining({ sheet_live: candidate.sheet_live }), templateData: candidate, destructiveChangeConfirmed: false }));
+    expect(reconcileChatTemplate_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      baselineData: expect.objectContaining({ sheet_live: candidate.sheet_live }), templateData: candidate, destructiveChangeConfirmed: false, storageMode: 'sqlite',
+    }));
     expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({
-      isolationKey: '', baseRevision: 'runtime-v1:test', sheetChanges: expect.any(Array), deletedSheetKeys: [], templateSource: candidate,
+      isolationKey: '', baseRevision: 'runtime-v1:test', sheetChanges: expect.any(Array), deletedSheetKeys: [], templateSource: candidate, storageMode: 'sqlite',
     }));
     expect(result).toMatchObject({ saved: true });
   });
@@ -749,8 +780,9 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
     expect(reloadStorageProvider).toHaveBeenCalled();
   });
 
-  it('非 SQLite 模式不触发 runtime 重建', async () => {
+  it('原生模式将 native 契约传给协调与提交，且不触发 SQLite runtime 重建', async () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
+    vi.mocked(getCurrentStorageMode).mockReturnValue('native');
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
     vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
     vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_live', sheetData: candidate.sheet_live }], deletedSheetKeys: [], blockers: [], audit: [] } as any);
@@ -758,6 +790,8 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
 
     await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
 
+    expect(reconcileChatTemplate_ACU).toHaveBeenCalledWith(expect.objectContaining({ storageMode: 'native' }));
+    expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({ storageMode: 'native' }));
     expect(reloadStorageProvider).not.toHaveBeenCalled();
   });
 

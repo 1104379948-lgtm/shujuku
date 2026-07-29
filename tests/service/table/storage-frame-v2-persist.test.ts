@@ -1067,6 +1067,38 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_Identity).toBeUndefined();
   });
 
+  it('native pristine 提交不生成、校验或写回 DDL', async () => {
+    const message = { is_user: false } as any;
+    mocks.chat.push(message);
+    const nativeSheet = {
+      ...sheetA,
+      sourceData: {},
+      content: [['row_id', 'value'], ['1', 'native-value']],
+    } as any;
+    const templateSource = { mate: { type: 'acu' }, sheet_a: nativeSheet };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      storageMode: 'native',
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: nativeSheet,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      guideData: { sheet_a: { name: 'A' } },
+      templateSource,
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit' });
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.checkpoint.data.sheet_a.sourceData).toEqual({});
+    expect(frame.perSheetCheckpoints.sheet_a.data.sourceData).toEqual({});
+    expect(templateSource.sheet_a.sourceData).toEqual({});
+  });
+
   it('pristine 聊天删表时按 templateSource 重建基线，不再拒绕删除', async () => {
     // 回归：pristine 分支的 checkpoint 完全由 templateSource 重建，没有历史楼层需要回溯清理，
     // 因此新聊天删表必须能走通；旧守卫无条件拒绕，使首次填表前删表完全不可用。

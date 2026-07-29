@@ -704,15 +704,30 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         }
 
         const existingTagData = anchorMsg.TavernDB_ACU_IsolatedData[isolationKey];
+        const checkpoint = {
+            kind: 'full' as const,
+            createdAt: Date.now(),
+            reason: 'compaction' as const,
+            data,
+            scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex }),
+        };
+        const validation = validateCanonicalCheckpoint_ACU(checkpoint, {
+            messageIndex: boundaryAnchorIndex,
+            isolationKey,
+            reason: 'compaction',
+        });
+        if (!validation.valid) {
+            const issueSummary = validation.issues
+                .slice(0, MAX_CHECKPOINT_RISK_DETAILS_ACU)
+                .map(issue => `${issue.sheetKey || 'root'}:${issue.rowIndex ?? '-'}:${issue.type}`)
+                .join(', ');
+            const error = new Error(`边界 checkpoint 写入失败：replay 结果未满足 canonical 契约（${issueSummary}）。`) as Error & { failedIsolationKey?: string };
+            error.failedIsolationKey = isolationKey;
+            throw error;
+        }
         const frame: TableStorageFrameV2_ACU = {
             version: 2,
-            checkpoint: {
-                kind: 'full',
-                createdAt: Date.now(),
-                reason: 'compaction',
-                data,
-                scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex }),
-            },
+            checkpoint,
             logEntries: [],
         };
 

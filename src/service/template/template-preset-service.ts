@@ -27,8 +27,9 @@ import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeO
 import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
 import { resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
-import { isSqliteMode } from '../table/storage-mode';
+import { getCurrentStorageMode, isSqliteMode } from '../table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../table/table-storage-strategy';
+import { normalizeHeaderOnlyRowIdColumns_ACU } from '../table/table-data-upgrade-audit';
 import { abortableDelay } from '../../shared/abortable-delay';
 
 // ═══ 预设存储 CRUD（内部辅助） ═══
@@ -204,6 +205,7 @@ export function parseImportedTemplateData_ACU(templateData: any) {
         }
     }
 
+    jsonData = normalizeHeaderOnlyRowIdColumns_ACU(jsonData);
     const importDiagnostics = validateImportedTemplateObject_ACU(jsonData);
     if (importDiagnostics.length > 0) {
         throw new TemplateImportValidationError_ACU(importDiagnostics);
@@ -503,12 +505,14 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
             : { mate: { type: 'chatSheets', version: 1 } };
     }
 
+    const storageMode = getCurrentStorageMode();
     let plan;
     try {
         plan = await reconcileChatTemplate_ACU({
             baselineData,
             templateData: targetTemplateData,
             destructiveChangeConfirmed,
+            storageMode,
         });
     } catch (error) {
         return { saved: false, error: `模板协调失败：${error instanceof Error ? error.message : String(error)}` };
@@ -541,6 +545,7 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
             baseRevision,
             expectedChatIdentity: targetChatIdentity,
             expectedFirstMessage: entryContext.firstMessage,
+            storageMode,
             signal,
         })
         : await commitCurrentFloorTemplateScopeOnly_ACU({

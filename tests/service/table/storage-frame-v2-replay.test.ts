@@ -1094,16 +1094,20 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     });
   });
 
-  it('合成 spv7.9 invalid V2 full checkpoint fixture fail closed 且不修改 frame', async () => {
+  it('合成 spv7.9 重复 row_id full checkpoint 在内存副本中无损修复且不修改 frame', async () => {
     const chat = [{
       is_user: false,
       TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: structuredClone(invalidV2FrameFixture) } },
     }];
     const before = structuredClone(chat);
 
-    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
-      .rejects.toThrow('full checkpoint 行标识不合法');
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toMatchObject({
+      sheet_0: expect.objectContaining({
+        content: [['row_id', '名称'], ['1', '铁剑'], ['2', '冒名副本']],
+      }),
+    });
     expect(chat).toEqual(before);
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('已在内存副本中保留全部行并重映射 1 行'));
   });
 
   it('合成 spv7.9 orphan data_replace fixture 无锚点时拒绝 replay', async () => {
@@ -1230,9 +1234,10 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('无锚点 V2 replay artifacts'));
   });
 
-  it('坏 full checkpoint 含重复 canonical row_id 时 fail closed 且不修改持久化 frame', async () => {
+  it('旧 full checkpoint 含重复 canonical row_id 时保留全部行并按既有最大 ID 加一', async () => {
     const checkpointData = makeCheckpointData();
     checkpointData.sheet_0.content.push([' 1 ', '冒名副本']);
+    checkpointData.sheet_0.content.push(['7', '既有高位身份']);
     const chat = [{
       is_user: false,
       TavernDB_ACU_IsolatedData: {
@@ -1248,10 +1253,51 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     }];
     const before = structuredClone(chat);
 
-    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
-      .rejects.toThrow('full checkpoint 行标识不合法');
+    const result = await loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false });
 
+    expect(result?.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['1', '铁剑'],
+      ['8', '冒名副本'],
+      ['7', '既有高位身份'],
+    ]);
     expect(chat).toEqual(before);
+  });
+
+  it('旧重复 row_id 修复后，历史 row_delete 仍只作用于首个原身份', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.content.push([' 1 ', '冒名副本']);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [{
+              seq: 1,
+              entryId: 'legacy-delete-first-row-id',
+              createdAt: 2,
+              source: 'system',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: [],
+              changedSheetKeys: ['sheet_0'],
+              groupKeys: [],
+              operations: [{ kind: 'row_delete', sheetKey: 'sheet_0', rowId: '1' }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(result?.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['2', '冒名副本'],
+    ]);
   });
 
   it('坏 full checkpoint 含空 row_id 时 fail closed 且不清洗持久化 frame', async () => {

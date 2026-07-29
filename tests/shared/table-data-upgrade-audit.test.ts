@@ -32,6 +32,42 @@ describe('table-data-upgrade-audit', () => {
     expect((result.candidateData as any).sheet_0.content).toEqual([['row_id', '物品名'], ['1', '铁剑']]);
   });
 
+  it('为无数据业务表头插入 row_id，不创建占位行且不修改输入', () => {
+    const source = data([['名称', '数量']]);
+    const audit = auditTableDataForUpgrade_ACU(source);
+    const result = repairTableDataFromAudit_ACU(audit);
+
+    expect(audit.status).toBe('repairable');
+    expect(audit.repairPlan).toContainEqual(expect.objectContaining({
+      action: 'insert_row_id_column', sheetKey: 'sheet_0', rowIndex: 0,
+    }));
+    expect((result.candidateData as any).sheet_0.content).toEqual([['row_id', '名称', '数量']]);
+    expect((result.candidateData as any).sheet_0.seedRows).toBeUndefined();
+    expect(result.idRemap).toEqual([]);
+    expect(source.sheet_0.content).toEqual([['名称', '数量']]);
+  });
+
+  it('无数据模板的 rowId 别名只改名，不额外插入列', () => {
+    const source = data([['rowId', '名称']]);
+    const result = repairTableDataFromAudit_ACU(auditTableDataForUpgrade_ACU(source));
+
+    expect((result.candidateData as any).sheet_0.content).toEqual([['row_id', '名称']]);
+  });
+
+  it('有 content 或 seedRows 数据的无 DDL 表头仍不猜测插入 row_id', () => {
+    const contentSource = data([['名称'], ['铁剑']]);
+    const seedSource = data([['名称']], [['铁剑']]);
+
+    expect(auditTableDataForUpgrade_ACU(contentSource).status).toBe('requires_confirmation');
+    expect(auditTableDataForUpgrade_ACU(seedSource).status).toBe('requires_confirmation');
+  });
+
+  it('无数据模板的错位 row_id 仍要求人工确认', () => {
+    const source = data([['名称', 'row_id']]);
+
+    expect(auditTableDataForUpgrade_ACU(source).status).toBe('requires_confirmation');
+  });
+
   it('为数值/字符串重复 ID 与空 ID 分配稳定新 ID，保留所有业务单元格', () => {
     const source = data([['row_id', 'name'], [1, '铁剑'], ['1', '盾牌'], [' ', '药水']]);
     const audit = auditTableDataForUpgrade_ACU(source);
