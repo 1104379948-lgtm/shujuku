@@ -9,7 +9,7 @@ import { callCustomOpenAI_ACU } from '../ai/prompt-builder';
 import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
-import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getEffectiveSeedRowsForSheet_ACU, resolveTemplateScope_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
+import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import type { TemplateScope_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../vector/summary-vector-index-flush-queue';
@@ -183,6 +183,18 @@ function buildTemplateScopeFromData_ACU(data: Record<string, any> | null | undef
         sheets[sheetKey] = data[sheetKey];
     });
     return sheetKeys.size > 0 ? { sheetKeys, sheets } : null;
+}
+
+function resolveManualRefillTemplateData_ACU(chat: any[], isolationKey: string): Record<string, any> | null {
+    const scopedState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey });
+    const globalSnapshot = scopedState ? null : getGlobalTemplateSnapshotForCurrentProfile_ACU();
+    const effectiveTemplate = scopedState?.templateObj || scopedState?.templateStr
+        || globalSnapshot?.templateObj || globalSnapshot?.templateStr;
+    const snapshot = sanitizeTemplateSnapshotForChat_ACU(effectiveTemplate || null);
+    if (!snapshot?.templateObj || typeof snapshot.templateObj !== 'object' || Array.isArray(snapshot.templateObj)) {
+        return null;
+    }
+    return snapshot.templateObj as Record<string, any>;
 }
 
 function captureFillExecutionScope_ACU(): FillExecutionScope_ACU {
@@ -2859,6 +2871,11 @@ export async function orchestrateManualUpdate_ACU(
         const groupKeys = Object.keys(updateGroups);
 
         const manualRefillEnabled = options.clearBeforeUpdate === true;
+        // 最终 commit 只能消费本次会话开始时解析出的模板，不能在 bucket 已写入后重新读取
+        // chat override / profile 全局模板；后者在长事务期间变化会让 fallback 根与本次重填依据脱节。
+        const frozenManualRefillTemplateData = manualRefillEnabled
+            ? resolveManualRefillTemplateData_ACU(liveChat, getCurrentIsolationKey_ACU())
+            : null;
         // 手动填表先无条件清空本次范围内选中表的 checkpoint 与增量，再完全沿用自动填表语义
         // （逐 bucket 取 bucketFirstMessageIndex - 1）解析基底。初始基线保持原位，不做前移。
         if (manualRefillEnabled) {
@@ -2897,6 +2914,7 @@ export async function orchestrateManualUpdate_ACU(
                 const failureError = error?.message || '手动重填清理后刷新运行时快照失败。';
                 return { success: false, error: rollbackError ? `${failureError}；回滚失败：${rollbackError}` : failureError };
             }
+
         }
 
         _set_isAutoUpdatingCard_ACU(true);
@@ -2993,11 +3011,13 @@ export async function orchestrateManualUpdate_ACU(
                 return await failManualRefillSession('手动重填已完成，但无法从运行时导出完整恢复快照；已拒绝写入不完整 checkpoint。');
             }
             try {
+                const isolationKey = getCurrentIsolationKey_ACU();
                 const snapshotResult = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
-                    isolationKey: getCurrentIsolationKey_ACU(),
+                    isolationKey,
                     targetMessageIndices: contextScopeIndices,
                     targetSheetKeys: targetKeys,
                     snapshotData: completedData,
+                    templateData: frozenManualRefillTemplateData || undefined,
                 });
                 if (!snapshotResult.success) {
                     logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 失败:', snapshotResult.error);

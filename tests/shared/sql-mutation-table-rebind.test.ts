@@ -69,6 +69,29 @@ describe('sql mutation table rebind', () => {
     expect(result).toBe('INSERT INTO missing_table VALUES (1)');
   });
 
+  it('严格写入模式在执行前拒绝未知目标表与关联表', () => {
+    expect(() => rebindSqlMutationTableReferences_ACU(
+      ['INSERT INTO missing_table VALUES (1)'],
+      new Map([['known', 'runtime_known']]),
+      { requireKnownTables: true },
+    )).toThrow('无法识别的目标表「missing_table」');
+    expect(() => rebindSqlMutationTableReferences_ACU(
+      ['UPDATE known SET row_id = row_id WHERE EXISTS (SELECT 1 FROM missing_table)'],
+      new Map([['known', 'runtime_known']]),
+      { requireKnownTables: true },
+    )).toThrow('无法识别的关联表「missing_table」');
+  });
+
+  it('严格写入模式仍允许已知表的 CTE，并重绑定真实表引用', () => {
+    const [result] = rebindSqlMutationTableReferences_ACU(
+      ['WITH known AS (SELECT 1 AS row_id) UPDATE old_target SET row_id = row_id WHERE row_id IN (SELECT row_id FROM known)'],
+      new Map([['old_target', 'runtime_target']]),
+      { requireKnownTables: true },
+    );
+    expect(result).toContain('UPDATE runtime_target');
+    expect(result).toContain('FROM known');
+  });
+
   it('只读查询重绑定表和单表列名，且不触碰字面量与注释', () => {
     const result = rebindSqlReadIdentifiers_ACU(
       "SELECT item_name, inventory_count, 'inventory' /* inventory */ FROM inventory WHERE item_name = '铁剑' -- inventory",

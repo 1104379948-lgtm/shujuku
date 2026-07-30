@@ -144,7 +144,7 @@ export function decodeSqlIdentifier_ACU(value: unknown): string {
 export function rebindSqlMutationTableReferences_ACU(
   statements: string[],
   aliases: SqlTableAliasMap_ACU,
-  options: { lenient?: boolean } = {},
+  options: { lenient?: boolean; requireKnownTables?: boolean } = {},
 ): string[] {
   const resolvedAliases = new Map<string, string>();
   for (const [alias, physicalName] of aliases) resolvedAliases.set(decodeSqlIdentifier_ACU(alias).toLowerCase(), physicalName);
@@ -152,8 +152,18 @@ export function rebindSqlMutationTableReferences_ACU(
     try {
       const values = tokens(statement);
       const target = mutationTarget(statement, values);
-      if (!target || !resolvedAliases.has(target.value.toLowerCase())) return statement;
-      const replacements = references(statement, values, target)
+      if (!target) return statement;
+      const tableReferences = references(statement, values, target);
+      if (options.requireKnownTables) {
+        for (const reference of tableReferences) {
+          if (!resolvedAliases.has(reference.value.toLowerCase())) {
+            const role = reference.start === target.start ? '目标表' : '关联表';
+            throw new Error(`SQL 写入包含无法识别的${role}「${reference.value}」。`);
+          }
+        }
+      }
+      if (!resolvedAliases.has(target.value.toLowerCase())) return statement;
+      const replacements = tableReferences
         .map(token => ({ token, name: resolvedAliases.get(token.value.toLowerCase()) }))
         .filter((item): item is { token: Token_ACU; name: string } => !!item.name);
       let result = statement;

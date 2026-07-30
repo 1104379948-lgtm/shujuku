@@ -244,7 +244,20 @@ function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): V2RecoveryDi
   const latestFull = [...frames].reverse().find(item => item.frame.checkpoint?.kind === 'full');
   if (latestFull?.frame.checkpoint) {
     const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
-    if (repair.status === 'clean') return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '最新 full checkpoint 已通过完整性审计，无需恢复。' } };
+    if (repair.status === 'clean') {
+      const isTemplateFallbackRoot = latestFull.frame.checkpoint.fallbackProvenance?.kind === 'manual_refill_template_root';
+      return {
+        summary: {
+          status: 'unrecoverable',
+          isolationKey,
+          sourceMessageIndex: latestFull.messageIndex,
+          requiresConfirmation: false,
+          message: isTemplateFallbackRoot
+            ? '最新 full checkpoint 是可正常回放的手动重填模板临时根；无需完整性恢复，后续边界 compaction 会将其固化为正式 checkpoint。'
+            : '最新 full checkpoint 已通过完整性审计，无需恢复。',
+        },
+      };
+    }
     if (!repair.candidateData) return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '最新 full checkpoint 不可无损自动修复；请先导出原始 frame。' } };
     if (hasReplayArtifactsAfterCheckpoint_ACU(latestFull.frame) || hasLaterReplayArtifacts_ACU(frames, latestFull.messageIndex)) {
       const ambiguity = findAmbiguousRowIdReference_ACU(frames, latestFull.messageIndex, repair.idRemap);

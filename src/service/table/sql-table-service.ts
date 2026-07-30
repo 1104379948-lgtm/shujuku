@@ -347,6 +347,7 @@ export function rebindSqlMutationTableIdentifiers_ACU(
   statements: string[],
   tableData: TableDataObject_ACU,
   supplementalData?: TableDataObject_ACU | Record<string, unknown> | null,
+  options: { requireKnownTables?: boolean } = {},
 ): string[] {
   // 建表权威是模板（_ensureTablesFromTemplate），运行时快照在新卡首次填表时还没有该表。
   // 未显式传入补充源时默认取当前聊天模板，保证别名覆盖与实际建表一致。
@@ -359,7 +360,7 @@ export function rebindSqlMutationTableIdentifiers_ACU(
     [templateSource, tableData],
     { includeExtendedAliases: false, skipInvalidSources: true },
   );
-  return rebindSqlMutationTableReferences_ACU(statements, aliases);
+  return rebindSqlMutationTableReferences_ACU(statements, aliases, options);
 }
 
 /**
@@ -1104,6 +1105,7 @@ export class SqlTableService implements ITableStorageProvider {
         normalizedStatements,
         (currentJsonTableData_ACU || { mate: DEFAULT_MATE_ACU }) as TableDataObject_ACU,
         scope?.templateData,
+        { requireKnownTables: Boolean(scope?.templateData) },
       );
     });
     const userStatements = normalizedGroups.flat();

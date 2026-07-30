@@ -96,6 +96,29 @@ describe('table-v2-recovery-service', () => {
     await expect(loadTableStateFromFramesV2_ACU(h.chat, '', { updateRuntimeState: false })).resolves.toBeTruthy();
   });
 
+  it('模板临时根数据完整时仅作为可升级根诊断，不创建修复计划或写入', () => {
+    const templateRoot = frame({
+      kind: 'full', createdAt: 1, reason: 'manual', data: data(),
+      fallbackProvenance: {
+        version: 1, kind: 'manual_refill_template_root', runId: 'manual-refill:test',
+        isolationKey: '', targetSheetKeys: ['sheet_0'], rangeStartMessageIndex: 0,
+        rangeEndMessageIndex: 0, templateFingerprint: 'fnv1a:test', createdAt: 1,
+      },
+    });
+    h.chat = chatWithFrame(templateRoot);
+
+    const summary = prepareV2Recovery_ACU();
+
+    expect(summary).toMatchObject({
+      status: 'unrecoverable',
+      requiresConfirmation: false,
+      message: expect.stringContaining('模板临时根'),
+    });
+    expect(summary.planId).toBeUndefined();
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+
   it('后续 operation 引用被重复身份修复重映射的 row_id 时拒绝猜测', () => {
     const source = frame({ kind: 'full', createdAt: 1, reason: 'init', data: data([['1', '铁剑'], [' 1 ', '副本']]) });
     h.chat = chatWithFrame(source);

@@ -2402,6 +2402,43 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(result?.sheet_0.content).toEqual([['row_id', 'name', 'quality'], ['1', '铁剑', ''], ['2', '木剑', '']]);
   });
 
+  it('带 provenance 的模板临时根可回放 data_replace，并由末端 rebase 恢复目标表', async () => {
+    const template = makeCheckpointData();
+    const finalSheet = { ...template.sheet_0, content: [['row_id', 'name'], ['final', '重填完成']] };
+    const replacement = {
+      ...template,
+      sheet_0: { ...template.sheet_0, content: [['row_id', 'name'], ['old', '旧数据']] },
+    };
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full', createdAt: 1, reason: 'manual', data: template,
+              fallbackProvenance: {
+                version: 1, kind: 'manual_refill_template_root', runId: 'manual-refill:test', isolationKey: '',
+                targetSheetKeys: ['sheet_0'], rangeStartMessageIndex: 0, rangeEndMessageIndex: 0,
+                templateFingerprint: 'fnv1a:test', createdAt: 1,
+              },
+            },
+            perSheetCheckpoints: {
+              sheet_0: { kind: 'sheet_full', createdAt: 3, reason: 'manual', sheetKey: 'sheet_0', data: finalSheet, timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 0, afterSeq: 1 } },
+            },
+            logEntries: [{ seq: 1, entryId: 'replace', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: [], groupKeys: [], operations: [{ kind: 'data_replace', data: replacement, reason: 'system' }] }],
+          },
+        },
+      },
+    }];
+
+    const detailed = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(detailed?.baseKind).toBe('full_checkpoint');
+    expect(detailed?.data.sheet_0.content).toEqual([['row_id', 'name'], ['final', '重填完成']]);
+  });
+
   it('sheet_reveal 分片在 afterSeq 之后整表恢复被隐藏的表（恢复离开时数据）', async () => {
     const rootData = makeCheckpointData();
     // 根 checkpoint 中不含 sheet_revived（已隐藏）；reveal 分片将其带数据整表恢复。

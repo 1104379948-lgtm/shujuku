@@ -1719,6 +1719,47 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(3);
   });
 
+  it('手动重填在 bucket 写入期间模板源变化时，最终 commit 仍使用启动时冻结模板', async () => {
+    const { getChatArray_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU } = await import('../../../src/service/chat/chat-service');
+    const { getGlobalTemplateSnapshotForCurrentProfile_ACU } = await import('../../../src/service/template/chat-scope');
+    const initialTemplate = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { name: '启动时模板', content: [['row_id', '值'], ['seed', '初始']] },
+    };
+    const changedTemplate = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { name: '中途变更模板', content: [['row_id', '值'], ['changed', '错误来源']] },
+    };
+    const chat = [{ is_user: false, mes: 'AI回复1' }];
+    vi.mocked(getChatArray_ACU).mockReturnValue(chat);
+    vi.mocked(getGlobalTemplateSnapshotForCurrentProfile_ACU).mockReturnValue({
+      templateObj: initialTemplate,
+      templateStr: JSON.stringify(initialTemplate),
+    } as any);
+    mockSettings.autoUpdateThreshold = 0;
+    mockSettings.updateBatchSize = 1;
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '测试表A', updateConfig: {}, content: [['row_id', '值'], ['1', '旧值']] },
+    };
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    mockPersistTablesToChatMessage.mockImplementationOnce(async () => {
+      vi.mocked(getGlobalTemplateSnapshotForCurrentProfile_ACU).mockReturnValue({
+        templateObj: changedTemplate,
+        templateStr: JSON.stringify(changedTemplate),
+      } as any);
+      return { saved: true, messageIndex: 0 };
+    });
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+
+    expect(result.success).toBe(true);
+    expect(commitManualRefillSheetSnapshotInRangeAtomic_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      templateData: initialTemplate,
+    }));
+  });
+
+
   it('跨 checkpoint 重填的最终快照提交失败时保留已提交 bucket，不回滚会话快照', async () => {
     const { getChatArray_ACU, captureManualRefillSessionSnapshot_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, restoreManualRefillSessionSnapshotAtomic_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
@@ -2285,7 +2326,7 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
       }
       if (callCount === 2) {
         expect(dynamicContent.tableDataText).toContain('SQL_ERROR_FEEDBACK');
-        expect(dynamicContent.tableDataText).toContain('no such table');
+        expect(dynamicContent.tableDataText).toContain('无法识别的目标表「invalid_table」');
         expect(dynamicContent.tableDataText).toContain('SQL执行错误，请修正后重新输出');
         return '<tableEdit>DELETE FROM test WHERE row_id = 1;</tableEdit>';
       }
@@ -2382,7 +2423,7 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     expect(callCount).toBe(3);
 
     // 第二次调用时应包含第一次的错误信息
-    expect(capturedTableDataTexts[1]).toContain('无法识别目标表');
+    expect(capturedTableDataTexts[1]).toContain('无法识别的目标表「missing」');
     // 第三次调用时应包含第二次的错误信息（替换了第一次的）
     expect(capturedTableDataTexts[2]).toContain('missing_col');
     // 第三次不应包含第一次的错误信息（被替换了）
@@ -2679,6 +2720,61 @@ describe('collectGroupFillResponse_ACU', () => {
     expect(result.error).toContain('provider_fallback');
     expect(result.error).toContain('SQLite 运行时加载失败');
     expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+  });
+
+  it('作者 DDL 名冲突返回结构化失败时不调用 AI', async () => {
+    const job = createJob();
+    mockPrepareAIInput.mockResolvedValue({
+      ok: false,
+      failureCode: 'authored_table_name_conflict',
+      message: '模板中多个表共用作者 DDL 表名「inventory」，无法安全路由 AI SQL。',
+      retryable: false,
+    });
+
+    const result = await collectGroupFillResponse_ACU(job);
+
+    expect(result).toMatchObject({ success: false, attempt: 0, errorCategory: 'infrastructure' });
+    expect(result.error).toContain('authored_table_name_conflict');
+    expect(result.error).toContain('多个表共用作者 DDL 表名');
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+  });
+
+  it('普通 tableEdit 路径保留 AI 使用的作者英文 SQL 表名', async () => {
+    const job = createJob();
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);' });
+    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
+      expect(dynamicContent.tableDataText).toContain('CREATE TABLE inventory');
+      expect(dynamicContent.tableDataText).not.toContain('beibaowupinbiao');
+      return "<tableEdit>INSERT INTO inventory (item_name) VALUES ('药水');</tableEdit>";
+    });
+
+    const result = await collectGroupFillResponse_ACU(job);
+
+    expect(result).toMatchObject({ success: true, tableEditText: "INSERT INTO inventory (item_name) VALUES ('药水');" });
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
+  it('strict JSON 路径同样保留 AI 使用的作者英文 SQL 表名', async () => {
+    const job = createJob();
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    mockSettings.strictJsonTableFillEnabled = true;
+    try {
+      mockPrepareAIInput.mockResolvedValue({ tableDataText: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);' });
+      mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
+        expect(dynamicContent.tableDataText).toContain('CREATE TABLE inventory');
+        expect(dynamicContent.tableDataText).not.toContain('beibaowupinbiao');
+        return JSON.stringify({ format: 'table_edit_sql_v1', sql: "INSERT INTO inventory (item_name) VALUES ('药水');" });
+      });
+
+      const result = await collectGroupFillResponse_ACU(job);
+      expect(result).toMatchObject({ success: true, tableEditText: "INSERT INTO inventory (item_name) VALUES ('药水');" });
+    } finally {
+      mockSettings.strictJsonTableFillEnabled = false;
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
   });
 
   it('AI 响应缺少完整 tableEdit 标签时按重试次数失败', async () => {

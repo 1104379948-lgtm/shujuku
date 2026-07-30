@@ -181,6 +181,26 @@ describe('rebindSqlMutationTableIdentifiers_ACU · 模板别名补充', () => {
     expect(rebound).toContain('zhujuexinxibiao');
     expect(rebound).not.toContain('protagonist_info');
   });
+
+  it('AI 严格写入重绑定拒绝未知或冲突的作者 DDL 名，不保留原 SQL 交给 SQLite 猜测', () => {
+    expect(() => rebindSqlMutationTableIdentifiers_ACU(
+      ['INSERT INTO missing_contract (row_id, name) VALUES (1, \'不应写入\')'],
+      templateData,
+      null,
+      { requireKnownTables: true },
+    )).toThrow('无法识别的目标表「missing_contract」');
+
+    const conflictingTemplate = {
+      ...templateData,
+      sheet_duplicate: { ...templateData.sheet_zhujue, uid: 'duplicate', name: '重复表' },
+    } as any;
+    expect(() => rebindSqlMutationTableIdentifiers_ACU(
+      ['INSERT INTO protagonist_info (row_id, name) VALUES (1, \'不应写入\')'],
+      conflictingTemplate,
+      null,
+      { requireKnownTables: true },
+    )).toThrow('无法识别的目标表「protagonist_info」');
+  });
 });
 
 
@@ -1321,6 +1341,7 @@ describe('SqlTableService', () => {
         templateStr: JSON.stringify(chat === originalChat ? originalTemplate : switchedTemplate),
       }));
 
+      mockGetEffectiveSeedRows.mockReturnValue([]);
       const capturedScope = captureSqlTableApplyScope_ACU({ chat: originalChat, isolationKey: 'scope-a' });
       // 模拟 AI await 期间全局聊天已切到 chat-b。若提交仍走隐式全局 fallback，
       // memory_summary 不会建表，下面的 INSERT 会以 no such table 失败。

@@ -130,9 +130,7 @@ describe('formatTableForSqliteMode', () => {
     expect(result).toContain('CREATE TABLE inventory');
   });
 
-  it('传入 runtimeTableName 时把 DDL 表名重绑定为运行时物理名', () => {
-    // AI 必须看到真实的 runtime 表名（显示名拼音），否则会照抄 DDL 原文英文名，
-    // 生成的 SQL 打到不存在的表上 → no such table。
+  it('作者英文表名覆盖内部 runtime 名，供 AI 作为写入契约使用', () => {
     const table = {
       name: '主角信息',
       sourceData: {
@@ -142,9 +140,14 @@ describe('formatTableForSqliteMode', () => {
       content: [['row_id', 'character_name']],
       updateConfig: {},
     };
-    const result = formatTableForSqliteMode(table, 0, 'sheet_zhujue', null, { runtimeTableName: 'zhujuexinxi' });
-    expect(result).toContain('CREATE TABLE zhujuexinxi');
-    expect(result).not.toContain('protagonist_info');
+    const result = formatTableForSqliteMode(table, 0, 'sheet_zhujue', null, {
+      runtimeTableName: 'zhujuexinxi',
+      authoredTableName: 'protagonist_info',
+    });
+
+    expect(result).toContain('CREATE TABLE protagonist_info');
+    expect(result).not.toContain('CREATE TABLE zhujuexinxi');
+    expect(result).toContain('SQL 写入必须使用表名 protagonist_info；系统会在执行时映射到内部表。');
   });
 
   it('未传 runtimeTableName 时保持原 DDL 表名（向后兼容）', () => {
