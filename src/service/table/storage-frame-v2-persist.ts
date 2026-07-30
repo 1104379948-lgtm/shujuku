@@ -129,6 +129,8 @@ export interface CommitCurrentFloorTemplateChangesOptions_ACU {
   presetName?: string;
   source?: string;
   reason?: string;
+  /** Correlates one template reconciliation across planning and atomic persistence logs. */
+  requestId?: string;
   createdAt?: number;
   baseRevision?: string | null;
   expectedChatIdentity?: string;
@@ -1066,6 +1068,17 @@ async function persistTableMutationLogV2Core_ACU(
   const hasMetadataOnlyFillEvent = filledSheetKeys.length > 0 || (Array.isArray(options.groupKeys) && options.groupKeys.length > 0);
   const hasManualRefillProgress = !!options.manualRefillProgress;
   const isManualRefillProgressOnly = operations.length === 0 && !hasMetadataOnlyFillEvent && hasManualRefillProgress;
+  const latestFullCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
+  const writesReplayArtifact = operations.length > 0 || hasMetadataOnlyFillEvent || hasManualRefillProgress || replacement !== null;
+  // V2 replay 只从最后一个 full checkpoint 开始。向该 checkpoint 之前写入任何
+  // operation、填表事件或追平进度都会制造“保存成功但永远无法回放”的伪提交；不能等到
+  // terminal progress-only 写入时才暴露问题。
+  if (writesReplayArtifact && latestFullCheckpoint && latestFullCheckpoint.index > target.index) {
+    return {
+      saved: false,
+      error: `V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}.`,
+    };
+  }
   const latestV2FrameMessageIndex = getLatestV2FrameMessageIndex_ACU(chat, isolationKey);
   const hasUnanchoredArtifacts = !hasCheckpointAnywhere
     && hasUnanchoredReplayArtifactsForChatV2_ACU(chat, isolationKey);
@@ -2302,8 +2315,12 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       const activeHas = Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey);
       const historyHas = historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, change.sheetKey);
       if (activeHas) {
-        // 仍活跃：既非全新，也非可恢复的隐藏表 → 保持 introduction 冲突防覆盖语义。
-        throw new Error(`V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`);
+        // 仍活跃：既非全新，也非可恢复的隐藏表。绝不能让模板 introduction 覆盖活数据。
+        // 正常的 stale plan 应先被 baseRevision 拦截；保留这里作为跨入口/异常状态的最终保险。
+        throw new Error(
+          `当前模板计划尝试将仍在使用的表作为新表引入，已拒绝覆盖已有数据：sheetKey=${change.sheetKey}，requestId=${options.requestId || 'unknown'}。请重新读取当前表格后重试。 `
+          + `V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`,
+        );
       }
       if (historyHas) {
         // historyHas 有两种含义：(1) 历史确实曾有该表（可恢复的隐藏表）；
@@ -2507,7 +2524,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       assertTemplateCommitChatContext_ACU(chat, options);
       primarySaveAttempted = true;
       await saveChatToHostStrict_ACU();
-      logDebug_ACU(`[V2 Persist] 当前楼层模板提交完成: messageIndex=${target.index}, checkpoints=${checkpoints.length}, operations=${operations.length}, isolationKey=${isolationKey}`);
+      logDebug_ACU(`[V2 Persist] 当前楼层模板提交完成: requestId=${options.requestId || 'unknown'}, messageIndex=${target.index}, checkpoints=${checkpoints.length}, operations=${operations.length}, isolationKey=${isolationKey}`);
       return {
         saved: true,
         mode: 'v2_commit',

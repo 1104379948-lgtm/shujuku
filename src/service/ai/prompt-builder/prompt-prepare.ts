@@ -59,7 +59,7 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
     }
 
     try {
-        const provider = await ensureStorageProviderReady_ACU();
+        const provider = await ensureStorageProviderReady_ACU({ signal: options?.signal });
         if (provider.mode !== 'sqlite') {
             logError_ACU('prepareAIInput_ACU: SQLite mode expected a SQLite runtime provider.');
             return createPromptRuntimeFailure_ACU('provider_fallback', 'SQLite 运行时加载失败，当前未使用 SQLite 数据库。', false);
@@ -71,6 +71,9 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
         }
         return runtimeData;
     } catch (e) {
+        if ((e as any)?.name === 'AbortError') {
+            throw e;
+        }
         const failure = getPromptRuntimeFailureFromHealth_ACU();
         logError_ACU(`prepareAIInput_ACU: SQLite runtime unavailable (${failure.failureCode}).`, e);
         return failure;
@@ -81,7 +84,7 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
     messages: any[],
     updateMode = 'standard',
     targetSheetKeys: string[] | null = null,
-    options: { tableData?: any; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU } = {},
+    options: { tableData?: any; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU; signal?: AbortSignal } = {},
   ) {
     const sqlMode = isSqliteMode();
     const sourceTableData = await resolvePromptSourceTableData_ACU(options, sqlMode);

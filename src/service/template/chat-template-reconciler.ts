@@ -153,15 +153,36 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
   }
   candidateData.mate = clone_ACU(candidateData.mate);
   if (input.storageMode !== 'native') {
-    try {
-      for (const [key, sheet] of listSheets_ACU(candidateData)) {
+    for (const [key, sheet] of listSheets_ACU(candidateData)) {
+      try {
         const validation = validateDDLTextAgainstHeaders_ACU(String(sheet.sourceData?.ddl || ''), headers_ACU(sheet));
-        if (!validation.valid) throw new Error(`${key}: ${validation.message}`);
-        getSheetColumnProjection_ACU(sheet);
+        if (validation.valid) continue;
+        return emptyPlan_ACU(baselineData, audit, [
+          `完整 replay candidate DDL/表头预检失败: ${key}: ${validation.message}`,
+        ]);
+      } catch (error: any) {
+        return emptyPlan_ACU(baselineData, audit, [
+          `完整 replay candidate DDL/表头预检失败: ${key}: ${error?.message || String(error)}`,
+        ]);
       }
+    }
+
+    for (const [key, sheet] of listSheets_ACU(candidateData)) {
+      try {
+        getSheetColumnProjection_ACU(sheet);
+      } catch (error: any) {
+        return emptyPlan_ACU(baselineData, audit, [
+          `完整 replay candidate 列投影预检失败: ${key}: ${error?.message || String(error)}`,
+        ]);
+      }
+    }
+
+    try {
       await hydrateTableDataStrict_ACU(candidateData);
     } catch (error: any) {
-      return emptyPlan_ACU(baselineData, audit, [`完整 replay candidate SQLite hydrate 失败: ${error?.message || String(error)}`]);
+      return emptyPlan_ACU(baselineData, audit, [
+        `完整 replay candidate SQLite hydrate 失败: ${error?.message || String(error)}`,
+      ]);
     }
   }
   for (const key of deletedSheetKeys) audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'delete' });

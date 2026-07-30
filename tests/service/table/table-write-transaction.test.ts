@@ -7,6 +7,7 @@ import {
   normalizeTableWriteSet_ACU,
   resolveTableWriteTargetMessageIndex_ACU,
   captureTableRuntimeRevisionForWriteSet_ACU,
+  TableRuntimeRevisionConflictError_ACU,
   runTableWriteTransaction_ACU,
   tableWriteSetsConflict_ACU,
 } from '../../../src/service/table/table-write-transaction';
@@ -193,7 +194,10 @@ describe('table-write-transaction', () => {
       baseRevision: staleRevision,
     }, async (ctx) => {
       await ctx.runCommit(async () => 'should-fail');
-    })).rejects.toThrow('表 sheet_0 已变化');
+    })).rejects.toMatchObject({
+      name: 'TableRuntimeRevisionConflictError',
+      message: expect.stringContaining('表 sheet_0 已变化'),
+    } satisfies Partial<TableRuntimeRevisionConflictError_ACU>);
   });
 
   it('全局写入后旧 all revision 提交被拒绝', async () => {

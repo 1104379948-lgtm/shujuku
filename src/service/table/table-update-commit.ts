@@ -29,7 +29,7 @@ export interface TableUpdateCommitPersistOverride_ACU {
   strictSave?: boolean;
 }
 
-export type TableUpdateCommitErrorCategory_ACU = 'model' | 'infrastructure' | 'precondition';
+export type TableUpdateCommitErrorCategory_ACU = 'model' | 'infrastructure' | 'precondition' | 'conflict';
 
 export interface TableUpdateCommitApplyResult_ACU<T> {
   success: boolean;
@@ -228,11 +228,16 @@ export async function runTableUpdateCommit_ACU<T>(
       }
     }
     const message = error?.message || String(error);
-    logError_ACU(`[TableUpdateCommit] ${options.reason} failed:`, error);
+    const errorCategory: TableUpdateCommitErrorCategory_ACU = error instanceof TableUpdateCommitError_ACU
+      ? error.category
+      : error?.name === 'TableRuntimeRevisionConflictError'
+      ? 'conflict'
+      : 'infrastructure';
+    (errorCategory === 'conflict' ? logWarn_ACU : logError_ACU)(`[TableUpdateCommit] ${options.reason} failed:`, error);
     return {
       success: false,
       error: message,
-      errorCategory: error instanceof TableUpdateCommitError_ACU ? error.category : 'infrastructure',
+      errorCategory,
     };
   }
 }

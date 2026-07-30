@@ -431,6 +431,197 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     }
   });
 
+  it('真实 persist 将连续 native buckets 写入同一锚点之后，bounded replay 可恢复累计行', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.content = [['row_id', 'name']];
+    const chat = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: false, mes: '第一段追平' },
+      { is_user: false, mes: '第二段追平' },
+    ];
+    const transactionContext = {
+      baseRevision: 'manual-catch-up-integration',
+      writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+      assertFresh: () => undefined,
+      runCommit: async (task: () => Promise<any>) => task(),
+    };
+    const previousHostApi = SillyTavern_API_ACU;
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat: async () => undefined } as any);
+      const firstAfterData = {
+        ...checkpointData,
+        sheet_0: { ...checkpointData.sheet_0, content: [['row_id', 'name'], ['1', '第一 bucket']] },
+      } as any;
+      const first = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: 1,
+        source: 'manual_fill',
+        afterData: firstAfterData,
+        filledSheetKeys: ['sheet_0'],
+        candidateChangedSheetKeys: ['sheet_0'],
+        operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', '第一 bucket'] }],
+        transactionContext,
+      });
+      expect(first).toMatchObject({ saved: true, messageIndex: 1 });
+
+      const secondAfterData = {
+        ...firstAfterData,
+        sheet_0: { ...firstAfterData.sheet_0, content: [['row_id', 'name'], ['1', '第一 bucket'], ['2', '第二 bucket']] },
+      } as any;
+      const second = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: 2,
+        source: 'manual_fill',
+        afterData: secondAfterData,
+        filledSheetKeys: ['sheet_0'],
+        candidateChangedSheetKeys: ['sheet_0'],
+        operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '第二 bucket'] }],
+        transactionContext,
+      });
+      expect(second).toMatchObject({ saved: true, messageIndex: 2 });
+
+      await expect(loadTableStateFromFramesV2_ACU(chat, '', {
+        maxMessageIndex: 2,
+        updateRuntimeState: false,
+      })).resolves.toEqual(secondAfterData);
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+    }
+  });
+
+  it('真实 persist 拒绝 checkpoint 之前的 metadata-only 写入，且不触碰聊天或宿主保存', async () => {
+    const checkpointData = makeCheckpointData();
+    const chat = [
+      { is_user: false, mes: '过早目标' },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    ];
+    const saveChat = vi.fn(async () => undefined);
+    const before = structuredClone(chat);
+    const previousHostApi = SillyTavern_API_ACU;
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+      const result = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: 0,
+        source: 'manual_fill',
+        afterData: checkpointData,
+        filledSheetKeys: ['sheet_0'],
+        candidateChangedSheetKeys: [],
+        operations: [],
+        transactionContext: {
+          baseRevision: 'metadata-before-anchor',
+          writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+          assertFresh: () => undefined,
+          runCommit: async (task: () => Promise<any>) => task(),
+        },
+      });
+
+      expect(result).toEqual({
+        saved: false,
+        error: 'V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=0, latestFullCheckpointIndex=1.',
+      });
+      expect(chat).toEqual(before);
+      expect(saveChat).not.toHaveBeenCalled();
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+    }
+  });
+
+  it('真实 persist 将连续 SQLite buckets 写入同一锚点之后，replay 保留累计 SQL 结果', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.content = [['row_id', 'name']];
+    const chat = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: false, mes: 'SQLite 第一段追平' },
+      { is_user: false, mes: 'SQLite 第二段追平' },
+    ];
+    const transactionContext = {
+      baseRevision: 'manual-catch-up-sqlite-integration',
+      writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+      assertFresh: () => undefined,
+      runCommit: async (task: () => Promise<any>) => task(),
+    };
+    const previousHostApi = SillyTavern_API_ACU;
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat: async () => undefined } as any);
+      const firstAfterData = {
+        ...checkpointData,
+        sheet_0: { ...checkpointData.sheet_0, content: [['row_id', 'name'], ['1', 'SQLite 第一 bucket']] },
+      } as any;
+      const first = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: 1,
+        source: 'manual_fill',
+        afterData: firstAfterData,
+        filledSheetKeys: ['sheet_0'],
+        candidateChangedSheetKeys: ['sheet_0'],
+        operations: [{
+          kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',
+          statements: ['INSERT INTO inventory (row_id, name) VALUES (?, ?)'], params: [[1, 'SQLite 第一 bucket']],
+        }],
+        transactionContext,
+      });
+      expect(first).toMatchObject({ saved: true, messageIndex: 1 });
+
+      const secondAfterData = {
+        ...firstAfterData,
+        sheet_0: { ...firstAfterData.sheet_0, content: [['row_id', 'name'], ['1', 'SQLite 第一 bucket'], ['2', 'SQLite 第二 bucket']] },
+      } as any;
+      const second = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: 2,
+        source: 'manual_fill',
+        afterData: secondAfterData,
+        filledSheetKeys: ['sheet_0'],
+        candidateChangedSheetKeys: ['sheet_0'],
+        operations: [{
+          kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',
+          statements: ['INSERT INTO inventory (row_id, name) VALUES (?, ?)'], params: [[2, 'SQLite 第二 bucket']],
+        }],
+        transactionContext,
+      });
+      expect(second).toMatchObject({ saved: true, messageIndex: 2 });
+
+      await expect(loadTableStateFromFramesV2_ACU(chat, '', {
+        maxMessageIndex: 2,
+        updateRuntimeState: false,
+      })).resolves.toEqual(secondAfterData);
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+    }
+  });
+
   it('legacy 显式 row_id SQL operation 保持历史指定身份', async () => {
     const chat = [{
       is_user: false,

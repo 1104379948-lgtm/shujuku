@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   guideContainer: null as any,
   setGuide: vi.fn(() => true),
   runTransaction: vi.fn(),
+  runCommit: vi.fn(),
   chatIdentity: 'chat-a',
 }));
 
@@ -242,6 +243,44 @@ describe('manualRefillProgress V2 validation', () => {
       error: 'V2 manualRefillProgress-only write requires an existing full checkpoint anchor.',
     });
     expect(message.TavernDB_ACU_IsolatedData).toEqual(beforeIsolatedData);
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+  });
+
+  it('拒绝写入位于最新 full checkpoint 之前的填表 artifact，且不产生副作用', async () => {
+    mocks.saveChat.mockClear();
+    mocks.saveChatStrict.mockClear();
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const earlierMessage = { is_user: false, TavernDB_ACU_IsolatedData: {} as Record<string, any> };
+    const checkpointMessage = seedFrame({ logEntries: [], manualRefillProgress: undefined });
+    mocks.chat.splice(0, mocks.chat.length, earlierMessage, checkpointMessage);
+    const beforeEarlierMessage = JSON.parse(JSON.stringify(earlierMessage));
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any,
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }] as any,
+      manualRefillProgress: {
+        kind: 'manual_refill', version: 2, status: 'committed',
+        selectedSheetKeys: ['sheet_a'], contextMessageIndices: [0],
+        originalStartMessageIndex: 0, targetMessageIndex: 0, batchSize: 1,
+        completedUntilMessageIndex: 0, completedSheetMessageIndexByKey: { sheet_a: 0 },
+        runId: 'checkpoint-after-target', mode: 'catch_up', targetAiFloor: 1,
+        planSignature: 'plan-signature', waveIndex: 0, bucketIndex: 0,
+        totalWaves: 1, totalBuckets: 1, updatedAt: 2,
+      },
+      strictSave: true,
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+
+    expect(result).toEqual({
+      saved: false,
+      error: 'V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=0, latestFullCheckpointIndex=1.',
+    });
+    expect(earlierMessage).toEqual(beforeEarlierMessage);
     expect(mocks.saveChatStrict).not.toHaveBeenCalled();
     expect(mocks.saveChat).not.toHaveBeenCalled();
   });
@@ -829,10 +868,11 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     mocks.loadReplayDetailed.mockReset();
 
     mocks.setGuide.mockReset().mockImplementation(() => true);
+    mocks.runCommit.mockReset().mockImplementation(async (commitTask: () => any) => commitTask());
     mocks.runTransaction.mockReset().mockImplementation(async (_options: any, task: any) => task({
       baseRevision: 'runtime-v1:test',
       assertFresh: vi.fn(),
-      runCommit: async (commitTask: () => any) => commitTask(),
+      runCommit: mocks.runCommit,
     }));
   });
 
@@ -862,6 +902,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       expect(mocks.runTransaction).toHaveBeenCalledWith(expect.objectContaining({
         source: 'template_assistant', isolationKey: 'scope-only', writeSet: [{ kind: 'all' }], maintenanceMode: 'exclusive',
       }), expect.any(Function));
+      expect(mocks.runCommit).toHaveBeenCalledWith(expect.any(Function), []);
       expect(mocks.setGuide).toHaveBeenCalledWith('scope-only', expect.any(Object), expect.objectContaining({
         syncTemplateScope: true, templateSource: scopeOnlyData, presetName: '预设A', source: 'test', updatedAt: 30,
       }));
@@ -1192,10 +1233,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(mocks.saveChatStrict).not.toHaveBeenCalled();
   });
 
-  it('更晚楼层已有 full checkpoint 时，对更早楼层填表不再写第二个初始基线', async () => {
-    // 回归：锚点判定若只看目标楼层之前，对更早楼层追平/重填时会误判为首次初始化，
-    // 又写一个 init full checkpoint。回放只认最后一个 full checkpoint，
-    // 于是它之前的所有增量全部失效，表现为“只有最后一层有数据”。
+  it('拒绝写入更晚 full checkpoint 之前的填表数据，避免产生不可回放增量', async () => {
     const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
     const earlyMessage = { is_user: false } as any;
     const laterCheckpointMessage = {
@@ -1223,13 +1261,12 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       transactionContext: makeTransaction(), assumeCommitLock: true,
     });
 
-    expect(result.error).toBeUndefined();
-    expect(result.saved).toBe(true);
-    const frame = earlyMessage.TavernDB_ACU_IsolatedData[''].storageFrame;
-    // 绝不能在更早楼层再造一个 full checkpoint。
-    expect(frame.checkpoint).toBeUndefined();
-    // 只追加增量。
-    expect(frame.logEntries).toHaveLength(1);
+    expect(result).toEqual({
+      saved: false,
+      error: 'V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=0, latestFullCheckpointIndex=1.',
+    });
+    expect(earlyMessage.TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
   });
 
 
@@ -1728,16 +1765,16 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       assumeCommitLock: true,
     });
 
-    expect(historicalImport.saved).toBe(true);
-    // 同一隔离键下同一时刻只能有一个 full checkpoint：
-    // 更晚楼层已有基线时，往更早楼层导入不得再新建一个初始基线，
-    // 否则回放只认最后一个 full checkpoint，它之前的增量全部失效。
-    expect(historicalImportMessage.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
-    expect(historicalImportMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+    expect(historicalImport).toEqual({
+      saved: false,
+      error: 'V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=0, latestFullCheckpointIndex=1.',
+    });
+    // 回放只从最后一个 full checkpoint 开始；因此不能把导入伪装成已保存的历史增量。
+    expect(historicalImportMessage.TavernDB_ACU_IsolatedData).toBeUndefined();
     expect(futureCheckpointMessage.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data).toEqual({
       mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB,
     });
-    expect(mocks.saveChat).toHaveBeenCalledOnce();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
 
     const incrementalImportMessage = seedFrame({ logEntries: [] });
     mocks.loadReplayState.mockResolvedValue({ mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB });

@@ -601,6 +601,15 @@ function isAsciiOnly_ACU(value: string): boolean {
   return /^[\x00-\x7F]+$/.test(String(value || ''));
 }
 
+/**
+ * DDL 物理列与 snapshot 展示表头的唯一匹配契约。
+ * 比较保持精确，不做大小写、拼音或位置兜底；展示名必须由物理名或 DDL 注释明确声明。
+ */
+export function matchesDDLColumnHeader_ACU(sqlName: string, comment: string | null, header: string): boolean {
+  if (!header) return false;
+  return header === sqlName || (sqlName === 'row_id' && header === '行号') || (!!comment && header === comment);
+}
+
 function buildDDLHeaderMismatchMessage_ACU(index: number, ddlColumn: DDLColumnInfo_ACU, header: string): string {
   return ddlColumn.comment
     ? `第 ${index + 1} 列不匹配：DDL 列名为「${ddlColumn.sqlName}」，注释为「${ddlColumn.comment}」，表头为「${header}」`
@@ -645,24 +654,14 @@ export function validateDDLTextAgainstHeaders_ACU(
   for (let index = 0; index < compareLength; index += 1) {
     const ddlColumn = comparableColumns[index];
     const header = comparableHeaders[index];
-    const headerIsAscii = isAsciiOnly_ACU(header);
     const sqlNameIsAscii = isAsciiOnly_ACU(ddlColumn.sqlName);
-    const matchesPhysical = ddlColumn.sqlName === header;
-    const matchesComment = !!ddlColumn.comment && ddlColumn.comment === header;
 
-    if (headerIsAscii) {
-      if (!matchesPhysical) {
-        issues.push(buildDDLHeaderMismatchMessage_ACU(index, ddlColumn, header));
-      }
-      continue;
-    }
-
-    if (!matchesComment) {
+    if (!matchesDDLColumnHeader_ACU(ddlColumn.sqlName, ddlColumn.comment, header)) {
       issues.push(buildDDLHeaderMismatchMessage_ACU(index, ddlColumn, header));
       continue;
     }
 
-    if (!sqlNameIsAscii) {
+    if (!isAsciiOnly_ACU(header) && !sqlNameIsAscii) {
       issues.push(
         `第 ${index + 1} 列不匹配：表头为「${header}」时，DDL 物理列名必须使用英文/ASCII，当前 DDL 列名为「${ddlColumn.sqlName}」，注释为「${ddlColumn.comment}」`,
       );

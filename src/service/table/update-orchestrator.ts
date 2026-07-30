@@ -6,7 +6,7 @@
 
 import { currentChatFileIdentifier_ACU, isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
 import { callCustomOpenAI_ACU } from '../ai/prompt-builder';
-import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
+import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
@@ -115,8 +115,16 @@ export interface ManualUpdateResult {
     autoMergeTriggered?: boolean;
     autoMergeSuccess?: boolean;
     checkpointWarning?: string;
-    outcome?: 'complete' | 'no_work' | 'stopped' | 'sync_pending';
+    outcome?: 'complete' | 'no_work' | 'stopped' | 'sync_pending' | 'blocked' | 'integrity_failed' | 'progress_metadata_failed';
     committedBucketCount?: number;
+    /** 是否至少有一个 bucket 已严格提交到聊天记录。 */
+    dataCommitted?: boolean;
+    /** 至少一次终态 bounded replay 已确认可读取已提交状态。 */
+    replayVerified?: boolean;
+    /** terminal manualRefillProgress 是否已严格保存。 */
+    terminalProgressSaved?: boolean;
+    /** 面向 UI/恢复诊断的稳定失败分类；不得依赖错误文案解析。 */
+    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_data_mismatch' | 'replay_failed';
     catchUpPlan?: ManualCatchUpPlan_ACU;
 }
 
@@ -516,6 +524,15 @@ function getTouchedSheetKeysFromSqlText_ACU(sqlText: string, tableData: Record<s
     return mapSqlTableNamesToSheetKeys_ACU(tableData as any, tableNames);
 }
 
+function shouldDiscardUnauthorizedTableEdits_ACU(): boolean {
+    return settings_ACU.discardUnauthorizedTableEditsEnabled !== false;
+}
+
+function formatAllowedSheetKeys_ACU(sheetKeys: readonly string[]): string {
+    const normalized = [...new Set(sheetKeys.filter(key => typeof key === 'string' && key.startsWith('sheet_')))].sort();
+    return normalized.length > 0 ? normalized.join(', ') : '无（当前任务未授权任何目标表）';
+}
+
 function findSqlFailureGroupKey_ACU(sqlTexts: string[], responses: GroupFillResponse_ACU[], errorMessage: string): string | null {
     const match = String(errorMessage || '').match(/第\s*(\d+)\s*条语句失败/);
     const failedIndex = match ? Number.parseInt(match[1], 10) : NaN;
@@ -547,6 +564,35 @@ function getRuntimeTableDataSnapshot_ACU(fallbackData: Record<string, any> | nul
     const fallback = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU || null);
     if (hasUsableRuntimeTableData_ACU(fallback)) return fallback;
     return null;
+}
+
+function resolveLatestAiMessageIndex_ACU(chat: any[]): number {
+    if (!Array.isArray(chat)) return -1;
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+        if (chat[index] && !chat[index].is_user) return index;
+    }
+    return -1;
+}
+
+function canReplayConflictOnLatestRuntime_ACU(saveTargetIndex: number, chat: any[]): boolean {
+    return Number.isInteger(saveTargetIndex)
+        && saveTargetIndex >= 0
+        && saveTargetIndex === resolveLatestAiMessageIndex_ACU(chat);
+}
+
+function rebaseGroupFillResponses_ACU(
+    responses: GroupFillResponse_ACU[],
+    baseSnapshot: Record<string, any>,
+    baseRevision: string,
+): GroupFillResponse_ACU[] {
+    return responses.map(response => ({
+        ...response,
+        job: {
+            ...response.job,
+            baseSnapshot,
+            baseRevision,
+        },
+    }));
 }
 
 
@@ -730,16 +776,24 @@ export async function collectGroupFillResponse_ACU(
 ): Promise<GroupFillResponse_ACU> {
     const effectiveAbortController = abortController || new AbortController();
     const isStopped = () => effectiveAbortController.signal.aborted || (options.respectGlobalStop !== false && wasStoppedByUser_ACU);
-    options.onProgress?.({ phase: 'preparing' });
-
-    const dynamicContent = await prepareAIInput_ACU(job.messagesForContext, job.updateMode, job.targetSheetKeys, {
-        tableData: job.baseSnapshot,
-        excludeImportTaggedWorldbookEntries: job.isImportMode === true && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
-        agentGreenlights: Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [],
-        isolationKey: job.isolationKey,
-        templateScope: job.templateScope,
-        sqlApplyScope: job.sqlApplyScope,
-    });
+    const maxRetries = options.maxRetriesOverride || settings_ACU.tableMaxRetries || 3;
+    if (isStopped()) return { job, success: false, attempt: 0, aborted: true };
+    options.onProgress?.({ phase: 'preparing', attempt: 1, maxRetries: 1 });
+    let dynamicContent: any = null;
+    try {
+        dynamicContent = await prepareAIInput_ACU(job.messagesForContext, job.updateMode, job.targetSheetKeys, {
+            tableData: job.baseSnapshot,
+            excludeImportTaggedWorldbookEntries: job.isImportMode === true && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
+            agentGreenlights: Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [],
+            isolationKey: job.isolationKey,
+            templateScope: job.templateScope,
+            sqlApplyScope: job.sqlApplyScope,
+            signal: effectiveAbortController.signal,
+        });
+    } catch (error: any) {
+        if (error?.name === 'AbortError' || isStopped()) return { job, success: false, attempt: 0, aborted: true };
+        throw error;
+    }
     if (dynamicContent && typeof dynamicContent === 'object' && dynamicContent.ok === false) {
         const failure = dynamicContent as { failureCode?: string; message?: string };
         const error = `无法准备AI输入（${failure.failureCode || 'provider_load_failed'}）：${failure.message || 'SQLite 运行时未就绪。'}`;
@@ -752,6 +806,7 @@ export async function collectGroupFillResponse_ACU(
             errorCategory: 'infrastructure',
         };
     }
+
     if (!dynamicContent) {
         return {
             job,
@@ -762,8 +817,6 @@ export async function collectGroupFillResponse_ACU(
             errorCategory: 'infrastructure',
         };
     }
-
-    const maxRetries = options.maxRetriesOverride || settings_ACU.tableMaxRetries || 3;
     let lastErrorMessage = 'AI响应中未找到完整有效的 <tableEdit> 标签';
     let lastErrorCategory: TableUpdateCommitErrorCategory_ACU = 'model';
 
@@ -1103,16 +1156,15 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 logDebug_ACU(`[TemplateScope] ${formatResponseGroupReference_ACU(response)} 的目标表不在模板范围内，已屏蔽其 SQL。`);
                 continue;
             }
-            let sqlText: string;
+            let reboundStatements: string[];
             try {
-                const reboundStatements = rebindSqlMutationTableIdentifiers_ACU(
+                reboundStatements = rebindSqlMutationTableIdentifiers_ACU(
                     normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''),
                     baseSnapshot as any,
                     capturedSqlApplyScope?.templateData,
                 );
                 // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                 assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
-                sqlText = reboundStatements.join(';\n');
             } catch (error: any) {
                 return {
                     success: false,
@@ -1121,19 +1173,46 @@ export async function applyUnifiedGroupFillResponses_ACU(
                     errorCategory: 'model',
                 };
             }
-            const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(sqlText, baseSnapshot);
+
             if (Array.isArray(response.job.targetSheetKeys) && response.job.targetSheetKeys.length > 0) {
                 const allowedSheetKeys = new Set(response.job.targetSheetKeys);
-                const unauthorizedKeys = touchedKeys.filter((sheetKey: string) => !allowedSheetKeys.has(sheetKey));
-                if (unauthorizedKeys.length > 0) {
+                const retainedStatements: string[] = [];
+                const discardedKeys = new Set<string>();
+                for (const statement of reboundStatements) {
+                    const touchedKeys = getTouchedSheetKeysFromSqlText_ACU(statement, baseSnapshot);
+                    const unauthorizedKeys = touchedKeys.filter(sheetKey => !allowedSheetKeys.has(sheetKey));
+                    if (unauthorizedKeys.length === 0) {
+                        retainedStatements.push(statement);
+                        continue;
+                    }
+                    const authorizedKeys = touchedKeys.filter(sheetKey => allowedSheetKeys.has(sheetKey));
+                    const mayDiscardStatement = shouldDiscardUnauthorizedTableEdits_ACU()
+                        && authorizedKeys.length === 0
+                        && touchedKeys.length > 0;
+                    if (!mayDiscardStatement) {
+                        return {
+                            success: false,
+                            modifiedKeys: [],
+                            error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。允许写入表：${formatAllowedSheetKeys_ACU(response.job.targetSheetKeys)}。`,
+                            errorCategory: 'model',
+                        };
+                    }
+                    unauthorizedKeys.forEach(sheetKey => discardedKeys.add(sheetKey));
+                }
+                if (discardedKeys.size > 0) {
+                    logWarn_ACU(`[TargetScope] ${formatResponseGroupReference_ACU(response)} 已丢弃仅影响非目标表的 SQL statement: ${[...discardedKeys].sort().join(', ')}`);
+                }
+                reboundStatements = retainedStatements;
+                if (reboundStatements.length === 0) {
                     return {
                         success: false,
                         modifiedKeys: [],
-                        error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。`,
+                        error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 的 SQL 仅修改非目标表，已全部丢弃。允许写入表：${formatAllowedSheetKeys_ACU(response.job.targetSheetKeys)}。请仅生成允许表的写入。`,
                         errorCategory: 'model',
                     };
                 }
             }
+            const sqlText = reboundStatements.join(';\n');
             sqlTexts.push(sqlText);
             sqlResponses.push(response);
         }
@@ -1217,7 +1296,9 @@ export async function applyUnifiedGroupFillResponses_ACU(
             // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations；但若已存在
             // 可由模板临时基线回放的 orphan artifacts，则必须保留本次 operations，供 persist
             // 层校验 replay + operations === afterData 后升级为 integrity_repair checkpoint。
-            const persistChat = capturedChat;
+            // Prompt 上下文保持执行开始时的冻结快照；但 checkpoint 拓扑是持久化事实，
+            // 首个 bucket 成功后必须立即对后续 bucket 可见，不能继续使用旧快照。
+            const persistChat = getChatArray_ACU() || [];
             const persistIsolationKey = capturedIsolationKey;
             const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
                 persistChat,
@@ -1338,7 +1419,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
                 return {
                     success: false,
                     modifiedKeys: [],
-                    error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。`,
+                    error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。允许写入表：${formatAllowedSheetKeys_ACU(response.job.targetSheetKeys)}。`,
                     errorCategory: 'model',
                 };
             }
@@ -1369,7 +1450,9 @@ export async function applyUnifiedGroupFillResponses_ACU(
         // full checkpoint；pristine 场景只接受 afterData 快照。若已有可临时回放的
         // orphan artifacts，则必须保留本次 operations，由 persist 验证
         // temporary replay + operations === afterData 后升级为 integrity_repair checkpoint。
-        const persistChat = capturedChat;
+        // 同 SQLite 路径：只冻结 AI 上下文，不冻结存储锚点事实。
+        // 否则首 bucket 建立 checkpoint 后，后续 bucket 仍会被误判为无锚点。
+        const persistChat = getChatArray_ACU() || [];
         const persistIsolationKey = capturedIsolationKey;
         const hasCheckpointAnchor = hasAnyV2Checkpoint_ACU(
             persistChat,
@@ -1566,6 +1649,7 @@ export async function processGroupedRuntimeChunk_ACU(
         const bucket = orderedBuckets[bucketIndex];
         const maxBucketRetries = Math.max(1, Number(settings_ACU.tableMaxRetries) || 3);
         let retryUnifiedError: string | null = null;
+        let conflictReplayResponses: GroupFillResponse_ACU[] | null = null;
         let bucketSucceeded = false;
 
         for (let bucketAttempt = 1; bucketAttempt <= maxBucketRetries; bucketAttempt++) {
@@ -1599,7 +1683,15 @@ export async function processGroupedRuntimeChunk_ACU(
                 break;
             }
 
-            const mergedBatchData = baseResult.data;
+            const conflictReplayData = conflictReplayResponses
+                ? getRuntimeTableDataSnapshot_ACU()
+                : null;
+            if (conflictReplayResponses && !conflictReplayData) {
+                bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
+                firstError = firstError || '运行时版本冲突后无法读取最新表格数据，已停止自动恢复。';
+                break;
+            }
+            const mergedBatchData = conflictReplayData || baseResult.data;
             _set_currentJsonTableData_ACU(mergedBatchData);
             const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
             const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
@@ -1658,16 +1750,19 @@ export async function processGroupedRuntimeChunk_ACU(
                 break;
             }
 
-            const collectFeedback = retryUnifiedError ? { lastUnifiedError: retryUnifiedError } : undefined;
-            const settledResponses = await Promise.allSettled(jobs.map(job => collectGroupFillResponse_ACU(
-                job,
-                collectFeedback,
-                options.abortController,
-                {
-                    onProgress: event => emitBucketProgress(bucketIndex, event),
-                    respectGlobalStop: options.respectGlobalStop,
-                },
-            )));
+            const collectFeedback = retryUnifiedError && !conflictReplayResponses ? { lastUnifiedError: retryUnifiedError } : undefined;
+            const settledResponses = conflictReplayResponses
+                ? rebaseGroupFillResponses_ACU(conflictReplayResponses, baseSnapshot, baseRevision)
+                    .map(response => ({ status: 'fulfilled' as const, value: response }))
+                : await Promise.allSettled(jobs.map(job => collectGroupFillResponse_ACU(
+                    job,
+                    collectFeedback,
+                    options.abortController,
+                    {
+                        onProgress: event => emitBucketProgress(bucketIndex, event),
+                        respectGlobalStop: options.respectGlobalStop,
+                    },
+                )));
             let responses: GroupFillResponse_ACU[] = [];
             let collectFailed = false;
             let collectError: string | undefined;
@@ -1782,11 +1877,34 @@ export async function processGroupedRuntimeChunk_ACU(
             }
 
             const safeApplyError = sanitizeRetryFeedback_ACU(applyResult.error || '统一提交失败。', MAX_WARN_ERROR_LENGTH_ACU);
+            if (applyResult.errorCategory === 'conflict') {
+                const canReplay = canReplayConflictOnLatestRuntime_ACU(bucket.saveTargetIndex, executionScope.chatSnapshot);
+                if (!canReplay) {
+                    jobs.forEach(job => failedGroups.add(job.groupKey));
+                    firstError = firstError || `${safeApplyError} 当前批次不是聊天最新 AI 楼层，旧输出不能安全重放到最新运行时数据。`;
+                    break;
+                }
+                if (bucketAttempt >= maxBucketRetries) {
+                    jobs.forEach(job => failedGroups.add(job.groupKey));
+                    firstError = firstError || `运行时版本冲突在自动恢复 ${maxBucketRetries - 1} 次后仍未收敛：${safeApplyError}`;
+                    break;
+                }
+                conflictReplayResponses = responses;
+                retryUnifiedError = null;
+                emitBucketProgress(bucketIndex, {
+                    phase: 'retry',
+                    attempt: bucketAttempt,
+                    maxRetries: maxBucketRetries,
+                    message: '检测到并发写入，正在基于最新运行时数据重放已生成结果',
+                });
+                continue;
+            }
             if (applyResult.errorCategory !== 'model') {
                 jobs.forEach(job => failedGroups.add(job.groupKey));
                 firstError = firstError || safeApplyError;
                 break;
             }
+            conflictReplayResponses = null;
             retryUnifiedError = safeApplyError;
             if (bucketAttempt >= maxBucketRetries) {
                 jobs.forEach(job => failedGroups.add(job.groupKey));
@@ -1865,15 +1983,18 @@ export async function executeCardUpdateCore_ACU(
 
     try {
         let lastSqlError: string | null = null;
+        let conflictReplayResponse: GroupFillResponse_ACU | null = null;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                const rawBaseSnapshot = getRuntimeTableDataSnapshot_ACU(progressContext?.batchBaseSnapshot || null) || {};
+                const rawBaseSnapshot = getRuntimeTableDataSnapshot_ACU(
+                    conflictReplayResponse ? null : (progressContext?.batchBaseSnapshot || null),
+                ) || {};
                 const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
                     buildWriteSetForSheetKeys_ACU(targetSheetKeys, rawBaseSnapshot),
                     { chatKey: executionScope.chatKey, isolationKey: executionScope.isolationKey },
                 );
-                const collectResult = await collectGroupFillResponse_ACU({
+                const currentJob: GroupFillJob_ACU = {
                     groupKey: `legacy_execute_${saveTargetIndex}`,
                     groupId: 0,
                     batchNumber: progressContext?.currentBatch || 1,
@@ -1890,7 +2011,15 @@ export async function executeCardUpdateCore_ACU(
                     chatSnapshot: executionScope.chatSnapshot,
                     templateScope: executionScope.templateScope,
                     sqlApplyScope: executionScope.sqlApplyScope,
-                }, { lastSqlError }, effectiveAbortController, { onProgress: emitProgress, maxRetriesOverride: 1 });
+                };
+                const collectResult = conflictReplayResponse
+                    ? { ...conflictReplayResponse, job: currentJob }
+                    : await collectGroupFillResponse_ACU(
+                        currentJob,
+                        { lastSqlError },
+                        effectiveAbortController,
+                        { onProgress: emitProgress, maxRetriesOverride: 1 },
+                    );
 
                 if (collectResult.aborted) {
                     return { success: false, modifiedKeys: [], aborted: true };
@@ -1901,6 +2030,7 @@ export async function executeCardUpdateCore_ACU(
                         collectResult.errorCategory || 'infrastructure',
                     );
                 }
+                conflictReplayResponse = collectResult;
 
                 emitProgress({ phase: 'parsing' });
                 const aiResponse = collectResult.aiResponse;
@@ -2193,9 +2323,35 @@ export async function executeCardUpdateCore_ACU(
                 const errorCategory: TableUpdateCommitErrorCategory_ACU = error instanceof UpdateAttemptError_ACU
                     ? error.category
                     : 'infrastructure';
+                if (errorCategory === 'conflict') {
+                    if (!canReplayConflictOnLatestRuntime_ACU(saveTargetIndex, executionScope.chatSnapshot)) {
+                        return {
+                            success: false,
+                            modifiedKeys: [],
+                            error: `${safeError} 当前目标不是聊天最新 AI 楼层，旧输出不能安全重放到最新运行时数据。`,
+                            errorCategory,
+                        };
+                    }
+                    if (attempt >= maxRetries) {
+                        return {
+                            success: false,
+                            modifiedKeys: [],
+                            error: `运行时版本冲突在自动恢复 ${maxRetries - 1} 次后仍未收敛：${safeError}`,
+                            errorCategory,
+                        };
+                    }
+                    emitProgress({
+                        phase: 'retry',
+                        attempt,
+                        maxRetries,
+                        message: '检测到并发写入，正在基于最新运行时数据重放已生成结果',
+                    });
+                    continue;
+                }
                 if (errorCategory !== 'model') {
                     return { success: false, modifiedKeys: [], error: safeError, errorCategory };
                 }
+                conflictReplayResponse = null;
                 if (isSqliteMode()) lastSqlError = safeError;
 
                 if (attempt < maxRetries) {
@@ -2499,7 +2655,34 @@ export async function orchestrateManualCatchUp_ACU(
     const selectedSheetKeys = [...new Set(plan.waves.flatMap(wave => wave.sheetKeys))].sort();
 
     if (plan.waves.length === 0) {
-        return { success: true, outcome: 'no_work', catchUpPlan: plan, committedBucketCount: 0 };
+        return {
+            success: true,
+            outcome: 'no_work',
+            catchUpPlan: plan,
+            committedBucketCount: 0,
+            dataCommitted: false,
+            replayVerified: true,
+            terminalProgressSaved: false,
+        };
+    }
+
+    // 旧版“删除全部数据”会将 header-only reset checkpoint 留在原先较晚楼层。
+    // 在任何 AI 调用之前修复可证明安全的布局；无法证明安全则阻断，而不是让 bucket
+    // 伪提交后由 terminal progress-only 写入兜底报错。
+    const preflightTargetIndex = plan.waves[0]?.messageIndices[0] ?? plan.targetMessageIndex;
+    if (preflightTargetIndex !== null && preflightTargetIndex !== undefined) {
+        const anchorPreflight = await ensureManualCatchUpAnchorBeforeTarget_ACU(preflightTargetIndex, getCurrentIsolationKey_ACU());
+        if (anchorPreflight.status === 'blocked') {
+            return {
+                success: false,
+                outcome: 'blocked',
+                error: anchorPreflight.error,
+                catchUpPlan: plan,
+                committedBucketCount: 0,
+                dataCommitted: false,
+                diagnosticCode: 'anchor_preflight_blocked',
+            };
+        }
     }
 
     const maxConcurrentGroups = Math.max(1, Math.trunc(Number(settings_ACU.maxConcurrentGroups) || 1));
@@ -2513,6 +2696,7 @@ export async function orchestrateManualCatchUp_ACU(
     const runId = createManualCatchUpRunId_ACU();
     let committedBucketCount = 0;
     let activeWaveIndex = 0;
+    let lastCommittedBucketTargetIndex: number | null = null;
     const completedSheetMessageIndexByKey: Record<string, number> = {};
     const allContextMessageIndices = [...new Set(plan.waves.flatMap(wave => wave.messageIndices))].sort((left, right) => left - right);
     const originalStartMessageIndex = plan.waves[0]?.messageIndices[0] ?? plan.targetMessageIndex ?? 0;
@@ -2548,20 +2732,84 @@ export async function orchestrateManualCatchUp_ACU(
             updatedAt: Date.now(),
         };
     };
+    const resolveSafeTerminalTargetMessageIndex = (): number | undefined => {
+        const liveChat = getChatArray_ACU() || [];
+        const isolationKey = getCurrentIsolationKey_ACU();
+        const targetCandidates = [terminalTargetMessageIndex, lastCommittedBucketTargetIndex]
+            .filter((value): value is number => Number.isInteger(value) && value >= 0)
+            .filter((value, index, values) => values.indexOf(value) === index);
+        return targetCandidates.find(targetIndex =>
+            hasAnyV2Checkpoint_ACU(liveChat, isolationKey, targetIndex),
+        );
+    };
+    const verifyCommittedCatchUpReplay = async (): Promise<{ error?: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }> => {
+        // 不能用内存 runtime 作为验收依据：bucket 的唯一交付物是聊天中的 V2 frame。
+        // 在终态前从 live chat 做 bounded replay，并用结果回写运行时视图，确保 UI 不会继续
+        // 展示仅存在于内存的假数据。
+        const safeTargetMessageIndex = resolveSafeTerminalTargetMessageIndex();
+        if (safeTargetMessageIndex === undefined) {
+            return {
+                error: '手动追平提交后未找到可见 full checkpoint，无法验证 V2 replay。',
+                diagnosticCode: 'replay_anchor_missing',
+            };
+        }
+        try {
+            const replay = await loadTableStateFromFramesV2Detailed_ACU(getChatArray_ACU(), getCurrentIsolationKey_ACU(), {
+                maxMessageIndex: safeTargetMessageIndex,
+                updateRuntimeState: false,
+            });
+            const replayData = replay?.data as Record<string, any> | undefined;
+            const missingSheetKeys = selectedSheetKeys.filter(sheetKey => !replayData?.[sheetKey]);
+            if (!replayData || missingSheetKeys.length > 0) {
+                return {
+                    error: `V2 replay 未恢复所选表：${missingSheetKeys.join('、') || '无可用回放数据'}。`,
+                    diagnosticCode: 'replay_missing_selected_sheet',
+                };
+            }
+            // 存在 sheet 只证明锚点可见，不证明本轮 bucket 的 operations 真正进入可回放
+            // 时间线。对运行时产生的数据内容逐表比对，防止“有表头但本轮数据被最后 checkpoint
+            // 跳过”的伪成功。
+            const replayMismatchSheetKeys = selectedSheetKeys.filter(sheetKey =>
+                JSON.stringify(replayData[sheetKey]?.content)
+                !== JSON.stringify((currentJsonTableData_ACU as Record<string, any> | null)?.[sheetKey]?.content),
+            );
+            if (replayMismatchSheetKeys.length > 0) {
+                return {
+                    error: `V2 replay 与本轮已提交数据不一致：${replayMismatchSheetKeys.join('、')}。`,
+                    diagnosticCode: 'replay_data_mismatch',
+                };
+            }
+            _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(replayData)));
+            return {};
+        } catch (error: any) {
+            return {
+                error: error?.message || String(error || 'V2 replay 验证失败。'),
+                diagnosticCode: 'replay_failed',
+            };
+        }
+    };
     const persistCatchUpTerminalProgress = async (
         status: 'complete' | 'stopped' | 'failed' | 'sync_pending',
         lastError?: string,
     ): Promise<string | undefined> => {
         try {
+            // terminal progress 是纯 metadata，必须写在当前 live chat 中能看到 full
+            // checkpoint 的楼层。优先计划终点；聊天在运行期间变化时才退回最后一个已严格
+            // 提交的 bucket，绝不能向无锚点楼层发起一次注定失败的写入。
+            const isolationKey = getCurrentIsolationKey_ACU();
+            const safeTargetMessageIndex = resolveSafeTerminalTargetMessageIndex();
+            if (safeTargetMessageIndex === undefined) {
+                return `手动追平终态 ${status} 未找到可见 full checkpoint。`;
+            }
             const progress = buildCatchUpProgress(status, lastError);
             const commitResult = await runTableUpdateCommit_ACU({
                 source: 'manual_fill',
                 reason: `orchestrateManualCatchUp:terminal:${status}`,
-                isolationKey: getCurrentIsolationKey_ACU(),
+                isolationKey,
                 writeSet: buildWriteSetForSheetKeys_ACU(selectedSheetKeys, currentJsonTableData_ACU),
                 revisionWriteSet: [],
                 initialData: currentJsonTableData_ACU,
-                targetMessageIndex: terminalTargetMessageIndex,
+                targetMessageIndex: safeTargetMessageIndex,
                 targetSheetKeys: [],
                 updateGroupKeys: [],
                 trackingSheetKeys: [],
@@ -2598,6 +2846,9 @@ export async function orchestrateManualCatchUp_ACU(
                     success: false, outcome: 'stopped',
                     error: terminalError ? `手动追平已终止；终态进度保存失败：${terminalError}` : '手动追平已终止。',
                     committedBucketCount, catchUpPlan: plan,
+                    dataCommitted: committedBucketCount > 0,
+                    replayVerified: false,
+                    terminalProgressSaved: !terminalError,
                 };
             }
             const wave = plan.waves[waveIndex];
@@ -2609,6 +2860,9 @@ export async function orchestrateManualCatchUp_ACU(
                         success: false, outcome: 'stopped',
                         error: terminalError ? `手动追平已终止；终态进度保存失败：${terminalError}` : '手动追平已终止。',
                         committedBucketCount, catchUpPlan: plan,
+                        dataCommitted: committedBucketCount > 0,
+                        replayVerified: false,
+                        terminalProgressSaved: !terminalError,
                     };
                 }
                 const groupChunk = wave.groups.slice(groupStart, groupStart + maxConcurrentGroups);
@@ -2662,6 +2916,7 @@ export async function orchestrateManualCatchUp_ACU(
                         bucket.sheetKeys.forEach(sheetKey => {
                             completedSheetMessageIndexByKey[sheetKey] = bucket.saveTargetIndex;
                         });
+                        lastCommittedBucketTargetIndex = bucket.saveTargetIndex;
                     },
                 });
                 committedBucketCount += result.committedBucketCount;
@@ -2676,10 +2931,39 @@ export async function orchestrateManualCatchUp_ACU(
                         error: terminalError ? `${primaryError}；终态进度保存失败：${terminalError}` : primaryError,
                         committedBucketCount,
                         catchUpPlan: plan,
+                        dataCommitted: committedBucketCount > 0,
+                        replayVerified: false,
+                        terminalProgressSaved: !terminalError,
                     };
                 }
             }
             await loadAllChatMessages_ACU();
+        }
+
+        const replayVerification = await verifyCommittedCatchUpReplay();
+        if (replayVerification.error) {
+            // 任何 bucket 在内存中的成功都不足以证明已交付。回放失败后不能继续刷新世界书，
+            // 更不能写 complete/failed progress 掩盖不可验证的持久化状态。
+            let reloadError: string | undefined;
+            try {
+                const reloadResult = await reloadStorageProvider();
+                if (!reloadResult.ok) {
+                    reloadError = reloadResult.error || reloadResult.failureCode || '存储运行时重载未完成。';
+                }
+            } catch (error: any) {
+                reloadError = error?.message || String(error || '存储运行时重载异常。');
+            }
+            return {
+                success: false,
+                outcome: 'integrity_failed',
+                error: `手动追平持久化完整性校验失败：${replayVerification.error}${reloadError ? `；聊天状态回载失败：${reloadError}` : '；已从聊天持久化状态回载运行时。'}`,
+                committedBucketCount,
+                dataCommitted: committedBucketCount > 0,
+                replayVerified: false,
+                terminalProgressSaved: false,
+                diagnosticCode: replayVerification.diagnosticCode,
+                catchUpPlan: plan,
+            };
         }
 
         const refreshResult = await refreshData();
@@ -2687,9 +2971,15 @@ export async function orchestrateManualCatchUp_ACU(
             const terminalError = await persistCatchUpTerminalProgress('sync_pending');
             if (terminalError) {
                 return {
-                    success: false,
+                    // 世界书同步已经明确处于待重试状态；terminal progress 同样只是恢复
+                    // 辅助元数据，不能把已提交的表数据误报成失败。
+                    success: true,
+                    outcome: 'progress_metadata_failed',
                     error: `手动追平数据已提交且世界书同步待重试，但终态进度保存失败：${terminalError}`,
                     committedBucketCount,
+                    dataCommitted: committedBucketCount > 0,
+                    replayVerified: true,
+                    terminalProgressSaved: false,
                     catchUpPlan: plan,
                 };
             }
@@ -2697,19 +2987,28 @@ export async function orchestrateManualCatchUp_ACU(
                 success: true,
                 outcome: 'sync_pending',
                 committedBucketCount,
+                dataCommitted: committedBucketCount > 0,
+                replayVerified: true,
+                terminalProgressSaved: true,
                 catchUpPlan: plan,
             };
         }
         const terminalError = await persistCatchUpTerminalProgress('complete');
         if (terminalError) {
             return {
-                success: false,
+                // bucket 已严格提交并完成最终刷新；终态进度是恢复辅助元数据，失败不能
+                // 反向篡改“表数据已提交”的事实。
+                success: true,
+                outcome: 'progress_metadata_failed',
                 error: `手动追平数据与世界书同步已完成，但终态进度保存失败：${terminalError}`,
                 committedBucketCount,
+                dataCommitted: committedBucketCount > 0,
+                replayVerified: true,
+                terminalProgressSaved: false,
                 catchUpPlan: plan,
             };
         }
-        return { success: true, outcome: 'complete', committedBucketCount, catchUpPlan: plan };
+        return { success: true, outcome: 'complete', committedBucketCount, dataCommitted: committedBucketCount > 0, replayVerified: true, terminalProgressSaved: true, catchUpPlan: plan };
     } catch (error: any) {
         const primaryError = error?.message || String(error || '手动追平执行异常。');
         const terminalError = await persistCatchUpTerminalProgress('failed', primaryError);
@@ -2719,6 +3018,9 @@ export async function orchestrateManualCatchUp_ACU(
             error: terminalError ? `${primaryError}；终态进度保存失败：${terminalError}` : primaryError,
             committedBucketCount,
             catchUpPlan: plan,
+            dataCommitted: committedBucketCount > 0,
+            replayVerified: false,
+            terminalProgressSaved: !terminalError,
         };
     } finally {
         _set_isAutoUpdatingCard_ACU(false);

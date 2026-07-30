@@ -1317,6 +1317,117 @@ type PreservedInitialCheckpointSlot_ACU = {
     tagData: Record<string, any>;
 };
 
+export type ManualCatchUpAnchorPreflightResult_ACU =
+    | { status: 'ready'; checkpointMessageIndex: number | null }
+    | { status: 'repaired'; checkpointMessageIndex: number }
+    | { status: 'blocked'; error: string };
+
+function isEmptyResetEvent_ACU(event: any): boolean {
+    return !!event && Array.isArray(event.filledSheetKeys) && event.filledSheetKeys.length === 0
+        && Array.isArray(event.changedSheetKeys) && event.changedSheetKeys.length === 0
+        && Array.isArray(event.groupKeys) && event.groupKeys.length === 0;
+}
+
+function isSafeHeaderOnlyResetCheckpoint_ACU(frame: any): boolean {
+    const checkpoint = frame?.checkpoint;
+    if (checkpoint?.kind !== 'full' || checkpoint.reason !== 'init' || !checkpoint.data || typeof checkpoint.data !== 'object') return false;
+    if (!isEmptyResetEvent_ACU(checkpoint.event)) return false;
+    if (checkpoint.scheduleSummary !== undefined || checkpoint.manualRefillProgress !== undefined) return false;
+    if ((frame.logEntries || []).length > 0 || frame.manualRefillProgress !== undefined || frame.headRevision !== undefined) return false;
+    if (frame.perSheetCheckpoints !== undefined && Object.keys(frame.perSheetCheckpoints || {}).length > 0) return false;
+    const sheetKeys = Object.keys(checkpoint.data).filter(key => key.startsWith('sheet_'));
+    return sheetKeys.length > 0 && sheetKeys.every(sheetKey => Array.isArray(checkpoint.data[sheetKey]?.content) && checkpoint.data[sheetKey].content.length === 1);
+}
+
+/**
+ * 兼容旧版“全范围删除后仍把 reset checkpoint 留在较晚楼层”的聊天。
+ *
+ * 只移动可证明是 header-only reset 的唯一 init checkpoint；任何真实数据、未知增量或
+ * 多 checkpoint 都 fail-closed。调用方必须在发起 AI 请求前调用，避免付出请求成本后才
+ * 因 checkpoint 位于追平范围之后而失败。
+ */
+export async function ensureManualCatchUpAnchorBeforeTarget_ACU(
+    targetMessageIndex: number,
+    isolationKey = getCurrentIsolationKey_ACU(),
+): Promise<ManualCatchUpAnchorPreflightResult_ACU> {
+    return runTableWriteTransaction_ACU({
+        source: 'system_cleanup',
+        reason: 'ensureManualCatchUpAnchorBeforeTarget',
+        isolationKey,
+        writeSet: [{ kind: 'all' }],
+        maintenanceMode: 'exclusive',
+    }, async () => {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0) return { status: 'blocked', error: '聊天记录为空，无法验证手动追平锚点。' };
+        const aiMessageIndices = chat.map((message, index) => !message?.is_user ? index : -1).filter(index => index >= 0);
+        if (!Number.isInteger(targetMessageIndex) || targetMessageIndex < 0 || !chat[targetMessageIndex] || chat[targetMessageIndex].is_user) {
+            return { status: 'blocked', error: '手动追平目标楼层无效，无法验证 V2 锚点。' };
+        }
+        const checkpoints = aiMessageIndices.filter(index => {
+            const tagData = readIsolatedTagData_ACU(chat[index], isolationKey) as any;
+            return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
+        });
+        if (checkpoints.length === 0) return { status: 'ready', checkpointMessageIndex: null };
+        const checkpointMessageIndex = checkpoints[checkpoints.length - 1];
+        if (checkpointMessageIndex <= targetMessageIndex) return { status: 'ready', checkpointMessageIndex };
+        if (checkpoints.length !== 1) {
+            return { status: 'blocked', error: '手动追平目标早于多个 V2 full checkpoint；无法安全自动重排历史，请先执行 V2 恢复诊断。' };
+        }
+
+        const unsafeArtifactIndex = aiMessageIndices.find(index => {
+            if (index === checkpointMessageIndex) return false;
+            const tagData = readIsolatedTagData_ACU(chat[index], isolationKey) as any;
+            if (!isV2TagData_ACU(tagData)) return false;
+            const frame = tagData.storageFrame;
+            return (frame.logEntries || []).length > 0
+                || Object.keys(frame.perSheetCheckpoints || {}).length > 0
+                || frame.manualRefillProgress !== undefined
+                || (frame.headRevision !== undefined && frame.headRevision !== null);
+        });
+        if (unsafeArtifactIndex !== undefined) {
+            return { status: 'blocked', error: `手动追平目标之前存在无法安全重排的 V2 增量 artifact（messageIndex=${unsafeArtifactIndex}）；请先执行 V2 恢复诊断。` };
+        }
+
+        const sourceMessage = chat[checkpointMessageIndex];
+        const sourceTagData = readIsolatedTagData_ACU(sourceMessage, isolationKey) as any;
+        if (!isV2TagData_ACU(sourceTagData) || !isSafeHeaderOnlyResetCheckpoint_ACU(sourceTagData.storageFrame)) {
+            return { status: 'blocked', error: '手动追平目标早于包含真实数据或未知历史的 V2 checkpoint；已在调用 AI 前阻止写入，请先执行 V2 恢复诊断。' };
+        }
+
+        const anchorMessageIndex = aiMessageIndices[0];
+        const anchorMessage = chat[anchorMessageIndex];
+        const affectedMessages = [...new Set([anchorMessageIndex, checkpointMessageIndex])].map(index => ({
+            message: chat[index],
+            hadIsolatedData: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_IsolatedData'),
+            isolatedData: chat[index].TavernDB_ACU_IsolatedData,
+            hadIdentity: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_Identity'),
+            identity: chat[index].TavernDB_ACU_Identity,
+        }));
+        try {
+            const sourceContainer = readIsolatedDataContainer_ACU(sourceMessage) || {};
+            delete sourceContainer[isolationKey];
+            if (Object.keys(sourceContainer).length === 0) delete sourceMessage.TavernDB_ACU_IsolatedData;
+            else sourceMessage.TavernDB_ACU_IsolatedData = sourceContainer;
+
+            const anchorContainer = readIsolatedDataContainer_ACU(anchorMessage) || {};
+            anchorContainer[isolationKey] = JSON.parse(JSON.stringify(sourceTagData));
+            anchorMessage.TavernDB_ACU_IsolatedData = anchorContainer;
+            writeMessageIdentity_ACU(anchorMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
+            await saveChatToHostStrict_ACU();
+        } catch (error: any) {
+            for (const state of affectedMessages) {
+                if (state.hadIsolatedData) state.message.TavernDB_ACU_IsolatedData = state.isolatedData;
+                else delete state.message.TavernDB_ACU_IsolatedData;
+                if (state.hadIdentity) state.message.TavernDB_ACU_Identity = state.identity;
+                else delete state.message.TavernDB_ACU_Identity;
+            }
+            return { status: 'blocked', error: `手动追平 reset checkpoint 前移保存失败：${error?.message || String(error)}` };
+        }
+        logDebug_ACU(`[手动追平] 已将 header-only reset checkpoint 从 #${checkpointMessageIndex} 前移到 #${anchorMessageIndex}。`);
+        return { status: 'repaired', checkpointMessageIndex: anchorMessageIndex };
+    });
+}
+
 /**
  * 全范围清空时保留每个隔离域最早的 init checkpoint 结构锚点。
  *
@@ -1501,11 +1612,15 @@ async function deleteLocalDataInChatCoreInner_ACU(
         }
     }
 
-    // “删除全部数据”清空行数据和增量历史，但保留原始 init 的 header-only 锚点。
-    // 否则下一次切模板会把该聊天误判为 pristine，并在最新楼层新建“初始基线”。
+    // “删除全部数据”清空行数据和增量历史，但保留 init 的 header-only 锚点。
+    //
+    // 锚点必须落在最早 AI 楼层，而不能留在它原先出现的较晚楼层：一键追平可以
+    // 因 skipUpdateFloors 写入该旧锚点之前的消息；V2 replay 只从目标边界内最后一个
+    // full checkpoint 开始，那些写入会变成不可回放的伪提交。
     const latestAiMessageIndex = aiMessageIndices[aiMessageIndices.length - 1];
+    const resetAnchorMessageIndex = aiMessageIndices[0];
     for (const preserved of preservedInitialCheckpoints) {
-        const anchorMessage = chat[preserved.messageIndex];
+        const anchorMessage = chat[resetAnchorMessageIndex];
         if (!anchorMessage || anchorMessage.is_user) continue;
         const anchorIsolatedData = readIsolatedDataContainer_ACU(anchorMessage) || {};
         anchorIsolatedData[preserved.isolationKey] = preserved.tagData as any;
@@ -1514,7 +1629,7 @@ async function deleteLocalDataInChatCoreInner_ACU(
         // 既有 checkpoint 分支要求当前最新 AI 楼层有合法 V2 frame，模板 rebase/introduction
         // 也必须落在该数据边界。清空后补一个无日志空 frame，不携带任何表数据。
         const boundaryMessage = chat[latestAiMessageIndex];
-        if (boundaryMessage && !boundaryMessage.is_user && latestAiMessageIndex !== preserved.messageIndex) {
+        if (boundaryMessage && !boundaryMessage.is_user && latestAiMessageIndex !== resetAnchorMessageIndex) {
             const boundaryIsolatedData = readIsolatedDataContainer_ACU(boundaryMessage) || {};
             boundaryIsolatedData[preserved.isolationKey] = {
                 _acu_storage_version: 2,
@@ -1527,7 +1642,7 @@ async function deleteLocalDataInChatCoreInner_ACU(
                 enabled: settings_ACU.dataIsolationEnabled,
                 code: settings_ACU.dataIsolationCode,
             });
-            if (boundaryMessage && latestAiMessageIndex !== preserved.messageIndex) {
+            if (boundaryMessage && latestAiMessageIndex !== resetAnchorMessageIndex) {
                 writeMessageIdentity_ACU(boundaryMessage, {
                     enabled: settings_ACU.dataIsolationEnabled,
                     code: settings_ACU.dataIsolationCode,

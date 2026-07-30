@@ -62,6 +62,10 @@ describe('sql read resolver', () => {
       .toBe("SELECT '内容' AS 内容 /* 内容 */");
     expect(resolveReadQuerySql_ACU('SELECT 1 内容', null, translate).sql)
       .toBe('SELECT 1 内容');
+    expect(resolveReadQuerySql_ACU('SELECT 内容 FROM (SELECT 1 AS 内容) AS derived_values ORDER BY 内容', null, translate).sql)
+      .toBe('SELECT 内容 FROM (SELECT 1 AS 内容) AS derived_values ORDER BY 内容');
+    expect(resolveReadQuerySql_ACU('SELECT derived_values."内容" FROM (SELECT 1 AS "内容") AS derived_values', null, translate).sql)
+      .toBe('SELECT derived_values."内容" FROM (SELECT 1 AS "内容") AS derived_values');
   });
 
   it('零 token 命中时保护复杂投影表达式的隐式输出别名', () => {
@@ -131,5 +135,54 @@ describe('sql read resolver', () => {
       tableRebindCount: 0,
       conflicts: ['legacy'],
     });
+  });
+
+  it('保留派生表输出别名的外层引用，即使它命中实体显示列映射', () => {
+    const tableData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'sheet_0',
+        name: 'People',
+        sourceData: { ddl: 'CREATE TABLE people (row_id INTEGER PRIMARY KEY, name TEXT -- 姓名);' },
+        content: [['row_id', '姓名'], ['1', 'Ada']],
+      },
+    } as any;
+    const translate = (sql: string) => sql.replaceAll('姓名', 'name');
+
+    expect(resolveReadQuerySql_ACU(
+      'SELECT 姓名 FROM (SELECT name AS 姓名 FROM people) AS derived_people ORDER BY 姓名',
+      tableData,
+      translate,
+    ).sql).toBe(
+      'SELECT 姓名 FROM (SELECT name AS 姓名 FROM people) AS derived_people ORDER BY 姓名',
+    );
+  });
+
+  it('保护 CTE 显式列清单和 UNION 第一分支导出的显示列', () => {
+    const tableData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'sheet_0',
+        name: 'People',
+        sourceData: { ddl: 'CREATE TABLE people (row_id INTEGER PRIMARY KEY, name TEXT -- 姓名);' },
+        content: [['row_id', '姓名'], ['1', 'Ada']],
+      },
+    } as any;
+    const translate = (sql: string) => sql.replaceAll('姓名', 'name').replaceAll('别名', 'alias');
+
+    expect(resolveReadQuerySql_ACU(
+      'WITH people_view(姓名) AS (SELECT name FROM people) SELECT 姓名 FROM people_view ORDER BY 姓名',
+      tableData,
+      translate,
+    ).sql).toBe(
+      'WITH people_view(姓名) AS (SELECT name FROM people) SELECT 姓名 FROM people_view ORDER BY 姓名',
+    );
+    expect(resolveReadQuerySql_ACU(
+      'SELECT derived_people.姓名 FROM (SELECT name AS 姓名 FROM people UNION ALL SELECT name AS 别名 FROM people) AS derived_people ORDER BY derived_people.姓名',
+      tableData,
+      translate,
+    ).sql).toBe(
+      'SELECT derived_people.姓名 FROM (SELECT name AS 姓名 FROM people UNION ALL SELECT name AS 别名 FROM people) AS derived_people ORDER BY derived_people.姓名',
+    );
   });
 });

@@ -165,6 +165,61 @@ describe('sql mutation table rebind', () => {
     expect(derived.sql).toBe('SELECT sub.item_name FROM runtime_other JOIN (SELECT physical_item AS item_name FROM runtime_inventory) AS sub ON 1 = 1');
   });
 
+  it('将派生表和 CTE 输出视为虚拟列，而不是实体列别名', () => {
+    const aliases = new Map([['people', 'runtime_people'], ['other', 'runtime_other']]);
+    const columns = new Map([
+      ['runtime_people', new Map([['姓名', 'physical_name']])],
+      ['runtime_other', new Map([['姓名', 'other_name']])],
+    ]);
+    const derived = rebindSqlReadIdentifiers_ACU(
+      'SELECT 姓名, d.姓名 FROM other JOIN (SELECT physical_name AS 姓名 FROM people) AS d ON 1 = 1 ORDER BY 姓名',
+      aliases,
+      columns,
+    );
+    const cte = rebindSqlReadIdentifiers_ACU(
+      'WITH people_view(姓名) AS (SELECT physical_name FROM people) SELECT 姓名 FROM people_view ORDER BY 姓名',
+      aliases,
+      columns,
+    );
+
+    expect(derived.sql).toBe('SELECT 姓名, d.姓名 FROM runtime_other JOIN (SELECT physical_name AS 姓名 FROM runtime_people) AS d ON 1 = 1 ORDER BY 姓名');
+    expect(cte.sql).toBe('WITH people_view(姓名) AS (SELECT physical_name FROM runtime_people) SELECT 姓名 FROM people_view ORDER BY 姓名');
+  });
+
+  it('以 UNION 第一分支的输出别名保护派生表外层引用', () => {
+    const result = rebindSqlReadIdentifiers_ACU(
+      'SELECT d.姓名 FROM (SELECT name_a AS 姓名 FROM first_source UNION ALL SELECT name_b AS 别名 FROM second_source) AS d ORDER BY d.姓名',
+      new Map([['first_source', 'runtime_first'], ['second_source', 'runtime_second']]),
+      new Map([
+        ['runtime_first', new Map([['姓名', 'name_a']])],
+        ['runtime_second', new Map([['别名', 'name_b']])],
+      ]),
+    );
+
+    expect(result.sql).toBe('SELECT d.姓名 FROM (SELECT name_a AS 姓名 FROM runtime_first UNION ALL SELECT name_b AS 别名 FROM runtime_second) AS d ORDER BY d.姓名');
+  });
+
+  it('在输出别名排序及未知派生输出场景保守地保留列标识符', () => {
+    const aliases = new Map([['people', 'runtime_people'], ['other', 'runtime_other']]);
+    const columns = new Map([
+      ['runtime_people', new Map([['姓名', 'physical_name']])],
+      ['runtime_other', new Map([['姓名', 'other_name']])],
+    ]);
+    const outputAlias = rebindSqlReadIdentifiers_ACU(
+      'SELECT physical_name AS 姓名 FROM people ORDER BY 姓名',
+      aliases,
+      columns,
+    );
+    const unknownDerived = rebindSqlReadIdentifiers_ACU(
+      'SELECT 姓名, d.姓名 FROM other JOIN (SELECT * FROM people) AS d ON 1 = 1',
+      aliases,
+      columns,
+    );
+
+    expect(outputAlias.sql).toBe('SELECT physical_name AS 姓名 FROM runtime_people ORDER BY 姓名');
+    expect(unknownDerived.sql).toBe('SELECT 姓名, d.姓名 FROM runtime_other JOIN (SELECT * FROM runtime_people) AS d ON 1 = 1');
+  });
+
   it('不将函数名视为列标识符', () => {
     const result = rebindSqlReadIdentifiers_ACU(
       'SELECT count(*) FROM inventory',

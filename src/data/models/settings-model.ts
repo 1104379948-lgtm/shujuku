@@ -51,6 +51,8 @@ export interface Settings_ACU {
   autoUpdateThresholdNewMessages: number;
   autoUpdateThresholdInterval: number;
   tableMaxRetries: number;
+  /** 丢弃可证明仅影响非目标表的 SQL 语句；混合/无法归属写入仍保持失败。 */
+  discardUnauthorizedTableEditsEnabled: boolean;
   worldbookConfig: WorldbookConfig_ACU;
   plotSettings: PlotSettings_ACU;
   mergeSummaryPrompt: string;

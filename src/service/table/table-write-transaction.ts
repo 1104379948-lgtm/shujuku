@@ -5,6 +5,13 @@ import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsol
 type ReleaseLock_ACU = () => void;
 type LockMode_ACU = 'read' | 'write';
 
+export class TableRuntimeRevisionConflictError_ACU extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TableRuntimeRevisionConflictError';
+  }
+}
+
 interface QueuedLockRequest_ACU {
   mode: LockMode_ACU;
   resolve: (release: ReleaseLock_ACU) => void;
@@ -116,14 +123,14 @@ function assertRuntimeRevisionFresh_ACU(scopeKey: string, baseRevision: string |
   const snapshot = decodeRuntimeRevisionSnapshot_ACU(baseRevision);
   if (!snapshot) return;
   if (snapshot.scopeKey && snapshot.scopeKey !== scopeKey) {
-    throw new Error(`[RuntimeRevision] 写入基准作用域不匹配，请重新读取当前运行时数据后重试。reason=${reason}`);
+    throw new TableRuntimeRevisionConflictError_ACU(`[RuntimeRevision] 写入基准作用域不匹配，请重新读取当前运行时数据后重试。reason=${reason}`);
   }
   const state = getRuntimeRevisionState_ACU(scopeKey);
   if (snapshot.all && state.global !== snapshot.global) {
-    throw new Error(`[RuntimeRevision] 运行时数据已变化：base=${snapshot.global}, current=${state.global}。请重新读取当前数据后重试。reason=${reason}`);
+    throw new TableRuntimeRevisionConflictError_ACU(`[RuntimeRevision] 运行时数据已变化：base=${snapshot.global}, current=${state.global}。请重新读取当前数据后重试。reason=${reason}`);
   }
   if (state.allRevision !== snapshot.allRevision) {
-    throw new Error(`[RuntimeRevision] 运行时全局数据已变化：baseAll=${snapshot.allRevision}, currentAll=${state.allRevision}。请重新读取当前数据后重试。reason=${reason}`);
+    throw new TableRuntimeRevisionConflictError_ACU(`[RuntimeRevision] 运行时全局数据已变化：baseAll=${snapshot.allRevision}, currentAll=${state.allRevision}。请重新读取当前数据后重试。reason=${reason}`);
   }
   // `all` 快照在捕获时不记录任何 per-sheet 基准（snapshot.sheets 为空），其新鲜度已由上面的
   // global 检查完整保证。此时不能再用缺省基准 0 去比对具体表的 per-sheet revision，否则任何
@@ -136,7 +143,7 @@ function assertRuntimeRevisionFresh_ACU(scopeKey: string, baseRevision: string |
     const expected = Number(snapshot.sheets?.[sheetKey] || 0);
     const actual = state.sheets.get(sheetKey) || 0;
     if (actual !== expected) {
-      throw new Error(`[RuntimeRevision] 表 ${sheetKey} 已变化：base=${expected}, current=${actual}。请重新读取当前运行时数据后重试。reason=${reason}`);
+      throw new TableRuntimeRevisionConflictError_ACU(`[RuntimeRevision] 表 ${sheetKey} 已变化：base=${expected}, current=${actual}。请重新读取当前运行时数据后重试。reason=${reason}`);
     }
   }
 }

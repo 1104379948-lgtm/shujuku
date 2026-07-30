@@ -31,6 +31,7 @@ vi.mock('../../../src/service/table/table-storage-strategy', () => ({
 }));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: mocks.transaction,
+  TableRuntimeRevisionConflictError_ACU: class TableRuntimeRevisionConflictError_ACU extends Error {},
 }));
 
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../src/service/table/table-update-commit';
@@ -112,6 +113,23 @@ describe('runTableUpdateCommit_ACU migration gate', () => {
     });
     expect(mocks.transaction).not.toHaveBeenCalled();
     expect(apply).not.toHaveBeenCalled();
+    expect(mocks.persist).not.toHaveBeenCalled();
+    expect(mocks.setCurrentData).not.toHaveBeenCalled();
+  });
+
+  it('RuntimeRevision 冲突返回一等 conflict 类别而不是 infrastructure', async () => {
+    mocks.migration.mockResolvedValue({ success: true, migrated: false });
+    mocks.transaction.mockRejectedValueOnce(Object.assign(new Error('[RuntimeRevision] 表 sheet_0 已变化'), {
+      name: 'TableRuntimeRevisionConflictError',
+    }));
+
+    const result = await runTableUpdateCommit_ACU(options('test_runtime_conflict'), vi.fn());
+
+    expect(result).toEqual({
+      success: false,
+      error: '[RuntimeRevision] 表 sheet_0 已变化',
+      errorCategory: 'conflict',
+    });
     expect(mocks.persist).not.toHaveBeenCalled();
     expect(mocks.setCurrentData).not.toHaveBeenCalled();
   });

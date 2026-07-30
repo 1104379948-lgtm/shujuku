@@ -205,7 +205,7 @@ function protectImplicitSelectAliases_ACU(masked: string, mask: (value: string) 
   return result;
 }
 
-function translateLegacyReadSqlSafely_ACU(sql: string, translateSql: (sql: string) => string): string {
+function translateLegacyReadSqlSafely_ACU(sql: string, translateSql: (sql: string) => string, protectedIdentifierSpans: ReadonlyArray<{ start: number; end: number }> = []): string {
   const protectedParts: string[] = [];
   let masked = '';
   let index = 0;
@@ -214,7 +214,14 @@ function translateLegacyReadSqlSafely_ACU(sql: string, translateSql: (sql: strin
     protectedParts.push(value);
     return marker;
   };
+  const protectedByStart = new Map(protectedIdentifierSpans.map(span => [span.start, span]));
   while (index < sql.length) {
+    const protectedSpan = protectedByStart.get(index);
+    if (protectedSpan && protectedSpan.end > index) {
+      masked += mask(sql.slice(index, protectedSpan.end));
+      index = protectedSpan.end;
+      continue;
+    }
     const char = sql[index];
     const next = sql[index + 1];
     if (char === '-' && next === '-') {
@@ -256,7 +263,15 @@ function translateLegacyReadSqlSafely_ACU(sql: string, translateSql: (sql: strin
     ;
   const protectedOutputAliases = protectImplicitSelectAliases_ACU(protectedAliases, mask);
   const translated = translateSql(protectedOutputAliases);
-  return translated.replace(/__ACU_SQL_PROTECTED_(\d+)__/g, (_match, value) => protectedParts[Number(value)] || '');
+  let restored = translated;
+  // Quoted identifiers are masked before explicit AS aliases are masked. The
+  // latter can therefore contain an earlier marker; restore to a fixed point.
+  for (let pass = 0; pass < protectedParts.length; pass += 1) {
+    const next = restored.replace(/__ACU_SQL_PROTECTED_(\d+)__/g, (_match, value) => protectedParts[Number(value)] || '');
+    if (next === restored) break;
+    restored = next;
+  }
+  return restored;
 }
 
 export function resolveReadQuerySql_ACU(
@@ -267,7 +282,13 @@ export function resolveReadQuerySql_ACU(
   // PRAGMA arguments are SQLite grammar rather than SELECT identifiers.
   // Do not run a broad legacy translation over them.
   if (/^\s*PRAGMA\b/i.test(sql)) return { sql, tableRebindCount: 0, columnRebindCount: 0 };
-  if (!tableData) return { sql: translateLegacyReadSqlSafely_ACU(sql, translateSql), tableRebindCount: 0, columnRebindCount: 0 };
+  if (!tableData) {
+    // Even without runtime table data, the legacy mapper must still respect
+    // derived/CTE output scope. Run the structural pass with no aliases solely
+    // to collect protected virtual-output spans.
+    const rebound = rebindSqlReadIdentifiers_ACU(sql, new Map(), new Map(), { lenient: true });
+    return { ...rebound, sql: translateLegacyReadSqlSafely_ACU(rebound.sql, translateSql, rebound.protectedIdentifierSpans) };
+  }
   const { aliases: tableAliases, conflicts: tableConflicts } = buildSheetTableAliasMap_ACU([tableData]);
   const { aliases: columnAliases, conflicts: columnConflicts } = buildSheetColumnAliasMap_ACU([tableData]);
 
@@ -283,7 +304,7 @@ export function resolveReadQuerySql_ACU(
   const referencedTableConflicts = [...tableConflicts].filter(conflict => referencedTableAliases.has(conflict));
   return {
     ...rebound,
-    sql: translateLegacyReadSqlSafely_ACU(rebound.sql, translateSql),
+    sql: translateLegacyReadSqlSafely_ACU(rebound.sql, translateSql, rebound.protectedIdentifierSpans),
     tableConflicts: referencedTableConflicts,
     columnConflicts: [...referencedColumnConflicts],
     conflicts: [...referencedTableConflicts, ...referencedColumnConflicts],
