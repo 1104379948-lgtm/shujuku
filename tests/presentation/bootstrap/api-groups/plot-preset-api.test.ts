@@ -79,6 +79,29 @@ describe('initGameSession 模板重置契约', () => {
     expect(result).toMatchObject({ success: true, templateInjected: true });
   });
 
+  it('reset 成功后用已提交的规范化模板注册预设，而非原始缺列输入', async () => {
+    const templateData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_summary_log: { uid: 'sheet_summary_log', name: 'SummaryLog', content: [['时间', '摘要'], ['T1', '事件']] },
+    };
+    const committedTemplateData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_summary_log: { uid: 'sheet_summary_log', name: 'SummaryLog', content: [['row_id', '时间', '摘要'], ['1', 'T1', '事件']] },
+    };
+    mocks.resetFromTemplate.mockResolvedValueOnce({
+      saved: true, messageIndex: 0, runtimeReady: true, normalizedTemplateData: committedTemplateData,
+    });
+
+    const result = await createApi().initGameSession({}, {
+      templateData, templatePresetName: '规范化预设', loadPreset: false,
+    });
+
+    expect(result).toMatchObject({ success: true, templateInjected: true });
+    expect(mocks.sanitizeTemplate).toHaveBeenCalledWith(committedTemplateData);
+    expect(mocks.sanitizeTemplate).not.toHaveBeenCalledWith(templateData);
+    expect(mocks.upsertTemplatePreset).toHaveBeenCalledWith('规范化预设', JSON.stringify(committedTemplateData));
+  });
+
   it('原子提交失败时返回失败，不能以 guide-only fallback 伪造模板注入成功', async () => {
     mocks.resetFromTemplate.mockResolvedValueOnce({ saved: false, error: '严格保存失败，状态已回滚。' });
 

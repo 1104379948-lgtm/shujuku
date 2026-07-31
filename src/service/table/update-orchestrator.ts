@@ -21,6 +21,7 @@ import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider
 import { rebindSheetKeysThroughTableAliases_ACU, resolveHistoricalSheetKeyMigrations_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
+import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
 
 import { applyTableDelta_ACU, isDeltaTagData_ACU } from './table-delta';
 /**
@@ -150,9 +151,10 @@ export interface GroupFillJob_ACU {
     /** AI 请求发起前锁定的提交作用域；后续不得重新读取全局当前聊天。 */
     chatKey?: string;
     isolationKey?: string;
-    chatSnapshot?: any[];
     templateScope?: TemplateScope_ACU;
     sqlApplyScope?: SqlTableApplyScope_ACU;
+    performanceRunId?: string;
+    performanceParentSpanId?: string;
 }
 
 export interface GroupFillResponse_ACU {
@@ -177,7 +179,7 @@ export interface UnifiedApplyAttempt_ACU {
 interface FillExecutionScope_ACU {
     chatKey: string;
     isolationKey: string;
-    chatSnapshot: any[];
+    promptMessages: any[];
     templateScope: TemplateScope_ACU;
     sqlApplyScope?: SqlTableApplyScope_ACU;
 }
@@ -206,18 +208,39 @@ function resolveManualRefillTemplateData_ACU(chat: any[], isolationKey: string):
     return snapshot.templateObj as Record<string, any>;
 }
 
-function captureFillExecutionScope_ACU(): FillExecutionScope_ACU {
+function capturePromptMessageSnapshot_ACU(messages: any[]): any[] {
+    return messages.map(message => {
+        if (!message || typeof message !== 'object') return {};
+        return {
+            is_user: message.is_user === true,
+            ...(typeof message.name === 'string' ? { name: message.name } : {}),
+            ...(typeof message.mes === 'string' ? { mes: message.mes } : {}),
+            ...(typeof message.message === 'string' ? { message: message.message } : {}),
+        };
+    });
+}
+
+function captureFillExecutionScope_ACU(
+    performanceContext?: { runId?: string; parentSpanId?: string },
+): FillExecutionScope_ACU {
+    const performanceSpan = startRuntimePerformanceSpan_ACU('fill-execution-scope-capture', {
+        ...performanceContext,
+        settings: settings_ACU,
+        metrics: { sqlite: isSqliteMode() },
+    });
     const chatKey = String(currentChatFileIdentifier_ACU || 'current-chat');
     const isolationKey = getCurrentIsolationKey_ACU();
     const liveChat = getChatArray_ACU() || [];
-    const chatSnapshot = JSON.parse(JSON.stringify(liveChat));
+    const promptMessages = capturePromptMessageSnapshot_ACU(liveChat);
     const sqlApplyScope = isSqliteMode()
         ? captureSqlTableApplyScope_ACU({ chat: liveChat, isolationKey })
         : undefined;
     const templateScope = sqlApplyScope
         ? buildTemplateScopeFromData_ACU(sqlApplyScope.templateData)
         : resolveTemplateScope_ACU(isolationKey);
-    return { chatKey, isolationKey, chatSnapshot, templateScope, sqlApplyScope };
+    const result = { chatKey, isolationKey, promptMessages, templateScope, sqlApplyScope };
+    performanceSpan.end({ messageCount: liveChat.length });
+    return result;
 }
 
 interface ManualRuntimeUpdateGroup_ACU {
@@ -573,34 +596,6 @@ function getRuntimeTableDataSnapshot_ACU(fallbackData: Record<string, any> | nul
     return null;
 }
 
-function resolveLatestAiMessageIndex_ACU(chat: any[]): number {
-    if (!Array.isArray(chat)) return -1;
-    for (let index = chat.length - 1; index >= 0; index -= 1) {
-        if (chat[index] && !chat[index].is_user) return index;
-    }
-    return -1;
-}
-
-function canReplayConflictOnLatestRuntime_ACU(saveTargetIndex: number, chat: any[]): boolean {
-    return Number.isInteger(saveTargetIndex)
-        && saveTargetIndex >= 0
-        && saveTargetIndex === resolveLatestAiMessageIndex_ACU(chat);
-}
-
-function rebaseGroupFillResponses_ACU(
-    responses: GroupFillResponse_ACU[],
-    baseSnapshot: Record<string, any>,
-    baseRevision: string,
-): GroupFillResponse_ACU[] {
-    return responses.map(response => ({
-        ...response,
-        job: {
-            ...response.job,
-            baseSnapshot,
-            baseRevision,
-        },
-    }));
-}
 
 
 function mergeGuideStructureIntoBaseData_ACU(data: Record<string, any>): Record<string, any> {
@@ -797,6 +792,16 @@ export async function collectGroupFillResponse_ACU(
     const maxRetries = options.maxRetriesOverride || settings_ACU.tableMaxRetries || 3;
     if (isStopped()) return { job, success: false, attempt: 0, aborted: true };
     options.onProgress?.({ phase: 'preparing', attempt: 1, maxRetries: 1 });
+    const prepareSpan = startRuntimePerformanceSpan_ACU('table-fill-prepare-ai-input', {
+        runId: job.performanceRunId,
+        parentSpanId: job.performanceParentSpanId,
+        settings: settings_ACU,
+        metrics: {
+            messageCount: job.messagesForContext.length,
+            sheetCount: Array.isArray(job.targetSheetKeys) ? job.targetSheetKeys.length : 0,
+            sqlite: isSqliteMode(),
+        },
+    });
     let dynamicContent: any = null;
     try {
         dynamicContent = await prepareAIInput_ACU(job.messagesForContext, job.updateMode, job.targetSheetKeys, {
@@ -809,9 +814,11 @@ export async function collectGroupFillResponse_ACU(
             signal: effectiveAbortController.signal,
         });
     } catch (error: any) {
+        prepareSpan.end({ success: false });
         if (error?.name === 'AbortError' || isStopped()) return { job, success: false, attempt: 0, aborted: true };
         throw error;
     }
+    prepareSpan.end({ success: Boolean(dynamicContent) });
     if (dynamicContent && typeof dynamicContent === 'object' && dynamicContent.ok === false) {
         const failure = dynamicContent as { failureCode?: string; message?: string };
         const error = `无法准备AI输入（${failure.failureCode || 'provider_load_failed'}）：${failure.message || 'SQLite 运行时未就绪。'}`;
@@ -861,11 +868,24 @@ export async function collectGroupFillResponse_ACU(
         }
 
         try {
-            const aiResponse = await callCustomOpenAI_ACU(dynamicContent, effectiveAbortController, {
-                ...(job.requestOptions || {}),
-                tableData: job.baseSnapshot,
-                targetSheetKeys: job.targetSheetKeys,
+            const aiWaitSpan = startRuntimePerformanceSpan_ACU('table-fill-ai-wait', {
+                runId: job.performanceRunId,
+                parentSpanId: job.performanceParentSpanId,
+                settings: settings_ACU,
+                metrics: { sheetCount: Array.isArray(job.targetSheetKeys) ? job.targetSheetKeys.length : 0 },
             });
+            let aiResponse: string;
+            try {
+                aiResponse = await callCustomOpenAI_ACU(dynamicContent, effectiveAbortController, {
+                    ...(job.requestOptions || {}),
+                    tableData: job.baseSnapshot,
+                    targetSheetKeys: job.targetSheetKeys,
+                });
+                aiWaitSpan.end({ success: true });
+            } catch (error) {
+                aiWaitSpan.end({ success: false });
+                throw error;
+            }
             if (isStopped()) {
                 return { job, success: false, attempt, aborted: true };
             }
@@ -1091,7 +1111,7 @@ function buildMixedSqliteFormatError_ACU(nonSqlResponses: GroupFillResponse_ACU[
     return `SQLite 严格模式下同一批分组填表禁止混合 SQL/非 SQL 输出；以下分组未返回 SQL tableEdit：${groupLabels}。请只重试这些分组，并输出 SQL。`;
 }
 
-export async function applyUnifiedGroupFillResponses_ACU(
+async function applyUnifiedGroupFillResponsesCore_ACU(
     responses: GroupFillResponse_ACU[],
     baseSnapshot: Record<string, any>,
     options: {
@@ -1100,13 +1120,14 @@ export async function applyUnifiedGroupFillResponses_ACU(
         isImportMode: boolean;
         chatKey?: string;
         isolationKey?: string;
-        chatSnapshot?: any[];
         templateScope?: TemplateScope_ACU;
         sqlApplyScope?: SqlTableApplyScope_ACU;
         replaceExistingIncremental?: { targetMessageIndices: number[]; targetSheetKeys: string[] };
         manualRefillProgress?: ManualRefillProgressV2_ACU;
         syncAfterCommit?: boolean;
         baseRevision?: string | null;
+        performanceRunId?: string;
+        performanceParentSpanId?: string;
     }
 ): Promise<CardUpdateResult> {
     if (!Array.isArray(responses) || responses.length === 0) {
@@ -1120,7 +1141,6 @@ export async function applyUnifiedGroupFillResponses_ACU(
     const firstJob = sortedResponses[0]?.job;
     const capturedChatKey = options.chatKey ?? firstJob?.chatKey;
     const capturedIsolationKey = options.isolationKey ?? firstJob?.isolationKey ?? getCurrentIsolationKey_ACU();
-    const capturedChat = options.chatSnapshot ?? firstJob?.chatSnapshot ?? getChatArray_ACU() ?? [];
     const capturedSqlApplyScope = options.sqlApplyScope ?? firstJob?.sqlApplyScope;
     const capturedTemplateScope = options.templateScope !== undefined
         ? options.templateScope
@@ -1260,6 +1280,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
             isolationKey: capturedIsolationKey,
             writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
             baseRevision: options.baseRevision,
+            workingDataMode: 'none',
             initialData: baseSnapshot as any,
             targetMessageIndex: options.saveTargetIndex,
             targetSheetKeys: null,
@@ -1518,6 +1539,9 @@ export async function applyUnifiedGroupFillResponses_ACU(
             writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
             revisionWriteSet,
             baseRevision: options.baseRevision,
+            performanceRunId: options.performanceRunId,
+            performanceParentSpanId: options.performanceParentSpanId,
+            workingDataMode: 'none',
             initialData: baseSnapshot as any,
             targetMessageIndex: options.saveTargetIndex,
             targetSheetKeys: keysToSave,
@@ -1542,9 +1566,33 @@ export async function applyUnifiedGroupFillResponses_ACU(
         }
 
         if (options.syncAfterCommit !== false) {
-            await updateReadableLorebookEntry_ACU(true, false, null, workingTableData);
+            const lorebookSpan = startRuntimePerformanceSpan_ACU('table-fill-worldbook-sync', {
+                runId: options.performanceRunId,
+                parentSpanId: options.performanceParentSpanId,
+                settings: settings_ACU,
+                metrics: { targetMessageIndex: options.saveTargetIndex },
+            });
+            try {
+                await updateReadableLorebookEntry_ACU(true, false, null, workingTableData);
+                lorebookSpan.end({ success: true });
+            } catch (error) {
+                lorebookSpan.end({ success: false });
+                throw error;
+            }
             if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
-                await enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.saveTargetIndex, mode: 'sync', reason: 'unified_group_fill_complete' });
+                const vectorSpan = startRuntimePerformanceSpan_ACU('table-fill-vector-flush', {
+                    runId: options.performanceRunId,
+                    parentSpanId: options.performanceParentSpanId,
+                    settings: settings_ACU,
+                    metrics: { targetMessageIndex: options.saveTargetIndex },
+                });
+                try {
+                    await enqueueSummaryVectorIndexFlush_ACU({ targetMessageIndex: options.saveTargetIndex, mode: 'sync', reason: 'unified_group_fill_complete' });
+                    vectorSpan.end({ success: true });
+                } catch (error) {
+                    vectorSpan.end({ success: false });
+                    throw error;
+                }
             }
         }
     }
@@ -1552,7 +1600,33 @@ export async function applyUnifiedGroupFillResponses_ACU(
     return { success: true, modifiedKeys, tableData: workingTableData as any };
 }
 
-export async function processGroupedRuntimeChunk_ACU(
+export function applyUnifiedGroupFillResponses_ACU(
+    ...args: Parameters<typeof applyUnifiedGroupFillResponsesCore_ACU>
+): ReturnType<typeof applyUnifiedGroupFillResponsesCore_ACU> {
+    const responses = args[0];
+    const options = args[2];
+    const performanceSpan = startRuntimePerformanceSpan_ACU('table-fill-apply', {
+        runId: options.performanceRunId,
+        parentSpanId: options.performanceParentSpanId,
+        settings: settings_ACU,
+        metrics: {
+            groupCount: Array.isArray(responses) ? responses.length : 0,
+            targetMessageIndex: options.saveTargetIndex,
+        },
+    });
+    return applyUnifiedGroupFillResponsesCore_ACU(args[0], args[1], {
+        ...options,
+        performanceParentSpanId: performanceSpan.id,
+    }).then(result => {
+        performanceSpan.end({ success: result.success, changedSheetCount: result.modifiedKeys.length });
+        return result;
+    }, error => {
+        performanceSpan.end({ success: false });
+        throw error;
+    });
+}
+
+async function processGroupedRuntimeChunkCore_ACU(
     groups: GroupedRuntimeUpdateGroup_ACU[],
     mode: string,
     options: {
@@ -1574,6 +1648,8 @@ export async function processGroupedRuntimeChunk_ACU(
         syncAfterCommit?: boolean;
         onProgress?: (event: CardUpdateProgressEvent) => void;
         respectGlobalStop?: boolean;
+        performanceRunId?: string;
+        performanceParentSpanId?: string;
     } = {}
 ): Promise<{ success: boolean; failedGroups: string[]; error?: string; aborted?: boolean; committedBucketCount: number }> {
     if (!Array.isArray(groups) || groups.length === 0) {
@@ -1594,7 +1670,10 @@ export async function processGroupedRuntimeChunk_ACU(
         await reloadStorageProvider();
     }
 
-    const executionScope = captureFillExecutionScope_ACU();
+    const executionScope = captureFillExecutionScope_ACU({
+        runId: options.performanceRunId,
+        parentSpanId: options.performanceParentSpanId,
+    });
     const templateForLookup = executionScope.sqlApplyScope?.templateData || parseTableTemplateJson_ACU({ stripSeedRows: true });
     const failedGroups = new Set<string>();
     let firstError: string | undefined;
@@ -1694,7 +1773,6 @@ export async function processGroupedRuntimeChunk_ACU(
         const bucket = orderedBuckets[bucketIndex];
         const maxBucketRetries = Math.max(1, Number(settings_ACU.tableMaxRetries) || 3);
         let retryUnifiedError: string | null = null;
-        let conflictReplayResponses: GroupFillResponse_ACU[] | null = null;
         let bucketSucceeded = false;
 
         for (let bucketAttempt = 1; bucketAttempt <= maxBucketRetries; bucketAttempt++) {
@@ -1702,7 +1780,7 @@ export async function processGroupedRuntimeChunk_ACU(
                 aborted = true;
                 break;
             }
-            const chatHistory = executionScope.chatSnapshot;
+            const chatHistory = executionScope.promptMessages;
             const bucketFirstMessageIndex = Math.min(...bucket.plannedJobs.map(job => job.firstMessageIndexOfBatch));
             const explicitMergeBaseBounds = [...new Set(
                 bucket.plannedJobs
@@ -1728,15 +1806,7 @@ export async function processGroupedRuntimeChunk_ACU(
                 break;
             }
 
-            const conflictReplayData = conflictReplayResponses
-                ? getRuntimeTableDataSnapshot_ACU()
-                : null;
-            if (conflictReplayResponses && !conflictReplayData) {
-                bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
-                firstError = firstError || '运行时版本冲突后无法读取最新表格数据，已停止自动恢复。';
-                break;
-            }
-            const mergedBatchData = conflictReplayData || baseResult.data;
+            const mergedBatchData = baseResult.data;
             try {
                 bucket.plannedJobs = bucket.plannedJobs.map(plannedJob => ({
                     ...plannedJob,
@@ -1801,9 +1871,10 @@ export async function processGroupedRuntimeChunk_ACU(
                     isImportMode: options.isImportMode === true,
                     chatKey: executionScope.chatKey,
                     isolationKey: executionScope.isolationKey,
-                    chatSnapshot: executionScope.chatSnapshot,
                     templateScope: executionScope.templateScope,
                     sqlApplyScope: executionScope.sqlApplyScope,
+                    performanceRunId: options.performanceRunId,
+                    performanceParentSpanId: options.performanceParentSpanId,
                 });
             }
 
@@ -1812,11 +1883,8 @@ export async function processGroupedRuntimeChunk_ACU(
                 break;
             }
 
-            const collectFeedback = retryUnifiedError && !conflictReplayResponses ? { lastUnifiedError: retryUnifiedError } : undefined;
-            const settledResponses = conflictReplayResponses
-                ? rebaseGroupFillResponses_ACU(conflictReplayResponses, baseSnapshot, baseRevision)
-                    .map(response => ({ status: 'fulfilled' as const, value: response }))
-                : await Promise.allSettled(jobs.map(job => collectGroupFillResponse_ACU(
+            const collectFeedback = retryUnifiedError ? { lastUnifiedError: retryUnifiedError } : undefined;
+            const settledResponses = await Promise.allSettled(jobs.map(job => collectGroupFillResponse_ACU(
                     job,
                     collectFeedback,
                     options.abortController,
@@ -1920,9 +1988,10 @@ export async function processGroupedRuntimeChunk_ACU(
                 baseRevision,
                 chatKey: executionScope.chatKey,
                 isolationKey: executionScope.isolationKey,
-                chatSnapshot: executionScope.chatSnapshot,
                 templateScope: executionScope.templateScope,
                 sqlApplyScope: executionScope.sqlApplyScope,
+                performanceRunId: options.performanceRunId,
+                performanceParentSpanId: options.performanceParentSpanId,
             });
             if (applyResult.success) {
                 const nextCommittedBucketCount = committedBucketCount + 1;
@@ -1939,34 +2008,11 @@ export async function processGroupedRuntimeChunk_ACU(
             }
 
             const safeApplyError = sanitizeRetryFeedback_ACU(applyResult.error || '统一提交失败。', MAX_WARN_ERROR_LENGTH_ACU);
-            if (applyResult.errorCategory === 'conflict') {
-                const canReplay = canReplayConflictOnLatestRuntime_ACU(bucket.saveTargetIndex, executionScope.chatSnapshot);
-                if (!canReplay) {
-                    jobs.forEach(job => failedGroups.add(job.groupKey));
-                    firstError = firstError || `${safeApplyError} 当前批次不是聊天最新 AI 楼层，旧输出不能安全重放到最新运行时数据。`;
-                    break;
-                }
-                if (bucketAttempt >= maxBucketRetries) {
-                    jobs.forEach(job => failedGroups.add(job.groupKey));
-                    firstError = firstError || `运行时版本冲突在自动恢复 ${maxBucketRetries - 1} 次后仍未收敛：${safeApplyError}`;
-                    break;
-                }
-                conflictReplayResponses = responses;
-                retryUnifiedError = null;
-                emitBucketProgress(bucketIndex, {
-                    phase: 'retry',
-                    attempt: bucketAttempt,
-                    maxRetries: maxBucketRetries,
-                    message: '检测到并发写入，正在基于最新运行时数据重放已生成结果',
-                });
-                continue;
-            }
             if (applyResult.errorCategory !== 'model') {
                 jobs.forEach(job => failedGroups.add(job.groupKey));
                 firstError = firstError || safeApplyError;
                 break;
             }
-            conflictReplayResponses = null;
             retryUnifiedError = safeApplyError;
             if (bucketAttempt >= maxBucketRetries) {
                 jobs.forEach(job => failedGroups.add(job.groupKey));
@@ -1997,6 +2043,33 @@ export async function processGroupedRuntimeChunk_ACU(
     return failedGroups.size > 0
         ? { success: false, failedGroups: [...failedGroups], error: firstError || '统一提交失败。', committedBucketCount }
         : { success: true, failedGroups: [], committedBucketCount };
+}
+
+export function processGroupedRuntimeChunk_ACU(
+    ...args: Parameters<typeof processGroupedRuntimeChunkCore_ACU>
+): ReturnType<typeof processGroupedRuntimeChunkCore_ACU> {
+    const groups = args[0];
+    const options = args[2] || {};
+    const performanceSpan = startRuntimePerformanceSpan_ACU('grouped-runtime-chunk', {
+        runId: options.performanceRunId,
+        parentSpanId: options.performanceParentSpanId,
+        settings: settings_ACU,
+        metrics: {
+            groupCount: Array.isArray(groups) ? groups.length : 0,
+            sheetCount: Array.isArray(groups) ? new Set(groups.flatMap(group => group.sheetKeys || [])).size : 0,
+            sqlite: isSqliteMode(),
+        },
+    });
+    return processGroupedRuntimeChunkCore_ACU(groups, args[1], {
+        ...options,
+        performanceParentSpanId: performanceSpan.id,
+    }).then(result => {
+        performanceSpan.end({ success: result.success, failedGroupCount: result.failedGroups.length, bucketCount: result.committedBucketCount });
+        return result;
+    }, error => {
+        performanceSpan.end({ success: false });
+        throw error;
+    });
 }
 
 /**
@@ -2045,13 +2118,10 @@ export async function executeCardUpdateCore_ACU(
 
     try {
         let lastSqlError: string | null = null;
-        let conflictReplayResponse: GroupFillResponse_ACU | null = null;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                const rawBaseSnapshot = getRuntimeTableDataSnapshot_ACU(
-                    conflictReplayResponse ? null : (progressContext?.batchBaseSnapshot || null),
-                ) || {};
+                const rawBaseSnapshot = getRuntimeTableDataSnapshot_ACU(progressContext?.batchBaseSnapshot || null) || {};
                 const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
                     buildWriteSetForSheetKeys_ACU(targetSheetKeys, rawBaseSnapshot),
                     { chatKey: executionScope.chatKey, isolationKey: executionScope.isolationKey },
@@ -2070,18 +2140,15 @@ export async function executeCardUpdateCore_ACU(
                     isImportMode,
                     chatKey: executionScope.chatKey,
                     isolationKey: executionScope.isolationKey,
-                    chatSnapshot: executionScope.chatSnapshot,
                     templateScope: executionScope.templateScope,
                     sqlApplyScope: executionScope.sqlApplyScope,
                 };
-                const collectResult = conflictReplayResponse
-                    ? { ...conflictReplayResponse, job: currentJob }
-                    : await collectGroupFillResponse_ACU(
-                        currentJob,
-                        { lastSqlError },
-                        effectiveAbortController,
-                        { onProgress: emitProgress, maxRetriesOverride: 1 },
-                    );
+                const collectResult = await collectGroupFillResponse_ACU(
+                    currentJob,
+                    { lastSqlError },
+                    effectiveAbortController,
+                    { onProgress: emitProgress, maxRetriesOverride: 1 },
+                );
 
                 if (collectResult.aborted) {
                     return { success: false, modifiedKeys: [], aborted: true };
@@ -2092,7 +2159,6 @@ export async function executeCardUpdateCore_ACU(
                         collectResult.errorCategory || 'infrastructure',
                     );
                 }
-                conflictReplayResponse = collectResult;
 
                 emitProgress({ phase: 'parsing' });
                 const aiResponse = collectResult.aiResponse;
@@ -2110,6 +2176,7 @@ export async function executeCardUpdateCore_ACU(
                         isolationKey: executionScope.isolationKey,
                         writeSet,
                         baseRevision,
+                        workingDataMode: 'none',
                         initialData: rawBaseSnapshot as any,
                         targetMessageIndex: saveTargetIndex,
                         targetSheetKeys: null,
@@ -2385,35 +2452,9 @@ export async function executeCardUpdateCore_ACU(
                 const errorCategory: TableUpdateCommitErrorCategory_ACU = error instanceof UpdateAttemptError_ACU
                     ? error.category
                     : 'infrastructure';
-                if (errorCategory === 'conflict') {
-                    if (!canReplayConflictOnLatestRuntime_ACU(saveTargetIndex, executionScope.chatSnapshot)) {
-                        return {
-                            success: false,
-                            modifiedKeys: [],
-                            error: `${safeError} 当前目标不是聊天最新 AI 楼层，旧输出不能安全重放到最新运行时数据。`,
-                            errorCategory,
-                        };
-                    }
-                    if (attempt >= maxRetries) {
-                        return {
-                            success: false,
-                            modifiedKeys: [],
-                            error: `运行时版本冲突在自动恢复 ${maxRetries - 1} 次后仍未收敛：${safeError}`,
-                            errorCategory,
-                        };
-                    }
-                    emitProgress({
-                        phase: 'retry',
-                        attempt,
-                        maxRetries,
-                        message: '检测到并发写入，正在基于最新运行时数据重放已生成结果',
-                    });
-                    continue;
-                }
                 if (errorCategory !== 'model') {
                     return { success: false, modifiedKeys: [], error: safeError, errorCategory };
                 }
-                conflictReplayResponse = null;
                 if (isSqliteMode()) lastSqlError = safeError;
 
                 if (attempt < maxRetries) {
@@ -2889,6 +2930,7 @@ export async function orchestrateManualCatchUp_ACU(
                 isolationKey,
                 writeSet: buildWriteSetForSheetKeys_ACU(selectedSheetKeys, currentJsonTableData_ACU),
                 revisionWriteSet: [],
+                workingDataMode: 'none',
                 initialData: currentJsonTableData_ACU,
                 targetMessageIndex: safeTargetMessageIndex,
                 targetSheetKeys: [],
@@ -2898,9 +2940,9 @@ export async function orchestrateManualCatchUp_ACU(
                 operations: [],
                 manualRefillProgress: progress,
                 strictSave: true,
-            }, ({ workingData }) => ({
+            }, () => ({
                 success: true,
-                tableData: workingData || currentJsonTableData_ACU,
+                tableData: currentJsonTableData_ACU,
             }));
             return commitResult.success ? undefined : (commitResult.error || `手动追平终态 ${status} 保存失败。`);
         } catch (error: any) {

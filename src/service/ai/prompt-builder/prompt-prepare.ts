@@ -267,6 +267,7 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
     }
     
     let messagesText = '当前最新对话内容:\n';
+    const conditionalSeedParts: string[] = [];
     if (messages && messages.length > 0) {
         const extractTags = (settings_ACU.tableContextExtractTags || '').trim();
         const extractRules = normalizeExtractRules_ACU(settings_ACU.tableContextExtractRules, extractTags);
@@ -280,12 +281,16 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
             if (!msg.is_user && (extractTags || extractRules.length > 0 || excludeTags || excludeRules.length > 0)) {
                 content = applyContextTagFilters_ACU(content, { extractTags, extractRules, excludeTags, excludeRules });
             }
+            if (!msg.is_user && typeof content === 'string' && content) {
+                conditionalSeedParts.push(content);
+            }
 
             return `${prefix}: ${content}`;
         }).join('\n');
     } else {
         messagesText += '(无最新对话内容)';
     }
+    const conditionalSeedContent = conditionalSeedParts.join('\n');
 
     const worldbookScanText = messagesText;
     const excludeImportTaggedWorldbookEntries = options?.excludeImportTaggedWorldbookEntries === true;
@@ -347,6 +352,7 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
     return {
         tableDataText,
         messagesText,
+        conditionalSeedContent,
         worldbookContent,
         worldbookDatabaseExcludedContent,
         resolveTableWorldbookContent,

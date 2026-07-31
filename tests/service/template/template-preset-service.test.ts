@@ -383,14 +383,24 @@ describe('parseImportedTemplateData_ACU', () => {
     }));
     expect(template.sheet_legacy_random.content).toEqual([['名称']]);
   });
-  it('有数据的缺失 row_id 模板仍由严格校验拒绝', () => {
+  it('有数据的缺失 row_id 模板在严格校验前规范化，快照与输入对象契约保持一致', () => {
     const template = {
       mate: { type: 'chatSheets', version: 1 },
       sheet_legacy_random: { uid: 'sheet_legacy_random', name: '表1', content: [['名称'], ['铁剑']], sourceData: {} },
     };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockImplementationOnce((value: any) => ({
+      templateStr: JSON.stringify(value), templateObj: value,
+    }));
 
-    expect(() => parseImportedTemplateData_ACU(template)).toThrow(TemplateImportValidationError_ACU);
-    expect(sanitizeTemplateSnapshotForChat_ACU).not.toHaveBeenCalled();
+    const result = parseImportedTemplateData_ACU(template);
+
+    expect(result.templateObj.sheet_legacy_random.content).toEqual([
+      ['row_id', '名称'], ['1', '铁剑'],
+    ]);
+    expect(sanitizeTemplateSnapshotForChat_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      sheet_legacy_random: expect.objectContaining({ content: [['row_id', '名称'], ['1', '铁剑']] }),
+    }));
+    expect(template.sheet_legacy_random.content).toEqual([['名称'], ['铁剑']]);
   });
   it('无效 JSON 抛出错误', () => {
     expect(() => parseImportedTemplateData_ACU('not json')).toThrow('JSON解析错误');

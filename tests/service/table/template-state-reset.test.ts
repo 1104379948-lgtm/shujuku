@@ -31,6 +31,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
 }));
 vi.mock('../../../src/shared/sheet-identity', () => ({
   allocateStableSheetKeys_ACU: (names: string[]) => ({ keys: names.map(name => `sheet_${String(name).toLowerCase()}`), diagnostics: [] }),
+  canonicalizeDisplayName_ACU: (value: unknown) => String(value ?? '').trim(),
   assertNoPhysicalTableNameCollision_ACU: () => {
     if (mocks.physicalNameError) throw mocks.physicalNameError;
   },
@@ -81,13 +82,49 @@ describe('resetCurrentChatTableStateFromTemplate_ACU', () => {
     const frame = mocks.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame;
     expect(frame.logEntries).toEqual([]);
     expect(frame.checkpoint.data.sheet_role.uid).toBe('sheet_role');
-    expect(frame.checkpoint.data.sheet_role.content[1]).toEqual(['generated-1', '助手']);
+    expect(frame.checkpoint.data.sheet_role.content[1]).toEqual(['1', '助手']);
     expect(frame.checkpoint.data.sheet_role.sourceData.tableAliases).toEqual(['sheet_random']);
     expect(frame.checkpoint.data.sheet_old).toBeUndefined();
     expect(mocks.guide.tags[''].data.sheet_role).toBeDefined();
     expect(mocks.guide.tags[''].data.sheet_role.sourceData.tableAliases).toEqual(['sheet_random']);
     expect(mocks.setRuntime).toHaveBeenCalledWith(expect.objectContaining({ sheet_role: expect.any(Object) }));
     expect(mocks.saveStrict).toHaveBeenCalledOnce();
+  });
+
+  it('缺失整列 row_id 的有数据模板在写入前规范化，并将同一候选用于 checkpoint、guide、runtime 与结果', async () => {
+    const input = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_summary_log: {
+        uid: 'sheet_summary_log', name: 'SummaryLog',
+        content: [['时间', '摘要'], ['T1', '事件']], sourceData: {},
+      },
+    };
+
+    const result = await resetCurrentChatTableStateFromTemplate_ACU(input);
+
+    expect(result).toMatchObject({ saved: true });
+    expect(result.normalizedTemplateData?.sheet_summarylog.content).toEqual([
+      ['row_id', '时间', '摘要'], ['1', 'T1', '事件'],
+    ]);
+    expect(result.normalizationAudit).toEqual([expect.objectContaining({
+      sheetKey: 'sheet_summary_log', headerAction: 'inserted', generatedRowIdCount: 1,
+    })]);
+    const committed = mocks.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_summarylog;
+    expect(committed.content).toEqual(result.normalizedTemplateData?.sheet_summarylog.content);
+    expect(mocks.guide.tags[''].data.sheet_summarylog.content).toEqual(committed.content);
+    expect(mocks.setRuntime).toHaveBeenCalledWith(expect.objectContaining({ sheet_summarylog: expect.objectContaining({ content: committed.content }) }));
+    expect(input.sheet_summary_log.content).toEqual([['时间', '摘要'], ['T1', '事件']]);
+  });
+
+  it('错位 row_id 在事务前拒绝，且不写入 guide、checkpoint 或 runtime', async () => {
+    const result = await resetCurrentChatTableStateFromTemplate_ACU({
+      sheet_summary_log: { uid: 'sheet_summary_log', name: 'SummaryLog', content: [['时间', 'row_id'], ['T1', '1']], sourceData: {} },
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('row_id 位于第 2 列') });
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(mocks.saveStrict).not.toHaveBeenCalled();
+    expect(mocks.setRuntime).not.toHaveBeenCalled();
   });
 
   it('严格保存失败时恢复旧 V2 数据、scope 与 guide，再严格保存回滚状态', async () => {
@@ -170,7 +207,7 @@ describe('resetCurrentChatTableStateFromTemplate_ACU', () => {
       sheet_random: { uid: 'sheet_random', name: 'Role', content: [['row_id', 'name'], ['same', '助手'], ['same', '助手2']] },
     });
 
-    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('重复或非法 row_id') });
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('row_id「same」重复') });
     expect(mocks.chat[0].TavernDB_ACU_IsolatedData).toEqual(oldFrame);
     expect(mocks.scope).toEqual(oldScope);
     expect(mocks.guide).toEqual(oldGuide);

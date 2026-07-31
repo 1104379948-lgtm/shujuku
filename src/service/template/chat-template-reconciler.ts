@@ -4,6 +4,7 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
 import { getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU, parseDDLTableConstraints_ACU, parseDDLTableName, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
 import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist';
 import { hydrateTableDataStrict_ACU } from '../table/sqlite-template-validation';
+import { normalizeTemplateRowIds_ACU } from './template-row-id-normalizer';
 import type { StorageMode } from '../../shared/table-storage-provider';
 
 export interface ChatTemplateReconcileInput_ACU {
@@ -56,17 +57,22 @@ export interface ChatTemplateReconcilePlan_ACU {
  */
 export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInput_ACU): Promise<ChatTemplateReconcilePlan_ACU> {
   const baselineData = clone_ACU(input.baselineData);
-  const templateData = clone_ACU(input.templateData);
+  const rawTemplateData = clone_ACU(input.templateData);
   const blockers: string[] = [];
   const deletedSheetKeys: string[] = [];
   const hiddenSheetKeys: string[] = [];
   const audit: ChatTemplateReconcileAudit_ACU[] = [];
+  const normalization = normalizeTemplateRowIds_ACU(rawTemplateData, {
+    syncDdl: input.storageMode !== 'native',
+    rejectCrossSourceDuplicateRowIds: false,
+    validateExistingDdl: false,
+  });
+  if (normalization.blockers.length > 0) {
+    return emptyPlan_ACU(baselineData, audit, normalization.blockers.map(item => item.message));
+  }
+  const templateData = normalization.templateData;
   const candidateData = stripRuntimeSeedRows_ACU(baselineData);
   candidateData.mate = clone_ACU(templateData.mate || baselineData.mate);
-  for (const [key, sheet] of listSheets_ACU(templateData)) {
-    normalizeTemplateSheetRowIdColumn_ACU(sheet, key, blockers, input.storageMode !== 'native');
-  }
-  if (blockers.length > 0) return emptyPlan_ACU(baselineData, audit, blockers);
   for (const [key, sheet] of listSheets_ACU(baselineData)) {
     try { validateBaselineSheetRows_ACU(sheet); } catch (error: any) { blockers.push(`当前聊天表「${sheet.name || key}」历史数据无效：${error?.message || String(error)}`); }
   }
@@ -322,38 +328,6 @@ function headers_ACU(sheet: Sheet_ACU): string[] {
   const headers = sheet?.content?.[0];
   if (!Array.isArray(headers) || headers[0] !== 'row_id') throw new Error('缺少 row_id 首列表头。');
   return headers.map(value => String(value ?? ''));
-}
-
-/**
- * 仅作用于模板侧 sheet：缺失 row_id 首列时自动注入（表头 + 顺序行号 + row_id PRIMARY KEY DDL 兜底）；
- * row_id 错位（出现在非首列）或 content 结构非法则记录带表名/key 的 blocker，绝不裸抛。
- */
-function normalizeTemplateSheetRowIdColumn_ACU(sheet: Sheet_ACU, sheetKey: string, blockers: string[], syncDdl: boolean): void {
-  const label = `表「${sheet?.name || sheetKey}」(${sheetKey})`;
-  const content = sheet?.content;
-  if (!Array.isArray(content) || !Array.isArray(content[0])) {
-    blockers.push(`${label} content 结构非法，无法解析表头。`);
-    return;
-  }
-  const headers = content[0];
-  if (headers[0] === 'row_id') return;
-  if (headers.some(name => String(name ?? '') === 'row_id')) {
-    blockers.push(`${label} 的 row_id 列不在首列，无法自动修复，请调整模板列顺序。`);
-    return;
-  }
-  content[0] = ['row_id', ...headers.map(value => String(value ?? ''))];
-  for (let index = 1; index < content.length; index += 1) {
-    if (!Array.isArray(content[index])) { blockers.push(`${label} 第 ${index + 1} 行不是数组。`); return; }
-    content[index] = [String(index), ...content[index].map((value: any) => (value === null ? null : String(value ?? '')))];
-  }
-  const ddl = syncDdl ? String(sheet.sourceData?.ddl || '').trim() : '';
-  if (ddl) {
-    const tableName = parseDDLTableName(ddl);
-    if (tableName && !/\brow_id\b/i.test(ddl)) {
-      if (!sheet.sourceData || typeof sheet.sourceData !== 'object') sheet.sourceData = {} as any;
-      sheet.sourceData.ddl = ddl.replace(/\(/, '(\n  row_id INTEGER PRIMARY KEY,');
-    }
-  }
 }
 
 /**

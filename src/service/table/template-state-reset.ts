@@ -9,22 +9,37 @@ import { hydrateTableDataStrict_ACU } from './sqlite-template-validation';
 import { getCurrentStorageMode } from './storage-mode';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 import { buildChatSheetGuideDataFromTemplateObj_ACU, clearCurrentChatTemplateSnapshots_ACU, ensureStableRowIdsForSheetContent_ACU, setChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
+import { normalizeTemplateRowIds_ACU, type TemplateRowIdNormalizationAudit_ACU } from '../template/template-row-id-normalizer';
 import { logWarn_ACU } from '../../shared/utils';
 
-type ResetResult = { saved: boolean; messageIndex?: number; runtimeReady?: boolean; postCommitWarning?: string; error?: string };
+type ResetResult = {
+  saved: boolean; messageIndex?: number; runtimeReady?: boolean; postCommitWarning?: string; error?: string;
+  normalizedTemplateData?: Record<string, any>; normalizationAudit?: TemplateRowIdNormalizationAudit_ACU[];
+};
+type PreparedTemplate = {
+  templateData: Record<string, any>;
+  normalizationAudit: TemplateRowIdNormalizationAudit_ACU[];
+};
 // Chat metadata stores scope/guide outside message fields, so both containers are snapshotted explicitly below.
 const MESSAGE_FIELDS = ['TavernDB_ACU_IsolatedData', 'TavernDB_ACU_Data', 'TavernDB_ACU_SummaryData', 'TavernDB_ACU_IndependentData', 'TavernDB_ACU_Identity', 'TavernDB_ACU_ModifiedKeys', 'TavernDB_ACU_UpdateGroupKeys', 'TavernDB_ACU_TableHeaderGuide', '_acu_local_template_base_state_seeded'];
 
 function clone<T>(value: T): T { return value === undefined ? value : JSON.parse(JSON.stringify(value)); }
 
-function prepareTemplate(templateData: Record<string, any>): Record<string, any> {
+function prepareTemplate(templateData: Record<string, any>): PreparedTemplate {
   if (!templateData || typeof templateData !== 'object' || Array.isArray(templateData)) throw new Error('初始化模板必须是对象。');
-  const entries = Object.entries(templateData).filter(([key]) => key.startsWith('sheet_'));
+  const normalization = normalizeTemplateRowIds_ACU(templateData, {
+    syncDdl: getCurrentStorageMode() === 'sqlite',
+  });
+  if (normalization.blockers.length > 0) {
+    throw new Error(`初始化模板 row_id 规范化失败：${normalization.blockers.map(item => item.message).join('；')}`);
+  }
+  const normalizedTemplateData = normalization.templateData;
+  const entries = Object.entries(normalizedTemplateData).filter(([key]) => key.startsWith('sheet_'));
   if (entries.length === 0) throw new Error('初始化模板不包含任何 Sheet。');
   const allocation = allocateStableSheetKeys_ACU(entries.map(([, sheet]) => sheet?.name));
   if (allocation.diagnostics.length || allocation.keys.some(key => !key)) throw new Error(`初始化模板无法分配稳定 Sheet key：${allocation.diagnostics.map(item => item.code).join('；')}`);
   const result: Record<string, any> = {};
-  for (const [key, value] of Object.entries(templateData)) if (!key.startsWith('sheet_')) result[key] = clone(value);
+  for (const [key, value] of Object.entries(normalizedTemplateData)) if (!key.startsWith('sheet_')) result[key] = clone(value);
   entries.forEach(([oldKey, source], index) => {
     if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error(`初始化模板 Sheet 无效：${oldKey}`);
     const sheet = clone(source);
@@ -51,7 +66,7 @@ function prepareTemplate(templateData: Record<string, any>): Record<string, any>
   if (aliasRegistry.conflicts.size > 0) {
     throw new Error(`初始化模板存在歧义表别名：${[...aliasRegistry.conflicts].join('、')}。`);
   }
-  return result;
+  return { templateData: result, normalizationAudit: normalization.audits };
 }
 
 function snapshotMessages(chat: any[]) {
@@ -68,8 +83,11 @@ export async function resetCurrentChatTableStateFromTemplate_ACU(
 ): Promise<ResetResult> {
   let prepared: Record<string, any>;
   let guideData: Record<string, any>;
+  let normalizationAudit: TemplateRowIdNormalizationAudit_ACU[];
   try {
-    prepared = prepareTemplate(templateData);
+    const preparedResult = prepareTemplate(templateData);
+    prepared = preparedResult.templateData;
+    normalizationAudit = preparedResult.normalizationAudit;
     guideData = buildChatSheetGuideDataFromTemplateObj_ACU(prepared, { stripSeedRows: false });
     if (!guideData) throw new Error('无法从初始化模板生成聊天指导表。');
     if (getCurrentStorageMode() === 'sqlite') await hydrateTableDataStrict_ACU(prepared);
@@ -133,7 +151,7 @@ export async function resetCurrentChatTableStateFromTemplate_ACU(
         primarySaveAttempted = true;
         await saveChatToHostStrict_ACU();
         _set_currentJsonTableData_ACU(clone(prepared));
-        return { saved: true, messageIndex: targetIndex, runtimeReady: true };
+        return { saved: true, messageIndex: targetIndex, runtimeReady: true, normalizedTemplateData: clone(prepared), normalizationAudit };
       } catch (error: any) {
         restoreMessages(messageSnapshots);
         setChatScopedConfigContainer_ACU(chat, previousScope);

@@ -1,7 +1,8 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
-import { getCurrentIsolationKey_ACU, independentTableStates_ACU } from '../runtime/state-manager';
+import { getCurrentIsolationKey_ACU, independentTableStates_ACU, settings_ACU } from '../runtime/state-manager';
 import type { TableDataObject_ACU, Sheet_ACU, Mate_ACU } from '../../shared/models/table-data';
 import { logError_ACU, logWarn_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
+import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../data/sqlite/sync-bridge';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
@@ -58,6 +59,8 @@ export interface LoadTableStateFromFramesV2Options_ACU {
   allowTemporaryTemplateBaseline?: boolean;
   /** apply 仅在明确 sql_sheet_batch.sheetKey 缺失时使用同 key 模板表做内存临时补锚。 */
   compatibilityMode?: 'apply' | 'disabled';
+  performanceRunId?: string;
+  performanceParentSpanId?: string;
 }
 
 function deepClone_ACU<T>(value: T): T {
@@ -842,7 +845,7 @@ export function collectScheduleSummaryFromFramesV2_ACU(
   return summary;
 }
 
-export async function loadTableStateFromFramesV2Detailed_ACU(
+async function loadTableStateFromFramesV2DetailedCore_ACU(
   chatArg?: any[],
   isolationKeyArg?: string,
   options: LoadTableStateFromFramesV2Options_ACU = {},
@@ -991,6 +994,37 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
     };
   } finally {
     runtime.engine.dispose();
+  }
+}
+
+export async function loadTableStateFromFramesV2Detailed_ACU(
+  chatArg?: any[],
+  isolationKeyArg?: string,
+  options: LoadTableStateFromFramesV2Options_ACU = {},
+): Promise<TableReplayResultV2_ACU | null> {
+  const chat = chatArg || getChatArray_ACU();
+  const performanceSpan = startRuntimePerformanceSpan_ACU('v2-replay', {
+    runId: options.performanceRunId,
+    parentSpanId: options.performanceParentSpanId,
+    settings: settings_ACU,
+    metrics: {
+      messageCount: Array.isArray(chat) ? chat.length : 0,
+      maxMessageIndex: options.maxMessageIndex ?? -1,
+    },
+  });
+  try {
+    const result = await loadTableStateFromFramesV2DetailedCore_ACU(chatArg, isolationKeyArg, options);
+    performanceSpan.end({
+      success: result !== null,
+      baseKind: result?.baseKind || 'none',
+      sheetCount: result?.data
+        ? Object.keys(result.data).filter(key => key.startsWith('sheet_')).length
+        : 0,
+    });
+    return result;
+  } catch (error) {
+    performanceSpan.end({ success: false });
+    throw error;
   }
 }
 

@@ -20,7 +20,7 @@ import { refreshMergedDataAndNotify_ACU } from '../worldbook/pipeline';
 import { safeJsonParse_ACU, safeJsonStringify_ACU } from '../../shared/json-helpers';
 import { ensureSheetOrderNumbers_ACU, logDebug_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { buildDefaultExportConfig_ACU, ensureExportConfigDefaults_ACU } from '../worldbook/injection-engine';
-import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from './template-import-validator';
+import { TemplateImportValidationError_ACU, type TemplateImportDiagnostic_ACU, validateImportedTemplateObject_ACU } from './template-import-validator';
 import { allocateStableSheetKeys_ACU } from '../../shared/sheet-identity';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
@@ -29,7 +29,7 @@ import { resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resol
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 import { getCurrentStorageMode, isSqliteMode } from '../table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../table/table-storage-strategy';
-import { normalizeHeaderOnlyRowIdColumns_ACU } from '../table/table-data-upgrade-audit';
+import { normalizeTemplateRowIds_ACU } from './template-row-id-normalizer';
 import { abortableDelay } from '../../shared/abortable-delay';
 
 // ═══ 预设存储 CRUD（内部辅助） ═══
@@ -205,7 +205,18 @@ export function parseImportedTemplateData_ACU(templateData: any) {
         }
     }
 
-    jsonData = normalizeHeaderOnlyRowIdColumns_ACU(jsonData);
+    const normalization = normalizeTemplateRowIds_ACU(jsonData, {
+        syncDdl: getCurrentStorageMode() === 'sqlite',
+    });
+    if (normalization.blockers.length > 0) {
+        const diagnostics: TemplateImportDiagnostic_ACU[] = normalization.blockers.map(issue => ({
+            code: issue.code === 'misplaced_row_id' ? 'misplaced_row_id' : 'invalid_header_row',
+            sheetKey: issue.sheetKey, sheetName: issue.sheetName, message: issue.message,
+            columnIndex: issue.columnIndex,
+        }));
+        throw new TemplateImportValidationError_ACU(diagnostics);
+    }
+    jsonData = normalization.templateData;
     const importDiagnostics = validateImportedTemplateObject_ACU(jsonData);
     if (importDiagnostics.length > 0) {
         throw new TemplateImportValidationError_ACU(importDiagnostics);

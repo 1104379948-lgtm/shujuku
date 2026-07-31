@@ -616,6 +616,25 @@ function buildDDLHeaderMismatchMessage_ACU(index: number, ddlColumn: DDLColumnIn
     : `第 ${index + 1} 列不匹配：DDL 列名为「${ddlColumn.sqlName}」，表头为「${header}」`;
 }
 
+
+/**
+ * Injects a canonical `row_id INTEGER PRIMARY KEY` column right after the opening
+ * parenthesis of the first CREATE TABLE definition. It only inserts at the exact
+ * definition boundary parsed by the SQL scanner, so literals, comments and other
+ * parentheses remain untouched. Callers must validate column-count and header
+ * mapping afterwards (e.g. via validateDDLTextAgainstHeaders_ACU).
+ */
+export function injectRowIdPrimaryKeyColumn_ACU(ddl: string): string {
+  const value = String(ddl || '').trim();
+  if (!value) throw new Error('无法在空 DDL 中注入 row_id。');
+  const bounds = findCreateTableDefinitionBounds_ACU(value);
+  if (!bounds) throw new Error('无法解析 CREATE TABLE 语句，不能注入 row_id。');
+  const after = value.slice(bounds.openingIndex + 1);
+  const injected = `\n  row_id INTEGER PRIMARY KEY, -- 行号`;
+  const separator = after.startsWith('\n') || after.startsWith('\r') ? '' : '\n  ';
+  return `${value.slice(0, bounds.openingIndex + 1)}${injected}${separator}${after}`;
+}
+
 export function validateDDLTextAgainstHeaders_ACU(
   ddlText: string,
   tableHeaders: string[],

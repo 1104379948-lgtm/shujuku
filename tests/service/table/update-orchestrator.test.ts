@@ -248,7 +248,9 @@ const mockRunTableWriteTransaction = vi.fn(async (options: any, task: any) => ta
   baseRevision: null,
   writeSet: options.writeSet,
   runCommit: async (commitTask: any) => commitTask(),
-}, options.initialData ? JSON.parse(JSON.stringify(options.initialData)) : mockCurrentJsonTableData));
+}, options.workingDataMode === 'none'
+  ? null
+  : (options.initialData ? JSON.parse(JSON.stringify(options.initialData)) : mockCurrentJsonTableData)));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   captureTableRuntimeRevisionForWriteSet_ACU: vi.fn(() => 'runtime-test-revision'),
   invalidateTableRuntimeRevision_ACU: vi.fn(() => 'runtime-test-invalidated'),
@@ -4246,6 +4248,37 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
+  it('执行 scope 只冻结 prompt 所需消息字段，不序列化完整聊天元数据', async () => {
+    const metadataToJson = vi.fn(() => {
+      throw new Error('不应序列化聊天持久化元数据');
+    });
+    mockGetChatArray_ACU.mockReturnValue([
+      { is_user: true, name: '助手', mes: '问题', TavernDB_ACU_IsolatedData: { toJSON: metadataToJson } },
+      { is_user: false, name: '角色', mes: 'AI回复', extra: { nested: '不应进入 prompt 快照' } },
+    ]);
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any);
+    mockCallCustomOpenAI.mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent');
+
+    expect(result.success).toBe(true);
+    expect(metadataToJson).not.toHaveBeenCalled();
+    expect(mockPrepareAIInput).toHaveBeenCalledWith([
+      { is_user: true, name: '助手', mes: '问题' },
+      { is_user: false, name: '角色', mes: 'AI回复' },
+    ], expect.any(String), ['sheet_0'], expect.any(Object));
+
+    const promptMessages = mockPrepareAIInput.mock.calls[0][0];
+    promptMessages[0].mes = '被调用方修改';
+    expect(mockGetChatArray_ACU.mock.results[0].value[0].mes).toBe('问题');
+  });
+
   it('同一 bucket 的多组只统一提交一次', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
@@ -4387,7 +4420,7 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
-  it('最新 AI 楼层发生 RuntimeRevision 冲突时复用已生成响应，并基于最新运行时快照重放', async () => {
+  it('外部插件推进 runtime revision 后提交不中断，且不触发 RuntimeRevision 专用重放', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: true }, { is_user: false, mes: 'AI回复' }]);
@@ -4397,19 +4430,17 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     } as any);
     mockSettings = { ...mockSettings, tableMaxRetries: 2 };
     mockCallCustomOpenAI.mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>');
-    mockRunTableWriteTransaction
-      .mockRejectedValueOnce(Object.assign(new Error('[RuntimeRevision] 表 sheet_0 已变化'), {
-        name: 'TableRuntimeRevisionConflictError',
-      }))
-      .mockImplementationOnce(async (options: any, task: any) => task({
-        transactionId: 'tx-conflict-replay',
-        chatKey: 'test-chat',
-        isolationKey: '',
-        source: options.source,
-        baseRevision: options.baseRevision,
-        writeSet: options.writeSet,
-        runCommit: async (commitTask: any) => commitTask(),
-      }, JSON.parse(JSON.stringify(options.initialData))));
+    // 外部插件已推进 revision（baseRevision 与当前 runtime 不一致），但事务层不再拒写，
+    // 提交正常完成，不触发任何 RuntimeRevision 专用重试/重放。
+    mockRunTableWriteTransaction.mockImplementationOnce(async (options: any, task: any) => task({
+      transactionId: 'tx-external-drift',
+      chatKey: 'test-chat',
+      isolationKey: '',
+      source: options.source,
+      baseRevision: 'runtime-v1:stale-base',
+      writeSet: options.writeSet,
+      runCommit: async (commitTask: any) => commitTask(),
+    }, JSON.parse(JSON.stringify(options.initialData))));
 
     const result = await processGroupedRuntimeChunk_ACU([
       { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
@@ -4418,8 +4449,57 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(result).toEqual(expect.objectContaining({ success: true, committedBucketCount: 1 }));
     expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
     expect(mockPrepareAIInput).toHaveBeenCalledTimes(1);
-    expect(mockRunTableWriteTransaction).toHaveBeenCalledTimes(2);
+    expect(mockRunTableWriteTransaction).toHaveBeenCalledTimes(1);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('多 bucket 批量重填期间外部并发写入不中断后续 bucket', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户0' },
+      { is_user: false, mes: '历史 AI 回复1' },
+      { is_user: true, mes: '用户2' },
+      { is_user: false, mes: '最新 AI 回复3' },
+    ]);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any);
+    mockSettings = { ...mockSettings, tableMaxRetries: 2 };
+    mockCallCustomOpenAI
+      .mockResolvedValueOnce('<tableEdit>sheet_0 bucket1</tableEdit>')
+      .mockResolvedValueOnce('<tableEdit>sheet_0 bucket2</tableEdit>');
+    mockRunTableWriteTransaction
+      .mockImplementationOnce(async (options: any, task: any) => task({
+        transactionId: 'tx-bucket1',
+        chatKey: 'test-chat',
+        isolationKey: '',
+        source: options.source,
+        baseRevision: 'runtime-v1:bucket1-stale',
+        writeSet: options.writeSet,
+        runCommit: async (commitTask: any) => commitTask(),
+      }, JSON.parse(JSON.stringify(options.initialData))));
+    // 第二个 bucket 提交时 revision 同样已漂移，仍正常提交。
+    mockRunTableWriteTransaction.mockImplementationOnce(async (options: any, task: any) => task({
+      transactionId: 'tx-bucket2',
+      chatKey: 'test-chat',
+      isolationKey: '',
+      source: options.source,
+      baseRevision: 'runtime-v1:bucket2-stale',
+      writeSet: options.writeSet,
+      runCommit: async (commitTask: any) => commitTask(),
+    }, JSON.parse(JSON.stringify(options.initialData))));
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+      { key: 'group_b', groupId: 1, indices: [3], batchSize: 1, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent');
+
+    expect(result).toEqual(expect.objectContaining({ success: true, committedBucketCount: 2 }));
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+    expect(mockRunTableWriteTransaction).toHaveBeenCalledTimes(2);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(2);
   });
 
   it('可回放重填只向当前 bucket 的真实 AI 消息和目标表传递 replacement 范围', async () => {
@@ -5141,6 +5221,9 @@ describe('orchestrateManualCatchUp_ACU', () => {
         completedSheetMessageIndexByKey: { sheet_a: 5, sheet_b: 5 },
       }),
     }));
+    expect(mockRunTableWriteTransaction.mock.calls.find(call => (
+      call[0]?.reason === 'orchestrateManualCatchUp:terminal:complete'
+    ))?.[0]).toEqual(expect.objectContaining({ workingDataMode: 'none' }));
     expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
     expect(refreshData).toHaveBeenCalledTimes(1);
   });

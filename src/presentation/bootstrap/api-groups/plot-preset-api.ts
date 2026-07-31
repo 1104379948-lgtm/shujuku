@@ -287,10 +287,13 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                             });
                         if (!templateResult?.saved) throw new Error(templateResult?.error || '模板原子提交失败');
                         result.templateInjected = true;
+                        const committedTemplateData = (
+                            'normalizedTemplateData' in templateResult && templateResult.normalizedTemplateData
+                        ) || templateObj;
                         // 预设库不是聊天状态的一部分，不能先于严格聊天保存；失败只报告警告，不能回滚已提交 checkpoint。
                         if (templatePresetName) {
                             try {
-                                const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateObj);
+                                const snapshot = sanitizeTemplateSnapshotForChat_ACU(committedTemplateData);
                                 if (!snapshot?.templateStr || !upsertTemplatePreset_ACU(templatePresetName, snapshot.templateStr)) {
                                     throw new Error('模板预设存储拒绝写入。');
                                 }

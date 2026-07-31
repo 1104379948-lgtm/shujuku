@@ -4,6 +4,7 @@ import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, pe
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import type { StorageMode } from '../../shared/table-storage-provider';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
 import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
@@ -73,6 +74,8 @@ export interface PersistTableMutationV2Options_ACU {
   assumeCommitLock?: boolean;
   /** 对破坏性复合写入要求宿主真实保存；默认保持历史宽松保存语义。 */
   strictSave?: boolean;
+  performanceRunId?: string;
+  performanceParentSpanId?: string;
   transactionContext?: Pick<TableWriteTransactionContext_ACU, 'runCommit' | 'baseRevision' | 'writeSet' | 'assertFresh'>;
 }
 
@@ -560,6 +563,63 @@ export function collectCheckpointGenerationStatusV2_ACU(
 function normalizeKeys_ACU(keys: string[] | null | undefined, data?: TableDataObject_ACU): string[] {
   if (!Array.isArray(keys)) return [];
   return [...new Set(keys.filter(key => typeof key === 'string' && key.startsWith('sheet_') && (!data || Boolean(data[key]))))];
+}
+
+function collectScopedAfterDataSheetKeys_ACU(options: PersistTableMutationV2Options_ACU): string[] | null {
+  const keys = new Set<string>();
+  const addKeys = (values: unknown): void => {
+    if (!Array.isArray(values)) return;
+    values.forEach(value => {
+      if (typeof value === 'string' && value.startsWith('sheet_')) keys.add(value);
+    });
+  };
+  addKeys(options.filledSheetKeys);
+  addKeys(options.candidateChangedSheetKeys);
+  addKeys(options.groupKeys);
+  addKeys(options.replaceExistingIncremental?.targetSheetKeys);
+
+  for (const operation of options.operations || []) {
+    if (!operation || typeof operation !== 'object') return null;
+    switch (operation.kind) {
+      case 'sql_sheet_batch':
+      case 'row_upsert':
+      case 'row_delete':
+      case 'meta_update':
+      case 'sheet_schema_migrate':
+      case 'sheet_replace': {
+        const sheetKey = operation.sheetKey;
+        if (typeof sheetKey !== 'string' || !sheetKey.startsWith('sheet_')) return null;
+        keys.add(sheetKey);
+        break;
+      }
+      case 'data_replace':
+      case 'sql_batch':
+      case 'table_edit_dsl':
+      default:
+        // 未知 operation 不能因“碰巧带 sheetKey”就被推断为单表语义。
+        return null;
+    }
+  }
+  return [...keys];
+}
+
+function clonePersistAfterData_ACU(
+  options: PersistTableMutationV2Options_ACU,
+  requiresFullSnapshot: boolean,
+): TableDataObject_ACU {
+  if (requiresFullSnapshot) return deepClone_ACU(options.afterData);
+  const sheetKeys = collectScopedAfterDataSheetKeys_ACU(options);
+  if (sheetKeys === null) return deepClone_ACU(options.afterData);
+  const projected: TableDataObject_ACU = {} as TableDataObject_ACU;
+  if (Object.prototype.hasOwnProperty.call(options.afterData, 'mate')) {
+    (projected as any).mate = deepClone_ACU((options.afterData as any).mate);
+  }
+  sheetKeys.forEach(sheetKey => {
+    if (Object.prototype.hasOwnProperty.call(options.afterData, sheetKey)) {
+      (projected as any)[sheetKey] = deepClone_ACU((options.afterData as any)[sheetKey]);
+    }
+  });
+  return projected;
 }
 
 function normalizeOperations_ACU(
@@ -1093,7 +1153,11 @@ async function persistTableMutationLogV2Core_ACU(
     return { saved: false, error: replacementValidation.error };
   }
   const replacement = replacementValidation as { targetMessageIndices: number[]; targetSheetKeys: string[] } | null;
-  const afterData = deepClone_ACU(options.afterData);
+  const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index);
+  const hasCheckpointAnywhere = hasAnyV2Checkpoint_ACU(chat, isolationKey);
+  const requiresFullAfterData = !hasCheckpointAnywhere
+    || (options.source === 'import' && (!Array.isArray(options.operations) || options.operations.length === 0));
+  const afterData = clonePersistAfterData_ACU(options, requiresFullAfterData);
   const normalization = normalizeCanonicalTableRows_ACU(afterData);
   if (normalization.errors.length > 0) {
     return { saved: false, error: `V2 operation log snapshot 行标识不合法：${formatCanonicalRowIssues_ACU(normalization.errors)}` };
@@ -1103,12 +1167,10 @@ async function persistTableMutationLogV2Core_ACU(
   }
   const filledSheetKeys = normalizeKeys_ACU(options.filledSheetKeys, afterData);
   const candidateChangedSheetKeys = normalizeKeys_ACU(options.candidateChangedSheetKeys, afterData);
-  const hasExistingCheckpoint = hasAnyV2Checkpoint_ACU(chat, isolationKey, target.index);
   // 「本次是否首次初始化」必须看整个聊天，而不是只看目标楼层之前。
   // 对更早楼层填表（追平/重填）时，锚点可能位于更晚的楼层；
   // 只看之前会误判为首次初始化，从而又写一个 init full checkpoint，
   // 于是聊天里出现两个初始基线，回放只认最后一个，前面楼层的数据全部失效。
-  const hasCheckpointAnywhere = hasAnyV2Checkpoint_ACU(chat, isolationKey);
   const hasExistingV2Frame = hasAnyV2Frame_ACU(chat, isolationKey, target.index);
   const operations = normalizeOperations_ACU(options.operations, afterData, options.source, hasExistingCheckpoint);
   const effectiveChangedSheetKeys = candidateChangedSheetKeys;
@@ -1133,6 +1195,10 @@ async function persistTableMutationLogV2Core_ACU(
     const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
       maxMessageIndex: target.index,
       updateRuntimeState: false,
+      ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
+      ...(options.performanceParentSpanId
+        ? { performanceParentSpanId: options.performanceParentSpanId }
+        : {}),
       allowTemporaryTemplateBaseline: true,
       compatibilityMode: 'disabled',
     });
@@ -1279,6 +1345,10 @@ async function persistTableMutationLogV2Core_ACU(
         replayBeforeAppend = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
           maxMessageIndex: target.index,
           updateRuntimeState: false,
+          ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
+          ...(options.performanceParentSpanId
+            ? { performanceParentSpanId: options.performanceParentSpanId }
+            : {}),
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1415,13 +1485,38 @@ async function persistTableMutationLogV2Core_ACU(
 export async function persistTableMutationLogV2_ACU(
   options: PersistTableMutationV2Options_ACU,
 ): Promise<{ saved: boolean; messageIndex?: number; entry?: TableMutationLogEntryV2_ACU; error?: string }> {
+  const performanceSpan = startRuntimePerformanceSpan_ACU('v2-persist-mutation-log', {
+    runId: options.performanceRunId,
+    parentSpanId: options.performanceParentSpanId,
+    settings: settings_ACU,
+    metrics: {
+      targetMessageIndex: options.targetMessageIndex,
+      operationCount: Array.isArray(options.operations) ? options.operations.length : 0,
+      changedSheetCount: Array.isArray(options.candidateChangedSheetKeys) ? options.candidateChangedSheetKeys.length : 0,
+      source: options.source,
+      strictSave: options.strictSave === true,
+      replacement: Boolean(options.replaceExistingIncremental),
+    },
+  });
   if (!options.transactionContext) {
-    return { saved: false, error: 'V2 operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
+    const result = { saved: false, error: 'V2 operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
+    performanceSpan.end({ success: false });
+    return result;
   }
-  if (options.assumeCommitLock) {
-    return persistTableMutationLogV2Core_ACU(options);
+  try {
+    const hasPerformanceContext = Boolean(options.performanceRunId || options.performanceParentSpanId);
+    const coreOptions = hasPerformanceContext
+      ? { ...options, performanceParentSpanId: performanceSpan.id }
+      : options;
+    const result = options.assumeCommitLock
+      ? await persistTableMutationLogV2Core_ACU(coreOptions)
+      : await options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(coreOptions), options.revisionWriteSet);
+    performanceSpan.end({ success: result.saved });
+    return result;
+  } catch (error) {
+    performanceSpan.end({ success: false });
+    throw error;
   }
-  return options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(options), options.revisionWriteSet);
 }
 
 function validateBatchOperationScope_ACU(
