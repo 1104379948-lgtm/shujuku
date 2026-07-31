@@ -104174,14 +104174,10 @@ $CONTENT
                                     logWarn_ACU('[游戏初始化] SQLite 运行时重建失败:', error);
                                 }
                             }
-                            if (messageIndex != null) {
-                                if (SillyTavern_API_ACU?.eventSource?.emit && SillyTavern_API_ACU?.eventTypes?.MESSAGE_UPDATED) {
-                                    SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, messageIndex);
-                                }
-                                if (topLevelWindow_ACU?.AutoCardUpdaterAPI) {
-                                    topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate();
-                                }
-                            }
+                            // 模板已由严格保存路径写入聊天。这里若同步触发 MESSAGE_UPDATED 或表格
+                            // 回调，会销毁正在 await initGameSession() 的第三方 iframe，使其后续
+                            // insertRow 永远没有机会执行。初始化 API 只保证持久化和 runtime 就绪；
+                            // 宿主重渲染仍由正常消息生命周期或调用方后续写入的既有通知路径处理。
                             logDebug_ACU('[游戏初始化] 数据库模板已原子提交');
                         }
                         catch (templateError) {
@@ -104222,12 +104218,9 @@ $CONTENT
                             logWarn_ACU('[游戏初始化] 剧情引导预设加载失败，但继续游戏初始化');
                         }
                     }
-                    // 步骤3: 保存设置并刷新
+                    // 步骤3: 保存设置。不得在异步初始化链中刷新消息/iframe，见上方模板提交说明。
                     try {
                         saveSettingsAndNotify_ACU();
-                        if (topLevelWindow_ACU.AutoCardUpdaterAPI && topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate) {
-                            topLevelWindow_ACU.AutoCardUpdaterAPI._notifyTableUpdate();
-                        }
                     }
                     catch (saveError) {
                         logWarn_ACU('[游戏初始化] 保存设置时出错:', saveError);

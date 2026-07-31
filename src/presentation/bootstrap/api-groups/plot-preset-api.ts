@@ -3,10 +3,8 @@
  * 剧情推进预设管理 API + 游戏初始化 API
  */
 
-import { topLevelWindow_ACU } from '../../../shared/env';
 import { deriveTemplatePresetNameForImport_ACU } from '../../../shared/template-preset-utils';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../shared/utils';
-import { SillyTavern_API_ACU } from '../../../shared/host-api';
 import { settings_ACU } from '../../../service/runtime/state-manager';
 import { getCurrentRuntimePlotPresetName_ACU, normalizePlotPresetExcludeRules_ACU, switchCurrentChatPlotPreset_ACU } from '../../../service/plot/plot-logic';
 import { resetCurrentChatTableStateFromTemplate_ACU } from '../../../service/table/template-state-reset';
@@ -319,14 +317,10 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                                 logWarn_ACU('[游戏初始化] SQLite 运行时重建失败:', error);
                             }
                         }
-                        if (messageIndex != null) {
-                            if (SillyTavern_API_ACU?.eventSource?.emit && SillyTavern_API_ACU?.eventTypes?.MESSAGE_UPDATED) {
-                                SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, messageIndex);
-                            }
-                            if ((topLevelWindow_ACU as any)?.AutoCardUpdaterAPI) {
-                                (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate();
-                            }
-                        }
+                        // 模板已由严格保存路径写入聊天。这里若同步触发 MESSAGE_UPDATED 或表格
+                        // 回调，会销毁正在 await initGameSession() 的第三方 iframe，使其后续
+                        // insertRow 永远没有机会执行。初始化 API 只保证持久化和 runtime 就绪；
+                        // 宿主重渲染仍由正常消息生命周期或调用方后续写入的既有通知路径处理。
                         logDebug_ACU('[游戏初始化] 数据库模板已原子提交');
                     } catch (templateError) {
                         logError_ACU('[游戏初始化] 模板注入失败:', templateError);
@@ -368,12 +362,9 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                     }
                 }
 
-                // 步骤3: 保存设置并刷新
+                // 步骤3: 保存设置。不得在异步初始化链中刷新消息/iframe，见上方模板提交说明。
                 try {
                     saveSettingsAndNotify_ACU();
-                    if ((topLevelWindow_ACU as any).AutoCardUpdaterAPI && (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate) {
-                        (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate();
-                    }
                 } catch (saveError) {
                     logWarn_ACU('[游戏初始化] 保存设置时出错:', saveError);
                 }

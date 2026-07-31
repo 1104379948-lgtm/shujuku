@@ -11,10 +11,16 @@ const mocks = vi.hoisted(() => ({
   saveSettings: vi.fn(),
   refreshPreset: vi.fn(),
   switchPreset: vi.fn(() => ({ presetName: '西幻剧情引导', followsGlobal: false })),
+  emitMessageUpdated: vi.fn(),
+  notifyTableUpdate: vi.fn(),
 }));
 
-vi.mock('../../../../src/shared/env', () => ({ topLevelWindow_ACU: {} }));
-vi.mock('../../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: {} }));
+vi.mock('../../../../src/shared/env', () => ({
+  topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: mocks.notifyTableUpdate } },
+}));
+vi.mock('../../../../src/shared/host-api', () => ({
+  SillyTavern_API_ACU: { eventTypes: { MESSAGE_UPDATED: 'MESSAGE_UPDATED' }, eventSource: { emit: mocks.emitMessageUpdated } },
+}));
 vi.mock('../../../../src/shared/template-preset-utils', () => ({
   deriveTemplatePresetNameForImport_ACU: vi.fn(({ presetName }: any) => String(presetName || '').trim()),
 }));
@@ -95,6 +101,18 @@ describe('initGameSession 模板重置契约', () => {
       source: 'game_init', presetName: '', destructiveChangeConfirmed: false,
     }));
     expect(result).toMatchObject({ success: true, templateInjected: true });
+  });
+
+  it('模板提交后不在 await initGameSession 的调用栈内刷新宿主消息或第三方 iframe', async () => {
+    const result = await createApi().initGameSession({}, {
+      templateData: { sheet_a: { uid: 'sheet_a', name: 'A', content: [['row_id']] } },
+      loadPreset: false,
+    });
+
+    expect(result).toMatchObject({ success: true, templateInjected: true });
+    expect(mocks.emitMessageUpdated).not.toHaveBeenCalled();
+    expect(mocks.notifyTableUpdate).not.toHaveBeenCalled();
+    expect(mocks.saveSettings).toHaveBeenCalledOnce();
   });
 
   it('SQLite 重载回退后保留已提交状态，并向调用方报告 runtime warning', async () => {
