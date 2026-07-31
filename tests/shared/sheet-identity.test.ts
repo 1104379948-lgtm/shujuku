@@ -3,7 +3,9 @@ import {
   allocateStableSheetKeys_ACU,
   buildStableSheetKeyCandidate_ACU,
   canonicalizeDisplayName_ACU,
+  rebindSheetKeysAcrossSnapshots_ACU,
   SHEET_KEY_ALGORITHM_VERSION_ACU,
+  SheetIdentityRebindError_ACU,
   toAsciiSlug_ACU,
 } from '../../src/shared/sheet-identity';
 import {
@@ -75,6 +77,79 @@ describe('sheet identity', () => {
     expect(key).toMatch(/^sheet_[a-z0-9_]+$/);
     expect(key.length).toBeLessThanOrEqual(54);
     expect(buildStableSheetKeyCandidate_ACU(name)).toBe(key);
+  });
+
+  it('跨快照用唯一 DDL/显示名证据把旧随机 key 重绑定为稳定 key', () => {
+    const scheduled = {
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+    const replayBase = {
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+
+    expect(rebindSheetKeysAcrossSnapshots_ACU(['sheet_in05z9vz'], scheduled, replayBase))
+      .toEqual(['sheet_bei_bao_wu_pin_biao']);
+  });
+
+  it('身份只能一对多匹配时 fail closed，不把授权静默扩到多个表', () => {
+    const scheduled = {
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+    const ambiguousBase = {
+      sheet_inventory_a: {
+        uid: 'sheet_inventory_a',
+        name: '旧背包',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+      sheet_inventory_b: {
+        uid: 'sheet_inventory_b',
+        name: '新背包',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+
+    expect(() => rebindSheetKeysAcrossSnapshots_ACU(['sheet_in05z9vz'], scheduled, ambiguousBase))
+      .toThrow(SheetIdentityRebindError_ACU);
+  });
+
+  it('两个旧 key 只能落到同一个目标表时拒绝多对一授权折叠', () => {
+    const scheduled = {
+      sheet_old_a: {
+        uid: 'sheet_old_a',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+      sheet_old_b: {
+        uid: 'sheet_old_b',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+    const target = {
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+
+    expect(() => rebindSheetKeysAcrossSnapshots_ACU(
+      ['sheet_old_a', 'sheet_old_b'],
+      scheduled,
+      target,
+    )).toThrow(/多对一冲突/);
   });
 });
 

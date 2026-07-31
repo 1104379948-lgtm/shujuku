@@ -1,5 +1,6 @@
 import { pinyin } from 'pinyin-pro';
 import type { Sheet_ACU, TableDataObject_ACU } from './models/table-data';
+import { parseDDLTableName } from './ddl-utils';
 
 export const SHEET_KEY_ALGORITHM_VERSION_ACU = 1;
 export const MAX_SHEET_SLUG_LENGTH_ACU = 48;
@@ -29,6 +30,102 @@ export interface StableSheetKeyAllocationOptions_ACU {
 export interface StableSheetKeyAllocation_ACU {
   keys: Array<string | null>;
   diagnostics: SheetNameDiagnostic_ACU[];
+}
+
+export class SheetIdentityRebindError_ACU extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SheetIdentityRebindError_ACU';
+  }
+}
+
+interface SheetIdentityDescriptor_ACU {
+  sheetKey: string;
+  uid: string;
+  canonicalName: string;
+  ddlTableName: string;
+}
+
+function listSheetIdentityDescriptors_ACU(data: TableDataObject_ACU | Record<string, unknown> | null | undefined): SheetIdentityDescriptor_ACU[] {
+  return Object.keys(data || {})
+    .filter(sheetKey => sheetKey.startsWith('sheet_'))
+    .sort()
+    .map(sheetKey => {
+      const sheet = (data as Record<string, Sheet_ACU>)[sheetKey];
+      return {
+        sheetKey,
+        uid: String(sheet?.uid || '').trim(),
+        canonicalName: canonicalizeDisplayName_ACU(sheet?.name),
+        ddlTableName: String(parseDDLTableName(String(sheet?.sourceData?.ddl || '')) || '').trim().toLowerCase(),
+      };
+    });
+}
+
+/**
+ * Rebinds keys captured from one immutable scheduling snapshot to another snapshot.
+ * Exact keys win. Otherwise only a unique uid/key alias, author DDL table name, or
+ * canonical display name is accepted. Ambiguous or unprovable identities fail closed.
+ */
+export function rebindSheetKeysAcrossSnapshots_ACU(
+  sheetKeys: readonly string[],
+  sourceData: TableDataObject_ACU | Record<string, unknown> | null | undefined,
+  targetData: TableDataObject_ACU | Record<string, unknown> | null | undefined,
+): string[] {
+  const sourceDescriptors = listSheetIdentityDescriptors_ACU(sourceData);
+  const targetDescriptors = listSheetIdentityDescriptors_ACU(targetData);
+  const sourceByKey = new Map(sourceDescriptors.map(item => [item.sheetKey, item]));
+  const targetByKey = new Map(targetDescriptors.map(item => [item.sheetKey, item]));
+  const rebound: string[] = [];
+  const sourceOwnerByTargetKey = new Map<string, string>();
+
+  const selectUnique = (source: SheetIdentityDescriptor_ACU, candidates: SheetIdentityDescriptor_ACU[], evidence: string): SheetIdentityDescriptor_ACU | null => {
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return candidates[0];
+    throw new SheetIdentityRebindError_ACU(
+      `Sheet 身份重绑定存在歧义：${source.sheetKey} 通过${evidence}同时匹配 ${candidates.map(item => item.sheetKey).join('、')}。`,
+    );
+  };
+
+  for (const rawKey of sheetKeys || []) {
+    const sheetKey = String(rawKey || '').trim();
+    if (!sheetKey.startsWith('sheet_')) continue;
+    const source = sourceByKey.get(sheetKey);
+    if (!source) {
+      throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定失败：调度快照中不存在 ${sheetKey}。`);
+    }
+
+    let match: SheetIdentityDescriptor_ACU | null = targetByKey.get(sheetKey) || null;
+    if (match) {
+      const existingOwner = sourceOwnerByTargetKey.get(match.sheetKey);
+      if (existingOwner && existingOwner !== sheetKey) {
+        throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定存在多对一冲突：${existingOwner}、${sheetKey} 同时匹配 ${match.sheetKey}。`);
+      }
+      sourceOwnerByTargetKey.set(match.sheetKey, sheetKey);
+      if (!rebound.includes(match.sheetKey)) rebound.push(match.sheetKey);
+      continue;
+    }
+
+    const aliases = new Set([source.sheetKey, source.uid].filter(Boolean).map(value => value.toLowerCase()));
+    match = selectUnique(source, targetDescriptors.filter(candidate =>
+      aliases.has(candidate.sheetKey.toLowerCase()) || (!!candidate.uid && aliases.has(candidate.uid.toLowerCase())),
+    ), 'key/uid');
+    if (!match && source.ddlTableName) {
+      match = selectUnique(source, targetDescriptors.filter(candidate => candidate.ddlTableName === source.ddlTableName), '作者 DDL 表名');
+    }
+    if (!match && source.canonicalName) {
+      match = selectUnique(source, targetDescriptors.filter(candidate => candidate.canonicalName === source.canonicalName), '规范化显示名');
+    }
+    if (!match) {
+      throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定失败：无法证明 ${sheetKey} 在当前基底中的对应表。`);
+    }
+    const existingOwner = sourceOwnerByTargetKey.get(match.sheetKey);
+    if (existingOwner && existingOwner !== sheetKey) {
+      throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定存在多对一冲突：${existingOwner}、${sheetKey} 同时匹配 ${match.sheetKey}。`);
+    }
+    sourceOwnerByTargetKey.set(match.sheetKey, sheetKey);
+    if (!rebound.includes(match.sheetKey)) rebound.push(match.sheetKey);
+  }
+  return rebound;
 }
 
 /** One physical-table-name collision: distinct sheetKeys resolving to the same slug. */

@@ -18,6 +18,7 @@ import { resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
+import { rebindSheetKeysAcrossSnapshots_ACU, SheetIdentityRebindError_ACU } from '../../shared/sheet-identity';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 
@@ -1553,6 +1554,7 @@ export async function processGroupedRuntimeChunk_ACU(
     if (!Array.isArray(groups) || groups.length === 0) {
         return { success: true, failedGroups: [], committedBucketCount: 0 };
     }
+    const schedulingIdentitySnapshot = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU);
 
     const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processGroupedRuntimeChunk');
     if (!migration.success) {
@@ -1574,15 +1576,29 @@ export async function processGroupedRuntimeChunk_ACU(
     // 模板只起指导作用：只有模板声明的表参与填表。
     // 范围未知时不过滤，避免把所有表判成不参与导致数据写不进去。
     const templateScope = executionScope.templateScope;
-    const scopedGroups = groups
-        .map(group => {
-            const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(group.sheetKeys || [], templateScope);
-            if (scopedSheetKeys.length === (group.sheetKeys || []).length) return group;
-            const dropped = (group.sheetKeys || []).filter(sheetKey => !scopedSheetKeys.includes(sheetKey));
-            logDebug_ACU(`[TemplateScope] ${formatGroupReference_ACU(group)} 剔除模板未声明的表：${dropped.join('、')}。`);
-            return { ...group, sheetKeys: scopedSheetKeys };
-        })
-        .filter(group => (group.sheetKeys || []).length > 0);
+    let scopedGroups: GroupedRuntimeUpdateGroup_ACU[];
+    try {
+        scopedGroups = groups
+            .map(group => {
+                const reboundSheetKeys = templateForLookup
+                    ? rebindSheetKeysAcrossSnapshots_ACU(group.sheetKeys || [], schedulingIdentitySnapshot, templateForLookup)
+                    : [...(group.sheetKeys || [])];
+                const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(reboundSheetKeys, templateScope);
+                if (scopedSheetKeys.length === reboundSheetKeys.length) return { ...group, sheetKeys: scopedSheetKeys };
+                const dropped = reboundSheetKeys.filter(sheetKey => !scopedSheetKeys.includes(sheetKey));
+                logDebug_ACU(`[TemplateScope] ${formatGroupReference_ACU(group)} 剔除模板未声明的表：${dropped.join('、')}。`);
+                return { ...group, sheetKeys: scopedSheetKeys };
+            })
+            .filter(group => (group.sheetKeys || []).length > 0);
+    } catch (error) {
+        const message = error instanceof SheetIdentityRebindError_ACU ? error.message : String(error);
+        return {
+            success: false,
+            failedGroups: groups.map(group => group.key),
+            error: sanitizeRetryFeedback_ACU(message, MAX_WARN_ERROR_LENGTH_ACU),
+            committedBucketCount: 0,
+        };
+    }
     if (scopedGroups.length === 0) {
         logDebug_ACU('[TemplateScope] 所有分组的目标表都不在模板范围内，本次无需填表。');
         return { success: true, failedGroups: [], committedBucketCount: 0 };
@@ -1696,6 +1712,23 @@ export async function processGroupedRuntimeChunk_ACU(
                 break;
             }
             const mergedBatchData = conflictReplayData || baseResult.data;
+            try {
+                bucket.plannedJobs = bucket.plannedJobs.map(plannedJob => ({
+                    ...plannedJob,
+                    group: {
+                        ...plannedJob.group,
+                        sheetKeys: rebindSheetKeysAcrossSnapshots_ACU(
+                            plannedJob.group.sheetKeys || [],
+                            templateForLookup || schedulingIdentitySnapshot,
+                            mergedBatchData,
+                        ),
+                    },
+                }));
+            } catch (error) {
+                bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
+                firstError = firstError || (error instanceof Error ? error.message : String(error));
+                break;
+            }
             _set_currentJsonTableData_ACU(mergedBatchData);
             const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
             const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
@@ -2447,6 +2480,7 @@ export async function processUpdatesBatch_ACU(
     }
 
     const { targetSheetKeys, batchSize: specificBatchSize, requestOptions } = options;
+    const schedulingIdentitySnapshot = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU);
 
     const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processUpdatesBatch');
     if (!migration.success) {
@@ -2487,6 +2521,18 @@ export async function processUpdatesBatch_ACU(
                 return { success: false, failedBatch: batchNumber, error: baseResult.error || '无法构建合并基底，操作已终止。' };
             }
             const mergedBatchData = baseResult.data;
+            let effectiveTargetSheetKeys = targetSheetKeys;
+            if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0) {
+                try {
+                    effectiveTargetSheetKeys = rebindSheetKeysAcrossSnapshots_ACU(
+                        targetSheetKeys,
+                        schedulingIdentitySnapshot,
+                        mergedBatchData,
+                    );
+                } catch (error) {
+                    return { success: false, failedBatch: batchNumber, error: error instanceof Error ? error.message : String(error) };
+                }
+            }
 
             const batchSheetKeys = getSortedSheetKeys_ACU(mergedBatchData);
             const batchIsolationKey = getCurrentIsolationKey_ACU();
@@ -2521,9 +2567,8 @@ export async function processUpdatesBatch_ACU(
             // 决议 effective API preset：如果调用方未指定 tableApiPreset，
             // 则以 targetSheetKeys 中第一个表名为准查覆盖映射
             let effectiveRequestOptions = requestOptions;
-            if (!effectiveRequestOptions?.tableApiPreset && targetSheetKeys && targetSheetKeys.length > 0) {
-                const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
-                const firstTableName = templateForLookup?.[targetSheetKeys[0]]?.name || '';
+            if (!effectiveRequestOptions?.tableApiPreset && effectiveTargetSheetKeys && effectiveTargetSheetKeys.length > 0) {
+                const firstTableName = mergedBatchData?.[effectiveTargetSheetKeys[0]]?.name || '';
                 const resolvedPreset = resolveTableApiPresetOverride_ACU(firstTableName);
                 if (resolvedPreset) {
                     effectiveRequestOptions = { ...(effectiveRequestOptions || {}), tableApiPreset: resolvedPreset };
@@ -2535,7 +2580,7 @@ export async function processUpdatesBatch_ACU(
                 finalSaveTargetIndex,
                 updateMode,
                 isSilentMode,
-                targetSheetKeys,
+                effectiveTargetSheetKeys,
                 effectiveRequestOptions,
                 {
                     currentBatch: batchNumber,

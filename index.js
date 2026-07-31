@@ -33871,758 +33871,6 @@ $CONTENT
         return middlewareOutputFormat(segments, { format: options.format, separator: options.separator });
     }
 
-    const SHEET_KEY_ALGORITHM_VERSION_ACU = 1;
-    const MAX_SHEET_SLUG_LENGTH_ACU = 48;
-    const PHYSICAL_TABLE_NAME_ALGORITHM_VERSION_ACU = 1;
-    const MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU = 48;
-    const SQLITE_RESERVED_TABLE_PREFIXES_ACU = ['sqlite_', '_acu_'];
-    /**
-     * Thrown when two distinct sheets resolve to the same physical table name.
-     * This is a fail-loud signal: the user must rename one of the colliding tables.
-     * It is never recovered from by silently mutating a name, because that would
-     * reintroduce set-dependent drift.
-     */
-    class PhysicalTableNameCollisionError_ACU extends Error {
-        constructor(collisions) {
-            const detail = collisions
-                .map(c => `「${c.physicalTableName}」← ${c.sheetKeys.join(' / ')}`)
-                .join('；');
-            super(`SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
-            this.name = 'PhysicalTableNameCollisionError_ACU';
-            this.collisions = collisions;
-        }
-    }
-    /** Comparison-only normalization. Never write this value back to the display name. */
-    function canonicalizeDisplayName_ACU(value) {
-        return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
-    }
-    /** Converts a display value to an ASCII slug using the locked pinyin-pro dictionary. */
-    function toAsciiSlug_ACU(value, maxLength = MAX_SHEET_SLUG_LENGTH_ACU) {
-        const canonical = canonicalizeDisplayName_ACU(value);
-        if (!canonical)
-            return '';
-        const romanized = pinyin(canonical, {
-            toneType: 'none',
-            traditional: true,
-            v: true,
-            separator: '_',
-            nonZh: 'consecutive',
-        });
-        return romanized.normalize('NFKD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, '_')
-            .replace(/^_+|_+$/g, '')
-            .slice(0, Math.max(1, maxLength))
-            .replace(/_+$/g, '');
-    }
-    /** Returns an unreserved candidate only; callers must allocate before persisting it. */
-    function buildStableSheetKeyCandidate_ACU(displayName) {
-        const slug = toAsciiSlug_ACU(displayName);
-        return slug ? `sheet_${slug}` : null;
-    }
-    /**
-     * Runtime SQLite names are derived from the display name, not from a legacy
-     * CREATE TABLE identifier embedded in user-authored DDL. Each name is a
-     * deterministic pure function of the sheet's own display name and is
-     * independent of which other sheets are present, so building/filling/exporting
-     * always agree. Duplicate slugs are a hard error (see the fail-loud note below).
-     */
-    function resolvePhysicalTableNames_ACU(data) {
-        const entries = Object.keys(data || {})
-            .filter(sheetKey => sheetKey.startsWith('sheet_'))
-            .sort()
-            .map(sheetKey => ({ sheetKey, sheet: data[sheetKey] }));
-        // 物理表名是 sheetKey 的确定性纯函数（仅由该 sheet 的显示名 slug 决定），
-        // 绝不依赖“当前还有哪些别的表在场”。这样建表、填表、导出三处对同一 sheetKey
-        // 永远解析出同一个名字，从根上消除集合漂移导致的 no such table。
-        //
-        // 拼音 slug 相同但 sheetKey 不同 = 真实物理表名冲突。此处 fail-loud 抛出，
-        // 而不是静默追加 hash 令两表分叉——静默重命名会随入参集合变化重新产生漂移。
-        // 冲突应由启动自检提前拦截并提示用户改名（见 assertNoPhysicalTableNameCollision_ACU）。
-        const result = new Map();
-        const ownerBySlug = new Map();
-        const collisions = [];
-        for (const { sheetKey, sheet } of entries) {
-            const base = physicalTableNameBase_ACU(sheet, sheetKey);
-            const normalized = base.toLowerCase();
-            const owner = ownerBySlug.get(normalized);
-            if (owner && owner !== sheetKey) {
-                collisions.push({ physicalTableName: base, sheetKeys: [owner, sheetKey] });
-                continue;
-            }
-            ownerBySlug.set(normalized, sheetKey);
-            result.set(sheetKey, base);
-        }
-        if (collisions.length > 0) {
-            throw new PhysicalTableNameCollisionError_ACU(collisions);
-        }
-        return result;
-    }
-    function getPhysicalTableNameForSheet_ACU(data, sheetKey) {
-        const resolved = resolvePhysicalTableNames_ACU(data).get(sheetKey);
-        if (!resolved)
-            throw new Error(`无法为 Sheet 分配 SQLite runtime 表名：${sheetKey}`);
-        return resolved;
-    }
-    /** Use resolvePhysicalTableNames_ACU whenever collision arbitration is possible. */
-    function resolvePhysicalTableName_ACU(sheet, sheetKey) {
-        return physicalTableNameBase_ACU(sheet, sheetKey);
-    }
-    function physicalTableNameBase_ACU(sheet, sheetKey) {
-        const displaySlug = toAsciiSlug_ACU(sheet?.name).replace(/_/g, '');
-        const keySlug = toAsciiSlug_ACU(String(sheetKey || '').replace(/^sheet_/, '')).replace(/_/g, '');
-        let candidate = (displaySlug || keySlug || 'sheet').slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU);
-        if (/^[0-9]/.test(candidate) || SQLITE_RESERVED_TABLE_PREFIXES_ACU.some(prefix => candidate.toLowerCase().startsWith(prefix))) {
-            candidate = `table_${candidate}`;
-        }
-        return candidate.slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU) || 'table_sheet';
-    }
-    /**
-     * Detects physical-table-name collisions without throwing. Startup self-check
-     * uses this to fail loud before any DDL runs. Returns [] when every sheet maps
-     * to a unique physical name.
-     */
-    function detectPhysicalTableNameCollisions_ACU(data) {
-        const ownerBySlug = new Map();
-        const grouped = new Map();
-        const entries = Object.keys(data || {})
-            .filter(sheetKey => sheetKey.startsWith('sheet_'))
-            .sort()
-            .map(sheetKey => ({ sheetKey, sheet: data[sheetKey] }));
-        for (const { sheetKey, sheet } of entries) {
-            const base = physicalTableNameBase_ACU(sheet, sheetKey);
-            const normalized = base.toLowerCase();
-            const owner = ownerBySlug.get(normalized);
-            if (!owner) {
-                ownerBySlug.set(normalized, { sheetKey, base });
-                continue;
-            }
-            if (owner.sheetKey === sheetKey)
-                continue;
-            const set = grouped.get(normalized) || new Set([owner.sheetKey]);
-            set.add(sheetKey);
-            grouped.set(normalized, set);
-        }
-        return [...grouped.entries()].map(([normalized, sheetKeys]) => ({
-            physicalTableName: ownerBySlug.get(normalized).base,
-            sheetKeys: [...sheetKeys],
-        }));
-    }
-    /** Startup guard: throws PhysicalTableNameCollisionError_ACU when any collision exists. */
-    function assertNoPhysicalTableNameCollision_ACU(data) {
-        const collisions = detectPhysicalTableNameCollisions_ACU(data);
-        if (collisions.length > 0) {
-            throw new PhysicalTableNameCollisionError_ACU(collisions);
-        }
-    }
-    /**
-     * Allocates identities for a new batch while preserving supplied persisted identities verbatim.
-     * Colliding slugs receive a canonical-name hash, so new-key selection is input-order independent.
-     */
-    function allocateStableSheetKeys_ACU(displayNames, options = {}) {
-        const canonicalNames = displayNames.map(canonicalizeDisplayName_ACU);
-        const slugs = displayNames.map(name => toAsciiSlug_ACU(name));
-        const diagnostics = [];
-        const firstCanonicalIndex = new Map();
-        const slugGroups = new Map();
-        const existingByCanonicalName = new Map();
-        const reservedKeys = new Set();
-        for (const existing of options.existing || []) {
-            const canonicalName = canonicalizeDisplayName_ACU(existing.canonicalName);
-            const sheetKey = String(existing.sheetKey || '');
-            if (canonicalName && sheetKey)
-                existingByCanonicalName.set(canonicalName, sheetKey);
-            if (sheetKey)
-                reservedKeys.add(sheetKey.toLowerCase());
-        }
-        canonicalNames.forEach((canonicalName, index) => {
-            const originalName = String(displayNames[index] ?? '');
-            if (!canonicalName || !slugs[index]) {
-                diagnostics.push({ code: 'empty_name', index, originalName, canonicalName, candidateKey: null });
-                return;
-            }
-            const firstIndex = firstCanonicalIndex.get(canonicalName);
-            if (firstIndex === undefined)
-                firstCanonicalIndex.set(canonicalName, index);
-            else
-                diagnostics.push({ code: 'duplicate_canonical_name', index, originalName, canonicalName, candidateKey: null, conflictsWithIndex: firstIndex });
-            const group = slugGroups.get(slugs[index]) || [];
-            group.push(index);
-            slugGroups.set(slugs[index], group);
-        });
-        const keys = slugs.map((slug, index) => {
-            if (!slug || !canonicalNames[index])
-                return null;
-            const existingKey = existingByCanonicalName.get(canonicalNames[index]);
-            if (existingKey)
-                return existingKey;
-            const group = slugGroups.get(slug) || [];
-            const bareKey = `sheet_${slug}`;
-            if (group.length === 1 && !reservedKeys.has(bareKey.toLowerCase()))
-                return bareKey;
-            return `sheet_${truncateForHash_ACU(slug)}_${stableHash_ACU(canonicalNames[index])}`;
-        });
-        const firstKeyIndex = new Map();
-        keys.forEach((key, index) => {
-            if (!key)
-                return;
-            const firstIndex = firstKeyIndex.get(key);
-            if (firstIndex === undefined) {
-                firstKeyIndex.set(key, index);
-            }
-            else {
-                diagnostics.push({ code: 'duplicate_sheet_key', index, originalName: String(displayNames[index] ?? ''), canonicalName: canonicalNames[index], candidateKey: key, conflictsWithIndex: firstIndex });
-            }
-            if (!existingByCanonicalName.has(canonicalNames[index]) && reservedKeys.has(key.toLowerCase())) {
-                diagnostics.push({ code: 'duplicate_sheet_key', index, originalName: String(displayNames[index] ?? ''), canonicalName: canonicalNames[index], candidateKey: key });
-            }
-        });
-        return { keys, diagnostics };
-    }
-    function truncateForHash_ACU(slug) {
-        return slug.slice(0, Math.max(1, MAX_SHEET_SLUG_LENGTH_ACU - 11)).replace(/_+$/g, '') || 'sheet';
-    }
-    function stableHash_ACU(value) {
-        let hash = 0xcbf29ce484222325n;
-        for (const char of value) {
-            hash ^= BigInt(char.codePointAt(0));
-            hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-        }
-        return hash.toString(16).padStart(16, '0').slice(0, 10);
-    }
-
-    /**
-     * Maps display headers to fallback SQLite identifiers. Mapping is positional and deterministic:
-     * physical collisions use _2, _3 suffixes in header order. Callers must reject duplicate
-     * canonical display names before a persistence or migration operation.
-     */
-    function mapSqlColumnIdentifiers_ACU(headers) {
-        const usedSqlNames = new Set();
-        const firstCanonicalIndex = new Map();
-        const mappings = [];
-        const diagnostics = [];
-        const firstHeaderCanonicalName = canonicalizeDisplayName_ACU(headers[0]);
-        if (firstHeaderCanonicalName !== 'row_id') {
-            diagnostics.push({
-                code: 'missing_row_id', index: 0, originalName: String(headers[0] ?? ''),
-                normalizedDisplayName: String(headers[0] ?? '').normalize('NFKC').trim(),
-                canonicalName: firstHeaderCanonicalName, candidateSqlName: null,
-            });
-        }
-        headers.forEach((header, index) => {
-            const originalName = String(header ?? '');
-            const displayName = originalName.normalize('NFKC').trim();
-            const canonicalName = canonicalizeDisplayName_ACU(displayName);
-            const isRowId = index === 0 && canonicalName === 'row_id';
-            const firstIndex = canonicalName ? firstCanonicalIndex.get(canonicalName) : undefined;
-            if (!canonicalName) {
-                diagnostics.push({ code: 'empty_column_name', index, originalName, normalizedDisplayName: displayName, canonicalName, candidateSqlName: null });
-            }
-            else if (firstIndex === undefined) {
-                firstCanonicalIndex.set(canonicalName, index);
-            }
-            else {
-                diagnostics.push({ code: 'duplicate_canonical_column_name', index, originalName, normalizedDisplayName: displayName, canonicalName, candidateSqlName: null, conflictsWithIndex: firstIndex });
-            }
-            const baseName = isRowId ? 'row_id' : toSqlIdentifierBase_ACU(displayName, index);
-            const sqlName = isRowId
-                ? reserveRowId_ACU(usedSqlNames, index)
-                : reserveSqlName_ACU(baseName, usedSqlNames);
-            if (!isRowId && canonicalName === 'row_id') {
-                diagnostics.push({ code: 'misplaced_row_id', index, originalName, normalizedDisplayName: displayName, canonicalName, candidateSqlName: sqlName });
-            }
-            mappings.push({ index, displayName, canonicalName, sqlName, isRowId });
-        });
-        return { mappings, diagnostics };
-    }
-    function toSqlIdentifierBase_ACU(displayName, index = 0) {
-        const slug = toAsciiSlug_ACU(displayName);
-        const normalized = slug.replace(/^\d+/, match => `col_${match}`);
-        if (normalized === 'row_id' || SQLITE_RESERVED_IDENTIFIERS_ACU.has(normalized))
-            return `col_${normalized}`;
-        return normalized || `col_${index + 1}`;
-    }
-    function reserveRowId_ACU(usedSqlNames, index) {
-        if (index === 0 && !usedSqlNames.has('row_id')) {
-            usedSqlNames.add('row_id');
-            return 'row_id';
-        }
-        return reserveSqlName_ACU('row_id', usedSqlNames);
-    }
-    function reserveSqlName_ACU(baseName, usedSqlNames) {
-        let candidate = baseName;
-        let suffix = 2;
-        while (usedSqlNames.has(candidate.toLowerCase())) {
-            candidate = `${baseName}_${suffix}`;
-            suffix += 1;
-        }
-        usedSqlNames.add(candidate.toLowerCase());
-        return candidate;
-    }
-    const SQLITE_RESERVED_IDENTIFIERS_ACU = new Set([
-        'abort', 'action', 'add', 'after', 'all', 'alter', 'analyze', 'and', 'as', 'asc', 'attach',
-        'autoincrement', 'before', 'begin', 'between', 'by', 'cascade', 'case', 'cast', 'check',
-        'collate', 'column', 'commit', 'conflict', 'constraint', 'create', 'cross', 'current_date',
-        'current', 'current_time', 'current_timestamp', 'database', 'default', 'deferrable', 'deferred', 'delete',
-        'desc', 'detach', 'distinct', 'drop', 'each', 'else', 'end', 'escape', 'except', 'exclude',
-        'exclusive', 'exists', 'explain', 'fail', 'filter', 'first', 'following', 'for', 'foreign',
-        'from', 'full', 'generated', 'glob', 'group', 'groups', 'having', 'if', 'ignore', 'immediate', 'in',
-        'index', 'indexed', 'initially', 'inner', 'insert', 'instead', 'intersect', 'into', 'is',
-        'isnull', 'join', 'key', 'last', 'left', 'like', 'limit', 'match', 'materialized', 'natural', 'no', 'not',
-        'nothing', 'notnull', 'null', 'nulls', 'of', 'offset', 'on', 'or', 'order', 'others', 'outer',
-        'over', 'partition', 'plan', 'pragma', 'preceding', 'primary', 'query', 'raise', 'range',
-        'recursive', 'references', 'regexp', 'reindex', 'release', 'rename', 'replace', 'restrict',
-        'returning', 'right', 'rollback', 'row', 'rowid', 'rows', 'savepoint', 'select', 'set', 'table', 'temp',
-        'temporary', 'then', 'ties', 'to', 'transaction', 'trigger', 'unbounded', 'union', 'unique',
-        'update', 'using', 'vacuum', 'values', 'view', 'virtual', 'when', 'where', 'window', 'with',
-        'without',
-    ]);
-
-    /**
-     * data/sqlite/sql-normalizer.ts — SQL 输入规范化模块
-     *
-     * 职责：
-     * - normalizeSqlStructure: 将 SQL 结构位置上的全角兼容字符转换为 ASCII
-     *   （不修改字符串字面量和注释中的内容）
-     * - normalizeConstrainedValue: 对白名单约束字段的值做规范化
-     *   （当前白名单：code_index）
-     *
-     * 设计原则：
-     * - 只做可安全判断语义的转换，不猜测业务含义
-     * - 规范化后仍非法的值，不做伪装，保留失败
-     * - 不对正文文本做无差别替换
-     */
-    // ═══════════════════════════════════════════════════════════════
-    // 全角 → ASCII 映射表
-    // ═══════════════════════════════════════════════════════════════
-    /**
-     * 全角字符到 ASCII 的映射
-     * 只包含会影响 SQLite 语法解析的字符（运算符、括号、逗号、分号等）
-     * 不包含正文文本中合理的全角标点（如句号、问号、感叹号等）
-     */
-    const FULLWIDTH_TO_ASCII = {
-        // 运算符
-        '＝': '=', // U+FF1D 全角等号
-        '＞': '>', // U+FF1E 全角大于号
-        '＜': '<', // U+FF1C 全角小于号
-        '＋': '+', // U+FF0B 全角加号
-        '－': '-', // U+FF0D 全角减号
-        '＊': '*', // U+FF0A 全角星号
-        '／': '/', // U+FF0F 全角斜杠
-        // 括号
-        '（': '(', // U+FF08 全角左括号
-        '）': ')', // U+FF09 全角右括号
-        // 标点
-        '，': ',', // U+FF0C 全角逗号
-        '；': ';', // U+FF1B 全角分号
-        // 空白
-        '\u3000': ' ', // 全角空格 → 半角空格（仅在结构位置）
-    };
-    // ═══════════════════════════════════════════════════════════════
-    // SQL 结构规范化
-    // ═══════════════════════════════════════════════════════════════
-    /**
-     * 规范化 SQL 结构字符：将全角兼容字符转换为 ASCII
-     *
-     * 扫描式处理，逐字符判断当前是否在字符串字面量内或注释内：
-     * - 字符串字面量（单引号包裹）：不修改内容
-     * - SQL 行注释（-- 到行尾）：不修改内容（注释中可能有中文说明）
-     * - 其他位置（结构位置）：全角兼容字符 → ASCII
-     *
-     * @param sql 原始 SQL 文本
-     * @returns 规范化后的 SQL 文本
-     */
-    function normalizeSqlStructure(sql) {
-        if (!sql || typeof sql !== 'string')
-            return sql;
-        // 快速检查：是否包含任何需要替换的全角字符
-        // 如果没有，直接返回原字符串，避免不必要的字符串拼接开销
-        const needsNormalization = Object.keys(FULLWIDTH_TO_ASCII).some(ch => sql.includes(ch));
-        if (!needsNormalization)
-            return sql;
-        const chars = Array.from(sql);
-        const result = [];
-        let inString = false; // 是否在单引号字符串内
-        let inComment = false; // 是否在 -- 行注释内
-        let stringChar = ''; // 字符串的引号字符（只处理单引号）
-        for (let i = 0; i < chars.length; i++) {
-            const ch = chars[i];
-            // 在行注释内：直接输出原文，直到遇到换行
-            if (inComment) {
-                result.push(ch);
-                if (ch === '\n') {
-                    inComment = false;
-                }
-                continue;
-            }
-            // 在字符串字面量内
-            if (inString) {
-                result.push(ch);
-                // 检查字符串结束或转义引号
-                if (ch === stringChar) {
-                    // 检查转义的引号（SQL 中用 '' 表示字面量中的单引号）
-                    if (i + 1 < chars.length && chars[i + 1] === stringChar) {
-                        // 转义引号，跳过下一个字符
-                        result.push(chars[i + 1]);
-                        i++;
-                    }
-                    else {
-                        // 字符串结束
-                        inString = false;
-                    }
-                }
-                continue;
-            }
-            // 检测字符串字面量开始
-            if (ch === "'") {
-                inString = true;
-                stringChar = "'";
-                result.push(ch);
-                continue;
-            }
-            // 检测行注释开始（-- ）
-            if (ch === '-' && i + 1 < chars.length && chars[i + 1] === '-') {
-                inComment = true;
-                result.push(ch);
-                continue;
-            }
-            // 结构位置：尝试全角 → ASCII 转换
-            const replacement = FULLWIDTH_TO_ASCII[ch];
-            if (replacement !== undefined) {
-                result.push(replacement);
-            }
-            else {
-                result.push(ch);
-            }
-        }
-        const normalized = result.join('');
-        if (normalized !== sql) {
-            logDebug_ACU('[SqlNormalizer] SQL 结构字符已规范化');
-        }
-        return normalized;
-    }
-    // ═══════════════════════════════════════════════════════════════
-    // 受约束字段值规范化
-    // ═══════════════════════════════════════════════════════════════
-    /**
-     * Unicode NFKC 兼容归一化
-     * 将全角字母数字转换为半角，统一兼容形式
-     *
-     * 优先使用 String.prototype.normalize('NFKC')，
-     * 如果运行时不支持（极端情况），fallback 到手动全角数字/字母映射
-     */
-    function nfkcNormalize(str) {
-        if (typeof str.normalize === 'function') {
-            return str.normalize('NFKC');
-        }
-        // Fallback：手动转换全角数字和基本全角拉丁字母
-        return manualFullwidthToAscii(str);
-    }
-    /**
-     * 手动全角→半角转换（fallback）
-     * 覆盖全角数字 ０-９ 和全角大写/小写拉丁字母 Ａ-Ｚ ａ-ｚ
-     */
-    function manualFullwidthToAscii(str) {
-        let result = '';
-        for (const ch of str) {
-            const code = ch.codePointAt(0);
-            // 全角数字 U+FF10-U+FF19 → 半角 0-9
-            if (code >= 0xFF10 && code <= 0xFF19) {
-                result += String.fromCodePoint(code - 0xFF10 + 0x30);
-            }
-            // 全角大写字母 U+FF21-U+FF3A → 半角 A-Z
-            else if (code >= 0xFF21 && code <= 0xFF3A) {
-                result += String.fromCodePoint(code - 0xFF21 + 0x41);
-            }
-            // 全角小写字母 U+FF41-U+FF5A → 半角 a-z
-            else if (code >= 0xFF41 && code <= 0xFF5A) {
-                result += String.fromCodePoint(code - 0xFF41 + 0x61);
-            }
-            // 全角空格 U+3000 → 半角空格
-            else if (code === 0x3000) {
-                result += ' ';
-            }
-            else {
-                result += ch;
-            }
-        }
-        return result;
-    }
-    /**
-     * 字段级规范化器注册表
-     * key = 列名（小写，匹配时不区分大小写）
-     * value = 规范化函数
-     *
-     * 扩展方式：在此注册表中添加新的列名和对应的规范化函数
-     */
-    const FIELD_NORMALIZERS = {
-        /**
-         * code_index 规范化
-         * 目标模式：AM[0-9][0-9][0-9][0-9]（如 AM0001, AM0002...）
-         *
-         * 处理内容：
-         * 1. trim() — 去除首尾空白
-         * 2. NFKC 归一化 — 全角字母数字 → 半角
-         * 3. 转大写 — am0001 → AM0001
-         *
-         * 不做的事：
-         * - 不补零（AM1 不会变成 AM0001，语义不确定）
-         * - 不截断（AM00001 不会变成 AM0001，会保留失败）
-         * - 不改前缀（AX0001 不会变成 AM0001，语义不同）
-         */
-        code_index: (value) => {
-            return nfkcNormalize(value.trim()).toUpperCase();
-        },
-    };
-    /**
-     * 对受约束字段的值做规范化
-     *
-     * 仅对白名单中的列名生效，其他列直接返回原值。
-     * 规范化后仍不满足约束的值不会被强制篡改，保留由 SQLite CHECK 约束来拒绝。
-     *
-     * @param columnName 列名（不区分大小写）
-     * @param value 原始值
-     * @returns 规范化后的值（如果该列在白名单中），或原值（如果不在白名单中）
-     */
-    function normalizeConstrainedValue(columnName, value) {
-        if (value === null || value === undefined)
-            return value ?? null;
-        if (!columnName)
-            return value;
-        const normalizer = FIELD_NORMALIZERS[columnName.toLowerCase()];
-        if (!normalizer)
-            return value;
-        const normalized = normalizer(value);
-        if (normalized !== value) {
-            logDebug_ACU(`[SqlNormalizer] 字段 ${columnName} 值已规范化: "${value}" → "${normalized}"`);
-        }
-        return normalized;
-    }
-    /**
-     * 获取所有已注册的规范化列名（小写）
-     * 用于外部判断哪些列需要做值规范化
-     */
-    function getNormalizedColumnNames() {
-        return Object.keys(FIELD_NORMALIZERS);
-    }
-    /**
-     * 规范化 SQL 语句中 INSERT/UPDATE 语句里受约束字段的值
-     *
-     * 这是一个更高层的函数，用于运行时 SQL 写入链路。
-     * 它会解析 SQL 语句中的列名列表和对应的值，对白名单字段做值规范化。
-     *
-     * 注意：此函数在 normalizeSqlStructure 之后调用，
-     * 此时 SQL 已经是 ASCII 兼容的，可以安全地用正则提取列名和值。
-     *
-     * @param sql 单条 SQL 语句
-     * @returns 值已规范化的 SQL 语句（如果发生了修改），或原语句
-     */
-    function normalizeStatementValues(sql) {
-        if (!sql || typeof sql !== 'string')
-            return sql;
-        const normalizedCols = getNormalizedColumnNames();
-        if (normalizedCols.length === 0)
-            return sql;
-        // 尝试匹配 INSERT INTO table (col1, col2, ...) VALUES (val1, val2, ...);
-        let result = tryNormalizeInsertValues(sql, normalizedCols);
-        // 尝试匹配 UPDATE table SET col1 = val1, col2 = val2 WHERE ...
-        if (result === sql) {
-            result = tryNormalizeUpdateValues(sql, normalizedCols);
-        }
-        return result;
-    }
-    /**
-     * 规范化 INSERT 语句中受约束字段的值
-     *
-     * 匹配格式：INSERT INTO table (col1, col2, ...) VALUES (val1, val2, ...)
-     * 对白名单列对应的值做规范化
-     */
-    function tryNormalizeInsertValues(sql, normalizedCols) {
-        // 匹配 INSERT INTO table (columns) VALUES (values)
-        const insertMatch = sql.match(/^(INSERT\s+INTO\s+\w+\s*)\(([^)]+)\)(\s*VALUES\s*)\((.+)\)\s*;?\s*$/is);
-        if (!insertMatch)
-            return sql;
-        const prefix = insertMatch[1];
-        const columnsStr = insertMatch[2];
-        const valuesKeyword = insertMatch[3];
-        const valuesStr = insertMatch[4];
-        // 解析列名
-        const columns = splitColumnList(columnsStr);
-        if (columns.length === 0)
-            return sql;
-        // 解析值列表（需要处理字符串内的逗号）
-        const values = splitValueList(valuesStr);
-        if (values.length !== columns.length)
-            return sql;
-        // 检查是否有任何列需要规范化
-        let hasChange = false;
-        const normalizedValues = [];
-        for (let i = 0; i < columns.length; i++) {
-            const colName = columns[i].trim();
-            const rawValue = values[i].trim();
-            if (normalizedCols.includes(colName.toLowerCase()) && isQuotedString(rawValue)) {
-                // 提取引号内的值
-                const innerValue = rawValue.slice(1, -1).replace(/''/g, "'");
-                const normalizedInner = normalizeConstrainedValue(colName, innerValue);
-                if (normalizedInner !== innerValue) {
-                    hasChange = true;
-                    normalizedValues.push(`'${normalizedInner.replace(/'/g, "''")}'`);
-                }
-                else {
-                    normalizedValues.push(rawValue);
-                }
-            }
-            else {
-                normalizedValues.push(rawValue);
-            }
-        }
-        if (!hasChange)
-            return sql;
-        const suffix = sql.trimEnd().endsWith(';') ? ';' : '';
-        return `${prefix}(${columns.join(', ')})${valuesKeyword}(${normalizedValues.join(', ')})${suffix}`;
-    }
-    /**
-     * 规范化 UPDATE 语句中受约束字段的值
-     *
-     * 匹配格式：UPDATE table SET col1 = val1, col2 = val2 WHERE ...
-     * 对白名单列对应的值做规范化
-     */
-    function tryNormalizeUpdateValues(sql, normalizedCols) {
-        // 匹配 UPDATE table SET col1 = val1, col2 = val2 ...
-        const updateMatch = sql.match(/^(UPDATE\s+\w+\s+SET\s+)(.+?)(\s+WHERE\s+.+)?$/is);
-        if (!updateMatch)
-            return sql;
-        const prefix = updateMatch[1];
-        const setClauses = updateMatch[2];
-        const whereClause = updateMatch[3] || '';
-        // 按 SET 子句中的逗号拆分（需要跳过字符串内的逗号）
-        const assignments = splitSetClauses(setClauses);
-        let hasChange = false;
-        const normalizedAssignments = [];
-        for (const assignment of assignments) {
-            // 匹配 col = value
-            const assignMatch = assignment.match(/^(\s*\w+\s*)=\s*(.+)$/s);
-            if (!assignMatch) {
-                normalizedAssignments.push(assignment);
-                continue;
-            }
-            const colName = assignMatch[1].trim();
-            const rawValue = assignMatch[2].trim();
-            if (normalizedCols.includes(colName.toLowerCase()) && isQuotedString(rawValue)) {
-                const innerValue = rawValue.slice(1, -1).replace(/''/g, "'");
-                const normalizedInner = normalizeConstrainedValue(colName, innerValue);
-                if (normalizedInner !== innerValue) {
-                    hasChange = true;
-                    normalizedAssignments.push(`${assignMatch[1]}= '${normalizedInner.replace(/'/g, "''")}'`);
-                }
-                else {
-                    normalizedAssignments.push(assignment);
-                }
-            }
-            else {
-                normalizedAssignments.push(assignment);
-            }
-        }
-        if (!hasChange)
-            return sql;
-        return `${prefix}${normalizedAssignments.join(', ')}${whereClause}`;
-    }
-    // ═══════════════════════════════════════════════════════════════
-    // 内部工具函数
-    // ═══════════════════════════════════════════════════════════════
-    /**
-     * 拆分列名列表（逗号分隔）
-     * "col1, col2, col3" → ["col1", "col2", "col3"]
-     */
-    function splitColumnList(str) {
-        return str.split(',').map(s => s.trim()).filter(s => s.length > 0);
-    }
-    /**
-     * 拆分值列表（逗号分隔，但跳过字符串内的逗号）
-     * "'val1', 'val,2', 3" → ["'val1'", "'val,2'", "3"]
-     */
-    function splitValueList(str) {
-        const values = [];
-        let current = '';
-        let inStr = false;
-        for (let i = 0; i < str.length; i++) {
-            const ch = str[i];
-            if (inStr) {
-                current += ch;
-                if (ch === "'") {
-                    if (i + 1 < str.length && str[i + 1] === "'") {
-                        current += str[i + 1];
-                        i++;
-                    }
-                    else {
-                        inStr = false;
-                    }
-                }
-            }
-            else if (ch === "'") {
-                inStr = true;
-                current += ch;
-            }
-            else if (ch === ',') {
-                values.push(current);
-                current = '';
-            }
-            else {
-                current += ch;
-            }
-        }
-        if (current.trim()) {
-            values.push(current);
-        }
-        return values;
-    }
-    /**
-     * 拆分 SET 子句（逗号分隔，跳过字符串内的逗号）
-     */
-    function splitSetClauses(str) {
-        const clauses = [];
-        let current = '';
-        let inStr = false;
-        for (let i = 0; i < str.length; i++) {
-            const ch = str[i];
-            if (inStr) {
-                current += ch;
-                if (ch === "'") {
-                    if (i + 1 < str.length && str[i + 1] === "'") {
-                        current += str[i + 1];
-                        i++;
-                    }
-                    else {
-                        inStr = false;
-                    }
-                }
-            }
-            else if (ch === "'") {
-                inStr = true;
-                current += ch;
-            }
-            else if (ch === ',') {
-                clauses.push(current);
-                current = '';
-            }
-            else {
-                current += ch;
-            }
-        }
-        if (current.trim()) {
-            clauses.push(current);
-        }
-        return clauses;
-    }
-    /**
-     * 判断值是否是引号包裹的字符串
-     * "'hello'" → true, "123" → false, "NULL" → false
-     */
-    function isQuotedString(value) {
-        return value.startsWith("'") && value.endsWith("'") && value.length >= 2;
-    }
-
     /**
      * shared/ddl-utils.ts — DDL 纯解析/操作工具函数
      *
@@ -35486,6 +34734,837 @@ $CONTENT
             results.push(current);
         }
         return results;
+    }
+
+    const SHEET_KEY_ALGORITHM_VERSION_ACU = 1;
+    const MAX_SHEET_SLUG_LENGTH_ACU = 48;
+    const PHYSICAL_TABLE_NAME_ALGORITHM_VERSION_ACU = 1;
+    const MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU = 48;
+    const SQLITE_RESERVED_TABLE_PREFIXES_ACU = ['sqlite_', '_acu_'];
+    class SheetIdentityRebindError_ACU extends Error {
+        constructor(message) {
+            super(message);
+            this.name = 'SheetIdentityRebindError_ACU';
+        }
+    }
+    function listSheetIdentityDescriptors_ACU(data) {
+        return Object.keys(data || {})
+            .filter(sheetKey => sheetKey.startsWith('sheet_'))
+            .sort()
+            .map(sheetKey => {
+            const sheet = data[sheetKey];
+            return {
+                sheetKey,
+                uid: String(sheet?.uid || '').trim(),
+                canonicalName: canonicalizeDisplayName_ACU(sheet?.name),
+                ddlTableName: String(parseDDLTableName(String(sheet?.sourceData?.ddl || '')) || '').trim().toLowerCase(),
+            };
+        });
+    }
+    /**
+     * Rebinds keys captured from one immutable scheduling snapshot to another snapshot.
+     * Exact keys win. Otherwise only a unique uid/key alias, author DDL table name, or
+     * canonical display name is accepted. Ambiguous or unprovable identities fail closed.
+     */
+    function rebindSheetKeysAcrossSnapshots_ACU(sheetKeys, sourceData, targetData) {
+        const sourceDescriptors = listSheetIdentityDescriptors_ACU(sourceData);
+        const targetDescriptors = listSheetIdentityDescriptors_ACU(targetData);
+        const sourceByKey = new Map(sourceDescriptors.map(item => [item.sheetKey, item]));
+        const targetByKey = new Map(targetDescriptors.map(item => [item.sheetKey, item]));
+        const rebound = [];
+        const sourceOwnerByTargetKey = new Map();
+        const selectUnique = (source, candidates, evidence) => {
+            if (candidates.length === 0)
+                return null;
+            if (candidates.length === 1)
+                return candidates[0];
+            throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定存在歧义：${source.sheetKey} 通过${evidence}同时匹配 ${candidates.map(item => item.sheetKey).join('、')}。`);
+        };
+        for (const rawKey of sheetKeys || []) {
+            const sheetKey = String(rawKey || '').trim();
+            if (!sheetKey.startsWith('sheet_'))
+                continue;
+            const source = sourceByKey.get(sheetKey);
+            if (!source) {
+                throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定失败：调度快照中不存在 ${sheetKey}。`);
+            }
+            let match = targetByKey.get(sheetKey) || null;
+            if (match) {
+                const existingOwner = sourceOwnerByTargetKey.get(match.sheetKey);
+                if (existingOwner && existingOwner !== sheetKey) {
+                    throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定存在多对一冲突：${existingOwner}、${sheetKey} 同时匹配 ${match.sheetKey}。`);
+                }
+                sourceOwnerByTargetKey.set(match.sheetKey, sheetKey);
+                if (!rebound.includes(match.sheetKey))
+                    rebound.push(match.sheetKey);
+                continue;
+            }
+            const aliases = new Set([source.sheetKey, source.uid].filter(Boolean).map(value => value.toLowerCase()));
+            match = selectUnique(source, targetDescriptors.filter(candidate => aliases.has(candidate.sheetKey.toLowerCase()) || (!!candidate.uid && aliases.has(candidate.uid.toLowerCase()))), 'key/uid');
+            if (!match && source.ddlTableName) {
+                match = selectUnique(source, targetDescriptors.filter(candidate => candidate.ddlTableName === source.ddlTableName), '作者 DDL 表名');
+            }
+            if (!match && source.canonicalName) {
+                match = selectUnique(source, targetDescriptors.filter(candidate => candidate.canonicalName === source.canonicalName), '规范化显示名');
+            }
+            if (!match) {
+                throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定失败：无法证明 ${sheetKey} 在当前基底中的对应表。`);
+            }
+            const existingOwner = sourceOwnerByTargetKey.get(match.sheetKey);
+            if (existingOwner && existingOwner !== sheetKey) {
+                throw new SheetIdentityRebindError_ACU(`Sheet 身份重绑定存在多对一冲突：${existingOwner}、${sheetKey} 同时匹配 ${match.sheetKey}。`);
+            }
+            sourceOwnerByTargetKey.set(match.sheetKey, sheetKey);
+            if (!rebound.includes(match.sheetKey))
+                rebound.push(match.sheetKey);
+        }
+        return rebound;
+    }
+    /**
+     * Thrown when two distinct sheets resolve to the same physical table name.
+     * This is a fail-loud signal: the user must rename one of the colliding tables.
+     * It is never recovered from by silently mutating a name, because that would
+     * reintroduce set-dependent drift.
+     */
+    class PhysicalTableNameCollisionError_ACU extends Error {
+        constructor(collisions) {
+            const detail = collisions
+                .map(c => `「${c.physicalTableName}」← ${c.sheetKeys.join(' / ')}`)
+                .join('；');
+            super(`SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
+            this.name = 'PhysicalTableNameCollisionError_ACU';
+            this.collisions = collisions;
+        }
+    }
+    /** Comparison-only normalization. Never write this value back to the display name. */
+    function canonicalizeDisplayName_ACU(value) {
+        return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+    }
+    /** Converts a display value to an ASCII slug using the locked pinyin-pro dictionary. */
+    function toAsciiSlug_ACU(value, maxLength = MAX_SHEET_SLUG_LENGTH_ACU) {
+        const canonical = canonicalizeDisplayName_ACU(value);
+        if (!canonical)
+            return '';
+        const romanized = pinyin(canonical, {
+            toneType: 'none',
+            traditional: true,
+            v: true,
+            separator: '_',
+            nonZh: 'consecutive',
+        });
+        return romanized.normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_+|_+$/g, '')
+            .slice(0, Math.max(1, maxLength))
+            .replace(/_+$/g, '');
+    }
+    /** Returns an unreserved candidate only; callers must allocate before persisting it. */
+    function buildStableSheetKeyCandidate_ACU(displayName) {
+        const slug = toAsciiSlug_ACU(displayName);
+        return slug ? `sheet_${slug}` : null;
+    }
+    /**
+     * Runtime SQLite names are derived from the display name, not from a legacy
+     * CREATE TABLE identifier embedded in user-authored DDL. Each name is a
+     * deterministic pure function of the sheet's own display name and is
+     * independent of which other sheets are present, so building/filling/exporting
+     * always agree. Duplicate slugs are a hard error (see the fail-loud note below).
+     */
+    function resolvePhysicalTableNames_ACU(data) {
+        const entries = Object.keys(data || {})
+            .filter(sheetKey => sheetKey.startsWith('sheet_'))
+            .sort()
+            .map(sheetKey => ({ sheetKey, sheet: data[sheetKey] }));
+        // 物理表名是 sheetKey 的确定性纯函数（仅由该 sheet 的显示名 slug 决定），
+        // 绝不依赖“当前还有哪些别的表在场”。这样建表、填表、导出三处对同一 sheetKey
+        // 永远解析出同一个名字，从根上消除集合漂移导致的 no such table。
+        //
+        // 拼音 slug 相同但 sheetKey 不同 = 真实物理表名冲突。此处 fail-loud 抛出，
+        // 而不是静默追加 hash 令两表分叉——静默重命名会随入参集合变化重新产生漂移。
+        // 冲突应由启动自检提前拦截并提示用户改名（见 assertNoPhysicalTableNameCollision_ACU）。
+        const result = new Map();
+        const ownerBySlug = new Map();
+        const collisions = [];
+        for (const { sheetKey, sheet } of entries) {
+            const base = physicalTableNameBase_ACU(sheet, sheetKey);
+            const normalized = base.toLowerCase();
+            const owner = ownerBySlug.get(normalized);
+            if (owner && owner !== sheetKey) {
+                collisions.push({ physicalTableName: base, sheetKeys: [owner, sheetKey] });
+                continue;
+            }
+            ownerBySlug.set(normalized, sheetKey);
+            result.set(sheetKey, base);
+        }
+        if (collisions.length > 0) {
+            throw new PhysicalTableNameCollisionError_ACU(collisions);
+        }
+        return result;
+    }
+    function getPhysicalTableNameForSheet_ACU(data, sheetKey) {
+        const resolved = resolvePhysicalTableNames_ACU(data).get(sheetKey);
+        if (!resolved)
+            throw new Error(`无法为 Sheet 分配 SQLite runtime 表名：${sheetKey}`);
+        return resolved;
+    }
+    /** Use resolvePhysicalTableNames_ACU whenever collision arbitration is possible. */
+    function resolvePhysicalTableName_ACU(sheet, sheetKey) {
+        return physicalTableNameBase_ACU(sheet, sheetKey);
+    }
+    function physicalTableNameBase_ACU(sheet, sheetKey) {
+        const displaySlug = toAsciiSlug_ACU(sheet?.name).replace(/_/g, '');
+        const keySlug = toAsciiSlug_ACU(String(sheetKey || '').replace(/^sheet_/, '')).replace(/_/g, '');
+        let candidate = (displaySlug || keySlug || 'sheet').slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU);
+        if (/^[0-9]/.test(candidate) || SQLITE_RESERVED_TABLE_PREFIXES_ACU.some(prefix => candidate.toLowerCase().startsWith(prefix))) {
+            candidate = `table_${candidate}`;
+        }
+        return candidate.slice(0, MAX_PHYSICAL_TABLE_NAME_LENGTH_ACU) || 'table_sheet';
+    }
+    /**
+     * Detects physical-table-name collisions without throwing. Startup self-check
+     * uses this to fail loud before any DDL runs. Returns [] when every sheet maps
+     * to a unique physical name.
+     */
+    function detectPhysicalTableNameCollisions_ACU(data) {
+        const ownerBySlug = new Map();
+        const grouped = new Map();
+        const entries = Object.keys(data || {})
+            .filter(sheetKey => sheetKey.startsWith('sheet_'))
+            .sort()
+            .map(sheetKey => ({ sheetKey, sheet: data[sheetKey] }));
+        for (const { sheetKey, sheet } of entries) {
+            const base = physicalTableNameBase_ACU(sheet, sheetKey);
+            const normalized = base.toLowerCase();
+            const owner = ownerBySlug.get(normalized);
+            if (!owner) {
+                ownerBySlug.set(normalized, { sheetKey, base });
+                continue;
+            }
+            if (owner.sheetKey === sheetKey)
+                continue;
+            const set = grouped.get(normalized) || new Set([owner.sheetKey]);
+            set.add(sheetKey);
+            grouped.set(normalized, set);
+        }
+        return [...grouped.entries()].map(([normalized, sheetKeys]) => ({
+            physicalTableName: ownerBySlug.get(normalized).base,
+            sheetKeys: [...sheetKeys],
+        }));
+    }
+    /** Startup guard: throws PhysicalTableNameCollisionError_ACU when any collision exists. */
+    function assertNoPhysicalTableNameCollision_ACU(data) {
+        const collisions = detectPhysicalTableNameCollisions_ACU(data);
+        if (collisions.length > 0) {
+            throw new PhysicalTableNameCollisionError_ACU(collisions);
+        }
+    }
+    /**
+     * Allocates identities for a new batch while preserving supplied persisted identities verbatim.
+     * Colliding slugs receive a canonical-name hash, so new-key selection is input-order independent.
+     */
+    function allocateStableSheetKeys_ACU(displayNames, options = {}) {
+        const canonicalNames = displayNames.map(canonicalizeDisplayName_ACU);
+        const slugs = displayNames.map(name => toAsciiSlug_ACU(name));
+        const diagnostics = [];
+        const firstCanonicalIndex = new Map();
+        const slugGroups = new Map();
+        const existingByCanonicalName = new Map();
+        const reservedKeys = new Set();
+        for (const existing of options.existing || []) {
+            const canonicalName = canonicalizeDisplayName_ACU(existing.canonicalName);
+            const sheetKey = String(existing.sheetKey || '');
+            if (canonicalName && sheetKey)
+                existingByCanonicalName.set(canonicalName, sheetKey);
+            if (sheetKey)
+                reservedKeys.add(sheetKey.toLowerCase());
+        }
+        canonicalNames.forEach((canonicalName, index) => {
+            const originalName = String(displayNames[index] ?? '');
+            if (!canonicalName || !slugs[index]) {
+                diagnostics.push({ code: 'empty_name', index, originalName, canonicalName, candidateKey: null });
+                return;
+            }
+            const firstIndex = firstCanonicalIndex.get(canonicalName);
+            if (firstIndex === undefined)
+                firstCanonicalIndex.set(canonicalName, index);
+            else
+                diagnostics.push({ code: 'duplicate_canonical_name', index, originalName, canonicalName, candidateKey: null, conflictsWithIndex: firstIndex });
+            const group = slugGroups.get(slugs[index]) || [];
+            group.push(index);
+            slugGroups.set(slugs[index], group);
+        });
+        const keys = slugs.map((slug, index) => {
+            if (!slug || !canonicalNames[index])
+                return null;
+            const existingKey = existingByCanonicalName.get(canonicalNames[index]);
+            if (existingKey)
+                return existingKey;
+            const group = slugGroups.get(slug) || [];
+            const bareKey = `sheet_${slug}`;
+            if (group.length === 1 && !reservedKeys.has(bareKey.toLowerCase()))
+                return bareKey;
+            return `sheet_${truncateForHash_ACU(slug)}_${stableHash_ACU(canonicalNames[index])}`;
+        });
+        const firstKeyIndex = new Map();
+        keys.forEach((key, index) => {
+            if (!key)
+                return;
+            const firstIndex = firstKeyIndex.get(key);
+            if (firstIndex === undefined) {
+                firstKeyIndex.set(key, index);
+            }
+            else {
+                diagnostics.push({ code: 'duplicate_sheet_key', index, originalName: String(displayNames[index] ?? ''), canonicalName: canonicalNames[index], candidateKey: key, conflictsWithIndex: firstIndex });
+            }
+            if (!existingByCanonicalName.has(canonicalNames[index]) && reservedKeys.has(key.toLowerCase())) {
+                diagnostics.push({ code: 'duplicate_sheet_key', index, originalName: String(displayNames[index] ?? ''), canonicalName: canonicalNames[index], candidateKey: key });
+            }
+        });
+        return { keys, diagnostics };
+    }
+    function truncateForHash_ACU(slug) {
+        return slug.slice(0, Math.max(1, MAX_SHEET_SLUG_LENGTH_ACU - 11)).replace(/_+$/g, '') || 'sheet';
+    }
+    function stableHash_ACU(value) {
+        let hash = 0xcbf29ce484222325n;
+        for (const char of value) {
+            hash ^= BigInt(char.codePointAt(0));
+            hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+        }
+        return hash.toString(16).padStart(16, '0').slice(0, 10);
+    }
+
+    /**
+     * Maps display headers to fallback SQLite identifiers. Mapping is positional and deterministic:
+     * physical collisions use _2, _3 suffixes in header order. Callers must reject duplicate
+     * canonical display names before a persistence or migration operation.
+     */
+    function mapSqlColumnIdentifiers_ACU(headers) {
+        const usedSqlNames = new Set();
+        const firstCanonicalIndex = new Map();
+        const mappings = [];
+        const diagnostics = [];
+        const firstHeaderCanonicalName = canonicalizeDisplayName_ACU(headers[0]);
+        if (firstHeaderCanonicalName !== 'row_id') {
+            diagnostics.push({
+                code: 'missing_row_id', index: 0, originalName: String(headers[0] ?? ''),
+                normalizedDisplayName: String(headers[0] ?? '').normalize('NFKC').trim(),
+                canonicalName: firstHeaderCanonicalName, candidateSqlName: null,
+            });
+        }
+        headers.forEach((header, index) => {
+            const originalName = String(header ?? '');
+            const displayName = originalName.normalize('NFKC').trim();
+            const canonicalName = canonicalizeDisplayName_ACU(displayName);
+            const isRowId = index === 0 && canonicalName === 'row_id';
+            const firstIndex = canonicalName ? firstCanonicalIndex.get(canonicalName) : undefined;
+            if (!canonicalName) {
+                diagnostics.push({ code: 'empty_column_name', index, originalName, normalizedDisplayName: displayName, canonicalName, candidateSqlName: null });
+            }
+            else if (firstIndex === undefined) {
+                firstCanonicalIndex.set(canonicalName, index);
+            }
+            else {
+                diagnostics.push({ code: 'duplicate_canonical_column_name', index, originalName, normalizedDisplayName: displayName, canonicalName, candidateSqlName: null, conflictsWithIndex: firstIndex });
+            }
+            const baseName = isRowId ? 'row_id' : toSqlIdentifierBase_ACU(displayName, index);
+            const sqlName = isRowId
+                ? reserveRowId_ACU(usedSqlNames, index)
+                : reserveSqlName_ACU(baseName, usedSqlNames);
+            if (!isRowId && canonicalName === 'row_id') {
+                diagnostics.push({ code: 'misplaced_row_id', index, originalName, normalizedDisplayName: displayName, canonicalName, candidateSqlName: sqlName });
+            }
+            mappings.push({ index, displayName, canonicalName, sqlName, isRowId });
+        });
+        return { mappings, diagnostics };
+    }
+    function toSqlIdentifierBase_ACU(displayName, index = 0) {
+        const slug = toAsciiSlug_ACU(displayName);
+        const normalized = slug.replace(/^\d+/, match => `col_${match}`);
+        if (normalized === 'row_id' || SQLITE_RESERVED_IDENTIFIERS_ACU.has(normalized))
+            return `col_${normalized}`;
+        return normalized || `col_${index + 1}`;
+    }
+    function reserveRowId_ACU(usedSqlNames, index) {
+        if (index === 0 && !usedSqlNames.has('row_id')) {
+            usedSqlNames.add('row_id');
+            return 'row_id';
+        }
+        return reserveSqlName_ACU('row_id', usedSqlNames);
+    }
+    function reserveSqlName_ACU(baseName, usedSqlNames) {
+        let candidate = baseName;
+        let suffix = 2;
+        while (usedSqlNames.has(candidate.toLowerCase())) {
+            candidate = `${baseName}_${suffix}`;
+            suffix += 1;
+        }
+        usedSqlNames.add(candidate.toLowerCase());
+        return candidate;
+    }
+    const SQLITE_RESERVED_IDENTIFIERS_ACU = new Set([
+        'abort', 'action', 'add', 'after', 'all', 'alter', 'analyze', 'and', 'as', 'asc', 'attach',
+        'autoincrement', 'before', 'begin', 'between', 'by', 'cascade', 'case', 'cast', 'check',
+        'collate', 'column', 'commit', 'conflict', 'constraint', 'create', 'cross', 'current_date',
+        'current', 'current_time', 'current_timestamp', 'database', 'default', 'deferrable', 'deferred', 'delete',
+        'desc', 'detach', 'distinct', 'drop', 'each', 'else', 'end', 'escape', 'except', 'exclude',
+        'exclusive', 'exists', 'explain', 'fail', 'filter', 'first', 'following', 'for', 'foreign',
+        'from', 'full', 'generated', 'glob', 'group', 'groups', 'having', 'if', 'ignore', 'immediate', 'in',
+        'index', 'indexed', 'initially', 'inner', 'insert', 'instead', 'intersect', 'into', 'is',
+        'isnull', 'join', 'key', 'last', 'left', 'like', 'limit', 'match', 'materialized', 'natural', 'no', 'not',
+        'nothing', 'notnull', 'null', 'nulls', 'of', 'offset', 'on', 'or', 'order', 'others', 'outer',
+        'over', 'partition', 'plan', 'pragma', 'preceding', 'primary', 'query', 'raise', 'range',
+        'recursive', 'references', 'regexp', 'reindex', 'release', 'rename', 'replace', 'restrict',
+        'returning', 'right', 'rollback', 'row', 'rowid', 'rows', 'savepoint', 'select', 'set', 'table', 'temp',
+        'temporary', 'then', 'ties', 'to', 'transaction', 'trigger', 'unbounded', 'union', 'unique',
+        'update', 'using', 'vacuum', 'values', 'view', 'virtual', 'when', 'where', 'window', 'with',
+        'without',
+    ]);
+
+    /**
+     * data/sqlite/sql-normalizer.ts — SQL 输入规范化模块
+     *
+     * 职责：
+     * - normalizeSqlStructure: 将 SQL 结构位置上的全角兼容字符转换为 ASCII
+     *   （不修改字符串字面量和注释中的内容）
+     * - normalizeConstrainedValue: 对白名单约束字段的值做规范化
+     *   （当前白名单：code_index）
+     *
+     * 设计原则：
+     * - 只做可安全判断语义的转换，不猜测业务含义
+     * - 规范化后仍非法的值，不做伪装，保留失败
+     * - 不对正文文本做无差别替换
+     */
+    // ═══════════════════════════════════════════════════════════════
+    // 全角 → ASCII 映射表
+    // ═══════════════════════════════════════════════════════════════
+    /**
+     * 全角字符到 ASCII 的映射
+     * 只包含会影响 SQLite 语法解析的字符（运算符、括号、逗号、分号等）
+     * 不包含正文文本中合理的全角标点（如句号、问号、感叹号等）
+     */
+    const FULLWIDTH_TO_ASCII = {
+        // 运算符
+        '＝': '=', // U+FF1D 全角等号
+        '＞': '>', // U+FF1E 全角大于号
+        '＜': '<', // U+FF1C 全角小于号
+        '＋': '+', // U+FF0B 全角加号
+        '－': '-', // U+FF0D 全角减号
+        '＊': '*', // U+FF0A 全角星号
+        '／': '/', // U+FF0F 全角斜杠
+        // 括号
+        '（': '(', // U+FF08 全角左括号
+        '）': ')', // U+FF09 全角右括号
+        // 标点
+        '，': ',', // U+FF0C 全角逗号
+        '；': ';', // U+FF1B 全角分号
+        // 空白
+        '\u3000': ' ', // 全角空格 → 半角空格（仅在结构位置）
+    };
+    // ═══════════════════════════════════════════════════════════════
+    // SQL 结构规范化
+    // ═══════════════════════════════════════════════════════════════
+    /**
+     * 规范化 SQL 结构字符：将全角兼容字符转换为 ASCII
+     *
+     * 扫描式处理，逐字符判断当前是否在字符串字面量内或注释内：
+     * - 字符串字面量（单引号包裹）：不修改内容
+     * - SQL 行注释（-- 到行尾）：不修改内容（注释中可能有中文说明）
+     * - 其他位置（结构位置）：全角兼容字符 → ASCII
+     *
+     * @param sql 原始 SQL 文本
+     * @returns 规范化后的 SQL 文本
+     */
+    function normalizeSqlStructure(sql) {
+        if (!sql || typeof sql !== 'string')
+            return sql;
+        // 快速检查：是否包含任何需要替换的全角字符
+        // 如果没有，直接返回原字符串，避免不必要的字符串拼接开销
+        const needsNormalization = Object.keys(FULLWIDTH_TO_ASCII).some(ch => sql.includes(ch));
+        if (!needsNormalization)
+            return sql;
+        const chars = Array.from(sql);
+        const result = [];
+        let inString = false; // 是否在单引号字符串内
+        let inComment = false; // 是否在 -- 行注释内
+        let stringChar = ''; // 字符串的引号字符（只处理单引号）
+        for (let i = 0; i < chars.length; i++) {
+            const ch = chars[i];
+            // 在行注释内：直接输出原文，直到遇到换行
+            if (inComment) {
+                result.push(ch);
+                if (ch === '\n') {
+                    inComment = false;
+                }
+                continue;
+            }
+            // 在字符串字面量内
+            if (inString) {
+                result.push(ch);
+                // 检查字符串结束或转义引号
+                if (ch === stringChar) {
+                    // 检查转义的引号（SQL 中用 '' 表示字面量中的单引号）
+                    if (i + 1 < chars.length && chars[i + 1] === stringChar) {
+                        // 转义引号，跳过下一个字符
+                        result.push(chars[i + 1]);
+                        i++;
+                    }
+                    else {
+                        // 字符串结束
+                        inString = false;
+                    }
+                }
+                continue;
+            }
+            // 检测字符串字面量开始
+            if (ch === "'") {
+                inString = true;
+                stringChar = "'";
+                result.push(ch);
+                continue;
+            }
+            // 检测行注释开始（-- ）
+            if (ch === '-' && i + 1 < chars.length && chars[i + 1] === '-') {
+                inComment = true;
+                result.push(ch);
+                continue;
+            }
+            // 结构位置：尝试全角 → ASCII 转换
+            const replacement = FULLWIDTH_TO_ASCII[ch];
+            if (replacement !== undefined) {
+                result.push(replacement);
+            }
+            else {
+                result.push(ch);
+            }
+        }
+        const normalized = result.join('');
+        if (normalized !== sql) {
+            logDebug_ACU('[SqlNormalizer] SQL 结构字符已规范化');
+        }
+        return normalized;
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // 受约束字段值规范化
+    // ═══════════════════════════════════════════════════════════════
+    /**
+     * Unicode NFKC 兼容归一化
+     * 将全角字母数字转换为半角，统一兼容形式
+     *
+     * 优先使用 String.prototype.normalize('NFKC')，
+     * 如果运行时不支持（极端情况），fallback 到手动全角数字/字母映射
+     */
+    function nfkcNormalize(str) {
+        if (typeof str.normalize === 'function') {
+            return str.normalize('NFKC');
+        }
+        // Fallback：手动转换全角数字和基本全角拉丁字母
+        return manualFullwidthToAscii(str);
+    }
+    /**
+     * 手动全角→半角转换（fallback）
+     * 覆盖全角数字 ０-９ 和全角大写/小写拉丁字母 Ａ-Ｚ ａ-ｚ
+     */
+    function manualFullwidthToAscii(str) {
+        let result = '';
+        for (const ch of str) {
+            const code = ch.codePointAt(0);
+            // 全角数字 U+FF10-U+FF19 → 半角 0-9
+            if (code >= 0xFF10 && code <= 0xFF19) {
+                result += String.fromCodePoint(code - 0xFF10 + 0x30);
+            }
+            // 全角大写字母 U+FF21-U+FF3A → 半角 A-Z
+            else if (code >= 0xFF21 && code <= 0xFF3A) {
+                result += String.fromCodePoint(code - 0xFF21 + 0x41);
+            }
+            // 全角小写字母 U+FF41-U+FF5A → 半角 a-z
+            else if (code >= 0xFF41 && code <= 0xFF5A) {
+                result += String.fromCodePoint(code - 0xFF41 + 0x61);
+            }
+            // 全角空格 U+3000 → 半角空格
+            else if (code === 0x3000) {
+                result += ' ';
+            }
+            else {
+                result += ch;
+            }
+        }
+        return result;
+    }
+    /**
+     * 字段级规范化器注册表
+     * key = 列名（小写，匹配时不区分大小写）
+     * value = 规范化函数
+     *
+     * 扩展方式：在此注册表中添加新的列名和对应的规范化函数
+     */
+    const FIELD_NORMALIZERS = {
+        /**
+         * code_index 规范化
+         * 目标模式：AM[0-9][0-9][0-9][0-9]（如 AM0001, AM0002...）
+         *
+         * 处理内容：
+         * 1. trim() — 去除首尾空白
+         * 2. NFKC 归一化 — 全角字母数字 → 半角
+         * 3. 转大写 — am0001 → AM0001
+         *
+         * 不做的事：
+         * - 不补零（AM1 不会变成 AM0001，语义不确定）
+         * - 不截断（AM00001 不会变成 AM0001，会保留失败）
+         * - 不改前缀（AX0001 不会变成 AM0001，语义不同）
+         */
+        code_index: (value) => {
+            return nfkcNormalize(value.trim()).toUpperCase();
+        },
+    };
+    /**
+     * 对受约束字段的值做规范化
+     *
+     * 仅对白名单中的列名生效，其他列直接返回原值。
+     * 规范化后仍不满足约束的值不会被强制篡改，保留由 SQLite CHECK 约束来拒绝。
+     *
+     * @param columnName 列名（不区分大小写）
+     * @param value 原始值
+     * @returns 规范化后的值（如果该列在白名单中），或原值（如果不在白名单中）
+     */
+    function normalizeConstrainedValue(columnName, value) {
+        if (value === null || value === undefined)
+            return value ?? null;
+        if (!columnName)
+            return value;
+        const normalizer = FIELD_NORMALIZERS[columnName.toLowerCase()];
+        if (!normalizer)
+            return value;
+        const normalized = normalizer(value);
+        if (normalized !== value) {
+            logDebug_ACU(`[SqlNormalizer] 字段 ${columnName} 值已规范化: "${value}" → "${normalized}"`);
+        }
+        return normalized;
+    }
+    /**
+     * 获取所有已注册的规范化列名（小写）
+     * 用于外部判断哪些列需要做值规范化
+     */
+    function getNormalizedColumnNames() {
+        return Object.keys(FIELD_NORMALIZERS);
+    }
+    /**
+     * 规范化 SQL 语句中 INSERT/UPDATE 语句里受约束字段的值
+     *
+     * 这是一个更高层的函数，用于运行时 SQL 写入链路。
+     * 它会解析 SQL 语句中的列名列表和对应的值，对白名单字段做值规范化。
+     *
+     * 注意：此函数在 normalizeSqlStructure 之后调用，
+     * 此时 SQL 已经是 ASCII 兼容的，可以安全地用正则提取列名和值。
+     *
+     * @param sql 单条 SQL 语句
+     * @returns 值已规范化的 SQL 语句（如果发生了修改），或原语句
+     */
+    function normalizeStatementValues(sql) {
+        if (!sql || typeof sql !== 'string')
+            return sql;
+        const normalizedCols = getNormalizedColumnNames();
+        if (normalizedCols.length === 0)
+            return sql;
+        // 尝试匹配 INSERT INTO table (col1, col2, ...) VALUES (val1, val2, ...);
+        let result = tryNormalizeInsertValues(sql, normalizedCols);
+        // 尝试匹配 UPDATE table SET col1 = val1, col2 = val2 WHERE ...
+        if (result === sql) {
+            result = tryNormalizeUpdateValues(sql, normalizedCols);
+        }
+        return result;
+    }
+    /**
+     * 规范化 INSERT 语句中受约束字段的值
+     *
+     * 匹配格式：INSERT INTO table (col1, col2, ...) VALUES (val1, val2, ...)
+     * 对白名单列对应的值做规范化
+     */
+    function tryNormalizeInsertValues(sql, normalizedCols) {
+        // 匹配 INSERT INTO table (columns) VALUES (values)
+        const insertMatch = sql.match(/^(INSERT\s+INTO\s+\w+\s*)\(([^)]+)\)(\s*VALUES\s*)\((.+)\)\s*;?\s*$/is);
+        if (!insertMatch)
+            return sql;
+        const prefix = insertMatch[1];
+        const columnsStr = insertMatch[2];
+        const valuesKeyword = insertMatch[3];
+        const valuesStr = insertMatch[4];
+        // 解析列名
+        const columns = splitColumnList(columnsStr);
+        if (columns.length === 0)
+            return sql;
+        // 解析值列表（需要处理字符串内的逗号）
+        const values = splitValueList(valuesStr);
+        if (values.length !== columns.length)
+            return sql;
+        // 检查是否有任何列需要规范化
+        let hasChange = false;
+        const normalizedValues = [];
+        for (let i = 0; i < columns.length; i++) {
+            const colName = columns[i].trim();
+            const rawValue = values[i].trim();
+            if (normalizedCols.includes(colName.toLowerCase()) && isQuotedString(rawValue)) {
+                // 提取引号内的值
+                const innerValue = rawValue.slice(1, -1).replace(/''/g, "'");
+                const normalizedInner = normalizeConstrainedValue(colName, innerValue);
+                if (normalizedInner !== innerValue) {
+                    hasChange = true;
+                    normalizedValues.push(`'${normalizedInner.replace(/'/g, "''")}'`);
+                }
+                else {
+                    normalizedValues.push(rawValue);
+                }
+            }
+            else {
+                normalizedValues.push(rawValue);
+            }
+        }
+        if (!hasChange)
+            return sql;
+        const suffix = sql.trimEnd().endsWith(';') ? ';' : '';
+        return `${prefix}(${columns.join(', ')})${valuesKeyword}(${normalizedValues.join(', ')})${suffix}`;
+    }
+    /**
+     * 规范化 UPDATE 语句中受约束字段的值
+     *
+     * 匹配格式：UPDATE table SET col1 = val1, col2 = val2 WHERE ...
+     * 对白名单列对应的值做规范化
+     */
+    function tryNormalizeUpdateValues(sql, normalizedCols) {
+        // 匹配 UPDATE table SET col1 = val1, col2 = val2 ...
+        const updateMatch = sql.match(/^(UPDATE\s+\w+\s+SET\s+)(.+?)(\s+WHERE\s+.+)?$/is);
+        if (!updateMatch)
+            return sql;
+        const prefix = updateMatch[1];
+        const setClauses = updateMatch[2];
+        const whereClause = updateMatch[3] || '';
+        // 按 SET 子句中的逗号拆分（需要跳过字符串内的逗号）
+        const assignments = splitSetClauses(setClauses);
+        let hasChange = false;
+        const normalizedAssignments = [];
+        for (const assignment of assignments) {
+            // 匹配 col = value
+            const assignMatch = assignment.match(/^(\s*\w+\s*)=\s*(.+)$/s);
+            if (!assignMatch) {
+                normalizedAssignments.push(assignment);
+                continue;
+            }
+            const colName = assignMatch[1].trim();
+            const rawValue = assignMatch[2].trim();
+            if (normalizedCols.includes(colName.toLowerCase()) && isQuotedString(rawValue)) {
+                const innerValue = rawValue.slice(1, -1).replace(/''/g, "'");
+                const normalizedInner = normalizeConstrainedValue(colName, innerValue);
+                if (normalizedInner !== innerValue) {
+                    hasChange = true;
+                    normalizedAssignments.push(`${assignMatch[1]}= '${normalizedInner.replace(/'/g, "''")}'`);
+                }
+                else {
+                    normalizedAssignments.push(assignment);
+                }
+            }
+            else {
+                normalizedAssignments.push(assignment);
+            }
+        }
+        if (!hasChange)
+            return sql;
+        return `${prefix}${normalizedAssignments.join(', ')}${whereClause}`;
+    }
+    // ═══════════════════════════════════════════════════════════════
+    // 内部工具函数
+    // ═══════════════════════════════════════════════════════════════
+    /**
+     * 拆分列名列表（逗号分隔）
+     * "col1, col2, col3" → ["col1", "col2", "col3"]
+     */
+    function splitColumnList(str) {
+        return str.split(',').map(s => s.trim()).filter(s => s.length > 0);
+    }
+    /**
+     * 拆分值列表（逗号分隔，但跳过字符串内的逗号）
+     * "'val1', 'val,2', 3" → ["'val1'", "'val,2'", "3"]
+     */
+    function splitValueList(str) {
+        const values = [];
+        let current = '';
+        let inStr = false;
+        for (let i = 0; i < str.length; i++) {
+            const ch = str[i];
+            if (inStr) {
+                current += ch;
+                if (ch === "'") {
+                    if (i + 1 < str.length && str[i + 1] === "'") {
+                        current += str[i + 1];
+                        i++;
+                    }
+                    else {
+                        inStr = false;
+                    }
+                }
+            }
+            else if (ch === "'") {
+                inStr = true;
+                current += ch;
+            }
+            else if (ch === ',') {
+                values.push(current);
+                current = '';
+            }
+            else {
+                current += ch;
+            }
+        }
+        if (current.trim()) {
+            values.push(current);
+        }
+        return values;
+    }
+    /**
+     * 拆分 SET 子句（逗号分隔，跳过字符串内的逗号）
+     */
+    function splitSetClauses(str) {
+        const clauses = [];
+        let current = '';
+        let inStr = false;
+        for (let i = 0; i < str.length; i++) {
+            const ch = str[i];
+            if (inStr) {
+                current += ch;
+                if (ch === "'") {
+                    if (i + 1 < str.length && str[i + 1] === "'") {
+                        current += str[i + 1];
+                        i++;
+                    }
+                    else {
+                        inStr = false;
+                    }
+                }
+            }
+            else if (ch === "'") {
+                inStr = true;
+                current += ch;
+            }
+            else if (ch === ',') {
+                clauses.push(current);
+                current = '';
+            }
+            else {
+                current += ch;
+            }
+        }
+        if (current.trim()) {
+            clauses.push(current);
+        }
+        return clauses;
+    }
+    /**
+     * 判断值是否是引号包裹的字符串
+     * "'hello'" → true, "123" → false, "NULL" → false
+     */
+    function isQuotedString(value) {
+        return value.startsWith("'") && value.endsWith("'") && value.length >= 2;
     }
 
     /**
@@ -58772,7 +58851,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "spv8.7.8" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "1.1.0" || 'unknown';
     /**
      * 核心优化逻辑（纯 service 层：读数据→业务决策→写数据→构造返回值）。
      */
@@ -80189,6 +80268,7 @@ $CONTENT
         if (!Array.isArray(groups) || groups.length === 0) {
             return { success: true, failedGroups: [], committedBucketCount: 0 };
         }
+        const schedulingIdentitySnapshot = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU);
         const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processGroupedRuntimeChunk');
         if (!migration.success) {
             return {
@@ -80208,16 +80288,31 @@ $CONTENT
         // 模板只起指导作用：只有模板声明的表参与填表。
         // 范围未知时不过滤，避免把所有表判成不参与导致数据写不进去。
         const templateScope = executionScope.templateScope;
-        const scopedGroups = groups
-            .map(group => {
-            const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(group.sheetKeys || [], templateScope);
-            if (scopedSheetKeys.length === (group.sheetKeys || []).length)
-                return group;
-            const dropped = (group.sheetKeys || []).filter(sheetKey => !scopedSheetKeys.includes(sheetKey));
-            logDebug_ACU(`[TemplateScope] ${formatGroupReference_ACU(group)} 剔除模板未声明的表：${dropped.join('、')}。`);
-            return { ...group, sheetKeys: scopedSheetKeys };
-        })
-            .filter(group => (group.sheetKeys || []).length > 0);
+        let scopedGroups;
+        try {
+            scopedGroups = groups
+                .map(group => {
+                const reboundSheetKeys = templateForLookup
+                    ? rebindSheetKeysAcrossSnapshots_ACU(group.sheetKeys || [], schedulingIdentitySnapshot, templateForLookup)
+                    : [...(group.sheetKeys || [])];
+                const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(reboundSheetKeys, templateScope);
+                if (scopedSheetKeys.length === reboundSheetKeys.length)
+                    return { ...group, sheetKeys: scopedSheetKeys };
+                const dropped = reboundSheetKeys.filter(sheetKey => !scopedSheetKeys.includes(sheetKey));
+                logDebug_ACU(`[TemplateScope] ${formatGroupReference_ACU(group)} 剔除模板未声明的表：${dropped.join('、')}。`);
+                return { ...group, sheetKeys: scopedSheetKeys };
+            })
+                .filter(group => (group.sheetKeys || []).length > 0);
+        }
+        catch (error) {
+            const message = error instanceof SheetIdentityRebindError_ACU ? error.message : String(error);
+            return {
+                success: false,
+                failedGroups: groups.map(group => group.key),
+                error: sanitizeRetryFeedback_ACU(message, MAX_WARN_ERROR_LENGTH_ACU),
+                committedBucketCount: 0,
+            };
+        }
         if (scopedGroups.length === 0) {
             logDebug_ACU('[TemplateScope] 所有分组的目标表都不在模板范围内，本次无需填表。');
             return { success: true, failedGroups: [], committedBucketCount: 0 };
@@ -80314,6 +80409,20 @@ $CONTENT
                     break;
                 }
                 const mergedBatchData = conflictReplayData || baseResult.data;
+                try {
+                    bucket.plannedJobs = bucket.plannedJobs.map(plannedJob => ({
+                        ...plannedJob,
+                        group: {
+                            ...plannedJob.group,
+                            sheetKeys: rebindSheetKeysAcrossSnapshots_ACU(plannedJob.group.sheetKeys || [], templateForLookup || schedulingIdentitySnapshot, mergedBatchData),
+                        },
+                    }));
+                }
+                catch (error) {
+                    bucket.plannedJobs.forEach(job => failedGroups.add(job.group.key));
+                    firstError = firstError || (error instanceof Error ? error.message : String(error));
+                    break;
+                }
                 _set_currentJsonTableData_ACU(mergedBatchData);
                 const baseSnapshot = JSON.parse(JSON.stringify(mergedBatchData));
                 const bucketSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
@@ -80966,6 +81075,7 @@ $CONTENT
             return { success: true };
         }
         const { targetSheetKeys, batchSize: specificBatchSize, requestOptions } = options;
+        const schedulingIdentitySnapshot = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU);
         const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processUpdatesBatch');
         if (!migration.success) {
             return { success: false, error: migration.error || '旧存储迁移失败，已阻止本次填表。' };
@@ -80998,6 +81108,15 @@ $CONTENT
                     return { success: false, failedBatch: batchNumber, error: baseResult.error || '无法构建合并基底，操作已终止。' };
                 }
                 const mergedBatchData = baseResult.data;
+                let effectiveTargetSheetKeys = targetSheetKeys;
+                if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0) {
+                    try {
+                        effectiveTargetSheetKeys = rebindSheetKeysAcrossSnapshots_ACU(targetSheetKeys, schedulingIdentitySnapshot, mergedBatchData);
+                    }
+                    catch (error) {
+                        return { success: false, failedBatch: batchNumber, error: error instanceof Error ? error.message : String(error) };
+                    }
+                }
                 const batchSheetKeys = getSortedSheetKeys_ACU(mergedBatchData);
                 const batchIsolationKey = getCurrentIsolationKey_ACU();
                 // 加载历史数据
@@ -81025,15 +81144,14 @@ $CONTENT
                 // 决议 effective API preset：如果调用方未指定 tableApiPreset，
                 // 则以 targetSheetKeys 中第一个表名为准查覆盖映射
                 let effectiveRequestOptions = requestOptions;
-                if (!effectiveRequestOptions?.tableApiPreset && targetSheetKeys && targetSheetKeys.length > 0) {
-                    const templateForLookup = parseTableTemplateJson_ACU({ stripSeedRows: true });
-                    const firstTableName = templateForLookup?.[targetSheetKeys[0]]?.name || '';
+                if (!effectiveRequestOptions?.tableApiPreset && effectiveTargetSheetKeys && effectiveTargetSheetKeys.length > 0) {
+                    const firstTableName = mergedBatchData?.[effectiveTargetSheetKeys[0]]?.name || '';
                     const resolvedPreset = resolveTableApiPresetOverride_ACU(firstTableName);
                     if (resolvedPreset) {
                         effectiveRequestOptions = { ...(effectiveRequestOptions || {}), tableApiPreset: resolvedPreset };
                     }
                 }
-                const result = await executeUpdate(messagesForContext, finalSaveTargetIndex, updateMode, isSilentMode, targetSheetKeys, effectiveRequestOptions, {
+                const result = await executeUpdate(messagesForContext, finalSaveTargetIndex, updateMode, isSilentMode, effectiveTargetSheetKeys, effectiveRequestOptions, {
                     currentBatch: batchNumber,
                     totalBatches: batches.length,
                     batchBaseSnapshot: JSON.parse(JSON.stringify(mergedBatchData)),
@@ -98528,8 +98646,8 @@ $CONTENT
                     #${POPUP_ID_ACU} .toggle-switch input:checked + .slider:before { transform: translateY(-50%) translateX(20px); }
 
                     /* 提示词编辑器 */
-                    #${POPUP_ID_ACU} .prompt-segment { 
-                        margin-bottom: 12px; 
+                    #${POPUP_ID_ACU} .prompt-segment {
+                        margin-bottom: 12px;
                         border: 1px solid var(--acu-border);
                         background: var(--acu-bg-2);
                         padding: 12px;
@@ -98537,7 +98655,7 @@ $CONTENT
                     }
                     #${POPUP_ID_ACU} .prompt-segment-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
                     #${POPUP_ID_ACU} .prompt-segment-role { width: 120px !important; flex-grow: 0; }
-                    #${POPUP_ID_ACU} .prompt-segment-delete-btn { 
+                    #${POPUP_ID_ACU} .prompt-segment-delete-btn {
                         width: 28px; height: 28px; padding: 0;
                         border-radius: 999px;
                         border: 1px solid rgba(255, 107, 107, 0.35);
@@ -98546,7 +98664,7 @@ $CONTENT
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn { 
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-add-prompt-segment-btn {
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -98582,7 +98700,7 @@ $CONTENT
                         font-weight: 800;
                         line-height: 28px;
                     }
-                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn { 
+                    #${POPUP_ID_ACU} .${SCRIPT_ID_PREFIX_ACU}-plot-add-prompt-segment-btn {
                         height: 32px;
                         padding: 0 14px;
                         border-radius: 999px;
@@ -98618,7 +98736,7 @@ $CONTENT
                         max-height: 220px;
                         overflow: auto;
                     }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item { 
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item {
                         padding: 8px 10px;
                         border-radius: 6px;
                         cursor: pointer;
@@ -98629,7 +98747,7 @@ $CONTENT
                         border: 1px solid transparent;
                     }
                     #${POPUP_ID_ACU} .qrf_worldbook_list_item:hover { background: var(--acu-bg-2); color: var(--acu-text-1); }
-                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected { 
+                    #${POPUP_ID_ACU} .qrf_worldbook_list_item.selected {
                         background: rgba(37, 99, 235, 0.08);
                         border-color: rgba(37, 99, 235, 0.25);
                         color: var(--acu-accent);
@@ -98647,7 +98765,7 @@ $CONTENT
                         color: var(--acu-text-3);
                         text-align: left;
                     }
-                    
+
                     /* 底部状态栏：独立成条，居中不“歪” */
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-status-message {
                         margin: 12px 0 0 0;
@@ -98659,7 +98777,7 @@ $CONTENT
                         background: var(--acu-bg-2);
                         color: var(--acu-text-2);
                         }
-                        
+
                     /* 状态显示 */
                         #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-card-update-status-display {
                         padding: 10px 12px;
@@ -98669,7 +98787,7 @@ $CONTENT
                         color: var(--acu-text-2);
                         }
                     #${POPUP_ID_ACU} #${SCRIPT_ID_PREFIX_ACU}-total-messages-display { color: var(--acu-text-3); font-size: 12px; }
-                        
+
                     /* 表格 */
                     #${POPUP_ID_ACU} table { width: 100%; border-collapse: collapse; }
                     #${POPUP_ID_ACU} table th { color: var(--acu-text-3); font-weight: 600; font-size: 12px; }
@@ -98681,7 +98799,7 @@ $CONTENT
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-track { background: transparent; border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb { background: var(--acu-border-2); border-radius: 999px; }
                     #${POPUP_ID_ACU} ::-webkit-scrollbar-thumb:hover { background: var(--acu-text-3); }
-                        
+
                     /* Toast 终止按钮（剧情推进） */
                     #toast-container .qrf-abort-btn {
                         margin-left: 8px;
@@ -98916,7 +99034,7 @@ $CONTENT
                             line-height: 1.35 !important;
                         }
                     }
-                    
+
                     /* ═══ 手机横屏/小平板 (≤768px) ═══ */
                     @media screen and (max-width: 768px) {
                         #${POPUP_ID_ACU} {
@@ -98970,7 +99088,7 @@ $CONTENT
                             justify-content: flex-start !important;
                         }
                     }
-                    
+
                     /* ═══ 手机竖屏 (≤520px) ═══ */
                     @media screen and (max-width: 520px) {
                         #${POPUP_ID_ACU} {
@@ -99048,7 +99166,7 @@ $CONTENT
                             font-size: 0.9em;
                             height: 36px;
                         }
-                        
+
                         /* 移动端：按钮自然宽度flex-wrap */
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons button,
                         #${POPUP_ID_ACU} .button-group.acu-data-mgmt-buttons .button {
@@ -99057,11 +99175,11 @@ $CONTENT
                             padding: 6px 12px !important;
                         }
                     }
-                    
+
                     /* ═══ 极窄屏 (≤420px) ═══ */
                     @media screen and (max-width: 420px) {
-                        #${POPUP_ID_ACU} { 
-                            padding: 4px; 
+                        #${POPUP_ID_ACU} {
+                            padding: 4px;
                             padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 4px; margin-top: 4px; min-height: 0; }
@@ -99073,12 +99191,12 @@ $CONTENT
                         #${POPUP_ID_ACU} .acu-tabs-nav { padding: 3px; gap: 2px; flex-shrink: 0; border-radius: 16px; }
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 4px 8px !important; font-size: 10px !important; }
                         #${POPUP_ID_ACU} label { font-size: 10px; margin-bottom: 3px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
-                            padding: 6px 8px !important; 
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
+                            padding: 6px 8px !important;
                             border-radius: 6px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
-                            padding: 5px 8px !important; 
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
+                            padding: 5px 8px !important;
                             min-height: 28px !important;
                             font-size: 11px !important;
                             border-radius: 6px !important;
@@ -99096,11 +99214,11 @@ $CONTENT
                             border-radius: 6px !important;
                         }
                     }
-                    
+
                     /* ═══ 超小屏 (≤360px) ═══ */
                     @media screen and (max-width: 360px) {
-                        #${POPUP_ID_ACU} { 
-                            padding: 3px; 
+                        #${POPUP_ID_ACU} {
+                            padding: 3px;
                             padding-bottom: calc(3px + env(safe-area-inset-bottom, 0px));
                         }
                         #${POPUP_ID_ACU} .acu-layout { gap: 3px; margin-top: 3px; min-height: 0; }
@@ -99114,13 +99232,13 @@ $CONTENT
                         #${POPUP_ID_ACU} .acu-tab-button { padding: 3px 6px !important; font-size: 10px !important; border-radius: 12px !important; }
                         #${POPUP_ID_ACU} .acu-tab-button::after { display: none !important; }
                         #${POPUP_ID_ACU} label { font-size: 9px; }
-                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea { 
-                            padding: 5px 6px !important; 
+                        #${POPUP_ID_ACU} input, #${POPUP_ID_ACU} select, #${POPUP_ID_ACU} textarea {
+                            padding: 5px 6px !important;
                             font-size: 14px !important;
                             border-radius: 5px !important;
                         }
-                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button { 
-                            padding: 4px 6px !important; 
+                        #${POPUP_ID_ACU} button, #${POPUP_ID_ACU} .button {
+                            padding: 4px 6px !important;
                             min-height: 26px !important;
                             font-size: 10px !important;
                             border-radius: 5px !important;
@@ -99130,8 +99248,8 @@ $CONTENT
                             gap: 3px !important;
                         }
                         #${POPUP_ID_ACU} .checkbox-group label { font-size: 9px !important; line-height: 1.2 !important; }
-                        #${POPUP_ID_ACU} input[type="checkbox"] { 
-                            width: 15px !important; 
+                        #${POPUP_ID_ACU} input[type="checkbox"] {
+                            width: 15px !important;
                             height: 15px !important;
                             min-width: 15px !important;
                             min-height: 15px !important;
@@ -99211,7 +99329,7 @@ $CONTENT
                         color: #dc2626;
                     }
                     #${POPUP_ID_ACU} .acu-mini-btn .fa-solid { opacity: 0.92; }
-                    
+
                     /* 超极小屏幕 (≤320px) */
                     @media screen and (max-width: 320px) {
                         #${POPUP_ID_ACU} {
@@ -99296,18 +99414,18 @@ $CONTENT
         }).join('');
         return `
         <div class="acu-theme-selector" style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select" 
+            <select id="${SCRIPT_ID_PREFIX_ACU}-theme-select"
                     style="padding: 4px 8px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-control-bg, #ffffff) !important; color: var(--acu-text-1, #1a2332) !important; font-size: 12px !important; cursor: pointer !important; max-width: 140px !important; font-family: inherit !important;"
                     title="切换界面主题">
                 ${options}
             </select>
             <div class="acu-theme-actions" style="display: flex; gap: 4px;">
-                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import" 
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-import"
                         style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导入自定义主题">
                     <i class="fa-solid fa-upload" style="font-size: 11px;"></i>
                 </button>
-                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export" 
+                <button id="${SCRIPT_ID_PREFIX_ACU}-theme-export"
                         style="padding: 4px 6px !important; border-radius: 6px !important; border: 1px solid var(--acu-border-2, #c8cdd5) !important; background: var(--acu-bg-1, #ffffff) !important; color: var(--acu-text-3, #8896a8) !important; font-size: 11px !important; cursor: pointer !important; font-family: inherit !important;"
                         title="导出当前主题模板（完整可编辑版）">
                     <i class="fa-solid fa-download" style="font-size: 11px;"></i>

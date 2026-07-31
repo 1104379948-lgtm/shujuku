@@ -854,6 +854,64 @@ describe('processUpdatesBatch_ACU', () => {
     expect(progressContext.batchBaseSnapshot.sheet_1.content[1][1]).toBe('旧事件');
     expect(progressContext.batchBaseSnapshot).not.toBe(mockCurrentJsonTableData);
   });
+
+  it('构建历史基底后将调度期随机 key 唯一重绑定为稳定 key', async () => {
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    mockCurrentJsonTableData = {
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+        content: [['row_id', 'item']],
+      },
+    };
+    const stableTemplate = {
+      mate: { type: 'acu' },
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+        content: [['row_id', 'item']],
+      },
+    } as any;
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(stableTemplate);
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      {
+        is_user: false,
+        mes: '历史 V2 锚点',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full',
+                reason: 'init',
+                createdAt: 1,
+                data: structuredClone(stableTemplate),
+              },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: false, mes: '足够长的 AI 回复' },
+    ]);
+    const executeUpdate = vi.fn().mockResolvedValue({ success: true, modifiedKeys: [] } as CardUpdateResult);
+
+    const result = await processUpdatesBatch_ACU(
+      [1],
+      'auto_standard',
+      { targetSheetKeys: ['sheet_in05z9vz'] },
+      executeUpdate,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeUpdate).toHaveBeenCalledTimes(1);
+    expect(executeUpdate.mock.calls[0][4]).toEqual(['sheet_bei_bao_wu_pin_biao']);
+    expect(executeUpdate.mock.calls[0][6].batchBaseSnapshot.sheet_bei_bao_wu_pin_biao).toBeDefined();
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -4067,6 +4125,123 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     expect(mockUpdateReadableLorebookEntry).toHaveBeenCalledTimes(1);
     expect(mockEnqueueSummaryVectorIndexFlush).toHaveBeenCalledTimes(1);
+  });
+
+  it('grouped 提交在基底 key 漂移时使用唯一重绑定后的目标 key，不扩大授权集合', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    mockCurrentJsonTableData = {
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+        content: [['row_id', 'item']],
+      },
+    };
+    const stableTemplate = {
+      mate: { type: 'acu' },
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+        content: [['row_id', 'item']],
+      },
+    } as any;
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(stableTemplate);
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      {
+        is_user: false,
+        mes: '历史 V2 锚点',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full',
+                reason: 'init',
+                createdAt: 1,
+                data: structuredClone(stableTemplate),
+              },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: false, mes: 'AI回复' },
+    ]);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '稳定 key 基底' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>stable-target</tableEdit>');
+    mockParseAndApplyTableEditsToData.mockImplementation((_response: string, tableData: any) => {
+      tableData.sheet_bei_bao_wu_pin_biao.content.push(['1', '铁剑']);
+      return { success: true, modifiedKeys: ['sheet_bei_bao_wu_pin_biao'], appliedEdits: 1 };
+    });
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      {
+        key: 'legacy-inventory',
+        groupId: -1,
+        indices: [1],
+        batchSize: 2,
+        sheetKeys: ['sheet_in05z9vz'],
+        requestOptions: null,
+      },
+    ], 'manual_independent');
+
+    expect(result.success).toBe(true);
+    expect(mockPrepareAIInput.mock.calls[0][2]).toEqual(['sheet_bei_bao_wu_pin_biao']);
+    const persistPayload = mockPersistTablesToChatMessage.mock.calls[0][0];
+    expect(persistPayload.targetSheetKeys).toEqual(['sheet_bei_bao_wu_pin_biao']);
+    expect(persistPayload.targetSheetKeys).not.toContain('sheet_in05z9vz');
+  });
+
+  it('grouped 身份一对多时在调用 AI 前 fail closed，不执行或持久化', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    mockCurrentJsonTableData = {
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+        content: [['row_id', 'item']],
+      },
+    };
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' },
+      sheet_inventory_a: {
+        uid: 'sheet_inventory_a',
+        name: '旧背包',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+        content: [['row_id', 'item']],
+      },
+      sheet_inventory_b: {
+        uid: 'sheet_inventory_b',
+        name: '新背包',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+        content: [['row_id', 'item']],
+      },
+    } as any);
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true, mes: '用户' },
+      { is_user: false, mes: 'AI回复' },
+    ]);
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      {
+        key: 'ambiguous-inventory',
+        groupId: -1,
+        indices: [1],
+        batchSize: 2,
+        sheetKeys: ['sheet_in05z9vz'],
+        requestOptions: null,
+      },
+    ], 'manual_independent');
+
+    expect(result).toEqual(expect.objectContaining({ success: false, failedGroups: ['ambiguous-inventory'] }));
+    expect(result.error).toContain('身份重绑定存在歧义');
+    expect(mockPrepareAIInput).not.toHaveBeenCalled();
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
   it('最新 AI 楼层发生 RuntimeRevision 冲突时复用已生成响应，并基于最新运行时快照重放', async () => {
