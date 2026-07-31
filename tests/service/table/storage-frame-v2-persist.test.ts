@@ -378,6 +378,35 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     expect(mocks.saveChatStrict).not.toHaveBeenCalled();
   });
 
+  it('拒绝重复的非空 row_id，且不仲裁身份或修改聊天状态', async () => {
+    const message = seedFrame();
+    message.TavernDB_ACU_Identity = 'identity-before-rejection';
+    const isolatedDataBefore = message.TavernDB_ACU_IsolatedData;
+    const messageBefore = JSON.parse(JSON.stringify(message));
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData: {
+        mate: { type: 'acu' },
+        sheet_a: { ...sheetA, content: [['row_id', 'value'], ['stable-id', 'first'], [' stable-id ', 'second']] },
+        sheet_b: sheetB,
+      } as any,
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(result).toEqual({ saved: false, error: expect.stringContaining('duplicate_row_id') });
+    expect(message).toEqual(messageBefore);
+    expect(message.TavernDB_ACU_IsolatedData).toBe(isolatedDataBefore);
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+  });
+
   it.each([
     { label: 'row_upsert 身份不一致', operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['2', 'new'] }] },
     { label: 'row_upsert 行宽不匹配', operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1'] }] },
@@ -1930,6 +1959,13 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
         changedSheetKeys: ['sheet_a'],
         operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', '历史孤立数据'] }],
       })],
+      perSheetCheckpoints: {
+        sheet_a: {
+          kind: 'sheet_full', createdAt: 1, reason: 'manual', sheetKey: 'sheet_a',
+          data: sheetA,
+          timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 0, afterSeq: 1 },
+        },
+      },
     };
     const message = seedFrame(orphanFrame);
     const replayedOrphanData = {
@@ -1944,7 +1980,8 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     mocks.loadReplayDetailed.mockResolvedValueOnce({
       baseKind: 'temporary_template_baseline',
       data: replayedOrphanData,
-    });
+    }).mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: afterData })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: afterData });
     mocks.saveChatStrict.mockClear();
 
     const result = await persistTableMutationLogV2_ACU({
@@ -1964,10 +2001,12 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       checkpoint: { kind: 'full', reason: 'integrity_repair', data: afterData },
       logEntries: [],
     });
+    expect(tagData.storageFrame.perSheetCheckpoints).toBeUndefined();
     const expectedBackupFrame = {
       version: orphanFrame.version,
       headRevision: orphanFrame.headRevision,
       logEntries: orphanFrame.logEntries,
+      perSheetCheckpoints: orphanFrame.perSheetCheckpoints,
     };
     expect(tagData.recoveryBackup).toMatchObject({
       version: 1,
@@ -2020,7 +2059,9 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     message.TavernDB_ACU_Identity = 'old-identity';
     const beforeIsolatedData = message.TavernDB_ACU_IsolatedData;
     const replayedData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
-    mocks.loadReplayDetailed.mockResolvedValueOnce({ baseKind: 'temporary_template_baseline', data: replayedData });
+    mocks.loadReplayDetailed.mockResolvedValueOnce({ baseKind: 'temporary_template_baseline', data: replayedData })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: replayedData })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: replayedData });
     mocks.saveChatStrict.mockReset().mockRejectedValueOnce(new Error('upgrade save failed'));
 
     await expect(persistTableMutationLogV2_ACU({

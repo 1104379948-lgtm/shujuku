@@ -15,6 +15,7 @@ import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration
 import { getPhysicalTableNameForSheet_ACU } from '../../shared/sheet-identity';
 import { parseDDLTableName } from '../../shared/ddl-utils';
 import { decodeSqlIdentifier_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
+import { buildSheetTableAliasMap_ACU } from '../../shared/sql-read-resolver';
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
 
@@ -428,11 +429,14 @@ function buildReplaySqlTableAliases_ACU(
   const isPlainSqlIdentifier = (value: unknown): value is string => (
     typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(value)
   );
-  const aliases = new Map<string, string>();
+  // 与实时 SQL/Strict JSON 复用同一表身份别名来源；V2 仅额外保留已写入
+  // 历史日志的短 sheetKey 和 operation.tableName 兼容语义。
+  const sharedRegistry = buildSheetTableAliasMap_ACU([state], { includeExtendedAliases: true });
+  const aliases = new Map(sharedRegistry.aliases);
   const conflicts = new Set<string>();
   const addAlias = (alias: unknown, runtimeName: string): void => {
-    const normalized = decodeSqlIdentifier_ACU(alias).trim().toLowerCase();
-    if (!normalized || conflicts.has(normalized)) return;
+    const normalized = decodeSqlIdentifier_ACU(alias).normalize('NFKC').trim().toLocaleLowerCase('en-US');
+    if (!normalized || conflicts.has(normalized) || sharedRegistry.conflicts.has(normalized)) return;
     const existing = aliases.get(normalized);
     if (existing && existing !== runtimeName) {
       aliases.delete(normalized);
@@ -445,11 +449,8 @@ function buildReplaySqlTableAliases_ACU(
     if (!sheetKey.startsWith('sheet_')) continue;
     const sheet = value as Sheet_ACU;
     const runtimeName = getPhysicalTableNameForSheet_ACU(state, sheetKey);
-    addAlias(parseDDLTableName(String(sheet?.sourceData?.ddl || '')), runtimeName);
-    addAlias(runtimeName, runtimeName);
-    if (isPlainSqlIdentifier(sheetKey)) addAlias(sheetKey, runtimeName);
+    // historical V2 logs emitted this short key; it is not a current public alias.
     if (isPlainSqlIdentifier(sheetKey.slice('sheet_'.length))) addAlias(sheetKey.slice('sheet_'.length), runtimeName);
-    if (isPlainSqlIdentifier(sheet?.uid)) addAlias(sheet.uid, runtimeName);
   }
   if (operation.kind === 'sql_sheet_batch') {
     // operation.tableName 是写入当时的历史物理表名，属于历史事实。

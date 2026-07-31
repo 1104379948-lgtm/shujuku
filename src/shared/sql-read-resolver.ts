@@ -1,6 +1,6 @@
 import type { TableDataObject_ACU } from './models/table-data';
 import { parseDDLColumnInfos_ACU, parseDDLTableName } from './ddl-utils';
-import { getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from './sheet-identity';
+import { canonicalizeDisplayName_ACU, getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from './sheet-identity';
 import { resolveEffectiveDDL } from '../data/sqlite/schema-mapper';
 import { rebindSqlReadIdentifiers_ACU } from './sql-mutation-table-rebind';
 
@@ -30,8 +30,12 @@ export interface ReadQueryResolveResult_ACU {
   conflicts?: string[];
 }
 
+function canonicalizeSheetTableAlias_ACU(alias: unknown): string {
+  return canonicalizeDisplayName_ACU(alias);
+}
+
 function addAlias_ACU(aliases: Map<string, string>, conflicts: Set<string>, alias: unknown, physicalName: string): void {
-  const key = String(alias || '').trim().toLowerCase();
+  const key = canonicalizeSheetTableAlias_ACU(alias);
   if (!key || conflicts.has(key)) return;
   const existing = aliases.get(key);
   if (existing && existing !== physicalName) {
@@ -60,7 +64,8 @@ export function buildSheetTableAliasMap_ACU(
     }
     for (const [sheetKey, physicalName] of physicalNames) {
       const sheet = (source as Record<string, any>)[sheetKey];
-      const sourceAliases = [parseDDLTableName(String(sheet?.sourceData?.ddl || '')), physicalName];
+      const declaredAliases = Array.isArray(sheet?.sourceData?.tableAliases) ? sheet.sourceData.tableAliases : [];
+      const sourceAliases = [parseDDLTableName(String(sheet?.sourceData?.ddl || '')), physicalName, ...declaredAliases];
       if (options.includeExtendedAliases !== false) {
         sourceAliases.push(sheetKey, sheet?.uid, sheet?.name);
       }
@@ -138,7 +143,7 @@ export function rebindSheetKeysThroughTableAliases_ACU(
   const targetPhysicalNames = resolvePhysicalTableNames_ACU(targetData);
   const targetSheetKeyByPhysicalName = new Map<string, string>();
   for (const [sheetKey, physicalName] of targetPhysicalNames) {
-    targetSheetKeyByPhysicalName.set(physicalName.toLowerCase(), sheetKey);
+    targetSheetKeyByPhysicalName.set(canonicalizeSheetTableAlias_ACU(physicalName), sheetKey);
   }
   const sourceRegistry = buildSheetTableAliasMap_ACU([sourceData], { includeExtendedAliases: true });
   const targetRegistry = buildSheetTableAliasMap_ACU([targetData], { includeExtendedAliases: true });
@@ -147,12 +152,12 @@ export function rebindSheetKeysThroughTableAliases_ACU(
   for (const rawSelector of selectors || []) {
     const selector = String(rawSelector || '').trim();
     if (!selector) continue;
-    const normalized = selector.toLowerCase();
+    const normalized = canonicalizeSheetTableAlias_ACU(selector);
     const sourcePhysicalNameForSelector = sourceRegistry.conflicts.has(normalized)
       ? undefined
       : sourceRegistry.aliases.get(normalized);
     const sourceOwner = sourcePhysicalNameForSelector
-      ? ([...sourcePhysicalNames].find(([, physicalName]) => physicalName.toLowerCase() === sourcePhysicalNameForSelector.toLowerCase())?.[0] || normalized)
+      ? ([...sourcePhysicalNames].find(([, physicalName]) => canonicalizeSheetTableAlias_ACU(physicalName) === canonicalizeSheetTableAlias_ACU(sourcePhysicalNameForSelector))?.[0] || normalized)
       : normalized;
 
     if (targetRegistry.conflicts.has(normalized)) {
@@ -160,7 +165,7 @@ export function rebindSheetKeysThroughTableAliases_ACU(
     }
     const directTargetPhysicalName = targetRegistry.aliases.get(normalized);
     if (directTargetPhysicalName) {
-      const directTargetSheetKey = targetSheetKeyByPhysicalName.get(directTargetPhysicalName.toLowerCase());
+      const directTargetSheetKey = targetSheetKeyByPhysicalName.get(canonicalizeSheetTableAlias_ACU(directTargetPhysicalName));
       if (!directTargetSheetKey) {
         throw new SheetTableAliasResolutionError_ACU(`表身份重绑定失败：别名「${selector}」对应的物理表不在当前基底中。`);
       }
@@ -181,7 +186,7 @@ export function rebindSheetKeysThroughTableAliases_ACU(
       throw new SheetTableAliasResolutionError_ACU(`表身份重绑定失败：无法解析别名「${selector}」。`);
     }
     const sourceAliases = [...sourceRegistry.aliases.entries()]
-      .filter(([, physicalName]) => physicalName.toLowerCase() === sourcePhysicalName.toLowerCase())
+      .filter(([, physicalName]) => canonicalizeSheetTableAlias_ACU(physicalName) === canonicalizeSheetTableAlias_ACU(sourcePhysicalName))
       .map(([alias]) => alias);
     const ambiguousAliases = sourceAliases.filter(alias => targetRegistry.conflicts.has(alias));
     if (ambiguousAliases.length > 0) {
@@ -189,7 +194,7 @@ export function rebindSheetKeysThroughTableAliases_ACU(
     }
     const targetCandidates = new Set(
       sourceAliases
-        .map(alias => targetRegistry.aliases.get(alias)?.toLowerCase())
+        .map(alias => targetRegistry.aliases.get(alias) && canonicalizeSheetTableAlias_ACU(targetRegistry.aliases.get(alias)))
         .filter((physicalName): physicalName is string => Boolean(physicalName)),
     );
     if (targetCandidates.size !== 1) {
@@ -199,7 +204,7 @@ export function rebindSheetKeysThroughTableAliases_ACU(
     const targetPhysicalName = [...targetCandidates][0];
     const targetSheetKey = targetSheetKeyByPhysicalName.get(targetPhysicalName);
     if (!targetSheetKey) throw new SheetTableAliasResolutionError_ACU(`表身份重绑定失败：别名「${selector}」对应的物理表不在当前基底中。`);
-    const sourceSheetKey = [...sourcePhysicalNames].find(([, physicalName]) => physicalName.toLowerCase() === sourcePhysicalName.toLowerCase())?.[0] || normalized;
+    const sourceSheetKey = [...sourcePhysicalNames].find(([, physicalName]) => canonicalizeSheetTableAlias_ACU(physicalName) === canonicalizeSheetTableAlias_ACU(sourcePhysicalName))?.[0] || normalized;
     const existingOwner = sourceOwnerByTargetKey.get(targetSheetKey);
     if (existingOwner && existingOwner !== sourceSheetKey) {
       throw new SheetTableAliasResolutionError_ACU(`表身份重绑定存在多对一冲突：${existingOwner}、${sourceSheetKey} 同时指向 ${targetSheetKey}。`);

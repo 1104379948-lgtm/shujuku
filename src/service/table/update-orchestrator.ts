@@ -497,6 +497,12 @@ function buildSqlSheetBatchOperationsFromText_ACU(
         keepLegacyForUnclassified: true,
         reason: 'system',
     });
+    if (buildResult.ambiguousStatements.length > 0) {
+        return { success: false, error: 'SQL 表身份存在歧义，拒绝生成可回放操作。' };
+    }
+    if (buildResult.unknownStatements.some(statement => extractTableNamesFromStatements([statement]).length > 0)) {
+        return { success: false, error: 'SQL 显式引用了未知表名，拒绝生成可回放操作。' };
+    }
     return { success: true, operations: buildResult.operations };
 }
 
@@ -1185,6 +1191,7 @@ export async function applyUnifiedGroupFillResponses_ACU(
                     normalizeSqlStatementsForRuntimeLog_ACU(response.tableEditText || ''),
                     baseSnapshot as any,
                     capturedSqlApplyScope?.templateData,
+                    { requireKnownTables: true },
                 );
                 // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                 assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);

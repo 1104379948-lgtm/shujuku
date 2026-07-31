@@ -143,6 +143,53 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.audit[0].inheritedColumns).toContain('前一轮时间');
   });
 
+  it('同一逻辑表改名时累积旧表名，并允许后续模板以显式 tableAliases 认回旧 key', async () => {
+    const baseline = state({
+      sheet_protagonist: sheet('sheet_protagonist', '主角信息', ['row_id', '名称'],
+        'row_id INTEGER PRIMARY KEY, 名称 TEXT'),
+    });
+    const renamed = state({
+      sheet_protagonist: sheet('sheet_protagonist', '主角信息表', ['row_id', '名称'],
+        'row_id INTEGER PRIMARY KEY, 名称 TEXT'),
+    });
+    renamed.sheet_protagonist.sourceData.tableAliases = ['主角信息'];
+
+    const first = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: renamed, destructiveChangeConfirmed: false, storageMode: 'native' });
+    expect(first.blockers).toEqual([]);
+    expect(first.candidateData.sheet_protagonist.sourceData.tableAliases).toEqual(['主角信息']);
+
+    const laterTemplate = state({
+      sheet_protagonist_later: sheet('sheet_protagonist_later', '人物档案', ['row_id', '名称'],
+        'row_id INTEGER PRIMARY KEY, 名称 TEXT'),
+    });
+    laterTemplate.sheet_protagonist_later.sourceData.tableAliases = ['主角信息表'];
+    const second = await reconcileChatTemplate_ACU({
+      baselineData: first.candidateData,
+      templateData: laterTemplate,
+      destructiveChangeConfirmed: false,
+      storageMode: 'native',
+    });
+
+    expect(second.blockers).toEqual([]);
+    expect(second.candidateData.sheet_protagonist.name).toBe('人物档案');
+    expect(second.candidateData.sheet_protagonist.sourceData.tableAliases)
+      .toEqual(['主角信息', '主角信息表']);
+  });
+
+  it('模板中的 tableAliases 与其他表身份冲突时在协调前 fail closed', async () => {
+    const template = state({
+      sheet_alpha: sheet('sheet_alpha', '甲表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT'),
+      sheet_beta: sheet('sheet_beta', '乙表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT'),
+    });
+    template.sheet_alpha.sourceData.tableAliases = ['角色表'];
+    template.sheet_beta.sourceData.tableAliases = [' 角色表 '];
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers.join('\n')).toContain('表别名规范化重复');
+    expect(plan.sheetChanges).toEqual([]);
+  });
+
   it('改名后自动累积别名，再改一次仍能顺别名链继承', async () => {
     const baseline = state({
       sheet_g: sheet('sheet_g', '表', ['row_id', '上轮场景时间'],

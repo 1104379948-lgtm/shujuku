@@ -418,14 +418,6 @@ function hasAnyV2Frame_ACU(chat: any[], isolationKey: string, maxMessageIndex = 
   });
 }
 
-function getLatestV2FrameMessageIndex_ACU(chat: any[], isolationKey: string): number {
-  for (let index = chat.length - 1; index >= 0; index -= 1) {
-    const tagData = chat[index]?.TavernDB_ACU_IsolatedData?.[isolationKey];
-    if (isV2TagData_ACU(tagData)) return index;
-  }
-  return -1;
-}
-
 function projectReplayComparableData_ACU(data: TableDataObject_ACU): TableDataObject_ACU {
   const projected = deepClone_ACU(data);
   for (const [key, value] of Object.entries(projected)) {
@@ -444,6 +436,57 @@ async function verifyTemporaryBaselineUpgrade_ACU(
   for (const operation of operations) await applyTableOperationV2_ACU(expected, operation);
   return getTableDataFingerprint_ACU(projectReplayComparableData_ACU(expected))
     === getTableDataFingerprint_ACU(projectReplayComparableData_ACU(afterData));
+}
+
+function buildCandidateChatWithIsolatedDataOverrides_ACU(
+  chat: any[],
+  isolatedDataByMessageIndex: Map<number, Record<string, any>>,
+): any[] {
+  return chat.map((message, messageIndex) => {
+    const isolatedData = isolatedDataByMessageIndex.get(messageIndex);
+    return isolatedData === undefined
+      ? message
+      : { ...message, TavernDB_ACU_IsolatedData: isolatedData };
+  });
+}
+
+async function validateTemporaryBaselineUpgradeCandidate_ACU(
+  candidateChat: any[],
+  isolationKey: string,
+  targetMessageIndex: number,
+  afterData: TableDataObject_ACU,
+): Promise<string | null> {
+  const validateReplay = async (
+    scope: 'boundary' | 'suffix',
+    options: { maxMessageIndex?: number },
+  ): Promise<string | null> => {
+    let replay;
+    try {
+      replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+        ...options,
+        updateRuntimeState: false,
+        compatibilityMode: 'disabled',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `V2 candidate_${scope}_replay_failed: ${message}`;
+    }
+    if (!replay || replay.baseKind !== 'full_checkpoint') {
+      return `V2 candidate_${scope}_replay_failed: 未能从正式 full checkpoint 建立回放基底。`;
+    }
+    if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+      return `V2 candidate_requires_convergence: ${scope} replay 仍依赖临时 Sheet 补锚。`;
+    }
+    if (scope === 'boundary'
+      && getTableDataFingerprint_ACU(projectReplayComparableData_ACU(replay.data))
+        !== getTableDataFingerprint_ACU(projectReplayComparableData_ACU(afterData))) {
+      return 'V2 candidate_boundary_replay_failed: checkpoint 边界回放结果与 afterData 不一致。';
+    }
+    return null;
+  };
+
+  return await validateReplay('boundary', { maxMessageIndex: targetMessageIndex })
+    || await validateReplay('suffix', {});
 }
 
 export function getLatestTableStorageHeadRevisionV2_ACU(chat: any[] | null | undefined, isolationKey: string): string | null {
@@ -1083,37 +1126,24 @@ async function persistTableMutationLogV2Core_ACU(
       error: `V2 write target precedes the latest full checkpoint and would never replay: targetMessageIndex=${target.index}, latestFullCheckpointIndex=${latestFullCheckpoint.index}.`,
     };
   }
-  const latestV2FrameMessageIndex = getLatestV2FrameMessageIndex_ACU(chat, isolationKey);
   const hasUnanchoredArtifacts = !hasCheckpointAnywhere
     && hasUnanchoredReplayArtifactsForChatV2_ACU(chat, isolationKey);
-  let temporaryBaselineUpgrade: { sourceMessageIndex: number; storageFrame: TableStorageFrameV2_ACU } | null = null;
+  let temporaryBaselineUpgrade = false;
   if (hasUnanchoredArtifacts && !isManualRefillProgressOnly) {
-    if (target.index < latestV2FrameMessageIndex) {
-      return {
-        saved: false,
-        error: `V2 临时基线升级必须写在最后一个无锚点 artifact 之后：target=${target.index}, latestArtifact=${latestV2FrameMessageIndex}。`,
-      };
-    }
     const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
       maxMessageIndex: target.index,
       updateRuntimeState: false,
       allowTemporaryTemplateBaseline: true,
+      compatibilityMode: 'disabled',
     });
-    if (!replay || replay.baseKind !== 'temporary_template_baseline') {
-      return { saved: false, error: 'V2 无锚点 artifacts 无法从当前聊天模板建立安全临时基线，已拒绝自动升级。' };
+    if (!replay || replay.baseKind !== 'temporary_template_baseline'
+      || replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+      return { saved: false, error: 'V2 boundary_replay_failed: 无锚点 artifacts 无法从当前聊天模板建立安全临时基线，已拒绝自动升级。' };
     }
     if (!await verifyTemporaryBaselineUpgrade_ACU(replay.data, operations, afterData)) {
-      return { saved: false, error: 'V2 临时基线回放与本次 afterData 不一致，已拒绝建立 full checkpoint。' };
+      return { saved: false, error: 'V2 boundary_after_data_mismatch: 临时基线回放与本次 afterData 不一致，已拒绝建立 full checkpoint。' };
     }
-    const sourceTagData = latestV2FrameMessageIndex >= 0
-      ? readIsolatedTagData_ACU(chat[latestV2FrameMessageIndex], isolationKey)
-      : null;
-    if (isV2TagData_ACU(sourceTagData)) {
-      temporaryBaselineUpgrade = {
-        sourceMessageIndex: latestV2FrameMessageIndex,
-        storageFrame: deepClone_ACU(sourceTagData.storageFrame),
-      };
-    }
+    temporaryBaselineUpgrade = true;
   }
   if (!manualRefillProgressIsValidForIntroductionHistory_ACU(options.manualRefillProgress)) {
     return { saved: false, error: 'V2 manualRefillProgress 格式无效，已拒绝写入。' };
@@ -1137,7 +1167,7 @@ async function persistTableMutationLogV2Core_ACU(
   // 同一张表的差异只是列，新增列按空处理，不需要另立基线。
   const shouldCheckpoint = !hasCheckpointAnywhere
     && !isManualRefillProgressOnly
-    && (temporaryBaselineUpgrade !== null
+    && (temporaryBaselineUpgrade
       || initialCheckpointReason === 'init'
       || initialCheckpointReason === 'migration');
   if (shouldCheckpoint && operations.length > 0 && !temporaryBaselineUpgrade) {
@@ -1219,13 +1249,14 @@ async function persistTableMutationLogV2Core_ACU(
     frame.checkpoint = checkpointResult.checkpoint;
     frame.headRevision = checkpointRevision;
     frame.logEntries = [];
-    if (temporaryBaselineUpgrade) {
+    delete frame.perSheetCheckpoints;
+    if (temporaryBaselineUpgrade && targetExistingFrame) {
       const recoveryBackup: TableV2RecoveryBackup_ACU = {
         version: 1,
         createdAt: now,
         recoveryKind: 'temporary_template_baseline_upgrade',
-        sourceMessageIndex: temporaryBaselineUpgrade.sourceMessageIndex,
-        storageFrame: targetExistingFrame || temporaryBaselineUpgrade.storageFrame,
+        sourceMessageIndex: target.index,
+        storageFrame: targetExistingFrame,
       };
       const tagData = isolatedData[isolationKey];
       if (tagData && typeof tagData === 'object' && !Array.isArray(tagData)) {
@@ -1332,6 +1363,19 @@ async function persistTableMutationLogV2Core_ACU(
   }
 
   replacementIsolatedDataByMessageIndex.set(target.index, isolatedData);
+  if (temporaryBaselineUpgrade) {
+    const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex);
+    const candidateValidationError = await validateTemporaryBaselineUpgradeCandidate_ACU(
+      candidateChat,
+      isolationKey,
+      target.index,
+      afterData,
+    );
+    if (candidateValidationError) {
+      return { saved: false, error: candidateValidationError };
+    }
+    options.transactionContext?.assertFresh?.('persistTableMutationLogV2:before_boundary_checkpoint_save');
+  }
   const previousMessageState = [...replacementIsolatedDataByMessageIndex.keys()].map(messageIndex => {
     const message = chat[messageIndex];
     return {

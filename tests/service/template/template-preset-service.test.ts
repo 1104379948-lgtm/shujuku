@@ -465,6 +465,26 @@ describe('validateImportedTemplateObject_ACU', () => {
     ]));
   });
 
+  it('拒绝与另一张表当前名称或历史名称规范化冲突的 tableAliases', () => {
+    const template = {
+      mate: { type: 'chatSheets' },
+      sheet_protagonist: validSheet({
+        uid: 'sheet_protagonist',
+        name: '主角信息表',
+        sourceData: { tableAliases: ['主角信息'] },
+      }),
+      sheet_other: validSheet({
+        uid: 'sheet_other',
+        name: '其他表',
+        sourceData: { tableAliases: [' Ｐｒｏｔａｇｏｎｉｓｔ＿Ｉｎｆｏ ', '主角信息'] },
+      }),
+    };
+
+    expect(validateImportedTemplateObject_ACU(template)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'table_alias_conflict', sheetKey: 'sheet_other', conflictsWith: 'sheet_protagonist' }),
+    ]));
+  });
+
   it('拒绝缺失表头、错位 row_id、空列和 canonical 重名列', () => {
     const missingHeader = { mate: { type: 'chatSheets' }, sheet_one: validSheet({ uid: 'sheet_one', content: [] }) };
     expect(validateImportedTemplateObject_ACU(missingHeader)).toContainEqual(expect.objectContaining({ code: 'missing_header_row' }));

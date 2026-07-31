@@ -9,11 +9,11 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../shared/utils';
 import { SillyTavern_API_ACU } from '../../../shared/host-api';
 import { settings_ACU } from '../../../service/runtime/state-manager';
 import { getCurrentRuntimePlotPresetName_ACU, normalizePlotPresetExcludeRules_ACU, switchCurrentChatPlotPreset_ACU } from '../../../service/plot/plot-logic';
-import { fillFirstLayerWithTemplateData_ACU } from '../../../service/runtime/helpers-remaining';
-import { deleteLocalDataInChatCore_ACU } from '../../../service/chat/chat-service';
-import { clearCurrentChatTemplateSnapshots_ACU, overwriteChatSheetGuideFromTemplate_ACU } from '../../../service/template/chat-scope';
+import { resetCurrentChatTableStateFromTemplate_ACU } from '../../../service/table/template-state-reset';
+import { applyChatTemplateSnapshotWithReconciliation_ACU, upsertTemplatePreset_ACU } from '../../../service/template/template-preset-service';
+import { sanitizeTemplateSnapshotForChat_ACU } from '../../../service/template/chat-scope';
 import { isSqliteMode } from '../../../service/table/storage-mode';
-import { reloadStorageProvider } from '../../../service/table/table-storage-strategy';
+import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../../../service/table/table-storage-strategy';
 import { saveSettingsAndNotify_ACU } from '../../components/settings-ui-helpers';
 import { refreshPresetUIAfterSwitch_ACU } from '../../components/pipeline-ui-helpers';
 import type { ApiGroupContext } from './callback-api';
@@ -240,12 +240,14 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
         // =========================
 
         initGameSession: async function(characterData: any, options: any = {}) {
-            const result = {
+            const result: any = {
                 success: false,
                 templateInjected: false,
                 presetLoaded: false,
                 protagonistInitialized: false,
                 equipmentInitialized: false,
+                runtimeReady: true,
+                warning: '',
                 message: ''
             };
 
@@ -254,17 +256,6 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                 if (options.injectTemplate !== false) {
                     logDebug_ACU('[游戏初始化] 开始注入数据库模板...');
                     try {
-                        if (options.resetExistingTableData !== false) {
-                            await deleteLocalDataInChatCore_ACU('current');
-                            await clearCurrentChatTemplateSnapshots_ACU({
-                                clearCurrentOverride: true,
-                                clearArchives: true,
-                                clearGuide: true,
-                                clearLegacyGuide: true,
-                                save: false,
-                            });
-                        }
-
                         let templateData;
 
                         if (options.templateData) {
@@ -283,38 +274,60 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                         const templatePresetName = deriveTemplatePresetNameForImport_ACU({
                             presetName: options.templatePresetName || characterData?.name || characterData?.data?.name || '',
                         });
-                        const fillResult = await fillFirstLayerWithTemplateData_ACU(templateObj, {
-                            reason: 'game_init',
-                            presetName: templatePresetName,
-                            source: 'game_init',
-                            registerPreset: true,
-                        });
-                        if (fillResult && typeof fillResult === 'object' && fillResult.success) {
-                            result.templateInjected = true;
-                            if (isSqliteMode()) {
-                                await reloadStorageProvider();
-                            }
-                            const messageIndex = (fillResult as any).messageIndex;
-                            if (messageIndex != null) {
-                                if (SillyTavern_API_ACU?.eventSource?.emit && SillyTavern_API_ACU?.eventTypes?.MESSAGE_UPDATED) {
-                                    SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, messageIndex);
-                                }
-                                if ((topLevelWindow_ACU as any)?.AutoCardUpdaterAPI) {
-                                    (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate();
-                                }
-                            }
-                            logDebug_ACU('[游戏初始化] 数据库模板注入成功（包含种子数据）');
-                        } else {
-                            await overwriteChatSheetGuideFromTemplate_ACU(templateObj, {
+                        const resetExistingTableData = options.resetExistingTableData !== false;
+                        const templateResult = resetExistingTableData
+                            ? await resetCurrentChatTableStateFromTemplate_ACU(templateObj, {
                                 reason: 'game_init',
                                 presetName: templatePresetName,
                                 source: 'game_init',
-                                syncTemplateScope: true,
-                                registerPreset: true,
+                                resetExistingTableData: true,
+                            })
+                            : await applyChatTemplateSnapshotWithReconciliation_ACU(templateObj, {
+                                source: 'game_init',
+                                presetName: templatePresetName,
+                                destructiveChangeConfirmed: false,
                             });
-                            result.templateInjected = true;
-                            logDebug_ACU('[游戏初始化] 数据库模板注入成功（仅指导表）');
+                        if (!templateResult?.saved) throw new Error(templateResult?.error || '模板原子提交失败');
+                        result.templateInjected = true;
+                        // 预设库不是聊天状态的一部分，不能先于严格聊天保存；失败只报告警告，不能回滚已提交 checkpoint。
+                        if (templatePresetName) {
+                            try {
+                                const snapshot = sanitizeTemplateSnapshotForChat_ACU(templateObj);
+                                if (!snapshot?.templateStr || !upsertTemplatePreset_ACU(templatePresetName, snapshot.templateStr)) {
+                                    throw new Error('模板预设存储拒绝写入。');
+                                }
+                            } catch (error: any) {
+                                result.warning = `模板已保存，但模板预设注册失败：${error?.message || String(error)}`;
+                                logWarn_ACU('[游戏初始化] 模板预设注册失败:', error);
+                            }
                         }
+                        const runtimeStatus = templateResult as { runtimeReady?: boolean; postCommitWarning?: string };
+                        if (runtimeStatus.runtimeReady === false) {
+                            result.runtimeReady = false;
+                            result.warning = runtimeStatus.postCommitWarning || '模板已保存，但运行时尚未就绪。';
+                        }
+                        const messageIndex = (templateResult as { messageIndex?: number }).messageIndex;
+                        if (isSqliteMode() && resetExistingTableData) {
+                            try {
+                                await reloadStorageProvider();
+                                if (didSqliteFallbackAfterReload_ACU('sqlite')) {
+                                    throw new Error('SQLite 运行时重载后已回退到原生模式。');
+                                }
+                            } catch (error: any) {
+                                result.runtimeReady = false;
+                                result.warning = `模板已保存，但 SQLite 运行时重建失败：${error?.message || String(error)}`;
+                                logWarn_ACU('[游戏初始化] SQLite 运行时重建失败:', error);
+                            }
+                        }
+                        if (messageIndex != null) {
+                            if (SillyTavern_API_ACU?.eventSource?.emit && SillyTavern_API_ACU?.eventTypes?.MESSAGE_UPDATED) {
+                                SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, messageIndex);
+                            }
+                            if ((topLevelWindow_ACU as any)?.AutoCardUpdaterAPI) {
+                                (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate();
+                            }
+                        }
+                        logDebug_ACU('[游戏初始化] 数据库模板已原子提交');
                     } catch (templateError) {
                         logError_ACU('[游戏初始化] 模板注入失败:', templateError);
                         throw new Error(`数据库模板注入失败: ${templateError.message}`);

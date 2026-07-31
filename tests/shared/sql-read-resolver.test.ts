@@ -243,6 +243,63 @@ describe('sql read resolver', () => {
     }
   });
 
+  it('显式表级别名经 NFKC、空白与大小写归一后仍唯一路由到权威 sheetKey', () => {
+    const tableData = {
+      mate: { type: 'acu' },
+      sheet_zhu_jue_xin_xi: {
+        uid: 'protagonist_uid',
+        name: '主角信息表',
+        sourceData: {
+          tableAliases: ['主角信息', ' Ｐｒｏｔａｇｏｎｉｓｔ＿Ｉｎｆｏ '],
+          ddl: 'CREATE TABLE protagonist_info (row_id INTEGER PRIMARY KEY);',
+        },
+      },
+    } as any;
+
+    for (const selector of [
+      'sheet_zhu_jue_xin_xi', 'protagonist_uid', '主角信息表', '主角信息',
+      ' Ｐｒｏｔａｇｏｎｉｓｔ＿Ｉｎｆｏ ', 'protagonist_info', 'zhujuexinxibiao',
+    ]) {
+      expect(rebindSheetKeysThroughTableAliases_ACU([selector], null, tableData))
+        .toEqual(['sheet_zhu_jue_xin_xi']);
+    }
+  });
+
+  it('两个表声明同一显式别名时标记歧义，而不猜测路由目标', () => {
+    const tableData = {
+      mate: { type: 'acu' },
+      sheet_alpha: {
+        uid: 'alpha_uid', name: '甲表',
+        sourceData: { tableAliases: ['共享名称'], ddl: 'CREATE TABLE alpha_table (row_id INTEGER PRIMARY KEY);' },
+      },
+      sheet_beta: {
+        uid: 'beta_uid', name: '乙表',
+        sourceData: { tableAliases: [' 共享名称 '], ddl: 'CREATE TABLE beta_table (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+
+    expect(() => rebindSheetKeysThroughTableAliases_ACU(['共享名称'], null, tableData))
+      .toThrow(/歧义/);
+  });
+
+  it('跨快照通过显式表级历史名称将旧 key 重绑定为权威 key', () => {
+    const scheduled = {
+      sheet_DpKcVGqg: {
+        uid: 'legacy_protagonist_uid', name: '旧主角表',
+        sourceData: { tableAliases: ['主角信息'], ddl: 'CREATE TABLE protagonist_info (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+    const target = {
+      sheet_zhu_jue_xin_xi: {
+        uid: 'protagonist_uid', name: '主角信息表',
+        sourceData: { tableAliases: ['主角信息'], ddl: 'CREATE TABLE protagonist_info (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+
+    expect(rebindSheetKeysThroughTableAliases_ACU(['sheet_DpKcVGqg'], scheduled, target))
+      .toEqual(['sheet_zhu_jue_xin_xi']);
+  });
+
   it('同一源表的多个别名不会被误判为多对一折叠', () => {
     const scheduled = {
       sheet_legacy: {
