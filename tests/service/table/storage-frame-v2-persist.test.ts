@@ -431,35 +431,6 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     expect(mocks.saveChat).toHaveBeenCalledOnce();
   });
 
-  it('已有 checkpoint 的单表增量只复制相关 afterData，不遍历未写入表', async () => {
-    const message = seedFrame({ logEntries: [] });
-    const untouchedToJson = vi.fn(() => {
-      throw new Error('未写入表不应被增量持久化复制');
-    });
-    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
-
-    const result = await persistTableMutationLogV2_ACU({
-      targetMessageIndex: 0,
-      source: 'manual_fill',
-      afterData: {
-        mate: { type: 'acu' },
-        sheet_a: sheetA,
-        sheet_b: { ...sheetB, toJSON: untouchedToJson },
-      } as any,
-      filledSheetKeys: ['sheet_a'],
-      candidateChangedSheetKeys: ['sheet_a'],
-      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'updated'] }] as any,
-      transactionContext: makeTransaction(),
-      assumeCommitLock: true,
-    });
-
-    expect(result.saved).toBe(true);
-    expect(untouchedToJson).not.toHaveBeenCalled();
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual([
-      { kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'updated'] },
-    ]);
-  });
-
   it('operation 可应用但结果与 afterData 分叉时仍保存（不再做 afterData 相等性阻断）', async () => {
     const message = seedFrame({ logEntries: [] });
     const afterData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;

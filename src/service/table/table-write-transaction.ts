@@ -252,8 +252,6 @@ export interface RunTableWriteTransactionOptions_ACU {
   maintenanceMode?: TableWriteMaintenanceMode_ACU;
   baseRevision?: string | null;
   initialData?: TableDataObject_ACU | null;
-  /** 已在事务外构建不可变结果、task 不读取 workingData 时跳过完整数据克隆。 */
-  workingDataMode?: 'clone' | 'none';
 }
 
 function generateTransactionId_ACU(): string {
@@ -410,9 +408,7 @@ export async function runTableWriteTransaction_ACU<T>(
       },
     };
 
-    const workingData = options.workingDataMode === 'none'
-      ? null
-      : deepClone_ACU(options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU);
+    const workingData = deepClone_ACU(options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU);
     return await task(ctx, workingData);
   } finally {
     for (const release of releases.reverse()) release();

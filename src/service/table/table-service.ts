@@ -60,8 +60,6 @@ export interface TableChatPersistOptions_ACU {
   assumeCommitLock?: boolean;
   /** 对破坏性复合写入要求宿主真实保存；默认保持历史宽松保存语义。 */
   strictSave?: boolean;
-  performanceRunId?: string;
-  performanceParentSpanId?: string;
   transactionContext?: TableWriteTransactionContext_ACU;
 }
 
@@ -145,8 +143,6 @@ async function persistTablesToChatMessageWithLockOption_ACU(
     replaceExistingIncremental,
     assumeCommitLock,
     strictSave,
-    performanceRunId,
-    performanceParentSpanId,
     transactionContext,
   } = options;
 
@@ -243,8 +239,6 @@ async function persistTablesToChatMessageWithLockOption_ACU(
         revisionWriteSet,
         assumeCommitLock,
         strictSave,
-        performanceRunId,
-        performanceParentSpanId,
         transactionContext,
       });
 

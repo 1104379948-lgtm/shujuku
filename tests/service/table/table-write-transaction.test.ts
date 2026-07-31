@@ -179,27 +179,6 @@ describe('table-write-transaction', () => {
     expect(globalData.sheet_0.content).toEqual([['row_id'], ['r1']]);
   });
 
-  it('workingDataMode=none 时不复制 initialData，并向不需要工作副本的提交回调传 null', async () => {
-    const serializationProbe = {
-      toJSON() {
-        throw new Error('不应复制未使用的事务工作数据');
-      },
-    };
-    let receivedWorkingData: any = 'unset';
-
-    await runTableWriteTransaction_ACU({
-      source: 'group_fill',
-      reason: 'commit precomputed snapshot',
-      writeSet: sheetWrite('sheet_0'),
-      initialData: { sheet_0: serializationProbe } as any,
-      workingDataMode: 'none',
-    }, async (_ctx, workingData) => {
-      receivedWorkingData = workingData;
-    });
-
-    expect(receivedWorkingData).toBeNull();
-  });
-
   it('提交时同表运行时版本已变化仍允许提交（兼容第三方外部修改）', async () => {
     const staleRevision = captureTableRuntimeRevisionForWriteSet_ACU(sheetWrite('sheet_0'));
 

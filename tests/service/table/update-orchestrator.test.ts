@@ -248,9 +248,7 @@ const mockRunTableWriteTransaction = vi.fn(async (options: any, task: any) => ta
   baseRevision: null,
   writeSet: options.writeSet,
   runCommit: async (commitTask: any) => commitTask(),
-}, options.workingDataMode === 'none'
-  ? null
-  : (options.initialData ? JSON.parse(JSON.stringify(options.initialData)) : mockCurrentJsonTableData)));
+}, options.initialData ? JSON.parse(JSON.stringify(options.initialData)) : mockCurrentJsonTableData));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   captureTableRuntimeRevisionForWriteSet_ACU: vi.fn(() => 'runtime-test-revision'),
   invalidateTableRuntimeRevision_ACU: vi.fn(() => 'runtime-test-invalidated'),
@@ -4248,37 +4246,6 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
-  it('执行 scope 只冻结 prompt 所需消息字段，不序列化完整聊天元数据', async () => {
-    const metadataToJson = vi.fn(() => {
-      throw new Error('不应序列化聊天持久化元数据');
-    });
-    mockGetChatArray_ACU.mockReturnValue([
-      { is_user: true, name: '助手', mes: '问题', TavernDB_ACU_IsolatedData: { toJSON: metadataToJson } },
-      { is_user: false, name: '角色', mes: 'AI回复', extra: { nested: '不应进入 prompt 快照' } },
-    ]);
-    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
-    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
-      mate: { type: 'acu' },
-      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
-    } as any);
-    mockCallCustomOpenAI.mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>');
-
-    const result = await processGroupedRuntimeChunk_ACU([
-      { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
-    ], 'manual_independent');
-
-    expect(result.success).toBe(true);
-    expect(metadataToJson).not.toHaveBeenCalled();
-    expect(mockPrepareAIInput).toHaveBeenCalledWith([
-      { is_user: true, name: '助手', mes: '问题' },
-      { is_user: false, name: '角色', mes: 'AI回复' },
-    ], expect.any(String), ['sheet_0'], expect.any(Object));
-
-    const promptMessages = mockPrepareAIInput.mock.calls[0][0];
-    promptMessages[0].mes = '被调用方修改';
-    expect(mockGetChatArray_ACU.mock.results[0].value[0].mes).toBe('问题');
-  });
-
   it('同一 bucket 的多组只统一提交一次', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
@@ -5221,9 +5188,6 @@ describe('orchestrateManualCatchUp_ACU', () => {
         completedSheetMessageIndexByKey: { sheet_a: 5, sheet_b: 5 },
       }),
     }));
-    expect(mockRunTableWriteTransaction.mock.calls.find(call => (
-      call[0]?.reason === 'orchestrateManualCatchUp:terminal:complete'
-    ))?.[0]).toEqual(expect.objectContaining({ workingDataMode: 'none' }));
     expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
     expect(refreshData).toHaveBeenCalledTimes(1);
   });

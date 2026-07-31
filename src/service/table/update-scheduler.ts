@@ -6,9 +6,8 @@
  */
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
-import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
-import { resolveTableHistoryStatesFromChat_ACU } from './table-history';
+import { resolveTableHistoryStateFromChat_ACU } from './table-history';
 
 export interface TableUpdateItem {
     sheetKey: string;
@@ -46,26 +45,10 @@ export function buildAutoUpdatePlan_ACU(
     liveChat: any[],
     tableData: Record<string, any>,
     settings: any,
-    isolationKey: string,
-    performanceContext?: { runId?: string; parentSpanId?: string },
+    isolationKey: string
 ): AutoUpdatePlan {
     const tablesToUpdate: TableUpdateItem[] = [];
     const sheetKeys = getSortedSheetKeys_ACU(tableData);
-    const performanceSpan = startRuntimePerformanceSpan_ACU('auto-update-plan', {
-        ...performanceContext,
-        settings,
-        metrics: { messageCount: liveChat.length, sheetCount: sheetKeys.length },
-    });
-
-    const historyBySheetKey = resolveTableHistoryStatesFromChat_ACU(
-        liveChat,
-        sheetKeys.map(sheetKey => ({
-            sheetKey,
-            isSummaryTable: isSummaryOrOutlineTable_ACU(tableData[sheetKey]?.name),
-            isolationKey,
-            settings,
-        })),
-    );
 
     // 预计算所有 AI 消息索引
     const allAiMessageIndices = liveChat
@@ -83,6 +66,7 @@ export function buildAutoUpdatePlan_ACU(
         if (!table) continue;
 
         const tableConfig = table.updateConfig || {};
+        const isSummary = isSummaryOrOutlineTable_ACU(table.name);
 
         // 获取该表的更新配置 (优先使用表内配置，否则使用全局默认)
         const rawDepth = Number.isFinite(tableConfig.contextDepth) ? tableConfig.contextDepth : -1;
@@ -96,8 +80,13 @@ export function buildAutoUpdatePlan_ACU(
         const skipFloors = Math.max(0, (rawSkip === -1) ? globalSkip : rawSkip);
         const groupId = rawGroupId;
 
-        const history = historyBySheetKey.get(sheetKey);
-        const lastUpdatedAiFloor = history?.lastTrackedUpdateAiFloor ?? 0;
+        const history = resolveTableHistoryStateFromChat_ACU(liveChat, {
+            sheetKey,
+            isSummaryTable: isSummary,
+            isolationKey,
+            settings,
+        });
+        const lastUpdatedAiFloor = history.lastTrackedUpdateAiFloor;
 
         // 计算未记录楼层数
         const effectiveUnrecordedFloors = Math.max(0, (totalAiMessages - skipFloors) - lastUpdatedAiFloor);
@@ -156,10 +145,6 @@ export function buildAutoUpdatePlan_ACU(
         updateGroups[key].sheetNames.push(item.sheetName);
     });
 
-    performanceSpan.end({
-        groupCount: Object.keys(updateGroups).length,
-        changedSheetCount: tablesToUpdate.length,
-    });
     return { tablesToUpdate, updateGroups };
 }
 
@@ -233,23 +218,16 @@ export async function executeAutoUpdatePlan_ACU(
     plan: AutoUpdatePlan,
     settings: any,
     setAutoUpdating: (v: boolean) => void,
-    ops: AutoUpdateOperations,
-    performanceContext?: { runId?: string; parentSpanId?: string },
+    ops: AutoUpdateOperations
 ): Promise<AutoUpdateResult> {
     const { tablesToUpdate, updateGroups } = plan;
     const groupKeys = Object.keys(updateGroups);
     if (groupKeys.length === 0) return { success: true, failedGroups: 0, totalGroups: 0 };
-    const performanceSpan = startRuntimePerformanceSpan_ACU('auto-update-execute', {
-        ...performanceContext,
-        settings,
-        metrics: { groupCount: groupKeys.length, sheetCount: tablesToUpdate.length },
-    });
 
     const totalGroups = groupKeys.length;
     const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
 
-    try {
-      setAutoUpdating(true);
+    setAutoUpdating(true);
 
     const failedGroupKeys: string[] = [];
     const failedGroupErrors: string[] = [];
@@ -273,13 +251,7 @@ export async function executeAutoUpdatePlan_ACU(
                     requestOptions: { skipProfileSwitch: true, forceDirectApi: true },
                 };
             });
-            const groupedOptions = performanceContext?.runId || performanceContext?.parentSpanId
-                ? {
-                    ...(performanceContext.runId ? { performanceRunId: performanceContext.runId } : {}),
-                    performanceParentSpanId: performanceSpan.id,
-                }
-                : {};
-            const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', groupedOptions);
+            const groupedResult = await ops.processGroupedUpdates(groupedChunk, 'auto_independent', {});
             if (!groupedResult.success) {
                 failedGroupKeys.push(...groupedResult.failedGroups);
                 const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
@@ -366,7 +338,7 @@ export async function executeAutoUpdatePlan_ACU(
         logWarn_ACU('清理旧层数据失败:', e);
     }
 
-    const result = {
+    return {
         success: failedGroupKeys.length === 0,
         failedGroups: failedGroupKeys.length,
         totalGroups,
@@ -374,13 +346,6 @@ export async function executeAutoUpdatePlan_ACU(
         autoMergeTriggered,
         autoMergeSuccess,
     };
-    performanceSpan.end({ success: result.success, failedGroupCount: result.failedGroups });
-    return result;
-    } catch (error) {
-      performanceSpan.end({ success: false });
-      setAutoUpdating(false);
-      throw error;
-    }
 }
 
 // ============================================================
