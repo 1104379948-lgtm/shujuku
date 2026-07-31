@@ -58772,7 +58772,7 @@ $CONTENT
      * 剧情推进 — 规划入口（runOptimizationLogic）
      * 从 helpers-plot-runtime.ts 拆出（L1401-L1512）
      */
-    const PLOT_RUNTIME_BUILD_VERSION_ACU = "spv3.7.8" || 'unknown';
+    const PLOT_RUNTIME_BUILD_VERSION_ACU = "spv8.7.8" || 'unknown';
     /**
      * 核心优化逻辑（纯 service 层：读数据→业务决策→写数据→构造返回值）。
      */
