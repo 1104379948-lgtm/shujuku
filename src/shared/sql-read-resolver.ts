@@ -14,6 +14,13 @@ export interface SheetAliasMapResult_ACU {
   conflicts: Set<string>;
 }
 
+export class SheetTableAliasResolutionError_ACU extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SheetTableAliasResolutionError_ACU';
+  }
+}
+
 export interface ReadQueryResolveResult_ACU {
   sql: string;
   tableRebindCount: number;
@@ -61,6 +68,98 @@ export function buildSheetTableAliasMap_ACU(
     }
   }
   return { aliases, conflicts };
+}
+
+/**
+ * Rebinds scheduling-time table selectors to sheet keys in a later snapshot by
+ * using the same conflict-safe alias registry as SQL readers and writers.
+ * Selectors may be sheet keys, uid values, display names, pinyin physical names,
+ * or author DDL table names. Ambiguous and unprovable aliases fail closed.
+ */
+export function rebindSheetKeysThroughTableAliases_ACU(
+  selectors: readonly string[],
+  sourceData: TableDataObject_ACU | Record<string, unknown> | null | undefined,
+  targetData: TableDataObject_ACU | Record<string, unknown> | null | undefined,
+): string[] {
+  if (!targetData || typeof targetData !== 'object') {
+    throw new SheetTableAliasResolutionError_ACU('表身份重绑定失败：当前基底不可用。');
+  }
+  const sourcePhysicalNames = sourceData && typeof sourceData === 'object'
+    ? resolvePhysicalTableNames_ACU(sourceData)
+    : new Map<string, string>();
+  const targetPhysicalNames = resolvePhysicalTableNames_ACU(targetData);
+  const targetSheetKeyByPhysicalName = new Map<string, string>();
+  for (const [sheetKey, physicalName] of targetPhysicalNames) {
+    targetSheetKeyByPhysicalName.set(physicalName.toLowerCase(), sheetKey);
+  }
+  const sourceRegistry = buildSheetTableAliasMap_ACU([sourceData], { includeExtendedAliases: true });
+  const targetRegistry = buildSheetTableAliasMap_ACU([targetData], { includeExtendedAliases: true });
+  const rebound: string[] = [];
+  const sourceOwnerByTargetKey = new Map<string, string>();
+  for (const rawSelector of selectors || []) {
+    const selector = String(rawSelector || '').trim();
+    if (!selector) continue;
+    const normalized = selector.toLowerCase();
+    const sourcePhysicalNameForSelector = sourceRegistry.conflicts.has(normalized)
+      ? undefined
+      : sourceRegistry.aliases.get(normalized);
+    const sourceOwner = sourcePhysicalNameForSelector
+      ? ([...sourcePhysicalNames].find(([, physicalName]) => physicalName.toLowerCase() === sourcePhysicalNameForSelector.toLowerCase())?.[0] || normalized)
+      : normalized;
+
+    if (targetRegistry.conflicts.has(normalized)) {
+      throw new SheetTableAliasResolutionError_ACU(`表身份重绑定存在歧义：别名「${selector}」同时指向多张物理表。`);
+    }
+    const directTargetPhysicalName = targetRegistry.aliases.get(normalized);
+    if (directTargetPhysicalName) {
+      const directTargetSheetKey = targetSheetKeyByPhysicalName.get(directTargetPhysicalName.toLowerCase());
+      if (!directTargetSheetKey) {
+        throw new SheetTableAliasResolutionError_ACU(`表身份重绑定失败：别名「${selector}」对应的物理表不在当前基底中。`);
+      }
+      const directOwner = sourceOwnerByTargetKey.get(directTargetSheetKey);
+      if (directOwner && directOwner !== sourceOwner) {
+        throw new SheetTableAliasResolutionError_ACU(`表身份重绑定存在多对一冲突：${directOwner}、${sourceOwner} 同时指向 ${directTargetSheetKey}。`);
+      }
+      sourceOwnerByTargetKey.set(directTargetSheetKey, sourceOwner);
+      if (!rebound.includes(directTargetSheetKey)) rebound.push(directTargetSheetKey);
+      continue;
+    }
+
+    if (sourceRegistry.conflicts.has(normalized)) {
+      throw new SheetTableAliasResolutionError_ACU(`表身份重绑定存在歧义：调度快照中的别名「${selector}」同时指向多张物理表。`);
+    }
+    const sourcePhysicalName = sourceRegistry.aliases.get(normalized);
+    if (!sourcePhysicalName) {
+      throw new SheetTableAliasResolutionError_ACU(`表身份重绑定失败：无法解析别名「${selector}」。`);
+    }
+    const sourceAliases = [...sourceRegistry.aliases.entries()]
+      .filter(([, physicalName]) => physicalName.toLowerCase() === sourcePhysicalName.toLowerCase())
+      .map(([alias]) => alias);
+    const ambiguousAliases = sourceAliases.filter(alias => targetRegistry.conflicts.has(alias));
+    if (ambiguousAliases.length > 0) {
+      throw new SheetTableAliasResolutionError_ACU(`表身份重绑定存在歧义：别名「${ambiguousAliases[0]}」在当前基底中同时指向多张物理表。`);
+    }
+    const targetCandidates = new Set(
+      sourceAliases
+        .map(alias => targetRegistry.aliases.get(alias)?.toLowerCase())
+        .filter((physicalName): physicalName is string => Boolean(physicalName)),
+    );
+    if (targetCandidates.size !== 1) {
+      const reason = targetCandidates.size === 0 ? '无法证明其在当前基底中的对应表' : '多个别名证据指向不同物理表';
+      throw new SheetTableAliasResolutionError_ACU(`表身份重绑定失败：别名「${selector}」${reason}。`);
+    }
+    const targetPhysicalName = [...targetCandidates][0];
+    const targetSheetKey = targetSheetKeyByPhysicalName.get(targetPhysicalName);
+    if (!targetSheetKey) throw new SheetTableAliasResolutionError_ACU(`表身份重绑定失败：别名「${selector}」对应的物理表不在当前基底中。`);
+    const sourceSheetKey = [...sourcePhysicalNames].find(([, physicalName]) => physicalName.toLowerCase() === sourcePhysicalName.toLowerCase())?.[0] || normalized;
+    const existingOwner = sourceOwnerByTargetKey.get(targetSheetKey);
+    if (existingOwner && existingOwner !== sourceSheetKey) {
+      throw new SheetTableAliasResolutionError_ACU(`表身份重绑定存在多对一冲突：${existingOwner}、${sourceSheetKey} 同时指向 ${targetSheetKey}。`);
+    }
+    sourceOwnerByTargetKey.set(targetSheetKey, sourceSheetKey);
+    if (!rebound.includes(targetSheetKey)) rebound.push(targetSheetKey);
+  }
+  return rebound;
 }
 
 /** Builds table-scoped column aliases without guessing ambiguous fallback DDL columns. */

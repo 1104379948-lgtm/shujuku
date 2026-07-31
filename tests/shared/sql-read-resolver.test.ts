@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { resolveReadQuerySql_ACU } from '../../src/shared/sql-read-resolver';
+import {
+  rebindSheetKeysThroughTableAliases_ACU,
+  resolveReadQuerySql_ACU,
+  SheetTableAliasResolutionError_ACU,
+} from '../../src/shared/sql-read-resolver';
 
 describe('sql read resolver', () => {
   it('把原始 DDL 表名和显示列名重绑定到运行时物理标识符', () => {
@@ -184,5 +188,141 @@ describe('sql read resolver', () => {
     ).sql).toBe(
       'SELECT derived_people.姓名 FROM (SELECT name AS 姓名 FROM people UNION ALL SELECT name AS 别名 FROM people) AS derived_people ORDER BY derived_people.姓名',
     );
+  });
+
+  it('跨快照目标表复用 SQL 读写共享别名，可接受旧 key、uid、显示名、拼音名和作者 DDL 名', () => {
+    const scheduled = {
+      mate: { type: 'acu' },
+      sheet_in05z9vz: {
+        uid: 'legacy_inventory_uid',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+    const replayBase = {
+      mate: { type: 'acu' },
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'stable_inventory_uid',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+
+    for (const selector of [
+      'sheet_in05z9vz',
+      'legacy_inventory_uid',
+      '背包物品表',
+      'beibaowupinbiao',
+      'inventory',
+    ]) {
+      expect(rebindSheetKeysThroughTableAliases_ACU([selector], scheduled, replayBase))
+        .toEqual(['sheet_bei_bao_wu_pin_biao']);
+    }
+  });
+
+  it('目标快照的稳定 key、uid、显示名、拼音名和作者 DDL 名可直接解析', () => {
+    const target = {
+      mate: { type: 'acu' },
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'stable_inventory_uid',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item TEXT);' },
+      },
+    } as any;
+
+    for (const selector of [
+      'sheet_bei_bao_wu_pin_biao',
+      'stable_inventory_uid',
+      '背包物品表',
+      'beibaowupinbiao',
+      'inventory',
+    ]) {
+      expect(rebindSheetKeysThroughTableAliases_ACU([selector], null, target))
+        .toEqual(['sheet_bei_bao_wu_pin_biao']);
+    }
+  });
+
+  it('同一源表的多个别名不会被误判为多对一折叠', () => {
+    const scheduled = {
+      sheet_legacy: {
+        uid: 'legacy_uid',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+    const target = {
+      sheet_stable: {
+        uid: 'stable_uid',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+
+    expect(rebindSheetKeysThroughTableAliases_ACU(
+      ['sheet_legacy', 'legacy_uid', 'inventory'],
+      scheduled,
+      target,
+    )).toEqual(['sheet_stable']);
+  });
+
+  it('两个不同源表折叠到同一个目标表时 fail closed', () => {
+    const scheduled = {
+      sheet_old_a: { uid: 'old_a', name: '旧表甲', sourceData: { ddl: 'CREATE TABLE shared_a (row_id INTEGER PRIMARY KEY);' } },
+      sheet_old_b: { uid: 'old_b', name: '旧表乙', sourceData: { ddl: 'CREATE TABLE shared_b (row_id INTEGER PRIMARY KEY);' } },
+    } as any;
+    const target = {
+      sheet_stable: {
+        uid: 'stable_uid',
+        name: '新表',
+        sourceData: { ddl: 'CREATE TABLE shared_a (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+    target.sheet_stable.uid = 'old_b';
+
+    expect(() => rebindSheetKeysThroughTableAliases_ACU(
+      ['sheet_old_a', 'sheet_old_b'],
+      scheduled,
+      target,
+    )).toThrow(/多对一冲突/);
+  });
+
+  it('跨快照别名一对多时 fail closed，不扩大目标授权', () => {
+    const scheduled = {
+      sheet_in05z9vz: {
+        uid: 'legacy_inventory_uid',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+    const ambiguousTarget = {
+      sheet_inventory_a: {
+        uid: 'inventory_a',
+        name: '旧背包',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+      sheet_inventory_b: {
+        uid: 'inventory_b',
+        name: '新背包',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+
+    expect(() => rebindSheetKeysThroughTableAliases_ACU(
+      ['sheet_in05z9vz'],
+      scheduled,
+      ambiguousTarget,
+    )).toThrow(SheetTableAliasResolutionError_ACU);
+  });
+
+  it('无法从共享别名证明跨快照身份时 fail closed', () => {
+    const scheduled = {
+      sheet_old: { uid: 'old_uid', name: '旧表', sourceData: { ddl: 'CREATE TABLE old_table (row_id INTEGER PRIMARY KEY);' } },
+    } as any;
+    const target = {
+      sheet_new: { uid: 'new_uid', name: '新表', sourceData: { ddl: 'CREATE TABLE new_table (row_id INTEGER PRIMARY KEY);' } },
+    } as any;
+
+    expect(() => rebindSheetKeysThroughTableAliases_ACU(['sheet_old'], scheduled, target))
+      .toThrow(/无法证明/);
   });
 });

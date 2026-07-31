@@ -18,7 +18,7 @@ import { resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
-import { rebindSheetKeysAcrossSnapshots_ACU, SheetIdentityRebindError_ACU } from '../../shared/sheet-identity';
+import { rebindSheetKeysThroughTableAliases_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 
@@ -1581,7 +1581,7 @@ export async function processGroupedRuntimeChunk_ACU(
         scopedGroups = groups
             .map(group => {
                 const reboundSheetKeys = templateForLookup
-                    ? rebindSheetKeysAcrossSnapshots_ACU(group.sheetKeys || [], schedulingIdentitySnapshot, templateForLookup)
+                    ? rebindSheetKeysThroughTableAliases_ACU(group.sheetKeys || [], schedulingIdentitySnapshot, templateForLookup)
                     : [...(group.sheetKeys || [])];
                 const scopedSheetKeys = filterSheetKeysByTemplateScope_ACU(reboundSheetKeys, templateScope);
                 if (scopedSheetKeys.length === reboundSheetKeys.length) return { ...group, sheetKeys: scopedSheetKeys };
@@ -1591,7 +1591,7 @@ export async function processGroupedRuntimeChunk_ACU(
             })
             .filter(group => (group.sheetKeys || []).length > 0);
     } catch (error) {
-        const message = error instanceof SheetIdentityRebindError_ACU ? error.message : String(error);
+        const message = error instanceof SheetTableAliasResolutionError_ACU ? error.message : String(error);
         return {
             success: false,
             failedGroups: groups.map(group => group.key),
@@ -1717,7 +1717,7 @@ export async function processGroupedRuntimeChunk_ACU(
                     ...plannedJob,
                     group: {
                         ...plannedJob.group,
-                        sheetKeys: rebindSheetKeysAcrossSnapshots_ACU(
+                        sheetKeys: rebindSheetKeysThroughTableAliases_ACU(
                             plannedJob.group.sheetKeys || [],
                             templateForLookup || schedulingIdentitySnapshot,
                             mergedBatchData,
@@ -2524,7 +2524,7 @@ export async function processUpdatesBatch_ACU(
             let effectiveTargetSheetKeys = targetSheetKeys;
             if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0) {
                 try {
-                    effectiveTargetSheetKeys = rebindSheetKeysAcrossSnapshots_ACU(
+                    effectiveTargetSheetKeys = rebindSheetKeysThroughTableAliases_ACU(
                         targetSheetKeys,
                         schedulingIdentitySnapshot,
                         mergedBatchData,
