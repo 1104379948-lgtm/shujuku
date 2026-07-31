@@ -15,7 +15,7 @@ import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration
 import { getPhysicalTableNameForSheet_ACU } from '../../shared/sheet-identity';
 import { parseDDLTableName } from '../../shared/ddl-utils';
 import { decodeSqlIdentifier_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
-import { auditTableDataForUpgrade_ACU } from './table-data-upgrade-audit';
+import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
 
 interface V2FrameRef_ACU {
@@ -28,9 +28,21 @@ export type TableScheduleSummaryV2_ACU = NonNullable<TableCheckpointV2_ACU['sche
 
 export type TableReplayBaseKindV2_ACU = 'full_checkpoint' | 'temporary_template_baseline';
 
+export interface TableReplayCompatibilityRepairV2_ACU {
+  kind: 'temporary_sheet_anchor';
+  sheetKey: string;
+  messageIndex: number;
+  seq: number;
+  operationIndex: number;
+  templateFingerprint: string;
+  reason: 'missing_at_operation';
+}
+
 export interface TableReplayResultV2_ACU {
   data: TableDataObject_ACU;
   baseKind: TableReplayBaseKindV2_ACU;
+  compatibilityRepairs?: TableReplayCompatibilityRepairV2_ACU[];
+  requiresCheckpointConvergence?: boolean;
 }
 
 export interface LoadTableStateFromFramesV2Options_ACU {
@@ -43,6 +55,8 @@ export interface LoadTableStateFromFramesV2Options_ACU {
    * 写入编排器应同时开启 throwOnRecoveryRequired，避免把待确认恢复误当成空表。
    */
   allowTemporaryTemplateBaseline?: boolean;
+  /** apply 仅在明确 sql_sheet_batch.sheetKey 缺失时使用同 key 模板表做内存临时补锚。 */
+  compatibilityMode?: 'apply' | 'disabled';
 }
 
 function deepClone_ACU<T>(value: T): T {
@@ -104,7 +118,7 @@ function hasOrphanDataReplace_ACU(frameRefs: V2FrameRef_ACU[]): boolean {
     (entry.operations || []).some(operation => operation?.kind === 'data_replace')));
 }
 
-function resolveTemporaryTemplateBaseline_ACU(chat: any[], isolationKey: string): TableDataObject_ACU | null {
+function resolveHeaderOnlyTemplateSnapshot_ACU(chat: any[], isolationKey: string): TableDataObject_ACU | null {
   const scopeState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey });
   const globalSnapshot = scopeState ? null : getGlobalTemplateSnapshotForCurrentProfile_ACU();
   const effectiveTemplate = scopeState?.templateStr || scopeState?.templateObj
@@ -220,17 +234,13 @@ function getValidatedFrameLogEntries_ACU(frame: TableStorageFrameV2_ACU): TableM
   });
 }
 
-function getValidatedIntroductionsForFrame_ACU(
+function getValidatedTimelineCheckpointsForFrame_ACU(
   checkpoints: TableSheetCheckpointV2_ACU[],
-  messageIndex: number,
 ): TableSheetCheckpointV2_ACU[] {
-  const introductions = checkpoints.filter(checkpoint => checkpoint.timeline !== undefined);
-  for (const checkpoint of introductions) {
-    if (checkpoint.timeline!.activateAtMessageIndex !== messageIndex) {
-      throw new Error(`[V2 Replay] introduction shard messageIndex 不匹配: sheetKey=${checkpoint.sheetKey}, expected=${checkpoint.timeline!.activateAtMessageIndex}, actual=${messageIndex}`);
-    }
-  }
-  return introductions;
+  // shard 的物理承载 frame 是跨楼层回放位置；聊天插入、删除或导入会让旧的声明索引漂移。
+  // activateAtMessageIndex 仍在 getValidatedSheetCheckpoints_ACU 中做类型/范围校验，
+  // 但不再作为寻址键。同一 frame 内的真实生效顺序继续由 afterSeq 决定。
+  return checkpoints.filter(checkpoint => checkpoint.timeline !== undefined);
 }
 
 function splitSqlStatementsForReplay_ACU(sql: string): string[] {
@@ -449,6 +459,13 @@ function buildReplaySqlTableAliases_ACU(
     let target: string | null = null;
     if (state[operation.sheetKey]) {
       target = getPhysicalTableNameForSheet_ACU(state, operation.sheetKey);
+      const historical = decodeSqlIdentifier_ACU(operation.tableName).trim().toLowerCase();
+      const existingTarget = aliases.get(historical);
+      if (historical && existingTarget && existingTarget !== target) {
+        throw new Error(
+          `[V2 Replay] sql_sheet_batch 历史表名与其他 Sheet 冲突：sheetKey=${operation.sheetKey}, tableName=${operation.tableName}, target=${target}, occupiedBy=${existingTarget}。`,
+        );
+      }
     } else {
       // sheetKey 不在 state 中时，退而按历史表名在已注册别名里定位目标表。
       const historical = decodeSqlIdentifier_ACU(operation.tableName).trim().toLowerCase();
@@ -795,7 +812,7 @@ export function collectScheduleSummaryFromFramesV2_ACU(
   for (const ref of frameRefs) {
     if (checkpointRef && ref.messageIndex < checkpointRef.messageIndex) continue;
     const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame);
-    const introductions = getValidatedIntroductionsForFrame_ACU(checkpoints, ref.messageIndex);
+    const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
     for (const sheetCheckpoint of checkpoints.filter(checkpoint => checkpoint.timeline === undefined)) {
       summary[sheetCheckpoint.sheetKey] = deepClone_ACU(sheetCheckpoint.scheduleSummary || {});
       applyEventToScheduleSummary_ACU(
@@ -853,7 +870,7 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
       if (options.throwOnRecoveryRequired) throw new Error(`${message} 请先在数据管理中执行 V2 恢复诊断并确认恢复。`);
       return null;
     }
-    const temporaryBaseline = resolveTemporaryTemplateBaseline_ACU(chat, isolationKey);
+    const temporaryBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
     if (!temporaryBaseline) {
       logWarn_ACU('[V2 Replay] 无锚点 artifacts 缺少同聊天同隔离域的有效模板，拒绝建立临时基线。');
       return null;
@@ -875,13 +892,16 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
     syncBridge: null as unknown as SyncBridge,
     loaded: false,
   };
+  const compatibilityRepairs: TableReplayCompatibilityRepairV2_ACU[] = [];
+  let headerOnlyTemplate: TableDataObject_ACU | null | undefined;
+  let headerOnlyTemplateFingerprint = '';
   runtime.syncBridge = new SyncBridge(runtime.engine);
 
   try {
     for (const ref of frameRefs) {
       if (ref.messageIndex < replayStartMessageIndex) continue;
       const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame);
-      const introductions = getValidatedIntroductionsForFrame_ACU(checkpoints, ref.messageIndex);
+      const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
       await applySheetCheckpointsForReplay_ACU(
         state,
         checkpoints.filter(checkpoint => checkpoint.timeline === undefined),
@@ -906,6 +926,34 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
           if (Array.isArray(entry.operations) && entry.operations.length > 0) {
             for (const [operationIndex, operation] of entry.operations.entries()) {
               try {
+                if (options.compatibilityMode !== 'disabled'
+                  && operation?.kind === 'sql_sheet_batch'
+                  && typeof operation.sheetKey === 'string'
+                  && operation.sheetKey.startsWith('sheet_')
+                  && !Object.prototype.hasOwnProperty.call(state, operation.sheetKey)) {
+                  if (headerOnlyTemplate === undefined) {
+                    headerOnlyTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+                    headerOnlyTemplateFingerprint = headerOnlyTemplate
+                      ? getTableDataFingerprint_ACU(headerOnlyTemplate)
+                      : '';
+                  }
+                  const templateSheet = headerOnlyTemplate?.[operation.sheetKey];
+                  if (templateSheet && typeof templateSheet === 'object' && !Array.isArray(templateSheet)) {
+                    const candidate = buildReplayCandidate_ACU(runtime, state);
+                    candidate[operation.sheetKey] = deepClone_ACU(templateSheet) as Sheet_ACU;
+                    await commitReplayCandidate_ACU(runtime, state, candidate, 'temporary sheet anchor');
+                    compatibilityRepairs.push({
+                      kind: 'temporary_sheet_anchor',
+                      sheetKey: operation.sheetKey,
+                      messageIndex: ref.messageIndex,
+                      seq: entry.seq,
+                      operationIndex,
+                      templateFingerprint: headerOnlyTemplateFingerprint,
+                      reason: 'missing_at_operation',
+                    });
+                    logWarn_ACU(`[V2 Replay] operation 执行点缺少目标表，已从当前聊天模板临时补锚：sheetKey=${operation.sheetKey}, messageIndex=${ref.messageIndex}, seq=${entry.seq}, operationIndex=${operationIndex}。该状态需要由 recovery 或 compaction 固化。`);
+                  }
+                }
                 await applyTableOperationV2_ACU(state, operation, runtime);
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
@@ -934,7 +982,12 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
     }
 
     if (runtime.loaded) exportSqlReplayRuntime_ACU(runtime, state);
-    return { data: state, baseKind };
+    return {
+      data: state,
+      baseKind,
+      ...(compatibilityRepairs.length > 0 ? { compatibilityRepairs } : {}),
+      ...(compatibilityRepairs.length > 0 ? { requiresCheckpointConvergence: true } : {}),
+    };
   } finally {
     runtime.engine.dispose();
   }
@@ -951,11 +1004,27 @@ export async function loadTableStateFromFramesV2_ACU(
 
 export async function validateCurrentChatTableRecovery_ACU(
   options: { chat?: any[]; isolationKey?: string } = {},
-): Promise<{ success: true } | { success: false; error: string }> {
+): Promise<
+  | { success: true }
+  | { success: false; error: string; diagnosticCode?: 'replay_requires_checkpoint_convergence'; affectedSheetKeys?: string[] }
+> {
   const chat = options.chat || getChatArray_ACU();
   if (!Array.isArray(chat) || chat.length === 0) return { success: true };
   try {
-    await loadTableStateFromFramesV2_ACU(chat, options.isolationKey ?? getCurrentIsolationKey_ACU());
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(
+      chat,
+      options.isolationKey ?? getCurrentIsolationKey_ACU(),
+      { updateRuntimeState: false },
+    );
+    if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+      const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
+      return {
+        success: false,
+        diagnosticCode: 'replay_requires_checkpoint_convergence',
+        affectedSheetKeys,
+        error: `当前 V2 历史仍依赖临时 Sheet 补锚：${affectedSheetKeys.join('、') || '未知 Sheet'}。请先在数据管理中完成恢复收敛。`,
+      };
+    }
     return { success: true };
   } catch (error) {
     return {

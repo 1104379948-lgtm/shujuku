@@ -124,7 +124,7 @@ export interface ManualUpdateResult {
     /** terminal manualRefillProgress 是否已严格保存。 */
     terminalProgressSaved?: boolean;
     /** 面向 UI/恢复诊断的稳定失败分类；不得依赖错误文案解析。 */
-    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_data_mismatch' | 'replay_failed';
+    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed';
     catchUpPlan?: ManualCatchUpPlan_ACU;
 }
 
@@ -638,6 +638,10 @@ async function loadV2ReplayMergeBase_ACU(
             allowTemporaryTemplateBaseline: true,
             throwOnRecoveryRequired: true,
         });
+        if (replayResult?.requiresCheckpointConvergence || replayResult?.compatibilityRepairs?.length) {
+            const affectedSheetKeys = [...new Set((replayResult.compatibilityRepairs || []).map(item => item.sheetKey))];
+            throw new Error(`V2 replay 仍依赖临时 Sheet 补锚（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先执行 V2 恢复或边界 compaction，再继续生成新表格增量。`);
+        }
         const cloned = cloneTableDataSnapshot_ACU(replayResult?.data as any);
         if (!hasUsableRuntimeTableData_ACU(cloned)) return { data: null, attempted: true };
         const mergedData = mergeGuideStructureIntoBaseData_ACU(cloned as Record<string, any>);
@@ -2758,6 +2762,13 @@ export async function orchestrateManualCatchUp_ACU(
                 maxMessageIndex: safeTargetMessageIndex,
                 updateRuntimeState: false,
             });
+            if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+                const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
+                return {
+                    error: `V2 replay 仍依赖临时 Sheet 补锚：${affectedSheetKeys.join('、') || '未知 Sheet'}。请先执行恢复收敛。`,
+                    diagnosticCode: 'replay_requires_checkpoint_convergence',
+                };
+            }
             const replayData = replay?.data as Record<string, any> | undefined;
             const missingSheetKeys = selectedSheetKeys.filter(sheetKey => !replayData?.[sheetKey]);
             if (!replayData || missingSheetKeys.length > 0) {

@@ -4935,6 +4935,66 @@ describe('orchestrateManualCatchUp_ACU', () => {
     expect(refreshData).not.toHaveBeenCalled();
   });
 
+  it('终态 replay 依赖临时 Sheet 补锚时返回稳定收敛诊断且不写 terminal progress', async () => {
+    const chat = createCatchUpChat(2, 3) as any;
+    mockGetChatArray_ACU.mockReturnValue(chat);
+    const { getGlobalTemplateSnapshotForCurrentProfile_ACU } = await import('../../../src/service/template/chat-scope');
+    vi.mocked(getGlobalTemplateSnapshotForCurrentProfile_ACU).mockReturnValue({
+      templateObj: {
+        mate: { type: 'acu' },
+        sheet_a: {
+          uid: 'table_a',
+          name: '表A',
+          sourceData: { ddl: 'CREATE TABLE table_a (row_id INTEGER PRIMARY KEY, value TEXT);' },
+          updateConfig: { groupId: 0 },
+          exportConfig: {},
+          orderNo: 0,
+          content: [['row_id', 'value']],
+        },
+      },
+    } as any);
+    mockPersistTablesToChatMessage.mockImplementationOnce(async () => {
+      const frame = chat[1].TavernDB_ACU_IsolatedData[''].storageFrame;
+      delete frame.checkpoint.data.sheet_a;
+      frame.logEntries.push({
+        seq: 1,
+        entryId: 'compatibility-only-sheet-a',
+        createdAt: 2,
+        source: 'manual_crud',
+        targetMessageIndex: 1,
+        aiFloor: 1,
+        filledSheetKeys: ['sheet_a'],
+        changedSheetKeys: ['sheet_a'],
+        groupKeys: [],
+        operations: [{
+          kind: 'sql_sheet_batch',
+          sheetKey: 'sheet_a',
+          tableName: 'table_a',
+          statements: ["INSERT INTO table_a (row_id, value) VALUES (1, 'committed')"],
+          reason: 'manual_refill',
+        }],
+      });
+      return { saved: true, messageIndex: 5 };
+    });
+    const refreshData = vi.fn().mockResolvedValue({ degraded: false });
+
+    const result = await orchestrateManualCatchUp_ACU(['sheet_a'], refreshData);
+
+    expect(result).toEqual(expect.objectContaining({
+      success: false,
+      outcome: 'integrity_failed',
+      committedBucketCount: 1,
+      replayVerified: false,
+      dataCommitted: true,
+      terminalProgressSaved: false,
+      diagnosticCode: 'replay_requires_checkpoint_convergence',
+      error: expect.stringContaining('V2 replay 仍依赖临时 Sheet 补锚：sheet_a'),
+    }));
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    expect(mockReloadStorageProvider).toHaveBeenCalledTimes(1);
+    expect(refreshData).not.toHaveBeenCalled();
+  });
+
   it('bucket 与世界书同步完成但 terminal progress 保存失败时返回 progress_metadata_failed', async () => {
     mockGetChatArray_ACU.mockReturnValue(createCatchUpChat(2, 3) as any);
     mockPersistTablesToChatMessage

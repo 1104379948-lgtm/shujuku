@@ -405,7 +405,7 @@ export interface TableMutationLogEntryV2_ACU extends TableMutationEventV2_ACU {
 export interface TableV2RecoveryBackup_ACU {
   version: 1;
   createdAt: number;
-  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade';
+  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence';
   sourceMessageIndex: number | null;
   failedMessageIndex?: number;
   failedSeq?: number;

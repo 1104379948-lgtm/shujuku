@@ -33,7 +33,7 @@ import { cleanupUnreachableSummaryVectorIndexFiles_ACU, deleteSummaryVectorIndex
 import { assignSummaryVectorIndexStateToTagData_ACU, readSummaryVectorIndexStateFromTagData_ACU } from '../vector/summary-vector-index-state-service';
 import type { ChatSummaryVectorIndexManifest_ACU, ChatSummaryVectorIndexState_ACU, SummaryVectorIndexSafeGcScopeHint_ACU } from '../vector/summary-vector-index-types';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
-import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableStorageFrameV2_ACU } from '../table/storage-frame-v2-types';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
@@ -694,20 +694,21 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             continue;
         }
 
-        let data: Awaited<ReturnType<typeof loadTableStateFromFramesV2_ACU>>;
+        let replay: Awaited<ReturnType<typeof loadTableStateFromFramesV2Detailed_ACU>>;
         try {
-            data = await loadTableStateFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex });
+            replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { maxMessageIndex: boundaryAnchorIndex });
         } catch (error: unknown) {
             const replayError = new Error(error instanceof Error ? error.message : String(error ?? '未知 replay 错误。')) as Error & { cause?: unknown; failedIsolationKey?: string };
             replayError.cause = error;
             replayError.failedIsolationKey = isolationKey;
             throw replayError;
         }
-        if (!data) {
+        if (!replay) {
             const error = new Error(`边界 checkpoint 写入失败：无法在 boundaryAnchorIndex=${boundaryAnchorIndex} 前恢复 isolationKey=[${isolationKey || '无标签'}] 的 V2 数据。`) as Error & { failedIsolationKey?: string };
             error.failedIsolationKey = isolationKey;
             throw error;
         }
+        const data = replay.data;
 
         const anchorMsg = chat[boundaryAnchorIndex];
         if (!anchorMsg.TavernDB_ACU_IsolatedData || typeof anchorMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(anchorMsg.TavernDB_ACU_IsolatedData)) {
@@ -741,6 +742,33 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             checkpoint,
             logEntries: [],
         };
+
+        if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+            const candidateChat = structuredClone(chat);
+            const candidateAnchor = candidateChat[boundaryAnchorIndex];
+            const candidateExistingTagData = candidateAnchor?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            candidateAnchor.TavernDB_ACU_IsolatedData = {
+                ...(candidateAnchor.TavernDB_ACU_IsolatedData || {}),
+                [isolationKey]: {
+                    ...(candidateExistingTagData || {}),
+                    storageFrame: frame,
+                    _acu_storage_version: 2,
+                },
+            };
+            const strictReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+                maxMessageIndex: boundaryAnchorIndex,
+                updateRuntimeState: false,
+                compatibilityMode: 'disabled',
+            });
+            if (!strictReplay
+                || strictReplay.requiresCheckpointConvergence
+                || strictReplay.compatibilityRepairs?.length
+                || getTableDataFingerprint_ACU(strictReplay.data) !== getTableDataFingerprint_ACU(data)) {
+                const error = new Error(`边界 checkpoint 写入失败：兼容回放结果无法收敛为严格可回放 checkpoint（isolationKey=[${isolationKey || '无标签'}]）。`) as Error & { failedIsolationKey?: string };
+                error.failedIsolationKey = isolationKey;
+                throw error;
+            }
+        }
 
         anchorMsg.TavernDB_ACU_IsolatedData[isolationKey] = {
             ...(existingTagData || {}),
@@ -2301,8 +2329,14 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
             writeMessageIdentity_ACU(rootMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
             writeMessageIdentity_ACU(finalMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
 
-            const replayed = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, options.isolationKey, { updateRuntimeState: false });
+            const replayed = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, options.isolationKey, {
+                updateRuntimeState: false,
+                compatibilityMode: 'disabled',
+            });
             if (!replayed || replayed.baseKind !== 'full_checkpoint') throw new Error('手动重填最终快照提交失败：候选聊天未能建立持久化 full checkpoint 回放基底。');
+            if (replayed.requiresCheckpointConvergence || replayed.compatibilityRepairs?.length) {
+                throw new Error('手动重填最终快照提交失败：候选聊天仍依赖临时 Sheet 补锚，必须先完成恢复收敛。');
+            }
             for (const sheetKey of options.targetSheetKeys) {
                 if (getTableDataFingerprint_ACU(replayed.data[sheetKey]) !== getTableDataFingerprint_ACU(options.snapshotData[sheetKey])) {
                     throw new Error(`手动重填最终快照提交失败：候选回放后的目标表 ${sheetKey} 与最终快照不一致。`);

@@ -111,8 +111,15 @@ vi.mock('../../../src/service/table/storage-frame-v2-persist', () => ({
   commitCurrentFloorTemplateChanges_ACU: vi.fn(),
   commitCurrentFloorTemplateScopeOnly_ACU: vi.fn(),
 }));
+const replayMocks = vi.hoisted(() => ({
+  load: vi.fn(),
+}));
 vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
-  loadTableStateFromFramesV2_ACU: vi.fn(),
+  loadTableStateFromFramesV2_ACU: replayMocks.load,
+  loadTableStateFromFramesV2Detailed_ACU: vi.fn(async (...args: any[]) => {
+    const data = await replayMocks.load(...args);
+    return data ? { baseKind: 'full_checkpoint', data } : null;
+  }),
 }));
 vi.mock('../../../src/service/table/storage-strategy-resolver', () => ({
   resolveTableStorageStrategy_ACU: vi.fn(() => ({ mode: 'v2' })),
@@ -164,7 +171,7 @@ import {
   commitCurrentFloorTemplateChanges_ACU,
   commitCurrentFloorTemplateScopeOnly_ACU,
 } from '../../../src/service/table/storage-frame-v2-persist';
-import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { resolveTableStorageStrategy_ACU } from '../../../src/service/table/storage-strategy-resolver';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../../../src/service/table/table-write-transaction';
 
@@ -821,6 +828,35 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
     expect(loadTableStateFromFramesV2_ACU).toHaveBeenCalledTimes(2);
     expect(reconcileChatTemplate_ACU).toHaveBeenCalledWith(expect.objectContaining({ baselineData: currentBaseline }));
     expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({ baseRevision: 'runtime-v1:current' }));
+  });
+
+  it('V2 replay 仍依赖临时 Sheet 补锚时阻断模板切换且零协调零提交', async () => {
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2Detailed_ACU).mockResolvedValueOnce({
+      baseKind: 'full_checkpoint',
+      data: candidate,
+      requiresCheckpointConvergence: true,
+      compatibilityRepairs: [{
+        kind: 'temporary_sheet_anchor',
+        sheetKey: 'sheet_live',
+        messageIndex: 384,
+        seq: 1,
+        operationIndex: 0,
+        templateFingerprint: 'test-fingerprint',
+        reason: 'missing_at_operation',
+      }],
+    } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(result).toMatchObject({
+      saved: false,
+      error: expect.stringContaining('V2 恢复收敛'),
+    });
+    expect(result.error).toContain('sheet_live');
+    expect(reconcileChatTemplate_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
   });
 
   it('已有 V2 聊天的 replay baseline 不可用时 fail-closed，不得使用运行时缓存生成结构计划', async () => {

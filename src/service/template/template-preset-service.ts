@@ -24,7 +24,7 @@ import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU }
 import { allocateStableSheetKeys_ACU } from '../../shared/sheet-identity';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
-import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
+import { loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 import { getCurrentStorageMode, isSqliteMode } from '../table/storage-mode';
@@ -459,8 +459,13 @@ async function loadConsistentTemplateBaseline_ACU(isolationKey: string, signal?:
     for (let attempt = 0; attempt < 2; attempt += 1) {
         if (signal?.aborted) return { error: '模板提交已取消。' };
         const beforeRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
-        const baselineData = await loadTableStateFromFramesV2_ACU(undefined, isolationKey, { updateRuntimeState: false });
+        const replay = await loadTableStateFromFramesV2Detailed_ACU(undefined, isolationKey, { updateRuntimeState: false });
         if (signal?.aborted) return { error: '模板提交已取消。' };
+        if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+            const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
+            return { error: `当前 V2 历史仍依赖临时 Sheet 补锚（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先在数据管理中完成 V2 恢复收敛，再切换模板。` };
+        }
+        const baselineData = replay?.data ?? null;
         const afterRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
         if (beforeRevision === afterRevision) return { baselineData, baseRevision: beforeRevision };
     }
