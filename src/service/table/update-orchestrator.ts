@@ -18,7 +18,7 @@ import { resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
-import { rebindSheetKeysThroughTableAliases_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
+import { rebindSheetKeysThroughTableAliases_ACU, resolveHistoricalSheetKeyMigrations_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 
@@ -606,6 +606,13 @@ function mergeGuideStructureIntoBaseData_ACU(data: Record<string, any>): Record<
     }
 
     const guideBase = buildGuidedBaseDataFromSheetGuide_ACU(sheetGuideForBatch);
+    const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(base, guideBase);
+    for (const [sourceKey, targetKey] of historicalKeyMigrations) {
+        base[targetKey] = base[sourceKey];
+        delete base[sourceKey];
+        logDebug_ACU(`[MergeBase] 已将可证明同表的历史 Sheet key 重绑定：${sourceKey} -> ${targetKey}`);
+    }
+
     if (!base.mate && guideBase?.mate) base.mate = JSON.parse(JSON.stringify(guideBase.mate));
     Object.keys(guideBase || {}).forEach(sheetKey => {
         if (!sheetKey.startsWith('sheet_')) return;
@@ -949,6 +956,17 @@ function buildSqlInitializationBase_ACU(baseSnapshot: Record<string, any>, targe
         guidedBaseData = guideData ? buildGuidedBaseDataFromSheetGuide_ACU(guideData) : null;
     } catch (error) {
         logWarn_ACU('[SQL Init] getChatSheetGuideDataForIsolationKey_ACU failed, fallback to template/baseSnapshot only.', error);
+    }
+
+    const identityTargetData = guidedBaseData && Object.keys(guidedBaseData).some(key => key.startsWith('sheet_'))
+        ? guidedBaseData
+        : templateData;
+    if (identityTargetData) {
+        const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(workingTableData, identityTargetData);
+        for (const [sourceKey, targetKey] of historicalKeyMigrations) {
+            workingTableData[targetKey] = workingTableData[sourceKey];
+            delete workingTableData[sourceKey];
+        }
     }
 
     if (!workingTableData.mate && templateData?.mate) {

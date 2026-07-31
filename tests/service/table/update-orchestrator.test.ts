@@ -593,6 +593,91 @@ describe('buildBatchMergeBase_ACU', () => {
     }
   });
 
+  it('SQLite runtime 旧随机 key 与 guide 稳定 key 可证明同表时折叠到稳定 key 并保留历史数据', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
+    const legacyDdl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER);';
+    const guide = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: legacyDdl, note: 'guide-structure' },
+        content: [['row_id', '物品名称', '数量']],
+      },
+    } as any;
+    try {
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      vi.mocked(getChatArray_ACU).mockReturnValue([]);
+      vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(guide);
+      vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(structuredClone(guide));
+      mockCurrentJsonTableData = {
+        mate: { type: 'acu' },
+        sheet_in05z9vz: {
+          uid: 'sheet_in05z9vz',
+          name: '背包物品表',
+          sourceData: { ddl: legacyDdl, note: 'legacy-structure' },
+          content: [['row_id', '旧物品名', '数量'], ['1', '铁剑', '1']],
+        },
+      };
+
+      const result = await buildBatchMergeBase_ACU(1);
+
+      expect(result.error).toBeNull();
+      expect(result.data?.sheet_in05z9vz).toBeUndefined();
+      expect(result.data?.sheet_bei_bao_wu_pin_biao).toMatchObject({
+        uid: 'sheet_in05z9vz',
+        name: '背包物品表',
+        sourceData: { ddl: legacyDdl, note: 'guide-structure' },
+        content: [['row_id', '物品名称', '数量'], ['1', '铁剑', '1']],
+      });
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+      vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
+      vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(undefined as any);
+      mockCurrentJsonTableData = null;
+    }
+  });
+
+  it('SQLite runtime 与 guide 仅显示名相同但 DDL 表身份不同仍拒绝折叠', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
+    const guide = {
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory_v2 (row_id INTEGER PRIMARY KEY, item_name TEXT);' },
+        content: [['row_id', '物品名称']],
+      },
+    } as any;
+    try {
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      vi.mocked(getChatArray_ACU).mockReturnValue([]);
+      vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(guide);
+      vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(structuredClone(guide));
+      mockCurrentJsonTableData = {
+        sheet_in05z9vz: {
+          uid: 'sheet_in05z9vz',
+          name: '背包物品表',
+          sourceData: { ddl: 'CREATE TABLE legacy_inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);' },
+          content: [['row_id', '物品名称'], ['1', '铁剑']],
+        },
+      };
+
+      const result = await buildBatchMergeBase_ACU(1);
+
+      expect(result.data).toBeNull();
+      expect(result.error).toContain('无法构建合并基底');
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+      vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
+      vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(undefined as any);
+      mockCurrentJsonTableData = null;
+    }
+  });
+
   it('写入编排遇到无锚点 data_replace 时阻断，不退回模板空基底', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
@@ -3899,6 +3984,64 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(mockSaveIndependentTable).not.toHaveBeenCalled();
     expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
     expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
+  });
+
+  it('SQLite 快照初始化再次遇到旧随机 key 基底时按 guide 稳定 key 归一且不保留重复表', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
+    const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT NOT NULL);';
+    const guide = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl },
+        content: [['row_id', 'item_name']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(structuredClone(guide));
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(guide);
+    vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(structuredClone(guide));
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1 },
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
+        name: '背包物品表',
+        sourceData: { ddl },
+        content: [['row_id', 'item_name'], ['1', '铁剑']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+    mockParseAndApplyTableEditsToData.mockImplementationOnce((_response: string, tableData: any) => {
+      tableData.sheet_bei_bao_wu_pin_biao.content.push(['2', '药水']);
+      return { success: true, modifiedKeys: ['sheet_bei_bao_wu_pin_biao'], appliedEdits: 1 };
+    });
+    const responses = [{
+      success: true,
+      attempt: 1,
+      aiResponse: '<tableEdit>insertRow(0,{"0":"药水"})</tableEdit>',
+      tableEditText: 'insertRow(0,{"0":"药水"})',
+      job: { groupKey: 'inventory', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_bei_bao_wu_pin_biao'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
+    }];
+
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+    expect(result.success).toBe(true);
+    const savedData = mockPersistTablesToChatMessage.mock.calls[0][0].tableData;
+    expect(savedData.sheet_in05z9vz).toBeUndefined();
+    expect(savedData.sheet_bei_bao_wu_pin_biao.content).toEqual([
+      ['row_id', 'item_name'],
+      ['1', '铁剑'],
+      ['2', '药水'],
+    ]);
+    vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
   it('SQL 模式下部分表无反馈时，仍用模板结构与基础数据初始化缺失表', async () => {

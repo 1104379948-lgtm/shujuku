@@ -71,6 +71,54 @@ export function buildSheetTableAliasMap_ACU(
 }
 
 /**
+ * Resolves historical runtime sheet keys that may be safely moved to keys from a
+ * newer guide/template snapshot. A destructive re-key requires two independent,
+ * deterministic identity signals: the runtime physical name and the author DDL
+ * table name must both match. Display-name/physical-name equality alone is not
+ * sufficient because genuinely distinct sheets may collide after romanization.
+ */
+export function resolveHistoricalSheetKeyMigrations_ACU(
+  sourceData: TableDataObject_ACU | Record<string, unknown> | null | undefined,
+  targetData: TableDataObject_ACU | Record<string, unknown> | null | undefined,
+): Map<string, string> {
+  if (!sourceData || typeof sourceData !== 'object' || !targetData || typeof targetData !== 'object') {
+    return new Map();
+  }
+
+  const sourcePhysicalNames = resolvePhysicalTableNames_ACU(sourceData);
+  const targetPhysicalNames = resolvePhysicalTableNames_ACU(targetData);
+  const targetByPhysicalName = new Map<string, { sheetKey: string; ddlTableName: string }>();
+
+  for (const [targetKey, physicalName] of targetPhysicalNames) {
+    const targetSheet = (targetData as Record<string, any>)[targetKey];
+    const ddlTableName = String(parseDDLTableName(String(targetSheet?.sourceData?.ddl || '')) || '').trim().toLowerCase();
+    targetByPhysicalName.set(physicalName.toLowerCase(), { sheetKey: targetKey, ddlTableName });
+  }
+
+  const migrations = new Map<string, string>();
+  for (const [sourceKey, physicalName] of sourcePhysicalNames) {
+    if (targetPhysicalNames.has(sourceKey)) continue;
+    const targetIdentity = targetByPhysicalName.get(physicalName.toLowerCase());
+    if (!targetIdentity) continue;
+    const sourceSheet = (sourceData as Record<string, any>)[sourceKey];
+    const ddlTableName = String(parseDDLTableName(String(sourceSheet?.sourceData?.ddl || '')) || '').trim().toLowerCase();
+    if (!ddlTableName || !targetIdentity.ddlTableName || ddlTableName !== targetIdentity.ddlTableName) {
+      throw new SheetTableAliasResolutionError_ACU(
+        `历史表身份迁移无法证明：${sourceKey} 与 ${targetIdentity.sheetKey} 共享物理表名「${physicalName}」，但作者 DDL 表名不一致或缺失。`,
+      );
+    }
+    const targetKey = targetIdentity.sheetKey;
+    if (Object.prototype.hasOwnProperty.call(sourceData, targetKey)) {
+      throw new SheetTableAliasResolutionError_ACU(
+        `历史表身份迁移冲突：${sourceKey} 对应 ${targetKey}，但运行时基底已存在目标 key。`,
+      );
+    }
+    migrations.set(sourceKey, targetKey);
+  }
+  return migrations;
+}
+
+/**
  * Rebinds scheduling-time table selectors to sheet keys in a later snapshot by
  * using the same conflict-safe alias registry as SQL readers and writers.
  * Selectors may be sheet keys, uid values, display names, pinyin physical names,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   rebindSheetKeysThroughTableAliases_ACU,
+  resolveHistoricalSheetKeyMigrations_ACU,
   resolveReadQuerySql_ACU,
   SheetTableAliasResolutionError_ACU,
 } from '../../src/shared/sql-read-resolver';
@@ -324,5 +325,81 @@ describe('sql read resolver', () => {
 
     expect(() => rebindSheetKeysThroughTableAliases_ACU(['sheet_old'], scheduled, target))
       .toThrow(/无法证明/);
+  });
+
+  it('仅在物理名与作者 DDL 表名同时一致时迁移历史随机 key', () => {
+    const source = {
+      sheet_in05z9vz: {
+        uid: 'sheet_in05z9vz',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+      sheet_3NoMc1wI: {
+        uid: 'sheet_3NoMc1wI',
+        name: '纪要表',
+        sourceData: { ddl: 'CREATE TABLE chronicle (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+    const target = {
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+      sheet_ji_yao_biao: {
+        uid: 'sheet_ji_yao_biao',
+        name: '纪要表',
+        sourceData: { ddl: 'CREATE TABLE chronicle (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+
+    expect([...resolveHistoricalSheetKeyMigrations_ACU(source, target)]).toEqual([
+      ['sheet_3NoMc1wI', 'sheet_ji_yao_biao'],
+      ['sheet_in05z9vz', 'sheet_bei_bao_wu_pin_biao'],
+    ]);
+  });
+
+  it('同物理名但作者 DDL 表名不同或缺失时拒绝历史 key 迁移', () => {
+    const source = {
+      sheet_legacy: {
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE legacy_inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+    const target = {
+      sheet_stable: {
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+
+    expect(() => resolveHistoricalSheetKeyMigrations_ACU(source, target))
+      .toThrow(/作者 DDL 表名不一致或缺失/);
+
+    source.sheet_legacy.sourceData.ddl = '';
+    expect(() => resolveHistoricalSheetKeyMigrations_ACU(source, target))
+      .toThrow(/作者 DDL 表名不一致或缺失/);
+  });
+
+  it('运行时已同时存在历史 key 与稳定 key 时拒绝覆盖稳定 key', () => {
+    const source = {
+      sheet_legacy: {
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+      sheet_stable: {
+        name: '其他表',
+        sourceData: { ddl: 'CREATE TABLE other_table (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+    const target = {
+      sheet_stable: {
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY);' },
+      },
+    } as any;
+
+    expect(() => resolveHistoricalSheetKeyMigrations_ACU(source, target))
+      .toThrow(/运行时基底已存在目标 key/);
   });
 });
