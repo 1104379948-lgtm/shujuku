@@ -45776,7 +45776,7 @@ $CONTENT
                 audit.push(reconciled.audit);
             }
             catch (error) {
-                blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」无法协调：${error?.message || String(error)}`);
+                blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」无法协调（baselineKey=${previous.key} → templateKey=${templateEntry.key}）：${error?.message || String(error)}`);
             }
         }
         for (const [key, sheet] of listSheets_ACU(baselineData)) {
@@ -46144,11 +46144,67 @@ $CONTENT
         const beforeByCanonical = new Map(beforeEntries.map(column => [column.canonical, column]));
         const targetByCanonical = new Map(targetEntries.map(column => [column.canonical, column]));
         if (beforeByCanonical.size !== beforeHeaders.length - 1 || targetByCanonical.size !== targetHeaders.length - 1)
-            throw new Error('存在空列或规范化重复列。');
+            throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey}) 存在空列或规范化重复列。`);
         const beforeByPhysical = new Map(beforeEntries.map(column => [column.physical.toLowerCase(), column]));
         const targetByPhysical = new Map(targetEntries.map(column => [column.physical.toLowerCase(), column]));
         if (beforeByPhysical.size !== beforeEntries.length || targetByPhysical.size !== targetEntries.length)
-            throw new Error('DDL 存在重复 physical column。');
+            throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey}) DDL 存在重复 physical column。`);
+        // === 零数据覆盖语义（计划 3.1）===
+        // 逐表判定：before.content.length > 1 才认为有数据行。该表无任何单元格时，
+        // “继承/隐藏/重解释”全部退化为空操作，却可能因隐藏列与目标可见列撞 physical 名
+        // 而误阻断（计划 2.3）。此时按覆盖处理：不继承、不隐藏、不做 reuse 判定，
+        // 结构与元数据整体取模板，仅保留既有 sheet key / uid（计划 3.2）。
+        const hasBaselineRows = before.content.length > 1;
+        if (!hasBaselineRows) {
+            const sheet = clone_ACU$4(template);
+            sheet.uid = before.uid;
+            // 模板自带数据行是模板结构的一部分，按目标可见列落地并补齐稳定 row_id。
+            const templateRows = Array.isArray(template.content) ? template.content.slice(1) : [];
+            const adoptedRows = templateRows.length > 0
+                ? adoptTemplateRowsForMatchedSheet_ACU(templateRows, targetEntries.length, 0)
+                : [];
+            sheet.content = [targetHeaders, ...adoptedRows];
+            sheet.sourceData = clone_ACU$4(template.sourceData);
+            // 旧表无行 ⇒ 所有旧列均无单元格，丢弃无损；不把旧隐藏列/旧别名带进新结构，
+            // 避免残留投影指向不存在的 physical column，或跨 key 把无关列误认为同一列。
+            // 模板自身声明的 hiddenPhysicalColumns / columnAliases 保留（属于新结构）。
+            delete sheet.seedRows;
+            // 表级别名仍累积（覆盖后表名取模板，后续切换仍需按历史表名认回）。
+            accumulateTableAliases_ACU(sheet, before, template);
+            validateBaselineSheetRows_ACU(sheet);
+            const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
+            const beforeProjection = clone_ACU$4(before);
+            delete beforeProjection.seedRows;
+            const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
+            // audit 如实记录：旧列全部丢弃（零数据无单元格，无损但必须可审计），
+            // 新增列为模板全部可见列，无隐藏列、无填充、无行受影响。
+            const deletedColumns = beforeEntries.map(column => column.header);
+            return {
+                sheet,
+                changed,
+                meta,
+                audit: {
+                    sheetKey,
+                    match: 'matched',
+                    baselineSheetKey: sheetKey,
+                    templateSheetKey,
+                    baselineName: before.name,
+                    templateName: template.name,
+                    canonicalName: canonicalizeDisplayName_ACU(before.name),
+                    inheritedColumns: [],
+                    addedColumns: targetEntries.map(column => column.header),
+                    deletedColumns,
+                    hiddenColumns: [],
+                    physicalColumnMappings: [],
+                    fills: [],
+                    affectedRowCount: 0,
+                    metadataChanged: !!meta,
+                    metadataChangedFields: meta ? Object.keys(meta) : [],
+                    destructiveChangeConfirmed: false,
+                    operations: [],
+                },
+            };
+        }
         const matchedBeforeCanonical = new Set();
         const matchedTargetCanonical = new Set();
         const targetSourceByCanonical = new Map();
@@ -46216,7 +46272,14 @@ $CONTENT
             .filter(column => !matchedTargetCanonical.has(column.canonical) && hiddenPhysicalNames.has(column.physical.toLowerCase()))
             .map(column => column.physical);
         if (reusedPhysicalNames.length > 0) {
-            throw new Error(`新增列复用了无法证明同一身份的历史 physical column「${reusedPhysicalNames.join('、')}」，无法安全重解释历史数据。`);
+            // 真实原因：隐藏旧列与目标可见列产生重复列名 DDL，SQLite 建表必然失败。
+            // 列出 key 对、冲突 physical 名、两侧显示名与 baseline 行数，便于定位。
+            const conflictDetails = reusedPhysicalNames.map(physical => {
+                const hidden = hiddenEntries.find(entry => entry.physical.toLowerCase() === physical.toLowerCase());
+                const target = targetEntries.find(entry => entry.physical.toLowerCase() === physical.toLowerCase());
+                return `physical=${physical}（隐藏列「${hidden?.header}」→ 目标列「${target?.header}」）`;
+            }).join('；');
+            throw new Error(`表「${before.name || sheetKey}」(${sheetKey}) → 模板表「${template.name || templateSheetKey}」(${templateSheetKey})：隐藏列与目标可见列存在同名 physical column，产出重复列名 DDL，SQLite 建表会失败。冲突：${conflictDetails}。baseline 行数=${before.content.length - 1}。`);
         }
         // 新列填充决策（替代 fills 静态契约）：可解析 literal DEFAULT → 该值；NOT NULL 无 DEFAULT → 空串；nullable → null。
         const fillAudit = [];

@@ -427,7 +427,7 @@ describe('reconcileChatTemplate_ACU', () => {
 
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
 
-    expect(plan.blockers.join('\n')).toContain('无法安全重解释历史数据');
+    expect(plan.blockers.join('\n')).toContain('同名 physical column');
     expect(plan.sheetChanges).toEqual([]);
   });
 
@@ -441,7 +441,7 @@ describe('reconcileChatTemplate_ACU', () => {
 
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
 
-    expect(plan.blockers.join('\n')).toContain('无法安全重解释历史数据');
+    expect(plan.blockers.join('\n')).toContain('同名 physical column');
     expect(plan.sheetChanges).toEqual([]);
     expect(plan.deletedSheetKeys).toEqual([]);
   });
@@ -684,7 +684,7 @@ describe('reconcileChatTemplate_ACU', () => {
 
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
 
-    expect(plan.blockers.join('\n')).toContain('无法安全重解释历史数据');
+    expect(plan.blockers.join('\n')).toContain('同名 physical column');
     expect(plan.sheetChanges).toEqual([]);
     expect(plan.deletedSheetKeys).toEqual([]);
   });
@@ -853,7 +853,199 @@ describe('reconcileChatTemplate_ACU', () => {
       hardDeleteMissingSheets: true,
     });
     expect(hardDeletePlan.audit.find(item => item.sheetKey === 'sheet_old')?.operations).toEqual([{ kind: 'delete' }]);
+
   });
 
+  it('Phase 1：跨 key + 零数据 + physical 同名 + 异显示名 → 覆盖切换，不阻断、结构取模板、key 保持', async () => {
+    // 计划 6.1-1/5/8：真实样本 global-state.js → romance-overrides.js（表名同为「全局数据表」，
+    // 显示名「主角当前所在地点」→「当前详细地点」，physical 同名 current_location，key 不同）。
+    const baseline = state({
+      sheet_dCudvUnH: sheet('sheet_dCudvUnH', '全局数据表', ['row_id', '主角当前所在地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 主角当前所在地点', []),
+    });
+    const template = state({
+      sheet_global_data: sheet('sheet_global_data', '全局数据表', ['row_id', '当前详细地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 当前详细地点', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    // 覆盖语义：结构整体取模板（表头 = 模板可见列），旧列不保留。
+    expect(plan.candidateData.sheet_dCudvUnH.content).toEqual([['row_id', '当前详细地点']]);
+    expect(plan.candidateData.sheet_dCudvUnH.sourceData.hiddenPhysicalColumns).toBeUndefined();
+    // 不重新分配 key：旧 key 继续使用，模板 key 不出现。
+    expect(plan.candidateData.sheet_dCudvUnH.uid).toBe('sheet_dCudvUnH');
+    expect(plan.candidateData.sheet_global_data).toBeUndefined();
+    // rebase change 落在旧 key 上。
+    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'rebase', sheetKey: 'sheet_dCudvUnH' })]);
+    // audit 如实记录：旧列全部丢弃，无隐藏列，零行受影响。
+    expect(plan.audit[0]).toMatchObject({
+      sheetKey: 'sheet_dCudvUnH',
+      inheritedColumns: [],
+      addedColumns: ['当前详细地点'],
+      deletedColumns: ['主角当前所在地点'],
+      hiddenColumns: [],
+      affectedRowCount: 0,
+    });
+  });
+
+  it('Phase 1：零数据覆盖且模板自带数据行 → 模板行按目标可见列落地', async () => {
+    // 计划 6.1-2：模板自带数据行是模板结构的一部分，覆盖后随结构落地。
+    const baseline = state({
+      sheet_dCudvUnH: sheet('sheet_dCudvUnH', '全局数据表', ['row_id', '主角当前所在地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 主角当前所在地点', []),
+    });
+    const template = state({
+      sheet_global_data: sheet('sheet_global_data', '全局数据表', ['row_id', '当前详细地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 当前详细地点', [
+          [null as any, '御苑'],
+        ]),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_dCudvUnH.content).toEqual([
+      ['row_id', '当前详细地点'],
+      ['1', '御苑'],
+    ]);
+  });
+
+  it('Phase 1：零数据 + 旧表带残留 hiddenPhysicalColumns / columnAliases → 覆盖后投影不报指向不存在列', async () => {
+    // 计划 6.1-3/4：旧表残留的隐藏列与别名不得进入新结构，否则投影预检会因
+    // 「指向不存在的 physical column」失败。
+    const baselineSheet = sheet('sheet_dCudvUnH', '全局数据表', ['row_id', '主角当前所在地点'],
+      'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 主角当前所在地点', []);
+    baselineSheet.sourceData.hiddenPhysicalColumns = ['ghost_col'];
+    baselineSheet.sourceData.columnAliases = { ghost_col: ['旧显示名'] };
+    const template = state({
+      sheet_global_data: sheet('sheet_global_data', '全局数据表', ['row_id', '当前详细地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 当前详细地点', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({ sheet_dCudvUnH: baselineSheet }), templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_dCudvUnH.sourceData.hiddenPhysicalColumns).toBeUndefined();
+    expect(plan.candidateData.sheet_dCudvUnH.sourceData.columnAliases).toBeUndefined();
+  });
+
+  it('Phase 1：同一协调中空表覆盖、有数据表继承（逐表判定）', async () => {
+    // 计划 6.1-6：逐表判定，不能因整聊天有数据就让空表被迫走迁移路径。
+    const baseline = state({
+      sheet_dCudvUnH: sheet('sheet_dCudvUnH', '全局数据表', ['row_id', '主角当前所在地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 主角当前所在地点', []),
+      sheet_notes: sheet('sheet_notes', '纪要表', ['row_id', '事件'],
+        'row_id INTEGER PRIMARY KEY,\n  event TEXT -- 事件', [['1', '旧事件']]),
+    });
+    const template = state({
+      sheet_global_data: sheet('sheet_global_data', '全局数据表', ['row_id', '当前详细地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 当前详细地点', []),
+      sheet_notes2: sheet('sheet_notes2', '纪要表', ['row_id', '事件', '结论'],
+        'row_id INTEGER PRIMARY KEY,\n  event TEXT, -- 事件\n  conclusion TEXT -- 结论', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+
+    expect(plan.blockers).toEqual([]);
+    // 空表覆盖：结构 = 模板，旧列丢弃。
+    expect(plan.candidateData.sheet_dCudvUnH.content).toEqual([['row_id', '当前详细地点']]);
+    // 有数据表继承：事件列继承，新增列 null，旧行保留。
+    expect(plan.candidateData.sheet_notes.content).toEqual([['row_id', '事件', '结论'], ['1', '旧事件', null]]);
+    const globalAudit = plan.audit.find(item => item.sheetKey === 'sheet_dCudvUnH');
+    expect(globalAudit).toMatchObject({ deletedColumns: ['主角当前所在地点'], hiddenColumns: [], affectedRowCount: 0 });
+    const notesAudit = plan.audit.find(item => item.sheetKey === 'sheet_notes');
+    expect(notesAudit).toMatchObject({ inheritedColumns: ['事件'], hiddenColumns: [], affectedRowCount: 1 });
+  });
+
+
+  it('Phase 1 证明：删除全部数据后连续切换多个不同 key 预设均成功，覆盖后 schema 可投影', async () => {
+    // 计划 6.3-1/6.2-1：零数据锚点（删除全部数据后的状态）连续切换 3 个不同 key 的预设，
+    // 每次都是跨 key + physical 同名/不同名混合，全部不应被 blocker 阻断；
+    // 覆盖后的 candidate 需通过顶层 DDL/表头预检、列投影预检与真实 SQLite hydrate。
+    const presets = [
+      // 预设 1：global-state 结构（key sheet_dCudvUnH）
+      state({
+        sheet_dCudvUnH: sheet('sheet_dCudvUnH', '全局数据表', ['row_id', '主角当前所在地点'],
+          'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 主角当前所在地点', []),
+      }),
+      // 预设 2：romance-overrides 结构（key sheet_global_data，physical 撞 current_location）
+      state({
+        sheet_global_data: sheet('sheet_global_data', '全局数据表', ['row_id', '当前详细地点'],
+          'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 当前详细地点', []),
+      }),
+      // 预设 3：第三个不同 key，完全不同的列结构
+      state({
+        sheet_world_state: sheet('sheet_world_state', '全局数据表', ['row_id', '世界时间', '季节'],
+          'row_id INTEGER PRIMARY KEY,\n  world_clock TEXT, -- 世界时间\n  season TEXT -- 季节', []),
+      }),
+    ];
+
+    // 初始状态 = 零数据锚点（模拟 deleteLocalDataInChatCore_ACU 全范围删除后的 header-only）。
+    let baseline = presets[0];
+    for (const preset of presets) {
+      const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: preset, destructiveChangeConfirmed: false });
+      expect(plan.blockers).toEqual([]);
+      const matchedKey = Object.keys(baseline).find(key => key.startsWith('sheet_'))!;
+      const templateKey = Object.keys(preset).find(key => key.startsWith('sheet_'))!;
+      // 覆盖后结构 = 模板可见列，旧列不残留。
+      expect(plan.candidateData[matchedKey].content[0]).toEqual(preset[templateKey].content[0]);
+      // 无隐藏列残留（覆盖语义：旧结构不保留）。
+      expect(plan.candidateData[matchedKey].sourceData.hiddenPhysicalColumns).toBeUndefined();
+      baseline = plan.candidateData;
+    }
+  });
+
+  it('Phase 1 证明：覆盖后历史结构完全移除，replay 不会因旧列消失而撞 no such column', async () => {
+    // 计划 6.2-2/2.7-1：覆盖后 candidate 的 DDL 只含目标列；旧 physical 列不在 DDL 中，
+    // 因此后续 SQL 回放不会引用已不存在的列。此断言与顶层真实 SQLite hydrate 共同构成
+    // “覆盖后当前边界可 hydrate 目标 schema，历史旧列不可再被引用”的证明。
+    const baseline = state({
+      sheet_dCudvUnH: sheet('sheet_dCudvUnH', '全局数据表', ['row_id', '主角当前所在地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 主角当前所在地点', []),
+    });
+    const template = state({
+      sheet_global_data: sheet('sheet_global_data', '全局数据表', ['row_id', '当前详细地点'],
+        'row_id INTEGER PRIMARY KEY,\n  current_location TEXT -- 当前详细地点', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+    expect(plan.blockers).toEqual([]);
+
+    // 覆盖后 DDL 只含目标物理列 current_location，不含任何旧列残留。
+    const ddl = plan.candidateData.sheet_dCudvUnH.sourceData.ddl as string;
+    expect(ddl).toContain('current_location');
+    // 投影只返回目标可见列。
+    const projection = getSheetColumnProjection_ACU(plan.candidateData.sheet_dCudvUnH);
+    expect(projection.visibleColumns.map(column => column.header)).toEqual(['row_id', '当前详细地点']);
+    expect(projection.hiddenPhysicalColumns).toEqual([]);
+  });
+
+
+  it('Phase 2：非空表跨 key 冲突时 blocker 文案陈述真实原因并含定位信息', async () => {
+    // 计划 5/9-5：有数据表（50 行）仍 fail-closed，但文案必须说明是 DDL 重复列名冲突，
+    // 并列出 key 对、冲突 physical 名、两侧显示名与 baseline 行数。
+    const baseline = state({
+      sheet_legacy: sheet('sheet_legacy', '背包', ['row_id', '备注'],
+        'row_id INTEGER PRIMARY KEY, note TEXT -- 备注', [['1', '旧备注']]),
+    });
+    const template = state({
+      sheet_imported: sheet('sheet_imported', '背包', ['row_id', '品质'],
+        'row_id INTEGER PRIMARY KEY, note TEXT -- 品质', []),
+    });
+
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+
+    expect(plan.blockers).not.toEqual([]);
+    const blockerText = plan.blockers.join('\n');
+    expect(blockerText).toContain('重复列名 DDL');
+    expect(blockerText).toContain('同名 physical column');
+    expect(blockerText).toContain('baselineKey=sheet_legacy → templateKey=sheet_imported');
+    expect(blockerText).toContain('physical=note');
+    expect(blockerText).toContain('隐藏列「备注」→ 目标列「品质」');
+    expect(blockerText).toContain('baseline 行数=1');
+    expect(plan.sheetChanges).toEqual([]);
+  });
 
 });

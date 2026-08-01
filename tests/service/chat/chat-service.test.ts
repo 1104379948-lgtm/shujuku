@@ -117,6 +117,7 @@ import {
   saveCurrentDataForTable_ACU,
 } from '../../../src/service/chat/chat-service';
 import { resolveTableHistoryStateFromChat_ACU } from '../../../src/service/table/table-history';
+import { resolveTableStorageStrategy_ACU } from '../../../src/service/table/storage-strategy-resolver';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -1469,6 +1470,56 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(chat[3].TavernDB_ACU_IsolatedData[''].storageFrame).toEqual({ version: 2, logEntries: [] });
     expect(mockSaveChatToHost).toHaveBeenCalledOnce();
   });
+
+  it('Phase 0 实测：全范围清空后锚点保留旧 DDL 与 hiddenPhysicalColumns，且存储策略判定为 v2', async () => {
+    // 计划 2.1/2.2 的实测：collectInitialCheckpointSlotsForFullDeletion_ACU 的 sanitize
+    // 白名单含 sourceData，因此旧 DDL、旧 physical 列名、旧 hiddenPhysicalColumns 原样保留；
+    // 锚点重新包装 _acu_storage_version: 2，使 resolveTableStorageStrategy_ACU 返回 v2，
+    // 后续模板切换因此不会走 pristine 重新初始化，而进入热切换路径。
+    const initialSheet = {
+      uid: 'sheet_dCudvUnH',
+      name: '全局数据表',
+      content: [['row_id', '主角当前所在地点'], ['1', '御苑']],
+      sourceData: {
+        ddl: 'CREATE TABLE global_state (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  current_location TEXT -- 主角当前所在地点\n);',
+        hiddenPhysicalColumns: ['legacy_col'],
+      },
+    };
+    const chat: any[] = [
+      { is_user: true },
+      { is_user: false, mes: 'AI 1' },
+      {
+        is_user: false,
+        mes: 'AI 2',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full', createdAt: 1, reason: 'init',
+                data: { mate: { type: 'acu' }, sheet_dCudvUnH: initialSheet },
+              },
+              logEntries: [{ seq: 1, operations: [{ kind: 'row_upsert' }] }],
+            },
+          },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    await deleteLocalDataInChatCore_ACU('all');
+
+    const anchorSheet = chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_dCudvUnH;
+    // 只留表头，行数据清零。
+    expect(anchorSheet.content).toEqual([['row_id', '主角当前所在地点']]);
+    // 白名单含 sourceData → 旧 DDL 与隐藏列原样保留。
+    expect(anchorSheet.sourceData.ddl).toContain('current_location');
+    expect(anchorSheet.sourceData.hiddenPhysicalColumns).toEqual(['legacy_col']);
+    // 锚点按 v2 重新包装 → 存储策略判定为 v2（不会回退 pristine 重新初始化）。
+    expect(resolveTableStorageStrategy_ACU(chat, '')!.mode).toBe('v2');
+  });
+
 
   it('手动追平预检将旧版较晚的 header-only reset checkpoint 前移到首个 AI 楼层', async () => {
     const resetFrame = {
