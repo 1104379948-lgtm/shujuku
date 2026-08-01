@@ -1,4 +1,5 @@
 import type { AgentWorldbookControl_ACU } from '../../shared/models/agent-worldbook-model';
+import { stripAgentTakeoverMetaBlockStrict_ACU } from '../../shared/agent-worldbook-comment';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
 import { createStrictLorebookReadError_ACU, getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../worldbook/pipeline';
@@ -207,7 +208,7 @@ function hasUsableWorldbookSkillMeta_ACU(meta: ReturnType<typeof parseWorldbookS
 }
 
 function buildFallbackWorldbookSummaryText_ACU(entry: Record<string, any>, comment: string, keys: string[]): { description: string; triggerWhen: string } {
-  const normalizedComment = stripWorldbookSkillMetaBlock_ACU(comment).trim();
+  const normalizedComment = stripWorldbookSkillMetaBlock_ACU(stripAgentTakeoverMetaBlockStrict_ACU(comment)).trim();
   const name = String(entry?.name || '').trim();
   const description = normalizedComment || name || keys.join('、') || '未命名世界书条目';
   const triggerWhen = keys.length > 0

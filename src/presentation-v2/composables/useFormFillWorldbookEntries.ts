@@ -15,9 +15,9 @@ import { saveSettings_ACU } from '../../service/settings/settings-service';
 import { refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU } from '../../service/agent/agent-worldbook-takeover';
 import {
   parseWorldbookSkillMetaFromComment_ACU,
-  stripWorldbookSkillMetaBlock_ACU,
 } from '../../service/agent/agent-worldbook-skill-meta';
 import { logError_ACU } from '../../shared/utils';
+import { buildWorldbookEntryDisplayLabel_ACU } from '../../shared/agent-worldbook-comment';
 import {
   buildWorldbookEntryDisplayView_ACU,
   buildWorldbookSnapshotEntryIndexByBook_ACU,
@@ -101,7 +101,7 @@ export function useFormFillWorldbookEntries() {
           return {
             uid: entry.uid,
             bookName,
-            label: stripWorldbookSkillMetaBlock_ACU(comment).trim() || `条目 ${entry.uid}`,
+            label: buildWorldbookEntryDisplayLabel_ACU(comment, entry.uid),
             comment,
             skillMeta,
             hasSkill: !!skillMeta,

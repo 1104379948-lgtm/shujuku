@@ -10,6 +10,12 @@ const mockDeleteSkill = vi.fn();
 const mockSnapshot = vi.fn(() => ({ active: false, books: {} }));
 const mockRefreshSnapshot = vi.fn(async () => mockSnapshot());
 
+const skillMetaBlock = '<!-- ACU_SKILL_META_START\n{"version":1,"description":"已有","triggerWhen":"测试","tk":0,"updatedAt":1,"updatedBy":"manual"}\nACU_SKILL_META_END -->';
+
+function withSkill(comment: string): string {
+  return `${comment}\n\n${skillMetaBlock}`;
+}
+
 async function getComposable(onSkillMetaChanged?: () => Promise<unknown>) {
   vi.resetModules();
   vi.doMock('../../../src/service/worldbook/pipeline', () => ({ getLorebookEntriesByNames_ACU: mockGetEntries }));
@@ -18,8 +24,7 @@ async function getComposable(onSkillMetaChanged?: () => Promise<unknown>) {
     refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU: mockRefreshSnapshot,
   }));
   vi.doMock('../../../src/service/agent/agent-worldbook-skill-meta', () => ({
-    parseWorldbookSkillMetaFromComment_ACU: (comment: string) => comment.includes('SKILL') ? { description: '已有', triggerWhen: '测试' } : null,
-    stripWorldbookSkillMetaBlock_ACU: (comment: string) => comment.replace(' SKILL', ''),
+    parseWorldbookSkillMetaFromComment_ACU: (comment: string) => comment.includes('ACU_SKILL_META_START') ? { description: '已有', triggerWhen: '测试' } : null,
     saveWorldbookEntrySkillMeta_ACU: mockSaveSkill,
     deleteWorldbookEntrySkillMeta_ACU: mockDeleteSkill,
   }));
@@ -67,7 +72,7 @@ describe('useAgentWorldbookEntries', () => {
     mockGetEntries.mockResolvedValue({ AgentBook: [
       { uid: 1, comment: '原生', enabled: true, type: 'selective' },
       { uid: 2, comment: '已接管', enabled: true, type: 'constant' },
-      { uid: 3, comment: '已 Skill SKILL', enabled: false, type: 'selective' },
+      { uid: 3, comment: withSkill('已 Skill'), enabled: false, type: 'selective' },
       { uid: 4, comment: 'database 已接管', enabled: true, type: 'selective' },
       { uid: 5, comment: 'database 无关', enabled: true, type: 'selective' },
     ] });
@@ -96,8 +101,8 @@ describe('useAgentWorldbookEntries', () => {
       },
     });
     mockGetEntries.mockResolvedValue({ AgentBook: [
-      { uid: 7, comment: '分享后重建的接管条目 SKILL', enabled: false, type: 'selective', keys: ['原关键词'] },
-      { uid: 8, comment: '用户手动关闭 SKILL', enabled: false, type: 'selective', keys: ['手动关键词'] },
+      { uid: 7, comment: withSkill('分享后重建的接管条目'), enabled: false, type: 'selective', keys: ['原关键词'] },
+      { uid: 8, comment: withSkill('用户手动关闭'), enabled: false, type: 'selective', keys: ['手动关键词'] },
     ] });
     const c = await getComposable();
 
@@ -119,7 +124,7 @@ describe('useAgentWorldbookEntries', () => {
       },
     });
     mockGetEntries.mockResolvedValue({ AgentBook: [
-      { uid: 9, comment: '历史快照条目 SKILL', enabled: false, type: 'selective', keys: ['手动关键词'] },
+      { uid: 9, comment: withSkill('历史快照条目'), enabled: false, type: 'selective', keys: ['手动关键词'] },
     ] });
     const c = await getComposable();
 
@@ -150,7 +155,7 @@ describe('useAgentWorldbookEntries', () => {
     const notify = vi.fn(async () => undefined);
     mockResolveScope.mockResolvedValue(['AgentBook']);
     mockGetEntries.mockResolvedValue({ AgentBook: [{ uid: 1, comment: '角色', enabled: true, type: 'selective' }] });
-    mockSaveSkill.mockResolvedValue({ updated: true, entry: { uid: 1, comment: '角色 SKILL' } });
+    mockSaveSkill.mockResolvedValue({ updated: true, entry: { uid: 1, comment: withSkill('角色') } });
     const c = await getComposable(notify);
     await c.loadEntries();
 
@@ -163,8 +168,8 @@ describe('useAgentWorldbookEntries', () => {
   it('对已有 Skill 的非候选条目保存和删除元数据时保持本地状态与同步契约', async () => {
     const notify = vi.fn(async () => undefined);
     mockResolveScope.mockResolvedValue(['AgentBook']);
-    mockGetEntries.mockResolvedValue({ AgentBook: [{ uid: 2, comment: '关闭 SKILL', enabled: false, type: 'selective' }] });
-    mockSaveSkill.mockResolvedValue({ updated: false, entry: { uid: 2, comment: '关闭 SKILL' } });
+    mockGetEntries.mockResolvedValue({ AgentBook: [{ uid: 2, comment: withSkill('关闭'), enabled: false, type: 'selective' }] });
+    mockSaveSkill.mockResolvedValue({ updated: false, entry: { uid: 2, comment: withSkill('关闭') } });
     mockDeleteSkill.mockResolvedValue({ updated: true, entry: { uid: 2, comment: '关闭' } });
     const c = await getComposable(notify);
     await c.loadEntries();
@@ -183,7 +188,7 @@ describe('useAgentWorldbookEntries', () => {
     const notify = vi.fn(async () => { throw new Error('sync failed'); });
     mockResolveScope.mockResolvedValue(['AgentBook']);
     mockGetEntries.mockResolvedValue({ AgentBook: [{ uid: 1, comment: '角色', enabled: true, type: 'selective' }] });
-    mockSaveSkill.mockResolvedValue({ updated: true, entry: { uid: 1, comment: '角色 SKILL' } });
+    mockSaveSkill.mockResolvedValue({ updated: true, entry: { uid: 1, comment: withSkill('角色') } });
     const c = await getComposable(notify);
     await c.loadEntries();
 
@@ -197,7 +202,7 @@ describe('useAgentWorldbookEntries', () => {
     const notify = vi.fn(async () => false);
     mockResolveScope.mockResolvedValue(['AgentBook']);
     mockGetEntries.mockResolvedValue({ AgentBook: [{ uid: 1, comment: '角色', enabled: true, type: 'selective' }] });
-    mockSaveSkill.mockResolvedValue({ updated: true, entry: { uid: 1, comment: '角色 SKILL' } });
+    mockSaveSkill.mockResolvedValue({ updated: true, entry: { uid: 1, comment: withSkill('角色') } });
     const c = await getComposable(notify);
     await c.loadEntries();
 
@@ -205,5 +210,22 @@ describe('useAgentWorldbookEntries', () => {
 
     expect(notify).toHaveBeenCalledTimes(1);
     expect(c.groups.value[0].entries[0]).toMatchObject({ hasSkill: true, label: '角色' });
+  });
+
+  it('含 takeover meta 的条目渲染为纯净标题且不泄漏元数据', async () => {
+    mockResolveScope.mockResolvedValue(['AgentBook']);
+    mockSnapshot.mockReturnValue({ active: true, books: { AgentBook: [{ uid: 5, previousEnabled: true, previousKeys: ['钥匙'], previousType: 'selective' }] } });
+    const takeoverBlock = '<!-- ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\n{"version":1,"kind":"agent_worldbook_takeover","selectionSignature":"sig","createdAt":1,"previousEnabled":true}\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END -->';
+    mockGetEntries.mockResolvedValue({ AgentBook: [
+      { uid: 5, comment: `已接管条目\n\n${takeoverBlock}`, enabled: false, type: 'selective', keys: ['钥匙'] },
+    ] });
+    const c = await getComposable();
+
+    await c.loadEntries();
+
+    const entry = c.groups.value[0].entries[0];
+    expect(entry.label).toBe('已接管条目');
+    expect(entry.label).not.toContain('ACU_AGENT_WORLDBOOK_TAKEOVER_META');
+    expect(entry.label).not.toContain('\n');
   });
 });

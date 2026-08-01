@@ -11,6 +11,12 @@ import { persistTavernSettings_ACU } from '../../data/storage/tavern-storage';
 import { hashUserInput_ACU, logWarn_ACU } from '../../shared/utils';
 import { buildAgentWorldbookSnapshotSelectionSignature_ACU } from '../../shared/agent-worldbook-snapshot';
 import {
+  AGENT_TAKEOVER_META_END_ACU,
+  AGENT_TAKEOVER_META_START_ACU,
+  createAgentTakeoverMetaPattern_ACU,
+  stripAgentTakeoverMetaBlockStrict_ACU,
+} from '../../shared/agent-worldbook-comment';
+import {
   getAgentWorldbookSnapshotRevision_ACU,
   getAgentWorldbookSnapshotState_ACU,
   setAgentWorldbookSnapshotState_ACU,
@@ -70,9 +76,6 @@ export interface AgentWorldbookRestoreResult_ACU {
 
 export const AGENT_WORLDBOOK_SNAPSHOT_COMMENT_ACU = 'TavernDB-ACU-AgentWorldbookSnapshot';
 export const AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU = 'TavernDB-ACU-AgentFinalGenerationGreenlights';
-const AGENT_TAKEOVER_META_START_ACU = 'ACU_AGENT_WORLDBOOK_TAKEOVER_META_START';
-const AGENT_TAKEOVER_META_END_ACU = 'ACU_AGENT_WORLDBOOK_TAKEOVER_META_END';
-const AGENT_TAKEOVER_META_PATTERN_ACU = /\n?<!--\s*ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\s*\n([\s\S]*?)\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END\s*-->\n?/g;
 
 interface AgentWorldbookTakeoverMeta_ACU {
   version: 1;
@@ -316,26 +319,16 @@ function buildInactiveSnapshot_ACU(selectionSignature = ''): AgentWorldbookContr
 }
 
 function stripTakeoverMetaBlock_ACU(comment: unknown): string {
-  return normalizeCommentText_ACU(comment)
-    .replace(AGENT_TAKEOVER_META_PATTERN_ACU, (block, rawMeta: string) => {
-      try {
-        const meta = JSON.parse(rawMeta.trim()) as Record<string, unknown>;
-        return meta.version === 1 && meta.kind === 'agent_worldbook_takeover' ? '\n' : block;
-      } catch {
-        return block;
-      }
-    })
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return stripAgentTakeoverMetaBlockStrict_ACU(comment);
 }
 
 function hasTakeoverMetaBlock_ACU(comment: unknown): boolean {
-  return new RegExp(AGENT_TAKEOVER_META_PATTERN_ACU.source).test(normalizeCommentText_ACU(comment));
+  return new RegExp(createAgentTakeoverMetaPattern_ACU().source).test(normalizeCommentText_ACU(comment));
 }
 
 function hasUnsupportedTakeoverMetaBlock_ACU(comment: unknown): boolean {
   const text = normalizeCommentText_ACU(comment);
-  const pattern = new RegExp(AGENT_TAKEOVER_META_PATTERN_ACU.source, 'g');
+  const pattern = createAgentTakeoverMetaPattern_ACU();
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text))) {
     try {
@@ -364,7 +357,7 @@ function doesTakeoverSnapshotCommentHashMatch_ACU(snapshotCommentHash: string | 
 
 function parseTakeoverMetaFromComment_ACU(comment: unknown): AgentWorldbookTakeoverMeta_ACU | null {
   const text = normalizeCommentText_ACU(comment);
-  const pattern = new RegExp(AGENT_TAKEOVER_META_PATTERN_ACU.source, 'g');
+  const pattern = createAgentTakeoverMetaPattern_ACU();
   const match = pattern.exec(text);
   if (!match) return null;
   try {

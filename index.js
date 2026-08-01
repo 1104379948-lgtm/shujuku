@@ -52922,6 +52922,82 @@ $CONTENT
             && snapshot.selectionSignature === buildAgentWorldbookSnapshotSelectionSignature_ACU(bookNames);
     }
 
+    /**
+     * Agent 世界书 comment 元数据标记/剥离的单一出口。
+     *
+     * 本模块是跨 service 与 presentation-v2 两层的纯字符串工具：
+     * - service 层：takeover / snapshot-restore / skill-meta / decision-engine
+     * - presentation 层：三个条目列表 composable 的 label 派生
+     *
+     * 约束（防止回归）：
+     * 1. 本模块除 TS 类型外不得 import 任何项目内模块，保持零依赖。
+     * 2. strict / loose / skill 三个剥离函数必须与迁移前逐字符等价（含空白归一化），
+     *    任何改动都会破坏 commentHash 比对与快照恢复的一致性。
+     * 3. 单行压缩只发生在 buildWorldbookEntryDisplayLabel_ACU（展示专用），
+     *    绝不进入任何 hash 输入路径。
+     */
+    const AGENT_TAKEOVER_META_START_ACU = 'ACU_AGENT_WORLDBOOK_TAKEOVER_META_START';
+    const AGENT_TAKEOVER_META_END_ACU = 'ACU_AGENT_WORLDBOOK_TAKEOVER_META_END';
+    const ACU_SKILL_META_START_ACU = 'ACU_SKILL_META_START';
+    const ACU_SKILL_META_END_ACU = 'ACU_SKILL_META_END';
+    /**
+     * 工厂而非共享常量实例：带 g 标志的 RegExp 共享 lastIndex，
+     * 跨调用 exec/test 会漏匹配。每次返回新实例避免污染。
+     */
+    function createAgentTakeoverMetaPattern_ACU() {
+        return /\n?<!--\s*ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\s*\n([\s\S]*?)\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END\s*-->\n?/g;
+    }
+    function createSkillMetaPattern_ACU() {
+        return /\n?<!--\s*ACU_SKILL_META_START\s*\n([\s\S]*?)\nACU_SKILL_META_END\s*-->\n?/g;
+    }
+    function normalizeCommentText_ACU$2(comment) {
+        return typeof comment === 'string' ? comment : '';
+    }
+    /**
+     * 严格剥离：仅移除 version===1 且 kind==='agent_worldbook_takeover' 的块。
+     * 未知版本 / 非 JSON 块原样保留（恢复路径需识别为不支持并跳过）。
+     * 逐字照搬自 agent-worldbook-takeover.ts 的 stripTakeoverMetaBlock_ACU。
+     */
+    function stripAgentTakeoverMetaBlockStrict_ACU(comment) {
+        return normalizeCommentText_ACU$2(comment)
+            .replace(createAgentTakeoverMetaPattern_ACU(), (block, rawMeta) => {
+            try {
+                const meta = JSON.parse(rawMeta.trim());
+                return meta.version === 1 && meta.kind === 'agent_worldbook_takeover' ? '\n' : block;
+            }
+            catch {
+                return block;
+            }
+        })
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+    /**
+     * 宽松剥离：不校验 version/kind，清除任何残留 takeover 块（含 {} 等非法 meta）。
+     * 逐字照搬自 agent-worldbook-snapshot-restore.ts 的 stripTakeoverMeta_ACU。
+     * 与 strict 版行为相反，禁止合并。
+     */
+    function stripAgentTakeoverMetaBlockLoose_ACU(comment) {
+        return String(comment || '').replace(createAgentTakeoverMetaPattern_ACU(), '\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+    /** 剥离 Skill meta 块（不校验内容）。逐字照搬自 agent-worldbook-skill-meta.ts 的 stripWorldbookSkillMetaBlock_ACU。 */
+    function stripWorldbookSkillMetaBlockCore_ACU(comment) {
+        return normalizeCommentText_ACU$2(comment)
+            .replace(createSkillMetaPattern_ACU(), '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+    /**
+     * 展示专用标题：strict 剥 takeover → 剥 Skill → 压成单行 → 空则回退 `条目 ${uid}`。
+     * 注意：单行压缩只在这里，绝不进入任何 hash 输入路径。
+     */
+    function buildWorldbookEntryDisplayLabel_ACU(comment, uid) {
+        const cleaned = stripWorldbookSkillMetaBlockCore_ACU(stripAgentTakeoverMetaBlockStrict_ACU(comment))
+            .replace(/\s+/g, ' ')
+            .trim();
+        return cleaned || `条目 ${uid}`;
+    }
+
     let cachedAgentWorldbookSnapshot_ACU = {
         active: false,
         selectionSignature: '',
@@ -52959,8 +53035,6 @@ $CONTENT
         return Math.max(0, base);
     }
 
-    const TAKEOVER_META_PATTERN_ACU = /\n?<!--\s*ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\s*\n[\s\S]*?\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END\s*-->\n?/g;
-    const SKILL_META_PATTERN_ACU = /\n?<!--\s*ACU_SKILL_META_START\s*\n[\s\S]*?\nACU_SKILL_META_END\s*-->\n?/g;
     function isSamePatchValue_ACU(left, right) {
         return JSON.stringify(left) === JSON.stringify(right);
     }
@@ -53028,10 +53102,10 @@ $CONTENT
         return value !== null && value !== undefined && String(value).trim() !== '';
     }
     function stripTakeoverMeta_ACU(comment) {
-        return String(comment || '').replace(TAKEOVER_META_PATTERN_ACU, '\n').replace(/\n{3,}/g, '\n\n').trim();
+        return stripAgentTakeoverMetaBlockLoose_ACU(comment);
     }
     function comparableComment_ACU(comment) {
-        return stripTakeoverMeta_ACU(comment).replace(SKILL_META_PATTERN_ACU, '\n').replace(/\n{3,}/g, '\n\n').trim();
+        return stripTakeoverMeta_ACU(comment).replace(createSkillMetaPattern_ACU(), '\n').replace(/\n{3,}/g, '\n\n').trim();
     }
     function isCommentHashMatched_ACU(snapshotHash, currentComment) {
         if (!snapshotHash)
@@ -54290,9 +54364,6 @@ $CONTENT
         return deleted;
     }
 
-    const ACU_SKILL_META_START_ACU = 'ACU_SKILL_META_START';
-    const ACU_SKILL_META_END_ACU = 'ACU_SKILL_META_END';
-    const SKILL_META_BLOCK_PATTERN_ACU = /\n?<!--\s*ACU_SKILL_META_START\s*\n([\s\S]*?)\nACU_SKILL_META_END\s*-->\n?/g;
     function normalizeCommentText_ACU$1(comment) {
         return typeof comment === 'string' ? comment : '';
     }
@@ -54309,14 +54380,11 @@ $CONTENT
         return value === 'manual' || value === 'agent-skillify';
     }
     function stripWorldbookSkillMetaBlock_ACU(comment) {
-        return normalizeCommentText_ACU$1(comment)
-            .replace(SKILL_META_BLOCK_PATTERN_ACU, '\n')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
+        return stripWorldbookSkillMetaBlockCore_ACU(comment);
     }
     function parseWorldbookSkillMetaFromComment_ACU(comment) {
         const text = normalizeCommentText_ACU$1(comment);
-        const pattern = new RegExp(SKILL_META_BLOCK_PATTERN_ACU.source, 'g');
+        const pattern = createSkillMetaPattern_ACU();
         const match = pattern.exec(text);
         if (!match)
             return null;
@@ -54417,7 +54485,7 @@ $CONTENT
             bookName,
             uid,
             comment,
-            label: stripWorldbookSkillMetaBlock_ACU(comment).trim() || `条目 ${uid}`,
+            label: buildWorldbookEntryDisplayLabel_ACU(comment, uid),
             skillMeta,
         };
     }
@@ -54783,9 +54851,6 @@ $CONTENT
 
     const AGENT_WORLDBOOK_SNAPSHOT_COMMENT_ACU = 'TavernDB-ACU-AgentWorldbookSnapshot';
     const AGENT_FINAL_GENERATION_GREENLIGHT_COMMENT_ACU = 'TavernDB-ACU-AgentFinalGenerationGreenlights';
-    const AGENT_TAKEOVER_META_START_ACU = 'ACU_AGENT_WORLDBOOK_TAKEOVER_META_START';
-    const AGENT_TAKEOVER_META_END_ACU = 'ACU_AGENT_WORLDBOOK_TAKEOVER_META_END';
-    const AGENT_TAKEOVER_META_PATTERN_ACU = /\n?<!--\s*ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\s*\n([\s\S]*?)\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END\s*-->\n?/g;
     function normalizeBookNamesForTakeover_ACU(bookNames) {
         if (!Array.isArray(bookNames))
             return [];
@@ -54989,25 +55054,14 @@ $CONTENT
         return { active: false, selectionSignature, createdAt: 0, books: {} };
     }
     function stripTakeoverMetaBlock_ACU(comment) {
-        return normalizeCommentText_ACU(comment)
-            .replace(AGENT_TAKEOVER_META_PATTERN_ACU, (block, rawMeta) => {
-            try {
-                const meta = JSON.parse(rawMeta.trim());
-                return meta.version === 1 && meta.kind === 'agent_worldbook_takeover' ? '\n' : block;
-            }
-            catch {
-                return block;
-            }
-        })
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
+        return stripAgentTakeoverMetaBlockStrict_ACU(comment);
     }
     function hasTakeoverMetaBlock_ACU(comment) {
-        return new RegExp(AGENT_TAKEOVER_META_PATTERN_ACU.source).test(normalizeCommentText_ACU(comment));
+        return new RegExp(createAgentTakeoverMetaPattern_ACU().source).test(normalizeCommentText_ACU(comment));
     }
     function hasUnsupportedTakeoverMetaBlock_ACU(comment) {
         const text = normalizeCommentText_ACU(comment);
-        const pattern = new RegExp(AGENT_TAKEOVER_META_PATTERN_ACU.source, 'g');
+        const pattern = createAgentTakeoverMetaPattern_ACU();
         let match;
         while ((match = pattern.exec(text))) {
             try {
@@ -55035,7 +55089,7 @@ $CONTENT
     }
     function parseTakeoverMetaFromComment_ACU(comment) {
         const text = normalizeCommentText_ACU(comment);
-        const pattern = new RegExp(AGENT_TAKEOVER_META_PATTERN_ACU.source, 'g');
+        const pattern = createAgentTakeoverMetaPattern_ACU();
         const match = pattern.exec(text);
         if (!match)
             return null;
@@ -57916,7 +57970,7 @@ $CONTENT
         return !!meta && (!!String(meta.description || '').trim() || !!String(meta.triggerWhen || '').trim());
     }
     function buildFallbackWorldbookSummaryText_ACU(entry, comment, keys) {
-        const normalizedComment = stripWorldbookSkillMetaBlock_ACU(comment).trim();
+        const normalizedComment = stripWorldbookSkillMetaBlock_ACU(stripAgentTakeoverMetaBlockStrict_ACU(comment)).trim();
         const name = String(entry?.name || '').trim();
         const description = normalizedComment || name || keys.join('、') || '未命名世界书条目';
         const triggerWhen = keys.length > 0
@@ -137871,8 +137925,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-wb-entries[data-v-21530e23] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-21530e23] {\r\n  padding: 8px 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entries__status--error[data-v-21530e23] { color: var(--acu-danger);\n}\n.acu-v2-wb-entry-item[data-v-21530e23] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 6px 8px;\r\n  align-items: center;\r\n  padding: 3px 10px;\r\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-21530e23]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-21530e23] {\r\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-21530e23] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-21530e23] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-21530e23] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-21530e23] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-21530e23] {\r\n  grid-column: 1 / -1;\r\n  display: grid;\r\n  gap: 8px;\r\n  margin: 4px 0 6px 24px;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-21530e23] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-21530e23] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-21530e23] {\r\n    justify-content: flex-start;\r\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-21530e23] {\r\n    margin-left: 0;\n}\n}\r\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-21530e23");
-    var WorldbookEntryList_vue_vue_type_style_index_0_scoped_21530e23_lang = null;
+    injectSfcStyle("\n.acu-v2-wb-entries[data-v-c56bd63a] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-c56bd63a] {\r\n  padding: 8px 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entries__status--error[data-v-c56bd63a] { color: var(--acu-danger);\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 6px 8px;\r\n  align-items: center;\r\n  padding: 3px 10px;\r\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-c56bd63a] {\r\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-c56bd63a] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\r\n\r\n/* 剧情页 / 填表页走 AcuCheckbox 分支；:deep 把夹断锁在本列表内，避免改动全局组件 */\n.acu-v2-wb-entry-item[data-v-c56bd63a] .acu-checkbox__label {\r\n  min-width: 0;\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n  grid-column: 1 / -1;\r\n  display: grid;\r\n  gap: 8px;\r\n  margin: 4px 0 6px 24px;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-c56bd63a] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n    justify-content: flex-start;\r\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n    margin-left: 0;\n}\n}\r\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-c56bd63a");
+    var WorldbookEntryList_vue_vue_type_style_index_0_scoped_c56bd63a_lang = null;
 
     const _hoisted_1$t = { class: "acu-v2-wb-entries" };
     const _hoisted_2$o = {
@@ -137888,10 +137942,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 2,
 	class: "acu-v2-wb-entries__status"
     };
-    const _hoisted_5$f = {
-	key: 1,
-	class: "acu-v2-wb-entry-item__label"
-    };
+    const _hoisted_5$f = ["title"];
     const _hoisted_6$e = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__actions"
@@ -137961,20 +138012,20 @@ Expected function or array of functions, received type ${typeof value}.`
 									key: 0,
 									"model-value": entry.checked,
 									label: entry.label,
+									title: entry.label,
 									disabled: entry.disabled,
 									"onUpdate:modelValue": ($event) => $setup.onToggle(entry.bookName, entry.uid, $event)
 								}, null, 8, [
 									"model-value",
 									"label",
+									"title",
 									"disabled",
 									"onUpdate:modelValue"
-								])) : (openBlock(), createElementBlock(
-									"div",
-									_hoisted_5$f,
-									toDisplayString(entry.label),
-									1
-									/* TEXT */
-								)),
+								])) : (openBlock(), createElementBlock("div", {
+									key: 1,
+									class: "acu-v2-wb-entry-item__label",
+									title: entry.label
+								}, toDisplayString(entry.label), 9, _hoisted_5$f)),
 								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$e, [
 									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$c, "Skill")) : createCommentVNode("v-if", true),
 									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$c, "常量")) : createCommentVNode("v-if", true),
@@ -138073,7 +138124,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* KEYED_FRAGMENT */
 	))]);
     }
-    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-21530e23"]]);
+    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-c56bd63a"]]);
 
     var _sfc_main$s = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryToolbar',
@@ -138583,7 +138634,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         return {
                             uid: entry.uid,
                             bookName,
-                            label: stripWorldbookSkillMetaBlock_ACU(comment).trim() || `条目 ${entry.uid}`,
+                            label: buildWorldbookEntryDisplayLabel_ACU(comment, entry.uid),
                             comment,
                             skillMeta,
                             hasSkill: !!skillMeta,
@@ -139171,9 +139222,7 @@ Expected function or array of functions, received type ${typeof value}.`
      * 持久化到 plotWorldbookConfig.enabledEntries。
      */
     function buildWorldbookEntryLabel_ACU(entry) {
-        const rawComment = String(entry?.comment || entry?.name || '');
-        const label = stripWorldbookSkillMetaBlock_ACU(rawComment).trim();
-        return label || `条目 ${entry?.uid}`;
+        return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
     }
     function ensurePlotWorldbookConfig() {
         if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object') {
@@ -140174,7 +140223,7 @@ Expected function or array of functions, received type ${typeof value}.`
     var WorldbookAgentControlBar = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-b1d37101"]]);
 
     function getEntryLabel_ACU(entry) {
-        return stripWorldbookSkillMetaBlock_ACU(String(entry?.comment || entry?.name || '')).trim() || `条目 ${entry?.uid}`;
+        return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
     }
     function selectionKey_ACU(bookName, uid) {
         return `${bookName}\u0000${String(uid)}`;
@@ -140294,7 +140343,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         return {
                             ...entry,
                             comment,
-                            label: stripWorldbookSkillMetaBlock_ACU(comment).trim() || `条目 ${uid}`,
+                            label: buildWorldbookEntryDisplayLabel_ACU(comment, uid),
                             skillMeta,
                             hasSkill: !!skillMeta,
                         };

@@ -143,4 +143,26 @@ describe('resolveAgentWorldbookFilterAvailability_ACU', () => {
       source: 'agent_runtime', validationPolicy: 'trusted_direct', runId: 'plot-agent-meta-test', context: readContext,
     }));
   });
+
+  it('读取 Skill 元数据时 label 剥离 takeover meta，保持纯净标题', async () => {
+    const takeoverBlock = '<!-- ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\n{"version":1,"kind":"agent_worldbook_takeover","selectionSignature":"sig","createdAt":1,"previousEnabled":true}\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END -->';
+    mockEntriesByBook.clear();
+    mockSetLorebookEntries.mockClear();
+    vi.mocked(readAgentWorldbookControlFromWorldbooks_ACU).mockReset();
+    vi.mocked(resolveAgentWorldbookScopeBookNames_ACU).mockReset();
+    vi.mocked(resolveAgentWorldbookScopeBookNames_ACU).mockResolvedValue(['角色A世界书']);
+    vi.mocked(readAgentWorldbookControlFromWorldbooks_ACU).mockResolvedValue({
+      control: { mode: 'agent' }, source: 'worldbook', bookName: '角色A世界书', duplicateCount: 0, writableBookName: '角色A世界书',
+    } as any);
+    mockEntriesByBook.set('角色A世界书', [
+      { uid: 1, comment: `条目正文\n\n${skillBlock}\n\n${takeoverBlock}`, enabled: true },
+    ]);
+
+    const result = await resolveAgentWorldbookFilterAvailability_ACU();
+
+    expect(result.skillCount).toBe(1);
+    expect(result.skillMetas[0].label).toBe('条目正文');
+    expect(result.skillMetas[0].label).not.toContain('ACU_AGENT_WORLDBOOK_TAKEOVER_META');
+    expect(result.skillMetas[0].label).not.toContain('ACU_SKILL_META');
+  });
 });

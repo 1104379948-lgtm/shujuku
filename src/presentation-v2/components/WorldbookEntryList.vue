@@ -35,10 +35,11 @@
             v-if="showEntryToggle"
             :model-value="entry.checked"
             :label="entry.label"
+            :title="entry.label"
             :disabled="entry.disabled"
             @update:model-value="onToggle(entry.bookName, entry.uid, $event)"
           />
-          <div v-else class="acu-v2-wb-entry-item__label">{{ entry.label }}</div>
+          <div v-else class="acu-v2-wb-entry-item__label" :title="entry.label">{{ entry.label }}</div>
           <div v-if="showSkillifyControls || entry.isConstant || (showAgentTakeoverState && formatAgentTakeoverState(entry))" class="acu-v2-wb-entry-item__actions">
             <span v-if="showSkillifyControls && entry.skillMeta" class="acu-v2-wb-entry-item__skill-badge">Skill</span>
             <span v-if="entry.isConstant" class="acu-v2-wb-entry-item__state-badge">常量</span>
@@ -244,6 +245,21 @@ function saveSkill(entry: WorldbookEntryDisplayItem_ACU): void {
   min-width: 0;
   color: var(--acu-text-1);
   font-size: var(--acu-font-size-body, 12px);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 剧情页 / 填表页走 AcuCheckbox 分支；:deep 把夹断锁在本列表内，避免改动全局组件 */
+.acu-v2-wb-entry-item :deep(.acu-checkbox__label) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .acu-v2-wb-entry-item__skill-badge {

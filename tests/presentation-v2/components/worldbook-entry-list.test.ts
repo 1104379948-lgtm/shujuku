@@ -123,4 +123,31 @@ describe('WorldbookEntryList', () => {
 
     expect(toggleSkillify).toHaveBeenCalledWith('CharBook', 1, true);
   });
+
+  it('label 元素带完整文本的 title 悬浮属性（长文本兜底）', async () => {
+    const longLabel = '这是一段非常长的条目标题'.repeat(10);
+    const groups = [
+      {
+        bookName: 'CharBook',
+        expanded: true,
+        entries: [
+          { uid: 1, bookName: 'CharBook', label: longLabel, checked: true, skillifySelected: false, skillifySelectable: true, disabled: false, hasSkill: false, agentTakeoverState: 'native' },
+        ],
+      },
+    ];
+    const wrapper = defineComponent({
+      setup() {
+        return () => h(WorldbookEntryList, { groups, filter: '', loading: false, showEntryToggle: false });
+      },
+    });
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const app = createApp(wrapper);
+    app.mount(el);
+    mounted.push({ app, el });
+
+    const label = el.querySelector('.acu-v2-wb-entry-item__label');
+    expect(label?.getAttribute('title')).toBe(longLabel);
+    expect(label?.textContent).toBe(longLabel);
+  });
 });

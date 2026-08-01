@@ -208,4 +208,21 @@ describe('useFormFillWorldbookEntries', () => {
     expect(c.status.value).toBe('error');
     expect(c.error.value).toBe('刷新 snapshot 失败');
   });
+
+  it('含 takeover meta 的条目渲染为纯净标题且不泄漏元数据', async () => {
+    const takeoverBlock = '<!-- ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\n{"version":1,"kind":"agent_worldbook_takeover","selectionSignature":"sig","createdAt":1,"previousEnabled":true}\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END -->';
+    mockGetEntries.mockResolvedValue({
+      'CharBook': [
+        { uid: 1, comment: `受控条目\n\n${takeoverBlock}`, name: `受控条目\n\n${takeoverBlock}`, enabled: false, type: 'selective', keys: ['钥匙'] },
+      ],
+    });
+
+    const c = await getComposable();
+    await c.loadEntries(['CharBook']);
+
+    const entry = c.groups.value[0].entries[0];
+    expect(entry.label).toBe('受控条目');
+    expect(entry.label).not.toContain('ACU_AGENT_WORLDBOOK_TAKEOVER_META');
+    expect(entry.label).not.toContain('\n');
+  });
 });

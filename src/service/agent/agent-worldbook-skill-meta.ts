@@ -12,11 +12,15 @@ import {
   resolveAgentWorldbookScopeBookNames_ACU,
   type AgentWorldbookConfigSource_ACU,
 } from './agent-worldbook-config-meta';
+import {
+  ACU_SKILL_META_END_ACU,
+  ACU_SKILL_META_START_ACU,
+  buildWorldbookEntryDisplayLabel_ACU,
+  createSkillMetaPattern_ACU,
+  stripWorldbookSkillMetaBlockCore_ACU,
+} from '../../shared/agent-worldbook-comment';
 
-export const ACU_SKILL_META_START_ACU = 'ACU_SKILL_META_START';
-export const ACU_SKILL_META_END_ACU = 'ACU_SKILL_META_END';
-
-const SKILL_META_BLOCK_PATTERN_ACU = /\n?<!--\s*ACU_SKILL_META_START\s*\n([\s\S]*?)\nACU_SKILL_META_END\s*-->\n?/g;
+export { ACU_SKILL_META_START_ACU, ACU_SKILL_META_END_ACU };
 
 export interface WorldbookSkillMetaSaveResult_ACU {
   updated: boolean;
@@ -72,15 +76,12 @@ function isValidUpdatedBy_ACU(value: unknown): value is WorldbookSkillMetaUpdate
 }
 
 export function stripWorldbookSkillMetaBlock_ACU(comment: unknown): string {
-  return normalizeCommentText_ACU(comment)
-    .replace(SKILL_META_BLOCK_PATTERN_ACU, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return stripWorldbookSkillMetaBlockCore_ACU(comment);
 }
 
 export function parseWorldbookSkillMetaFromComment_ACU(comment: unknown): WorldbookSkillMeta_ACU | null {
   const text = normalizeCommentText_ACU(comment);
-  const pattern = new RegExp(SKILL_META_BLOCK_PATTERN_ACU.source, 'g');
+  const pattern = createSkillMetaPattern_ACU();
   const match = pattern.exec(text);
   if (!match) return null;
 
@@ -200,7 +201,7 @@ function buildWorldbookSkillMetaReadResult_ACU(
     bookName,
     uid,
     comment,
-    label: stripWorldbookSkillMetaBlock_ACU(comment).trim() || `条目 ${uid}`,
+    label: buildWorldbookEntryDisplayLabel_ACU(comment, uid),
     skillMeta,
   };
 }

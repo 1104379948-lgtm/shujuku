@@ -2,9 +2,11 @@ import type { AgentWorldbookControlSnapshot_ACU } from '../../shared/models/agen
 import { getLorebookEntries_ACU, setLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
 import { hashUserInput_ACU, logWarn_ACU } from '../../shared/utils';
 import { buildAgentWorldbookSnapshotSelectionSignature_ACU } from '../../shared/agent-worldbook-snapshot';
-
-const TAKEOVER_META_PATTERN_ACU = /\n?<!--\s*ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\s*\n[\s\S]*?\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END\s*-->\n?/g;
-const SKILL_META_PATTERN_ACU = /\n?<!--\s*ACU_SKILL_META_START\s*\n[\s\S]*?\nACU_SKILL_META_END\s*-->\n?/g;
+import {
+  createAgentTakeoverMetaPattern_ACU,
+  createSkillMetaPattern_ACU,
+  stripAgentTakeoverMetaBlockLoose_ACU,
+} from '../../shared/agent-worldbook-comment';
 
 export interface AgentWorldbookSnapshotRestoreResult_ACU {
   restored: number;
@@ -90,11 +92,11 @@ function hasValidUid_ACU(value: unknown): value is string | number {
 }
 
 function stripTakeoverMeta_ACU(comment: unknown): string {
-  return String(comment || '').replace(TAKEOVER_META_PATTERN_ACU, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return stripAgentTakeoverMetaBlockLoose_ACU(comment);
 }
 
 function comparableComment_ACU(comment: unknown): string {
-  return stripTakeoverMeta_ACU(comment).replace(SKILL_META_PATTERN_ACU, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return stripTakeoverMeta_ACU(comment).replace(createSkillMetaPattern_ACU(), '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function isCommentHashMatched_ACU(snapshotHash: string | undefined, currentComment: unknown): boolean {

@@ -247,6 +247,37 @@ describe('runAgentDecisionForPlot_ACU', () => {
     expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
   });
 
+  it('fallback 摘要剥离 takeover meta，不把接管元数据泄漏进提示词', async () => {
+    const takeoverBlock = '<!-- ACU_AGENT_WORLDBOOK_TAKEOVER_META_START\n{"version":1,"kind":"agent_worldbook_takeover","selectionSignature":"sig","createdAt":1,"previousEnabled":true}\nACU_AGENT_WORLDBOOK_TAKEOVER_META_END -->';
+    mockGetLorebookEntries.mockResolvedValueOnce([
+      { uid: 12, comment: `陈默人物档案\n\n${takeoverBlock}`, keys: ['陈默'], content: '陈默内容', enabled: true },
+    ]);
+    mockCallAIWithPreset.mockResolvedValue(JSON.stringify({
+      taskPlan: [{ taskId: 'task_id', run: true, effectiveStage: 1, effectiveOrder: 0 }],
+      plotGreenlights: {},
+      finalGenerationGreenlights: [{ entries: [1], reason: '最终生成' }],
+      fallbackMode: false,
+      reason: 'ok',
+    }));
+
+    const result = await runAgentDecisionForPlot_ACU({
+      plotSettings: { agentWorldbookControl: { enabled: true, mode: 'agent' } },
+      userMessage: '敲门',
+      sharedContext: {},
+      enabledTasks: [{ id: 'task id', name: '默认任务', description: '需要判断的剧情任务', enabled: true, promptGroup: { messages: [] } }],
+    });
+
+    expect(result.active).toBe(true);
+    expect(result.finalGenerationGreenlights).toEqual([{ bookName: '剧情书', uid: 12, reason: '最终生成' }]);
+    const promptText = mockCallAIWithPreset.mock.calls[0][0].map((message: any) => String(message.content || '')).join('\n');
+    expect(promptText).toContain('陈默人物档案');
+    expect(promptText).toContain('关键词：陈默');
+    expect(promptText).not.toContain('ACU_AGENT_WORLDBOOK_TAKEOVER_META');
+    expect(promptText).not.toContain('agent_worldbook_takeover');
+    expect(promptText).not.toContain('"version":1');
+    expect(mockCallAIWithPreset).toHaveBeenCalledTimes(1);
+  });
+
   it('uses user-layer plot records from recent context instead of independent plot context messages', async () => {
     mockCallAIWithPreset.mockResolvedValue(JSON.stringify({
       taskPlan: [{ taskId: 'selectable_task', run: true, effectiveStage: 1, effectiveOrder: 0 }],

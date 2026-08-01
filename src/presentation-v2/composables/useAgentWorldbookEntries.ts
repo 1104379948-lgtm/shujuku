@@ -10,13 +10,13 @@ import {
   deleteWorldbookEntrySkillMeta_ACU,
   parseWorldbookSkillMetaFromComment_ACU,
   saveWorldbookEntrySkillMeta_ACU,
-  stripWorldbookSkillMetaBlock_ACU,
   type WorldbookSkillMeta_ACU,
   type WorldbookSkillMetaUpdatedBy_ACU,
 } from '../../service/agent/agent-worldbook-skill-meta';
 import { isWorldbookEntrySkillifyCandidate_ACU } from '../../service/agent/agent-skillify-service';
 import { resolveAgentWorldbookScopeBookNames_ACU } from '../../service/agent/agent-worldbook-config-meta';
 import { logError_ACU } from '../../shared/utils';
+import { buildWorldbookEntryDisplayLabel_ACU } from '../../shared/agent-worldbook-comment';
 import type {
   WorldbookEntryDisplayGroup_ACU,
   WorldbookEntryDisplayItem_ACU,
@@ -32,7 +32,7 @@ export type AgentWorldbookEntryGroup = WorldbookEntryDisplayGroup_ACU;
 export type AgentWorldbookSkillifySelectedEntry = WorldbookSkillifySelectedEntry_ACU;
 
 function getEntryLabel_ACU(entry: any): string {
-  return stripWorldbookSkillMetaBlock_ACU(String(entry?.comment || entry?.name || '')).trim() || `条目 ${entry?.uid}`;
+  return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
 }
 
 function selectionKey_ACU(bookName: string, uid: number): string {
@@ -166,7 +166,7 @@ export function useAgentWorldbookEntries(options: UseAgentWorldbookEntriesOption
           return {
             ...entry,
             comment,
-            label: stripWorldbookSkillMetaBlock_ACU(comment).trim() || `条目 ${uid}`,
+            label: buildWorldbookEntryDisplayLabel_ACU(comment, uid),
             skillMeta,
             hasSkill: !!skillMeta,
           };

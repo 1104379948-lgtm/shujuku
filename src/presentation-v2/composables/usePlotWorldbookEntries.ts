@@ -12,9 +12,9 @@ import { saveSettings_ACU } from '../../service/settings/settings-service';
 import { refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU } from '../../service/agent/agent-worldbook-takeover';
 import {
   parseWorldbookSkillMetaFromComment_ACU,
-  stripWorldbookSkillMetaBlock_ACU,
 } from '../../service/agent/agent-worldbook-skill-meta';
 import { logError_ACU } from '../../shared/utils';
+import { buildWorldbookEntryDisplayLabel_ACU } from '../../shared/agent-worldbook-comment';
 import {
   buildWorldbookEntryDisplayView_ACU,
   buildWorldbookSnapshotEntryIndexByBook_ACU,
@@ -34,9 +34,7 @@ export type WorldbookEntryGroup = WorldbookEntryDisplayGroup_ACU;
 export type EntryLoadStatus = 'idle' | 'loading' | 'success' | 'error';
 
 function buildWorldbookEntryLabel_ACU(entry: any): string {
-  const rawComment = String(entry?.comment || entry?.name || '');
-  const label = stripWorldbookSkillMetaBlock_ACU(rawComment).trim();
-  return label || `条目 ${entry?.uid}`;
+  return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
 }
 
 function ensurePlotWorldbookConfig(): Record<string, any> {
