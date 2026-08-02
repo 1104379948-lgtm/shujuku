@@ -5,7 +5,7 @@
  */
 import { currentPlotTaskEditorId_ACU, _set_currentPlotTaskEditorId_ACU } from '../../plot/plot-state';
 import { currentChatFileIdentifier_ACU, planningGuard_ACU, settings_ACU, tempPlotToSave_ACU, _set_tempPlotToSave_ACU } from '../state-manager';
-import { getChatArray_ACU, saveChatToHost_ACU } from '../../../data/gateways/chat-gateway';
+import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
 import { saveSettings_ACU } from '../../settings/settings-service';
 import { clearCurrentChatPlotScopeState_ACU, getCurrentChatPlotScopeState_ACU } from '../../template/chat-scope';
 import { hashUserInput_ACU, logDebug_ACU, logWarn_ACU } from '../../../shared/utils';
@@ -249,54 +249,91 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
   }
 
   /**
-   * 将plot附加到对应的用户消息上。
-   * 使用用户输入文本哈希精确匹配，避免保存到错误的楼层。
+   * Plot 保存结果（如实表达已完成动作，而非“已安排一个回调”）。
+   *
+   * 语义边界（重要）：
+   * - `committed` 仅代表“已写入目标消息字段，且已请求宿主保存且未抛错”。
+   *   宿主 `saveChat()` 不提供真实落盘确认，因此本状态不代表文件已写入磁盘。
+   * - `deferred` 代表目标消息尚未出现在聊天数组中，已转入受管延迟提交（轮询），
+   *   调用方不需要也不应该等待其最终结果（见 P2 时序约束）。
+   * - `superseded` 代表本轮 pending 已被更新一轮或聊天切换取代，放弃本轮写入。
+   * - `failed` 代表本轮内容未提交；pending 保留，供下一轮入口 flush 重试。
    */
-  export async function savePlotToLatestMessage_ACU(force = false) {
+  export type PlotSaveOutcome_ACU =
+    | { status: 'committed'; targetIndex: number }
+    | { status: 'deferred'; reason: 'target_not_found_yet' }
+    | { status: 'superseded'; reason: 'newer_round_pending' | 'chat_changed' }
+    | { status: 'failed'; reason: 'host_save_failed' | 'empty_content'; error?: unknown };
+
+  /**
+   * 将 plot 附加到对应的用户消息上，并显式请求一次宿主保存。
+   * 使用用户输入哈希精确匹配，避免保存到错误的楼层。
+   *
+   * 执行语义：
+   * - 入口先做一次同步查找；命中则立即写入并提交，`await` 具备真实语义（策略 1 主路径）。
+   * - 未命中则转入受管延迟提交（轮询），立即返回 `deferred`，不阻塞调用方
+   *   （策略 2 下目标消息要等宿主 Generate 后续步骤才入数组）。
+   */
+  export async function savePlotToLatestMessage_ACU(
+    force = false,
+    options: { syncOnly?: boolean } = {},
+  ): Promise<PlotSaveOutcome_ACU> {
     logDebug_ACU('[剧情推进] [Plot] savePlotToLatestMessage_ACU 被调用');
     logDebug_ACU('[剧情推进] [Plot] planningGuard_ACU.inProgress:', planningGuard_ACU.inProgress);
     logDebug_ACU('[剧情推进] [Plot] planningGuard_ACU.ignoreNextGenerationEndedCount:', planningGuard_ACU.ignoreNextGenerationEndedCount);
     logDebug_ACU('[剧情推进] [Plot] tempPlotToSave_ACU:', tempPlotToSave_ACU ? (typeof tempPlotToSave_ACU === 'string' ? `长度=${tempPlotToSave_ACU.length}` : `content长度=${tempPlotToSave_ACU.content?.length}, hash=${tempPlotToSave_ACU.userInputHash}`) : '(空)');
 
+    // GENERATION_ENDED 驱动的调用仍保留门控；force=true 的推进内调用跳过门控。
     if (!force && planningGuard_ACU.inProgress) {
       logDebug_ACU('[剧情推进] [Plot] Planning in progress, ignoring GENERATION_ENDED.');
-      return;
+      return { status: 'deferred', reason: 'target_not_found_yet' };
     }
     if (planningGuard_ACU.ignoreNextGenerationEndedCount > 0) {
       planningGuard_ACU.ignoreNextGenerationEndedCount--;
       logDebug_ACU(`[剧情推进] [Plot] Ignoring planning-triggered GENERATION_ENDED (${planningGuard_ACU.ignoreNextGenerationEndedCount} left).`);
-      return;
+      return { status: 'deferred', reason: 'target_not_found_yet' };
     }
 
     if (!tempPlotToSave_ACU) {
       logDebug_ACU('[剧情推进] [Plot] tempPlotToSave_ACU 为空，无需保存');
-      return;
+      return { status: 'deferred', reason: 'target_not_found_yet' };
     }
 
-    let plotContent, userInputHash, userInputText;
-    if (typeof tempPlotToSave_ACU === 'string') {
-      plotContent = tempPlotToSave_ACU;
+    // ── P1: 本轮 pending 快照化（对象引用 + 内容 + taskResults + 聊天标识）──
+    // roundRef 是轮次标识：plot-task-engine.ts 每轮以新对象覆盖全局 pending，
+    // 因此对象引用可作为“这一轮”的唯一身份。若引擎侧改为复用对象，此契约失效，
+    // 需改用显式 roundId（见计划 §7 R5）。
+    const roundRef = tempPlotToSave_ACU;
+    const roundChatId = currentChatFileIdentifier_ACU || '';
+    let plotContent: string;
+    let userInputHash: string | null;
+    let userInputText: string | null;
+    let taskResults: any[] | null;
+    if (typeof roundRef === 'string') {
+      plotContent = roundRef;
       userInputHash = null;
       userInputText = null;
+      taskResults = null;
       logDebug_ACU('[剧情推进] [Plot] 检测到旧格式数据，使用回退匹配逻辑');
     } else {
-      plotContent = tempPlotToSave_ACU.content;
-      userInputHash = tempPlotToSave_ACU.userInputHash;
-      userInputText = tempPlotToSave_ACU.userInputText;
+      plotContent = roundRef?.content;
+      userInputHash = roundRef?.userInputHash ?? null;
+      userInputText = roundRef?.userInputText ?? null;
+      taskResults = Array.isArray(roundRef?.taskResults) ? roundRef.taskResults : null;
       logDebug_ACU('[剧情推进] [Plot] 使用新格式，用户输入哈希:', userInputHash, '，原始文本长度:', userInputText?.length || 0);
     }
 
     if (!plotContent) {
       logWarn_ACU('[剧情推进] [Plot] plotContent 为空，无法保存');
-      _set_tempPlotToSave_ACU(null);
-      return;
+      if (tempPlotToSave_ACU === roundRef) {
+        _set_tempPlotToSave_ACU(null);
+      }
+      return { status: 'failed', reason: 'empty_content' };
     }
 
-    const MAX_POLL_ATTEMPTS = 20;
-    const POLL_INTERVAL_MS = 100;
-    let pollAttempts = 0;
-    let target = null;
-
+    // tryFindTarget 内部策略：
+    // - 持有 userInputHash：只允许标记哈希 / 文本哈希精确匹配，禁止尾部回退（P5-T5.2）。
+    // - 无 hash（旧字符串格式）：保留原回退语义（最近一条 is_user 且无 qrf_plot）。
     const tryFindTarget = () => {
       const chat = getChatArray_ACU();
       if (!chat || chat.length === 0) {
@@ -304,88 +341,165 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
       }
 
       if (userInputHash) {
+        // 阶段1：标记身份优先（策略1 首写 / 保存失败重试）。
+        // 标记由 plot-orchestrator.ts 写到唯一目标消息上，匹配即身份成立；
+        // 不要求无 qrf_plot，以便保存失败后（字段已写、标记保留）下一轮 flush 能重新定位并重试。
         for (let i = chat.length - 1; i >= 0; i--) {
           const msg = chat[i];
-          if (msg && msg.is_user) {
-            if (msg._qrf_plot_pending_hash === userInputHash) {
-              delete msg._qrf_plot_pending_hash;
-              if (!msg.qrf_plot) {
-                logDebug_ACU(`[剧情推进] [Plot] ✓ 通过消息对象上的哈希标记找到目标用户消息（索引 ${i}，哈希: ${userInputHash}）`);
-                return { msg, index: i };
-              } else {
-                logDebug_ACU(`[剧情推进] [Plot] 索引 ${i} 的消息哈希标记匹配但已有plot，继续查找`);
-              }
-            }
-            
-            const msgText = msg.mes || '';
-            const msgHash = hashUserInput_ACU(msgText);
-            
-            if (msgHash === userInputHash) {
-              if (!msg.qrf_plot) {
-                logDebug_ACU(`[剧情推进] [Plot] ✓ 通过消息文本哈希精确匹配找到目标用户消息（索引 ${i}，哈希: ${userInputHash}）`);
-                return { msg, index: i };
-              } else {
-                logDebug_ACU(`[剧情推进] [Plot] 索引 ${i} 的消息哈希匹配但已有plot，继续查找`);
-              }
-            }
+          if (msg && msg.is_user && msg._qrf_plot_pending_hash === userInputHash) {
+            logDebug_ACU(`[剧情推进] [Plot] ✓ 通过消息对象上的哈希标记找到目标用户消息（索引 ${i}，哈希: ${userInputHash}）`);
+            return { msg, index: i };
           }
         }
-      }
-
-      for (let i = chat.length - 1; i >= 0; i--) {
-        const msg = chat[i];
-        if (msg && msg.is_user && !msg.qrf_plot) {
-          logDebug_ACU(`[剧情推进] [Plot] 使用回退逻辑找到目标用户消息于索引 ${i}`);
-          return { msg, index: i };
+        // 阶段2：无标记（策略2）时按文本哈希精确匹配，仅接受未写入过的消息，
+        // 避免把同一文本的旧楼层当作目标。
+        for (let i = chat.length - 1; i >= 0; i--) {
+          const msg = chat[i];
+          if (msg && msg.is_user && !msg.qrf_plot && hashUserInput_ACU(msg.mes || '') === userInputHash) {
+            logDebug_ACU(`[剧情推进] [Plot] ✓ 通过消息文本哈希精确匹配找到目标用户消息（索引 ${i}，哈希: ${userInputHash}）`);
+            return { msg, index: i };
+          }
+        }
+      } else {
+        // 无 hash：仅旧字符串格式走回退（最近一条 is_user 且无 qrf_plot）
+        for (let i = chat.length - 1; i >= 0; i--) {
+          const msg = chat[i];
+          if (msg && msg.is_user && !msg.qrf_plot) {
+            logDebug_ACU(`[剧情推进] [Plot] 使用回退逻辑找到目标用户消息于索引 ${i}`);
+            return { msg, index: i };
+          }
         }
       }
 
       return null;
     };
 
-    const pollForTarget = () => {
-      pollAttempts++;
-      const result = tryFindTarget();
-      
-      if (result) {
-        target = result.msg;
-        logDebug_ACU(`[剧情推进] [Plot] 在第 ${pollAttempts} 次轮询中找到目标消息`);
-        
-        target.qrf_plot = plotContent;
-        const currentPresetName = getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
-        target.qrf_plot_preset = currentPresetName;
+    // ── P3: 写入并提交（立即 / 延迟共用）──
+    const writeAndCommit = async (found: { msg: any; index: number }): Promise<PlotSaveOutcome_ACU> => {
+      const target = found.msg;
+      target.qrf_plot = plotContent;
+      const currentPresetName = getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
+      target.qrf_plot_preset = currentPresetName;
 
-        // 同时写入任务级结果映射 qrf_plot_tasks
-        if (typeof tempPlotToSave_ACU === 'object' && tempPlotToSave_ACU !== null) {
-          const taskResults = tempPlotToSave_ACU.taskResults;
-          if (Array.isArray(taskResults) && taskResults.length > 0) {
-            if (!target.qrf_plot_tasks || typeof target.qrf_plot_tasks !== 'object') {
-              target.qrf_plot_tasks = {};
-            }
-            for (const result of taskResults) {
-              if (result && result.success && result.taskId && typeof result.rawResponse === 'string' && result.rawResponse.trim()) {
-                target.qrf_plot_tasks[result.taskId] = result.rawResponse.trim();
-              }
-            }
+      // 同时写入任务级结果映射 qrf_plot_tasks（使用本轮快照，不重读全局）
+      if (Array.isArray(taskResults) && taskResults.length > 0) {
+        if (!target.qrf_plot_tasks || typeof target.qrf_plot_tasks !== 'object') {
+          target.qrf_plot_tasks = {};
+        }
+        for (const result of taskResults) {
+          if (result && result.success && result.taskId && typeof result.rawResponse === 'string' && result.rawResponse.trim()) {
+            target.qrf_plot_tasks[result.taskId] = result.rawResponse.trim();
           }
         }
+      }
 
-        logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已精确附加到目标用户消息，长度:', plotContent.length, '，预设:', currentPresetName || '(默认预设)');
-        
+      logDebug_ACU('[剧情推进] [Plot] ✓ Plot数据已精确附加到目标用户消息，长度:', plotContent.length, '，预设:', currentPresetName || '(默认预设)');
+
+      // P3-T3.1: 显式请求宿主保存；失败保留 pending、标记与内存字段，不向上游抛错（D-5）。
+      // 标记只有在宿主保存成功后才删除，否则下一轮 flush 无法重新定位目标（失败重试契约）。
+      try {
+        await saveChatToHostStrict_ACU();
+      } catch (error) {
+        logWarn_ACU('[剧情推进] [Plot] 请求宿主保存失败，保留 pending 待下一轮重试:', error);
+        return { status: 'failed', reason: 'host_save_failed', error };
+      }
+
+      // P5-T5.1: 标记在宿主保存成功后才删除（身份已消费）
+      if (target._qrf_plot_pending_hash) {
+        delete target._qrf_plot_pending_hash;
+      }
+
+      // T1.2: 仅当全局 pending 仍是本轮同一对象时才清空
+      if (tempPlotToSave_ACU === roundRef) {
         _set_tempPlotToSave_ACU(null);
-        return true;
+      } else {
+        logWarn_ACU('[剧情推进] [Plot] pending 已被其他轮次替换，跳过清空以保护新一轮数据');
+      }
+
+      return { status: 'committed', targetIndex: found.index };
+    };
+
+    // ── P2-T2.1: 入口先做一次同步查找，命中走立即提交 ──
+    const immediate = tryFindTarget();
+    if (immediate) {
+      return await writeAndCommit(immediate);
+    }
+
+    // ── 延迟提交（策略 2：目标消息待宿主加入）──
+    if (options.syncOnly) {
+      // flush 场景：只做同步查找 + 写入 + 提交，不注册定时器（P4）
+      logDebug_ACU('[剧情推进] [Plot] syncOnly 模式：未同步命中，直接返回 deferred，不启动轮询');
+      return { status: 'deferred', reason: 'target_not_found_yet' };
+    }
+
+    const MAX_POLL_ATTEMPTS = 20;
+    const POLL_INTERVAL_MS = 100;
+    let pollAttempts = 0;
+    let delayedFinished = false;
+
+    const pollForTarget = async () => {
+      if (delayedFinished) return;
+      pollAttempts++;
+
+      // T1.3: 被更新轮次取代 → 终止本轮
+      if (tempPlotToSave_ACU !== null && tempPlotToSave_ACU !== roundRef) {
+        logWarn_ACU('[剧情推进] [Plot] 检测到新一轮 pending，放弃本轮延迟提交');
+        delayedFinished = true;
+        return;
+      }
+      // T1.4: 聊天切换 → 终止本轮
+      if (roundChatId && (currentChatFileIdentifier_ACU || '') !== roundChatId) {
+        logWarn_ACU(`[剧情推进] [Plot] 聊天已切换（${roundChatId} → ${currentChatFileIdentifier_ACU || '(未知)'}），放弃本轮延迟提交`);
+        if (tempPlotToSave_ACU === roundRef) {
+          _set_tempPlotToSave_ACU(null);
+        }
+        delayedFinished = true;
+        return;
+      }
+
+      const result = tryFindTarget();
+      if (result) {
+        delayedFinished = true;
+        await writeAndCommit(result);
+        return;
       }
 
       if (pollAttempts >= MAX_POLL_ATTEMPTS) {
-        logWarn_ACU(`[剧情推进] [Plot] 轮询 ${MAX_POLL_ATTEMPTS} 次后仍未找到目标用户消息。用户输入哈希: ${userInputHash || '(无)'}，原始文本: ${userInputText ? `长度=${userInputText.length}` : '(无)'}。将在下一次事件中重试。`);
-        return false;
+        delayedFinished = true;
+        logWarn_ACU(`[剧情推进] [Plot] 轮询 ${MAX_POLL_ATTEMPTS} 次后仍未找到目标用户消息。用户输入哈希: ${userInputHash || '(无)'}，原始文本: ${userInputText ? `长度=${userInputText.length}` : '(无)'}。pending 已保留，将在下一轮推进入口尝试补写。`);
+        return;
       }
 
-      setTimeout(pollForTarget, POLL_INTERVAL_MS);
-      return null;
+      setTimeout(() => { pollForTarget(); }, POLL_INTERVAL_MS);
     };
 
-    setTimeout(() => {
-      pollForTarget();
-    }, 100);
+    setTimeout(() => { pollForTarget(); }, 100);
+    return { status: 'deferred', reason: 'target_not_found_yet' };
+  }
+
+  /**
+   * 下一轮推进入口 flush：补写上一轮残留的 pending。
+   *
+   * 时机约束（P4）：下一轮 runPlotTasksRuntime_ACU 入口处，上一轮目标用户消息
+   * 必然已在 chat 数组中，因此这里只做一次同步查找 + 写入 + 提交，不起定时器。
+   *
+   * 安全约束（P4-T4.2）：
+   * - pending 绑定的聊天标识与当前不一致 → 丢弃并 warn，禁止跨聊天误写。
+   * - 持 hash 时禁用尾部回退（savePlotToLatestMessage_ACU 内已实现）；此刻聊天尾部
+   *   是新一轮用户消息，回退会直接错层。
+   */
+  export async function flushPlotPendingSave_ACU(): Promise<PlotSaveOutcome_ACU | null> {
+    if (!tempPlotToSave_ACU) return null;
+    const pendingChatId = typeof tempPlotToSave_ACU === 'object' && tempPlotToSave_ACU !== null
+      ? String(tempPlotToSave_ACU.chatId || '')
+      : '';
+    const currentChatId = currentChatFileIdentifier_ACU || '';
+
+    if (pendingChatId && pendingChatId !== currentChatId) {
+      logWarn_ACU(`[剧情推进] [Plot] flush 检测到残留 pending 属于其他聊天（${pendingChatId}），丢弃以避免跨聊天误写`);
+      _set_tempPlotToSave_ACU(null);
+      return { status: 'superseded', reason: 'chat_changed' };
+    }
+
+    return await savePlotToLatestMessage_ACU(true, { syncOnly: true });
   }

@@ -5,7 +5,7 @@
  */
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../../shared/defaults-json.js';
 import { callApi_ACU, callApiWithPlotPreset_ACU, getApiConfigByPreset_ACU } from '../../ai/api-call';
-import { abortController_ACU, currentJsonTableData_ACU, planningGuard_ACU, settings_ACU, _set_tempPlotToSave_ACU, _set_currentJsonTableData_ACU, _set_pendingFinalGenerationGreenlights_ACU } from '../state-manager';
+import { abortController_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, planningGuard_ACU, settings_ACU, tempPlotToSave_ACU, _set_tempPlotToSave_ACU, _set_currentJsonTableData_ACU, _set_pendingFinalGenerationGreenlights_ACU } from '../state-manager';
 import { getCurrentCharacterWorldbookBinding_ACU } from '../../../data/gateways/character-gateway';
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data/gateways/host-state-gateway';
@@ -20,7 +20,7 @@ import { applyContextTagFilters_ACU, applyExcludeRulesToText_ACU } from '../help
 import { mergeAllIndependentTables_ACU } from '../helpers-data-merge';
 import { formatTableDataForLLM_ACU, formatOutlineTableForPlot_ACU, formatSummaryIndexForPlot_ACU, getSummaryIndexContentForPlot_ACU } from './plot-data-format';
 import { getNormalizedPlotMessageRole_ACU, tryRenderPlotTemplateWithEjs_ACU, renderPlotTaskContentWithIsolatedVariables_ACU, extractPlotTagsFromResponse_ACU, getPlotPlaceholderTagNames_ACU, buildPlotTagMapFromText_ACU, replacePlotTagPlaceholders_ACU, buildTaskWorldbookTriggerText_ACU, sortPlotTaskResults_ACU, aggregatePlotTaskTags_ACU, buildPlotSaveContentFromTaskResults_ACU, buildFinalPlotInjectionMessage_ACU } from './plot-tag-utils';
-import { getPlotFromHistory_ACU, savePlotToLatestMessage_ACU } from './plot-history-preset';
+import { flushPlotPendingSave_ACU, getPlotFromHistory_ACU, savePlotToLatestMessage_ACU } from './plot-history-preset';
 import { abortableDelay } from '../../../shared/abortable-delay';
 import { runAgentDecisionForPlot_ACU, type AgentDecisionResult_ACU, type AgentWorldbookRef_ACU } from '../../agent/agent-decision-engine';
 import { normalizeAgentContextSettings_ACU } from '../../agent/agent-prompt-template';
@@ -716,6 +716,25 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
   export async function runPlotTasksRuntime_ACU(plotSettings: Record<string, any>, userMessage: string, runtimeOptions: any = {}) {
     const { inputForHash = userMessage, hasExistingUserMessage = false } = runtimeOptions;
 
+    // ── P4-T4.1: 入口 flush 上一轮残留 pending ──
+    // 下一轮开始意味着用户已发送新消息，上一轮目标用户消息必然已在 chat 中，
+    // 因此这里只做一次同步查找 + 写入 + 提交，不起定时器。
+    // flush 失败不阻断本轮推进（T4.2）。
+    if (tempPlotToSave_ACU) {
+      try {
+        const flushOutcome = await flushPlotPendingSave_ACU();
+        if (flushOutcome?.status === 'committed') {
+          logDebug_ACU(`[剧情推进] [Plot] flush 补写上一轮残留 pending 成功（目标索引 ${flushOutcome.targetIndex}）`);
+        } else if (flushOutcome?.status === 'failed') {
+          logWarn_ACU('[剧情推进] [Plot] flush 补写上一轮残留 pending 失败，将在本轮结束后再次重试:', flushOutcome.reason);
+        } else if (flushOutcome?.status === 'superseded') {
+          logWarn_ACU(`[剧情推进] [Plot] flush 放弃残留 pending（原因: ${flushOutcome.reason}）`);
+        }
+      } catch (error) {
+        logWarn_ACU('[剧情推进] [Plot] flush 补写上一轮残留 pending 时发生异常，跳过:', error);
+      }
+    }
+
     _set_pendingFinalGenerationGreenlights_ACU([]);
     await clearFinalGenerationGreenlights_ACU();
 
@@ -914,7 +933,11 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       userInputHash,
       userInputText: inputForHash,
       taskResults: successfulResults,
+      // P1-T1.1: 绑定当前聊天标识，供 flush/延迟路径跨聊天校验
+      chatId: currentChatFileIdentifier_ACU || '',
     });
+    // 注：此处每轮新建对象。该对象引用被 savePlotToLatestMessage_ACU 用作轮次身份，
+    // 若改为复用同一对象会导致旧回调无法识别“已被新轮次取代”（见计划 §7 R5）。
     logDebug_ACU('[剧情推进] [Plot] 已暂存plot数据，用户输入哈希:', userInputHash, '，原始文本长度:', inputForHash?.length || 0);
 
     const finalMessage = buildFinalPlotInjectionMessage_ACU(
@@ -924,7 +947,16 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       aggregatedInjectOnlyTagNames,
     );
 
-    await savePlotToLatestMessage_ACU(true);
+    const saveOutcome = await savePlotToLatestMessage_ACU(true);
+    if (saveOutcome?.status === 'committed') {
+      logDebug_ACU(`[剧情推进] [Plot] 已写入并提交到目标消息索引 ${saveOutcome.targetIndex}`);
+    } else if (saveOutcome?.status === 'deferred') {
+      logDebug_ACU('[剧情推进] [Plot] 目标消息尚未出现，已转入延迟提交，不阻塞本轮推进');
+    } else if (saveOutcome?.status === 'failed') {
+      logWarn_ACU(`[剧情推进] [Plot] 本轮 Plot 提交失败（${saveOutcome.reason}），pending 已保留待重试`);
+    } else if (saveOutcome?.status === 'superseded') {
+      logWarn_ACU(`[剧情推进] [Plot] 本轮 Plot 被取代（${saveOutcome.reason}），未写入`);
+    }
 
     return {
       finalMessage,

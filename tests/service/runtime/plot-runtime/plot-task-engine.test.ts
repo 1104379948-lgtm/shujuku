@@ -6,6 +6,9 @@ const {
   mockCurrentJsonTableDataRef,
   mockPlanningGuard,
   mockSetTempPlotToSave,
+  mockTempPlotToSaveRef,
+  mockCurrentChatFileIdentifier,
+  mockFlushPlotPendingSave,
   mockSetCurrentJsonTableData,
   mockSetPendingFinalGenerationGreenlights,
   mockGetApiConfigByPreset,
@@ -87,6 +90,9 @@ const {
     mockAbortControllerRef,
     mockCurrentJsonTableDataRef,
     mockPlanningGuard: { ignoreNextGenerationEndedCount: 0 } as any,
+    mockTempPlotToSaveRef: { value: null as any },
+    mockCurrentChatFileIdentifier: 'test-chat',
+    mockFlushPlotPendingSave: vi.fn(),
     mockSetTempPlotToSave: vi.fn(),
     mockSetCurrentJsonTableData: vi.fn((value: any) => {
       mockCurrentJsonTableDataRef.value = value;
@@ -161,6 +167,10 @@ vi.mock('../../../../src/service/ai/api-call', () => ({
 vi.mock('../../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mockSettings,
   planningGuard_ACU: mockPlanningGuard,
+  currentChatFileIdentifier_ACU: mockCurrentChatFileIdentifier,
+  get tempPlotToSave_ACU() {
+    return mockTempPlotToSaveRef.value;
+  },
   _set_tempPlotToSave_ACU: mockSetTempPlotToSave,
   _set_currentJsonTableData_ACU: mockSetCurrentJsonTableData,
   _set_pendingFinalGenerationGreenlights_ACU: mockSetPendingFinalGenerationGreenlights,
@@ -289,6 +299,7 @@ vi.mock('../../../../src/service/runtime/plot-runtime/plot-tag-utils', () => ({
 vi.mock('../../../../src/service/runtime/plot-runtime/plot-history-preset', () => ({
   getPlotFromHistory_ACU: mockGetPlotFromHistory,
   savePlotToLatestMessage_ACU: mockSavePlotToLatestMessage,
+  flushPlotPendingSave_ACU: mockFlushPlotPendingSave,
 }));
 
 vi.mock('../../../../src/shared/abortable-delay', () => ({
@@ -368,6 +379,8 @@ beforeEach(() => {
     },
   };
   mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+  mockTempPlotToSaveRef.value = null;
+  mockFlushPlotPendingSave.mockResolvedValue(null);
 
   mockGetApiConfigByPreset.mockReturnValue({
     apiMode: 'custom',
@@ -445,7 +458,7 @@ beforeEach(() => {
   mockBuildPlotSaveContentFromTaskResults.mockReturnValue('保存的剧情内容');
   mockBuildFinalPlotInjectionMessage.mockReturnValue('最终注入消息');
   mockGetPlotFromHistory.mockReturnValue('上一轮剧情');
-  mockSavePlotToLatestMessage.mockResolvedValue(undefined);
+  mockSavePlotToLatestMessage.mockResolvedValue({ status: 'committed', targetIndex: 2 });
   mockCallApiWithPlotPreset.mockResolvedValue('任务输出');
   mockRunAgentDecisionForPlot.mockImplementation(async ({ enabledTasks }: any) => ({
     active: false,
@@ -978,6 +991,52 @@ describe('runPlotTasksRuntime_ACU', () => {
     });
     expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
     expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith([]);
+  });
+
+  it('入口存在残留 pending 时调用 flush 补写，且不阻断本轮任务', async () => {
+    mockTempPlotToSaveRef.value = { content: '旧剧情', userInputHash: 'hash_旧' };
+    mockFlushPlotPendingSave.mockResolvedValue({ status: 'committed', targetIndex: 0 });
+    const plotSettings = { tasks: [] };
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockFlushPlotPendingSave).toHaveBeenCalledTimes(1);
+    // flush 不阻断本轮推进：任务照常执行
+    expect(result.enabledTaskCount).toBe(0);
+    expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith([]);
+  });
+
+  it('入口 flush 返回 failed 时仍继续本轮任务，不抛错', async () => {
+    mockTempPlotToSaveRef.value = { content: '旧剧情', userInputHash: 'hash_旧' };
+    mockFlushPlotPendingSave.mockResolvedValue({ status: 'failed', reason: 'host_save_failed', error: new Error('保存失败') });
+    const plotSettings = { tasks: [] };
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockFlushPlotPendingSave).toHaveBeenCalledTimes(1);
+    expect(result.enabledTaskCount).toBe(0);
+    expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith([]);
+  });
+
+  it('入口 flush 抛异常时被捕获，本轮任务继续', async () => {
+    mockTempPlotToSaveRef.value = { content: '旧剧情', userInputHash: 'hash_旧' };
+    mockFlushPlotPendingSave.mockRejectedValue(new Error('flush 内部异常'));
+    const plotSettings = { tasks: [] };
+
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockFlushPlotPendingSave).toHaveBeenCalledTimes(1);
+    expect(result.enabledTaskCount).toBe(0);
+    expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith([]);
+  });
+
+  it('无残留 pending 时不调用 flush', async () => {
+    mockTempPlotToSaveRef.value = null;
+    const plotSettings = { tasks: [] };
+
+    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+
+    expect(mockFlushPlotPendingSave).not.toHaveBeenCalled();
   });
 
   it('成功执行时会按 stage 与 order 排序、暂存剧情并保存到最新消息', async () => {
