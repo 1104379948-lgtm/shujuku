@@ -278,6 +278,35 @@ describe('SyncBridge', () => {
       ]);
     });
 
+    it('strict hydrate 的 SQLite 写入失败保留脱敏后的语句位置、操作与约束诊断', () => {
+      const privateChronicleText = '这段纪要正文不得出现在 SQLite 错误诊断中。';
+      const invalidSheet = makeSheet({
+        uid: 'checked_value',
+        name: '受约束表',
+        sourceData: {
+          note: '', initNode: '', deleteNode: '', updateNode: '', insertNode: '',
+          ddl: `CREATE TABLE checked_value (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  name TEXT NOT NULL CHECK(length(name) >= 3) -- 名称
+);`,
+        },
+        content: [
+          ['row_id', '名称'],
+          ['1', privateChronicleText],
+          ['2', '短'],
+        ],
+      });
+
+      expect(() => bridge.loadFromTableData(makeTableData({ sheet_invalid: invalidSheet }), { strict: true }))
+        .toThrow('SQLite 写入失败：第 3 条语句失败（INSERT INTO shouyueshubiao）：CHECK constraint failed');
+      try {
+        bridge.loadFromTableData(makeTableData({ sheet_invalid: invalidSheet }), { strict: true });
+      } catch (error: any) {
+        expect(error.message).not.toContain(privateChronicleText);
+        expect(error.message).not.toContain('VALUES');
+      }
+    });
+
     it('单张表加载失败不影响其他表', () => {
       // 第一张表 DDL 有语法错误
       const badSheet = makeSheet({

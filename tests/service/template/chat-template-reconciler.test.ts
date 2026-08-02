@@ -813,7 +813,8 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: invalidRow }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers.join('\n')).toContain('完整 replay candidate SQLite hydrate 失败');
-    expect(plan.blockers.join('\n')).toContain('SQLite 写入失败');
+    expect(plan.blockers.join('\n')).toContain('SQLite 写入失败：第 2 条语句失败（INSERT INTO xinbiao）');
+    expect(plan.blockers.join('\n')).toContain('CHECK constraint failed: score > 0');
     expect(plan.sheetChanges).toEqual([]);
     expect(plan.candidateData.sheet_new).toBeUndefined();
   });

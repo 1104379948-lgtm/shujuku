@@ -1,8 +1,9 @@
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
-import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
+import { isSummaryOrOutlineTable_ACU, logDebug_ACU } from '../../shared/utils';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getChatArray_ACU } from '../chat/chat-service';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
+import { isSqliteMode } from './storage-mode';
 import { sanitizeChatSheetsObject_ACU } from '../template/chat-scope';
 import { getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
@@ -127,17 +128,21 @@ export async function importTableJsonThroughCommit_ACU(
     };
   }
   const candidateData = repair.candidateData as TableDataObject_ACU;
-  const sqlitePreflight = await validateSqliteTemplateDataStrict_ACU(candidateData);
-  if (!sqlitePreflight.success) {
-    const message = sqlitePreflight.error || '候选数据无法通过 SQLite hydrate。';
-    return {
-      success: false,
-      persisted: false,
-      failureStage: 'preflight',
-      auditStatus: audit.status,
-      issues: [{ code: 'sqlite_preflight_failed', message }],
-      error: `导入候选数据未通过 SQLite 预检：${message}`,
-    };
+  if (isSqliteMode()) {
+    const sqlitePreflight = await validateSqliteTemplateDataStrict_ACU(candidateData, { allowRuntimeDdlFallback: true });
+    if (!sqlitePreflight.success) {
+      const message = sqlitePreflight.error || '候选数据无法通过 SQLite hydrate。';
+      return {
+        success: false,
+        persisted: false,
+        failureStage: 'preflight',
+        auditStatus: audit.status,
+        issues: [{ code: 'sqlite_preflight_failed', message }],
+        error: `导入候选数据未通过 SQLite 预检：${message}`,
+      };
+    }
+  } else {
+    logDebug_ACU('[TableImport] 当前为 native 存储模式，跳过 SQLite hydrate 预检。');
   }
   const sheetKeys = Object.keys(candidateData).filter(k => k.startsWith('sheet_'));
   const targetMessageIndex = resolveLatestAiMessageIndex_ACU();

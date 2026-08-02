@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   runTableUpdateCommit: vi.fn(),
   reloadStorageProvider: vi.fn().mockResolvedValue(undefined),
   validateSqliteTemplateDataStrict: vi.fn().mockResolvedValue({ success: true }),
+  isSqliteMode: vi.fn(() => false),
 }));
 
 vi.mock('../../../src/service/chat/chat-service', () => ({
@@ -42,6 +43,11 @@ vi.mock('../../../src/service/table/sqlite-template-validation', () => ({
 
 vi.mock('../../../src/shared/utils', () => ({
   isSummaryOrOutlineTable_ACU: vi.fn((name: string) => name.includes('纪要') || name.includes('总结')),
+  logDebug_ACU: vi.fn(),
+}));
+
+vi.mock('../../../src/service/table/storage-mode', () => ({
+  isSqliteMode: mocks.isSqliteMode,
 }));
 
 import { importTableJsonThroughCommit_ACU } from '../../../src/service/table/table-import-service';
@@ -49,6 +55,9 @@ import { importTableJsonThroughCommit_ACU } from '../../../src/service/table/tab
 describe('importTableJsonThroughCommit_ACU', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.isSqliteMode.mockReturnValue(false);
+    // clearAllMocks 不会清空上个用例未消费的 mockResolvedValueOnce 队列。
+    mocks.validateSqliteTemplateDataStrict.mockReset().mockResolvedValue({ success: true });
     mocks.getChatArray.mockReturnValue([{ is_user: true }, { is_user: false, mes: 'AI回复' }]);
     mocks.getCurrentData.mockReturnValue(null);
     mocks.runTableUpdateCommit.mockImplementation(async (options: any, apply: any) => {
@@ -109,7 +118,7 @@ describe('importTableJsonThroughCommit_ACU', () => {
     expect(result).toEqual(expect.objectContaining({ success: true, tableData: expectedCandidate }));
   });
 
-  it('无数据业务表头自动补 row_id，并以同一候选数据预检、提交和替换 runtime', async () => {
+  it('SQLite 模式下无数据业务表头自动补 row_id，并以同一候选数据预检、提交和替换 runtime', async () => {
     const importedData = {
       mate: { type: 'acu', version: 1 },
       sheet_0: { name: '背包', content: [['物品', '数量']] },
@@ -118,15 +127,31 @@ describe('importTableJsonThroughCommit_ACU', () => {
       mate: { type: 'acu', version: 1 },
       sheet_0: { name: '背包', content: [['row_id', '物品', '数量']] },
     };
+    mocks.isSqliteMode.mockReturnValue(true);
 
     const result = await importTableJsonThroughCommit_ACU(JSON.stringify(importedData));
 
     expect(result).toEqual(expect.objectContaining({ success: true, tableData: expectedCandidate }));
-    expect(mocks.validateSqliteTemplateDataStrict).toHaveBeenCalledWith(expectedCandidate);
+    expect(mocks.validateSqliteTemplateDataStrict).toHaveBeenCalledWith(expectedCandidate, { allowRuntimeDdlFallback: true });
     const [, apply] = mocks.runTableUpdateCommit.mock.calls[0];
     expect((await apply()).tableData).toEqual(expectedCandidate);
     expect(mocks.replaceAllData).toHaveBeenCalledWith(expectedCandidate);
     expect(importedData.sheet_0.content).toEqual([['物品', '数量']]);
+  });
+
+  it('native 模式下跳过 SQLite 预检，仍可导入 SQLite 约束不兼容的历史数据', async () => {
+    const importedData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_3NoMc1wI: { name: '纪要表', content: [['row_id', '编码索引'], ['1', 'not-an-AM-code']] },
+    };
+    mocks.validateSqliteTemplateDataStrict.mockResolvedValueOnce({ success: false, error: 'CHECK constraint failed' });
+
+    const result = await importTableJsonThroughCommit_ACU(JSON.stringify(importedData));
+
+    expect(result.success).toBe(true);
+    expect(mocks.validateSqliteTemplateDataStrict).not.toHaveBeenCalled();
+    expect(mocks.runTableUpdateCommit).toHaveBeenCalledOnce();
+    expect(mocks.replaceAllData).toHaveBeenCalledWith(importedData);
   });
 
   it('有种子行的业务表头不走空模板补列捷径', async () => {
@@ -225,6 +250,7 @@ describe('importTableJsonThroughCommit_ACU', () => {
       sheet_0: { name: '背包', content: [['row_id', '物品'], ['1', '铁剑']] },
     };
     mocks.validateSqliteTemplateDataStrict.mockResolvedValueOnce({ success: false, error: 'DDL 与表头不一致' });
+    mocks.isSqliteMode.mockReturnValue(true);
 
     const result = await importTableJsonThroughCommit_ACU(JSON.stringify(importedData));
 

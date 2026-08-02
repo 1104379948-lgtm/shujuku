@@ -132,8 +132,7 @@ export class SyncBridge {
         this._loadSheet(key, sheet, options.allowRuntimeDdlFallback === true, physicalTableNames.get(key));
       } catch (e: any) {
         const errorMessage = e?.message || String(e);
-        const reason = /^第 \d+ 条语句失败:/.test(errorMessage) ? 'SQLite 写入失败' : errorMessage;
-        const message = `[SyncBridge] 加载表 ${key} (${sheet.name}) 失败: ${reason}`;
+        const message = `[SyncBridge] 加载表 ${key} (${sheet.name}) 失败: ${formatSqliteLoadFailure_ACU(errorMessage)}`;
         logError_ACU(message);
         if (options.strict) {
           throw new Error(message);
@@ -423,6 +422,21 @@ interface SheetMeta {
   exportConfig: any;
   /** meta 表存储的历史物理表名（多路识别路径 1）；老库或未回填时为 undefined。 */
   physicalTableName?: string;
+}
+
+/**
+ * 保留批量写入的可行动诊断，但绝不把 INSERT 的 VALUES（用户业务数据）传播到日志或 UI。
+ */
+function formatSqliteLoadFailure_ACU(errorMessage: string): string {
+  const batchFailure = /^第 (\d+) 条语句失败:\s*([\s\S]*?)\s*→\s*([\s\S]+)$/.exec(errorMessage);
+  if (!batchFailure) return errorMessage;
+
+  const [, statementIndex, statement, sqliteError] = batchFailure;
+  const operation = /^(INSERT\s+INTO|CREATE\s+TABLE|UPDATE|DELETE\s+FROM)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/i.exec(statement.trim());
+  const statementSummary = operation
+    ? `${operation[1].replace(/\s+/g, ' ').toUpperCase()} ${operation[2]}`
+    : 'SQLite 语句';
+  return `SQLite 写入失败：第 ${statementIndex} 条语句失败（${statementSummary}）：${sqliteError.trim()}`;
 }
 
 /** 安全的 JSON 解析 */
