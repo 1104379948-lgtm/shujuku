@@ -121,6 +121,13 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
   }
 
   // ═══ 历史记录读写 ═══
+  // 身份契约：_qrf_plot_round_id 是推进结果附着到用户楼层后的稳定身份，
+  // 仅供保存侧定位与失败重试使用；输入/最终消息哈希只用于首次认领。
+  //
+  // 注意：历史检索锚点不使用 roundId。本轮 roundId 在任务全部完成后才生成，
+  // 而历史读取发生在任务开始前，此时无 roundId 可用。锚点的职责是定位
+  // “当前用户层”，策略1 下由 _qrf_plot_pending_hash 提供，策略2 / hook 下
+  // 当前层尚未入 chat，因此无需锚点。
 
   function findPlotHistoryAnchorIndex_ACU(chat: any[], options: any = {}) {
     if (!Array.isArray(chat) || chat.length === 0) return -1;
@@ -153,12 +160,23 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
       return Math.min(chat.length - 1, Math.floor(options.beforeIndex) - 1);
     }
 
+    const hasHistoryAnchor = Boolean(String(options?.beforeUserInputHash || '').trim() || String(options?.beforeUserInputText || '').trim());
+    if (!hasHistoryAnchor) return chat.length - 1;
+
     const anchorIndex = findPlotHistoryAnchorIndex_ACU(chat, options);
     if (anchorIndex >= 0) {
       return anchorIndex - 1;
     }
 
-    return chat.length - 1;
+    // 调用方明确给了锚点却匹配不上（如 swipe/重试：pending 标记已被消费、
+    // mes 已被 finalMessage 覆盖）。此时末条带 plot 的用户层就是“当前层”，
+    // 不能当作上一轮返回，否则会自读。
+    const lastIndex = chat.length - 1;
+    const lastMessage = chat[lastIndex];
+    if (lastMessage?.is_user && lastMessage.qrf_plot) {
+      return lastIndex - 1;
+    }
+    return lastIndex;
   }
 
   export function getPlotFromHistory_ACU(options: any = {}) {
@@ -244,6 +262,14 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
       return latestPlotContent;
     }
 
+    const skippedPresetLayers = chat
+      .slice(0, upperBound + 1)
+      .map((message: any, index: number) => ({ message, index }))
+      .filter(({ message }: any) => message?.qrf_plot && String(message.qrf_plot_preset || '') && String(message.qrf_plot_preset || '') !== currentPresetName)
+      .map(({ message, index }: any) => `#${index}:${String(message.qrf_plot_preset)}`);
+    if (currentPresetName && skippedPresetLayers.length > 0) {
+      logWarn_ACU(`[剧情推进] [Plot] 未找到当前预设 "${currentPresetName}" 的历史数据；已跳过其他预设层: ${skippedPresetLayers.join(', ')}`);
+    }
     logDebug_ACU(`[剧情推进] [Plot] 未找到匹配预设 "${currentPresetName || '(无)'}" 的plot数据，检索上界: ${upperBound}`);
     return '';
   }
@@ -267,7 +293,7 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
 
   /**
    * 将 plot 附加到对应的用户消息上，并显式请求一次宿主保存。
-   * 使用用户输入哈希精确匹配，避免保存到错误的楼层。
+   * roundId 是稳定身份；两类内容哈希仅用于首次认领宿主刚创建的用户楼层。
    *
    * 执行语义：
    * - 入口先做一次同步查找；命中则立即写入并提交，`await` 具备真实语义（策略 1 主路径）。
@@ -299,28 +325,31 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
       return { status: 'deferred', reason: 'target_not_found_yet' };
     }
 
-    // ── P1: 本轮 pending 快照化（对象引用 + 内容 + taskResults + 聊天标识）──
-    // roundRef 是轮次标识：plot-task-engine.ts 每轮以新对象覆盖全局 pending，
-    // 因此对象引用可作为“这一轮”的唯一身份。若引擎侧改为复用对象，此契约失效，
-    // 需改用显式 roundId（见计划 §7 R5）。
+    // ── P1: 本轮 pending 快照化（对象引用防旧回调 + roundId 持久化身份）──
     const roundRef = tempPlotToSave_ACU;
     const roundChatId = currentChatFileIdentifier_ACU || '';
     let plotContent: string;
     let userInputHash: string | null;
+    let finalMessageHash: string | null;
+    let roundId: string | null;
     let userInputText: string | null;
     let taskResults: any[] | null;
     if (typeof roundRef === 'string') {
       plotContent = roundRef;
       userInputHash = null;
+      finalMessageHash = null;
+      roundId = null;
       userInputText = null;
       taskResults = null;
       logDebug_ACU('[剧情推进] [Plot] 检测到旧格式数据，使用回退匹配逻辑');
     } else {
       plotContent = roundRef?.content;
       userInputHash = roundRef?.userInputHash ?? null;
+      finalMessageHash = roundRef?.finalMessageHash ?? null;
+      roundId = String(roundRef?.roundId || '').trim() || null;
       userInputText = roundRef?.userInputText ?? null;
       taskResults = Array.isArray(roundRef?.taskResults) ? roundRef.taskResults : null;
-      logDebug_ACU('[剧情推进] [Plot] 使用新格式，用户输入哈希:', userInputHash, '，原始文本长度:', userInputText?.length || 0);
+      logDebug_ACU('[剧情推进] [Plot] 使用新格式，roundId:', roundId || '(兼容)', '，用户输入哈希:', userInputHash, '，原始文本长度:', userInputText?.length || 0);
     }
 
     if (!plotContent) {
@@ -332,18 +361,51 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
     }
 
     // tryFindTarget 内部策略：
-    // - 持有 userInputHash：只允许标记哈希 / 文本哈希精确匹配，禁止尾部回退（P5-T5.2）。
-    // - 无 hash（旧字符串格式）：保留原回退语义（最近一条 is_user 且无 qrf_plot）。
+    // - 新格式：roundId 命中 > 策略1 标记 > 按最终/原始文本哈希首次认领。
+    // - 无 roundId 的旧格式：完整保留原哈希/尾部回退语义。
     const tryFindTarget = () => {
       const chat = getChatArray_ACU();
       if (!chat || chat.length === 0) {
         return null;
       }
 
+      if (roundId) {
+        for (let i = chat.length - 1; i >= 0; i--) {
+          const msg = chat[i];
+          if (msg?.is_user && msg._qrf_plot_round_id === roundId) {
+            logDebug_ACU(`[剧情推进] [Plot] ✓ 通过 roundId 命中目标用户消息（索引 ${i}，roundId: ${roundId}）`);
+            return { msg, index: i };
+          }
+        }
+
+        // 策略1 标记认领：要求未被其他轮次认领，且尚未附着 plot。
+        // 失败重试无需依赖本分支（已写入 roundId，由上一分支精确命中），
+        // 因此这里可以安全地拒绝覆盖任何已有 plot 的楼层：宁可不写，也不错层。
+        for (let i = chat.length - 1; i >= 0; i--) {
+          const msg = chat[i];
+          if (msg?.is_user && !msg._qrf_plot_round_id && !msg.qrf_plot && msg._qrf_plot_pending_hash === userInputHash) {
+            msg._qrf_plot_round_id = roundId;
+            logDebug_ACU(`[剧情推进] [Plot] ✓ 通过策略1待处理标记认领目标用户消息（索引 ${i}，roundId: ${roundId}）`);
+            return { msg, index: i };
+          }
+        }
+
+        // 策略2 首次认领：宿主已把 finalMessage 写入 msg.mes，因此同时接受
+        // 最终注入文本哈希与用户原文哈希；只认未认领、未附着 plot 的用户层。
+        for (let i = chat.length - 1; i >= 0; i--) {
+          const msg = chat[i];
+          if (!msg?.is_user || msg._qrf_plot_round_id || msg.qrf_plot) continue;
+          const messageHash = hashUserInput_ACU(msg.mes || '');
+          if (messageHash !== finalMessageHash && messageHash !== userInputHash) continue;
+          msg._qrf_plot_round_id = roundId;
+          logDebug_ACU(`[剧情推进] [Plot] ✓ 通过内容哈希首次认领目标用户消息（索引 ${i}，roundId: ${roundId}）`);
+          return { msg, index: i };
+        }
+        return null;
+      }
+
       if (userInputHash) {
-        // 阶段1：标记身份优先（策略1 首写 / 保存失败重试）。
-        // 标记由 plot-orchestrator.ts 写到唯一目标消息上，匹配即身份成立；
-        // 不要求无 qrf_plot，以便保存失败后（字段已写、标记保留）下一轮 flush 能重新定位并重试。
+        // 旧对象格式：保留标记身份优先与文本哈希回退。
         for (let i = chat.length - 1; i >= 0; i--) {
           const msg = chat[i];
           if (msg && msg.is_user && msg._qrf_plot_pending_hash === userInputHash) {
@@ -377,6 +439,9 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
     // ── P3: 写入并提交（立即 / 延迟共用）──
     const writeAndCommit = async (found: { msg: any; index: number }): Promise<PlotSaveOutcome_ACU> => {
       const target = found.msg;
+      if (roundId) {
+        target._qrf_plot_round_id = roundId;
+      }
       target.qrf_plot = plotContent;
       const currentPresetName = getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
       target.qrf_plot_preset = currentPresetName;
@@ -466,7 +531,7 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
 
       if (pollAttempts >= MAX_POLL_ATTEMPTS) {
         delayedFinished = true;
-        logWarn_ACU(`[剧情推进] [Plot] 轮询 ${MAX_POLL_ATTEMPTS} 次后仍未找到目标用户消息。用户输入哈希: ${userInputHash || '(无)'}，原始文本: ${userInputText ? `长度=${userInputText.length}` : '(无)'}。pending 已保留，将在下一轮推进入口尝试补写。`);
+        logWarn_ACU(`[剧情推进] [Plot] 轮询 ${MAX_POLL_ATTEMPTS} 次后仍未找到目标用户消息。roundId: ${roundId || '(旧格式)'}，用户输入哈希: ${userInputHash || '(无)'}，原始文本: ${userInputText ? `长度=${userInputText.length}` : '(无)'}。pending 已保留，将在下一轮推进入口尝试补写。`);
         return;
       }
 

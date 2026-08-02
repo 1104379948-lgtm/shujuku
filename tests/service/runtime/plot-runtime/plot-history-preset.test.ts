@@ -220,6 +220,43 @@ describe('getPlotFromHistory_ACU', () => {
     ]);
     expect(getPlotFromHistory_ACU({ beforeIndex: 1 })).toBe('旧数据');
   });
+
+  it('显式锚点失配且末层已带 plot 时不自读当前层', () => {
+    mockGetCurrentRuntimePresetName.mockReturnValue('');
+    mockGetChatArray.mockReturnValue([
+      { is_user: true, mes: '第一轮', qrf_plot: '第一轮推进' },
+      { is_user: false, mes: 'AI回复' },
+      // 当前层：mes 已被 finalMessage 覆盖，pending 标记已在上次保存后删除
+      { is_user: true, mes: '当前层最终注入内容', qrf_plot: '当前轮推进' },
+    ]);
+    // 调用方给了锚点（原文哈希），但当前层 mes 已被覆盖 →锚点失配
+    const out = getPlotFromHistory_ACU({
+      beforeUserInputHash: 'hash_用户原文',
+      beforeUserInputText: '用户原文',
+    });
+    expect(out).toBe('第一轮推进');
+  });
+
+  it('无锚点读取保持原语义：从末层向前取最近 plot', () => {
+    mockGetCurrentRuntimePresetName.mockReturnValue('');
+    mockGetChatArray.mockReturnValue([
+      { is_user: true, mes: '旧', qrf_plot: '旧推进' },
+      { is_user: true, mes: '新', qrf_plot: '新推进' },
+    ]);
+    expect(getPlotFromHistory_ACU()).toBe('新推进');
+  });
+
+  it('连续三层：第三层读到第二层而非第一层', () => {
+    mockGetCurrentRuntimePresetName.mockReturnValue('预设A');
+    mockGetChatArray.mockReturnValue([
+      { is_user: true, mes: 'U1', qrf_plot: '第一层推进', qrf_plot_preset: '预设A' },
+      { is_user: false, mes: 'A1' },
+      { is_user: true, mes: 'U2', qrf_plot: '第二层推进', qrf_plot_preset: '预设A' },
+      { is_user: false, mes: 'A2' },
+    ]);
+    expect(getPlotFromHistory_ACU()).toBe('第二层推进');
+  });
+
 });
 
 
@@ -498,4 +535,164 @@ describe('savePlotToLatestMessage_ACU', () => {
     expect(mockTempPlotToSaveRef.value).toBeNull();
     expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
   });
+
+  // ── roundId 身份契约（策略2 错层缺陷回归） ──
+
+  it('策略2红线：mes 已被 finalMessage 覆盖时，按 finalMessageHash 首次认领并写入 roundId', async () => {
+    mockPlanningGuard.inProgress = false;
+    mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+    // 第一层已完成；第二层是宿主刚创建的用户层，mes 是最终注入内容而非用户原文
+    const first = { is_user: true, mes: 'U1', qrf_plot: '第一层推进', qrf_plot_preset: '预设A', _qrf_plot_round_id: 'round-1' };
+    const aiReply = { is_user: false, mes: 'A1' };
+    const target = { is_user: true, mes: '最终注入内容' } as any;
+    mockGetChatArray.mockReturnValue([first, aiReply, target]);
+    mockTempPlotToSaveRef.value = {
+      content: '第二层推进',
+      userInputHash: 'hash_用户原文',
+      finalMessageHash: 'hash_最终注入内容',
+      roundId: 'round-2',
+      userInputText: '用户原文',
+      taskResults: null,
+      chatId: 'test-chat',
+    };
+    mockGetCurrentRuntimePresetName.mockReturnValue('预设A');
+
+    const out = await savePlotToLatestMessage_ACU(true);
+    expect(out).toEqual({ status: 'committed', targetIndex: 2 });
+    expect(target.qrf_plot).toBe('第二层推进');
+    expect(target.qrf_plot_preset).toBe('预设A');
+    expect(target._qrf_plot_round_id).toBe('round-2');
+    // 不得污染第一层
+    expect(first.qrf_plot).toBe('第一层推进');
+    expect(first._qrf_plot_round_id).toBe('round-1');
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+    expect(mockTempPlotToSaveRef.value).toBeNull();
+  });
+
+  it('策略2：finalMessageHash 不匹配时回退用户原文哈希认领（hook 未改写 mes）', async () => {
+    mockPlanningGuard.inProgress = false;
+    mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+    const target = { is_user: true, mes: '用户原文' } as any;
+    mockGetChatArray.mockReturnValue([target]);
+    mockTempPlotToSaveRef.value = {
+      content: '本轮推进',
+      userInputHash: 'hash_用户原文',
+      finalMessageHash: 'hash_最终注入内容',
+      roundId: 'round-2',
+      userInputText: '用户原文',
+      taskResults: null,
+      chatId: 'test-chat',
+    };
+
+    const out = await savePlotToLatestMessage_ACU(true);
+    expect(out).toEqual({ status: 'committed', targetIndex: 0 });
+    expect(target.qrf_plot).toBe('本轮推进');
+    expect(target._qrf_plot_round_id).toBe('round-2');
+  });
+
+  it('roundId 重试：保存失败后 flush 按 roundId 精确命中同一层，即便已出现新用户层', async () => {
+    mockPlanningGuard.inProgress = false;
+    mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+    const target = { is_user: true, mes: '最终注入内容' } as any;
+    mockGetChatArray.mockReturnValue([target]);
+    const pending = {
+      content: '第二层推进',
+      userInputHash: 'hash_用户原文',
+      finalMessageHash: 'hash_最终注入内容',
+      roundId: 'round-2',
+      userInputText: '用户原文',
+      taskResults: null,
+      chatId: 'test-chat',
+    };
+    mockTempPlotToSaveRef.value = pending;
+    mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('宿主保存失败'));
+
+    const first = await savePlotToLatestMessage_ACU(true);
+    expect(first.status).toBe('failed');
+    // 失败后 roundId 已落在目标层上，pending 保留
+    expect(target._qrf_plot_round_id).toBe('round-2');
+    expect(mockTempPlotToSaveRef.value).toBe(pending);
+
+    // 下一轮：新用户层已进入聊天尾部，且其 mes 与本轮 finalMessage 完全相同
+    const newerLayer = { is_user: true, mes: '最终注入内容' } as any;
+    mockGetChatArray.mockReturnValue([target, { is_user: false, mes: 'A' }, newerLayer]);
+    mockSaveChatToHostStrict.mockResolvedValueOnce(undefined);
+
+    const retry = await flushPlotPendingSave_ACU();
+    expect(retry).toEqual({ status: 'committed', targetIndex: 0 });
+    expect(target.qrf_plot).toBe('第二层推进');
+    // 绝不能写到新用户层
+    expect(newerLayer.qrf_plot).toBeUndefined();
+    expect(newerLayer._qrf_plot_round_id).toBeUndefined();
+    expect(mockTempPlotToSaveRef.value).toBeNull();
+  });
+
+  it('防错认：已属于其他 roundId 的用户层不得被本轮哈希认领', async () => {
+    mockPlanningGuard.inProgress = false;
+    mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+    const occupied = { is_user: true, mes: '最终注入内容', _qrf_plot_round_id: 'round-other' } as any;
+    mockGetChatArray.mockReturnValue([occupied]);
+    mockTempPlotToSaveRef.value = {
+      content: '本轮推进',
+      userInputHash: 'hash_用户原文',
+      finalMessageHash: 'hash_最终注入内容',
+      roundId: 'round-2',
+      userInputText: '用户原文',
+      taskResults: null,
+      chatId: 'test-chat',
+    };
+
+    const out = await flushPlotPendingSave_ACU();
+    expect(out).toEqual({ status: 'deferred', reason: 'target_not_found_yet' });
+    expect(occupied.qrf_plot).toBeUndefined();
+    expect(occupied._qrf_plot_round_id).toBe('round-other');
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+    expect(mockTempPlotToSaveRef.value).not.toBeNull();
+  });
+
+  it('防错认：已附着 qrf_plot 的层即使带策略1标记也不得被新轮次覆盖', async () => {
+    mockPlanningGuard.inProgress = false;
+    mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+    // 残留场景：上一轮已写入 plot 但标记未清理，且未带 roundId（旧版本遗留）
+    const stale = { is_user: true, mes: '用户原文', qrf_plot: '上一轮推进', _qrf_plot_pending_hash: 'hash_用户原文' } as any;
+    mockGetChatArray.mockReturnValue([stale]);
+    mockTempPlotToSaveRef.value = {
+      content: '本轮推进',
+      userInputHash: 'hash_用户原文',
+      finalMessageHash: 'hash_最终注入内容',
+      roundId: 'round-2',
+      userInputText: '用户原文',
+      taskResults: null,
+      chatId: 'test-chat',
+    };
+
+    const out = await flushPlotPendingSave_ACU();
+    expect(out).toEqual({ status: 'deferred', reason: 'target_not_found_yet' });
+    expect(stale.qrf_plot).toBe('上一轮推进');
+    expect(stale._qrf_plot_round_id).toBeUndefined();
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('roundId 格式仍保留策略1标记路径，并在保存成功后清理标记、保留 roundId', async () => {
+    mockPlanningGuard.inProgress = false;
+    mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+    const target = { is_user: true, mes: '你好', _qrf_plot_pending_hash: 'hash_你好' } as any;
+    mockGetChatArray.mockReturnValue([target]);
+    mockTempPlotToSaveRef.value = {
+      content: '本轮推进',
+      userInputHash: 'hash_你好',
+      finalMessageHash: 'hash_你好',
+      roundId: 'round-2',
+      userInputText: '你好',
+      taskResults: null,
+      chatId: 'test-chat',
+    };
+
+    const out = await savePlotToLatestMessage_ACU(true);
+    expect(out).toEqual({ status: 'committed', targetIndex: 0 });
+    expect(target.qrf_plot).toBe('本轮推进');
+    expect(target._qrf_plot_pending_hash).toBeUndefined();
+    expect(target._qrf_plot_round_id).toBe('round-2');
+  });
+
 });

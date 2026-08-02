@@ -926,26 +926,29 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       await applyAgentFinalGreenlights_ACU(agentDecision);
     }
 
-    const saveContent = buildPlotSaveContentFromTaskResults_ACU(successfulResults);
-    const userInputHash = hashUserInput_ACU(inputForHash);
-    _set_tempPlotToSave_ACU({
-      content: saveContent,
-      userInputHash,
-      userInputText: inputForHash,
-      taskResults: successfulResults,
-      // P1-T1.1: 绑定当前聊天标识，供 flush/延迟路径跨聊天校验
-      chatId: currentChatFileIdentifier_ACU || '',
-    });
-    // 注：此处每轮新建对象。该对象引用被 savePlotToLatestMessage_ACU 用作轮次身份，
-    // 若改为复用同一对象会导致旧回调无法识别“已被新轮次取代”（见计划 §7 R5）。
-    logDebug_ACU('[剧情推进] [Plot] 已暂存plot数据，用户输入哈希:', userInputHash, '，原始文本长度:', inputForHash?.length || 0);
-
     const finalMessage = buildFinalPlotInjectionMessage_ACU(
       sharedContext.finalSystemDirectiveContent,
       successfulResults,
       aggregatedTags,
       aggregatedInjectOnlyTagNames,
     );
+    const saveContent = buildPlotSaveContentFromTaskResults_ACU(successfulResults);
+    const userInputHash = hashUserInput_ACU(inputForHash);
+    const finalMessageHash = hashUserInput_ACU(finalMessage);
+    const roundId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const chatId = currentChatFileIdentifier_ACU || '';
+    _set_tempPlotToSave_ACU({
+      content: saveContent,
+      userInputHash,
+      userInputText: inputForHash,
+      finalMessageHash,
+      roundId,
+      taskResults: successfulResults,
+      // P1-T1.1: 绑定当前聊天标识，供 flush/延迟路径跨聊天校验
+      chatId,
+    });
+    // 对象引用仅用于识别旧延迟回调是否被新 pending 取代；roundId 才是消息持久化身份。
+    logDebug_ACU('[剧情推进] [Plot] 已暂存plot数据，roundId:', roundId, '，用户输入哈希:', userInputHash, '，原始文本长度:', inputForHash?.length || 0);
 
     const saveOutcome = await savePlotToLatestMessage_ACU(true);
     if (saveOutcome?.status === 'committed') {

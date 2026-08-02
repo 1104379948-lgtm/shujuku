@@ -216,6 +216,7 @@ function messageHasLocalLayerData_ACU(msg: any): boolean {
         msg.TavernDB_ACU_IsolatedData ||
         msg.TavernDB_ACU_Identity ||
         msg.qrf_plot ||
+        msg._qrf_plot_round_id ||
         msg.qrf_plot_preset ||
         msg.qrf_plot_tasks
     );
@@ -1084,6 +1085,7 @@ async function purgeOldLayerDataCore_ACU() {
         'TavernDB_ACU_IsolatedData',
         'TavernDB_ACU_Identity',
         'qrf_plot',
+        '_qrf_plot_round_id',
         'qrf_plot_preset',
         'qrf_plot_tasks'
     ];

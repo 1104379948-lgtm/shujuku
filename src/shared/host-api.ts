@@ -61,6 +61,8 @@ export interface ChatMessageACUExtensions {
     _qrf_from_planning?: boolean;
     /** QRF 剧情待处理哈希 */
     _qrf_plot_pending_hash?: string;
+    /** QRF 剧情推进轮次身份；用于精确定位与失败重试。 */
+    _qrf_plot_round_id?: string;
     /** QRF 剧情推进任务级结果映射（key=taskId, value=该任务的推进内容） */
     qrf_plot_tasks?: Record<string, string>;
 }
