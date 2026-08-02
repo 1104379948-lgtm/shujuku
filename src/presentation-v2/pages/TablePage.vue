@@ -65,23 +65,6 @@
             <div class="acu-v2-table-page__toggle-row">
               <div class="acu-v2-table-page__toggle-head">
                 <span class="acu-v2-table-page__toggle-label">
-                  严格 JSON 填表响应
-                </span>
-                <AcuToggle
-                  :model-value="settings.strictJsonTableFillEnabled.value"
-                  aria-label="严格 JSON 填表响应"
-                  data-acu-setting-key="strictJsonTableFillEnabled"
-                  @update:model-value="settings.setStrictJsonTableFillEnabled($event)"
-                />
-              </div>
-              <p class="acu-v2-table-page__toggle-desc">
-                开启后使用隔离的严格 JSON 提示词。原生表格输出结构化操作，SQLite 输出 SQL 脚本文本。
-              </p>
-            </div>
-
-            <div class="acu-v2-table-page__toggle-row">
-              <div class="acu-v2-table-page__toggle-head">
-                <span class="acu-v2-table-page__toggle-label">
                   丢弃纯越权 SQL 语句
                 </span>
                 <AcuToggle

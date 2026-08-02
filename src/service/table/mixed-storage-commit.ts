@@ -2,6 +2,7 @@ import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/
 import type { IsolationConfig_ACU } from '../../data/models/chat-message-data';
 import { cloneIsolatedData_ACU, isLegacyMatchForIsolation_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { validateMigrationProvenanceV1_ACU } from '../../shared/canonical-checkpoint-validator';
+import type { MixedStorageDecisionBackupV1_ACU } from './storage-frame-v2-types';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder';
@@ -92,6 +93,22 @@ function commitFailure_ACU(decision: MixedStorageDecision_ACU, error: string): M
   return { status: 'commit_failed_rolled_back', decisionId: decision.decisionId, error };
 }
 
+function buildDecisionBackup_ACU(
+  decision: MixedStorageDecision_ACU,
+  action: MixedStorageCommitAction_ACU,
+  createdAt: number,
+): MixedStorageDecisionBackupV1_ACU {
+  return {
+    version: 1, createdAt, action,
+    legacyData: clone_ACU(decision.legacyAudit.sourceData),
+    legacyFingerprint: decision.legacyFingerprint,
+    v2Fingerprint: decision.v2Fingerprint,
+    sourceMessageIndices: [...decision.evidence.legacy.sourceMessageIndices],
+    sourceAiFloors: [...decision.evidence.legacy.sourceAiFloors],
+    decisionId: decision.decisionId, decisionKind: decision.kind,
+  };
+}
+
 /**
  * Commits only an evaluator-authorized action. Before mutation, source evidence and scope
  * are refreshed to reject stale decisions; a merge candidate is then deterministically
@@ -101,7 +118,7 @@ function commitFailure_ACU(decision: MixedStorageDecision_ACU, error: string): M
 export async function commitMixedStorageDecision_ACU(options: MixedStorageCommitOptions_ACU): Promise<MixedStorageCommitResult_ACU> {
   const { decision, action, isolationConfig } = options;
   if (!decision.allowedActions.includes(action)) return commitFailure_ACU(decision, 'decision does not authorize this action');
-  if (action === 'keep_v2' && decision.kind !== 'equivalent_provenance_verified' && decision.kind !== 'v2_successor_verified') {
+  if (action === 'keep_v2' && decision.kind !== 'equivalent_provenance_verified' && decision.kind !== 'equivalent_projection_verified' && decision.kind !== 'v2_successor_verified') {
     return commitFailure_ACU(decision, 'keep_v2 requires a verified V2 decision');
   }
   if (action === 'commit_merge_candidate' && (decision.kind !== 'legacy_has_v2_missing_data' || !decision.frozenMergeCandidate)) {
@@ -121,6 +138,12 @@ export async function commitMixedStorageDecision_ACU(options: MixedStorageCommit
   const candidateChat = clone_ACU(chat);
   const isolationKey = decision.scopeSnapshot.activeIsolationKey;
   const originalV2 = v2Projection_ACU(candidateChat, isolationKey);
+  const createdAt = Date.now();
+  const backup = buildDecisionBackup_ACU(decision, action, createdAt);
+  const backupTargetIndex = action === 'keep_v2' ? decision.evidence.v2.anchor.messageIndex : null;
+  if (action === 'keep_v2' && (backupTargetIndex === null || !isV2TagData_ACU(readIsolatedTagData_ACU(candidateChat[backupTargetIndex], isolationKey)))) {
+    return commitFailure_ACU(decision, 'verified V2 anchor is unavailable for decision backup');
+  }
   if (action === 'commit_merge_candidate') {
     const candidateData = clone_ACU(decision.frozenMergeCandidate!);
     if (auditTableDataForUpgrade_ACU(candidateData).status !== 'clean') {
@@ -132,7 +155,6 @@ export async function commitMixedStorageDecision_ACU(options: MixedStorageCommit
       return commitFailure_ACU(decision, 'no later non-V2 AI message is available for an append-only merge checkpoint');
     }
     const target = candidateChat[targetIndex];
-    const createdAt = Date.now();
     const provenance = {
       version: 1 as const,
       legacyDataFingerprint: getTableDataFingerprint_ACU(candidateData),
@@ -160,8 +182,16 @@ export async function commitMixedStorageDecision_ACU(options: MixedStorageCommit
       ...(existing?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existing.summaryVectorIndexState } : {}),
       ...(existing?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existing.summaryVectorIndexManifest } : {}),
       _acu_storage_version: 2,
+      mixedStorageDecisionBackup: backup,
       storageFrame: { version: 2, headRevision: `checkpoint:mixed-merge:${createdAt.toString(36)}`, checkpoint: checkpoint.checkpoint, logEntries: [] },
     };
+    target.TavernDB_ACU_IsolatedData = isolated;
+  }
+  if (action === 'keep_v2') {
+    const target = candidateChat[backupTargetIndex!];
+    const isolated = cloneIsolatedData_ACU(target) as Record<string, any>;
+    const existing = readIsolatedTagData_ACU(target, isolationKey) as any;
+    isolated[isolationKey] = { ...existing, mixedStorageDecisionBackup: backup };
     target.TavernDB_ACU_IsolatedData = isolated;
   }
   removeLegacy_ACU(candidateChat, isolationKey, isolationConfig);

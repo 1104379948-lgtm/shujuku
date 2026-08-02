@@ -146,6 +146,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU: 500,
   TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU: 'test-table-defaults-refresh',
   TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-prompt-force-default',
+  STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU: 'test-strict-json-force-disable',
   VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
   SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU: 'spv3.6.10-v2-writer-force-enable',
   defaultWorldbookConfig_ACU: {
@@ -311,6 +312,8 @@ beforeEach(() => {
   mockSettings.currentTemplatePresetName = '';
   mockSettings.tableTemplateDefaultsRefreshVersion = '';
   mockSettings.tableFillPromptForceDefaultVersion = '';
+  mockSettings.strictJsonTableFillEnabled = false;
+  mockSettings.strictJsonTableFillForceDisableVersion = '';
   mockSettings.maxConcurrentGroups = 1;
   mockSettings.zeroTkOccupyModeDefault = false;
   mockSettings.characterSettings = {};
@@ -669,6 +672,30 @@ describe('loadSettings_ACU', () => {
     expect(mockWriteProfileTemplate).not.toHaveBeenCalledWith('', NEW_DEFAULT_TEMPLATE_STR_ACU);
     expect(mockSetTableTemplate).not.toHaveBeenCalledWith(NEW_DEFAULT_TEMPLATE_STR_ACU);
     expect(mockSettings.tableTemplateDefaultsRefreshVersion).toBe('test-table-defaults-refresh');
+  });
+
+  it('一次性强制关闭历史严格 JSON 填表开关并写入 marker', () => {
+    mockReadProfileSettings.mockReturnValue({
+      strictJsonTableFillEnabled: true,
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.strictJsonTableFillEnabled).toBe(false);
+    expect(mockSettings.strictJsonTableFillForceDisableVersion)
+      .toBe('test-strict-json-force-disable');
+  });
+
+  it('已记录严格 JSON 关闭 marker 后保留用户后续重新开启的设置', () => {
+    mockReadProfileSettings.mockReturnValue({
+      strictJsonTableFillEnabled: true,
+      strictJsonTableFillForceDisableVersion: 'test-strict-json-force-disable',
+      tableFillPromptForceDefaultVersion: 'test-prompt-force-default',
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.strictJsonTableFillEnabled).toBe(true);
   });
 
   it('一次性强制恢复会覆盖用户自定义的原生与严格 JSON 填表提示词', () => {

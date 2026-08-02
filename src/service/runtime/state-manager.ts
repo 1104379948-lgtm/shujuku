@@ -180,6 +180,7 @@ export let settings_ACU: any = {
     currentTemplatePresetName: '',
     tableTemplateDefaultsRefreshVersion: '',
     tableFillPromptForceDefaultVersion: '',
+    strictJsonTableFillForceDisableVersion: '',
     tableContextExtractTags: '',
     tableContextExtractRules: [],
     tableContextExcludeTags: '',

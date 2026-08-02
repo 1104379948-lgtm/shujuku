@@ -529,13 +529,102 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
 
     expect(result.saved).toBe(true);
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
-    if (operation.kind === 'sql_sheet_batch') {
-      expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', { maxMessageIndex: 0, updateRuntimeState: false });
-    } else {
-      expect(mocks.loadReplayDetailed).not.toHaveBeenCalled();
-    }
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', {
+      maxMessageIndex: 0,
+      updateRuntimeState: false,
+    });
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual([operation]);
     expect(mocks.saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('provisional Sheet 补锚在同一严格提交中先收敛为 checkpoint、保留 backup，再追加当前 SQL 写入', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const preWriteData = {
+      mate: { type: 'acu' },
+      sheet_a: {
+        ...sheetA,
+        uid: 'inventory',
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT);' },
+        content: [['row_id', 'value'], ['1', '收敛前值']],
+      },
+      sheet_b: sheetB,
+    } as any;
+    const provisionalRepair = {
+      kind: 'temporary_sheet_anchor' as const,
+      severity: 'provisional' as const,
+      sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0,
+      templateFingerprint: 'template-fingerprint', reason: 'missing_at_operation' as const,
+    };
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] })
+      .mockResolvedValue({ baseKind: 'full_checkpoint', data: preWriteData });
+    const beforeFrame = JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData[''].storageFrame));
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const operation = {
+      kind: 'sql_sheet_batch', sheetKey: 'sheet_a', tableName: 'inventory', reason: 'manual_crud',
+      statements: ['UPDATE inventory SET value = ? WHERE row_id = ?'], params: [['本次写入', 1]],
+    } as any;
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData: {
+        ...preWriteData,
+        sheet_a: { ...preWriteData.sheet_a, content: [['row_id', 'value'], ['1', '本次写入']] },
+      },
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [operation],
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(result.saved).toBe(true);
+    expect(frame.checkpoint).toMatchObject({ kind: 'full', reason: 'integrity_repair', data: preWriteData });
+    expect(message.TavernDB_ACU_IsolatedData[''].recoveryBackup).toEqual(expect.objectContaining({
+      recoveryKind: 'temporary_sheet_anchor_convergence',
+      sourceMessageIndex: 0,
+      storageFrame: beforeFrame,
+    }));
+    expect(frame.logEntries).toHaveLength(1);
+    expect(frame.logEntries[0].operations).toEqual([operation]);
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+  });
+
+  it('provisional 收敛候选未达到严格回放时取消本次写入且不修改原 frame', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const beforeIsolatedData = message.TavernDB_ACU_IsolatedData;
+    const preWriteData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    const provisionalRepair = {
+      kind: 'temporary_sheet_anchor' as const,
+      severity: 'provisional' as const,
+      sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0,
+      templateFingerprint: 'template-fingerprint', reason: 'missing_at_operation' as const,
+    };
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] });
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData: preWriteData,
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{
+        kind: 'sql_sheet_batch', sheetKey: 'sheet_a', tableName: 'inventory', reason: 'manual_crud',
+        statements: ['UPDATE inventory SET value = ? WHERE row_id = ?'], params: [['不会保存', 1]],
+      }] as any,
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+
+    expect(result).toEqual({ saved: false, error: expect.stringContaining('convergence_candidate_boundary_requires_repair') });
+    expect(message.TavernDB_ACU_IsolatedData).toBe(beforeIsolatedData);
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
   });
 
   it('跨 replacement 范围裁剪旧 bucket 增量、追加新 entry，并只严格保存一次', async () => {
@@ -1400,7 +1489,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
         },
       },
     });
-    mocks.loadReplayDetailed.mockResolvedValueOnce({
+    mocks.loadReplayDetailed.mockResolvedValue({
       baseKind: 'full_checkpoint',
       data: { mate: { type: 'acu' }, sheet_a: sheetA },
     });
@@ -2423,15 +2512,21 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
   });
 
-  it('模板结构提交遇到 compatibility-only replay 基线时阻断且零写入', async () => {
+  it('模板结构提交在同一严格提交中收敛 provisional replay 基线并保留原 frame backup', async () => {
     const message = seedFrame({ logEntries: [] });
-    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+    const preCommitData = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', '收敛前值']] },
+      sheet_b: sheetB,
+    } as any;
+    const beforeFrame = JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData[''].storageFrame));
     mocks.loadReplayDetailed.mockResolvedValueOnce({
       baseKind: 'full_checkpoint',
-      data: message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data,
+      data: preCommitData,
       requiresCheckpointConvergence: true,
       compatibilityRepairs: [{
         kind: 'temporary_sheet_anchor',
+        severity: 'provisional',
         sheetKey: 'sheet_a',
         messageIndex: 384,
         seq: 1,
@@ -2439,7 +2534,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
         templateFingerprint: 'test-fingerprint',
         reason: 'missing_at_operation',
       }],
-    });
+    }).mockResolvedValue({ baseKind: 'full_checkpoint', data: preCommitData });
 
     const result = await commitCurrentFloorTemplateChanges_ACU({
       isolationKey: '',
@@ -2453,8 +2548,50 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       createdAt: 30,
     });
 
-    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('恢复收敛') });
-    expect(result.error).toContain('sheet_a');
+    expect(result).toMatchObject({ saved: true, messageIndex: 0 });
+    const tagData = message.TavernDB_ACU_IsolatedData[''];
+    expect(tagData.storageFrame.checkpoint).toMatchObject({
+      kind: 'full', reason: 'integrity_repair', data: preCommitData,
+    });
+    expect(tagData.recoveryBackup).toEqual(expect.objectContaining({
+      recoveryKind: 'temporary_sheet_anchor_convergence',
+      sourceMessageIndex: 0,
+      storageFrame: beforeFrame,
+    }));
+    expect(tagData.storageFrame.logEntries).toHaveLength(1);
+    expect(tagData.storageFrame.logEntries[0]).toMatchObject({
+      seq: 1,
+      operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+    });
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(mocks.setGuide).toHaveBeenCalledOnce();
+  });
+
+  it('模板结构提交遇到 structural replay repair 时保持零写入', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+    mocks.loadReplayDetailed.mockResolvedValueOnce({
+      baseKind: 'full_checkpoint',
+      data: message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data,
+      requiresCheckpointConvergence: true,
+      compatibilityRepairs: [{
+        kind: 'temporary_sheet_anchor',
+        sheetKey: 'sheet_a', messageIndex: 384, seq: 1, operationIndex: 0,
+        templateFingerprint: 'test-fingerprint', reason: 'missing_at_operation',
+      }],
+    });
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{
+        kind: 'operations', sheetKey: 'sheet_a', targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('结构性 replay repair') });
     expect(mocks.saveChatStrict).not.toHaveBeenCalled();
     expect(mocks.setGuide).not.toHaveBeenCalled();
     expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
@@ -3111,11 +3248,97 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     ]));
 
     expect(result).toMatchObject({ saved: true, messageIndices: [0, 1] });
-    expect(mocks.loadReplayState).not.toHaveBeenCalled();
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', {
+      maxMessageIndex: 0,
+      updateRuntimeState: false,
+    });
     expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
     expect(mocks.saveChat).not.toHaveBeenCalled();
     expect(checkpointMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
     expect(laterMessage.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+  });
+
+  it('batch provisional 补锚以最早目标的操作前状态收敛，验证边界与完整 suffix 后再保存', async () => {
+    const first = seedFrame({ logEntries: [] });
+    const second = { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: appendableFrame() } } };
+    mocks.chat.splice(0, mocks.chat.length, first, second);
+    const preWriteData = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', '收敛前值']] },
+      sheet_b: sheetB,
+    } as any;
+    const beforeFrame = JSON.parse(JSON.stringify(first.TavernDB_ACU_IsolatedData[''].storageFrame));
+    const provisionalRepair = {
+      kind: 'temporary_sheet_anchor' as const,
+      severity: 'provisional' as const,
+      sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0,
+      templateFingerprint: 'test-fingerprint', reason: 'missing_at_operation' as const,
+    };
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] })
+      .mockResolvedValue({ baseKind: 'full_checkpoint', data: preWriteData });
+    const afterData = {
+      ...preWriteData,
+      sheet_a: { ...preWriteData.sheet_a, content: [['row_id', 'value'], ['1', '最早目标写入']] },
+      sheet_b: { ...sheetB, content: [['row_id', 'value'], ['2', '后续目标写入']] },
+    };
+
+    const result = await persistTableMutationLogBatchV2_ACU(makeBatchOptions(afterData, [
+      { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', '最早目标写入'] }] },
+      { targetMessageIndex: 1, changedSheetKeys: ['sheet_b'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_b', rowId: '2', cells: ['2', '后续目标写入'] }] },
+    ]));
+
+    expect(result).toMatchObject({ saved: true, messageIndices: [0, 1] });
+    const firstTagData = first.TavernDB_ACU_IsolatedData[''];
+    expect(firstTagData.storageFrame.checkpoint).toMatchObject({
+      kind: 'full', reason: 'integrity_repair', data: preWriteData,
+    });
+    expect(firstTagData.recoveryBackup).toEqual(expect.objectContaining({
+      recoveryKind: 'temporary_sheet_anchor_convergence', sourceMessageIndex: 0, storageFrame: beforeFrame,
+    }));
+    expect(firstTagData.storageFrame.logEntries).toHaveLength(1);
+    expect(firstTagData.storageFrame.logEntries[0].operations).toEqual([
+      { kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', '最早目标写入'] },
+    ]);
+    expect(second.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
+    expect(second.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual([
+      { kind: 'row_upsert', sheetKey: 'sheet_b', rowId: '2', cells: ['2', '后续目标写入'] },
+    ]);
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(expect.any(Array), '', expect.objectContaining({
+      updateRuntimeState: false, compatibilityMode: 'disabled',
+    }));
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(expect.any(Array), '', {
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+  });
+
+  it('batch provisional 收敛的严格保存失败时恢复所有 target 的 isolated data 与 identity', async () => {
+    const first = seedFrame({ logEntries: [] });
+    const second = { is_user: false, TavernDB_ACU_Identity: 'before-second', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: appendableFrame() } } };
+    mocks.chat.splice(0, mocks.chat.length, first, second);
+    const firstBefore = first.TavernDB_ACU_IsolatedData;
+    const secondBefore = second.TavernDB_ACU_IsolatedData;
+    const preWriteData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({
+        baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true,
+        compatibilityRepairs: [{ kind: 'temporary_sheet_anchor', severity: 'provisional', sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0, templateFingerprint: 'test-fingerprint', reason: 'missing_at_operation' }],
+      })
+      .mockResolvedValue({ baseKind: 'full_checkpoint', data: preWriteData });
+    mocks.settings.dataIsolationEnabled = true;
+    mocks.settings.dataIsolationCode = 'new-identity';
+    mocks.saveChatStrict.mockRejectedValueOnce(new Error('host save failed'));
+
+    await expect(persistTableMutationLogBatchV2_ACU(makeBatchOptions(preWriteData, [
+      { targetMessageIndex: 0, changedSheetKeys: ['sheet_a'], operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }] },
+      { targetMessageIndex: 1, changedSheetKeys: ['sheet_b'], operations: [{ kind: 'meta_update', sheetKey: 'sheet_b', meta: { name: 'B' } }] },
+    ]))).rejects.toThrow('host save failed');
+
+    expect(first.TavernDB_ACU_IsolatedData).toBe(firstBefore);
+    expect(second.TavernDB_ACU_IsolatedData).toBe(secondBefore);
+    expect(second.TavernDB_ACU_Identity).toBe('before-second');
   });
 
   it('candidate 与 afterData 分叉时仍保存 batch（不再做 afterData 相等性阻断）', async () => {
@@ -3136,7 +3359,10 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     ]));
 
     expect(result).toMatchObject({ saved: true, messageIndices: [0] });
-    expect(mocks.loadReplayState).not.toHaveBeenCalled();
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', {
+      maxMessageIndex: 0,
+      updateRuntimeState: false,
+    });
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations).toEqual([
       { kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'from-operation'] },
@@ -3157,7 +3383,10 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     ]));
 
     expect(result).toMatchObject({ saved: true, messageIndices: [0] });
-    expect(mocks.loadReplayState).not.toHaveBeenCalled();
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', {
+      maxMessageIndex: 0,
+      updateRuntimeState: false,
+    });
     expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
   });
 

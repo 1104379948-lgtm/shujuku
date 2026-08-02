@@ -10,6 +10,7 @@ const { chatRef, saveStrict, scope, reload, storageMode, didFallback } = vi.hois
 }));
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({ getChatArray_ACU: vi.fn(() => chatRef.value), saveChatToHostStrict_ACU: saveStrict }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
+  settings_ACU: { dataIsolationEnabled: false, dataIsolationCode: '', storageMode: 'native' },
   get currentChatFileIdentifier_ACU() { return scope.chatIdentifier; },
   getCurrentIsolationKey_ACU: vi.fn(() => scope.isolationKey),
 }));
@@ -67,6 +68,37 @@ describe('mixed-storage-commit', () => {
     expect(saveStrict).toHaveBeenCalledTimes(1);
     expect(chatRef.value[0].TavernDB_ACU_Data).toBeUndefined();
     expect(chatRef.value[1].TavernDB_ACU_IsolatedData[''].storageFrame).toEqual(v2Before);
+    expect(chatRef.value[1].TavernDB_ACU_IsolatedData[''].mixedStorageDecisionBackup).toMatchObject({
+      version: 1,
+      action: 'keep_v2',
+      legacyData: legacy,
+      legacyFingerprint: getTableDataFingerprint_ACU(legacy),
+      decisionId: decision.decisionId,
+      decisionKind: 'equivalent_provenance_verified',
+      sourceMessageIndices: [0],
+      sourceAiFloors: [1],
+    });
+  });
+
+  it('无 provenance 但业务投影与覆盖可验证时，以 keep_v2 提交并保留决议 backup', async () => {
+    const legacy = { sheet_0: sheet([['1', '药水']]) } as any;
+    chatRef.value = buildChat(legacy, structuredClone(legacy), false);
+    const decision = await decisionFor(chatRef.value, legacy);
+
+    expect(decision).toMatchObject({ kind: 'equivalent_projection_verified' });
+    const result = await commitMixedStorageDecision_ACU({ decision, action: 'keep_v2', isolationConfig: { enabled: false, code: '' } });
+
+    expect(result).toEqual({ status: 'committed', decisionId: decision.decisionId });
+    expect(saveStrict).toHaveBeenCalledTimes(1);
+    expect(chatRef.value[0].TavernDB_ACU_Data).toBeUndefined();
+    expect(chatRef.value[1].TavernDB_ACU_IsolatedData[''].mixedStorageDecisionBackup).toMatchObject({
+      version: 1,
+      action: 'keep_v2',
+      decisionId: decision.decisionId,
+      decisionKind: 'equivalent_projection_verified',
+      legacyData: legacy,
+      legacyFingerprint: getTableDataFingerprint_ACU(legacy),
+    });
   });
 
   it('只使用 frozen merge candidate 写入新 checkpoint 并保存一次', async () => {
@@ -82,6 +114,14 @@ describe('mixed-storage-commit', () => {
     const checkpoint = chatRef.value[2].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint;
     expect(checkpoint.data).toEqual(candidate);
     expect(checkpoint.migrationProvenance.legacySourceMessageIndices).toEqual([0]);
+    expect(chatRef.value[2].TavernDB_ACU_IsolatedData[''].mixedStorageDecisionBackup).toMatchObject({
+      version: 1,
+      action: 'commit_merge_candidate',
+      legacyData: legacy,
+      legacyFingerprint: getTableDataFingerprint_ACU(legacy),
+      decisionId: decision.decisionId,
+      decisionKind: 'legacy_has_v2_missing_data',
+    });
     expect(chatRef.value[0].TavernDB_ACU_Data).toBeUndefined();
   });
 

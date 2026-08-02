@@ -680,7 +680,7 @@ describe('buildBatchMergeBase_ACU', () => {
     }
   });
 
-  it('写入编排遇到无锚点 data_replace 时阻断，不退回模板空基底', async () => {
+  it('写入编排遇到完整 orphan data_replace 时以 replacement anchor 读取业务基底', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     try {
@@ -711,8 +711,8 @@ describe('buildBatchMergeBase_ACU', () => {
 
       const result = await buildBatchMergeBase_ACU(1, { maxMessageIndex: 0 });
 
-      expect(result.data).toBeNull();
-      expect(result.error).toContain('请先在数据管理中执行 V2 恢复诊断并确认恢复');
+      expect(result.error).toBeNull();
+      expect(result.data?.sheet_0.content).toEqual([['row_id'], ['1']]);
     } finally {
       vi.mocked(isSqliteMode).mockReturnValue(false);
     }
@@ -5336,7 +5336,7 @@ describe('orchestrateManualCatchUp_ACU', () => {
     expect(refreshData).not.toHaveBeenCalled();
   });
 
-  it('终态 replay 依赖临时 Sheet 补锚时返回稳定收敛诊断且不写 terminal progress', async () => {
+  it('终态 provisional Sheet 补锚不再作为单独阻断，但投影不一致仍拒绝 terminal progress', async () => {
     const chat = createCatchUpChat(2, 3) as any;
     mockGetChatArray_ACU.mockReturnValue(chat);
     const { getGlobalTemplateSnapshotForCurrentProfile_ACU } = await import('../../../src/service/template/chat-scope');
@@ -5388,8 +5388,8 @@ describe('orchestrateManualCatchUp_ACU', () => {
       replayVerified: false,
       dataCommitted: true,
       terminalProgressSaved: false,
-      diagnosticCode: 'replay_requires_checkpoint_convergence',
-      error: expect.stringContaining('V2 replay 仍依赖临时 Sheet 补锚：sheet_a'),
+      diagnosticCode: 'replay_data_mismatch',
+      error: expect.stringContaining('V2 replay 与本轮已提交数据不一致：sheet_a'),
     }));
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     expect(mockReloadStorageProvider).toHaveBeenCalledTimes(1);

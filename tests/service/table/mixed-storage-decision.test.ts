@@ -49,12 +49,13 @@ describe('mixed-storage-decision', () => {
     expect(chat).toEqual(before);
   });
 
-  it('历史 checkpoint 缺 provenance 即使投影相等也必须转为人工冲突', async () => {
+  it('历史 checkpoint 缺 provenance 但业务投影与覆盖均可验证时，授权带 backup 的 keep_v2', async () => {
     const legacyData = { sheet_0: sheet([['1', '药水']]) } as any;
     const decision = await evaluate(buildChat(legacyData, structuredClone(legacyData), { provenance: false }), legacyData);
 
-    expect(decision.kind).toBe('conflict_requires_user_choice');
+    expect(decision.kind).toBe('equivalent_projection_verified');
     expect(decision.diagnosticCodes).toContain('provenance_missing_or_invalid');
+    expect(decision.allowedActions).toContain('keep_v2');
   });
 
   it('V2 replay 缺少 full anchor 时保持 fail-closed', async () => {

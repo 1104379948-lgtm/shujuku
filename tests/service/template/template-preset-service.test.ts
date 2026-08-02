@@ -120,6 +120,7 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
     const data = await replayMocks.load(...args);
     return data ? { baseKind: 'full_checkpoint', data } : null;
   }),
+  hasStructuralReplayCompatibilityRepairs_ACU: (repairs: any[] | undefined) => Boolean(repairs?.some(repair => repair.severity !== 'provisional')),
 }));
 vi.mock('../../../src/service/table/storage-strategy-resolver', () => ({
   resolveTableStorageStrategy_ACU: vi.fn(() => ({ mode: 'v2' })),
@@ -860,7 +861,7 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
     expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({ baseRevision: 'runtime-v1:current' }));
   });
 
-  it('V2 replay 仍依赖临时 Sheet 补锚时阻断模板切换且零协调零提交', async () => {
+  it('V2 provisional Sheet 补锚交给模板提交在同一候选中收敛', async () => {
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
     vi.mocked(loadTableStateFromFramesV2Detailed_ACU).mockResolvedValueOnce({
       baseKind: 'full_checkpoint',
@@ -868,6 +869,7 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
       requiresCheckpointConvergence: true,
       compatibilityRepairs: [{
         kind: 'temporary_sheet_anchor',
+        severity: 'provisional',
         sheetKey: 'sheet_live',
         messageIndex: 384,
         seq: 1,
@@ -876,16 +878,20 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
         reason: 'missing_at_operation',
       }],
     } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({
+      candidateData: candidate,
+      sheetChanges: [{ kind: 'operations', sheetKey: 'sheet_live', targetSheetData: candidate.sheet_live, operations: [{ kind: 'meta_update', sheetKey: 'sheet_live', meta: { name: '背包' } }] }],
+      deletedSheetKeys: [], blockers: [], audit: [],
+    } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({ saved: true, mode: 'v2_commit' } as any);
 
     const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
 
-    expect(result).toMatchObject({
-      saved: false,
-      error: expect.stringContaining('V2 恢复收敛'),
-    });
-    expect(result.error).toContain('sheet_live');
-    expect(reconcileChatTemplate_ACU).not.toHaveBeenCalled();
-    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ saved: true });
+    expect(reconcileChatTemplate_ACU).toHaveBeenCalledWith(expect.objectContaining({ baselineData: candidate }));
+    expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      sheetChanges: expect.arrayContaining([expect.objectContaining({ kind: 'operations', sheetKey: 'sheet_live' })]),
+    }));
     expect(commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
   });
 

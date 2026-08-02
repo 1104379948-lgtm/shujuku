@@ -10,7 +10,7 @@ import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationO
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { ensureStableRowIdsForSeedRows_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, getSortedSheetKeys_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
-import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
+import { formatCanonicalRowIssues_ACU, isEmptyCanonicalRowId_ACU, normalizeCanonicalTableRows_ACU, restoreLegacyRowIdentity_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
 import { getPhysicalTableNameForSheet_ACU } from '../../shared/sheet-identity';
@@ -28,16 +28,29 @@ interface V2FrameRef_ACU {
 
 export type TableScheduleSummaryV2_ACU = NonNullable<TableCheckpointV2_ACU['scheduleSummary']>;
 
-export type TableReplayBaseKindV2_ACU = 'full_checkpoint' | 'temporary_template_baseline';
+export type TableReplayBaseKindV2_ACU = 'full_checkpoint' | 'replacement_anchor' | 'temporary_template_baseline';
 
 export interface TableReplayCompatibilityRepairV2_ACU {
   kind: 'temporary_sheet_anchor';
+  /**
+   * `provisional` means this replay reconstructed a usable state from an
+   * external template and can be converged by a verified checkpoint. Missing
+   * severity is deliberately interpreted as structural by consumers: old
+   * persisted diagnostics must never become less strict merely by upgrading.
+   */
+  severity?: 'provisional' | 'structural';
   sheetKey: string;
   messageIndex: number;
   seq: number;
   operationIndex: number;
   templateFingerprint: string;
   reason: 'missing_at_operation';
+}
+
+export function hasStructuralReplayCompatibilityRepairs_ACU(
+  repairs: readonly TableReplayCompatibilityRepairV2_ACU[] | null | undefined,
+): boolean {
+  return Boolean(repairs?.some(repair => repair.severity !== 'provisional'));
 }
 
 export interface TableReplayResultV2_ACU {
@@ -67,6 +80,21 @@ function deepClone_ACU<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
 }
 
+function isReplayableV2TagData_ACU(tagData: unknown): tagData is { storageFrame: TableStorageFrameV2_ACU } {
+  if (isV2TagData_ACU(tagData)) return true;
+  if (!tagData || typeof tagData !== 'object' || Array.isArray(tagData)) return false;
+  const frame = (tagData as { storageFrame?: unknown }).storageFrame;
+  if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false;
+  const rawFrame = frame as Record<string, unknown>;
+  // Only the old singleton log encoding is admitted here. Persist/write paths
+  // deliberately keep the canonical-array type guard and will reserialize only
+  // after their own validation succeeds.
+  return rawFrame.version === 2
+    && rawFrame.logEntries !== null
+    && typeof rawFrame.logEntries === 'object'
+    && !Array.isArray(rawFrame.logEntries);
+}
+
 function getV2FrameRefs_ACU(chat: any[], isolationKey: string): V2FrameRef_ACU[] {
   const refs: V2FrameRef_ACU[] = [];
   let aiFloor = 0;
@@ -77,7 +105,7 @@ function getV2FrameRefs_ACU(chat: any[], isolationKey: string): V2FrameRef_ACU[]
     aiFloor += 1;
 
     const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
-    if (isV2TagData_ACU(tagData)) {
+    if (isReplayableV2TagData_ACU(tagData)) {
       refs.push({ messageIndex: i, aiFloor, frame: tagData.storageFrame });
     }
   }
@@ -99,7 +127,11 @@ function hasUnanchoredReplayArtifacts_ACU(frameRefs: V2FrameRef_ACU[]): boolean 
       && headRevision !== null
       && (typeof headRevision !== 'string' || headRevision.length > 0);
 
-    return frame.logEntries.length > 0
+    const rawLogEntries = persistedFrame.logEntries;
+    const hasLogEntryArtifact = Array.isArray(rawLogEntries)
+      ? rawLogEntries.length > 0
+      : rawLogEntries !== undefined && rawLogEntries !== null;
+    return hasLogEntryArtifact
       || hasPerSheetCheckpointArtifact
       || persistedFrame.manualRefillProgress !== undefined
       || hasHeadRevisionArtifact;
@@ -117,9 +149,53 @@ export function hasUnanchoredReplayArtifactsForChatV2_ACU(
   return hasUnanchoredReplayArtifacts_ACU(frameRefs);
 }
 
-function hasOrphanDataReplace_ACU(frameRefs: V2FrameRef_ACU[]): boolean {
-  return frameRefs.some(({ frame }) => (frame.logEntries || []).some(entry =>
-    (entry.operations || []).some(operation => operation?.kind === 'data_replace')));
+interface ReplacementAnchor_ACU {
+  messageIndex: number;
+  seq: number;
+  operationIndex: number;
+  data: TableDataObject_ACU;
+}
+
+/**
+ * `data_replace` carries a complete post-state, so it is a self-sufficient
+ * replay base: everything logged before it is superseded by definition. Older
+ * histories that lost their full checkpoint can therefore still be replayed
+ * exactly from their last replacement onward.
+ *
+ * Only a structurally complete payload qualifies. A truncated or non-object
+ * `data` cannot be trusted as a base — adopting it would silently drop every
+ * sheet it fails to carry — so such entries are skipped and an earlier
+ * replacement is used instead.
+ */
+function findLastUsableReplacementAnchor_ACU(frameRefs: V2FrameRef_ACU[]): ReplacementAnchor_ACU | null {
+  let anchor: ReplacementAnchor_ACU | null = null;
+  for (const { messageIndex, frame } of frameRefs) {
+    // Anchor discovery must observe the same ordering the replay loop will use,
+    // otherwise a legacy frame with missing or repeated `seq` yields an anchor
+    // cursor that cannot be matched during replay and the truncation of
+    // superseded operations silently misfires. Warnings are suppressed here
+    // because the replay loop reports the same repair on the same frame.
+    let entries: TableMutationLogEntryV2_ACU[];
+    try {
+      entries = getReplayOrderedFrameLogEntries_ACU(frame, { warnOnRepair: false });
+    } catch {
+      // An undecodable frame cannot contribute an anchor. If it is inside the
+      // replayed range the main loop still fails loudly on it.
+      continue;
+    }
+    for (const entry of entries) {
+      if (!Array.isArray(entry.operations)) continue;
+      for (const [operationIndex, operation] of entry.operations.entries()) {
+        if (operation?.kind !== 'data_replace') continue;
+        const data = (operation as { data?: unknown }).data;
+        if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+        const sheetKeys = Object.keys(data as Record<string, unknown>).filter(key => key.startsWith('sheet_'));
+        if (sheetKeys.length === 0) continue;
+        anchor = { messageIndex, seq: entry.seq, operationIndex, data: data as TableDataObject_ACU };
+      }
+    }
+  }
+  return anchor;
 }
 
 function resolveHeaderOnlyTemplateSnapshot_ACU(chat: any[], isolationKey: string): TableDataObject_ACU | null {
@@ -184,66 +260,168 @@ function replaceState_ACU(state: TableDataObject_ACU, next: TableDataObject_ACU)
   Object.assign(state, deepClone_ACU(next));
 }
 
-function getValidatedSheetCheckpoints_ACU(frame: TableStorageFrameV2_ACU): TableSheetCheckpointV2_ACU[] {
+/**
+ * Repairs ordering metadata of a legacy timeline shard for this replay only.
+ *
+ * `activateAtMessageIndex` is no longer an addressing key (the physical frame
+ * position is), so a missing or out-of-range value can be filled from the frame
+ * itself. A missing `afterSeq` has no single safe default: applying a hide too
+ * early makes the frame's own operations hit an already-deleted table, while
+ * applying an introduction/rebase/reveal too late overwrites business writes
+ * those operations performed. The checkpoint map does not record a position
+ * relative to log entries, so that ordering remains fail-closed.
+ */
+function normalizeSheetCheckpointTimelineForReplay_ACU(
+  timeline: NonNullable<TableSheetCheckpointV2_ACU['timeline']>,
+  context: { recordKey: string; frameMessageIndex: number; sheetKey: string },
+): NonNullable<TableSheetCheckpointV2_ACU['timeline']> {
+  if (!timeline || typeof timeline !== 'object' || Array.isArray(timeline)
+    || (timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase'
+      && timeline.kind !== 'sheet_reveal' && timeline.kind !== 'sheet_hide')) {
+    throw new Error(`perSheetCheckpoints.${context.recordKey} 包含非法 timeline`);
+  }
+
+  const repairs: string[] = [];
+  let activateAtMessageIndex = timeline.activateAtMessageIndex;
+  if (activateAtMessageIndex === undefined) {
+    activateAtMessageIndex = context.frameMessageIndex;
+    repairs.push(`activateAtMessageIndex→${activateAtMessageIndex}`);
+  } else if (!Number.isInteger(activateAtMessageIndex) || activateAtMessageIndex < 0) {
+    throw new Error(`perSheetCheckpoints.${context.recordKey} 包含非法 timeline`);
+  }
+  let afterSeq = timeline.afterSeq;
+  if (afterSeq === undefined) {
+    throw new Error(
+      `perSheetCheckpoints.${context.recordKey} 缺少 afterSeq，无法确定相对日志顺序：`
+      + `sheetKey=${context.sheetKey}, messageIndex=${context.frameMessageIndex}`,
+    );
+  } else if (!Number.isInteger(afterSeq) || afterSeq < 0) {
+    throw new Error(`perSheetCheckpoints.${context.recordKey} 包含非法 timeline`);
+  }
+  if (repairs.length === 0) return timeline;
+
+  logWarn_ACU(
+    `[V2 Replay] perSheetCheckpoints.${context.recordKey} 的 timeline 缺少可用排序元数据，`
+    + `已仅在内存回放中按 frame 物理位置修复：${repairs.join('、')}。原 storage frame 未修改。`,
+  );
+  return { ...timeline, activateAtMessageIndex, afterSeq } as NonNullable<TableSheetCheckpointV2_ACU['timeline']>;
+}
+
+/**
+ * Normalizes per-sheet checkpoint metadata for replay without mutating the frame.
+ *
+ * Writers derive the map key from `checkpoint.sheetKey`, so both sides agree on
+ * anything written by a current version. Old archives can disagree, and every
+ * other reader in this codebase (purge, table history, mixed-storage evidence,
+ * persist) addresses these records by map key. The map key is therefore the
+ * effective identity when both sides are usable, and the usable side wins when
+ * only one is. Two records collapsing onto the same effective key stays
+ * rejected: adopting either would silently drop one sheet's checkpoint.
+ */
+function getValidatedSheetCheckpoints_ACU(
+  frame: TableStorageFrameV2_ACU,
+  frameMessageIndex: number,
+): TableSheetCheckpointV2_ACU[] {
   const checkpoints = frame.perSheetCheckpoints;
   if (checkpoints === undefined) return [];
   if (!checkpoints || typeof checkpoints !== 'object' || Array.isArray(checkpoints)) {
     throw new Error('perSheetCheckpoints 必须是按 sheetKey 索引的对象');
   }
-
-  return Object.entries(checkpoints).map(([recordKey, checkpoint]) => {
-    if (!recordKey.startsWith('sheet_')) {
-      throw new Error(`perSheetCheckpoints 包含非法键: ${recordKey}`);
-    }
-    if (!checkpoint || checkpoint.kind !== 'sheet_full') {
+  const isSheetKey = (value: unknown): value is string => typeof value === 'string' && value.startsWith('sheet_');
+  const normalized = Object.entries(checkpoints).map(([recordKey, checkpoint]) => {
+    if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)
+      || checkpoint.kind !== 'sheet_full') {
       throw new Error(`perSheetCheckpoints.${recordKey} 缺少有效的 sheet_full checkpoint`);
-    }
-    if (checkpoint.sheetKey !== recordKey) {
-      throw new Error(`perSheetCheckpoints.${recordKey} 的 sheetKey 不一致: ${checkpoint.sheetKey}`);
     }
     if (!checkpoint.data || typeof checkpoint.data !== 'object' || Array.isArray(checkpoint.data)) {
       throw new Error(`perSheetCheckpoints.${recordKey} 缺少有效的单表 data`);
     }
-    if (checkpoint.timeline !== undefined) {
-      const timeline = checkpoint.timeline;
-      if ((timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase'
-        && timeline.kind !== 'sheet_reveal' && timeline.kind !== 'sheet_hide')
-        || !Number.isInteger(timeline.activateAtMessageIndex)
-        || timeline.activateAtMessageIndex < 0
-        || !Number.isInteger(timeline.afterSeq)
-        || timeline.afterSeq < 0) {
-        throw new Error(`perSheetCheckpoints.${recordKey} 包含非法 timeline`);
-      }
+    const declaredKey = checkpoint.sheetKey;
+    if (!isSheetKey(recordKey) && !isSheetKey(declaredKey)) {
+      throw new Error(`perSheetCheckpoints 包含非法键: ${recordKey}`);
     }
-    return checkpoint;
+
+    const sheetKey = isSheetKey(recordKey) ? recordKey : declaredKey;
+    const repairs: string[] = [];
+    if (sheetKey !== declaredKey) repairs.push(`sheetKey ${String(declaredKey)}→${sheetKey}`);
+    if (repairs.length > 0) {
+      logWarn_ACU(
+        `[V2 Replay] perSheetCheckpoints.${recordKey} 的协议元数据不完整，`
+        + `已仅在内存回放中按 map key 归一：${repairs.join('、')}。原 storage frame 未修改。`,
+      );
+    }
+
+    const timeline = checkpoint.timeline === undefined
+      ? undefined
+      : normalizeSheetCheckpointTimelineForReplay_ACU(checkpoint.timeline, {
+        recordKey,
+        frameMessageIndex,
+        sheetKey,
+      });
+    return {
+      ...checkpoint,
+      kind: checkpoint.kind,
+      sheetKey,
+      ...(timeline === undefined ? {} : { timeline }),
+    };
   }).sort((left, right) => left.sheetKey.localeCompare(right.sheetKey));
+
+  const duplicateKey = normalized.find(
+    (checkpoint, index) => normalized.findIndex(other => other.sheetKey === checkpoint.sheetKey) !== index,
+  );
+  if (duplicateKey) {
+    throw new Error(`perSheetCheckpoints 归一化后存在重复 sheetKey: ${duplicateKey.sheetKey}`);
+  }
+  return normalized;
 }
 
-function getValidatedFrameLogEntries_ACU(frame: TableStorageFrameV2_ACU): TableMutationLogEntryV2_ACU[] {
-  const entries = frame.logEntries;
-  if (entries === undefined) return [];
-  if (!Array.isArray(entries)) throw new Error('logEntries 必须是数组');
+/**
+ * Normalizes legacy log ordering without mutating the persisted frame.
+ *
+ * Old writers could omit `seq`, or emit repeated / out-of-order values, but
+ * JSON array order still unambiguously preserves the order in which those
+ * entries were persisted. In that case we use the physical ordinal as an
+ * ephemeral sequence for this replay. Both state replay and schedule summary
+ * consume this function, so they cannot diverge on the same history.
+ */
+function getReplayOrderedFrameLogEntries_ACU(
+  frame: TableStorageFrameV2_ACU,
+  options: { warnOnRepair?: boolean } = {},
+): TableMutationLogEntryV2_ACU[] {
+  const rawEntries = frame.logEntries;
+  if (rawEntries === undefined) return [];
+  const entries = Array.isArray(rawEntries)
+    ? rawEntries
+    : (rawEntries && typeof rawEntries === 'object' ? [rawEntries] : null);
+  if (!entries) throw new Error('logEntries 必须是数组或旧版单条日志对象');
 
-  let previousSeq = -1;
-  return entries.map((entry, index) => {
-    const seq = entry?.seq;
-    if (!Number.isInteger(seq) || seq < 0) {
-      throw new Error(`logEntries[${index}] 包含非法 seq: ${String(seq)}`);
-    }
-    if (seq <= previousSeq) {
-      throw new Error(`logEntries 必须按唯一且严格递增的 seq 排列: previous=${previousSeq}, current=${seq}`);
-    }
-    previousSeq = seq;
-    return entry;
+  const usesCanonicalOrder = entries.every((entry, index) => {
+    const seq = (entry as any)?.seq;
+    return Number.isInteger(seq) && seq >= 0 && (index === 0 || seq > (entries[index - 1] as any)?.seq);
   });
+  if (usesCanonicalOrder) return entries as TableMutationLogEntryV2_ACU[];
+
+  const normalized = entries.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`logEntries[${index}] 必须是对象，无法按物理顺序兼容。`);
+    }
+    return { ...(entry as TableMutationLogEntryV2_ACU), seq: index };
+  });
+  if (options.warnOnRepair !== false) {
+    logWarn_ACU(
+      `[V2 Replay] 检测到旧 logEntries 的 seq 缺失、重复或倒序，`
+      + `已仅在内存回放中按数组物理顺序重建临时 seq：entries=${normalized.length}。原 storage frame 未修改。`,
+    );
+  }
+  return normalized;
 }
 
 function getValidatedTimelineCheckpointsForFrame_ACU(
   checkpoints: TableSheetCheckpointV2_ACU[],
 ): TableSheetCheckpointV2_ACU[] {
   // shard 的物理承载 frame 是跨楼层回放位置；聊天插入、删除或导入会让旧的声明索引漂移。
-  // activateAtMessageIndex 仍在 getValidatedSheetCheckpoints_ACU 中做类型/范围校验，
-  // 但不再作为寻址键。同一 frame 内的真实生效顺序继续由 afterSeq 决定。
+  // activateAtMessageIndex 不再作为寻址键，缺失或越界时由 getValidatedSheetCheckpoints_ACU
+  // 按 frame 物理位置补齐。同一 frame 内的真实生效顺序继续由 afterSeq 决定。
   return checkpoints.filter(checkpoint => checkpoint.timeline !== undefined);
 }
 
@@ -304,12 +482,65 @@ function normalizeReplayState_ACU(state: TableDataObject_ACU, context: string): 
   replaceState_ACU(state, candidate);
 }
 
+/**
+ * Normalizes a candidate built from already-persisted history.
+ *
+ * Legacy payloads predate the row_id identity contract, so identity is restored
+ * first and only then handed to the strict canonical normalizer. Without this
+ * order, rows whose identity column was empty or absent are classified as
+ * deleted and the whole replay aborts — which is what made upgraded chats
+ * unreadable even though their data was intact.
+ *
+ * Newly constructed candidates (template baselines, freshly built checkpoints)
+ * must keep using normalizeReplayState_ACU so new writes stay strict.
+ */
+function normalizeHistoricalReplayState_ACU(state: TableDataObject_ACU, context: string): void {
+  const candidate = deepClone_ACU(state);
+  const identity = restoreLegacyRowIdentity_ACU(candidate);
+
+  // A repair that loses a row or a business cell is an implementation defect,
+  // not a data defect. Fail loudly instead of persisting a lossy candidate.
+  const { conservation } = identity;
+  if (conservation.rowCountAfter !== conservation.rowCountBefore
+    || conservation.businessCellCountAfter !== conservation.businessCellCountBefore) {
+    throw new Error(
+      `[V2 Replay] ${context} 历史行身份兼容破坏数据守恒：`
+      + `rows ${conservation.rowCountBefore}→${conservation.rowCountAfter}, `
+      + `cells ${conservation.businessCellCountBefore}→${conservation.businessCellCountAfter}。`,
+    );
+  }
+
+  const normalization = normalizeCanonicalTableRows_ACU(candidate);
+  const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+  if (canonicalIssues.length > 0) {
+    throw new Error(`[V2 Replay] ${context} 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`);
+  }
+
+  if (identity.repairs.length > 0) {
+    const assigned = identity.repairs.filter(repair => repair.code === 'assigned_row_id').length;
+    const headerRepairs = identity.repairs.filter(repair => repair.code !== 'assigned_row_id');
+    const affectedSheetKeys = [...new Set(identity.repairs.map(repair => repair.sheetKey))];
+    logWarn_ACU(
+      `[V2 Replay] ${context} 旧格式缺少行身份，已在内存副本中保留全部行`
+      + `并补 ${assigned} 个 row_id、修正 ${headerRepairs.length} 个表头身份列：`
+      + `${affectedSheetKeys.join(', ')}。原 storage frame 未修改。`,
+    );
+  }
+
+  replaceState_ACU(state, candidate);
+}
+
 function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU): void {
+  // Restore legacy identity on the live state first: an empty or absent row_id
+  // is a legacy format trait, not a duplicate, and leaving it here would send
+  // the whole checkpoint down the strict reject path below.
+  restoreLegacyRowIdentity_ACU(state);
+
   const probe = deepClone_ACU(state);
   const normalization = normalizeCanonicalTableRows_ACU(probe);
   const nonDuplicateErrors = normalization.errors.filter(issue => issue.reason !== 'duplicate_row_id');
   if (normalization.removedRows.length > 0 || nonDuplicateErrors.length > 0) {
-    normalizeReplayState_ACU(state, 'full checkpoint');
+    normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
     return;
   }
 
@@ -327,16 +558,16 @@ function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU)
     return;
   }
   if (audit.status !== 'repairable' || duplicateIssues.length === 0 || unsupportedIssues.length > 0) {
-    normalizeReplayState_ACU(state, 'full checkpoint');
+    normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
     return;
   }
   const repair = repairTableDataFromAudit_ACU(audit);
   if (repair.requiresConfirmation || !repair.candidateData || typeof repair.candidateData !== 'object') {
-    normalizeReplayState_ACU(state, 'full checkpoint');
+    normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
     return;
   }
   const candidate = repair.candidateData as TableDataObject_ACU;
-  normalizeReplayState_ACU(candidate, 'legacy duplicate row_id repair');
+  normalizeHistoricalReplayState_ACU(candidate, 'legacy duplicate row_id repair');
   replaceState_ACU(state, candidate);
   const affectedSheetKeys = [...new Set(repair.idRemap.map(remap => remap.sheetKey))];
   logWarn_ACU(
@@ -346,7 +577,11 @@ function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU)
 
 async function ensureSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU, state: TableDataObject_ACU): Promise<void> {
   if (runtime.loaded) return;
-  normalizeReplayState_ACU(state, 'snapshot');
+  // The snapshot handed to SQLite comes from persisted history, so legacy
+  // identity must be restored before strict hydrate. The export path below
+  // stays strict: by then every row has an identity, and a defect there would
+  // be ours, not the historical data's.
+  normalizeHistoricalReplayState_ACU(state, 'snapshot');
   await runtime.engine.init();
   runtime.syncBridge.loadFromTableData(state, { strict: true });
   runtime.loaded = true;
@@ -400,8 +635,14 @@ async function commitReplayCandidate_ACU(
   state: TableDataObject_ACU,
   candidate: TableDataObject_ACU,
   context: string,
+  options: { historical?: boolean } = {},
 ): Promise<void> {
-  normalizeReplayState_ACU(candidate, context);
+  // Every operation funnels through here, so this is the single place where the
+  // historical/strict split is decided. Candidates derived from persisted
+  // operations get legacy identity restored; candidates we construct ourselves
+  // (template baselines) stay strict so new writes cannot regress the format.
+  if (options.historical) normalizeHistoricalReplayState_ACU(candidate, context);
+  else normalizeReplayState_ACU(candidate, context);
   if (runtime?.loaded) await reloadSqlReplayRuntime_ACU(runtime, candidate);
   replaceState_ACU(state, candidate);
 }
@@ -422,7 +663,7 @@ async function applySheetCheckpointsForReplay_ACU(
       candidate[checkpoint.sheetKey] = deepClone_ACU(checkpoint.data);
     }
   }
-  await commitReplayCandidate_ACU(runtime, state, candidate, '单表 checkpoint');
+  await commitReplayCandidate_ACU(runtime, state, candidate, '单表 checkpoint', { historical: true });
 }
 
 function buildReplaySqlTableAliases_ACU(
@@ -751,7 +992,7 @@ export async function applyTableOperationV2_ACU(
   try {
     if (operation.kind === 'data_replace') {
       const candidate = deepClone_ACU(operation.data);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace');
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace', { historical: true });
       return;
     }
     if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
@@ -763,13 +1004,13 @@ export async function applyTableOperationV2_ACU(
     if (operation.kind === 'sheet_schema_migrate') {
       const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state);
       const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate');
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate', { historical: true });
       return;
     }
     if (operation.kind === 'sheet_replace') {
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
       candidate[operation.sheetKey] = deepClone_ACU(operation.sheet);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace');
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace', { historical: true });
       return;
     }
     if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
@@ -778,13 +1019,13 @@ export async function applyTableOperationV2_ACU(
       }
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
       applyTablePatchV2_ACU(candidate, operation);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind);
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind, { historical: true });
       return;
     }
     if (operation.kind === 'table_edit_dsl') {
       const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
       applyTableEditDslOperationV2_ACU(candidate, operation.text);
-      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl');
+      await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl', { historical: true });
       return;
     }
 
@@ -815,7 +1056,7 @@ export function collectScheduleSummaryFromFramesV2_ACU(
 
   for (const ref of frameRefs) {
     if (checkpointRef && ref.messageIndex < checkpointRef.messageIndex) continue;
-    const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame);
+    const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
     const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
     for (const sheetCheckpoint of checkpoints.filter(checkpoint => checkpoint.timeline === undefined)) {
       summary[sheetCheckpoint.sheetKey] = deepClone_ACU(sheetCheckpoint.scheduleSummary || {});
@@ -825,7 +1066,7 @@ export function collectScheduleSummaryFromFramesV2_ACU(
         ref.aiFloor,
       );
     }
-    const entries = getValidatedFrameLogEntries_ACU(ref.frame);
+    const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
     const pendingIntroductions = [...introductions];
     const applyDueIntroductions = (nextSeq: number): void => {
       const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline!.afterSeq < nextSeq);
@@ -861,17 +1102,27 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
   let baseKind: TableReplayBaseKindV2_ACU = 'full_checkpoint';
   let state: TableDataObject_ACU;
   let replayStartMessageIndex: number;
+  let replacementAnchorCursor: ReplacementAnchor_ACU | null = null;
 
   if (!checkpointRef?.frame.checkpoint) {
     if (!hasUnanchoredArtifacts) return null;
+    // A replacement anchor supersedes everything before it, so it is a valid
+    // base on its own and needs no template baseline or user confirmation.
+    const replacementAnchor = findLastUsableReplacementAnchor_ACU(frameRefs);
+    if (replacementAnchor) {
+      state = deepClone_ACU(replacementAnchor.data);
+      normalizeLegacyDuplicateCheckpointState_ACU(state);
+      baseKind = 'replacement_anchor';
+      replayStartMessageIndex = replacementAnchor.messageIndex;
+      replacementAnchorCursor = replacementAnchor;
+      logWarn_ACU(
+        `[V2 Replay] 未找到 full checkpoint，已采用最后一个完整 data_replace 作为替换基底：`
+        + `messageIndex=${replacementAnchor.messageIndex}, seq=${replacementAnchor.seq}, `
+        + `operationIndex=${replacementAnchor.operationIndex}。该基底之前的日志按完整替换语义被覆盖。`,
+      );
+    } else {
     if (!options.allowTemporaryTemplateBaseline) {
       logWarn_ACU('[V2 Replay] 未找到 full checkpoint，检测到无锚点 V2 replay artifacts，拒绝恢复不完整 V2 表格数据。');
-      return null;
-    }
-    if (hasOrphanDataReplace_ACU(frameRefs)) {
-      const message = '[V2 Replay] 无锚点 artifacts 包含 data_replace，必须通过显式恢复确认，拒绝使用临时模板基线。';
-      logWarn_ACU(message);
-      if (options.throwOnRecoveryRequired) throw new Error(`${message} 请先在数据管理中执行 V2 恢复诊断并确认恢复。`);
       return null;
     }
     const temporaryBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
@@ -883,6 +1134,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
     baseKind = 'temporary_template_baseline';
     replayStartMessageIndex = frameRefs[0]?.messageIndex ?? 0;
     logWarn_ACU('[V2 Replay] 未找到 full checkpoint，正使用当前聊天模板的 header-only 临时基线回放；该状态不是持久化锚点。');
+    }
   } else {
     const checkpoint = checkpointRef.frame.checkpoint;
     state = deepClone_ACU(checkpoint.data);
@@ -904,15 +1156,22 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
   try {
     for (const ref of frameRefs) {
       if (ref.messageIndex < replayStartMessageIndex) continue;
-      const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame);
+      const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
       const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
+      const isAnchorFrame = replacementAnchorCursor?.messageIndex === ref.messageIndex;
       await applySheetCheckpointsForReplay_ACU(
         state,
-        checkpoints.filter(checkpoint => checkpoint.timeline === undefined),
+        // A replacement anchor is a complete state. Untimed checkpoints in
+        // that same frame have no ordering marker proving they occurred after
+        // it, so replaying them would resurrect superseded data. Timeline
+        // checkpoints are retained below and only become due after anchor seq.
+        checkpoints.filter(checkpoint => checkpoint.timeline === undefined && !isAnchorFrame),
         runtime,
       );
-      const entries = getValidatedFrameLogEntries_ACU(ref.frame);
-      const pendingIntroductions = [...introductions];
+      const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
+      const pendingIntroductions = isAnchorFrame
+        ? introductions.filter(checkpoint => checkpoint.timeline!.afterSeq > replacementAnchorCursor!.seq)
+        : [...introductions];
       const applyDueIntroductions = async (nextSeq: number): Promise<void> => {
         const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline!.afterSeq < nextSeq);
         if (due.length === 0) return;
@@ -925,10 +1184,16 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
         }
       };
       for (const entry of entries) {
+        if (isAnchorFrame && entry.seq < replacementAnchorCursor!.seq) continue;
         try {
           await applyDueIntroductions(entry.seq);
           if (Array.isArray(entry.operations) && entry.operations.length > 0) {
             for (const [operationIndex, operation] of entry.operations.entries()) {
+              if (isAnchorFrame
+                && entry.seq === replacementAnchorCursor!.seq
+                && operationIndex <= replacementAnchorCursor!.operationIndex) {
+                continue;
+              }
               try {
                 if (options.compatibilityMode !== 'disabled'
                   && operation?.kind === 'sql_sheet_batch'
@@ -948,6 +1213,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                     await commitReplayCandidate_ACU(runtime, state, candidate, 'temporary sheet anchor');
                     compatibilityRepairs.push({
                       kind: 'temporary_sheet_anchor',
+                      severity: 'provisional',
                       sheetKey: operation.sheetKey,
                       messageIndex: ref.messageIndex,
                       seq: entry.seq,
@@ -972,7 +1238,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
             for (const patch of entry.patches || []) {
               applyTablePatchV2_ACU(candidate, patch);
             }
-            await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches');
+            await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches', { historical: true });
           }
           if (options.updateRuntimeState !== false) {
             replayEventForState_ACU(entry, ref.aiFloor);

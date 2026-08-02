@@ -159,6 +159,16 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     expect(validateMigrationProvenanceV1_ACU(tagData.storageFrame.checkpoint.migrationProvenance))
       .toEqual({ valid: true, issues: [] });
     expect(tagData.storageFrame.logEntries).toEqual([]);
+    expect(tagData.migrationAuditBackup).toMatchObject({
+      version: 1,
+      auditStatus: 'clean',
+      sourceData: data,
+      dataFingerprintBefore: getTableDataFingerprint_ACU(data),
+      dataFingerprintAfter: getTableDataFingerprint_ACU(data),
+      issues: [],
+      repairPlan: [],
+      idRemap: [],
+    });
     expect(resolveTableStorageStrategy_ACU(mockChatRef.value, '', { enabled: false, code: '' }).mode).toBe('v2');
   });
 
@@ -351,6 +361,15 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
     const checkpointData = mockChatRef.value[2].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data;
     const replayedData = await loadTableStateFromFramesV2_ACU(mockChatRef.value, '', { updateRuntimeState: false });
+    const auditBackup = mockChatRef.value[2].TavernDB_ACU_IsolatedData[''].migrationAuditBackup;
+    expect(auditBackup).toMatchObject({
+      version: 1,
+      auditStatus: 'repairable',
+      sourceData: data,
+      dataFingerprintBefore: getTableDataFingerprint_ACU(data),
+      dataFingerprintAfter: getTableDataFingerprint_ACU(checkpointData),
+    });
+    expect(auditBackup.repairPlan.length).toBeGreaterThan(0);
     expect(getBusinessDataProjection_ACU(result.data)).toEqual(beforeProjection);
     expect(getBusinessDataProjection_ACU(checkpointData)).toEqual(beforeProjection);
     expect(getBusinessDataProjection_ACU(replayedData)).toEqual(beforeProjection);

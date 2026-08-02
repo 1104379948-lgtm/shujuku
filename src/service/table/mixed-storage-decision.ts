@@ -10,6 +10,7 @@ export type MixedStorageDecisionKind_ACU =
   | 'blocked_checkpoint_convergence'
   | 'blocked_legacy_requires_confirmation'
   | 'equivalent_provenance_verified'
+  | 'equivalent_projection_verified'
   | 'v2_successor_verified'
   | 'legacy_has_v2_missing_data'
   | 'conflict_requires_user_choice';
@@ -179,7 +180,7 @@ function verifiedProvenance_ACU(evidence: MixedStorageEvidence_ACU): boolean {
 }
 
 function actionsFor_ACU(kind: MixedStorageDecisionKind_ACU): MixedStorageDecisionAction_ACU[] {
-  if (kind === 'equivalent_provenance_verified' || kind === 'v2_successor_verified') return ['noop', 'download_snapshots', 'keep_v2'];
+  if (kind === 'equivalent_provenance_verified' || kind === 'equivalent_projection_verified' || kind === 'v2_successor_verified') return ['noop', 'download_snapshots', 'keep_v2'];
   if (kind === 'legacy_has_v2_missing_data') return ['noop', 'download_snapshots', 'commit_merge_candidate'];
   return ['noop', 'download_snapshots'];
 }
@@ -226,6 +227,8 @@ export async function evaluateMixedStorageDecision_ACU(
     if (!coverageSufficient) diagnostics.push('v2_coverage_insufficient');
     if (scopeMatches && provenanceVerified && coverageSufficient && evidence.comparison.fingerprintsEqual === true) {
       kind = 'equivalent_provenance_verified';
+    } else if (scopeMatches && !evidence.v2.provenance.present && coverageSufficient && evidence.comparison.fingerprintsEqual === true) {
+      kind = 'equivalent_projection_verified';
     } else if (scopeMatches && provenanceVerified && coverageSufficient && evidence.comparison.fingerprintsEqual === false && hasV2SuccessorActivity_ACU(evidence)) {
       kind = 'v2_successor_verified';
     } else {

@@ -8,7 +8,7 @@
 
 import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normalizeIsolationCode_ACU } from '../../shared/data-constants';
 import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
-import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
+import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -591,6 +591,7 @@ export   function loadSettings_ACU() {
 
       settingsStorageReadyForSave_ACU = true;
       refreshDefaultTableTemplateOnce_ACU(activeCode);
+      forceDisableStrictJsonTableFillOnce_ACU();
       forceDefaultTableFillPromptsOnce_ACU();
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();
@@ -743,6 +744,24 @@ function refreshDefaultTableTemplateOnce_ACU(activeCode: string) {
   }
 
 /**
+ * 一次性将历史用户保留的严格 JSON 填表开关关闭。
+ * marker 写入后不再执行，用户仍可在高级设置中重新开启。
+ */
+function forceDisableStrictJsonTableFillOnce_ACU() {
+      try {
+          if (!settings_ACU || typeof settings_ACU !== 'object') return;
+          if (settings_ACU.strictJsonTableFillForceDisableVersion === STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU) return;
+
+          settings_ACU.strictJsonTableFillEnabled = false;
+          settings_ACU.strictJsonTableFillForceDisableVersion = STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU;
+          saveSettings_ACU();
+          logDebug_ACU(`[严格 JSON 填表] 已一次性关闭并记录版本: ${STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU}`);
+      } catch (error) {
+          logWarn_ACU('[严格 JSON 填表] 一次性关闭失败:', error);
+      }
+  }
+
+/**
  * [spv8.9.2] 一次性强制恢复全部填表提示词为当前版本默认值。
  * marker 写入后不再执行，用户后续仍可正常自定义。
  */
@@ -799,6 +818,7 @@ export   function buildDefaultSettings_ACU() {
           currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
           tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
           tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
+          strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本
           // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
           tableContextExtractTags: '',
           tableContextExtractRules: [] as any[],

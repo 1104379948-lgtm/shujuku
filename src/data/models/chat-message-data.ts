@@ -6,7 +6,7 @@
  */
 
 import type { Sheet_ACU } from '../../shared/models/table-data';
-import type { TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../../service/table/storage-frame-v2-types';
+import type { MixedStorageDecisionBackupV1_ACU, TableMigrationAuditBackupV1_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../../service/table/storage-frame-v2-types';
 import type {
     ChatSummaryVectorIndexManifest_ACU,
     ChatSummaryVectorIndexState_ACU,
@@ -23,6 +23,10 @@ export interface IsolationTagData_ACU {
     storageFrame?: TableStorageFrameV2_ACU;
     /** 显式 V2 恢复替换当前 frame 前保留的原始帧，用于导出与事故复盘。 */
     recoveryBackup?: TableV2RecoveryBackup_ACU;
+    /** Legacy-V1 自动迁移的审计与原始输入备份，不参与 V2 replay。 */
+    migrationAuditBackup?: TableMigrationAuditBackupV1_ACU;
+    /** Mixed legacy/V2 自动决议提交前保留的输入与证据，不参与 V2 replay。 */
+    mixedStorageDecisionBackup?: MixedStorageDecisionBackupV1_ACU;
     /** 旧版/兼容向量记忆状态。保留字段是为了不破坏已有聊天记录。 */
     vectorMemoryState?: any;
     /** 交火模式纪要向量索引轻量状态。新外置模式下不应保存完整 vector 数组。 */

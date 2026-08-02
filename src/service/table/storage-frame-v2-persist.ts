@@ -10,7 +10,7 @@ import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
 import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { hasLegacyTopLevelTableData_ACU, hasV2TableHistoryEvidence_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
-import { applyTableOperationV2_ACU, collectScheduleSummaryFromFramesV2_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, collectScheduleSummaryFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU } from '../../data/sqlite/schema-mapper';
@@ -490,6 +490,35 @@ async function validateTemporaryBaselineUpgradeCandidate_ACU(
 
   return await validateReplay('boundary', { maxMessageIndex: targetMessageIndex })
     || await validateReplay('suffix', {});
+}
+
+async function validateProvisionalConvergenceCandidate_ACU(
+  candidateChat: any[],
+  isolationKey: string,
+  targetMessageIndex: number,
+): Promise<string | null> {
+  for (const [scope, options] of [
+    ['boundary', { maxMessageIndex: targetMessageIndex }],
+    ['suffix', {}],
+  ] as const) {
+    try {
+      const replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+        ...options,
+        updateRuntimeState: false,
+        compatibilityMode: 'disabled',
+      });
+      if (!replay || replay.baseKind !== 'full_checkpoint') {
+        return `V2 convergence_candidate_${scope}_replay_failed: 候选未能从正式 full checkpoint 建立回放基底。`;
+      }
+      if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+        return `V2 convergence_candidate_${scope}_requires_repair: 候选仍依赖兼容补锚。`;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `V2 convergence_candidate_${scope}_replay_failed: ${message}`;
+    }
+  }
+  return null;
 }
 
 export function getLatestTableStorageHeadRevisionV2_ACU(chat: any[] | null | undefined, isolationKey: string): string | null {
@@ -1211,6 +1240,36 @@ async function persistTableMutationLogV2Core_ACU(
     }
     temporaryBaselineUpgrade = true;
   }
+  // A temporary sheet anchor is derived from the current template, not from
+  // persisted evidence. Before accepting another write, replace that dependency
+  // with the *pre-write* replay state in the same candidate commit. Using
+  // `afterData` here would capture the current operation and then append it a
+  // second time, so the checkpoint must come from the replay before this call
+  // mutates the frame.
+  let provisionalConvergenceReplay: Awaited<ReturnType<typeof loadTableStateFromFramesV2Detailed_ACU>> | null = null;
+  if (hasExistingCheckpoint && writesReplayArtifact) {
+    let replay;
+    try {
+      replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+        maxMessageIndex: target.index,
+        updateRuntimeState: false,
+        ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
+        ...(options.performanceParentSpanId
+          ? { performanceParentSpanId: options.performanceParentSpanId }
+          : {}),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { saved: false, error: `V2 写入前无法验证 provisional replay：${message}` };
+    }
+    if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+      if (!replay || !replay.compatibilityRepairs?.length
+        || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
+        return { saved: false, error: 'V2 写入前检测到结构性 replay repair，不能自动收敛或继续写入。' };
+      }
+      provisionalConvergenceReplay = replay;
+    }
+  }
   if (!manualRefillProgressIsValidForIntroductionHistory_ACU(options.manualRefillProgress)) {
     return { saved: false, error: 'V2 manualRefillProgress 格式无效，已拒绝写入。' };
   }
@@ -1291,6 +1350,42 @@ async function persistTableMutationLogV2Core_ACU(
   const aiFloor = countAiFloor_ACU(chat, target.index);
   let entry: TableMutationLogEntryV2_ACU | undefined;
 
+  if (provisionalConvergenceReplay) {
+    if (!targetExistingFrame) {
+      return { saved: false, error: 'V2 provisional replay 缺少可备份的目标 storage frame，已拒绝自动收敛。' };
+    }
+    const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+    const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+      createdAt: now,
+      reason: 'integrity_repair',
+      data: provisionalConvergenceReplay.data,
+      scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
+      context: { messageIndex: target.index, aiFloor, isolationKey },
+    });
+    if (!checkpointResult.checkpoint) {
+      return { saved: false, error: `V2 provisional replay 无法构建 canonical 收敛 checkpoint：${checkpointResult.error}` };
+    }
+    frame.checkpoint = checkpointResult.checkpoint;
+    frame.headRevision = checkpointRevision;
+    frame.logEntries = [];
+    delete frame.perSheetCheckpoints;
+    const tagData = isolatedData[isolationKey];
+    if (!tagData || typeof tagData !== 'object' || Array.isArray(tagData)) {
+      return { saved: false, error: 'V2 provisional replay 目标标签在收敛准备期间无效。' };
+    }
+    tagData.recoveryBackup = {
+      version: 1,
+      createdAt: now,
+      recoveryKind: 'temporary_sheet_anchor_convergence',
+      sourceMessageIndex: target.index,
+      storageFrame: targetExistingFrame,
+    } satisfies TableV2RecoveryBackup_ACU;
+    logDebug_ACU(
+      `[V2 Persist] 已在候选提交中将 provisional Sheet 补锚收敛为 full checkpoint：`
+      + `messageIndex=${target.index}, sheets=${Object.keys(provisionalConvergenceReplay.data).filter(key => key.startsWith('sheet_')).length}。`,
+    );
+  }
+
   if (shouldCheckpoint) {
     const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
     const checkpointEvent = {
@@ -1354,9 +1449,12 @@ async function persistTableMutationLogV2Core_ACU(
         const message = error instanceof Error ? error.message : String(error);
         return { saved: false, error: `V2 无法确认 operation 执行前的 active sheet state，已拒绝写入：${message}` };
       }
-      const compatibilityOnlySheetKeys = new Set(
-        (replayBeforeAppend?.compatibilityRepairs || []).map(repair => repair.sheetKey),
-      );
+      // 已在当前候选 frame 写入 full checkpoint 的 provisional replay 不再是
+      // "compatibility-only"：再追加 header shard 会制造冗余 timeline，且让本次
+      // operation 对不必要的第二个锚点产生依赖。
+      const compatibilityOnlySheetKeys = provisionalConvergenceReplay
+        ? new Set<string>()
+        : new Set((replayBeforeAppend?.compatibilityRepairs || []).map(repair => repair.sheetKey));
       {
         const missingSheetKeys = operationSheetKeys.filter(
           sheetKey => Boolean((afterData as any)[sheetKey])
@@ -1433,14 +1531,20 @@ async function persistTableMutationLogV2Core_ACU(
   }
 
   replacementIsolatedDataByMessageIndex.set(target.index, isolatedData);
-  if (temporaryBaselineUpgrade) {
+  if (temporaryBaselineUpgrade || provisionalConvergenceReplay) {
     const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex);
-    const candidateValidationError = await validateTemporaryBaselineUpgradeCandidate_ACU(
-      candidateChat,
-      isolationKey,
-      target.index,
-      afterData,
-    );
+    const candidateValidationError = temporaryBaselineUpgrade
+      ? await validateTemporaryBaselineUpgradeCandidate_ACU(
+        candidateChat,
+        isolationKey,
+        target.index,
+        afterData,
+      )
+      : await validateProvisionalConvergenceCandidate_ACU(
+        candidateChat,
+        isolationKey,
+        target.index,
+      );
     if (candidateValidationError) {
       return { saved: false, error: candidateValidationError };
     }
@@ -1465,7 +1569,7 @@ async function persistTableMutationLogV2Core_ACU(
       code: settings_ACU.dataIsolationCode,
     });
     // 临时基线升级会替换 orphan frame、清空日志并写 recoveryBackup，必须确认宿主真实落盘。
-    if (options.strictSave || replacement || temporaryBaselineUpgrade) {
+    if (options.strictSave || replacement || temporaryBaselineUpgrade || provisionalConvergenceReplay) {
       await saveChatToHostStrict_ACU();
     } else {
       await saveChatToHost_ACU();
@@ -1593,6 +1697,25 @@ async function persistTableMutationLogBatchV2Core_ACU(
     target.changedSheetKeys.forEach(sheetKey => changedSheetKeys.add(sheetKey));
   }
 
+  const convergenceTargetIndex = Math.min(...targetByIndex.keys());
+  let provisionalConvergenceReplay: Awaited<ReturnType<typeof loadTableStateFromFramesV2Detailed_ACU>> | null = null;
+  try {
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+      maxMessageIndex: convergenceTargetIndex,
+      updateRuntimeState: false,
+    });
+    if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+      if (!replay?.compatibilityRepairs?.length
+        || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
+        return { saved: false, error: 'V2 batch 写入前检测到结构性 replay repair，不能自动收敛或继续写入。' };
+      }
+      provisionalConvergenceReplay = replay;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { saved: false, error: `V2 batch 写入前无法验证 provisional replay：${message}` };
+  }
+
   const candidateChat = deepClone_ACU(chat);
   for (const [targetIndex, target] of targetByIndex) {
     const message = candidateChat[targetIndex];
@@ -1600,6 +1723,30 @@ async function persistTableMutationLogBatchV2Core_ACU(
     const tagData = isolatedData[isolationKey];
     if (!isV2TagData_ACU(tagData)) return { saved: false, error: `V2 batch write target ${targetIndex} has no V2 storage frame.` };
     const frame = tagData.storageFrame as TableStorageFrameV2_ACU;
+    if (provisionalConvergenceReplay && targetIndex === convergenceTargetIndex) {
+      const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+        createdAt: Date.now(),
+        reason: 'integrity_repair',
+        data: provisionalConvergenceReplay.data,
+        scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: targetIndex }),
+        context: { messageIndex: targetIndex, aiFloor: countAiFloor_ACU(candidateChat, targetIndex), isolationKey },
+      });
+      if (!checkpointResult.checkpoint) {
+        return { saved: false, error: `V2 batch provisional replay 无法构建 canonical 收敛 checkpoint：${checkpointResult.error}` };
+      }
+      const previousFrame = deepClone_ACU(frame);
+      frame.checkpoint = checkpointResult.checkpoint;
+      frame.headRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+      frame.logEntries = [];
+      delete frame.perSheetCheckpoints;
+      (tagData as Record<string, any>).recoveryBackup = {
+        version: 1,
+        createdAt: Date.now(),
+        recoveryKind: 'temporary_sheet_anchor_convergence',
+        sourceMessageIndex: targetIndex,
+        storageFrame: previousFrame,
+      } satisfies TableV2RecoveryBackup_ACU;
+    }
     const nextSeq = Math.max(0, ...(frame.logEntries || []).map(item => Number(item.seq) || 0)) + 1;
     const entryId = generateEntryId_ACU();
     const parentRevision = frame.headRevision ?? null;
@@ -1634,6 +1781,16 @@ async function persistTableMutationLogBatchV2Core_ACU(
   logDebug_ACU(
     `[V2 Persist] batch candidate 写入准备完成（已移除 afterData 相等性阻断）: source=${options.source}, targetMessageIndex=${targetMessageIndices.join(',')}, operations=${operationCount}, targets=${targetByIndex.size}, changedSheets=${changedSheetKeys.size}`,
   );
+
+  if (provisionalConvergenceReplay) {
+    const candidateValidationError = await validateProvisionalConvergenceCandidate_ACU(
+      candidateChat,
+      isolationKey,
+      convergenceTargetIndex,
+    );
+    if (candidateValidationError) return { saved: false, error: candidateValidationError };
+    options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_convergence_save');
+  }
 
   const snapshots = [...targetByIndex.keys()].map(index => ({
     index,
@@ -2441,10 +2598,43 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       throw new Error('V2 当前楼层模板提交无法解析 active full checkpoint replay state。');
     }
     if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
-      const affectedSheetKeys = [...new Set((activeReplay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
-      throw new Error(
-        `V2 当前楼层模板提交拒绝依赖临时 Sheet 补锚的回放基线：${affectedSheetKeys.join('、') || '未知 Sheet'}。请先完成恢复收敛。`,
-      );
+      if (!activeReplay.compatibilityRepairs?.length
+        || hasStructuralReplayCompatibilityRepairs_ACU(activeReplay.compatibilityRepairs)) {
+        const affectedSheetKeys = [...new Set((activeReplay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
+        throw new Error(
+          `V2 当前楼层模板提交检测到结构性 replay repair，不能自动收敛或继续写入：${affectedSheetKeys.join('、') || '未知 Sheet'}。`,
+        );
+      }
+      const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+      const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+        createdAt,
+        reason: 'integrity_repair',
+        // 必须捕获本次模板修改前的回放状态；若写入目标状态后再追加 operation，
+        // 回放会把同一模板 operation 应用两次。
+        data: activeReplay.data,
+        scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
+        context: { messageIndex: target.index, aiFloor: countAiFloor_ACU(chat, target.index), isolationKey },
+      });
+      if (!checkpointResult.checkpoint) {
+        throw new Error(`V2 当前楼层模板提交无法构建 provisional 收敛 checkpoint：${checkpointResult.error}`);
+      }
+      const tagData = isolatedData[isolationKey];
+      if (!isV2TagData_ACU(tagData)) {
+        throw new Error('V2 当前楼层模板提交在 provisional 收敛准备期间缺少有效 storage frame。');
+      }
+      const previousFrame = deepClone_ACU(frame);
+      frame.checkpoint = checkpointResult.checkpoint;
+      frame.headRevision = checkpointRevision;
+      frame.logEntries = [];
+      delete frame.perSheetCheckpoints;
+      tagData.recoveryBackup = {
+        version: 1,
+        createdAt,
+        recoveryKind: 'temporary_sheet_anchor_convergence',
+        sourceMessageIndex: target.index,
+        storageFrame: previousFrame,
+      } satisfies TableV2RecoveryBackup_ACU;
+      logDebug_ACU(`[V2 Persist] 当前楼层模板提交已在候选中收敛 provisional Sheet 补锚：messageIndex=${target.index}。`);
     }
     const activeReplayState = activeReplay.data;
     const checkpoints: TableSheetCheckpointV2_ACU[] = [];
@@ -2643,15 +2833,29 @@ export async function commitCurrentFloorTemplateChanges_ACU(
 
       // 所有异步准备完成后，在第一次内存写入前重新核验当前活动聊天与取消状态。
       assertTemplateCommitChatContext_ACU(chat, options);
-      sharedStateMutated = true;
-      purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (
-        purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count
-      ), 0);
       frame.perSheetCheckpoints = {
         ...(frame.perSheetCheckpoints || {}),
         ...Object.fromEntries(checkpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
       };
       if (entryOptions) appendMutationLogEntry_ACU(frame, entryOptions);
+      if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
+        const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(
+          chat,
+          new Map([[target.index, isolatedData]]),
+        );
+        const candidateValidationError = await validateProvisionalConvergenceCandidate_ACU(
+          candidateChat,
+          isolationKey,
+          target.index,
+        );
+        if (candidateValidationError) throw new Error(candidateValidationError);
+        transactionContext.assertFresh?.('commitCurrentFloorTemplateChanges:before_convergence_save');
+      }
+      assertTemplateCommitChatContext_ACU(chat, options);
+      sharedStateMutated = true;
+      purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (
+        purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count
+      ), 0);
       target.message.TavernDB_ACU_IsolatedData = isolatedData;
       // isolatedData 在异步准备前已克隆；重新挂回目标消息后必须同步应用删除，
       // 否则会把刚刚从真实消息清理掉的目标 frame 旧快照覆盖回来。

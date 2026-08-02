@@ -32,7 +32,10 @@ vi.mock('../../../src/service/table/table-history', () => ({
 }));
 vi.mock('../../../src/service/table/table-service', () => ({ ensureLegacyStorageMigratedBeforeWrite_ACU: mocks.migration }));
 vi.mock('../../../src/service/table/storage-frame-v2-persist', () => ({ persistTableMutationLogBatchV2_ACU: mocks.persist }));
-vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({ loadTableStateFromFramesV2Detailed_ACU: mocks.replay }));
+vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
+  loadTableStateFromFramesV2Detailed_ACU: mocks.replay,
+  hasStructuralReplayCompatibilityRepairs_ACU: (repairs: any[] | undefined) => Boolean(repairs?.some(repair => repair.severity !== 'provisional')),
+}));
 vi.mock('../../../src/service/table/table-storage-strategy', () => ({ reloadStorageProvider: mocks.reload }));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({ runTableWriteTransaction_ACU: mocks.transaction }));
 vi.mock('../../../src/service/table/storage-mode', () => ({ isSqliteMode: () => mocks.sqlite }));
@@ -176,7 +179,7 @@ describe('visualizer-data-ops V2 replay save', () => {
     expect(persistOptions.targets[0].operations[0].cells).toEqual(['1', 'new-a']);
   });
 
-  it('V2 replay 仍依赖临时 Sheet 补锚时阻止保存且不启动事务', async () => {
+  it('V2 provisional Sheet 补锚交给 batch persist 在同一事务中收敛', async () => {
     const draft = state();
     recordVisualizerCellUpdate_ACU(draft, 'sheet_a', '1', 'value', 'new-a');
     mocks.replay.mockResolvedValueOnce({
@@ -185,6 +188,7 @@ describe('visualizer-data-ops V2 replay save', () => {
       requiresCheckpointConvergence: true,
       compatibilityRepairs: [{
         kind: 'temporary_sheet_anchor',
+        severity: 'provisional',
         sheetKey: 'sheet_a',
         messageIndex: 384,
         seq: 1,
@@ -196,11 +200,11 @@ describe('visualizer-data-ops V2 replay save', () => {
 
     const result = await applyVisualizerPendingDataOps_ACU(draft);
 
-    expect(result).toEqual({ success: false, changed: false, error: expect.stringContaining('恢复收敛') });
-    expect(mocks.transaction).not.toHaveBeenCalled();
-    expect(mocks.persist).not.toHaveBeenCalled();
-    expect(mocks.setCurrentData).not.toHaveBeenCalled();
-    expect(draft.pendingDataOps.committed).toBeUndefined();
+    expect(result).toEqual({ success: true, changed: true });
+    expect(mocks.transaction).toHaveBeenCalledOnce();
+    expect(mocks.persist).toHaveBeenCalledOnce();
+    expect(mocks.persist.mock.calls[0][0].afterData.sheet_a.content).toEqual([['row_id', 'value'], ['1', 'new-a']]);
+    expect(draft.pendingDataOps.committed).toBeDefined();
   });
 
   it('candidate replay 校验失败时不刷新、不标记 committed', async () => {

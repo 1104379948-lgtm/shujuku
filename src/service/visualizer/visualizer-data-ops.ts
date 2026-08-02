@@ -3,7 +3,7 @@ import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonT
 import { getLatestV2FullCheckpointMessageIndex_ACU, getLatestV2SheetReplayMessageIndex_ACU } from '../table/table-history';
 import { ensureLegacyStorageMigratedBeforeWrite_ACU } from '../table/table-service';
 import { persistTableMutationLogBatchV2_ACU } from '../table/storage-frame-v2-persist';
-import { loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import { hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { reloadStorageProvider } from '../table/table-storage-strategy';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { isSqliteMode } from '../table/storage-mode';
@@ -270,9 +270,11 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
         if (!replay) {
             return { success: false, changed: false, error: 'V2 replay 未产生表格数据，已阻止可视化编辑器保存。' };
         }
-        if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
-            return { success: false, changed: false, error: '当前 V2 回放仍依赖临时 Sheet 补锚，请先在数据管理中完成恢复收敛，再使用可视化编辑器保存。' };
+        if (hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
+            return { success: false, changed: false, error: '当前 V2 回放存在结构性兼容修复，不能自动收敛；请先在数据管理中完成恢复，再使用可视化编辑器保存。' };
         }
+        // provisional temporary_sheet_anchor 由 batch persist 在同一候选提交中收敛；
+        // 此处提前拒绝只会绕过该事务、backup 与 strict replay 路径。
         const result = await runTableWriteTransaction_ACU({
             source: 'manual_crud',
             reason: 'visualizer_save_v2_replay',

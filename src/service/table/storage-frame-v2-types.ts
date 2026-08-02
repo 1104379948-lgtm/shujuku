@@ -401,6 +401,22 @@ export interface TableMutationLogEntryV2_ACU extends TableMutationEventV2_ACU {
   writeSet?: TableMutationWriteSetV2_ACU;
 }
 
+/**
+ * Legacy-V1 自动迁移时保留的审计证据与原始业务数据。
+ * 它不参与 V2 replay；用途是让无损修复后的 migration 仍可导出原始输入并复核 repair plan。
+ */
+export interface TableMigrationAuditBackupV1_ACU {
+  version: 1;
+  createdAt: number;
+  sourceData: unknown;
+  dataFingerprintBefore: string;
+  dataFingerprintAfter: string;
+  auditStatus: 'clean' | 'repairable';
+  issues: unknown[];
+  repairPlan: unknown[];
+  idRemap: unknown[];
+}
+
 /** 显式恢复在覆盖目标 V2 frame 前保留的原始持久化证据。 */
 export interface TableV2RecoveryBackup_ACU {
   version: 1;
@@ -411,6 +427,20 @@ export interface TableV2RecoveryBackup_ACU {
   failedSeq?: number;
   failure?: string;
   storageFrame: TableStorageFrameV2_ACU;
+}
+
+/** 混合 legacy/V2 决议提交前保留的 legacy 输入与决议证据，不参与 replay。 */
+export interface MixedStorageDecisionBackupV1_ACU {
+  version: 1;
+  createdAt: number;
+  action: 'keep_v2' | 'commit_merge_candidate';
+  legacyData: unknown;
+  legacyFingerprint: string | null;
+  v2Fingerprint: string | null;
+  sourceMessageIndices: number[];
+  sourceAiFloors: number[];
+  decisionId: string;
+  decisionKind: string;
 }
 
 export interface TableStorageFrameV2_ACU {

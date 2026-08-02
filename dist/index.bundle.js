@@ -3985,6 +3985,8 @@ $CONTENT
     const SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU = 'spv3.6.10-v2-writer-force-enable';
     // 一次性强制恢复填表默认提示词；执行后用户仍可继续自定义。
     const TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.2-force-default-table-fill-prompt';
+    // 一次性关闭严格 JSON 填表：旧版本可能已保留显式开启状态；迁移完成后，用户仍可在高级设置中自行重新开启。
+    const STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU = 'spv8.9.3-force-disable-strict-json-table-fill';
     // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
     const defaultVectorMemoryConfig_ACU = {
         enabled: false,
@@ -4710,6 +4712,7 @@ $CONTENT
         currentTemplatePresetName: '',
         tableTemplateDefaultsRefreshVersion: '',
         tableFillPromptForceDefaultVersion: '',
+        strictJsonTableFillForceDisableVersion: '',
         tableContextExtractTags: '',
         tableContextExtractRules: [],
         tableContextExcludeTags: '',
@@ -35996,6 +35999,57 @@ $CONTENT
         return cleaned || '_unknown';
     }
 
+    function canonicalRowId_ACU$1(value) {
+        if (value === null || value === undefined)
+            return null;
+        const rowId = String(value).trim();
+        return rowId ? rowId : null;
+    }
+    function createStableRowIdReservation_ACU(rows) {
+        const reserved = new Set();
+        for (const row of rows || []) {
+            if (!Array.isArray(row))
+                continue;
+            const rowId = canonicalRowId_ACU$1(row[0]);
+            if (rowId)
+                reserved.add(rowId);
+        }
+        return reserved;
+    }
+    /**
+     * Allocates an ID greater than every already-reserved canonical positive integer
+     * and reserves it immediately. Gaps from deleted rows are intentionally not reused:
+     * row_id is a stable identity, not a display position.
+     * This is only for newly created rows; it must not be used to rewrite persisted IDs.
+     */
+    function allocateStableRowId_ACU(reserved) {
+        let maxRowId = 0;
+        for (const value of reserved) {
+            if (!/^[1-9]\d*$/.test(value))
+                continue;
+            const numericId = Number(value);
+            if (Number.isSafeInteger(numericId) && String(numericId) === value) {
+                maxRowId = Math.max(maxRowId, numericId);
+            }
+        }
+        if (maxRowId >= Number.MAX_SAFE_INTEGER) {
+            throw new Error('无法分配 row_id：已达到正安全整数上限。');
+        }
+        const rowId = String(maxRowId + 1);
+        reserved.add(rowId);
+        return rowId;
+    }
+
+    /**
+     * Header cells that historically carried the row identity before `row_id`
+     * became the canonical name. Only exact, unambiguous legacy spellings.
+     */
+    const LEGACY_ROW_ID_HEADER_ALIASES_ACU = new Set(['id', 'rowid', 'row-id', 'row_id']);
+    function isLegacyRowIdHeaderAlias_ACU(value) {
+        if (typeof value !== 'string')
+            return false;
+        return LEGACY_ROW_ID_HEADER_ALIASES_ACU.has(value.trim().toLowerCase());
+    }
     function isEmptyCanonicalRowId_ACU(value) {
         return value === null || value === undefined || (typeof value === 'string' && value.trim() === '');
     }
@@ -36067,6 +36121,11 @@ $CONTENT
      * Canonical table data must never retain a row without an identity.
      * Empty row_id means that row has been deleted; duplicate IDs remain an
      * explicit error because choosing a winner would silently lose data.
+     *
+     * These are the *current* protocol's semantics and only hold for data that was
+     * written under it. Historical payloads predate the row_id contract, so read
+     * paths must run restoreLegacyRowIdentity_ACU first; otherwise live legacy rows
+     * are reported here as removed.
      */
     function normalizeCanonicalTableRows_ACU(data) {
         const result = { changedSheetKeys: [], removedRows: [], errors: [] };
@@ -36097,6 +36156,112 @@ $CONTENT
                 result.changedSheetKeys.push(sheetKey);
         });
         return result;
+    }
+    /**
+     * Restores row identity for historical table data written before `row_id`
+     * became the canonical identity column.
+     *
+     * Why this exists: `normalizeCanonicalTableRows_ACU` treats an empty row_id as
+     * proof the row was deleted. That is the *current* protocol's semantics. Data
+     * persisted by older versions never followed it — rows were addressed by their
+     * physical index in `content`, and the identity column was variously `row_id`,
+     * `id`, `null`, or entirely absent (see tests/fixtures/migrations/spv7.9/).
+     * Applying the delete semantics to that data drops live business rows, so
+     * historical read paths must repair identity *before* canonical normalization
+     * runs.
+     *
+     * Contract:
+     * - Never removes a row and never drops a business cell.
+     * - Mutates the given object; callers must pass a deep clone, never a
+     *   persisted frame. Determinism relies on the input being untouched, which is
+     *   what makes repeated replays idempotent.
+     * - Only assigns identities to rows that have none. Rows with an existing
+     *   row_id keep it, so this does not rewrite persisted identities (see the
+     *   contract note on allocateStableRowId_ACU).
+     * - Duplicate and non-array rows are left for the canonical normalizer to
+     *   report; picking a winner or coercing a shape here would lose data.
+     */
+    function restoreLegacyRowIdentity_ACU(data) {
+        const result = {
+            repairs: [],
+            conservation: { rowCountBefore: 0, rowCountAfter: 0, businessCellCountBefore: 0, businessCellCountAfter: 0 },
+        };
+        if (!data || typeof data !== 'object')
+            return result;
+        Object.entries(data).forEach(([sheetKey, sheet]) => {
+            if (!sheetKey.startsWith('sheet_') || !sheet || typeof sheet !== 'object')
+                return;
+            const content = sheet.content;
+            if (!Array.isArray(content) || content.length === 0 || !Array.isArray(content[0]))
+                return;
+            const header = content[0];
+            const dataRows = content.slice(1).filter((row) => Array.isArray(row));
+            const seedRows = Array.isArray(sheet.seedRows)
+                ? sheet.seedRows.filter((row) => Array.isArray(row))
+                : [];
+            // An absent identity column is not a defect in legacy data; the concept did
+            // not exist. Insert one so every business cell keeps its column position.
+            const hasIdentityColumn = header.length > 0 && (header[0] === null || isLegacyRowIdHeaderAlias_ACU(header[0]));
+            // Count the baseline with the same column semantics used after the repair:
+            // when there is no identity column yet, column 0 already holds business
+            // data, so skipping it here would understate the baseline and make a
+            // faithful repair look like it invented cells.
+            const businessColumnOffsetBefore = hasIdentityColumn ? 1 : 0;
+            result.conservation.rowCountBefore += dataRows.length + seedRows.length;
+            [...dataRows, ...seedRows].forEach(row => {
+                result.conservation.businessCellCountBefore += countBusinessCells_ACU(row, businessColumnOffsetBefore);
+            });
+            if (!hasIdentityColumn) {
+                header.unshift('row_id');
+                content.slice(1).forEach((row) => {
+                    if (Array.isArray(row))
+                        row.unshift(null);
+                });
+                if (Array.isArray(sheet.seedRows)) {
+                    sheet.seedRows.forEach(row => {
+                        if (Array.isArray(row))
+                            row.unshift(null);
+                    });
+                }
+                result.repairs.push({ sheetKey, rowIndex: 0, code: 'header_identity_inserted' });
+            }
+            else if (header[0] !== 'row_id') {
+                header[0] = 'row_id';
+                result.repairs.push({ sheetKey, rowIndex: 0, code: 'header_identity_alias' });
+            }
+            // Reserve across content and seedRows together: they share one identity
+            // space, so allocating per-collection could collide between them.
+            const liveRows = content.slice(1).filter((row) => Array.isArray(row));
+            const liveSeedRows = Array.isArray(sheet.seedRows)
+                ? sheet.seedRows.filter((row) => Array.isArray(row))
+                : [];
+            const reserved = createStableRowIdReservation_ACU([...liveRows, ...liveSeedRows]);
+            assignMissingRowIds_ACU$1(liveRows, sheetKey, 1, reserved, result);
+            assignMissingRowIds_ACU$1(liveSeedRows, sheetKey, 0, reserved, result);
+            [...liveRows, ...liveSeedRows].forEach(row => {
+                result.conservation.businessCellCountAfter += countBusinessCells_ACU(row, 1);
+            });
+            result.conservation.rowCountAfter += liveRows.length + liveSeedRows.length;
+        });
+        return result;
+    }
+    function countBusinessCells_ACU(row, skipLeadingColumns) {
+        let count = 0;
+        for (let index = skipLeadingColumns; index < row.length; index += 1) {
+            const cell = row[index];
+            if (cell === null || cell === undefined || (typeof cell === 'string' && cell.trim() === ''))
+                continue;
+            count += 1;
+        }
+        return count;
+    }
+    function assignMissingRowIds_ACU$1(rows, sheetKey, startIndex, reserved, result) {
+        rows.forEach((row, offset) => {
+            if (!isEmptyCanonicalRowId_ACU(row[0]))
+                return;
+            row[0] = allocateStableRowId_ACU(reserved);
+            result.repairs.push({ sheetKey, rowIndex: startIndex + offset, code: 'assigned_row_id' });
+        });
     }
 
     function isRecord_ACU$4(value) {
@@ -36649,47 +36814,6 @@ $CONTENT
         catch (_) {
             return {};
         }
-    }
-
-    function canonicalRowId_ACU$1(value) {
-        if (value === null || value === undefined)
-            return null;
-        const rowId = String(value).trim();
-        return rowId ? rowId : null;
-    }
-    function createStableRowIdReservation_ACU(rows) {
-        const reserved = new Set();
-        for (const row of rows || []) {
-            if (!Array.isArray(row))
-                continue;
-            const rowId = canonicalRowId_ACU$1(row[0]);
-            if (rowId)
-                reserved.add(rowId);
-        }
-        return reserved;
-    }
-    /**
-     * Allocates an ID greater than every already-reserved canonical positive integer
-     * and reserves it immediately. Gaps from deleted rows are intentionally not reused:
-     * row_id is a stable identity, not a display position.
-     * This is only for newly created rows; it must not be used to rewrite persisted IDs.
-     */
-    function allocateStableRowId_ACU(reserved) {
-        let maxRowId = 0;
-        for (const value of reserved) {
-            if (!/^[1-9]\d*$/.test(value))
-                continue;
-            const numericId = Number(value);
-            if (Number.isSafeInteger(numericId) && String(numericId) === value) {
-                maxRowId = Math.max(maxRowId, numericId);
-            }
-        }
-        if (maxRowId >= Number.MAX_SAFE_INTEGER) {
-            throw new Error('无法分配 row_id：已达到正安全整数上限。');
-        }
-        const rowId = String(maxRowId + 1);
-        reserved.add(rowId);
-        return rowId;
     }
 
     /**
@@ -38563,8 +38687,28 @@ $CONTENT
         };
     }
 
+    function hasStructuralReplayCompatibilityRepairs_ACU(repairs) {
+        return Boolean(repairs?.some(repair => repair.severity !== 'provisional'));
+    }
     function deepClone_ACU$4(value) {
         return JSON.parse(JSON.stringify(value));
+    }
+    function isReplayableV2TagData_ACU(tagData) {
+        if (isV2TagData_ACU(tagData))
+            return true;
+        if (!tagData || typeof tagData !== 'object' || Array.isArray(tagData))
+            return false;
+        const frame = tagData.storageFrame;
+        if (!frame || typeof frame !== 'object' || Array.isArray(frame))
+            return false;
+        const rawFrame = frame;
+        // Only the old singleton log encoding is admitted here. Persist/write paths
+        // deliberately keep the canonical-array type guard and will reserialize only
+        // after their own validation succeeds.
+        return rawFrame.version === 2
+            && rawFrame.logEntries !== null
+            && typeof rawFrame.logEntries === 'object'
+            && !Array.isArray(rawFrame.logEntries);
     }
     function getV2FrameRefs_ACU(chat, isolationKey) {
         const refs = [];
@@ -38575,7 +38719,7 @@ $CONTENT
                 continue;
             aiFloor += 1;
             const tagData = readIsolatedTagData_ACU(message, isolationKey);
-            if (isV2TagData_ACU(tagData)) {
+            if (isReplayableV2TagData_ACU(tagData)) {
                 refs.push({ messageIndex: i, aiFloor, frame: tagData.storageFrame });
             }
         }
@@ -38594,7 +38738,11 @@ $CONTENT
             const hasHeadRevisionArtifact = headRevision !== undefined
                 && headRevision !== null
                 && (typeof headRevision !== 'string' || headRevision.length > 0);
-            return frame.logEntries.length > 0
+            const rawLogEntries = persistedFrame.logEntries;
+            const hasLogEntryArtifact = Array.isArray(rawLogEntries)
+                ? rawLogEntries.length > 0
+                : rawLogEntries !== undefined && rawLogEntries !== null;
+            return hasLogEntryArtifact
                 || hasPerSheetCheckpointArtifact
                 || persistedFrame.manualRefillProgress !== undefined
                 || hasHeadRevisionArtifact;
@@ -38606,8 +38754,51 @@ $CONTENT
             .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
         return hasUnanchoredReplayArtifacts_ACU(frameRefs);
     }
-    function hasOrphanDataReplace_ACU(frameRefs) {
-        return frameRefs.some(({ frame }) => (frame.logEntries || []).some(entry => (entry.operations || []).some(operation => operation?.kind === 'data_replace')));
+    /**
+     * `data_replace` carries a complete post-state, so it is a self-sufficient
+     * replay base: everything logged before it is superseded by definition. Older
+     * histories that lost their full checkpoint can therefore still be replayed
+     * exactly from their last replacement onward.
+     *
+     * Only a structurally complete payload qualifies. A truncated or non-object
+     * `data` cannot be trusted as a base — adopting it would silently drop every
+     * sheet it fails to carry — so such entries are skipped and an earlier
+     * replacement is used instead.
+     */
+    function findLastUsableReplacementAnchor_ACU(frameRefs) {
+        let anchor = null;
+        for (const { messageIndex, frame } of frameRefs) {
+            // Anchor discovery must observe the same ordering the replay loop will use,
+            // otherwise a legacy frame with missing or repeated `seq` yields an anchor
+            // cursor that cannot be matched during replay and the truncation of
+            // superseded operations silently misfires. Warnings are suppressed here
+            // because the replay loop reports the same repair on the same frame.
+            let entries;
+            try {
+                entries = getReplayOrderedFrameLogEntries_ACU(frame, { warnOnRepair: false });
+            }
+            catch {
+                // An undecodable frame cannot contribute an anchor. If it is inside the
+                // replayed range the main loop still fails loudly on it.
+                continue;
+            }
+            for (const entry of entries) {
+                if (!Array.isArray(entry.operations))
+                    continue;
+                for (const [operationIndex, operation] of entry.operations.entries()) {
+                    if (operation?.kind !== 'data_replace')
+                        continue;
+                    const data = operation.data;
+                    if (!data || typeof data !== 'object' || Array.isArray(data))
+                        continue;
+                    const sheetKeys = Object.keys(data).filter(key => key.startsWith('sheet_'));
+                    if (sheetKeys.length === 0)
+                        continue;
+                    anchor = { messageIndex, seq: entry.seq, operationIndex, data: data };
+                }
+            }
+        }
+        return anchor;
     }
     function resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey) {
         const scopeState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey });
@@ -38666,63 +38857,145 @@ $CONTENT
         Object.keys(state).forEach(key => delete state[key]);
         Object.assign(state, deepClone_ACU$4(next));
     }
-    function getValidatedSheetCheckpoints_ACU(frame) {
+    /**
+     * Repairs ordering metadata of a legacy timeline shard for this replay only.
+     *
+     * `activateAtMessageIndex` is no longer an addressing key (the physical frame
+     * position is), so a missing or out-of-range value can be filled from the frame
+     * itself. A missing `afterSeq` has no single safe default: applying a hide too
+     * early makes the frame's own operations hit an already-deleted table, while
+     * applying an introduction/rebase/reveal too late overwrites business writes
+     * those operations performed. The checkpoint map does not record a position
+     * relative to log entries, so that ordering remains fail-closed.
+     */
+    function normalizeSheetCheckpointTimelineForReplay_ACU(timeline, context) {
+        if (!timeline || typeof timeline !== 'object' || Array.isArray(timeline)
+            || (timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase'
+                && timeline.kind !== 'sheet_reveal' && timeline.kind !== 'sheet_hide')) {
+            throw new Error(`perSheetCheckpoints.${context.recordKey} 包含非法 timeline`);
+        }
+        const repairs = [];
+        let activateAtMessageIndex = timeline.activateAtMessageIndex;
+        if (activateAtMessageIndex === undefined) {
+            activateAtMessageIndex = context.frameMessageIndex;
+            repairs.push(`activateAtMessageIndex→${activateAtMessageIndex}`);
+        }
+        else if (!Number.isInteger(activateAtMessageIndex) || activateAtMessageIndex < 0) {
+            throw new Error(`perSheetCheckpoints.${context.recordKey} 包含非法 timeline`);
+        }
+        let afterSeq = timeline.afterSeq;
+        if (afterSeq === undefined) {
+            throw new Error(`perSheetCheckpoints.${context.recordKey} 缺少 afterSeq，无法确定相对日志顺序：`
+                + `sheetKey=${context.sheetKey}, messageIndex=${context.frameMessageIndex}`);
+        }
+        else if (!Number.isInteger(afterSeq) || afterSeq < 0) {
+            throw new Error(`perSheetCheckpoints.${context.recordKey} 包含非法 timeline`);
+        }
+        if (repairs.length === 0)
+            return timeline;
+        logWarn_ACU(`[V2 Replay] perSheetCheckpoints.${context.recordKey} 的 timeline 缺少可用排序元数据，`
+            + `已仅在内存回放中按 frame 物理位置修复：${repairs.join('、')}。原 storage frame 未修改。`);
+        return { ...timeline, activateAtMessageIndex, afterSeq };
+    }
+    /**
+     * Normalizes per-sheet checkpoint metadata for replay without mutating the frame.
+     *
+     * Writers derive the map key from `checkpoint.sheetKey`, so both sides agree on
+     * anything written by a current version. Old archives can disagree, and every
+     * other reader in this codebase (purge, table history, mixed-storage evidence,
+     * persist) addresses these records by map key. The map key is therefore the
+     * effective identity when both sides are usable, and the usable side wins when
+     * only one is. Two records collapsing onto the same effective key stays
+     * rejected: adopting either would silently drop one sheet's checkpoint.
+     */
+    function getValidatedSheetCheckpoints_ACU(frame, frameMessageIndex) {
         const checkpoints = frame.perSheetCheckpoints;
         if (checkpoints === undefined)
             return [];
         if (!checkpoints || typeof checkpoints !== 'object' || Array.isArray(checkpoints)) {
             throw new Error('perSheetCheckpoints 必须是按 sheetKey 索引的对象');
         }
-        return Object.entries(checkpoints).map(([recordKey, checkpoint]) => {
-            if (!recordKey.startsWith('sheet_')) {
-                throw new Error(`perSheetCheckpoints 包含非法键: ${recordKey}`);
-            }
-            if (!checkpoint || checkpoint.kind !== 'sheet_full') {
+        const isSheetKey = (value) => typeof value === 'string' && value.startsWith('sheet_');
+        const normalized = Object.entries(checkpoints).map(([recordKey, checkpoint]) => {
+            if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)
+                || checkpoint.kind !== 'sheet_full') {
                 throw new Error(`perSheetCheckpoints.${recordKey} 缺少有效的 sheet_full checkpoint`);
-            }
-            if (checkpoint.sheetKey !== recordKey) {
-                throw new Error(`perSheetCheckpoints.${recordKey} 的 sheetKey 不一致: ${checkpoint.sheetKey}`);
             }
             if (!checkpoint.data || typeof checkpoint.data !== 'object' || Array.isArray(checkpoint.data)) {
                 throw new Error(`perSheetCheckpoints.${recordKey} 缺少有效的单表 data`);
             }
-            if (checkpoint.timeline !== undefined) {
-                const timeline = checkpoint.timeline;
-                if ((timeline.kind !== 'sheet_introduction' && timeline.kind !== 'sheet_rebase'
-                    && timeline.kind !== 'sheet_reveal' && timeline.kind !== 'sheet_hide')
-                    || !Number.isInteger(timeline.activateAtMessageIndex)
-                    || timeline.activateAtMessageIndex < 0
-                    || !Number.isInteger(timeline.afterSeq)
-                    || timeline.afterSeq < 0) {
-                    throw new Error(`perSheetCheckpoints.${recordKey} 包含非法 timeline`);
-                }
+            const declaredKey = checkpoint.sheetKey;
+            if (!isSheetKey(recordKey) && !isSheetKey(declaredKey)) {
+                throw new Error(`perSheetCheckpoints 包含非法键: ${recordKey}`);
             }
-            return checkpoint;
+            const sheetKey = isSheetKey(recordKey) ? recordKey : declaredKey;
+            const repairs = [];
+            if (sheetKey !== declaredKey)
+                repairs.push(`sheetKey ${String(declaredKey)}→${sheetKey}`);
+            if (repairs.length > 0) {
+                logWarn_ACU(`[V2 Replay] perSheetCheckpoints.${recordKey} 的协议元数据不完整，`
+                    + `已仅在内存回放中按 map key 归一：${repairs.join('、')}。原 storage frame 未修改。`);
+            }
+            const timeline = checkpoint.timeline === undefined
+                ? undefined
+                : normalizeSheetCheckpointTimelineForReplay_ACU(checkpoint.timeline, {
+                    recordKey,
+                    frameMessageIndex,
+                    sheetKey,
+                });
+            return {
+                ...checkpoint,
+                kind: checkpoint.kind,
+                sheetKey,
+                ...(timeline === undefined ? {} : { timeline }),
+            };
         }).sort((left, right) => left.sheetKey.localeCompare(right.sheetKey));
+        const duplicateKey = normalized.find((checkpoint, index) => normalized.findIndex(other => other.sheetKey === checkpoint.sheetKey) !== index);
+        if (duplicateKey) {
+            throw new Error(`perSheetCheckpoints 归一化后存在重复 sheetKey: ${duplicateKey.sheetKey}`);
+        }
+        return normalized;
     }
-    function getValidatedFrameLogEntries_ACU(frame) {
-        const entries = frame.logEntries;
-        if (entries === undefined)
+    /**
+     * Normalizes legacy log ordering without mutating the persisted frame.
+     *
+     * Old writers could omit `seq`, or emit repeated / out-of-order values, but
+     * JSON array order still unambiguously preserves the order in which those
+     * entries were persisted. In that case we use the physical ordinal as an
+     * ephemeral sequence for this replay. Both state replay and schedule summary
+     * consume this function, so they cannot diverge on the same history.
+     */
+    function getReplayOrderedFrameLogEntries_ACU(frame, options = {}) {
+        const rawEntries = frame.logEntries;
+        if (rawEntries === undefined)
             return [];
-        if (!Array.isArray(entries))
-            throw new Error('logEntries 必须是数组');
-        let previousSeq = -1;
-        return entries.map((entry, index) => {
+        const entries = Array.isArray(rawEntries)
+            ? rawEntries
+            : (rawEntries && typeof rawEntries === 'object' ? [rawEntries] : null);
+        if (!entries)
+            throw new Error('logEntries 必须是数组或旧版单条日志对象');
+        const usesCanonicalOrder = entries.every((entry, index) => {
             const seq = entry?.seq;
-            if (!Number.isInteger(seq) || seq < 0) {
-                throw new Error(`logEntries[${index}] 包含非法 seq: ${String(seq)}`);
-            }
-            if (seq <= previousSeq) {
-                throw new Error(`logEntries 必须按唯一且严格递增的 seq 排列: previous=${previousSeq}, current=${seq}`);
-            }
-            previousSeq = seq;
-            return entry;
+            return Number.isInteger(seq) && seq >= 0 && (index === 0 || seq > entries[index - 1]?.seq);
         });
+        if (usesCanonicalOrder)
+            return entries;
+        const normalized = entries.map((entry, index) => {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+                throw new Error(`logEntries[${index}] 必须是对象，无法按物理顺序兼容。`);
+            }
+            return { ...entry, seq: index };
+        });
+        if (options.warnOnRepair !== false) {
+            logWarn_ACU(`[V2 Replay] 检测到旧 logEntries 的 seq 缺失、重复或倒序，`
+                + `已仅在内存回放中按数组物理顺序重建临时 seq：entries=${normalized.length}。原 storage frame 未修改。`);
+        }
+        return normalized;
     }
     function getValidatedTimelineCheckpointsForFrame_ACU(checkpoints) {
         // shard 的物理承载 frame 是跨楼层回放位置；聊天插入、删除或导入会让旧的声明索引漂移。
-        // activateAtMessageIndex 仍在 getValidatedSheetCheckpoints_ACU 中做类型/范围校验，
-        // 但不再作为寻址键。同一 frame 内的真实生效顺序继续由 afterSeq 决定。
+        // activateAtMessageIndex 不再作为寻址键，缺失或越界时由 getValidatedSheetCheckpoints_ACU
+        // 按 frame 物理位置补齐。同一 frame 内的真实生效顺序继续由 afterSeq 决定。
         return checkpoints.filter(checkpoint => checkpoint.timeline !== undefined);
     }
     function splitSqlStatementsForReplay_ACU(sql) {
@@ -38779,12 +39052,55 @@ $CONTENT
         }
         replaceState_ACU(state, candidate);
     }
+    /**
+     * Normalizes a candidate built from already-persisted history.
+     *
+     * Legacy payloads predate the row_id identity contract, so identity is restored
+     * first and only then handed to the strict canonical normalizer. Without this
+     * order, rows whose identity column was empty or absent are classified as
+     * deleted and the whole replay aborts — which is what made upgraded chats
+     * unreadable even though their data was intact.
+     *
+     * Newly constructed candidates (template baselines, freshly built checkpoints)
+     * must keep using normalizeReplayState_ACU so new writes stay strict.
+     */
+    function normalizeHistoricalReplayState_ACU(state, context) {
+        const candidate = deepClone_ACU$4(state);
+        const identity = restoreLegacyRowIdentity_ACU(candidate);
+        // A repair that loses a row or a business cell is an implementation defect,
+        // not a data defect. Fail loudly instead of persisting a lossy candidate.
+        const { conservation } = identity;
+        if (conservation.rowCountAfter !== conservation.rowCountBefore
+            || conservation.businessCellCountAfter !== conservation.businessCellCountBefore) {
+            throw new Error(`[V2 Replay] ${context} 历史行身份兼容破坏数据守恒：`
+                + `rows ${conservation.rowCountBefore}→${conservation.rowCountAfter}, `
+                + `cells ${conservation.businessCellCountBefore}→${conservation.businessCellCountAfter}。`);
+        }
+        const normalization = normalizeCanonicalTableRows_ACU(candidate);
+        const canonicalIssues = [...normalization.errors, ...normalization.removedRows];
+        if (canonicalIssues.length > 0) {
+            throw new Error(`[V2 Replay] ${context} 行标识不合法：${formatCanonicalRowIssues_ACU(canonicalIssues)}`);
+        }
+        if (identity.repairs.length > 0) {
+            const assigned = identity.repairs.filter(repair => repair.code === 'assigned_row_id').length;
+            const headerRepairs = identity.repairs.filter(repair => repair.code !== 'assigned_row_id');
+            const affectedSheetKeys = [...new Set(identity.repairs.map(repair => repair.sheetKey))];
+            logWarn_ACU(`[V2 Replay] ${context} 旧格式缺少行身份，已在内存副本中保留全部行`
+                + `并补 ${assigned} 个 row_id、修正 ${headerRepairs.length} 个表头身份列：`
+                + `${affectedSheetKeys.join(', ')}。原 storage frame 未修改。`);
+        }
+        replaceState_ACU(state, candidate);
+    }
     function normalizeLegacyDuplicateCheckpointState_ACU(state) {
+        // Restore legacy identity on the live state first: an empty or absent row_id
+        // is a legacy format trait, not a duplicate, and leaving it here would send
+        // the whole checkpoint down the strict reject path below.
+        restoreLegacyRowIdentity_ACU(state);
         const probe = deepClone_ACU$4(state);
         const normalization = normalizeCanonicalTableRows_ACU(probe);
         const nonDuplicateErrors = normalization.errors.filter(issue => issue.reason !== 'duplicate_row_id');
         if (normalization.removedRows.length > 0 || nonDuplicateErrors.length > 0) {
-            normalizeReplayState_ACU(state, 'full checkpoint');
+            normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
             return;
         }
         const audit = auditTableDataForUpgrade_ACU(state);
@@ -38797,16 +39113,16 @@ $CONTENT
             return;
         }
         if (audit.status !== 'repairable' || duplicateIssues.length === 0 || unsupportedIssues.length > 0) {
-            normalizeReplayState_ACU(state, 'full checkpoint');
+            normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
             return;
         }
         const repair = repairTableDataFromAudit_ACU(audit);
         if (repair.requiresConfirmation || !repair.candidateData || typeof repair.candidateData !== 'object') {
-            normalizeReplayState_ACU(state, 'full checkpoint');
+            normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
             return;
         }
         const candidate = repair.candidateData;
-        normalizeReplayState_ACU(candidate, 'legacy duplicate row_id repair');
+        normalizeHistoricalReplayState_ACU(candidate, 'legacy duplicate row_id repair');
         replaceState_ACU(state, candidate);
         const affectedSheetKeys = [...new Set(repair.idRemap.map(remap => remap.sheetKey))];
         logWarn_ACU(`[V2 Replay] 旧 full checkpoint 含重复 row_id，已在内存副本中保留全部行并重映射 ${repair.idRemap.length} 行：${affectedSheetKeys.join(', ')}。原 storage frame 未修改。`);
@@ -38814,7 +39130,11 @@ $CONTENT
     async function ensureSqlReplayRuntime_ACU(runtime, state) {
         if (runtime.loaded)
             return;
-        normalizeReplayState_ACU(state, 'snapshot');
+        // The snapshot handed to SQLite comes from persisted history, so legacy
+        // identity must be restored before strict hydrate. The export path below
+        // stays strict: by then every row has an identity, and a defect there would
+        // be ours, not the historical data's.
+        normalizeHistoricalReplayState_ACU(state, 'snapshot');
         await runtime.engine.init();
         runtime.syncBridge.loadFromTableData(state, { strict: true });
         runtime.loaded = true;
@@ -38858,8 +39178,15 @@ $CONTENT
             ? getExportedSqlReplayRuntimeState_ACU(runtime, state)
             : deepClone_ACU$4(state);
     }
-    async function commitReplayCandidate_ACU(runtime, state, candidate, context) {
-        normalizeReplayState_ACU(candidate, context);
+    async function commitReplayCandidate_ACU(runtime, state, candidate, context, options = {}) {
+        // Every operation funnels through here, so this is the single place where the
+        // historical/strict split is decided. Candidates derived from persisted
+        // operations get legacy identity restored; candidates we construct ourselves
+        // (template baselines) stay strict so new writes cannot regress the format.
+        if (options.historical)
+            normalizeHistoricalReplayState_ACU(candidate, context);
+        else
+            normalizeReplayState_ACU(candidate, context);
         if (runtime?.loaded)
             await reloadSqlReplayRuntime_ACU(runtime, candidate);
         replaceState_ACU(state, candidate);
@@ -38878,7 +39205,7 @@ $CONTENT
                 candidate[checkpoint.sheetKey] = deepClone_ACU$4(checkpoint.data);
             }
         }
-        await commitReplayCandidate_ACU(runtime, state, candidate, '单表 checkpoint');
+        await commitReplayCandidate_ACU(runtime, state, candidate, '单表 checkpoint', { historical: true });
     }
     function buildReplaySqlTableAliases_ACU(state, operation) {
         const isPlainSqlIdentifier = (value) => (typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(value));
@@ -39199,7 +39526,7 @@ $CONTENT
         try {
             if (operation.kind === 'data_replace') {
                 const candidate = deepClone_ACU$4(operation.data);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace');
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'data_replace', { historical: true });
                 return;
             }
             if (operation.kind === 'sql_batch' || operation.kind === 'sql_sheet_batch') {
@@ -39213,13 +39540,13 @@ $CONTENT
             if (operation.kind === 'sheet_schema_migrate') {
                 const sourceState = buildReplayCandidate_ACU(effectiveRuntime, state);
                 const candidate = await applySheetSchemaMigrationOperation_ACU(sourceState, operation);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate');
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_schema_migrate', { historical: true });
                 return;
             }
             if (operation.kind === 'sheet_replace') {
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
                 candidate[operation.sheetKey] = deepClone_ACU$4(operation.sheet);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace');
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'sheet_replace', { historical: true });
                 return;
             }
             if (operation.kind === 'row_upsert' || operation.kind === 'row_delete' || operation.kind === 'meta_update') {
@@ -39228,13 +39555,13 @@ $CONTENT
                 }
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
                 applyTablePatchV2_ACU(candidate, operation);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind);
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, operation.kind, { historical: true });
                 return;
             }
             if (operation.kind === 'table_edit_dsl') {
                 const candidate = buildReplayCandidate_ACU(effectiveRuntime, state);
                 applyTableEditDslOperationV2_ACU(candidate, operation.text);
-                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl');
+                await commitReplayCandidate_ACU(effectiveRuntime, state, candidate, 'table_edit_dsl', { historical: true });
                 return;
             }
             throw new Error(`[V2 Replay] 不支持的 operation kind: ${operation.kind}`);
@@ -39260,13 +39587,13 @@ $CONTENT
         for (const ref of frameRefs) {
             if (checkpointRef && ref.messageIndex < checkpointRef.messageIndex)
                 continue;
-            const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame);
+            const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
             const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
             for (const sheetCheckpoint of checkpoints.filter(checkpoint => checkpoint.timeline === undefined)) {
                 summary[sheetCheckpoint.sheetKey] = deepClone_ACU$4(sheetCheckpoint.scheduleSummary || {});
                 applyEventToScheduleSummary_ACU(summary, sheetCheckpoint.event, ref.aiFloor);
             }
-            const entries = getValidatedFrameLogEntries_ACU(ref.frame);
+            const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
             const pendingIntroductions = [...introductions];
             const applyDueIntroductions = (nextSeq) => {
                 const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline.afterSeq < nextSeq);
@@ -39296,29 +39623,38 @@ $CONTENT
         let baseKind = 'full_checkpoint';
         let state;
         let replayStartMessageIndex;
+        let replacementAnchorCursor = null;
         if (!checkpointRef?.frame.checkpoint) {
             if (!hasUnanchoredArtifacts)
                 return null;
-            if (!options.allowTemporaryTemplateBaseline) {
-                logWarn_ACU('[V2 Replay] 未找到 full checkpoint，检测到无锚点 V2 replay artifacts，拒绝恢复不完整 V2 表格数据。');
-                return null;
+            // A replacement anchor supersedes everything before it, so it is a valid
+            // base on its own and needs no template baseline or user confirmation.
+            const replacementAnchor = findLastUsableReplacementAnchor_ACU(frameRefs);
+            if (replacementAnchor) {
+                state = deepClone_ACU$4(replacementAnchor.data);
+                normalizeLegacyDuplicateCheckpointState_ACU(state);
+                baseKind = 'replacement_anchor';
+                replayStartMessageIndex = replacementAnchor.messageIndex;
+                replacementAnchorCursor = replacementAnchor;
+                logWarn_ACU(`[V2 Replay] 未找到 full checkpoint，已采用最后一个完整 data_replace 作为替换基底：`
+                    + `messageIndex=${replacementAnchor.messageIndex}, seq=${replacementAnchor.seq}, `
+                    + `operationIndex=${replacementAnchor.operationIndex}。该基底之前的日志按完整替换语义被覆盖。`);
             }
-            if (hasOrphanDataReplace_ACU(frameRefs)) {
-                const message = '[V2 Replay] 无锚点 artifacts 包含 data_replace，必须通过显式恢复确认，拒绝使用临时模板基线。';
-                logWarn_ACU(message);
-                if (options.throwOnRecoveryRequired)
-                    throw new Error(`${message} 请先在数据管理中执行 V2 恢复诊断并确认恢复。`);
-                return null;
+            else {
+                if (!options.allowTemporaryTemplateBaseline) {
+                    logWarn_ACU('[V2 Replay] 未找到 full checkpoint，检测到无锚点 V2 replay artifacts，拒绝恢复不完整 V2 表格数据。');
+                    return null;
+                }
+                const temporaryBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+                if (!temporaryBaseline) {
+                    logWarn_ACU('[V2 Replay] 无锚点 artifacts 缺少同聊天同隔离域的有效模板，拒绝建立临时基线。');
+                    return null;
+                }
+                state = temporaryBaseline;
+                baseKind = 'temporary_template_baseline';
+                replayStartMessageIndex = frameRefs[0]?.messageIndex ?? 0;
+                logWarn_ACU('[V2 Replay] 未找到 full checkpoint，正使用当前聊天模板的 header-only 临时基线回放；该状态不是持久化锚点。');
             }
-            const temporaryBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
-            if (!temporaryBaseline) {
-                logWarn_ACU('[V2 Replay] 无锚点 artifacts 缺少同聊天同隔离域的有效模板，拒绝建立临时基线。');
-                return null;
-            }
-            state = temporaryBaseline;
-            baseKind = 'temporary_template_baseline';
-            replayStartMessageIndex = frameRefs[0]?.messageIndex ?? 0;
-            logWarn_ACU('[V2 Replay] 未找到 full checkpoint，正使用当前聊天模板的 header-only 临时基线回放；该状态不是持久化锚点。');
         }
         else {
             const checkpoint = checkpointRef.frame.checkpoint;
@@ -39341,11 +39677,19 @@ $CONTENT
             for (const ref of frameRefs) {
                 if (ref.messageIndex < replayStartMessageIndex)
                     continue;
-                const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame);
+                const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
                 const introductions = getValidatedTimelineCheckpointsForFrame_ACU(checkpoints);
-                await applySheetCheckpointsForReplay_ACU(state, checkpoints.filter(checkpoint => checkpoint.timeline === undefined), runtime);
-                const entries = getValidatedFrameLogEntries_ACU(ref.frame);
-                const pendingIntroductions = [...introductions];
+                const isAnchorFrame = replacementAnchorCursor?.messageIndex === ref.messageIndex;
+                await applySheetCheckpointsForReplay_ACU(state, 
+                // A replacement anchor is a complete state. Untimed checkpoints in
+                // that same frame have no ordering marker proving they occurred after
+                // it, so replaying them would resurrect superseded data. Timeline
+                // checkpoints are retained below and only become due after anchor seq.
+                checkpoints.filter(checkpoint => checkpoint.timeline === undefined && !isAnchorFrame), runtime);
+                const entries = getReplayOrderedFrameLogEntries_ACU(ref.frame);
+                const pendingIntroductions = isAnchorFrame
+                    ? introductions.filter(checkpoint => checkpoint.timeline.afterSeq > replacementAnchorCursor.seq)
+                    : [...introductions];
                 const applyDueIntroductions = async (nextSeq) => {
                     const due = pendingIntroductions.filter(checkpoint => checkpoint.timeline.afterSeq < nextSeq);
                     if (due.length === 0)
@@ -39359,10 +39703,17 @@ $CONTENT
                     }
                 };
                 for (const entry of entries) {
+                    if (isAnchorFrame && entry.seq < replacementAnchorCursor.seq)
+                        continue;
                     try {
                         await applyDueIntroductions(entry.seq);
                         if (Array.isArray(entry.operations) && entry.operations.length > 0) {
                             for (const [operationIndex, operation] of entry.operations.entries()) {
+                                if (isAnchorFrame
+                                    && entry.seq === replacementAnchorCursor.seq
+                                    && operationIndex <= replacementAnchorCursor.operationIndex) {
+                                    continue;
+                                }
                                 try {
                                     if (options.compatibilityMode !== 'disabled'
                                         && operation?.kind === 'sql_sheet_batch'
@@ -39382,6 +39733,7 @@ $CONTENT
                                             await commitReplayCandidate_ACU(runtime, state, candidate, 'temporary sheet anchor');
                                             compatibilityRepairs.push({
                                                 kind: 'temporary_sheet_anchor',
+                                                severity: 'provisional',
                                                 sheetKey: operation.sheetKey,
                                                 messageIndex: ref.messageIndex,
                                                 seq: entry.seq,
@@ -39406,7 +39758,7 @@ $CONTENT
                             for (const patch of entry.patches || []) {
                                 applyTablePatchV2_ACU(candidate, patch);
                             }
-                            await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches');
+                            await commitReplayCandidate_ACU(runtime, state, candidate, 'legacy patches', { historical: true });
                         }
                         if (options.updateRuntimeState !== false) {
                             replayEventForState_ACU(entry, ref.aiFloor);
@@ -40087,6 +40439,31 @@ $CONTENT
         return await validateReplay('boundary', { maxMessageIndex: targetMessageIndex })
             || await validateReplay('suffix', {});
     }
+    async function validateProvisionalConvergenceCandidate_ACU(candidateChat, isolationKey, targetMessageIndex) {
+        for (const [scope, options] of [
+            ['boundary', { maxMessageIndex: targetMessageIndex }],
+            ['suffix', {}],
+        ]) {
+            try {
+                const replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+                    ...options,
+                    updateRuntimeState: false,
+                    compatibilityMode: 'disabled',
+                });
+                if (!replay || replay.baseKind !== 'full_checkpoint') {
+                    return `V2 convergence_candidate_${scope}_replay_failed: 候选未能从正式 full checkpoint 建立回放基底。`;
+                }
+                if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+                    return `V2 convergence_candidate_${scope}_requires_repair: 候选仍依赖兼容补锚。`;
+                }
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return `V2 convergence_candidate_${scope}_replay_failed: ${message}`;
+            }
+        }
+        return null;
+    }
     function getLatestTableStorageHeadRevisionV2_ACU(chat, isolationKey) {
         if (!Array.isArray(chat) || chat.length === 0)
             return null;
@@ -40731,6 +41108,37 @@ $CONTENT
             }
             temporaryBaselineUpgrade = true;
         }
+        // A temporary sheet anchor is derived from the current template, not from
+        // persisted evidence. Before accepting another write, replace that dependency
+        // with the *pre-write* replay state in the same candidate commit. Using
+        // `afterData` here would capture the current operation and then append it a
+        // second time, so the checkpoint must come from the replay before this call
+        // mutates the frame.
+        let provisionalConvergenceReplay = null;
+        if (hasExistingCheckpoint && writesReplayArtifact) {
+            let replay;
+            try {
+                replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                    maxMessageIndex: target.index,
+                    updateRuntimeState: false,
+                    ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
+                    ...(options.performanceParentSpanId
+                        ? { performanceParentSpanId: options.performanceParentSpanId }
+                        : {}),
+                });
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return { saved: false, error: `V2 写入前无法验证 provisional replay：${message}` };
+            }
+            if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+                if (!replay || !replay.compatibilityRepairs?.length
+                    || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
+                    return { saved: false, error: 'V2 写入前检测到结构性 replay repair，不能自动收敛或继续写入。' };
+                }
+                provisionalConvergenceReplay = replay;
+            }
+        }
         if (!manualRefillProgressIsValidForIntroductionHistory_ACU(options.manualRefillProgress)) {
             return { saved: false, error: 'V2 manualRefillProgress 格式无效，已拒绝写入。' };
         }
@@ -40798,6 +41206,39 @@ $CONTENT
         const now = Date.now();
         const aiFloor = countAiFloor_ACU$1(chat, target.index);
         let entry;
+        if (provisionalConvergenceReplay) {
+            if (!targetExistingFrame) {
+                return { saved: false, error: 'V2 provisional replay 缺少可备份的目标 storage frame，已拒绝自动收敛。' };
+            }
+            const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+            const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+                createdAt: now,
+                reason: 'integrity_repair',
+                data: provisionalConvergenceReplay.data,
+                scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
+                context: { messageIndex: target.index, aiFloor, isolationKey },
+            });
+            if (!checkpointResult.checkpoint) {
+                return { saved: false, error: `V2 provisional replay 无法构建 canonical 收敛 checkpoint：${checkpointResult.error}` };
+            }
+            frame.checkpoint = checkpointResult.checkpoint;
+            frame.headRevision = checkpointRevision;
+            frame.logEntries = [];
+            delete frame.perSheetCheckpoints;
+            const tagData = isolatedData[isolationKey];
+            if (!tagData || typeof tagData !== 'object' || Array.isArray(tagData)) {
+                return { saved: false, error: 'V2 provisional replay 目标标签在收敛准备期间无效。' };
+            }
+            tagData.recoveryBackup = {
+                version: 1,
+                createdAt: now,
+                recoveryKind: 'temporary_sheet_anchor_convergence',
+                sourceMessageIndex: target.index,
+                storageFrame: targetExistingFrame,
+            };
+            logDebug_ACU(`[V2 Persist] 已在候选提交中将 provisional Sheet 补锚收敛为 full checkpoint：`
+                + `messageIndex=${target.index}, sheets=${Object.keys(provisionalConvergenceReplay.data).filter(key => key.startsWith('sheet_')).length}。`);
+        }
         if (shouldCheckpoint) {
             const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
             const checkpointEvent = {
@@ -40861,7 +41302,12 @@ $CONTENT
                     const message = error instanceof Error ? error.message : String(error);
                     return { saved: false, error: `V2 无法确认 operation 执行前的 active sheet state，已拒绝写入：${message}` };
                 }
-                const compatibilityOnlySheetKeys = new Set((replayBeforeAppend?.compatibilityRepairs || []).map(repair => repair.sheetKey));
+                // 已在当前候选 frame 写入 full checkpoint 的 provisional replay 不再是
+                // "compatibility-only"：再追加 header shard 会制造冗余 timeline，且让本次
+                // operation 对不必要的第二个锚点产生依赖。
+                const compatibilityOnlySheetKeys = provisionalConvergenceReplay
+                    ? new Set()
+                    : new Set((replayBeforeAppend?.compatibilityRepairs || []).map(repair => repair.sheetKey));
                 {
                     const missingSheetKeys = operationSheetKeys.filter(sheetKey => Boolean(afterData[sheetKey])
                         && (!Object.prototype.hasOwnProperty.call(replayBeforeAppend?.data || {}, sheetKey)
@@ -40934,9 +41380,11 @@ $CONTENT
             logDebug_ACU(`[V2 Persist] 仅更新 manualRefillProgress，不追加 mutation entry: messageIndex=${target.index}`);
         }
         replacementIsolatedDataByMessageIndex.set(target.index, isolatedData);
-        if (temporaryBaselineUpgrade) {
+        if (temporaryBaselineUpgrade || provisionalConvergenceReplay) {
             const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex);
-            const candidateValidationError = await validateTemporaryBaselineUpgradeCandidate_ACU(candidateChat, isolationKey, target.index, afterData);
+            const candidateValidationError = temporaryBaselineUpgrade
+                ? await validateTemporaryBaselineUpgradeCandidate_ACU(candidateChat, isolationKey, target.index, afterData)
+                : await validateProvisionalConvergenceCandidate_ACU(candidateChat, isolationKey, target.index);
             if (candidateValidationError) {
                 return { saved: false, error: candidateValidationError };
             }
@@ -40961,7 +41409,7 @@ $CONTENT
                 code: settings_ACU.dataIsolationCode,
             });
             // 临时基线升级会替换 orphan frame、清空日志并写 recoveryBackup，必须确认宿主真实落盘。
-            if (options.strictSave || replacement || temporaryBaselineUpgrade) {
+            if (options.strictSave || replacement || temporaryBaselineUpgrade || provisionalConvergenceReplay) {
                 await saveChatToHostStrict_ACU();
             }
             else {
@@ -41084,6 +41532,25 @@ $CONTENT
             }
             target.changedSheetKeys.forEach(sheetKey => changedSheetKeys.add(sheetKey));
         }
+        const convergenceTargetIndex = Math.min(...targetByIndex.keys());
+        let provisionalConvergenceReplay = null;
+        try {
+            const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                maxMessageIndex: convergenceTargetIndex,
+                updateRuntimeState: false,
+            });
+            if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+                if (!replay?.compatibilityRepairs?.length
+                    || hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
+                    return { saved: false, error: 'V2 batch 写入前检测到结构性 replay repair，不能自动收敛或继续写入。' };
+                }
+                provisionalConvergenceReplay = replay;
+            }
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return { saved: false, error: `V2 batch 写入前无法验证 provisional replay：${message}` };
+        }
         const candidateChat = deepClone_ACU$1(chat);
         for (const [targetIndex, target] of targetByIndex) {
             const message = candidateChat[targetIndex];
@@ -41092,6 +41559,30 @@ $CONTENT
             if (!isV2TagData_ACU(tagData))
                 return { saved: false, error: `V2 batch write target ${targetIndex} has no V2 storage frame.` };
             const frame = tagData.storageFrame;
+            if (provisionalConvergenceReplay && targetIndex === convergenceTargetIndex) {
+                const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+                    createdAt: Date.now(),
+                    reason: 'integrity_repair',
+                    data: provisionalConvergenceReplay.data,
+                    scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: targetIndex }),
+                    context: { messageIndex: targetIndex, aiFloor: countAiFloor_ACU$1(candidateChat, targetIndex), isolationKey },
+                });
+                if (!checkpointResult.checkpoint) {
+                    return { saved: false, error: `V2 batch provisional replay 无法构建 canonical 收敛 checkpoint：${checkpointResult.error}` };
+                }
+                const previousFrame = deepClone_ACU$1(frame);
+                frame.checkpoint = checkpointResult.checkpoint;
+                frame.headRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+                frame.logEntries = [];
+                delete frame.perSheetCheckpoints;
+                tagData.recoveryBackup = {
+                    version: 1,
+                    createdAt: Date.now(),
+                    recoveryKind: 'temporary_sheet_anchor_convergence',
+                    sourceMessageIndex: targetIndex,
+                    storageFrame: previousFrame,
+                };
+            }
             const nextSeq = Math.max(0, ...(frame.logEntries || []).map(item => Number(item.seq) || 0)) + 1;
             const entryId = generateEntryId_ACU();
             const parentRevision = frame.headRevision ?? null;
@@ -41124,6 +41615,12 @@ $CONTENT
         const targetMessageIndices = [...targetByIndex.keys()].sort((a, b) => a - b);
         const operationCount = [...targetByIndex.values()].reduce((sum, target) => sum + target.operations.length, 0);
         logDebug_ACU(`[V2 Persist] batch candidate 写入准备完成（已移除 afterData 相等性阻断）: source=${options.source}, targetMessageIndex=${targetMessageIndices.join(',')}, operations=${operationCount}, targets=${targetByIndex.size}, changedSheets=${changedSheetKeys.size}`);
+        if (provisionalConvergenceReplay) {
+            const candidateValidationError = await validateProvisionalConvergenceCandidate_ACU(candidateChat, isolationKey, convergenceTargetIndex);
+            if (candidateValidationError)
+                return { saved: false, error: candidateValidationError };
+            options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_convergence_save');
+        }
         const snapshots = [...targetByIndex.keys()].map(index => ({
             index,
             message: chat[index],
@@ -41908,8 +42405,41 @@ $CONTENT
                         throw new Error('V2 当前楼层模板提交无法解析 active full checkpoint replay state。');
                     }
                     if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
-                        const affectedSheetKeys = [...new Set((activeReplay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
-                        throw new Error(`V2 当前楼层模板提交拒绝依赖临时 Sheet 补锚的回放基线：${affectedSheetKeys.join('、') || '未知 Sheet'}。请先完成恢复收敛。`);
+                        if (!activeReplay.compatibilityRepairs?.length
+                            || hasStructuralReplayCompatibilityRepairs_ACU(activeReplay.compatibilityRepairs)) {
+                            const affectedSheetKeys = [...new Set((activeReplay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
+                            throw new Error(`V2 当前楼层模板提交检测到结构性 replay repair，不能自动收敛或继续写入：${affectedSheetKeys.join('、') || '未知 Sheet'}。`);
+                        }
+                        const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+                        const checkpointResult = buildCanonicalFullCheckpoint_ACU({
+                            createdAt,
+                            reason: 'integrity_repair',
+                            // 必须捕获本次模板修改前的回放状态；若写入目标状态后再追加 operation，
+                            // 回放会把同一模板 operation 应用两次。
+                            data: activeReplay.data,
+                            scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
+                            context: { messageIndex: target.index, aiFloor: countAiFloor_ACU$1(chat, target.index), isolationKey },
+                        });
+                        if (!checkpointResult.checkpoint) {
+                            throw new Error(`V2 当前楼层模板提交无法构建 provisional 收敛 checkpoint：${checkpointResult.error}`);
+                        }
+                        const tagData = isolatedData[isolationKey];
+                        if (!isV2TagData_ACU(tagData)) {
+                            throw new Error('V2 当前楼层模板提交在 provisional 收敛准备期间缺少有效 storage frame。');
+                        }
+                        const previousFrame = deepClone_ACU$1(frame);
+                        frame.checkpoint = checkpointResult.checkpoint;
+                        frame.headRevision = checkpointRevision;
+                        frame.logEntries = [];
+                        delete frame.perSheetCheckpoints;
+                        tagData.recoveryBackup = {
+                            version: 1,
+                            createdAt,
+                            recoveryKind: 'temporary_sheet_anchor_convergence',
+                            sourceMessageIndex: target.index,
+                            storageFrame: previousFrame,
+                        };
+                        logDebug_ACU(`[V2 Persist] 当前楼层模板提交已在候选中收敛 provisional Sheet 补锚：messageIndex=${target.index}。`);
                     }
                     const activeReplayState = activeReplay.data;
                     const checkpoints = [];
@@ -42096,14 +42626,22 @@ $CONTENT
                     })();
                     // 所有异步准备完成后，在第一次内存写入前重新核验当前活动聊天与取消状态。
                     assertTemplateCommitChatContext_ACU(chat, options);
-                    sharedStateMutated = true;
-                    purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count), 0);
                     frame.perSheetCheckpoints = {
                         ...(frame.perSheetCheckpoints || {}),
                         ...Object.fromEntries(checkpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
                     };
                     if (entryOptions)
                         appendMutationLogEntry_ACU(frame, entryOptions);
+                    if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
+                        const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, new Map([[target.index, isolatedData]]));
+                        const candidateValidationError = await validateProvisionalConvergenceCandidate_ACU(candidateChat, isolationKey, target.index);
+                        if (candidateValidationError)
+                            throw new Error(candidateValidationError);
+                        transactionContext.assertFresh?.('commitCurrentFloorTemplateChanges:before_convergence_save');
+                    }
+                    assertTemplateCommitChatContext_ACU(chat, options);
+                    sharedStateMutated = true;
+                    purgedMessageCount = deletedSheetKeys.length === 0 ? 0 : messageSnapshots.reduce((count, snapshot) => (purgeSheetKeysFromMessage_ACU(snapshot.message, deletedSheetKeys) ? count + 1 : count), 0);
                     target.message.TavernDB_ACU_IsolatedData = isolatedData;
                     // isolatedData 在异步准备前已克隆；重新挂回目标消息后必须同步应用删除，
                     // 否则会把刚刚从真实消息清理掉的目标 frame 旧快照覆盖回来。
@@ -42512,6 +43050,17 @@ $CONTENT
     function commitFailure_ACU(decision, error) {
         return { status: 'commit_failed_rolled_back', decisionId: decision.decisionId, error };
     }
+    function buildDecisionBackup_ACU(decision, action, createdAt) {
+        return {
+            version: 1, createdAt, action,
+            legacyData: clone_ACU$6(decision.legacyAudit.sourceData),
+            legacyFingerprint: decision.legacyFingerprint,
+            v2Fingerprint: decision.v2Fingerprint,
+            sourceMessageIndices: [...decision.evidence.legacy.sourceMessageIndices],
+            sourceAiFloors: [...decision.evidence.legacy.sourceAiFloors],
+            decisionId: decision.decisionId, decisionKind: decision.kind,
+        };
+    }
     /**
      * Commits only an evaluator-authorized action. Before mutation, source evidence and scope
      * are refreshed to reject stale decisions; a merge candidate is then deterministically
@@ -42522,7 +43071,7 @@ $CONTENT
         const { decision, action, isolationConfig } = options;
         if (!decision.allowedActions.includes(action))
             return commitFailure_ACU(decision, 'decision does not authorize this action');
-        if (action === 'keep_v2' && decision.kind !== 'equivalent_provenance_verified' && decision.kind !== 'v2_successor_verified') {
+        if (action === 'keep_v2' && decision.kind !== 'equivalent_provenance_verified' && decision.kind !== 'equivalent_projection_verified' && decision.kind !== 'v2_successor_verified') {
             return commitFailure_ACU(decision, 'keep_v2 requires a verified V2 decision');
         }
         if (action === 'commit_merge_candidate' && (decision.kind !== 'legacy_has_v2_missing_data' || !decision.frozenMergeCandidate)) {
@@ -42543,6 +43092,12 @@ $CONTENT
         const candidateChat = clone_ACU$6(chat);
         const isolationKey = decision.scopeSnapshot.activeIsolationKey;
         const originalV2 = v2Projection_ACU(candidateChat, isolationKey);
+        const createdAt = Date.now();
+        const backup = buildDecisionBackup_ACU(decision, action, createdAt);
+        const backupTargetIndex = action === 'keep_v2' ? decision.evidence.v2.anchor.messageIndex : null;
+        if (action === 'keep_v2' && (backupTargetIndex === null || !isV2TagData_ACU(readIsolatedTagData_ACU(candidateChat[backupTargetIndex], isolationKey)))) {
+            return commitFailure_ACU(decision, 'verified V2 anchor is unavailable for decision backup');
+        }
         if (action === 'commit_merge_candidate') {
             const candidateData = clone_ACU$6(decision.frozenMergeCandidate);
             if (auditTableDataForUpgrade_ACU(candidateData).status !== 'clean') {
@@ -42554,7 +43109,6 @@ $CONTENT
                 return commitFailure_ACU(decision, 'no later non-V2 AI message is available for an append-only merge checkpoint');
             }
             const target = candidateChat[targetIndex];
-            const createdAt = Date.now();
             const provenance = {
                 version: 1,
                 legacyDataFingerprint: getTableDataFingerprint_ACU(candidateData),
@@ -42584,8 +43138,16 @@ $CONTENT
                 ...(existing?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existing.summaryVectorIndexState } : {}),
                 ...(existing?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existing.summaryVectorIndexManifest } : {}),
                 _acu_storage_version: 2,
+                mixedStorageDecisionBackup: backup,
                 storageFrame: { version: 2, headRevision: `checkpoint:mixed-merge:${createdAt.toString(36)}`, checkpoint: checkpoint.checkpoint, logEntries: [] },
             };
+            target.TavernDB_ACU_IsolatedData = isolated;
+        }
+        if (action === 'keep_v2') {
+            const target = candidateChat[backupTargetIndex];
+            const isolated = cloneIsolatedData_ACU(target);
+            const existing = readIsolatedTagData_ACU(target, isolationKey);
+            isolated[isolationKey] = { ...existing, mixedStorageDecisionBackup: backup };
             target.TavernDB_ACU_IsolatedData = isolated;
         }
         removeLegacy_ACU(candidateChat, isolationKey, isolationConfig);
@@ -42744,7 +43306,7 @@ $CONTENT
             && provenance.legacyFingerprintMatchesCandidate === true;
     }
     function actionsFor_ACU(kind) {
-        if (kind === 'equivalent_provenance_verified' || kind === 'v2_successor_verified')
+        if (kind === 'equivalent_provenance_verified' || kind === 'equivalent_projection_verified' || kind === 'v2_successor_verified')
             return ['noop', 'download_snapshots', 'keep_v2'];
         if (kind === 'legacy_has_v2_missing_data')
             return ['noop', 'download_snapshots', 'commit_merge_candidate'];
@@ -42800,6 +43362,9 @@ $CONTENT
                 diagnostics.push('v2_coverage_insufficient');
             if (scopeMatches && provenanceVerified && coverageSufficient && evidence.comparison.fingerprintsEqual === true) {
                 kind = 'equivalent_provenance_verified';
+            }
+            else if (scopeMatches && !evidence.v2.provenance.present && coverageSufficient && evidence.comparison.fingerprintsEqual === true) {
+                kind = 'equivalent_projection_verified';
             }
             else if (scopeMatches && provenanceVerified && coverageSufficient && evidence.comparison.fingerprintsEqual === false && hasV2SuccessorActivity_ACU(evidence)) {
                 kind = 'v2_successor_verified';
@@ -43231,6 +43796,9 @@ $CONTENT
         if (audit.status === 'unrecoverable') {
             return { migrated: false, error: `legacy migration audit failed: ${audit.issues.map(issue => issue.code).join(', ')}` };
         }
+        if (audit.status !== 'clean' && audit.status !== 'repairable') {
+            return { migrated: false, error: `legacy migration requires confirmation: ${audit.issues.map(issue => issue.code).join(', ')}` };
+        }
         const repair = repairTableDataFromAudit_ACU(audit);
         if (repair.requiresConfirmation) {
             return { migrated: false, error: `legacy migration requires confirmation: ${audit.issues.map(issue => issue.code).join(', ')}` };
@@ -43314,10 +43882,22 @@ $CONTENT
             logEntries: [],
         };
         const isolatedData = cloneIsolatedData_ACU(candidateTarget);
+        const migrationAuditBackup = {
+            version: 1,
+            createdAt: migratedAt,
+            sourceData: deepClone_ACU(audit.sourceData),
+            dataFingerprintBefore: audit.dataFingerprintBefore,
+            dataFingerprintAfter: repair.dataFingerprintAfter,
+            auditStatus: audit.status,
+            issues: deepClone_ACU(audit.issues),
+            repairPlan: deepClone_ACU(audit.repairPlan),
+            idRemap: deepClone_ACU(repair.idRemap),
+        };
         isolatedData[options.isolationKey] = {
             ...(existingTargetTagData?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTargetTagData.summaryVectorIndexState } : {}),
             ...(existingTargetTagData?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existingTargetTagData.summaryVectorIndexManifest } : {}),
             storageFrame: frame,
+            migrationAuditBackup,
             _acu_storage_version: 2,
         };
         candidateTarget.TavernDB_ACU_IsolatedData = isolatedData;
@@ -47007,10 +47587,12 @@ $CONTENT
             const replay = await loadTableStateFromFramesV2Detailed_ACU(undefined, isolationKey, { updateRuntimeState: false });
             if (signal?.aborted)
                 return { error: '模板提交已取消。' };
-            if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+            if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
                 const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
-                return { error: `当前 V2 历史仍依赖临时 Sheet 补锚（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先在数据管理中完成 V2 恢复收敛，再切换模板。` };
+                return { error: `当前 V2 历史存在结构性兼容修复（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先在数据管理中完成 V2 恢复，再切换模板。` };
             }
+            // provisional temporary_sheet_anchor 将由 commitCurrentFloorTemplateChanges_ACU
+            // 与本次模板变更在同一候选提交内收敛，不能在读取入口提前阻断。
             const baselineData = replay?.data ?? null;
             const afterRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
             if (beforeRevision === afterRevision)
@@ -73880,6 +74462,7 @@ $CONTENT
         settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
         settingsStorageReadyForSave_ACU = true;
         refreshDefaultTableTemplateOnce_ACU(activeCode);
+        forceDisableStrictJsonTableFillOnce_ACU();
         forceDefaultTableFillPromptsOnce_ACU();
         if (shouldPersistSettingsAfterLoad_ACU) {
             saveGlobalMeta_ACU();
@@ -74035,6 +74618,25 @@ $CONTENT
         }
     }
     /**
+     * 一次性将历史用户保留的严格 JSON 填表开关关闭。
+     * marker 写入后不再执行，用户仍可在高级设置中重新开启。
+     */
+    function forceDisableStrictJsonTableFillOnce_ACU() {
+        try {
+            if (!settings_ACU || typeof settings_ACU !== 'object')
+                return;
+            if (settings_ACU.strictJsonTableFillForceDisableVersion === STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU)
+                return;
+            settings_ACU.strictJsonTableFillEnabled = false;
+            settings_ACU.strictJsonTableFillForceDisableVersion = STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU;
+            saveSettings_ACU();
+            logDebug_ACU(`[严格 JSON 填表] 已一次性关闭并记录版本: ${STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU}`);
+        }
+        catch (error) {
+            logWarn_ACU('[严格 JSON 填表] 一次性关闭失败:', error);
+        }
+    }
+    /**
      * [spv8.9.2] 一次性强制恢复全部填表提示词为当前版本默认值。
      * marker 写入后不再执行，用户后续仍可正常自定义。
      */
@@ -74089,6 +74691,7 @@ $CONTENT
             currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
             tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
             tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
+            strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本
             // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
             tableContextExtractTags: '',
             tableContextExtractRules: [],
@@ -80376,9 +80979,9 @@ $CONTENT
                 allowTemporaryTemplateBaseline: true,
                 throwOnRecoveryRequired: true,
             });
-            if (replayResult?.requiresCheckpointConvergence || replayResult?.compatibilityRepairs?.length) {
+            if (hasStructuralReplayCompatibilityRepairs_ACU(replayResult?.compatibilityRepairs)) {
                 const affectedSheetKeys = [...new Set((replayResult.compatibilityRepairs || []).map(item => item.sheetKey))];
-                throw new Error(`V2 replay 仍依赖临时 Sheet 补锚（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先执行 V2 恢复或边界 compaction，再继续生成新表格增量。`);
+                throw new Error(`V2 replay 存在结构性兼容修复（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先执行 V2 恢复或边界 compaction，再继续生成新表格增量。`);
             }
             const cloned = cloneTableDataSnapshot_ACU(replayResult?.data);
             if (!hasUsableRuntimeTableData_ACU(cloned))
@@ -82334,10 +82937,10 @@ $CONTENT
                     maxMessageIndex: safeTargetMessageIndex,
                     updateRuntimeState: false,
                 });
-                if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+                if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
                     const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
                     return {
-                        error: `V2 replay 仍依赖临时 Sheet 补锚：${affectedSheetKeys.join('、') || '未知 Sheet'}。请先执行恢复收敛。`,
+                        error: `V2 replay 存在结构性兼容修复：${affectedSheetKeys.join('、') || '未知 Sheet'}。请先执行恢复收敛。`,
                         diagnosticCode: 'replay_requires_checkpoint_convergence',
                     };
                 }
@@ -87811,9 +88414,11 @@ $CONTENT
             if (!replay) {
                 return { success: false, changed: false, error: 'V2 replay 未产生表格数据，已阻止可视化编辑器保存。' };
             }
-            if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
-                return { success: false, changed: false, error: '当前 V2 回放仍依赖临时 Sheet 补锚，请先在数据管理中完成恢复收敛，再使用可视化编辑器保存。' };
+            if (hasStructuralReplayCompatibilityRepairs_ACU(replay.compatibilityRepairs)) {
+                return { success: false, changed: false, error: '当前 V2 回放存在结构性兼容修复，不能自动收敛；请先在数据管理中完成恢复，再使用可视化编辑器保存。' };
             }
+            // provisional temporary_sheet_anchor 由 batch persist 在同一候选提交中收敛；
+            // 此处提前拒绝只会绕过该事务、backup 与 strict replay 路径。
             const result = await runTableWriteTransaction_ACU({
                 source: 'manual_crud',
                 reason: 'visualizer_save_v2_replay',
@@ -105201,7 +105806,11 @@ $CONTENT
             storageFrame: clone_ACU$3(sourceTagData.storageFrame),
         };
         const isolatedData = cloneIsolatedData_ACU(sourceMessage);
-        const recoveredFrame = { version: 2, checkpoint: checkpointBuild.checkpoint, logEntries: [] };
+        // 修复的是已验证的 checkpoint 基底，不是把其后 artifact 一并抹掉。
+        // 只有已被诊断为完整可替换的孤立 frame/临时补锚才收敛为纯 checkpoint。
+        const recoveredFrame = plan.kind === 'repaired_full_checkpoint'
+            ? { ...clone_ACU$3(sourceTagData.storageFrame), checkpoint: checkpointBuild.checkpoint }
+            : { version: 2, checkpoint: checkpointBuild.checkpoint, logEntries: [] };
         const nextTagData = {
             ...isolatedData[plan.isolationKey],
             _acu_storage_version: 2,
@@ -105221,7 +105830,9 @@ $CONTENT
             throw new Error('恢复候选未产生可回放表数据。');
         if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length)
             throw new Error('恢复候选仍依赖临时 Sheet 补锚。');
-        if (getTableDataFingerprint_ACU(replay.data) !== getTableDataFingerprint_ACU(plan.candidateData)) {
+        // 基底修复后的 suffix 必须被严格回放；其结果不应再与修复时的基底本身相等。
+        if (plan.kind !== 'repaired_full_checkpoint'
+            && getTableDataFingerprint_ACU(replay.data) !== getTableDataFingerprint_ACU(plan.candidateData)) {
             throw new Error('恢复候选 replay 结果与修复数据不一致。');
         }
     }
@@ -105292,14 +105903,14 @@ $CONTENT
             }
             if (!repair.candidateData)
                 return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '最新 full checkpoint 不可无损自动修复；请先导出原始 frame。' } };
-            if (hasReplayArtifactsAfterCheckpoint_ACU(latestFull.frame) || hasLaterReplayArtifacts_ACU(frames, latestFull.messageIndex)) {
-                const ambiguity = findAmbiguousRowIdReference_ACU(frames, latestFull.messageIndex, repair.idRemap);
-                const message = ambiguity
-                    ? `重复 row_id 修复会改变后续引用的语义：${ambiguity}；拒绝猜测。`
-                    : '坏 full checkpoint 之后仍存在 V2 replay artifact；无法证明替换不会截断数据，拒绝自动恢复。';
+            const ambiguity = findAmbiguousRowIdReference_ACU(frames, latestFull.messageIndex, repair.idRemap);
+            if (ambiguity) {
+                const message = `重复 row_id 修复会改变后续引用的语义：${ambiguity}；拒绝猜测。`;
                 return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message } };
             }
-            const summary = { status: 'recoverable_repaired_checkpoint', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '已生成 full 修复候选。' };
+            const suffixCount = frames.filter(item => item.messageIndex > latestFull.messageIndex && hasAnyReplayArtifacts_ACU(item.frame)).length
+                + (hasReplayArtifactsAfterCheckpoint_ACU(latestFull.frame) ? 1 : 0);
+            const summary = { status: 'recoverable_repaired_checkpoint', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: suffixCount > 0 ? '已生成 full 修复候选；将保留并严格回放后缀 artifact。' : '已生成 full 修复候选。' };
             return { summary, plan: { ...summary, kind: 'repaired_full_checkpoint', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(latestFull.frame), candidateData: repair.candidateData } };
         }
         for (const item of [...frames].reverse()) {
@@ -126305,7 +126916,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$10 = { class: "acu-dialog__header" };
     const _hoisted_2$R = { class: "acu-dialog__message" };
-    const _hoisted_3$H = {
+    const _hoisted_3$I = {
 	key: 0,
 	class: "acu-dialog__danger-message"
     };
@@ -126368,7 +126979,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			),
 			$setup.renderedDialog.dangerMessage ? (openBlock(), createElementBlock(
 				"p",
-				_hoisted_3$H,
+				_hoisted_3$I,
 				toDisplayString($setup.renderedDialog.dangerMessage),
 				1
 				/* TEXT */
@@ -126660,7 +127271,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	"disabled",
 	"onClick"
     ];
-    const _hoisted_3$G = { class: "acu-segmented__label" };
+    const _hoisted_3$H = { class: "acu-segmented__label" };
     function _sfc_render$11(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", {
 		class: normalizeClass(["acu-segmented", [`acu-segmented--${$props.size}`, { "acu-segmented--disabled": $props.disabled }]]),
@@ -126696,7 +127307,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				]
 			}, [createBaseVNode(
 				"span",
-				_hoisted_3$G,
+				_hoisted_3$H,
 				toDisplayString(opt.label),
 				1
 				/* TEXT */
@@ -126946,7 +127557,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	style: { zIndex: 9410 }
     };
     const _hoisted_2$P = { class: "acu-toast-viewport__list" };
-    const _hoisted_3$F = ["role"];
+    const _hoisted_3$G = ["role"];
     const _hoisted_4$y = {
 	class: "acu-v2-toast__icon",
 	"aria-hidden": "true"
@@ -127005,7 +127616,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					title: "关闭通知",
 					onClick: ($event) => $setup.toast.dismiss(entry.item.id)
 				}, null, 8, ["onClick"])) : createCommentVNode("v-if", true)
-			], 10, _hoisted_3$F);
+			], 10, _hoisted_3$G);
 		}),
 		128
 		/* KEYED_FRAGMENT */
@@ -127204,7 +127815,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-mobile-panel-nav__track",
 	role: "list"
     };
-    const _hoisted_3$E = ["aria-current", "onClick"];
+    const _hoisted_3$F = ["aria-current", "onClick"];
     function _sfc_render$$(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"nav",
@@ -127222,7 +127833,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						class: normalizeClass(["acu-mobile-panel-nav__item", { "is-active": item.id === $setup.activeId }]),
 						"aria-current": item.id === $setup.activeId ? "location" : undefined,
 						onClick: ($event) => $setup.scrollToPanel(item.id)
-					}, toDisplayString(item.label), 11, _hoisted_3$E);
+					}, toDisplayString(item.label), 11, _hoisted_3$F);
 				}),
 				128
 				/* KEYED_FRAGMENT */
@@ -127720,7 +128331,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-form-row__label"
     };
-    const _hoisted_3$D = {
+    const _hoisted_3$E = {
 	key: 1,
 	class: "acu-form-row__hint"
     };
@@ -127736,7 +128347,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		renderSlot(_ctx.$slots, "default", {}, undefined, true),
 		$props.hint ? (openBlock(), createElementBlock(
 			"span",
-			_hoisted_3$D,
+			_hoisted_3$E,
 			toDisplayString($props.hint),
 			1
 			/* TEXT */
@@ -128019,7 +128630,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-panel__title"
     };
-    const _hoisted_3$C = {
+    const _hoisted_3$D = {
 	key: 1,
 	class: "acu-panel__header-right"
     };
@@ -128042,7 +128653,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				toDisplayString($props.title),
 				1
 				/* TEXT */
-			)], true)])) : createCommentVNode("v-if", true), _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock("div", _hoisted_3$C, [_ctx.$slots.actions ? (openBlock(), createElementBlock("div", _hoisted_4$x, [renderSlot(_ctx.$slots, "actions", {}, undefined, true)])) : createCommentVNode("v-if", true), $setup.hasDescription ? (openBlock(), createBlock($setup["AcuIconButton"], {
+			)], true)])) : createCommentVNode("v-if", true), _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock("div", _hoisted_3$D, [_ctx.$slots.actions ? (openBlock(), createElementBlock("div", _hoisted_4$x, [renderSlot(_ctx.$slots, "actions", {}, undefined, true)])) : createCommentVNode("v-if", true), $setup.hasDescription ? (openBlock(), createBlock($setup["AcuIconButton"], {
 				key: 1,
 				class: normalizeClass(["acu-panel__description-button", { "acu-panel__description-button--open": $setup.descriptionOpen }]),
 				icon: "fa-solid fa-circle-info",
@@ -128318,7 +128929,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$S = ["disabled"];
     const _hoisted_2$L = { class: "acu-preset-dd__label" };
-    const _hoisted_3$B = {
+    const _hoisted_3$C = {
 	key: 0,
 	class: "acu-preset-dd__menu"
     };
@@ -128361,7 +128972,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$S), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$B, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$S), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$C, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.items, (item) => {
@@ -128471,7 +129082,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-select__menu"
     };
-    const _hoisted_3$A = ["onClick"];
+    const _hoisted_3$B = ["onClick"];
     const _hoisted_4$v = {
 	key: 0,
 	class: "acu-select__empty"
@@ -128508,7 +129119,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					key: opt.value,
 					class: normalizeClass(["acu-select__item", { "acu-select__item--active": opt.value === $props.modelValue }]),
 					onClick: ($event) => $setup.select(opt.value)
-				}, toDisplayString(opt.label), 11, _hoisted_3$A);
+				}, toDisplayString(opt.label), 11, _hoisted_3$B);
 			}),
 			128
 			/* KEYED_FRAGMENT */
@@ -128674,7 +129285,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$Q = { class: "acu-api-config-panel__select-row" };
     const _hoisted_2$J = { class: "acu-api-config-panel__editor-section" };
-    const _hoisted_3$z = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_3$A = { class: "acu-api-config-panel__inline-action" };
     const _hoisted_4$u = {
 	key: 0,
 	class: "acu-api-config-panel__muted"
@@ -128801,7 +129412,7 @@ Expected function or array of functions, received type ${typeof value}.`
 									}, null, 8, ["modelValue"])]),
 									_: 1
 								}),
-								createBaseVNode("div", _hoisted_3$z, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
+								createBaseVNode("div", _hoisted_3$A, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
 									default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 										"加载模型",
 										-1
@@ -130370,7 +130981,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$N = { class: "acu-form-fill-update-settings-panel__settings-groups" };
     const _hoisted_2$G = { class: "acu-form-fill-update-settings-panel__setting-group" };
-    const _hoisted_3$y = { class: "acu-form-fill-update-settings-panel__number-grid" };
+    const _hoisted_3$z = { class: "acu-form-fill-update-settings-panel__number-grid" };
     function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.formFillCopy.panels.update.title,
@@ -130425,7 +131036,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			"body-mode": "if",
 			onToggle: _cache[1] || (_cache[1] = ($event) => $setup.advancedExpanded = !$setup.advancedExpanded)
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_3$y, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [createBaseVNode("div", _hoisted_3$z, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.advancedFields, (field) => {
@@ -131514,7 +132125,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$M = { class: "acu-v2-drawer__header" };
     const _hoisted_2$F = { class: "acu-v2-drawer__header-left" };
-    const _hoisted_3$x = { class: "acu-v2-drawer__body" };
+    const _hoisted_3$y = { class: "acu-v2-drawer__body" };
     function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.isRendered ? (openBlock(), createElementBlock(
 		"div",
@@ -131550,7 +132161,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				"aria-label": "关闭",
 				title: "关闭",
 				onClick: $setup.requestClose
-			})]), createBaseVNode("div", _hoisted_3$x, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
+			})]), createBaseVNode("div", _hoisted_3$y, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
 			4
 			/* STYLE */
 		)],
@@ -131619,7 +132230,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-rule-pair-list acu-rule-pair-list--standalone"
     };
-    const _hoisted_3$w = { class: "acu-rule-pair-list__body" };
+    const _hoisted_3$x = { class: "acu-rule-pair-list__body" };
     const _hoisted_4$t = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
@@ -131715,7 +132326,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		"label",
 		"meta",
 		"expanded"
-	])) : (openBlock(), createElementBlock("div", _hoisted_2$E, [createBaseVNode("div", _hoisted_3$w, [
+	])) : (openBlock(), createElementBlock("div", _hoisted_2$E, [createBaseVNode("div", _hoisted_3$x, [
 		(openBlock(true), createElementBlock(
 			Fragment,
 			null,
@@ -131927,7 +132538,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$J = { class: "acu-prompt-segs" };
     const _hoisted_2$C = { class: "acu-prompt-segs__add" };
-    const _hoisted_3$v = { class: "acu-prompt-segs__list" };
+    const _hoisted_3$w = { class: "acu-prompt-segs__list" };
     const _hoisted_4$s = { class: "acu-prompt-segs__item-head" };
     const _hoisted_5$n = { class: "acu-prompt-segs__index" };
     const _hoisted_6$l = { class: "acu-prompt-segs__actions" };
@@ -131956,7 +132567,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			)])]),
 			_: 1
 		})]),
-		createBaseVNode("ol", _hoisted_3$v, [(openBlock(true), createElementBlock(
+		createBaseVNode("ol", _hoisted_3$w, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.segments, (seg, index) => {
@@ -132174,7 +132785,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-plot-task-editor"
     };
     const _hoisted_2$B = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_3$u = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_3$v = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_4$r = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_5$m = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_6$k = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
@@ -132182,8 +132793,8 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$h = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_9$f = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_10$e = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_11$e = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_12$a = {
+    const _hoisted_11$d = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_12$9 = {
 	key: 1,
 	class: "acu-v2-plot-task-editor__empty"
     };
@@ -132197,7 +132808,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				-1
 				/* CACHED */
 			)),
-			createBaseVNode("div", _hoisted_3$u, [
+			createBaseVNode("div", _hoisted_3$v, [
 				createVNode($setup["AcuFormRow"], { label: "任务名称" }, {
 					default: withCtx(() => [createVNode($setup["AcuInput"], {
 						type: "text",
@@ -132413,7 +133024,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			}, null, 8, ["options", "model-value"])]),
 			_: 1
 		})]),
-		createBaseVNode("fieldset", _hoisted_11$e, [_cache[27] || (_cache[27] = createBaseVNode(
+		createBaseVNode("fieldset", _hoisted_11$d, [_cache[27] || (_cache[27] = createBaseVNode(
 			"legend",
 			null,
 			"提示词段（promptGroup）",
@@ -132426,7 +133037,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			onMove: _cache[21] || (_cache[21] = (index, delta) => _ctx.$emit("segment-move", index, delta)),
 			onUpdate: _cache[22] || (_cache[22] = (index, patch) => _ctx.$emit("segment-update", index, patch))
 		}, null, 8, ["segments"])])
-	])) : (openBlock(), createElementBlock("div", _hoisted_12$a, " 请在上方选择一个任务进行编辑。 "));
+	])) : (openBlock(), createElementBlock("div", _hoisted_12$9, " 请在上方选择一个任务进行编辑。 "));
     }
     var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-0d30f745"]]);
 
@@ -132458,7 +133069,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$H = { class: "acu-v2-plot-tasks" };
     const _hoisted_2$A = { class: "acu-v2-plot-tasks__toolbar" };
-    const _hoisted_3$t = { class: "acu-v2-plot-tasks__cards" };
+    const _hoisted_3$u = { class: "acu-v2-plot-tasks__cards" };
     const _hoisted_4$q = ["onClick"];
     const _hoisted_5$l = { class: "acu-v2-plot-tasks__name" };
     const _hoisted_6$j = {
@@ -132511,7 +133122,7 @@ Expected function or array of functions, received type ${typeof value}.`
 			title: "新增任务",
 			onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add"))
 		})
-	])]), createBaseVNode("div", _hoisted_3$t, [(openBlock(true), createElementBlock(
+	])]), createBaseVNode("div", _hoisted_3$u, [(openBlock(true), createElementBlock(
 		Fragment,
 		null,
 		renderList($props.tasks, (task) => {
@@ -132594,7 +133205,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-manage-list"
     };
     const _hoisted_2$z = { class: "acu-v2-manage-item__info" };
-    const _hoisted_3$s = { class: "acu-v2-manage-item__actions" };
+    const _hoisted_3$t = { class: "acu-v2-manage-item__actions" };
     const _hoisted_4$p = { class: "acu-v2-form__section" };
     const _hoisted_5$k = { class: "acu-v2-form__section" };
     const _hoisted_6$i = { class: "acu-v2-plot-drawer__rules" };
@@ -132677,7 +133288,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_3$s, [
+					)]), createBaseVNode("div", _hoisted_3$t, [
 						createVNode($setup["AcuIconButton"], {
 							icon: meta.name === $props.defaultPresetName ? "fa-solid fa-star" : "fa-regular fa-star",
 							title: "设为全局默认",
@@ -132986,7 +133597,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$F = { class: "acu-text__value" };
     const _hoisted_2$y = { class: "acu-text__value" };
-    const _hoisted_3$r = { class: "acu-plot-preset-panel__select-row" };
+    const _hoisted_3$s = { class: "acu-plot-preset-panel__select-row" };
     function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.plotCopy.panels.preset.title,
@@ -133065,7 +133676,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$r, [
+			createBaseVNode("div", _hoisted_3$s, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.presetDropdownItems,
 					"model-value": $setup.store.activePresetName,
@@ -133205,7 +133816,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 1,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_3$q = { class: "acu-v2-manage-item__info" };
+    const _hoisted_3$r = { class: "acu-v2-manage-item__info" };
     const _hoisted_4$o = { class: "acu-v2-manage-item__actions" };
     function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
@@ -133251,7 +133862,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					return openBlock(), createElementBlock("li", {
 						key: meta.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_3$q, [createVNode(
+					}, [createBaseVNode("div", _hoisted_3$r, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -134768,7 +135379,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$D = { class: "acu-text__value" };
     const _hoisted_2$w = { class: "acu-text__value" };
-    const _hoisted_3$p = { class: "acu-table-template-panel__preset-row" };
+    const _hoisted_3$q = { class: "acu-table-template-panel__preset-row" };
     const _hoisted_4$n = { class: "acu-table-template-panel__action-area" };
     function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
@@ -134859,7 +135470,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$p, [
+			createBaseVNode("div", _hoisted_3$q, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.templates.chatPresetItems.value,
 					"model-value": $setup.templates.selectedChatPreset.value,
@@ -135289,7 +135900,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$B = ["aria-label"];
     const _hoisted_2$v = { class: "acu-dashboard-storage-mode__head" };
-    const _hoisted_3$o = { class: "acu-dashboard-storage-mode__label" };
+    const _hoisted_3$p = { class: "acu-dashboard-storage-mode__label" };
     const _hoisted_4$m = { class: "acu-dashboard-storage-mode__desc-main" };
     const _hoisted_5$j = { class: "acu-dashboard-storage-mode__cards" };
     const _hoisted_6$h = {
@@ -135300,7 +135911,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$e = { class: "acu-dashboard-storage-mode__card-head" };
     const _hoisted_9$d = { class: "acu-dashboard-storage-mode__name" };
     const _hoisted_10$d = { class: "acu-dashboard-storage-mode__badge" };
-    const _hoisted_11$d = { class: "acu-dashboard-storage-mode__desc" };
+    const _hoisted_11$c = { class: "acu-dashboard-storage-mode__desc" };
     function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", {
 		class: "acu-dashboard-storage-mode",
@@ -135308,7 +135919,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	}, [
 		createBaseVNode("div", _hoisted_2$v, [createBaseVNode(
 			"span",
-			_hoisted_3$o,
+			_hoisted_3$p,
 			toDisplayString($setup.dashboardCopy.storage.sectionLabel),
 			1
 			/* TEXT */
@@ -135361,7 +135972,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						/* TEXT */
 					)]), createBaseVNode(
 						"span",
-						_hoisted_11$d,
+						_hoisted_11$c,
 						toDisplayString(option.description),
 						1
 						/* TEXT */
@@ -135403,7 +136014,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$A = { class: "acu-dashboard-toggle-row" };
     const _hoisted_2$u = { class: "acu-dashboard-toggle-row__head" };
-    const _hoisted_3$n = { class: "acu-dashboard-toggle-row__label" };
+    const _hoisted_3$o = { class: "acu-dashboard-toggle-row__label" };
     const _hoisted_4$l = {
 	key: 0,
 	class: "acu-dashboard-toggle-row__desc"
@@ -135411,7 +136022,7 @@ Expected function or array of functions, received type ${typeof value}.`
     function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$A, [createBaseVNode("div", _hoisted_2$u, [createBaseVNode(
 		"span",
-		_hoisted_3$n,
+		_hoisted_3$o,
 		toDisplayString($props.item.label),
 		1
 		/* TEXT */
@@ -136348,7 +136959,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$z = { class: "acu-v2-dashboard-page" };
     const _hoisted_2$t = { class: "acu-v2-dashboard-page__health-list" };
-    const _hoisted_3$m = {
+    const _hoisted_3$n = {
 	class: "acu-v2-dashboard-page__health-icon",
 	"aria-hidden": "true"
     };
@@ -136373,7 +136984,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							class: normalizeClass(["acu-v2-dashboard-page__health-item", `acu-v2-dashboard-page__health-item--${item.kind}`])
 						},
 						[
-							createBaseVNode("div", _hoisted_3$m, [createBaseVNode(
+							createBaseVNode("div", _hoisted_3$n, [createBaseVNode(
 								"i",
 								{ class: normalizeClass(item.iconClass) },
 								null,
@@ -136539,7 +137150,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-table-selector__empty"
     };
-    const _hoisted_3$l = { class: "acu-v2-table-selector__actions" };
+    const _hoisted_3$m = { class: "acu-v2-table-selector__actions" };
     const _hoisted_4$j = { class: "acu-v2-table-selector__count" };
     const _hoisted_5$h = { class: "acu-v2-table-selector__grid" };
     function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
@@ -136552,7 +137163,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	)) : (openBlock(), createElementBlock(
 		Fragment,
 		{ key: 1 },
-		[createBaseVNode("div", _hoisted_3$l, [
+		[createBaseVNode("div", _hoisted_3$m, [
 			createVNode($setup["AcuButton"], {
 				size: "sm",
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("select-all"))
@@ -137160,7 +137771,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$x = { class: "acu-v2-form-fill-page" };
     const _hoisted_2$r = ["title"];
-    const _hoisted_3$k = { class: "acu-text__value" };
+    const _hoisted_3$l = { class: "acu-text__value" };
     const _hoisted_4$i = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
     const _hoisted_5$g = { class: "acu-v2-form-fill-page__table-wrap" };
     const _hoisted_6$f = { class: "acu-v2-form-fill-page__status-table" };
@@ -137168,7 +137779,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const _hoisted_8$d = { key: 1 };
     const _hoisted_9$c = { class: "acu-v2-form-fill-page__manual-number-grid" };
     const _hoisted_10$c = { class: "acu-v2-form-fill-page__manual-extra" };
-    const _hoisted_11$c = { class: "acu-v2-form-fill-page__actions" };
+    const _hoisted_11$b = { class: "acu-v2-form-fill-page__actions" };
     function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$x, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
 		default: withCtx(() => [
@@ -137201,7 +137812,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							)),
 							createBaseVNode(
 								"strong",
-								_hoisted_3$k,
+								_hoisted_3$l,
 								toDisplayString($setup.dashboard.aiMessageCount.value),
 								1
 								/* TEXT */
@@ -137422,7 +138033,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						)]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_11$c, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_11$b, [createVNode($setup["AcuButton"], {
 						variant: "secondary",
 						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
 						onClick: $setup.manualUpdate.runManualCatchUp
@@ -137729,7 +138340,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	"disabled",
 	"onClick"
     ];
-    const _hoisted_3$j = { class: "acu-v2-wb-source-picker__item-label" };
+    const _hoisted_3$k = { class: "acu-v2-wb-source-picker__item-label" };
     const _hoisted_4$h = {
 	key: 0,
 	class: "acu-v2-wb-source-picker__empty"
@@ -137776,7 +138387,7 @@ Expected function or array of functions, received type ${typeof value}.`
 							onClick: ($event) => _ctx.$emit("toggle-book", name, !$setup.selectedSet.has(name))
 						}, [createBaseVNode(
 							"span",
-							_hoisted_3$j,
+							_hoisted_3$k,
 							toDisplayString(name),
 							1
 							/* TEXT */
@@ -137933,7 +138544,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 0,
 	class: "acu-v2-wb-entries__status"
     };
-    const _hoisted_3$i = {
+    const _hoisted_3$j = {
 	key: 1,
 	class: "acu-v2-wb-entries__status acu-v2-wb-entries__status--error",
 	role: "alert"
@@ -137963,11 +138574,11 @@ Expected function or array of functions, received type ${typeof value}.`
 	key: 3,
 	class: "acu-v2-wb-entry-skill"
     };
-    const _hoisted_11$b = { class: "acu-v2-wb-entry-skill__actions" };
+    const _hoisted_11$a = { class: "acu-v2-wb-entry-skill__actions" };
     function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$t, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$o, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_3$i,
+		_hoisted_3$j,
 		toDisplayString($props.error || "加载条目失败"),
 		1
 		/* TEXT */
@@ -138079,7 +138690,7 @@ Expected function or array of functions, received type ${typeof value}.`
 										"auto-resize": "",
 										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { triggerWhen: String($event) })
 									}, null, 8, ["model-value", "onUpdate:modelValue"]),
-									createBaseVNode("div", _hoisted_11$b, [createVNode($setup["AcuButton"], {
+									createBaseVNode("div", _hoisted_11$a, [createVNode($setup["AcuButton"], {
 										size: "sm",
 										variant: "primary",
 										onClick: ($event) => $setup.saveSkill(entry)
@@ -138861,21 +139472,19 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-table-page[data-v-4783414e] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-table-page__col[data-v-4783414e] {\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n  min-width: 0;\n}\n.acu-v2-table-page__filter[data-v-4783414e] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-table-page__toggle-row[data-v-4783414e] {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-table-page__toggle-head[data-v-4783414e] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n}\n.acu-v2-table-page__toggle-label[data-v-4783414e] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n  line-height: 1.35;\n}\n.acu-v2-table-page__toggle-desc[data-v-4783414e] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-table-page__actions[data-v-4783414e] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-table-page__status-line[data-v-4783414e] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  flex-wrap: wrap;\n}\n.acu-v2-table-page__status-line strong[data-v-4783414e] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n.acu-v2-table-page__preset-row[data-v-4783414e] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\n  gap: 6px;\n  align-items: stretch;\n  min-width: 0;\n}\n.acu-v2-table-page__badge[data-v-4783414e] {\n  display: inline-flex;\n  align-items: center;\n  padding: 2px 8px;\n  border-radius: var(--acu-radius-sm);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 500;\n}\n.acu-v2-table-page__badge--inherit[data-v-4783414e] {\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  color: var(--acu-text-2);\n}\n.acu-v2-table-page__badge--override[data-v-4783414e] {\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-table-page__hint[data-v-4783414e] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n}\n.acu-v2-table-page__hint strong[data-v-4783414e] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-table-page[data-v-4783414e] {\n    padding: 14px;\n}\n}\n", "src/presentation-v2/pages/TablePage.vue#style-0-4783414e");
-    var TablePage_vue_vue_type_style_index_0_scoped_4783414e_lang = null;
+    injectSfcStyle("\n.acu-v2-table-page[data-v-fb8884e1] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-table-page__col[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n  min-width: 0;\n}\n.acu-v2-table-page__filter[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-table-page__toggle-row[data-v-fb8884e1] {\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-table-page__toggle-head[data-v-fb8884e1] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n}\n.acu-v2-table-page__toggle-label[data-v-fb8884e1] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n  line-height: 1.35;\n}\n.acu-v2-table-page__toggle-desc[data-v-fb8884e1] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-table-page__actions[data-v-fb8884e1] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-table-page__status-line[data-v-fb8884e1] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  flex-wrap: wrap;\n}\n.acu-v2-table-page__status-line strong[data-v-fb8884e1] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n.acu-v2-table-page__preset-row[data-v-fb8884e1] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\n  gap: 6px;\n  align-items: stretch;\n  min-width: 0;\n}\n.acu-v2-table-page__badge[data-v-fb8884e1] {\n  display: inline-flex;\n  align-items: center;\n  padding: 2px 8px;\n  border-radius: var(--acu-radius-sm);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 500;\n}\n.acu-v2-table-page__badge--inherit[data-v-fb8884e1] {\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  color: var(--acu-text-2);\n}\n.acu-v2-table-page__badge--override[data-v-fb8884e1] {\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-table-page__hint[data-v-fb8884e1] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n}\n.acu-v2-table-page__hint strong[data-v-fb8884e1] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-table-page[data-v-fb8884e1] {\n    padding: 14px;\n}\n}\n", "src/presentation-v2/pages/TablePage.vue#style-0-fb8884e1");
+    var TablePage_vue_vue_type_style_index_0_scoped_fb8884e1_lang = null;
 
     const _hoisted_1$q = { class: "acu-v2-table-page" };
     const _hoisted_2$m = { class: "acu-v2-table-page__col" };
-    const _hoisted_3$h = { class: "acu-v2-table-page__actions" };
+    const _hoisted_3$i = { class: "acu-v2-table-page__actions" };
     const _hoisted_4$f = { class: "acu-v2-table-page__col" };
     const _hoisted_5$e = { class: "acu-v2-table-page__filter" };
     const _hoisted_6$d = { class: "acu-v2-table-page__toggle-row" };
     const _hoisted_7$b = { class: "acu-v2-table-page__toggle-head" };
     const _hoisted_8$b = { class: "acu-v2-table-page__toggle-row" };
     const _hoisted_9$a = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_10$a = { class: "acu-v2-table-page__toggle-row" };
-    const _hoisted_11$a = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_12$9 = { class: "acu-v2-table-page__hint" };
+    const _hoisted_10$a = { class: "acu-v2-table-page__hint" };
     function _sfc_render$q(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$q, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }),
@@ -138933,17 +139542,17 @@ Expected function or array of functions, received type ${typeof value}.`
 					key: 0,
 					kind: "warning"
 				}, {
-					default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
+					default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
 						" 填表提示词缺少必要主插槽，建议在编辑器里载入默认提示词后保存。 ",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
-				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_3$h, [createVNode($setup["AcuButton"], {
+				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_3$i, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					onClick: _cache[6] || (_cache[6] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
-					default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+					default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
 						" 编辑提示词 ",
 						-1
 						/* CACHED */
@@ -138957,25 +139566,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				description: $setup.formFillCopy.panels.filter.description
 			}, {
 				default: withCtx(() => [createBaseVNode("div", _hoisted_5$e, [
-					createBaseVNode("div", _hoisted_6$d, [createBaseVNode("div", _hoisted_7$b, [_cache[19] || (_cache[19] = createBaseVNode(
-						"span",
-						{ class: "acu-v2-table-page__toggle-label" },
-						" 严格 JSON 填表响应 ",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuToggle"], {
-						"model-value": $setup.settings.strictJsonTableFillEnabled.value,
-						"aria-label": "严格 JSON 填表响应",
-						"data-acu-setting-key": "strictJsonTableFillEnabled",
-						"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settings.setStrictJsonTableFillEnabled($event))
-					}, null, 8, ["model-value"])]), _cache[20] || (_cache[20] = createBaseVNode(
-						"p",
-						{ class: "acu-v2-table-page__toggle-desc" },
-						" 开启后使用隔离的严格 JSON 提示词。原生表格输出结构化操作，SQLite 输出 SQL 脚本文本。 ",
-						-1
-						/* CACHED */
-					))]),
-					createBaseVNode("div", _hoisted_8$b, [createBaseVNode("div", _hoisted_9$a, [_cache[21] || (_cache[21] = createBaseVNode(
+					createBaseVNode("div", _hoisted_6$d, [createBaseVNode("div", _hoisted_7$b, [_cache[18] || (_cache[18] = createBaseVNode(
 						"span",
 						{ class: "acu-v2-table-page__toggle-label" },
 						" 丢弃纯越权 SQL 语句 ",
@@ -138985,15 +139576,15 @@ Expected function or array of functions, received type ${typeof value}.`
 						"model-value": $setup.settings.discardUnauthorizedTableEditsEnabled.value,
 						"aria-label": "丢弃纯越权 SQL 语句",
 						"data-acu-setting-key": "discardUnauthorizedTableEditsEnabled",
-						"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settings.setDiscardUnauthorizedTableEditsEnabled($event))
-					}, null, 8, ["model-value"])]), _cache[22] || (_cache[22] = createBaseVNode(
+						"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settings.setDiscardUnauthorizedTableEditsEnabled($event))
+					}, null, 8, ["model-value"])]), _cache[19] || (_cache[19] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-table-page__toggle-desc" },
 						" 默认开启。仅丢弃可证明只影响非目标表的独立 SQL；跨目标表或无法归属的语句仍会拒绝并重试。 ",
 						-1
 						/* CACHED */
 					))]),
-					createBaseVNode("div", _hoisted_10$a, [createBaseVNode("div", _hoisted_11$a, [_cache[23] || (_cache[23] = createBaseVNode(
+					createBaseVNode("div", _hoisted_8$b, [createBaseVNode("div", _hoisted_9$a, [_cache[20] || (_cache[20] = createBaseVNode(
 						"span",
 						{ class: "acu-v2-table-page__toggle-label" },
 						" 仅识别最后一对 <tableEdit> 标签 ",
@@ -139003,8 +139594,8 @@ Expected function or array of functions, received type ${typeof value}.`
 						"model-value": $setup.settings.tableEditLastPairOnly.value,
 						"aria-label": "仅识别最后一对 tableEdit 标签",
 						"data-acu-setting-key": "tableEditLastPairOnly",
-						"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settings.setTableEditLastPairOnly($event))
-					}, null, 8, ["model-value"])]), _cache[24] || (_cache[24] = createBaseVNode(
+						"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settings.setTableEditLastPairOnly($event))
+					}, null, 8, ["model-value"])]), _cache[21] || (_cache[21] = createBaseVNode(
 						"p",
 						{ class: "acu-v2-table-page__toggle-desc" },
 						" 默认开启，用于忽略前面思维链或草稿里的旧指令。 ",
@@ -139017,7 +139608,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"start-placeholder": "提取开始边界",
 						"end-placeholder": "提取结束边界",
 						"add-label": "添加提取规则",
-						"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settings.setExtractRules($event))
+						"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settings.setExtractRules($event))
 					}, null, 8, ["model-value"]),
 					createVNode($setup["AcuRulePairList"], {
 						label: "排除规则",
@@ -139025,7 +139616,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						"start-placeholder": "排除开始边界",
 						"end-placeholder": "排除结束边界",
 						"add-label": "添加排除规则",
-						"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.settings.setExcludeRules($event))
+						"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settings.setExcludeRules($event))
 					}, null, 8, ["model-value"])
 				])]),
 				_: 1
@@ -139043,14 +139634,14 @@ Expected function or array of functions, received type ${typeof value}.`
 					"show-character-option": "",
 					"character-option-label": "角色卡绑定世界书",
 					filterable: "",
-					"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.onInjectionTargetChange($event))
+					"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.onInjectionTargetChange($event))
 				}, null, 8, [
 					"model-value",
 					"names",
 					"char-primary",
 					"status",
 					"error"
-				]), createBaseVNode("p", _hoisted_12$9, [_cache[25] || (_cache[25] = createTextVNode(
+				]), createBaseVNode("p", _hoisted_10$a, [_cache[22] || (_cache[22] = createTextVNode(
 					" 目前已选: ",
 					-1
 					/* CACHED */
@@ -139070,13 +139661,13 @@ Expected function or array of functions, received type ${typeof value}.`
 			segments: $setup.settings.promptSegments.value,
 			dirty: $setup.settings.promptDirty.value,
 			message: $setup.promptMessage,
-			onClose: _cache[13] || (_cache[13] = ($event) => $setup.promptDrawerOpen = false),
+			onClose: _cache[12] || (_cache[12] = ($event) => $setup.promptDrawerOpen = false),
 			onSave: $setup.settings.savePrompt,
 			onReset: $setup.settings.resetPrompt,
-			onImportFile: _cache[14] || (_cache[14] = ($event) => $setup.settings.importPromptFile($event)),
+			onImportFile: _cache[13] || (_cache[13] = ($event) => $setup.settings.importPromptFile($event)),
 			onExport: $setup.settings.exportPrompt,
-			onAdd: _cache[15] || (_cache[15] = ($event) => $setup.settings.addPromptSegment($event)),
-			onDelete: _cache[16] || (_cache[16] = ($event) => $setup.settings.deletePromptSegment($event)),
+			onAdd: _cache[14] || (_cache[14] = ($event) => $setup.settings.addPromptSegment($event)),
+			onDelete: _cache[15] || (_cache[15] = ($event) => $setup.settings.deletePromptSegment($event)),
 			onUpdate: $setup.updatePromptSegment
 		}, null, 8, [
 			"is-open",
@@ -139089,7 +139680,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var TablePage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-4783414e"]]);
+    var TablePage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-fb8884e1"]]);
 
     var _sfc_main$p = /*@__PURE__*/ defineComponent({
         __name: 'ApiPage',
@@ -139691,7 +140282,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$n = { class: "acu-agent-advanced" };
     const _hoisted_2$l = { class: "acu-agent-advanced__section" };
-    const _hoisted_3$g = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_3$h = { class: "acu-agent-advanced__section-head" };
     const _hoisted_4$e = { class: "acu-agent-advanced__section" };
     const _hoisted_5$d = { class: "acu-agent-advanced__section-head" };
     const _hoisted_6$c = { class: "acu-agent-advanced__grid" };
@@ -139724,7 +140315,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				)]),
 				_: 1
 			}),
-			createBaseVNode("section", _hoisted_2$l, [createBaseVNode("header", _hoisted_3$g, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_2$l, [createBaseVNode("header", _hoisted_3$h, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.executionMode.label),
@@ -140078,7 +140669,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$m = { class: "acu-v2-agent-wb-control" };
     const _hoisted_2$k = { class: "acu-v2-agent-wb-control__head" };
-    const _hoisted_3$f = { class: "acu-v2-agent-wb-control__title" };
+    const _hoisted_3$g = { class: "acu-v2-agent-wb-control__title" };
     const _hoisted_4$d = { class: "acu-v2-agent-wb-control__desc" };
     const _hoisted_5$c = { class: "acu-v2-agent-wb-control__body" };
     const _hoisted_6$b = { class: "acu-v2-agent-wb-control__config-source" };
@@ -140088,7 +140679,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	return openBlock(), createElementBlock("section", _hoisted_1$m, [
 		createBaseVNode("div", _hoisted_2$k, [createBaseVNode("div", null, [createBaseVNode(
 			"div",
-			_hoisted_3$f,
+			_hoisted_3$g,
 			toDisplayString($setup.plotCopy.agentControl.title),
 			1
 			/* TEXT */
@@ -141436,7 +142027,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$k = { class: "acu-v2-continuation-page" };
     const _hoisted_2$i = { class: "acu-v2-continuation-page__number-grid" };
-    const _hoisted_3$e = { class: "acu-v2-continuation-page__side-stack" };
+    const _hoisted_3$f = { class: "acu-v2-continuation-page__side-stack" };
     const _hoisted_4$c = { class: "acu-v2-continuation-page__prompt-toolbar" };
     const _hoisted_5$b = { class: "acu-v2-continuation-page__meta" };
     const _hoisted_6$a = {
@@ -141527,7 +142118,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				})
 			])]),
 			_: 1
-		}, 8, ["title", "description"]), createBaseVNode("div", _hoisted_3$e, [createVNode($setup["AcuPanel"], {
+		}, 8, ["title", "description"]), createBaseVNode("div", _hoisted_3$f, [createVNode($setup["AcuPanel"], {
 			title: $setup.continuationCopy.panels.prompts.title,
 			description: $setup.continuationCopy.panels.prompts.description
 		}, {
@@ -143138,7 +143729,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$g = { class: "acu-v2-vector-index-page" };
     const _hoisted_2$f = { class: "acu-v2-vector-index-page__panel-stack" };
-    const _hoisted_3$d = { class: "acu-v2-vector-index-page__actions" };
+    const _hoisted_3$e = { class: "acu-v2-vector-index-page__actions" };
     const _hoisted_4$b = { class: "acu-v2-vector-index-page__number-grid" };
     const _hoisted_5$a = { class: "acu-v2-vector-index-page__panel-stack" };
     const _hoisted_6$9 = { class: "acu-v2-vector-api-form__section" };
@@ -143184,7 +143775,7 @@ Expected function or array of functions, received type ${typeof value}.`
 						-1
 						/* CACHED */
 					)),
-					createBaseVNode("div", _hoisted_3$d, [
+					createBaseVNode("div", _hoisted_3$e, [
 						createVNode($setup["AcuButton"], {
 							variant: "primary",
 							disabled: $setup.vector.buildBusy.value || $setup.vector.maintenanceBusy.value,
@@ -145065,7 +145656,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$f = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$e = { class: "acu-v2-data-mgmt-page__panel-stack" };
-    const _hoisted_3$c = { class: "acu-v2-data-mgmt-page__form-stack" };
+    const _hoisted_3$d = { class: "acu-v2-data-mgmt-page__form-stack" };
     const _hoisted_4$a = {
     	key: 0,
     	class: "acu-v2-data-mgmt-page__history-list"
@@ -145155,7 +145746,7 @@ Expected function or array of functions, received type ${typeof value}.`
     			title: $setup.dataMgmtCopy.panels.isolation.title,
     			description: $setup.dataMgmtCopy.panels.isolation.description
     		}, {
-    			default: withCtx(() => [createBaseVNode("div", _hoisted_3$c, [createVNode($setup["AcuFormRow"], {
+    			default: withCtx(() => [createBaseVNode("div", _hoisted_3$d, [createVNode($setup["AcuFormRow"], {
     				label: "标识代码",
     				hint: $setup.isolationCodeHint
     			}, {
@@ -145837,7 +146428,7 @@ Expected function or array of functions, received type ${typeof value}.`
     	key: 1,
     	class: "acu-v2-manage-list"
     };
-    const _hoisted_3$b = { class: "acu-v2-manage-item__info" };
+    const _hoisted_3$c = { class: "acu-v2-manage-item__info" };
     const _hoisted_4$9 = { class: "acu-v2-manage-item__actions" };
     function _sfc_render$e(_ctx, _cache, $props, $setup, $data, $options) {
     	return openBlock(), createBlock($setup["AcuDrawer"], {
@@ -145883,7 +146474,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					return openBlock(), createElementBlock("li", {
     						key: preset.name,
     						class: "acu-v2-manage-item"
-    					}, [createBaseVNode("div", _hoisted_3$b, [createVNode(
+    					}, [createBaseVNode("div", _hoisted_3$c, [createVNode(
     						$setup["AcuText"],
     						{
     							as: "span",
@@ -146011,7 +146602,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$d = { class: "acu-content-replace-prompt-drawer__meta" };
     const _hoisted_2$c = { class: "acu-content-replace-prompt-drawer__toolbar" };
-    const _hoisted_3$a = { class: "acu-content-replace-prompt-drawer__actions" };
+    const _hoisted_3$b = { class: "acu-content-replace-prompt-drawer__actions" };
     function _sfc_render$d(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
@@ -146117,7 +146708,7 @@ Expected function or array of functions, received type ${typeof value}.`
 				onDelete: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("delete", $event)),
 				onUpdate: _cache[3] || (_cache[3] = (index, patch) => _ctx.$emit("update", index, patch))
 			}, null, 8, ["segments"]),
-			createBaseVNode("footer", _hoisted_3$a, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+			createBaseVNode("footer", _hoisted_3$b, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
 				default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 					"关闭",
 					-1
@@ -146915,7 +147506,7 @@ Expected function or array of functions, received type ${typeof value}.`
 
     const _hoisted_1$c = { class: "acu-v2-content-replace-page" };
     const _hoisted_2$b = { class: "acu-v2-content-replace-page__number-grid" };
-    const _hoisted_3$9 = { class: "acu-v2-content-replace-page__choice-list" };
+    const _hoisted_3$a = { class: "acu-v2-content-replace-page__choice-list" };
     const _hoisted_4$8 = { class: "acu-v2-content-replace-page__mini-status" };
     const _hoisted_5$8 = { class: "acu-v2-content-replace-page__actions" };
     const _hoisted_6$7 = { class: "acu-v2-content-replace-page__status-line" };
@@ -147029,7 +147620,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					description: $setup.contentReplaceCopy.panels.mode.description
 				}, {
 					default: withCtx(() => [
-						createBaseVNode("div", _hoisted_3$9, [
+						createBaseVNode("div", _hoisted_3$a, [
 							createVNode($setup["AcuCheckbox"], {
 								"model-value": $setup.store.seamlessMode,
 								label: "无感替换模式",
@@ -147732,7 +148323,7 @@ Expected function or array of functions, received type ${typeof value}.`
 	class: "acu-v2-advanced-tools-page__quick-actions",
 	"aria-label": "SQL 快捷操作"
     };
-    const _hoisted_3$8 = { class: "acu-v2-advanced-tools-page__sql-actions" };
+    const _hoisted_3$9 = { class: "acu-v2-advanced-tools-page__sql-actions" };
     const _hoisted_4$7 = {
 	class: "acu-v2-advanced-tools-page__sql-result-section",
 	"aria-label": "SQL 执行结果"
@@ -147855,7 +148446,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					}, null, 8, ["model-value"])]),
 					_: 1
 				}),
-				createBaseVNode("div", _hoisted_3$8, [
+				createBaseVNode("div", _hoisted_3$9, [
 					createVNode($setup["AcuButton"], {
 						variant: "primary",
 						loading: $setup.sqlFlow.busyAction.value === "execute",
@@ -148261,6 +148852,12 @@ Expected function or array of functions, received type ${typeof value}.`
                     value: devOptions.legacyUiMenuVisible.value,
                 },
             ]);
+            const strictJsonTableFillToggle = computed(() => ({
+                key: "strictJsonTableFillEnabled",
+                label: "严格 JSON 填表响应",
+                description: "默认关闭。开启后原生表格输出结构化操作，SQLite 输出 JSON 包裹的 SQL 脚本。",
+                value: settings.strictJsonTableFillEnabled.value,
+            }));
             const maxConcurrentGroups = computed(() => settings.numberFields.value.find((field) => field.key === "maxConcurrentGroups")?.value ?? 1);
             function handleToggleChange(key, value) {
                 if (key === "plotAdvanced") {
@@ -148273,60 +148870,74 @@ Expected function or array of functions, received type ${typeof value}.`
                     devOptions.setLegacyUiMenuVisible(value);
                 }
             }
-            const __returned__ = { devOptions, settings, toggles, maxConcurrentGroups, handleToggleChange, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, ToggleRow, get developerCopy() { return developerCopy; } };
+            const __returned__ = { devOptions, settings, toggles, strictJsonTableFillToggle, maxConcurrentGroups, handleToggleChange, AcuFormRow, AcuInput, AcuPanel, AcuPanelGrid, ToggleRow, get developerCopy() { return developerCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-developer-page[data-v-d859c428] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-developer-page__toggle-list[data-v-d859c428] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n@media (max-width: 860px) {\n.acu-v2-developer-page[data-v-d859c428] {\r\n    padding: 14px;\n}\n}\r\n", "src/presentation-v2/pages/DeveloperPage.vue#style-0-d859c428");
-    var DeveloperPage_vue_vue_type_style_index_0_scoped_d859c428_lang = null;
+    injectSfcStyle("\n.acu-v2-developer-page[data-v-db4a0743] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-developer-page__toggle-list[data-v-db4a0743] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n@media (max-width: 860px) {\n.acu-v2-developer-page[data-v-db4a0743] {\n    padding: 14px;\n}\n}\n", "src/presentation-v2/pages/DeveloperPage.vue#style-0-db4a0743");
+    var DeveloperPage_vue_vue_type_style_index_0_scoped_db4a0743_lang = null;
 
     const _hoisted_1$a = { class: "acu-v2-developer-page" };
     const _hoisted_2$9 = { class: "acu-v2-developer-page__toggle-list" };
+    const _hoisted_3$8 = { class: "acu-v2-developer-page__toggle-list" };
     function _sfc_render$a(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$a, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-developer-page__grid" }, {
-		default: withCtx(() => [createVNode($setup["AcuPanel"], {
-			title: $setup.developerCopy.panels.gatedFields.title,
-			description: $setup.developerCopy.panels.gatedFields.description
-		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$9, [(openBlock(true), createElementBlock(
-				Fragment,
-				null,
-				renderList($setup.toggles, (item) => {
-					return openBlock(), createBlock($setup["ToggleRow"], {
-						key: item.key,
-						item,
-						onChange: ($event) => $setup.handleToggleChange(item.key, $event)
-					}, null, 8, ["item", "onChange"]);
-				}),
-				128
-				/* KEYED_FRAGMENT */
-			))])]),
-			_: 1
-		}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
-			title: $setup.developerCopy.panels.formFillRuntime.title,
-			description: $setup.developerCopy.panels.formFillRuntime.description
-		}, {
-			default: withCtx(() => [createVNode($setup["AcuFormRow"], {
-				label: "最大并发更新组数",
-				hint: "大于 1 时，多个表格分组可能同时调用填表 API。数值越大越快，但 API 压力和失败后排查难度也越高。"
+		default: withCtx(() => [
+			createVNode($setup["AcuPanel"], {
+				title: $setup.developerCopy.panels.gatedFields.title,
+				description: $setup.developerCopy.panels.gatedFields.description
 			}, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "number",
-					min: 1,
-					step: 1,
-					"model-value": $setup.maxConcurrentGroups,
-					onChange: _cache[0] || (_cache[0] = ($event) => $setup.settings.setNumber("maxConcurrentGroups", $event))
-				}, null, 8, ["model-value"])]),
+				default: withCtx(() => [createBaseVNode("div", _hoisted_2$9, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.toggles, (item) => {
+						return openBlock(), createBlock($setup["ToggleRow"], {
+							key: item.key,
+							item,
+							onChange: ($event) => $setup.handleToggleChange(item.key, $event)
+						}, null, 8, ["item", "onChange"]);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])]),
 				_: 1
-			})]),
-			_: 1
-		}, 8, ["title", "description"])]),
+			}, 8, ["title", "description"]),
+			createVNode($setup["AcuPanel"], {
+				title: "填表高级选项",
+				description: "仅在需要严格约束模型填表响应时开启。开启后将切换到隔离提示词和严格 JSON 解析链路。"
+			}, {
+				default: withCtx(() => [createBaseVNode("div", _hoisted_3$8, [createVNode($setup["ToggleRow"], {
+					item: $setup.strictJsonTableFillToggle,
+					onChange: _cache[0] || (_cache[0] = ($event) => $setup.settings.setStrictJsonTableFillEnabled($event))
+				}, null, 8, ["item"])])]),
+				_: 1
+			}),
+			createVNode($setup["AcuPanel"], {
+				title: $setup.developerCopy.panels.formFillRuntime.title,
+				description: $setup.developerCopy.panels.formFillRuntime.description
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuFormRow"], {
+					label: "最大并发更新组数",
+					hint: "大于 1 时，多个表格分组可能同时调用填表 API。数值越大越快，但 API 压力和失败后排查难度也越高。"
+				}, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "number",
+						min: 1,
+						step: 1,
+						"model-value": $setup.maxConcurrentGroups,
+						onChange: _cache[1] || (_cache[1] = ($event) => $setup.settings.setNumber("maxConcurrentGroups", $event))
+					}, null, 8, ["model-value"])]),
+					_: 1
+				})]),
+				_: 1
+			}, 8, ["title", "description"])
+		]),
 		_: 1
 	})]);
     }
-    var DeveloperPage = /*#__PURE__*/ _export_sfc(_sfc_main$a, [["render", _sfc_render$a], ["__scopeId", "data-v-d859c428"]]);
+    var DeveloperPage = /*#__PURE__*/ _export_sfc(_sfc_main$a, [["render", _sfc_render$a], ["__scopeId", "data-v-db4a0743"]]);
 
     /**
      * page-registry — 一级页静态注册表（plan §4.1 + §D24）

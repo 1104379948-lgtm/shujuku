@@ -214,7 +214,11 @@ function buildRecoveredCandidateChat_ACU(plan: RecoveryPlan_ACU): any[] {
     storageFrame: clone_ACU(sourceTagData.storageFrame),
   };
   const isolatedData = cloneIsolatedData_ACU(sourceMessage);
-  const recoveredFrame: TableStorageFrameV2_ACU = { version: 2, checkpoint: checkpointBuild.checkpoint, logEntries: [] };
+  // 修复的是已验证的 checkpoint 基底，不是把其后 artifact 一并抹掉。
+  // 只有已被诊断为完整可替换的孤立 frame/临时补锚才收敛为纯 checkpoint。
+  const recoveredFrame: TableStorageFrameV2_ACU = plan.kind === 'repaired_full_checkpoint'
+    ? { ...clone_ACU(sourceTagData.storageFrame), checkpoint: checkpointBuild.checkpoint }
+    : { version: 2, checkpoint: checkpointBuild.checkpoint, logEntries: [] };
   const nextTagData = {
     ...isolatedData[plan.isolationKey],
     _acu_storage_version: 2 as const,
@@ -232,7 +236,9 @@ async function validateRecoveredCandidateReplay_ACU(plan: RecoveryPlan_ACU, cand
   });
   if (!replay) throw new Error('恢复候选未产生可回放表数据。');
   if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) throw new Error('恢复候选仍依赖临时 Sheet 补锚。');
-  if (getTableDataFingerprint_ACU(replay.data) !== getTableDataFingerprint_ACU(plan.candidateData)) {
+  // 基底修复后的 suffix 必须被严格回放；其结果不应再与修复时的基底本身相等。
+  if (plan.kind !== 'repaired_full_checkpoint'
+    && getTableDataFingerprint_ACU(replay.data) !== getTableDataFingerprint_ACU(plan.candidateData)) {
     throw new Error('恢复候选 replay 结果与修复数据不一致。');
   }
 }
@@ -297,14 +303,14 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
       };
     }
     if (!repair.candidateData) return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '最新 full checkpoint 不可无损自动修复；请先导出原始 frame。' } };
-    if (hasReplayArtifactsAfterCheckpoint_ACU(latestFull.frame) || hasLaterReplayArtifacts_ACU(frames, latestFull.messageIndex)) {
-      const ambiguity = findAmbiguousRowIdReference_ACU(frames, latestFull.messageIndex, repair.idRemap);
-      const message = ambiguity
-        ? `重复 row_id 修复会改变后续引用的语义：${ambiguity}；拒绝猜测。`
-        : '坏 full checkpoint 之后仍存在 V2 replay artifact；无法证明替换不会截断数据，拒绝自动恢复。';
+    const ambiguity = findAmbiguousRowIdReference_ACU(frames, latestFull.messageIndex, repair.idRemap);
+    if (ambiguity) {
+      const message = `重复 row_id 修复会改变后续引用的语义：${ambiguity}；拒绝猜测。`;
       return { summary: { status: 'unrecoverable', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message } };
     }
-    const summary: V2RecoverySummary_ACU = { status: 'recoverable_repaired_checkpoint', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: '已生成 full 修复候选。' };
+    const suffixCount = frames.filter(item => item.messageIndex > latestFull.messageIndex && hasAnyReplayArtifacts_ACU(item.frame)).length
+      + (hasReplayArtifactsAfterCheckpoint_ACU(latestFull.frame) ? 1 : 0);
+    const summary: V2RecoverySummary_ACU = { status: 'recoverable_repaired_checkpoint', isolationKey, sourceMessageIndex: latestFull.messageIndex, requiresConfirmation: false, message: suffixCount > 0 ? '已生成 full 修复候选；将保留并严格回放后缀 artifact。' : '已生成 full 修复候选。' };
     return { summary, plan: { ...summary, kind: 'repaired_full_checkpoint', chat, chatKey: String(currentChatFileIdentifier_ACU || '').trim(), sourceFrameFingerprint: getFrameFingerprint_ACU(latestFull.frame), candidateData: repair.candidateData } };
   }
   for (const item of [...frames].reverse()) {

@@ -19,6 +19,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   saveChatToHostStrict_ACU: h.save,
 }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
+  settings_ACU: { dataIsolationEnabled: false, dataIsolationCode: '', storageMode: 'native' },
   get currentChatFileIdentifier_ACU() { return h.scope.chatKey; },
   getCurrentIsolationKey_ACU: () => h.scope.isolationKey,
 }));
@@ -381,17 +382,26 @@ describe('table-v2-recovery-service', () => {
     expect(h.save).not.toHaveBeenCalled();
   });
 
-  it('checkpoint 后存在日志或健康 checkpoint 时拒绝自动重写', async () => {
+  it('可验证的坏 checkpoint 基底修复后保留并严格回放后缀 artifact', async () => {
     const invalidWithLog = frame(
       { kind: 'full', createdAt: 1, reason: 'init', data: data([['1', '铁剑'], [' 1 ', '副本']]) },
       [{ seq: 1, entryId: 'later', createdAt: 2, source: 'system', targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: [], groupKeys: [], operations: [{ kind: 'data_replace', data: data([['2', '后续']]), reason: 'system' }] }],
     );
     h.chat = chatWithFrame(invalidWithLog);
-    expect(await prepareV2Recovery_ACU()).toMatchObject({ status: 'unrecoverable', message: expect.stringContaining('replay artifact') });
+    const prepared = await prepareV2Recovery_ACU();
+    expect(prepared).toMatchObject({
+      status: 'recoverable_repaired_checkpoint',
+      message: expect.stringContaining('保留并严格回放后缀 artifact'),
+    });
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toEqual({ status: 'committed', planId: prepared.planId });
+    const tag = h.chat[0].TavernDB_ACU_IsolatedData[''];
+    expect(tag.recoveryBackup).toMatchObject({ recoveryKind: 'repaired_full_checkpoint', storageFrame: invalidWithLog });
+    expect(tag.storageFrame.logEntries).toEqual(invalidWithLog.logEntries);
+    await expect(loadTableStateFromFramesV2_ACU(h.chat, '', { updateRuntimeState: false })).resolves.toEqual(data([['2', '后续']]));
 
     h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: data() }));
     expect(await prepareV2Recovery_ACU()).toMatchObject({ status: 'unrecoverable', message: expect.stringContaining('无需恢复') });
-    expect(h.save).not.toHaveBeenCalled();
+    expect(h.save).toHaveBeenCalledTimes(1);
   });
 
   it('纯无 base 日志保持不可恢复且零保存', async () => {

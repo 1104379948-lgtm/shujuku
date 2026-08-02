@@ -6,7 +6,7 @@ import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { validateMigrationProvenanceV1_ACU } from '../../shared/canonical-checkpoint-validator';
 import { logDebug_ACU } from '../../shared/utils';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
-import type { TableCheckpointScheduleSummaryV2_ACU, TableMigrationProvenanceV1_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
+import type { TableCheckpointScheduleSummaryV2_ACU, TableMigrationAuditBackupV1_ACU, TableMigrationProvenanceV1_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { commitMixedStorageDecision_ACU } from './mixed-storage-commit';
 import { evaluateMixedStorageDecision_ACU, type MixedStorageDecision_ACU } from './mixed-storage-decision';
 import { registerMixedStorageDecision_ACU } from './mixed-storage-decision-registry';
@@ -299,6 +299,9 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
   if (audit.status === 'unrecoverable') {
     return { migrated: false, error: `legacy migration audit failed: ${audit.issues.map(issue => issue.code).join(', ')}` };
   }
+  if (audit.status !== 'clean' && audit.status !== 'repairable') {
+    return { migrated: false, error: `legacy migration requires confirmation: ${audit.issues.map(issue => issue.code).join(', ')}` };
+  }
   const repair = repairTableDataFromAudit_ACU(audit);
   if (repair.requiresConfirmation) {
     return { migrated: false, error: `legacy migration requires confirmation: ${audit.issues.map(issue => issue.code).join(', ')}` };
@@ -391,10 +394,22 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
   };
 
   const isolatedData = cloneIsolatedData_ACU(candidateTarget) as Record<string, any>;
+  const migrationAuditBackup: TableMigrationAuditBackupV1_ACU = {
+    version: 1,
+    createdAt: migratedAt,
+    sourceData: deepClone_ACU(audit.sourceData),
+    dataFingerprintBefore: audit.dataFingerprintBefore,
+    dataFingerprintAfter: repair.dataFingerprintAfter,
+    auditStatus: audit.status,
+    issues: deepClone_ACU(audit.issues),
+    repairPlan: deepClone_ACU(audit.repairPlan),
+    idRemap: deepClone_ACU(repair.idRemap),
+  };
   isolatedData[options.isolationKey] = {
     ...(existingTargetTagData?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTargetTagData.summaryVectorIndexState } : {}),
     ...(existingTargetTagData?.summaryVectorIndexManifest !== undefined ? { summaryVectorIndexManifest: existingTargetTagData.summaryVectorIndexManifest } : {}),
     storageFrame: frame,
+    migrationAuditBackup,
     _acu_storage_version: 2,
   };
   candidateTarget.TavernDB_ACU_IsolatedData = isolatedData;

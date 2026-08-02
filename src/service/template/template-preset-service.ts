@@ -24,7 +24,7 @@ import { TemplateImportValidationError_ACU, type TemplateImportDiagnostic_ACU, v
 import { allocateStableSheetKeys_ACU } from '../../shared/sheet-identity';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
-import { loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import { hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 import { getCurrentStorageMode, isSqliteMode } from '../table/storage-mode';
@@ -472,10 +472,12 @@ async function loadConsistentTemplateBaseline_ACU(isolationKey: string, signal?:
         const beforeRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
         const replay = await loadTableStateFromFramesV2Detailed_ACU(undefined, isolationKey, { updateRuntimeState: false });
         if (signal?.aborted) return { error: '模板提交已取消。' };
-        if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+        if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
             const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
-            return { error: `当前 V2 历史仍依赖临时 Sheet 补锚（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先在数据管理中完成 V2 恢复收敛，再切换模板。` };
+            return { error: `当前 V2 历史存在结构性兼容修复（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先在数据管理中完成 V2 恢复，再切换模板。` };
         }
+        // provisional temporary_sheet_anchor 将由 commitCurrentFloorTemplateChanges_ACU
+        // 与本次模板变更在同一候选提交内收敛，不能在读取入口提前阻断。
         const baselineData = replay?.data ?? null;
         const afterRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
         if (beforeRevision === afterRevision) return { baselineData, baseRevision: beforeRevision };

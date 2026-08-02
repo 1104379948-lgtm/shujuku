@@ -53,7 +53,7 @@ import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '.
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
 import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationTableIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
-import { hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
+import { hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transaction';
@@ -647,9 +647,9 @@ async function loadV2ReplayMergeBase_ACU(
             allowTemporaryTemplateBaseline: true,
             throwOnRecoveryRequired: true,
         });
-        if (replayResult?.requiresCheckpointConvergence || replayResult?.compatibilityRepairs?.length) {
+        if (hasStructuralReplayCompatibilityRepairs_ACU(replayResult?.compatibilityRepairs)) {
             const affectedSheetKeys = [...new Set((replayResult.compatibilityRepairs || []).map(item => item.sheetKey))];
-            throw new Error(`V2 replay 仍依赖临时 Sheet 补锚（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先执行 V2 恢复或边界 compaction，再继续生成新表格增量。`);
+            throw new Error(`V2 replay 存在结构性兼容修复（${affectedSheetKeys.join('、') || '未知 Sheet'}）；请先执行 V2 恢复或边界 compaction，再继续生成新表格增量。`);
         }
         const cloned = cloneTableDataSnapshot_ACU(replayResult?.data as any);
         if (!hasUsableRuntimeTableData_ACU(cloned)) return { data: null, attempted: true };
@@ -2873,10 +2873,10 @@ export async function orchestrateManualCatchUp_ACU(
                 maxMessageIndex: safeTargetMessageIndex,
                 updateRuntimeState: false,
             });
-            if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
+            if (hasStructuralReplayCompatibilityRepairs_ACU(replay?.compatibilityRepairs)) {
                 const affectedSheetKeys = [...new Set((replay.compatibilityRepairs || []).map(item => item.sheetKey))];
                 return {
-                    error: `V2 replay 仍依赖临时 Sheet 补锚：${affectedSheetKeys.join('、') || '未知 Sheet'}。请先执行恢复收敛。`,
+                    error: `V2 replay 存在结构性兼容修复：${affectedSheetKeys.join('、') || '未知 Sheet'}。请先执行恢复收敛。`,
                     diagnosticCode: 'replay_requires_checkpoint_convergence',
                 };
             }

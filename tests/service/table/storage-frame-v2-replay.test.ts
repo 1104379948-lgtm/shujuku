@@ -1529,14 +1529,16 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('已在内存副本中保留全部行并重映射 1 行'));
   });
 
-  it('合成 spv7.9 orphan data_replace fixture 无锚点时拒绝 replay', async () => {
+  it('合成 spv7.9 orphan data_replace fixture 无 full checkpoint 时以 replacement anchor 回放', async () => {
     const chat = [{
       is_user: false,
       TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: structuredClone(orphanV2FrameFixture) } },
     }];
 
-    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toBeNull();
-    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('无锚点 V2 replay artifacts'));
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false })).resolves.toMatchObject({
+      sheet_0: expect.objectContaining({ content: [['row_id', '名称'], ['1', '铁剑']] }),
+    });
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('data_replace 作为替换基底'));
   });
 
   it('显式开启时使用当前聊天模板 header-only 基线回放无锚点 sql_sheet_batch', async () => {
@@ -1670,7 +1672,14 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       ['1', '2026-08-07 00:15', '5分', '2026-08-07 00:20'],
     ]);
     expect(detailed?.compatibilityRepairs).toEqual([
-      expect.objectContaining({ kind: 'temporary_sheet_anchor', sheetKey: 'sheet_global', messageIndex: 384, seq: 1, operationIndex: 0 }),
+      expect.objectContaining({
+        kind: 'temporary_sheet_anchor',
+        severity: 'provisional',
+        sheetKey: 'sheet_global',
+        messageIndex: 384,
+        seq: 1,
+        operationIndex: 0,
+      }),
     ]);
     expect(detailed?.requiresCheckpointConvergence).toBe(true);
     expect(detailed?.data.sheet_global.content).not.toContainEqual(['99', '模板示例', '0分', '模板时间']);
@@ -1716,7 +1725,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     ]);
   });
 
-  it('临时模板基线不绕过 orphan data_replace 显式确认', async () => {
+  it('orphan data_replace 不依赖临时模板基线或恢复确认', async () => {
     const template = makeCheckpointData();
     const chat = [{
       is_user: false,
@@ -1732,17 +1741,14 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     await expect(loadTableStateFromFramesV2Detailed_ACU(chat, '', {
       updateRuntimeState: false,
       allowTemporaryTemplateBaseline: true,
-    })).resolves.toBeNull();
-    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('data_replace'));
-
-    await expect(loadTableStateFromFramesV2Detailed_ACU(chat, '', {
-      updateRuntimeState: false,
-      allowTemporaryTemplateBaseline: true,
       throwOnRecoveryRequired: true,
-    })).rejects.toThrow('请先在数据管理中执行 V2 恢复诊断并确认恢复');
+    })).resolves.toMatchObject({
+      baseKind: 'replacement_anchor',
+      data: { sheet_0: expect.objectContaining({ content: [['row_id', '名称'], ['1', '铁剑']] }) },
+    });
   });
 
-  it('无 full checkpoint 时拒绝从 data_replace/log-only 恢复不完整数据', async () => {
+  it('无 full checkpoint 时从完整 data_replace 建立 replacement anchor', async () => {
     const chat = [
       {
         is_user: false,
@@ -1771,11 +1777,12 @@ describe('loadTableStateFromFramesV2_ACU', () => {
 
     const result = await loadTableStateFromFramesV2_ACU(chat, '');
 
-    expect(result).toBeNull();
-    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('无锚点 V2 replay artifacts'));
+    expect(result).toEqual(makeDslCheckpointData());
   });
 
   it('旧 full checkpoint 含重复 canonical row_id 时保留全部行并按既有最大 ID 加一', async () => {
+
+
     const checkpointData = makeCheckpointData();
     checkpointData.sheet_0.content.push([' 1 ', '冒名副本']);
     checkpointData.sheet_0.content.push(['7', '既有高位身份']);
@@ -1803,6 +1810,87 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       ['7', '既有高位身份'],
     ]);
     expect(chat).toEqual(before);
+  });
+
+
+  it('replacement anchor 跳过同 frame 内其前的 operation，不复活已被替换的业务状态', async () => {
+    const superseded = makeCheckpointData();
+    superseded.sheet_0.content = [['row_id', 'name'], ['1', '应被替换掉']];
+    const replacement = makeCheckpointData();
+    replacement.sheet_0.content = [['row_id', 'name'], ['2', 'replacement 基底']];
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1, entryId: 'mixed-anchor-entry', createdAt: 1, source: 'import', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [
+                { kind: 'data_replace', data: superseded, reason: 'import' },
+                { kind: 'data_replace', data: replacement, reason: 'import' },
+                { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '3', cells: ['3', 'replacement 后增量'], reason: 'system' },
+              ],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(result?.baseKind).toBe('replacement_anchor');
+    expect(result?.data.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['2', 'replacement 基底'],
+      ['3', 'replacement 后增量'],
+    ]);
+    expect(result?.data.sheet_0.content.flat()).not.toContain('应被替换掉');
+  });
+
+  it('replacement anchor 与旧 seq 的物理顺序归一共用同一 cursor', async () => {
+    const superseded = makeCheckpointData();
+    superseded.sheet_0.content = [['row_id', 'name'], ['1', '不能复活']];
+    const replacement = makeCheckpointData();
+    replacement.sheet_0.content = [['row_id', 'name'], ['2', '旧 seq replacement']];
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [
+              {
+                entryId: 'legacy-first', createdAt: 1, source: 'import', targetMessageIndex: 0, aiFloor: 1,
+                filledSheetKeys: [], changedSheetKeys: [], groupKeys: [],
+                operations: [{ kind: 'data_replace', data: superseded, reason: 'import' }],
+              },
+              {
+                entryId: 'legacy-anchor', createdAt: 2, source: 'import', targetMessageIndex: 0, aiFloor: 1,
+                filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+                operations: [
+                  { kind: 'data_replace', data: replacement, reason: 'import' },
+                  { kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '3', cells: ['3', 'anchor 后写入'], reason: 'system' },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    }] as any[];
+
+    const result = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(result?.baseKind).toBe('replacement_anchor');
+    expect(result?.data.sheet_0.content).toEqual([
+      ['row_id', 'name'],
+      ['2', '旧 seq replacement'],
+      ['3', 'anchor 后写入'],
+    ]);
+    expect(result?.data.sheet_0.content.flat()).not.toContain('不能复活');
   });
 
   it('旧重复 row_id 修复后，历史 row_delete 仍只作用于首个原身份', async () => {
@@ -1841,7 +1929,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     ]);
   });
 
-  it('坏 full checkpoint 含空 row_id 时 fail closed 且不清洗持久化 frame', async () => {
+  it('旧 full checkpoint 含空 row_id 时保留该行并补稳定 ID，且不修改持久化 frame', async () => {
     const checkpointData = makeCheckpointData();
     checkpointData.sheet_0.content.push(['', '无身份行']);
     const chat = [{
@@ -1859,10 +1947,23 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     }];
     const before = structuredClone(chat);
 
-    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
-      .rejects.toThrow('full checkpoint 行标识不合法');
+    const result = await loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false });
 
+    // 业务行必须保留，并获得不与既有 ID 冲突的稳定身份。
+    const rows = result!.sheet_0.content.slice(1);
+    expect(rows).toHaveLength(checkpointData.sheet_0.content.length - 1);
+    const restored = rows.find((row: any[]) => row[1] === '无身份行');
+    expect(restored).toBeDefined();
+    expect(String(restored![0]).trim()).not.toBe('');
+    const rowIds = rows.map((row: any[]) => String(row[0]));
+    expect(new Set(rowIds).size).toBe(rowIds.length);
+
+    // 只读回放不得改写持久化 frame。
     expect(chat).toEqual(before);
+
+    // 幂等：同一输入重复回放结果一致。
+    const again = await loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false });
+    expect(again).toEqual(result);
   });
 
   it('bounded replay 范围早于首个 V2 frame 时返回空基底但不误报无锚点历史', async () => {
@@ -1982,7 +2083,9 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       },
     ];
 
-    await expect(loadTableStateFromFramesV2_ACU(chat, '', { maxMessageIndex: 1 })).resolves.toBeNull();
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { maxMessageIndex: 1 })).resolves.toMatchObject({
+      sheet_0: expect.objectContaining({ content: [['row_id', 'name'], ['1', '降级快照']] }),
+    });
     await expect(loadTableStateFromFramesV2_ACU(chat, '')).resolves.toMatchObject({
       sheet_0: expect.objectContaining({ content: [['row_id', 'name'], ['1', '后方 full']] }),
     });
@@ -2858,10 +2961,11 @@ describe('loadTableStateFromFramesV2_ACU', () => {
   });
 
   it.each([
-    { label: 'duplicate', entries: [{ seq: 1 }, { seq: 1 }], message: '唯一且严格递增' },
-    { label: 'out-of-order', entries: [{ seq: 2 }, { seq: 1 }], message: '唯一且严格递增' },
-    { label: 'invalid', entries: [{ seq: -1 }], message: '非法 seq' },
-  ])('拒绝 $label frame seq，且 schedule summary 使用同一校验', async ({ entries, message }) => {
+    { label: 'missing', entries: [{}, {}] },
+    { label: 'duplicate', entries: [{ seq: 1 }, { seq: 1 }] },
+    { label: 'out-of-order', entries: [{ seq: 2 }, { seq: 1 }] },
+    { label: 'negative', entries: [{ seq: -1 }, { seq: 0 }] },
+  ])('按物理数组顺序兼容 $label frame seq，且 schedule summary 使用同一顺序', async ({ entries }) => {
     const rootData = makeCheckpointData();
     const chat = [{
       is_user: false,
@@ -2873,15 +2977,21 @@ describe('loadTableStateFromFramesV2_ACU', () => {
             checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
             logEntries: entries.map((entry, index) => ({
               ...entry, entryId: `bad-${index}`, createdAt: index + 1, source: 'system', targetMessageIndex: 0, aiFloor: 1,
-              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [], operations: [],
+              filledSheetKeys: index === 0 ? ['sheet_0'] : [],
+              changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', `物理顺序-${index}`] }],
             })),
           },
         },
       },
     }];
 
-    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow(message);
-    expect(() => collectScheduleSummaryFromFramesV2_ACU(chat, '')).toThrow(message);
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+    const summary = collectScheduleSummaryFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '物理顺序-1']]);
+    expect(summary.sheet_0).toEqual({ lastFilledAiFloor: 1, lastChangedAiFloor: 1 });
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('按数组物理顺序重建临时 seq'));
   });
 
   it('introduction 的声明 messageIndex 漂移时，replay 与 schedule summary 按物理承载 frame 继续工作', async () => {
@@ -3226,7 +3336,84 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(() => collectScheduleSummaryFromFramesV2_ACU(chat, '')).toThrow('非法 timeline');
   });
 
-  it('per-sheet checkpoint 的 map key 与 sheetKey 冲突时，state 与 schedule 仍同时拒绝', async () => {
+  it('per-sheet checkpoint 的合法 map key 覆盖冲突 sheetKey，state 与 schedule 使用同一物理归属', async () => {
+    const rootData = makeCheckpointData();
+    const rebasedSheet = {
+      ...rootData.sheet_0,
+      content: [['row_id', 'name'], ['1', '来自 map key 的 checkpoint']],
+    };
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
+            perSheetCheckpoints: {
+              sheet_0: {
+                kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_other', data: rebasedSheet,
+                event: { filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [] },
+                timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 34, afterSeq: 0 },
+              },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+    const summary = collectScheduleSummaryFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual(rebasedSheet.content);
+    expect(result && Object.prototype.hasOwnProperty.call(result, 'sheet_other')).toBe(false);
+    expect(summary.sheet_0).toEqual({ lastChangedAiFloor: 1 });
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('sheetKey sheet_other→sheet_0'));
+  });
+
+  it('per-sheet checkpoint 的非法 map key 使用合法 sheetKey，并为缺失 activateAtMessageIndex 补承载 frame 位置', async () => {
+    const rootData = makeCheckpointData();
+    const introducedSheet = {
+      ...rootData.sheet_0,
+      uid: 'legacy-sheet',
+      name: '旧协议表',
+      content: [['row_id', 'name'], ['1', '旧元数据仍可读']],
+    };
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
+            perSheetCheckpoints: {
+              legacy_checkpoint_slot: {
+                kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_legacy', data: introducedSheet,
+                event: { filledSheetKeys: ['sheet_legacy'], changedSheetKeys: ['sheet_legacy'], groupKeys: [] },
+                timeline: { kind: 'sheet_introduction', afterSeq: 0 },
+              },
+            },
+            logEntries: {
+              entryId: 'legacy-single-entry', createdAt: 3, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: [], groupKeys: [], operations: [],
+            },
+          },
+        },
+      },
+    }] as any[];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+    const summary = collectScheduleSummaryFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_legacy.content).toEqual(introducedSheet.content);
+    expect(summary.sheet_legacy).toEqual({ lastFilledAiFloor: 1, lastChangedAiFloor: 1 });
+    expect(mockLogWarn).not.toHaveBeenCalledWith(expect.stringContaining('sheetKey sheet_legacy→sheet_legacy'));
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('activateAtMessageIndex→0'));
+  });
+
+  it('per-sheet checkpoint 缺失 afterSeq 时保留结构性拒绝并提供 frame 定位', async () => {
     const rootData = makeCheckpointData();
     const chat = [{
       is_user: false,
@@ -3237,19 +3424,23 @@ describe('loadTableStateFromFramesV2_ACU', () => {
             version: 2,
             checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: rootData },
             perSheetCheckpoints: {
-              sheet_record_key: {
-                kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_other', data: rootData.sheet_0,
-                timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 34, afterSeq: 0 },
+              sheet_legacy: {
+                kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_legacy', data: rootData.sheet_0,
+                timeline: { kind: 'sheet_introduction', activateAtMessageIndex: 0 },
               },
             },
             logEntries: [],
           },
         },
       },
-    }];
+    }] as any[];
 
-    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow('sheetKey 不一致');
-    expect(() => collectScheduleSummaryFromFramesV2_ACU(chat, '')).toThrow('sheetKey 不一致');
+    await expect(loadTableStateFromFramesV2_ACU(chat, '')).rejects.toThrow(
+      'sheetKey=sheet_legacy, messageIndex=0',
+    );
+    expect(() => collectScheduleSummaryFromFramesV2_ACU(chat, '')).toThrow(
+      'sheetKey=sheet_legacy, messageIndex=0',
+    );
   });
 
 
@@ -3338,38 +3529,156 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(loadedRuntime.loaded).toBe(true);
   });
 
-  it('非法 data_replace 失败后不修改输入 state', async () => {
+  it('旧 data_replace 含空 row_id 时保留业务行并补稳定 ID', async () => {
+    const state = makeCheckpointData();
+    const legacyData = makeCheckpointData();
+    legacyData.sheet_0.content.push(['', '无身份行']);
+    const legacyDataBefore = structuredClone(legacyData);
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'data_replace',
+      data: legacyData,
+      reason: 'system',
+    } as any);
+
+    const rows = state.sheet_0.content.slice(1);
+    expect(rows).toHaveLength(legacyDataBefore.sheet_0.content.length - 1);
+    const restored = rows.find((row: any[]) => row[1] === '无身份行');
+    expect(restored).toBeDefined();
+    expect(String(restored![0]).trim()).not.toBe('');
+    const rowIds = rows.map((row: any[]) => String(row[0]));
+    expect(new Set(rowIds).size).toBe(rowIds.length);
+
+    // operation 载荷本身不得被就地改写。
+    expect(legacyData).toEqual(legacyDataBefore);
+  });
+
+  it('旧 sheet_replace 含空 row_id 时保留业务行并补稳定 ID', async () => {
+    const state = makeCheckpointData();
+    const legacySheet = {
+      ...structuredClone(state.sheet_0),
+      content: [['row_id', 'name'], ['', '无身份行']],
+    };
+    const legacySheetBefore = structuredClone(legacySheet);
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'sheet_replace',
+      sheetKey: 'sheet_0',
+      sheet: legacySheet,
+      reason: 'system',
+    } as any);
+
+    const rows = state.sheet_0.content.slice(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0][1]).toBe('无身份行');
+    expect(String(rows[0][0]).trim()).not.toBe('');
+
+    expect(legacySheet).toEqual(legacySheetBefore);
+  });
+
+  it('data_replace 含非数组行时仍然拒绝且不修改输入 state', async () => {
     const state = makeCheckpointData();
     const original = structuredClone(state);
     const invalidData = makeCheckpointData();
-    invalidData.sheet_0.content.push(['', '无身份行']);
+    invalidData.sheet_0.content.push('不是数组行' as any);
 
     await expect(applyTableOperationV2_ACU(state, {
       kind: 'data_replace',
       data: invalidData,
       reason: 'system',
-    } as any)).rejects.toThrow('data_replace 行标识不合法');
+    } as any)).rejects.toThrow('行标识不合法');
 
     expect(state).toEqual(original);
   });
 
-  it('非法 sheet_replace 失败后不修改输入 state', async () => {
+  it('data_replace 空 row_id 补 ID 后，后续 row_upsert 仍按既有身份命中原行', async () => {
+    const state = makeCheckpointData();
+    const legacyData = makeCheckpointData();
+    // '1' 已被占用；无身份行补 ID 时不得抢占既有身份。
+    legacyData.sheet_0.content = [['row_id', 'name'], ['1', '原有行'], ['', '无身份行']];
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'data_replace',
+      data: legacyData,
+      reason: 'system',
+    } as any);
+
+    const synthesized = state.sheet_0.content
+      .slice(1)
+      .find((row: any[]) => row[1] === '无身份行');
+    expect(String(synthesized![0])).not.toBe('1');
+
+    // 后续 operation 引用 '1' 必须仍然命中原有行，而不是被合成 ID 顶掉。
+    await applyTableOperationV2_ACU(state, {
+      kind: 'row_upsert',
+      sheetKey: 'sheet_0',
+      rowId: '1',
+      cells: ['1', '原有行已更新'],
+      reason: 'system',
+    } as any);
+
+    const rows = state.sheet_0.content.slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row: any[]) => String(row[0]) === '1')![1]).toBe('原有行已更新');
+    expect(rows.find((row: any[]) => row[1] === '无身份行')).toBeDefined();
+  });
+
+  it('data_replace 旧 id 表头归一为 row_id 且业务值不移位', async () => {
+    const state = makeCheckpointData();
+    const legacyData = makeCheckpointData();
+    legacyData.sheet_0.content = [['id', 'name'], ['1', '铁剑'], ['', '药水']];
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'data_replace',
+      data: legacyData,
+      reason: 'system',
+    } as any);
+
+    expect(state.sheet_0.content[0][0]).toBe('row_id');
+    const rows = state.sheet_0.content.slice(1);
+    expect(rows).toHaveLength(2);
+    // 业务列不得因表头改名而错位。
+    expect(rows.map((row: any[]) => row[1])).toEqual(['铁剑', '药水']);
+    expect(String(rows[1][0]).trim()).not.toBe('');
+  });
+
+  it('data_replace 完全缺失身份列时前插 row_id 且保留全部业务单元格', async () => {
+    const state = makeCheckpointData();
+    const legacyData = makeCheckpointData();
+    // header-chinese.json 同型：旧数据没有身份列概念。
+    legacyData.sheet_0.content = [['名称', '数量'], ['铁剑', 1], ['药水', 2]];
+
+    await applyTableOperationV2_ACU(state, {
+      kind: 'data_replace',
+      data: legacyData,
+      reason: 'system',
+    } as any);
+
+    expect(state.sheet_0.content[0]).toEqual(['row_id', '名称', '数量']);
+    const rows = state.sheet_0.content.slice(1);
+    expect(rows).toHaveLength(2);
+    // 每行业务值整体右移一列，不得丢失或截断。
+    expect(rows.map((row: any[]) => row.slice(1))).toEqual([['铁剑', 1], ['药水', 2]]);
+    const rowIds = rows.map((row: any[]) => String(row[0]));
+    expect(rowIds.every(rowId => rowId.trim() !== '')).toBe(true);
+    expect(new Set(rowIds).size).toBe(rowIds.length);
+  });
+
+  it('data_replace 空 row_id 与 duplicate 并存时仍拒绝，不静默择一', async () => {
     const state = makeCheckpointData();
     const original = structuredClone(state);
-    const invalidSheet = {
-      ...structuredClone(state.sheet_0),
-      content: [['row_id', 'name'], ['', '无身份行']],
-    };
+    const legacyData = makeCheckpointData();
+    legacyData.sheet_0.content = [['row_id', 'name'], ['1', '甲'], ['1', '乙'], ['', '丙']];
 
     await expect(applyTableOperationV2_ACU(state, {
-      kind: 'sheet_replace',
-      sheetKey: 'sheet_0',
-      sheet: invalidSheet,
+      kind: 'data_replace',
+      data: legacyData,
       reason: 'system',
-    } as any)).rejects.toThrow('sheet_replace 行标识不合法');
+    } as any)).rejects.toThrow('行标识不合法');
 
     expect(state).toEqual(original);
   });
+
 
   it('已加载 runtime 的候选 hydrate 失败时保留旧 runtime 与输入 state', async () => {
     const state = makeCheckpointData();
