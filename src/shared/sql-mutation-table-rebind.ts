@@ -150,16 +150,38 @@ export function decodeSqlIdentifier_ACU(value: unknown): string {
 export function rebindSqlMutationTableReferences_ACU(
   statements: string[],
   aliases: SqlTableAliasMap_ACU,
-  options: { lenient?: boolean; requireKnownTables?: boolean } = {},
+  options: {
+    lenient?: boolean;
+    requireKnownTables?: boolean;
+    /** 规范化后的歧义别名集合：命中即结构化拒绝，不随机选择、不当作未知表放行。 */
+    ambiguousAliases?: ReadonlySet<string>;
+  } = {},
 ): string[] {
   const resolvedAliases = new Map<string, string>();
   for (const [alias, physicalName] of aliases) resolvedAliases.set(decodeSqlIdentifier_ACU(alias).toLowerCase(), physicalName);
+  const normalizedAmbiguous = new Set<string>();
+  for (const alias of options.ambiguousAliases || []) {
+    normalizedAmbiguous.add(decodeSqlIdentifier_ACU(alias).toLowerCase());
+  }
   return statements.map(statement => {
     try {
       const values = tokens(statement);
       const target = mutationTarget(statement, values);
       if (!target) return statement;
       const tableReferences = references(statement, values, target);
+      for (const reference of tableReferences) {
+        if (normalizedAmbiguous.has(reference.value.toLowerCase())) {
+          const role = reference.start === target.start ? '目标表' : '关联表';
+          const error = new Error(
+            `SQL 写入引用了歧义表名「${reference.value}」：该名称同时指向多张物理表，无法安全路由。请改用各表当前唯一物理表名，或只针对唯一英文表名编写 SQL。`,
+          );
+          Object.defineProperty(error, 'code', {
+            value: 'SQL_ALIAS_AMBIGUOUS_ACU',
+            enumerable: false,
+          });
+          throw error;
+        }
+      }
       if (options.requireKnownTables) {
         for (const reference of tableReferences) {
           if (!resolvedAliases.has(reference.value.toLowerCase())) {

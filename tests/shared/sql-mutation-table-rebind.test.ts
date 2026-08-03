@@ -342,4 +342,54 @@ describe('sql mutation table rebind', () => {
     expect(result.sql).toBe('SELECT count(*) FROM runtime_inventory');
   });
 
+
+  it('歧义别名（ambiguousAliases）结构化拒绝，不当作未知表放行也不随机选择', () => {
+    // 两个物理表共用英文名 shared_legacy：registry 将其移入 conflicts，rebind 必须 fail-loud。
+    expect(() => rebindSqlMutationTableReferences_ACU(
+      ['INSERT INTO shared_legacy (row_id) VALUES (1)'],
+      new Map([['jiabiao', 'jiabiao'], ['yibiao', 'yibiao']]),
+      { requireKnownTables: true, ambiguousAliases: new Set(['shared_legacy']) },
+    )).toThrow('SQL 写入引用了歧义表名「shared_legacy」：该名称同时指向多张物理表，无法安全路由');
+
+    // 关联表位置同样拒绝。
+    expect(() => rebindSqlMutationTableReferences_ACU(
+      ['UPDATE jiabiao SET row_id = row_id WHERE EXISTS (SELECT 1 FROM shared_legacy)'],
+      new Map([['jiabiao', 'jiabiao']]),
+      { requireKnownTables: true, ambiguousAliases: new Set(['shared_legacy']) },
+    )).toThrow('SQL 写入引用了歧义表名「shared_legacy」');
+  });
+
+  it('唯一英文名与当前物理名都正确定位；重复英文 DDL 名不污染物理名的唯一映射', () => {
+    // 两个物理表 jiabiao/yibiao 各自物理名唯一；shared_legacy 是它们的公共英文名。
+    const aliases = new Map([
+      ['jiabiao', 'jiabiao'],
+      ['yibiao', 'yibiao'],
+    ]);
+    const [insertA] = rebindSqlMutationTableReferences_ACU(
+      ['INSERT INTO jiabiao (row_id) VALUES (1)'],
+      aliases,
+      { requireKnownTables: true },
+    );
+    const [insertB] = rebindSqlMutationTableReferences_ACU(
+      ['INSERT INTO yibiao (row_id) VALUES (1)'],
+      aliases,
+      { requireKnownTables: true },
+    );
+    expect(insertA).toBe('INSERT INTO jiabiao (row_id) VALUES (1)');
+    expect(insertB).toBe('INSERT INTO yibiao (row_id) VALUES (1)');
+  });
+
+  it('唯一英文名 SQL 重绑定到当前物理名（改名后每次重算，不缓存旧物理名）', () => {
+    // 改名后旧英文名仍唯一，映射必须指向新物理名。
+    const aliasesAfterRename = new Map([
+      ['characters', 'juesebiao'],
+      ['juesebiao', 'juesebiao'],
+    ]);
+    const [result] = rebindSqlMutationTableReferences_ACU(
+      ['UPDATE characters SET row_id = row_id WHERE row_id = 1'],
+      aliasesAfterRename,
+      { requireKnownTables: true },
+    );
+    expect(result).toBe('UPDATE juesebiao SET row_id = row_id WHERE row_id = 1');
+  });
 });

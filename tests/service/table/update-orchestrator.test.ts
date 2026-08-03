@@ -3946,6 +3946,43 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
+
+  it('歧义英文表名统一提交失败分类为 precondition，不保存、不当作可重试模型错误', async () => {
+    // E1 止损：歧义英文 DDL 表名无法由 AI 通过重试解决，必须 fail-closed。
+    // 若错误被包装为 ModelOutputRetryError_ACU 或标记为 model 类别，会回灌错误并等待 5 秒重试。
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const sharedDDL = 'CREATE TABLE global_state (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);';
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
+      sheet_0: { uid: 'a', name: '表A', sourceData: { ddl: sharedDDL }, content: [['row_id', 'value'], ['1', 'base-a']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_1: { uid: 'b', name: '表B', sourceData: { ddl: sharedDDL }, content: [['row_id', 'value'], ['1', 'base-b']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    const sql = "INSERT INTO global_state (value) VALUES ('ambiguous');";
+    const responses = [{
+      success: true,
+      attempt: 1,
+      aiResponse: `<tableEdit>${sql}</tableEdit>`,
+      tableEditText: sql,
+      job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
+    }];
+
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+    const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCategory).toBe('precondition');
+    expect(result.error).toContain('歧义表名');
+    expect(result.error).toContain('global_state');
+    // 不落盘：不产生数据变更、不写 V2 增量、不回灌 Prompt。
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
+    expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
+    expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', 'value'], ['1', 'base-a']]);
+    expect(mockCurrentJsonTableData.sheet_1.content).toEqual([['row_id', 'value'], ['1', 'base-b']]);
+    vi.mocked(isSqliteMode).mockReturnValue(false);
+  });
+
   it('parser 返回越权 modifiedKeys 时直接失败且不保存', async () => {
     const baseSnapshot = {
       sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },

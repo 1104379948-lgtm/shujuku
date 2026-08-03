@@ -176,7 +176,7 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result).not.toBeNull();
     expect(result!.tableDataText).toContain('CREATE TABLE inventory');
     expect(result!.tableDataText).not.toContain('CREATE TABLE beibaowupinbiao');
-    expect(result!.tableDataText).toContain('SQL 写入必须使用表名 inventory；系统会在执行时映射到内部表。');
+    expect(result!.tableDataText).toContain('SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 inventory；不得使用其他名称。');
     // 应输出 Note 注释
     expect(result!.tableDataText).toContain('-- Note: 记录角色背包中的物品');
     // 应输出当前数据（注释格式）
@@ -248,18 +248,131 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result!.tableDataText).toContain('运行时数据');
   });
 
-  it('请求模板内作者 DDL 表名冲突时返回结构化失败，不构造可能误写的 AI prompt', async () => {
+  it('请求模板内作者 DDL 表名冲突时，仅冲突组降级为各自拼音物理名，不阻断整个 Prompt', async () => {
     mockCurrentJsonTableData = {
       sheet_0: { name: '甲表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
       sheet_1: { name: '乙表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
     };
 
-    await expect(prepareAIInput_ACU([], 'standard')).resolves.toEqual({
-      ok: false,
-      failureCode: 'authored_table_name_conflict',
-      message: '模板中多个表共用作者 DDL 表名「shared_legacy」，无法安全路由 AI SQL。',
-      retryable: false,
-    });
+    const result = await prepareAIInput_ACU([], 'standard');
+    expect(result).not.toBeNull();
+    // 冲突组不再使用冲突英文名，分别使用各自当前拼音物理名。
+    expect(result!.tableDataText).not.toContain('CREATE TABLE shared_legacy');
+    expect(result!.tableDataText).toContain('CREATE TABLE jiabiao');
+    expect(result!.tableDataText).toContain('CREATE TABLE yibiao');
+  });
+
+  it('A/B 共用同一英文名时，仅 A/B 降级为各自物理名；唯一英文名 C 保持英文名', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '甲表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+      sheet_1: { name: '乙表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+      sheet_2: { name: '角色表', sourceData: { ddl: 'CREATE TABLE characters (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+    };
+
+    const result = await prepareAIInput_ACU([], 'standard');
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).not.toContain('CREATE TABLE shared_legacy');
+    expect(result!.tableDataText).toContain('CREATE TABLE jiabiao');
+    expect(result!.tableDataText).toContain('CREATE TABLE yibiao');
+    // 唯一英文名 C 不受冲突组影响，继续使用英文名。
+    expect(result!.tableDataText).toContain('CREATE TABLE characters');
+    expect(result!.tableDataText).toContain('SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 characters；不得使用其他名称。');
+  });
+
+  it('英文名缺失的表降级为当前拼音物理名', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '背包物品表', sourceData: { note: '无 DDL' }, content: [['row_id', 'item_name'], ['1', '铁剑']], updateConfig: {} },
+    };
+
+    const result = await prepareAIInput_ACU([], 'standard');
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).toContain('CREATE TABLE beibaowupinbiao');
+    expect(result!.tableDataText).toContain('-- WARNING: DDL 缺失，已使用运行时 fallback schema。 原始 DDL 未被改写。');
+  });
+
+  it('英文名大小写/引号规范化后相同的表视为同一冲突组，各自降级为物理名', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '甲表', sourceData: { ddl: 'CREATE TABLE "Shared_Legacy" (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+      sheet_1: { name: '乙表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+    };
+
+    const result = await prepareAIInput_ACU([], 'standard');
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).not.toContain('Shared_Legacy');
+    expect(result!.tableDataText).not.toContain('CREATE TABLE shared_legacy');
+    expect(result!.tableDataText).toContain('CREATE TABLE jiabiao');
+    expect(result!.tableDataText).toContain('CREATE TABLE yibiao');
+  });
+
+  it('英文名唯一时 Prompt 使用作者英文名，SQL 写入说明指向该英文名', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '背包物品表', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);' }, content: [['row_id', 'item_name'], ['1', '铁剑']], updateConfig: {} },
+    };
+
+    const result = await prepareAIInput_ACU([], 'standard');
+    expect(result).not.toBeNull();
+    expect(result!.tableDataText).toContain('CREATE TABLE inventory');
+    expect(result!.tableDataText).toContain('SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 inventory；不得使用其他名称。');
+  });
+
+  it('当前物理名本身冲突（拼音物理名碰撞）时前置失败，不得回退英文名掩盖真实 SQLite 冲突', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '测试表', sourceData: { ddl: 'CREATE TABLE test_unique (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+      sheet_1: { name: '测试表', sourceData: { ddl: 'CREATE TABLE test_other (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+    };
+
+    const result = await prepareAIInput_ACU([], 'standard');
+    expect(result).toMatchObject({ ok: false, retryable: false });
+    expect(typeof (result as any)?.failureCode).toBe('string');
+  });
+
+
+  it('r1: 改名后冲突组降级为各自新物理名，不沿用旧物理名', async () => {
+    // 改名前：甲表/乙表 共用英文名 shared_legacy -> 降级为 jiabiao/yibiao。
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '甲表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+      sheet_1: { name: '乙表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+    };
+
+    const before = await prepareAIInput_ACU([], 'standard');
+    expect(before).not.toBeNull();
+    expect(before!.tableDataText).toContain('CREATE TABLE jiabiao');
+    expect(before!.tableDataText).toContain('CREATE TABLE yibiao');
+    expect(before!.tableDataText).not.toContain('CREATE TABLE shared_legacy');
+
+    // 改名后：sheet_0 显示名改为 背包物品表 -> 新物理名 beibaowupinbiao；英文名仍冲突。
+    // 映射必须按本次 scope 重建，不得继续使用旧拼音物理名 jiabiao 作为新写入目标。
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '背包物品表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+      sheet_1: { name: '乙表', sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {} },
+    };
+
+    const after = await prepareAIInput_ACU([], 'standard');
+    expect(after).not.toBeNull();
+    expect(after!.tableDataText).not.toContain('CREATE TABLE jiabiao');
+    expect(after!.tableDataText).toContain('CREATE TABLE beibaowupinbiao');
+    expect(after!.tableDataText).toContain('CREATE TABLE yibiao');
+    expect(after!.tableDataText).not.toContain('CREATE TABLE shared_legacy');
+  });
+
+  it('r1: 改名后英文名仍唯一时 Prompt 保持英文名，映射按当前快照重算', async () => {
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '背包物品表', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);' }, content: [['row_id', 'item_name'], ['1', '铁剑']], updateConfig: {} },
+    };
+
+    const before = await prepareAIInput_ACU([], 'standard');
+    expect(before).not.toBeNull();
+    expect(before!.tableDataText).toContain('CREATE TABLE inventory');
+
+    // 改名：显示名变化（物理名随之变化），英文名 inventory 仍唯一 -> Prompt 继续使用英文名。
+    mockCurrentJsonTableData = {
+      sheet_0: { name: '角色背包表', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT);' }, content: [['row_id', 'item_name'], ['1', '铁剑']], updateConfig: {} },
+    };
+
+    const after = await prepareAIInput_ACU([], 'standard');
+    expect(after).not.toBeNull();
+    expect(after!.tableDataText).toContain('CREATE TABLE inventory');
+    expect(after!.tableDataText).toContain('SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 inventory；不得使用其他名称。');
   });
 
   it('无 DDL 的表在 SQLite 模式下使用 effective fallback DDL，且不使用 seedRows', async () => {
@@ -416,7 +529,7 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result!.tableDataText).toContain('row_id 由系统在执行前分配稳定身份');
     expect(result!.tableDataText).not.toContain('row_id 值为当前表最大 row_id + 1');
     expect(result!.tableDataText).toContain('UNIQUE 约束');
-    expect(result!.tableDataText).toContain('SQL 表名和列名必须严格使用上方 CREATE TABLE 中的英文标识符');
+    expect(result!.tableDataText).toContain('SQL 表名和列名必须严格照抄上方对应 CREATE TABLE 中提供的标识符，不得翻译、缩写、猜测或改写。');
     expect(result!.tableDataText).toContain('<tableEdit> 标签内');
     expect(result!.tableDataText).toContain('表达式更新');
     expect(result!.tableDataText).toContain('按 SQLite 原生整行替换语义执行');
@@ -438,7 +551,7 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
     expect(result!.tableDataText).toContain('CREATE TABLE inventory');
     expect(result!.tableDataText).not.toContain('CREATE TABLE beibaowupinbiao');
     expect(result!.tableDataText).toContain('响应 JSON 的 sql 字符串中');
-    expect(result!.tableDataText).toContain('SQL 表名和列名必须严格使用上方 CREATE TABLE 中的英文标识符');
+    expect(result!.tableDataText).toContain('SQL 表名和列名必须严格照抄上方对应 CREATE TABLE 中提供的标识符，不得翻译、缩写、猜测或改写。');
   });
 
   it('固定 row_id 约束不再生成专用 REPLACE 许可注释', async () => {

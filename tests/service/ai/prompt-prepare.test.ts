@@ -157,7 +157,7 @@ describe('formatTableForSqliteMode', () => {
 
     expect(result).toContain('CREATE TABLE protagonist_info');
     expect(result).not.toContain('CREATE TABLE zhujuexinxi');
-    expect(result).toContain('SQL 写入必须使用表名 protagonist_info；系统会在执行时映射到内部表。');
+    expect(result).toContain('SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 protagonist_info；不得使用其他名称。');
   });
 
   it('未传 runtimeTableName 时保持原 DDL 表名（向后兼容）', () => {

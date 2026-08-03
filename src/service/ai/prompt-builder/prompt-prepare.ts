@@ -19,6 +19,8 @@ import { ensureStorageProviderReady_ACU, getStorageRuntimeHealth_ACU } from '../
 import { parseDDLTableName, rebindCreateTableName_ACU, resolveEffectiveDDL, type EffectiveDDLColumnMap_ACU } from '../../../data/sqlite/schema-mapper';
 import { getSheetColumnProjection_ACU, projectSheetDDLForVisibleColumns_ACU, projectSheetRowToVisibleColumns_ACU } from '../../../shared/ddl-utils';
 import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity';
+import { buildSheetTableAliasMap_ACU } from '../../../shared/sql-read-resolver';
+import { decodeSqlIdentifier_ACU } from '../../../shared/sql-mutation-table-rebind';
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
 import { getCurrentFlightModeState_ACU } from '../../flight-mode/flight-mode-state';
 import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flight-mode-hidden-rows';
@@ -144,27 +146,22 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
         ? options.templateScope ?? null
         : resolveTemplateScope_ACU(options.isolationKey);
     const tableIndexes = filterSheetKeysByTemplateScope_ACU(getSortedSheetKeys_ACU(workingTableData), templateScope);
-    // 作者 DDL 名是 AI 写入契约；冲突时不能让异常越过编排器，也不能继续构造无法安全路由的 prompt。
+    // 作者 DDL 名是 AI 写入契约。以本次请求捕获的完整模板作用域建立英文名归属索引：
+    // 唯一英文名优先；冲突/缺失回退到当前拼音物理名；当前物理名碰撞必须 fail-loud。
+    // 显式 sqlApplyScope 必须使用请求前模板快照，不能读取请求后变化的全局模板。
     const promptIdentifierSource = options.sqlApplyScope?.templateData || workingTableData;
-    const authoredTableNames = new Map<string, string | undefined>();
-    if (sqlMode) {
-        try {
-            for (const sheetKey of tableIndexes) {
-                authoredTableNames.set(sheetKey, resolveAuthoredTableNameForPrompt_ACU(promptIdentifierSource, sheetKey));
-            }
-        } catch (error: any) {
-            const message = error?.message || String(error);
-            return createPromptRuntimeFailure_ACU('authored_table_name_conflict', message, false);
-        }
-    }
-    tableIndexes.forEach((sheetKey, tableIndex) => {
+    const promptTableNameForSheet = sqlMode
+        ? resolvePromptTableNameForSheet_ACU(promptIdentifierSource, tableIndexes)
+        : null;
+    for (let tableIndex = 0; tableIndex < tableIndexes.length; tableIndex += 1) {
+        const sheetKey = tableIndexes[tableIndex];
         const rawTable = workingTableData[sheetKey];
-        if (!rawTable || !rawTable.name || !rawTable.content) return;
+        if (!rawTable || !rawTable.name || !rawTable.content) continue;
         // 模板未声明的列合并进 hiddenPhysicalColumns，只影响投影，不改写持久化数据。
         const table: any = projectSheetForTemplateScope_ACU(rawTable, templateScope, sheetKey);
 
         if (targetSheetKeys && Array.isArray(targetSheetKeys)) {
-            if (!targetSheetKeys.includes(sheetKey)) return;
+            if (!targetSheetKeys.includes(sheetKey)) continue;
         }
 
         const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
@@ -185,18 +182,20 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
         }
 
         if (!shouldShowData) {
-            return;
+            continue;
         }
 
         // SQLite 模式：输出 DDL + 注释数据格式；数据只来自运行时 DB，不再从模板 seedRows 兜底。
         if (sqlMode) {
-            // 作者 DDL 名必须与提交阶段使用同一请求前模板快照解析；运行时数据可能仍保留旧模板显示名。
+            const selectedPromptName = promptTableNameForSheet?.(sheetKey);
+            if (selectedPromptName && typeof selectedPromptName === 'object' && 'ok' in selectedPromptName) {
+                return selectedPromptName;
+            }
             tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, {
                 allowSeedRowsFallback: false,
-                authoredTableName: authoredTableNames.get(sheetKey),
-                runtimeTableName: resolveRuntimeTableNameForPrompt_ACU(promptIdentifierSource, sheetKey),
+                ...(selectedPromptName as { authoredTableName?: string; runtimeTableName?: string }),
             });
-            return;
+            continue;
         }
 
         const allRows = table.content.slice(1);
@@ -273,7 +272,7 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
             }
             tableDataText += '\n';
         }
-    });
+    }
     if (_seedRowsTablesUsed_ACU.length > 0) {
         logDebug_ACU(`[SeedRows] $0 使用 seedRows 作为基础数据：${_seedRowsTablesUsed_ACU.join('、')}`);
     }
@@ -354,10 +353,11 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
     // SQLite 模式下追加 SQL 编辑格式兜底说明（Q17 确认：$0 自带格式说明）
     if (isSqliteMode() && tableDataText) {
+        const identifierContract = 'SQL 表名和列名必须严格照抄上方对应 CREATE TABLE 中提供的标识符，不得翻译、缩写、猜测或改写。';
         if (settings_ACU.strictJsonTableFillEnabled === true) {
-            tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在响应 JSON 的 sql 字符串中仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句\n-- SQL 表名和列名必须严格使用上方 CREATE TABLE 中的英文标识符；禁止使用中文名、sheet key、uid 或自行拼音化的内部表名\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- 普通 INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- INSERT OR REPLACE / REPLACE INTO 按 SQLite 原生整行替换语义执行，应显式提供目标列及用于冲突定位的 row_id 或 UNIQUE 列\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
+            tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在响应 JSON 的 sql 字符串中仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句\n-- ${identifierContract}\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- 普通 INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- INSERT OR REPLACE / REPLACE INTO 按 SQLite 原生整行替换语义执行，应显式提供目标列及用于冲突定位的 row_id 或 UNIQUE 列\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
         } else {
-            tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在 <tableEdit> 标签内仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句\n-- SQL 表名和列名必须严格使用上方 CREATE TABLE 中的英文标识符；禁止使用中文名、sheet key、uid 或自行拼音化的内部表名\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- 普通 INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- INSERT OR REPLACE / REPLACE INTO 按 SQLite 原生整行替换语义执行，应显式提供目标列及用于冲突定位的 row_id 或 UNIQUE 列\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
+            tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在 <tableEdit> 标签内仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句\n-- ${identifierContract}\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- 普通 INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- INSERT OR REPLACE / REPLACE INTO 按 SQLite 原生整行替换语义执行，应显式提供目标列及用于冲突定位的 row_id 或 UNIQUE 列\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
         }
     }
 
@@ -372,28 +372,46 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
     };
 }
 
+
 /**
  * Resolves the user-authored DDL identifier that AI must use for mutations.
  * Runtime names are deliberately excluded from the prompt: they are an
  * implementation detail rebound at the write boundary.
+ *
+ * Returns the unique author DDL name, or undefined when the name is missing,
+ * invalid, or shared by more than one sheet in the same request scope.
  */
 function resolveAuthoredTableNameForPrompt_ACU(data: any, sheetKey: string): string | undefined {
     const sheet = data?.[sheetKey];
-    const tableName = parseDDLTableName(String(sheet?.sourceData?.ddl || ''));
+    const rawTableName = parseDDLTableName(String(sheet?.sourceData?.ddl || ''));
+    // 执行层 rebind 用 decodeSqlIdentifier_ACU 剥引号后做规范化比较；Prompt 层必须一致，
+    // 否则带引号的 "Shared_Legacy" 会被当成无合法英文名而漏判冲突。
+    const tableName = decodeSqlIdentifier_ACU(rawTableName);
     if (!tableName || !AUTHOR_SQL_TABLE_IDENTIFIER_ACU.test(tableName)) return undefined;
 
-    const normalized = tableName.toLowerCase();
-    for (const [candidateKey, candidate] of Object.entries(data || {})) {
-        if (candidateKey === sheetKey || !candidateKey.startsWith('sheet_')) continue;
-        const candidateName = parseDDLTableName(String((candidate as any)?.sourceData?.ddl || ''));
-        if (candidateName && candidateName.toLowerCase() === normalized) {
-            throw new Error(`模板中多个表共用作者 DDL 表名「${tableName}」，无法安全路由 AI SQL。`);
-        }
+    let ownedPhysicalName: string | undefined;
+    try {
+        const registry = buildSheetTableAliasMap_ACU([data], { includeExtendedAliases: false });
+        const normalized = canonicalizeAliasForPrompt_ACU(tableName);
+        if (registry.conflicts.has(normalized)) return undefined;
+        // owner index 的 key 可能带引号，需剥引号后匹配；冲突集同样按剥引号后的规范比较。
+        const conflictKey = [...registry.conflicts].find(key => canonicalizeAliasForPrompt_ACU(decodeSqlIdentifier_ACU(key)) === normalized);
+        if (conflictKey) return undefined;
+        ownedPhysicalName = [...registry.aliases.entries()]
+            .find(([key]) => canonicalizeAliasForPrompt_ACU(decodeSqlIdentifier_ACU(key)) === normalized)?.[1];
+    } catch {
+        return undefined;
     }
+    const physicalName = resolvePhysicalNameForSheet_ACU(data, sheetKey);
+    if (!ownedPhysicalName || !physicalName || ownedPhysicalName !== physicalName) return undefined;
     return tableName;
 }
 
-function resolveRuntimeTableNameForPrompt_ACU(data: any, sheetKey: string): string | undefined {
+function canonicalizeAliasForPrompt_ACU(value: unknown): string {
+    return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+}
+
+function resolvePhysicalNameForSheet_ACU(data: any, sheetKey: string): string | undefined {
     try {
         return getPhysicalTableNameForSheet_ACU(data, sheetKey);
     } catch (error: any) {
@@ -402,6 +420,63 @@ function resolveRuntimeTableNameForPrompt_ACU(data: any, sheetKey: string): stri
     }
 }
 
+/**
+ * Builds a per-request, per-sheet prompt table-name selector from the complete
+ * request template scope. The selector returns the chosen prompt identifier
+ * plus its authored counterpart:
+ *
+ * - unique author DDL name  -> { authoredTableName, runtimeTableName }
+ * - missing/ambiguous name  -> { runtimeTableName } (current pinyin physical name)
+ * - physical-name collision -> structured precondition failure that must not
+ *                              be hidden by falling back to the author name.
+ */
+function resolvePromptTableNameForSheet_ACU(
+    data: any,
+    _sheetKeys: string[],
+): (sheetKey: string) => { authoredTableName?: string; runtimeTableName?: string } | PrepareAIInputFailure_ACU {
+    let registry: { aliases: Map<string, string>; conflicts: Set<string> };
+    let registryFailure: PrepareAIInputFailure_ACU | null = null;
+    try {
+        registry = buildSheetTableAliasMap_ACU([data], { includeExtendedAliases: false });
+    } catch (error: any) {
+        // 当前拼音物理名自身碰撞：结构化前置失败，绝不回退英文名掩盖真实 SQLite 冲突。
+        registryFailure = createPromptRuntimeFailure_ACU(
+            'authored_table_name_conflict',
+            `表身份解析失败：${error?.message || String(error)}`,
+            false,
+        );
+        registry = { aliases: new Map(), conflicts: new Set() };
+    }
+    const ambiguousEnglishNames = new Set(
+        [...registry.conflicts].map(key => canonicalizeAliasForPrompt_ACU(decodeSqlIdentifier_ACU(key))),
+    );
+    const ownerByEnglishName = new Map<string, string>();
+    for (const [alias, physicalName] of registry.aliases) {
+        const normalized = canonicalizeAliasForPrompt_ACU(decodeSqlIdentifier_ACU(alias));
+        if (!normalized || ambiguousEnglishNames.has(normalized)) continue;
+        ownerByEnglishName.set(normalized, physicalName);
+    }
+    return (sheetKey: string) => {
+        if (registryFailure) return registryFailure;
+        const authoredName = resolveAuthoredTableNameForPrompt_ACU(data, sheetKey);
+        const runtimeName = resolvePhysicalNameForSheet_ACU(data, sheetKey);
+        if (authoredName && runtimeName) {
+            const normalized = canonicalizeAliasForPrompt_ACU(authoredName);
+            if (!ambiguousEnglishNames.has(normalized)
+                && ownerByEnglishName.get(normalized) === runtimeName) {
+                return { authoredTableName: authoredName, runtimeTableName: runtimeName };
+            }
+        }
+        if (!runtimeName) {
+            return createPromptRuntimeFailure_ACU(
+                'authored_table_name_conflict',
+                `无法为表 ${sheetKey} 解析当前拼音物理名，已阻止构造可能误写的 AI prompt。`,
+                false,
+            );
+        }
+        return { runtimeTableName: runtimeName };
+    };
+}
 
 /**
  * SQLite 模式下的表格格式化
@@ -441,7 +516,7 @@ export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKe
         text += `-- WARNING: ${resolvedDDL.diagnostics[0]} 原始 DDL 未被改写。\n`;
     }
     if (options.authoredTableName) {
-        text += `-- SQL 写入必须使用表名 ${options.authoredTableName}；系统会在执行时映射到内部表。\n`;
+        text += `-- SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 ${options.authoredTableName}；不得使用其他名称。\n`;
     }
 
     // 输出 Note 和 Trigger（作为 SQL 注释）

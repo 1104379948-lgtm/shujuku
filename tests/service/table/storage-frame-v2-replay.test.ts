@@ -3928,6 +3928,7 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       TavernDB_ACU_IsolatedData: {
         '': {
           _acu_storage_version: 2,
+
           storageFrame: {
             version: 2,
             checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
@@ -3949,6 +3950,121 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     } finally {
       _set_independentTableStates_ACU(previousIndependentStates);
     }
+  });
+
+
+  it('V1: 唯一历史英文 SQL 跨改名回放，映射到改名后的当前物理名', async () => {
+    // 显示名决定当前物理名（背包物品表 -> beibaowupinbiao），DDL 英文名 inventory 仍唯一，
+    // 历史 SQL 用英文名 inventory 写入，replay 必须把它重绑到改名后的当前物理名。
+    const data = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory_uid', name: '背包物品表',
+        content: [['row_id', 'name'], ['1', '铁剑']],
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);' },
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data, event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] } },
+            logEntries: [{
+              seq: 1, entryId: 'v1-english-replay', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{ kind: 'sql_batch', statements: ["UPDATE inventory SET name = '改名后写入' WHERE row_id = 1"] }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+    expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '改名后写入']]);
+  });
+
+  it('V2: 当前拼音物理名 SQL 回放定位到正确 sheet，不因英文名冲突污染', async () => {
+    // 两个 sheet 共用英文名 shared_legacy（冲突），但物理名各自唯一（甲表->jiabiao，乙表->yibiao）。
+    // 历史 SQL 用物理名 jiabiao 写入，必须只落到 sheet_0，不得被英文名冲突污染或误路由。
+    const data = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'jiabiao_uid', name: '甲表',
+        content: [['row_id', 'note'], ['1', '甲']],
+        sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY, note TEXT);' },
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+      sheet_1: {
+        uid: 'yibiao_uid', name: '乙表',
+        content: [['row_id', 'note'], ['1', '乙']],
+        sourceData: { ddl: 'CREATE TABLE shared_legacy (row_id INTEGER PRIMARY KEY, note TEXT);' },
+        updateConfig: {}, exportConfig: {}, orderNo: 1,
+      },
+    } as any;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data, event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] } },
+            logEntries: [{
+              seq: 1, entryId: 'v2-physical-replay', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              // 物理名 jiabiao 必须正确定位到 sheet_0，即使 shared_legacy 冲突也不受影响。
+              operations: [{ kind: 'sql_batch', statements: ["UPDATE jiabiao SET note = '甲更新' WHERE row_id = 1"] }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+    expect(result?.sheet_0.content).toEqual([['row_id', 'note'], ['1', '甲更新']]);
+    expect(result?.sheet_1.content).toEqual([['row_id', 'note'], ['1', '乙']]);
+  });
+
+  it('V3: 带稳定 sheetKey 的 sql_sheet_batch 可跨改名回放', async () => {
+    // sql_sheet_batch 带 sheetKey=sheet_0 与历史 tableName=obsolete_legacy；
+    // 当前物理名由显示名决定（背包物品表 -> beibaowupinbiao），与历史物理名不同，
+    // 但稳定 sheetKey 必须保证这条历史增量正确落到 sheet_0。
+    const data = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory_uid', name: '背包物品表',
+        content: [['row_id', 'name'], ['1', '铁剑']],
+        sourceData: { ddl: 'CREATE TABLE obsolete_legacy (row_id INTEGER PRIMARY KEY, name TEXT);' },
+        updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data, event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] } },
+            logEntries: [{
+              seq: 1, entryId: 'v3-sheetkey-replay', createdAt: 2, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'obsolete_legacy', reason: 'system',
+                statements: ["UPDATE obsolete_legacy SET name = '跨改名写入' WHERE row_id = 1"],
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+    expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '跨改名写入']]);
   });
 
 });

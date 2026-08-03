@@ -1239,11 +1239,16 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 // collect 不是安全边界。执行前再次校验 AI SQL，防止导出函数被直接调用时绕过白名单。
                 assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
             } catch (error: any) {
+                // 歧义英文表名属于前置条件失败：AI 无法通过重试解决，回灌错误只会浪费模型调用并等待 5 秒。
+                // 分类为 precondition，不包装 ModelOutputRetryError_ACU、不回灌、不重试。
+                const isAliasAmbiguous = error?.code === 'SQL_ALIAS_AMBIGUOUS_ACU';
                 return {
                     success: false,
                     modifiedKeys: [],
-                    error: `统一提交失败：${formatResponseGroupReference_ACU(response)} SQL 校验失败。${sanitizeRetryFeedback_ACU(error?.message || String(error))}`,
-                    errorCategory: 'model',
+                    error: isAliasAmbiguous
+                        ? `统一提交失败：${formatResponseGroupReference_ACU(response)} ${sanitizeRetryFeedback_ACU(error?.message || String(error))}`
+                        : `统一提交失败：${formatResponseGroupReference_ACU(response)} SQL 校验失败。${sanitizeRetryFeedback_ACU(error?.message || String(error))}`,
+                    errorCategory: isAliasAmbiguous ? 'precondition' : 'model',
                 };
             }
 

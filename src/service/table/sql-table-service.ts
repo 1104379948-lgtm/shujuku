@@ -355,11 +355,14 @@ export function rebindSqlMutationTableIdentifiers_ACU(
   // 生成路径和 Strict JSON/调度使用同一份显式身份别名契约。SQL token 一旦
   // 被唯一解析，必须立即替换为物理名；不能因 AI 使用显示名或历史名称而
   // 原样交给 SQLite，再在提交阶段误判为未知/跨表。
-  const { aliases } = buildSheetTableAliasMap_ACU(
+  const { aliases, conflicts } = buildSheetTableAliasMap_ACU(
     [templateSource, tableData],
     { includeExtendedAliases: true, skipInvalidSources: true },
   );
-  return rebindSqlMutationTableReferences_ACU(statements, aliases, options);
+  return rebindSqlMutationTableReferences_ACU(statements, aliases, {
+    ...options,
+    ambiguousAliases: conflicts,
+  });
 }
 
 /**
@@ -601,17 +604,26 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
   statements: string[],
   tableData: Record<string, any>,
 ): void {
-  const physicalNames = resolvePhysicalTableNames_ACU(tableData as TableDataObject_ACU);
+  // 与 rebind/调度共享同一表身份规范化与冲突结论（canonicalizeDisplayName_ACU），
+  // 避免隐藏列保护与执行层对英文名唯一性的判断不一致。
+  const { aliases, conflicts } = buildSheetTableAliasMap_ACU(
+    [tableData as TableDataObject_ACU],
+    { includeExtendedAliases: false },
+  );
+  const sheetKeyByPhysicalName = new Map<string, string>();
+  for (const [sheetKey, physicalName] of resolvePhysicalTableNames_ACU(tableData as TableDataObject_ACU)) {
+    sheetKeyByPhysicalName.set(canonicalizeTableAliasForHiddenProtection_ACU(physicalName), sheetKey);
+  }
   const sheetsByAlias = new Map<string, { sheetKey: string; sheet: any } | null>();
-  for (const [sheetKey, physicalName] of physicalNames) {
-    const sheet = tableData[sheetKey] as any;
-    for (const alias of [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName]) {
-      const normalized = String(alias || '').trim().toLowerCase();
-      if (!normalized) continue;
-      const existing = sheetsByAlias.get(normalized);
-      if (existing && existing.sheetKey !== sheetKey) sheetsByAlias.set(normalized, null);
-      else if (existing !== null) sheetsByAlias.set(normalized, { sheetKey, sheet });
-    }
+  for (const [alias, physicalName] of aliases) {
+    const normalized = canonicalizeTableAliasForHiddenProtection_ACU(alias);
+    if (conflicts.has(normalized) || !normalized) continue;
+    const sheetKey = sheetKeyByPhysicalName.get(canonicalizeTableAliasForHiddenProtection_ACU(physicalName));
+    if (!sheetKey) continue;
+    sheetsByAlias.set(normalized, { sheetKey, sheet: tableData[sheetKey] });
+  }
+  for (const conflictKey of conflicts) {
+    sheetsByAlias.set(canonicalizeTableAliasForHiddenProtection_ACU(conflictKey), null);
   }
 
   for (const statement of statements) {
@@ -623,9 +635,13 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
       throw new Error(`SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 CREATE、ALTER、DROP、事务或查询语句。`);
     }
     const target = getSqlMutationTargetToken_ACU(statement, tokens);
-    const resolved = sheetsByAlias.get(target.value.toLowerCase());
+    const resolved = sheetsByAlias.get(canonicalizeTableAliasForHiddenProtection_ACU(target.value));
     if (resolved === undefined) continue;
-    if (resolved === null) throw new Error(`无法唯一解析隐藏列保护的 SQL 目标表：${target.value}。`);
+    if (resolved === null) {
+      const error = new Error(`无法唯一解析隐藏列保护的 SQL 目标表：${target.value}。该名称同时指向多张物理表。`);
+      Object.defineProperty(error, 'code', { value: 'SQL_ALIAS_AMBIGUOUS_ACU', enumerable: false });
+      throw error;
+    }
     const hidden = new Set(getSheetColumnProjection_ACU(resolved.sheet).hiddenPhysicalColumns.map(name => name.toLowerCase()));
     if (hidden.size === 0) continue;
 
@@ -648,6 +664,10 @@ export function assertNoHiddenPhysicalColumnMutations_ACU(
       }
     }
   }
+}
+
+function canonicalizeTableAliasForHiddenProtection_ACU(value: unknown): string {
+  return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
 
 export function mapSqlTableNamesToSheetKeys_ACU(tableData: TableDataObject_ACU | null | undefined, tableNames: string[]): string[] {

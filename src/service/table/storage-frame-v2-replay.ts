@@ -724,7 +724,7 @@ async function applySheetCheckpointsForReplay_ACU(
 function buildReplaySqlTableAliases_ACU(
   state: TableDataObject_ACU,
   operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
-): Map<string, string> {
+): { aliases: Map<string, string>; conflicts: Set<string> } {
   const isPlainSqlIdentifier = (value: unknown): value is string => (
     typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(value)
   );
@@ -773,7 +773,7 @@ function buildReplaySqlTableAliases_ACU(
     }
     if (target) addAlias(operation.tableName, target);
   }
-  return aliases;
+  return { aliases, conflicts };
 }
 
 async function applySqlBatchOperationV2_ACU(
@@ -784,8 +784,10 @@ async function applySqlBatchOperationV2_ACU(
   const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
   if (statements.length === 0) return;
   await ensureSqlReplayRuntime_ACU(runtime, state);
-  const replayStatements = rebindSqlMutationTableReferences_ACU(statements, buildReplaySqlTableAliases_ACU(state, operation), {
+  const { aliases, conflicts } = buildReplaySqlTableAliases_ACU(state, operation);
+  const replayStatements = rebindSqlMutationTableReferences_ACU(statements, aliases, {
     lenient: true,
+    ambiguousAliases: conflicts,
   });
   const params = Array.isArray(operation.params) ? operation.params : undefined;
   runtime.engine.runBatch(replayStatements, params);

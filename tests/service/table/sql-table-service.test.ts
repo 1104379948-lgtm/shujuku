@@ -229,12 +229,13 @@ describe('rebindSqlMutationTableIdentifiers_ACU · 模板别名补充', () => {
       ...templateData,
       sheet_duplicate: { ...templateData.sheet_zhujue, uid: 'duplicate', name: '重复表' },
     } as any;
+    // 冲突英文名不再被当作“未知表”：结构化识别为歧义表名，fail-loud。
     expect(() => rebindSqlMutationTableIdentifiers_ACU(
       ['INSERT INTO protagonist_info (row_id, name) VALUES (1, \'不应写入\')'],
       conflictingTemplate,
       null,
       { requireKnownTables: true },
-    )).toThrow('无法识别的目标表「protagonist_info」');
+    )).toThrow('SQL 写入引用了歧义表名「protagonist_info」：该名称同时指向多张物理表，无法安全路由');
   });
 });
 
