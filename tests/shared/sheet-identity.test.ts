@@ -110,6 +110,28 @@ describe('physical table name (deterministic)', () => {
     expect(() => assertNoPhysicalTableNameCollision_ACU(data)).toThrow(PhysicalTableNameCollisionError_ACU);
   });
 
+
+  it('规范名相同的物理名冲突标记为身份归并失败，并提供完整显示名', () => {
+    const data = { mate: {}, sheet_legacy: sheet('重要角色表'), sheet_guide: sheet(' 重要角色表 ') } as any;
+
+    const collisions = detectPhysicalTableNameCollisions_ACU(data);
+
+    expect(collisions).toEqual([expect.objectContaining({
+      reason: 'identity_merge_failed',
+      sheetNames: [' 重要角色表 ', '重要角色表'],
+    })]);
+    expect(() => assertNoPhysicalTableNameCollision_ACU(data)).toThrow(/身份归并未完成/);
+  });
+
+  it('同音但规范名不同的物理名冲突要求用户改名', () => {
+    const data = { mate: {}, sheet_beibao: sheet('背包'), sheet_beibao2: sheet('被包') } as any;
+
+    const collisions = detectPhysicalTableNameCollisions_ACU(data);
+
+    expect(collisions[0]).toMatchObject({ reason: 'homophone_distinct_names', sheetNames: ['背包', '被包'] });
+    expect(() => assertNoPhysicalTableNameCollision_ACU(data)).toThrow(/请重命名/);
+  });
+
   it('无冲突时 detect 返回空、assert 不抛', () => {
     const data = { mate: {}, sheet_beibao: sheet('背包'), sheet_juese: sheet('角色') } as any;
     expect(detectPhysicalTableNameCollisions_ACU(data)).toEqual([]);

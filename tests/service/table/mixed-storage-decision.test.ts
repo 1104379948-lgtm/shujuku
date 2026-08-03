@@ -58,6 +58,23 @@ describe('mixed-storage-decision', () => {
     expect(decision.allowedActions).toContain('keep_v2');
   });
 
+
+  it('legacy 与 V2 仅 key 不同但规范名相同时先归一化，再按投影等价放行', async () => {
+    const legacyData = { sheet_legacy: { ...sheet([['1', '药水']]), uid: 'sheet_legacy', name: '背包物品表' } } as any;
+    const v2Data = { sheet_bei_bao_wu_pin_biao: { ...sheet([['1', '药水']]), uid: 'sheet_bei_bao_wu_pin_biao', name: '背包物品表' } } as any;
+    const chat = buildChat(legacyData, v2Data, { provenance: false });
+    chat[0].TavernDB_ACU_ModifiedKeys = ['sheet_legacy'];
+    chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.scheduleSummary = {
+      sheet_bei_bao_wu_pin_biao: { lastChangedAiFloor: 1 },
+    };
+
+    const decision = await evaluate(chat, legacyData);
+
+    expect(decision.kind).toBe('equivalent_projection_verified');
+    expect(decision.diagnosticCodes).toContain('legacy_keys_normalized');
+    expect(decision.allowedActions).toContain('keep_v2');
+  });
+
   it('V2 replay 缺少 full anchor 时保持 fail-closed', async () => {
     const legacyData = { sheet_0: sheet([['1', '药水']]) } as any;
     const chat = [{ is_user: false, TavernDB_ACU_Data: legacyData }, { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } } } }];

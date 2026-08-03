@@ -629,7 +629,7 @@ describe('buildBatchMergeBase_ACU', () => {
       expect(result.error).toBeNull();
       expect(result.data?.sheet_in05z9vz).toBeUndefined();
       expect(result.data?.sheet_bei_bao_wu_pin_biao).toMatchObject({
-        uid: 'sheet_in05z9vz',
+        uid: 'sheet_bei_bao_wu_pin_biao',
         name: '背包物品表',
         sourceData: { ddl: legacyDdl, note: 'guide-structure' },
         content: [['row_id', '物品名称', '数量'], ['1', '铁剑', '1']],
@@ -642,7 +642,7 @@ describe('buildBatchMergeBase_ACU', () => {
     }
   });
 
-  it('SQLite runtime 与 guide 仅显示名相同但 DDL 表身份不同仍拒绝折叠', async () => {
+  it('SQLite runtime 与 guide 规范显示名相同但 DDL 不同仍折叠', async () => {
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
@@ -670,8 +670,14 @@ describe('buildBatchMergeBase_ACU', () => {
 
       const result = await buildBatchMergeBase_ACU(1);
 
-      expect(result.data).toBeNull();
-      expect(result.error).toContain('无法构建合并基底');
+      expect(result.error).toBeNull();
+      expect(result.data?.sheet_in05z9vz).toBeUndefined();
+      expect(result.data?.sheet_bei_bao_wu_pin_biao).toMatchObject({
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: 'CREATE TABLE inventory_v2 (row_id INTEGER PRIMARY KEY, item_name TEXT);' },
+        content: [['row_id', '物品名称'], ['1', '铁剑']],
+      });
     } finally {
       vi.mocked(isSqliteMode).mockReturnValue(false);
       vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
@@ -4038,6 +4044,7 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     expect(result.success).toBe(true);
     const savedData = mockPersistTablesToChatMessage.mock.calls[0][0].tableData;
     expect(savedData.sheet_in05z9vz).toBeUndefined();
+    expect(savedData.sheet_bei_bao_wu_pin_biao.uid).toBe('sheet_bei_bao_wu_pin_biao');
     expect(savedData.sheet_bei_bao_wu_pin_biao.content).toEqual([
       ['row_id', 'item_name'],
       ['1', '铁剑'],

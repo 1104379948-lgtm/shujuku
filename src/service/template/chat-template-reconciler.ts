@@ -1,5 +1,5 @@
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
-import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
+import { buildStableSheetKeyCandidate_ACU, canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU, parseDDLTableConstraints_ACU, parseDDLTableName, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
 import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist';
@@ -100,22 +100,23 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
       }
       previous = aliasMatches[0];
     }
-    // 早期内置模板曾在保持稳定 key 的同时混用“主角信息”与“主角信息表”。
-    // 兼容范围绑定已知稳定 key 与明确名称对，禁止把任意“名称/名称表”推断成同一张用户表。
-    if (!previous && occupiedByKey && areLegacyEquivalentSheetNames_ACU(templateEntry.key, occupiedByKey.name, templateEntry.sheet.name)) {
-      previous = { key: templateEntry.key, sheet: occupiedByKey };
-    }
     if (!previous) {
-      if (occupiedByKey) {
-        blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」的 key「${templateEntry.key}」已被当前聊天占用。`);
+      const introducedKey = buildStableSheetKeyCandidate_ACU(templateEntry.sheet.name);
+      if (!introducedKey) {
+        blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」缺少可用于派生 key 的有效显示名。`);
+        continue;
+      }
+      const occupiedByIntroducedKey = candidateData[introducedKey] as Sheet_ACU | undefined;
+      if (occupiedByIntroducedKey) {
+        blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」派生 key「${introducedKey}」与当前表「${occupiedByIntroducedKey.name || introducedKey}」冲突；两张不同名称的表不能共享同一 key。`);
         continue;
       }
       try {
-        const introduced = asIntroducedSheet_ACU(templateEntry.sheet, templateEntry.key);
-        candidateData[templateEntry.key] = introduced;
-        audit.push({ sheetKey: templateEntry.key, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+        const introduced = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
+        candidateData[introducedKey] = introduced;
+        audit.push({ sheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
       } catch (error: any) {
-        blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${templateEntry.key}) 无法引入：${error?.message || String(error)}`);
+        blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 无法引入：${error?.message || String(error)}`);
       }
       continue;
     }
@@ -313,17 +314,6 @@ function accumulateTableAliases_ACU(sheet: Sheet_ACU, before: Sheet_ACU, templat
   else delete sheet.sourceData.tableAliases;
 }
 
-function areLegacyEquivalentSheetNames_ACU(sheetKey: string, left: unknown, right: unknown): boolean {
-  const knownAliases = new Map<string, ReadonlySet<string>>([
-    ['sheet_DpKcVGqg', new Set(['主角信息', '主角信息表'])],
-  ]);
-  const aliases = knownAliases.get(sheetKey);
-  if (!aliases) return false;
-  const leftName = canonicalizeDisplayName_ACU(left);
-  const rightName = canonicalizeDisplayName_ACU(right);
-  return leftName !== rightName && aliases.has(leftName) && aliases.has(rightName);
-}
-
 function headers_ACU(sheet: Sheet_ACU): string[] {
   const headers = sheet?.content?.[0];
   if (!Array.isArray(headers) || headers[0] !== 'row_id') throw new Error('缺少 row_id 首列表头。');
@@ -338,7 +328,7 @@ function headers_ACU(sheet: Sheet_ACU): string[] {
  */
 function asIntroducedSheet_ACU(sheet: Sheet_ACU, sheetKey: string): Sheet_ACU {
   const clone = clone_ACU(sheet);
-  if (clone.uid !== sheetKey) throw new Error(`新增表 uid 必须等于 key：${sheetKey}。`);
+  clone.uid = sheetKey;
   const headers = headers_ACU(clone);
   const templateRows = Array.isArray(clone.content) ? clone.content.slice(1) : [];
   const seedRows = Array.isArray(clone.seedRows) ? clone.seedRows : [];

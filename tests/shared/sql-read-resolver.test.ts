@@ -384,7 +384,7 @@ describe('sql read resolver', () => {
       .toThrow(/无法证明/);
   });
 
-  it('仅在物理名与作者 DDL 表名同时一致时迁移历史随机 key', () => {
+  it('规范显示名相同即迁移历史随机 key，不依赖 DDL 名', () => {
     const source = {
       sheet_in05z9vz: {
         uid: 'sheet_in05z9vz',
@@ -411,12 +411,12 @@ describe('sql read resolver', () => {
     } as any;
 
     expect([...resolveHistoricalSheetKeyMigrations_ACU(source, target)]).toEqual([
-      ['sheet_3NoMc1wI', 'sheet_ji_yao_biao'],
       ['sheet_in05z9vz', 'sheet_bei_bao_wu_pin_biao'],
+      ['sheet_3NoMc1wI', 'sheet_ji_yao_biao'],
     ]);
   });
 
-  it('同物理名但作者 DDL 表名不同或缺失时拒绝历史 key 迁移', () => {
+  it('同规范显示名时忽略 DDL 差异或缺失', () => {
     const source = {
       sheet_legacy: {
         name: '背包物品表',
@@ -430,15 +430,15 @@ describe('sql read resolver', () => {
       },
     } as any;
 
-    expect(() => resolveHistoricalSheetKeyMigrations_ACU(source, target))
-      .toThrow(/作者 DDL 表名不一致或缺失/);
+    expect([...resolveHistoricalSheetKeyMigrations_ACU(source, target)])
+      .toEqual([['sheet_legacy', 'sheet_stable']]);
 
     source.sheet_legacy.sourceData.ddl = '';
-    expect(() => resolveHistoricalSheetKeyMigrations_ACU(source, target))
-      .toThrow(/作者 DDL 表名不一致或缺失/);
+    expect([...resolveHistoricalSheetKeyMigrations_ACU(source, target)])
+      .toEqual([['sheet_legacy', 'sheet_stable']]);
   });
 
-  it('运行时已同时存在历史 key 与稳定 key 时拒绝覆盖稳定 key', () => {
+  it('运行时已存在目标 key 时跳过归并，不覆盖数据', () => {
     const source = {
       sheet_legacy: {
         name: '背包物品表',
@@ -456,7 +456,7 @@ describe('sql read resolver', () => {
       },
     } as any;
 
-    expect(() => resolveHistoricalSheetKeyMigrations_ACU(source, target))
-      .toThrow(/运行时基底已存在目标 key/);
+    expect([...resolveHistoricalSheetKeyMigrations_ACU(source, target)])
+      .toEqual([]);
   });
 });

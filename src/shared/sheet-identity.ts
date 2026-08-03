@@ -35,6 +35,8 @@ export interface StableSheetKeyAllocation_ACU {
 export interface PhysicalTableNameCollision_ACU {
   physicalTableName: string;
   sheetKeys: string[];
+  sheetNames: string[];
+  reason: 'identity_merge_failed' | 'homophone_distinct_names';
 }
 
 /**
@@ -47,9 +49,12 @@ export class PhysicalTableNameCollisionError_ACU extends Error {
   readonly collisions: PhysicalTableNameCollision_ACU[];
   constructor(collisions: PhysicalTableNameCollision_ACU[]) {
     const detail = collisions
-      .map(c => `「${c.physicalTableName}」← ${c.sheetKeys.join(' / ')}`)
+      .map(c => `「${c.physicalTableName}」← ${c.sheetNames.map((name, index) => `「${name}」(${c.sheetKeys[index]})`).join(' / ')}`)
       .join('；');
-    super(`SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
+    const hasIdentityMergeFailure = collisions.some(collision => collision.reason === 'identity_merge_failed');
+    super(hasIdentityMergeFailure
+      ? `SQLite 物理表名冲突：相同规范表名被保留为多个 key，说明身份归并未完成；请检查历史数据与指导表的 key 对齐。冲突：${detail}`
+      : `SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
     this.name = 'PhysicalTableNameCollisionError_ACU';
     this.collisions = collisions;
   }
@@ -106,17 +111,17 @@ export function resolvePhysicalTableNames_ACU(data: TableDataObject_ACU | Record
   // 而不是静默追加 hash 令两表分叉——静默重命名会随入参集合变化重新产生漂移。
   // 冲突应由启动自检提前拦截并提示用户改名（见 assertNoPhysicalTableNameCollision_ACU）。
   const result = new Map<string, string>();
-  const ownerBySlug = new Map<string, string>();
+  const ownerBySlug = new Map<string, { sheetKey: string; sheet: Sheet_ACU | null | undefined }>();
   const collisions: PhysicalTableNameCollision_ACU[] = [];
   for (const { sheetKey, sheet } of entries) {
     const base = physicalTableNameBase_ACU(sheet, sheetKey);
     const normalized = base.toLowerCase();
     const owner = ownerBySlug.get(normalized);
-    if (owner && owner !== sheetKey) {
-      collisions.push({ physicalTableName: base, sheetKeys: [owner, sheetKey] });
+    if (owner && owner.sheetKey !== sheetKey) {
+      collisions.push(buildPhysicalTableNameCollision_ACU(base, [owner.sheetKey, sheetKey], [owner.sheet, sheet]));
       continue;
     }
-    ownerBySlug.set(normalized, sheetKey);
+    ownerBySlug.set(normalized, { sheetKey, sheet });
     result.set(sheetKey, base);
   }
   if (collisions.length > 0) {
@@ -154,8 +159,8 @@ function physicalTableNameBase_ACU(sheet: Sheet_ACU | null | undefined, sheetKey
 export function detectPhysicalTableNameCollisions_ACU(
   data: TableDataObject_ACU | Record<string, unknown>,
 ): PhysicalTableNameCollision_ACU[] {
-  const ownerBySlug = new Map<string, { sheetKey: string; base: string }>();
-  const grouped = new Map<string, Set<string>>();
+  const ownerBySlug = new Map<string, { sheetKey: string; base: string; sheet: Sheet_ACU | null | undefined }>();
+  const grouped = new Map<string, { physicalTableName: string; sheetKeys: string[]; sheets: Array<Sheet_ACU | null | undefined> }>();
   const entries = Object.keys(data || {})
     .filter(sheetKey => sheetKey.startsWith('sheet_'))
     .sort()
@@ -165,18 +170,33 @@ export function detectPhysicalTableNameCollisions_ACU(
     const normalized = base.toLowerCase();
     const owner = ownerBySlug.get(normalized);
     if (!owner) {
-      ownerBySlug.set(normalized, { sheetKey, base });
+      ownerBySlug.set(normalized, { sheetKey, base, sheet });
       continue;
     }
     if (owner.sheetKey === sheetKey) continue;
-    const set = grouped.get(normalized) || new Set<string>([owner.sheetKey]);
-    set.add(sheetKey);
-    grouped.set(normalized, set);
+    const collision = grouped.get(normalized) || { physicalTableName: owner.base, sheetKeys: [owner.sheetKey], sheets: [owner.sheet] };
+    collision.sheetKeys.push(sheetKey);
+    collision.sheets.push(sheet);
+    grouped.set(normalized, collision);
   }
-  return [...grouped.entries()].map(([normalized, sheetKeys]) => ({
-    physicalTableName: ownerBySlug.get(normalized)!.base,
-    sheetKeys: [...sheetKeys],
-  }));
+  return [...grouped.values()].map(collision => buildPhysicalTableNameCollision_ACU(collision.physicalTableName, collision.sheetKeys, collision.sheets));
+}
+
+function buildPhysicalTableNameCollision_ACU(
+  physicalTableName: string,
+  sheetKeys: string[],
+  sheets: Array<Sheet_ACU | null | undefined>,
+): PhysicalTableNameCollision_ACU {
+  const sheetNames = sheets.map((sheet, index) => String(sheet?.name || sheetKeys[index]));
+  const canonicalNames = sheetNames.map(canonicalizeDisplayName_ACU);
+  return {
+    physicalTableName,
+    sheetKeys,
+    sheetNames,
+    reason: canonicalNames.length > 0 && canonicalNames.every(name => name === canonicalNames[0])
+      ? 'identity_merge_failed'
+      : 'homophone_distinct_names',
+  };
 }
 
 /** Startup guard: throws PhysicalTableNameCollisionError_ACU when any collision exists. */

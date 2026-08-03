@@ -316,7 +316,7 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
       isolationConfig: options.isolationConfig,
       legacyData: candidateData,
     });
-    if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'v2_successor_verified') {
+    if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'equivalent_projection_verified' && mixedDecision.kind !== 'v2_successor_verified') {
       registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
       return {
         migrated: false,

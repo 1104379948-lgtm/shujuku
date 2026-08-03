@@ -1,5 +1,6 @@
 import type { IsolationConfig_ACU } from '../../data/models/chat-message-data';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
+import { resolveHistoricalSheetKeyMigrations_ACU } from '../../shared/sql-read-resolver';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { collectMixedStorageEvidence_ACU, type MixedStorageEvidence_ACU } from './mixed-storage-evidence';
 import { auditTableDataForUpgrade_ACU, type UpgradeAuditResult_ACU } from './table-data-upgrade-audit';
@@ -27,6 +28,7 @@ export type MixedStorageDecisionDiagnosticCode_ACU =
   | 'v2_successor_activity_missing'
   | 'legacy_v2_fingerprints_equal'
   | 'legacy_v2_fingerprints_differ'
+  | 'legacy_keys_normalized'
   | 'merge_candidate_available'
   | 'merge_candidate_conflict';
 
@@ -185,6 +187,19 @@ function actionsFor_ACU(kind: MixedStorageDecisionKind_ACU): MixedStorageDecisio
   return ['noop', 'download_snapshots'];
 }
 
+function normalizeLegacyKeysToReplay_ACU(data: TableDataObject_ACU, replayedData: TableDataObject_ACU): { data: TableDataObject_ACU; migrations: Map<string, string> } {
+  const migrations = resolveHistoricalSheetKeyMigrations_ACU(data, replayedData);
+  if (migrations.size === 0) return { data, migrations };
+  const normalized = clone_ACU(data);
+  for (const [sourceKey, targetKey] of migrations) {
+    normalized[targetKey] = normalized[sourceKey];
+    const targetSheet = normalized[targetKey] as any;
+    if (targetSheet && typeof targetSheet === 'object') targetSheet.uid = targetKey;
+    delete normalized[sourceKey];
+  }
+  return { data: normalized, migrations };
+}
+
 export async function evaluateMixedStorageDecision_ACU(
   options: EvaluateMixedStorageDecisionOptions_ACU,
 ): Promise<MixedStorageDecision_ACU> {
@@ -192,14 +207,27 @@ export async function evaluateMixedStorageDecision_ACU(
   const initialChatIdentifier = String(currentChatFileIdentifier_ACU || '').trim();
   const legacyAudit = auditTableDataForUpgrade_ACU(options.legacyData);
   const legacyRepair = repairTableDataFromAudit_ACU(legacyAudit);
-  const repairedLegacyData = legacyRepair.candidateData as TableDataObject_ACU;
-  const evidence = await collectMixedStorageEvidence_ACU({
+  let repairedLegacyData = legacyRepair.candidateData as TableDataObject_ACU;
+  let evidence = await collectMixedStorageEvidence_ACU({
     chat: options.chat,
     isolationKey: options.isolationKey,
     isolationConfig: options.isolationConfig,
     legacyCandidateData: legacyAudit.status === 'unrecoverable' ? null : repairedLegacyData,
   });
   const diagnostics: MixedStorageDecisionDiagnosticCode_ACU[] = [];
+  if (evidence.v2.replay.status === 'success' && evidence.v2.replay.data) {
+    const normalized = normalizeLegacyKeysToReplay_ACU(repairedLegacyData, evidence.v2.replay.data);
+    if (normalized.migrations.size > 0) {
+      repairedLegacyData = normalized.data;
+      diagnostics.push('legacy_keys_normalized');
+      evidence = await collectMixedStorageEvidence_ACU({
+        chat: options.chat,
+        isolationKey: options.isolationKey,
+        isolationConfig: options.isolationConfig,
+        legacyCandidateData: repairedLegacyData,
+      });
+    }
+  }
   const scopeMatches = scopeSnapshot.chatReference === options.chat
     && scopeSnapshot.activeIsolationKey === options.isolationKey
     && scopeSnapshot.chatIdentifier === initialChatIdentifier

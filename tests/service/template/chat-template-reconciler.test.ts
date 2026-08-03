@@ -46,9 +46,9 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(defaultPlan.blockers).toEqual([]);
     expect(defaultPlan.hiddenSheetKeys).toEqual(['sheet_old']);
     expect(defaultPlan.deletedSheetKeys).toEqual([]);
-    expect(defaultPlan.candidateData.sheet_new.content).toEqual([['row_id', 'value'], ['9', '示例']]);
+    expect(defaultPlan.candidateData.sheet_xin_biao.content).toEqual([['row_id', 'value'], ['9', '示例']]);
     expect(defaultPlan.sheetChanges).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' }),
+      expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_xin_biao' }),
       expect.objectContaining({ kind: 'hide', sheetKey: 'sheet_old' }),
     ]));
 
@@ -60,8 +60,8 @@ describe('reconcileChatTemplate_ACU', () => {
     const accepted = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true, hardDeleteMissingSheets: true });
     expect(accepted.blockers).toEqual([]);
     expect(accepted.deletedSheetKeys).toEqual(['sheet_old']);
-    expect(accepted.candidateData.sheet_new.content).toEqual([['row_id', 'value'], ['9', '示例']]);
-    expect(accepted.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' })]);
+    expect(accepted.candidateData.sheet_xin_biao.content).toEqual([['row_id', 'value'], ['9', '示例']]);
+    expect(accepted.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_xin_biao' })]);
   });
 
   it('旧表无数据且新模板同名表有数据时，采用模板数据', async () => {
@@ -321,14 +321,16 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(invalidDefault.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', '']]);
   });
 
-  it('拒绝新表占用当前聊天已有不同表的 key', async () => {
+  it('不同显示名即使模板声明 key 已被占用，也作为派生 key 的新表引入', async () => {
     const baseline = state({ sheet_taken: sheet('sheet_taken', '旧表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值') });
     const template = state({ sheet_taken: sheet('sheet_taken', '新表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值') });
-    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
-    expect(plan.blockers.join('\n')).toContain('已被当前聊天占用');
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_xin_biao).toMatchObject({ uid: 'sheet_xin_biao', name: '新表' });
+    expect(plan.hiddenSheetKeys).toEqual(['sheet_taken']);
   });
 
-  it('同一稳定 key 的表名仅增减末尾“表”时按既有 Sheet 协调，而非误判 key 被占用', async () => {
+  it('同一模板 key 下显示名变化仍视为新表，不自动继承旧表', async () => {
     const baseline = state({
       sheet_DpKcVGqg: sheet('sheet_DpKcVGqg', '主角信息', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', [['1', '助手']]),
     });
@@ -336,15 +338,15 @@ describe('reconcileChatTemplate_ACU', () => {
       sheet_DpKcVGqg: sheet('sheet_DpKcVGqg', '主角信息表', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', []),
     });
 
-    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false });
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_DpKcVGqg).toMatchObject({ uid: 'sheet_DpKcVGqg', name: '主角信息表' });
-    expect(plan.candidateData.sheet_DpKcVGqg.content).toEqual([['row_id', '姓名'], ['1', '助手']]);
-    expect(plan.deletedSheetKeys).toEqual([]);
+    expect(plan.candidateData.sheet_zhu_jue_xin_xi_biao).toMatchObject({ uid: 'sheet_zhu_jue_xin_xi_biao', name: '主角信息表' });
+    expect(plan.candidateData.sheet_zhu_jue_xin_xi_biao.content).toEqual([['row_id', '姓名']]);
+    expect(plan.hiddenSheetKeys).toEqual(['sheet_DpKcVGqg']);
   });
 
-  it('任意用户表名仅增减末尾“表”时仍视为不同表，不扩大历史兼容范围', async () => {
+  it('不同名称的表使用显示名派生 key，与模板声明 key 无关', async () => {
     const baseline = state({
       sheet_stable: sheet('sheet_stable', '订单', ['row_id', '编号'], 'row_id INTEGER PRIMARY KEY,\n  order_no TEXT -- 编号', [['1', 'A-1']]),
     });
@@ -352,12 +354,11 @@ describe('reconcileChatTemplate_ACU', () => {
       sheet_stable: sheet('sheet_stable', '订单表', ['row_id', '编号'], 'row_id INTEGER PRIMARY KEY,\n  order_no TEXT -- 编号', []),
     });
 
-    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
 
-    expect(plan.blockers.join('\n')).toContain('已被当前聊天占用');
-    expect(plan.sheetChanges).toEqual([]);
-    expect(plan.deletedSheetKeys).toEqual([]);
-    expect(plan.candidateData.sheet_stable.content[1][1]).toBe('A-1');
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_ding_dan_biao.uid).toBe('sheet_ding_dan_biao');
+    expect(plan.hiddenSheetKeys).toEqual(['sheet_stable']);
   });
 
   it('稳定 key 与精确表名分别命中不同历史表时 fail closed，禁止静默串表', async () => {
@@ -381,7 +382,7 @@ describe('reconcileChatTemplate_ACU', () => {
   it.each([
     ['精确名称项在前', ['sheet_other', 'sheet_DpKcVGqg']],
     ['历史别名项在前', ['sheet_DpKcVGqg', 'sheet_other']],
-  ])('多个模板表争用同一历史 Sheet 时 fail closed：%s', async (_label, order) => {
+  ])('多个模板表中只有显式匹配项继承历史 Sheet，其他项按显示名作为新表引入：%s', async (_label, order) => {
     const baseline = state({
       sheet_DpKcVGqg: sheet('sheet_DpKcVGqg', '主角信息', ['row_id', '姓名'], 'row_id INTEGER PRIMARY KEY,\n  name TEXT -- 姓名', [['1', '历史数据']]),
     });
@@ -391,15 +392,14 @@ describe('reconcileChatTemplate_ACU', () => {
     };
     const template = state(Object.fromEntries(order.map(key => [key, entries[key]])));
 
-    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: true });
+    const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
 
-    expect(plan.blockers.join('\n')).toContain('多个表同时匹配');
-    expect(plan.sheetChanges).toEqual([]);
-    expect(plan.deletedSheetKeys).toEqual([]);
+    expect(plan.blockers).toEqual([]);
     expect(plan.candidateData.sheet_DpKcVGqg.content).toEqual([
       ['row_id', '姓名'],
       ['1', '历史数据'],
     ]);
+    expect(plan.candidateData.sheet_zhu_jue_xin_xi_biao).toMatchObject({ uid: 'sheet_zhu_jue_xin_xi_biao', name: '主角信息表' });
   });
 
   it('同一稳定 key 下 physical column 未变时允许表头改名并继承历史数据', async () => {
@@ -480,13 +480,10 @@ describe('reconcileChatTemplate_ACU', () => {
       current[skillsKey].content[0],
       ['1', '分析', '主动', 'Lv.1', '定位问题'],
     ]);
-    expect(plan.candidateData[protagonistKey].name).toBe('主角信息表');
-    expect(getSheetColumnProjection_ACU(plan.candidateData[protagonistKey]).visibleColumns.map(column => column.header)).toEqual(current[protagonistKey].content[0]);
-    expect(plan.candidateData[protagonistKey].content[1]).toEqual([
-      '1', null, null, null, '红发', null, null, null, null,
-      '助手', '女/18', '研究员', '旧经历', '理性',
-    ]);
-    expect(plan.candidateData[protagonistKey].sourceData.hiddenPhysicalColumns).toHaveLength(5);
+    const introducedProtagonistKey = 'sheet_zhu_jue_xin_xi_biao';
+    expect(plan.candidateData[introducedProtagonistKey].name).toBe('主角信息表');
+    expect(getSheetColumnProjection_ACU(plan.candidateData[introducedProtagonistKey]).visibleColumns.map(column => column.header)).toEqual(current[protagonistKey].content[0]);
+    expect(plan.hiddenSheetKeys).toContain(protagonistKey);
     expect(plan.deletedSheetKeys).toEqual([]);
     expect(plan.audit.find(item => item.sheetKey === globalKey)).toMatchObject({
       inheritedColumns: expect.arrayContaining(['当前详细地点', '上轮场景时间', '经过的时间', '当前时间']),
@@ -498,11 +495,11 @@ describe('reconcileChatTemplate_ACU', () => {
       addedColumns: [],
       deletedColumns: [],
     });
-    expect(plan.audit.find(item => item.sheetKey === protagonistKey)).toMatchObject({
-      inheritedColumns: ['外貌特征'],
-      addedColumns: expect.arrayContaining(['姓名', '性别', '年龄', '身份', '近况', '所在地点', '随身财物']),
-      deletedColumns: [],
-      hiddenColumns: expect.arrayContaining(['人物名称', '性别/年龄', '职业/身份', '过往经历', '性格特点']),
+    expect(plan.audit.find(item => item.sheetKey === introducedProtagonistKey)).toMatchObject({
+      match: 'introduced',
+      templateSheetKey: protagonistKey,
+      inheritedColumns: [],
+      addedColumns: current[protagonistKey].content[0].slice(1),
     });
   });
 
@@ -564,12 +561,12 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_rules: templateSheet }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_rules.content).toEqual([
+    expect(plan.candidateData.sheet_xi_tong_gui_ze_biao.content).toEqual([
       ['row_id', '规则类别', '规则名称'],
       ['1', '六维属性', '属性说明'],
       ['2', '经验', '升级公式'],
     ]);
-    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_rules' })]);
+    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_xi_tong_gui_ze_biao' })]);
   });
 
 
@@ -581,8 +578,8 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_new).toMatchObject({ content: [['row_id', 'value'], ['9', '示例']] });
-    expect(plan.candidateData.sheet_new.seedRows).toBeUndefined();
+    expect(plan.candidateData.sheet_xin_biao).toMatchObject({ content: [['row_id', 'value'], ['9', '示例']] });
+    expect(plan.candidateData.sheet_xin_biao.seedRows).toBeUndefined();
   });
 
   it('新增表无 content 数据行时，退回使用模板 seedRows 作为初始数据', async () => {
@@ -591,8 +588,8 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_new).toMatchObject({ content: [['row_id', 'value'], ['9', 'seed']] });
-    expect(plan.candidateData.sheet_new.seedRows).toBeUndefined();
+    expect(plan.candidateData.sheet_xin_biao).toMatchObject({ content: [['row_id', 'value'], ['9', 'seed']] });
+    expect(plan.candidateData.sheet_xin_biao.seedRows).toBeUndefined();
   });
 
   it('模板数据行缺少 row_id 时自动补齐稳定 row_id，不再拒绝引入', async () => {
@@ -605,7 +602,7 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_new.content).toEqual([
+    expect(plan.candidateData.sheet_xi_tong_gui_ze_biao.content).toEqual([
       ['row_id', 'rule_name', 'rule_desc'],
       ['1', '六维属性', '力量/敏捷/体质'],
       ['2', '初始分配', '总值36点'],
@@ -621,7 +618,7 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_new.content).toEqual([
+    expect(plan.candidateData.sheet_xi_tong_gui_ze_biao.content).toEqual([
       ['row_id', 'rule_name'],
       ['5', '已有ID'],
       ['6', '待分配'],
@@ -634,7 +631,7 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_new.content).toEqual([['row_id', 'a', 'b'], ['1', '只有A', '']]);
+    expect(plan.candidateData.sheet_xi_tong_gui_ze_biao.content).toEqual([['row_id', 'a', 'b'], ['1', '只有A', '']]);
   });
 
 
@@ -643,7 +640,7 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: templateSheet }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_new).toMatchObject({ content: [['row_id', 'value']] });
+    expect(plan.candidateData.sheet_xin_biao).toMatchObject({ content: [['row_id', 'value']] });
   });
 
   it('rebase 语义下 sourceData 字段删除可通过整表 checkpoint 表达', async () => {
@@ -726,9 +723,9 @@ describe('reconcileChatTemplate_ACU', () => {
     });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.candidateData.sheet_new.content).toEqual([['row_id', '地点']]);
-    expect(plan.candidateData.sheet_new.sourceData).toEqual({});
-    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_new' })]);
+    expect(plan.candidateData.sheet_quan_ju_shu_ju_biao.content).toEqual([['row_id', '地点']]);
+    expect(plan.candidateData.sheet_quan_ju_shu_ju_biao.sourceData).toEqual({});
+    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_quan_ju_shu_ju_biao' })]);
   });
 
   it('原生模式匹配旧表时只按表头继承，不解析错误 DDL', async () => {
@@ -755,9 +752,9 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: state({ sheet_new: invalidTemplate }), destructiveChangeConfirmed: false });
 
     expect(plan.blockers.join('\n')).toContain('完整 replay candidate DDL/表头预检失败');
-    expect(plan.blockers.join('\n')).toContain('sheet_new');
+    expect(plan.blockers.join('\n')).toContain('sheet_xin_biao');
     expect(plan.sheetChanges).toEqual([]);
-    expect(plan.candidateData.sheet_new).toBeUndefined();
+    expect(plan.candidateData.sheet_xin_biao).toBeUndefined();
     expect(plan.audit.every(item => item.operations.length === 0)).toBe(true);
   });
 
@@ -800,7 +797,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.blockers.join('\n')).toContain('完整 replay candidate 列投影预检失败');
     expect(plan.blockers.join('\n')).toContain('missing_column');
     expect(plan.sheetChanges).toEqual([]);
-    expect(plan.candidateData.sheet_new).toBeUndefined();
+    expect(plan.candidateData.sheet_xin_biao).toBeUndefined();
   });
 
   it('通过预检但违反 SQLite CHECK 的数据由真实 hydrate 阶段阻断', async () => {
@@ -816,7 +813,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.blockers.join('\n')).toContain('SQLite 写入失败：第 2 条语句失败（INSERT INTO xinbiao）');
     expect(plan.blockers.join('\n')).toContain('CHECK constraint failed: score > 0');
     expect(plan.sheetChanges).toEqual([]);
-    expect(plan.candidateData.sheet_new).toBeUndefined();
+    expect(plan.candidateData.sheet_xin_biao).toBeUndefined();
   });
 
   it('audit 与实际 change set 对账，包含 schema、metadata、introduction 和 hide/delete 摘要', async () => {
@@ -843,7 +840,7 @@ describe('reconcileChatTemplate_ACU', () => {
       baselineSheetKey: 'sheet_legacy', templateSheetKey: 'sheet_imported', canonicalName: '背包', metadataChangedFields: ['orderNo'],
     });
     expect(matchedAudit?.operations).toEqual([{ kind: 'rebase' }]);
-    expect(defaultPlan.audit.find(item => item.sheetKey === 'sheet_new')?.operations).toEqual([{ kind: 'introduction' }]);
+    expect(defaultPlan.audit.find(item => item.sheetKey === 'sheet_xin_biao')?.operations).toEqual([{ kind: 'introduction' }]);
     expect(defaultPlan.audit.find(item => item.sheetKey === 'sheet_old')?.operations).toEqual([{ kind: 'hide' }]);
 
     // 显式硬删除路径：hardDeleteMissingSheets=true + destructiveChangeConfirmed=true，产出 delete。

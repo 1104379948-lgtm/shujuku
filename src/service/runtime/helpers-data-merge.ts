@@ -23,6 +23,7 @@ import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
+import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
 
 /**
  * Legacy entry point retained for callers that need in-place normalization.
@@ -38,13 +39,36 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       return !!(sheetGuideData && typeof sheetGuideData === 'object' && Object.keys(sheetGuideData).some(k => k.startsWith('sheet_')));
   }
 
+  function isSheetAllowedByGuide_ACU(sheetKey: string, sheet: any, guideData: any, allowedKeys: Set<string>): boolean {
+      if (allowedKeys.has(sheetKey)) return true;
+      const canonicalName = canonicalizeDisplayName_ACU(sheet?.name);
+      if (!canonicalName || !guideData || typeof guideData !== 'object') return false;
+      return Object.keys(guideData).some(key => key.startsWith('sheet_')
+          && canonicalizeDisplayName_ACU(guideData[key]?.name) === canonicalName);
+  }
+
   function mergeSheetGuideStructureIntoData_ACU(mergedData: Record<string, any>, sheetGuideData: any): Record<string, any> {
       const guided = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
       const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
+      const historicalKeysByCanonicalName = new Map<string, string[]>();
+      Object.entries(mergedData).forEach(([key, sheet]: [string, any]) => {
+          if (!key.startsWith('sheet_') || !sheet || typeof sheet !== 'object') return;
+          const canonicalName = canonicalizeDisplayName_ACU(sheet.name);
+          if (!canonicalName) return;
+          const keys = historicalKeysByCanonicalName.get(canonicalName) || [];
+          keys.push(key);
+          historicalKeysByCanonicalName.set(canonicalName, keys);
+      });
       guideKeys.forEach(k => {
           if (!k || !k.startsWith('sheet_')) return;
           const guideSheet = guided[k];
-          const hist = mergedData[k];
+          const canonicalName = canonicalizeDisplayName_ACU(guideSheet?.name);
+          const historicalKeys = canonicalName ? (historicalKeysByCanonicalName.get(canonicalName) || []) : [];
+          if (historicalKeys.length > 1) {
+              logWarn_ACU(`[Merge] 指导表「${guideSheet?.name || k}」匹配多个历史 Sheet (${historicalKeys.join(', ')})，拒绝自动继承。`);
+          }
+          const historicalKey = historicalKeys.length === 1 ? historicalKeys[0] : null;
+          const hist = historicalKey ? mergedData[historicalKey] : undefined;
           if (hist && typeof hist === 'object') {
               const next = JSON.parse(JSON.stringify(hist));
               next.uid = k;
@@ -137,7 +161,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
               Object.keys(independentData).forEach(storedSheetKey => {
                   // [新增] 只处理当前模板/指导表中存在的表格
-                  if (!templateSheetKeySet.has(storedSheetKey)) {
+                  if (!isSheetAllowedByGuide_ACU(storedSheetKey, independentData[storedSheetKey], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
                       logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] - not in current template/guide`);
                       return;
                   }
@@ -188,7 +212,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
                   Object.keys(independentData).forEach(storedSheetKey => {
                       // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(storedSheetKey)) {
+                      if (!isSheetAllowedByGuide_ACU(storedSheetKey, independentData[storedSheetKey], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
                           logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] (legacy) - not in current template/guide`);
                           return;
                       }
@@ -220,7 +244,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                   const standardData: any = legacyStdData;
                   Object.keys(standardData).forEach(k => {
                       // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(k)) {
+                      if (!isSheetAllowedByGuide_ACU(k, standardData[k], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
                           return;
                       }
                       if (k.startsWith('sheet_') && !foundSheets[k] && standardData[k].name && !isSummaryOrOutlineTable_ACU(standardData[k].name)) {
@@ -237,7 +261,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                   const summaryData: any = legacySumData;
                   Object.keys(summaryData).forEach(k => {
                       // [新增] 只处理当前模板/指导表中存在的表格
-                      if (!templateSheetKeySet.has(k)) {
+                      if (!isSheetAllowedByGuide_ACU(k, summaryData[k], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
                           return;
                       }
                       if (k.startsWith('sheet_') && !foundSheets[k] && summaryData[k].name && isSummaryOrOutlineTable_ACU(summaryData[k].name)) {

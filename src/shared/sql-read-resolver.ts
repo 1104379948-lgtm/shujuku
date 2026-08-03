@@ -3,6 +3,7 @@ import { parseDDLColumnInfos_ACU, parseDDLTableName } from './ddl-utils';
 import { canonicalizeDisplayName_ACU, getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from './sheet-identity';
 import { resolveEffectiveDDL } from '../data/sqlite/schema-mapper';
 import { rebindSqlReadIdentifiers_ACU } from './sql-mutation-table-rebind';
+import { logWarn_ACU } from './utils';
 
 export interface SheetColumnAliasMapResult_ACU {
   aliases: Map<string, Map<string, string>>;
@@ -77,10 +78,9 @@ export function buildSheetTableAliasMap_ACU(
 
 /**
  * Resolves historical runtime sheet keys that may be safely moved to keys from a
- * newer guide/template snapshot. A destructive re-key requires two independent,
- * deterministic identity signals: the runtime physical name and the author DDL
- * table name must both match. Display-name/physical-name equality alone is not
- * sufficient because genuinely distinct sheets may collide after romanization.
+ * newer guide/template snapshot. Canonical display names are the sole automatic
+ * identity signal: they are user-visible, available to legacy snapshots and are
+ * stricter than the lossy pinyin physical name. Ambiguous mappings are skipped.
  */
 export function resolveHistoricalSheetKeyMigrations_ACU(
   sourceData: TableDataObject_ACU | Record<string, unknown> | null | undefined,
@@ -90,33 +90,38 @@ export function resolveHistoricalSheetKeyMigrations_ACU(
     return new Map();
   }
 
-  const sourcePhysicalNames = resolvePhysicalTableNames_ACU(sourceData);
-  const targetPhysicalNames = resolvePhysicalTableNames_ACU(targetData);
-  const targetByPhysicalName = new Map<string, { sheetKey: string; ddlTableName: string }>();
-
-  for (const [targetKey, physicalName] of targetPhysicalNames) {
-    const targetSheet = (targetData as Record<string, any>)[targetKey];
-    const ddlTableName = String(parseDDLTableName(String(targetSheet?.sourceData?.ddl || '')) || '').trim().toLowerCase();
-    targetByPhysicalName.set(physicalName.toLowerCase(), { sheetKey: targetKey, ddlTableName });
-  }
-
-  const migrations = new Map<string, string>();
-  for (const [sourceKey, physicalName] of sourcePhysicalNames) {
-    if (targetPhysicalNames.has(sourceKey)) continue;
-    const targetIdentity = targetByPhysicalName.get(physicalName.toLowerCase());
-    if (!targetIdentity) continue;
-    const sourceSheet = (sourceData as Record<string, any>)[sourceKey];
-    const ddlTableName = String(parseDDLTableName(String(sourceSheet?.sourceData?.ddl || '')) || '').trim().toLowerCase();
-    if (!ddlTableName || !targetIdentity.ddlTableName || ddlTableName !== targetIdentity.ddlTableName) {
-      throw new SheetTableAliasResolutionError_ACU(
-        `历史表身份迁移无法证明：${sourceKey} 与 ${targetIdentity.sheetKey} 共享物理表名「${physicalName}」，但作者 DDL 表名不一致或缺失。`,
-      );
+  const indexByCanonicalName = (data: TableDataObject_ACU | Record<string, unknown>, label: string): Map<string, string> => {
+    const indexed = new Map<string, string>();
+    const ambiguous = new Set<string>();
+    for (const [sheetKey, rawSheet] of Object.entries(data)) {
+      if (!sheetKey.startsWith('sheet_') || !rawSheet || typeof rawSheet !== 'object') continue;
+      const canonicalName = canonicalizeDisplayName_ACU((rawSheet as any).name);
+      if (!canonicalName) {
+        logWarn_ACU(`[SheetIdentity] ${label} sheet ${sheetKey} 缺少有效显示名，跳过历史 key 对齐。`);
+        continue;
+      }
+      if (ambiguous.has(canonicalName)) continue;
+      const existing = indexed.get(canonicalName);
+      if (existing && existing !== sheetKey) {
+        indexed.delete(canonicalName);
+        ambiguous.add(canonicalName);
+        logWarn_ACU(`[SheetIdentity] ${label} 中规范表名「${canonicalName}」对应多个 sheet，跳过历史 key 对齐。`);
+        continue;
+      }
+      indexed.set(canonicalName, sheetKey);
     }
-    const targetKey = targetIdentity.sheetKey;
+    return indexed;
+  };
+
+  const sourceByCanonicalName = indexByCanonicalName(sourceData, '历史数据');
+  const targetByCanonicalName = indexByCanonicalName(targetData, '目标快照');
+  const migrations = new Map<string, string>();
+  for (const [canonicalName, sourceKey] of sourceByCanonicalName) {
+    const targetKey = targetByCanonicalName.get(canonicalName);
+    if (!targetKey || sourceKey === targetKey) continue;
     if (Object.prototype.hasOwnProperty.call(sourceData, targetKey)) {
-      throw new SheetTableAliasResolutionError_ACU(
-        `历史表身份迁移冲突：${sourceKey} 对应 ${targetKey}，但运行时基底已存在目标 key。`,
-      );
+      logWarn_ACU(`[SheetIdentity] 历史 sheet ${sourceKey} 与目标 ${targetKey} 同名，但历史数据已存在目标 key；跳过归并。`);
+      continue;
     }
     migrations.set(sourceKey, targetKey);
   }

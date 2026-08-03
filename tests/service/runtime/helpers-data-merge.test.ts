@@ -654,7 +654,7 @@ describe('mergeAllIndependentTables_ACU', () => {
     expect(result!.sheet_0.updateConfig.uiSentinel).toBe(-1);
   });
 
-  it('V2 回放后用当前聊天指导表结构覆盖旧数据结构', async () => {
+  it('V2 回放表与指导表显示名不同，不继承旧数据', async () => {
     vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
     vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' } as any);
     vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({
@@ -708,9 +708,82 @@ describe('mergeAllIndependentTables_ACU', () => {
     expect(result!.sheet_test.exportConfig).toEqual({ enabled: true });
     expect(result!.sheet_test.orderNo).toBe(1);
     expect(result!.sheet_test.content[0]).toEqual(['row_id', '新列', '新增列']);
-    expect(result!.sheet_test.content[1]).toEqual(['1', '旧值', '']);
+    expect(result!.sheet_test.content[1]).toBeUndefined();
     expect(result!.sheet_test.seedRows).toEqual([['seed', '模板种子']]);
     expect(result!.sheet_removed).toBeUndefined();
+  });
+
+  it('V2 回放旧 key 与指导表规范显示名相同时迁入指导表 key', async () => {
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({
+      sheet_legacy: {
+        uid: 'sheet_legacy',
+        name: '背包物品表',
+        content: [['row_id', '物品名称'], ['1', '铁剑']],
+      },
+    } as any);
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '背包物品表', content: [['row_id', '物品名称', '数量']] },
+    } as any);
+    vi.mocked(materializeDataFromSheetGuide_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '背包物品表', content: [['row_id', '物品名称', '数量']] },
+    } as any);
+
+    const result = await mergeAllIndependentTables_ACU();
+
+    expect(result?.sheet_legacy).toBeUndefined();
+    expect(result?.sheet_new).toMatchObject({
+      uid: 'sheet_new',
+      name: '背包物品表',
+      content: [['row_id', '物品名称', '数量'], ['1', '铁剑', '']],
+    });
+  });
+
+  it('V2 回放表与指导表显示名不同，只保留指导表空壳', async () => {
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({
+      sheet_legacy: { uid: 'sheet_legacy', name: '旧表', content: [['row_id', '值'], ['1', '旧数据']] },
+    } as any);
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '新表', content: [['row_id', '值']] },
+    } as any);
+    vi.mocked(materializeDataFromSheetGuide_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '新表', content: [['row_id', '值']] },
+    } as any);
+
+    const result = await mergeAllIndependentTables_ACU();
+
+    expect(result?.sheet_legacy).toBeUndefined();
+    expect(result?.sheet_new).toMatchObject({
+      uid: 'sheet_new',
+      name: '新表',
+      content: [['row_id', '值']],
+    });
+  });
+
+  it('多个历史 key 匹配同一指导表时拒绝自动继承并记录警告', async () => {
+    const { logWarn_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({
+      sheet_legacy_a: { uid: 'sheet_legacy_a', name: '背包物品表', content: [['row_id', '物品名称'], ['1', '铁剑']] },
+      sheet_legacy_b: { uid: 'sheet_legacy_b', name: '背包物品表', content: [['row_id', '物品名称'], ['2', '药水']] },
+    } as any);
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '背包物品表', content: [['row_id', '物品名称']] },
+    } as any);
+    vi.mocked(materializeDataFromSheetGuide_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '背包物品表', content: [['row_id', '物品名称']] },
+    } as any);
+
+    const result = await mergeAllIndependentTables_ACU();
+
+    expect(result?.sheet_legacy_a).toBeUndefined();
+    expect(result?.sheet_legacy_b).toBeUndefined();
+    expect(result?.sheet_new?.content).toEqual([['row_id', '物品名称']]);
+    expect(logWarn_ACU).toHaveBeenCalledWith(expect.stringContaining('匹配多个历史 Sheet'));
   });
 });
 

@@ -34035,9 +34035,12 @@ $CONTENT
     class PhysicalTableNameCollisionError_ACU extends Error {
         constructor(collisions) {
             const detail = collisions
-                .map(c => `「${c.physicalTableName}」← ${c.sheetKeys.join(' / ')}`)
+                .map(c => `「${c.physicalTableName}」← ${c.sheetNames.map((name, index) => `「${name}」(${c.sheetKeys[index]})`).join(' / ')}`)
                 .join('；');
-            super(`SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
+            const hasIdentityMergeFailure = collisions.some(collision => collision.reason === 'identity_merge_failed');
+            super(hasIdentityMergeFailure
+                ? `SQLite 物理表名冲突：相同规范表名被保留为多个 key，说明身份归并未完成；请检查历史数据与指导表的 key 对齐。冲突：${detail}`
+                : `SQLite 物理表名冲突：不同表的名称拼音相同，请重命名其中一张表。冲突：${detail}`);
             this.name = 'PhysicalTableNameCollisionError_ACU';
             this.collisions = collisions;
         }
@@ -34097,11 +34100,11 @@ $CONTENT
             const base = physicalTableNameBase_ACU(sheet, sheetKey);
             const normalized = base.toLowerCase();
             const owner = ownerBySlug.get(normalized);
-            if (owner && owner !== sheetKey) {
-                collisions.push({ physicalTableName: base, sheetKeys: [owner, sheetKey] });
+            if (owner && owner.sheetKey !== sheetKey) {
+                collisions.push(buildPhysicalTableNameCollision_ACU(base, [owner.sheetKey, sheetKey], [owner.sheet, sheet]));
                 continue;
             }
-            ownerBySlug.set(normalized, sheetKey);
+            ownerBySlug.set(normalized, { sheetKey, sheet });
             result.set(sheetKey, base);
         }
         if (collisions.length > 0) {
@@ -34145,19 +34148,29 @@ $CONTENT
             const normalized = base.toLowerCase();
             const owner = ownerBySlug.get(normalized);
             if (!owner) {
-                ownerBySlug.set(normalized, { sheetKey, base });
+                ownerBySlug.set(normalized, { sheetKey, base, sheet });
                 continue;
             }
             if (owner.sheetKey === sheetKey)
                 continue;
-            const set = grouped.get(normalized) || new Set([owner.sheetKey]);
-            set.add(sheetKey);
-            grouped.set(normalized, set);
+            const collision = grouped.get(normalized) || { physicalTableName: owner.base, sheetKeys: [owner.sheetKey], sheets: [owner.sheet] };
+            collision.sheetKeys.push(sheetKey);
+            collision.sheets.push(sheet);
+            grouped.set(normalized, collision);
         }
-        return [...grouped.entries()].map(([normalized, sheetKeys]) => ({
-            physicalTableName: ownerBySlug.get(normalized).base,
-            sheetKeys: [...sheetKeys],
-        }));
+        return [...grouped.values()].map(collision => buildPhysicalTableNameCollision_ACU(collision.physicalTableName, collision.sheetKeys, collision.sheets));
+    }
+    function buildPhysicalTableNameCollision_ACU(physicalTableName, sheetKeys, sheets) {
+        const sheetNames = sheets.map((sheet, index) => String(sheet?.name || sheetKeys[index]));
+        const canonicalNames = sheetNames.map(canonicalizeDisplayName_ACU);
+        return {
+            physicalTableName,
+            sheetKeys,
+            sheetNames,
+            reason: canonicalNames.length > 0 && canonicalNames.every(name => name === canonicalNames[0])
+                ? 'identity_merge_failed'
+                : 'homophone_distinct_names',
+        };
     }
     /** Startup guard: throws PhysicalTableNameCollisionError_ACU when any collision exists. */
     function assertNoPhysicalTableNameCollision_ACU(data) {
@@ -36548,8 +36561,7 @@ $CONTENT
                 }
                 catch (e) {
                     const errorMessage = e?.message || String(e);
-                    const reason = /^第 \d+ 条语句失败:/.test(errorMessage) ? 'SQLite 写入失败' : errorMessage;
-                    const message = `[SyncBridge] 加载表 ${key} (${sheet.name}) 失败: ${reason}`;
+                    const message = `[SyncBridge] 加载表 ${key} (${sheet.name}) 失败: ${formatSqliteLoadFailure_ACU(errorMessage)}`;
                     logError_ACU(message);
                     if (options.strict) {
                         throw new Error(message);
@@ -36804,6 +36816,20 @@ $CONTENT
             return null;
         }
     }
+    /**
+     * 保留批量写入的可行动诊断，但绝不把 INSERT 的 VALUES（用户业务数据）传播到日志或 UI。
+     */
+    function formatSqliteLoadFailure_ACU(errorMessage) {
+        const batchFailure = /^第 (\d+) 条语句失败:\s*([\s\S]*?)\s*→\s*([\s\S]+)$/.exec(errorMessage);
+        if (!batchFailure)
+            return errorMessage;
+        const [, statementIndex, statement, sqliteError] = batchFailure;
+        const operation = /^(INSERT\s+INTO|CREATE\s+TABLE|UPDATE|DELETE\s+FROM)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/i.exec(statement.trim());
+        const statementSummary = operation
+            ? `${operation[1].replace(/\s+/g, ' ').toUpperCase()} ${operation[2]}`
+            : 'SQLite 语句';
+        return `SQLite 写入失败：第 ${statementIndex} 条语句失败（${statementSummary}）：${sqliteError.trim()}`;
+    }
     /** 安全的 JSON 解析 */
     function safeJsonParse(val) {
         if (val === null || val === undefined)
@@ -36820,20 +36846,23 @@ $CONTENT
      * 使用生产 SyncBridge 路径执行真实 SQLite hydrate。
      * 成功意味着 DDL 与全部 snapshot 行已经在临时 SQLite 中实际执行。
      */
-    async function hydrateTableDataStrict_ACU(tableData) {
+    async function hydrateTableDataStrict_ACU(tableData, options = {}) {
         const engine = new SqliteEngine();
         const syncBridge = new SyncBridge(engine);
         try {
             await engine.init();
-            syncBridge.loadFromTableData(tableData, { strict: true });
+            syncBridge.loadFromTableData(tableData, {
+                strict: true,
+                allowRuntimeDdlFallback: options.allowRuntimeDdlFallback === true,
+            });
         }
         finally {
             engine.dispose();
         }
     }
-    async function validateSqliteTemplateDataStrict_ACU(tableData) {
+    async function validateSqliteTemplateDataStrict_ACU(tableData, options = {}) {
         try {
-            await hydrateTableDataStrict_ACU(tableData);
+            await hydrateTableDataStrict_ACU(tableData, options);
             return { success: true };
         }
         catch (error) {
@@ -37918,38 +37947,48 @@ $CONTENT
     }
     /**
      * Resolves historical runtime sheet keys that may be safely moved to keys from a
-     * newer guide/template snapshot. A destructive re-key requires two independent,
-     * deterministic identity signals: the runtime physical name and the author DDL
-     * table name must both match. Display-name/physical-name equality alone is not
-     * sufficient because genuinely distinct sheets may collide after romanization.
+     * newer guide/template snapshot. Canonical display names are the sole automatic
+     * identity signal: they are user-visible, available to legacy snapshots and are
+     * stricter than the lossy pinyin physical name. Ambiguous mappings are skipped.
      */
     function resolveHistoricalSheetKeyMigrations_ACU(sourceData, targetData) {
         if (!sourceData || typeof sourceData !== 'object' || !targetData || typeof targetData !== 'object') {
             return new Map();
         }
-        const sourcePhysicalNames = resolvePhysicalTableNames_ACU(sourceData);
-        const targetPhysicalNames = resolvePhysicalTableNames_ACU(targetData);
-        const targetByPhysicalName = new Map();
-        for (const [targetKey, physicalName] of targetPhysicalNames) {
-            const targetSheet = targetData[targetKey];
-            const ddlTableName = String(parseDDLTableName(String(targetSheet?.sourceData?.ddl || '')) || '').trim().toLowerCase();
-            targetByPhysicalName.set(physicalName.toLowerCase(), { sheetKey: targetKey, ddlTableName });
-        }
-        const migrations = new Map();
-        for (const [sourceKey, physicalName] of sourcePhysicalNames) {
-            if (targetPhysicalNames.has(sourceKey))
-                continue;
-            const targetIdentity = targetByPhysicalName.get(physicalName.toLowerCase());
-            if (!targetIdentity)
-                continue;
-            const sourceSheet = sourceData[sourceKey];
-            const ddlTableName = String(parseDDLTableName(String(sourceSheet?.sourceData?.ddl || '')) || '').trim().toLowerCase();
-            if (!ddlTableName || !targetIdentity.ddlTableName || ddlTableName !== targetIdentity.ddlTableName) {
-                throw new SheetTableAliasResolutionError_ACU(`历史表身份迁移无法证明：${sourceKey} 与 ${targetIdentity.sheetKey} 共享物理表名「${physicalName}」，但作者 DDL 表名不一致或缺失。`);
+        const indexByCanonicalName = (data, label) => {
+            const indexed = new Map();
+            const ambiguous = new Set();
+            for (const [sheetKey, rawSheet] of Object.entries(data)) {
+                if (!sheetKey.startsWith('sheet_') || !rawSheet || typeof rawSheet !== 'object')
+                    continue;
+                const canonicalName = canonicalizeDisplayName_ACU(rawSheet.name);
+                if (!canonicalName) {
+                    logWarn_ACU(`[SheetIdentity] ${label} sheet ${sheetKey} 缺少有效显示名，跳过历史 key 对齐。`);
+                    continue;
+                }
+                if (ambiguous.has(canonicalName))
+                    continue;
+                const existing = indexed.get(canonicalName);
+                if (existing && existing !== sheetKey) {
+                    indexed.delete(canonicalName);
+                    ambiguous.add(canonicalName);
+                    logWarn_ACU(`[SheetIdentity] ${label} 中规范表名「${canonicalName}」对应多个 sheet，跳过历史 key 对齐。`);
+                    continue;
+                }
+                indexed.set(canonicalName, sheetKey);
             }
-            const targetKey = targetIdentity.sheetKey;
+            return indexed;
+        };
+        const sourceByCanonicalName = indexByCanonicalName(sourceData, '历史数据');
+        const targetByCanonicalName = indexByCanonicalName(targetData, '目标快照');
+        const migrations = new Map();
+        for (const [canonicalName, sourceKey] of sourceByCanonicalName) {
+            const targetKey = targetByCanonicalName.get(canonicalName);
+            if (!targetKey || sourceKey === targetKey)
+                continue;
             if (Object.prototype.hasOwnProperty.call(sourceData, targetKey)) {
-                throw new SheetTableAliasResolutionError_ACU(`历史表身份迁移冲突：${sourceKey} 对应 ${targetKey}，但运行时基底已存在目标 key。`);
+                logWarn_ACU(`[SheetIdentity] 历史 sheet ${sourceKey} 与目标 ${targetKey} 同名，但历史数据已存在目标 key；跳过归并。`);
+                continue;
             }
             migrations.set(sourceKey, targetKey);
         }
@@ -43312,19 +43351,46 @@ $CONTENT
             return ['noop', 'download_snapshots', 'commit_merge_candidate'];
         return ['noop', 'download_snapshots'];
     }
+    function normalizeLegacyKeysToReplay_ACU(data, replayedData) {
+        const migrations = resolveHistoricalSheetKeyMigrations_ACU(data, replayedData);
+        if (migrations.size === 0)
+            return { data, migrations };
+        const normalized = clone_ACU$5(data);
+        for (const [sourceKey, targetKey] of migrations) {
+            normalized[targetKey] = normalized[sourceKey];
+            const targetSheet = normalized[targetKey];
+            if (targetSheet && typeof targetSheet === 'object')
+                targetSheet.uid = targetKey;
+            delete normalized[sourceKey];
+        }
+        return { data: normalized, migrations };
+    }
     async function evaluateMixedStorageDecision_ACU(options) {
         const scopeSnapshot = options.scope || captureScope_ACU(options.chat);
         const initialChatIdentifier = String(currentChatFileIdentifier_ACU || '').trim();
         const legacyAudit = auditTableDataForUpgrade_ACU(options.legacyData);
         const legacyRepair = repairTableDataFromAudit_ACU(legacyAudit);
-        const repairedLegacyData = legacyRepair.candidateData;
-        const evidence = await collectMixedStorageEvidence_ACU({
+        let repairedLegacyData = legacyRepair.candidateData;
+        let evidence = await collectMixedStorageEvidence_ACU({
             chat: options.chat,
             isolationKey: options.isolationKey,
             isolationConfig: options.isolationConfig,
             legacyCandidateData: legacyAudit.status === 'unrecoverable' ? null : repairedLegacyData,
         });
         const diagnostics = [];
+        if (evidence.v2.replay.status === 'success' && evidence.v2.replay.data) {
+            const normalized = normalizeLegacyKeysToReplay_ACU(repairedLegacyData, evidence.v2.replay.data);
+            if (normalized.migrations.size > 0) {
+                repairedLegacyData = normalized.data;
+                diagnostics.push('legacy_keys_normalized');
+                evidence = await collectMixedStorageEvidence_ACU({
+                    chat: options.chat,
+                    isolationKey: options.isolationKey,
+                    isolationConfig: options.isolationConfig,
+                    legacyCandidateData: repairedLegacyData,
+                });
+            }
+        }
         const scopeMatches = scopeSnapshot.chatReference === options.chat
             && scopeSnapshot.activeIsolationKey === options.isolationKey
             && scopeSnapshot.chatIdentifier === initialChatIdentifier
@@ -43813,7 +43879,7 @@ $CONTENT
                 isolationConfig: options.isolationConfig,
                 legacyData: candidateData,
             });
-            if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'v2_successor_verified') {
+            if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'equivalent_projection_verified' && mixedDecision.kind !== 'v2_successor_verified') {
                 registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
                 return {
                     migrated: false,
@@ -46321,23 +46387,24 @@ $CONTENT
                 }
                 previous = aliasMatches[0];
             }
-            // 早期内置模板曾在保持稳定 key 的同时混用“主角信息”与“主角信息表”。
-            // 兼容范围绑定已知稳定 key 与明确名称对，禁止把任意“名称/名称表”推断成同一张用户表。
-            if (!previous && occupiedByKey && areLegacyEquivalentSheetNames_ACU(templateEntry.key, occupiedByKey.name, templateEntry.sheet.name)) {
-                previous = { key: templateEntry.key, sheet: occupiedByKey };
-            }
             if (!previous) {
-                if (occupiedByKey) {
-                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」的 key「${templateEntry.key}」已被当前聊天占用。`);
+                const introducedKey = buildStableSheetKeyCandidate_ACU(templateEntry.sheet.name);
+                if (!introducedKey) {
+                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」缺少可用于派生 key 的有效显示名。`);
+                    continue;
+                }
+                const occupiedByIntroducedKey = candidateData[introducedKey];
+                if (occupiedByIntroducedKey) {
+                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」派生 key「${introducedKey}」与当前表「${occupiedByIntroducedKey.name || introducedKey}」冲突；两张不同名称的表不能共享同一 key。`);
                     continue;
                 }
                 try {
-                    const introduced = asIntroducedSheet_ACU(templateEntry.sheet, templateEntry.key);
-                    candidateData[templateEntry.key] = introduced;
-                    audit.push({ sheetKey: templateEntry.key, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+                    const introduced = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
+                    candidateData[introducedKey] = introduced;
+                    audit.push({ sheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
                 }
                 catch (error) {
-                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${templateEntry.key}) 无法引入：${error?.message || String(error)}`);
+                    blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 无法引入：${error?.message || String(error)}`);
                 }
                 continue;
             }
@@ -46539,17 +46606,6 @@ $CONTENT
         else
             delete sheet.sourceData.tableAliases;
     }
-    function areLegacyEquivalentSheetNames_ACU(sheetKey, left, right) {
-        const knownAliases = new Map([
-            ['sheet_DpKcVGqg', new Set(['主角信息', '主角信息表'])],
-        ]);
-        const aliases = knownAliases.get(sheetKey);
-        if (!aliases)
-            return false;
-        const leftName = canonicalizeDisplayName_ACU(left);
-        const rightName = canonicalizeDisplayName_ACU(right);
-        return leftName !== rightName && aliases.has(leftName) && aliases.has(rightName);
-    }
     function headers_ACU(sheet) {
         const headers = sheet?.content?.[0];
         if (!Array.isArray(headers) || headers[0] !== 'row_id')
@@ -46564,8 +46620,7 @@ $CONTENT
      */
     function asIntroducedSheet_ACU(sheet, sheetKey) {
         const clone = clone_ACU$4(sheet);
-        if (clone.uid !== sheetKey)
-            throw new Error(`新增表 uid 必须等于 key：${sheetKey}。`);
+        clone.uid = sheetKey;
         const headers = headers_ACU(clone);
         const templateRows = Array.isArray(clone.content) ? clone.content.slice(1) : [];
         const seedRows = Array.isArray(clone.seedRows) ? clone.seedRows : [];
@@ -47940,14 +47995,40 @@ $CONTENT
     function hasUsableSheetGuide_ACU(sheetGuideData) {
         return !!(sheetGuideData && typeof sheetGuideData === 'object' && Object.keys(sheetGuideData).some(k => k.startsWith('sheet_')));
     }
+    function isSheetAllowedByGuide_ACU(sheetKey, sheet, guideData, allowedKeys) {
+        if (allowedKeys.has(sheetKey))
+            return true;
+        const canonicalName = canonicalizeDisplayName_ACU(sheet?.name);
+        if (!canonicalName || !guideData || typeof guideData !== 'object')
+            return false;
+        return Object.keys(guideData).some(key => key.startsWith('sheet_')
+            && canonicalizeDisplayName_ACU(guideData[key]?.name) === canonicalName);
+    }
     function mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData) {
         const guided = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
         const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
+        const historicalKeysByCanonicalName = new Map();
+        Object.entries(mergedData).forEach(([key, sheet]) => {
+            if (!key.startsWith('sheet_') || !sheet || typeof sheet !== 'object')
+                return;
+            const canonicalName = canonicalizeDisplayName_ACU(sheet.name);
+            if (!canonicalName)
+                return;
+            const keys = historicalKeysByCanonicalName.get(canonicalName) || [];
+            keys.push(key);
+            historicalKeysByCanonicalName.set(canonicalName, keys);
+        });
         guideKeys.forEach(k => {
             if (!k || !k.startsWith('sheet_'))
                 return;
             const guideSheet = guided[k];
-            const hist = mergedData[k];
+            const canonicalName = canonicalizeDisplayName_ACU(guideSheet?.name);
+            const historicalKeys = canonicalName ? (historicalKeysByCanonicalName.get(canonicalName) || []) : [];
+            if (historicalKeys.length > 1) {
+                logWarn_ACU(`[Merge] 指导表「${guideSheet?.name || k}」匹配多个历史 Sheet (${historicalKeys.join(', ')})，拒绝自动继承。`);
+            }
+            const historicalKey = historicalKeys.length === 1 ? historicalKeys[0] : null;
+            const hist = historicalKey ? mergedData[historicalKey] : undefined;
             if (hist && typeof hist === 'object') {
                 const next = JSON.parse(JSON.stringify(hist));
                 next.uid = k;
@@ -48043,7 +48124,7 @@ $CONTENT
                 const updateGroupKeys = tagData.updateGroupKeys || [];
                 Object.keys(independentData).forEach(storedSheetKey => {
                     // [新增] 只处理当前模板/指导表中存在的表格
-                    if (!templateSheetKeySet.has(storedSheetKey)) {
+                    if (!isSheetAllowedByGuide_ACU(storedSheetKey, independentData[storedSheetKey], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
                         logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] - not in current template/guide`);
                         return;
                     }
@@ -48090,7 +48171,7 @@ $CONTENT
                     const updateGroupKeys = readUpdateGroupKeys_ACU(message);
                     Object.keys(independentData).forEach(storedSheetKey => {
                         // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(storedSheetKey)) {
+                        if (!isSheetAllowedByGuide_ACU(storedSheetKey, independentData[storedSheetKey], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
                             logDebug_ACU(`[Merge] Skipping sheet [${storedSheetKey}] (legacy) - not in current template/guide`);
                             return;
                         }
@@ -48122,7 +48203,7 @@ $CONTENT
                     const standardData = legacyStdData;
                     Object.keys(standardData).forEach(k => {
                         // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(k)) {
+                        if (!isSheetAllowedByGuide_ACU(k, standardData[k], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
                             return;
                         }
                         if (k.startsWith('sheet_') && !foundSheets[k] && standardData[k].name && !isSummaryOrOutlineTable_ACU(standardData[k].name)) {
@@ -48140,7 +48221,7 @@ $CONTENT
                     const summaryData = legacySumData;
                     Object.keys(summaryData).forEach(k => {
                         // [新增] 只处理当前模板/指导表中存在的表格
-                        if (!templateSheetKeySet.has(k)) {
+                        if (!isSheetAllowedByGuide_ACU(k, summaryData[k], hasSheetGuide ? sheetGuideData : null, templateSheetKeySet)) {
                             return;
                         }
                         if (k.startsWith('sheet_') && !foundSheets[k] && summaryData[k].name && isSummaryOrOutlineTable_ACU(summaryData[k].name)) {
@@ -81142,8 +81223,10 @@ $CONTENT
         const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(base, guideBase);
         for (const [sourceKey, targetKey] of historicalKeyMigrations) {
             base[targetKey] = base[sourceKey];
+            if (base[targetKey] && typeof base[targetKey] === 'object')
+                base[targetKey].uid = targetKey;
             delete base[sourceKey];
-            logDebug_ACU(`[MergeBase] 已将可证明同表的历史 Sheet key 重绑定：${sourceKey} -> ${targetKey}`);
+            logDebug_ACU(`[MergeBase] 已按规范表名将历史 Sheet key 对齐：${sourceKey} -> ${targetKey}`);
         }
         if (!base.mate && guideBase?.mate)
             base.mate = JSON.parse(JSON.stringify(guideBase.mate));
@@ -81508,6 +81591,8 @@ $CONTENT
             const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(workingTableData, identityTargetData);
             for (const [sourceKey, targetKey] of historicalKeyMigrations) {
                 workingTableData[targetKey] = workingTableData[sourceKey];
+                if (workingTableData[targetKey] && typeof workingTableData[targetKey] === 'object')
+                    workingTableData[targetKey].uid = targetKey;
                 delete workingTableData[sourceKey];
             }
         }
@@ -103889,17 +103974,22 @@ $CONTENT
             };
         }
         const candidateData = repair.candidateData;
-        const sqlitePreflight = await validateSqliteTemplateDataStrict_ACU(candidateData);
-        if (!sqlitePreflight.success) {
-            const message = sqlitePreflight.error || '候选数据无法通过 SQLite hydrate。';
-            return {
-                success: false,
-                persisted: false,
-                failureStage: 'preflight',
-                auditStatus: audit.status,
-                issues: [{ code: 'sqlite_preflight_failed', message }],
-                error: `导入候选数据未通过 SQLite 预检：${message}`,
-            };
+        if (isSqliteMode()) {
+            const sqlitePreflight = await validateSqliteTemplateDataStrict_ACU(candidateData, { allowRuntimeDdlFallback: true });
+            if (!sqlitePreflight.success) {
+                const message = sqlitePreflight.error || '候选数据无法通过 SQLite hydrate。';
+                return {
+                    success: false,
+                    persisted: false,
+                    failureStage: 'preflight',
+                    auditStatus: audit.status,
+                    issues: [{ code: 'sqlite_preflight_failed', message }],
+                    error: `导入候选数据未通过 SQLite 预检：${message}`,
+                };
+            }
+        }
+        else {
+            logDebug_ACU('[TableImport] 当前为 native 存储模式，跳过 SQLite hydrate 预检。');
         }
         const sheetKeys = Object.keys(candidateData).filter(k => k.startsWith('sheet_'));
         const targetMessageIndex = resolveLatestAiMessageIndex_ACU();

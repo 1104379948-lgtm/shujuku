@@ -610,8 +610,9 @@ function mergeGuideStructureIntoBaseData_ACU(data: Record<string, any>): Record<
     const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(base, guideBase);
     for (const [sourceKey, targetKey] of historicalKeyMigrations) {
         base[targetKey] = base[sourceKey];
+        if (base[targetKey] && typeof base[targetKey] === 'object') base[targetKey].uid = targetKey;
         delete base[sourceKey];
-        logDebug_ACU(`[MergeBase] 已将可证明同表的历史 Sheet key 重绑定：${sourceKey} -> ${targetKey}`);
+        logDebug_ACU(`[MergeBase] 已按规范表名将历史 Sheet key 对齐：${sourceKey} -> ${targetKey}`);
     }
 
     if (!base.mate && guideBase?.mate) base.mate = JSON.parse(JSON.stringify(guideBase.mate));
@@ -991,6 +992,7 @@ function buildSqlInitializationBase_ACU(baseSnapshot: Record<string, any>, targe
         const historicalKeyMigrations = resolveHistoricalSheetKeyMigrations_ACU(workingTableData, identityTargetData);
         for (const [sourceKey, targetKey] of historicalKeyMigrations) {
             workingTableData[targetKey] = workingTableData[sourceKey];
+            if (workingTableData[targetKey] && typeof workingTableData[targetKey] === 'object') workingTableData[targetKey].uid = targetKey;
             delete workingTableData[sourceKey];
         }
     }
