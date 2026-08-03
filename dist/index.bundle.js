@@ -48043,6 +48043,9 @@ $CONTENT
                 const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
                     ? JSON.parse(JSON.stringify(guideSheet.content[0]))
                     : null;
+                if (guideHeader && String(guideHeader[0] ?? '') !== 'row_id') {
+                    throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || k)}`);
+                }
                 if (!Array.isArray(next.content))
                     next.content = guideHeader ? [guideHeader] : [['row_id']];
                 if (guideHeader) {
@@ -48054,10 +48057,10 @@ $CONTENT
                             continue;
                         if (row.length < targetLen) {
                             while (row.length < targetLen)
-                                row.push('');
+                                row.push(null);
                         }
                         else if (row.length > targetLen) {
-                            row.splice(targetLen);
+                            throw new Error(`历史表「${String(guideSheet?.name || k)}」行宽度超过 Sheet Guide 表头，拒绝截断数据。`);
                         }
                     }
                 }
@@ -48985,8 +48988,10 @@ $CONTENT
             // 表名映射：中文 → 英文
             this.tableNameMap = new Map();
             // 列名映射：表英文名.中文列名 → 英文列名
+            // 仅保留可翻译的展示名，避免物理列自映射改变 translateSql 的输出。
             this.columnNameMap = new Map();
-            // 反向映射：英文 → 中文
+            // 反向映射：物理列名 → 展示名；无注释物理列使用自身作为展示名，
+            // 因此它同时是 CRUD 写入门禁可依赖的 runtime schema 存在性集合。
             this.reverseTableMap = new Map();
             this.reverseColumnMap = new Map();
         }
@@ -49025,6 +49030,14 @@ $CONTENT
                         mapper.columnNameMap.set(key, colName);
                         mapper.reverseColumnMap.set(`${englishTableName}.${colName}`, comment);
                     }
+                }
+                // 注释只提供展示名，不能决定物理列是否存在。显式 DDL 中常见 STR/DEX
+                // 这类无注释 ASCII 列；若不登记它们，CRUD 的 fail-closed 门禁会误拒绝真实列。
+                // 不覆盖上方的注释映射，保证有展示名的列仍可按中文表头解析。
+                for (const column of parseDDLColumnInfos_ACU(ddl)) {
+                    const key = `${englishTableName}.${column.sqlName}`;
+                    if (!mapper.reverseColumnMap.has(key))
+                        mapper.reverseColumnMap.set(key, column.sqlName);
                 }
             }
             return mapper;
@@ -71503,9 +71516,14 @@ $CONTENT
                 updateConfig: s.updateConfig || { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1, sendLatestRows: -1, groupId: -1 },
                 exportConfig: ensureExportConfigDefaults_ACU(s.exportConfig, s.name || k),
             };
-            if (Array.isArray(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])) {
+            // `_seedRows` 是早期聊天级 guide 的历史字段；读取时收敛为当前
+            // `seedRows`，避免它在身份列健全化前被静默丢弃。
+            const seedRows = Array.isArray(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])
+                ? s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU]
+                : s._seedRows;
+            if (Array.isArray(seedRows)) {
                 try {
-                    keep[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU]));
+                    keep[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(seedRows));
                 }
                 catch (e) {
                     keep[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = [];
@@ -71609,6 +71627,106 @@ $CONTENT
         return setCurrentChatPlotScopeState_ACU({ mode: 'inherit_global' }, { reason: 'clear_plot_override' });
     }
 
+    const ROW_ID_ALIASES = new Set(['id', 'rowid', 'row-id', 'row_id', '行号']);
+    function clone$7(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function isRowIdAlias(value) {
+        return ROW_ID_ALIASES.has(String(value ?? '').trim().toLowerCase());
+    }
+    function label(sheet, key) {
+        return `表「${String(sheet?.name ?? '') || key}」(${key})`;
+    }
+    function normalizeSheetGuideRowIds_ACU(guideData) {
+        if (!guideData || typeof guideData !== 'object' || Array.isArray(guideData)) {
+            return { guideData, changed: false, blockers: ['Sheet Guide 必须是对象。'] };
+        }
+        const candidate = clone$7(guideData);
+        const blockers = [];
+        let changed = false;
+        for (const [key, sheet] of Object.entries(candidate)) {
+            if (!key.startsWith('sheet_'))
+                continue;
+            if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet)) {
+                blockers.push(`Sheet Guide ${key} 不是对象。`);
+                continue;
+            }
+            const content = sheet.content;
+            const header = Array.isArray(content) ? content[0] : null;
+            const name = label(sheet, key);
+            if (!Array.isArray(header) || header.length === 0) {
+                blockers.push(`${name} 缺少有效表头，无法规范化 row_id。`);
+                continue;
+            }
+            const aliases = header.map(isRowIdAlias);
+            const identityIndexes = aliases.map((matched, index) => matched ? index : -1).filter(index => index >= 0);
+            if (identityIndexes.some(index => index > 0)) {
+                blockers.push(`${name} 的身份列位于第 ${identityIndexes[0] + 1} 列，无法安全移动。`);
+                continue;
+            }
+            // `_seedRows` existed in early guide payloads and remains in older chat
+            // snapshots. Preserve its field spelling while normalizing its row shape.
+            const seedRowsField = Object.prototype.hasOwnProperty.call(sheet, CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU)
+                ? CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU : '_seedRows';
+            const seedRows = sheet[seedRowsField];
+            if (seedRows !== undefined && !Array.isArray(seedRows)) {
+                blockers.push(`${name} 的种子行不是数组。`);
+                continue;
+            }
+            if (Array.isArray(seedRows) && seedRows.some(row => !Array.isArray(row))) {
+                blockers.push(`${name} 存在非数组种子行，无法安全规范化。`);
+                continue;
+            }
+            const businessWidth = header.length;
+            if (header[0] === 'row_id') {
+                // Canonical header; only validate and normalize existing seed identities below.
+            }
+            else if (isRowIdAlias(header[0])) {
+                header[0] = 'row_id';
+                changed = true;
+            }
+            else {
+                header.unshift('row_id');
+                changed = true;
+                for (const row of seedRows || []) {
+                    if (row.length > businessWidth) {
+                        blockers.push(`${name} 的种子行宽度超过表头，无法安全插入 row_id。`);
+                        continue;
+                    }
+                    while (row.length < businessWidth)
+                        row.push(null);
+                    row.unshift(null);
+                }
+            }
+            const rows = Array.isArray(seedRows) ? seedRows : [];
+            if (rows.some(row => row.length > header.length)) {
+                blockers.push(`${name} 的种子行宽度超过规范化表头。`);
+                continue;
+            }
+            for (const row of rows)
+                while (row.length < header.length)
+                    row.push(null);
+            const reserved = createStableRowIdReservation_ACU(rows);
+            const seen = new Set();
+            for (const row of rows) {
+                const id = String(row[0] ?? '').trim();
+                if (!id) {
+                    row[0] = allocateStableRowId_ACU(reserved);
+                    changed = true;
+                }
+                else if (seen.has(id))
+                    blockers.push(`${name} 存在重复 row_id「${id}」，不能自动重写。`);
+                else {
+                    if (row[0] !== id)
+                        changed = true;
+                    row[0] = id;
+                    seen.add(id);
+                }
+            }
+        }
+        return { guideData: candidate, changed: blockers.length === 0 && changed, blockers };
+    }
+
     /**
      * service/template/chat-scope/chat-scope-sheet.ts
      * Sheet 排序和清洗（E 组）
@@ -71678,7 +71796,13 @@ $CONTENT
     }
     // [新增] 基于"空白指导表"构建可合并的骨架数据（深拷贝，避免后续修改污染原对象）
     function buildGuidedBaseDataFromSheetGuide_ACU(guideData) {
-        const normalized = normalizeGuideData_ACU(guideData);
+        if (!guideData)
+            return { mate: { type: 'chatSheets', version: 1 } };
+        const identityNormalized = normalizeSheetGuideRowIds_ACU(guideData);
+        if (identityNormalized.blockers.length > 0) {
+            throw new Error(`Sheet Guide row_id 结构无效：${identityNormalized.blockers.join('；')}`);
+        }
+        const normalized = normalizeGuideData_ACU(identityNormalized.guideData);
         if (!normalized)
             return { mate: { type: 'chatSheets', version: 1 } };
         try {
@@ -71841,6 +71965,17 @@ $CONTENT
         });
         return rows;
     }
+    function normalizeGuideRowIdentitiesForUse_ACU(guideData) {
+        if (!guideData)
+            return null;
+        // 必须先审计原始 guide。若先经过 normalizeGuideData_ACU，缺失 content
+        // 会被伪造为 [null]，从而把损坏结构误判成可安全插入 row_id 的空表。
+        const result = normalizeSheetGuideRowIds_ACU(guideData);
+        if (result.blockers.length > 0) {
+            throw new Error(`Sheet Guide row_id 结构无效：${result.blockers.join('；')}`);
+        }
+        return normalizeGuideData_ACU(result.guideData);
+    }
     function ensureStableRowIdsForSeedRows_ACU(seedRows) {
         const normalizedRows = cloneTableRows_ACU(seedRows).map(normalizeSeedRow_ACU);
         return assignMissingStableRowIds_ACU(normalizedRows);
@@ -71896,7 +72031,7 @@ $CONTENT
         return shouldUseInitialSeedRows_ACU();
     }
     function materializeDataFromSheetGuide_ACU(guideData, { includeSeedRows = true } = {}) {
-        const normalized = normalizeGuideData_ACU(guideData);
+        const normalized = normalizeGuideRowIdentitiesForUse_ACU(guideData);
         if (!normalized)
             return { mate: { type: 'chatSheets', version: 1 } };
         const out = { mate: normalized.mate || { type: 'chatSheets', version: 1 } };
@@ -72128,14 +72263,15 @@ $CONTENT
         const normalizedKey = String(isolationKey ?? '');
         const scopedTemplateState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey: normalizedKey })
             || migrateLegacyTemplateScopeForCurrentChat_ACU({ chat, isolationKey: normalizedKey });
-        const scopedGuideData = normalizeGuideData_ACU(scopedTemplateState?.guideData);
+        const scopedGuideData = normalizeGuideRowIdentitiesForUse_ACU(scopedTemplateState?.guideData);
         if (scopedGuideData && Object.keys(scopedGuideData).some(k => k.startsWith('sheet_'))) {
             return scopedGuideData;
         }
         const buildGuideDataFromTemplateSource_ACU = (templateSource) => {
             const templateSnapshot = sanitizeTemplateSnapshotForChat_ACU(templateSource);
             const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(templateSnapshot?.templateObj, { stripSeedRows: false });
-            return (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) ? guideData : null;
+            const normalizedGuideData = normalizeGuideRowIdentitiesForUse_ACU(guideData);
+            return (normalizedGuideData && Object.keys(normalizedGuideData).some(k => k.startsWith('sheet_'))) ? normalizedGuideData : null;
         };
         if (scopedTemplateState?.mode === 'chat_override' && scopedTemplateState?.templateStr) {
             const overrideGuideData = buildGuideDataFromTemplateSource_ACU(scopedTemplateState.templateStr);
@@ -72155,8 +72291,9 @@ $CONTENT
         }
         const globalSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU();
         const globalGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(globalSnapshot?.templateObj, { stripSeedRows: false });
-        if (globalGuideData && Object.keys(globalGuideData).some(k => k.startsWith('sheet_'))) {
-            return globalGuideData;
+        const normalizedGlobalGuideData = normalizeGuideRowIdentitiesForUse_ACU(globalGuideData);
+        if (normalizedGlobalGuideData && Object.keys(normalizedGlobalGuideData).some(k => k.startsWith('sheet_'))) {
+            return normalizedGlobalGuideData;
         }
         return null;
     }
@@ -72165,7 +72302,14 @@ $CONTENT
         const first = getChatFirstLayerMessage_ACU(chat);
         if (!first)
             return false;
-        const normalized = normalizeGuideData_ACU(guideData);
+        let normalized;
+        try {
+            normalized = normalizeGuideRowIdentitiesForUse_ACU(guideData);
+        }
+        catch (error) {
+            logWarn_ACU('[SheetGuide] 拒绝写入非 canonical row_id 结构：', error);
+            return false;
+        }
         if (!normalized || !Object.keys(normalized).some(k => k.startsWith('sheet_')))
             return false;
         const normalizedKey = String(isolationKey ?? '');
@@ -80993,9 +81137,13 @@ $CONTENT
         if (guideSheet.sourceData)
             mergedSheet.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
         // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的
-        if (Array.isArray(guideSheet.content) && guideSheet.content.length > 0 &&
-            Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
-            mergedSheet.content[0] = JSON.parse(JSON.stringify(guideSheet.content[0]));
+        const guideHeader = Array.isArray(guideSheet.content) ? guideSheet.content[0] : null;
+        if (guideHeader && (!Array.isArray(guideHeader) || String(guideHeader[0] ?? '') !== 'row_id')) {
+            throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || 'unknown')}`);
+        }
+        if (Array.isArray(guideHeader)
+            && Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
+            mergedSheet.content[0] = JSON.parse(JSON.stringify(guideHeader));
         }
     }
     function loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData) {

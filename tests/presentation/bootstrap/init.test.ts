@@ -4,10 +4,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 const m = vi.hoisted(() => ({
   chatChanged: undefined as undefined | ((name: string) => Promise<void>),
+  chatMutationHandler: undefined as undefined | ((data: any) => Promise<void>),
   currentChatKey: '',
-  api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat' }, eventSource: { on: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
-  gate: { lastUserMessageId: 7 as any, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true } as any },
+  api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat', MESSAGE_DELETED: 'deleted', MESSAGE_SWIPED: 'swiped' }, eventSource: { on: vi.fn(), makeFirst: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
+  gate: { lastUserMessageId: 7 as any, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true } as any, generationSeq: 0, activeGenerations: [] as any[] },
   resetTakeover: vi.fn(), dispose: vi.fn(), setData: vi.fn(), setTables: vi.fn(), setMessages: vi.fn(), setTotal: vi.fn(), setChat: vi.fn(),
+  setChatMutationTimer: vi.fn(),
   notify: vi.fn(), resetScript: vi.fn(), loadPreset: vi.fn(), loadMessages: vi.fn(), refresh: vi.fn(),
   preload: vi.fn(), shouldRebuild: vi.fn(), rebuild: vi.fn(), restoreFlush: vi.fn(),
 }));
@@ -19,8 +21,8 @@ vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn(
 vi.mock('../../../src/presentation/triggers/settings-ui-sync', () => ({ attemptToLoadCoreApis_ACU: vi.fn(() => true), handleNewMessageDebounced_ACU: vi.fn() }));
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: vi.fn(), handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
-  newMessageDebounceTimer_ACU: null, _set_newMessageDebounceTimer_ACU: vi.fn(), generationGate_ACU: m.gate,
-  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: vi.fn(), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: vi.fn(), recordLastUserSend_ACU: vi.fn(), settings_ACU: { plotSettings: {} }, shouldProcessAutoTableUpdateForGenerationEnded_ACU: vi.fn(), shouldProcessPlotForGeneration_ACU: vi.fn(), shouldProcessSummaryVectorIndexForGeneration_ACU: vi.fn(),
+  chatMutationDebounceTimer_ACU: null, _set_chatMutationDebounceTimer_ACU: m.setChatMutationTimer, generationGate_ACU: m.gate,
+  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: vi.fn(), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: vi.fn(), recordLastUserSend_ACU: vi.fn(), settings_ACU: { plotSettings: {} }, shouldProcessAutoTableUpdateForGenerationEnded_ACU: vi.fn(), shouldProcessPlotForGeneration_ACU: vi.fn(), shouldProcessSummaryVectorIndexForGeneration_ACU: vi.fn(),
   _set_allChatMessages_ACU: m.setMessages, _set_currentChatFileIdentifier_ACU: (value: string) => { m.currentChatKey = value; m.setChat(value); }, _set_currentJsonTableData_ACU: m.setData, _set_independentTableStates_ACU: m.setTables, _set_isProcessing_Plot_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: m.setTotal,
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
@@ -49,6 +51,7 @@ beforeAll(async () => {
   vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
   m.api.eventSource.on.mockImplementation((event: string, callback: any) => {
     if (event === 'chat') m.chatChanged = callback;
+    if (event === 'deleted' || event === 'swiped') m.chatMutationHandler = callback;
   });
   const { mainInitialize_ACU } = await import('../../../src/presentation/bootstrap/init');
   mainInitialize_ACU();
@@ -66,7 +69,7 @@ beforeEach(() => {
   m.shouldRebuild.mockReturnValue(false);
   m.rebuild.mockResolvedValue(undefined);
   m.restoreFlush.mockResolvedValue(0);
-  Object.assign(m.gate, { lastUserMessageId: 7, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true } });
+  Object.assign(m.gate, { lastUserMessageId: 7, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true }, generationSeq: 3, activeGenerations: [{ seq: 3 }] });
 });
 
 describe('mainInitialize_ACU CHAT_CHANGED 无活动聊天早退', () => {
@@ -86,7 +89,7 @@ describe('mainInitialize_ACU CHAT_CHANGED 无活动聊天早退', () => {
     expect(m.loadPreset).not.toHaveBeenCalled();
     expect(m.loadMessages).not.toHaveBeenCalled();
     expect(m.refresh).not.toHaveBeenCalled();
-    expect(m.gate).toEqual({ lastUserMessageId: null, lastUserMessageText: '', lastUserMessageAt: 0, lastUserSendIntentAt: 0, lastGeneration: null });
+    expect(m.gate).toEqual({ lastUserMessageId: null, lastUserMessageText: '', lastUserMessageAt: 0, lastUserSendIntentAt: 0, lastGeneration: null, generationSeq: 0, activeGenerations: [] });
   });
 
   it('无效聊天名但仍有消息时不误清理运行时', async () => {
@@ -131,6 +134,21 @@ describe('mainInitialize_ACU CHAT_CHANGED 向量 flush 恢复编排', () => {
 
     expect(m.rebuild).not.toHaveBeenCalled();
     expect(m.restoreFlush).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+});
+
+describe('mainInitialize_ACU 聊天变更防抖', () => {
+  it('删除或滑动事件仅设置聊天变更 timer', async () => {
+    vi.useFakeTimers();
+    expect(m.chatMutationHandler).toBeTypeOf('function');
+
+    await m.chatMutationHandler!({});
+
+    expect(m.setChatMutationTimer).toHaveBeenCalledOnce();
+    expect(m.refresh).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(m.refresh).toHaveBeenCalledOnce();
     vi.useRealTimers();
   });
 });

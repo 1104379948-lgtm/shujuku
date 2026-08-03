@@ -89,6 +89,40 @@ describe('NameMapper', () => {
       expect(m.resolveColumnName('jiyaobiao', '内容')).toBe('content');
       expect(m.getAllTableNames()).toEqual(['jiyaobiao']);
     });
+
+    it('无 DDL 注释的物理 ASCII 列仍被视为可写列，且不覆盖有注释列的展示名', () => {
+      const m = NameMapper.fromDDLs(new Map([
+        ['diaochayuanjuesekabiao', `CREATE TABLE investigator ( -- 调查员角色卡表
+  row_id INTEGER PRIMARY KEY, -- 行号
+  STR TEXT,
+  DEX TEXT,
+  name TEXT -- 姓名
+);`],
+      ]));
+
+      expect(m.hasColumnName('diaochayuanjuesekabiao', 'STR')).toBe(true);
+      expect(m.resolveColumnName('diaochayuanjuesekabiao', 'STR')).toBe('STR');
+      expect(m.getChineseColumnName('diaochayuanjuesekabiao', 'STR')).toBe('STR');
+      expect(m.getChineseColumnName('diaochayuanjuesekabiao', 'name')).toBe('姓名');
+      expect(m.hasColumnName('diaochayuanjuesekabiao', '不存在的列')).toBe(false);
+      expect(m.translateSql('SELECT STR FROM 调查员角色卡表 WHERE 姓名 = \'助手\'')).toBe(
+        "SELECT STR FROM diaochayuanjuesekabiao WHERE name = '助手'",
+      );
+    });
+
+    it('无法提取列定义时不产生伪物理列', () => {
+      const m = NameMapper.fromDDLs(new Map([
+        ['empty_table', `CREATE TABLE empty_table ( -- 空表
+  PRIMARY KEY (row_id),
+  CHECK (1 = 1)
+);`],
+      ]));
+
+      expect(m.tableCount).toBe(1);
+      expect(m.hasColumnName('empty_table', 'row_id')).toBe(true);
+      expect(m.hasColumnName('empty_table', 'PRIMARY')).toBe(false);
+      expect(m.hasColumnName('empty_table', 'CHECK')).toBe(false);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════

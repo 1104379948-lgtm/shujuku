@@ -79,6 +79,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
               const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
                   ? JSON.parse(JSON.stringify(guideSheet.content[0]))
                   : null;
+              if (guideHeader && String(guideHeader[0] ?? '') !== 'row_id') {
+                  throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || k)}`);
+              }
               if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [['row_id']];
               if (guideHeader) {
                   next.content[0] = guideHeader;
@@ -87,9 +90,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                       const row = next.content[r];
                       if (!Array.isArray(row)) continue;
                       if (row.length < targetLen) {
-                          while (row.length < targetLen) row.push('');
+                          while (row.length < targetLen) row.push(null);
                       } else if (row.length > targetLen) {
-                          row.splice(targetLen);
+                          throw new Error(`历史表「${String(guideSheet?.name || k)}」行宽度超过 Sheet Guide 表头，拒绝截断数据。`);
                       }
                   }
               }

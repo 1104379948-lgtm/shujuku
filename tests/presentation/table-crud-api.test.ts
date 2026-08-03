@@ -288,6 +288,24 @@ describe('createTableCrudApi — SQLite 模式', () => {
   let api: Record<string, Function>;
   const mockCtx: any = {};
 
+  function useInvestigatorSheetWithUncommentedStats() {
+    mockCurrentJsonTableData = {
+      sheet_diao_cha_yuan_jue_se_ka_biao: {
+        uid: 'sheet_diao_cha_yuan_jue_se_ka_biao',
+        name: '调查员角色卡表',
+        sourceData: {
+          ddl: `CREATE TABLE investigator_legacy ( -- 调查员角色卡表
+  row_id INTEGER PRIMARY KEY, -- 行号
+  STR TEXT,
+  DEX TEXT,
+  name TEXT -- 姓名
+);`,
+        },
+        content: [['row_id', 'STR', 'DEX', '姓名'], ['1', '50', '60', '助手']],
+      },
+    };
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsSqliteMode = true;
@@ -333,12 +351,14 @@ describe('createTableCrudApi — SQLite 模式', () => {
     mockExecuteRuntimeMutation.mockReturnValue({ changes: 1, errors: [] });
     mockGetRuntimeData.mockImplementation(() => {
       const workingData = JSON.parse(JSON.stringify(mockCurrentJsonTableData));
-      const sheet = workingData.sheet_0;
+      const sheet = Object.entries(workingData)
+        .find(([key, value]) => key.startsWith('sheet_') && value && typeof value === 'object')?.[1] as any;
+      if (!sheet) return workingData;
       const lastCall = mockExecuteRuntimeMutation.mock.calls.at(-1) || [];
       const sql = String(lastCall[0] || '');
       const params = (lastCall[1] || []) as any[];
       if (sql.startsWith('INSERT')) {
-        sheet.content.push(['3', params[0] ?? '', params[1] ?? '']);
+        sheet.content.push([String(sheet.content.length), params[0] ?? '', params[1] ?? '']);
       } else if (sql.startsWith('DELETE')) {
         sheet.content = sheet.content.filter((row: any[]) => row[0] !== params[0]);
       } else if (sql.startsWith('UPDATE')) {
@@ -418,6 +438,18 @@ describe('createTableCrudApi — SQLite 模式', () => {
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
         'UPDATE `beibaowupinbiao` SET `quantity` = ? WHERE `row_id` = ?;',
         ['10', '1'],
+      );
+    });
+
+    it('显式 DDL 中无注释的 ASCII 物理列仍可更新', async () => {
+      useInvestigatorSheetWithUncommentedStats();
+
+      const result = await api.updateCell('调查员角色卡表', 1, 'STR', '65');
+
+      expect(result).toBe(true);
+      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
+        'UPDATE `diaochayuanjuesekabiao` SET `STR` = ? WHERE `row_id` = ?;',
+        ['65', '1'],
       );
     });
 
@@ -504,6 +536,18 @@ describe('createTableCrudApi — SQLite 模式', () => {
       expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     });
 
+    it('显式 DDL 中无注释的 ASCII 物理列仍可批量更新', async () => {
+      useInvestigatorSheetWithUncommentedStats();
+
+      const result = await api.updateRow('调查员角色卡表', 1, { STR: '65' });
+
+      expect(result).toBe(true);
+      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
+        'UPDATE `diaochayuanjuesekabiao` SET `STR` = ? WHERE `row_id` = ?;',
+        ['65', '1'],
+      );
+    });
+
     it('无有效列时返回 false（无效操作）', async () => {
       const result = await api.updateRow('背包物品表', 1, { '不存在的列': '值' });
       expect(result).toBe(false);
@@ -569,6 +613,18 @@ describe('createTableCrudApi — SQLite 模式', () => {
       expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
         'INSERT INTO `beibaowupinbiao` (`item_name`) VALUES (?);',
         ["铁剑'加强版"],
+      );
+    });
+
+    it('显式 DDL 中无注释的 ASCII 物理列仍可插入', async () => {
+      useInvestigatorSheetWithUncommentedStats();
+
+      const result = await api.insertRow('调查员角色卡表', { STR: '65' });
+
+      expect(result).toBe(2);
+      expect(mockExecuteRuntimeMutation).toHaveBeenCalledWith(
+        'INSERT INTO `diaochayuanjuesekabiao` (`STR`) VALUES (?);',
+        ['65'],
       );
     });
 
@@ -640,6 +696,17 @@ describe('createTableCrudApi — SQLite 模式', () => {
 
     it('包含未解析列时拒绝 INSERT，不能静默丢弃字段', async () => {
       const result = await api.insertRow('背包物品表', { '物品名': '盾牌', '不存在的列': '值' });
+
+      expect(result).toBe(-1);
+      expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    });
+
+    it('DDL 中存在但 canonical 表头缺失的 ASCII 物理列仍拒绝写入', async () => {
+      useInvestigatorSheetWithUncommentedStats();
+      mockCurrentJsonTableData.sheet_diao_cha_yuan_jue_se_ka_biao.content[0] = ['row_id', 'DEX', '姓名'];
+
+      const result = await api.insertRow('调查员角色卡表', { STR: '65' });
 
       expect(result).toBe(-1);
       expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();

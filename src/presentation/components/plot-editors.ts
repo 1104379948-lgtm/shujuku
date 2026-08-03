@@ -4,7 +4,27 @@
 import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../shared/defaults-json.js';
 import { showToastr_ACU } from '../theme/toast';
 
-import { settings_ACU } from '../../service/runtime/state-manager';
+import {
+  settings_ACU,
+  isAutoUpdatingCard_ACU,
+  wasStoppedByUser_ACU,
+  autoFillDebounceTimer_ACU,
+  chatMutationDebounceTimer_ACU,
+  currentAbortController_ACU,
+  activeAbortControllers_ACU,
+  manualExtraHint_ACU,
+  trackAbortController_ACU,
+  untrackAbortController_ACU,
+  abortAllActiveRequests_ACU,
+  _set_currentAbortController_ACU,
+  _set_isAutoUpdatingCard_ACU,
+  _set_manualExtraHint_ACU,
+  _set_wasStoppedByUser_ACU,
+  _set_autoFillDebounceTimer_ACU,
+  _set_chatMutationDebounceTimer_ACU,
+} from '../../service/runtime/state-manager';
+
+let plotTaskEditorAutoSaveTimer_ACU: ReturnType<typeof setTimeout> | null = null;
 import { saveSettingsAndNotify_ACU } from './settings-ui-helpers';
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { escapeHtml_ACU } from '../../shared/html-helpers';
@@ -565,39 +585,13 @@ function persistPlotTaskEditorSettings_ACU(source = 'ui_task_edit') {
   }
 
 
-  export let isAutoUpdatingCard_ACU = false; // Tracks if an update is in progress
-  export let wasStoppedByUser_ACU = false; // [新增] 标记更新是否被用户手动终止
-  export let newMessageDebounceTimer_ACU: ReturnType<typeof setTimeout> | null = null;
-  export let currentAbortController_ACU: AbortController | null = null; // [新增] 用于中止正在进行的AI请求
-  // activePlotEditorSettings_ACU, currentPlotTaskEditorId_ACU, currentEditablePlotPresetState_ACU 已搬到 service/plot/plot-state.ts
-  export let plotTaskEditorAutoSaveTimer_ACU: ReturnType<typeof setTimeout> | null = null;
-  export let activeAbortControllers_ACU: Set<AbortController> = new Set(); // [新增] 并发请求的 AbortController 集合
-  export let manualExtraHint_ACU = ''; // [新增] 手动更新时的额外提示词（一次性）
-
-  export function trackAbortController_ACU(controller: AbortController) {
-      if (controller) activeAbortControllers_ACU.add(controller);
-  }
-
-  export function untrackAbortController_ACU(controller: AbortController) {
-      if (controller) activeAbortControllers_ACU.delete(controller);
-  }
-
-  export function abortAllActiveRequests_ACU() {
-      activeAbortControllers_ACU.forEach(controller => {
-          try {
-              controller.abort();
-          } catch (e) {
-              // ignore
-          }
-      });
-      activeAbortControllers_ACU.clear();
-  }
-
-  // --- [新增] 内部保存函数：保存单个表格的数据到聊天历史 ---
-export function _set_currentAbortController_ACU(v: any) { currentAbortController_ACU = v; }
-
-export function _set_isAutoUpdatingCard_ACU(v: any) { isAutoUpdatingCard_ACU = v; }
-export function _set_manualExtraHint_ACU(v: any) { manualExtraHint_ACU = v; }
-export function _set_wasStoppedByUser_ACU(v: any) { wasStoppedByUser_ACU = v; }
-// _set_currentEditablePlotPresetState_ACU, _set_activePlotEditorSettings_ACU, _set_currentPlotTaskEditorId_ACU 已搬到 service/plot/plot-state.ts
-export function _set_newMessageDebounceTimer_ACU(v: any) { newMessageDebounceTimer_ACU = v; }
+// 运行时可变状态统一归 service/runtime/state-manager 所有；此处仅保留兼容导出。
+export {
+  isAutoUpdatingCard_ACU, wasStoppedByUser_ACU,
+  autoFillDebounceTimer_ACU, chatMutationDebounceTimer_ACU,
+  currentAbortController_ACU, activeAbortControllers_ACU,
+  manualExtraHint_ACU, trackAbortController_ACU, untrackAbortController_ACU,
+  abortAllActiveRequests_ACU, _set_currentAbortController_ACU, _set_isAutoUpdatingCard_ACU,
+  _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU,
+  _set_autoFillDebounceTimer_ACU, _set_chatMutationDebounceTimer_ACU,
+};

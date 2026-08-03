@@ -20,6 +20,7 @@ import { formatPlotScopeUpdatedAt_ACU } from '../../../shared/utils';
 import { ensureExportConfigDefaults_ACU, ensureGlobalInjectionConfigDefaults_ACU } from '../../worldbook/injection-engine';
 import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU, isLegacyMatchForIsolation_ACU } from '../../../data/repositories/chat-message-data-repo';
 import { normalizeGuideData_ACU } from './chat-scope-base';
+import { normalizeSheetGuideRowIds_ACU } from './sheet-guide-row-id-normalizer';
 import { getCurrentChatTemplateScopeState_ACU, buildChatTemplateScopeStateFromCurrent_ACU, setCurrentChatTemplateScopeState_ACU } from './chat-scope-template';
 import { migrateLegacyTemplateScopeForCurrentChat_ACU, getChatSheetGuideDataForIsolationKey_ACU, buildChatSheetGuideDataFromTemplateObj_ACU } from './chat-scope-guide';
 
@@ -86,7 +87,12 @@ import { migrateLegacyTemplateScopeForCurrentChat_ACU, getChatSheetGuideDataForI
 
   // [新增] 基于"空白指导表"构建可合并的骨架数据（深拷贝，避免后续修改污染原对象）
   export function buildGuidedBaseDataFromSheetGuide_ACU(guideData: any) {
-      const normalized = normalizeGuideData_ACU(guideData);
+      if (!guideData) return { mate: { type: 'chatSheets', version: 1 } };
+      const identityNormalized = normalizeSheetGuideRowIds_ACU(guideData);
+      if (identityNormalized.blockers.length > 0) {
+          throw new Error(`Sheet Guide row_id 结构无效：${identityNormalized.blockers.join('；')}`);
+      }
+      const normalized = normalizeGuideData_ACU(identityNormalized.guideData);
       if (!normalized) return { mate: { type: 'chatSheets', version: 1 } };
       try { return JSON.parse(JSON.stringify(normalized)); } catch (e) { return normalized; }
   }

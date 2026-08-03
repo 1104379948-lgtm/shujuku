@@ -61,6 +61,8 @@ import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../agent/agent-world
             generationGate_ACU.lastUserMessageAt = 0;
             generationGate_ACU.lastUserSendIntentAt = 0;
             generationGate_ACU.lastGeneration = null;
+            generationGate_ACU.generationSeq = 0;
+            generationGate_ACU.activeGenerations = [];
             return;
         }
         logWarn_ACU(`ACU: Received invalid chat file name: "${chatFileName}". This can happen after an update error. Ignoring event to preserve current state.`);
@@ -92,6 +94,8 @@ import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../agent/agent-world
     generationGate_ACU.lastUserMessageAt = 0;
     generationGate_ACU.lastUserSendIntentAt = 0;
     generationGate_ACU.lastGeneration = null;
+    generationGate_ACU.generationSeq = 0;
+    generationGate_ACU.activeGenerations = [];
 
     logDebug_ACU(
       `ACU: currentChatFileIdentifier FINAL set to: "${currentChatFileIdentifier_ACU}" (Source: CHAT_CHANGED event)`,

@@ -4,7 +4,7 @@
 import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../../shared/defaults-json.js';
 import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
-import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, manualExtraHint_ACU, newMessageDebounceTimer_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU , _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_newMessageDebounceTimer_ACU} from '../../components/plot-editors';
+import { autoFillDebounceTimer_ACU, getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, manualExtraHint_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_autoFillDebounceTimer_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../../shared/constants';
 import { SillyTavern_API_ACU, TavernHelper_API_ACU, toastr_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
@@ -13,7 +13,7 @@ import { isExtensionMode, getHostWindow } from '../../../shared/runtime-env';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
 import { getConnectionManagerProfiles_ACU, fetchAvailableModels_ACU } from '../../../service/ai/ai-service';
 import { getCurrentCharacterFallback_ACU } from '../../../service/host/host-state-service';
-import { NEW_MESSAGE_DEBOUNCE_DELAY_ACU, allChatMessages_ACU, coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
+import { NEW_MESSAGE_DEBOUNCE_DELAY_ACU, allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $apiStatusDisplay_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { saveSettingsAndNotify_ACU, loadSettingsAndRefreshUI_ACU } from '../../components/settings-ui-helpers';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../../../service/summary/merge-logic';
@@ -29,7 +29,8 @@ import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-perform
 import { executeContentOptimization_ACU } from '../../components/optimization-ui';
 import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
 import { triggerAutomaticUpdateIfNeeded_ACU } from './settings-ui-trigger';
-import { evaluateNewMessageAction_ACU } from '../../../service/runtime/message-handler';
+import { evaluateNewMessageAction_ACU, type AutoFillIntent_ACU } from '../../../service/runtime/message-handler';
+import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
 
   export async function fetchModelsAndConnect_ACU() {
     if (
@@ -197,12 +198,12 @@ import { evaluateNewMessageAction_ACU } from '../../../service/runtime/message-h
     return coreApisAreReady_ACU;
   }
 
-  export async function handleNewMessageDebounced_ACU(eventType = 'unknown_acu') {
+  export async function handleNewMessageDebounced_ACU(eventType = 'unknown_acu', intent?: AutoFillIntent_ACU) {
     logDebug_ACU(
       `New message event (${eventType}) detected for ACU, debouncing for ${NEW_MESSAGE_DEBOUNCE_DELAY_ACU}ms...`,
     );
-    clearTimeout(newMessageDebounceTimer_ACU);
-    _set_newMessageDebounceTimer_ACU(setTimeout(async () => {
+    clearTimeout(autoFillDebounceTimer_ACU);
+    _set_autoFillDebounceTimer_ACU(setTimeout(async () => {
       const performanceSpan = startRuntimePerformanceSpan_ACU('new-message-pipeline', {
         settings: settings_ACU,
         metrics: { source: eventType },
@@ -222,6 +223,11 @@ import { evaluateNewMessageAction_ACU } from '../../../service/runtime/message-h
         loadSpan.end();
       }
 
+      if (intent && currentChatFileIdentifier_ACU !== intent.chatKey) {
+        logAutoFillSkip_ACU('chat_changed', { eventType, messageId: intent.messageId, chatKey: intent.chatKey });
+        return;
+      }
+
       const liveChat = getChatArray_ACU();
 
       // [重构] 调用 service 层的 evaluateNewMessageAction_ACU 进行决策
@@ -230,13 +236,20 @@ import { evaluateNewMessageAction_ACU } from '../../../service/runtime/message-h
           isAutoUpdatingCard_ACU,
           coreApisAreReady_ACU,
           wasStoppedByUser_ACU,
-          settings_ACU.contentOptimizationSettings
+          settings_ACU.contentOptimizationSettings,
+          intent,
       );
 
       logDebug_ACU(`[NewMessage] Evaluation result: action=${result.action}, reason=${result.reason}`);
 
       if (result.action === 'skip') {
           logDebug_ACU(`ACU: ${result.reason}. Skipping.`);
+          logAutoFillSkip_ACU(result.skipReason || 'message_evaluation_skipped', {
+              eventType,
+              messageId: intent?.messageId,
+              aiFloorCount: liveChat.filter((message: any) => !message.is_user).length,
+              inFlight: isAutoUpdatingCard_ACU,
+          });
           return;
       }
 

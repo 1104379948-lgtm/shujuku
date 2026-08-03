@@ -5,7 +5,7 @@ import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../../shared/defaults-json.js';
 import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
 import { bindTableFillStopButton_ACU } from '../../components/status-display';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
-import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, newMessageDebounceTimer_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU , _set_isAutoUpdatingCard_ACU, _set_newMessageDebounceTimer_ACU} from '../../components/plot-editors';
+import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../../shared/constants';
 import { SillyTavern_API_ACU, TavernHelper_API_ACU, toastr_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
@@ -31,6 +31,7 @@ import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoU
 import { processGroupedRuntimeChunk_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-performance';
+import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
 
 function buildAutoUpdateProgressLabel_ACU(event: Partial<CardUpdateProgressEvent>): string {
     if (Number.isFinite(event.currentBatch) && Number.isFinite(event.totalBatches)) {
@@ -101,13 +102,20 @@ function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, load
 }
 
 let autoUpdateTriggerInFlight_ACU = false;
+let pendingAutoUpdateTrigger_ACU = false;
+let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: string } | undefined;
 
   export async function triggerAutomaticUpdateIfNeeded_ACU(
     performanceContext?: { runId?: string; parentSpanId?: string },
   ) {
     logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
     if (autoUpdateTriggerInFlight_ACU) {
-      logDebug_ACU('ACU Auto-Trigger: trigger already in flight. Skipping.');
+      pendingAutoUpdateTrigger_ACU = true;
+      pendingAutoUpdatePerformanceContext_ACU = performanceContext;
+      logDebug_ACU('ACU Auto-Trigger: trigger already in flight. Coalescing a follow-up run.');
+      logAutoFillSkip_ACU('auto_update_coalesced', {
+        inFlight: true,
+      });
       return;
     }
     autoUpdateTriggerInFlight_ACU = true;
@@ -127,11 +135,18 @@ let autoUpdateTriggerInFlight_ACU = false;
     );
     if (!preCheck.canProceed) {
       logDebug_ACU(`ACU Auto-Trigger: ${preCheck.reason} Skipping.`);
+      logAutoFillSkip_ACU('preconditions_failed', {
+        aiFloorCount: allChatMessages_ACU.filter((message: any) => !message.is_user).length,
+        inFlight: isAutoUpdatingCard_ACU,
+      });
       return;
     }
 
     let liveChat = getChatArray_ACU();
-    if (!liveChat || liveChat.length === 0) return;
+    if (!liveChat || liveChat.length === 0) {
+      logAutoFillSkip_ACU('empty_chat');
+      return;
+    }
 
     let totalAiMessages = liveChat.filter(m => !m.is_user).length;
 
@@ -143,7 +158,10 @@ let autoUpdateTriggerInFlight_ACU = false;
         getChatArray_ACU,
         _set_lastTotalAiMessages_ACU
     );
-    if (delayResult === null) return; // chat 为空
+    if (delayResult === null) {
+      logAutoFillSkip_ACU('empty_chat');
+      return;
+    }
     if (delayResult) {
         liveChat = delayResult.liveChat;
         totalAiMessages = delayResult.totalAiMessages;
@@ -158,7 +176,10 @@ let autoUpdateTriggerInFlight_ACU = false;
       triggerIsolationKey,
       { runId: performanceContext?.runId || performanceSpan.id, parentSpanId: performanceSpan.id },
     );
-    if (plan.tablesToUpdate.length === 0) return;
+    if (plan.tablesToUpdate.length === 0) {
+      logAutoFillSkip_ACU('no_tables_due', { aiFloorCount: totalAiMessages });
+      return;
+    }
 
     // UI：显示开始 toast
     const totalGroups = Object.keys(plan.updateGroups).length;
@@ -250,6 +271,15 @@ let autoUpdateTriggerInFlight_ACU = false;
         sqlite: isSqliteMode(),
       });
       autoUpdateTriggerInFlight_ACU = false;
+      if (!pendingAutoUpdateTrigger_ACU || wasStoppedByUser_ACU) {
+        pendingAutoUpdateTrigger_ACU = false;
+        pendingAutoUpdatePerformanceContext_ACU = undefined;
+        return;
+      }
+      const followUpContext = pendingAutoUpdatePerformanceContext_ACU;
+      pendingAutoUpdateTrigger_ACU = false;
+      pendingAutoUpdatePerformanceContext_ACU = undefined;
+      queueMicrotask(() => { void triggerAutomaticUpdateIfNeeded_ACU(followUpContext); });
     }
   }
 

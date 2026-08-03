@@ -44,9 +44,14 @@ export function normalizeGuideData_ACU(dataObj: any) {
             updateConfig: s.updateConfig || { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1, sendLatestRows: -1, groupId: -1 },
             exportConfig: ensureExportConfigDefaults_ACU(s.exportConfig, s.name || k),
         };
-        if (Array.isArray(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])) {
+        // `_seedRows` 是早期聊天级 guide 的历史字段；读取时收敛为当前
+        // `seedRows`，避免它在身份列健全化前被静默丢弃。
+        const seedRows = Array.isArray(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU])
+            ? s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU]
+            : s._seedRows;
+        if (Array.isArray(seedRows)) {
             try {
-                keep[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(s[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU]));
+                keep[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = JSON.parse(JSON.stringify(seedRows));
             } catch (e) {
                 keep[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU] = [];
             }

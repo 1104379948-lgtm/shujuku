@@ -488,6 +488,27 @@ describe('buildGuidedBaseDataFromSheetGuide_ACU', () => {
     // 深拷贝验证
     expect(result.sheet_0).not.toBe(guide.sheet_0);
   });
+
+  it('直接传入历史“行号” guide 时先规范化再构建基底', () => {
+    const guide = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_0: { name: '表', content: [['行号', '名称']], _seedRows: [['7', '铁剑']] },
+    };
+
+    const result = buildGuidedBaseDataFromSheetGuide_ACU(guide);
+
+    expect(result.sheet_0.content).toEqual([['row_id', '名称']]);
+    expect(result.sheet_0._seedRows).toEqual([['7', '铁剑']]);
+  });
+
+  it('直接传入错位身份列的 guide 时拒绝构建运行时基底', () => {
+    const guide = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_0: { name: '表', content: [['名称', '行号']], _seedRows: [['铁剑', '7']] },
+    };
+
+    expect(() => buildGuidedBaseDataFromSheetGuide_ACU(guide)).toThrow('Sheet Guide row_id 结构无效');
+  });
 });
 
 describe('getSortedSheetKeys_ACU', () => {

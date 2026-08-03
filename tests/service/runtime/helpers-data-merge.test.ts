@@ -713,6 +713,56 @@ describe('mergeAllIndependentTables_ACU', () => {
     expect(result!.sheet_removed).toBeUndefined();
   });
 
+  it('V2 canonical 回放与 canonical guide 合并时保留历史行，并为短行补齐 null', async () => {
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({
+      sheet_legacy: { uid: 'sheet_legacy', name: '背包物品表', content: [['row_id', '名称'], ['1', '铁剑']] },
+    } as any);
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '背包物品表', content: [['row_id', '名称', '数量']] },
+    } as any);
+    vi.mocked(materializeDataFromSheetGuide_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '背包物品表', content: [['row_id', '名称', '数量']] },
+    } as any);
+
+    const result = await mergeAllIndependentTables_ACU();
+
+    expect(result?.sheet_new.content).toEqual([['row_id', '名称', '数量'], ['1', '铁剑', null]]);
+  });
+
+  it('V2 canonical 回放行宽超过 guide 时拒绝静默截断业务数据', async () => {
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({
+      sheet_legacy: { uid: 'sheet_legacy', name: '背包物品表', content: [['row_id', '名称', '数量'], ['1', '铁剑', 1]] },
+    } as any);
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '背包物品表', content: [['row_id', '名称']] },
+    } as any);
+    vi.mocked(materializeDataFromSheetGuide_ACU).mockReturnValue({
+      sheet_new: { uid: 'sheet_new', name: '背包物品表', content: [['row_id', '名称']] },
+    } as any);
+
+    await expect(mergeAllIndependentTables_ACU()).rejects.toThrow('行宽度超过 Sheet Guide 表头');
+  });
+
+  it('非法 guide 表头不能覆盖 V2 canonical 回放表头', async () => {
+    vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
+    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({
+      sheet_test: { uid: 'sheet_test', name: '测试表', content: [['row_id', '值'], ['1', '保留']] },
+    } as any);
+    vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue({
+      sheet_test: { uid: 'sheet_test', name: '测试表', content: [['行号', '值']] },
+    } as any);
+    vi.mocked(materializeDataFromSheetGuide_ACU).mockReturnValue({
+      sheet_test: { uid: 'sheet_test', name: '测试表', content: [['行号', '值']] },
+    } as any);
+
+    await expect(mergeAllIndependentTables_ACU()).rejects.toThrow('Sheet Guide 表头缺少 row_id 首列');
+  });
+
   it('V2 回放旧 key 与指导表规范显示名相同时迁入指导表 key', async () => {
     vi.mocked(getChatArray_ACU).mockReturnValue([{ is_user: false, mes: 'AI回复' }] as any);
     vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'v2' } as any);
@@ -736,7 +786,7 @@ describe('mergeAllIndependentTables_ACU', () => {
     expect(result?.sheet_new).toMatchObject({
       uid: 'sheet_new',
       name: '背包物品表',
-      content: [['row_id', '物品名称', '数量'], ['1', '铁剑', '']],
+      content: [['row_id', '物品名称', '数量'], ['1', '铁剑', null]],
     });
   });
 

@@ -59,7 +59,8 @@ import {
   _set_isAutoUpdatingCard_ACU,
   _set_manualExtraHint_ACU,
   _set_wasStoppedByUser_ACU,
-  _set_newMessageDebounceTimer_ACU,
+  _set_autoFillDebounceTimer_ACU,
+  _set_chatMutationDebounceTimer_ACU,
   trackAbortController_ACU,
   untrackAbortController_ACU,
   abortAllActiveRequests_ACU,
@@ -74,6 +75,8 @@ beforeEach(() => {
   generationGate_ACU.lastUserMessageAt = 0;
   generationGate_ACU.lastUserSendIntentAt = 0;
   generationGate_ACU.lastGeneration = null;
+  generationGate_ACU.generationSeq = 0;
+  generationGate_ACU.activeGenerations = [];
   // 重置 loopState
   loopState_ACU.isLooping = false;
   loopState_ACU.isRetrying = false;
@@ -183,6 +186,15 @@ describe('recordGenerationContext_ACU', () => {
     expect(generationGate_ACU.lastGeneration.at).toBeGreaterThanOrEqual(before);
     expect(generationGate_ACU.lastGeneration.at).toBeLessThanOrEqual(after);
   });
+
+  it('前台生成结束时先消费自身上下文，后续 quiet 生成不影响本轮判定', () => {
+    recordGenerationContext_ACU('normal', {}, false);
+    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(true);
+
+    recordGenerationContext_ACU('quiet', { quiet_prompt: '第三方插件后台任务' }, false);
+    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
+  });
+
 });
 
 // ═══ isQuietLikeGeneration_ACU ═══
@@ -285,22 +297,27 @@ describe('shouldProcessAutoTableUpdateForGenerationEnded_ACU', () => {
   });
 
   it('dryRun 时返回 false', () => {
-    generationGate_ACU.lastGeneration = { type: 'normal', params: {}, dryRun: true, at: Date.now() };
+    recordGenerationContext_ACU('normal', {}, true);
     expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
   });
 
   it('quiet 类型时返回 false', () => {
-    generationGate_ACU.lastGeneration = { type: 'quiet', params: {}, dryRun: false, at: Date.now() };
+    recordGenerationContext_ACU('quiet', {}, false);
     expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
   });
 
   it('quiet_prompt 有内容时返回 false', () => {
-    generationGate_ACU.lastGeneration = { type: 'normal', params: { quiet_prompt: '静默' }, dryRun: false, at: Date.now() };
+    recordGenerationContext_ACU('normal', { quiet_prompt: '静默' }, false);
+    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
+  });
+
+  it('automatic_trigger 时返回 false', () => {
+    recordGenerationContext_ACU('normal', { automatic_trigger: true }, false);
     expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
   });
 
   it('正常生成时返回 true', () => {
-    generationGate_ACU.lastGeneration = { type: 'normal', params: {}, dryRun: false, at: Date.now() };
+    recordGenerationContext_ACU('normal', {}, false);
     expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(true);
   });
 });
@@ -338,6 +355,21 @@ describe('Setter 函数', () => {
     const mod = await import('../../../src/service/runtime/state-manager');
     expect(mod.pendingBaseStatePlacement_ACU).toBe(true);
     _set_pendingBaseStatePlacement_ACU(false);
+  });
+
+  it('自动填表与聊天变更防抖 timer 独立保存', async () => {
+    const autoFillTimer = { kind: 'auto-fill' };
+    const chatMutationTimer = { kind: 'chat-mutation' };
+
+    _set_autoFillDebounceTimer_ACU(autoFillTimer);
+    _set_chatMutationDebounceTimer_ACU(chatMutationTimer);
+
+    const mod = await import('../../../src/service/runtime/state-manager');
+    expect(mod.autoFillDebounceTimer_ACU).toBe(autoFillTimer);
+    expect(mod.chatMutationDebounceTimer_ACU).toBe(chatMutationTimer);
+
+    _set_autoFillDebounceTimer_ACU(null);
+    _set_chatMutationDebounceTimer_ACU(null);
   });
 });
 

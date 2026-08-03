@@ -6,14 +6,22 @@
  */
 
 import { logDebug_ACU } from '../../shared/utils';
+import type { AutoFillSkipReason_ACU } from '../../shared/trigger-diagnostics';
 import { getCurrentCharacterFallback_ACU } from '../host/host-state-service';
 
 export type MessageAction = 'skip' | 'update_only' | 'optimize_parallel' | 'optimize_then_update' | 'optimize_manual';
+
+export interface AutoFillIntent_ACU {
+    messageId: number;
+    chatKey: string;
+    capturedAt: number;
+}
 
 export interface MessageActionResult {
     action: MessageAction;
     reason: string;
     lastMessageIndex?: number;
+    skipReason?: AutoFillSkipReason_ACU;
 }
 
 /**
@@ -24,6 +32,7 @@ export interface MessageActionResult {
  * @param coreApisReady - 核心 API 是否就绪
  * @param wasStoppedByUser - 是否被用户终止
  * @param contentOptimizationSettings - 正文优化设置
+ * @param intent - GENERATION_ENDED 时抓取的楼层快照；存在时不再盲读聊天尾部
  * @returns MessageActionResult 包含 action 和 reason
  */
 export function evaluateNewMessageAction_ACU(
@@ -31,37 +40,34 @@ export function evaluateNewMessageAction_ACU(
     isAutoUpdating: boolean,
     coreApisReady: boolean,
     wasStoppedByUser: boolean,
-    contentOptimizationSettings: any
+    contentOptimizationSettings: any,
+    intent?: AutoFillIntent_ACU,
 ): MessageActionResult {
     if (wasStoppedByUser) {
-        return { action: 'skip', reason: 'Skipping update check after user abort' };
-    }
-
-    if (isAutoUpdating) {
-        return { action: 'skip', reason: 'Auto-update already in progress' };
+        return { action: 'skip', reason: 'Skipping update check after user abort', skipReason: 'user_aborted' };
     }
 
     if (!coreApisReady) {
-        return { action: 'skip', reason: 'Core APIs not ready' };
+        return { action: 'skip', reason: 'Core APIs not ready', skipReason: 'core_apis_not_ready' };
     }
 
     if (!liveChat || liveChat.length === 0) {
-        return { action: 'skip', reason: 'No chat data available' };
+        return { action: 'skip', reason: 'No chat data available', skipReason: 'empty_chat' };
     }
 
-    const lastMessage = liveChat[liveChat.length - 1];
-    const lastMessageIndex = liveChat.length - 1;
+    const lastMessageIndex = intent ? intent.messageId : liveChat.length - 1;
+    const lastMessage = liveChat[lastMessageIndex];
 
-    // 如果最新消息不是AI回复，跳过
+    // 若有事件快照，校验该楼层仍存在；否则保持历史上的"最后一条 AI 消息"语义。
     if (!lastMessage || lastMessage.is_user) {
-        return { action: 'skip', reason: 'Last message is not an AI reply' };
+        return { action: 'skip', reason: 'Last message is not an AI reply', skipReason: 'last_message_not_ai' };
     }
 
     // 检查是否来自当前角色
     const activeChar = getCurrentCharacterFallback_ACU();
     const activeCharName = activeChar?.name;
     if (activeCharName && lastMessage.name && lastMessage.name !== activeCharName) {
-        return { action: 'skip', reason: `AI reply from different character (${lastMessage.name} != ${activeCharName})` };
+        return { action: 'skip', reason: `AI reply from different character (${lastMessage.name} != ${activeCharName})`, skipReason: 'different_character' };
     }
 
     // 决定执行模式

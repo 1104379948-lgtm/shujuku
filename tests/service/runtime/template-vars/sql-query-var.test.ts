@@ -73,6 +73,13 @@ const CHARACTERS_DDL = `CREATE TABLE characters ( -- 重要人物表
   status TEXT DEFAULT '存活' -- 状态
 );`;
 
+const INVESTIGATOR_DDL = `CREATE TABLE diaochayuanjuesekabiao ( -- 调查员角色卡表
+  row_id INTEGER PRIMARY KEY, -- 行号
+  STR TEXT,
+  DEX TEXT,
+  name TEXT -- 姓名
+);`;
+
 // DDL 原始名、sheet key、uid 与显示名均不同，故意不在 DDL 首行添加显示名注释。
 // 旧 NameMapper 无法识别该表，只有运行时共享 resolver 能安全绑定到 zabiao。
 const MISC_DDL = `CREATE TABLE legacy_misc (
@@ -143,6 +150,8 @@ describe('sql-query-var', () => {
     // 建表
     _engine.run(INVENTORY_DDL);
     _engine.run(CHARACTERS_DDL);
+    _engine.run(INVESTIGATOR_DDL);
+    _engine.run("INSERT INTO diaochayuanjuesekabiao VALUES (1, '65', '70', '阿卡姆');");
 
     // 灌入测试数据
     _engine.runBatch([
@@ -162,6 +171,7 @@ describe('sql-query-var', () => {
     const ddlMap = new Map<string, string>();
     ddlMap.set('inventory', INVENTORY_DDL);
     ddlMap.set('characters', CHARACTERS_DDL);
+    ddlMap.set('diaochayuanjuesekabiao', INVESTIGATOR_DDL);
     _mapper = NameMapper.fromDDLs(ddlMap);
   });
 
@@ -420,6 +430,11 @@ describe('sql-query-var', () => {
         const sql = builder.where('物品名称', '铁剑').toSQL();
         expect(sql).toContain('SELECT * FROM inventory');
         expect(sql).toContain("WHERE item_name = '铁剑'");
+      });
+
+      it('无注释 ASCII 物理列的 ORM 条件保持原始 SQL 列名', () => {
+        const sql = new TableQueryBuilder('调查员角色卡表').where('STR', '65').toSQL();
+        expect(sql).toBe("SELECT * FROM diaochayuanjuesekabiao WHERE STR = '65'");
       });
     });
 

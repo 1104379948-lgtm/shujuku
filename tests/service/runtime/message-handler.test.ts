@@ -41,13 +41,12 @@ describe('evaluateNewMessageAction_ACU', () => {
       expect(result.reason).toContain('user abort');
     });
 
-    it('正在自动更新时跳过', () => {
+    it('正在自动更新时仍基于消息快照作出决策，调度层负责合并补跑', () => {
       const result = evaluateNewMessageAction_ACU(
         [{ is_user: false, mes: 'AI回复' }],
         true, true, false, {},
       );
-      expect(result.action).toBe('skip');
-      expect(result.reason).toContain('already in progress');
+      expect(result.action).toBe('update_only');
     });
 
     it('核心 API 未就绪时跳过', () => {
@@ -118,6 +117,46 @@ describe('evaluateNewMessageAction_ACU', () => {
       );
       expect(result.action).toBe('update_only');
     });
+
+    it('事件快照仍指向 AI 楼层时，不受随后追加用户楼层影响', () => {
+      const result = evaluateNewMessageAction_ACU(
+        [
+          { is_user: true, mes: '用户消息' },
+          { is_user: false, mes: '本轮 AI 回复' },
+          { is_user: true, mes: '第三方插件追加的楼层' },
+        ],
+        false,
+        true,
+        false,
+        {},
+        { messageId: 1, chatKey: 'chat-a', capturedAt: Date.now() },
+      );
+
+      expect(result.action).toBe('update_only');
+      expect(result.lastMessageIndex).toBe(1);
+    });
+
+    it('事件快照楼层已被删除时跳过', () => {
+      const result = evaluateNewMessageAction_ACU([], false, true, false, {}, { messageId: 1, chatKey: 'chat-a', capturedAt: Date.now() });
+      expect(result.action).toBe('skip');
+      expect(result.skipReason).toBe('empty_chat');
+    });
+
+    it('非空聊天中事件快照楼层已被删除时不回退到其他消息', () => {
+      const result = evaluateNewMessageAction_ACU(
+        [
+          { is_user: false, mes: '仍存在的旧 AI 回复' },
+          { is_user: true, mes: '后续用户消息' },
+        ],
+        false,
+        true,
+        false,
+        {},
+        { messageId: 3, chatKey: 'chat-a', capturedAt: Date.now() },
+      );
+
+      expect(result).toMatchObject({ action: 'skip', skipReason: 'last_message_not_ai' });
+    });
   });
 
   // ═══ optimize 场景 ═══
@@ -185,13 +224,13 @@ describe('evaluateNewMessageAction_ACU', () => {
       expect(result.reason).toContain('user abort');
     });
 
-    it('isAutoUpdating 优先于 coreApisReady', () => {
+    it('coreApisReady 在自动更新中仍是必要前提', () => {
       const result = evaluateNewMessageAction_ACU(
         [{ is_user: false, mes: 'AI回复' }],
         true, false, false, {},
       );
       expect(result.action).toBe('skip');
-      expect(result.reason).toContain('already in progress');
+      expect(result.reason).toContain('not ready');
     });
   });
 });

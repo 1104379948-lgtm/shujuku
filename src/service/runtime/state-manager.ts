@@ -52,12 +52,25 @@ export let tempPlotToSave_ACU: any = null;
 export let pendingFinalGenerationGreenlights_ACU: any[] = [];
 
 export const USER_SEND_TRIGGER_TTL_MS_ACU = 12000;
+export const GENERATION_CONTEXT_TTL_MS_ACU = 60000;
+
+export interface GenerationContext_ACU {
+  seq: number;
+  type: any;
+  params: any;
+  dryRun: any;
+  at: number;
+}
+
 export const generationGate_ACU = {
   lastUserMessageId: null as number | null,
   lastUserMessageText: '',
   lastUserMessageAt: 0,
   lastUserSendIntentAt: 0,
-  lastGeneration: null as any,
+  // 保留给旧调用方和诊断；自动填表不能再仅依赖这个可被其他插件覆写的单槽。
+  lastGeneration: null as GenerationContext_ACU | null,
+  generationSeq: 0,
+  activeGenerations: [] as GenerationContext_ACU[],
 };
 
 export function markUserSendIntent_ACU() {
@@ -82,8 +95,32 @@ export function recordLastUserSend_ACU(messageId: any) {
   }
 }
 
-export function recordGenerationContext_ACU(type: any, params: any, dryRun: any) {
-  generationGate_ACU.lastGeneration = { type, params, dryRun, at: Date.now() };
+function removeExpiredGenerationContexts_ACU(now = Date.now()): void {
+  const earliestValidAt = now - GENERATION_CONTEXT_TTL_MS_ACU;
+  generationGate_ACU.activeGenerations = generationGate_ACU.activeGenerations.filter(context => context.at >= earliestValidAt);
+}
+
+export function recordGenerationContext_ACU(type: any, params: any, dryRun: any): GenerationContext_ACU {
+  const context: GenerationContext_ACU = {
+    seq: ++generationGate_ACU.generationSeq,
+    type,
+    params,
+    dryRun,
+    at: Date.now(),
+  };
+  removeExpiredGenerationContexts_ACU(context.at);
+  generationGate_ACU.activeGenerations.push(context);
+  generationGate_ACU.lastGeneration = context;
+  return context;
+}
+
+/**
+ * 宿主的 GENERATION_STOPPED 不携带 generation id，只能关闭最近一个未结束生成。
+ * 这比让陈旧上下文持续污染下一次 GENERATION_ENDED 更安全。
+ */
+export function discardLatestGenerationContext_ACU(): GenerationContext_ACU | null {
+  removeExpiredGenerationContexts_ACU();
+  return generationGate_ACU.activeGenerations.pop() || null;
 }
 
 export function isQuietLikeGeneration_ACU(type: any, params: any) {
@@ -133,11 +170,21 @@ export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, para
   return fresh.result;
 }
 
+/**
+ * 消费与本次 GENERATION_ENDED 对应的最近生成上下文。
+ * 事件 API 没有 generation id，因此按完成顺序（栈）配对；配合 makeFirst，避免其他插件在
+ * 同一 ended 回调里新开 quiet 生成后覆盖当前正文生成的判定。
+ */
 export function shouldProcessAutoTableUpdateForGenerationEnded_ACU() {
-  const g = generationGate_ACU.lastGeneration;
+  removeExpiredGenerationContexts_ACU();
+  const activeContext = generationGate_ACU.activeGenerations.pop();
+  // lastGeneration 仅保留给旧调用方。已有受追踪生成全部消费后，不能重复使用最后一个
+  // quiet 上下文，否则下一次无关 GENERATION_ENDED 会被持续误拦截。
+  const g = activeContext || (generationGate_ACU.generationSeq === 0 ? generationGate_ACU.lastGeneration : null);
   if (!g) return true;
   if (g.dryRun) return false;
   if (isQuietLikeGeneration_ACU(g.type, g.params)) return false;
+  if (g.params?.automatic_trigger) return false;
   return true;
 }
 
@@ -251,9 +298,9 @@ export function _set_independentTableStates_ACU(v: any) { independentTableStates
 // ═══ 从 plot-editors.ts 迁移的业务状态 ═══
 export let isAutoUpdatingCard_ACU = false;
 export let wasStoppedByUser_ACU = false;
-export let newMessageDebounceTimer_ACU: any = null;
+export let autoFillDebounceTimer_ACU: any = null;
+export let chatMutationDebounceTimer_ACU: any = null;
 export let currentAbortController_ACU: any = null;
-export let plotTaskEditorAutoSaveTimer_ACU: any = null;
 export let activeAbortControllers_ACU = new Set<any>();
 export let manualExtraHint_ACU = '';
 
@@ -275,4 +322,5 @@ export function _set_currentAbortController_ACU(v: any) { currentAbortController
 export function _set_isAutoUpdatingCard_ACU(v: any) { isAutoUpdatingCard_ACU = v; }
 export function _set_manualExtraHint_ACU(v: any) { manualExtraHint_ACU = v; }
 export function _set_wasStoppedByUser_ACU(v: any) { wasStoppedByUser_ACU = v; }
-export function _set_newMessageDebounceTimer_ACU(v: any) { newMessageDebounceTimer_ACU = v; }
+export function _set_autoFillDebounceTimer_ACU(v: any) { autoFillDebounceTimer_ACU = v; }
+export function _set_chatMutationDebounceTimer_ACU(v: any) { chatMutationDebounceTimer_ACU = v; }

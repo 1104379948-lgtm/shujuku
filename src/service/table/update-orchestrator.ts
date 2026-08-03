@@ -348,9 +348,13 @@ function restoreGuideStructure(mergedSheet: any, guideSheet: any): void {
     if (guideSheet.sourceData) mergedSheet.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
 
     // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的
-    if (Array.isArray(guideSheet.content) && guideSheet.content.length > 0 &&
-        Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
-        mergedSheet.content[0] = JSON.parse(JSON.stringify(guideSheet.content[0]));
+    const guideHeader = Array.isArray(guideSheet.content) ? guideSheet.content[0] : null;
+    if (guideHeader && (!Array.isArray(guideHeader) || String(guideHeader[0] ?? '') !== 'row_id')) {
+        throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || 'unknown')}`);
+    }
+    if (Array.isArray(guideHeader)
+        && Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
+        mergedSheet.content[0] = JSON.parse(JSON.stringify(guideHeader));
     }
 }
 

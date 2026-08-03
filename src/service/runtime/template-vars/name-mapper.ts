@@ -12,6 +12,7 @@
 import {
   parseDDLChineseName,
   parseDDLColumnComments,
+  parseDDLColumnInfos_ACU,
 } from '../../../shared/ddl-utils';
 import { logDebug_ACU, logWarn_ACU } from '../../../shared/utils';
 import { resolveEffectiveDDL, type EffectiveDDLResult_ACU } from '../../../data/sqlite/schema-mapper';
@@ -257,8 +258,10 @@ export class NameMapper {
   // 表名映射：中文 → 英文
   private tableNameMap: Map<string, string> = new Map();
   // 列名映射：表英文名.中文列名 → 英文列名
+  // 仅保留可翻译的展示名，避免物理列自映射改变 translateSql 的输出。
   private columnNameMap: Map<string, string> = new Map();
-  // 反向映射：英文 → 中文
+  // 反向映射：物理列名 → 展示名；无注释物理列使用自身作为展示名，
+  // 因此它同时是 CRUD 写入门禁可依赖的 runtime schema 存在性集合。
   private reverseTableMap: Map<string, string> = new Map();
   private reverseColumnMap: Map<string, string> = new Map();
 
@@ -299,6 +302,14 @@ export class NameMapper {
           mapper.columnNameMap.set(key, colName);
           mapper.reverseColumnMap.set(`${englishTableName}.${colName}`, comment);
         }
+      }
+
+      // 注释只提供展示名，不能决定物理列是否存在。显式 DDL 中常见 STR/DEX
+      // 这类无注释 ASCII 列；若不登记它们，CRUD 的 fail-closed 门禁会误拒绝真实列。
+      // 不覆盖上方的注释映射，保证有展示名的列仍可按中文表头解析。
+      for (const column of parseDDLColumnInfos_ACU(ddl)) {
+        const key = `${englishTableName}.${column.sqlName}`;
+        if (!mapper.reverseColumnMap.has(key)) mapper.reverseColumnMap.set(key, column.sqlName);
       }
     }
 

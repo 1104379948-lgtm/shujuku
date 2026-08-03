@@ -3,12 +3,12 @@
 
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { addAutoCardMenuItem_ACU } from './startup';
-import { newMessageDebounceTimer_ACU, _set_newMessageDebounceTimer_ACU} from '../../service/runtime/state-manager';
+import { chatMutationDebounceTimer_ACU, _set_chatMutationDebounceTimer_ACU } from '../../service/runtime/state-manager';
 import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync';
 import { ensureInitialSeedCheckpoint_ACU, handleChatCompletionReady_ACU, loadPresetAndCleanCharacterData_ACU } from '../../service/runtime/helpers-remaining';
 import { SillyTavern_API_ACU } from '../../shared/host-api';
-import { currentChatFileIdentifier_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessAutoTableUpdateForGenerationEnded_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_isProcessing_Plot_ACU, _set_lastTotalAiMessages_ACU} from '../../service/runtime/state-manager';
+import { currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessAutoTableUpdateForGenerationEnded_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_isProcessing_Plot_ACU, _set_lastTotalAiMessages_ACU} from '../../service/runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
@@ -30,6 +30,7 @@ import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../ser
 import { markSummaryVectorIndexDirtyForRealign_ACU } from '../../service/vector/summary-vector-index-realign-state';
 import { buildSummaryVectorIndexArchiveScopeKey_ACU, findSummaryTable_ACU } from '../../service/vector/summary-vector-index-archive-service';
 import { topLevelWindow_ACU } from '../../shared/env';
+import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
@@ -77,6 +78,8 @@ function clearRuntimeForNoActiveChat_ACU(chatFileName: unknown): void {
   generationGate_ACU.lastUserMessageAt = 0;
   generationGate_ACU.lastUserSendIntentAt = 0;
   generationGate_ACU.lastGeneration = null;
+  generationGate_ACU.generationSeq = 0;
+  generationGate_ACU.activeGenerations = [];
   notifyRuntimeTableCleared_ACU();
   logDebug_ACU(`ACU: No active chat after CHAT_CHANGED (${String(chatFileName)}), runtime table state cleared.`);
 }
@@ -336,19 +339,40 @@ export   function mainInitialize_ACU() {
             } catch (e) {}
           });
         }
+        if (SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED) {
+          SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
+            try {
+              discardLatestGenerationContext_ACU();
+            } catch (e) {}
+          });
+        }
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
-            SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, (message_id: any) => {
+            const onGenerationEnded = (message_id: any) => {
                 logDebug_ACU(`ACU GENERATION_ENDED event for message_id: ${message_id}`);
+                const autoFillIntent = typeof message_id === 'number' && Number.isInteger(message_id)
+                  ? { messageId: message_id, chatKey: currentChatFileIdentifier_ACU, capturedAt: Date.now() }
+                  : undefined;
                 if (shouldProcessAutoTableUpdateForGenerationEnded_ACU()) {
-                  handleNewMessageDebounced_ACU('GENERATION_ENDED');
+                  handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);
                 } else {
                   logDebug_ACU('ACU: Skip auto table update due to quiet/background generation.');
+                  logAutoFillSkip_ACU('quiet_or_background_generation', {
+                    eventType: 'GENERATION_ENDED',
+                    messageId: message_id,
+                    chatKey: currentChatFileIdentifier_ACU,
+                    lastGenerationType: generationGate_ACU.lastGeneration?.type,
+                  });
                 }
 
                 // [剧情推进] 保存Plot到消息和循环检测
                 // savePlotToLatestMessage_ACU(); // Moved to runOptimizationLogic_ACU
                 onLoopGenerationEnded_ACU();
-            });
+            };
+            if (typeof SillyTavern_API_ACU.eventSource.makeFirst === 'function') {
+              SillyTavern_API_ACU.eventSource.makeFirst(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, onGenerationEnded);
+            } else {
+              SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, onGenerationEnded);
+            }
         }
 
         // [剧情推进] 拦截用户输入进行剧情规划
@@ -482,8 +506,8 @@ export   function mainInitialize_ACU() {
             if (SillyTavern_API_ACU.eventTypes[evName as keyof typeof SillyTavern_API_ACU.eventTypes]) {
                 SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes[evName as keyof typeof SillyTavern_API_ACU.eventTypes], async (data: any) => {
                     logDebug_ACU(`ACU ${evName} event detected. Triggering data reload and merge from chat history.`);
-                    clearTimeout(newMessageDebounceTimer_ACU);
-                    _set_newMessageDebounceTimer_ACU(setTimeout(async () => {
+                    clearTimeout(chatMutationDebounceTimer_ACU);
+                    _set_chatMutationDebounceTimer_ACU(setTimeout(async () => {
                         // [6.7.3] SQLite 模式下，楼层删除/滑动后需要重建内存数据库
                         if (isSqliteMode()) {
                             logDebug_ACU(`[SQLite] ${evName}: 重建内存数据库...`);

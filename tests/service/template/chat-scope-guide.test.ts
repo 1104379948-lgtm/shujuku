@@ -276,7 +276,7 @@ describe('materializeDataFromSheetGuide_ACU', () => {
     expect(result.sheet_0.content).toEqual([['row_id', '物品名'], ['1', '铁剑'], ['2', '盾牌']]);
   });
 
-  it('includeSeedRows=true 时只补空 row_id，不重编号重复非空身份', () => {
+  it('includeSeedRows=true 时拒绝重复非空身份', () => {
     const guide = {
       sheet_0: {
         name: '表',
@@ -285,22 +285,20 @@ describe('materializeDataFromSheetGuide_ACU', () => {
       },
     };
 
-    const result = materializeDataFromSheetGuide_ACU(guide, { includeSeedRows: true });
-
-    expect(result.sheet_0.content).toEqual([['row_id', '名称'], ['2', '第一行'], ['1', '第二行'], ['1', '第三行']]);
-    expect(result.sheet_0._seedRows).toEqual([['2', '第一行'], ['1', '第二行'], ['1', '第三行']]);
+    expect(() => materializeDataFromSheetGuide_ACU(guide, { includeSeedRows: true }))
+      .toThrow('重复 row_id');
   });
 
   it('includeSeedRows=false 时只包含表头', () => {
     const guide = {
       sheet_0: {
         name: '表',
-        content: [['row_id']],
+        content: [['row_id', '名称']],
         _seedRows: [['1', '数据']],
       },
     };
     const result = materializeDataFromSheetGuide_ACU(guide, { includeSeedRows: false });
-    expect(result.sheet_0.content).toEqual([['row_id']]);
+    expect(result.sheet_0.content).toEqual([['row_id', '名称']]);
   });
 });
 
@@ -342,6 +340,24 @@ describe('getChatSheetGuideDataForIsolationKey_ACU', () => {
     const result = getChatSheetGuideDataForIsolationKey_ACU('');
     expect(result).toBeDefined();
     expect(result.sheet_0).toBeDefined();
+  });
+
+  it('读取历史 guide 时将“行号”首列表头和旧 _seedRows 无损规范为 row_id', () => {
+    mockGetCurrentChatTemplateScopeState.mockReturnValue({
+      mode: 'chat_override',
+      guideData: {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_0: {
+          name: '表', content: [['行号', '名称']],
+          _seedRows: [['7', '铁剑']],
+        },
+      },
+    });
+
+    const result = getChatSheetGuideDataForIsolationKey_ACU('');
+
+    expect(result?.sheet_0.content).toEqual([['row_id', '名称']]);
+    expect(result?.sheet_0._seedRows).toEqual([['7', '铁剑']]);
   });
 
   it('无 scoped state 时回退到全局快照', () => {
@@ -469,7 +485,7 @@ describe('getEffectiveSeedRowsForSheet_ACU', () => {
       mode: 'chat_override',
       guideData: {
         mate: { type: 'chatSheets', version: 2 },
-        sheet_0: { name: '表', content: [['row_id']], _seedRows: [['1', '数据']] },
+        sheet_0: { name: '表', content: [['row_id', '值']], _seedRows: [['1', '数据']] },
       },
     });
     const result = getEffectiveSeedRowsForSheet_ACU('sheet_0');
@@ -485,16 +501,16 @@ describe('getEffectiveSeedRowsForSheet_ACU', () => {
     expect(result).not.toBe(mockCurrentJsonTableData.sheet_0._seedRows);
   });
 
-  it('回退到 guide 时保留重复非空 row_id，避免静默改变历史身份', () => {
+  it('回退到 guide 时拒绝重复非空 row_id，避免静默改变历史身份', () => {
     mockCurrentJsonTableData.sheet_0 = {};
     mockGetCurrentChatTemplateScopeState.mockReturnValue({
       mode: 'chat_override',
-      guideData: { mate: { type: 'chatSheets', version: 2 }, sheet_0: { name: '表', content: [['row_id']], _seedRows: [['alpha', '首个'], ['alpha', '重复']] } },
+      guideData: { mate: { type: 'chatSheets', version: 2 }, sheet_0: { name: '表', content: [['row_id', '值']], _seedRows: [['alpha', '首个'], ['alpha', '重复']] } },
     });
 
     const result = getEffectiveSeedRowsForSheet_ACU('sheet_0');
 
-    expect(result).toEqual([['alpha', '首个'], ['alpha', '重复']]);
+    expect(result).toEqual([]);
   });
 
   it('allowTemplateFallback=false 时不回退到模板', () => {

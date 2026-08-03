@@ -18,6 +18,7 @@ import { formatPlotScopeUpdatedAt_ACU } from '../../../shared/utils';
 import { ensureExportConfigDefaults_ACU, ensureGlobalInjectionConfigDefaults_ACU } from '../../worldbook/injection-engine';
 import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU, isLegacyMatchForIsolation_ACU } from '../../../data/repositories/chat-message-data-repo';
 import { normalizeChatScopedConfigSource_ACU, normalizeGuideData_ACU } from './chat-scope-base';
+import { normalizeSheetGuideRowIds_ACU } from './sheet-guide-row-id-normalizer';
 // 循环 import — 运行时安全
 import { normalizeTemplateScopeMode_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeTemplateSnapshotForChat_ACU, getCurrentChatTemplateScopeState_ACU, setCurrentChatTemplateScopeState_ACU, buildChatTemplateScopeStateFromCurrent_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, normalizeChatTemplateScopeState_ACU } from './chat-scope-template';
 import { getSortedSheetKeys_ACU } from './chat-scope-sheet';
@@ -42,6 +43,17 @@ function assignMissingStableRowIds_ACU(rows: any[][]) {
     });
 
     return rows;
+}
+
+function normalizeGuideRowIdentitiesForUse_ACU(guideData: Record<string, any> | null) {
+    if (!guideData) return null;
+    // 必须先审计原始 guide。若先经过 normalizeGuideData_ACU，缺失 content
+    // 会被伪造为 [null]，从而把损坏结构误判成可安全插入 row_id 的空表。
+    const result = normalizeSheetGuideRowIds_ACU(guideData);
+    if (result.blockers.length > 0) {
+        throw new Error(`Sheet Guide row_id 结构无效：${result.blockers.join('；')}`);
+    }
+    return normalizeGuideData_ACU(result.guideData);
 }
 
 export function ensureStableRowIdsForSeedRows_ACU(seedRows: any[] | null | undefined) {
@@ -94,7 +106,7 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
 }
 
   export function materializeDataFromSheetGuide_ACU(guideData: Record<string, any> | null, { includeSeedRows = true } = {}) {
-      const normalized = normalizeGuideData_ACU(guideData);
+      const normalized = normalizeGuideRowIdentitiesForUse_ACU(guideData);
       if (!normalized) return { mate: { type: 'chatSheets', version: 1 } };
       const out: Record<string, any> = { mate: normalized.mate || { type: 'chatSheets', version: 1 } };
       Object.keys(normalized).forEach((k: string) => {
@@ -322,7 +334,7 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
       const normalizedKey = String(isolationKey ?? '');
       const scopedTemplateState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey: normalizedKey })
           || migrateLegacyTemplateScopeForCurrentChat_ACU({ chat, isolationKey: normalizedKey });
-      const scopedGuideData = normalizeGuideData_ACU(scopedTemplateState?.guideData);
+      const scopedGuideData = normalizeGuideRowIdentitiesForUse_ACU(scopedTemplateState?.guideData);
       if (scopedGuideData && Object.keys(scopedGuideData).some(k => k.startsWith('sheet_'))) {
           return scopedGuideData;
       }
@@ -330,7 +342,8 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
       const buildGuideDataFromTemplateSource_ACU = (templateSource: any) => {
           const templateSnapshot = sanitizeTemplateSnapshotForChat_ACU(templateSource);
           const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(templateSnapshot?.templateObj, { stripSeedRows: false });
-          return (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) ? guideData : null;
+          const normalizedGuideData = normalizeGuideRowIdentitiesForUse_ACU(guideData);
+          return (normalizedGuideData && Object.keys(normalizedGuideData).some(k => k.startsWith('sheet_'))) ? normalizedGuideData : null;
       };
 
       if (scopedTemplateState?.mode === 'chat_override' && scopedTemplateState?.templateStr) {
@@ -353,8 +366,9 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
 
       const globalSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU();
       const globalGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(globalSnapshot?.templateObj, { stripSeedRows: false });
-      if (globalGuideData && Object.keys(globalGuideData).some(k => k.startsWith('sheet_'))) {
-          return globalGuideData;
+      const normalizedGlobalGuideData = normalizeGuideRowIdentitiesForUse_ACU(globalGuideData);
+      if (normalizedGlobalGuideData && Object.keys(normalizedGlobalGuideData).some(k => k.startsWith('sheet_'))) {
+          return normalizedGlobalGuideData;
       }
 
       return null;
@@ -365,7 +379,13 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
       const first = getChatFirstLayerMessage_ACU(chat);
       if (!first) return false;
 
-      const normalized = normalizeGuideData_ACU(guideData);
+      let normalized: Record<string, any> | null;
+      try {
+          normalized = normalizeGuideRowIdentitiesForUse_ACU(guideData);
+      } catch (error) {
+          logWarn_ACU('[SheetGuide] 拒绝写入非 canonical row_id 结构：', error);
+          return false;
+      }
       if (!normalized || !Object.keys(normalized).some(k => k.startsWith('sheet_'))) return false;
 
       const normalizedKey = String(isolationKey ?? '');
