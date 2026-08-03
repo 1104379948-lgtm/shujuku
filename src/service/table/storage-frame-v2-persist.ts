@@ -1279,6 +1279,23 @@ async function persistTableMutationLogV2Core_ACU(
       error: 'V2 manualRefillProgress-only write requires an existing full checkpoint anchor.',
     };
   }
+  // `hasExistingV2Frame` only proves that a V2 envelope exists; it does not
+  // establish which later write is entitled to choose the one global replay
+  // anchor. In particular, a historical catch-up bucket can otherwise turn an
+  // earlier empty V2 frame into a migration-labelled checkpoint at whichever
+  // bucket happens to commit first.
+  //
+  // Import keeps its established data_replace bootstrap path. A genuine
+  // legacy-to-V2 migration never reaches this function: it writes a checkpoint
+  // together with migrationProvenance in storage-v2-migration.ts.
+  const usesImplicitMigrationCheckpoint = !hasCheckpointAnywhere
+    && !temporaryBaselineUpgrade
+    && options.checkpointReason === undefined
+    && options.source !== 'import'
+    && hasExistingV2Frame;
+  if (usesImplicitMigrationCheckpoint) {
+    return { saved: false, error: 'V2 storage contains frames but no full checkpoint anchor; refusing to create an implicit migration checkpoint at the current write target. Please run V2 recovery diagnostics first.' };
+  }
   const initialCheckpointReason: TableCheckpointV2_ACU['reason'] = temporaryBaselineUpgrade
     ? 'integrity_repair'
     : (options.checkpointReason || (hasExistingV2Frame ? 'migration' : 'init'));

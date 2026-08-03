@@ -1391,6 +1391,91 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
       reason: 'checkpoint_fallback',
     });
   });
+  it('compaction 每 20 个 AI 楼层滚动一次，并在 29/30/41/50/70 节点保持节流', async () => {
+    mockSettings.retainRecentLayers = 10;
+    const createFrame = (index: number) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(index === 0 ? {
+              checkpoint: {
+                kind: 'full', createdAt: 1, reason: 'init',
+                data: { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] } },
+              },
+            } : {}),
+            logEntries: [],
+          },
+        },
+      },
+    });
+    const chat = Array.from({ length: 29 }, (_, index) => createFrame(index));
+    mockGetChatArray.mockReturnValue(chat);
+
+    expect(shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()).toBe(false);
+    chat.push(createFrame(29));
+    expect(shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()).toBe(true);
+
+    const first = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+    expect(first).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 20 }));
+    expect(chat[20].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.compactionProvenance).toEqual({
+      version: 1, triggeredAtAiCount: 30, retainCount: 10, bufferLayers: 20,
+    });
+
+    while (chat.length < 41) chat.push(createFrame(chat.length));
+    expect(shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()).toBe(false);
+
+    while (chat.length < 50) chat.push(createFrame(chat.length));
+    expect(shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()).toBe(true);
+    const second = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+    expect(second).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 40 }));
+    expect(chat[40].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.compactionProvenance).toEqual({
+      version: 1, triggeredAtAiCount: 50, retainCount: 10, bufferLayers: 20,
+    });
+
+    while (chat.length < 70) chat.push(createFrame(chat.length));
+    expect(shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()).toBe(true);
+    const third = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+    expect(third).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 60 }));
+    expect(chat[60].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.compactionProvenance).toEqual({
+      version: 1, triggeredAtAiCount: 70, retainCount: 10, bufferLayers: 20,
+    });
+  });
+  it('旧 compaction checkpoint 缺 provenance 时按锚点反推触发楼层，并在满 20 个 AI 楼层后滚动', async () => {
+    mockSettings.retainRecentLayers = 10;
+    const checkpointData = { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] } };
+    const chat = Array.from({ length: 50 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            ...(index === 0 ? { checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData } } : {}),
+            ...(index === 20 ? { checkpoint: { kind: 'full', createdAt: 20, reason: 'compaction', data: checkpointData } } : {}),
+            logEntries: [],
+          },
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+
+    expect(shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()).toBe(true);
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 40 }));
+    expect(chat[40].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.compactionProvenance).toMatchObject({
+      triggeredAtAiCount: 50, retainCount: 10, bufferLayers: 20,
+    });
+    expect(mockLogDebug).toHaveBeenCalledWith(expect.stringContaining('缺少 provenance'));
+  });
+
+
+
+
+
 });
 
 
@@ -1546,7 +1631,7 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
   });
 
-  it('手动追平预检拒绝前移包含真实行数据的 checkpoint，且不保存', async () => {
+  it('手动追平预检前移 canonical init checkpoint 时保持真实行数据，并保存恢复备份', async () => {
     const chat: any[] = [
       { is_user: false, mes: 'AI 1' },
       {
@@ -1570,12 +1655,17 @@ describe('deleteLocalDataInChatCore_ACU', () => {
 
     const result = await ensureManualCatchUpAnchorBeforeTarget_ACU(0, '');
 
-    expect(result).toMatchObject({ status: 'blocked', error: expect.stringContaining('真实数据或未知历史') });
-    expect(chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content).toHaveLength(2);
-    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+    expect(result).toEqual({ status: 'repaired', checkpointMessageIndex: 0 });
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content).toHaveLength(2);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].recoveryBackup).toMatchObject({
+      recoveryKind: 'relocated_checkpoint_discarded_prefix',
+      sourceMessageIndex: 1,
+    });
+    expect(chat[1].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
   });
 
-  it('手动追平预检拒绝前置楼层中已有未知 V2 增量的旧布局', async () => {
+  it('手动追平预检丢弃 checkpoint 前已被 replay 忽略的 artifact，并保留恢复备份', async () => {
     const chat: any[] = [
       {
         is_user: false, mes: 'AI 1', TavernDB_ACU_IsolatedData: {
@@ -1603,10 +1693,53 @@ describe('deleteLocalDataInChatCore_ACU', () => {
 
     const result = await ensureManualCatchUpAnchorBeforeTarget_ACU(0, '');
 
-    expect(result).toMatchObject({ status: 'blocked', error: expect.stringContaining('增量 artifact') });
-    expect(chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeDefined();
+    expect(result).toEqual({ status: 'repaired', checkpointMessageIndex: 0 });
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeDefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].recoveryBackup).toMatchObject({
+      recoveryKind: 'relocated_checkpoint_discarded_prefix',
+      sourceMessageIndex: 1,
+      discardedPrefixFrames: [{ messageIndex: 0 }],
+    });
+    expect(chat[1].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
+  });
+
+  it('手动追平预检遇到 checkpoint 之后的 artifact 时保持 blocked 且零写入', async () => {
+    const checkpoint = {
+      kind: 'full', createdAt: 1, reason: 'migration',
+      data: { mate: { type: 'acu' }, sheet_0: { uid: 'sheet_0', name: '表', content: [['row_id', '值']] } },
+    };
+    const chat: any[] = [
+      { is_user: false, mes: 'AI 1' },
+      { is_user: false, mes: 'AI 2', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, checkpoint, logEntries: [] } } } },
+      { is_user: false, mes: 'AI 3', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [{ seq: 1, operations: [] }] } } } },
+    ];
+    const before = JSON.parse(JSON.stringify(chat));
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await ensureManualCatchUpAnchorBeforeTarget_ACU(0, '');
+
+    expect(result).toMatchObject({ status: 'blocked', error: expect.stringContaining('之后存在无法安全重排') });
+    expect(chat).toEqual(before);
     expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
   });
+
+  it('手动追平锚点移动严格保存失败时恢复所有受影响 frame', async () => {
+    const chat: any[] = [
+      { is_user: false, mes: 'AI 1', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [{ seq: 1, operations: [] }] } } } },
+      { is_user: false, mes: 'AI 2', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' }, sheet_0: { uid: 'sheet_0', name: '表', content: [['row_id', '值']] } } }, logEntries: [] } } } },
+    ];
+    const before = JSON.parse(JSON.stringify(chat));
+    mockGetChatArray.mockReturnValue(chat);
+    mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('host unavailable'));
+
+    const result = await ensureManualCatchUpAnchorBeforeTarget_ACU(0, '');
+
+    expect(result).toMatchObject({ status: 'blocked', error: expect.stringContaining('保存失败') });
+    expect(chat).toEqual(before);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
+  });
+
 
   it('空聊天记录返回 0', async () => {
     mockGetChatArray.mockReturnValue([]);

@@ -2067,6 +2067,40 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     ]);
   });
 
+  it('有 V2 frame 但无 full checkpoint 时拒绝隐式 migration 基线，且零写入零保存', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const message = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } },
+      },
+    } as any;
+    mocks.chat.splice(0, mocks.chat.length, message);
+    const before = JSON.parse(JSON.stringify(message));
+    mocks.saveChat.mockClear();
+    mocks.saveChatStrict.mockClear();
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any,
+      filledSheetKeys: [],
+      candidateChangedSheetKeys: [],
+      operations: [],
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(result).toEqual({
+      saved: false,
+      error: 'V2 storage contains frames but no full checkpoint anchor; refusing to create an implicit migration checkpoint at the current write target. Please run V2 recovery diagnostics first.',
+    });
+    expect(message).toEqual(before);
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+  });
+
+
   it('无锚点日志可由临时模板基线完整回放时，以 afterData 建立唯一正式 full checkpoint 并保留原 frame 备份', async () => {
     const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
     const orphanFrame = {

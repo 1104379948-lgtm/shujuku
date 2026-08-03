@@ -5,6 +5,7 @@ import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../ru
 import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder';
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 import { repairTableDataFromAudit_ACU, type UpgradeIdRemap_ACU } from './table-data-repair';
+import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
 import { getCurrentStorageMode } from './storage-mode';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from './table-storage-strategy';
@@ -13,7 +14,7 @@ import type { TableMutationOperationV2_ACU, TablePatchV2_ACU, TableStorageFrameV
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
 type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence';
-export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'unrecoverable_no_base' | 'unrecoverable';
+export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable';
 export type V2RecoveryCommitStatus_ACU = 'committed' | 'committed_postcondition_failed' | 'commit_failed_rolled_back';
 
 export interface V2RecoveryCommitResult_ACU {
@@ -81,6 +82,30 @@ function hasReplayArtifactsAfterCheckpoint_ACU(frame: TableStorageFrameV2_ACU): 
 }
 function hasAnyReplayArtifacts_ACU(frame: TableStorageFrameV2_ACU): boolean {
   return !!frame.checkpoint || hasReplayArtifactsAfterCheckpoint_ACU(frame);
+}
+function hasV2ReplayArtifact_ACU(frame: TableStorageFrameV2_ACU): boolean {
+  return (frame.logEntries?.length || 0) > 0
+    || Object.keys(frame.perSheetCheckpoints || {}).length > 0
+    || frame.manualRefillProgress !== undefined
+    || (frame.headRevision !== undefined && frame.headRevision !== null);
+}
+function findLateCheckpointWithSuffixArtifacts_ACU(
+  frames: Array<{ messageIndex: number; frame: TableStorageFrameV2_ACU }>,
+): { checkpointMessageIndex: number; suffixMessageIndex: number } | null {
+  const fullCheckpoints = frames.filter(item => item.frame.checkpoint?.kind === 'full');
+  if (fullCheckpoints.length !== 1) return null;
+  const checkpoint = fullCheckpoints[0];
+  const checkpointData = checkpoint.frame.checkpoint;
+  if (!checkpointData
+    || !['init', 'migration'].includes(checkpointData.reason)
+    || !validateCanonicalCheckpoint_ACU(checkpointData).valid
+    || hasV2ReplayArtifact_ACU(checkpoint.frame)) return null;
+
+  // 此类诊断只覆盖“较晚 reset 锚点截断了已有历史”的布局。普通 init 后的
+  // 正常增量没有前置 artifact，不能误报为需要人工恢复。
+  if (!frames.some(item => item.messageIndex < checkpoint.messageIndex && hasV2ReplayArtifact_ACU(item.frame))) return null;
+  const suffix = frames.find(item => item.messageIndex > checkpoint.messageIndex && hasV2ReplayArtifact_ACU(item.frame));
+  return suffix ? { checkpointMessageIndex: checkpoint.messageIndex, suffixMessageIndex: suffix.messageIndex } : null;
 }
 function isIsolatedDataReplaceFrame_ACU(frame: TableStorageFrameV2_ACU): boolean {
   if (Object.keys(frame.perSheetCheckpoints || {}).length > 0 || frame.manualRefillProgress) return false;
@@ -288,6 +313,18 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
           chatKey: String(currentChatFileIdentifier_ACU || '').trim(),
           sourceFrameFingerprint: getFrameFingerprint_ACU(source.frame), candidateData: replay.data,
         } };
+      }
+      const lateCheckpoint = findLateCheckpointWithSuffixArtifacts_ACU(frames);
+      if (lateCheckpoint) {
+        return {
+          summary: {
+            status: 'unrecoverable_late_checkpoint_artifacts',
+            isolationKey,
+            sourceMessageIndex: lateCheckpoint.checkpointMessageIndex,
+            requiresConfirmation: false,
+            message: `检测到较晚的 canonical ${latestFull.frame.checkpoint.reason} checkpoint（#${lateCheckpoint.checkpointMessageIndex}）两侧均存在 V2 replay artifact；自动前移会改变后缀回放语义，已拒绝自动恢复。请先导出 recovery backup，再人工核对并执行 V2 恢复诊断。`,
+          },
+        };
       }
       const isTemplateFallbackRoot = latestFull.frame.checkpoint.fallbackProvenance?.kind === 'manual_refill_template_root';
       return {

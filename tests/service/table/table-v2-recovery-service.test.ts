@@ -207,6 +207,31 @@ describe('table-v2-recovery-service', () => {
   });
 
 
+  it('较晚 canonical checkpoint 两侧均有 replay artifact 时给出人工恢复引导且零写入', async () => {
+    const logEntry = (entryId: string, targetMessageIndex: number) => ({
+      seq: 1, entryId, createdAt: 1, source: 'system', targetMessageIndex, aiFloor: targetMessageIndex + 1,
+      filledSheetKeys: [], changedSheetKeys: ['sheet_0'], groupKeys: [],
+      operations: [{ kind: 'data_replace', data: data([[String(targetMessageIndex + 1), entryId]]), reason: 'system' }],
+    });
+    h.chat = [
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, [logEntry('discarded-prefix', 0)]) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame({ kind: 'full', createdAt: 2, reason: 'init', data: data() }) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, [logEntry('unsafe-suffix', 2)]) } } },
+    ];
+
+    const summary = await prepareV2Recovery_ACU();
+
+    expect(summary).toMatchObject({
+      status: 'unrecoverable_late_checkpoint_artifacts',
+      sourceMessageIndex: 1,
+      requiresConfirmation: false,
+      message: expect.stringContaining('自动前移会改变后缀回放语义'),
+    });
+    expect(summary.planId).toBeUndefined();
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
+
   it('后续 operation 引用被重复身份修复重映射的 row_id 时拒绝猜测', async () => {
     const source = frame({ kind: 'full', createdAt: 1, reason: 'init', data: data([['1', '铁剑'], [' 1 ', '副本']]) });
     h.chat = chatWithFrame(source);

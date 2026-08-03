@@ -92,6 +92,13 @@ export interface TableCheckpointV2_ACU {
   createdAt: number;
   reason: 'init' | 'periodic' | 'manual' | 'schema_change' | 'compaction' | 'import' | 'migration' | 'integrity_repair';
   data: TableDataObject_ACU;
+  /** compaction 的触发计数，用于避免缓冲阈值满足后每层重复滚动。 */
+  compactionProvenance?: {
+    version: 1;
+    triggeredAtAiCount: number;
+    retainCount: number;
+    bufferLayers: number;
+  };
   scheduleSummary?: Record<string, TableCheckpointScheduleSummaryV2_ACU>;
   event?: TableMutationEventV2_ACU;
   manualRefillProgress?: ManualRefillProgressV2_ACU;
@@ -421,12 +428,17 @@ export interface TableMigrationAuditBackupV1_ACU {
 export interface TableV2RecoveryBackup_ACU {
   version: 1;
   createdAt: number;
-  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence';
+  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence' | 'relocated_checkpoint_discarded_prefix';
   sourceMessageIndex: number | null;
   failedMessageIndex?: number;
   failedSeq?: number;
   failure?: string;
   storageFrame: TableStorageFrameV2_ACU;
+  /** 将错误落在较晚楼层的 full checkpoint 前移时，被 replay 忽略的前缀证据。 */
+  discardedPrefixFrames?: Array<{
+    messageIndex: number;
+    storageFrame: TableStorageFrameV2_ACU;
+  }>;
 }
 
 /** 混合 legacy/V2 决议提交前保留的 legacy 输入与决议证据，不参与 replay。 */
