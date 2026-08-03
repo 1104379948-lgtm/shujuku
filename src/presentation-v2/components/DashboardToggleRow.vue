@@ -6,6 +6,7 @@
         :model-value="item.value"
         :aria-label="item.label"
         :data-acu-toggle-key="item.key"
+        :disabled="item.disabled === true"
         @update:model-value="$emit('change', $event)"
       />
     </div>
@@ -29,6 +30,7 @@ defineProps<{
     label: string;
     description: string;
     value: boolean;
+    disabled?: boolean;
   };
 }>();
 

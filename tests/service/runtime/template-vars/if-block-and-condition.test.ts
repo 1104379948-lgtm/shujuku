@@ -46,12 +46,20 @@ vi.mock('../../../../src/service/runtime/template-vars/var-store-and-tags', () =
 // mock sql-query-var 的 evaluateDbCondition 和 evaluateSqlCondition
 const mockEvaluateDbCondition = vi.fn(() => false);
 const mockEvaluateSqlCondition = vi.fn(() => false);
+const mockGetCurrentFlightModeState = vi.fn(() => ({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' }));
 vi.mock('../../../../src/service/runtime/template-vars/sql-query-var', () => ({
   evaluateDbCondition: (...args: any[]) => mockEvaluateDbCondition(...args),
   evaluateSqlCondition: (...args: any[]) => mockEvaluateSqlCondition(...args),
   replaceDbSqlVariables: vi.fn((s: string) => s),
   replaceVarReferences: vi.fn((s: string) => s),
 }));
+
+vi.mock('../../../../src/service/flight-mode/flight-mode-state', () => ({
+  getCurrentFlightModeState_ACU: (...args: any[]) => mockGetCurrentFlightModeState(...args),
+}));
+vi.mock('../../../../src/service/flight-mode/flight-mode-hidden-rows', async () =>
+  await vi.importActual('../../../../src/service/flight-mode/flight-mode-hidden-rows')
+);
 
 import { parseIfBlockRecursive_ACU } from '../../../../src/service/runtime/template-vars/if-block-parser';
 import { evaluateCondExpression_ACU } from '../../../../src/service/runtime/template-vars/seed-condition';
@@ -65,6 +73,7 @@ describe('parseIfBlockRecursive_ACU — db/sql 条件类型', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSettings = {};
+    mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
   });
 
   it('<if db="..."> 条件为 true 时输出 if 分支', () => {
@@ -149,6 +158,26 @@ describe('parseIfBlockRecursive_ACU — db/sql 条件类型', () => {
 
   it('null 返回空字符串', () => {
     expect(parseIfBlockRecursive_ACU(null as any, context)).toBe('');
+  });
+
+  it('飞行模式下 cell 条件使用隐藏纪要行投影，关闭态不额外投影', async () => {
+    const { evaluateCellExpression_ACU } = await import('../../../../src/service/runtime/template-vars/cell-utils');
+    const sourceTables = {
+      sheet_chronicle: { name: '纪要表', content: [['row_id', '内容'], ['c1', '可见'], ['c2', '隐藏']] },
+    };
+    const expectedProjectedTables = {
+      sheet_chronicle: { name: '纪要表', content: [['row_id', '内容'], ['c1', '可见']] },
+    };
+    mockGetCurrentFlightModeState.mockReturnValue({ enabled: true, hiddenRowIds: ['c2'], bigSummarySheetKey: 'sheet_da_zong_jie' });
+    vi.mocked(evaluateCellExpression_ACU).mockReturnValue(true);
+
+    expect(parseIfBlockRecursive_ACU('<if cell="纪要表/c1/内容 == 可见">可见</if>', { seedContent: '', plotContent: '', allTablesJson: sourceTables })).toBe('可见');
+    expect(evaluateCellExpression_ACU).toHaveBeenCalledWith('纪要表/c1/内容 == 可见', expectedProjectedTables);
+
+    mockGetCurrentFlightModeState.mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
+    vi.mocked(evaluateCellExpression_ACU).mockClear();
+    parseIfBlockRecursive_ACU('<if cell="纪要表/c1/内容 == 可见">可见</if>', { seedContent: '', plotContent: '', allTablesJson: sourceTables });
+    expect(evaluateCellExpression_ACU).toHaveBeenCalledWith('纪要表/c1/内容 == 可见', sourceTables);
   });
 });
 

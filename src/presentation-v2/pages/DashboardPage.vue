@@ -109,12 +109,16 @@ import {
   FEATURE_GATE_VECTOR_INDEX,
 } from "../router/page-registry";
 import { dashboardCopy } from "../copy/dashboard-copy";
+import { useDialogStore } from "../stores/dialog-store";
 import { usePlotPresetStore } from "../stores/plot-preset-store";
 import { useRouterStore } from "../stores/router-store";
+import { useToastStore } from "../stores/toast-store";
 
 const dashboard = useDashboardPage();
 const plotStore = usePlotPresetStore();
 const routerStore = useRouterStore();
+const dialogStore = useDialogStore();
+const toastStore = useToastStore();
 
 const activeGroup = ref<"basic" | "advanced">("basic");
 const groupOptions = [
@@ -160,6 +164,53 @@ function goToHealthAction(pageId: string): void {
 }
 
 async function handleToggleChange(key: string, value: boolean): Promise<void> {
+  if (key === "flightMode") {
+    if (!value) {
+      const confirmed = await dialogStore.confirm({
+        title: dashboardCopy.toggles.flightMode.disableTitle,
+        message: dashboardCopy.toggles.flightMode.disableMessage,
+        dangerMessage: dashboardCopy.toggles.flightMode.disableDanger,
+        confirmLabel: dashboardCopy.toggles.flightMode.confirmDisable,
+        confirmVariant: "danger",
+      });
+      if (!confirmed) return;
+    }
+    const result = await dashboard.setFlightMode(value);
+    if (result.ok) {
+      toastStore.success(
+        value
+          ? dashboardCopy.toggles.flightMode.enabled
+          : dashboardCopy.toggles.flightMode.disabled,
+        { muteable: false },
+      );
+      return;
+    }
+    if (result.reason === "template_scope_changed") {
+      const confirmed = await dialogStore.confirm({
+        title: dashboardCopy.toggles.flightMode.templateScopeChangedTitle,
+        message: dashboardCopy.toggles.flightMode.templateScopeChangedMessage,
+        dangerMessage: dashboardCopy.toggles.flightMode.templateScopeChangedDanger,
+        confirmLabel: dashboardCopy.toggles.flightMode.confirmDisableLabel,
+        confirmVariant: "danger",
+      });
+      if (!confirmed) return;
+      const confirmedResult = await dashboard.setFlightMode(false, {
+        confirmTemplateScopeChange: true,
+      });
+      if (confirmedResult.ok) {
+        toastStore.success(dashboardCopy.toggles.flightMode.disabled, { muteable: false });
+      } else {
+        toastStore.error(confirmedResult.error || dashboardCopy.toggles.flightMode.disableFailed, { muteable: false });
+      }
+      return;
+    }
+    if (result.reason === "too_many_visible_chronicle_rows") {
+      toastStore.error(`飞行模式未开启：当前有 ${result.visibleChronicleRowCount ?? 0} 条可见纪要，最多允许 15 条。`, { muteable: false });
+      return;
+    }
+    toastStore.error(result.error || (value ? dashboardCopy.toggles.flightMode.enableFailed : dashboardCopy.toggles.flightMode.disableFailed), { muteable: false });
+    return;
+  }
   dashboard.setToggle(key, value);
   if (key === "plotEnabled") plotStore.refreshFromSettings();
   syncFeaturePageGates();

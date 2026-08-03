@@ -8,6 +8,7 @@ import { abortController_ACU, loopState_ACU, planningGuard_ACU, settings_ACU, _s
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import { runPlotTasksRuntime_ACU } from './plot-task-engine';
 import { capturePlotRuntimeScope_ACU, summarizePlotRuntimeError_ACU, summarizePlotRuntimeScope_ACU } from './plot-runtime-scope';
+import { isFlightModeActive_ACU } from '../../flight-mode/flight-mode-state';
 
 const PLOT_RUNTIME_BUILD_VERSION_ACU = (globalThis as any).__ACU_BUILD_VERSION__ || 'unknown';
 
@@ -47,7 +48,7 @@ const PLOT_RUNTIME_BUILD_VERSION_ACU = (globalThis as any).__ACU_BUILD_VERSION__
         ...currentSettings,
       };
 
-      if (!plotSettings.enabled) {
+      if (!plotSettings.enabled || isFlightModeActive_ACU()) {
         return { success: false, skipped: true, reason: 'disabled' };
       }
 

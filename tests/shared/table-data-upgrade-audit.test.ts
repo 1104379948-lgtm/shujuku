@@ -87,6 +87,17 @@ describe('table-data-upgrade-audit', () => {
     expect(result.overflowCells).toEqual([{ sheetKey: 'sheet_0', rowPool: 'content', rowIndex: 2, cells: ['不可丢失'] }]);
   });
 
+  it('将非数组行与可补齐短行分为不同审计类别，避免把不可修复形状误放入无损修复', () => {
+    const source: any = data([['row_id', 'name'], ['1'], { malformed: true } as any]);
+    const audit = auditTableDataForUpgrade_ACU(source);
+
+    expect(audit.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'upgrade_row_width_mismatch', rowIndex: 1 }),
+      expect.objectContaining({ code: 'upgrade_invalid_row_shape', rowIndex: 2 }),
+    ]));
+    expect(audit.status).toBe('requires_confirmation');
+  });
+
   it('短行缺少 NOT NULL 且无默认值的业务列时禁止自动猜值', () => {
     const source = data(
       [['row_id', '当前地点', '当前主要地区'], ['1', '新宿']],

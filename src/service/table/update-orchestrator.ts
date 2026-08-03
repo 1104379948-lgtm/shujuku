@@ -59,6 +59,8 @@ import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers
 import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transaction';
 import { runTableUpdateCommit_ACU, type TableUpdateCommitErrorCategory_ACU } from './table-update-commit';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
+import { getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU } from '../flight-mode/flight-mode-hidden-rows';
+import { getCurrentFlightModeState_ACU, stageFlightModeHiddenRowIds_ACU } from '../flight-mode/flight-mode-state';
 
 // ============================================================
 // 类型定义：返回值 + 进度事件（service 层不驱动 UI）
@@ -503,6 +505,21 @@ function buildWriteSetForSheetKeys_ACU(sheetKeys: string[] | null | undefined, f
     return normalized.length > 0
         ? normalized.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }))
         : [{ kind: 'all' as const }];
+}
+
+function buildFlightModeHiddenRowsBeforePersist_ACU(
+    beforeData: Record<string, any>,
+    isImportMode: boolean,
+): (afterData: Record<string, any>) => { rollback?: () => void } | void {
+    return (afterData) => {
+        if (isImportMode) return;
+        const state = getCurrentFlightModeState_ACU();
+        if (!state.enabled) return;
+        const hiddenRowIds = getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU(beforeData, afterData, state);
+        if (!hiddenRowIds) return;
+        const rollback = stageFlightModeHiddenRowIds_ACU(hiddenRowIds);
+        return rollback ? { rollback } : undefined;
+    };
 }
 
 
@@ -1402,6 +1419,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                     trackAsUpdate: true,
                     operations,
                     revisionWriteSet,
+                    beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode),
                 },
             };
         });
@@ -1561,6 +1579,9 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             success: true,
             value: { modifiedKeys },
             tableData: workingTableData as any,
+            persist: {
+                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode),
+            },
         }));
         if (!commitResult.success) {
             return {
@@ -2292,6 +2313,7 @@ export async function executeCardUpdateCore_ACU(
                                 trackAsUpdate: true,
                                 operations,
                                 revisionWriteSet,
+                                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode),
                             },
                         };
                     });
@@ -2427,6 +2449,7 @@ export async function executeCardUpdateCore_ACU(
                             trackAsUpdate: true,
                             operations,
                             revisionWriteSet,
+                            beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode),
                         },
                     };
                 });

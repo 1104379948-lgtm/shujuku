@@ -32,7 +32,7 @@ export interface LegacyRowIdentityResult_ACU {
  * Header cells that historically carried the row identity before `row_id`
  * became the canonical name. Only exact, unambiguous legacy spellings.
  */
-const LEGACY_ROW_ID_HEADER_ALIASES_ACU = new Set(['id', 'rowid', 'row-id', 'row_id']);
+const LEGACY_ROW_ID_HEADER_ALIASES_ACU = new Set(['id', 'rowid', 'row-id', 'row_id', '行号']);
 
 function isLegacyRowIdHeaderAlias_ACU(value: unknown): boolean {
   if (typeof value !== 'string') return false;

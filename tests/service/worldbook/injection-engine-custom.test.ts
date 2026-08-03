@@ -21,6 +21,7 @@ const {
   mockSplitKeywordsByComma,
   mockGetLatestSummaryVectorIndexSnapshotState,
   mockGetEffectiveSummaryVectorIndexConfig,
+  mockGetCurrentFlightModeState,
 } = vi.hoisted(() => ({
   mockSettings: {
     dataIsolationEnabled: false,
@@ -76,6 +77,7 @@ const {
   mockGetEffectiveSummaryVectorIndexConfig: vi.fn(() => ({
     summaryIndexKeywordMinRows: 3,
   })),
+  mockGetCurrentFlightModeState: vi.fn(() => ({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' })),
 }));
 
 vi.mock('../../../src/service/settings/settings-readers', () => ({
@@ -144,6 +146,10 @@ vi.mock('../../../src/service/vector/vector-memory-config', () => ({
   getEffectiveSummaryVectorIndexConfig_ACU: mockGetEffectiveSummaryVectorIndexConfig,
 }));
 
+vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
+  getCurrentFlightModeState_ACU: (...args: any[]) => mockGetCurrentFlightModeState(...args),
+}));
+
 import { updateCustomTableExports_ACU } from '../../../src/service/worldbook/injection-engine-custom';
 
 beforeEach(() => {
@@ -160,6 +166,7 @@ beforeEach(() => {
   mockAllocConsecutiveOrderBlock.mockReturnValue(100);
   mockGetCurrentWorldbookConfig.mockReturnValue({ zeroTkOccupyMode: false });
   mockGetSortedSheetKeys.mockReturnValue([]);
+  mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
 });
 
 describe('updateCustomTableExports_ACU', () => {
@@ -288,6 +295,34 @@ describe('updateCustomTableExports_ACU', () => {
       expect(contents).toContain('| 铁剑 | 可用 |');
       expect(contents).not.toContain('旧备注');
       expect(contents).not.toContain('历史秘密');
+    });
+
+    it('飞行模式导出时排除隐藏纪要行且不修改原始快照', async () => {
+      const mergedData: any = {
+        sheet_chronicle: {
+          name: '纪要表',
+          content: [['row_id', '事件'], ['c1', '可见纪要'], ['c2', '隐藏纪要']],
+          exportConfig: { enabled: true, entryName: '纪要表', entryType: 'constant' },
+        },
+      };
+      mockGetSortedSheetKeys.mockReturnValue(['sheet_chronicle']);
+      mockGetCurrentFlightModeState.mockReturnValue({ enabled: true, hiddenRowIds: ['c2'], bigSummarySheetKey: 'sheet_da_zong_jie' });
+      mockEnsureExportConfigDefaults.mockReturnValue({
+        enabled: true, splitByRow: false, entryName: '纪要表', entryType: 'constant', keywords: '', preventRecursion: true,
+        injectionTemplate: '', extraIndexEnabled: false, extraIndexEntryName: '纪要表-索引', extraIndexColumns: [],
+        extraIndexColumnModes: {}, extraIndexInjectionTemplate: '',
+        entryPlacement: { position: 'at_depth_as_system', depth: 2, order: 10000 },
+        extraIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 10010 },
+      });
+
+      await updateCustomTableExports_ACU(mergedData);
+
+      const contents = mockCreateLorebookEntries.mock.calls[0][1].map((entry: any) => String(entry.content || '')).join('\n');
+      expect(contents).toContain('可见纪要');
+      expect(contents).not.toContain('隐藏纪要');
+      expect(mergedData.sheet_chronicle.content).toEqual([
+        ['row_id', '事件'], ['c1', '可见纪要'], ['c2', '隐藏纪要'],
+      ]);
     });
 
     it('未启用导出的表格被跳过', async () => {
@@ -611,6 +646,59 @@ describe('updateCustomTableExports_ACU', () => {
       expect(mockCreateLorebookEntries).not.toHaveBeenCalled();
     });
   });
+
+  describe('附加索引生命周期', () => {
+    it('关闭自定义纪要索引时删除旧索引且不会重新创建', async () => {
+      mockEnsureExportConfigDefaults.mockReturnValue({
+        enabled: true,
+        splitByRow: false,
+        entryName: '纪要表',
+        entryType: 'constant',
+        keywords: '',
+        preventRecursion: true,
+        injectionTemplate: '',
+        extraIndexEnabled: false,
+        extraIndexEntryName: '飞行模式前的自定义纪要索引',
+        extraIndexColumns: ['内容'],
+        extraIndexColumnModes: {},
+        extraIndexInjectionTemplate: '',
+        entryPlacement: { position: 'at_depth_as_system', depth: 2, order: 10000 },
+        extraIndexPlacement: { position: 'at_depth_as_system', depth: 2, order: 10010 },
+      });
+      const previousEntries = [
+        { uid: 101, comment: 'TavernDB-ACU-CustomExport-纪要表' },
+        { uid: 102, comment: 'TavernDB-ACU-CustomExport-飞行模式前的自定义纪要索引' },
+        { uid: 103, comment: '不相关条目' },
+      ];
+      mockGetLorebookEntries.mockResolvedValue(previousEntries);
+      mockGetSortedSheetKeys.mockReturnValue(['sheet_chronicle']);
+
+      await updateCustomTableExports_ACU({
+        sheet_chronicle: {
+          name: '纪要表',
+          content: [['row_id', '内容'], ['1', '旧纪要']],
+          exportConfig: {
+            enabled: true,
+            entryName: '纪要表',
+            entryType: 'constant',
+            extraIndexEnabled: false,
+            extraIndexEntryName: '飞行模式前的自定义纪要索引',
+            extraIndexColumns: ['内容'],
+          },
+        },
+      });
+
+      expect(mockDeleteLorebookEntries).toHaveBeenCalledWith('test-lorebook', [101, 102]);
+      const recreated = mockCreateLorebookEntries.mock.calls[0][1];
+      expect(recreated).toEqual(expect.arrayContaining([
+        expect.objectContaining({ comment: '纪要表' }),
+      ]));
+      expect(recreated).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ comment: '飞行模式前的自定义纪要索引' }),
+      ]));
+    });
+  });
+
 
   // ═══ 主条目禁用但索引启用 ═══
   describe('主条目禁用但索引启用', () => {

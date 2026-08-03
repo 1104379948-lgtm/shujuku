@@ -20,6 +20,8 @@ import { parseDDLTableName, rebindCreateTableName_ACU, resolveEffectiveDDL, type
 import { getSheetColumnProjection_ACU, projectSheetDDLForVisibleColumns_ACU, projectSheetRowToVisibleColumns_ACU } from '../../../shared/ddl-utils';
 import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity';
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
+import { getCurrentFlightModeState_ACU } from '../../flight-mode/flight-mode-state';
+import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flight-mode-hidden-rows';
 
 const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -123,6 +125,16 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
             }
         }
     } catch (e) { logWarn_ACU('[AI输入准备] ensureChatSheetGuideSeeded 失败, seed rows 可能不完整:', e); }
+
+    const flightMode = getCurrentFlightModeState_ACU();
+    if (flightMode.enabled && flightMode.hiddenRowIds.length > 0) {
+        try {
+            workingTableData = projectFlightModeHiddenChronicleRows_ACU(workingTableData, flightMode);
+        } catch (error) {
+            // 仅 prompt 投影失败时必须保留原始数据，不能以异常换来空表或中断填表。
+            logWarn_ACU('[FlightMode] 填表 prompt 纪要隐藏行投影失败，已回退为未过滤数据。', error);
+        }
+    }
 
     let tableDataText = '';
     let _seedRowsTablesUsed_ACU: string[] = [];

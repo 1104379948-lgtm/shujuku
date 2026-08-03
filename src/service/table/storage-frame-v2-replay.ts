@@ -530,6 +530,39 @@ function normalizeHistoricalReplayState_ACU(state: TableDataObject_ACU, context:
   replaceState_ACU(state, candidate);
 }
 
+function formatLegacyDuplicateRepairDiagnostics_ACU(
+  gate: 'canonical_precheck' | 'audit_gate' | 'repair_gate',
+  options: {
+    canonicalReasons?: string[];
+    auditStatus?: string;
+    auditCodes?: string[];
+    auditLocations?: string[];
+    requiresConfirmation?: boolean;
+  } = {},
+): string {
+  const fields = [`gate=${gate}`];
+  if (options.canonicalReasons?.length) fields.push(`canonical=${options.canonicalReasons.join(',')}`);
+  if (options.auditStatus) fields.push(`audit_status=${options.auditStatus}`);
+  if (options.auditCodes?.length) fields.push(`audit_codes=${options.auditCodes.join(',')}`);
+  if (options.auditLocations?.length) fields.push(`audit_locations=${options.auditLocations.join(',')}`);
+  if (options.requiresConfirmation !== undefined) fields.push(`requires_confirmation=${options.requiresConfirmation}`);
+  return fields.join('; ');
+}
+
+function summarizeUpgradeIssueCodes_ACU(codes: string[]): string[] {
+  const counts = new Map<string, number>();
+  codes.forEach(code => counts.set(code, (counts.get(code) || 0) + 1));
+  return [...counts].map(([code, count]) => `${code}:${count}`);
+}
+
+function summarizeUpgradeIssueLocations_ACU(issues: Array<{ code: string; sheetKey?: string; rowIndex?: number }>): string[] {
+  return issues.map(issue => {
+    const sheetKey = issue.sheetKey || 'unknown_sheet';
+    const row = issue.rowIndex === undefined ? '' : `#${issue.rowIndex}`;
+    return `${issue.code}@${sheetKey}${row}`;
+  });
+}
+
 function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU): void {
   // Restore legacy identity on the live state first: an empty or absent row_id
   // is a legacy format trait, not a duplicate, and leaving it here would send
@@ -540,7 +573,11 @@ function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU)
   const normalization = normalizeCanonicalTableRows_ACU(probe);
   const nonDuplicateErrors = normalization.errors.filter(issue => issue.reason !== 'duplicate_row_id');
   if (normalization.removedRows.length > 0 || nonDuplicateErrors.length > 0) {
-    normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
+    const diagnostics = formatLegacyDuplicateRepairDiagnostics_ACU('canonical_precheck', {
+      canonicalReasons: [...normalization.removedRows, ...nonDuplicateErrors].map(issue => issue.reason),
+    });
+    logWarn_ACU(`[V2 Replay] 旧 full checkpoint 重复 row_id 兼容修复未执行：${diagnostics}。`);
+    normalizeHistoricalReplayState_ACU(state, `full checkpoint（${diagnostics}）`);
     return;
   }
 
@@ -549,21 +586,39 @@ function normalizeLegacyDuplicateCheckpointState_ACU(state: TableDataObject_ACU)
     issue.code === 'upgrade_duplicate_row_id'
     || issue.code === 'upgrade_seed_pool_conflict'
   ));
-  const unsupportedIssues = audit.issues.filter(issue => (
-    issue.code !== 'upgrade_duplicate_row_id'
-    && issue.code !== 'upgrade_seed_pool_conflict'
-  ));
+  // These repair actions preserve every existing row and business cell. New
+  // writes remain strict; this exception is only for persisted legacy frames.
+  const losslessIssueCodes = new Set([
+    'upgrade_duplicate_row_id',
+    'upgrade_seed_pool_conflict',
+    'upgrade_row_width_mismatch',
+  ]);
+  const unsupportedIssues = audit.issues.filter(issue => !losslessIssueCodes.has(issue.code));
   if (audit.status === 'clean' && normalization.errors.length === 0) {
     replaceState_ACU(state, probe);
     return;
   }
   if (audit.status !== 'repairable' || duplicateIssues.length === 0 || unsupportedIssues.length > 0) {
-    normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
+    const diagnostics = formatLegacyDuplicateRepairDiagnostics_ACU('audit_gate', {
+      auditStatus: audit.status,
+      auditCodes: summarizeUpgradeIssueCodes_ACU(audit.issues.map(issue => issue.code)),
+      auditLocations: summarizeUpgradeIssueLocations_ACU(audit.issues),
+    });
+    logWarn_ACU(`[V2 Replay] 旧 full checkpoint 重复 row_id 兼容修复未执行：${diagnostics}。`
+      + '该 checkpoint 不可无损自动修复，请先导出原始 frame 后在数据管理执行 V2 恢复。');
+    normalizeHistoricalReplayState_ACU(state, `full checkpoint（${diagnostics}）`);
     return;
   }
   const repair = repairTableDataFromAudit_ACU(audit);
   if (repair.requiresConfirmation || !repair.candidateData || typeof repair.candidateData !== 'object') {
-    normalizeHistoricalReplayState_ACU(state, 'full checkpoint');
+    const diagnostics = formatLegacyDuplicateRepairDiagnostics_ACU('repair_gate', {
+      auditStatus: audit.status,
+      auditCodes: summarizeUpgradeIssueCodes_ACU(audit.issues.map(issue => issue.code)),
+      auditLocations: summarizeUpgradeIssueLocations_ACU(audit.issues),
+      requiresConfirmation: repair.requiresConfirmation,
+    });
+    logWarn_ACU(`[V2 Replay] 旧 full checkpoint 重复 row_id 兼容修复未执行：${diagnostics}。`);
+    normalizeHistoricalReplayState_ACU(state, `full checkpoint（${diagnostics}）`);
     return;
   }
   const candidate = repair.candidateData as TableDataObject_ACU;

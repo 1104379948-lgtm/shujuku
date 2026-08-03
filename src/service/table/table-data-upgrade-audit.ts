@@ -7,6 +7,7 @@ export type UpgradeAuditIssueCode_ACU =
   | 'upgrade_invalid_header'
   | 'upgrade_empty_row_id'
   | 'upgrade_duplicate_row_id'
+  | 'upgrade_invalid_row_shape'
   | 'upgrade_row_width_mismatch'
   | 'upgrade_required_mapping_ambiguous'
   | 'upgrade_required_business_cell_missing'
@@ -133,7 +134,7 @@ function inspectRows_ACU(result: UpgradeAuditResult_ACU, sheetKey: string, rows:
   rows.forEach((row, offset) => {
     const rowIndex = pool === 'content' ? offset + 1 : offset;
     if (!Array.isArray(row)) {
-      addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
+      addIssue_ACU(result, { code: 'upgrade_invalid_row_shape', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
       return;
     }
     const rowId = canonicalId_ACU(row[0]);
@@ -167,7 +168,7 @@ function inspectRowsWithoutIds_ACU(result: UpgradeAuditResult_ACU, sheetKey: str
   rows.forEach((row, offset) => {
     const rowIndex = pool === 'content' ? offset + 1 : offset;
     if (!Array.isArray(row)) {
-      addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
+      addIssue_ACU(result, { code: 'upgrade_invalid_row_shape', sheetKey, rowIndex, rowPool: pool, message: '行不是数组，无法无损自动修复' });
     } else if (row.length < expectedWidth) {
       addIssue_ACU(result, { code: 'upgrade_row_width_mismatch', sheetKey, rowIndex, rowPool: pool, message: '行短于业务表头，可尾部补 null' }, { action: 'pad_row', sheetKey, rowIndex, rowPool: pool });
     } else if (row.length > expectedWidth) {
@@ -298,7 +299,7 @@ export function auditTableDataForUpgrade_ACU(data: unknown): UpgradeAuditResult_
     inspectRows_ACU(result, sheetKey, seedRows, 'seedRows', headerState.header.length, ids, requiredHeaderIndexes);
   }
   if (result.issues.some(issue => issue.code === 'upgrade_invalid_data' || issue.code === 'upgrade_missing_sheet')) result.status = 'unrecoverable';
-  else if (result.issues.some(issue => issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells' || issue.code === 'upgrade_required_mapping_ambiguous' || issue.code === 'upgrade_required_business_cell_missing')) result.status = 'requires_confirmation';
+  else if (result.issues.some(issue => issue.code === 'upgrade_invalid_row_shape' || issue.code === 'upgrade_invalid_header' && !result.repairPlan.some(plan => plan.sheetKey === issue.sheetKey && (plan.action === 'rename_header' || plan.action === 'insert_row_id_column')) || issue.code === 'upgrade_overflow_cells' || issue.code === 'upgrade_required_mapping_ambiguous' || issue.code === 'upgrade_required_business_cell_missing')) result.status = 'requires_confirmation';
   else if (result.issues.length > 0) result.status = 'repairable';
   return result;
 }

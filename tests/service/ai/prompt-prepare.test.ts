@@ -22,6 +22,7 @@ const mockResolvePreTakeoverSnapshot = vi.fn(async () => ({
   snapshot: { active: false, selectionSignature: '', createdAt: 0, books: {} },
   expectedSignature: 'signature:["Agent书"]',
 }));
+const mockGetCurrentFlightModeState = vi.fn(() => ({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' }));
 
 vi.mock('../../../src/service/template/chat-scope', () => ({
   getEffectiveSeedRowsForSheet_ACU: (...args: any[]) => mockGetEffectiveSeedRows(...args),
@@ -84,6 +85,13 @@ vi.mock('../../../src/service/table/table-storage-strategy', () => ({
   ensureStorageProviderReady_ACU: vi.fn(() => Promise.resolve(mockRuntimeProvider)),
 }));
 
+vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
+  getCurrentFlightModeState_ACU: (...args: any[]) => mockGetCurrentFlightModeState(...args),
+}));
+vi.mock('../../../src/service/flight-mode/flight-mode-hidden-rows', async () =>
+  await vi.importActual('../../../src/service/flight-mode/flight-mode-hidden-rows')
+);
+
 import { formatTableForSqliteMode, prepareAIInput_ACU } from '../../../src/service/ai/prompt-builder/prompt-prepare';
 import { getCombinedWorldbookContent_ACU } from '../../../src/service/worldbook/pipeline';
 
@@ -109,6 +117,7 @@ describe('formatTableForSqliteMode', () => {
       tableContextExtractRules: '',
       tableContextExcludeRules: '',
     };
+    mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
   });
 
   // ═══════════════════════════════════════════════════════════════
@@ -440,6 +449,7 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
       tableContextExtractRules: '',
       tableContextExcludeRules: '',
     };
+    mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
   });
 
   it('传入显式 tableData 时优先使用显式数据而不是全局数据', async () => {
@@ -584,6 +594,21 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
     expect(result!.tableDataText).toContain('[0] 助手, 正常');
     expect(result!.tableDataText).not.toContain('旧备注');
     expect(result!.tableDataText).not.toContain('不可见');
+  });
+
+  it('飞行模式对填表 prompt 仅输出可见纪要行，不修改调用方快照', async () => {
+    const data = {
+      sheet_chronicle: {
+        uid: 'sheet_chronicle', name: '纪要表', content: [['row_id', '事件'], ['c1', '可见纪要'], ['c2', '隐藏纪要']], updateConfig: {},
+      },
+    };
+    mockGetCurrentFlightModeState.mockReturnValue({ enabled: true, hiddenRowIds: ['c2'], bigSummarySheetKey: 'sheet_da_zong_jie' });
+
+    const result = await prepareAIInput_ACU([], 'standard', null, { tableData: data });
+
+    expect(result?.tableDataText).toContain('可见纪要');
+    expect(result?.tableDataText).not.toContain('隐藏纪要');
+    expect(data.sheet_chronicle.content).toEqual([['row_id', '事件'], ['c1', '可见纪要'], ['c2', '隐藏纪要']]);
   });
 
   it('传入显式 tableData 且存在 guideData 时不调用全局 attach helper，且不污染原始显式对象', async () => {

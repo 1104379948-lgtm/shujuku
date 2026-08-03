@@ -39,6 +39,23 @@ function makeCheckpointData() {
   } as any;
 }
 
+function makeLegacyMessyCheckpointData() {
+  return {
+    mate: { type: 'acu', version: 1 },
+    sheet_legacy: {
+      uid: 'legacy_inventory',
+      name: '旧背包',
+      content: [
+        ['行号', '名称', '备注'],
+        ['1', '铁剑', '完整行'],
+        [' 1 ', '木剑'],
+      ],
+      sourceData: { ddl: 'CREATE TABLE legacy_inventory (row_id INTEGER PRIMARY KEY, name TEXT, note TEXT);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 0,
+    },
+  } as any;
+}
+
 function makeDslCheckpointData() {
   return {
     mate: { type: 'acu', version: 1 },
@@ -1810,6 +1827,64 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       ['7', '既有高位身份'],
     ]);
     expect(chat).toEqual(before);
+  });
+
+  it('旧 full checkpoint 的重复 row_id 与短行共存时无损修复，并保留行号身份列', async () => {
+    const checkpointData = makeLegacyMessyCheckpointData();
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+    const before = structuredClone(chat);
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false });
+
+    expect(result?.sheet_legacy.content).toEqual([
+      ['row_id', '名称', '备注'],
+      ['1', '铁剑', '完整行'],
+      ['2', '木剑', null],
+    ]);
+    expect(chat).toEqual(before);
+    expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('已在内存副本中保留全部行并重映射 1 行'));
+
+    const again = await loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false });
+    expect(again).toEqual(result);
+  });
+
+  it('不可无损修复的历史重复 checkpoint 输出脱敏审计原因，不误报为可修复', async () => {
+    const checkpointData = makeCheckpointData();
+    checkpointData.sheet_0.content.push([' 1 ', '不会进入诊断的业务值', '不可确定的额外列']);
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: checkpointData },
+            logEntries: [],
+          },
+        },
+      },
+    }];
+
+    await expect(loadTableStateFromFramesV2_ACU(chat, '', { updateRuntimeState: false }))
+      .rejects.toThrow(/gate=audit_gate.*upgrade_overflow_cells:1.*upgrade_overflow_cells@sheet_0#2/);
+    const diagnostic = mockLogWarn.mock.calls.map(([message]) => String(message)).find(message => message.includes('gate=audit_gate'));
+    expect(diagnostic).toContain('upgrade_duplicate_row_id:1');
+    expect(diagnostic).toContain('upgrade_overflow_cells:1');
+    expect(diagnostic).toContain('导出原始 frame 后在数据管理执行 V2 恢复');
+    expect(diagnostic).not.toContain('不会进入诊断的业务值');
+    expect(diagnostic).not.toContain('不可确定的额外列');
   });
 
 

@@ -4,6 +4,7 @@ import {
   isEmptyCanonicalRowId_ACU,
   normalizeCanonicalTableRows_ACU,
   repairLegacyAutoMergedRowTails_ACU,
+  restoreLegacyRowIdentity_ACU,
 } from '../../../src/shared/canonical-row-normalizer';
 
 describe('canonical-row-normalizer', () => {
@@ -51,6 +52,27 @@ describe('canonical-row-normalizer', () => {
     ]);
     expect(formatCanonicalRowIssues_ACU(result.errors)).toBe('sheet_0 第 2 行：duplicate_row_id；sheet_0 第 3 行：invalid_row');
     expect(formatCanonicalRowIssues_ACU(result.errors)).not.toContain('不得进入错误文本');
+  });
+
+  it('将历史“行号”首列视为已有身份并仅改名，不右移业务列或重分配 ID', () => {
+    const data: any = {
+      sheet_0: {
+        content: [['行号', '名称'], ['7', '药水']],
+        seedRows: [['8', '种子药水']],
+      },
+    };
+
+    const result = restoreLegacyRowIdentity_ACU(data);
+
+    expect(data.sheet_0).toEqual({
+      content: [['row_id', '名称'], ['7', '药水']],
+      seedRows: [['8', '种子药水']],
+    });
+    expect(result.repairs).toEqual([{ sheetKey: 'sheet_0', rowIndex: 0, code: 'header_identity_alias' }]);
+    expect(result.conservation).toEqual({
+      rowCountBefore: 2, rowCountAfter: 2,
+      businessCellCountBefore: 2, businessCellCountAfter: 2,
+    });
   });
 
   it('只剥离恰好多一格且末位严格为 auto_merged 的历史尾标记', () => {

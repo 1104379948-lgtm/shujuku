@@ -489,12 +489,18 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
     source = 'ui',
     presetName = '',
     destructiveChangeConfirmed = false,
+    hardDeleteMissingSheets = false,
     signal,
     requestId = createTemplateReconciliationRequestId_ACU(),
 }: {
     source?: string;
     presetName?: string;
     destructiveChangeConfirmed?: boolean;
+    /**
+     * 目标模板缺失的既有表默认隐藏保留。仅当调用方确实要跨全历史硬删该表数据时才置 true，
+     * 且必须同时提供 destructiveChangeConfirmed，否则协调层会以 blocker 拒绝。
+     */
+    hardDeleteMissingSheets?: boolean;
     signal?: AbortSignal;
     requestId?: string;
 } = {}) {
@@ -564,6 +570,7 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
             baselineData,
             templateData: targetTemplateData,
             destructiveChangeConfirmed,
+            hardDeleteMissingSheets,
             storageMode,
         });
     } catch (error) {
@@ -658,6 +665,11 @@ export async function applyChatTemplateSnapshotWithReconciliation_ACU(templateDa
     source?: string;
     presetName?: string;
     destructiveChangeConfirmed?: boolean;
+    /**
+     * 目标模板缺失的既有表默认隐藏保留（数据留在 V2 历史）。置 true 才跨全历史硬删，
+     * 且必须同时提供 destructiveChangeConfirmed。
+     */
+    hardDeleteMissingSheets?: boolean;
     signal?: AbortSignal;
     requestId?: string;
 } = {}) {

@@ -215,6 +215,23 @@ export const dashboardCopy = {
     pendingInitial: "待初始",
   },
   toggles: {
+    flightMode: {
+      label: "飞行模式",
+      description: "仅对当前会话生效。开启后抑制剧情推进，并在大总结新增时隐藏已归纳纪要。",
+      enableFailed: "飞行模式未开启",
+      enabled: "已开启当前会话的飞行模式。",
+      disableTitle: "关闭飞行模式",
+      disableMessage: "关闭后，当前会话的隐藏纪要会恢复可见。",
+      disableDanger: "将跨全部历史永久删除「大总结」表及其内容；此操作不可逆。",
+      confirmDisable: "关闭并永久删除",
+      disableFailed: "飞行模式未关闭",
+      disabled: "已关闭飞行模式，并已永久删除大总结表。",
+      templateScopeChangedTitle: "检测到模板已修改",
+      templateScopeChangedMessage: "飞行模式启用后，此会话的表格模板已被修改。继续关闭会按启用前归档模板恢复，并覆盖这些模板修改。",
+      templateScopeChangedDanger: "关闭飞行模式会跨全部历史永久删除「大总结」表及其内容；此操作不可逆。",
+      confirmDisableLabel: "仍要关闭并删除",
+      disabledNoChat: "请先加载一个聊天会话。",
+    },
     autoUpdate: {
       label: "自动更新",
       description:

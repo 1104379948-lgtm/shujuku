@@ -97,6 +97,30 @@ describe('table-v2-recovery-service', () => {
     await expect(loadTableStateFromFramesV2_ACU(h.chat, '', { updateRuntimeState: false })).resolves.toBeTruthy();
   });
 
+  it('重复 row_id 与可尾部补齐短行共存时可生成恢复候选，短行不引入身份引用歧义', async () => {
+    const checkpointData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'inventory', name: '背包',
+        content: [['row_id', '名称', '备注'], ['1', '铁剑', '完整'], [' 1 ', '副本']],
+        sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0,
+      },
+    } as any;
+    const source = frame({ kind: 'full', createdAt: 1, reason: 'init', data: checkpointData });
+    h.chat = chatWithFrame(source);
+
+    const prepared = await prepareV2Recovery_ACU();
+
+    expect(prepared).toMatchObject({ status: 'recoverable_repaired_checkpoint', requiresConfirmation: false });
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toEqual({ status: 'committed', planId: prepared.planId });
+    const repaired = h.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content;
+    expect(repaired).toEqual([
+      ['row_id', '名称', '备注'],
+      ['1', '铁剑', '完整'],
+      ['2', '副本', null],
+    ]);
+  });
+
   it('健康 full checkpoint 的历史 SQL 依赖临时 Sheet 补锚时，生成并提交严格可回放的收敛 checkpoint', async () => {
     const template = {
       mate: { type: 'acu', version: 1 },

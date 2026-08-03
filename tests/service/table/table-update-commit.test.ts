@@ -202,6 +202,56 @@ describe('runTableUpdateCommit_ACU migration gate', () => {
     expect(result).toMatchObject({ success: true, value: null, tableData: precomputedData });
   });
 
+  it('表格持久化失败时回滚同提交暂存的附属状态', async () => {
+    const data: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_target: { uid: 'sheet_target', name: '目标表', content: [['row_id'], ['r1']] },
+    };
+    const rollback = vi.fn();
+    const beforePersist = vi.fn(() => ({ rollback }));
+    mocks.migration.mockResolvedValue({ success: true, migrated: false });
+    mocks.transaction.mockImplementation(async (_options: any, task: any) => task({
+      runCommit: async (commitTask: any) => commitTask(),
+    }, null));
+    mocks.persist.mockResolvedValue({ saved: false, error: 'host save failed' });
+
+    const result = await runTableUpdateCommit_ACU({
+      ...options('test_before_persist_rollback'),
+      targetSheetKeys: ['sheet_target'],
+    }, async () => ({
+      success: true,
+      tableData: data,
+      persist: { beforePersist },
+    }));
+
+    expect(result).toMatchObject({ success: false, error: 'host save failed' });
+    expect(beforePersist).toHaveBeenCalledWith(data);
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(mocks.setCurrentData).not.toHaveBeenCalled();
+  });
+
+  it('表格持久化成功后保留同提交暂存的附属状态', async () => {
+    const data: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_target: { uid: 'sheet_target', name: '目标表', content: [['row_id'], ['r1']] },
+    };
+    const rollback = vi.fn();
+    mocks.migration.mockResolvedValue({ success: true, migrated: false });
+    mocks.transaction.mockImplementation(async (_options: any, task: any) => task({
+      runCommit: async (commitTask: any) => commitTask(),
+    }, null));
+    mocks.persist.mockResolvedValue({ saved: true, messageIndex: 1 });
+
+    const result = await runTableUpdateCommit_ACU({ ...options('test_before_persist_success'), targetSheetKeys: ['sheet_target'] }, async () => ({
+      success: true,
+      tableData: data,
+      persist: { beforePersist: () => ({ rollback }) },
+    }));
+
+    expect(result.success).toBe(true);
+    expect(rollback).not.toHaveBeenCalled();
+  });
+
   it('增量提交只校验目标表，不因未写入表的既有坏行重复扫描并阻断', async () => {
     const data: any = {
       mate: { type: 'acu', version: 1 },

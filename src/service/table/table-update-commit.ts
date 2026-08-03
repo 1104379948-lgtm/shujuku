@@ -15,6 +15,11 @@ export interface TableUpdateCommitApplyContext_ACU {
 }
 
 export interface TableUpdateCommitPersistOverride_ACU {
+  /**
+   * 在表格快照写入聊天前暂存同一聊天保存周期内的附属状态。
+   * 若后续持久化失败，rollback 会在释放表锁前执行，避免表格与附属状态分叉。
+   */
+  beforePersist?: (tableData: TableDataObject_ACU) => Promise<{ rollback?: () => void | Promise<void> } | void> | { rollback?: () => void | Promise<void> } | void;
   targetMessageIndex?: number;
   targetSheetKeys?: string[] | null;
   updateGroupKeys?: string[] | null;
@@ -176,60 +181,72 @@ export async function runTableUpdateCommit_ACU<T>(
     }, async (transactionContext, workingData) => {
       let commitRevisionWriteSet = options.revisionWriteSet;
       return transactionContext.runCommit(async () => {
-        assertExpectedCommitScope_ACU(options, '应用前');
-        const applied = await apply({ transactionContext, workingData });
-        if (!applied.success || !applied.tableData) {
-          throw new TableUpdateCommitError_ACU(applied.error || `${options.reason}: update apply failed`, applied.errorCategory || 'infrastructure');
-        }
-
-        let saved = true;
-        let messageIndex: number | undefined;
-        const persistOptions = applied.persist || {};
-        const revisionWriteSet = persistOptions.revisionWriteSet ?? options.revisionWriteSet;
-        const targetSheetKeys = persistOptions.targetSheetKeys !== undefined ? persistOptions.targetSheetKeys : options.targetSheetKeys;
-        const operations = persistOptions.operations ?? options.operations;
-        commitRevisionWriteSet = revisionWriteSet;
-        if (!options.skipChatSave) {
-          assertExpectedCommitScope_ACU(options, '持久化前');
-          assertPersistableRowIdentities_ACU(applied.tableData, options.reason, targetSheetKeys);
-          const saveResult = await persistTablesToChatMessage_ACU({
-            targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
-            targetSheetKeys,
-            updateGroupKeys: persistOptions.updateGroupKeys !== undefined ? persistOptions.updateGroupKeys : (options.updateGroupKeys ?? null),
-            trackingSheetKeys: persistOptions.trackingSheetKeys !== undefined ? persistOptions.trackingSheetKeys : (options.trackingSheetKeys ?? []),
-            tableData: applied.tableData,
-            trackAsUpdate: persistOptions.trackAsUpdate ?? options.trackAsUpdate ?? false,
-            source: options.source,
-            operations,
-            revisionWriteSet,
-            forceCheckpoint: persistOptions.forceCheckpoint,
-            checkpointReason: persistOptions.checkpointReason,
-            manualRefillProgress: persistOptions.manualRefillProgress ?? options.manualRefillProgress,
-            replaceExistingIncremental: persistOptions.replaceExistingIncremental ?? options.replaceExistingIncremental,
-            strictSave: persistOptions.strictSave ?? options.strictSave,
-            performanceRunId: options.performanceRunId,
-            performanceParentSpanId: options.performanceParentSpanId,
-            assumeCommitLock: true,
-            transactionContext,
-          });
-          saved = saveResult.saved;
-          messageIndex = saveResult.messageIndex;
-          if (!saveResult.saved) {
-            logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update; reload after releasing transaction locks: ${saveResult.error || 'unknown error'}`);
-            requiresRuntimeReload = true;
-            throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, 'infrastructure');
+        let rollbackBeforePersist: (() => void | Promise<void>) | undefined;
+        try {
+          assertExpectedCommitScope_ACU(options, '应用前');
+          const applied = await apply({ transactionContext, workingData });
+          if (!applied.success || !applied.tableData) {
+            throw new TableUpdateCommitError_ACU(applied.error || `${options.reason}: update apply failed`, applied.errorCategory || 'infrastructure');
           }
-        }
 
-        _set_currentJsonTableData_ACU(cloneTableData_ACU(applied.tableData));
-        return {
-          success: true,
-          value: applied.value,
-          tableData: applied.tableData,
-          mutationResult: applied.mutationResult,
-          saved,
-          messageIndex,
-        };
+          let saved = true;
+          let messageIndex: number | undefined;
+          const persistOptions = applied.persist || {};
+          const revisionWriteSet = persistOptions.revisionWriteSet ?? options.revisionWriteSet;
+          const targetSheetKeys = persistOptions.targetSheetKeys !== undefined ? persistOptions.targetSheetKeys : options.targetSheetKeys;
+          const operations = persistOptions.operations ?? options.operations;
+          commitRevisionWriteSet = revisionWriteSet;
+          const staged = persistOptions.beforePersist
+            ? await persistOptions.beforePersist(applied.tableData)
+            : undefined;
+          if (staged && typeof staged.rollback === 'function') {
+            rollbackBeforePersist = staged.rollback;
+          }
+          if (!options.skipChatSave) {
+            assertExpectedCommitScope_ACU(options, '持久化前');
+            assertPersistableRowIdentities_ACU(applied.tableData, options.reason, targetSheetKeys);
+            const saveResult = await persistTablesToChatMessage_ACU({
+              targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
+              targetSheetKeys,
+              updateGroupKeys: persistOptions.updateGroupKeys !== undefined ? persistOptions.updateGroupKeys : (options.updateGroupKeys ?? null),
+              trackingSheetKeys: persistOptions.trackingSheetKeys !== undefined ? persistOptions.trackingSheetKeys : (options.trackingSheetKeys ?? []),
+              tableData: applied.tableData,
+              trackAsUpdate: persistOptions.trackAsUpdate ?? options.trackAsUpdate ?? false,
+              source: options.source,
+              operations,
+              revisionWriteSet,
+              forceCheckpoint: persistOptions.forceCheckpoint,
+              checkpointReason: persistOptions.checkpointReason,
+              manualRefillProgress: persistOptions.manualRefillProgress ?? options.manualRefillProgress,
+              replaceExistingIncremental: persistOptions.replaceExistingIncremental ?? options.replaceExistingIncremental,
+              strictSave: persistOptions.strictSave ?? options.strictSave,
+              performanceRunId: options.performanceRunId,
+              performanceParentSpanId: options.performanceParentSpanId,
+              assumeCommitLock: true,
+              transactionContext,
+            });
+            saved = saveResult.saved;
+            messageIndex = saveResult.messageIndex;
+            if (!saveResult.saved) {
+              logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update; reload after releasing transaction locks: ${saveResult.error || 'unknown error'}`);
+              requiresRuntimeReload = true;
+              throw new TableUpdateCommitError_ACU(saveResult.error || `${options.reason}: persist failed`, 'infrastructure');
+            }
+          }
+
+          _set_currentJsonTableData_ACU(cloneTableData_ACU(applied.tableData));
+          return {
+            success: true,
+            value: applied.value,
+            tableData: applied.tableData,
+            mutationResult: applied.mutationResult,
+            saved,
+            messageIndex,
+          };
+        } catch (error) {
+          if (rollbackBeforePersist) await rollbackBeforePersist();
+          throw error;
+        }
       }, () => commitRevisionWriteSet);
     });
   } catch (error: any) {

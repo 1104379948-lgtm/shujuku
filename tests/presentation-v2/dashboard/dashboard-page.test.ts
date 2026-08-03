@@ -138,6 +138,8 @@ async function mountDashboardPage(
   );
 
   const saveSettings = vi.fn(() => ({ saved: true, storageType: "memory" }));
+  const enableFlightMode = vi.fn(async () => ({ ok: true, visibleChronicleRowCount: 2 }));
+  const disableFlightMode = vi.fn(async () => ({ ok: true }));
 
   vi.doMock("../../../src/service/runtime/state-manager", () => ({
     settings_ACU: settings,
@@ -223,13 +225,20 @@ async function mountDashboardPage(
       models: [],
     })),
   }));
+  vi.doMock("../../../src/service/flight-mode/flight-mode-state", () => ({
+    getCurrentFlightModeState_ACU: () => ({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: "" }),
+  }));
+  vi.doMock("../../../src/service/flight-mode/flight-mode-transition", () => ({
+    enableFlightMode_ACU: enableFlightMode,
+    disableFlightMode_ACU: disableFlightMode,
+  }));
 
   vi.spyOn(window, "confirm").mockReturnValue(false);
 
   const mount = await import("../../../src/presentation-v2/bootstrap/mount");
   await mount.openAcuV2App();
   await new Promise((r) => setTimeout(r, 0));
-  return { mount, settings, saveSettings };
+  return { mount, settings, saveSettings, enableFlightMode, disableFlightMode };
 }
 
 beforeEach(() => {
@@ -316,6 +325,7 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
+      "flightMode",
       "autoUpdateEnabled",
       "toastMuteEnabled",
       "zeroTkOccupyModeDefault",
@@ -623,6 +633,19 @@ describe("DashboardPage", () => {
     expect(text).not.toContain(`服务${"地址"}`);
     expect(text).not.toContain(`模型${"名称"}`);
     expect(text).toContain("配置交火模式");
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it("飞行模式开关调用会话级入口，并在失败时展示可见错误", async () => {
+    const { mount, enableFlightMode } = await mountDashboardPage();
+    const toggle = document.querySelector('button[data-acu-toggle-key="flightMode"]') as HTMLButtonElement;
+
+    expect(toggle).not.toBeNull();
+    toggle.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(enableFlightMode).toHaveBeenCalledOnce();
+    expect(document.body.textContent || "").toContain("已开启当前会话的飞行模式。");
 
     mount.__resetAcuV2MountForTests();
   });

@@ -131,6 +131,7 @@ import { getCurrentIsolationKey_ACU } from '../../src/service/runtime/state-mana
 import { buildTableDelta_ACU, applyTableDelta_ACU, isDeltaTagData_ACU, isCheckpointTagData_ACU } from '../../src/service/table/table-delta';
 import { persistTableMutationLogV2_ACU } from '../../src/service/table/storage-frame-v2-persist';
 import { loadTableStateFromFramesV2_ACU } from '../../src/service/table/storage-frame-v2-replay';
+import { getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU, projectFlightModeHiddenChronicleRows_ACU } from '../../src/service/flight-mode/flight-mode-hidden-rows';
 import type { TableWriteTransactionContext_ACU } from '../../src/service/table/table-write-transaction';
 
 function seedLegacySlot(message: any, isolationKey = ''): void {
@@ -404,6 +405,69 @@ describe('V2 顺序日志追加', () => {
     expect(frame.headRevision).toBe(result.entry?.commitRevision);
     expect(frame.logEntries).toHaveLength(2);
     expect(vi.mocked(saveChatToHost_ACU)).toHaveBeenCalledTimes(1);
+  });
+
+  it('飞行模式大总结写入后：隐藏仅作用于投影，V2 checkpoint/replay 保留纪要物理行', async () => {
+    const beforeData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_chronicle: {
+        name: '纪要表',
+        content: [['row_id', '事件'], ['c1', '第一段纪要'], ['c2', '第二段纪要']],
+      },
+      sheet_da_zong_jie: {
+        name: '大总结',
+        content: [['row_id', '总结']],
+      },
+    };
+    const afterData = clone_ACU(beforeData);
+    afterData.sheet_da_zong_jie.content.push(['s1', '阶段总结']);
+    const flightMode = {
+      enabled: true,
+      enabledAt: 1,
+      hiddenRowIds: [],
+      bigSummarySheetKey: 'sheet_da_zong_jie',
+    };
+
+    const hiddenRowIds = getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU(beforeData, afterData, flightMode);
+    expect(hiddenRowIds).toEqual(['c1', 'c2']);
+
+    mockChat.push({
+      is_user: false,
+      mes: 'AI回复',
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            headRevision: 'checkpoint:flight-mode',
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: clone_ACU(beforeData) },
+            logEntries: [],
+          },
+        },
+      },
+    });
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData,
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_da_zong_jie', sheet: afterData.sheet_da_zong_jie, reason: 'system' }],
+      candidateChangedSheetKeys: ['sheet_da_zong_jie'],
+      isolationKey: '',
+      baseRevision: 'checkpoint:flight-mode',
+      writeSet: [{ kind: 'sheet', sheetKey: 'sheet_da_zong_jie' }],
+      transactionContext: makeTestTransactionContext_ACU('checkpoint:flight-mode', [{ kind: 'sheet', sheetKey: 'sheet_da_zong_jie' }]),
+    });
+
+    expect(result.saved).toBe(true);
+    expect(mockChat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_chronicle.content).toEqual(beforeData.sheet_chronicle.content);
+    const replayed = await loadTableStateFromFramesV2_ACU(mockChat, '');
+    expect(replayed?.sheet_chronicle.content).toEqual(beforeData.sheet_chronicle.content);
+    expect(replayed?.sheet_da_zong_jie.content).toEqual(afterData.sheet_da_zong_jie.content);
+
+    const projected = projectFlightModeHiddenChronicleRows_ACU(replayed!, { ...flightMode, hiddenRowIds: hiddenRowIds! });
+    expect(projected.sheet_chronicle.content).toEqual([['row_id', '事件']]);
+    expect(replayed?.sheet_chronicle.content).toEqual(beforeData.sheet_chronicle.content);
   });
 });
 

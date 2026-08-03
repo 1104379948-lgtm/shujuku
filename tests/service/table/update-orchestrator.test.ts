@@ -77,6 +77,9 @@ const mockCallCustomOpenAI = vi.fn();
 const mockParseAndApplyTableEdits = vi.fn();
 const mockParseAndApplyTableEditsToData = vi.fn();
 const mockApplySqlEditsToTableDataSnapshot = vi.fn();
+const mockGetCurrentFlightModeState = vi.fn(() => ({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' }));
+const mockStageFlightModeHiddenRowIds = vi.fn(() => null);
+const mockGetHiddenChronicleRowIdsAfterBigSummaryInsert = vi.fn(() => null);
 const mockPrepareAIInput = vi.fn();
 const mockReloadStorageProvider = vi.hoisted(() => vi.fn().mockResolvedValue({ ok: true, degraded: false, source: 'merged' }));
 const mockEnsureStorageProviderReady = vi.hoisted(() => vi.fn().mockResolvedValue({ mode: 'sqlite', isReady: () => true }));
@@ -181,6 +184,14 @@ const mockUpdateReadableLorebookEntry = vi.fn();
 vi.mock('../../../src/service/worldbook/pipeline', () => ({
   loadAllChatMessages_ACU: vi.fn(),
   updateReadableLorebookEntry_ACU: (...args: any[]) => mockUpdateReadableLorebookEntry(...args),
+}));
+
+vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
+  getCurrentFlightModeState_ACU: (...args: any[]) => mockGetCurrentFlightModeState(...args),
+  stageFlightModeHiddenRowIds_ACU: (...args: any[]) => mockStageFlightModeHiddenRowIds(...args),
+}));
+vi.mock('../../../src/service/flight-mode/flight-mode-hidden-rows', () => ({
+  getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU: (...args: any[]) => mockGetHiddenChronicleRowIdsAfterBigSummaryInsert(...args),
 }));
 
 const mockCheckIfFirstTimeInit = vi.fn().mockResolvedValue(false);
@@ -1020,6 +1031,9 @@ describe('executeCardUpdateCore_ACU', () => {
     mockParseAndApplyTableEdits.mockReset();
     mockParseAndApplyTableEditsToData.mockReset();
     mockApplySqlEditsToTableDataSnapshot.mockReset();
+    mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
+    mockGetHiddenChronicleRowIdsAfterBigSummaryInsert.mockReset().mockReturnValue(null);
+    mockStageFlightModeHiddenRowIds.mockReset().mockReturnValue(null);
     mockWasStopped = false;
     mockSettings = {
       ...mockSettings,
@@ -1108,6 +1122,45 @@ describe('executeCardUpdateCore_ACU', () => {
       }), reason: 'system' },
     ]);
     expect(mockCurrentJsonTableData.sheet_0.content).toEqual([['row_id', '值'], ['1', '旧A']]);
+  });
+
+  it('飞行模式下大总结新增行时，在表格持久化前暂存同批纪要隐藏状态', async () => {
+    mockCurrentJsonTableData = {
+      sheet_chronicle: { name: '纪要表', content: [['row_id', '事件'], ['c1', '既有纪要']] },
+      sheet_da_zong_jie: { name: '大总结', content: [['row_id', '总结']] },
+    };
+    mockGetCurrentFlightModeState.mockReturnValue({
+      enabled: true,
+      enabledAt: 1,
+      hiddenRowIds: [],
+      bigSummarySheetKey: 'sheet_da_zong_jie',
+    });
+    mockGetHiddenChronicleRowIdsAfterBigSummaryInsert.mockReturnValue(['c1', 'c2']);
+    const rollback = vi.fn();
+    mockStageFlightModeHiddenRowIds.mockReturnValue(rollback);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    mockParseAndApplyTableEditsToData.mockImplementation((_aiResponse: string, tableData: any) => {
+      tableData.sheet_chronicle.content.push(['c2', '同批新增纪要']);
+      tableData.sheet_da_zong_jie.content.push(['s1', '阶段总结']);
+      return { success: true, modifiedKeys: ['sheet_chronicle', 'sheet_da_zong_jie'] };
+    });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      0, false, 'auto_standard', false,
+      ['sheet_chronicle', 'sheet_da_zong_jie'], null, new AbortController(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(mockGetHiddenChronicleRowIdsAfterBigSummaryInsert).toHaveBeenCalledWith(
+      expect.objectContaining({ sheet_chronicle: expect.anything() }),
+      expect.objectContaining({ sheet_da_zong_jie: expect.anything() }),
+      expect.objectContaining({ bigSummarySheetKey: 'sheet_da_zong_jie' }),
+    );
+    expect(mockStageFlightModeHiddenRowIds).toHaveBeenCalledWith(['c1', 'c2']);
+    expect(rollback).not.toHaveBeenCalled();
   });
 
   it('AI 返回后在同 scope 锁内恢复 batchBaseSnapshot，避免保存被其他组污染', async () => {

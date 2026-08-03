@@ -26,6 +26,12 @@ import { switchStorageMode } from "../../service/table/table-storage-strategy";
 import { getSortedSheetKeys_ACU } from "../../service/template/chat-scope";
 import { getActiveTemplatePresetMeta_ACU } from "../../service/template/template-preset-service";
 import {
+  disableFlightMode_ACU,
+  enableFlightMode_ACU,
+  type FlightModeTransitionResult_ACU,
+} from "../../service/flight-mode/flight-mode-transition";
+import { getCurrentFlightModeState_ACU } from "../../service/flight-mode/flight-mode-state";
+import {
   getCurrentVectorMemoryConfig_ACU,
   validateSummaryVectorIndexConfig_ACU,
 } from "../../service/vector/vector-memory-config";
@@ -87,6 +93,7 @@ export interface DashboardToggleItem {
   label: string;
   description: string;
   value: boolean;
+  disabled?: boolean;
 }
 
 export interface DashboardStorageOption {
@@ -126,6 +133,7 @@ export interface DashboardPageState {
   healthItems: ComputedRef<DashboardHealthItem[]>;
   contentReplaceGateEnabled: ComputedRef<boolean>;
   refresh: () => Promise<void>;
+  setFlightMode: (enabled: boolean, options?: { confirmTemplateScopeChange?: boolean }) => Promise<FlightModeTransitionResult_ACU>;
   setToggle: (key: string, value: boolean) => void;
   setStorageMode: (mode: string) => Promise<void>;
 }
@@ -901,7 +909,16 @@ export function useDashboardPage(): DashboardPageState {
   /** 基础设置 — 同一聊天里时不时开关的功能。 */
   const basicToggles = computed<DashboardToggleItem[]>(() => {
     void dataRefreshTick.value;
+    const flightMode = getCurrentFlightModeState_ACU();
+    const hasActiveChat = hasActiveChatContext(chatFileIdentifier.value);
     return [
+      {
+        key: "flightMode",
+        label: dashboardCopy.toggles.flightMode.label,
+        description: dashboardCopy.toggles.flightMode.description,
+        value: flightMode.enabled,
+        disabled: !hasActiveChat,
+      },
       {
         key: "autoUpdateEnabled",
         label: dashboardCopy.toggles.autoUpdate.label,
@@ -1039,6 +1056,25 @@ export function useDashboardPage(): DashboardPageState {
     dataRefreshTick.value++;
   }
 
+  async function setFlightMode(
+    enabled: boolean,
+    options: { confirmTemplateScopeChange?: boolean } = {},
+  ): Promise<FlightModeTransitionResult_ACU> {
+    try {
+      return enabled
+        ? await enableFlightMode_ACU()
+        : await disableFlightMode_ACU(options);
+    } catch (error: any) {
+      return {
+        ok: false,
+        reason: "commit_failed",
+        error: error?.message || String(error || "飞行模式切换失败。"),
+      };
+    } finally {
+      await refresh();
+    }
+  }
+
   function setToggle(key: string, value: boolean): void {
     if (key === "plotEnabled") {
       const next = !!value;
@@ -1121,6 +1157,7 @@ export function useDashboardPage(): DashboardPageState {
     healthItems,
     contentReplaceGateEnabled,
     refresh,
+    setFlightMode,
     setToggle,
     setStorageMode,
   };

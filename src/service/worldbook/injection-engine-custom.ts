@@ -18,12 +18,25 @@ import { getEffectiveSummaryVectorIndexConfig_ACU } from '../vector/vector-memor
 import { isSqliteMode } from '../table/storage-mode';
 import { buildExternalCustomTableExportComment_ACU, type ExternalCustomTableExportMarker_ACU } from './worldbook-placeholder-classification';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
+import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
+import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-mode-hidden-rows';
 
   // [新增] 处理自定义表格导出逻辑
   // [修复] 当 mergedData 为空/null 时，仍需执行"清理旧自定义导出条目"逻辑，
   // 避免删除楼层回溯到空数据时旧条目残留在世界书中。
   export async function updateCustomTableExports_ACU(mergedData: Record<string, any> | null, isImport = false, targetLorebookOverride: string | null = null) {
       if (!isWorldbookApiAvailable_ACU()) return;
+      if (mergedData) {
+          const flightMode = getCurrentFlightModeState_ACU();
+          if (flightMode.enabled && flightMode.hiddenRowIds.length > 0) {
+              try {
+                  mergedData = projectFlightModeHiddenChronicleRows_ACU(mergedData, flightMode);
+              } catch (error) {
+                  // 投影失败不得阻断世界书重建，更不能误删运行时数据。
+                  logWarn_ACU('[FlightMode] 世界书纪要隐藏行投影失败，已回退为未过滤数据。', error);
+              }
+          }
+      }
       const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
       if (!primaryLorebookName) return;
 

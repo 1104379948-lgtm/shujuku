@@ -233,6 +233,31 @@ describe('buildAutoUpdatePlan_ACU', () => {
     }
   });
 
+  it('飞行模式的大总结与纪要表沿用相同调度配置时进入同一更新组', () => {
+    const liveChat = [
+      { is_user: true },
+      { is_user: false },
+    ];
+    const sharedUpdateConfig = {
+      contextDepth: 3,
+      updateFrequency: 1,
+      skipFloors: 0,
+      batchSize: 2,
+      groupId: 8,
+    };
+    const tableData = {
+      sheet_chronicle: { name: '纪要表', updateConfig: sharedUpdateConfig },
+      sheet_da_zong_jie: { name: '大总结', updateConfig: { ...sharedUpdateConfig } },
+    };
+
+    const plan = buildAutoUpdatePlan_ACU(liveChat, tableData, baseSettings, '');
+
+    expect(plan.tablesToUpdate.map(item => item.sheetName)).toEqual(['纪要表', '大总结']);
+    expect(Object.values(plan.updateGroups)).toEqual([
+      expect.objectContaining({ groupId: 8, sheetKeys: ['sheet_chronicle', 'sheet_da_zong_jie'] }),
+    ]);
+  });
+
   it('同组但不同频率的表不会被强制合组', () => {
     const liveChat = [
       { is_user: true },

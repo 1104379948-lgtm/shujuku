@@ -4,11 +4,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing } = vi.hoisted(() => ({
+const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive } = vi.hoisted(() => ({
   mockSettings: { plotSettings: { enabled: true } } as any,
   mockLoopState: { isLooping: false, isRetrying: false, awaitingReply: false } as any,
   mockIsProcessing: false,
   mockSetIsProcessing: vi.fn(),
+  mockFlightModeActive: vi.fn(() => false),
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
@@ -34,6 +35,10 @@ vi.mock('../../../src/shared/defaults-json.js', () => ({
   DEFAULT_PLOT_SETTINGS_ACU: { enabled: false },
 }));
 
+vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
+  isFlightModeActive_ACU: mockFlightModeActive,
+}));
+
 import {
   shouldProcessTavernHelperHook_ACU,
   extractUserMessageFromOptions_ACU,
@@ -51,6 +56,7 @@ beforeEach(() => {
   mockLoopState.isLooping = false;
   mockLoopState.isRetrying = false;
   mockLoopState.awaitingReply = false;
+  mockFlightModeActive.mockReturnValue(false);
 });
 
 // ═══ shouldProcessTavernHelperHook_ACU ═══
@@ -60,6 +66,10 @@ describe('shouldProcessTavernHelperHook_ACU', () => {
   });
   it('未启用返回 false', () => {
     mockSettings.plotSettings.enabled = false;
+    expect(shouldProcessTavernHelperHook_ACU({})).toBe(false);
+  });
+  it('飞行模式开启时返回 false', () => {
+    mockFlightModeActive.mockReturnValue(true);
     expect(shouldProcessTavernHelperHook_ACU({})).toBe(false);
   });
   it('重试中返回 false', () => {

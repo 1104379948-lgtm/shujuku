@@ -9,6 +9,8 @@ import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { evaluateCellExpression_ACU } from './cell-utils';
 import { evaluateSeedExpression_ACU, evaluateCondExpression_ACU } from './seed-condition';
 import { evaluateDbCondition, evaluateSqlCondition, replaceVarReferences } from './sql-query-var';
+import { getCurrentFlightModeState_ACU } from '../../flight-mode/flight-mode-state';
+import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flight-mode-hidden-rows';
 
   /**
    * 解析条件模板（支持 else 和嵌套）
@@ -25,7 +27,21 @@ import { evaluateDbCondition, evaluateSqlCondition, replaceVarReferences } from 
       return content;
     }
     
-    const result = parseIfBlocksInContent_ACU(content, context, depth);
+    let effectiveContext = context;
+    const flightMode = getCurrentFlightModeState_ACU();
+    if (flightMode.enabled && flightMode.hiddenRowIds.length > 0 && context?.allTablesJson) {
+      try {
+        effectiveContext = {
+          ...context,
+          allTablesJson: projectFlightModeHiddenChronicleRows_ACU(context.allTablesJson, flightMode),
+        };
+      } catch (error) {
+        // 条件模板解析必须保守退化：投影异常时仍按原始表格求值。
+        logWarn_ACU('[FlightMode] if 块纪要隐藏行投影失败，已回退为未过滤数据。', error);
+      }
+    }
+
+    const result = parseIfBlocksInContent_ACU(content, effectiveContext, depth);
     
     return result;
   }
@@ -149,13 +165,6 @@ import { evaluateDbCondition, evaluateSqlCondition, replaceVarReferences } from 
     }
     
     return null;
-  }
-
-  /**
-   * 获取用于提示词处理的数据库表格数据
-   */
-  function getTableDataForPrompt_ACU() {
-    return currentJsonTableData_ACU || {};
   }
 
   /**
