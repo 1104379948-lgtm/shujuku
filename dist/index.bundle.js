@@ -2726,7 +2726,7 @@ $CONTENT
         if (!entry)
             return false;
         const blockedKeywords = ["规则", "思维链", "cot", "MVU", "mvu", "变量", "状态", "Status", "Rule", "rule", "检定", "判断", "叙事", "文风", "InitVar", "格式"];
-        const name = entry.comment || entry.name || '';
+        const name = String(entry.comment || entry.name || '');
         return blockedKeywords.some(keyword => name.includes(keyword));
     }
 
@@ -5703,6 +5703,42 @@ $CONTENT
         const normalizedMatches = availableNames.filter(name => normalizeLorebookNameForMatch_ACU(name) === matchKey);
         return normalizedMatches.length === 1 ? normalizedMatches[0] : null;
     }
+    function normalizeLorebookEntryTextField_ACU(value) {
+        return typeof value === 'string' ? value : '';
+    }
+    /**
+     * 归一化宿主读取到的世界书条目文本字段。
+     *
+     * 宿主数据属于不受信输入：非字符串 comment/name 必须按既有 agent 元数据逻辑
+     * 收敛为空串，而不是 String(value)。后者会让读取侧的异常值进入后续写回路径。
+     * 仅在实际需要修正时浅拷贝，避免修改宿主可能复用的原始对象。
+     */
+    function normalizeLorebookEntriesForRead_ACU(entries, bookName = '') {
+        if (!Array.isArray(entries))
+            return [];
+        const normalizedFields = [];
+        const normalizedEntries = entries.map(entry => {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+                return entry;
+            const source = entry;
+            const patch = {};
+            for (const field of ['comment', 'name']) {
+                if (!(field in source) || typeof source[field] === 'string')
+                    continue;
+                patch[field] = normalizeLorebookEntryTextField_ACU(source[field]);
+                normalizedFields.push({ uid: source.uid, field, sourceType: typeof source[field] });
+            }
+            return Object.keys(patch).length > 0 ? { ...source, ...patch } : entry;
+        });
+        if (normalizedFields.length > 0) {
+            logWarn_ACU('[WorldbookGateway] 已归一化宿主返回的非字符串世界书条目文本字段。', {
+                phase: 'normalize_entry_text_field',
+                bookName,
+                normalizedFields,
+            });
+        }
+        return normalizedEntries;
+    }
     /**
      * 获取指定世界书的所有条目
      * @param bookName 世界书名称
@@ -5714,7 +5750,7 @@ $CONTENT
             return [];
         }
         try {
-            return await TavernHelper_API_ACU.getLorebookEntries(bookName);
+            return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(bookName), bookName);
         }
         catch (error) {
             if (!isLorebookNotFoundError_ACU(error))
@@ -5734,7 +5770,7 @@ $CONTENT
                 resolvedName,
             });
             try {
-                return await TavernHelper_API_ACU.getLorebookEntries(resolvedName);
+                return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(resolvedName), resolvedName);
             }
             catch (retryError) {
                 // 保留第一次宿主 not-found 错误的分类与堆栈，同时附带恢复失败证据。
@@ -62448,7 +62484,7 @@ $CONTENT
                     if (fallbackName)
                         hostName = fallbackName;
                     const matchedBook = fallbackBooks.find((book) => book?.name === hostName);
-                    entries = matchedBook?.entries || [];
+                    entries = normalizeLorebookEntriesForRead_ACU(matchedBook?.entries, hostName);
                 }
                 // 返回键保留调用方请求名称以兼容现有接口；条目 book 使用真实宿主名称。
                 entriesMap[requestedName] = Array.isArray(entries) ? entries.map((entry) => ({ ...entry, book: hostName })) : [];
@@ -71157,19 +71193,20 @@ $CONTENT
                 knownNames = [];
             const uidsToDelete = allEntries
                 .filter(e => {
-                if (!e.comment)
+                const comment = typeof e?.comment === 'string' ? e.comment : '';
+                if (!comment)
                     return false;
                 // 用户要求：外部导入每次导入前不清理（允许多批并存）
                 if (isImport)
                     return false;
                 // 1. 检查旧版前缀 (兼容性)
                 // LEGACY_EXPORT_PREFIX 已经包含了 isoPrefix
-                if (e.comment.startsWith(LEGACY_EXPORT_PREFIX))
+                if (comment.startsWith(LEGACY_EXPORT_PREFIX))
                     return true;
                 // 2. 检查是否在已知列表中（仅非外部导入模式）
                 // 只有当条目属于当前隔离环境时才删除
-                if (e.comment.startsWith(isoPrefix)) {
-                    if (knownNames.includes(e.comment))
+                if (comment.startsWith(isoPrefix)) {
+                    if (knownNames.includes(comment))
                         return true;
                 }
                 return false;
@@ -77173,7 +77210,7 @@ $CONTENT
         if (!entry)
             return false;
         const blockedKeywords = ["规则", "思维链", "cot", "MVU", "mvu", "变量", "状态", "Status", "Rule", "rule", "检定", "判断", "叙事", "文风", "InitVar", "格式"];
-        const name = entry.comment || entry.name || ''; // In ST, 'comment' is often the display name
+        const name = String(entry.comment || entry.name || ''); // In ST, 'comment' is often the display name
         return blockedKeywords.some(keyword => name.includes(keyword));
     }
     const WORLDBOOK_ENTRY_LAZY_PAGE_SIZE_ACU = 80;

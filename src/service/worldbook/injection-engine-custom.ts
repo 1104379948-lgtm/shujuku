@@ -100,19 +100,20 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
 
           const uidsToDelete = allEntries
               .filter(e => {
-                  if (!e.comment) return false;
+                  const comment = typeof e?.comment === 'string' ? e.comment : '';
+                  if (!comment) return false;
 
                   // 用户要求：外部导入每次导入前不清理（允许多批并存）
                   if (isImport) return false;
                   
                   // 1. 检查旧版前缀 (兼容性)
                   // LEGACY_EXPORT_PREFIX 已经包含了 isoPrefix
-                  if (e.comment.startsWith(LEGACY_EXPORT_PREFIX)) return true;
+                  if (comment.startsWith(LEGACY_EXPORT_PREFIX)) return true;
 
                   // 2. 检查是否在已知列表中（仅非外部导入模式）
                   // 只有当条目属于当前隔离环境时才删除
-                  if (e.comment.startsWith(isoPrefix)) {
-                      if (knownNames.includes(e.comment)) return true;
+                  if (comment.startsWith(isoPrefix)) {
+                      if (knownNames.includes(comment)) return true;
                   }
                   return false;
               })

@@ -197,6 +197,19 @@ describe('updateCustomTableExports_ACU', () => {
       expect(mockCreateLorebookEntries).not.toHaveBeenCalled();
     });
 
+    it('坏 comment 不会阻断旧条目清理或设置保存', async () => {
+      mockGetLorebookEntries.mockResolvedValue([
+        { uid: 1, comment: 2024 },
+        { uid: 2, comment: 'TavernDB-ACU-CustomExport-表A' },
+      ]);
+
+      await expect(updateCustomTableExports_ACU(null)).resolves.toBeUndefined();
+
+      expect(mockDeleteLorebookEntries).toHaveBeenCalledWith('test-lorebook', [2]);
+      expect(mockSaveSettings).toHaveBeenCalled();
+      expect(mockLogError).not.toHaveBeenCalled();
+    });
+
     it('清理后保存 knownNames', async () => {
       mockSettings.knownCustomEntryNames = ['TavernDB-ACU-CustomExport-旧表'];
       mockGetLorebookEntries.mockResolvedValue([]);

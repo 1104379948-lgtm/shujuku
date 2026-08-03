@@ -232,7 +232,7 @@ import { $popupInstance_ACU } from '../state/ui-refs';
   export function isEntryBlocked_ACU(entry: Record<string, any> | null) {
       if (!entry) return false;
       const blockedKeywords = ["规则", "思维链", "cot", "MVU", "mvu", "变量", "状态", "Status", "Rule", "rule", "检定", "判断", "叙事", "文风", "InitVar", "格式"];
-      const name = entry.comment || entry.name || ''; // In ST, 'comment' is often the display name
+      const name = String(entry.comment || entry.name || ''); // In ST, 'comment' is often the display name
       return blockedKeywords.some(keyword => name.includes(keyword));
   }
 

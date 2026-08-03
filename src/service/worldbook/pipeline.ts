@@ -1,7 +1,7 @@
 import type { AgentWorldbookControlSnapshot_ACU, AgentWorldbookControlSnapshotEntry_ACU } from '../../shared/models/agent-worldbook-model';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU, _set_allChatMessages_ACU} from '../runtime/state-manager';
-import { getLorebookEntries_ACU as gwGetLorebookEntries_ACU, setLorebookEntries_ACU as gwSetLorebookEntries_ACU, createLorebookEntries_ACU as gwCreateLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
+import { getLorebookEntries_ACU as gwGetLorebookEntries_ACU, setLorebookEntries_ACU as gwSetLorebookEntries_ACU, createLorebookEntries_ACU as gwCreateLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU, normalizeLorebookEntriesForRead_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
 import { getCharLorebooks_ACU, getChatMessages_ACU } from '../../data/gateways/character-gateway';
 import { getChatLength_ACU } from '../../data/gateways/chat-gateway';
 import { saveSettings_ACU } from '../settings/settings-service';
@@ -1020,7 +1020,7 @@ export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) 
                   const fallbackName = resolveLorebookNameFromList_ACU(hostName, fallbackBooks);
                   if (fallbackName) hostName = fallbackName;
                   const matchedBook = fallbackBooks.find((book: any) => book?.name === hostName);
-                  entries = (matchedBook as any)?.entries || [];
+                  entries = normalizeLorebookEntriesForRead_ACU((matchedBook as any)?.entries, hostName);
               }
               // 返回键保留调用方请求名称以兼容现有接口；条目 book 使用真实宿主名称。
               entriesMap[requestedName] = Array.isArray(entries) ? entries.map((entry: any) => ({ ...entry, book: hostName })) : [];

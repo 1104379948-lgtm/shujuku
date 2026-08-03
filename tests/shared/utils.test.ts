@@ -532,6 +532,11 @@ describe('isEntryBlocked_ACU', () => {
   it('空对象返回 false', () => {
     expect(isEntryBlocked_ACU({})).toBe(false);
   });
+
+  it('comment 或 name 不是字符串时不抛错', () => {
+    expect(() => isEntryBlocked_ACU({ comment: 2024, name: { invalid: true } })).not.toThrow();
+    expect(isEntryBlocked_ACU({ comment: 2024, name: { invalid: true } })).toBe(false);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════

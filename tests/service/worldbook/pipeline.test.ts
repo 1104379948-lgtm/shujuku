@@ -15,7 +15,7 @@ const {
   mockIsWorldbookApiAvailable,
   mockGwGetLorebookEntries, mockGwSetLorebookEntries,
   mockGwCreateLorebookEntries, mockGwDeleteLorebookEntries,
-  mockListLorebooks, mockGwGetWorldBooks, mockResolveLorebookNameFromList,
+  mockListLorebooks, mockGwGetWorldBooks, mockNormalizeLorebookEntriesForRead, mockResolveLorebookNameFromList,
   mockGetCharLorebooks, mockGetChatMessages, mockGetChatLength,
   mockSaveSettings,
   mockGetSortedSheetKeys, mockMaterializeDataFromSheetGuide,
@@ -65,6 +65,7 @@ const {
     mockGwDeleteLorebookEntries: vi.fn(async () => {}),
     mockListLorebooks: vi.fn(async () => []),
     mockGwGetWorldBooks: vi.fn(async () => []),
+    mockNormalizeLorebookEntriesForRead: vi.fn((entries: unknown) => Array.isArray(entries) ? entries : []),
     mockResolveLorebookNameFromList: vi.fn((requestedName: unknown, bookList: unknown) => {
       const requested = String(requestedName ?? '').normalize('NFKC').replace(/[\u200B\uFEFF]/g, '').trim();
       const names = (Array.isArray(bookList) ? bookList : []).map(item =>
@@ -162,6 +163,7 @@ vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
   deleteLorebookEntries_ACU: mockGwDeleteLorebookEntries,
   listLorebooks_ACU: mockListLorebooks,
   getWorldBooks_ACU: mockGwGetWorldBooks,
+  normalizeLorebookEntriesForRead_ACU: mockNormalizeLorebookEntriesForRead,
   resolveLorebookNameFromList_ACU: mockResolveLorebookNameFromList,
 }));
 
@@ -272,6 +274,7 @@ beforeEach(() => {
   mockShouldSuppressWorldbookInjection.mockReturnValue(false);
   mockGwGetLorebookEntries.mockResolvedValue([]);
   mockListLorebooks.mockResolvedValue([]);
+  mockNormalizeLorebookEntriesForRead.mockImplementation((entries: unknown) => Array.isArray(entries) ? entries : []);
   mockResolveLorebookNameFromList.mockClear();
   mockGetCharLorebooks.mockResolvedValue({ primary: null, additional: [] });
   mockGetImportStablePrefix.mockReturnValue('外部导入-');
@@ -556,6 +559,18 @@ describe('getLorebookEntriesByNames_ACU', () => {
     ]);
     const result = await getLorebookEntriesByNames_ACU(['书A']);
     expect(result['书A']).toHaveLength(1);
+  });
+
+  it('fallback 路径复用 gateway 的条目归一化契约', async () => {
+    mockIsWorldbookApiAvailable.mockReturnValue(false);
+    const sourceEntries = [{ uid: 1, comment: 2024 }];
+    mockGwGetWorldBooks.mockResolvedValue([{ name: '书A', entries: sourceEntries }]);
+    mockNormalizeLorebookEntriesForRead.mockReturnValue([{ uid: 1, comment: '' }]);
+
+    const result = await getLorebookEntriesByNames_ACU(['书A']);
+
+    expect(mockNormalizeLorebookEntriesForRead).toHaveBeenCalledWith(sourceEntries, '书A');
+    expect(result['书A']).toEqual([{ uid: 1, comment: '', book: '书A' }]);
   });
 
   it('Unicode 等价名称使用宿主真实名称读取，同时保留请求名称作为返回键', async () => {

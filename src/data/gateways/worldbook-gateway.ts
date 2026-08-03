@@ -65,6 +65,42 @@ export function resolveLorebookNameFromList_ACU(requestedName: unknown, bookList
     return normalizedMatches.length === 1 ? normalizedMatches[0] : null;
 }
 
+function normalizeLorebookEntryTextField_ACU(value: unknown): string {
+    return typeof value === 'string' ? value : '';
+}
+
+/**
+ * 归一化宿主读取到的世界书条目文本字段。
+ *
+ * 宿主数据属于不受信输入：非字符串 comment/name 必须按既有 agent 元数据逻辑
+ * 收敛为空串，而不是 String(value)。后者会让读取侧的异常值进入后续写回路径。
+ * 仅在实际需要修正时浅拷贝，避免修改宿主可能复用的原始对象。
+ */
+export function normalizeLorebookEntriesForRead_ACU(entries: unknown, bookName = ''): any[] {
+    if (!Array.isArray(entries)) return [];
+    const normalizedFields: Array<{ uid: unknown; field: 'comment' | 'name'; sourceType: string }> = [];
+    const normalizedEntries = entries.map(entry => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+        const source = entry as Record<string, any>;
+        const patch: Record<string, string> = {};
+        for (const field of ['comment', 'name'] as const) {
+            if (!(field in source) || typeof source[field] === 'string') continue;
+            patch[field] = normalizeLorebookEntryTextField_ACU(source[field]);
+            normalizedFields.push({ uid: source.uid, field, sourceType: typeof source[field] });
+        }
+        return Object.keys(patch).length > 0 ? { ...source, ...patch } : entry;
+    });
+
+    if (normalizedFields.length > 0) {
+        logWarn_ACU('[WorldbookGateway] 已归一化宿主返回的非字符串世界书条目文本字段。', {
+            phase: 'normalize_entry_text_field',
+            bookName,
+            normalizedFields,
+        });
+    }
+    return normalizedEntries;
+}
+
 /**
  * 获取指定世界书的所有条目
  * @param bookName 世界书名称
@@ -76,7 +112,7 @@ export async function getLorebookEntries_ACU(bookName: string): Promise<any[]> {
         return [];
     }
     try {
-        return await TavernHelper_API_ACU.getLorebookEntries(bookName);
+        return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(bookName), bookName);
     } catch (error) {
         if (!isLorebookNotFoundError_ACU(error)) throw error;
         let resolvedName: string | null = null;
@@ -92,7 +128,7 @@ export async function getLorebookEntries_ACU(bookName: string): Promise<any[]> {
             resolvedName,
         });
         try {
-            return await TavernHelper_API_ACU.getLorebookEntries(resolvedName);
+            return normalizeLorebookEntriesForRead_ACU(await TavernHelper_API_ACU.getLorebookEntries(resolvedName), resolvedName);
         } catch (retryError) {
             // 保留第一次宿主 not-found 错误的分类与堆栈，同时附带恢复失败证据。
             // 直接抛 retryError 会让调用方误以为首次故障就是网络/权限问题。

@@ -386,6 +386,26 @@ describe('agent worldbook config/state meta', () => {
     expect(state.control.agentApiPreset).toBe('new');
   });
 
+  it('对已归一为空串的状态条目仍写入既有规范 comment，不写回异常原值', async () => {
+    mockEntriesByBook.set('主世界书', [configEntry({
+      version: 2,
+      kind: 'agent_worldbook_state',
+      updatedAt: 2,
+      identity: { marker: AGENT_WORLDBOOK_CONFIG_COMMENT_ACU, hostBookName: '主世界书', stateEntryUid: 'cfg-normalized' },
+      control: { mode: 'agent', agentApiPreset: 'old' },
+      snapshot: { active: false, selectionSignature: '', createdAt: 0, books: {} },
+    }, 'cfg-normalized', '')]);
+
+    await writeAgentWorldbookControlToWorldbook_ACU({ agentApiPreset: 'new' } as any);
+
+    const entries = mockEntriesByBook.get('主世界书') || [];
+    expect(entries[0].comment).toBe(AGENT_WORLDBOOK_CONFIG_COMMENT_ACU);
+    expect(mockSetEntries).toHaveBeenCalledWith('主世界书', [expect.objectContaining({
+      uid: 'cfg-normalized',
+      comment: AGENT_WORLDBOOK_CONFIG_COMMENT_ACU,
+    })]);
+  });
+
   it('writes control without losing existing snapshot', async () => {
     mockEntriesByBook.set('主世界书', [configEntry({
       version: 2,

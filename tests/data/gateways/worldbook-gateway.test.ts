@@ -98,6 +98,42 @@ describe('getLorebookEntries_ACU', () => {
     expect(await getLorebookEntries_ACU('book1')).toEqual(entries);
   });
 
+  it('将宿主返回的非字符串 comment/name 归一为空串且不污染原对象', async () => {
+    const entries: any[] = [
+      { uid: 1, comment: 2024, name: { invalid: true } },
+      { uid: 2, comment: '  保留空白  ', name: '正常名称' },
+      { uid: 3, comment: null },
+      null,
+      'unexpected-entry',
+    ];
+    mockTavernHelper.getLorebookEntries = vi.fn().mockResolvedValue(entries);
+
+    const result = await getLorebookEntries_ACU('book1');
+
+    expect(result).toEqual([
+      { uid: 1, comment: '', name: '' },
+      { uid: 2, comment: '  保留空白  ', name: '正常名称' },
+      { uid: 3, comment: '' },
+      null,
+      'unexpected-entry',
+    ]);
+    expect(result[0]).not.toBe(entries[0]);
+    expect(result[1]).toBe(entries[1]);
+    expect(entries[0]).toEqual({ uid: 1, comment: 2024, name: { invalid: true } });
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      '[WorldbookGateway] 已归一化宿主返回的非字符串世界书条目文本字段。',
+      expect.objectContaining({
+        phase: 'normalize_entry_text_field',
+        bookName: 'book1',
+        normalizedFields: expect.arrayContaining([
+          { uid: 1, field: 'comment', sourceType: 'number' },
+          { uid: 1, field: 'name', sourceType: 'object' },
+          { uid: 3, field: 'comment', sourceType: 'object' },
+        ]),
+      }),
+    );
+  });
+
   it('名称仅有 Unicode 或不可见字符差异时使用宿主真实名称重试', async () => {
     const entries = [{ uid: 1, content: '条目1' }];
     mockTavernHelper.getLorebookEntries = vi.fn()
@@ -108,6 +144,15 @@ describe('getLorebookEntries_ACU', () => {
     expect(await getLorebookEntries_ACU('ABC')).toEqual(entries);
     expect(mockTavernHelper.getLorebookEntries).toHaveBeenNthCalledWith(1, 'ABC');
     expect(mockTavernHelper.getLorebookEntries).toHaveBeenNthCalledWith(2, 'ＡＢ\u200BＣ');
+  });
+
+  it('名称恢复重试路径同样归一化条目文本字段', async () => {
+    mockTavernHelper.getLorebookEntries = vi.fn()
+      .mockRejectedValueOnce(new Error('Worldbook "ABC" not found'))
+      .mockResolvedValueOnce([{ uid: 1, comment: true }]);
+    mockTavernHelper.getLorebooks = vi.fn().mockResolvedValue(['ＡＢ\u200BＣ']);
+
+    await expect(getLorebookEntries_ACU('ABC')).resolves.toEqual([{ uid: 1, comment: '' }]);
   });
 
   it('真实名称重试失败时保留首次 not-found 错误并附加重试诊断', async () => {
