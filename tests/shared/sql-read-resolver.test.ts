@@ -163,6 +163,27 @@ describe('sql read resolver', () => {
     );
   });
 
+  it('保留无别名派生表的显式输出列，避免 legacy 翻译改写外层引用', () => {
+    const tableData = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: {
+        uid: 'sheet_0',
+        name: 'People',
+        sourceData: { ddl: 'CREATE TABLE people (row_id INTEGER PRIMARY KEY, name TEXT -- 姓名);' },
+        content: [['row_id', '姓名'], ['1', 'Ada']],
+      },
+    } as any;
+    const translate = (sql: string) => sql.replaceAll('姓名', 'name');
+
+    expect(resolveReadQuerySql_ACU(
+      'SELECT 姓名 FROM (SELECT name AS 姓名 FROM people UNION ALL SELECT name AS 姓名 FROM people) ORDER BY 姓名',
+      tableData,
+      translate,
+    ).sql).toBe(
+      'SELECT 姓名 FROM (SELECT name AS 姓名 FROM people UNION ALL SELECT name AS 姓名 FROM people) ORDER BY 姓名',
+    );
+  });
+
   it('保护 CTE 显式列清单和 UNION 第一分支导出的显示列', () => {
     const tableData = {
       mate: { type: 'acu', version: 1 },

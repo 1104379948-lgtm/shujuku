@@ -1,11 +1,15 @@
 import { allocateStableSheetKeys_ACU, canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
 import { mapSqlColumnIdentifiers_ACU, toSqlIdentifierBase_ACU } from '../../shared/sql-identifier-mapper';
+import { resolveEffectiveDDL } from '../../data/sqlite/schema-mapper';
+import { parseDDLChineseName, parseDDLColumnComments } from '../../shared/ddl-utils';
+import type { Sheet_ACU } from '../../shared/models/table-data';
 
 export type TemplateImportDiagnosticCode_ACU =
   | 'invalid_sheet_key' | 'duplicate_sheet_key' | 'missing_sheet_uid' | 'sheet_uid_mismatch'
   | 'empty_sheet_name' | 'duplicate_sheet_name' | 'missing_header_row' | 'invalid_header_row'
   | 'empty_header_cell' | 'missing_row_id' | 'misplaced_row_id' | 'duplicate_column_name'
-  | 'physical_column_name_collision' | 'table_alias_conflict';
+  | 'physical_column_name_collision' | 'table_alias_conflict'
+  | 'display_column_translation_ambiguity' | 'display_name_substring_hazard';
 
 export interface TemplateImportDiagnostic_ACU {
   code: TemplateImportDiagnosticCode_ACU;
@@ -78,6 +82,66 @@ export function validateImportedTemplateObject_ACU(template: unknown): TemplateI
     validateHeaders_ACU(sheetKey, sheetName, sheet.content, diagnostics);
   });
   return diagnostics;
+}
+
+/**
+ * Finds known hazards in NameMapper.translateSql's legacy broad replacement.
+ * These are warnings, not import blockers: they only break specific SQL shapes.
+ */
+export function detectDisplayNameTranslationHazards_ACU(template: unknown): TemplateImportDiagnostic_ACU[] {
+  if (!template || typeof template !== 'object' || Array.isArray(template)) return [];
+  const data = template as Record<string, any>;
+  const warnings: TemplateImportDiagnostic_ACU[] = [];
+  const firstColumnByDisplay = new Map<string, { sheetKey: string; sheetName: string; displayName: string; sqlName: string }>();
+  const tableNames: Array<{ sheetKey: string; sheetName: string; displayName: string }> = [];
+  const columns: Array<{ sheetKey: string; sheetName: string; displayName: string }> = [];
+
+  for (const sheetKey of Object.keys(data).filter(key => key.startsWith('sheet_'))) {
+    const sheet = data[sheetKey];
+    if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet) || !Array.isArray(sheet.content)) continue;
+    const sheetName = String(sheet.name ?? '');
+    try {
+      // The detector must model the DDL that NameMapper actually consumes, including
+      // fallback schemas, rather than trusting editable sourceData.ddl directly.
+      const effectiveDDL = resolveEffectiveDDL(sheet as Sheet_ACU, sheet.uid || sheetKey, sheet.uid || sheetKey).effectiveDDL;
+      const tableDisplayName = normalizeTranslationDisplayName_ACU(parseDDLChineseName(effectiveDDL));
+      if (tableDisplayName) tableNames.push({ sheetKey, sheetName, displayName: tableDisplayName });
+      for (const [sqlName, rawDisplayName] of parseDDLColumnComments(effectiveDDL)) {
+        if (sqlName === 'row_id') continue;
+        const displayName = normalizeTranslationDisplayName_ACU(rawDisplayName);
+        const canonical = canonicalizeDisplayName_ACU(displayName);
+        if (!displayName || !canonical) continue;
+        columns.push({ sheetKey, sheetName, displayName });
+        const first = firstColumnByDisplay.get(canonical);
+        if (!first) {
+          firstColumnByDisplay.set(canonical, { sheetKey, sheetName, displayName, sqlName });
+        } else if (first.sheetKey !== sheetKey && first.sqlName.toLowerCase() !== sqlName.toLowerCase()) {
+          warnings.push(issue_ACU(
+            'display_column_translation_ambiguity', sheetKey, sheetName,
+            `列展示名「${displayName}」在表「${sheetName || sheetKey}」映射为「${sqlName}」，但在表「${first.sheetName || first.sheetKey}」映射为「${first.sqlName}」；旧式 SQL 全文翻译可能按表加载顺序选错列。`,
+            undefined, first.sheetKey,
+          ));
+        }
+      }
+    } catch {
+      // Structural validation owns malformed templates. A warning detector must not
+      // turn its best-effort inspection into a new import failure mode.
+    }
+  }
+
+  for (const table of tableNames) {
+    for (const column of columns) {
+      // translateSql applies table substitutions globally before column substitutions,
+      // so a table can corrupt a column from its own sheet as well as another one.
+      if (!column.displayName.includes(table.displayName)) continue;
+      warnings.push(issue_ACU(
+        'display_name_substring_hazard', table.sheetKey, table.sheetName,
+        `表展示名「${table.displayName}」是表「${column.sheetName || column.sheetKey}」列展示名「${column.displayName}」的子串；旧式 SQL 翻译会先替换表名，可能破坏列名。`,
+        undefined, column.sheetKey,
+      ));
+    }
+  }
+  return warnings;
 }
 
 function validateHeaders_ACU(sheetKey: string, sheetName: string, content: unknown, diagnostics: TemplateImportDiagnostic_ACU[]): void {
@@ -155,6 +219,10 @@ function validateTableAliases_ACU(data: Record<string, any>, sheetKeys: string[]
 
 function issue_ACU(code: TemplateImportDiagnosticCode_ACU, sheetKey: string, sheetName: unknown, message: string, columnIndex?: number, conflictsWith?: string | number): TemplateImportDiagnostic_ACU {
   return { code, sheetKey, sheetName: String(sheetName ?? ''), message, columnIndex, conflictsWith };
+}
+
+function normalizeTranslationDisplayName_ACU(value: unknown): string {
+  return String(value ?? '').normalize('NFKC').trim();
 }
 
 function isSheetLikeObject_ACU(value: unknown): value is Record<string, unknown> {

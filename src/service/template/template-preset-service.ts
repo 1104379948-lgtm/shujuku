@@ -20,7 +20,12 @@ import { refreshMergedDataAndNotify_ACU } from '../worldbook/pipeline';
 import { safeJsonParse_ACU, safeJsonStringify_ACU } from '../../shared/json-helpers';
 import { ensureSheetOrderNumbers_ACU, logDebug_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { buildDefaultExportConfig_ACU, ensureExportConfigDefaults_ACU } from '../worldbook/injection-engine';
-import { TemplateImportValidationError_ACU, type TemplateImportDiagnostic_ACU, validateImportedTemplateObject_ACU } from './template-import-validator';
+import {
+    detectDisplayNameTranslationHazards_ACU,
+    TemplateImportValidationError_ACU,
+    type TemplateImportDiagnostic_ACU,
+    validateImportedTemplateObject_ACU,
+} from './template-import-validator';
 import { allocateStableSheetKeys_ACU } from '../../shared/sheet-identity';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
@@ -220,6 +225,10 @@ export function parseImportedTemplateData_ACU(templateData: any) {
     const importDiagnostics = validateImportedTemplateObject_ACU(jsonData);
     if (importDiagnostics.length > 0) {
         throw new TemplateImportValidationError_ACU(importDiagnostics);
+    }
+    const translationWarnings = detectDisplayNameTranslationHazards_ACU(jsonData);
+    for (const warning of translationWarnings) {
+        logWarn_ACU(`[模板预设] SQL 展示名翻译风险：${warning.message}`);
     }
 
     try {

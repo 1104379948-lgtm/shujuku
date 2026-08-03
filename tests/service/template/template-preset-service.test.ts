@@ -160,8 +160,8 @@ import {
 import { saveSettings_ACU } from '../../../src/service/settings/settings-service';
 import { getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, activateChatTemplatePresetSelection_ACU } from '../../../src/service/template/chat-scope';
 import { getCurrentTemplatePresetName_ACU } from '../../../src/shared/template-preset-utils';
-import { parseTableTemplateJson_ACU } from '../../../src/shared/utils';
-import { TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from '../../../src/service/template/template-import-validator';
+import { logWarn_ACU, parseTableTemplateJson_ACU } from '../../../src/shared/utils';
+import { detectDisplayNameTranslationHazards_ACU, TemplateImportValidationError_ACU, validateImportedTemplateObject_ACU } from '../../../src/service/template/template-import-validator';
 import { buildDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
 import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-template-reconciler';
 import { getCurrentStorageMode, isSqliteMode } from '../../../src/service/table/storage-mode';
@@ -435,6 +435,14 @@ describe('validateImportedTemplateObject_ACU', () => {
   const validSheet = (overrides: any = {}) => ({
     uid: 'sheet_legacy_random', name: '背包', content: [['row_id', '名称']], sourceData: {}, ...overrides,
   });
+  const sheetWithDdl = (uid: string, name: string, columnName: string, sqlName: string) => ({
+    uid,
+    name,
+    content: [['row_id', columnName]],
+    sourceData: {
+      ddl: `CREATE TABLE ignored ( -- ${name}\n  row_id INTEGER PRIMARY KEY, -- 行号\n  ${sqlName} TEXT -- ${columnName}\n);`,
+    },
+  });
 
   it('保留合法历史随机 key，并且不修改输入', () => {
     const template = { mate: { type: 'chatSheets' }, sheet_legacy_random: validSheet() };
@@ -513,6 +521,70 @@ describe('validateImportedTemplateObject_ACU', () => {
     expect(validateImportedTemplateObject_ACU(template)).toContainEqual(expect.objectContaining({
       code: 'physical_column_name_collision', columnIndex: 2, conflictsWith: 1,
     }));
+  });
+
+  it('同展示列映射到同一物理列时不报告翻译歧义', () => {
+    const template = {
+      mate: { type: 'chatSheets' },
+      sheet_one: sheetWithDdl('sheet_one', '表一', '名称', 'name'),
+      sheet_two: sheetWithDdl('sheet_two', '表二', '名称', 'name'),
+    };
+
+    expect(detectDisplayNameTranslationHazards_ACU(template)).toEqual([]);
+  });
+
+  it('同展示列映射到不同物理列时报告非阻断翻译风险', () => {
+    const template = {
+      mate: { type: 'chatSheets' },
+      sheet_one: sheetWithDdl('sheet_one', '表一', '名称', 'person_name'),
+      sheet_two: sheetWithDdl('sheet_two', '表二', '名称', 'item_name'),
+    };
+
+    expect(detectDisplayNameTranslationHazards_ACU(template)).toContainEqual(expect.objectContaining({
+      code: 'display_column_translation_ambiguity', sheetKey: 'sheet_two', conflictsWith: 'sheet_one',
+    }));
+  });
+
+  it('表展示名是另一张表列展示名子串时报告翻译风险', () => {
+    const template = {
+      mate: { type: 'chatSheets' },
+      sheet_place: sheetWithDdl('sheet_place', '地点', '名称', 'name'),
+      sheet_character: sheetWithDdl('sheet_character', '角色', '所在地点', 'location_name'),
+    };
+
+    expect(detectDisplayNameTranslationHazards_ACU(template)).toContainEqual(expect.objectContaining({
+      code: 'display_name_substring_hazard', sheetKey: 'sheet_place', conflictsWith: 'sheet_character',
+    }));
+  });
+
+  it('表展示名也是本表列展示名子串时同样报告翻译风险', () => {
+    const template = {
+      mate: { type: 'chatSheets' },
+      sheet_place: sheetWithDdl('sheet_place', '地点', '所在地点', 'location_name'),
+    };
+
+    expect(detectDisplayNameTranslationHazards_ACU(template)).toContainEqual(expect.objectContaining({
+      code: 'display_name_substring_hazard', sheetKey: 'sheet_place', conflictsWith: 'sheet_place',
+    }));
+  });
+
+  it('默认模板没有展示名翻译风险', () => {
+    expect(detectDisplayNameTranslationHazards_ACU(buildDefaultTableTemplateObject_ACU())).toEqual([]);
+  });
+
+  it('展示名翻译风险仅记录警告，不阻断导入', () => {
+    const template = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_one: sheetWithDdl('sheet_one', '表一', '名称', 'person_name'),
+      sheet_two: sheetWithDdl('sheet_two', '表二', '名称', 'item_name'),
+    };
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValueOnce({
+      templateStr: JSON.stringify(template),
+      templateObj: template,
+    } as any);
+
+    expect(() => parseImportedTemplateData_ACU(template)).not.toThrow();
+    expect(logWarn_ACU).toHaveBeenCalledWith(expect.stringContaining('SQL 展示名翻译风险'));
   });
 });
 

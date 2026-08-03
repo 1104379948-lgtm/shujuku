@@ -190,6 +190,8 @@ interface ReadScope_ACU {
   depth: number;
   /** Projection aliases exported by this SELECT scope. */
   outputs: Set<string>;
+  /** Explicit or implicit outputs of alias-less derived sources in this scope. */
+  unaliasedDerivedOutputs: Set<string>[];
   /** Derived-table aliases visible to this SELECT scope. */
   derivedSources: Map<string, Set<string>>;
   /** Virtual sources whose exported columns cannot be determined safely. */
@@ -238,6 +240,58 @@ function projectionOutputs_ACU(values: Token_ACU[], scope: ReadScope_ACU): Set<s
   return outputs;
 }
 
+const IMPLICIT_OUTPUT_ALIAS_STOP_WORDS_ACU = new Set(['END', 'ASC', 'DESC', 'NULLS', 'FIRST', 'LAST', 'COLLATE']);
+const IMPLICIT_OUTPUT_ALIAS_MODIFIERS_ACU = new Set(['DISTINCT', 'ALL']);
+const IMPLICIT_OUTPUT_ALIAS_OPERAND_PREFIX_ACU = /(?:\b(?:AND|OR|IN|IS|LIKE|GLOB|MATCH|REGEXP|BETWEEN|ESCAPE|COLLATE)\s*|[+*/%<>=|&~-]\s*)$/i;
+
+/**
+ * Finds implicit projection aliases (for example `SELECT name 姓名`) only for
+ * alias-less derived sources. This deliberately does not enrich `outputs`:
+ * that existing field also drives named derived tables and CTEs, where changing
+ * an empty output set to a precise one would narrow established protection.
+ */
+function implicitProjectionOutputs_ACU(sql: string, values: Token_ACU[], scope: ReadScope_ACU): {
+  outputs: Set<string>;
+  aliasTokenStarts: Set<number>;
+} {
+  const outputs = new Set<string>();
+  const aliasTokenStarts = new Set<number>();
+  let projectionEnd = scope.end;
+  for (let index = scope.start + 1; index < scope.end; index += 1) {
+    const token = values[index];
+    if (token.depth === scope.depth && keyword(token, 'FROM')) {
+      projectionEnd = index;
+      break;
+    }
+  }
+  let segment: Token_ACU[] = [];
+  const record = (): void => {
+    if (segment.length < 2) return;
+    const alias = segment[segment.length - 1];
+    const beforeAlias = segment[segment.length - 2];
+    if (IMPLICIT_OUTPUT_ALIAS_STOP_WORDS_ACU.has(alias.value.toUpperCase())
+      || !/\s/.test(sql.slice(beforeAlias.end, alias.start))) return;
+    const expression = sql.slice(segment[0].start, alias.start).trim();
+    const expressionWithoutModifiers = expression.replace(/^(?:DISTINCT|ALL)\s+/i, '').trim();
+    if (!expressionWithoutModifiers
+      || IMPLICIT_OUTPUT_ALIAS_MODIFIERS_ACU.has(expression.toUpperCase())
+      || IMPLICIT_OUTPUT_ALIAS_OPERAND_PREFIX_ACU.test(expressionWithoutModifiers)) return;
+    outputs.add(alias.value.toLowerCase());
+    aliasTokenStarts.add(alias.start);
+  };
+  for (let index = scope.start + 1; index < projectionEnd; index += 1) {
+    const token = values[index];
+    if (token.depth !== scope.depth) continue;
+    if (token.commaBefore) {
+      record();
+      segment = [];
+    }
+    segment.push(token);
+  }
+  record();
+  return { outputs, aliasTokenStarts };
+}
+
 function compoundScopeEnd_ACU(values: Token_ACU[], scope: ReadScope_ACU): number {
   for (let index = scope.end; index < values.length; index += 1) {
     if (values[index].depth < scope.depth) return index;
@@ -281,6 +335,7 @@ function collectReadScopes_ACU(
       end,
       depth: select.depth,
       outputs: new Set(),
+      unaliasedDerivedOutputs: [],
       derivedSources: new Map(),
       unknownDerivedSources: new Set(),
       protectedTokens: new Set(),
@@ -332,6 +387,22 @@ function collectReadScopes_ACU(
           const aliasKey = alias.value.toLowerCase();
           scope.derivedSources.set(aliasKey, nested.outputs);
           if (nested.outputs.size === 0) scope.unknownDerivedSources.add(aliasKey);
+        } else if (nested) {
+          // An alias-less derived source can only be read through unqualified
+          // output names. Prefer explicit outputs, then independently detected
+          // implicit aliases. In particular, do not treat SELECT * as unknown:
+          // its physical output names may still need legacy display-name
+          // translation in the enclosing scope.
+          let provableOutputs = nested.outputs;
+          if (provableOutputs.size === 0) {
+            const implicitOutputs = implicitProjectionOutputs_ACU(sql, values, nested);
+            provableOutputs = implicitOutputs.outputs;
+            // The alias declaration itself is not an entity-column reference.
+            // Without this, the inner alias could be rebound before the outer
+            // scope gets a chance to preserve the alias-less derived output.
+            for (const start of implicitOutputs.aliasTokenStarts) nested.protectedTokens.add(start);
+          }
+          if (provableOutputs.size > 0) scope.unaliasedDerivedOutputs.push(provableOutputs);
         }
         return;
       }
@@ -423,6 +494,9 @@ export function rebindSqlReadIdentifiers_ACU(
       const scope = findReadScope_ACU(scopes, values, index);
       if (!scope) continue;
       const key = token.value.toLowerCase();
+      if (scope.protectedTokens.has(token.start)) {
+        continue;
+      }
       if (isOutputAliasReference_ACU(values, scope, index, key)) {
         scope.protectedTokens.add(token.start);
         continue;
@@ -436,7 +510,9 @@ export function rebindSqlReadIdentifiers_ACU(
         scope.protectedTokens.add(token.start);
         continue;
       }
-      if (!qualifier && (scope.unknownDerivedSources.size > 0 || [...scope.derivedSources.values()].some(outputs => outputs.has(key))) ) {
+      if (!qualifier && (scope.unknownDerivedSources.size > 0
+        || [...scope.derivedSources.values()].some(outputs => outputs.has(key))
+        || scope.unaliasedDerivedOutputs.some(outputs => outputs.has(key)))) {
         scope.protectedTokens.add(token.start);
         continue;
       }

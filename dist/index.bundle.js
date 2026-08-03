@@ -37674,6 +37674,57 @@ $CONTENT
         }
         return outputs;
     }
+    const IMPLICIT_OUTPUT_ALIAS_STOP_WORDS_ACU = new Set(['END', 'ASC', 'DESC', 'NULLS', 'FIRST', 'LAST', 'COLLATE']);
+    const IMPLICIT_OUTPUT_ALIAS_MODIFIERS_ACU = new Set(['DISTINCT', 'ALL']);
+    const IMPLICIT_OUTPUT_ALIAS_OPERAND_PREFIX_ACU = /(?:\b(?:AND|OR|IN|IS|LIKE|GLOB|MATCH|REGEXP|BETWEEN|ESCAPE|COLLATE)\s*|[+*/%<>=|&~-]\s*)$/i;
+    /**
+     * Finds implicit projection aliases (for example `SELECT name 姓名`) only for
+     * alias-less derived sources. This deliberately does not enrich `outputs`:
+     * that existing field also drives named derived tables and CTEs, where changing
+     * an empty output set to a precise one would narrow established protection.
+     */
+    function implicitProjectionOutputs_ACU(sql, values, scope) {
+        const outputs = new Set();
+        const aliasTokenStarts = new Set();
+        let projectionEnd = scope.end;
+        for (let index = scope.start + 1; index < scope.end; index += 1) {
+            const token = values[index];
+            if (token.depth === scope.depth && keyword(token, 'FROM')) {
+                projectionEnd = index;
+                break;
+            }
+        }
+        let segment = [];
+        const record = () => {
+            if (segment.length < 2)
+                return;
+            const alias = segment[segment.length - 1];
+            const beforeAlias = segment[segment.length - 2];
+            if (IMPLICIT_OUTPUT_ALIAS_STOP_WORDS_ACU.has(alias.value.toUpperCase())
+                || !/\s/.test(sql.slice(beforeAlias.end, alias.start)))
+                return;
+            const expression = sql.slice(segment[0].start, alias.start).trim();
+            const expressionWithoutModifiers = expression.replace(/^(?:DISTINCT|ALL)\s+/i, '').trim();
+            if (!expressionWithoutModifiers
+                || IMPLICIT_OUTPUT_ALIAS_MODIFIERS_ACU.has(expression.toUpperCase())
+                || IMPLICIT_OUTPUT_ALIAS_OPERAND_PREFIX_ACU.test(expressionWithoutModifiers))
+                return;
+            outputs.add(alias.value.toLowerCase());
+            aliasTokenStarts.add(alias.start);
+        };
+        for (let index = scope.start + 1; index < projectionEnd; index += 1) {
+            const token = values[index];
+            if (token.depth !== scope.depth)
+                continue;
+            if (token.commaBefore) {
+                record();
+                segment = [];
+            }
+            segment.push(token);
+        }
+        record();
+        return { outputs, aliasTokenStarts };
+    }
     function compoundScopeEnd_ACU(values, scope) {
         for (let index = scope.end; index < values.length; index += 1) {
             if (values[index].depth < scope.depth)
@@ -37716,6 +37767,7 @@ $CONTENT
                 end,
                 depth: select.depth,
                 outputs: new Set(),
+                unaliasedDerivedOutputs: [],
                 derivedSources: new Map(),
                 unknownDerivedSources: new Set(),
                 protectedTokens: new Set(),
@@ -37774,6 +37826,25 @@ $CONTENT
                         scope.derivedSources.set(aliasKey, nested.outputs);
                         if (nested.outputs.size === 0)
                             scope.unknownDerivedSources.add(aliasKey);
+                    }
+                    else if (nested) {
+                        // An alias-less derived source can only be read through unqualified
+                        // output names. Prefer explicit outputs, then independently detected
+                        // implicit aliases. In particular, do not treat SELECT * as unknown:
+                        // its physical output names may still need legacy display-name
+                        // translation in the enclosing scope.
+                        let provableOutputs = nested.outputs;
+                        if (provableOutputs.size === 0) {
+                            const implicitOutputs = implicitProjectionOutputs_ACU(sql, values, nested);
+                            provableOutputs = implicitOutputs.outputs;
+                            // The alias declaration itself is not an entity-column reference.
+                            // Without this, the inner alias could be rebound before the outer
+                            // scope gets a chance to preserve the alias-less derived output.
+                            for (const start of implicitOutputs.aliasTokenStarts)
+                                nested.protectedTokens.add(start);
+                        }
+                        if (provableOutputs.size > 0)
+                            scope.unaliasedDerivedOutputs.push(provableOutputs);
                     }
                     return;
                 }
@@ -37874,6 +37945,9 @@ $CONTENT
                 if (!scope)
                     continue;
                 const key = token.value.toLowerCase();
+                if (scope.protectedTokens.has(token.start)) {
+                    continue;
+                }
                 if (isOutputAliasReference_ACU(values, scope, index, key)) {
                     scope.protectedTokens.add(token.start);
                     continue;
@@ -37887,7 +37961,9 @@ $CONTENT
                     scope.protectedTokens.add(token.start);
                     continue;
                 }
-                if (!qualifier && (scope.unknownDerivedSources.size > 0 || [...scope.derivedSources.values()].some(outputs => outputs.has(key)))) {
+                if (!qualifier && (scope.unknownDerivedSources.size > 0
+                    || [...scope.derivedSources.values()].some(outputs => outputs.has(key))
+                    || scope.unaliasedDerivedOutputs.some(outputs => outputs.has(key)))) {
                     scope.protectedTokens.add(token.start);
                     continue;
                 }
@@ -46087,6 +46163,63 @@ $CONTENT
         });
         return diagnostics;
     }
+    /**
+     * Finds known hazards in NameMapper.translateSql's legacy broad replacement.
+     * These are warnings, not import blockers: they only break specific SQL shapes.
+     */
+    function detectDisplayNameTranslationHazards_ACU(template) {
+        if (!template || typeof template !== 'object' || Array.isArray(template))
+            return [];
+        const data = template;
+        const warnings = [];
+        const firstColumnByDisplay = new Map();
+        const tableNames = [];
+        const columns = [];
+        for (const sheetKey of Object.keys(data).filter(key => key.startsWith('sheet_'))) {
+            const sheet = data[sheetKey];
+            if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet) || !Array.isArray(sheet.content))
+                continue;
+            const sheetName = String(sheet.name ?? '');
+            try {
+                // The detector must model the DDL that NameMapper actually consumes, including
+                // fallback schemas, rather than trusting editable sourceData.ddl directly.
+                const effectiveDDL = resolveEffectiveDDL(sheet, sheet.uid || sheetKey, sheet.uid || sheetKey).effectiveDDL;
+                const tableDisplayName = normalizeTranslationDisplayName_ACU(parseDDLChineseName(effectiveDDL));
+                if (tableDisplayName)
+                    tableNames.push({ sheetKey, sheetName, displayName: tableDisplayName });
+                for (const [sqlName, rawDisplayName] of parseDDLColumnComments(effectiveDDL)) {
+                    if (sqlName === 'row_id')
+                        continue;
+                    const displayName = normalizeTranslationDisplayName_ACU(rawDisplayName);
+                    const canonical = canonicalizeDisplayName_ACU(displayName);
+                    if (!displayName || !canonical)
+                        continue;
+                    columns.push({ sheetKey, sheetName, displayName });
+                    const first = firstColumnByDisplay.get(canonical);
+                    if (!first) {
+                        firstColumnByDisplay.set(canonical, { sheetKey, sheetName, displayName, sqlName });
+                    }
+                    else if (first.sheetKey !== sheetKey && first.sqlName.toLowerCase() !== sqlName.toLowerCase()) {
+                        warnings.push(issue_ACU$1('display_column_translation_ambiguity', sheetKey, sheetName, `列展示名「${displayName}」在表「${sheetName || sheetKey}」映射为「${sqlName}」，但在表「${first.sheetName || first.sheetKey}」映射为「${first.sqlName}」；旧式 SQL 全文翻译可能按表加载顺序选错列。`, undefined, first.sheetKey));
+                    }
+                }
+            }
+            catch {
+                // Structural validation owns malformed templates. A warning detector must not
+                // turn its best-effort inspection into a new import failure mode.
+            }
+        }
+        for (const table of tableNames) {
+            for (const column of columns) {
+                // translateSql applies table substitutions globally before column substitutions,
+                // so a table can corrupt a column from its own sheet as well as another one.
+                if (!column.displayName.includes(table.displayName))
+                    continue;
+                warnings.push(issue_ACU$1('display_name_substring_hazard', table.sheetKey, table.sheetName, `表展示名「${table.displayName}」是表「${column.sheetName || column.sheetKey}」列展示名「${column.displayName}」的子串；旧式 SQL 翻译会先替换表名，可能破坏列名。`, undefined, column.sheetKey));
+            }
+        }
+        return warnings;
+    }
     function validateHeaders_ACU(sheetKey, sheetName, content, diagnostics) {
         if (!Array.isArray(content) || content.length === 0) {
             diagnostics.push(issue_ACU$1('missing_header_row', sheetKey, sheetName, `表「${sheetName || sheetKey}」缺少表头行。`));
@@ -46155,6 +46288,9 @@ $CONTENT
     }
     function issue_ACU$1(code, sheetKey, sheetName, message, columnIndex, conflictsWith) {
         return { code, sheetKey, sheetName: String(sheetName ?? ''), message, columnIndex, conflictsWith };
+    }
+    function normalizeTranslationDisplayName_ACU(value) {
+        return String(value ?? '').normalize('NFKC').trim();
     }
     function isSheetLikeObject_ACU(value) {
         if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -47534,6 +47670,10 @@ $CONTENT
         const importDiagnostics = validateImportedTemplateObject_ACU(jsonData);
         if (importDiagnostics.length > 0) {
             throw new TemplateImportValidationError_ACU(importDiagnostics);
+        }
+        const translationWarnings = detectDisplayNameTranslationHazards_ACU(jsonData);
+        for (const warning of translationWarnings) {
+            logWarn_ACU(`[模板预设] SQL 展示名翻译风险：${warning.message}`);
         }
         try {
             if (!jsonData.mate || typeof jsonData.mate !== 'object')

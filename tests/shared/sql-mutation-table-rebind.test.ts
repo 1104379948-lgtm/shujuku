@@ -220,6 +220,118 @@ describe('sql mutation table rebind', () => {
     expect(unknownDerived.sql).toBe('SELECT 姓名, d.姓名 FROM runtime_other JOIN (SELECT * FROM runtime_people) AS d ON 1 = 1');
   });
 
+  it('无别名派生表的 SELECT * 不得被当作已知中文输出列', () => {
+    // 内层 SELECT * 导出物理列名；外层展示列名仍须交由 legacy 翻译层处理。
+    const result = rebindSqlReadIdentifiers_ACU(
+      'SELECT 姓名 FROM (SELECT * FROM people) ORDER BY 姓名',
+      new Map([['people', 'runtime_people']]),
+      new Map([['runtime_people', new Map([['姓名', 'physical_name']])]]),
+    );
+
+    expect(result.sql).toBe('SELECT 姓名 FROM (SELECT * FROM runtime_people) ORDER BY 姓名');
+    expect(result.columnRebindCount).toBe(0);
+  });
+
+  it('无别名派生表的显式输出列在 ORDER BY、GROUP BY 与 HAVING 中保持虚拟列语义', () => {
+    const aliases = new Map([['people', 'runtime_people']]);
+    const columns = new Map([['runtime_people', new Map([['姓名', 'physical_name']])]]);
+    const ordered = rebindSqlReadIdentifiers_ACU(
+      'SELECT 姓名 FROM (SELECT physical_name AS 姓名 FROM people) ORDER BY 姓名',
+      aliases,
+      columns,
+    );
+    const grouped = rebindSqlReadIdentifiers_ACU(
+      'SELECT 姓名 FROM (SELECT physical_name AS 姓名 FROM people) GROUP BY 姓名 HAVING 姓名 IS NOT NULL',
+      aliases,
+      columns,
+    );
+
+    expect(ordered.sql).toBe('SELECT 姓名 FROM (SELECT physical_name AS 姓名 FROM runtime_people) ORDER BY 姓名');
+    expect(grouped.sql).toBe('SELECT 姓名 FROM (SELECT physical_name AS 姓名 FROM runtime_people) GROUP BY 姓名 HAVING 姓名 IS NOT NULL');
+  });
+
+  it('无别名 UNION 派生表沿用第一分支的显式输出，并在实体列同名时不猜测', () => {
+    const result = rebindSqlReadIdentifiers_ACU(
+      'SELECT 姓名 FROM other JOIN (SELECT name_a AS 姓名 FROM first_source UNION ALL SELECT name_b AS 别名 FROM second_source) ON 1 = 1 ORDER BY 姓名',
+      new Map([
+        ['other', 'runtime_other'],
+        ['first_source', 'runtime_first'],
+        ['second_source', 'runtime_second'],
+      ]),
+      new Map([
+        ['runtime_other', new Map([['姓名', 'other_name']])],
+        ['runtime_first', new Map([['姓名', 'name_a']])],
+        ['runtime_second', new Map([['别名', 'name_b']])],
+      ]),
+    );
+
+    expect(result.sql).toBe(
+      'SELECT 姓名 FROM runtime_other JOIN (SELECT name_a AS 姓名 FROM runtime_first UNION ALL SELECT name_b AS 别名 FROM runtime_second) ON 1 = 1 ORDER BY 姓名',
+    );
+    expect(result.columnRebindCount).toBe(0);
+  });
+
+  it('无别名派生表的隐式输出列保持虚拟列语义，但不改变有别名派生表或 CTE', () => {
+    const aliases = new Map([['people', 'runtime_people']]);
+    const columns = new Map([['runtime_people', new Map([['姓名', 'physical_name']])]]);
+    const aliasless = rebindSqlReadIdentifiers_ACU(
+      'SELECT 姓名 FROM (SELECT physical_name 姓名 FROM people) ORDER BY 姓名',
+      aliases,
+      columns,
+    );
+    const named = rebindSqlReadIdentifiers_ACU(
+      'SELECT d.姓名 FROM (SELECT physical_name 姓名 FROM people) AS d ORDER BY d.姓名',
+      aliases,
+      columns,
+    );
+    const cte = rebindSqlReadIdentifiers_ACU(
+      'WITH d AS (SELECT physical_name 姓名 FROM people) SELECT 姓名 FROM d ORDER BY 姓名',
+      aliases,
+      columns,
+    );
+
+    expect(aliasless.sql).toBe('SELECT 姓名 FROM (SELECT physical_name 姓名 FROM runtime_people) ORDER BY 姓名');
+    // P2 is deliberately limited to alias-less derived sources; preserve their existing output.
+    expect(named.sql).toBe('SELECT d.姓名 FROM (SELECT physical_name physical_name FROM runtime_people) AS d ORDER BY d.姓名');
+    expect(cte.sql).toBe('WITH d AS (SELECT physical_name physical_name FROM runtime_people) SELECT 姓名 FROM d ORDER BY 姓名');
+  });
+
+  it('仅识别有效隐式别名，不将 CASE 终止词、排序词或 SELECT * 误认为输出列', () => {
+    const aliases = new Map([['people', 'runtime_people']]);
+    const columns = new Map([['runtime_people', new Map([['姓名', 'physical_name'], ['状态值', 'state_value']])]]);
+    const caseResult = rebindSqlReadIdentifiers_ACU(
+      'SELECT 状态值 FROM (SELECT CASE WHEN physical_name IS NOT NULL THEN 1 ELSE 0 END 状态值 FROM people) ORDER BY 状态值',
+      aliases,
+      columns,
+    );
+    const starResult = rebindSqlReadIdentifiers_ACU(
+      'SELECT 姓名 FROM (SELECT * FROM people) ORDER BY 姓名',
+      aliases,
+      columns,
+    );
+
+    expect(caseResult.sql).toBe('SELECT 状态值 FROM (SELECT CASE WHEN physical_name IS NOT NULL THEN 1 ELSE 0 END 状态值 FROM runtime_people) ORDER BY 状态值');
+    expect(starResult.sql).toBe('SELECT 姓名 FROM (SELECT * FROM runtime_people) ORDER BY 姓名');
+  });
+
+  it('识别运算式和函数式的无别名派生输出别名', () => {
+    const aliases = new Map([['people', 'runtime_people']]);
+    const columns = new Map([['runtime_people', new Map([['数量', 'physical_amount'], ['总数', 'total_count']])]]);
+    const arithmetic = rebindSqlReadIdentifiers_ACU(
+      'SELECT 数量 FROM (SELECT physical_amount + 1 数量 FROM people) ORDER BY 数量',
+      aliases,
+      columns,
+    );
+    const aggregate = rebindSqlReadIdentifiers_ACU(
+      'SELECT 总数 FROM (SELECT count(physical_amount) 总数 FROM people) ORDER BY 总数',
+      aliases,
+      columns,
+    );
+
+    expect(arithmetic.sql).toBe('SELECT 数量 FROM (SELECT physical_amount + 1 数量 FROM runtime_people) ORDER BY 数量');
+    expect(aggregate.sql).toBe('SELECT 总数 FROM (SELECT count(physical_amount) 总数 FROM runtime_people) ORDER BY 总数');
+  });
+
   it('不将函数名视为列标识符', () => {
     const result = rebindSqlReadIdentifiers_ACU(
       'SELECT count(*) FROM inventory',
