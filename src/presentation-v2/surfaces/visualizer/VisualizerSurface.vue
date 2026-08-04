@@ -549,12 +549,19 @@ const save = useVisualizerSave({
   requestSchemaMigrationChoice(summary) {
     return dialogStore.choose({
       title: "确认历史列对应关系",
-      message: `${summary.message}。选择只绑定当前模板草稿；草稿变化后必须重新选择。`,
-      actions: summary.choices.map(choice => ({
-        value: choice.id,
-        label: choice.label,
-        variant: "primary" as const,
-      })),
+      message: `${summary.message}。可保留历史列值进行映射，或以当前编辑器候选整表作为新边界。草稿变化后必须重新选择。`,
+      actions: [
+        ...summary.choices.map(choice => ({
+          value: choice.id,
+          label: choice.label,
+          variant: "primary" as const,
+        })),
+        {
+          value: summary.rebaseChoiceId,
+          label: "按当前表结构重建",
+          variant: "danger" as const,
+        },
+      ],
       cancelLabel: "取消保存",
     });
   },

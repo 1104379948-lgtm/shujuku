@@ -74,7 +74,13 @@ export interface VisualizerSaveInteractions {
   requestSchemaMigrationChoice?: (summary: VisualizerSchemaMigrationChoiceSummary) => string | null | Promise<string | null>;
 }
 
-export interface VisualizerSchemaMigrationChoiceSummary { sheetKey: string; message: string; choices: Array<{ id: string; label: string }> }
+export interface VisualizerSchemaMigrationChoiceSummary {
+  sheetKey: string;
+  message: string;
+  choices: Array<{ id: string; label: string }>;
+  /** Rebase keeps the candidate Sheet authoritative when no historical mapping is desired. */
+  rebaseChoiceId: string;
+}
 
 export interface VisualizerDestructiveSchemaChangeSummary {
   sheets: Array<{
@@ -531,6 +537,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
           lockDirty: visualizer.lockDirty,
         };
         const schemaMigrationIntents: Record<string, any> = {};
+        const requestedRebaseSheetKeys = new Set<string>();
         let preflight = await preflightSchemaMigrations_ACU({
           baselineData: visualizer.templateBaseData as any,
           candidateData: orderedData as any,
@@ -543,12 +550,18 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
             && decisions.every(decision => Array.isArray(decision.choices) && decision.choices.length > 0);
           if (onlyChoiceBlockers && interactions.requestSchemaMigrationChoice) {
             for (const decision of decisions) {
+              const rebaseChoiceId = `rebase:${decision.sheetKey}`;
               const selectedId = await interactions.requestSchemaMigrationChoice({
                 sheetKey: decision.sheetKey,
                 message: decision.message || '请选择该 Sheet 的历史列映射。',
                 choices: (decision.choices || []).map(choice => ({ id: choice.id, label: choice.label })),
+                rebaseChoiceId,
               });
               if (!selectedId) return false;
+              if (selectedId === rebaseChoiceId) {
+                requestedRebaseSheetKeys.add(decision.sheetKey);
+                continue;
+              }
               const selected = (decision.choices || []).find(choice => choice.id === selectedId);
               if (!selected) {
                 toastStore.error(`schema migration 返回了无效选择：${decision.sheetKey}。`, { muteable: false });
@@ -568,7 +581,9 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
             }
             preflight = await preflightSchemaMigrations_ACU({
               baselineData: visualizer.templateBaseData as any, candidateData: orderedData as any,
-              intents: schemaMigrationIntents, destructiveChangeConfirmed: false,
+              intents: schemaMigrationIntents,
+              rebaseSheetKeys: [...requestedRebaseSheetKeys],
+              destructiveChangeConfirmed: false,
             });
           }
         }
@@ -610,6 +625,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
             baselineData: visualizer.templateBaseData as any,
             candidateData: orderedData as any,
             intents: schemaMigrationIntents,
+            rebaseSheetKeys: [...requestedRebaseSheetKeys],
             destructiveChangeConfirmed: true,
           });
           if (preflight.blockers.length > 0) {
@@ -622,12 +638,21 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         const operationKeys = preflight.operations.map(operation => String(operation?.sheetKey || ''));
         const preflightChangedKeys = [...preflight.changedSheetKeys].sort();
         const expectedSchemaKeys = [...changes.schemaChangedSheetKeys].sort();
-        const applyModes = preflight.applyModes || {};
-        const actionKeys = [...new Set([...operationKeys, ...Object.keys(applyModes)])].sort();
+        // 兼容旧 preflight 返回值：没有 applyModes 时，operation 自然就是 migration。
+        // 新契约中 applyModes 必须和 operation 的归属一致；不能把 rebase 和 migration
+        // 同时用于一个 Sheet，更不能让未声明的 mode 绕过 action 校验。
+        const declaredApplyModes = preflight.applyModes || {};
+        const applyModes: Record<string, 'migration' | 'rebase'> = { ...declaredApplyModes };
+        for (const sheetKey of operationKeys) {
+          if (!applyModes[sheetKey]) applyModes[sheetKey] = 'migration';
+        }
+        const actionKeys = Object.keys(applyModes).sort();
         const operationKeysUnique = new Set(operationKeys).size === operationKeys.length;
-        const noModeOverlap = operationKeys.every(sheetKey => !Object.prototype.hasOwnProperty.call(applyModes, sheetKey));
+        const operationModesAreMigration = operationKeys.every(sheetKey => applyModes[sheetKey] === 'migration');
+        const modesAreSupported = Object.values(applyModes).every(mode => mode === 'migration' || mode === 'rebase');
         const actionValid = operationKeysUnique
-          && noModeOverlap
+          && operationModesAreMigration
+          && modesAreSupported
           && sameTemplateValue_ACU(preflightChangedKeys, expectedSchemaKeys)
           && actionKeys.length === expectedSchemaKeys.length
           && new Set(actionKeys).size === actionKeys.length

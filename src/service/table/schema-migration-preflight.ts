@@ -110,6 +110,8 @@ export async function preflightSchemaMigrations_ACU(input: {
   baselineData: TableDataObject_ACU;
   candidateData: TableDataObject_ACU;
   intents?: Record<string, SchemaMigrationPreflightIntent_ACU | undefined>;
+  /** Sheets explicitly selected by the user for candidate-authoritative full rebase. */
+  rebaseSheetKeys?: readonly string[];
   /** Authorizes only this preflight invocation to construct destructive drop operations. */
   destructiveChangeConfirmed?: boolean;
 }): Promise<SchemaMigrationPreflightResult_ACU> {
@@ -126,6 +128,7 @@ export async function preflightSchemaMigrations_ACU(input: {
   const operations: SchemaMigrationPreflightResult_ACU['operations'] = [];
   const decisions: SchemaMigrationPreflightDecision_ACU[] = [];
   const applyModes: Record<string, SchemaMigrationApplyMode_ACU> = {};
+  const requestedRebaseSheetKeys = new Set(input.rebaseSheetKeys || []);
   for (const sheetKey of changedSheetKeys) {
     const before = input.baselineData[sheetKey] as Sheet_ACU;
     const after = input.candidateData[sheetKey] as Sheet_ACU;
@@ -156,8 +159,21 @@ export async function preflightSchemaMigrations_ACU(input: {
         }
         const issue = input.destructiveChangeConfirmed === true ? null : getDestructiveDropIssue_ACU(sheetKey, before, after);
         const isNeedsChoice = planned?.status === 'needs_choice';
+        if (requestedRebaseSheetKeys.has(sheetKey)) {
+          if (issue) {
+            // 存在实际删除列：即使用户明确选择 rebase，也必须先确认数据丢弃。
+            issues.push(issue);
+            decisions.push({ sheetKey, status: 'needs_confirmation', code: issue.code, message: issue.message });
+            blockers.push(`${sheetKey}: ${issue.message}`);
+            continue;
+          }
+          decisions.push({ sheetKey, status: 'auto_apply', code: 'USER_REQUESTED_REBASE', message: '用户选择按候选整表 rebase。' });
+          applyModes[sheetKey] = 'rebase';
+          continue;
+        }
         if (isNeedsChoice && Array.isArray(planned.choices) && planned.choices.length > 0) {
-          // 可提供唯一列身份映射：让用户在 mapping 中选择。
+          // 可精确保留历史值的 mapping 仍交由用户确认；若不存在候选 mapping，
+          // 也可由调用方显式要求按候选整表 rebase，而不是永久阻断模板保存。
           decisions.push({
             sheetKey,
             status: 'needs_choice',
@@ -169,14 +185,14 @@ export async function preflightSchemaMigrations_ACU(input: {
           continue;
         }
         if (issue) {
-          // 存在实际删除列：必须显式确认（无论走 migration 还是 rebase）。
+          // 不存在可选 mapping 时，删除列仍必须显式确认。
           issues.push(issue);
           decisions.push({ sheetKey, status: 'needs_confirmation', code: issue.code, message: issue.message });
           blockers.push(`${sheetKey}: ${issue.message}`);
           continue;
         }
         if (planned?.status === 'rebase_available' || isNeedsChoice) {
-          // 约束放宽 / 无唯一映射 / planner 能力不足：候选合法即可 rebase。
+          // 无可选 mapping 时，候选 Sheet 本身就是用户明确给出的新边界，按整表 rebase。
           decisions.push({ sheetKey, status: 'auto_apply', code: 'REBASE_AVAILABLE', message: planned?.message });
           applyModes[sheetKey] = 'rebase';
         } else {

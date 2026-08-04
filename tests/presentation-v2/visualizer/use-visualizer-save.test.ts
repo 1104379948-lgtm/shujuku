@@ -721,6 +721,45 @@ describe('useVisualizerSave', () => {
     expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledTimes(1);
   });
 
+  it('列身份选择中选择按当前表结构重建时，以 rebase action 原子提交', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({ mate: { type: 'chatSheets', version: 1 }, sheet_test_vz2: sheet() }, ['sheet_test_vz2']);
+    store.currentSheet.content = [['row_id', '品质', '状态'], ['1', 'normal', '平静']];
+    store.currentSheet.sourceData.ddl = `CREATE TABLE sheet_test_vz2 (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  quality INTEGER, -- 品质
+  col_2 TEXT -- 状态
+);`;
+    serviceMock.preflightSchemaMigrations_ACU
+      .mockResolvedValueOnce({
+        changedSheetKeys: ['sheet_test_vz2'], blockers: ['sheet_test_vz2: 需要确认列身份。'], issues: [], operations: [],
+        decisions: [{
+          sheetKey: 'sheet_test_vz2', status: 'needs_choice', code: 'AMBIGUOUS_COLUMN_IDENTITY', message: '需要确认列身份。',
+          choices: [{ id: 'map:col_1->quality', label: '姓名（col_1）→ 品质（quality）', intent: { physicalColumnMappings: [], fills: {}, conversions: [], migrationPolicy: { destructiveChangeConfirmed: false, lossyConversionConfirmed: false } } }],
+        }],
+      })
+      .mockResolvedValueOnce({
+        changedSheetKeys: ['sheet_test_vz2'], blockers: [], issues: [], operations: [], decisions: [],
+        applyModes: { sheet_test_vz2: 'rebase' },
+      });
+    const requestSchemaMigrationChoice = vi.fn(async ({ rebaseChoiceId }: { rebaseChoiceId: string }) => rebaseChoiceId);
+
+    const saved = await useVisualizerSave({ requestSchemaMigrationChoice }).saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(requestSchemaMigrationChoice).toHaveBeenCalledWith(expect.objectContaining({
+      sheetKey: 'sheet_test_vz2', rebaseChoiceId: 'rebase:sheet_test_vz2',
+    }));
+    expect(serviceMock.preflightSchemaMigrations_ACU).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      rebaseSheetKeys: ['sheet_test_vz2'], intents: {}, destructiveChangeConfirmed: false,
+    }));
+    const [[{ sheetChanges }]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
+    expect(sheetChanges).toEqual([expect.objectContaining({ kind: 'rebase', sheetKey: 'sheet_test_vz2' })]);
+  });
+
+
   it('取消 schema migration 列身份选择时没有提交或后置副作用', async () => {
     const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
     const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');

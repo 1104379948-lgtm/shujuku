@@ -170,7 +170,7 @@ describe('schema migration preflight', () => {
     expect(result.operations).toMatchObject([{ contractVersion: 2, physicalColumnMappings: [], fills: {}, conversions: [] }]);
   });
 
-  it('无法唯一证明 identity 的 physical add/drop 仍然拒绝', async () => {
+  it('存在可精确迁移的候选 mapping 时仍要求用户选择', async () => {
     const baseline = state(sheet());
     const candidate = state(sheet({
       content: [['row_id', 'quality'], ['1', 'normal']],
@@ -180,8 +180,33 @@ describe('schema migration preflight', () => {
     const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
 
     expect(result.operations).toEqual([]);
-    expect(result.blockers.join('\n')).toContain('无法唯一推导');
+    expect(result.blockers).toEqual([expect.stringContaining('无法唯一推导')]);
+    expect(result.decisions).toEqual([expect.objectContaining({
+      status: 'needs_choice', choices: [expect.objectContaining({ id: 'map:name->quality' })],
+    })]);
   });
+
+  it('无可选 mapping 的 add/drop 在删除确认后按候选整表 rebase', async () => {
+    const baseline = state(sheet());
+    const candidate = state(sheet({
+      content: [['row_id', 'quality'], ['1', 'normal']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, quality INTEGER);' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({
+      baselineData: baseline,
+      candidateData: candidate,
+      destructiveChangeConfirmed: true,
+    });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.operations).toEqual([]);
+    expect(result.applyModes).toEqual({ sheet_inventory: 'rebase' });
+    expect(result.decisions).toEqual([expect.objectContaining({
+      sheetKey: 'sheet_inventory', status: 'auto_apply', code: 'REBASE_AVAILABLE',
+    })]);
+  });
+
 
   it('完整 candidate hydrate 失败时不返回 operation', async () => {
     const baseline = state(sheet());
