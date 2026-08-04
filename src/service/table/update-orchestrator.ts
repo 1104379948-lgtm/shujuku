@@ -1256,7 +1256,9 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             }
 
             if (Array.isArray(response.job.targetSheetKeys) && response.job.targetSheetKeys.length > 0) {
-                const allowedSheetKeys = new Set(response.job.targetSheetKeys);
+                // 授权集合必须与"已按 TemplateScope 过滤的目标"一致：隐藏表已从 scope 移除，
+                // 即使 AI 仍把它写进 targetSheetKeys，也不得授权写入（阶段3：统一 allowed）。
+                const allowedSheetKeys = new Set(scopedTargets);
                 const retainedStatements: string[] = [];
                 const discardedKeys = new Set<string>();
                 for (const statement of reboundStatements) {
@@ -1274,7 +1276,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                         return {
                             success: false,
                             modifiedKeys: [],
-                            error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。允许写入表：${formatAllowedSheetKeys_ACU(response.job.targetSheetKeys)}。`,
+                            error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。允许写入表：${formatAllowedSheetKeys_ACU(scopedTargets)}。`,
                             errorCategory: 'model',
                         };
                     }
@@ -1288,7 +1290,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                     return {
                         success: false,
                         modifiedKeys: [],
-                        error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 的 SQL 仅修改非目标表，已全部丢弃。允许写入表：${formatAllowedSheetKeys_ACU(response.job.targetSheetKeys)}。请仅生成允许表的写入。`,
+                        error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 的 SQL 仅修改非目标表，已全部丢弃。允许写入表：${formatAllowedSheetKeys_ACU(scopedTargets)}。请仅生成允许表的写入。`,
                         errorCategory: 'model',
                     };
                 }
@@ -1309,7 +1311,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             reason: 'applyUnifiedGroupFillResponses:runtime_sql',
             chatKey: capturedChatKey,
             isolationKey: capturedIsolationKey,
-            writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
+            writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet].filter(sheetKey => sqlScopedKeys([sheetKey]).length > 0), baseSnapshot),
             baseRevision: options.baseRevision,
             workingDataMode: 'none',
             initialData: baseSnapshot as any,
@@ -1367,7 +1369,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             const snapshotScope = capturedTemplateScope;
             const scopedKeys = (keys: readonly string[]) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
             const allRuntimeSheetKeys: string[] = scopedKeys(getSortedSheetKeys_ACU(runtimeData));
-            const initializedKeys = [...allTargetSheetKeySet]
+            const initializedKeys = scopedKeys([...allTargetSheetKeySet])
                 .filter(sheetKey => Boolean((runtimeData as any)?.[sheetKey]) && !Boolean((baseSnapshot as any)?.[sheetKey]))
                 .sort();
             const keysToSave = isFirstTimeInit
@@ -1394,7 +1396,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 // 因此 sqlResponses 与 sqlTexts 一一对应，不会错位。
                 for (let index = 0; index < sqlResponses.length; index += 1) {
                     const response = sqlResponses[index];
-                    const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
+                    const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, scopedKeys(response.job.targetSheetKeys || []));
                     if (operationBuild.success === false) {
                         return {
                             success: false,
@@ -1410,7 +1412,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                     + `本次以初始 checkpoint 形式提交 SQL 运行时快照（tracked=${keysToTrack.join(',') || '无'}）。`,
                 );
             }
-            const fillAttemptKeys = [...allTargetSheetKeySet]
+            const fillAttemptKeys = scopedKeys([...allTargetSheetKeySet])
                 .filter(sheetKey => Boolean((runtimeData as any)?.[sheetKey]))
                 .sort();
             const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));

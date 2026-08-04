@@ -3428,7 +3428,123 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
     expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a).toBeUndefined();
   });
+
+  it('[阶段7] hide checkpoint 存在时 reveal 直接从 hide 数据恢复，不再逐边界 bounded replay', async () => {
+    const hiddenData = { ...sheetB, uid: 'sheet_hidden', name: '主角装备表', content: [['row_id', 'value'], ['1', '隐藏前的数据']] };
+    const message = seedFrame({
+      logEntries: [],
+      perSheetCheckpoints: {
+        sheet_hidden: {
+          kind: 'sheet_full', createdAt: 10, reason: 'schema_change', sheetKey: 'sheet_hidden',
+          data: hiddenData,
+          timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 1 },
+        },
+      },
+    });
+    const activeData = message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data;
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: activeData })
+      .mockResolvedValue({ baseKind: 'full_checkpoint', data: activeData });
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_hidden', sheetData: hiddenData }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_hidden: { name: '主角装备表' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    expect(revived?.timeline?.kind).toBe('sheet_reveal');
+    expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '隐藏前的数据']]);
+    // 只有 activeReplay 一次 detailed replay；reveal 数据来自 hide checkpoint，不触发逐边界回退。
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it('[阶段7] hide 直接取 active replay state 的当前数据，不触发逐边界 bounded replay', async () => {
+    const sheetToHide = { ...sheetA, uid: 'sheet_a', name: '表A', content: [['row_id', 'value'], ['1', 'active-data']] };
+    const message = seedFrame({ logEntries: [] });
+    // activeReplayState 含该表（hide 的目标是当前可见表）。
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { sheet_a: sheetToHide, mate: { type: 'acu', version: 1 } },
+    });
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'hide', sheetKey: 'sheet_a', sheetData: sheetToHide }],
+      guideData: { sheet_a: { name: '表A' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const hidden = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a;
+    expect(hidden?.timeline?.kind).toBe('sheet_hide');
+    expect(hidden?.data?.content).toEqual([['row_id', 'value'], ['1', 'active-data']]);
+    // hide 数据来自 activeReplayState（已加载），不再为 hide 单独逐边界回退。
+    expect(mocks.loadReplayDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it('[阶段7] 显式 reveal 恢复 hide 前最后可信数据，不被 caller 模板空壳覆盖', async () => {
+    const hiddenData = { ...sheetB, uid: 'sheet_hidden', name: '主角装备表', content: [['row_id', 'value'], ['1', '历史数据行'], ['2', '另一行']] };
+    const message = seedFrame({
+      logEntries: [],
+      perSheetCheckpoints: {
+        sheet_hidden: {
+          kind: 'sheet_full', createdAt: 10, reason: 'schema_change', sheetKey: 'sheet_hidden',
+          data: hiddenData,
+          timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 1 },
+        },
+      },
+    });
+    const activeData = message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data;
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: activeData })
+      .mockResolvedValue({ baseKind: 'full_checkpoint', data: activeData });
+
+    // 协调器侧：hidden 表重新进入模板，模板表本身不带数据 → asIntroducedSheet_ACU 产出 header-only 空壳。
+    const shellData = { ...sheetB, uid: 'sheet_hidden', name: '主角装备表', content: [['row_id', 'value']] };
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'reveal', sheetKey: 'sheet_hidden', sheetData: shellData }],
+      guideData: { sheet_hidden: { name: '主角装备表' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    expect(revived?.timeline?.kind).toBe('sheet_reveal');
+    // 恢复的是 hide 前最后可信数据，而不是模板空壳。
+    expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '历史数据行'], ['2', '另一行']]);
+  });
+
+  it('[阶段7] 显式 reveal 无历史 hide checkpoint 时退回 bounded replay 恢复数据', async () => {
+    const hiddenData = { ...sheetB, uid: 'sheet_hidden', name: '主角装备表', content: [['row_id', 'value'], ['1', '历史数据行']] };
+    const message = seedFrame({ logEntries: [] });
+    const activeData = message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data;
+    // 无 perSheetCheckpoints.sheet_hidden（旧历史），loadReplayDetailed 在 bounded replay 中
+    // 返回包含该表的完整 state → 恢复历史数据。
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: activeData })
+      .mockResolvedValue({ baseKind: 'full_checkpoint', data: { mate: { type: 'acu' }, sheet_hidden: hiddenData } });
+
+    const shellData = { ...sheetB, uid: 'sheet_hidden', name: '主角装备表', content: [['row_id', 'value']] };
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'reveal', sheetKey: 'sheet_hidden', sheetData: shellData }],
+      guideData: { sheet_hidden: { name: '主角装备表' } },
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    expect(revived?.timeline?.kind).toBe('sheet_reveal');
+    expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '历史数据行']]);
+  });
+
+
 });
+
 
 describe('persistTableMutationLogBatchV2_ACU', () => {
   beforeEach(() => {
@@ -3635,5 +3751,193 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     expect(first.TavernDB_ACU_IsolatedData).toBe(firstBefore);
     expect(second.TavernDB_ACU_IsolatedData).toBe(secondBefore);
     expect(second.TavernDB_ACU_Identity).toBe('before-second');
+  });
+});
+
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// [阶段0红测试] 统一表级可见性生命周期 + operation 契约
+// 复现场景：目标表历史只存在于 log operation（manual_refill），
+// active replay 已因模板 hide 移除该表。修复前：
+//   persistTableMutationLogV2_ACU 补锚时调用 introductionHistoryEvidence_ACU
+//   扫到 manual_refill operation → reason=目标相关 operation 无法验证
+//   → history_indeterminate，第二次 runtime SQL 失败。
+// ═══════════════════════════════════════════════════════════════════════════
+describe('生命周期统一：隐藏表在连续 runtime SQL 中不触发历史补锚误阻断', () => {
+  const targetKey = 'sheet_zhong_yao_jue_se_biao';
+  let persistTableMutationLogV2_ACU: typeof import('../../../src/service/table/storage-frame-v2-persist')['persistTableMutationLogV2_ACU'];
+  beforeEach(() => {
+    mocks.chat.length = 0;
+    mocks.saveChat.mockReset().mockResolvedValue(undefined);
+    mocks.saveChatStrict.mockReset().mockResolvedValue(undefined);
+    mocks.loadReplayState.mockReset();
+    mocks.loadReplayDetailed.mockReset();
+    mocks.settings.dataIsolationEnabled = false;
+    mocks.settings.dataIsolationCode = '';
+  });
+  beforeAll(async () => {
+    ({ persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist'));
+  });
+
+  function makeTargetSheet(content: unknown[][] = [['row_id', 'value']]): any {
+    return {
+      uid: 'sheet_zhong_yao_jue_se_biao',
+      name: '重要角色表',
+      sourceData: {},
+      content,
+      updateConfig: {},
+      exportConfig: {},
+      orderNo: 1,
+    };
+  }
+
+  function makeHistoryWithOperationOnly(operation: any): any {
+    // 目标表只出现在历史 log operation 中；checkpoint 与 perSheetCheckpoints 均不含。
+    // 这样 introductionHistoryEvidence_ACU 只能走到 operation 分支验证。
+    return seedFrame({
+      checkpoint: {
+        kind: 'full',
+        createdAt: 1,
+        reason: 'init',
+        data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+      },
+      logEntries: [
+        makeEntry({
+          seq: 1,
+          source: 'manual_fill',
+          operations: [operation],
+        }),
+      ],
+      perSheetCheckpoints: {},
+    });
+  }
+
+  it('目标表历史上仅以 manual_refill sql_sheet_batch 出现时，连续两次 runtime SQL 均成功且不报 history_indeterminate', async () => {
+    const targetSheet = makeTargetSheet([['row_id', 'value'], ['1', '隐藏前数据']]);
+    const message = makeHistoryWithOperationOnly({
+      kind: 'sql_sheet_batch',
+      sheetKey: targetKey,
+      tableName: 'zhong_yao_jue_se_biao',
+      statements: ["INSERT INTO zhong_yao_jue_se_biao (row_id, value) VALUES (1, 'hidden-data')"],
+      reason: 'manual_refill',
+    });
+    // active replay state：目标表已被 hide 移出。
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    const afterData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB, [targetKey]: targetSheet } as any;
+    const operations = [{ kind: 'row_upsert', sheetKey: targetKey, rowId: '1', cells: ['1', '隐藏前数据'] }] as any;
+
+    const first = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData,
+      operations,
+      candidateChangedSheetKeys: [targetKey],
+      filledSheetKeys: [targetKey],
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+    expect(first.error).toBeUndefined();
+    expect(first.saved).toBe(true);
+
+    const second = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData,
+      operations,
+      candidateChangedSheetKeys: [targetKey],
+      filledSheetKeys: [targetKey],
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+    expect(second.error).toBeUndefined();
+    expect(second.saved).toBe(true);
+  });
+
+  it('隐藏表在补锚路径被拒绝时（history_indeterminate），事务零副作用', async () => {
+    // 保留原 fail-closed 语义：目标相关 operation 畸形时不得静默放行。
+    const message = makeHistoryWithOperationOnly({
+      kind: 'sql_sheet_batch',
+      sheetKey: targetKey,
+      tableName: 'zhong_yao_jue_se_biao',
+      statements: 'not-an-array', // 畸形：历史证据无法验证
+      reason: 'manual_refill',
+    });
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+    const beforeIsolated = JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData));
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB, [targetKey]: makeTargetSheet() } as any,
+      operations: [{ kind: 'row_upsert', sheetKey: targetKey, rowId: '1', cells: ['1', 'x'] }] as any,
+      candidateChangedSheetKeys: [targetKey],
+      filledSheetKeys: [targetKey],
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('history is indeterminate') });
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData).toEqual(beforeIsolated);
+  });
+});
+
+describe('operation 契约：manual_refill reason 与共享 validator 对齐', () => {
+  beforeEach(() => {
+    mocks.chat.length = 0;
+    mocks.saveChat.mockReset().mockResolvedValue(undefined);
+    mocks.saveChatStrict.mockReset().mockResolvedValue(undefined);
+    mocks.loadReplayState.mockReset();
+    mocks.loadReplayDetailed.mockReset();
+    mocks.settings.dataIsolationEnabled = false;
+    mocks.settings.dataIsolationCode = '';
+  });
+  it('生产历史 manual_refill operation 在 history evidence 中可验证（兼容读取）', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const message = seedFrame({
+      checkpoint: {
+        kind: 'full',
+        createdAt: 1,
+        reason: 'init',
+        data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+      },
+      logEntries: [
+        makeEntry({
+          seq: 1,
+          source: 'manual_fill',
+          operations: [{
+            kind: 'sql_sheet_batch',
+            sheetKey: 'sheet_a',
+            tableName: 'table_a',
+            statements: ["INSERT INTO table_a (row_id, value) VALUES (1, 'committed')"],
+            reason: 'manual_refill',
+          }],
+        }),
+      ],
+      perSheetCheckpoints: {},
+    });
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any,
+      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_a', rowId: '1', cells: ['1', 'x'] }] as any,
+      candidateChangedSheetKeys: ['sheet_a'],
+      filledSheetKeys: ['sheet_a'],
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(result).toMatchObject({ saved: true });
+    expect(mocks.saveChat).toHaveBeenCalledTimes(1);
   });
 });

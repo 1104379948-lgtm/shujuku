@@ -6,7 +6,7 @@ import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performanc
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../data/sqlite/sync-bridge';
 import { normalizeSqlStructure, normalizeStatementValues } from '../../data/sqlite/sql-normalizer';
-import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TablePatchV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
+import type { TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TablePatchV2_ACU, TableSheetCheckpointV2_ACU, TableSheetLifecycleEntryV2_ACU, TableSheetLifecycleProjectionV2_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { ensureStableRowIdsForSeedRows_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, getSortedSheetKeys_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
@@ -112,6 +112,130 @@ function getV2FrameRefs_ACU(chat: any[], isolationKey: string): V2FrameRef_ACU[]
 
   return refs;
 }
+
+
+
+/**
+ * 只读派生：表级可见性生命周期（统一事实来源，不落盘）。
+ *
+ * 唯一持久化历史权威是 per-sheet timeline；本函数把各 frame 的 timeline 事件
+ * 按楼层物理位置与 afterSeq 归并成一张表当前的可见性结论：
+ * - active：最后可验证 timeline 是 introduction / rebase / reveal；
+ * - hidden：最后可验证 timeline 是 hide（数据保留在 checkpoint.data）；
+ * - never_seen：历史无目标相关 timeline / checkpoint / log；
+ * - indeterminate：frame 容器、目标 checkpoint 或顺序无法判定。
+ *
+ * 该派生刻意不扫描业务 operation 内容；隐藏/显示状态完全由 timeline 表达，
+ * 避免把普通 SQL 写入的归属歧义再次当作生命周期事实。
+ */
+export function deriveSheetLifecycleFromFramesV2_ACU(
+  chatArg: any[] | null | undefined,
+  isolationKey: string,
+  options: { maxMessageIndex?: number } = {},
+): TableSheetLifecycleProjectionV2_ACU {
+  const chat = Array.isArray(chatArg) ? chatArg : [];
+  const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
+    .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
+  const statusBySheetKey: Record<string, TableSheetLifecycleEntryV2_ACU> = {};
+  let sawIndeterminateFrame = false;
+
+  for (const ref of frameRefs) {
+    const frame = ref.frame;
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame)) {
+      sawIndeterminateFrame = true;
+      continue;
+    }
+
+    // 全量 checkpoint：包含该 sheetKey 即视为当前可见（除非被后续 hide 覆盖）。
+    const checkpointData = (frame.checkpoint as any)?.data;
+    if (checkpointData && typeof checkpointData === 'object' && !Array.isArray(checkpointData)) {
+      for (const sheetKey of Object.keys(checkpointData)) {
+        if (!sheetKey.startsWith('sheet_')) continue;
+        statusBySheetKey[sheetKey] = {
+          status: 'active',
+          lastTimelineKind: 'sheet_introduction',
+          lastTimelineMessageIndex: ref.messageIndex,
+        };
+      }
+    }
+
+    // per-sheet checkpoint 使用与 replay 相同的校验路径归一化，避免两处语义分叉。
+    let validatedCheckpoints: TableSheetCheckpointV2_ACU[];
+    try {
+      validatedCheckpoints = getValidatedSheetCheckpoints_ACU(frame, ref.messageIndex);
+    } catch (error) {
+      // frame 容器或 checkpoint 结构无法判定：该帧涉及的表全部 indeterminate（fail-closed）。
+      const perSheetCheckpoints = (frame as any).perSheetCheckpoints;
+      if (perSheetCheckpoints !== undefined && perSheetCheckpoints !== null
+        && typeof perSheetCheckpoints === 'object' && !Array.isArray(perSheetCheckpoints)) {
+        for (const sheetKey of Object.keys(perSheetCheckpoints)) {
+          if (sheetKey.startsWith('sheet_')) {
+            statusBySheetKey[sheetKey] = { status: 'indeterminate' };
+          }
+        }
+      }
+      sawIndeterminateFrame = true;
+      continue;
+    }
+
+    // 无 timeline 的 legacy checkpoint 在 replay 中于帧开头写回 active state；
+    // 派生结论与 replay 保持一致：视为 active（保留为恢复候选）。
+    for (const checkpoint of validatedCheckpoints) {
+      const { sheetKey } = checkpoint;
+      if (!sheetKey.startsWith('sheet_')) continue;
+      if (checkpoint.timeline !== undefined) continue;
+      statusBySheetKey[sheetKey] = {
+        status: 'active',
+        lastTimelineKind: 'sheet_introduction',
+        lastTimelineMessageIndex: ref.messageIndex,
+      };
+    }
+
+    // timeline checkpoint 按 afterSeq 归并：hide → hidden，其余 → active。
+    // 与 replay 的 applyDueIntroductions 一致：afterSeq 在对应 log seq 之后生效；
+    // 同一帧多个 checkpoint 由 getValidatedSheetCheckpoints_ACU 归一并保序。
+    const timelineCheckpoints = getValidatedTimelineCheckpointsForFrame_ACU(validatedCheckpoints);
+    for (const checkpoint of timelineCheckpoints) {
+      const { sheetKey } = checkpoint;
+      if (!sheetKey.startsWith('sheet_')) continue;
+      const timeline = checkpoint.timeline!;
+      if (timeline.afterSeq === undefined || !Number.isInteger(timeline.afterSeq) || timeline.afterSeq < 0) {
+        statusBySheetKey[sheetKey] = { status: 'indeterminate' };
+        sawIndeterminateFrame = true;
+        continue;
+      }
+      const kind = timeline.kind;
+      const entry: TableSheetLifecycleEntryV2_ACU = {
+        status: kind === 'sheet_hide' ? 'hidden' : 'active',
+        lastTimelineKind: kind,
+        lastTimelineMessageIndex: ref.messageIndex,
+        lastTimelineAfterSeq: timeline.afterSeq,
+      };
+      if (kind === 'sheet_hide' && checkpoint.data && typeof checkpoint.data === 'object' && !Array.isArray(checkpoint.data)) {
+        entry.restoreSourceData = deepClone_ACU(checkpoint.data);
+      }
+      statusBySheetKey[sheetKey] = entry;
+    }
+  }
+
+  const activeSheetKeys: string[] = [];
+  const hiddenSheetKeys: string[] = [];
+  const indeterminateSheetKeys: string[] = [];
+  const neverSeenSheetKeys: string[] = [];
+  for (const [sheetKey, entry] of Object.entries(statusBySheetKey)) {
+    if (entry.status === 'active') activeSheetKeys.push(sheetKey);
+    else if (entry.status === 'hidden') hiddenSheetKeys.push(sheetKey);
+    else if (entry.status === 'indeterminate') indeterminateSheetKeys.push(sheetKey);
+    else neverSeenSheetKeys.push(sheetKey);
+  }
+  activeSheetKeys.sort();
+  hiddenSheetKeys.sort();
+  indeterminateSheetKeys.sort();
+  neverSeenSheetKeys.sort();
+
+  return { statusBySheetKey, activeSheetKeys, hiddenSheetKeys, indeterminateSheetKeys, neverSeenSheetKeys };
+}
+
 
 function hasUnanchoredReplayArtifacts_ACU(frameRefs: V2FrameRef_ACU[]): boolean {
   return frameRefs.some(({ frame }) => {

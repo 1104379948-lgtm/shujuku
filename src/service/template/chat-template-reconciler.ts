@@ -7,10 +7,20 @@ import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist'
 import { hydrateTableDataStrict_ACU } from '../table/sqlite-template-validation';
 import { normalizeTemplateRowIds_ACU } from './template-row-id-normalizer';
 import type { StorageMode } from '../../shared/table-storage-provider';
+import type { TableSheetLifecycleProjectionV2_ACU } from '../table/storage-frame-v2-types';
 
 export interface ChatTemplateReconcileInput_ACU {
   baselineData: TableDataObject_ACU;
   templateData: TableDataObject_ACU;
+  /**
+   * 只读生命周期派生结果（V2 timeline 的 active/hidden/never_seen/indeterminate）。
+   * 可选：未提供时退回当前基于 baseline 的猜测行为（兼容旧调用方与纯数据测试）。
+   * 提供时协调层显式消费：
+   * - status hidden → 模板重新包含该表时生成 reveal（恢复历史 key 与数据），不再伪装 introduction；
+   * - status indeterminate → 目标生命周期无法判定，阻止计划提交（fail-closed）；
+   * - status active/never_seen → 维持既有 introduction/rebase 语义。
+   */
+  lifecycle?: TableSheetLifecycleProjectionV2_ACU;
   destructiveChangeConfirmed: boolean;
   /**
    * 目标模板缺失的既有表如何处理：
@@ -103,6 +113,7 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
 
   const matchedKeys = new Set<string>();
   const rebaseKeys = new Set<string>();
+  const revealKeys = new Set<string>();
   for (const [canonicalName, templateEntry] of templateByName) {
     const matchedByName = baselineByName.get(canonicalName);
     const occupiedByKey = baselineData[templateEntry.key] as Sheet_ACU | undefined;
@@ -124,6 +135,30 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
       if (!introducedKey) {
         blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」缺少可用于派生 key 的有效显示名。`);
         continue;
+      }
+      // 生命周期感知：派生 key 在历史中曾存在（hidden / indeterminate / active）时，
+      // 这不是"新增表"。协调层显式消费唯一生命周期事实，不再靠 baseline 缺席猜测。
+      const lifecycleEntry = input.lifecycle?.statusBySheetKey?.[introducedKey];
+      if (lifecycleEntry) {
+        if (lifecycleEntry.status === 'hidden') {
+          // hidden → 显式 reveal：恢复历史 key（稳定 sheetKey），数据由 persist 层
+          // resolveRevealSource_ACU 恢复"离开时最新状态"。协调层只带模板结构，不伪装 introduction。
+          const revealed = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
+          candidateData[introducedKey] = revealed;
+          audit.push({ sheetKey: introducedKey, resolvedSheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(revealed).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, revealed.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+          revealKeys.add(introducedKey);
+          continue;
+        }
+        if (lifecycleEntry.status === 'indeterminate') {
+          blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 的历史生命周期无法判定（indeterminate），已阻止模板提交。请先在数据管理中检查并恢复 V2 历史。`);
+          continue;
+        }
+        if (lifecycleEntry.status === 'active') {
+          // 派生 key 在历史中仍活跃但当前协调基线不含该表：异常状态，绝不覆盖活数据。
+          blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 在历史生命周期中仍为 active，但当前聊天基线不含该表，无法协调。请重新读取当前表格后重试。`);
+          continue;
+        }
+        // never_seen：历史上从未见过，正常 introduction。
       }
       const occupiedByIntroducedKey = candidateData[introducedKey] as Sheet_ACU | undefined;
       if (occupiedByIntroducedKey) {
@@ -164,6 +199,13 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
       delete (candidateData as any)[key];
       audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
     } else {
+      // 生命周期感知：目标表历史生命周期无法判定时，隐藏操作也属于"不知道它在哪"，
+      // 不能静默隐藏（可能误伤 indeterminate 历史）。fail-closed 阻止提交。
+      const lifecycleEntry = input.lifecycle?.statusBySheetKey?.[key];
+      if (lifecycleEntry?.status === 'indeterminate') {
+        blockers.push(`表「${sheet.name || key}」(${key}) 的历史生命周期无法判定（indeterminate），已阻止隐藏操作。请先在数据管理中检查并恢复 V2 历史。`);
+        continue;
+      }
       hiddenSheetKeys.push(key);
       delete (candidateData as any)[key];
       audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: [], hiddenColumns: headers_ACU(sheet).slice(1), physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
@@ -174,7 +216,10 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
   // checkpoint.data 就是协调器算好的目标全量；结构变更统一表达为数据边界上的 per-sheet checkpoint。
   const sheetChanges: TemplateSheetChange_ACU[] = [];
   for (const [key, sheet] of listSheets_ACU(candidateData)) {
-    if (!baselineData[key]) {
+    if (revealKeys.has(key)) {
+      sheetChanges.push({ kind: 'reveal', sheetKey: key, sheetData: sheet });
+      audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'reveal' });
+    } else if (!baselineData[key]) {
       sheetChanges.push({ kind: 'introduction', sheetKey: key, sheetData: sheet });
       audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'introduction' });
     } else if (rebaseKeys.has(key)) {

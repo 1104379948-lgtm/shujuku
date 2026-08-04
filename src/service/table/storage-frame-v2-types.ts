@@ -469,3 +469,46 @@ export interface TableStorageFrameV2_ACU {
   manualRefillProgress?: ManualRefillProgressV2_ACU;
   logEntries: TableMutationLogEntryV2_ACU[];
 }
+
+/**
+ * 表级可见性生命周期状态。
+ *
+ * 唯一持久化历史权威是 per-sheet timeline（sheet_introduction / sheet_rebase /
+ * sheet_reveal / sheet_hide）；本类型是只读派生结果，不落盘、不构成第二事实源。
+ *
+ * - active：当前可见，可进入 prompt / 填表 / SQL / 写集。
+ * - hidden：曾被 hide 移出 active 投影，数据仍留存于 checkpoint.data，可恢复。
+ * - never_seen：历史无目标相关证据，只允许作为 introduction 引入。
+ * - indeterminate：目标归属或顺序无法判定，必须 fail-closed。
+ */
+export type TableSheetLifecycleStatusV2_ACU =
+  | 'active'
+  | 'hidden'
+  | 'never_seen'
+  | 'indeterminate';
+
+export interface TableSheetLifecycleEntryV2_ACU {
+  /** 状态：active / hidden / never_seen / indeterminate。 */
+  status: TableSheetLifecycleStatusV2_ACU;
+  /** 最后一条可验证的可见性 timeline 事件 kind。 */
+  lastTimelineKind?: 'sheet_introduction' | 'sheet_rebase' | 'sheet_reveal' | 'sheet_hide';
+  /** 最后一条可见性 timeline 事件所在楼层。 */
+  lastTimelineMessageIndex?: number;
+  /** 最后一条可见性 timeline 事件的 afterSeq（frame 内排序）。 */
+  lastTimelineAfterSeq?: number;
+  /** 最近一次可见（introduction / rebase / reveal）后、hide 前的可信数据快照；仅 hidden 时存在。 */
+  restoreSourceData?: Sheet_ACU;
+}
+
+/** 只读生命周期派生结果：同一历史输入只产生一份确定结论。 */
+export interface TableSheetLifecycleProjectionV2_ACU {
+  statusBySheetKey: Record<string, TableSheetLifecycleEntryV2_ACU>;
+  /** 当前 active 的 sheetKey 集合。 */
+  activeSheetKeys: string[];
+  /** 当前 hidden 的 sheetKey 集合。 */
+  hiddenSheetKeys: string[];
+  /** 目标归属或顺序无法判定的 sheetKey 集合（fail-closed）。 */
+  indeterminateSheetKeys: string[];
+  /** 历史无目标相关证据的 sheetKey 集合（仅允许 introduction 引入）。 */
+  neverSeenSheetKeys: string[];
+}

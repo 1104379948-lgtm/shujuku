@@ -3975,6 +3975,40 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
+  it('模板范围外（隐藏）表即使声明在 targetSheetKeys 中也被 SQL 授权集合拒绝', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1 },
+      sheet_0: { uid: 'inventory', name: '表A', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value'], ['1', 'base-a']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+      sheet_1: { uid: 'quest_log', name: '表B', sourceData: { ddl: 'CREATE TABLE quest_log (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);' }, content: [['row_id', 'value'], ['1', 'base-b']], updateConfig: {}, exportConfig: {}, orderNo: 1 },
+    } as any;
+    // AI 声称目标包含隐藏表 sheet_1（生命周期 hidden → 已从 TemplateScope 移除）。
+    const sql = "INSERT INTO quest_log (value) VALUES ('hidden-write');";
+    const responses = [{
+      success: true,
+      attempt: 1,
+      aiResponse: `<tableEdit>${sql}</tableEdit>`,
+      tableEditText: sql,
+      job: { groupKey: 'a', groupId: 1, batchNumber: 1, saveTargetIndex: 3, targetSheetKeys: ['sheet_0', 'sheet_1'], updateMode: 'auto_standard', requestOptions: null, messagesForContext: [], baseSnapshot, isImportMode: false },
+    }];
+
+    // 模板范围只声明 sheet_0；sheet_1 视为隐藏/休眠表。
+    mockResolveTemplateScope.mockReturnValue({ sheetKeys: new Set(['sheet_0']), sheets: {} } as any);
+    try {
+      mockSettings.discardUnauthorizedTableEditsEnabled = false;
+      const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, { saveTargetIndex: 3, updateMode: 'auto_standard', isImportMode: false });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('越权修改了非目标表 (sheet_1)');
+      expect(result.error).toContain('允许写入表：sheet_0');
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    } finally {
+      mockResolveTemplateScope.mockReturnValue(null as any);
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
   it('无法归属到已知表的 SQL 保持失败，禁止以越权降级名义静默丢弃', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(isSqliteMode).mockReturnValue(true);

@@ -12,7 +12,7 @@ vi.mock('../../../src/shared/utils', async () => {
   return { ...actual, logWarn_ACU: mockLogWarn };
 });
 
-import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU, buildSheetSchemaMigrationOperationV2_ACU } from '../../../src/service/table/table-schema-migration';
 import { applySqlEditsToTableDataSnapshot_ACU } from '../../../src/service/table/sql-table-service';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
@@ -4067,4 +4067,150 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '跨改名写入']]);
   });
 
+});
+
+describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
+  const ISOLATION = '';
+
+  function makeFrame(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      version: 2,
+      logEntries: [],
+      ...overrides,
+    };
+  }
+
+  function makeChat(messages: Array<Record<string, unknown>>): any[] {
+    return messages.map(message => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        [ISOLATION]: {
+          _acu_storage_version: 2,
+          storageFrame: makeFrame(message.frame as Record<string, unknown>),
+        },
+      },
+    }));
+  }
+
+  function makeSheet(key: string, rows: unknown[][]): any {
+    return {
+      uid: key.replace('sheet_', ''),
+      name: key,
+      content: [['row_id', 'value'], ...rows],
+      sourceData: { ddl: `CREATE TABLE ${key.replace('sheet_', '')} (row_id INTEGER PRIMARY KEY, value TEXT);` },
+      updateConfig: {},
+      exportConfig: {},
+      orderNo: 0,
+    };
+  }
+
+  it('active：仅含全量 checkpoint 时派生为 active', () => {
+    const chat = makeChat([{
+      frame: {
+        checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_a: makeSheet('sheet_a', [['1', 'x']]) } },
+      },
+    }]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    expect(projection.activeSheetKeys).toEqual(['sheet_a']);
+    expect(projection.hiddenSheetKeys).toEqual([]);
+    expect(projection.indeterminateSheetKeys).toEqual([]);
+    expect(projection.statusBySheetKey.sheet_a.status).toBe('active');
+  });
+
+  it('hidden：hide timeline 后目标从 active 移入 hidden', () => {
+    const sheet = makeSheet('sheet_a', [['1', '离开数据']]);
+    const chat = makeChat([{
+      frame: {
+        perSheetCheckpoints: {
+          sheet_a: {
+            kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_a', data: sheet,
+            timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 0 },
+          },
+        },
+      },
+    }]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    expect(projection.hiddenSheetKeys).toEqual(['sheet_a']);
+    expect(projection.activeSheetKeys).toEqual([]);
+    expect(projection.statusBySheetKey.sheet_a.status).toBe('hidden');
+    expect(projection.statusBySheetKey.sheet_a.restoreSourceData?.content).toEqual(sheet.content);
+  });
+
+  it('hide 后 reveal：按 afterSeq 归并，最后状态为 active（恢复离开数据）', () => {
+    const sheet = makeSheet('sheet_a', [['1', '离开数据']]);
+    const chat = makeChat([{
+      frame: {
+        perSheetCheckpoints: {
+          sheet_a: {
+            kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_a', data: sheet,
+            timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 0 },
+          },
+        },
+      },
+    }, {
+      frame: {
+        perSheetCheckpoints: {
+          sheet_a: {
+            kind: 'sheet_full', createdAt: 3, reason: 'schema_change', sheetKey: 'sheet_a', data: sheet,
+            timeline: { kind: 'sheet_reveal', activateAtMessageIndex: 1, afterSeq: 0 },
+          },
+        },
+      },
+    }]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    expect(projection.activeSheetKeys).toEqual(['sheet_a']);
+    expect(projection.hiddenSheetKeys).toEqual([]);
+    expect(projection.statusBySheetKey.sheet_a.lastTimelineKind).toBe('sheet_reveal');
+  });
+
+  it('never_seen：无任何 checkpoint/log 时为空集合（不派生未知表）', () => {
+    const projection = deriveSheetLifecycleFromFramesV2_ACU([], ISOLATION);
+    expect(projection.activeSheetKeys).toEqual([]);
+    expect(projection.hiddenSheetKeys).toEqual([]);
+    expect(projection.neverSeenSheetKeys).toEqual([]);
+  });
+
+  it('indeterminate：timeline 缺 afterSeq 时 fail-closed 标 indeterminate', () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([{
+      frame: {
+        perSheetCheckpoints: {
+          sheet_a: {
+            kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_a', data: sheet,
+            timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0 },
+          },
+        },
+      },
+    }]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    expect(projection.indeterminateSheetKeys).toEqual(['sheet_a']);
+    expect(projection.statusBySheetKey.sheet_a.status).toBe('indeterminate');
+  });
+
+  it('legacy 无 timeline checkpoint：与 replay 一致视为 active（帧开头写回）', () => {
+    const sheet = makeSheet('sheet_legacy', [['1', '旧数据']]);
+    const chat = makeChat([{
+      frame: {
+        perSheetCheckpoints: {
+          sheet_legacy: {
+            kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_legacy', data: sheet,
+          },
+        },
+      },
+    }]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION);
+    expect(projection.activeSheetKeys).toEqual(['sheet_legacy']);
+    expect(projection.statusBySheetKey.sheet_legacy.lastTimelineKind).toBe('sheet_introduction');
+  });
+
+  it('maxMessageIndex 截断：只统计该楼层之前的 frame', () => {
+    const sheet = makeSheet('sheet_a', [['1', 'x']]);
+    const chat = makeChat([
+      { frame: { perSheetCheckpoints: { sheet_a: { kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_a', data: sheet, timeline: { kind: 'sheet_introduction', activateAtMessageIndex: 0, afterSeq: 0 } } } } },
+      { frame: { perSheetCheckpoints: { sheet_a: { kind: 'sheet_full', createdAt: 3, reason: 'schema_change', sheetKey: 'sheet_a', data: sheet, timeline: { kind: 'sheet_hide', activateAtMessageIndex: 1, afterSeq: 0 } } } } },
+    ]);
+    const projection = deriveSheetLifecycleFromFramesV2_ACU(chat, ISOLATION, { maxMessageIndex: 0 });
+    expect(projection.activeSheetKeys).toEqual(['sheet_a']);
+    expect(projection.hiddenSheetKeys).toEqual([]);
+  });
 });

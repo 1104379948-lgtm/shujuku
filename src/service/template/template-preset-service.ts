@@ -29,7 +29,8 @@ import {
 import { allocateStableSheetKeys_ACU } from '../../shared/sheet-identity';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
-import { hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import { deriveSheetLifecycleFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import type { TableSheetLifecycleProjectionV2_ACU } from '../table/storage-frame-v2-types';
 import { resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 import { getCurrentStorageMode, isSqliteMode } from '../table/storage-mode';
@@ -482,6 +483,7 @@ function createTemplateReconciliationRequestId_ACU(): string {
 async function loadConsistentTemplateBaseline_ACU(isolationKey: string, signal?: AbortSignal): Promise<{
     baselineData: any;
     baseRevision: string;
+    lifecycle: TableSheetLifecycleProjectionV2_ACU | null;
 } | { error: string }> {
     // 结构协调的 snapshot 与提交 revision 必须来自同一逻辑时点。
     // 旧实现先 replay、协调，最后才取 revision；期间发生的写入会让旧计划伪装成新计划。
@@ -498,7 +500,16 @@ async function loadConsistentTemplateBaseline_ACU(isolationKey: string, signal?:
         // 与本次模板变更在同一候选提交内收敛，不能在读取入口提前阻断。
         const baselineData = replay?.data ?? null;
         const afterRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
-        if (beforeRevision === afterRevision) return { baselineData, baseRevision: beforeRevision };
+        if (beforeRevision === afterRevision) {
+            // 同一逻辑时点派生只读生命周期投影：hidden/active/indeterminate 供协调层显式消费。
+            // 生命周期派生失败（chat 不可用等）时返回 null，协调层退回基线猜测兼容路径。
+            let lifecycle: TableSheetLifecycleProjectionV2_ACU | null = null;
+            try {
+                const chat = getChatArray_ACU();
+                if (Array.isArray(chat)) lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey);
+            } catch { lifecycle = null; }
+            return { baselineData, baseRevision: beforeRevision, lifecycle };
+        }
     }
     return { error: '当前表格状态在读取模板基线时发生变化，请稍后重试。' };
 }
@@ -556,6 +567,7 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
     }
     let baselineData: any;
     let baseRevision: string | null = null;
+    let lifecycle: TableSheetLifecycleProjectionV2_ACU | null | undefined;
     if (!chatContextMatches_ACU(targetChatIdentity, entryContext.firstMessage)) {
         return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
     }
@@ -564,6 +576,7 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
         if ('error' in baselineSnapshot) return { saved: false, error: baselineSnapshot.error };
         baselineData = baselineSnapshot.baselineData;
         baseRevision = baselineSnapshot.baseRevision;
+        lifecycle = baselineSnapshot.lifecycle;
         logDebug_ACU(`[TemplateScope] 模板协调基线已读取: requestId=${requestId}, source=v2_replay, baseRevision=${baseRevision}, isolationKey=${isolationKey}`);
     } catch (error) {
         return { saved: false, error: `无法读取当前聊天 V2 replay 基线：${error instanceof Error ? error.message : String(error)}` };
@@ -589,6 +602,7 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
             templateData: targetTemplateData,
             destructiveChangeConfirmed,
             hardDeleteMissingSheets,
+            lifecycle: lifecycle ?? undefined,
             storageMode,
         });
     } catch (error) {

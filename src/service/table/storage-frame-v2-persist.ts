@@ -1194,6 +1194,25 @@ function scopedHistoryArtifactEvidence_ACU(
     return 'indeterminate';
   }
   if (!containsOrCannotDisprove(artifact, sheetKey)) return 'absent';
+  // 归属明确的 mutation/patch：只要结构可验证（statements/params/tableName 等），
+  // 它就是该表"曾存在"的铁证，reason 等标注字段不参与"能否证伪"判定。
+  // 旧版本手动重填等路径可能写出非当前白名单的 reason（如 manual_refill），
+  // 这些值不影响表是否存在过；只有结构畸形才保持 fail-closed。
+  if (artifact.kind === 'sql_sheet_batch') {
+    return typeof artifact.sheetKey === 'string'
+      && Array.isArray(artifact.statements)
+      && artifact.statements.every(statement => typeof statement === 'string')
+      && (artifact.params === undefined
+        || (Array.isArray(artifact.params)
+          && artifact.params.every(params => Array.isArray(params)
+            && params.every(value => value === null || typeof value === 'string' || typeof value === 'number'))))
+      && (artifact.tableName === undefined || typeof artifact.tableName === 'string')
+      ? 'present'
+      : 'indeterminate';
+  }
+  // 其余归属明确的 kind：用哨兵区分"目标表证据确凿"与"字段无法验证"。
+  // 哨兵只对会随 sheetKey 变化的字段敏感；reason 等标注字段不得让合法
+  // 本表 operation 退化为 indeterminate（否则历史手动填表会被误判为不可验证）。
   return containsOrCannotDisprove(artifact, '__acu_history_evidence_sentinel__')
     ? 'indeterminate'
     : 'present';
@@ -1216,8 +1235,25 @@ async function resolveRevealSource_ACU(
   isolationKey: string,
   maxMessageIndex: number,
   sheetKey: string,
+  preferredHideCheckpoint?: unknown,
   currentSheetCheckpoint?: unknown,
 ): Promise<RevealSourceResolution_ACU> {
+  // 优先使用生命周期派生指向的最后 hide checkpoint：hide 语义保证 checkpoint.data 保留
+  // 离开 active 状态前的完整数据，且当前 frame 的精确同 key checkpoint 已通过 created/seq
+  // 校验。仅在缺少可信 hide checkpoint 时才退回逐边界 bounded replay（兼容旧历史）。
+  if (isObjectRecord_ACU(preferredHideCheckpoint)) {
+    const timeline = (preferredHideCheckpoint as any).timeline;
+    const data = (preferredHideCheckpoint as any).data;
+    if (isObjectRecord_ACU(timeline) && timeline.kind === 'sheet_hide' && isObjectRecord_ACU(data)) {
+      return {
+        status: 'resolved',
+        sheetData: deepClone_ACU(data) as Sheet_ACU,
+        sourceKind: 'current_sheet_checkpoint',
+        messageIndex: maxMessageIndex,
+      };
+    }
+    // 候选 hide checkpoint 结构非法：不得静默降级，继续走 bounded replay 验证，若仍找不到则 indeterminate。
+  }
   let replayFailureCount = 0;
   for (let boundary = maxMessageIndex; boundary >= 0; boundary -= 1) {
     const tagData = chat[boundary]?.TavernDB_ACU_IsolatedData?.[isolationKey];
@@ -2829,11 +2865,15 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       }
       if (historyEvidence.status === 'present') {
         // 历史确实曾有该表（可恢复的隐藏表）；bounded replay 用于定位离开时的可信数据。
+        // 优先使用生命周期派生的最后 hide checkpoint（含完整退出数据），仅在缺少可信
+        // hide checkpoint 时才退回逐边界 bounded replay（兼容旧历史）。
+        const preferredHideCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
         const revealSource = await resolveRevealSource_ACU(
           chat,
           isolationKey,
           target.index,
           change.sheetKey,
+          preferredHideCheckpoint,
           revealCheckpointSources.get(change.sheetKey),
         );
         assertTemplateCommitChatContext_ACU(chat, options);
@@ -2873,8 +2913,34 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       });
     }
 
-    // 显式 reveal change：数据来源为 caller 提供的 sheetData（已在准备循环校验/建表计划）。
+    // 显式 reveal change：恢复"离开时最新可信数据"。
+    // 协调器只带模板结构（可能是 header-only 空壳），数据恢复必须以历史为准：
+    // 优先使用生命周期派生的最后 hide checkpoint（data 保留退出前完整数据），
+    // 缺失时退回逐边界 bounded replay（兼容旧历史）；两者都不可信才 fail-closed；
+    // 仅当历史上完全不存在该表（not_found）时才回退 caller 的模板结构（语义同 introduction）。
     for (const change of requestedChanges.filter(item => item.kind === 'reveal')) {
+      const preferredHideCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+      const revealSource = await resolveRevealSource_ACU(
+        chat,
+        isolationKey,
+        target.index,
+        change.sheetKey,
+        preferredHideCheckpoint,
+        revealCheckpointSources.get(change.sheetKey),
+      );
+      assertTemplateCommitChatContext_ACU(chat, options);
+      if (revealSource.status === 'resolved') {
+        logDebug_ACU(`[V2 Persist] reveal_source_resolved: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, sourceKind=${revealSource.sourceKind}, sourceMessageIndex=${revealSource.messageIndex}。`);
+        revealDataBySheet.set(change.sheetKey, revealSource.sheetData);
+        continue;
+      }
+      if (revealSource.status === 'indeterminate') {
+        logDebug_ACU(`[V2 Persist] reveal_source_indeterminate: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, reason=${revealSource.reason}。`);
+        throw new Error(`V2 reveal_source_indeterminate: sheetKey=${change.sheetKey}, reason=${revealSource.reason}。`);
+      }
+      // not_found：历史上从未见过该表。显式 reveal 通常由协调器在 hidden 生命周期下生成，
+      // 理论上不应走到这里；但为兼容异常/旧历史，回退 caller 模板结构（等价 introduction）。
+      logDebug_ACU(`[V2 Persist] reveal_source_missing_fallback: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, 使用 caller 模板结构作为全新表。`);
       revealDataBySheet.set(change.sheetKey, revealSheets.get(change.sheetKey)!);
     }
 
@@ -2941,7 +3007,21 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       if (deletedSheetKeys.includes(sheetKey)) {
         throw new Error(`V2 sheet hide 不能与删除同一 sheetKey 组合：${sheetKey}。`);
       }
-      const hideSource = await resolveRevealSource_ACU(chat, isolationKey, target.index, sheetKey);
+      // hide 的语义是"当前可见 → 隐藏"：activeReplayState 中的当前数据就是权威来源，
+      // 直接 O(1) 取用，避免对每次 hide 都做逐边界 bounded replay（阶段7：性能收敛）。
+      // 仅当 active 无该表（异常状态）时才退回逐边界查找并验证。
+      let hideSource: RevealSourceResolution_ACU;
+      const activeSheetData = (activeReplayState as Record<string, unknown>)[sheetKey];
+      if (isObjectRecord_ACU(activeSheetData)) {
+        hideSource = {
+          status: 'resolved',
+          sheetData: deepClone_ACU(activeSheetData) as Sheet_ACU,
+          sourceKind: 'bounded_replay',
+          messageIndex: target.index,
+        };
+      } else {
+        hideSource = await resolveRevealSource_ACU(chat, isolationKey, target.index, sheetKey);
+      }
       assertTemplateCommitChatContext_ACU(chat, options);
       if (hideSource.status === 'indeterminate') {
         throw new Error(`V2 sheet hide 数据来源无法确认：sheetKey=${sheetKey}，reason=${hideSource.reason}。`);

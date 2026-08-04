@@ -1148,3 +1148,133 @@ describe('reconcileChatTemplate_ACU', () => {
       expect(plan.candidateData.sheet_legacy.sourceData.ddl).toBeUndefined();
     });
   });
+
+
+describe('reconcileChatTemplate_ACU 生命周期感知（阶段2）', () => {
+  function makeLifecycle(statusBySheetKey: Record<string, { status: 'active' | 'hidden' | 'never_seen' | 'indeterminate'; [key: string]: unknown }>): any {
+    const keys = Object.keys(statusBySheetKey);
+    return {
+      statusBySheetKey,
+      activeSheetKeys: keys.filter(k => statusBySheetKey[k].status === 'active').sort(),
+      hiddenSheetKeys: keys.filter(k => statusBySheetKey[k].status === 'hidden').sort(),
+      indeterminateSheetKeys: keys.filter(k => statusBySheetKey[k].status === 'indeterminate').sort(),
+      neverSeenSheetKeys: keys.filter(k => statusBySheetKey[k].status === 'never_seen').sort(),
+    };
+  }
+
+  it('hidden 表被模板重新包含时显式 reveal，而非伪装 introduction（保持稳定 key）', async () => {
+    const baseline = state({
+      sheet_other: sheet('sheet_other', '其他表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值'),
+    });
+    const template = state({
+      sheet_bei_bao: sheet('sheet_bei_bao', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT -- 名称'),
+    });
+    // 历史：sheet_bei_bao 曾被 hide（稳定 key 由显示名派生）。
+    const lifecycle = makeLifecycle({
+      sheet_other: { status: 'active' },
+      sheet_bei_bao: { status: 'hidden', lastTimelineKind: 'sheet_hide' },
+    });
+
+    const plan = await reconcileChatTemplate_ACU({
+      baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, lifecycle,
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.sheetChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'reveal', sheetKey: 'sheet_bei_bao' }),
+    ]));
+    expect(plan.sheetChanges.some(change => change.kind === 'introduction' && change.sheetKey === 'sheet_bei_bao')).toBe(false);
+    // 稳定 key 保持：不派生新 key，不伪装新表。
+    expect(plan.candidateData.sheet_bei_bao).toBeDefined();
+  });
+
+  it('indeterminate 表被模板包含时阻止提交（fail-closed）', async () => {
+    const baseline = state({
+      sheet_other: sheet('sheet_other', '其他表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值'),
+    });
+    const template = state({
+      sheet_bei_bao: sheet('sheet_bei_bao', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT -- 名称'),
+    });
+    const lifecycle = makeLifecycle({
+      sheet_other: { status: 'active' },
+      sheet_bei_bao: { status: 'indeterminate' },
+    });
+
+    const plan = await reconcileChatTemplate_ACU({
+      baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, lifecycle,
+    });
+
+    expect(plan.blockers.join('\n')).toContain('indeterminate');
+    expect(plan.sheetChanges).toEqual([]);
+  });
+
+  it('active 但基线缺失的表被模板包含时阻止（不覆盖活数据）', async () => {
+    const baseline = state({
+      sheet_other: sheet('sheet_other', '其他表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值'),
+    });
+    const template = state({
+      sheet_bei_bao: sheet('sheet_bei_bao', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT -- 名称'),
+    });
+    const lifecycle = makeLifecycle({
+      sheet_other: { status: 'active' },
+      sheet_bei_bao: { status: 'active' },
+    });
+
+    const plan = await reconcileChatTemplate_ACU({
+      baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, lifecycle,
+    });
+
+    expect(plan.blockers.join('\n')).toContain('仍为 active');
+    expect(plan.sheetChanges).toEqual([]);
+  });
+
+  it('隐藏表中 indeterminate 表被隐藏时阻止（不静默隐藏未知历史）', async () => {
+    const baseline = state({
+      sheet_bei_bao: sheet('sheet_bei_bao', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY, item_name TEXT -- 名称'),
+    });
+    const template = state({
+      sheet_other: sheet('sheet_other', '其他表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值'),
+    });
+    const lifecycle = makeLifecycle({
+      sheet_bei_bao: { status: 'indeterminate' },
+      sheet_other: { status: 'active' },
+    });
+
+    const plan = await reconcileChatTemplate_ACU({
+      baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, lifecycle,
+    });
+
+    expect(plan.blockers.join('\n')).toContain('indeterminate');
+    expect(plan.sheetChanges).toEqual([]);
+  });
+
+  it('never_seen 表维持 introduction；无 lifecycle 输入时退回基线猜测（兼容）', async () => {
+    const baseline = state({
+      sheet_other: sheet('sheet_other', '其他表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT -- 值'),
+    });
+    const template = state({
+      sheet_xin_biao: sheet('sheet_xin_biao', '新表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY,\n  value TEXT -- 值'),
+    });
+    const lifecycle = makeLifecycle({
+      sheet_other: { status: 'active' },
+      sheet_xin_biao: { status: 'never_seen' },
+    });
+
+    const withLifecycle = await reconcileChatTemplate_ACU({
+      baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, lifecycle,
+    });
+    expect(withLifecycle.blockers).toEqual([]);
+    expect(withLifecycle.sheetChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_xin_biao' }),
+    ]));
+
+    // 无 lifecycle：退回既有行为，仍 introduction。
+    const withoutLifecycle = await reconcileChatTemplate_ACU({
+      baselineData: baseline, templateData: template, destructiveChangeConfirmed: false,
+    });
+    expect(withoutLifecycle.blockers).toEqual([]);
+    expect(withoutLifecycle.sheetChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'introduction', sheetKey: 'sheet_xin_biao' }),
+    ]));
+  });
+});
