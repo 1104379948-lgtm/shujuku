@@ -63,6 +63,64 @@ describe('resolveGeneratedAiMessageIndex_ACU', () => {
     expect(result).toEqual({ kind: 'resolved', messageIndex: 1 });
   });
 
+  it('按消息对象的稳定 message_id 唯一命中 AI 楼层', () => {
+    const liveChat = chatWith([
+      { ...user, message_id: 10 },
+      { ...ai, message_id: 42 },
+    ]);
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat,
+      intent: makeIntent({ eventMessageId: 42, capturedChatLength: 2, capturedAiFloorCount: 1 }),
+    });
+    expect(result).toEqual({ kind: 'resolved', messageIndex: 1 });
+  });
+
+  it('稳定 message_id 与另一个 AI 的数组索引冲突时，稳定 ID 优先', () => {
+    const liveChat = chatWith([
+      { ...ai, message_id: 1, mes: '稳定 ID 目标' },
+      { ...ai, message_id: 99, mes: '数组索引碰巧等于事件值' },
+    ]);
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat,
+      intent: makeIntent({
+        eventMessageId: 1,
+        capturedChatLength: 2,
+        capturedAiFloorCount: 2,
+      }),
+    });
+    expect(result).toEqual({ kind: 'resolved', messageIndex: 0 });
+  });
+
+  it('重复 message_id 命中多个 AI 楼层时返回 ambiguous，不猜', () => {
+    const liveChat = chatWith([
+      { ...ai, message_id: 42 },
+      { ...ai, message_id: 42 },
+    ]);
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat,
+      intent: makeIntent({ eventMessageId: 42, capturedChatLength: 2, capturedAiFloorCount: 2 }),
+    });
+    expect(result).toEqual({ kind: 'ambiguous', candidates: [0, 1] });
+  });
+
+  it('真实宿主场景：eventMessageId 等于 chat.length 且边界未变、尾楼为 AI → 映射到末尾索引', () => {
+    const liveChat = chatWith([user, ai]);
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat,
+      intent: makeIntent({ eventMessageId: 2, capturedChatLength: 2, capturedAiFloorCount: 1 }),
+    });
+    expect(result).toEqual({ kind: 'resolved', messageIndex: 1 });
+  });
+
+  it('eventMessageId 等于 chat.length 但尾楼是用户时不得盲目 -1', () => {
+    const liveChat = chatWith([ai, user]);
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat,
+      intent: makeIntent({ eventMessageId: 2, capturedChatLength: 2, capturedAiFloorCount: 1 }),
+    });
+    expect(result).toEqual({ kind: 'pending_materialization', candidates: [] });
+  });
+
   it('用户锚点 + 捕获后延迟追加 AI → 从捕获边界解析唯一候选', () => {
     // 捕获时 chat 为 [user, user]，长度为 2，AI 数 0；防抖后追加了 AI
     const liveChat = chatWith([user, user, ai]);
@@ -99,6 +157,25 @@ describe('resolveGeneratedAiMessageIndex_ACU', () => {
   it('越界 eventMessageId 且无新增候选 → pending', () => {
     const liveChat = chatWith([user, ai]);
     const result = resolveGeneratedAiMessageIndex_ACU({ liveChat, intent: makeIntent({ eventMessageId: 99, capturedChatLength: 2, capturedAiFloorCount: 1 }) });
+    expect(result.kind).toBe('pending_materialization');
+  });
+
+  it('一基尾楼映射在捕获长度与实时长度不一致且无新增候选时不生效', () => {
+    const liveChat = chatWith([user, ai]);
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat,
+      intent: makeIntent({ eventMessageId: 2, capturedChatLength: 3, capturedAiFloorCount: 1 }),
+    });
+    expect(result.kind).toBe('pending_materialization');
+  });
+
+  it('一基尾楼映射要求捕获与实时 AI 数一致', () => {
+    const liveChat = chatWith([user, ai]);
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat,
+      intent: makeIntent({ eventMessageId: 2, capturedChatLength: 2, capturedAiFloorCount: 0 }),
+    });
+    // AI 数增加时应由捕获后/锚点后候选规则处理；此例没有捕获后区间，不能冒充一基尾楼命中。
     expect(result.kind).toBe('pending_materialization');
   });
 

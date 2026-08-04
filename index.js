@@ -85046,12 +85046,16 @@ $CONTENT
      * 解析本轮 AI 楼层（纯函数，不依赖 timer / 宿主状态）。
      *
      * 顺序：
-     * 1. 精确命中：eventMessageId 在范围内且是 AI 楼层 → 使用它。
-     * 2. 捕获后新增区间 [capturedChatLength, liveChat.length)：只接受 AI 楼层候选。
-     * 3. 锚点后区间 (eventMessageId, liveChat.length)：当捕获长度因宿主异步视图不可靠时，
+     * 1. 稳定消息 ID 命中：按消息对象的 message_id 唯一匹配 AI 楼层。
+     * 2. 兼容数组索引命中：eventMessageId 在范围内且是 AI 楼层 → 使用它。
+     * 3. 一基尾楼命中：仅当 eventMessageId === chat.length，捕获/实时边界完全未变，
+     *    且尾楼为 AI 时，将事件楼层号映射为数组末尾索引。该分支由真实宿主日志证实，
+     *    但条件必须严格，禁止泛化为无条件 messageId - 1。
+     * 4. 捕获后新增区间 [capturedChatLength, liveChat.length)：只接受 AI 楼层候选。
+     * 5. 锚点后区间 (eventMessageId, liveChat.length)：当捕获长度因宿主异步视图不可靠时，
      *    用 capturedAiFloorCount 约束——候选必须使 AI 总数相对捕获时增加（至少 +1）。
-     * 4. 唯一性：候选恰好一个才绑定；多个候选返回 ambiguous，绝不猜最新一个。
-     * 5. 没有候选：返回 pending_materialization，交给有界等待层重试。
+     * 6. 唯一性：候选恰好一个才绑定；多个候选返回 ambiguous，绝不猜最新一个。
+     * 7. 没有候选：返回 pending_materialization，交给有界等待层重试。
      */
     function resolveGeneratedAiMessageIndex_ACU(options) {
         const { liveChat, intent } = options;
@@ -85063,30 +85067,56 @@ $CONTENT
                 return false;
             return isAiMessage_ACU(liveChat[index]);
         };
-        // 1. 精确命中
+        const capturedLength = Number.isInteger(intent.capturedChatLength) ? intent.capturedChatLength : -1;
+        const capturedAiCount = Number.isInteger(intent.capturedAiFloorCount) ? intent.capturedAiFloorCount : -1;
+        const liveAiCount = countAiMessages_ACU(liveChat);
+        // 1. 消息对象的稳定 message_id 与数组索引不是同一概念。仓库既有逻辑同样通过
+        //    message_id 反查 runtime index（chat-service.ts / plot-logic.ts）。只接受唯一 AI 命中。
+        if (Number.isInteger(intent.eventMessageId)) {
+            const messageIdMatches = [];
+            for (let index = 0; index < liveChat.length; index += 1) {
+                if (liveChat[index]?.message_id === intent.eventMessageId && isAi(index)) {
+                    messageIdMatches.push(index);
+                }
+            }
+            if (messageIdMatches.length === 1) {
+                return { kind: 'resolved', messageIndex: messageIdMatches[0] };
+            }
+            if (messageIdMatches.length > 1) {
+                return { kind: 'ambiguous', candidates: messageIdMatches };
+            }
+        }
+        // 2. 没有稳定 message_id 命中时，兼容事件值直接作为零基数组索引的宿主版本。
         if (Number.isInteger(intent.eventMessageId)) {
             const exact = intent.eventMessageId;
             if (exact >= 0 && exact < liveChat.length && isAi(exact)) {
                 return { kind: 'resolved', messageIndex: exact };
             }
         }
-        const capturedLength = Number.isInteger(intent.capturedChatLength) ? intent.capturedChatLength : -1;
-        const capturedAiCount = Number.isInteger(intent.capturedAiFloorCount) ? intent.capturedAiFloorCount : -1;
+        // 3. 真实宿主日志已观测到 eventMessageId === capturedChatLength === liveChat.length，
+        //    且捕获/实时 AI 数量相同：目标 AI 在事件时已物化于尾楼，但事件值使用一基楼层号。
+        //    仅在所有边界均未变化且尾楼确为 AI 时接受该映射，避免把普通越界 ID 盲目 -1。
+        if (Number.isInteger(intent.eventMessageId)
+            && intent.eventMessageId === liveChat.length
+            && capturedLength === liveChat.length
+            && capturedAiCount === liveAiCount
+            && isAi(liveChat.length - 1)) {
+            return { kind: 'resolved', messageIndex: liveChat.length - 1 };
+        }
         const candidates = [];
         const consider = (index) => {
             if (isAi(index) && !candidates.includes(index))
                 candidates.push(index);
         };
-        // 2. 捕获后新增区间
+        // 4. 捕获后新增区间
         if (capturedLength >= 0 && capturedLength <= liveChat.length) {
             for (let index = capturedLength; index < liveChat.length; index += 1) {
                 consider(index);
             }
         }
-        // 3. 锚点后受约束区间（仅当捕获长度不可靠或步骤 2 无候选时兜底）
+        // 5. 锚点后受约束区间（仅当捕获长度不可靠或步骤 4 无候选时兜底）
         if (candidates.length === 0 && Number.isInteger(intent.eventMessageId) && capturedAiCount >= 0) {
             const anchor = intent.eventMessageId;
-            const liveAiCount = countAiMessages_ACU(liveChat);
             if (liveAiCount > capturedAiCount) {
                 for (let index = anchor + 1; index < liveChat.length; index += 1) {
                     consider(index);
