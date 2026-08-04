@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   mode: 'native' as 'native' | 'sqlite',
   save: vi.fn().mockResolvedValue(undefined),
   strictSave: vi.fn().mockResolvedValue(undefined),
+  reloadStorageProvider: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
 vi.mock('../../src/data/gateways/chat-gateway', () => ({
@@ -42,7 +43,7 @@ vi.mock('../../src/service/table/storage-mode', () => ({
   isSqliteMode: () => h.mode === 'sqlite',
 }));
 vi.mock('../../src/service/table/table-storage-strategy', () => ({
-  reloadStorageProvider: vi.fn(),
+  reloadStorageProvider: h.reloadStorageProvider,
   didSqliteFallbackAfterReload_ACU: () => false,
 }));
 vi.mock('../../src/service/table/storage-strategy-resolver', async importOriginal => ({
@@ -137,6 +138,7 @@ describe.each(['native', 'sqlite'] as const)('flight mode lifecycle (%s)', (mode
     });
     h.save.mockClear();
     h.strictSave.mockClear();
+    h.reloadStorageProvider.mockClear();
   });
 
   it('经正式模板协调启用，写入大总结后隐藏纪要投影，并在停用时跨历史硬删大总结', async () => {
@@ -163,8 +165,7 @@ describe.each(['native', 'sqlite'] as const)('flight mode lifecycle (%s)', (mode
       source: 'group_fill',
       afterData: afterWrite,
       operations: [
-        { kind: 'sheet_replace', sheetKey: 'sheet_chronicle', sheet: afterWrite.sheet_chronicle, reason: 'system' },
-        { kind: 'sheet_replace', sheetKey: summaryKey, sheet: afterWrite[summaryKey], reason: 'system' },
+        { kind: 'data_replace', data: afterWrite, reason: 'system' },
       ],
       candidateChangedSheetKeys: ['sheet_chronicle', summaryKey],
       isolationKey: '',
@@ -185,10 +186,32 @@ describe.each(['native', 'sqlite'] as const)('flight mode lifecycle (%s)', (mode
 
     expect(getCurrentFlightModeState_ACU()).toMatchObject({ enabled: false, hiddenRowIds: [] });
     expect(h.data.sheet_chronicle.exportConfig).toMatchObject({ entryType: 'keyword', extraIndexEnabled: true });
+    const terminalFrame = h.chat[h.chat.length - 1].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(terminalFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'schema_change' });
+    expect(terminalFrame.logEntries).toEqual([]);
+    expect(terminalFrame.perSheetCheckpoints).toBeUndefined();
     for (const message of h.chat) {
       expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data[summaryKey]).toBeUndefined();
-      expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints[summaryKey]).toBeUndefined();
+      expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints?.[summaryKey]).toBeUndefined();
     }
+
+    // data_replace 保持整库语义，硬删除不能只清 checkpoint/单表日志而让它在下一次 replay 复活。
+    const afterDeleteReplay = await loadTableStateFromFramesV2_ACU(h.chat, '');
+    expect(afterDeleteReplay?.[summaryKey]).toBeUndefined();
+
+    await expect(enableFlightMode_ACU()).resolves.toEqual({ ok: true, visibleChronicleRowCount: 3 });
+    expect(getCurrentFlightModeState_ACU()).toMatchObject({ enabled: true, bigSummarySheetKey: summaryKey });
+    expect(h.data[summaryKey]).toMatchObject({ name: '大总结' });
+
+    await expect(disableFlightMode_ACU()).resolves.toEqual({ ok: true });
+    expect(getCurrentFlightModeState_ACU()).toMatchObject({ enabled: false, hiddenRowIds: [] });
+    const secondTerminalFrame = h.chat[h.chat.length - 1].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(secondTerminalFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'schema_change' });
+    expect(secondTerminalFrame.logEntries).toEqual([]);
+    expect(secondTerminalFrame.perSheetCheckpoints).toBeUndefined();
+    const afterSecondDeleteReplay = await loadTableStateFromFramesV2_ACU(h.chat, '');
+    expect(afterSecondDeleteReplay?.[summaryKey]).toBeUndefined();
+    expect(h.reloadStorageProvider).toHaveBeenCalledTimes(mode === 'sqlite' ? 4 : 0);
   });
 
   describe('sqlite + 已有数据且无 DDL 时飞行模式启停', () => {
@@ -275,7 +298,7 @@ describe.each(['native', 'sqlite'] as const)('flight mode lifecycle (%s)', (mode
       expect(h.data.sheet_quan_ju.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
       for (const message of h.chat) {
         expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data[summaryKey]).toBeUndefined();
-        expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints[summaryKey]).toBeUndefined();
+        expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints?.[summaryKey]).toBeUndefined();
       }
     });
   });

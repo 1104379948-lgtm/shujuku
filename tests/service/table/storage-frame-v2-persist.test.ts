@@ -3111,12 +3111,15 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     const target = seedFrame({ logEntries: [] });
     mocks.chat.splice(0, mocks.chat.length, historical, target);
     mocks.loadReplayState.mockResolvedValue(target.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint', data: { mate: { type: 'acu' }, sheet_a: sheetA },
+    });
 
     const result = await commitCurrentFloorTemplateChanges_ACU({
       isolationKey: '', sheetChanges: [], deletedSheetKeys: ['sheet_b'], guideData: { sheet_a: { name: 'A' } }, createdAt: 30,
     });
 
-    expect(result).toMatchObject({ saved: true, mode: 'v2_commit', deletedSheetKeys: ['sheet_b'], purgedMessageCount: 2, checkpoints: [] });
+    expect(result).toMatchObject({ saved: true, mode: 'v2_commit', deletedSheetKeys: ['sheet_b'], purgedMessageCount: 2, checkpoints: [], hardDeleteCheckpointCreated: true });
     expect(mocks.saveChatStrict).toHaveBeenCalledTimes(1);
     for (const tagData of Object.values(historical.TavernDB_ACU_IsolatedData) as any[]) {
       expect(tagData.independentData?.sheet_b).toBeUndefined();
@@ -3130,6 +3133,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(historical.TavernDB_ACU_UpdateGroupKeys).toEqual([]);
     expect(target.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_b).toBeUndefined();
     expect(target.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toEqual([]);
+    expect(target.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints).toBeUndefined();
   });
 
   it('删除 key 与模板变更 key 冲突时在事务前拒绝', async () => {
@@ -3150,6 +3154,9 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     const target = seedFrame({ logEntries: [] });
     mocks.chat.splice(0, mocks.chat.length, historical, target);
     mocks.loadReplayState.mockResolvedValue(target.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint', data: { mate: { type: 'acu' }, sheet_a: sheetA },
+    });
     const beforeHistorical = JSON.parse(JSON.stringify(historical));
     const beforeTarget = JSON.parse(JSON.stringify(target));
     const beforeScope = JSON.parse(JSON.stringify(mocks.scopeContainer));

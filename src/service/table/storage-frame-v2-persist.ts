@@ -151,6 +151,7 @@ export interface CommitCurrentFloorTemplateChangesResult_ACU {
   removedNullRowCount?: number;
   deletedSheetKeys?: string[];
   purgedMessageCount?: number;
+  hardDeleteCheckpointCreated?: boolean;
   error?: string;
 }
 
@@ -517,6 +518,41 @@ async function validateProvisionalConvergenceCandidate_ACU(
       const message = error instanceof Error ? error.message : String(error);
       return `V2 convergence_candidate_${scope}_replay_failed: ${message}`;
     }
+  }
+  return null;
+}
+
+async function validateHardDeleteCandidate_ACU(
+  candidateChat: any[],
+  isolationKey: string,
+  targetMessageIndex: number,
+  deletedSheetKeys: string[],
+  expectedData: TableDataObject_ACU,
+): Promise<string | null> {
+  let replay;
+  try {
+    replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+      maxMessageIndex: targetMessageIndex,
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `V2 hard-delete candidate replay failed: ${message}`;
+  }
+  if (!replay || replay.baseKind !== 'full_checkpoint') {
+    return 'V2 hard-delete candidate replay failed: 未能从正式 full checkpoint 建立回放基底。';
+  }
+  if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+    return 'V2 hard-delete candidate replay requires compatibility convergence.';
+  }
+  const resurrectedSheetKeys = deletedSheetKeys.filter(sheetKey => Object.prototype.hasOwnProperty.call(replay.data, sheetKey));
+  if (resurrectedSheetKeys.length > 0) {
+    return `V2 hard-delete candidate replay resurrected deleted Sheet: ${resurrectedSheetKeys.join(', ')}。`;
+  }
+  if (getTableDataFingerprint_ACU(projectReplayComparableData_ACU(replay.data))
+    !== getTableDataFingerprint_ACU(projectReplayComparableData_ACU(expectedData))) {
+    return 'V2 hard-delete candidate replay does not match the requested terminal template state.';
   }
   return null;
 }
@@ -2561,6 +2597,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     let primarySaveAttempted = false;
     let sharedStateMutated = false;
     let purgedMessageCount = 0;
+    let hardDeleteCheckpointCreated = false;
 
     try {
     const introductionSheets = new Map<string, Sheet_ACU>();
@@ -2850,11 +2887,56 @@ export async function commitCurrentFloorTemplateChanges_ACU(
 
       // 所有异步准备完成后，在第一次内存写入前重新核验当前活动聊天与取消状态。
       assertTemplateCommitChatContext_ACU(chat, options);
-      frame.perSheetCheckpoints = {
-        ...(frame.perSheetCheckpoints || {}),
-        ...Object.fromEntries(checkpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
-      };
-      if (entryOptions) appendMutationLogEntry_ACU(frame, entryOptions);
+      let persistedCheckpoints = checkpoints;
+      if (deletedSheetKeys.length > 0) {
+        // data_replace 是完整历史状态，不能靠从旧 payload 局部删除 key 来伪造历史。
+        // 最新楼层改写为删除后的完整 checkpoint，使更早的整库替换不再参与当前 replay。
+        const terminalData = isObjectRecord_ACU(options.templateSource)
+          ? deepClone_ACU(options.templateSource as TableDataObject_ACU)
+          : deepClone_ACU(activeReplayState);
+        deletedSheetKeys.forEach(sheetKey => delete (terminalData as Record<string, unknown>)[sheetKey]);
+        const terminalScheduleSummary = Object.fromEntries(
+          Object.entries(scheduleSummaryBySheet).filter(([sheetKey]) => !deletedSheetKeys.includes(sheetKey)),
+        );
+        const terminalCheckpoint = buildCanonicalFullCheckpoint_ACU({
+          createdAt,
+          reason: 'schema_change',
+          data: terminalData,
+          scheduleSummary: terminalScheduleSummary,
+          event: {
+            filledSheetKeys: [],
+            changedSheetKeys: [...new Set([
+              ...requestedChanges.map(change => change.sheetKey),
+              ...deletedSheetKeys,
+            ])],
+            groupKeys: [],
+          },
+          context: { messageIndex: target.index, aiFloor: countAiFloor_ACU(chat, target.index), isolationKey },
+        });
+        if (!terminalCheckpoint.checkpoint) throw new Error(terminalCheckpoint.error);
+        frame.checkpoint = terminalCheckpoint.checkpoint;
+        frame.logEntries = [];
+        delete frame.perSheetCheckpoints;
+        frame.headRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+        persistedCheckpoints = [];
+        hardDeleteCheckpointCreated = true;
+
+        const candidateChat = deepClone_ACU(chat);
+        for (const message of candidateChat) {
+          if (message && !message.is_user) purgeSheetKeysFromMessage_ACU(message, deletedSheetKeys);
+        }
+        candidateChat[target.index].TavernDB_ACU_IsolatedData = isolatedData;
+        const candidateValidationError = await validateHardDeleteCandidate_ACU(
+          candidateChat, isolationKey, target.index, deletedSheetKeys, terminalData,
+        );
+        if (candidateValidationError) throw new Error(candidateValidationError);
+      } else {
+        frame.perSheetCheckpoints = {
+          ...(frame.perSheetCheckpoints || {}),
+          ...Object.fromEntries(checkpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
+        };
+        if (entryOptions) appendMutationLogEntry_ACU(frame, entryOptions);
+      }
       if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
         const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(
           chat,
@@ -2898,9 +2980,9 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         saved: true,
         mode: 'v2_commit',
         messageIndex: target.index,
-        checkpoints,
+        checkpoints: persistedCheckpoints,
         removedNullRowCount,
-        ...(deletedSheetKeys.length > 0 ? { deletedSheetKeys, purgedMessageCount } : {}),
+        ...(deletedSheetKeys.length > 0 ? { deletedSheetKeys, purgedMessageCount, hardDeleteCheckpointCreated } : {}),
       };
     } catch (error: any) {
       if (sharedStateMutated) {
