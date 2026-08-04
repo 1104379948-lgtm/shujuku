@@ -1,4 +1,10 @@
-import { logWarn_ACU } from './utils';
+import { logDebug_ACU, logWarn_ACU } from './utils';
+
+const AUTO_FILL_SKIP_WARN_REASONS_ACU = new Set<AutoFillSkipReason_ACU>([
+  'ambiguous_generated_ai_message',
+  'generated_ai_message_not_materialized',
+  'resolved_message_not_ai',
+]);
 
 export type AutoFillSkipReason_ACU =
   | 'quiet_or_background_generation'
@@ -63,7 +69,8 @@ export function logAutoFillSkip_ACU(
     candidateIndexes,
     inFlight,
   } = context;
-  logWarn_ACU('[AutoFill] Trigger skipped', {
+  const log = AUTO_FILL_SKIP_WARN_REASONS_ACU.has(reason) ? logWarn_ACU : logDebug_ACU;
+  log('[AutoFill] Trigger skipped', {
     reason,
     eventType,
     messageId,
