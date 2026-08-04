@@ -27,6 +27,14 @@ import { globalMeta_ACU } from '../../data/repositories/profile-repo';
 
 export const NEW_MESSAGE_DEBOUNCE_DELAY_ACU = 500;
 
+// [触发修复] GENERATION_ENDED 后 AI 楼层有界物化等待参数。
+// makeFirst 可能早于宿主把本轮 AI 回复追加进 chat；防抖回调发现尚未物化时，
+// 最多重试 AI_MATERIALIZATION_MAX_RETRIES_ACU 次、每次间隔
+// AI_MATERIALIZATION_RETRY_DELAY_MS_ACU，最大额外等待 300ms。
+// 正常精确命中路径零等待，不影响既有响应。
+export const AI_MATERIALIZATION_MAX_RETRIES_ACU = 3;
+export const AI_MATERIALIZATION_RETRY_DELAY_MS_ACU = 100;
+
 export let pendingBaseStatePlacement_ACU = false;
 export let suppressWorldbookInjectionInGreeting_ACU = false;
 

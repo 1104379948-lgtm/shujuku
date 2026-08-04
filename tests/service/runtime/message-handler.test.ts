@@ -118,7 +118,7 @@ describe('evaluateNewMessageAction_ACU', () => {
       expect(result.action).toBe('update_only');
     });
 
-    it('事件快照仍指向 AI 楼层时，不受随后追加用户楼层影响', () => {
+    it('已解析索引仍指向 AI 楼层时，不受随后追加用户楼层影响', () => {
       const result = evaluateNewMessageAction_ACU(
         [
           { is_user: true, mes: '用户消息' },
@@ -129,20 +129,20 @@ describe('evaluateNewMessageAction_ACU', () => {
         true,
         false,
         {},
-        { messageId: 1, chatKey: 'chat-a', capturedAt: Date.now() },
+        1,
       );
 
       expect(result.action).toBe('update_only');
       expect(result.lastMessageIndex).toBe(1);
     });
 
-    it('事件快照楼层已被删除时跳过', () => {
-      const result = evaluateNewMessageAction_ACU([], false, true, false, {}, { messageId: 1, chatKey: 'chat-a', capturedAt: Date.now() });
+    it('已解析索引越界时跳过', () => {
+      const result = evaluateNewMessageAction_ACU([], false, true, false, {}, 1);
       expect(result.action).toBe('skip');
       expect(result.skipReason).toBe('empty_chat');
     });
 
-    it('非空聊天中事件快照楼层已被删除时不回退到其他消息', () => {
+    it('非空聊天中已解析索引楼层已被删除时不回退到其他消息', () => {
       const result = evaluateNewMessageAction_ACU(
         [
           { is_user: false, mes: '仍存在的旧 AI 回复' },
@@ -152,10 +152,26 @@ describe('evaluateNewMessageAction_ACU', () => {
         true,
         false,
         {},
-        { messageId: 3, chatKey: 'chat-a', capturedAt: Date.now() },
+        3,
       );
 
-      expect(result).toMatchObject({ action: 'skip', skipReason: 'last_message_not_ai' });
+      expect(result).toMatchObject({ action: 'skip', skipReason: 'resolved_message_not_ai' });
+    });
+
+    it('已解析索引指向用户楼层时返回 resolved_message_not_ai', () => {
+      const result = evaluateNewMessageAction_ACU(
+        [
+          { is_user: true, mes: '用户消息' },
+          { is_user: false, mes: 'AI 回复' },
+        ],
+        false,
+        true,
+        false,
+  {},
+        0,
+      );
+
+      expect(result).toMatchObject({ action: 'skip', skipReason: 'resolved_message_not_ai' });
     });
   });
 

@@ -349,8 +349,24 @@ export   function mainInitialize_ACU() {
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
             const onGenerationEnded = (message_id: any) => {
                 logDebug_ACU(`ACU GENERATION_ENDED event for message_id: ${message_id}`);
-                const autoFillIntent = typeof message_id === 'number' && Number.isInteger(message_id)
-                  ? { messageId: message_id, chatKey: currentChatFileIdentifier_ACU, capturedAt: Date.now() }
+                // [触发修复] 原子捕获完整意图快照：事件参数只作为锚点，不承诺是 AI 数组下标。
+                // makeFirst 可能早于宿主把本轮 AI 回复追加进 chat，因此必须记录捕获时边界，
+                // 由 resolveGeneratedAiMessageIndex_ACU 在防抖回调中按唯一候选规则解析。
+                const chatAtCapture = SillyTavern_API_ACU?.chat || [];
+                const eventMessageId = typeof message_id === 'number' && Number.isInteger(message_id)
+                  ? message_id
+                  : undefined;
+                const autoFillIntent = eventMessageId !== undefined
+                  ? {
+                      eventMessageId,
+                      chatKey: currentChatFileIdentifier_ACU,
+                      isolationKey: getCurrentIsolationKey_ACU(),
+                      capturedAt: Date.now(),
+                      capturedChatLength: chatAtCapture.length,
+                      capturedAiFloorCount: chatAtCapture.filter((m: any) => m && !m.is_user && m?.extra?.type !== 'narrator').length,
+                      // generationSeq 仅在 generationGate 已产生过生成上下文时可靠；否则不假造。
+                      generationSeq: generationGate_ACU.generationSeq > 0 ? generationGate_ACU.generationSeq : undefined,
+                  }
                   : undefined;
                 if (shouldProcessAutoTableUpdateForGenerationEnded_ACU()) {
                   handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);
@@ -359,7 +375,11 @@ export   function mainInitialize_ACU() {
                   logAutoFillSkip_ACU('quiet_or_background_generation', {
                     eventType: 'GENERATION_ENDED',
                     messageId: message_id,
+                    eventMessageId: message_id,
                     chatKey: currentChatFileIdentifier_ACU,
+                    isolationKey: getCurrentIsolationKey_ACU(),
+                    capturedChatLength: chatAtCapture.length,
+                    capturedAiFloorCount: chatAtCapture.filter((m: any) => m && !m.is_user && m?.extra?.type !== 'narrator').length,
                     lastGenerationType: generationGate_ACU.lastGeneration?.type,
                   });
                 }

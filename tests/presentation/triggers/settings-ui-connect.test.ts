@@ -11,6 +11,8 @@ vi.mock('../../../src/presentation/components/plot-editors', () => ({
 }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   NEW_MESSAGE_DEBOUNCE_DELAY_ACU: 500,
+  AI_MATERIALIZATION_MAX_RETRIES_ACU: 3,
+  AI_MATERIALIZATION_RETRY_DELAY_MS_ACU: 100,
 }));
 
 afterEach(() => {

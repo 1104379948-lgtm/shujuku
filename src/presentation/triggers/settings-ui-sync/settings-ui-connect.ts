@@ -13,7 +13,7 @@ import { isExtensionMode, getHostWindow } from '../../../shared/runtime-env';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
 import { getConnectionManagerProfiles_ACU, fetchAvailableModels_ACU } from '../../../service/ai/ai-service';
 import { getCurrentCharacterFallback_ACU } from '../../../service/host/host-state-service';
-import { NEW_MESSAGE_DEBOUNCE_DELAY_ACU, allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
+import { AI_MATERIALIZATION_MAX_RETRIES_ACU, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU, NEW_MESSAGE_DEBOUNCE_DELAY_ACU, allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $apiStatusDisplay_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { saveSettingsAndNotify_ACU, loadSettingsAndRefreshUI_ACU } from '../../components/settings-ui-helpers';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../../../service/summary/merge-logic';
@@ -29,7 +29,7 @@ import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-perform
 import { executeContentOptimization_ACU } from '../../components/optimization-ui';
 import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
 import { triggerAutomaticUpdateIfNeeded_ACU } from './settings-ui-trigger';
-import { evaluateNewMessageAction_ACU, type AutoFillIntent_ACU } from '../../../service/runtime/message-handler';
+import { evaluateNewMessageAction_ACU, resolveGeneratedAiMessageIndex_ACU, type AutoFillIntent_ACU } from '../../../service/runtime/message-handler';
 import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
 
   export async function fetchModelsAndConnect_ACU() {
@@ -198,6 +198,7 @@ import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
     return coreApisAreReady_ACU;
   }
 
+  // [触发修复] GENERATION_ENDED 后 AI 楼层有界物化等待常量
   export async function handleNewMessageDebounced_ACU(eventType = 'unknown_acu', intent?: AutoFillIntent_ACU) {
     logDebug_ACU(
       `New message event (${eventType}) detected for ACU, debouncing for ${NEW_MESSAGE_DEBOUNCE_DELAY_ACU}ms...`,
@@ -223,12 +224,104 @@ import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
         loadSpan.end();
       }
 
-      if (intent && currentChatFileIdentifier_ACU !== intent.chatKey) {
-        logAutoFillSkip_ACU('chat_changed', { eventType, messageId: intent.messageId, chatKey: intent.chatKey });
-        return;
+      // [触发修复] chatKey / isolationKey 校验：防抖期间切聊天或切隔离必须立即丢弃，不污染新会话。
+      if (intent) {
+        if (currentChatFileIdentifier_ACU !== intent.chatKey) {
+          logAutoFillSkip_ACU('chat_changed', {
+            eventType,
+            eventMessageId: intent.eventMessageId,
+            messageId: intent.eventMessageId,
+            chatKey: intent.chatKey,
+            isolationKey: intent.isolationKey,
+            capturedChatLength: intent.capturedChatLength,
+            capturedAiFloorCount: intent.capturedAiFloorCount,
+          });
+          return;
+        }
+        const liveIsolationKey = getCurrentIsolationKey_ACU();
+        if (liveIsolationKey !== intent.isolationKey) {
+          logAutoFillSkip_ACU('chat_changed', {
+            eventType,
+            eventMessageId: intent.eventMessageId,
+            messageId: intent.eventMessageId,
+            chatKey: intent.chatKey,
+            isolationKey: intent.isolationKey,
+            liveIsolationKey,
+            capturedChatLength: intent.capturedChatLength,
+            capturedAiFloorCount: intent.capturedAiFloorCount,
+          });
+          return;
+        }
       }
 
-      const liveChat = getChatArray_ACU();
+      let liveChat = getChatArray_ACU();
+
+      // [触发修复] 解析本轮 AI 楼层；pending 时进行有界物化等待。
+      let resolvedMessageIndex: number | undefined;
+      if (intent) {
+        let resolution = resolveGeneratedAiMessageIndex_ACU({ liveChat, intent });
+        let retries = 0;
+        while (resolution.kind === 'pending_materialization' && retries < AI_MATERIALIZATION_MAX_RETRIES_ACU) {
+          await new Promise(resolve => setTimeout(resolve, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU));
+          // 每次重试前校验 chatKey / isolationKey：等待中切聊天/切隔离立即终止。
+          if (currentChatFileIdentifier_ACU !== intent.chatKey || getCurrentIsolationKey_ACU() !== intent.isolationKey) {
+            logAutoFillSkip_ACU('chat_changed', {
+              eventType,
+              eventMessageId: intent.eventMessageId,
+              messageId: intent.eventMessageId,
+              chatKey: intent.chatKey,
+              isolationKey: intent.isolationKey,
+              capturedChatLength: intent.capturedChatLength,
+              capturedAiFloorCount: intent.capturedAiFloorCount,
+            });
+            return;
+          }
+          liveChat = getChatArray_ACU();
+          resolution = resolveGeneratedAiMessageIndex_ACU({ liveChat, intent });
+          retries += 1;
+        }
+
+        if (resolution.kind === 'ambiguous') {
+          logAutoFillSkip_ACU('ambiguous_generated_ai_message', {
+            eventType,
+            eventMessageId: intent.eventMessageId,
+            messageId: intent.eventMessageId,
+            chatKey: intent.chatKey,
+            isolationKey: intent.isolationKey,
+            capturedChatLength: intent.capturedChatLength,
+            capturedAiFloorCount: intent.capturedAiFloorCount,
+            liveChatLength: liveChat.length,
+            liveAiFloorCount: liveChat.filter((message: any) => message && !message.is_user && message?.extra?.type !== 'narrator').length,
+            candidateIndexes: resolution.candidates,
+          });
+          return;
+        }
+        if (resolution.kind === 'pending_materialization') {
+          logAutoFillSkip_ACU('generated_ai_message_not_materialized', {
+            eventType,
+            eventMessageId: intent.eventMessageId,
+            messageId: intent.eventMessageId,
+            chatKey: intent.chatKey,
+            isolationKey: intent.isolationKey,
+            capturedChatLength: intent.capturedChatLength,
+            capturedAiFloorCount: intent.capturedAiFloorCount,
+            liveChatLength: liveChat.length,
+            liveAiFloorCount: liveChat.filter((message: any) => message && !message.is_user && message?.extra?.type !== 'narrator').length,
+          });
+          return;
+        }
+        if (resolution.kind === 'invalid_intent') {
+          logAutoFillSkip_ACU('message_evaluation_skipped', {
+            eventType,
+            eventMessageId: intent.eventMessageId,
+            messageId: intent.eventMessageId,
+            chatKey: intent.chatKey,
+            isolationKey: intent.isolationKey,
+          });
+          return;
+        }
+        resolvedMessageIndex = resolution.messageIndex;
+      }
 
       // [重构] 调用 service 层的 evaluateNewMessageAction_ACU 进行决策
       const result = evaluateNewMessageAction_ACU(
@@ -237,7 +330,7 @@ import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
           coreApisAreReady_ACU,
           wasStoppedByUser_ACU,
           settings_ACU.contentOptimizationSettings,
-          intent,
+          resolvedMessageIndex,
       );
 
       logDebug_ACU(`[NewMessage] Evaluation result: action=${result.action}, reason=${result.reason}`);
@@ -246,8 +339,9 @@ import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
           logDebug_ACU(`ACU: ${result.reason}. Skipping.`);
           logAutoFillSkip_ACU(result.skipReason || 'message_evaluation_skipped', {
               eventType,
-              messageId: intent?.messageId,
-              aiFloorCount: liveChat.filter((message: any) => !message.is_user).length,
+              eventMessageId: intent?.eventMessageId,
+              messageId: intent?.eventMessageId,
+              aiFloorCount: liveChat.filter((message: any) => message && !message.is_user && message?.extra?.type !== 'narrator').length,
               inFlight: isAutoUpdatingCard_ACU,
           });
           return;
