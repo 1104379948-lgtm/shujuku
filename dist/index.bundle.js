@@ -57278,6 +57278,34 @@ $CONTENT
      * 从 prompt-builder.ts 拆出（L14-L194）
      */
     const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
+    function resolvePromptRowWindow_ACU(table, effectiveAllRows, flightModeEnabled) {
+        const tableName = String(table?.name || '').trim();
+        const isChronicleTable = tableName === '纪要表';
+        const isFixedSummaryTable = isChronicleTable || tableName === '总结表';
+        const shouldShowAllVisibleChronicleRows = flightModeEnabled && isChronicleTable;
+        if (isFixedSummaryTable && !shouldShowAllVisibleChronicleRows && effectiveAllRows.length > 10) {
+            const rowsToProcess = effectiveAllRows.slice(-10);
+            return {
+                rowsToProcess,
+                startIndex: effectiveAllRows.length - rowsToProcess.length,
+                limitNote: `Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (summary table fixed limit).`,
+            };
+        }
+        if (!isFixedSummaryTable) {
+            const sendLatestRows = typeof table?.updateConfig?.sendLatestRows === 'number'
+                ? table.updateConfig.sendLatestRows
+                : -1;
+            if (sendLatestRows > 0 && effectiveAllRows.length > sendLatestRows) {
+                const rowsToProcess = effectiveAllRows.slice(-sendLatestRows);
+                return {
+                    rowsToProcess,
+                    startIndex: effectiveAllRows.length - rowsToProcess.length,
+                    limitNote: `Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (sendLatestRows=${sendLatestRows}).`,
+                };
+            }
+        }
+        return { rowsToProcess: effectiveAllRows, startIndex: 0 };
+    }
     function createPromptRuntimeFailure_ACU(failureCode, message, retryable) {
         return { ok: false, failureCode, message, retryable };
     }
@@ -57424,6 +57452,7 @@ $CONTENT
                 }
                 tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, {
                     allowSeedRowsFallback: false,
+                    flightModeEnabled: flightMode.enabled,
                     ...selectedPromptName,
                 });
                 continue;
@@ -57475,22 +57504,10 @@ $CONTENT
                 if (isUsingSeedRows) {
                     tableDataText += `  - SeedRows: 已提供模板基础数据（尚未写入聊天楼层数据；本次填表可直接基于这些行更新）\n`;
                 }
-                let rowsToProcess = effectiveAllRows;
-                let startIndex = 0;
-                const isSummaryTable = (table.name.trim() === '纪要表' || table.name.trim() === '总结表');
-                if (isSummaryTable && effectiveAllRows.length > 10) {
-                    startIndex = effectiveAllRows.length - 10;
-                    rowsToProcess = effectiveAllRows.slice(-10);
-                    tableDataText += `  - Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (summary table fixed limit).\n`;
-                }
-                else if (!isSummaryTable) {
-                    const sendLatestRows = (table.updateConfig && typeof table.updateConfig.sendLatestRows === 'number')
-                        ? table.updateConfig.sendLatestRows : -1;
-                    if (sendLatestRows > 0 && effectiveAllRows.length > sendLatestRows) {
-                        startIndex = effectiveAllRows.length - sendLatestRows;
-                        rowsToProcess = effectiveAllRows.slice(-sendLatestRows);
-                        tableDataText += `  - Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (sendLatestRows=${sendLatestRows}).\n`;
-                    }
+                const rowWindow = resolvePromptRowWindow_ACU(table, effectiveAllRows, flightMode.enabled);
+                const { rowsToProcess, startIndex } = rowWindow;
+                if (rowWindow.limitNote) {
+                    tableDataText += `  - Note: ${rowWindow.limitNote}\n`;
                 }
                 if (rowsToProcess.length > 0) {
                     rowsToProcess.forEach((row, index) => {
@@ -57785,22 +57802,10 @@ $CONTENT
             logWarn_ACU(`[SQLite prompt] 已忽略表 ${table.name || sheetKey} 的 sendRowsSqlTemplate：隐藏 physical columns 时无法证明自定义 SQL 不会泄露隐藏数据。`);
         }
         // 行数限制逻辑（与原生模式一致）
-        let rowsToProcess = effectiveAllRows;
-        let startIndex = 0;
-        const isSummaryTable = (table.name.trim() === '纪要表' || table.name.trim() === '总结表');
-        if (isSummaryTable && effectiveAllRows.length > 10) {
-            startIndex = effectiveAllRows.length - 10;
-            rowsToProcess = effectiveAllRows.slice(-10);
-            text += `-- Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (summary table fixed limit).\n`;
-        }
-        else if (!isSummaryTable) {
-            const sendLatestRows = (table.updateConfig && typeof table.updateConfig.sendLatestRows === 'number')
-                ? table.updateConfig.sendLatestRows : -1;
-            if (sendLatestRows > 0 && effectiveAllRows.length > sendLatestRows) {
-                startIndex = effectiveAllRows.length - sendLatestRows;
-                rowsToProcess = effectiveAllRows.slice(-sendLatestRows);
-                text += `-- Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (sendLatestRows=${sendLatestRows}).\n`;
-            }
+        const rowWindow = resolvePromptRowWindow_ACU(table, effectiveAllRows, options.flightModeEnabled === true);
+        const { rowsToProcess, startIndex } = rowWindow;
+        if (rowWindow.limitNote) {
+            text += `-- Note: ${rowWindow.limitNote}\n`;
         }
         // 输出当前数据（注释格式的表格）
         // 优先使用 DDL 中的英文列名作为表头，避免 AI 看到中文列名后用中文属性名写 SQL
@@ -57928,6 +57933,18 @@ $CONTENT
      * AI API 调用 — prompt 组装 + API 调用 + 流式/非流式响应处理
      * 从 prompt-builder.ts 拆出（L195-L501 + L1519-L1604）
      */
+    /**
+     * The request reached a provider successfully, but its body contained no
+     * usable model output. This is retryable without treating configuration,
+     * authentication, or transport failures as model-output failures.
+     */
+    class RetryableAiResponseError_ACU extends Error {
+        constructor(message = 'API响应格式不正确或内容为空。') {
+            super(message);
+            this.code = 'empty_or_invalid_api_response';
+            this.name = 'RetryableAiResponseError';
+        }
+    }
     function normalizeRoleForApi_ACU(role) {
         const ru = String(role || '').toUpperCase();
         const rl = String(role || '').toLowerCase();
@@ -58214,7 +58231,7 @@ $CONTENT
                     if (content) {
                         return content.trim();
                     }
-                    throw new Error('API响应格式不正确或内容为空。');
+                    throw new RetryableAiResponseError_ACU();
                 }
             }
         }
@@ -82426,7 +82443,10 @@ $CONTENT
             }
             catch (error) {
                 lastErrorMessage = error?.message || '未知错误';
-                lastErrorCategory = error instanceof ModelOutputRetryError_ACU ? 'model' : 'infrastructure';
+                lastErrorCategory = error instanceof ModelOutputRetryError_ACU
+                    || error instanceof RetryableAiResponseError_ACU
+                    ? 'model'
+                    : 'infrastructure';
                 const warnMessage = sanitizeRetryFeedback_ACU(lastErrorMessage, MAX_WARN_ERROR_LENGTH_ACU);
                 logWarn_ACU(`[${formatGroupAttemptLabel_ACU(job)}] 第 ${attempt} 次尝试失败: ${warnMessage}`);
                 if (error?.name === 'AbortError' || String(lastErrorMessage).toLowerCase().includes('aborted') || isStopped()) {
@@ -84736,9 +84756,15 @@ $CONTENT
         }
     }
 
+    const AUTO_FILL_SKIP_WARN_REASONS_ACU = new Set([
+        'ambiguous_generated_ai_message',
+        'generated_ai_message_not_materialized',
+        'resolved_message_not_ai',
+    ]);
     function logAutoFillSkip_ACU(reason, context = {}) {
         const { eventType, messageId, eventMessageId, chatKey, isolationKey, liveIsolationKey, lastGenerationType, aiFloorCount, capturedChatLength, capturedAiFloorCount, liveChatLength, liveAiFloorCount, resolvedMessageIndex, candidateIndexes, inFlight, } = context;
-        logWarn_ACU('[AutoFill] Trigger skipped', {
+        const log = AUTO_FILL_SKIP_WARN_REASONS_ACU.has(reason) ? logWarn_ACU : logDebug_ACU;
+        log('[AutoFill] Trigger skipped', {
             reason,
             eventType,
             messageId,
@@ -137689,11 +137715,11 @@ Expected function or array of functions, received type ${typeof value}.`
             uid: FLIGHT_MODE_BIG_SUMMARY_SHEET_KEY_ACU,
             name: FLIGHT_MODE_BIG_SUMMARY_SHEET_NAME_ACU,
             sourceData: {
-                note: '仅归纳当前仍可见的纪要。请自行判断何时需要新增一行大总结；新增后系统会隐藏当时已归纳的纪要。不要填写纪要引用范围。',
-                initNode: '无需初始化。',
-                deleteNode: '禁止删除已有大总结。',
-                updateNode: '已有大总结可以在新事实使其失效时修订。',
-                insertNode: '当当前可见纪要已经形成可复用的阶段性脉络时，新增一行大总结；无需写纪要引用范围。',
+                note: `大总结是按阶段追加、不可变的历史记录：每一行总结对应一个已完成的纪要阶段，已有行只能读取用于承接上下文，禁止修改或删除。仅当当前仍可见的纪要达到 ${FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU} 条时才允许新增一行大总结；少于 ${FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU} 条时禁止新增。新增行必须完整归纳当前纪要表中全部可见纪要，不得只总结最新若干条、不得只抽取重点、不得遗漏会改变整体脉络的事实；必须与此前已有大总结在时间顺序、因果、人物状态与阶段演进上保持逻辑连贯，不得与既有总结矛盾或割裂叙事。新增后系统会隐藏当时已归纳的纪要。不要填写纪要引用范围。`,
+                initNode: `无需初始化；当前可见纪要未达到 ${FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU} 条时，不得以初始化为由插入首行。`,
+                deleteNode: '禁止删除任何已有大总结。',
+                updateNode: '禁止修改任何已有大总结；已有大总结是不可变的历史阶段记录。',
+                insertNode: `仅当当前可见纪要达到 ${FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU} 条时，基于当前纪要表全部可见内容新增一行完整总结，并确保与此前大总结逻辑连贯；少于 ${FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU} 条时禁止新增。无需写纪要引用范围。`,
                 ddl: `CREATE TABLE flight_big_summary ( -- ${FLIGHT_MODE_BIG_SUMMARY_SHEET_NAME_ACU}\n  row_id INTEGER PRIMARY KEY, -- 行号\n  summary_text TEXT NOT NULL -- 总结\n);`,
             },
             content: [['row_id', '总结']],
