@@ -6646,11 +6646,11 @@ $CONTENT
         const next = arr.filter(x => x !== key);
         return { result: next, changed: next.length !== arr.length };
     }
-    function isObjectRecord_ACU$3(value) {
+    function isObjectRecord_ACU$4(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
     function hasSheetKeyInRecord_ACU(record) {
-        return isObjectRecord_ACU$3(record) && Object.keys(record).some(k => k.startsWith('sheet_'));
+        return isObjectRecord_ACU$4(record) && Object.keys(record).some(k => k.startsWith('sheet_'));
     }
     function hasSheetKeyInArray_ACU(value) {
         return Array.isArray(value) && value.some(item => typeof item === 'string' && item.startsWith('sheet_'));
@@ -6667,7 +6667,7 @@ $CONTENT
      * 该判定只识别 V1 表数据形态；是否放行由写入 barrier 结合 V2 结构统一裁决。
      */
     function isV1TablePayloadCandidate_ACU(tagData) {
-        if (!isObjectRecord_ACU$3(tagData))
+        if (!isObjectRecord_ACU$4(tagData))
             return false;
         if (hasSheetKeyInRecord_ACU(tagData.independentData))
             return true;
@@ -6686,7 +6686,7 @@ $CONTENT
         return false;
     }
     function deleteSheetKeysFromRecord_ACU(record, sheetKeys) {
-        if (!isObjectRecord_ACU$3(record))
+        if (!isObjectRecord_ACU$4(record))
             return false;
         let changed = false;
         sheetKeys.forEach(key => {
@@ -6704,7 +6704,7 @@ $CONTENT
         return { value: next, changed: next.length !== value.length };
     }
     function purgeEventSheetKeysV2_ACU(eventLike, sheetKeys) {
-        if (!isObjectRecord_ACU$3(eventLike))
+        if (!isObjectRecord_ACU$4(eventLike))
             return false;
         let changed = false;
         ['filledSheetKeys', 'changedSheetKeys', 'groupKeys'].forEach(field => {
@@ -6730,7 +6730,7 @@ $CONTENT
         const sheetKeyName = normalizeSqlIdentifierForPurge_ACU(sheetKey);
         if (sheetKeyName)
             targetNames.add(sheetKeyName);
-        if (!isObjectRecord_ACU$3(sheet))
+        if (!isObjectRecord_ACU$4(sheet))
             return;
         const uid = normalizeSqlIdentifierForPurge_ACU(sheet.uid);
         const name = normalizeSqlIdentifierForPurge_ACU(sheet.name);
@@ -6743,7 +6743,7 @@ $CONTENT
             targetNames.add(ddlName);
     }
     function collectSqlTargetTableNamesFromRecordForPurge_ACU(record, sheetKeys, targetNames) {
-        if (!isObjectRecord_ACU$3(record))
+        if (!isObjectRecord_ACU$4(record))
             return;
         sheetKeys.forEach(sheetKey => {
             if (Object.prototype.hasOwnProperty.call(record, sheetKey)) {
@@ -6752,7 +6752,7 @@ $CONTENT
         });
     }
     function collectSqlTargetTableNamesFromOperationForPurge_ACU(operation, sheetKeys, targetNames) {
-        if (!isObjectRecord_ACU$3(operation))
+        if (!isObjectRecord_ACU$4(operation))
             return;
         if (operation.kind === 'sheet_replace' && sheetKeys.has(operation.sheetKey)) {
             collectSqlTableNameCandidatesFromSheetForPurge_ACU(operation.sheetKey, operation.sheet, targetNames);
@@ -6770,17 +6770,17 @@ $CONTENT
                 targetNames.add(normalizedSheetKey);
         });
         collectSqlTargetTableNamesFromRecordForPurge_ACU(frame?.checkpoint?.data, sheetKeys, targetNames);
-        if (isObjectRecord_ACU$3(frame?.perSheetCheckpoints)) {
+        if (isObjectRecord_ACU$4(frame?.perSheetCheckpoints)) {
             sheetKeys.forEach(sheetKey => {
                 const checkpoint = frame.perSheetCheckpoints[sheetKey];
-                if (!isObjectRecord_ACU$3(checkpoint))
+                if (!isObjectRecord_ACU$4(checkpoint))
                     return;
                 collectSqlTableNameCandidatesFromSheetForPurge_ACU(sheetKey, checkpoint.data, targetNames);
             });
         }
         if (Array.isArray(frame?.logEntries)) {
             frame.logEntries.forEach((entry) => {
-                if (!isObjectRecord_ACU$3(entry))
+                if (!isObjectRecord_ACU$4(entry))
                     return;
                 if (Array.isArray(entry.operations)) {
                     entry.operations.forEach(operation => collectSqlTargetTableNamesFromOperationForPurge_ACU(operation, sheetKeys, targetNames));
@@ -6982,7 +6982,7 @@ $CONTENT
         catch {
             return { value, changed: false };
         }
-        if (!isObjectRecord_ACU$3(snapshot) || !isObjectRecord_ACU$3(snapshot.sheets)) {
+        if (!isObjectRecord_ACU$4(snapshot) || !isObjectRecord_ACU$4(snapshot.sheets)) {
             return { value, changed: false };
         }
         if (!deleteSheetKeysFromRecord_ACU(snapshot.sheets, sheetKeys)) {
@@ -6994,7 +6994,7 @@ $CONTENT
         };
     }
     function purgeManualRefillProgressV2_ACU(progress, sheetKeys) {
-        if (!isObjectRecord_ACU$3(progress))
+        if (!isObjectRecord_ACU$4(progress))
             return false;
         let changed = false;
         const selected = filterSheetKeyArray_ACU(progress.selectedSheetKeys, sheetKeys);
@@ -7039,7 +7039,7 @@ $CONTENT
         return { operation: nextOperation, changed: true };
     }
     function purgeOperationV2_ACU(operation, sheetKeys, targetSqlTableNames) {
-        if (!isObjectRecord_ACU$3(operation))
+        if (!isObjectRecord_ACU$4(operation))
             return { operation, changed: false };
         if ((operation.kind === 'sheet_replace'
             || operation.kind === 'sheet_schema_migrate'
@@ -7061,7 +7061,7 @@ $CONTENT
         return { operation, changed: false };
     }
     function purgePatchV2_ACU(patch, sheetKeys, targetSqlTableNames) {
-        if (!isObjectRecord_ACU$3(patch))
+        if (!isObjectRecord_ACU$4(patch))
             return { patch, changed: false };
         if ((patch.kind === 'sheet_replace'
             || patch.kind === 'row_upsert'
@@ -7085,7 +7085,7 @@ $CONTENT
         if (!Array.isArray(writeSet))
             return { writeSet, changed: false };
         const next = writeSet.filter(unit => {
-            if (!isObjectRecord_ACU$3(unit))
+            if (!isObjectRecord_ACU$4(unit))
                 return true;
             if (unit.kind === 'all')
                 return true;
@@ -7111,7 +7111,7 @@ $CONTENT
         return Array.isArray(value) && value.length > 0;
     }
     function hasMeaningfulManualRefillLogPayloadV2_ACU(entry) {
-        return hasNonEmptyArray_ACU(entry?.operations) || hasNonEmptyArray_ACU(entry?.patches) || hasNonEmptyArray_ACU(entry?.filledSheetKeys) || hasNonEmptyArray_ACU(entry?.changedSheetKeys) || hasNonEmptyArray_ACU(entry?.groupKeys) || hasNonEmptyArray_ACU(entry?.event?.filledSheetKeys) || hasNonEmptyArray_ACU(entry?.event?.changedSheetKeys) || hasNonEmptyArray_ACU(entry?.event?.groupKeys) || (Array.isArray(entry?.writeSet) && entry.writeSet.some((unit) => isObjectRecord_ACU$3(unit) && unit.kind !== 'all')) || hasNonEmptyArray_ACU(entry?.manualRefillProgress?.selectedSheetKeys) || (isObjectRecord_ACU$3(entry?.manualRefillProgress?.completedSheetMessageIndexByKey) && Object.keys(entry.manualRefillProgress.completedSheetMessageIndexByKey).length > 0);
+        return hasNonEmptyArray_ACU(entry?.operations) || hasNonEmptyArray_ACU(entry?.patches) || hasNonEmptyArray_ACU(entry?.filledSheetKeys) || hasNonEmptyArray_ACU(entry?.changedSheetKeys) || hasNonEmptyArray_ACU(entry?.groupKeys) || hasNonEmptyArray_ACU(entry?.event?.filledSheetKeys) || hasNonEmptyArray_ACU(entry?.event?.changedSheetKeys) || hasNonEmptyArray_ACU(entry?.event?.groupKeys) || (Array.isArray(entry?.writeSet) && entry.writeSet.some((unit) => isObjectRecord_ACU$4(unit) && unit.kind !== 'all')) || hasNonEmptyArray_ACU(entry?.manualRefillProgress?.selectedSheetKeys) || (isObjectRecord_ACU$4(entry?.manualRefillProgress?.completedSheetMessageIndexByKey) && Object.keys(entry.manualRefillProgress.completedSheetMessageIndexByKey).length > 0);
     }
     function purgePatchArrayV2_ACU(patches, sheetKeys, targetSqlTableNames) {
         if (!Array.isArray(patches))
@@ -7128,13 +7128,13 @@ $CONTENT
         return { value: next, changed };
     }
     function purgeSheetKeysFromStorageFrameV2_ACU(frame, sheetKeys) {
-        if (!isObjectRecord_ACU$3(frame))
+        if (!isObjectRecord_ACU$4(frame))
             return false;
         let changed = false;
         const previousHeadRevision = frame.headRevision;
         const targetSqlTableNames = collectSqlTargetTableNamesFromStorageFrameV2_ACU(frame, sheetKeys);
         const checkpoint = frame.checkpoint;
-        if (isObjectRecord_ACU$3(checkpoint)) {
+        if (isObjectRecord_ACU$4(checkpoint)) {
             if (deleteSheetKeysFromRecord_ACU(checkpoint.data, sheetKeys))
                 changed = true;
             if (deleteSheetKeysFromRecord_ACU(checkpoint.scheduleSummary, sheetKeys))
@@ -7148,7 +7148,7 @@ $CONTENT
             changed = true;
         if (purgeManualRefillProgressV2_ACU(frame.manualRefillProgress, sheetKeys))
             changed = true;
-        if (isObjectRecord_ACU$3(frame.perSheetCheckpoints)) {
+        if (isObjectRecord_ACU$4(frame.perSheetCheckpoints)) {
             sheetKeys.forEach(sheetKey => {
                 if (!Object.prototype.hasOwnProperty.call(frame.perSheetCheckpoints, sheetKey))
                     return;
@@ -7162,7 +7162,7 @@ $CONTENT
                 .filter((revision) => typeof revision === 'string'));
             const nextEntries = [];
             frame.logEntries.forEach((entry) => {
-                if (!isObjectRecord_ACU$3(entry)) {
+                if (!isObjectRecord_ACU$4(entry)) {
                     nextEntries.push(entry);
                     return;
                 }
@@ -7215,7 +7215,7 @@ $CONTENT
         frame.headRevision = latestEntryRevision || (typeof previousHeadRevision === 'string' && !previousEntryRevisions.has(previousHeadRevision) ? previousHeadRevision : null);
     }
     function purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU(frame, sheetKeys, knownSqlTableNames) {
-        if (!isObjectRecord_ACU$3(frame))
+        if (!isObjectRecord_ACU$4(frame))
             return false;
         // 单表 checkpoint 是重放基底；增量预清除只裁剪日志和重填进度，不能删除或改写 shard。
         // 需要替换基底时必须走完整的 purgeSheetKeysFromStorageFrameV2_ACU 流程。
@@ -7229,7 +7229,7 @@ $CONTENT
             }
         }
         const checkpoint = frame.checkpoint;
-        if (isObjectRecord_ACU$3(checkpoint)) {
+        if (isObjectRecord_ACU$4(checkpoint)) {
             if (purgeManualRefillProgressV2_ACU(checkpoint.manualRefillProgress, sheetKeys))
                 changed = true;
         }
@@ -7244,7 +7244,7 @@ $CONTENT
                 .filter((revision) => typeof revision === 'string'));
             const nextEntries = [];
             frame.logEntries.forEach((entry) => {
-                if (!isObjectRecord_ACU$3(entry)) {
+                if (!isObjectRecord_ACU$4(entry)) {
                     nextEntries.push(entry);
                     return;
                 }
@@ -7909,14 +7909,14 @@ $CONTENT
         return safeClone(container);
     }
 
-    function isObjectRecord_ACU$2(value) {
+    function isObjectRecord_ACU$3(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
     function hasOwnKey_ACU(value, key) {
         return Object.prototype.hasOwnProperty.call(value, key);
     }
     function hasAnySheetKey_ACU(value) {
-        return isObjectRecord_ACU$2(value) && Object.keys(value).some(k => k.startsWith('sheet_'));
+        return isObjectRecord_ACU$3(value) && Object.keys(value).some(k => k.startsWith('sheet_'));
     }
     function hasNonEmptyStringArray_ACU(value) {
         return Array.isArray(value) && value.some(item => typeof item === 'string' && item.startsWith('sheet_'));
@@ -7926,12 +7926,12 @@ $CONTENT
      * Vector-index-only metadata is deliberately excluded: it does not establish a sheet identity.
      */
     function hasV2TableHistoryEvidence_ACU(tagData) {
-        if (!isObjectRecord_ACU$2(tagData))
+        if (!isObjectRecord_ACU$3(tagData))
             return false;
         if (tagData._acu_storage_version === 2)
             return true;
         const frame = tagData.storageFrame;
-        if (!isObjectRecord_ACU$2(frame))
+        if (!isObjectRecord_ACU$3(frame))
             return false;
         if (frame.version === 2)
             return true;
@@ -7948,15 +7948,15 @@ $CONTENT
             && (typeof frame.headRevision !== 'string' || frame.headRevision.length > 0);
     }
     function isV2TagData_ACU(tagData) {
-        if (!isObjectRecord_ACU$2(tagData))
+        if (!isObjectRecord_ACU$3(tagData))
             return false;
         const frame = tagData.storageFrame;
-        return isObjectRecord_ACU$2(frame)
+        return isObjectRecord_ACU$3(frame)
             && frame.version === 2
             && Array.isArray(frame.logEntries);
     }
     function isLegacyV1TagData_ACU(tagData) {
-        if (!isObjectRecord_ACU$2(tagData))
+        if (!isObjectRecord_ACU$3(tagData))
             return false;
         if (isV2TagData_ACU(tagData))
             return false;
@@ -41487,7 +41487,7 @@ $CONTENT
     function projectReplayComparableData_ACU(data) {
         const projected = deepClone_ACU$1(data);
         for (const [key, value] of Object.entries(projected)) {
-            if (!key.startsWith('sheet_') || !isObjectRecord_ACU$1(value))
+            if (!key.startsWith('sheet_') || !isObjectRecord_ACU$2(value))
                 continue;
             delete value.seedRows;
         }
@@ -41746,7 +41746,7 @@ $CONTENT
         isolatedData[isolationKey] = nextTagData;
         return nextTagData.storageFrame;
     }
-    function isObjectRecord_ACU$1(value) {
+    function isObjectRecord_ACU$2(value) {
         return value !== null && typeof value === 'object' && !Array.isArray(value);
     }
     function classifyTemplateCommitStorageState_ACU(chat, isolationKey) {
@@ -41802,7 +41802,7 @@ $CONTENT
         return classifyTemplateCommitStorageState_ACU(simulatedChat, isolationKey);
     }
     function isPlainObjectRecord_ACU(value) {
-        if (!isObjectRecord_ACU$1(value))
+        if (!isObjectRecord_ACU$2(value))
             return false;
         const prototype = Object.getPrototypeOf(value);
         return prototype === Object.prototype || prototype === null;
@@ -41839,7 +41839,7 @@ $CONTENT
         return Boolean(checkpoint?.data && Object.prototype.hasOwnProperty.call(checkpoint.data, sheetKey));
     }
     function recordContainsSheet_ACU(value, sheetKey) {
-        return isObjectRecord_ACU$1(value) && Object.prototype.hasOwnProperty.call(value, sheetKey);
+        return isObjectRecord_ACU$2(value) && Object.prototype.hasOwnProperty.call(value, sheetKey);
     }
     function hasV2HistoryMarker_ACU(tagData) {
         return hasV2TableHistoryEvidence_ACU(tagData);
@@ -41865,7 +41865,7 @@ $CONTENT
         return Array.isArray(value) && value.every(item => typeof item === 'string');
     }
     function eventIsValidForIntroductionHistory_ACU(value) {
-        return value === undefined || (isObjectRecord_ACU$1(value)
+        return value === undefined || (isObjectRecord_ACU$2(value)
             && isStringArray_ACU(value.filledSheetKeys)
             && isStringArray_ACU(value.changedSheetKeys)
             && (value.groupKeys === undefined || isStringArray_ACU(value.groupKeys))
@@ -41874,22 +41874,22 @@ $CONTENT
             && (value.error === undefined || typeof value.error === 'string'));
     }
     function scheduleSummaryIsValidForIntroductionHistory_ACU(value) {
-        return value === undefined || (isObjectRecord_ACU$1(value)
-            && Object.values(value).every(summary => isObjectRecord_ACU$1(summary)
+        return value === undefined || (isObjectRecord_ACU$2(value)
+            && Object.values(value).every(summary => isObjectRecord_ACU$2(summary)
                 && (summary.lastFilledAiFloor === undefined || isFiniteNonNegativeNumber_ACU(summary.lastFilledAiFloor))
                 && (summary.lastChangedAiFloor === undefined || isFiniteNonNegativeNumber_ACU(summary.lastChangedAiFloor))));
     }
     function manualRefillProgressIsValidForIntroductionHistory_ACU(value) {
         if (value === undefined)
             return true;
-        if (!isObjectRecord_ACU$1(value) || value.kind !== 'manual_refill')
+        if (!isObjectRecord_ACU$2(value) || value.kind !== 'manual_refill')
             return false;
         const legacyStatus = value.status === 'in_progress' || value.status === 'complete';
         const commonFieldsAreValid = isStringArray_ACU(value.selectedSheetKeys)
             && Array.isArray(value.contextMessageIndices) && value.contextMessageIndices.every(Number.isInteger)
             && ['originalStartMessageIndex', 'targetMessageIndex', 'batchSize', 'completedUntilMessageIndex', 'updatedAt']
                 .every(key => isFiniteNonNegativeNumber_ACU(value[key]))
-            && (value.completedSheetMessageIndexByKey === undefined || (isObjectRecord_ACU$1(value.completedSheetMessageIndexByKey)
+            && (value.completedSheetMessageIndexByKey === undefined || (isObjectRecord_ACU$2(value.completedSheetMessageIndexByKey)
                 && Object.values(value.completedSheetMessageIndexByKey).every(Number.isInteger)));
         if (!commonFieldsAreValid)
             return false;
@@ -41905,32 +41905,32 @@ $CONTENT
             && (value.lastError === undefined || typeof value.lastError === 'string');
     }
     function timelineIsValidForIntroductionHistory_ACU(value) {
-        return value === undefined || (isObjectRecord_ACU$1(value)
+        return value === undefined || (isObjectRecord_ACU$2(value)
             && (value.kind === 'sheet_introduction' || value.kind === 'sheet_rebase'
                 || value.kind === 'sheet_reveal' || value.kind === 'sheet_hide')
             && Number.isInteger(value.activateAtMessageIndex) && value.activateAtMessageIndex >= 0
             && Number.isInteger(value.afterSeq) && value.afterSeq >= 0);
     }
     function sheetIsValidForIntroductionHistory_ACU(value) {
-        return isObjectRecord_ACU$1(value)
+        return isObjectRecord_ACU$2(value)
             && typeof value.uid === 'string'
             && typeof value.name === 'string'
-            && isObjectRecord_ACU$1(value.sourceData)
+            && isObjectRecord_ACU$2(value.sourceData)
             && Array.isArray(value.content)
             && value.content.every(row => Array.isArray(row) && row.every(cell => cell === null || typeof cell === 'string'))
-            && isObjectRecord_ACU$1(value.updateConfig)
-            && isObjectRecord_ACU$1(value.exportConfig)
+            && isObjectRecord_ACU$2(value.updateConfig)
+            && isObjectRecord_ACU$2(value.exportConfig)
             && typeof value.orderNo === 'number' && Number.isFinite(value.orderNo);
     }
     function schemaDescriptorIsValidForIntroductionHistory_ACU(value, version) {
-        if (!isObjectRecord_ACU$1(value)
+        if (!isObjectRecord_ACU$2(value)
             || value.descriptorVersion !== version
             || !['uid', 'tableName', 'ddl', 'normalizedSql', 'tableSuffix'].every(key => typeof value[key] === 'string')
             || !Array.isArray(value.headers) || !value.headers.every(header => header === null || typeof header === 'string')
             || !isStringArray_ACU(value.tableConstraints)
             || !Array.isArray(value.columns))
             return false;
-        return value.columns.every(column => isObjectRecord_ACU$1(column)
+        return value.columns.every(column => isObjectRecord_ACU$2(column)
             && isFiniteNonNegativeInteger_ACU(column.index)
             && ['physicalName', 'displayHeader', 'normalizedDefinition'].every(key => typeof column[key] === 'string')
             && (version === 1 || column.defaultExpression === null || typeof column.defaultExpression === 'string'));
@@ -41945,28 +41945,28 @@ $CONTENT
             return false;
         if (operation.contractVersion === 1) {
             return Array.isArray(operation.columnChanges)
-                && operation.columnChanges.every(change => isObjectRecord_ACU$1(change)
+                && operation.columnChanges.every(change => isObjectRecord_ACU$2(change)
                     && ['rename_display', 'add', 'drop'].includes(change.kind)
                     && typeof change.physicalName === 'string'
                     && ((change.kind === 'rename_display' && typeof change.fromHeader === 'string' && typeof change.toHeader === 'string')
                         || (change.kind === 'add' && typeof change.header === 'string' && isFiniteNonNegativeInteger_ACU(change.index))
                         || (change.kind === 'drop' && typeof change.header === 'string' && isFiniteNonNegativeInteger_ACU(change.index))))
-                && isObjectRecord_ACU$1(operation.migrationPolicy)
+                && isObjectRecord_ACU$2(operation.migrationPolicy)
                 && typeof operation.migrationPolicy.destructiveChangeConfirmed === 'boolean';
         }
         return Array.isArray(operation.physicalColumnMappings)
-            && operation.physicalColumnMappings.every(mapping => isObjectRecord_ACU$1(mapping)
+            && operation.physicalColumnMappings.every(mapping => isObjectRecord_ACU$2(mapping)
                 && typeof mapping.fromPhysicalName === 'string' && typeof mapping.toPhysicalName === 'string')
-            && isObjectRecord_ACU$1(operation.fills)
+            && isObjectRecord_ACU$2(operation.fills)
             && Array.isArray(operation.conversions)
-            && operation.conversions.every(conversion => isObjectRecord_ACU$1(conversion)
+            && operation.conversions.every(conversion => isObjectRecord_ACU$2(conversion)
                 && typeof conversion.fromPhysicalName === 'string'
                 && typeof conversion.toPhysicalName === 'string'
-                && isObjectRecord_ACU$1(conversion.policy)
+                && isObjectRecord_ACU$2(conversion.policy)
                 && ['identity', 'stringify', 'integer_strict', 'real_strict'].includes(conversion.policy.kind))
-            && isObjectRecord_ACU$1(operation.dryRun)
+            && isObjectRecord_ACU$2(operation.dryRun)
             && ['convertedRowCount', 'failedRowCount', 'lossyRowCount'].every(key => isFiniteNonNegativeInteger_ACU(operation.dryRun[key]))
-            && isObjectRecord_ACU$1(operation.migrationPolicy)
+            && isObjectRecord_ACU$2(operation.migrationPolicy)
             && typeof operation.migrationPolicy.destructiveChangeConfirmed === 'boolean'
             && typeof operation.migrationPolicy.lossyConversionConfirmed === 'boolean';
     }
@@ -41976,29 +41976,29 @@ $CONTENT
         // 与"目标表是否存在过"无关：用无关字段的畸形去否定目标表的存在性判断，会让
         // 一条坏 entry 永久污染该 isolationKey 下所有表的 evidence（现场 reason 只是
         // 换个字符串）。envelope 字段改由诊断日志记录，不参与 fail-closed。
-        return isObjectRecord_ACU$1(value)
+        return isObjectRecord_ACU$2(value)
             && Array.isArray(value.operations)
             && (value.patches === undefined || Array.isArray(value.patches));
     }
     function checkpointIsValidForIntroductionHistory_ACU(value) {
-        return isObjectRecord_ACU$1(value)
+        return isObjectRecord_ACU$2(value)
             && value.kind === 'full'
             && isFiniteNonNegativeNumber_ACU(value.createdAt)
             && typeof value.reason === 'string' && CHECKPOINT_REASONS_FOR_INTRODUCTION_HISTORY_ACU.has(value.reason)
-            && isObjectRecord_ACU$1(value.data)
+            && isObjectRecord_ACU$2(value.data)
             && scheduleSummaryIsValidForIntroductionHistory_ACU(value.scheduleSummary)
             && eventIsValidForIntroductionHistory_ACU(value.event)
             && manualRefillProgressIsValidForIntroductionHistory_ACU(value.manualRefillProgress);
     }
     function sheetCheckpointMapIsValidForIntroductionHistory_ACU(value) {
-        return isObjectRecord_ACU$1(value)
+        return isObjectRecord_ACU$2(value)
             && Object.entries(value).every(([sheetKey, checkpoint]) => (sheetKey.startsWith('sheet_')
-                && isObjectRecord_ACU$1(checkpoint)
+                && isObjectRecord_ACU$2(checkpoint)
                 && checkpoint.kind === 'sheet_full'
                 && checkpoint.sheetKey === sheetKey
                 && isFiniteNonNegativeNumber_ACU(checkpoint.createdAt)
                 && typeof checkpoint.reason === 'string' && CHECKPOINT_REASONS_FOR_INTRODUCTION_HISTORY_ACU.has(checkpoint.reason)
-                && isObjectRecord_ACU$1(checkpoint.data)
+                && isObjectRecord_ACU$2(checkpoint.data)
                 && scheduleSummaryIsValidForIntroductionHistory_ACU(checkpoint.scheduleSummary)
                 && eventIsValidForIntroductionHistory_ACU(checkpoint.event)
                 && manualRefillProgressIsValidForIntroductionHistory_ACU(checkpoint.manualRefillProgress)
@@ -42006,11 +42006,11 @@ $CONTENT
                 && timelineIsValidForIntroductionHistory_ACU(checkpoint.timeline)));
     }
     function operationContainsOrCannotDisproveSheet_ACU(operation, sheetKey) {
-        if (!isObjectRecord_ACU$1(operation))
+        if (!isObjectRecord_ACU$2(operation))
             return true;
         switch (operation.kind) {
             case 'data_replace':
-                return !isObjectRecord_ACU$1(operation.data) || recordContainsSheet_ACU(operation.data, sheetKey);
+                return !isObjectRecord_ACU$2(operation.data) || recordContainsSheet_ACU(operation.data, sheetKey);
             case 'sql_sheet_batch':
                 return typeof operation.sheetKey !== 'string'
                     || !isStringArray_ACU(operation.statements)
@@ -42038,7 +42038,7 @@ $CONTENT
                     || operation.sheetKey === sheetKey;
             case 'meta_update':
                 return typeof operation.sheetKey !== 'string'
-                    || !isObjectRecord_ACU$1(operation.meta)
+                    || !isObjectRecord_ACU$2(operation.meta)
                     || operation.sheetKey === sheetKey;
             // sql_batch and table_edit_dsl are global replay operations; all unknown
             // kinds are future or malformed persisted contracts and must fail closed.
@@ -42047,7 +42047,7 @@ $CONTENT
         }
     }
     function patchContainsOrCannotDisproveSheet_ACU(patch, sheetKey) {
-        if (!isObjectRecord_ACU$1(patch))
+        if (!isObjectRecord_ACU$2(patch))
             return true;
         switch (patch.kind) {
             case 'sheet_replace':
@@ -42066,7 +42066,7 @@ $CONTENT
                     || patch.sheetKey === sheetKey;
             case 'meta_update':
                 return typeof patch.sheetKey !== 'string'
-                    || !isObjectRecord_ACU$1(patch.meta)
+                    || !isObjectRecord_ACU$2(patch.meta)
                     || patch.sheetKey === sheetKey;
             default:
                 return true;
@@ -42089,7 +42089,7 @@ $CONTENT
                 ? 'absent'
                 : typeof rawIsolatedData === 'string'
                     ? 'string'
-                    : isObjectRecord_ACU$1(rawIsolatedData)
+                    : isObjectRecord_ACU$2(rawIsolatedData)
                         ? 'object'
                         : 'invalid';
             logDebug_ACU(`[V2 Persist] introduction_history_evidence_field_type: messageIndex=${messageIndex},isolatedDataFieldType=${isolatedDataFieldType}`);
@@ -42100,7 +42100,7 @@ $CONTENT
             if (!hasV2HistoryMarker_ACU(tagData))
                 continue;
             const frame = tagData.storageFrame;
-            if (!isObjectRecord_ACU$1(frame) || frame.version !== 2 || !Array.isArray(frame.logEntries)) {
+            if (!isObjectRecord_ACU$2(frame) || frame.version !== 2 || !Array.isArray(frame.logEntries)) {
                 return indeterminate(messageIndex, 'frame', 'V2 storage frame 无法解析');
             }
             if (frame.checkpoint !== undefined && !checkpointIsValidForIntroductionHistory_ACU(frame.checkpoint)) {
@@ -42108,7 +42108,7 @@ $CONTENT
             }
             if (checkpointDataContainsSheet_ACU(frame.checkpoint, sheetKey))
                 return present(messageIndex, 'checkpoint');
-            if (frame.perSheetCheckpoints !== undefined && !isObjectRecord_ACU$1(frame.perSheetCheckpoints)) {
+            if (frame.perSheetCheckpoints !== undefined && !isObjectRecord_ACU$2(frame.perSheetCheckpoints)) {
                 return indeterminate(messageIndex, 'per_sheet_checkpoint', 'per-sheet checkpoint map 无法解析');
             }
             if (recordContainsSheet_ACU(frame.perSheetCheckpoints, sheetKey)) {
@@ -42170,15 +42170,15 @@ $CONTENT
     }
     function scopedHistoryArtifactEvidence_ACU(artifact, sheetKey, containsOrCannotDisprove) {
         const indeterminateWithDiagnostics = (branch, failedField) => {
-            const artifactKind = isObjectRecord_ACU$1(artifact) ? String(artifact.kind) : typeof artifact;
-            const hasSheetKey = isObjectRecord_ACU$1(artifact) && typeof artifact.sheetKey === 'string';
+            const artifactKind = isObjectRecord_ACU$2(artifact) ? String(artifact.kind) : typeof artifact;
+            const hasSheetKey = isObjectRecord_ACU$2(artifact) && typeof artifact.sheetKey === 'string';
             logWarn_ACU(`[V2 Persist] scoped_history_artifact_indeterminate: branch=${branch}, artifactKind=${artifactKind}, hasSheetKey=${hasSheetKey}, sheetKeyMatchesTarget=${hasSheetKey && artifact.sheetKey === sheetKey}, failedField=${failedField}`);
             return 'indeterminate';
         };
-        if (!isObjectRecord_ACU$1(artifact))
+        if (!isObjectRecord_ACU$2(artifact))
             return indeterminateWithDiagnostics(1, 'artifact');
         if (artifact.kind === 'data_replace') {
-            if (!isObjectRecord_ACU$1(artifact.data))
+            if (!isObjectRecord_ACU$2(artifact.data))
                 return indeterminateWithDiagnostics(2, 'data');
             return recordContainsSheet_ACU(artifact.data, sheetKey) ? 'present' : 'absent';
         }
@@ -42202,6 +42202,20 @@ $CONTENT
         if (artifact.sheetKey !== sheetKey) {
             // 这些 mutation/patch 是严格按 sheetKey 定位的；另一个 sheet 的局部损坏
             // 不能伪造目标表曾存在的证据。未知 kind 仍保持 fail-closed。
+            // sql_sheet_batch 必须在此列：它是新填表写入的首选形态（见 storage-frame-v2-types.ts:230），
+            // sheetKey 为必填，且 buildSqlSheetBatchOperations_ACU 只在该 statement 只涉及单表时才产出
+            // （多表命中走 ambiguousStatements，见 sql-table-service.ts:773-778），
+            // 即 sheetKey 就是它的完整影响面。漏列会让任意一张表的历史填表写入，
+            // 把同 isolationKey 下其他表的 evidence 永久变成 indeterminate。
+            if (artifact.kind === 'sql_sheet_batch') {
+                // 别表 sql_sheet_batch 仍须结构合法才可证伪目标表：畸形结构（statements 非字符串数组等）
+                // 无法判定真实影响面，必须保持 fail-closed（与既有测试契约一致）。
+                const structureIsValid = Array.isArray(artifact.statements)
+                    && artifact.statements.every(statement => typeof statement === 'string');
+                if (!structureIsValid)
+                    return indeterminateWithDiagnostics(4, 'kind_unknown_or_unscoped');
+                return 'absent';
+            }
             if (['sheet_replace', 'sheet_schema_migrate', 'row_upsert', 'row_delete', 'meta_update'].includes(artifact.kind)) {
                 return 'absent';
             }
@@ -42235,10 +42249,10 @@ $CONTENT
         // 优先使用生命周期派生指向的最后 hide checkpoint：hide 语义保证 checkpoint.data 保留
         // 离开 active 状态前的完整数据，且当前 frame 的精确同 key checkpoint 已通过 created/seq
         // 校验。仅在缺少可信 hide checkpoint 时才退回逐边界 bounded replay（兼容旧历史）。
-        if (isObjectRecord_ACU$1(preferredHideCheckpoint)) {
+        if (isObjectRecord_ACU$2(preferredHideCheckpoint)) {
             const timeline = preferredHideCheckpoint.timeline;
             const data = preferredHideCheckpoint.data;
-            if (isObjectRecord_ACU$1(timeline) && timeline.kind === 'sheet_hide' && isObjectRecord_ACU$1(data)) {
+            if (isObjectRecord_ACU$2(timeline) && timeline.kind === 'sheet_hide' && isObjectRecord_ACU$2(data)) {
                 return {
                     status: 'resolved',
                     sheetData: deepClone_ACU$1(data),
@@ -42268,7 +42282,7 @@ $CONTENT
             }
             if (replayed && Object.prototype.hasOwnProperty.call(replayed.data, sheetKey)) {
                 const candidate = replayed.data[sheetKey];
-                if (isObjectRecord_ACU$1(candidate)) {
+                if (isObjectRecord_ACU$2(candidate)) {
                     return {
                         status: 'resolved',
                         sheetData: deepClone_ACU$1(candidate),
@@ -42279,9 +42293,9 @@ $CONTENT
                 return { status: 'indeterminate', reason: `bounded replay 返回了非对象 sheet：messageIndex=${boundary}` };
             }
         }
-        if (isObjectRecord_ACU$1(currentSheetCheckpoint)) {
+        if (isObjectRecord_ACU$2(currentSheetCheckpoint)) {
             const checkpointData = currentSheetCheckpoint.data;
-            if (isObjectRecord_ACU$1(checkpointData)) {
+            if (isObjectRecord_ACU$2(checkpointData)) {
                 return {
                     status: 'resolved',
                     sheetData: deepClone_ACU$1(checkpointData),
@@ -42300,7 +42314,7 @@ $CONTENT
         if (typeof options.sheetKey !== 'string' || !options.sheetKey.startsWith('sheet_')) {
             return { error: 'V2 sheet checkpoint requires a sheetKey beginning with "sheet_".' };
         }
-        if (!isObjectRecord_ACU$1(options.sheetData)) {
+        if (!isObjectRecord_ACU$2(options.sheetData)) {
             return { error: `V2 sheet checkpoint requires object sheetData for ${options.sheetKey}.` };
         }
         if (!options.reason) {
@@ -43156,7 +43170,7 @@ $CONTENT
                 }
                 const normalizedSheets = new Map();
                 for (const [sheetKey, sourceSheet] of requestedEntries) {
-                    if (!isObjectRecord_ACU$1(sourceSheet)) {
+                    if (!isObjectRecord_ACU$2(sourceSheet)) {
                         return { status: 'skipped_invalid_data', error: `null-row cleanup requires object sheetData: ${sheetKey}.` };
                     }
                     const sheetData = deepClone_ACU$1(sourceSheet);
@@ -43280,9 +43294,11 @@ $CONTENT
         if (!options.guideData || typeof options.guideData !== 'object' || Array.isArray(options.guideData)) {
             return { saved: false, error: 'scope-only 模板提交必须提供有效的 guideData。' };
         }
-        if (!options.baselineData || !options.candidateData
-            || !templatePersistentProjectionMatches_ACU(options.baselineData, options.candidateData)) {
-            return { saved: false, error: 'scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致。' };
+        if (options.pristineOverride !== true) {
+            if (!options.baselineData || !options.candidateData
+                || !templatePersistentProjectionMatches_ACU(options.baselineData, options.candidateData)) {
+                return { saved: false, error: 'scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致。' };
+            }
         }
         const createdAt = options.createdAt ?? Date.now();
         if (!Number.isFinite(createdAt) || createdAt < 0) {
@@ -43480,11 +43496,11 @@ $CONTENT
         }
         for (const change of sheetChanges) {
             if (change.kind === 'introduction' || change.kind === 'rebase' || change.kind === 'reveal' || change.kind === 'hide') {
-                if (!isObjectRecord_ACU$1(change.sheetData))
+                if (!isObjectRecord_ACU$2(change.sheetData))
                     throw new Error(`当前楼层模板提交缺少可恢复 Sheet：${change.sheetKey}。`);
                 continue;
             }
-            if (change.kind !== 'operations' || !isObjectRecord_ACU$1(change.targetSheetData) || !Array.isArray(change.operations) || change.operations.length === 0) {
+            if (change.kind !== 'operations' || !isObjectRecord_ACU$2(change.targetSheetData) || !Array.isArray(change.operations) || change.operations.length === 0) {
                 throw new Error(`当前楼层模板提交 operations action 无效：${change.sheetKey}。`);
             }
             let migrationCount = 0;
@@ -43581,7 +43597,7 @@ $CONTENT
                     throw new Error('target AI message changed before template commit; abort stale table write.');
                 }
                 if (storageState.kind === 'pristine_without_checkpoint') {
-                    if (!isObjectRecord_ACU$1(options.templateSource)) {
+                    if (!isObjectRecord_ACU$2(options.templateSource)) {
                         throw new Error('预填表模板提交必须提供完整有效的 templateSource。');
                     }
                     const templateSnapshot = deepClone_ACU$1(options.templateSource);
@@ -43600,7 +43616,7 @@ $CONTENT
                         if (change.kind === 'hide')
                             continue;
                         const snapshotSheet = templateSnapshot[change.sheetKey];
-                        if (!isObjectRecord_ACU$1(snapshotSheet) || !Array.isArray(snapshotSheet.content)) {
+                        if (!isObjectRecord_ACU$2(snapshotSheet) || !Array.isArray(snapshotSheet.content)) {
                             throw new Error(`预填表模板提交的 templateSource 缺少变更 Sheet：${change.sheetKey}。`);
                         }
                         const expectedSheet = deepClone_ACU$1(change.kind === 'operations' ? change.targetSheetData : change.sheetData);
@@ -43978,7 +43994,7 @@ $CONTENT
                         // 仅当 active 无该表（异常状态）时才退回逐边界查找并验证。
                         let hideSource;
                         const activeSheetData = activeReplayState[sheetKey];
-                        if (isObjectRecord_ACU$1(activeSheetData)) {
+                        if (isObjectRecord_ACU$2(activeSheetData)) {
                             hideSource = {
                                 status: 'resolved',
                                 sheetData: deepClone_ACU$1(activeSheetData),
@@ -44048,7 +44064,7 @@ $CONTENT
                     if (deletedSheetKeys.length > 0) {
                         // data_replace 是完整历史状态，不能靠从旧 payload 局部删除 key 来伪造历史。
                         // 最新楼层改写为删除后的完整 checkpoint，使更早的整库替换不再参与当前 replay。
-                        const terminalData = isObjectRecord_ACU$1(options.templateSource)
+                        const terminalData = isObjectRecord_ACU$2(options.templateSource)
                             ? deepClone_ACU$1(options.templateSource)
                             : deepClone_ACU$1(activeReplayState);
                         deletedSheetKeys.forEach(sheetKey => delete terminalData[sheetKey]);
@@ -48628,6 +48644,177 @@ $CONTENT
     }
 
     /**
+     * 检测聊天中是否存在 legacy（V1 或顶层）表格数据证据。
+     * legacy 会话（mode: 'legacy-v1'）可能没有任何 V2 frame，但其表格数据
+     * 必须走继承路径，绝不能按 pristine 覆盖式 rekey —— 否则会丢失 legacy 数据。
+     */
+    function chatHasLegacyTableEvidence_ACU(chat, isolationKey) {
+        const isolationConfig = {
+            enabled: Boolean(settings_ACU?.dataIsolationEnabled),
+            code: typeof settings_ACU?.dataIsolationCode === 'string' ? settings_ACU.dataIsolationCode : '',
+        };
+        for (const message of chat) {
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (tagData && isLegacyV1TagData_ACU(tagData))
+                return true;
+            if (hasLegacyTopLevelTableData_ACU(message, isolationConfig))
+                return true;
+        }
+        return false;
+    }
+    function isObjectRecord_ACU$1(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+    /**
+     * 判定一个 checkpoint 的 data 中是否存在任何含实质内容（非仅表头）的表。
+     * data 可能是 TableDataObject（sheetKey → Sheet）或单表 Sheet 对象。
+     */
+    function checkpointDataHasDataRows_ACU(data) {
+        if (!isObjectRecord_ACU$1(data))
+            return false;
+        for (const [key, value] of Object.entries(data)) {
+            if (!key.startsWith('sheet_'))
+                continue;
+            if (!isObjectRecord_ACU$1(value))
+                return false; // 表结构损坏：无法判定 → 调用方按 blocked 处理
+            const content = value.content;
+            if (!Array.isArray(content) || content.length === 0)
+                return false; // 结构损坏 → blocked
+            if (content.length > 1)
+                return true; // 存在数据行
+        }
+        return false;
+    }
+    /**
+     * 判定单个 Sheet 对象是否含数据行。perSheetCheckpoints 的 data 是单表 Sheet（非 map）。
+     */
+    function sheetHasDataRows_ACU(sheet) {
+        if (!isObjectRecord_ACU$1(sheet))
+            return false;
+        const content = sheet.content;
+        if (!Array.isArray(content) || content.length === 0)
+            return false;
+        return content.length > 1;
+    }
+    /**
+     * 判定单表 Sheet 结构是否损坏（content 缺失/非数组/空数组）。
+     */
+    function sheetIsMalformed_ACU(sheet) {
+        if (!isObjectRecord_ACU$1(sheet))
+            return true;
+        const content = sheet.content;
+        return !Array.isArray(content) || content.length === 0;
+    }
+    /**
+     * 遍历 chat 中该 isolationKey 的全部 V2 frame，返回是否含有任何实质表格内容。
+     * 任一帧结构无法解析（logEntries 非数组 / checkpoint 结构损坏）时返回 blocked 信号。
+     */
+    function scanFramesForSubstantialContent_ACU(chat, isolationKey) {
+        let substantial = false;
+        for (const message of chat) {
+            if (!message || message.is_user)
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (!tagData || typeof tagData !== 'object' || Array.isArray(tagData))
+                continue;
+            // V2 痕迹但结构无法解析：携带 _acu_storage_version:2 或 storageFrame 却非合法 V2 frame
+            // 属于损坏的存储痕迹，绝不能当作 pristine（否则会在删除/切换时覆盖真实数据）。
+            if (!isV2TagData_ACU(tagData)) {
+                const hasV2Trace = tagData._acu_storage_version === 2
+                    || tagData.storageFrame !== undefined;
+                if (hasV2Trace)
+                    return { substantial: false, corrupt: true };
+                continue;
+            }
+            const frame = tagData.storageFrame;
+            if (!Array.isArray(frame.logEntries))
+                return { substantial: false, corrupt: true };
+            if (frame.logEntries.length > 0) {
+                substantial = true;
+                continue;
+            }
+            if (frame.checkpoint !== undefined && frame.checkpoint !== null) {
+                if (!isObjectRecord_ACU$1(frame.checkpoint))
+                    return { substantial: false, corrupt: true };
+                const data = frame.checkpoint.data;
+                if (data !== undefined && data !== null) {
+                    const hasRows = checkpointDataHasDataRows_ACU(data);
+                    if (hasRows === false) {
+                        // 结构损坏或纯表头：损坏必须 blocked，纯表头不算实质内容
+                        if (isObjectRecord_ACU$1(data)) {
+                            // 检查是否有表结构损坏（非 sheet_ 键不计入）
+                            for (const [key, value] of Object.entries(data)) {
+                                if (!key.startsWith('sheet_'))
+                                    continue;
+                                if (!isObjectRecord_ACU$1(value) || !Array.isArray(value.content) || value.content.length === 0) {
+                                    return { substantial: false, corrupt: true };
+                                }
+                            }
+                        }
+                        else {
+                            return { substantial: false, corrupt: true };
+                        }
+                    }
+                    else if (hasRows === true) {
+                        substantial = true;
+                    }
+                }
+            }
+            if (frame.perSheetCheckpoints !== undefined && frame.perSheetCheckpoints !== null) {
+                if (!isObjectRecord_ACU$1(frame.perSheetCheckpoints))
+                    return { substantial: false, corrupt: true };
+                for (const checkpoint of Object.values(frame.perSheetCheckpoints)) {
+                    if (!isObjectRecord_ACU$1(checkpoint))
+                        return { substantial: false, corrupt: true };
+                    // per-sheet checkpoint 的 data 是单表 Sheet（不是 sheetKey map）
+                    const data = checkpoint.data;
+                    if (data === undefined || data === null)
+                        continue;
+                    if (sheetIsMalformed_ACU(data)) {
+                        return { substantial: false, corrupt: true };
+                    }
+                    if (sheetHasDataRows_ACU(data))
+                        substantial = true;
+                }
+            }
+        }
+        return { substantial, corrupt: false };
+    }
+    /**
+     * 会话级 pristine 判定：确定该 isolationKey 下切换模板应采取的模式。
+     */
+    function resolveTemplateSwitchMode_ACU(chat, isolationKey) {
+        const chatArray = Array.isArray(chat) ? chat : [];
+        // 0. legacy 数据证据优先：即使没有 V2 frame，legacy 表格数据也必须走继承。
+        if (chatHasLegacyTableEvidence_ACU(chatArray, isolationKey)) {
+            return { mode: 'inherit' };
+        }
+        // 1. lifecycle 派生：indeterminate → blocked，hidden → inherit
+        const lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chatArray, isolationKey);
+        if (lifecycle.indeterminateSheetKeys.length > 0) {
+            return {
+                mode: 'blocked',
+                reason: `表格历史状态不完整或顺序异常（indeterminate: ${lifecycle.indeterminateSheetKeys.join(', ')}），已拒绝切换模板。`,
+            };
+        }
+        if (lifecycle.hiddenSheetKeys.length > 0) {
+            // 隐藏表意味着历史上有过数据与切换记录，按 pristine 覆盖会丢掉隐藏表数据。
+            return { mode: 'inherit' };
+        }
+        // 2. 帧内容扫描：存在任何实质内容 → inherit；结构损坏 → blocked
+        const scan = scanFramesForSubstantialContent_ACU(chatArray, isolationKey);
+        if (scan.corrupt) {
+            return { mode: 'blocked', reason: '表格历史帧结构损坏，无法判定会话状态，已拒绝切换模板。' };
+        }
+        if (scan.substantial)
+            return { mode: 'inherit' };
+        // 3. 无任何实质内容 → pristine
+        return { mode: 'pristine' };
+    }
+
+    /**
      * shared/abortable-delay.ts
      * 可被 AbortSignal 中断的延时等待工具函数
      *
@@ -49169,7 +49356,11 @@ $CONTENT
         });
         let targetTemplateData = snapshot.templateObj;
         let pristineChat = false;
-        if (storageStrategy.mode === 'empty') {
+        const switchMode = resolveTemplateSwitchMode_ACU(readyContext.chat, isolationKey);
+        if (switchMode.mode === 'blocked') {
+            return { saved: false, error: switchMode.reason };
+        }
+        if (switchMode.mode === 'pristine') {
             try {
                 targetTemplateData = rekeyTemplateForPristineChat_ACU(snapshot.templateObj);
                 pristineChat = true;
@@ -49243,10 +49434,34 @@ $CONTENT
             return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
         }
         const hasStructuralChanges = plan.sheetChanges.length > 0 || plan.deletedSheetKeys.length > 0;
-        // 必须使用读取 replay baseline 时一并验证的 revision；此处重新捕获会掩盖 stale plan。
-        const commitBaseRevision = hasStructuralChanges ? baseRevision : null;
-        const committed = hasStructuralChanges
-            ? await commitCurrentFloorTemplateChanges_ACU({
+        let committed;
+        if (pristineChat) {
+            // pristine 会话没有任何数据帧，模板结构只需落到聊天级 guide + scope 容器。
+            // 刻意不调用 commitCurrentFloorTemplateChanges_ACU：不产生 checkpoint / logEntry，
+            // 也不读取任何残留 guide 的 seedRows（避免旧宽度污染新结构）。
+            const pristineGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(targetTemplateData, { stripSeedRows: false });
+            if (!pristineGuideData) {
+                return { saved: false, error: '目标模板不包含任何表，已取消提交。' };
+            }
+            committed = await commitCurrentFloorTemplateScopeOnly_ACU({
+                isolationKey,
+                baselineData,
+                candidateData: plan.candidateData,
+                guideData: pristineGuideData,
+                templateSource: plan.candidateData,
+                presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
+                source,
+                reason: 'chat_template_pristine_switch',
+                pristineOverride: true,
+                expectedChatIdentity: targetChatIdentity,
+                expectedFirstMessage: entryContext.firstMessage,
+                signal,
+            });
+        }
+        else if (hasStructuralChanges) {
+            // 必须使用读取 replay baseline 时一并验证的 revision；此处重新捕获会掩盖 stale plan。
+            const commitBaseRevision = hasStructuralChanges ? baseRevision : null;
+            committed = await commitCurrentFloorTemplateChanges_ACU({
                 isolationKey,
                 sheetChanges: plan.sheetChanges,
                 deletedSheetKeys: plan.deletedSheetKeys,
@@ -49262,8 +49477,10 @@ $CONTENT
                 expectedFirstMessage: entryContext.firstMessage,
                 storageMode,
                 signal,
-            })
-            : await commitCurrentFloorTemplateScopeOnly_ACU({
+            });
+        }
+        else {
+            committed = await commitCurrentFloorTemplateScopeOnly_ACU({
                 isolationKey,
                 baselineData,
                 candidateData: plan.candidateData,
@@ -49276,6 +49493,7 @@ $CONTENT
                 expectedFirstMessage: entryContext.firstMessage,
                 signal,
             });
+        }
         if (!committed.saved)
             return { ...committed, blockers: plan.blockers, audit: plan.audit };
         _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));
@@ -71459,10 +71677,50 @@ $CONTENT
                 error.failedIsolationKey = isolationKey;
                 throw error;
             }
+            // 隐藏表不在 replay state 中（replay 遇 hide checkpoint 会 delete 该表），
+            // 因此 full checkpoint.data 不含它们。若边界 frame 不带上这些 hide checkpoint，
+            // 旧楼层被 purge 后隐藏表数据将永久丢失，后续 reveal 必然 not_found。
+            const lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey, {
+                maxMessageIndex: boundaryAnchorIndex,
+            });
+            const migratedHiddenCheckpoints = {};
+            for (const hiddenSheetKey of lifecycle.hiddenSheetKeys) {
+                const entry = lifecycle.statusBySheetKey[hiddenSheetKey];
+                const restoreData = entry?.restoreSourceData;
+                if (!restoreData) {
+                    const error = new Error(`边界 checkpoint 写入失败：隐藏表 ${hiddenSheetKey} 缺少可迁移的 hide checkpoint 数据`
+                        + `（isolationKey=[${isolationKey || '无标签'}]）。`);
+                    error.failedIsolationKey = isolationKey;
+                    throw error;
+                }
+                const built = buildCanonicalSheetCheckpoint_ACU({
+                    createdAt: Date.now(),
+                    reason: 'compaction',
+                    sheetKey: hiddenSheetKey,
+                    data: JSON.parse(JSON.stringify(restoreData)),
+                    context: { messageIndex: boundaryAnchorIndex, isolationKey, reason: 'compaction' },
+                });
+                if (!built.checkpoint) {
+                    const error = new Error(`边界 checkpoint 写入失败：隐藏表 ${hiddenSheetKey} 的迁移 checkpoint 不合法：${built.error}`);
+                    error.failedIsolationKey = isolationKey;
+                    throw error;
+                }
+                migratedHiddenCheckpoints[hiddenSheetKey] = {
+                    ...built.checkpoint,
+                    timeline: {
+                        kind: 'sheet_hide',
+                        activateAtMessageIndex: boundaryAnchorIndex,
+                        afterSeq: 0,
+                    },
+                };
+            }
             const frame = {
                 version: 2,
                 checkpoint,
                 logEntries: [],
+                ...(Object.keys(migratedHiddenCheckpoints).length > 0
+                    ? { perSheetCheckpoints: migratedHiddenCheckpoints }
+                    : {}),
             };
             if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
                 const candidateChat = structuredClone(chat);
@@ -72163,74 +72421,6 @@ $CONTENT
         });
     }
     /**
-     * 全范围清空时保留每个隔离域最早的 init checkpoint 结构锚点。
-     *
-     * 行数据、增量、调度状态和后续 frame 仍会被删除；这里只留下 header-only full checkpoint，
-     * 避免后续模板切换把老聊天误判为 pristine，并在最新楼层重新创建“初始基线”。
-     */
-    function collectInitialCheckpointSlotsForFullDeletion_ACU(chat, mode, currentIsolationKey) {
-        const preservedByIsolationKey = new Map();
-        for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
-            const message = chat[messageIndex];
-            if (!message || message.is_user)
-                continue;
-            const isolatedData = readIsolatedDataContainer_ACU(message);
-            if (!isolatedData)
-                continue;
-            for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
-                if (mode === 'current' && isolationKey !== currentIsolationKey)
-                    continue;
-                if (preservedByIsolationKey.has(isolationKey) || !isV2TagData_ACU(tagData))
-                    continue;
-                const checkpoint = tagData.storageFrame.checkpoint;
-                if (checkpoint?.kind !== 'full' || checkpoint.reason !== 'init' || !checkpoint.data || typeof checkpoint.data !== 'object')
-                    continue;
-                const checkpointData = JSON.parse(JSON.stringify(checkpoint.data));
-                const sheetKeys = Object.keys(checkpointData).filter(key => key.startsWith('sheet_'));
-                if (sheetKeys.length === 0)
-                    continue;
-                for (const sheetKey of sheetKeys) {
-                    const sanitizedSheet = sanitizeSheetForStorage_ACU(checkpointData[sheetKey]);
-                    if (!sanitizedSheet || typeof sanitizedSheet !== 'object' || !Array.isArray(sanitizedSheet.content?.[0])) {
-                        delete checkpointData[sheetKey];
-                        continue;
-                    }
-                    sanitizedSheet.content = [JSON.parse(JSON.stringify(sanitizedSheet.content[0]))];
-                    // sanitizeSheetForStorage_ACU 已按持久化白名单剥离 seedRows 等运行时载荷。
-                    checkpointData[sheetKey] = sanitizedSheet;
-                }
-                if (!Object.keys(checkpointData).some(key => key.startsWith('sheet_')))
-                    continue;
-                const preservedCheckpoint = {
-                    kind: 'full',
-                    createdAt: checkpoint.createdAt,
-                    reason: 'init',
-                    data: checkpointData,
-                    event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
-                };
-                if (!validateCanonicalCheckpoint_ACU(preservedCheckpoint, {
-                    messageIndex,
-                    isolationKey,
-                    reason: 'deleteLocalDataInChat',
-                }).valid)
-                    continue;
-                preservedByIsolationKey.set(isolationKey, {
-                    messageIndex,
-                    isolationKey,
-                    tagData: {
-                        _acu_storage_version: 2,
-                        storageFrame: {
-                            version: 2,
-                            checkpoint: preservedCheckpoint,
-                            logEntries: [],
-                        },
-                    },
-                });
-            }
-        }
-        return [...preservedByIsolationKey.values()];
-    }
-    /**
      * 删除聊天记录中的本地数据（核心业务逻辑）
      * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
      *
@@ -72259,8 +72449,6 @@ $CONTENT
         const targetIndices = aiMessageIndices.slice(startAiIndex, endAiIndex + 1);
         const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
             && (endFloor === null || endFloor >= aiMessageIndices.length);
-        const preservedInitialCheckpoints = isFullRangeDeletion
-            ? collectInitialCheckpointSlotsForFullDeletion_ACU(chat, mode, currentIsolationKey) : [];
         for (const physicalIndex of targetIndices) {
             const msg = chat[physicalIndex];
             let shouldDelete = false;
@@ -72332,48 +72520,29 @@ $CONTENT
                 }
             }
         }
-        // “删除全部数据”清空行数据和增量历史，但保留 init 的 header-only 锚点。
+        // 删除本地数据后必须回到「从未填表」状态：不再保留 init header-only 锚点，
+        // 也不再向最新楼层写空 frame。保留它们会让 hasV2TableHistoryEvidence_ACU 判定
+        // 该会话仍是 V2（storage-strategy-resolver.ts:33），从而走继承路线并读取残留 guide，
+        // 这正是「删光数据后切模板报 guideData 写入失败」的成因。
+        // sheetKey 由表名拼音确定性派生，重新分配不会造成身份漂移（已与助手确认）。
         //
-        // 锚点必须落在最早 AI 楼层，而不能留在它原先出现的较晚楼层：一键追平可以
-        // 因 skipUpdateFloors 写入该旧锚点之前的消息；V2 replay 只从目标边界内最后一个
-        // full checkpoint 开始，那些写入会变成不可回放的伪提交。
-        const latestAiMessageIndex = aiMessageIndices[aiMessageIndices.length - 1];
-        const resetAnchorMessageIndex = aiMessageIndices[0];
-        for (const preserved of preservedInitialCheckpoints) {
-            const anchorMessage = chat[resetAnchorMessageIndex];
-            if (!anchorMessage || anchorMessage.is_user)
-                continue;
-            const anchorIsolatedData = readIsolatedDataContainer_ACU(anchorMessage) || {};
-            anchorIsolatedData[preserved.isolationKey] = preserved.tagData;
-            anchorMessage.TavernDB_ACU_IsolatedData = anchorIsolatedData;
-            // 既有 checkpoint 分支要求当前最新 AI 楼层有合法 V2 frame，模板 rebase/introduction
-            // 也必须落在该数据边界。清空后补一个无日志空 frame，不携带任何表数据。
-            const boundaryMessage = chat[latestAiMessageIndex];
-            if (boundaryMessage && !boundaryMessage.is_user && latestAiMessageIndex !== resetAnchorMessageIndex) {
-                const boundaryIsolatedData = readIsolatedDataContainer_ACU(boundaryMessage) || {};
-                boundaryIsolatedData[preserved.isolationKey] = {
-                    _acu_storage_version: 2,
-                    storageFrame: { version: 2, logEntries: [] },
-                };
-                boundaryMessage.TavernDB_ACU_IsolatedData = boundaryIsolatedData;
-            }
-            if (mode === 'current') {
-                writeMessageIdentity_ACU(anchorMessage, {
-                    enabled: settings_ACU.dataIsolationEnabled,
-                    code: settings_ACU.dataIsolationCode,
-                });
-                if (boundaryMessage && latestAiMessageIndex !== resetAnchorMessageIndex) {
-                    writeMessageIdentity_ACU(boundaryMessage, {
-                        enabled: settings_ACU.dataIsolationEnabled,
-                        code: settings_ACU.dataIsolationCode,
-                    });
-                }
-            }
-        }
         // 旧版“表头清单”固定挂在 chat[0]，与楼层范围无关，因此只在删除覆盖完整范围时清理，
         // 避免局部删除误删仍被其他楼层依赖的兼容指导数据。
         if (isFullRangeDeletion && clearLegacyTableHeaderGuide_ACU(chat, mode, currentIsolationKey)) {
             deletedCount++;
+        }
+        // 4.2 新版 guide 容器 + scope 容器（聊天级配置）随删除一并清空：
+        // - guide 容器是图 2 的污染源，必须清；
+        // - scope 容器（模板来源/presetName）也清（D-A 决策选 A）：删光后与全新会话完全等价，
+        //   模板选择回到 inherit_global（继承全局模板）。
+        if (isFullRangeDeletion) {
+            const guideBefore = peekChatSheetGuideContainer_ACU(chat);
+            const scopeBefore = peekChatScopedConfigContainer_ACU(chat);
+            setChatSheetGuideContainer_ACU(chat, null);
+            setChatScopedConfigContainer_ACU(chat, null);
+            if (guideBefore !== null || scopeBefore !== null) {
+                deletedCount++;
+            }
         }
         if (deletedCount > 0) {
             await saveChatToHost_ACU();
