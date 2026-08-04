@@ -283,7 +283,7 @@ function hasV2CompactionCheckpointAtIndex_ACU(chat: any[], isolationKey: string,
     if (!Array.isArray(chat) || messageIndex < 0 || messageIndex >= chat.length) return false;
     const msg = chat[messageIndex];
     if (!msg || msg.is_user) return false;
-    const tagData = msg.TavernDB_ACU_IsolatedData?.[isolationKey];
+    const tagData = readIsolatedTagData_ACU(msg, isolationKey);
     return isV2TagData_ACU(tagData)
         && tagData.storageFrame.checkpoint?.kind === 'full'
         && tagData.storageFrame.checkpoint.reason === 'compaction';
@@ -415,7 +415,7 @@ function countAiFloorAtMessage_ACU(chat: any[], messageIndex: number): number {
 function downgradeV2FullCheckpointAtIndex_ACU(chat: any[], isolationKey: string, messageIndex: number): boolean {
     const msg = chat?.[messageIndex];
     if (!msg || msg.is_user) return false;
-    const tagData = msg.TavernDB_ACU_IsolatedData?.[isolationKey];
+    const tagData = readIsolatedTagData_ACU(msg, isolationKey);
     if (!isV2TagData_ACU(tagData)) return false;
 
     const frame = tagData.storageFrame;
@@ -473,7 +473,7 @@ function downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat: any[], anchorInd
         for (let i = anchorIndex + 1; i < chat.length; i += 1) {
             const msg = chat[i];
             if (!msg || msg.is_user) continue;
-            const tagData = msg.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(msg, isolationKey);
             if (!isV2TagData_ACU(tagData) || tagData.storageFrame.checkpoint?.kind !== 'full') continue;
             if (downgradeV2FullCheckpointAtIndex_ACU(chat, isolationKey, i)) downgradedCount += 1;
         }
@@ -490,7 +490,7 @@ function downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat: any
     for (const isolationKey of isolationKeys) {
         if (!hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, anchorIndex)) continue;
         for (let i = 0; i < anchorIndex; i += 1) {
-            const tagData = chat[i]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
             if (!isV2TagData_ACU(tagData)) continue;
             const checkpoint = tagData.storageFrame.checkpoint;
             const isTemplateFallbackRoot = checkpoint?.fallbackProvenance?.kind === 'manual_refill_template_root';
@@ -509,7 +509,7 @@ function collectV2FullCheckpointRefsForIsolation_ACU(chat: any[], isolationKey: 
     const refs: Array<{ messageIndex: number; checkpoint: any }> = [];
     if (!Array.isArray(chat)) return refs;
     for (let i = 0; i < chat.length; i += 1) {
-        const tagData = chat[i]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+        const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
         if (!isV2TagData_ACU(tagData)) continue;
         const checkpoint = tagData.storageFrame.checkpoint;
         if (checkpoint?.kind === 'full') refs.push({ messageIndex: i, checkpoint });
@@ -1217,7 +1217,7 @@ function isSheetRetainedInAnyFloor_ACU(
         if (!msg || msg.is_user) continue;
 
         // 新版 IsolatedData 路径
-        const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+        const tagData = readIsolatedTagData_ACU(msg, isolationKey);
         if (tagData?.independentData?.[sheetKey]) {
             return true;
         }
@@ -1952,7 +1952,7 @@ async function clearTableDataAtFloorsCore_ACU(targetMessageIndices: number[], ta
             ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
             : clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
         if (clearsSummaryOrOutline) {
-            const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(msg, isolationKey);
             if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
                 logDebug_ACU(`[清空楼层] 已删除消息索引 ${idx} 上的交火向量索引外置文件引用。`);
             }
@@ -2142,7 +2142,7 @@ function cloneMessageFieldValue_ACU<T>(value: T, seen = new WeakMap<object, any>
 }
 
 function getV2FrameForIsolation_ACU(msg: any, isolationKey: string): TableStorageFrameV2_ACU | null {
-    const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    const tagData = readIsolatedTagData_ACU(msg, isolationKey);
     return isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
 }
 
@@ -2551,7 +2551,7 @@ export async function replaceManualRefillSheetBaselineInRangeAtomic_ACU(
                 const removedBaseline = purgeSheetKeysFromMessageForIsolation_ACU(msg, options.isolationKey, options.targetSheetKeys);
                 const removedIncremental = purgeManualRefillIncrementalSheetKeysFromMessage_ACU(msg, options.isolationKey, options.targetSheetKeys);
                 if (clearsSummaryOrOutline) {
-                    const tagData = msg?.TavernDB_ACU_IsolatedData?.[options.isolationKey];
+                    const tagData = readIsolatedTagData_ACU(msg, options.isolationKey);
                     await deleteVectorIndexManifestFromTagData_ACU(tagData, { deleteExternal: false, onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest) });
                 }
                 if (removedBaseline || removedIncremental) clearedCount += 1;

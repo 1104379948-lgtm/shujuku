@@ -20,6 +20,7 @@ import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
 import { rebindSheetKeysThroughTableAliases_ACU, resolveHistoricalSheetKeyMigrations_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
 import { establishProvisionalBridge_ACU, finalizeProvisionalBridge_ACU, rollbackProvisionalBridge_ACU, recoverProvisionalBridgeSession_ACU, hasActiveProvisionalBridgeAnywhere_ACU } from './manual-catch-up-provisional-bridge';
+import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
@@ -701,7 +702,7 @@ function collectManualRefillRollbackMessageIndices_ACU(
     for (let i = 0; i < chat.length; i += 1) {
         const message = chat[i];
         if (!message || message.is_user) continue;
-        const tagData = message.TavernDB_ACU_IsolatedData?.[currentIsolationKey];
+        const tagData = readIsolatedTagData_ACU(message, currentIsolationKey);
         if (!isV2TagData_ACU(tagData)) continue;
         if (tagData.storageFrame.checkpoint?.kind === 'full') indices.add(i);
     }

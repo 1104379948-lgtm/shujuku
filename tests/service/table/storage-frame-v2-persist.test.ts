@@ -23,7 +23,16 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
 }));
 vi.mock('../../../src/data/repositories/chat-message-data-repo', async importOriginal => ({
   ...(await importOriginal<typeof import('../../../src/data/repositories/chat-message-data-repo')>()),
-  cloneIsolatedData_ACU: vi.fn((message: any) => JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData || {}))),
+  cloneIsolatedData_ACU: vi.fn((message: any) => {
+    // 对齐真实实现 parseIsolatedDataField 的 string/object 双形态语义：
+    // IsolatedData 为 JSON string 时先解析；object 时 JSON round-trip 深拷贝。
+    const raw = message?.TavernDB_ACU_IsolatedData;
+    if (typeof raw === 'string') {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    }
+    return JSON.parse(JSON.stringify(raw || {}));
+  }),
   writeMessageIdentity_ACU: vi.fn((message: any, isolationConfig: any) => {
     if (isolationConfig.enabled) {
       message.TavernDB_ACU_Identity = isolationConfig.code;
@@ -3090,7 +3099,10 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     ['缺少 createdAt 的 full checkpoint', { checkpoint: { kind: 'full', reason: 'init', data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } } }, false],
     ['缺少 reason 的无关 sheet checkpoint', { perSheetCheckpoints: { sheet_other: { kind: 'sheet_full', sheetKey: 'sheet_other', createdAt: 1, data: sheetB } } }, true],
     ['V2 marker 与 frame version 不一致', { version: 1, logEntries: [] }, false],
-    ['缺少 entry 必填字段', { logEntries: [{ operations: [{ kind: 'row_delete', sheetKey: 'sheet_other', rowId: '1' }] }] }, false],
+    // entry envelope 字段（seq/entryId/createdAt/source/revision）与"目标表是否存在过"无因果关系：
+    // 这里 operations 可遍历且唯一 operation 归属 sheet_other，足以证伪目标表 sheet_new 存在过。
+    // 用无关字段畸形去否定目标表判定会让一条坏 entry 永久污染同 isolationKey 下所有表的 evidence。
+    ['缺少 entry 必填字段但容器可遍历且 operation 归属无关表', { logEntries: [{ operations: [{ kind: 'row_delete', sheetKey: 'sheet_other', rowId: '1' }] }] }, true],
     ['空的无关 sheet_replace sheet', { logEntries: [makeEntry({ operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_other', sheet: {}, reason: 'system' }] })] }, true],
     ['空的无关 schema migration descriptor', { logEntries: [makeEntry({ operations: [{ kind: 'sheet_schema_migrate', sheetKey: 'sheet_other', contractVersion: 1, beforeSchemaDigest: 'before', targetSchemaDigest: 'after', beforeSchema: {}, targetSchema: {}, columnChanges: [], migrationPolicy: { destructiveChangeConfirmed: false } }] })] }, true],
     ['畸形全局 sql_sheet_batch', { logEntries: [makeEntry({ operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_other', statements: [123] }] })] }, false],
@@ -3939,5 +3951,312 @@ describe('operation 契约：manual_refill reason 与共享 validator 对齐', (
 
     expect(result).toMatchObject({ saved: true });
     expect(mocks.saveChat).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// [阶段0-2 红测试] 证据缺口闭合前的基线
+// A-1 全局 sql_batch 污染、A-2 无关 envelope 字段畸形污染、B-1 checkpoint
+// 在旧楼层+最新 AI 楼层无 tagData、B-3 IsolatedData 为 string 时 classify
+// 与 2772 结论相反。修复前必须稳定红灯；断言零副作用。
+// ═══════════════════════════════════════════════════════════════════════════
+describe('阶段0红测试：introduction history evidence 与模板提交 frame 作用域', () => {
+  const targetKey = 'sheet_zhong_yao_jue_se_biao';
+  const isolationKey = '';
+  let persistTableMutationLogV2_ACU: typeof import('../../../src/service/table/storage-frame-v2-persist')['persistTableMutationLogV2_ACU'];
+  let commitCurrentFloorTemplateChanges_ACU: typeof import('../../../src/service/table/storage-frame-v2-persist')['commitCurrentFloorTemplateChanges_ACU'];
+
+  beforeAll(async () => {
+    const mod = await import('../../../src/service/table/storage-frame-v2-persist');
+    persistTableMutationLogV2_ACU = mod.persistTableMutationLogV2_ACU;
+    commitCurrentFloorTemplateChanges_ACU = mod.commitCurrentFloorTemplateChanges_ACU;
+  });
+
+  beforeEach(() => {
+    mocks.chat.length = 0;
+    mocks.saveChat.mockReset().mockResolvedValue(undefined);
+    mocks.saveChatStrict.mockReset().mockResolvedValue(undefined);
+    mocks.loadReplayState.mockReset();
+    mocks.loadReplayDetailed.mockReset();
+    mocks.settings.dataIsolationEnabled = false;
+    mocks.settings.dataIsolationCode = '';
+    mocks.setGuide.mockReset().mockImplementation(() => true);
+    mocks.runCommit.mockReset().mockImplementation(async (task: () => any) => task());
+    mocks.runTransaction.mockReset().mockImplementation(async (_options: any, task: any) => task({
+      baseRevision: 'runtime-v1:test',
+      assertFresh: vi.fn(),
+      runCommit: mocks.runCommit,
+    }));
+    mocks.scopeContainer = { version: 1, template: { '': { old: true } } };
+    mocks.guideContainer = { version: 1, tags: { '': { data: { sheet_old: {} } } } };
+  });
+
+  function makeTargetSheet(content: unknown[][] = [['row_id', 'value']]): any {
+    return {
+      uid: 'sheet_zhong_yao_jue_se_biao',
+      name: '重要角色表',
+      sourceData: {},
+      content,
+      updateConfig: {},
+      exportConfig: {},
+      orderNo: 1,
+    };
+  }
+
+  function makeFrameWithGlobalSqlBatch(operation: any, entryOverrides: Record<string, any> = {}): any {
+    // A-1：历史某条 entry 含一条合法全局 sql_batch（无 sheetKey），
+    // 目标表仅以 sql_sheet_batch 出现于更晚楼层。
+    return seedFrame({
+      checkpoint: {
+        kind: 'full',
+        createdAt: 1,
+        reason: 'init',
+        data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+      },
+      logEntries: [
+        makeEntry({
+          seq: 1,
+          source: 'raw_sql_batch',
+          ...entryOverrides,
+          operations: [operation],
+        }),
+      ],
+      perSheetCheckpoints: {},
+    });
+  }
+
+  it('A-1：历史含合法全局 sql_batch（无 sheetKey）不污染目标表 evidence，补锚成功', async () => {
+    // 修复目标（阶段3）：scopedHistoryArtifactEvidence_ACU 对无 sheetKey 的
+    // 全局 sql_batch 不应立即判 indeterminate；扫描继续，目标表无历史证据时
+    // 应得 absent → 补锚走 sheet_introduction → saved: true。
+    // 修复前（现状）：分支3 直接 indeterminate → 拒写 → 本测试红灯。
+    const targetSheet = makeTargetSheet([['row_id', 'value'], ['1', '历史数据']]);
+    const message = makeFrameWithGlobalSqlBatch({
+      kind: 'sql_batch',
+      statements: ["INSERT INTO unrelated_table (row_id, value) VALUES (1, 'global')"],
+      reason: 'raw_sql_batch',
+    });
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB, [targetKey]: targetSheet } as any,
+      operations: [{ kind: 'row_upsert', sheetKey: targetKey, rowId: '1', cells: ['1', 'x'] }] as any,
+      candidateChangedSheetKeys: [targetKey],
+      filledSheetKeys: [targetKey],
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(result.saved).toBe(true);
+    // 补锚成功。timeline kind 取 sheet_reveal：evidence 为 may_exist（历史只有
+    // 归属未知的全局 sql_batch），按"可能存在过"标注，不宣称该表是全新表。
+    // 两个 kind 在 replay 中数据应用与可见性判定完全等价
+    // （storage-frame-v2-replay.ts:837-843 与 209），此处仅为生命周期标注。
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.perSheetCheckpoints[targetKey]).toMatchObject({
+      kind: 'sheet_full',
+      sheetKey: targetKey,
+      timeline: { kind: 'sheet_reveal' },
+    });
+    expect(mocks.saveChat).toHaveBeenCalled();
+  });
+
+  it('A-2：无关 envelope 字段畸形（source 白名单外）不污染目标表 evidence，补锚成功', async () => {
+    // 修复目标（阶段3）：logEntryIsValidForIntroductionHistory_ACU 降级为
+    // 容器可遍历性校验，source 白名单移出判定；entry 可遍历且 operation
+    // 触及目标表 → present → 补锚走 sheet_reveal → saved: true。
+    // 修复前（现状）：source 白名单外 → 整条 entry indeterminate → 红灯。
+    const targetSheet = makeTargetSheet([['row_id', 'value'], ['1', '历史数据']]);
+    const message = makeFrameWithGlobalSqlBatch(
+      { kind: 'row_upsert', sheetKey: targetKey, rowId: '1', cells: ['1', 'x'] },
+      { source: 'unknown_source_contract' },
+    );
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB, [targetKey]: targetSheet } as any,
+      operations: [{ kind: 'row_upsert', sheetKey: targetKey, rowId: '1', cells: ['1', 'x'] }] as any,
+      candidateChangedSheetKeys: [targetKey],
+      filledSheetKeys: [targetKey],
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+
+    expect(result.saved).toBe(true);
+    // operation 触及目标表 → present → timeline 应为 sheet_reveal（历史曾存在）。
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.perSheetCheckpoints[targetKey]).toMatchObject({
+      kind: 'sheet_full',
+      sheetKey: targetKey,
+      timeline: { kind: 'sheet_reveal' },
+    });
+    expect(mocks.saveChat).toHaveBeenCalled();
+  });
+
+  it('B-1：checkpoint 在旧楼层、最新 AI 楼层无 tagData 时模板提交初始化空 frame 并成功', async () => {
+    // 修复目标（阶段2）：目标楼层缺合法 V2 frame 时按 getOrInitV2Frame_ACU
+    // 语义初始化空 frame（version:2, logEntries:[]），不再抛"请先完成既有迁移"。
+    // 修复前（现状）：2772 守卫抛错 → 本测试红灯。
+    const checkpointMessage = seedFrame({ logEntries: [] });
+    const newAiMessage = { is_user: false, content: '新的 AI 回复' } as any;
+    mocks.chat.splice(0, mocks.chat.length, checkpointMessage, newAiMessage);
+
+    mocks.loadReplayState.mockResolvedValue({
+      mate: { type: 'acu' },
+      sheet_a: sheetA,
+      sheet_b: sheetB,
+    });
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey,
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    // 新楼层被初始化出合法 V2 frame 并完成模板提交。
+    const newFrame = newAiMessage.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(newFrame.version).toBe(2);
+    expect(Array.isArray(newFrame.logEntries)).toBe(true);
+    expect(mocks.saveChatStrict).toHaveBeenCalled();
+  });
+
+  it('B-3：IsolatedData 为 string 时 classify 与 2772 结论一致，模板提交成功', async () => {
+    // 修复目标（阶段1）：2772 改用 readIsolatedTagData_ACU 统一读取 string/object，
+    // 与 classify 结论一致 → 模板提交成功。
+    // 修复前（现状）：2772 裸访问 string 形态拿不到 tagData → 抛错 → 红灯。
+    const checkpointMessage = seedFrame({ logEntries: [] });
+    // 把 IsolatedData 序列化为 string（宿主可能这么存储）。
+    checkpointMessage.TavernDB_ACU_IsolatedData = JSON.stringify(checkpointMessage.TavernDB_ACU_IsolatedData);
+    mocks.chat.splice(0, mocks.chat.length, checkpointMessage);
+    mocks.loadReplayState.mockResolvedValue({
+      mate: { type: 'acu' },
+      sheet_a: sheetA,
+      sheet_b: sheetB,
+    });
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey,
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    expect(mocks.saveChatStrict).toHaveBeenCalled();
+  });
+
+  it('阶段2负向：目标楼层有 V2 marker 但 frame 畸形时仍拒绝初始化并零副作用', async () => {
+    // 有 V2 历史 marker（hasV2TableHistoryEvidence_ACU=true）却非合法 V2：
+    // 说明是损坏的存储痕迹，绝不能当作缺 frame 静默初始化覆盖。
+    // 构造：tagData._acu_storage_version=2（marker）但 storageFrame 非法（logEntries 非数组）。
+    // 前置 classify 会先拦截"全 chat 范围内唯一畸形 marker"为 orphan_v2_artifacts；
+    // 要测到 2798 守卫，需构造"旧楼层有合法 checkpoint（existing_full_checkpoint）+
+    // 最新楼层是畸形 marker"的组合，绕过前置拦截。
+    const checkpointMessage = seedFrame({ logEntries: [] });
+    const malformedMessage = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: { version: 2, logEntries: 'not-an-array' },
+        },
+      },
+    } as any;
+    mocks.chat.splice(0, mocks.chat.length, checkpointMessage, malformedMessage);
+    const beforeCheckpointMessage = JSON.parse(JSON.stringify(checkpointMessage));
+    mocks.loadReplayState.mockResolvedValue({
+      mate: { type: 'acu' },
+      sheet_a: sheetA,
+      sheet_b: sheetB,
+    });
+    mocks.loadReplayDetailed.mockResolvedValue({
+      baseKind: 'full_checkpoint',
+      data: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+    });
+    const beforeMessage = JSON.parse(JSON.stringify(malformedMessage));
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('损坏的 V2 storage frame') });
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(malformedMessage).toEqual(beforeMessage);
+    expect(checkpointMessage).toEqual(beforeCheckpointMessage);
+  });
+
+  it('阶段2：B-1 初始化空 frame 后 activeReplay 输入与初始化前完全一致', async () => {
+    const checkpointMessage = seedFrame({ logEntries: [] });
+    const newAiMessage = { is_user: false, content: '新的 AI 回复' } as any;
+    mocks.chat.splice(0, mocks.chat.length, checkpointMessage, newAiMessage);
+
+    const replayData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB };
+    mocks.loadReplayState.mockResolvedValue(replayData);
+    mocks.loadReplayDetailed.mockResolvedValue({ baseKind: 'full_checkpoint', data: replayData });
+
+    const beforeReplayCalls = mocks.loadReplayDetailed.mock.calls.length;
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey,
+      sheetChanges: [{
+        kind: 'operations',
+        sheetKey: 'sheet_a',
+        targetSheetData: sheetA,
+        operations: [{ kind: 'meta_update', sheetKey: 'sheet_a', meta: { name: 'A' } }],
+      }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' } },
+      templateSource: { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB },
+      syncTemplateScope: true,
+      createdAt: 30,
+    });
+
+    expect(result.saved).toBe(true);
+    const replayCall = mocks.loadReplayDetailed.mock.calls[beforeReplayCalls];
+    expect(replayCall[0]).toEqual([checkpointMessage, newAiMessage]);
+    expect(replayCall[1]).toBe(isolationKey);
+    expect(replayCall[2]).toMatchObject({ maxMessageIndex: 1 });
   });
 });
