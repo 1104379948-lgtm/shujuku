@@ -41474,13 +41474,13 @@ $CONTENT
      */
     function hasAnyV2Checkpoint_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
         return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
-            const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
             return isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full';
         });
     }
     function hasAnyV2Frame_ACU(chat, isolationKey, maxMessageIndex = chat.length - 1) {
         return chat.slice(0, Math.max(0, maxMessageIndex + 1)).some(message => {
-            const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
             return isV2TagData_ACU(tagData);
         });
     }
@@ -41597,7 +41597,7 @@ $CONTENT
             return null;
         let headRevision = null;
         for (const message of chat) {
-            const tagData = message?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
             if (isV2TagData_ACU(tagData)) {
                 headRevision = tagData.storageFrame.headRevision ?? headRevision;
             }
@@ -41608,7 +41608,7 @@ $CONTENT
         if (!Array.isArray(chat) || chat.length === 0)
             return null;
         for (let i = chat.length - 1; i >= 0; i -= 1) {
-            const tagData = chat[i]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
             if (isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full') {
                 return { message: chat[i], index: i, checkpoint: tagData.storageFrame.checkpoint };
             }
@@ -41620,7 +41620,7 @@ $CONTENT
         const latestCheckpointIndex = latestCheckpoint?.index ?? -1;
         const entries = [];
         for (let i = Math.max(0, latestCheckpointIndex); i < chat.length; i += 1) {
-            const tagData = chat[i]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
             if (isV2TagData_ACU(tagData)) {
                 entries.push(...(tagData.storageFrame.logEntries || []));
             }
@@ -41853,9 +41853,14 @@ $CONTENT
     function isFiniteNonNegativeInteger_ACU(value) {
         return Number.isInteger(value) && value >= 0;
     }
-    const MUTATION_SOURCES_FOR_INTRODUCTION_HISTORY_ACU = new Set([
-        'auto_fill', 'manual_fill', 'group_fill', 'manual_crud', 'raw_sql_mutation', 'raw_sql_batch', 'import', 'merge_summary', 'template_assistant', 'system',
-    ]);
+    /**
+     * 结构性全局 replay operation：按类型定义就没有 sheetKey
+     * （TableSqlBatchOperationV2_ACU / TableEditDslOperationV2_ACU）。
+     *
+     * 它们对"目标表是否存在过"既不能证明也不能证伪，属于归属未知，
+     * 必须与"scoped kind 缺 sheetKey"（真结构畸形）区分开。
+     */
+    const HISTORY_GLOBAL_ARTIFACT_KINDS_ACU = new Set(['sql_batch', 'table_edit_dsl']);
     function isStringArray_ACU(value) {
         return Array.isArray(value) && value.every(item => typeof item === 'string');
     }
@@ -41966,18 +41971,14 @@ $CONTENT
             && typeof operation.migrationPolicy.lossyConversionConfirmed === 'boolean';
     }
     function logEntryIsValidForIntroductionHistory_ACU(value) {
+        // 只校验容器可遍历性。这个判定回答的问题是"能否从这条 entry 读出目标表证据"，
+        // 而 seq / entryId / createdAt / source / aiFloor / revision 等 envelope 字段
+        // 与"目标表是否存在过"无关：用无关字段的畸形去否定目标表的存在性判断，会让
+        // 一条坏 entry 永久污染该 isolationKey 下所有表的 evidence（现场 reason 只是
+        // 换个字符串）。envelope 字段改由诊断日志记录，不参与 fail-closed。
         return isObjectRecord_ACU$1(value)
-            && isFiniteNonNegativeInteger_ACU(value.seq)
-            && typeof value.entryId === 'string'
-            && isFiniteNonNegativeNumber_ACU(value.createdAt)
-            && typeof value.source === 'string' && MUTATION_SOURCES_FOR_INTRODUCTION_HISTORY_ACU.has(value.source)
-            && isFiniteNonNegativeInteger_ACU(value.targetMessageIndex)
-            && isFiniteNonNegativeInteger_ACU(value.aiFloor)
-            && eventIsValidForIntroductionHistory_ACU(value)
             && Array.isArray(value.operations)
-            && (value.baseRevision === undefined || value.baseRevision === null || typeof value.baseRevision === 'string')
-            && (value.parentRevision === undefined || value.parentRevision === null || typeof value.parentRevision === 'string')
-            && (value.commitRevision === undefined || typeof value.commitRevision === 'string');
+            && (value.patches === undefined || Array.isArray(value.patches));
     }
     function checkpointIsValidForIntroductionHistory_ACU(value) {
         return isObjectRecord_ACU$1(value)
@@ -42075,8 +42076,27 @@ $CONTENT
         const absent = () => ({ status: 'absent', sheetKey });
         const present = (messageIndex, artifactKind) => ({ status: 'present', sheetKey, messageIndex, artifactKind });
         const indeterminate = (messageIndex, artifactKind, reason) => ({ status: 'indeterminate', sheetKey, messageIndex, artifactKind, reason });
+        // 归属未知的全局 artifact 不再让扫描立即失败：记录首次出现位置后继续向后扫描，
+        // 因为更晚的楼层仍可能给出确定结论（present / absent）。
+        let firstUnattributableGlobal = null;
+        const noteUnattributableGlobal = (messageIndex, artifactKind) => {
+            if (firstUnattributableGlobal === null)
+                firstUnattributableGlobal = { messageIndex, artifactKind };
+        };
         for (let messageIndex = 0; messageIndex <= maxMessageIndex; messageIndex += 1) {
-            const tagData = chat[messageIndex]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const rawIsolatedData = chat[messageIndex]?.TavernDB_ACU_IsolatedData;
+            const isolatedDataFieldType = rawIsolatedData === undefined || rawIsolatedData === null
+                ? 'absent'
+                : typeof rawIsolatedData === 'string'
+                    ? 'string'
+                    : isObjectRecord_ACU$1(rawIsolatedData)
+                        ? 'object'
+                        : 'invalid';
+            logDebug_ACU(`[V2 Persist] introduction_history_evidence_field_type: messageIndex=${messageIndex},isolatedDataFieldType=${isolatedDataFieldType}`);
+            if (isolatedDataFieldType !== 'object') {
+                logWarn_ACU(`[V2 Persist] introduction_history_evidence_field_type_unusual: messageIndex=${messageIndex}, isolatedDataFieldType=${isolatedDataFieldType}`);
+            }
+            const tagData = readIsolatedTagData_ACU(chat[messageIndex], isolationKey);
             if (!hasV2HistoryMarker_ACU(tagData))
                 continue;
             const frame = tagData.storageFrame;
@@ -42100,47 +42120,92 @@ $CONTENT
             }
             for (const entry of frame.logEntries) {
                 if (!logEntryIsValidForIntroductionHistory_ACU(entry)) {
+                    logWarn_ACU(`[V2 Persist] introduction_history_entry_invalid: messageIndex=${messageIndex}, entrySeq=${String(entry?.seq)}`);
                     return indeterminate(messageIndex, 'operation', 'mutation log entry 无法验证');
                 }
-                for (const operation of entry.operations) {
+                for (const [operationIndex, operation] of entry.operations.entries()) {
                     const operationEvidence = scopedHistoryArtifactEvidence_ACU(operation, sheetKey, operationContainsOrCannotDisproveSheet_ACU);
                     if (operationEvidence === 'present')
                         return present(messageIndex, 'operation');
-                    if (operationEvidence === 'indeterminate')
+                    if (operationEvidence === 'unattributable_global') {
+                        noteUnattributableGlobal(messageIndex, 'operation');
+                        continue;
+                    }
+                    if (operationEvidence === 'indeterminate') {
+                        logWarn_ACU(`[V2 Persist] introduction_history_operation_indeterminate: messageIndex=${messageIndex}, entrySeq=${String(entry.seq)}, operationIndex=${operationIndex}`);
                         return indeterminate(messageIndex, 'operation', '目标相关 operation 无法验证');
+                    }
                 }
                 if (entry.patches === undefined)
                     continue;
                 if (!Array.isArray(entry.patches))
                     return indeterminate(messageIndex, 'patch', 'patch 列表无法解析');
-                for (const patch of entry.patches) {
+                for (const [patchIndex, patch] of entry.patches.entries()) {
                     const patchEvidence = scopedHistoryArtifactEvidence_ACU(patch, sheetKey, patchContainsOrCannotDisproveSheet_ACU);
                     if (patchEvidence === 'present')
                         return present(messageIndex, 'patch');
-                    if (patchEvidence === 'indeterminate')
+                    if (patchEvidence === 'unattributable_global') {
+                        noteUnattributableGlobal(messageIndex, 'patch');
+                        continue;
+                    }
+                    if (patchEvidence === 'indeterminate') {
+                        logWarn_ACU(`[V2 Persist] introduction_history_patch_indeterminate: messageIndex=${messageIndex}, entrySeq=${String(entry.seq)}, patchIndex=${patchIndex}`);
                         return indeterminate(messageIndex, 'patch', '目标相关 patch 无法验证');
+                    }
                 }
             }
+        }
+        if (firstUnattributableGlobal !== null) {
+            const note = firstUnattributableGlobal;
+            logDebug_ACU(`[V2 Persist] introduction_history_may_exist: sheetKey=${sheetKey}, messageIndex=${note.messageIndex}, artifact=${note.artifactKind || 'unknown'}。`);
+            return {
+                status: 'may_exist',
+                sheetKey,
+                messageIndex: note.messageIndex,
+                artifactKind: note.artifactKind,
+                reason: '仅存在归属未知的全局 artifact，无法证明或证伪目标表存在',
+            };
         }
         return absent();
     }
     function scopedHistoryArtifactEvidence_ACU(artifact, sheetKey, containsOrCannotDisprove) {
-        if (!isObjectRecord_ACU$1(artifact))
+        const indeterminateWithDiagnostics = (branch, failedField) => {
+            const artifactKind = isObjectRecord_ACU$1(artifact) ? String(artifact.kind) : typeof artifact;
+            const hasSheetKey = isObjectRecord_ACU$1(artifact) && typeof artifact.sheetKey === 'string';
+            logWarn_ACU(`[V2 Persist] scoped_history_artifact_indeterminate: branch=${branch}, artifactKind=${artifactKind}, hasSheetKey=${hasSheetKey}, sheetKeyMatchesTarget=${hasSheetKey && artifact.sheetKey === sheetKey}, failedField=${failedField}`);
             return 'indeterminate';
+        };
+        if (!isObjectRecord_ACU$1(artifact))
+            return indeterminateWithDiagnostics(1, 'artifact');
         if (artifact.kind === 'data_replace') {
             if (!isObjectRecord_ACU$1(artifact.data))
-                return 'indeterminate';
+                return indeterminateWithDiagnostics(2, 'data');
             return recordContainsSheet_ACU(artifact.data, sheetKey) ? 'present' : 'absent';
         }
+        // sql_batch / table_edit_dsl 是全局 replay operation，按类型定义就没有 sheetKey
+        // （见 storage-frame-v2-types.ts）。它们既不能证明也不能证伪目标表存在过，
+        // 属于"归属未知"而不是"结构畸形"。原实现把两者混进同一个 indeterminate，
+        // 导致任何一条合法全局 operation 让该 isolationKey 下所有表的 evidence 永久失效。
+        //
+        // 但只有"符合类型定义（不带 sheetKey）"的全局 artifact 才算归属未知。
+        // 全局 kind 却携带 sheetKey 属于伪造归属 / 契约违规：它声称自己定位到某个表，
+        // 而该 kind 的 replay 语义是全局的，两者矛盾且无法判定真实影响面，必须 fail-closed。
+        if (HISTORY_GLOBAL_ARTIFACT_KINDS_ACU.has(artifact.kind)) {
+            if ('sheetKey' in artifact) {
+                return indeterminateWithDiagnostics(7, 'global_kind_with_forged_sheetKey');
+            }
+            logDebug_ACU(`[V2 Persist] scoped_history_artifact_unattributable_global: artifactKind=${String(artifact.kind)}, targetSheetKey=${sheetKey}`);
+            return 'unattributable_global';
+        }
         if (typeof artifact.sheetKey !== 'string')
-            return 'indeterminate';
+            return indeterminateWithDiagnostics(3, 'sheetKey');
         if (artifact.sheetKey !== sheetKey) {
             // 这些 mutation/patch 是严格按 sheetKey 定位的；另一个 sheet 的局部损坏
-            // 不能伪造目标表曾存在的证据。全局或未知 kind 仍保持 fail-closed。
+            // 不能伪造目标表曾存在的证据。未知 kind 仍保持 fail-closed。
             if (['sheet_replace', 'sheet_schema_migrate', 'row_upsert', 'row_delete', 'meta_update'].includes(artifact.kind)) {
                 return 'absent';
             }
-            return 'indeterminate';
+            return indeterminateWithDiagnostics(4, 'kind_unknown_or_unscoped');
         }
         if (!containsOrCannotDisprove(artifact, sheetKey))
             return 'absent';
@@ -42149,22 +42214,21 @@ $CONTENT
         // 旧版本手动重填等路径可能写出非当前白名单的 reason（如 manual_refill），
         // 这些值不影响表是否存在过；只有结构畸形才保持 fail-closed。
         if (artifact.kind === 'sql_sheet_batch') {
-            return typeof artifact.sheetKey === 'string'
+            const structureIsValid = typeof artifact.sheetKey === 'string'
                 && Array.isArray(artifact.statements)
                 && artifact.statements.every(statement => typeof statement === 'string')
                 && (artifact.params === undefined
                     || (Array.isArray(artifact.params)
                         && artifact.params.every(params => Array.isArray(params)
                             && params.every(value => value === null || typeof value === 'string' || typeof value === 'number'))))
-                && (artifact.tableName === undefined || typeof artifact.tableName === 'string')
-                ? 'present'
-                : 'indeterminate';
+                && (artifact.tableName === undefined || typeof artifact.tableName === 'string');
+            return structureIsValid ? 'present' : indeterminateWithDiagnostics(5, 'sql_sheet_batch_structure');
         }
         // 其余归属明确的 kind：用哨兵区分"目标表证据确凿"与"字段无法验证"。
         // 哨兵只对会随 sheetKey 变化的字段敏感；reason 等标注字段不得让合法
         // 本表 operation 退化为 indeterminate（否则历史手动填表会被误判为不可验证）。
         return containsOrCannotDisprove(artifact, '__acu_history_evidence_sentinel__')
-            ? 'indeterminate'
+            ? indeterminateWithDiagnostics(6, 'sentinel_unfalsifiable')
             : 'present';
     }
     async function resolveRevealSource_ACU(chat, isolationKey, maxMessageIndex, sheetKey, preferredHideCheckpoint, currentSheetCheckpoint) {
@@ -42186,7 +42250,7 @@ $CONTENT
         }
         let replayFailureCount = 0;
         for (let boundary = maxMessageIndex; boundary >= 0; boundary -= 1) {
-            const tagData = chat[boundary]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(chat[boundary], isolationKey);
             if (!hasV2HistoryMarker_ACU(tagData))
                 continue;
             let replayed = null;
@@ -42574,7 +42638,13 @@ $CONTENT
                                 error: `V2 sheet introduction history is indeterminate: sheetKey=${sheetKey}, messageIndex=${historyEvidence.messageIndex ?? 'unknown'}, reason=${historyEvidence.reason || 'unknown'}.`,
                             };
                         }
-                        const timelineKind = historyEvidence.status === 'present'
+                        // 本路径两条分支写的是同一个 header-only 锚点，replay 对
+                        // introduction / rebase / reveal 的数据应用完全一致
+                        // （storage-frame-v2-replay.ts:837-843），可见性判定也只区分 hide
+                        // （同文件 209 行）。因此这里的 kind 只是生命周期标注：
+                        // may_exist（仅有归属未知的全局 artifact）按"可能存在过"取 reveal，
+                        // 既不阻断写入，也不宣称该表是全新表。
+                        const timelineKind = historyEvidence.status === 'present' || historyEvidence.status === 'may_exist'
                             ? 'sheet_reveal'
                             : 'sheet_introduction';
                         // timeline 决定回放时该表在本楼何时进入 state：必须早于本次追加的增量。
@@ -43099,7 +43169,7 @@ $CONTENT
                     }
                     normalizedSheets.set(sheetKey, sheetData);
                 }
-                const targetTagData = target.message?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                const targetTagData = readIsolatedTagData_ACU(target.message, isolationKey);
                 if (!isV2TagData_ACU(targetTagData)) {
                     return { status: 'skipped_no_v2_target' };
                 }
@@ -43621,9 +43691,15 @@ $CONTENT
                         throw error;
                     }
                 }
-                const targetTagData = target.message?.TavernDB_ACU_IsolatedData?.[isolationKey];
-                if (!isV2TagData_ACU(targetTagData)) {
-                    throw new Error('当前楼层模板提交要求目标 AI 楼层已存在合法 V2 storage frame；请先完成既有迁移。');
+                // 目标楼层缺合法 V2 frame 时按 getOrInitV2Frame_ACU 语义初始化空 frame。
+                // 但必须区分"缺 frame"（可初始化）与"frame 畸形"（必须先修复）：
+                // 有 V2 历史 marker（hasV2TableHistoryEvidence_ACU=true）却非合法 V2，
+                // 说明是损坏的存储痕迹，绝不能当作缺 frame 静默初始化覆盖。
+                const targetTagData = readIsolatedTagData_ACU(target.message, isolationKey);
+                if (targetTagData !== null
+                    && !isV2TagData_ACU(targetTagData)
+                    && hasV2TableHistoryEvidence_ACU(targetTagData)) {
+                    throw new Error('当前楼层模板提交检测到目标 AI 楼层存在损坏的 V2 storage frame；请先完成修复迁移。');
                 }
                 const messageSnapshots = snapshotTemplateDeleteMessages_ACU(chat, deletedSheetKeys.length > 0);
                 const previousScopeContainer = cloneOptionalJson_ACU(peekChatScopedConfigContainer_ACU(chat));
@@ -43678,8 +43754,10 @@ $CONTENT
                             revealSheets.set(change.sheetKey, targetSheetData);
                     }
                     const isolatedData = cloneIsolatedData_ACU(target.message);
-                    const frame = isolatedData[isolationKey]?.storageFrame;
-                    if (!isV2TagData_ACU(isolatedData[isolationKey]) || !frame) {
+                    // 缺 frame 时由 getOrInitV2Frame_ACU 初始化空 frame（version:2, logEntries:[]），
+                    // 保留既有 summaryVectorIndexState / summaryVectorIndexManifest。
+                    const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
+                    if (!isV2TagData_ACU(isolatedData[isolationKey])) {
                         throw new Error('目标 V2 storage frame 在模板提交准备期间发生变化。');
                     }
                     const activeReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { maxMessageIndex: target.index, updateRuntimeState: false });
@@ -43759,8 +43837,12 @@ $CONTENT
                             throw new Error(`V2 history_indeterminate: sheetKey=${change.sheetKey}, messageIndex=${historyEvidence.messageIndex ?? 'unknown'}, `
                                 + `artifact=${historyEvidence.artifactKind || 'unknown'}, reason=${historyEvidence.reason || 'unknown'}.`);
                         }
-                        if (historyEvidence.status === 'present') {
-                            // 历史确实曾有该表（可恢复的隐藏表）；bounded replay 用于定位离开时的可信数据。
+                        if (historyEvidence.status === 'present' || historyEvidence.status === 'may_exist') {
+                            // present：历史确实曾有该表（可恢复的隐藏表）。
+                            // may_exist：只有归属未知的全局 artifact（sql_batch / table_edit_dsl），
+                            //   无法证明也无法证伪。此时不能直接当作全新表引入（可能覆盖真实历史数据），
+                            //   必须先尝试定位可信恢复来源；只有 bounded replay 在全部历史边界都找不到
+                            //   该表可见数据时，才可安全回落 introduction。
                             // 优先使用生命周期派生的最后 hide checkpoint（含完整退出数据），仅在缺少可信
                             // hide checkpoint 时才退回逐边界 bounded replay（兼容旧历史）。
                             const preferredHideCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
@@ -43776,8 +43858,16 @@ $CONTENT
                                 logDebug_ACU(`[V2 Persist] reveal_source_indeterminate: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, historyMessageIndex=${historyEvidence.messageIndex ?? 'unknown'}, reason=${revealSource.reason}。`);
                                 throw new Error(`V2 reveal_source_indeterminate: sheetKey=${change.sheetKey}, reason=${revealSource.reason}。`);
                             }
-                            logDebug_ACU(`[V2 Persist] reveal_source_missing: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, historyMessageIndex=${historyEvidence.messageIndex ?? 'unknown'}。`);
-                            throw new Error(`V2 reveal_source_missing: sheetKey=${change.sheetKey} 有历史存在证据但无法定位可信恢复来源，已拒绝写入。`);
+                            // revealSource.status === 'not_found'
+                            if (historyEvidence.status === 'present') {
+                                // 有确定的历史存在证据却找不到恢复来源：状态不一致，保持 fail-closed。
+                                logDebug_ACU(`[V2 Persist] reveal_source_missing: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, historyMessageIndex=${historyEvidence.messageIndex ?? 'unknown'}。`);
+                                throw new Error(`V2 reveal_source_missing: sheetKey=${change.sheetKey} 有历史存在证据但无法定位可信恢复来源，已拒绝写入。`);
+                            }
+                            // may_exist + not_found：bounded replay 已扫过全部历史边界且该表从未可见，
+                            // 说明那条全局 artifact 并未真的建立过该表。此时按全新表 introduction 处理
+                            // 不会覆盖任何真实数据，落到下面的 introduction 分支。
+                            logDebug_ACU(`[V2 Persist] may_exist_falls_back_to_introduction: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, historyMessageIndex=${historyEvidence.messageIndex ?? 'unknown'}。`);
                         }
                         // 真正全新表：走 introduction。
                         const existingCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
@@ -70868,7 +70958,7 @@ $CONTENT
         const msg = chat[messageIndex];
         if (!msg || msg.is_user)
             return false;
-        const tagData = msg.TavernDB_ACU_IsolatedData?.[isolationKey];
+        const tagData = readIsolatedTagData_ACU(msg, isolationKey);
         return isV2TagData_ACU(tagData)
             && tagData.storageFrame.checkpoint?.kind === 'full'
             && tagData.storageFrame.checkpoint.reason === 'compaction';
@@ -70997,7 +71087,7 @@ $CONTENT
         const msg = chat?.[messageIndex];
         if (!msg || msg.is_user)
             return false;
-        const tagData = msg.TavernDB_ACU_IsolatedData?.[isolationKey];
+        const tagData = readIsolatedTagData_ACU(msg, isolationKey);
         if (!isV2TagData_ACU(tagData))
             return false;
         const frame = tagData.storageFrame;
@@ -71053,7 +71143,7 @@ $CONTENT
                 const msg = chat[i];
                 if (!msg || msg.is_user)
                     continue;
-                const tagData = msg.TavernDB_ACU_IsolatedData?.[isolationKey];
+                const tagData = readIsolatedTagData_ACU(msg, isolationKey);
                 if (!isV2TagData_ACU(tagData) || tagData.storageFrame.checkpoint?.kind !== 'full')
                     continue;
                 if (downgradeV2FullCheckpointAtIndex_ACU(chat, isolationKey, i))
@@ -71071,7 +71161,7 @@ $CONTENT
             if (!hasV2CompactionCheckpointAtIndex_ACU(chat, isolationKey, anchorIndex))
                 continue;
             for (let i = 0; i < anchorIndex; i += 1) {
-                const tagData = chat[i]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
                 if (!isV2TagData_ACU(tagData))
                     continue;
                 const checkpoint = tagData.storageFrame.checkpoint;
@@ -71092,7 +71182,7 @@ $CONTENT
         if (!Array.isArray(chat))
             return refs;
         for (let i = 0; i < chat.length; i += 1) {
-            const tagData = chat[i]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
             if (!isV2TagData_ACU(tagData))
                 continue;
             const checkpoint = tagData.storageFrame.checkpoint;
@@ -71726,7 +71816,7 @@ $CONTENT
             if (!msg || msg.is_user)
                 continue;
             // 新版 IsolatedData 路径
-            const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+            const tagData = readIsolatedTagData_ACU(msg, isolationKey);
             if (tagData?.independentData?.[sheetKey]) {
                 return true;
             }
@@ -72420,7 +72510,7 @@ $CONTENT
                 ? purgeTargetSheetKeysFromMessage_ACU(msg, targetSheetKeys)
                 : clearTableFieldsForIsolation_ACU(msg, isolationKey, isolationConfig);
             if (clearsSummaryOrOutline) {
-                const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+                const tagData = readIsolatedTagData_ACU(msg, isolationKey);
                 if (await deleteVectorIndexManifestFromTagData_ACU(tagData)) {
                     logDebug_ACU(`[清空楼层] 已删除消息索引 ${idx} 上的交火向量索引外置文件引用。`);
                 }
@@ -72601,7 +72691,7 @@ $CONTENT
         return clone;
     }
     function getV2FrameForIsolation_ACU(msg, isolationKey) {
-        const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
+        const tagData = readIsolatedTagData_ACU(msg, isolationKey);
         return isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
     }
     function resolveManualRefillReplayAnchor_ACU(chat, isolationKey, targetMessageIndices) {
@@ -72981,7 +73071,7 @@ $CONTENT
                     const removedBaseline = purgeSheetKeysFromMessageForIsolation_ACU(msg, options.isolationKey, options.targetSheetKeys);
                     const removedIncremental = purgeManualRefillIncrementalSheetKeysFromMessage_ACU(msg, options.isolationKey, options.targetSheetKeys);
                     if (clearsSummaryOrOutline) {
-                        const tagData = msg?.TavernDB_ACU_IsolatedData?.[options.isolationKey];
+                        const tagData = readIsolatedTagData_ACU(msg, options.isolationKey);
                         await deleteVectorIndexManifestFromTagData_ACU(tagData, { deleteExternal: false, onManifest: manifest => vectorManifestsToDeleteAfterCommit.push(manifest) });
                     }
                     if (removedBaseline || removedIncremental)
@@ -83890,7 +83980,7 @@ $CONTENT
             const message = chat[i];
             if (!message || message.is_user)
                 continue;
-            const tagData = message.TavernDB_ACU_IsolatedData?.[currentIsolationKey];
+            const tagData = readIsolatedTagData_ACU(message, currentIsolationKey);
             if (!isV2TagData_ACU(tagData))
                 continue;
             if (tagData.storageFrame.checkpoint?.kind === 'full')
