@@ -3160,6 +3160,68 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
   });
 
+  it('别表合法 sql_sheet_batch 归属明确时可证伪目标表，不阻碍 introduction', async () => {
+    // 阶段 1 修复：sql_sheet_batch 的 sheetKey 是完整影响面，别表合法写入
+    // 不得把同 isolationKey 下目标表的 evidence 永久变成 indeterminate。
+    const message = seedFrame({
+      logEntries: [makeEntry({ operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_other', statements: ['UPDATE other_table SET value = ?'], params: [['v']] }] })],
+    });
+    const introducedSheet = { ...sheetB, uid: 'introduced-after-other-batch', name: '新增表' };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: introducedSheet }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: '新增表' } },
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: true });
+    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toMatchObject({
+      timeline: { kind: 'sheet_introduction' },
+    });
+  });
+
+  it('本表合法 sql_sheet_batch 判定 present（表已存在），重复 introduction 被拒绝且零写入', async () => {
+    const message = seedFrame({
+      logEntries: [makeEntry({ operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_new', statements: ['INSERT INTO new_table (value) VALUES (?)'], params: [['v']] }] })],
+    });
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+    const introducedSheet = { ...sheetB, uid: 'introduced-with-own-batch', name: '新增表' };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: introducedSheet }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: '新增表' } },
+      createdAt: 30,
+    });
+
+    // present 语义 = 目标表在历史中存在：无可信恢复来源时 fail-closed（reveal_source_missing），
+    // 证明本表 sql_sheet_batch 被正确识别为 present，而不是被误判为 absent/indeterminate。
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('reveal_source_missing') });
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+  });
+
+  it('本表 sql_sheet_batch statements 非数组时保持 indeterminate（分支 5 fail-closed）', async () => {
+    const message = seedFrame({
+      logEntries: [makeEntry({ operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_new', statements: 'not-an-array' }] })],
+    });
+    const originalIsolatedData = message.TavernDB_ACU_IsolatedData;
+    const introducedSheet = { ...sheetB, uid: 'introduced-with-malformed-batch', name: '新增表' };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: introducedSheet }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: '新增表' } },
+      createdAt: 30,
+    });
+
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('history_indeterminate') });
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(originalIsolatedData);
+  });
+
+
   it.each([
     ['空 operations', [{ kind: 'operations', sheetKey: 'sheet_a', targetSheetData: sheetA, operations: [] }]],
     ['operation sheetKey 不一致', [{ kind: 'operations', sheetKey: 'sheet_a', targetSheetData: sheetA, operations: [{ kind: 'meta_update', sheetKey: 'sheet_b', meta: { name: 'A' } }] }]],

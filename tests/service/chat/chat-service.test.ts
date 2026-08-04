@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSaveChatToHostStrict, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockLoadTableStateFromFramesV2Detailed, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal, mockCleanupUnreachable } = vi.hoisted(() => ({
+const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSaveChatToHostStrict, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockLoadTableStateFromFramesV2Detailed, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal, mockCleanupUnreachable, mockDeriveSheetLifecycleFromFramesV2 } = vi.hoisted(() => ({
   mockSettings: {
     retainRecentLayers: 3,
     dataIsolationEnabled: false,
@@ -37,6 +37,7 @@ const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatTo
   mockLoadTableStateFromFramesV2: vi.fn(),
   mockLoadTableStateFromFramesV2Detailed: vi.fn(),
   mockCollectScheduleSummaryFromFramesV2: vi.fn(() => null),
+  mockDeriveSheetLifecycleFromFramesV2: vi.fn(() => ({ statusBySheetKey: {}, activeSheetKeys: [], hiddenSheetKeys: [], indeterminateSheetKeys: [], neverSeenSheetKeys: [] })),
   mockDeleteSummaryVectorIndexExternal: vi.fn(),
   mockCleanupUnreachable: vi.fn(),
 }));
@@ -92,6 +93,7 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
   loadTableStateFromFramesV2_ACU: mockLoadTableStateFromFramesV2,
   loadTableStateFromFramesV2Detailed_ACU: mockLoadTableStateFromFramesV2Detailed,
   collectScheduleSummaryFromFramesV2_ACU: mockCollectScheduleSummaryFromFramesV2,
+  deriveSheetLifecycleFromFramesV2_ACU: mockDeriveSheetLifecycleFromFramesV2,
 }));
 
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
@@ -158,6 +160,7 @@ beforeEach(() => {
     return { baseKind: 'full_checkpoint', data };
   });
   mockCollectScheduleSummaryFromFramesV2.mockReturnValue(null);
+  mockDeriveSheetLifecycleFromFramesV2.mockReturnValue({ statusBySheetKey: {}, activeSheetKeys: [], hiddenSheetKeys: [], indeterminateSheetKeys: [], neverSeenSheetKeys: [] });
   mockDeleteSummaryVectorIndexExternal.mockResolvedValue(undefined);
   mockCleanupUnreachable.mockResolvedValue({ deletedPaths: [], retainedPaths: [], failedDeletes: [] });
 });
@@ -1473,6 +1476,117 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(mockLogDebug).toHaveBeenCalledWith(expect.stringContaining('缺少 provenance'));
   });
 
+  it('有隐藏表时 compaction 将 hide checkpoint 迁移到边界 frame 的 perSheetCheckpoints（timeline=sheet_hide）', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const hiddenSheet = {
+      uid: 'sheet_hidden',
+      name: '历史隐藏表',
+      content: [['row_id', '值'], ['1', '隐藏前数据']],
+      sourceData: {},
+      updateConfig: {},
+      exportConfig: {},
+    };
+    mockDeriveSheetLifecycleFromFramesV2.mockReturnValue({
+      statusBySheetKey: {
+        sheet_hidden: { status: 'hidden', restoreSourceData: hiddenSheet },
+      },
+      activeSheetKeys: [],
+      hiddenSheetKeys: ['sheet_hidden'],
+      indeterminateSheetKeys: [],
+      neverSeenSheetKeys: [],
+    } as any);
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          storageFrame: {
+            version: 2,
+            checkpoint: index === 0
+              ? { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] } } }
+              : undefined,
+            logEntries: [],
+          },
+          _acu_storage_version: 2,
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    const boundaryFrame = chat[23].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(boundaryFrame.perSheetCheckpoints.sheet_hidden).toMatchObject({
+      kind: 'sheet_full',
+      reason: 'compaction',
+      sheetKey: 'sheet_hidden',
+      data: { name: '历史隐藏表', content: [['row_id', '值'], ['1', '隐藏前数据']] },
+      timeline: { kind: 'sheet_hide', activateAtMessageIndex: 23, afterSeq: 0 },
+    });
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+  });
+
+  it('无隐藏表时边界 frame 不含 perSheetCheckpoints 字段', async () => {
+    mockSettings.retainRecentLayers = 2;
+    // 默认 mockDeriveSheetLifecycleFromFramesV2 返回空 lifecycle（无隐藏表）。
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          storageFrame: {
+            version: 2,
+            checkpoint: index === 0
+              ? { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] } } }
+              : undefined,
+            logEntries: [],
+          },
+          _acu_storage_version: 2,
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    const boundaryFrame = chat[23].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(Object.prototype.hasOwnProperty.call(boundaryFrame, 'perSheetCheckpoints')).toBe(false);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+  });
+
+  it('隐藏表 restore 数据缺失时 compaction fail-closed 抛错，不静默丢数据', async () => {
+    mockSettings.retainRecentLayers = 2;
+    mockDeriveSheetLifecycleFromFramesV2.mockReturnValue({
+      statusBySheetKey: {
+        sheet_hidden: { status: 'hidden' },
+      },
+      activeSheetKeys: [],
+      hiddenSheetKeys: ['sheet_hidden'],
+      indeterminateSheetKeys: [],
+      neverSeenSheetKeys: [],
+    } as any);
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          storageFrame: {
+            version: 2,
+            checkpoint: index === 0
+              ? { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑']] } } }
+              : undefined,
+            logEntries: [],
+          },
+          _acu_storage_version: 2,
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+    expect(result).toMatchObject({ success: false, changed: false, error: expect.stringContaining('隐藏表 sheet_hidden 缺少可迁移的 hide checkpoint 数据') });
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
 
 
 
@@ -1496,7 +1610,7 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(chat[2].TavernDB_ACU_Data).toBeUndefined();
   });
 
-  it('全范围清空后将 header-only init 锚点前移到首个 AI 楼层，并在最新 AI 楼层保留空 V2 边界', async () => {
+  it('全范围清空后不保留任何 storageFrame：数据、V2 frame、guide/scope 容器全部清除', async () => {
     const initialSheet = {
       uid: 'sheet_0',
       name: '物品表',
@@ -1544,24 +1658,20 @@ describe('deleteLocalDataInChatCore_ACU', () => {
 
     const count = await deleteLocalDataInChatCore_ACU('all');
 
+
+    // 删光后回到「从未填表」状态：不再写回锚点 frame、不再保留空边界 frame。
     expect(count).toBe(2);
-    const anchorFrame = chat[1].TavernDB_ACU_IsolatedData[''].storageFrame;
-    expect(anchorFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'init' });
-    expect(anchorFrame.checkpoint.data.sheet_0.content).toEqual([['row_id', '物品名']]);
-    expect(anchorFrame.checkpoint.data.sheet_0.seedRows).toBeUndefined();
-    expect(anchorFrame.checkpoint.event).toEqual({ filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] });
-    expect(anchorFrame.perSheetCheckpoints).toBeUndefined();
-    expect(anchorFrame.logEntries).toEqual([]);
+    expect(chat[1].TavernDB_ACU_IsolatedData).toBeUndefined();
     expect(chat[2].TavernDB_ACU_IsolatedData).toBeUndefined();
-    expect(chat[3].TavernDB_ACU_IsolatedData[''].storageFrame).toEqual({ version: 2, logEntries: [] });
+    expect(chat[3].TavernDB_ACU_IsolatedData).toBeUndefined();
     expect(mockSaveChatToHost).toHaveBeenCalledOnce();
   });
 
-  it('Phase 0 实测：全范围清空后锚点保留旧 DDL 与 hiddenPhysicalColumns，且存储策略判定为 v2', async () => {
-    // 计划 2.1/2.2 的实测：collectInitialCheckpointSlotsForFullDeletion_ACU 的 sanitize
-    // 白名单含 sourceData，因此旧 DDL、旧 physical 列名、旧 hiddenPhysicalColumns 原样保留；
-    // 锚点重新包装 _acu_storage_version: 2，使 resolveTableStorageStrategy_ACU 返回 v2，
-    // 后续模板切换因此不会走 pristine 重新初始化，而进入热切换路径。
+
+  it('全范围清空后不残留旧 DDL/隐藏列：V2 frame 整体清除，会话回到 pristine', async () => {
+    // 阶段 4 语义：删光数据后必须回到「从未填表」状态。旧实现会保留 header-only
+    // init 锚点（含 sourceData 里的旧 DDL 与 hiddenPhysicalColumns），使存储策略仍判 v2，
+    // 导致后续切模板走继承路径并读取残留 guide，这正是「删光数据后切模板报错」的成因。
     const initialSheet = {
       uid: 'sheet_dCudvUnH',
       name: '全局数据表',
@@ -1596,14 +1706,11 @@ describe('deleteLocalDataInChatCore_ACU', () => {
 
     await deleteLocalDataInChatCore_ACU('all');
 
-    const anchorSheet = chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_dCudvUnH;
-    // 只留表头，行数据清零。
-    expect(anchorSheet.content).toEqual([['row_id', '主角当前所在地点']]);
-    // 白名单含 sourceData → 旧 DDL 与隐藏列原样保留。
-    expect(anchorSheet.sourceData.ddl).toContain('current_location');
-    expect(anchorSheet.sourceData.hiddenPhysicalColumns).toEqual(['legacy_col']);
-    // 锚点按 v2 重新包装 → 存储策略判定为 v2（不会回退 pristine 重新初始化）。
-    expect(resolveTableStorageStrategy_ACU(chat, '')!.mode).toBe('v2');
+    // 不再写回锚点 frame：旧 DDL 与隐藏列随数据一并清除。
+    expect(chat[1].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData).toBeUndefined();
+    // 存储策略不再因残留 V2 痕迹而判 v2。
+    expect(resolveTableStorageStrategy_ACU(chat, '')!.mode).toBe('empty');
   });
 
 

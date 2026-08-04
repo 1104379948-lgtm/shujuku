@@ -171,6 +171,13 @@ export interface CommitCurrentFloorTemplateScopeOnlyOptions_ACU {
   expectedChatIdentity?: string;
   expectedFirstMessage?: unknown;
   signal?: AbortSignal;
+  /**
+   * pristine 会话（无任何实质表格数据）专用：允许 baseline 与 candidate 的持久化投影不一致。
+   * 语义是「该会话尚无数据帧，模板结构只需落到聊天级配置层」，
+   * 因此不要求投影匹配，但仍然不写任何 storage frame。
+   * 调用方必须先用 resolveTemplateSwitchMode_ACU 确认为 pristine 才可传 true。
+   */
+  pristineOverride?: boolean;
 }
 
 function assertTemplateCommitChatContext_ACU(expectedChat: unknown[], options: { expectedChatIdentity?: string; expectedFirstMessage?: unknown; signal?: AbortSignal }): void {
@@ -1272,6 +1279,19 @@ function scopedHistoryArtifactEvidence_ACU(
   if (artifact.sheetKey !== sheetKey) {
     // 这些 mutation/patch 是严格按 sheetKey 定位的；另一个 sheet 的局部损坏
     // 不能伪造目标表曾存在的证据。未知 kind 仍保持 fail-closed。
+    // sql_sheet_batch 必须在此列：它是新填表写入的首选形态（见 storage-frame-v2-types.ts:230），
+    // sheetKey 为必填，且 buildSqlSheetBatchOperations_ACU 只在该 statement 只涉及单表时才产出
+    // （多表命中走 ambiguousStatements，见 sql-table-service.ts:773-778），
+    // 即 sheetKey 就是它的完整影响面。漏列会让任意一张表的历史填表写入，
+    // 把同 isolationKey 下其他表的 evidence 永久变成 indeterminate。
+    if (artifact.kind === 'sql_sheet_batch') {
+      // 别表 sql_sheet_batch 仍须结构合法才可证伪目标表：畸形结构（statements 非字符串数组等）
+      // 无法判定真实影响面，必须保持 fail-closed（与既有测试契约一致）。
+      const structureIsValid = Array.isArray(artifact.statements)
+        && artifact.statements.every(statement => typeof statement === 'string');
+      if (!structureIsValid) return indeterminateWithDiagnostics(4, 'kind_unknown_or_unscoped');
+      return 'absent';
+    }
     if (['sheet_replace', 'sheet_schema_migrate', 'row_upsert', 'row_delete', 'meta_update'].includes(artifact.kind)) {
       return 'absent';
     }
@@ -2437,9 +2457,11 @@ export async function commitCurrentFloorTemplateScopeOnly_ACU(
   if (!options.guideData || typeof options.guideData !== 'object' || Array.isArray(options.guideData)) {
     return { saved: false, error: 'scope-only 模板提交必须提供有效的 guideData。' };
   }
-  if (!options.baselineData || !options.candidateData
-    || !templatePersistentProjectionMatches_ACU(options.baselineData, options.candidateData)) {
-    return { saved: false, error: 'scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致。' };
+  if (options.pristineOverride !== true) {
+    if (!options.baselineData || !options.candidateData
+      || !templatePersistentProjectionMatches_ACU(options.baselineData, options.candidateData)) {
+      return { saved: false, error: 'scope-only 模板提交要求 baseline 与 candidate 的持久化 Sheet 投影完全一致。' };
+    }
   }
   const createdAt = options.createdAt ?? Date.now();
   if (!Number.isFinite(createdAt) || createdAt < 0) {

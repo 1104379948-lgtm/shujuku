@@ -27,6 +27,7 @@ import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
 import { clearTableFieldsForIsolation_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
 import { LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
+import { peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import { normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
 import { getLatestAiMessageIndexFromChat_ACU, resolveTableHistoryStateFromChat_ACU } from '../table/table-history';
@@ -34,10 +35,10 @@ import { cleanupUnreachableSummaryVectorIndexFiles_ACU, deleteSummaryVectorIndex
 import { assignSummaryVectorIndexStateToTagData_ACU, readSummaryVectorIndexStateFromTagData_ACU } from '../vector/summary-vector-index-state-service';
 import type { ChatSummaryVectorIndexManifest_ACU, ChatSummaryVectorIndexState_ACU, SummaryVectorIndexSafeGcScopeHint_ACU } from '../vector/summary-vector-index-types';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
-import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import { collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { hasActiveProvisionalBridgeAnywhere_ACU, recoverProvisionalBridgeSession_ACU } from '../table/manual-catch-up-provisional-bridge';
-import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
+import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from '../table/canonical-checkpoint-builder';
@@ -818,10 +819,56 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
             error.failedIsolationKey = isolationKey;
             throw error;
         }
+
+        // 隐藏表不在 replay state 中（replay 遇 hide checkpoint 会 delete 该表），
+        // 因此 full checkpoint.data 不含它们。若边界 frame 不带上这些 hide checkpoint，
+        // 旧楼层被 purge 后隐藏表数据将永久丢失，后续 reveal 必然 not_found。
+        const lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey, {
+            maxMessageIndex: boundaryAnchorIndex,
+        });
+        const migratedHiddenCheckpoints: Record<string, TableSheetCheckpointV2_ACU> = {};
+        for (const hiddenSheetKey of lifecycle.hiddenSheetKeys) {
+            const entry = lifecycle.statusBySheetKey[hiddenSheetKey];
+            const restoreData = entry?.restoreSourceData;
+            if (!restoreData) {
+                const error = new Error(
+                    `边界 checkpoint 写入失败：隐藏表 ${hiddenSheetKey} 缺少可迁移的 hide checkpoint 数据`
+                    + `（isolationKey=[${isolationKey || '无标签'}]）。`,
+                ) as Error & { failedIsolationKey?: string };
+                error.failedIsolationKey = isolationKey;
+                throw error;
+            }
+            const built = buildCanonicalSheetCheckpoint_ACU({
+                createdAt: Date.now(),
+                reason: 'compaction',
+                sheetKey: hiddenSheetKey,
+                data: JSON.parse(JSON.stringify(restoreData)),
+                context: { messageIndex: boundaryAnchorIndex, isolationKey, reason: 'compaction' },
+            });
+            if (!built.checkpoint) {
+                const error = new Error(
+                    `边界 checkpoint 写入失败：隐藏表 ${hiddenSheetKey} 的迁移 checkpoint 不合法：${built.error}`,
+                ) as Error & { failedIsolationKey?: string };
+                error.failedIsolationKey = isolationKey;
+                throw error;
+            }
+            migratedHiddenCheckpoints[hiddenSheetKey] = {
+                ...built.checkpoint,
+                timeline: {
+                    kind: 'sheet_hide',
+                    activateAtMessageIndex: boundaryAnchorIndex,
+                    afterSeq: 0,
+                },
+            };
+        }
+
         const frame: TableStorageFrameV2_ACU = {
             version: 2,
             checkpoint,
             logEntries: [],
+            ...(Object.keys(migratedHiddenCheckpoints).length > 0
+                ? { perSheetCheckpoints: migratedHiddenCheckpoints }
+                : {}),
         };
 
         if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
@@ -1377,11 +1424,6 @@ function clearLegacyTableHeaderGuide_ACU(chat: any[], mode: 'current' | 'all', i
     return true;
 }
 
-type PreservedInitialCheckpointSlot_ACU = {
-    messageIndex: number;
-    isolationKey: string;
-    tagData: Record<string, any>;
-};
 
 export type ManualCatchUpAnchorPreflightResult_ACU =
     | { status: 'ready'; checkpointMessageIndex: number | null }
@@ -1570,77 +1612,6 @@ export async function ensureManualCatchUpAnchorBeforeTarget_ACU(
 }
 
 /**
- * 全范围清空时保留每个隔离域最早的 init checkpoint 结构锚点。
- *
- * 行数据、增量、调度状态和后续 frame 仍会被删除；这里只留下 header-only full checkpoint，
- * 避免后续模板切换把老聊天误判为 pristine，并在最新楼层重新创建“初始基线”。
- */
-function collectInitialCheckpointSlotsForFullDeletion_ACU(
-    chat: any[],
-    mode: 'current' | 'all',
-    currentIsolationKey: string,
-): PreservedInitialCheckpointSlot_ACU[] {
-    const preservedByIsolationKey = new Map<string, PreservedInitialCheckpointSlot_ACU>();
-    for (let messageIndex = 0; messageIndex < chat.length; messageIndex += 1) {
-        const message = chat[messageIndex];
-        if (!message || message.is_user) continue;
-        const isolatedData = readIsolatedDataContainer_ACU(message);
-        if (!isolatedData) continue;
-
-        for (const [isolationKey, tagData] of Object.entries(isolatedData)) {
-            if (mode === 'current' && isolationKey !== currentIsolationKey) continue;
-            if (preservedByIsolationKey.has(isolationKey) || !isV2TagData_ACU(tagData)) continue;
-            const checkpoint = tagData.storageFrame.checkpoint;
-            if (checkpoint?.kind !== 'full' || checkpoint.reason !== 'init' || !checkpoint.data || typeof checkpoint.data !== 'object') continue;
-
-            const checkpointData = JSON.parse(JSON.stringify(checkpoint.data));
-            const sheetKeys = Object.keys(checkpointData).filter(key => key.startsWith('sheet_'));
-            if (sheetKeys.length === 0) continue;
-            for (const sheetKey of sheetKeys) {
-                const sanitizedSheet = sanitizeSheetForStorage_ACU(checkpointData[sheetKey]);
-                if (!sanitizedSheet || typeof sanitizedSheet !== 'object' || !Array.isArray(sanitizedSheet.content?.[0])) {
-                    delete checkpointData[sheetKey];
-                    continue;
-                }
-                sanitizedSheet.content = [JSON.parse(JSON.stringify(sanitizedSheet.content[0]))];
-                // sanitizeSheetForStorage_ACU 已按持久化白名单剥离 seedRows 等运行时载荷。
-                checkpointData[sheetKey] = sanitizedSheet;
-            }
-            if (!Object.keys(checkpointData).some(key => key.startsWith('sheet_'))) continue;
-
-            const preservedCheckpoint = {
-                kind: 'full' as const,
-                createdAt: checkpoint.createdAt,
-                reason: 'init' as const,
-                data: checkpointData,
-                event: { filledSheetKeys: [] as string[], changedSheetKeys: [] as string[], groupKeys: [] as string[] },
-            };
-            if (!validateCanonicalCheckpoint_ACU(preservedCheckpoint, {
-                messageIndex,
-                isolationKey,
-                reason: 'deleteLocalDataInChat',
-            }).valid) continue;
-
-            preservedByIsolationKey.set(isolationKey, {
-                messageIndex,
-                isolationKey,
-                tagData: {
-                    _acu_storage_version: 2,
-                    storageFrame: {
-                        version: 2,
-                        checkpoint: preservedCheckpoint,
-                        logEntries: [],
-                    },
-                },
-            });
-        }
-    }
-    return [...preservedByIsolationKey.values()];
-}
-
-
-
-/**
  * 删除聊天记录中的本地数据（核心业务逻辑）
  * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
  * 
@@ -1678,8 +1649,6 @@ async function deleteLocalDataInChatCoreInner_ACU(
     const targetIndices = aiMessageIndices.slice(startAiIndex, endAiIndex + 1);
     const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
         && (endFloor === null || endFloor >= aiMessageIndices.length);
-    const preservedInitialCheckpoints = isFullRangeDeletion
-        ? collectInitialCheckpointSlotsForFullDeletion_ACU(chat, mode, currentIsolationKey) : [];
 
     for (const physicalIndex of targetIndices) {
         const msg = chat[physicalIndex];
@@ -1753,49 +1722,30 @@ async function deleteLocalDataInChatCoreInner_ACU(
         }
     }
 
-    // “删除全部数据”清空行数据和增量历史，但保留 init 的 header-only 锚点。
+    // 删除本地数据后必须回到「从未填表」状态：不再保留 init header-only 锚点，
+    // 也不再向最新楼层写空 frame。保留它们会让 hasV2TableHistoryEvidence_ACU 判定
+    // 该会话仍是 V2（storage-strategy-resolver.ts:33），从而走继承路线并读取残留 guide，
+    // 这正是「删光数据后切模板报 guideData 写入失败」的成因。
+    // sheetKey 由表名拼音确定性派生，重新分配不会造成身份漂移（已与助手确认）。
     //
-    // 锚点必须落在最早 AI 楼层，而不能留在它原先出现的较晚楼层：一键追平可以
-    // 因 skipUpdateFloors 写入该旧锚点之前的消息；V2 replay 只从目标边界内最后一个
-    // full checkpoint 开始，那些写入会变成不可回放的伪提交。
-    const latestAiMessageIndex = aiMessageIndices[aiMessageIndices.length - 1];
-    const resetAnchorMessageIndex = aiMessageIndices[0];
-    for (const preserved of preservedInitialCheckpoints) {
-        const anchorMessage = chat[resetAnchorMessageIndex];
-        if (!anchorMessage || anchorMessage.is_user) continue;
-        const anchorIsolatedData = readIsolatedDataContainer_ACU(anchorMessage) || {};
-        anchorIsolatedData[preserved.isolationKey] = preserved.tagData as any;
-        anchorMessage.TavernDB_ACU_IsolatedData = anchorIsolatedData;
-
-        // 既有 checkpoint 分支要求当前最新 AI 楼层有合法 V2 frame，模板 rebase/introduction
-        // 也必须落在该数据边界。清空后补一个无日志空 frame，不携带任何表数据。
-        const boundaryMessage = chat[latestAiMessageIndex];
-        if (boundaryMessage && !boundaryMessage.is_user && latestAiMessageIndex !== resetAnchorMessageIndex) {
-            const boundaryIsolatedData = readIsolatedDataContainer_ACU(boundaryMessage) || {};
-            boundaryIsolatedData[preserved.isolationKey] = {
-                _acu_storage_version: 2,
-                storageFrame: { version: 2, logEntries: [] },
-            } as any;
-            boundaryMessage.TavernDB_ACU_IsolatedData = boundaryIsolatedData;
-        }
-        if (mode === 'current') {
-            writeMessageIdentity_ACU(anchorMessage, {
-                enabled: settings_ACU.dataIsolationEnabled,
-                code: settings_ACU.dataIsolationCode,
-            });
-            if (boundaryMessage && latestAiMessageIndex !== resetAnchorMessageIndex) {
-                writeMessageIdentity_ACU(boundaryMessage, {
-                    enabled: settings_ACU.dataIsolationEnabled,
-                    code: settings_ACU.dataIsolationCode,
-                });
-            }
-        }
-    }
-
     // 旧版“表头清单”固定挂在 chat[0]，与楼层范围无关，因此只在删除覆盖完整范围时清理，
     // 避免局部删除误删仍被其他楼层依赖的兼容指导数据。
     if (isFullRangeDeletion && clearLegacyTableHeaderGuide_ACU(chat, mode, currentIsolationKey)) {
         deletedCount++;
+    }
+
+    // 4.2 新版 guide 容器 + scope 容器（聊天级配置）随删除一并清空：
+    // - guide 容器是图 2 的污染源，必须清；
+    // - scope 容器（模板来源/presetName）也清（D-A 决策选 A）：删光后与全新会话完全等价，
+    //   模板选择回到 inherit_global（继承全局模板）。
+    if (isFullRangeDeletion) {
+        const guideBefore = peekChatSheetGuideContainer_ACU(chat);
+        const scopeBefore = peekChatScopedConfigContainer_ACU(chat);
+        setChatSheetGuideContainer_ACU(chat, null);
+        setChatScopedConfigContainer_ACU(chat, null);
+        if (guideBefore !== null || scopeBefore !== null) {
+            deletedCount++;
+        }
     }
 
     if (deletedCount > 0) {

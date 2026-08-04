@@ -67,7 +67,7 @@ vi.mock('../../../src/data/storage/chat-history', () => ({
 vi.mock('../../../src/service/template/chat-scope', () => ({
   activateChatTemplatePresetSelection_ACU: vi.fn(),
   buildChatSheetGuideDataFromData_ACU: vi.fn((data: any) => data),
-  buildChatSheetGuideDataFromTemplateObj_ACU: vi.fn(),
+  buildChatSheetGuideDataFromTemplateObj_ACU: vi.fn((templateObj: any) => ({ mate: templateObj?.mate, sheets: {} })),
   buildChatTemplatePresetLinkState_ACU: vi.fn(),
   buildChatTemplateScopeStateFromCurrent_ACU: vi.fn(),
   clearChatSheetGuideDataForIsolationKey_ACU: vi.fn(),
@@ -124,6 +124,15 @@ vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
 }));
 vi.mock('../../../src/service/table/storage-strategy-resolver', () => ({
   resolveTableStorageStrategy_ACU: vi.fn(() => ({ mode: 'v2' })),
+  isV2TagData_ACU: vi.fn((tagData: any) => tagData?.storageFrame?.version === 2 && Array.isArray(tagData.storageFrame.logEntries)),
+  isLegacyV1TagData_ACU: vi.fn(() => false),
+  hasLegacyTopLevelTableData_ACU: vi.fn(() => false),
+}));
+const switchModeMocks = vi.hoisted(() => ({
+  resolveTemplateSwitchMode: vi.fn(() => ({ mode: 'inherit' })),
+}));
+vi.mock('../../../src/service/table/template-switch-mode-resolver', () => ({
+  resolveTemplateSwitchMode_ACU: switchModeMocks.resolveTemplateSwitchMode,
 }));
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   captureTableRuntimeRevisionForWriteSet_ACU: vi.fn(() => 'runtime-v1:test'),
@@ -185,6 +194,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockChat.splice(0, mockChat.length, { is_user: false });
   mockChatState.current = mockChat;
+  switchModeMocks.resolveTemplateSwitchMode.mockReturnValue({ mode: 'inherit' });
   vi.mocked(getActiveChatStorageIdentity_ACU).mockReturnValue('chat-a');
   vi.mocked(getCurrentStorageMode).mockReturnValue('sqlite');
   vi.mocked(didSqliteFallbackAfterReload_ACU).mockReturnValue(false);
@@ -732,7 +742,7 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
       sheet_randomA: { ...candidate.sheet_live, uid: 'sheet_randomA', name: '背包' },
       sheet_randomB: { ...candidate.sheet_live, uid: 'sheet_randomB', name: '任务表' },
     };
-    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'empty' });
+    switchModeMocks.resolveTemplateSwitchMode.mockReturnValue({ mode: 'pristine' } as any);
     const staleGuide = { mate: legacyCandidate.mate, sheet_randomA: { seedRows: [['old-row']] } };
     const { getChatSheetGuideDataForIsolationKey_ACU, buildChatSheetGuideDataFromData_ACU } = await import('../../../src/service/template/chat-scope');
     vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(staleGuide as any);
@@ -759,8 +769,10 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
         sheet_ren_wu_biao: expect.objectContaining({ uid: 'sheet_ren_wu_biao', name: '任务表' }),
       }),
     }));
-    expect(commitCurrentFloorTemplateChanges_ACU).toHaveBeenCalledWith(expect.objectContaining({
-      templateSource: expect.objectContaining({ sheet_bei_bao: expect.any(Object), sheet_ren_wu_biao: expect.any(Object) }),
+    // pristine 会话切模板不得产生任何 storage frame：结构只落 guide + scope 容器。
+    expect(commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      pristineOverride: true,
     }));
     expect(buildChatSheetGuideDataFromData_ACU).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       preserveSeedRowsFromGuideData: null,
@@ -781,7 +793,7 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
       },
     };
     const before = JSON.stringify(template);
-    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'empty' });
+    switchModeMocks.resolveTemplateSwitchMode.mockReturnValue({ mode: 'pristine' } as any);
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: template, templateStr: JSON.stringify(template) } as any);
     vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue(null);
     vi.mocked(reconcileChatTemplate_ACU).mockImplementation(async ({ templateData }: any) => ({
@@ -817,7 +829,7 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
       sheet_one: { ...candidate.sheet_live, uid: 'sheet_one', name: names[0] },
       sheet_two: { ...candidate.sheet_live, uid: 'sheet_two', name: names[1] },
     };
-    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'empty' });
+    switchModeMocks.resolveTemplateSwitchMode.mockReturnValue({ mode: 'pristine' } as any);
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: invalidTemplate, templateStr: JSON.stringify(invalidTemplate) } as any);
 
     const result = await applyChatTemplateSnapshotWithReconciliation_ACU(invalidTemplate);
@@ -834,7 +846,7 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
       sheet_valid: { ...candidate.sheet_live, uid: 'sheet_valid', name: '有效表' },
       sheet_broken: [],
     };
-    vi.mocked(resolveTableStorageStrategy_ACU).mockReturnValue({ mode: 'empty' });
+    switchModeMocks.resolveTemplateSwitchMode.mockReturnValue({ mode: 'pristine' } as any);
     vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: malformedTemplate, templateStr: JSON.stringify(malformedTemplate) } as any);
 
     const result = await applyChatTemplateSnapshotWithReconciliation_ACU(malformedTemplate);

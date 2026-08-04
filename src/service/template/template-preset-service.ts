@@ -32,6 +32,7 @@ import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeO
 import { deriveSheetLifecycleFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import type { TableSheetLifecycleProjectionV2_ACU } from '../table/storage-frame-v2-types';
 import { resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
+import { resolveTemplateSwitchMode_ACU } from '../table/template-switch-mode-resolver';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from '../table/table-write-transaction';
 import { getCurrentStorageMode, isSqliteMode } from '../table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../table/table-storage-strategy';
@@ -557,7 +558,11 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
     });
     let targetTemplateData = snapshot.templateObj;
     let pristineChat = false;
-    if (storageStrategy.mode === 'empty') {
+    const switchMode = resolveTemplateSwitchMode_ACU(readyContext.chat, isolationKey);
+    if (switchMode.mode === 'blocked') {
+        return { saved: false, error: switchMode.reason };
+    }
+    if (switchMode.mode === 'pristine') {
         try {
             targetTemplateData = rekeyTemplateForPristineChat_ACU(snapshot.templateObj);
             pristineChat = true;
@@ -626,10 +631,33 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
         return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
     }
     const hasStructuralChanges = plan.sheetChanges.length > 0 || plan.deletedSheetKeys.length > 0;
-    // 必须使用读取 replay baseline 时一并验证的 revision；此处重新捕获会掩盖 stale plan。
-    const commitBaseRevision = hasStructuralChanges ? baseRevision : null;
-    const committed = hasStructuralChanges
-        ? await commitCurrentFloorTemplateChanges_ACU({
+    let committed;
+    if (pristineChat) {
+        // pristine 会话没有任何数据帧，模板结构只需落到聊天级 guide + scope 容器。
+        // 刻意不调用 commitCurrentFloorTemplateChanges_ACU：不产生 checkpoint / logEntry，
+        // 也不读取任何残留 guide 的 seedRows（避免旧宽度污染新结构）。
+        const pristineGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(targetTemplateData, { stripSeedRows: false });
+        if (!pristineGuideData) {
+            return { saved: false, error: '目标模板不包含任何表，已取消提交。' };
+        }
+        committed = await commitCurrentFloorTemplateScopeOnly_ACU({
+            isolationKey,
+            baselineData,
+            candidateData: plan.candidateData,
+            guideData: pristineGuideData,
+            templateSource: plan.candidateData,
+            presetName: normalizeTemplatePresetSelectionValue_ACU(presetName),
+            source,
+            reason: 'chat_template_pristine_switch',
+            pristineOverride: true,
+            expectedChatIdentity: targetChatIdentity,
+            expectedFirstMessage: entryContext.firstMessage,
+            signal,
+        });
+    } else if (hasStructuralChanges) {
+        // 必须使用读取 replay baseline 时一并验证的 revision；此处重新捕获会掩盖 stale plan。
+        const commitBaseRevision = hasStructuralChanges ? baseRevision : null;
+        committed = await commitCurrentFloorTemplateChanges_ACU({
             isolationKey,
             sheetChanges: plan.sheetChanges,
             deletedSheetKeys: plan.deletedSheetKeys,
@@ -645,8 +673,9 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
             expectedFirstMessage: entryContext.firstMessage,
             storageMode,
             signal,
-        })
-        : await commitCurrentFloorTemplateScopeOnly_ACU({
+        });
+    } else {
+        committed = await commitCurrentFloorTemplateScopeOnly_ACU({
             isolationKey,
             baselineData,
             candidateData: plan.candidateData,
@@ -659,6 +688,7 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
             expectedFirstMessage: entryContext.firstMessage,
             signal,
         });
+    }
     if (!committed.saved) return { ...committed, blockers: plan.blockers, audit: plan.audit };
 
     _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));
