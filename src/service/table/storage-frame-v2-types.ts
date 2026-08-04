@@ -61,6 +61,54 @@ export interface ManualRefillProgressV2_ACU {
   updatedAt: number;
 }
 
+/**
+ * 一键追平后置 Full Checkpoint 的临时锚点桥（provisional bridge）。
+ *
+ * 场景：追平目标早于现有正式 full checkpoint，且所选表需要从开头补齐。
+ * 此时为本次 run 建立临时 full checkpoint，一路填到原 full 边界后原子汇合。
+ *
+ * 该元数据是 run-scoped 的恢复证据，不是普通 mutation：它只存在于 isolation tag 的
+ * 非 replay 字段（storageFrame 之外），绝不参与 V2 replay，因此旧版本读取不受影响。
+ *
+ * 状态机：
+ *   preparing          候选构造临时根与原根备份，尚未严格落盘
+ *   provisional_active 临时根已落盘，原 full frame 已暂存，允许同 runId bucket 写入
+ *   bridging           正在恢复原根并写 selected-sheet rebase（仅存在于候选/事务内）
+ *   finalized          原根恢复、rebase 生效、临时根与 provisional 前缀已清理
+ *   rollback_required  拓扑漂移或无法安全自动 finalize，阻止普通写入并引导恢复
+ */
+export interface ManualCatchUpProvisionalBridgeV1_ACU {
+  version: 1;
+  kind: 'manual_catch_up_provisional_bridge';
+  runId: string;
+  chatKey: string;
+  isolationKey: string;
+  selectedSheetKeys: string[];
+  /** 追平范围首个有效 AI 楼层（临时根所在楼层）。 */
+  rangeStartMessageIndex: number;
+  /** 原正式 full checkpoint 所在楼层。 */
+  originalFullCheckpointIndex: number;
+  phase:
+    | 'preparing'
+    | 'provisional_active'
+    | 'bridging'
+    | 'finalized'
+    | 'rollback_required';
+  /** 原正式 full frame 的指纹，用于零猜测恢复校验。 */
+  originalFullFrameFingerprint: string;
+  /** 临时根（provisional full checkpoint）所在楼层。 */
+  provisionalRootIndex: number;
+  /** 最后一个已严格提交的 bucket 目标楼层。 */
+  lastCommittedTargetIndex: number;
+  createdAt: number;
+  updatedAt: number;
+  /** 原 full frame 的完整深拷贝备份（仅受影响 isolation slot/frame）。 */
+  originalFullFrame: TableStorageFrameV2_ACU;
+}
+
+export type ManualCatchUpProvisionalBridgePhase_ACU =
+  ManualCatchUpProvisionalBridgeV1_ACU['phase'];
+
 /** 新 migration checkpoint 对 legacy-v1 来源的声明性证据；历史 V2 checkpoint 可以缺失。 */
 export interface TableMigrationProvenanceV1_ACU {
   version: 1;
@@ -434,7 +482,7 @@ export interface TableMigrationAuditBackupV1_ACU {
 export interface TableV2RecoveryBackup_ACU {
   version: 1;
   createdAt: number;
-  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence' | 'relocated_checkpoint_discarded_prefix';
+  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence' | 'relocated_checkpoint_discarded_prefix' | 'manual_catch_up_provisional_bridge';
   sourceMessageIndex: number | null;
   failedMessageIndex?: number;
   failedSeq?: number;

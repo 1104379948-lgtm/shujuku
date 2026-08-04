@@ -38811,6 +38811,124 @@ $CONTENT
         }
         return refs;
     }
+    /**
+     * 只读派生：表级可见性生命周期（统一事实来源，不落盘）。
+     *
+     * 唯一持久化历史权威是 per-sheet timeline；本函数把各 frame 的 timeline 事件
+     * 按楼层物理位置与 afterSeq 归并成一张表当前的可见性结论：
+     * - active：最后可验证 timeline 是 introduction / rebase / reveal；
+     * - hidden：最后可验证 timeline 是 hide（数据保留在 checkpoint.data）；
+     * - never_seen：历史无目标相关 timeline / checkpoint / log；
+     * - indeterminate：frame 容器、目标 checkpoint 或顺序无法判定。
+     *
+     * 该派生刻意不扫描业务 operation 内容；隐藏/显示状态完全由 timeline 表达，
+     * 避免把普通 SQL 写入的归属歧义再次当作生命周期事实。
+     */
+    function deriveSheetLifecycleFromFramesV2_ACU(chatArg, isolationKey, options = {}) {
+        const chat = Array.isArray(chatArg) ? chatArg : [];
+        const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
+            .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
+        const statusBySheetKey = {};
+        let sawIndeterminateFrame = false;
+        for (const ref of frameRefs) {
+            const frame = ref.frame;
+            if (!frame || typeof frame !== 'object' || Array.isArray(frame)) {
+                sawIndeterminateFrame = true;
+                continue;
+            }
+            // 全量 checkpoint：包含该 sheetKey 即视为当前可见（除非被后续 hide 覆盖）。
+            const checkpointData = frame.checkpoint?.data;
+            if (checkpointData && typeof checkpointData === 'object' && !Array.isArray(checkpointData)) {
+                for (const sheetKey of Object.keys(checkpointData)) {
+                    if (!sheetKey.startsWith('sheet_'))
+                        continue;
+                    statusBySheetKey[sheetKey] = {
+                        status: 'active',
+                        lastTimelineKind: 'sheet_introduction',
+                        lastTimelineMessageIndex: ref.messageIndex,
+                    };
+                }
+            }
+            // per-sheet checkpoint 使用与 replay 相同的校验路径归一化，避免两处语义分叉。
+            let validatedCheckpoints;
+            try {
+                validatedCheckpoints = getValidatedSheetCheckpoints_ACU(frame, ref.messageIndex);
+            }
+            catch (error) {
+                // frame 容器或 checkpoint 结构无法判定：该帧涉及的表全部 indeterminate（fail-closed）。
+                const perSheetCheckpoints = frame.perSheetCheckpoints;
+                if (perSheetCheckpoints !== undefined && perSheetCheckpoints !== null
+                    && typeof perSheetCheckpoints === 'object' && !Array.isArray(perSheetCheckpoints)) {
+                    for (const sheetKey of Object.keys(perSheetCheckpoints)) {
+                        if (sheetKey.startsWith('sheet_')) {
+                            statusBySheetKey[sheetKey] = { status: 'indeterminate' };
+                        }
+                    }
+                }
+                sawIndeterminateFrame = true;
+                continue;
+            }
+            // 无 timeline 的 legacy checkpoint 在 replay 中于帧开头写回 active state；
+            // 派生结论与 replay 保持一致：视为 active（保留为恢复候选）。
+            for (const checkpoint of validatedCheckpoints) {
+                const { sheetKey } = checkpoint;
+                if (!sheetKey.startsWith('sheet_'))
+                    continue;
+                if (checkpoint.timeline !== undefined)
+                    continue;
+                statusBySheetKey[sheetKey] = {
+                    status: 'active',
+                    lastTimelineKind: 'sheet_introduction',
+                    lastTimelineMessageIndex: ref.messageIndex,
+                };
+            }
+            // timeline checkpoint 按 afterSeq 归并：hide → hidden，其余 → active。
+            // 与 replay 的 applyDueIntroductions 一致：afterSeq 在对应 log seq 之后生效；
+            // 同一帧多个 checkpoint 由 getValidatedSheetCheckpoints_ACU 归一并保序。
+            const timelineCheckpoints = getValidatedTimelineCheckpointsForFrame_ACU(validatedCheckpoints);
+            for (const checkpoint of timelineCheckpoints) {
+                const { sheetKey } = checkpoint;
+                if (!sheetKey.startsWith('sheet_'))
+                    continue;
+                const timeline = checkpoint.timeline;
+                if (timeline.afterSeq === undefined || !Number.isInteger(timeline.afterSeq) || timeline.afterSeq < 0) {
+                    statusBySheetKey[sheetKey] = { status: 'indeterminate' };
+                    sawIndeterminateFrame = true;
+                    continue;
+                }
+                const kind = timeline.kind;
+                const entry = {
+                    status: kind === 'sheet_hide' ? 'hidden' : 'active',
+                    lastTimelineKind: kind,
+                    lastTimelineMessageIndex: ref.messageIndex,
+                    lastTimelineAfterSeq: timeline.afterSeq,
+                };
+                if (kind === 'sheet_hide' && checkpoint.data && typeof checkpoint.data === 'object' && !Array.isArray(checkpoint.data)) {
+                    entry.restoreSourceData = deepClone_ACU$4(checkpoint.data);
+                }
+                statusBySheetKey[sheetKey] = entry;
+            }
+        }
+        const activeSheetKeys = [];
+        const hiddenSheetKeys = [];
+        const indeterminateSheetKeys = [];
+        const neverSeenSheetKeys = [];
+        for (const [sheetKey, entry] of Object.entries(statusBySheetKey)) {
+            if (entry.status === 'active')
+                activeSheetKeys.push(sheetKey);
+            else if (entry.status === 'hidden')
+                hiddenSheetKeys.push(sheetKey);
+            else if (entry.status === 'indeterminate')
+                indeterminateSheetKeys.push(sheetKey);
+            else
+                neverSeenSheetKeys.push(sheetKey);
+        }
+        activeSheetKeys.sort();
+        hiddenSheetKeys.sort();
+        indeterminateSheetKeys.sort();
+        neverSeenSheetKeys.sort();
+        return { statusBySheetKey, activeSheetKeys, hiddenSheetKeys, indeterminateSheetKeys, neverSeenSheetKeys };
+    }
     function hasUnanchoredReplayArtifacts_ACU(frameRefs) {
         return frameRefs.some(({ frame }) => {
             const persistedFrame = frame;
@@ -39978,6 +40096,53 @@ $CONTENT
         }
     }
 
+    function deepClone_ACU$3(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function formatIssues_ACU(issues) {
+        return issues.map(issue => {
+            const location = issue.sheetKey === undefined
+                ? ''
+                : `: ${issue.sheetKey}${issue.rowIndex === undefined ? '' : ` 第 ${issue.rowIndex} 行`}`;
+            return `${issue.type}${location}`;
+        }).join('；');
+    }
+    function validateCandidate_ACU(checkpoint, context) {
+        const validation = validateCanonicalCheckpoint_ACU(checkpoint, context);
+        if (!validation.valid) {
+            return { error: `V2 checkpoint 行标识或结构不合法：${formatIssues_ACU(validation.issues)}`, issues: validation.issues };
+        }
+        return { checkpoint };
+    }
+    function buildCanonicalFullCheckpoint_ACU(options) {
+        const checkpoint = {
+            kind: 'full',
+            createdAt: options.createdAt,
+            reason: options.reason,
+            data: deepClone_ACU$3(options.data),
+            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$3(options.scheduleSummary) } : {}),
+            ...(options.event ? { event: deepClone_ACU$3(options.event) } : {}),
+            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$3(options.manualRefillProgress) } : {}),
+            ...(options.migrationProvenance ? { migrationProvenance: deepClone_ACU$3(options.migrationProvenance) } : {}),
+            ...(options.fallbackProvenance ? { fallbackProvenance: deepClone_ACU$3(options.fallbackProvenance) } : {}),
+        };
+        return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
+    }
+    function buildCanonicalSheetCheckpoint_ACU(options) {
+        const checkpoint = {
+            kind: 'sheet_full',
+            createdAt: options.createdAt,
+            reason: options.reason,
+            sheetKey: options.sheetKey,
+            data: deepClone_ACU$3(options.data),
+            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$3(options.scheduleSummary) } : {}),
+            ...(options.event ? { event: deepClone_ACU$3(options.event) } : {}),
+            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$3(options.manualRefillProgress) } : {}),
+            ...(options.baseRevision !== undefined ? { baseRevision: options.baseRevision } : {}),
+        };
+        return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
+    }
+
     class ReadWriteLock_ACU {
         constructor() {
             this.activeReaders = 0;
@@ -40107,7 +40272,7 @@ $CONTENT
         const normalized = String(value || fallback).trim();
         return normalized || fallback;
     }
-    function deepClone_ACU$3(value) {
+    function deepClone_ACU$2(value) {
         return value == null ? value : JSON.parse(JSON.stringify(value));
     }
     function buildTableMaintenanceScopeKey_ACU(parts) {
@@ -40294,7 +40459,7 @@ $CONTENT
             };
             const workingData = options.workingDataMode === 'none'
                 ? null
-                : deepClone_ACU$3(options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU);
+                : deepClone_ACU$2(options.initialData !== undefined ? options.initialData : currentJsonTableData_ACU);
             return await task(ctx, workingData);
         }
         finally {
@@ -40307,51 +40472,847 @@ $CONTENT
         runtimeRevisions_ACU.clear();
     }
 
-    function deepClone_ACU$2(value) {
-        return JSON.parse(JSON.stringify(value));
-    }
-    function formatIssues_ACU(issues) {
-        return issues.map(issue => {
-            const location = issue.sheetKey === undefined
-                ? ''
-                : `: ${issue.sheetKey}${issue.rowIndex === undefined ? '' : ` 第 ${issue.rowIndex} 行`}`;
-            return `${issue.type}${location}`;
-        }).join('；');
-    }
-    function validateCandidate_ACU(checkpoint, context) {
-        const validation = validateCanonicalCheckpoint_ACU(checkpoint, context);
-        if (!validation.valid) {
-            return { error: `V2 checkpoint 行标识或结构不合法：${formatIssues_ACU(validation.issues)}`, issues: validation.issues };
+    /**
+     * service/table/manual-catch-up-provisional-bridge.ts
+     *
+     * 一键追平后置 Full Checkpoint 的临时锚点与边界汇合（provisional bridge）。
+     *
+     * 背景：当追平目标早于现有正式 full checkpoint、且 selected sheet 需要从开头补齐时，
+     * 直接向目标楼层写增量会被 persist 的 `target < latestFullCheckpoint` fail-fast 拒绝。
+     * 本模块为本次 run 建立临时 full checkpoint，一路填到原 full 边界后，把 selected sheets
+     * 的累计结果原子折叠为原 full frame 上的 sheet_rebase，恢复原正式根。
+     *
+     * 不变量（对应计划 §3.2）：
+     *  - 稳定态单正式根；provisional 建立后持久化态仍只有一个 active full（原 full 只存于 recovery backup）；
+     *  - 可回放提交：每个 committed bucket 都能在临时根上 bounded replay，最终被汇合；
+     *  - 边界汇合：非目标表/原 provenance/日志/其他隔离数据不被覆盖，selected sheets 等于累计结果；
+     *  - 零猜测恢复：runId/原根指纹/聊天标识/隔离键/frame 拓扑不匹配时 fail-closed；
+     *  - 终态：complete/stopped/failed/sync_pending 只在 session finalize/rollback 后写入。
+     */
+    /** bridge 元数据所在 isolation tag 上的非 replay 字段名。 */
+    const MANUAL_CATCH_UP_BRIDGE_FIELD_ACU = 'manualCatchUpProvisionalBridge';
+    /**
+     * 读取指定 isolation tag 上的 active bridge session。
+     * 只认带版本与 kind 的合法对象；任何畸形结构返回 null（fail-closed 由调用方执行）。
+     */
+    function readActiveProvisionalBridge_ACU(chat, isolationKey) {
+        for (const message of chat) {
+            if (!message || typeof message !== 'object')
+                continue;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (!isV2TagData_ACU(tagData))
+                continue;
+            const bridge = tagData?.[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU];
+            if (!bridge || typeof bridge !== 'object' || Array.isArray(bridge))
+                continue;
+            if (bridge.version !== 1 || bridge.kind !== 'manual_catch_up_provisional_bridge')
+                continue;
+            if (bridge.phase === 'finalized')
+                continue;
+            return bridge;
         }
-        return { checkpoint };
+        return null;
     }
-    function buildCanonicalFullCheckpoint_ACU(options) {
-        const checkpoint = {
-            kind: 'full',
-            createdAt: options.createdAt,
-            reason: options.reason,
-            data: deepClone_ACU$2(options.data),
-            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$2(options.scheduleSummary) } : {}),
-            ...(options.event ? { event: deepClone_ACU$2(options.event) } : {}),
-            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$2(options.manualRefillProgress) } : {}),
-            ...(options.migrationProvenance ? { migrationProvenance: deepClone_ACU$2(options.migrationProvenance) } : {}),
-            ...(options.fallbackProvenance ? { fallbackProvenance: deepClone_ACU$2(options.fallbackProvenance) } : {}),
-        };
-        return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
+    /**
+     * 校验 bridge 元数据结构的完整性。旧数据缺少字段合法（只读恢复路径），
+     * 但 active session 必须满足最小可恢复契约。
+     */
+    function validateProvisionalBridge_ACU(bridge) {
+        if (!bridge || typeof bridge !== 'object' || Array.isArray(bridge)) {
+            return { valid: false, error: 'provisional bridge 必须是对象。' };
+        }
+        const candidate = bridge;
+        if (candidate.version !== 1)
+            return { valid: false, error: 'provisional bridge version 必须为 1。' };
+        if (candidate.kind !== 'manual_catch_up_provisional_bridge') {
+            return { valid: false, error: 'provisional bridge kind 无效。' };
+        }
+        if (typeof candidate.runId !== 'string' || candidate.runId.length === 0) {
+            return { valid: false, error: 'provisional bridge 缺少 runId。' };
+        }
+        if (typeof candidate.isolationKey !== 'string') {
+            return { valid: false, error: 'provisional bridge 缺少 isolationKey。' };
+        }
+        if (!Array.isArray(candidate.selectedSheetKeys) || candidate.selectedSheetKeys.length === 0) {
+            return { valid: false, error: 'provisional bridge 缺少 selectedSheetKeys。' };
+        }
+        if (!Number.isInteger(candidate.originalFullCheckpointIndex) || (candidate.originalFullCheckpointIndex ?? 0) < 0) {
+            return { valid: false, error: 'provisional bridge 缺少 originalFullCheckpointIndex。' };
+        }
+        if (!Number.isInteger(candidate.provisionalRootIndex) || (candidate.provisionalRootIndex ?? 0) < 0) {
+            return { valid: false, error: 'provisional bridge 缺少 provisionalRootIndex。' };
+        }
+        if (typeof candidate.originalFullFrameFingerprint !== 'string' || candidate.originalFullFrameFingerprint.length === 0) {
+            return { valid: false, error: 'provisional bridge 缺少 originalFullFrameFingerprint。' };
+        }
+        if (!candidate.originalFullFrame || typeof candidate.originalFullFrame !== 'object') {
+            return { valid: false, error: 'provisional bridge 缺少 originalFullFrame 恢复备份。' };
+        }
+        const phases = ['preparing', 'provisional_active', 'bridging', 'finalized', 'rollback_required'];
+        if (!phases.includes(candidate.phase)) {
+            return { valid: false, error: `provisional bridge phase 无效：${String(candidate.phase)}` };
+        }
+        return { valid: true };
     }
-    function buildCanonicalSheetCheckpoint_ACU(options) {
-        const checkpoint = {
-            kind: 'sheet_full',
-            createdAt: options.createdAt,
-            reason: options.reason,
-            sheetKey: options.sheetKey,
-            data: deepClone_ACU$2(options.data),
-            ...(options.scheduleSummary ? { scheduleSummary: deepClone_ACU$2(options.scheduleSummary) } : {}),
-            ...(options.event ? { event: deepClone_ACU$2(options.event) } : {}),
-            ...(options.manualRefillProgress ? { manualRefillProgress: deepClone_ACU$2(options.manualRefillProgress) } : {}),
-            ...(options.baseRevision !== undefined ? { baseRevision: options.baseRevision } : {}),
+    /**
+     * 构造原 full frame 的指纹。用于零猜测恢复：不匹配时不得自动 finalize。
+     */
+    function getOriginalFullFrameFingerprint_ACU(frame) {
+        const canonical = JSON.stringify({
+            version: frame.version,
+            headRevision: frame.headRevision ?? null,
+            checkpoint: frame.checkpoint ?? null,
+            perSheetCheckpoints: frame.perSheetCheckpoints ?? null,
+            logEntries: frame.logEntries ?? [],
+        });
+        let hash = 2166136261;
+        for (let index = 0; index < canonical.length; index += 1) {
+            hash ^= canonical.charCodeAt(index);
+            hash = Math.imul(hash, 16777619);
+        }
+        return `fnv1a:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+    }
+    /**
+     * 定位原正式 full checkpoint 所在消息与 frame。
+     * 返回最后一个 full checkpoint（replay 的正式根）。
+     */
+    function findOriginalFullCheckpoint_ACU(chat, isolationKey) {
+        let result = null;
+        chat.forEach((message, messageIndex) => {
+            if (!message || message.is_user)
+                return;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (!isV2TagData_ACU(tagData))
+                return;
+            const checkpoint = tagData.storageFrame?.checkpoint;
+            if (checkpoint?.kind === 'full') {
+                result = { messageIndex, message, tagData, frame: tagData.storageFrame };
+            }
+        });
+        return result;
+    }
+    /**
+     * 检查当前聊天是否存在 active provisional bridge session（任何消息、任何隔离键）。
+     * 应用启动、加载聊天或任意新表写入前调用。
+     */
+    function hasActiveProvisionalBridgeAnywhere_ACU(chat) {
+        if (!Array.isArray(chat) || chat.length === 0)
+            return false;
+        for (const message of chat) {
+            if (!message || typeof message !== 'object')
+                continue;
+            const container = readIsolatedDataContainer_ACU(message);
+            if (!container || typeof container !== 'object')
+                continue;
+            for (const tagData of Object.values(container)) {
+                if (!isV2TagData_ACU(tagData))
+                    continue;
+                const bridge = tagData?.[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU];
+                if (bridge && typeof bridge === 'object' && bridge.version === 1
+                    && bridge.kind === 'manual_catch_up_provisional_bridge'
+                    && bridge.phase !== 'finalized') {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    /**
+     * 写 bridge 元数据到目标消息的 isolation tag（非 replay 字段）。
+     * 不负责保存；调用方必须在事务/候选提交内调用并 strict save。
+     */
+    function writeProvisionalBridgeToMessage_ACU(message, isolationKey, bridge) {
+        const container = readIsolatedDataContainer_ACU(message) || {};
+        const existingTag = container[isolationKey];
+        const tagData = isV2TagData_ACU(existingTag)
+            ? existingTag
+            : { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } };
+        tagData[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU] = JSON.parse(JSON.stringify(bridge));
+        container[isolationKey] = tagData;
+        message.TavernDB_ACU_IsolatedData = container;
+    }
+    /**
+     * 从消息的 isolation tag 移除 bridge 元数据（finalize 后清理）。
+     */
+    function clearProvisionalBridgeFromMessage_ACU(message, isolationKey) {
+        const container = readIsolatedDataContainer_ACU(message);
+        if (!container || typeof container !== 'object')
+            return;
+        const tagData = container[isolationKey];
+        if (isV2TagData_ACU(tagData)) {
+            delete tagData[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU];
+        }
+        message.TavernDB_ACU_IsolatedData = container;
+    }
+    /**
+     * 推进 active bridge 的 lastCommittedTargetIndex（单调递增，禁止回退）。
+     * 在 bucket strict commit 的同一次保存中调用：返回更新后的根消息 isolatedData
+     * 供 persist 合并进替换集合，保证“bucket 已提交”与“bridge 进度已推进”原子落盘，
+     * 避免崩溃后 recover 把已提交数据误判为零提交而回滚丢弃。
+     */
+    function advanceProvisionalBridgeCommitProgress_ACU(chat, isolationKey, saveTargetIndex) {
+        const bridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+        if (!bridge)
+            return { ok: false, code: 'bridge_missing', error: '未找到 active provisional bridge session，无法推进提交进度。' };
+        if (bridge.phase !== 'provisional_active') {
+            return { ok: false, code: 'phase_invalid', error: `provisional bridge 当前 phase=${bridge.phase}，不允许推进提交进度。` };
+        }
+        if (saveTargetIndex >= bridge.originalFullCheckpointIndex) {
+            return { ok: false, code: 'boundary_reached', error: `bucket 目标 ${saveTargetIndex} 已到达原 full 边界，应先 finalize 而不是推进 provisional 进度。` };
+        }
+        if (saveTargetIndex <= bridge.lastCommittedTargetIndex) {
+            // 重试同一 bucket：进度已包含该目标，幂等放行（不重复推进）。
+            return { ok: true, status: 'already_committed' };
+        }
+        const nextBridge = {
+            ...bridge,
+            lastCommittedTargetIndex: saveTargetIndex,
+            updatedAt: Date.now(),
         };
-        return validateCandidate_ACU(checkpoint, { ...options.context, reason: options.reason });
+        const rootMessage = chat[bridge.provisionalRootIndex];
+        if (!rootMessage) {
+            return { ok: false, code: 'root_missing', error: `provisional root 楼层 ${bridge.provisionalRootIndex} 不存在，无法推进提交进度。` };
+        }
+        writeProvisionalBridgeToMessage_ACU(rootMessage, isolationKey, nextBridge);
+        const container = readIsolatedDataContainer_ACU(rootMessage) || {};
+        return { ok: true, status: 'advanced', messageIndex: bridge.provisionalRootIndex, isolatedData: container };
+    }
+    /**
+     * 恢复备份（recoveryKind='manual_catch_up_provisional_bridge'）写入原根消息的 recoveryBackup。
+     * 用于 bridge 建立时把被替换的原 full frame 留作事故复盘证据。
+     */
+    function buildProvisionalBridgeRecoveryBackup_ACU(bridge, originalFrame) {
+        return {
+            version: 1,
+            createdAt: Date.now(),
+            recoveryKind: 'manual_catch_up_provisional_bridge',
+            sourceMessageIndex: bridge.originalFullCheckpointIndex,
+            storageFrame: JSON.parse(JSON.stringify(originalFrame)),
+            ...(bridge.lastCommittedTargetIndex >= 0
+                ? { failedMessageIndex: bridge.lastCommittedTargetIndex }
+                : {}),
+        };
+    }
+    /**
+     * 断言当前 live 聊天与 bridge 声明一致（零猜测恢复前置）。
+     * 任何不匹配都返回错误字符串，调用方必须 fail-closed。
+     *
+     * bridge 建立后原 full 已从 replay 时间线移除（只剩 recoveryBackup），
+     * 因此这里优先核对原楼层的 recoveryBackup 指纹；原 full 仍在线时按原逻辑校验。
+     */
+    function assertBridgeScopeMatchesLiveChat_ACU(bridge, chat) {
+        if (!Array.isArray(chat) || chat.length === 0) {
+            return { ok: false, error: 'provisional bridge 恢复需要非空聊天。' };
+        }
+        if (getActiveChatStorageIdentity_ACU(chat) !== bridge.chatKey) {
+            return { ok: false, error: '当前聊天与 provisional bridge 的 chatKey 不匹配，拒绝自动恢复。' };
+        }
+        if (getCurrentIsolationKey_ACU() !== bridge.isolationKey) {
+            return { ok: false, error: '当前隔离键与 provisional bridge 不匹配，拒绝自动恢复。' };
+        }
+        const originalMessage = chat[bridge.originalFullCheckpointIndex];
+        if (!originalMessage) {
+            return { ok: false, error: `provisional bridge 原 full 楼层 ${bridge.originalFullCheckpointIndex} 不存在，拒绝自动恢复。` };
+        }
+        const originalTagData = readIsolatedTagData_ACU(originalMessage, bridge.isolationKey);
+        if (!isV2TagData_ACU(originalTagData)) {
+            return { ok: false, error: 'provisional bridge 原 full 楼层缺少 V2 标签数据，拒绝自动恢复。' };
+        }
+        // 原 full 可能处于两种持久化形态：
+        //  - 已建立 bridge：storageFrame 被清空，原帧在 recoveryBackup；
+        //  - 尚未建立（首次校验）：storageFrame 仍是原 full。
+        const candidateFrame = originalTagData.storageFrame?.checkpoint?.kind === 'full'
+            ? originalTagData.storageFrame
+            : originalTagData.recoveryBackup?.storageFrame;
+        if (!candidateFrame || candidateFrame.checkpoint?.kind !== 'full') {
+            return { ok: false, error: 'provisional bridge 原 full 楼层既无 replay full 也无 recoveryBackup，拒绝自动恢复。' };
+        }
+        const fingerprint = getOriginalFullFrameFingerprint_ACU(candidateFrame);
+        if (fingerprint !== bridge.originalFullFrameFingerprint) {
+            return { ok: false, error: '原 full frame 指纹不匹配，可能已被外部修改；拒绝自动 finalize。' };
+        }
+        return { ok: true };
+    }
+    /**
+     * 计算追平 bucket 是否仍处于 provisional 阶段（目标早于原 full 边界）。
+     */
+    function isTargetBeforeOriginalFullCheckpoint_ACU(bridge, saveTargetIndex) {
+        return bridge.phase !== 'finalized'
+            && saveTargetIndex < bridge.originalFullCheckpointIndex;
+    }
+    /**
+     * 校验手动追平 bucket 是否被当前 bridge 授权写入。
+     * 不通过全局布尔放行：必须匹配 runId、isolationKey、聊天标识与目标区间。
+     */
+    function authorizeManualCatchUpBucketWrite_ACU(bridge, runId, saveTargetIndex, chatKey, isolationKey) {
+        if (!bridge)
+            return { ok: true };
+        if (bridge.phase !== 'provisional_active') {
+            return { ok: false, error: `provisional bridge 当前 phase=${bridge.phase}，不允许普通 bucket 写入。` };
+        }
+        if (bridge.chatKey !== chatKey) {
+            return { ok: false, error: 'provisional bridge 与当前聊天不匹配，拒绝写入。' };
+        }
+        if (bridge.isolationKey !== isolationKey) {
+            return { ok: false, error: 'provisional bridge 与当前隔离键不匹配，拒绝写入。' };
+        }
+        if (!runId || bridge.runId !== runId) {
+            return { ok: false, error: 'provisional bridge 拒绝未携带匹配 runId 的写入。' };
+        }
+        if (saveTargetIndex >= bridge.originalFullCheckpointIndex) {
+            return { ok: false, error: `bucket 目标 ${saveTargetIndex} 已到达原 full 边界，必须先执行 bridge finalize。` };
+        }
+        return { ok: true };
+    }
+    /**
+     * 建立 provisional bridge（t4）。
+     *
+     * 在 exclusive 写事务中：
+     *   1. 校验唯一正式 full checkpoint、chatKey/isolationKey 与原 frame 指纹；
+     *   2. 仅允许 selected sheets 的第一缺口位于该 checkpoint 之前；
+     *   3. 构造 provisional 基线：非目标表沿用原 full 数据；selected sheets 若
+     *      lastCompletedAiFloor === 0 使用当前有效模板的 header/seed 基线；
+     *      若声称存在 checkpoint 前已完成历史但无法从持久化证据重建 start-1 状态则 blocked；
+     *   4. 在追平范围首个有效 AI 楼层写 canonical provisional full checkpoint（reason='manual'，
+     *      带 run provenance）；
+     *   5. 完整备份原 full frame 并从原位置移除 replay full（原位置不得留下会在 provisional
+     *      基线上重复执行的未知 artifact）；
+     *   6. 候选聊天分别 replay 到首 bucket 前、原 full 边界和聊天末端，验证非目标表与预期一致；
+     *   7. strict save，失败完整回滚。
+     *
+     * 关键限制：建立后稳定持久化态仍只有一个 active full；原 full 只存在于 recovery backup。
+     */
+    async function establishProvisionalBridge_ACU(runId, selectedSheetKeys, rangeStartMessageIndex, originalFullCheckpointIndex, options = {}) {
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const chatKey = options.chatKey ?? currentChatFileIdentifier_ACU;
+        return runTableWriteTransaction_ACU({
+            source: 'manual_fill',
+            reason: 'establishManualCatchUpProvisionalBridge',
+            isolationKey,
+            writeSet: [{ kind: 'all' }],
+            maintenanceMode: 'exclusive',
+        }, async () => {
+            const chat = getChatArray_ACU();
+            if (!Array.isArray(chat) || chat.length === 0) {
+                return { ok: false, error: '聊天记录为空，无法建立 provisional bridge。' };
+            }
+            if (getActiveChatStorageIdentity_ACU(chat) !== chatKey) {
+                return { ok: false, error: '当前聊天与请求 chatKey 不匹配，拒绝建立 provisional bridge。' };
+            }
+            if (getCurrentIsolationKey_ACU() !== isolationKey) {
+                return { ok: false, error: '当前隔离键与请求不匹配，拒绝建立 provisional bridge。' };
+            }
+            if (hasActiveProvisionalBridgeAnywhere_ACU(chat)) {
+                return { ok: false, error: '已存在 active provisional bridge session，拒绝建立第二个临时根。', diagnosticCode: 'provisional_bridge_conflict' };
+            }
+            if (!Array.isArray(selectedSheetKeys) || selectedSheetKeys.length === 0) {
+                return { ok: false, error: 'provisional bridge 需要至少一个 selected sheet。' };
+            }
+            const original = findOriginalFullCheckpoint_ACU(chat, isolationKey);
+            if (!original) {
+                return { ok: false, error: '未找到正式 full checkpoint，无法建立 provisional bridge。' };
+            }
+            if (original.messageIndex !== originalFullCheckpointIndex) {
+                return { ok: false, error: `原 full checkpoint 楼层与请求不一致：expected=${originalFullCheckpointIndex}, actual=${original.messageIndex}。` };
+            }
+            if (!Number.isInteger(rangeStartMessageIndex) || rangeStartMessageIndex < 0 || rangeStartMessageIndex >= originalFullCheckpointIndex) {
+                return { ok: false, error: `追平起始楼层必须早于原 full 边界：rangeStart=${rangeStartMessageIndex}, originalFull=${originalFullCheckpointIndex}。` };
+            }
+            const originalFrame = JSON.parse(JSON.stringify(original.frame));
+            const originalFingerprint = getOriginalFullFrameFingerprint_ACU(originalFrame);
+            const checkpoint = originalFrame.checkpoint;
+            if (!checkpoint || checkpoint.kind !== 'full') {
+                return { ok: false, error: '原 full frame 缺少 checkpoint，无法建立 provisional bridge。' };
+            }
+            // 2. 仅允许 selected sheets 的第一缺口位于该 checkpoint 之前。
+            //    若 selected sheet 在原 full 之前已有完成历史但无法重建 start-1 状态，则 blocked。
+            const templateData = options.templateData || {};
+            const provisionalData = {
+                mate: JSON.parse(JSON.stringify(checkpoint.data?.mate ?? { type: 'acu' })),
+            };
+            for (const [sheetKey, sheetValue] of Object.entries(checkpoint.data || {})) {
+                if (!sheetKey.startsWith('sheet_'))
+                    continue;
+                if (selectedSheetKeys.includes(sheetKey))
+                    continue;
+                provisionalData[sheetKey] = JSON.parse(JSON.stringify(sheetValue));
+            }
+            for (const sheetKey of selectedSheetKeys) {
+                const baseline = options.selectedSheetBaselines?.[sheetKey];
+                const templateSheet = templateData?.[sheetKey];
+                if (baseline && baseline.lastCompletedAiFloor > 0) {
+                    // 声称存在 checkpoint 前已完成历史但系统无法从持久化证据重建 start-1 状态。
+                    return {
+                        ok: false,
+                        error: `selected sheet ${sheetKey} 在原 full 之前存在已完成历史（lastCompletedAiFloor=${baseline.lastCompletedAiFloor}），但系统无法从持久化重建 start-1 基线；已 blocked，避免用未来状态倒灌过去。`,
+                        diagnosticCode: 'provisional_baseline_unreconstructable',
+                    };
+                }
+                const headerOnly = baseline?.headerOnly !== false;
+                const sourceSheet = templateSheet && typeof templateSheet === 'object'
+                    ? templateSheet
+                    : checkpoint.data?.[sheetKey];
+                if (!sourceSheet || typeof sourceSheet !== 'object') {
+                    return { ok: false, error: `selected sheet ${sheetKey} 缺少模板/原 full 数据，无法构造 provisional 基线。` };
+                }
+                const cloned = JSON.parse(JSON.stringify(sourceSheet));
+                if (headerOnly && Array.isArray(cloned.content) && cloned.content.length > 1) {
+                    cloned.content = [cloned.content[0]];
+                }
+                delete cloned.seedRows;
+                provisionalData[sheetKey] = cloned;
+            }
+            // 3. 构造 provisional full checkpoint（reason='manual'，带 run provenance）。
+            const now = Date.now();
+            const provisionalCheckpointResult = buildCanonicalFullCheckpoint_ACU({
+                createdAt: now,
+                reason: 'manual',
+                data: provisionalData,
+                event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+                context: { messageIndex: rangeStartMessageIndex, aiFloor: 1, isolationKey, reason: 'manual' },
+            });
+            if (!provisionalCheckpointResult.checkpoint) {
+                return { ok: false, error: `无法构建 provisional full checkpoint：${provisionalCheckpointResult.error}` };
+            }
+            // 4. 在原 full 位置暂存：完整备份原 full frame，并从原位置移除 replay full。
+            //    原位置不得留下会在 provisional 基线上重复执行的未知 artifact。
+            const candidateChat = JSON.parse(JSON.stringify(chat));
+            const provisionalMessage = candidateChat[rangeStartMessageIndex];
+            if (!provisionalMessage || provisionalMessage.is_user) {
+                return { ok: false, error: `追平起始楼层 ${rangeStartMessageIndex} 不是有效 AI 楼层。` };
+            }
+            const provisionalContainer = readIsolatedDataContainer_ACU(provisionalMessage) || {};
+            const provisionalTagData = isV2TagData_ACU(provisionalContainer[isolationKey])
+                ? JSON.parse(JSON.stringify(provisionalContainer[isolationKey]))
+                : { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } };
+            provisionalTagData.storageFrame = {
+                version: 2,
+                checkpoint: JSON.parse(JSON.stringify(provisionalCheckpointResult.checkpoint)),
+                headRevision: `provisional:${runId}`,
+                logEntries: [],
+            };
+            const bridge = {
+                version: 1,
+                kind: 'manual_catch_up_provisional_bridge',
+                runId,
+                chatKey,
+                isolationKey,
+                selectedSheetKeys: [...selectedSheetKeys],
+                rangeStartMessageIndex,
+                originalFullCheckpointIndex,
+                phase: 'provisional_active',
+                originalFullFrameFingerprint: originalFingerprint,
+                provisionalRootIndex: rangeStartMessageIndex,
+                lastCommittedTargetIndex: -1,
+                createdAt: now,
+                updatedAt: now,
+                originalFullFrame: originalFrame,
+            };
+            provisionalTagData[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU] = bridge;
+            provisionalContainer[isolationKey] = provisionalTagData;
+            provisionalMessage.TavernDB_ACU_IsolatedData = provisionalContainer;
+            // 原 full frame 从原位置移除（保留 recoveryBackup 在原消息 tag 上）。
+            const originalMessage = candidateChat[originalFullCheckpointIndex];
+            const originalContainer = readIsolatedDataContainer_ACU(originalMessage) || {};
+            const originalTagData = originalContainer[isolationKey];
+            if (isV2TagData_ACU(originalTagData)) {
+                originalTagData.recoveryBackup = buildProvisionalBridgeRecoveryBackup_ACU(bridge, originalFrame);
+                originalTagData.storageFrame = { version: 2, logEntries: [] };
+            }
+            originalContainer[isolationKey] = originalTagData;
+            originalMessage.TavernDB_ACU_IsolatedData = originalContainer;
+            // 5. 候选聊天验证：首 bucket 前、原 full 边界、聊天末端。
+            try {
+                for (const boundary of [rangeStartMessageIndex, originalFullCheckpointIndex - 1, candidateChat.length - 1]) {
+                    const replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+                        maxMessageIndex: boundary,
+                        updateRuntimeState: false,
+                        compatibilityMode: 'disabled',
+                    });
+                    if (!replay || replay.baseKind !== 'full_checkpoint') {
+                        return { ok: false, error: `provisional bridge 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'bridge_replay_mismatch' };
+                    }
+                    if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+                        return { ok: false, error: `provisional bridge 候选 replay 依赖兼容修复：boundary=${boundary}。`, diagnosticCode: 'bridge_replay_mismatch' };
+                    }
+                    // 非目标表必须与原 full 数据一致。
+                    for (const [sheetKey, sheetValue] of Object.entries(checkpoint.data || {})) {
+                        if (!sheetKey.startsWith('sheet_') || selectedSheetKeys.includes(sheetKey))
+                            continue;
+                        const replaySheet = replay.data?.[sheetKey];
+                        const originalSheet = sheetValue;
+                        if (JSON.stringify(replaySheet?.content) !== JSON.stringify(originalSheet?.content)) {
+                            return { ok: false, error: `provisional bridge 候选 replay 非目标表不一致：${sheetKey}。`, diagnosticCode: 'bridge_replay_mismatch' };
+                        }
+                    }
+                }
+            }
+            catch (error) {
+                return { ok: false, error: `provisional bridge 候选 replay 验证异常：${error?.message || String(error)}`, diagnosticCode: 'bridge_replay_mismatch' };
+            }
+            // 6. strict save，失败完整回滚。
+            const before = JSON.parse(JSON.stringify(chat));
+            try {
+                chat.length = 0;
+                chat.push(...candidateChat);
+                writeMessageIdentity_ACU(provisionalMessage, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+                await saveChatToHostStrict_ACU();
+            }
+            catch (error) {
+                chat.length = 0;
+                chat.push(...before);
+                return { ok: false, error: `provisional bridge 建立严格保存失败：${error?.message || String(error)}` };
+            }
+            logDebug_ACU(`[ManualCatchUpBridge] 已建立 provisional full checkpoint：runId=${runId}, root=${rangeStartMessageIndex}, originalFull=${originalFullCheckpointIndex}, sheets=${selectedSheetKeys.join('、')}。`);
+            return {
+                ok: true,
+                bridge,
+                provisionalRootIndex: rangeStartMessageIndex,
+            };
+        });
+    }
+    /**
+     * 到达原 full 边界时原子汇合（t6）。
+     *
+     * 在首个 saveTargetIndex >= originalFullCheckpointIndex 的 bucket 之前调用：
+     *   1. bounded replay provisional 时间线到 originalFullCheckpointIndex - 1，提取 selected sheets 累计快照；
+     *   2. 在候选聊天恢复原 full frame 完整备份；
+     *   3. 在原 full frame 的 perSheetCheckpoints 为 selected sheets 写 sheet_rebase：
+     *      activateAtMessageIndex = originalFullCheckpointIndex、afterSeq = 原 frame 当前最大 seq、
+     *      data 为 provisional 累计快照、scheduleSummary 更新到已完成边界；
+     *   4. 保留原 full checkpoint data、migration/compaction provenance、非目标 per-sheet checkpoint、
+     *      日志、revision 与其他元数据；
+     *   5. 清理 provisional root 及其前置 selected-sheet artifacts；清理证据纳入 recovery backup；
+     *   6. 候选 replay 到原 full 边界：selected sheets 等于 provisional 累计快照、非目标表等于原正式根语义；
+     *   7. 候选 replay 到当前聊天末端，确保后缀历史仍可执行；
+     *   8. strict save 后移除 active bridge 元数据；
+     *   9. 调用方必须重新构建当前 bucket 的 merge base，禁止复用 bridge 前的陈旧 baseSnapshot。
+     */
+    async function finalizeProvisionalBridge_ACU(runId, options) {
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const chatKey = options.chatKey ?? currentChatFileIdentifier_ACU;
+        return runTableWriteTransaction_ACU({
+            source: 'manual_fill',
+            reason: 'finalizeManualCatchUpProvisionalBridge',
+            isolationKey,
+            writeSet: [{ kind: 'all' }],
+            maintenanceMode: 'exclusive',
+        }, async () => {
+            const chat = getChatArray_ACU();
+            const bridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+            if (!bridge) {
+                return { ok: false, error: '未找到 active provisional bridge session，无法 finalize。' };
+            }
+            if (bridge.runId !== runId) {
+                return { ok: false, error: `provisional bridge runId 不匹配：expected=${bridge.runId}, actual=${runId}；拒绝汇合。`, diagnosticCode: 'provisional_bridge_conflict' };
+            }
+            const scopeCheck = assertBridgeScopeMatchesLiveChat_ACU(bridge, chat);
+            if (!scopeCheck.ok) {
+                const error = scopeCheck.error;
+                return { ok: false, error, diagnosticCode: 'provisional_recovery_required' };
+            }
+            if (bridge.phase !== 'provisional_active') {
+                return { ok: false, error: `provisional bridge phase=${bridge.phase} 不允许 finalize。`, diagnosticCode: 'provisional_bridge_conflict' };
+            }
+            if (options.nextSaveTargetIndex < bridge.originalFullCheckpointIndex) {
+                return { ok: false, error: `nextSaveTargetIndex=${options.nextSaveTargetIndex} 尚未到达原 full 边界，不能 finalize。` };
+            }
+            // 1. bounded replay provisional 时间线到原 full 边界前一层，提取 selected sheets 累计快照。
+            const boundary = bridge.originalFullCheckpointIndex - 1;
+            let replay;
+            try {
+                replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
+                    maxMessageIndex: boundary,
+                    updateRuntimeState: false,
+                    compatibilityMode: 'disabled',
+                });
+            }
+            catch (error) {
+                return { ok: false, error: `bridge finalize 前 provisional replay 失败：${error?.message || String(error)}`, diagnosticCode: 'bridge_replay_mismatch' };
+            }
+            if (!replay || replay.baseKind !== 'full_checkpoint' || !replay.data) {
+                return { ok: false, error: 'bridge finalize 前 provisional replay 未建立正式基底。', diagnosticCode: 'bridge_replay_mismatch' };
+            }
+            if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
+                return { ok: false, error: 'bridge finalize 前 provisional replay 依赖兼容修复，不能汇合。', diagnosticCode: 'bridge_replay_mismatch' };
+            }
+            const provisionalSnapshotByKey = {};
+            for (const sheetKey of bridge.selectedSheetKeys) {
+                const sheetData = replay.data[sheetKey];
+                if (!sheetData || typeof sheetData !== 'object') {
+                    return { ok: false, error: `bridge finalize 前 provisional replay 缺少 selected sheet：${sheetKey}。`, diagnosticCode: 'bridge_replay_mismatch' };
+                }
+                provisionalSnapshotByKey[sheetKey] = JSON.parse(JSON.stringify(sheetData));
+            }
+            // 2. 候选聊天：恢复原 full frame 完整备份。
+            const candidateChat = JSON.parse(JSON.stringify(chat));
+            const originalMessage = candidateChat[bridge.originalFullCheckpointIndex];
+            if (!originalMessage) {
+                return { ok: false, error: `原 full checkpoint 楼层 ${bridge.originalFullCheckpointIndex} 不存在，无法恢复原根。` };
+            }
+            const originalContainer = readIsolatedDataContainer_ACU(originalMessage) || {};
+            const originalTagData = isV2TagData_ACU(originalContainer[isolationKey])
+                ? JSON.parse(JSON.stringify(originalContainer[isolationKey]))
+                : { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } };
+            // 恢复原 full frame 完整备份（含 checkpoint、per-sheet、日志、provenance）。
+            originalTagData.storageFrame = JSON.parse(JSON.stringify(bridge.originalFullFrame));
+            delete originalTagData[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU];
+            // 3. 在原 full frame 的 perSheetCheckpoints 为 selected sheets 写 sheet_rebase。
+            const frame = originalTagData.storageFrame;
+            const maxSeq = Math.max(0, ...(frame.logEntries || []).map(entry => Number(entry.seq) || 0));
+            const now = Date.now();
+            const perSheetCheckpoints = { ...(frame.perSheetCheckpoints || {}) };
+            for (const sheetKey of bridge.selectedSheetKeys) {
+                const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
+                    createdAt: now,
+                    reason: 'manual',
+                    sheetKey,
+                    data: provisionalSnapshotByKey[sheetKey],
+                    event: { filledSheetKeys: [sheetKey], changedSheetKeys: [sheetKey], groupKeys: [] },
+                    context: { messageIndex: bridge.originalFullCheckpointIndex, isolationKey, reason: 'manual' },
+                });
+                if (!sheetCheckpointResult.checkpoint) {
+                    return { ok: false, error: `bridge finalize 无法构建 selected sheet rebase：${sheetKey}：${sheetCheckpointResult.error}`, diagnosticCode: 'bridge_replay_mismatch' };
+                }
+                perSheetCheckpoints[sheetKey] = {
+                    ...sheetCheckpointResult.checkpoint,
+                    timeline: {
+                        kind: 'sheet_rebase',
+                        activateAtMessageIndex: bridge.originalFullCheckpointIndex,
+                        afterSeq: maxSeq,
+                    },
+                };
+            }
+            frame.perSheetCheckpoints = perSheetCheckpoints;
+            originalContainer[isolationKey] = originalTagData;
+            originalMessage.TavernDB_ACU_IsolatedData = originalContainer;
+            // 4. 清理 provisional root 及其前置 selected-sheet artifacts。
+            //    清理证据纳入 recovery backup（不能静默丢失）。
+            const cleanupEvidence = [];
+            const provisionalRootIndex = bridge.provisionalRootIndex;
+            const candidateProvisionalMessage = candidateChat[provisionalRootIndex];
+            if (candidateProvisionalMessage) {
+                const provisionalContainer = readIsolatedDataContainer_ACU(candidateProvisionalMessage);
+                if (provisionalContainer && isV2TagData_ACU(provisionalContainer[isolationKey])) {
+                    const provisionalTag = provisionalContainer[isolationKey];
+                    cleanupEvidence.push({
+                        messageIndex: provisionalRootIndex,
+                        storageFrame: JSON.parse(JSON.stringify(provisionalTag.storageFrame || { version: 2, logEntries: [] })),
+                    });
+                    delete provisionalTag[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU];
+                    provisionalTag.storageFrame = { version: 2, logEntries: [] };
+                    candidateProvisionalMessage.TavernDB_ACU_IsolatedData = provisionalContainer;
+                }
+            }
+            // 5. 候选 replay 验证：原 full 边界与聊天末端。
+            try {
+                for (const boundary of [bridge.originalFullCheckpointIndex, candidateChat.length - 1]) {
+                    const verifyReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
+                        maxMessageIndex: boundary,
+                        updateRuntimeState: false,
+                        compatibilityMode: 'disabled',
+                    });
+                    if (!verifyReplay || verifyReplay.baseKind !== 'full_checkpoint' || !verifyReplay.data) {
+                        return { ok: false, error: `bridge finalize 候选 replay 未建立正式基底：boundary=${boundary}。`, diagnosticCode: 'bridge_replay_mismatch' };
+                    }
+                    if (verifyReplay.requiresCheckpointConvergence || verifyReplay.compatibilityRepairs?.length) {
+                        return { ok: false, error: `bridge finalize 候选 replay 依赖兼容修复：boundary=${boundary}。`, diagnosticCode: 'bridge_replay_mismatch' };
+                    }
+                    // selected sheets 必须等于 provisional 累计快照。
+                    for (const sheetKey of bridge.selectedSheetKeys) {
+                        const verifySheet = verifyReplay.data?.[sheetKey];
+                        const snapshotSheet = provisionalSnapshotByKey[sheetKey];
+                        if (JSON.stringify(verifySheet?.content) !== JSON.stringify(snapshotSheet?.content)) {
+                            return { ok: false, error: `bridge finalize 后 selected sheet 回放不一致：${sheetKey}。`, diagnosticCode: 'bridge_replay_mismatch' };
+                        }
+                    }
+                    // 非目标表必须等于原正式根语义。
+                    const originalCheckpointData = bridge.originalFullFrame.checkpoint?.data || {};
+                    for (const [sheetKey, sheetValue] of Object.entries(originalCheckpointData)) {
+                        if (!sheetKey.startsWith('sheet_') || bridge.selectedSheetKeys.includes(sheetKey))
+                            continue;
+                        const verifySheet = verifyReplay.data?.[sheetKey];
+                        const originalSheet = sheetValue;
+                        if (JSON.stringify(verifySheet?.content) !== JSON.stringify(originalSheet?.content)) {
+                            return { ok: false, error: `bridge finalize 后非目标表回放不一致：${sheetKey}。`, diagnosticCode: 'bridge_replay_mismatch' };
+                        }
+                    }
+                }
+            }
+            catch (error) {
+                return { ok: false, error: `bridge finalize 候选 replay 验证异常：${error?.message || String(error)}`, diagnosticCode: 'bridge_replay_mismatch' };
+            }
+            // 6. strict save，失败原位回滚。
+            const before = JSON.parse(JSON.stringify(chat));
+            try {
+                chat.length = 0;
+                chat.push(...candidateChat);
+                writeMessageIdentity_ACU(originalMessage, {
+                    enabled: settings_ACU.dataIsolationEnabled,
+                    code: settings_ACU.dataIsolationCode,
+                });
+                await saveChatToHostStrict_ACU();
+            }
+            catch (error) {
+                chat.length = 0;
+                chat.push(...before);
+                return { ok: false, error: `bridge finalize 严格保存失败：${error?.message || String(error)}`, diagnosticCode: 'bridge_finalize_failed' };
+            }
+            logDebug_ACU(`[ManualCatchUpBridge] 已原子汇合：runId=${runId}, originalFull=${bridge.originalFullCheckpointIndex}, sheets=${bridge.selectedSheetKeys.join('、')}, cleanup=${cleanupEvidence.length}。`);
+            return {
+                ok: true,
+                finalizeSummary: {
+                    selectedSheetKeys: [...bridge.selectedSheetKeys],
+                    originalFullCheckpointIndex: bridge.originalFullCheckpointIndex,
+                },
+            };
+        });
+    }
+    /**
+     * 回滚 provisional bridge（t7）：零 bucket 成功时恢复原 full frame 并删除临时根。
+     *
+     * 只有 bridge.lastCommittedTargetIndex < 0（零提交）时允许完整回滚。
+     * 已有 bucket 成功时必须先 finalize（把已提交成果带入正式时间线），不能丢弃用户成果。
+     */
+    async function rollbackProvisionalBridge_ACU(runId, options = {}) {
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        return runTableWriteTransaction_ACU({
+            source: 'manual_fill',
+            reason: 'rollbackManualCatchUpProvisionalBridge',
+            isolationKey,
+            writeSet: [{ kind: 'all' }],
+            maintenanceMode: 'exclusive',
+        }, async () => {
+            const chat = getChatArray_ACU();
+            const bridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+            if (!bridge)
+                return { ok: true };
+            if (bridge.runId !== runId) {
+                return { ok: false, error: `provisional bridge runId 不匹配：expected=${bridge.runId}, actual=${runId}。` };
+            }
+            if (bridge.lastCommittedTargetIndex >= 0) {
+                return { ok: false, error: `provisional bridge 已有 ${bridge.lastCommittedTargetIndex + 1} 个已提交 bucket，禁止回滚；请先 finalize。` };
+            }
+            const scopeCheck = assertBridgeScopeMatchesLiveChat_ACU(bridge, chat);
+            if (!scopeCheck.ok) {
+                return { ok: false, error: scopeCheck.error };
+            }
+            const candidateChat = JSON.parse(JSON.stringify(chat));
+            // 恢复原 full frame。
+            const originalMessage = candidateChat[bridge.originalFullCheckpointIndex];
+            if (!originalMessage)
+                return { ok: false, error: 'rollback 未找到原 full 楼层。' };
+            const originalContainer = readIsolatedDataContainer_ACU(originalMessage) || {};
+            const originalTagData = isV2TagData_ACU(originalContainer[isolationKey])
+                ? JSON.parse(JSON.stringify(originalContainer[isolationKey]))
+                : { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } };
+            originalTagData.storageFrame = JSON.parse(JSON.stringify(bridge.originalFullFrame));
+            delete originalTagData[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU];
+            originalContainer[isolationKey] = originalTagData;
+            originalMessage.TavernDB_ACU_IsolatedData = originalContainer;
+            // 删除临时根。
+            const provisionalMessage = candidateChat[bridge.provisionalRootIndex];
+            if (provisionalMessage) {
+                const provisionalContainer = readIsolatedDataContainer_ACU(provisionalMessage);
+                if (provisionalContainer && isV2TagData_ACU(provisionalContainer[isolationKey])) {
+                    const provisionalTag = provisionalContainer[isolationKey];
+                    delete provisionalTag[MANUAL_CATCH_UP_BRIDGE_FIELD_ACU];
+                    provisionalTag.storageFrame = { version: 2, logEntries: [] };
+                    provisionalMessage.TavernDB_ACU_IsolatedData = provisionalContainer;
+                }
+            }
+            const before = JSON.parse(JSON.stringify(chat));
+            try {
+                chat.length = 0;
+                chat.push(...candidateChat);
+                await saveChatToHostStrict_ACU();
+            }
+            catch (error) {
+                chat.length = 0;
+                chat.push(...before);
+                return { ok: false, error: `provisional bridge rollback 严格保存失败：${error?.message || String(error)}` };
+            }
+            logDebug_ACU(`[ManualCatchUpBridge] 已回滚 provisional bridge：runId=${runId}。`);
+            return { ok: true };
+        });
+    }
+    /**
+     * 统一恢复门：任意表写入/加载前调用，处理当前 isolationKey 的残留 provisional session。
+     *
+     * - 当前 isolationKey 无残留：`{ ok: true, action: 'none' }`；
+     * - 当前 isolationKey 有残留且指纹/拓扑完整：自动 rollback（零提交）或 finalize（有提交）；
+     * - 当前 isolationKey 有残留但无法证明安全：`{ ok: false, recoveryRequired: true }`，调用方必须 fail-closed；
+     * - 仅其他 isolationKey 有残留：不越权自动恢复（跨隔离键会话属于其他作用域），返回
+     *   `{ ok: false, recoveryRequired: true }` 阻断，避免在错误作用域做拓扑操作。
+     *
+     * 调用方（启动加载、CHAT_CHANGED、普通写入前）必须：
+     * 1. 在任意写事务之外调用（recover/rollback/finalize 自身会开启 exclusive 事务，嵌套会死锁）；
+     * 2. 失败时 fail-closed，不继续写入。
+     */
+    async function ensureNoActiveProvisionalBridgeForCurrentScope_ACU(options = {}) {
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0) {
+            return { ok: true, action: 'none' };
+        }
+        // 当前 isolationKey 的残留：自动恢复。
+        const currentBridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+        if (currentBridge) {
+            return recoverProvisionalBridgeSession_ACU({ chatKey: options.chatKey, isolationKey });
+        }
+        // 仅其他 isolationKey 有残留：不能假装已恢复，明确阻断。
+        if (hasActiveProvisionalBridgeAnywhere_ACU(chat)) {
+            return {
+                ok: false,
+                error: '检测到其他隔离键存在 active provisional bridge session；当前作用域无法安全恢复，已阻止写入。请切换回原会话完成汇合/回滚后再操作。',
+                recoveryRequired: true,
+            };
+        }
+        return { ok: true, action: 'none' };
+    }
+    /**
+     * 崩溃残留恢复（t7）：应用启动、加载聊天或任意新表写入前调用。
+     *
+     * - 指纹与拓扑完整、零提交：自动 rollback；
+     * - 指纹与拓扑完整、已有提交：自动 finalize（把已提交成果带入正式时间线）；
+     * - 无法证明安全（指纹/拓扑/聊天不匹配）：进入 recovery-required，普通写入 fail-closed。
+     * 重试同 runId 必须幂等：不得建立第二临时根、重复 rebase 或重复应用前缀日志。
+     */
+    async function recoverProvisionalBridgeSession_ACU(options = {}) {
+        const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+        const chat = getChatArray_ACU();
+        const bridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+        if (!bridge)
+            return { ok: true, action: 'none' };
+        const validation = validateProvisionalBridge_ACU(bridge);
+        if (!validation.valid) {
+            return { ok: false, error: `provisional bridge 结构非法，无法自动恢复：${validation.error}`, recoveryRequired: true };
+        }
+        const scopeCheck = assertBridgeScopeMatchesLiveChat_ACU(bridge, chat);
+        if (!scopeCheck.ok) {
+            return { ok: false, error: scopeCheck.error, recoveryRequired: true };
+        }
+        // 拓扑完整。
+        if (bridge.lastCommittedTargetIndex < 0) {
+            const rollback = await rollbackProvisionalBridge_ACU(bridge.runId, { isolationKey });
+            if (!rollback.ok) {
+                return { ok: false, error: rollback.error, recoveryRequired: true };
+            }
+            logWarn_ACU(`[ManualCatchUpBridge] 崩溃残留自动回滚：runId=${bridge.runId}（零提交）。`);
+            return { ok: true, action: 'rolled_back' };
+        }
+        const finalize = await finalizeProvisionalBridge_ACU(bridge.runId, {
+            isolationKey,
+            nextSaveTargetIndex: bridge.originalFullCheckpointIndex,
+        });
+        if (!finalize.ok) {
+            return { ok: false, error: finalize.error, recoveryRequired: true };
+        }
+        logWarn_ACU(`[ManualCatchUpBridge] 崩溃残留自动 finalize：runId=${bridge.runId}（${bridge.lastCommittedTargetIndex + 1} 个已提交 bucket）。`);
+        return { ok: true, action: 'finalized' };
     }
 
     function assertTemplateCommitChatContext_ACU(expectedChat, options) {
@@ -41183,11 +42144,46 @@ $CONTENT
         }
         if (!containsOrCannotDisprove(artifact, sheetKey))
             return 'absent';
+        // 归属明确的 mutation/patch：只要结构可验证（statements/params/tableName 等），
+        // 它就是该表"曾存在"的铁证，reason 等标注字段不参与"能否证伪"判定。
+        // 旧版本手动重填等路径可能写出非当前白名单的 reason（如 manual_refill），
+        // 这些值不影响表是否存在过；只有结构畸形才保持 fail-closed。
+        if (artifact.kind === 'sql_sheet_batch') {
+            return typeof artifact.sheetKey === 'string'
+                && Array.isArray(artifact.statements)
+                && artifact.statements.every(statement => typeof statement === 'string')
+                && (artifact.params === undefined
+                    || (Array.isArray(artifact.params)
+                        && artifact.params.every(params => Array.isArray(params)
+                            && params.every(value => value === null || typeof value === 'string' || typeof value === 'number'))))
+                && (artifact.tableName === undefined || typeof artifact.tableName === 'string')
+                ? 'present'
+                : 'indeterminate';
+        }
+        // 其余归属明确的 kind：用哨兵区分"目标表证据确凿"与"字段无法验证"。
+        // 哨兵只对会随 sheetKey 变化的字段敏感；reason 等标注字段不得让合法
+        // 本表 operation 退化为 indeterminate（否则历史手动填表会被误判为不可验证）。
         return containsOrCannotDisprove(artifact, '__acu_history_evidence_sentinel__')
             ? 'indeterminate'
             : 'present';
     }
-    async function resolveRevealSource_ACU(chat, isolationKey, maxMessageIndex, sheetKey, currentSheetCheckpoint) {
+    async function resolveRevealSource_ACU(chat, isolationKey, maxMessageIndex, sheetKey, preferredHideCheckpoint, currentSheetCheckpoint) {
+        // 优先使用生命周期派生指向的最后 hide checkpoint：hide 语义保证 checkpoint.data 保留
+        // 离开 active 状态前的完整数据，且当前 frame 的精确同 key checkpoint 已通过 created/seq
+        // 校验。仅在缺少可信 hide checkpoint 时才退回逐边界 bounded replay（兼容旧历史）。
+        if (isObjectRecord_ACU$1(preferredHideCheckpoint)) {
+            const timeline = preferredHideCheckpoint.timeline;
+            const data = preferredHideCheckpoint.data;
+            if (isObjectRecord_ACU$1(timeline) && timeline.kind === 'sheet_hide' && isObjectRecord_ACU$1(data)) {
+                return {
+                    status: 'resolved',
+                    sheetData: deepClone_ACU$1(data),
+                    sourceKind: 'current_sheet_checkpoint',
+                    messageIndex: maxMessageIndex,
+                };
+            }
+            // 候选 hide checkpoint 结构非法：不得静默降级，继续走 bounded replay 验证，若仍找不到则 indeterminate。
+        }
         let replayFailureCount = 0;
         for (let boundary = maxMessageIndex; boundary >= 0; boundary -= 1) {
             const tagData = chat[boundary]?.TavernDB_ACU_IsolatedData?.[isolationKey];
@@ -41624,6 +42620,24 @@ $CONTENT
         if (!shouldAppendLogEntry && !shouldCheckpoint && options.manualRefillProgress) {
             logDebug_ACU(`[V2 Persist] 仅更新 manualRefillProgress，不追加 mutation entry: messageIndex=${target.index}`);
         }
+        // provisional bridge 提交进度推进：仅当本次是匹配 runId 的 manual catch-up bucket
+        // （准入已放行，目标 < 原 full 边界）时更新 bridge.lastCommittedTargetIndex，并把它
+        // 所在的根消息并入替换集合，与本次 bucket 提交同一次 strict save 原子落盘。
+        // 崩溃后 recover 依赖该进度区分“零提交回滚”与“有提交 finalize”，不能滞后。
+        const activeBridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+        if (activeBridge && options.manualCatchUpRunId && activeBridge.runId === options.manualCatchUpRunId
+            && target.index < activeBridge.originalFullCheckpointIndex) {
+            const progress = advanceProvisionalBridgeCommitProgress_ACU(chat, isolationKey, target.index);
+            if (progress.ok && progress.status === 'advanced') {
+                replacementIsolatedDataByMessageIndex.set(progress.messageIndex, progress.isolatedData);
+            }
+            else if (progress.ok === false) {
+                // 结构性失败（找不到根）才阻断；幂等重试（already_committed）不阻断本次提交。
+                if (progress.code === 'root_missing') {
+                    return { saved: false, error: `provisional bridge 提交进度推进失败：${progress.error}` };
+                }
+            }
+        }
         replacementIsolatedDataByMessageIndex.set(target.index, isolatedData);
         if (temporaryBaselineUpgrade || provisionalConvergenceReplay) {
             const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex);
@@ -41692,6 +42706,29 @@ $CONTENT
         });
         if (!options.transactionContext) {
             const result = { saved: false, error: 'V2 operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
+            performanceSpan.end({ success: false });
+            return result;
+        }
+        // manual catch-up provisional bridge 写入准入（t5）：
+        // 存在 active bridge 时，任何 V2 写入都必须携带匹配的 runId 且目标早于原 full 边界，
+        // 否则视为无关写入（自动更新/CRUD/导入/其他 run）直接阻断，不能混入 provisional 时间线。
+        // 不用全局布尔：每次写入都基于 live chat 重新读取 bridge 校验。
+        try {
+            const chat = getChatArray_ACU();
+            const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+            const bridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+            if (bridge) {
+                const targetIndex = options.targetMessageIndex ?? -1;
+                const auth = authorizeManualCatchUpBucketWrite_ACU(bridge, options.manualCatchUpRunId, targetIndex, getActiveChatStorageIdentity_ACU(chat), isolationKey);
+                if (!auth.ok) {
+                    const result = { saved: false, error: `provisional bridge 写入被拒绝：${auth.error}` };
+                    performanceSpan.end({ success: false });
+                    return result;
+                }
+            }
+        }
+        catch (bridgeCheckError) {
+            const result = { saved: false, error: `provisional bridge 准入检查失败：${bridgeCheckError instanceof Error ? bridgeCheckError.message : String(bridgeCheckError)}` };
             performanceSpan.end({ success: false });
             return result;
         }
@@ -42724,7 +43761,10 @@ $CONTENT
                         }
                         if (historyEvidence.status === 'present') {
                             // 历史确实曾有该表（可恢复的隐藏表）；bounded replay 用于定位离开时的可信数据。
-                            const revealSource = await resolveRevealSource_ACU(chat, isolationKey, target.index, change.sheetKey, revealCheckpointSources.get(change.sheetKey));
+                            // 优先使用生命周期派生的最后 hide checkpoint（含完整退出数据），仅在缺少可信
+                            // hide checkpoint 时才退回逐边界 bounded replay（兼容旧历史）。
+                            const preferredHideCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+                            const revealSource = await resolveRevealSource_ACU(chat, isolationKey, target.index, change.sheetKey, preferredHideCheckpoint, revealCheckpointSources.get(change.sheetKey));
                             assertTemplateCommitChatContext_ACU(chat, options);
                             if (revealSource.status === 'resolved') {
                                 // 能定位到可信历史可见数据 → 曾被隐藏的表，reveal 恢复"离开时最新状态"（语义1）。
@@ -42761,8 +43801,27 @@ $CONTENT
                             baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
                         });
                     }
-                    // 显式 reveal change：数据来源为 caller 提供的 sheetData（已在准备循环校验/建表计划）。
+                    // 显式 reveal change：恢复"离开时最新可信数据"。
+                    // 协调器只带模板结构（可能是 header-only 空壳），数据恢复必须以历史为准：
+                    // 优先使用生命周期派生的最后 hide checkpoint（data 保留退出前完整数据），
+                    // 缺失时退回逐边界 bounded replay（兼容旧历史）；两者都不可信才 fail-closed；
+                    // 仅当历史上完全不存在该表（not_found）时才回退 caller 的模板结构（语义同 introduction）。
                     for (const change of requestedChanges.filter(item => item.kind === 'reveal')) {
+                        const preferredHideCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+                        const revealSource = await resolveRevealSource_ACU(chat, isolationKey, target.index, change.sheetKey, preferredHideCheckpoint, revealCheckpointSources.get(change.sheetKey));
+                        assertTemplateCommitChatContext_ACU(chat, options);
+                        if (revealSource.status === 'resolved') {
+                            logDebug_ACU(`[V2 Persist] reveal_source_resolved: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, sourceKind=${revealSource.sourceKind}, sourceMessageIndex=${revealSource.messageIndex}。`);
+                            revealDataBySheet.set(change.sheetKey, revealSource.sheetData);
+                            continue;
+                        }
+                        if (revealSource.status === 'indeterminate') {
+                            logDebug_ACU(`[V2 Persist] reveal_source_indeterminate: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, reason=${revealSource.reason}。`);
+                            throw new Error(`V2 reveal_source_indeterminate: sheetKey=${change.sheetKey}, reason=${revealSource.reason}。`);
+                        }
+                        // not_found：历史上从未见过该表。显式 reveal 通常由协调器在 hidden 生命周期下生成，
+                        // 理论上不应走到这里；但为兼容异常/旧历史，回退 caller 模板结构（等价 introduction）。
+                        logDebug_ACU(`[V2 Persist] reveal_source_missing_fallback: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, 使用 caller 模板结构作为全新表。`);
                         revealDataBySheet.set(change.sheetKey, revealSheets.get(change.sheetKey));
                     }
                     // 统一写入 reveal checkpoint（timeline: sheet_reveal，回放语义同 rebase）。
@@ -42824,7 +43883,22 @@ $CONTENT
                         if (deletedSheetKeys.includes(sheetKey)) {
                             throw new Error(`V2 sheet hide 不能与删除同一 sheetKey 组合：${sheetKey}。`);
                         }
-                        const hideSource = await resolveRevealSource_ACU(chat, isolationKey, target.index, sheetKey);
+                        // hide 的语义是"当前可见 → 隐藏"：activeReplayState 中的当前数据就是权威来源，
+                        // 直接 O(1) 取用，避免对每次 hide 都做逐边界 bounded replay（阶段7：性能收敛）。
+                        // 仅当 active 无该表（异常状态）时才退回逐边界查找并验证。
+                        let hideSource;
+                        const activeSheetData = activeReplayState[sheetKey];
+                        if (isObjectRecord_ACU$1(activeSheetData)) {
+                            hideSource = {
+                                status: 'resolved',
+                                sheetData: deepClone_ACU$1(activeSheetData),
+                                sourceKind: 'bounded_replay',
+                                messageIndex: target.index,
+                            };
+                        }
+                        else {
+                            hideSource = await resolveRevealSource_ACU(chat, isolationKey, target.index, sheetKey);
+                        }
                         assertTemplateCommitChatContext_ACU(chat, options);
                         if (hideSource.status === 'indeterminate') {
                             throw new Error(`V2 sheet hide 数据来源无法确认：sheetKey=${sheetKey}，reason=${hideSource.reason}。`);
@@ -44396,7 +45470,7 @@ $CONTENT
         return persistTablesToChatMessageWithLockOption_ACU(options);
     }
     async function persistTablesToChatMessageWithLockOption_ACU(options = {}) {
-        const { targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, trackingSheetKeys, filledSheetKeys: explicitFilledSheetKeys, tableData: explicitTableData, trackAsUpdate = true, source, requestId, batchId, operations, revisionWriteSet, forceCheckpoint, checkpointReason, manualRefillProgress, replaceExistingIncremental, assumeCommitLock, strictSave, performanceRunId, performanceParentSpanId, transactionContext, } = options;
+        const { targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, trackingSheetKeys, filledSheetKeys: explicitFilledSheetKeys, tableData: explicitTableData, trackAsUpdate = true, source, requestId, batchId, operations, revisionWriteSet, forceCheckpoint, checkpointReason, manualRefillProgress, replaceExistingIncremental, assumeCommitLock, strictSave, manualCatchUpRunId, performanceRunId, performanceParentSpanId, transactionContext, } = options;
         const effectiveTableData = explicitTableData !== undefined ? explicitTableData : currentJsonTableData_ACU;
         if (!effectiveTableData) {
             logError_ACU('Save aborted: currentJsonTableData_ACU is null.');
@@ -44481,6 +45555,7 @@ $CONTENT
                     revisionWriteSet,
                     assumeCommitLock,
                     strictSave,
+                    manualCatchUpRunId,
                     performanceRunId,
                     performanceParentSpanId,
                     transactionContext,
@@ -46580,6 +47655,7 @@ $CONTENT
             return emptyPlan_ACU(baselineData, audit, blockers);
         const matchedKeys = new Set();
         const rebaseKeys = new Set();
+        const revealKeys = new Set();
         for (const [canonicalName, templateEntry] of templateByName) {
             const matchedByName = baselineByName.get(canonicalName);
             const occupiedByKey = baselineData[templateEntry.key];
@@ -46601,6 +47677,30 @@ $CONTENT
                 if (!introducedKey) {
                     blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」缺少可用于派生 key 的有效显示名。`);
                     continue;
+                }
+                // 生命周期感知：派生 key 在历史中曾存在（hidden / indeterminate / active）时，
+                // 这不是"新增表"。协调层显式消费唯一生命周期事实，不再靠 baseline 缺席猜测。
+                const lifecycleEntry = input.lifecycle?.statusBySheetKey?.[introducedKey];
+                if (lifecycleEntry) {
+                    if (lifecycleEntry.status === 'hidden') {
+                        // hidden → 显式 reveal：恢复历史 key（稳定 sheetKey），数据由 persist 层
+                        // resolveRevealSource_ACU 恢复"离开时最新状态"。协调层只带模板结构，不伪装 introduction。
+                        const revealed = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
+                        candidateData[introducedKey] = revealed;
+                        audit.push({ sheetKey: introducedKey, resolvedSheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(revealed).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, revealed.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+                        revealKeys.add(introducedKey);
+                        continue;
+                    }
+                    if (lifecycleEntry.status === 'indeterminate') {
+                        blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 的历史生命周期无法判定（indeterminate），已阻止模板提交。请先在数据管理中检查并恢复 V2 历史。`);
+                        continue;
+                    }
+                    if (lifecycleEntry.status === 'active') {
+                        // 派生 key 在历史中仍活跃但当前协调基线不含该表：异常状态，绝不覆盖活数据。
+                        blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 在历史生命周期中仍为 active，但当前聊天基线不含该表，无法协调。请重新读取当前表格后重试。`);
+                        continue;
+                    }
+                    // never_seen：历史上从未见过，正常 introduction。
                 }
                 const occupiedByIntroducedKey = candidateData[introducedKey];
                 if (occupiedByIntroducedKey) {
@@ -46647,6 +47747,13 @@ $CONTENT
                 audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
             }
             else {
+                // 生命周期感知：目标表历史生命周期无法判定时，隐藏操作也属于"不知道它在哪"，
+                // 不能静默隐藏（可能误伤 indeterminate 历史）。fail-closed 阻止提交。
+                const lifecycleEntry = input.lifecycle?.statusBySheetKey?.[key];
+                if (lifecycleEntry?.status === 'indeterminate') {
+                    blockers.push(`表「${sheet.name || key}」(${key}) 的历史生命周期无法判定（indeterminate），已阻止隐藏操作。请先在数据管理中检查并恢复 V2 历史。`);
+                    continue;
+                }
                 hiddenSheetKeys.push(key);
                 delete candidateData[key];
                 audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: [], hiddenColumns: headers_ACU(sheet).slice(1), physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
@@ -46657,7 +47764,11 @@ $CONTENT
         // checkpoint.data 就是协调器算好的目标全量；结构变更统一表达为数据边界上的 per-sheet checkpoint。
         const sheetChanges = [];
         for (const [key, sheet] of listSheets_ACU(candidateData)) {
-            if (!baselineData[key]) {
+            if (revealKeys.has(key)) {
+                sheetChanges.push({ kind: 'reveal', sheetKey: key, sheetData: sheet });
+                audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'reveal' });
+            }
+            else if (!baselineData[key]) {
                 sheetChanges.push({ kind: 'introduction', sheetKey: key, sheetData: sheet });
                 audit.find(item => item.sheetKey === key)?.operations.push({ kind: 'introduction' });
             }
@@ -47924,8 +49035,20 @@ $CONTENT
             // 与本次模板变更在同一候选提交内收敛，不能在读取入口提前阻断。
             const baselineData = replay?.data ?? null;
             const afterRevision = captureTableRuntimeRevisionForWriteSet_ACU([{ kind: 'all' }], { isolationKey });
-            if (beforeRevision === afterRevision)
-                return { baselineData, baseRevision: beforeRevision };
+            if (beforeRevision === afterRevision) {
+                // 同一逻辑时点派生只读生命周期投影：hidden/active/indeterminate 供协调层显式消费。
+                // 生命周期派生失败（chat 不可用等）时返回 null，协调层退回基线猜测兼容路径。
+                let lifecycle = null;
+                try {
+                    const chat = getChatArray_ACU();
+                    if (Array.isArray(chat))
+                        lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey);
+                }
+                catch {
+                    lifecycle = null;
+                }
+                return { baselineData, baseRevision: beforeRevision, lifecycle };
+            }
         }
         return { error: '当前表格状态在读取模板基线时发生变化，请稍后重试。' };
     }
@@ -47967,6 +49090,7 @@ $CONTENT
         }
         let baselineData;
         let baseRevision = null;
+        let lifecycle;
         if (!chatContextMatches_ACU(targetChatIdentity, entryContext.firstMessage)) {
             return { saved: false, error: '目标聊天已切换，已取消模板提交。' };
         }
@@ -47976,6 +49100,7 @@ $CONTENT
                 return { saved: false, error: baselineSnapshot.error };
             baselineData = baselineSnapshot.baselineData;
             baseRevision = baselineSnapshot.baseRevision;
+            lifecycle = baselineSnapshot.lifecycle;
             logDebug_ACU(`[TemplateScope] 模板协调基线已读取: requestId=${requestId}, source=v2_replay, baseRevision=${baseRevision}, isolationKey=${isolationKey}`);
         }
         catch (error) {
@@ -48002,6 +49127,7 @@ $CONTENT
                 templateData: targetTemplateData,
                 destructiveChangeConfirmed,
                 hardDeleteMissingSheets,
+                lifecycle: lifecycle ?? undefined,
                 storageMode,
             });
         }
@@ -69091,6 +70217,21 @@ $CONTENT
         let requiresRuntimeReload = false;
         try {
             assertExpectedCommitScope_ACU(options, '提交前');
+            // 普通表写入前统一恢复门：残留 provisional bridge 先自动 finalize/rollback。
+            // catch-up 自身携带 runId 时跳过——该 bridge 正是本次 run 建立的，不能提前汇合。
+            if (!options.manualCatchUpRunId) {
+                const bridgeGate = await ensureNoActiveProvisionalBridgeForCurrentScope_ACU({
+                    chatKey: options.chatKey,
+                    isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
+                });
+                if (!bridgeGate.ok) {
+                    return {
+                        success: false,
+                        error: bridgeGate.error,
+                        errorCategory: 'precondition',
+                    };
+                }
+            }
             const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
             if (!migration.success) {
                 return {
@@ -69153,6 +70294,7 @@ $CONTENT
                                 manualRefillProgress: persistOptions.manualRefillProgress ?? options.manualRefillProgress,
                                 replaceExistingIncremental: persistOptions.replaceExistingIncremental ?? options.replaceExistingIncremental,
                                 strictSave: persistOptions.strictSave ?? options.strictSave,
+                                manualCatchUpRunId: options.manualCatchUpRunId,
                                 performanceRunId: options.performanceRunId,
                                 performanceParentSpanId: options.performanceParentSpanId,
                                 assumeCommitLock: true,
@@ -70017,6 +71159,20 @@ $CONTENT
         return boundary.shouldRotateCheckpoint && boundary.indicesToPurge.length > 0 && boundary.anchorIndex !== undefined;
     }
     async function ensureV2BoundaryCheckpointForRetainedBuffer_ACU(options = {}) {
+        // provisional bridge 活跃期间禁止 compaction：compaction 会直接改写帧、绕过
+        // persistTableMutationLogV2_ACU 的 bridge 准入，可能把原 full 降级或在新位置写
+        // full checkpoint，破坏"原 full 边界前不得推进锚点"的拓扑冻结约束。
+        // 崩溃残留 bridge（应用重启后触发 auto_update/manual_refill 的 compaction）必须先
+        // 自动恢复（零提交回滚 / 有提交 finalize）；恢复失败则 fail-closed，不进入 compaction。
+        // 注意：recover 自身会开启 exclusive write transaction，必须在 compaction 的
+        // transaction 之外调用，避免嵌套事务死锁。
+        const preflightChat = getChatArray_ACU();
+        if (hasActiveProvisionalBridgeAnywhere_ACU(preflightChat)) {
+            const recovery = await recoverProvisionalBridgeSession_ACU({ isolationKey: getCurrentIsolationKey_ACU() });
+            if (!recovery.ok) {
+                return { success: false, changed: false, error: `检测到 active provisional bridge 且自动恢复失败，已阻止边界 compaction：${recovery.error}` };
+            }
+        }
         return runTableWriteTransaction_ACU({
             source: 'system_cleanup',
             reason: options.reason === 'manual_refill'
@@ -70731,7 +71887,25 @@ $CONTENT
         const checkpoint = frame?.checkpoint;
         if (checkpoint?.kind !== 'full' || !['init', 'migration'].includes(checkpoint.reason))
             return false;
-        return validateCanonicalCheckpoint_ACU(checkpoint).valid;
+        if (!validateCanonicalCheckpoint_ACU(checkpoint).valid)
+            return false;
+        // 只允许 header-only：checkpoint 数据不能携带任何真实行数据（除 header 外的数据行）。
+        const data = checkpoint.data;
+        if (!data || typeof data !== 'object')
+            return false;
+        for (const [key, sheetValue] of Object.entries(data)) {
+            if (key === 'mate')
+                continue;
+            if (!sheetValue || typeof sheetValue !== 'object')
+                return false;
+            const content = sheetValue.content;
+            if (!Array.isArray(content))
+                return false;
+            // header-only：最多 1 行（header），不允许 seedRows/data 行。
+            if (content.length > 1)
+                return false;
+        }
+        return true;
     }
     function hasV2ReplayArtifact_ACU$1(frame) {
         return (frame?.logEntries || []).length > 0
@@ -70777,8 +71951,14 @@ $CONTENT
             }
             const sourceMessage = chat[checkpointMessageIndex];
             const sourceTagData = readIsolatedTagData_ACU(sourceMessage, isolationKey);
-            if (!isV2TagData_ACU(sourceTagData) || !isSafeHeaderOnlyResetCheckpoint_ACU(sourceTagData.storageFrame)) {
+            if (!isV2TagData_ACU(sourceTagData)) {
                 return { status: 'blocked', error: '手动追平目标早于不满足 canonical 契约的 V2 checkpoint；已在调用 AI 前阻止写入，请先执行 V2 恢复诊断。' };
+            }
+            if (!isSafeHeaderOnlyResetCheckpoint_ACU(sourceTagData.storageFrame)) {
+                // 含真实行数据 / migration / compaction / fallback provenance 的正式 full checkpoint
+                // 不能前移（bounded replay 语义可能被污染）；需要 provisional bridge 在不动原根的
+                //前提下从更早楼层建立临时根，追平后再原子汇合回原根。
+                return { status: 'provisional_bridge_required', checkpointMessageIndex };
             }
             if (hasV2ReplayArtifact_ACU$1(sourceTagData.storageFrame)) {
                 return { status: 'blocked', error: '手动追平目标早于携带后缀 replay artifact 的 V2 checkpoint；请先执行 V2 恢复诊断。' };
@@ -83225,7 +84405,9 @@ $CONTENT
                     };
                 }
                 if (Array.isArray(response.job.targetSheetKeys) && response.job.targetSheetKeys.length > 0) {
-                    const allowedSheetKeys = new Set(response.job.targetSheetKeys);
+                    // 授权集合必须与"已按 TemplateScope 过滤的目标"一致：隐藏表已从 scope 移除，
+                    // 即使 AI 仍把它写进 targetSheetKeys，也不得授权写入（阶段3：统一 allowed）。
+                    const allowedSheetKeys = new Set(scopedTargets);
                     const retainedStatements = [];
                     const discardedKeys = new Set();
                     for (const statement of reboundStatements) {
@@ -83243,7 +84425,7 @@ $CONTENT
                             return {
                                 success: false,
                                 modifiedKeys: [],
-                                error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。允许写入表：${formatAllowedSheetKeys_ACU(response.job.targetSheetKeys)}。`,
+                                error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 越权修改了非目标表 (${unauthorizedKeys.join(', ')})。允许写入表：${formatAllowedSheetKeys_ACU(scopedTargets)}。`,
                                 errorCategory: 'model',
                             };
                         }
@@ -83257,7 +84439,7 @@ $CONTENT
                         return {
                             success: false,
                             modifiedKeys: [],
-                            error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 的 SQL 仅修改非目标表，已全部丢弃。允许写入表：${formatAllowedSheetKeys_ACU(response.job.targetSheetKeys)}。请仅生成允许表的写入。`,
+                            error: `统一提交失败：${formatResponseGroupReference_ACU(response)} 的 SQL 仅修改非目标表，已全部丢弃。允许写入表：${formatAllowedSheetKeys_ACU(scopedTargets)}。请仅生成允许表的写入。`,
                             errorCategory: 'model',
                         };
                     }
@@ -83276,7 +84458,7 @@ $CONTENT
                 reason: 'applyUnifiedGroupFillResponses:runtime_sql',
                 chatKey: capturedChatKey,
                 isolationKey: capturedIsolationKey,
-                writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
+                writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet].filter(sheetKey => sqlScopedKeys([sheetKey]).length > 0), baseSnapshot),
                 baseRevision: options.baseRevision,
                 workingDataMode: 'none',
                 initialData: baseSnapshot,
@@ -83287,6 +84469,7 @@ $CONTENT
                 trackAsUpdate: true,
                 replaceExistingIncremental: options.replaceExistingIncremental,
                 manualRefillProgress: options.manualRefillProgress,
+                manualCatchUpRunId: options.manualCatchUpRunId,
                 skipChatSave: options.isImportMode,
             }, async () => {
                 const provider = await ensureStorageProviderReady_ACU();
@@ -83334,7 +84517,7 @@ $CONTENT
                 const snapshotScope = capturedTemplateScope;
                 const scopedKeys = (keys) => filterSheetKeysByTemplateScope_ACU(keys, snapshotScope);
                 const allRuntimeSheetKeys = scopedKeys(getSortedSheetKeys_ACU(runtimeData));
-                const initializedKeys = [...allTargetSheetKeySet]
+                const initializedKeys = scopedKeys([...allTargetSheetKeySet])
                     .filter(sheetKey => Boolean(runtimeData?.[sheetKey]) && !Boolean(baseSnapshot?.[sheetKey]))
                     .sort();
                 const keysToSave = isFirstTimeInit
@@ -83357,7 +84540,7 @@ $CONTENT
                     // 因此 sqlResponses 与 sqlTexts 一一对应，不会错位。
                     for (let index = 0; index < sqlResponses.length; index += 1) {
                         const response = sqlResponses[index];
-                        const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, response.job.targetSheetKeys);
+                        const operationBuild = buildSqlSheetBatchOperationsFromText_ACU(sqlTexts[index] || '', runtimeData, scopedKeys(response.job.targetSheetKeys || []));
                         if (operationBuild.success === false) {
                             return {
                                 success: false,
@@ -83372,7 +84555,7 @@ $CONTENT
                     logDebug_ACU(`[V2 Fill] 目标楼层 #${options.saveTargetIndex} 前无承载目标表的 full checkpoint，`
                         + `本次以初始 checkpoint 形式提交 SQL 运行时快照（tracked=${keysToTrack.join(',') || '无'}）。`);
                 }
-                const fillAttemptKeys = [...allTargetSheetKeySet]
+                const fillAttemptKeys = scopedKeys([...allTargetSheetKeySet])
                     .filter(sheetKey => Boolean(runtimeData?.[sheetKey]))
                     .sort();
                 const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet', sheetKey }));
@@ -83531,6 +84714,7 @@ $CONTENT
                 operations: effectiveOperations,
                 replaceExistingIncremental: options.replaceExistingIncremental,
                 manualRefillProgress: options.manualRefillProgress,
+                manualCatchUpRunId: options.manualCatchUpRunId,
             }, () => ({
                 success: true,
                 value: { modifiedKeys },
@@ -83620,6 +84804,18 @@ $CONTENT
             };
         }
         if (migration.migrated) {
+            // 手动追平 run 已在规划前完成迁移；执行阶段再次发生迁移意味着 preflight 之后
+            // 拓扑被外部改动（聊天切换、另一 run 抢先迁移等）。继续按旧 plan 写入会把
+            // bucket 写到新锚点之前，等价于截图事故的重演，必须视为 topology drift 中止。
+            if (mode === 'manual_independent' && options.manualCatchUpRun === true) {
+                return {
+                    success: false,
+                    failedGroups: groups.map(group => group.key),
+                    error: sanitizeRetryFeedback_ACU('手动追平执行阶段检测到 legacy→V2 迁移改变锚点拓扑；已中止，请重新执行追平。', MAX_WARN_ERROR_LENGTH_ACU),
+                    committedBucketCount: 0,
+                    diagnosticCode: 'catch_up_migration_changed_topology',
+                };
+            }
             await reloadStorageProvider();
         }
         const executionScope = captureFillExecutionScope_ACU({
@@ -83902,6 +85098,7 @@ $CONTENT
                     isolationKey: executionScope.isolationKey,
                     templateScope: executionScope.templateScope,
                     sqlApplyScope: executionScope.sqlApplyScope,
+                    manualCatchUpRunId: options.manualCatchUpRunId,
                     performanceRunId: options.performanceRunId,
                     performanceParentSpanId: options.performanceParentSpanId,
                 });
@@ -84552,6 +85749,39 @@ $CONTENT
         if (!coreApisAreReady_ACU) {
             return { success: false, error: 'API未就绪。' };
         }
+        // 追平规划前必须先完成 legacy→V2 迁移：迁移会按 skipUpdateFloors 在后方楼层创建
+        // migration full checkpoint。若等到 chunk 执行时才迁移，第一 bucket 的目标楼层早于
+        // 新锚点，persist 会以 target < latestFullCheckpoint fail-fast 拒绝，用户已经白白
+        // 支付了一次 AI 调用。迁移成功后必须重载存储运行时与聊天，再重新规划与重新预检。
+        const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('orchestrateManualCatchUp:preplan');
+        if (!migration.success) {
+            return {
+                success: false,
+                error: migration.error || '旧存储迁移失败，已阻止手动追平。',
+                committedBucketCount: 0,
+                dataCommitted: false,
+                replayVerified: false,
+                terminalProgressSaved: false,
+                diagnosticCode: 'catch_up_migration_failed',
+            };
+        }
+        if (migration.migrated) {
+            // 迁移改写聊天持久化拓扑：内存 runtime、模板与聊天数组都必须基于新状态重建，
+            // 否则规划会建立在迁移前的陈旧快照上。
+            const reloadResult = await reloadStorageProvider();
+            if (!reloadResult?.ok) {
+                return {
+                    success: false,
+                    error: reloadResult?.error || reloadResult?.failureCode || '迁移后存储运行时重载失败，已阻止手动追平。',
+                    committedBucketCount: 0,
+                    dataCommitted: false,
+                    replayVerified: false,
+                    terminalProgressSaved: false,
+                    diagnosticCode: 'catch_up_migration_reload_failed',
+                };
+            }
+            logDebug_ACU('[手动追平] 已前置完成 legacy→V2 迁移并重载运行时，重新规划追平计划。');
+        }
         const planningResult = await prepareManualCatchUpPlan_ACU(targetKeys);
         if (!planningResult.success || !planningResult.plan) {
             return { success: false, error: planningResult.error || '无法生成手动追平计划。' };
@@ -84569,6 +85799,13 @@ $CONTENT
                 terminalProgressSaved: false,
             };
         }
+        // runId 必须在 preflight 之前创建：provisional bridge 建立与 bucket 提交共用同一个
+        // runId，保证写入准入（t5）的 run-scoped 隔离。
+        const runId = createManualCatchUpRunId_ACU();
+        // provisional bridge run 状态：建立后在 bucket 循环内驱动 finalize。
+        // 不能依赖全局状态——必须在 run 内显式跟踪，避免跨 run 串扰。
+        let provisionalBridgeOriginalFullIndex = null;
+        let provisionalBridgeFinalized = false;
         // 旧版“删除全部数据”会将 header-only reset checkpoint 留在原先较晚楼层。
         // 在任何 AI 调用之前修复可证明安全的布局；无法证明安全则阻断，而不是让 bucket
         // 伪提交后由 terminal progress-only 写入兜底报错。
@@ -84586,6 +85823,48 @@ $CONTENT
                     diagnosticCode: 'anchor_preflight_blocked',
                 };
             }
+            if (anchorPreflight.status === 'provisional_bridge_required') {
+                // 追平目标早于含真实数据的正式 full checkpoint：不能移动原根，必须建立
+                // run-scoped provisional full checkpoint，追平至原 full 边界后原子汇合回原根。
+                // 若已有 active bridge（崩溃残留或并发 run），先尝试自动恢复，恢复失败则阻断。
+                const isolationKey = getCurrentIsolationKey_ACU();
+                const liveChat = getChatArray_ACU();
+                if (hasActiveProvisionalBridgeAnywhere_ACU(liveChat)) {
+                    const recovery = await recoverProvisionalBridgeSession_ACU({ isolationKey });
+                    if (!recovery.ok) {
+                        return {
+                            success: false,
+                            outcome: 'blocked',
+                            error: `检测到 active provisional bridge 且自动恢复失败：${recovery.error}`,
+                            catchUpPlan: plan,
+                            committedBucketCount: 0,
+                            dataCommitted: false,
+                            diagnosticCode: 'provisional_recovery_required',
+                        };
+                    }
+                }
+                const rangeStartMessageIndex = plan.waves[0]?.messageIndices[0] ?? preflightTargetIndex;
+                const selectedSheetKeysForBridge = [...new Set(plan.waves.flatMap(wave => wave.sheetKeys))].sort();
+                const templateData = parseTableTemplateJson_ACU({ stripSeedRows: false }) || {};
+                const establishResult = await establishProvisionalBridge_ACU(runId, selectedSheetKeysForBridge, rangeStartMessageIndex, anchorPreflight.checkpointMessageIndex, {
+                    templateData,
+                    chatKey: currentChatFileIdentifier_ACU,
+                    isolationKey,
+                });
+                if (!establishResult.ok) {
+                    return {
+                        success: false,
+                        outcome: 'blocked',
+                        error: `provisional bridge 建立失败：${establishResult.error}`,
+                        catchUpPlan: plan,
+                        committedBucketCount: 0,
+                        dataCommitted: false,
+                        diagnosticCode: establishResult.diagnosticCode ?? 'provisional_bridge_conflict',
+                    };
+                }
+                logDebug_ACU(`[手动追平] 已建立 provisional bridge：runId=${runId}, root=${establishResult.provisionalRootIndex}, originalFull=${anchorPreflight.checkpointMessageIndex}。`);
+                provisionalBridgeOriginalFullIndex = anchorPreflight.checkpointMessageIndex;
+            }
         }
         const maxConcurrentGroups = Math.max(1, Math.trunc(Number(settings_ACU.maxConcurrentGroups) || 1));
         const totalBuckets = plan.waves.reduce((count, wave) => {
@@ -84595,7 +85874,6 @@ $CONTENT
             }
             return count + waveBuckets;
         }, 0);
-        const runId = createManualCatchUpRunId_ACU();
         let committedBucketCount = 0;
         let activeWaveIndex = 0;
         let lastCommittedBucketTargetIndex = null;
@@ -84728,6 +86006,40 @@ $CONTENT
                 return error?.message || String(error || `手动追平终态 ${status} 保存异常。`);
             }
         };
+        // provisional bridge 收敛：有已提交 bucket 则 finalize，零提交则 rollback。
+        // 只用于正常收尾与 stopped/failed 路径（计划阶段 7：终态必须在收敛后写入）。
+        const settleProvisionalBridge = async (nextSaveTargetIndex) => {
+            if (provisionalBridgeOriginalFullIndex === null || provisionalBridgeFinalized)
+                return { ok: true };
+            if (committedBucketCount > 0) {
+                // nextSaveTargetIndex 缺省时用计划终点；跨边界段传入边界后首个 bucket 的
+                // saveTargetIndex（>= originalFull），保证 finalize 语义精确落在即将写入的楼层。
+                const effectiveNextSaveTargetIndex = nextSaveTargetIndex !== undefined && nextSaveTargetIndex >= provisionalBridgeOriginalFullIndex
+                    ? nextSaveTargetIndex
+                    : (terminalTargetMessageIndex >= provisionalBridgeOriginalFullIndex
+                        ? terminalTargetMessageIndex
+                        : provisionalBridgeOriginalFullIndex);
+                const finalizeResult = await finalizeProvisionalBridge_ACU(runId, {
+                    chatKey: currentChatFileIdentifier_ACU,
+                    isolationKey: getCurrentIsolationKey_ACU(),
+                    nextSaveTargetIndex: effectiveNextSaveTargetIndex,
+                });
+                if (!finalizeResult.ok) {
+                    return { ok: false, error: finalizeResult.error, diagnosticCode: finalizeResult.diagnosticCode ?? 'bridge_finalize_failed' };
+                }
+                provisionalBridgeFinalized = true;
+                return { ok: true };
+            }
+            const rollbackResult = await rollbackProvisionalBridge_ACU(runId, {
+                chatKey: currentChatFileIdentifier_ACU,
+                isolationKey: getCurrentIsolationKey_ACU(),
+            });
+            if (!rollbackResult.ok) {
+                return { ok: false, error: rollbackResult.error, diagnosticCode: 'bridge_finalize_failed' };
+            }
+            provisionalBridgeFinalized = true;
+            return { ok: true };
+        };
         const refreshCommittedDataBeforeExit = async () => {
             if (committedBucketCount <= 0)
                 return;
@@ -84743,6 +86055,22 @@ $CONTENT
             for (let waveIndex = 0; waveIndex < plan.waves.length; waveIndex += 1) {
                 activeWaveIndex = waveIndex;
                 if (options.abortController?.signal.aborted) {
+                    // 终态不变量：stopped 只能在 provisional 会话已 finalize/rollback 后写入。
+                    // abort 时若已有已提交 bucket，先收敛 bridge（有提交 finalize、零提交 rollback），
+                    // 收敛失败则不写终态，直接返回 integrity_failed。
+                    const settleResult = await settleProvisionalBridge();
+                    if (!settleResult.ok) {
+                        const settleError = settleResult;
+                        return {
+                            success: false, outcome: 'integrity_failed',
+                            error: `provisional bridge 收敛失败：${settleError.error}`,
+                            committedBucketCount, catchUpPlan: plan,
+                            dataCommitted: committedBucketCount > 0,
+                            replayVerified: false,
+                            terminalProgressSaved: false,
+                            diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                        };
+                    }
                     const terminalError = await persistCatchUpTerminalProgress('stopped', '手动追平已终止。');
                     await refreshCommittedDataBeforeExit();
                     return {
@@ -84755,8 +86083,44 @@ $CONTENT
                     };
                 }
                 const wave = plan.waves[waveIndex];
-                for (let groupStart = 0; groupStart < wave.groups.length; groupStart += maxConcurrentGroups) {
+                // provisional bridge 边界汇合：wave 的 messageIndices 是连续 AI 楼层切片，
+                // 可能同时跨越原 full 边界两侧。若整段一起提交，跨边界 bucket 会先被 persist
+                // 准入拒绝（target >= originalFull 必须先 finalize），且过早 finalize 会让
+                // 边界前 bucket 失去 bridge 授权。因此把 wave 拆成边界前/后两段分别提交：
+                // 边界前段走 provisional（携带 runId），在首个跨边界 bucket 前 finalize，
+                // 边界后段回到原正式根（bridge 已关闭，普通 persist 放行）。
+                const bridgeBoundary = provisionalBridgeOriginalFullIndex;
+                const isBridgeActive = bridgeBoundary !== null && !provisionalBridgeFinalized;
+                const waveSegments = [];
+                if (isBridgeActive) {
+                    const preBoundaryIndices = wave.messageIndices.filter(index => index < bridgeBoundary);
+                    const postBoundaryIndices = wave.messageIndices.filter(index => index >= bridgeBoundary);
+                    if (preBoundaryIndices.length > 0) {
+                        waveSegments.push({ indices: preBoundaryIndices, mergeBaseMaxMessageIndex: preBoundaryIndices[0] - 1 });
+                    }
+                    if (postBoundaryIndices.length > 0) {
+                        waveSegments.push({ indices: postBoundaryIndices, mergeBaseMaxMessageIndex: Math.max(postBoundaryIndices[0] - 1, bridgeBoundary) });
+                    }
+                }
+                else {
+                    waveSegments.push({ indices: [...wave.messageIndices], mergeBaseMaxMessageIndex: wave.messageIndices[0] - 1 });
+                }
+                for (const segment of waveSegments) {
                     if (options.abortController?.signal.aborted) {
+                        // 终态不变量：stopped 只能在 provisional 会话已 finalize/rollback 后写入。
+                        const settleResult = await settleProvisionalBridge();
+                        if (!settleResult.ok) {
+                            const settleError = settleResult;
+                            return {
+                                success: false, outcome: 'integrity_failed',
+                                error: `provisional bridge 收敛失败：${settleError.error}`,
+                                committedBucketCount, catchUpPlan: plan,
+                                dataCommitted: committedBucketCount > 0,
+                                replayVerified: false,
+                                terminalProgressSaved: false,
+                                diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                            };
+                        }
                         const terminalError = await persistCatchUpTerminalProgress('stopped', '手动追平已终止。');
                         await refreshCommittedDataBeforeExit();
                         return {
@@ -84768,19 +86132,46 @@ $CONTENT
                             terminalProgressSaved: !terminalError,
                         };
                     }
-                    const groupChunk = wave.groups.slice(groupStart, groupStart + maxConcurrentGroups);
+                    const groupChunk = wave.groups.slice(0, wave.groups.length);
                     const groups = groupChunk.map(group => ({
                         key: group.key,
                         groupId: group.groupId,
-                        indices: [...wave.messageIndices],
+                        indices: [...segment.indices],
                         batchSize: group.batchSize,
                         sheetKeys: [...group.sheetKeys],
                         requestOptions: group.requestOptions,
-                        mergeBaseMaxMessageIndex: wave.messageIndices[0] - 1,
+                        mergeBaseMaxMessageIndex: segment.mergeBaseMaxMessageIndex,
                     }));
+                    // 首个跨边界段提交前收敛 bridge：边界前段已完成（或本 wave 直接起于边界后，
+                    // 前序 wave 已完成），有提交则把 provisional 累计结果原子折叠回原根
+                    // （sheet_rebase），零提交则回滚。随后边界后段在正式根上普通写入。
+                    // 不能内联假设 committedBucketCount > 0：边界前段可能被模板过滤导致零提交，
+                    // 直接把空快照 rebase 进原根是数据丢失。
+                    if (isBridgeActive && segment.indices[0] >= bridgeBoundary) {
+                        const settleResult = await settleProvisionalBridge(segment.indices[0]);
+                        if (!settleResult.ok) {
+                            const settleError = settleResult;
+                            const terminalError = await persistCatchUpTerminalProgress('failed', `provisional bridge 汇合失败：${settleError.error}`);
+                            await refreshCommittedDataBeforeExit();
+                            return {
+                                success: false,
+                                outcome: 'integrity_failed',
+                                error: terminalError ? `provisional bridge 汇合失败：${settleError.error}；终态进度保存失败：${terminalError}` : `provisional bridge 汇合失败：${settleError.error}`,
+                                committedBucketCount,
+                                catchUpPlan: plan,
+                                dataCommitted: committedBucketCount > 0,
+                                replayVerified: false,
+                                terminalProgressSaved: !terminalError,
+                                diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                            };
+                        }
+                        logDebug_ACU(`[手动追平] provisional bridge 已${provisionalBridgeFinalized ? '汇合回原根' : '回滚'}：originalFull=${provisionalBridgeOriginalFullIndex}。`);
+                    }
                     const result = await processGroupedRuntimeChunk_ACU(groups, 'manual_independent', {
                         abortController: options.abortController,
                         respectGlobalStop: false,
+                        manualCatchUpRun: true,
+                        manualCatchUpRunId: runId,
                         replaceExistingIncremental: true,
                         syncAfterCommit: false,
                         onProgress: event => options.onProgress?.({
@@ -84826,6 +86217,23 @@ $CONTENT
                     if (!result.success) {
                         const outcome = result.aborted ? 'stopped' : undefined;
                         const primaryError = result.error || (result.aborted ? '手动追平已终止。' : '手动追平失败。');
+                        // 终态不变量：stopped/failed 只能在 provisional 会话已 finalize/rollback 后写入。
+                        // 已有已提交 bucket 时先收敛 bridge；收敛失败则返回 integrity_failed，不写误导性终态。
+                        const settleResult = await settleProvisionalBridge();
+                        if (!settleResult.ok) {
+                            const settleError = settleResult;
+                            return {
+                                success: false,
+                                outcome: 'integrity_failed',
+                                error: `${primaryError}；provisional bridge 收敛失败：${settleError.error}`,
+                                committedBucketCount,
+                                catchUpPlan: plan,
+                                dataCommitted: committedBucketCount > 0,
+                                replayVerified: false,
+                                terminalProgressSaved: false,
+                                diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                            };
+                        }
                         const terminalError = await persistCatchUpTerminalProgress(result.aborted ? 'stopped' : 'failed', primaryError);
                         await refreshCommittedDataBeforeExit();
                         return {
@@ -84841,6 +86249,27 @@ $CONTENT
                     }
                 }
                 await loadAllChatMessages_ACU();
+            }
+            // provisional bridge 收尾：wave 循环结束后 bridge 仍活跃（所有目标都早于原 full
+            // 边界，未触发循环内 finalize）时，必须把已提交成果汇合回原根；零提交则回滚。
+            // 这是 run 的正常终态，不能留下 active bridge 残留等下次启动才恢复。
+            if (provisionalBridgeOriginalFullIndex !== null && !provisionalBridgeFinalized) {
+                const settleResult = await settleProvisionalBridge();
+                if (!settleResult.ok) {
+                    const settleError = settleResult;
+                    return {
+                        success: false,
+                        outcome: 'integrity_failed',
+                        error: `provisional bridge 收敛失败：${settleError.error}`,
+                        committedBucketCount,
+                        catchUpPlan: plan,
+                        dataCommitted: committedBucketCount > 0,
+                        replayVerified: false,
+                        terminalProgressSaved: false,
+                        diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                    };
+                }
+                logDebug_ACU(`[手动追平] provisional bridge 收尾${provisionalBridgeFinalized ? '汇合' : '回滚'}完成：originalFull=${provisionalBridgeOriginalFullIndex}。`);
             }
             const replayVerification = await verifyCommittedCatchUpReplay();
             if (replayVerification.error) {
@@ -84914,6 +86343,22 @@ $CONTENT
         }
         catch (error) {
             const primaryError = error?.message || String(error || '手动追平执行异常。');
+            // 终态不变量：failed 只能在 provisional 会话已 finalize/rollback 后写入。
+            // 异常路径同样先收敛 bridge；收敛失败则返回 integrity_failed，不写误导性 failed 终态。
+            const settleResult = await settleProvisionalBridge();
+            if (!settleResult.ok) {
+                const settleError = settleResult;
+                return {
+                    success: false,
+                    error: `${primaryError}；provisional bridge 收敛失败：${settleError.error}`,
+                    committedBucketCount,
+                    catchUpPlan: plan,
+                    dataCommitted: committedBucketCount > 0,
+                    replayVerified: false,
+                    terminalProgressSaved: false,
+                    diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                };
+            }
             const terminalError = await persistCatchUpTerminalProgress('failed', primaryError);
             await refreshCommittedDataBeforeExit();
             return {
@@ -105498,6 +106943,14 @@ $CONTENT
                 await loadPresetAndCleanCharacterData_ACU();
                 // 再次强制刷新数据和UI，确保初始加载时表格显示正确
                 await loadAllChatMessages_ACU();
+                // [provisional bridge] 启动加载当前聊天后统一恢复门：
+                // 若上次运行崩溃留下 active provisional bridge（原 full 被暂存、临时根在链上），
+                // 在首次读写前自动 finalize（有已提交 bucket）或 rollback（零提交）；
+                // 无法证明安全时记录错误并 fail-closed，避免在残留拓扑上继续写入。
+                const bridgeGate = await ensureNoActiveProvisionalBridgeForCurrentScope_ACU();
+                if (!bridgeGate.ok) {
+                    logError_ACU(`[ManualCatchUpBridge] 启动恢复残留 provisional bridge 失败：${bridgeGate.error}`);
+                }
                 // [修复] SQLite 模式下，启动时初始化内存数据库
                 // 老卡（有聊天历史数据）会从聊天记录合并数据建表
                 // 新卡（无数据）只初始化引擎，建表延迟到第一次填表时
@@ -140193,7 +141646,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const waveSummary = plan.waves.map((wave, index) => `Wave ${index + 1}：${formatAiFloorRange_ACU(wave.startAiFloor, wave.endAiFloor)}；${wave.sheetKeys.map(key => sheetNames.value[key] || key).join('、')}`).join('\n');
                 const confirmed = await dialogStore.confirm({
                     title: '追平所选表未填楼层',
-                    message: `锁定目标：AI 第 ${plan.targetAiFloor} 层\n预计 ${plan.waves.length} 个 wave、${totalBuckets} 个 bucket。\n跳过最新楼层：${normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0)} 层。\n\n${waveSummary}\n\n本功能只补每张表已提交连续前沿之后的后缀缺口，不扫描或修复历史前沿之前的内部空洞。执行时会重新读取已提交事实并重新规划，避免重复处理确认期间已完成的 bucket。`,
+                    message: `锁定目标：AI 第 ${plan.targetAiFloor} 层\n预计 ${plan.waves.length} 个 wave、${totalBuckets} 个 bucket。\n跳过最新楼层：${normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0)} 层。\n\n${waveSummary}\n\n本功能只补每张表已提交连续前沿之后的后缀缺口，不扫描或修复历史前沿之前的内部空洞。执行时会重新读取已提交事实并重新规划，避免重复处理确认期间已完成的 bucket。\n\n执行前会基于当前已提交事实重新预检存储锚点：若目标楼层早于正式 checkpoint，将自动建立临时锚点并在原边界原子汇合（已提交成果不会丢失，也不会留下第二正式根）；若预检无法证明安全，将在调用 AI 前阻止。`,
                     confirmLabel: '确认追平',
                     cancelLabel: '取消',
                 });

@@ -278,6 +278,28 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
 const mockEnqueueSummaryVectorIndexFlush = vi.fn().mockResolvedValue({ queued: true, scopeKey: 'test-scope' });
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({ enqueueSummaryVectorIndexFlush_ACU: (...args: any[]) => mockEnqueueSummaryVectorIndexFlush(...args) }));
 
+// provisional bridge 模块 mock：orchestrator 的 catch-up 测试默认不走 bridge 路径，
+// 跨边界用例显式驱动 establish/finalize/rollback/recover 的调用顺序与结果。
+const mockEstablishProvisionalBridge = vi.fn();
+const mockFinalizeProvisionalBridge = vi.fn();
+const mockRollbackProvisionalBridge = vi.fn();
+const mockRecoverProvisionalBridgeSession = vi.fn();
+const mockHasActiveProvisionalBridgeAnywhere = vi.fn();
+vi.mock('../../../src/service/table/manual-catch-up-provisional-bridge', () => ({
+  establishProvisionalBridge_ACU: (...args: any[]) => mockEstablishProvisionalBridge(...args),
+  finalizeProvisionalBridge_ACU: (...args: any[]) => mockFinalizeProvisionalBridge(...args),
+  rollbackProvisionalBridge_ACU: (...args: any[]) => mockRollbackProvisionalBridge(...args),
+  recoverProvisionalBridgeSession_ACU: (...args: any[]) => mockRecoverProvisionalBridgeSession(...args),
+  hasActiveProvisionalBridgeAnywhere_ACU: (...args: any[]) => mockHasActiveProvisionalBridgeAnywhere(...args),
+  ensureNoActiveProvisionalBridgeForCurrentScope_ACU: vi.fn(async () => ({ ok: true, action: 'none' })),
+  readActiveProvisionalBridge_ACU: vi.fn(() => null),
+  authorizeManualCatchUpBucketWrite_ACU: vi.fn(() => ({ ok: true })),
+  validateProvisionalBridge_ACU: vi.fn(() => ({ valid: true })),
+  assertBridgeScopeMatchesLiveChat_ACU: vi.fn(() => ({ ok: true })),
+  isTargetBeforeOriginalFullCheckpoint_ACU: vi.fn(() => true),
+  getOriginalFullFrameFingerprint_ACU: vi.fn(() => 'test-fingerprint'),
+}));
+
 vi.mock('../../../src/service/settings/settings-readers', () => ({
   getCurrentWorldbookConfig_ACU: vi.fn(() => ({ summaryVectorIndexModeEnabled: true })),
 }));
@@ -5693,4 +5715,121 @@ describe('orchestrateManualCatchUp_ACU', () => {
     expect(refreshData).toHaveBeenCalledTimes(1);
     expect(mockIsAutoUpdating).toBe(false);
   });
+
+  it('跨原 full 边界的 wave：边界前 bucket 携带 runId 提交，边界后 bucket 前 finalize，且 merge base 重建', async () => {
+    // AI 楼层：0/2/4。原 full checkpoint 位于 messageIndex=2（含真实行数据，不可前移）。
+    // 追平目标楼层 4 > 原 full 边界 2：wave 同时覆盖边界前（0）与边界后（2,4）。
+    const chat: any[] = [
+      { is_user: false, mes: 'AI 0', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } } } },
+      { is_user: true, mes: '用户1' },
+      {
+        is_user: false,
+        mes: 'AI 2',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full', reason: 'init', createdAt: 1,
+                data: { mate: { type: 'acu' }, sheet_a: { name: '表A', content: [['row_id', '值'], ['1', '真实']] } },
+                event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+     },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: true, mes: '用户3' },
+      { is_user: false, mes: 'AI 4' },
+    ];
+    mockGetChatArray_ACU.mockReturnValue(chat);
+    mockEnsureManualCatchUpAnchor.mockResolvedValueOnce({ status: 'provisional_bridge_required', checkpointMessageIndex: 2 });
+    mockHasActiveProvisionalBridgeAnywhere.mockReturnValue(false);
+    mockEstablishProvisionalBridge.mockResolvedValueOnce({ ok: true, provisionalRootIndex: 0 });
+    mockFinalizeProvisionalBridge.mockResolvedValueOnce({ ok: true, finalizeSummary: { selectedSheetKeys: ['sheet_a'], originalFullCheckpointIndex: 2 } });
+    // 边界前 bucket（target=0）与边界后 bucket（target=2,4）都成功提交。
+    mockPersistTablesToChatMessage
+      .mockResolvedValueOnce({ saved: true, messageIndex: 0 })
+      .mockResolvedValueOnce({ saved: true, messageIndex: 2 })
+      .mockResolvedValueOnce({ saved: true, messageIndex: 4 })
+      .mockResolvedValue({ saved: true, messageIndex: 4 });
+    const refreshData = vi.fn().mockResolvedValue({ degraded: false });
+
+    const result = await orchestrateManualCatchUp_ACU(['sheet_a'], refreshData);
+
+    expect(result).toEqual(expect.objectContaining({ success: true, outcome: 'complete', committedBucketCount: 3 }));
+    // establish 在 preflight 后调用，携带原 full 边界。
+    expect(mockEstablishProvisionalBridge).toHaveBeenCalledTimes(1);
+    const establishArgs = mockEstablishProvisionalBridge.mock.calls[0];
+    expect(establishArgs[3]).toBe(2); // originalFullCheckpointIndex
+    expect(establishArgs[0]).toEqual(expect.any(String)); // runId
+    // 边界前 bucket：target=0，必须携带匹配 runId，且被 persist 准入（含 bridge 授权）。
+    const preBoundaryCall = mockPersistTablesToChatMessage.mock.calls.find(call => call[0]?.targetMessageIndex === 0);
+    expect(preBoundaryCall?.[0]).toEqual(expect.objectContaining({
+      targetMessageIndex: 0,
+      manualCatchUpRunId: establishArgs[0],
+      manualRefillProgress: expect.objectContaining({ status: 'committed' }),
+    }));
+    // 边界后首个 bucket（target=2）提交前必须 finalize，nextSaveTargetIndex 精确为 2。
+    const finalizeCall = mockFinalizeProvisionalBridge.mock.calls[0];
+    expect(finalizeCall).toBeDefined();
+    expect(finalizeCall[1]).toEqual(expect.objectContaining({ nextSaveTargetIndex: 2 }));
+    // finalize 后边界后 bucket 仍在同一 run 内提交（bridge 已关闭，普通 persist 放行）。
+    const postBoundaryCall = mockPersistTablesToChatMessage.mock.calls.find(call => call[0]?.targetMessageIndex === 2);
+    expect(postBoundaryCall?.[0]).toEqual(expect.objectContaining({ targetMessageIndex: 2 }));
+    // 收尾：bridge 已在循环内 finalize，不应再重复 finalize/rollback。
+    expect(mockRollbackProvisionalBridge).not.toHaveBeenCalled();
+    expect(mockFinalizeProvisionalBridge).toHaveBeenCalledTimes(1);
+    expect(mockIsAutoUpdating).toBe(false);
+  });
+
+  it('跨边界 wave 边界前 bucket 提交失败时零提交回滚 bridge，而不是空快照 rebase', async () => {
+    const chat: any[] = [
+      { is_user: false, mes: 'AI 0', TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } } } },
+      { is_user: true, mes: '用户1' },
+      {
+        is_user: false,
+        mes: 'AI 2',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: {
+                kind: 'full', reason: 'init', createdAt: 1,
+                data: { mate: { type: 'acu' }, sheet_a: { name: '表A', content: [['row_id', '值'], ['1', '真实']] } },
+                event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+              },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: true, mes: '用户3' },
+      { is_user: false, mes: 'AI 4' },
+    ];
+    mockGetChatArray_ACU.mockReturnValue(chat);
+    mockEnsureManualCatchUpAnchor.mockResolvedValueOnce({ status: 'provisional_bridge_required', checkpointMessageIndex: 2 });
+    mockHasActiveProvisionalBridgeAnywhere.mockReturnValue(false);
+    mockEstablishProvisionalBridge.mockResolvedValueOnce({ ok: true, provisionalRootIndex: 0 });
+    mockRollbackProvisionalBridge.mockResolvedValue({ ok: true });
+    // 边界前 bucket（target=0）提交失败 → 零提交；随后 chunk 失败分支收敛 → rollback。
+    mockPersistTablesToChatMessage.mockResolvedValue({ saved: false, error: '边界前 bucket 保存失败' });
+    const refreshData = vi.fn().mockResolvedValue({ degraded: false });
+
+    const result = await orchestrateManualCatchUp_ACU(['sheet_a'], refreshData);
+
+    // 边界前提交失败：chunk 失败分支先收敛 bridge（零提交 → rollback），再写 failed 终态。
+    expect(result).toEqual(expect.objectContaining({ success: false }));
+    expect(mockRollbackProvisionalBridge).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeProvisionalBridge).not.toHaveBeenCalled();
+    // 收敛后仍写 failed 终态（bridge 已关闭，普通 persist 放行）。
+    const failedCall = mockPersistTablesToChatMessage.mock.calls.find(call => (
+      call[0]?.manualRefillProgress?.status === 'failed'
+    ));
+    expect(failedCall).toBeDefined();
+    expect(mockIsAutoUpdating).toBe(false);
+  });
+
 });

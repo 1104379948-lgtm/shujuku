@@ -5,6 +5,7 @@ import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsol
 import { ensureLegacyStorageMigratedBeforeWrite_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { ensureStorageProviderReady_ACU, reloadStorageProvider } from './table-storage-strategy';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
+import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from './manual-catch-up-provisional-bridge';
 import type { ReplaceExistingIncrementalOptions_ACU } from './storage-frame-v2-persist';
 import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 import { buildSqlSheetBatchOperations_ACU, rebindSqlMutationTableIdentifiers_ACU } from './sql-table-service';
@@ -66,6 +67,8 @@ export interface RunTableUpdateCommitOptions_ACU {
   manualRefillProgress?: ManualRefillProgressV2_ACU;
   replaceExistingIncremental?: ReplaceExistingIncrementalOptions_ACU;
   strictSave?: boolean;
+  /** manual catch-up provisional bridge run 的 runId；透传给 V2 persist 做准入校验。 */
+  manualCatchUpRunId?: string;
   performanceRunId?: string;
   performanceParentSpanId?: string;
   skipChatSave?: boolean;
@@ -156,6 +159,21 @@ export async function runTableUpdateCommit_ACU<T>(
   let requiresRuntimeReload = false;
   try {
     assertExpectedCommitScope_ACU(options, '提交前');
+    // 普通表写入前统一恢复门：残留 provisional bridge 先自动 finalize/rollback。
+    // catch-up 自身携带 runId 时跳过——该 bridge 正是本次 run 建立的，不能提前汇合。
+    if (!options.manualCatchUpRunId) {
+      const bridgeGate = await ensureNoActiveProvisionalBridgeForCurrentScope_ACU({
+        chatKey: options.chatKey,
+        isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
+      });
+      if (!bridgeGate.ok) {
+        return {
+          success: false,
+          error: (bridgeGate as { ok: false; error: string }).error,
+          errorCategory: 'precondition',
+        };
+      }
+    }
     const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
     if (!migration.success) {
       return {
@@ -220,6 +238,7 @@ export async function runTableUpdateCommit_ACU<T>(
               manualRefillProgress: persistOptions.manualRefillProgress ?? options.manualRefillProgress,
               replaceExistingIncremental: persistOptions.replaceExistingIncremental ?? options.replaceExistingIncremental,
               strictSave: persistOptions.strictSave ?? options.strictSave,
+              manualCatchUpRunId: options.manualCatchUpRunId,
               performanceRunId: options.performanceRunId,
               performanceParentSpanId: options.performanceParentSpanId,
               assumeCommitLock: true,

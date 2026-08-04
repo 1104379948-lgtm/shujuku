@@ -36,6 +36,7 @@ import type { ChatSummaryVectorIndexManifest_ACU, ChatSummaryVectorIndexState_AC
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
+import { hasActiveProvisionalBridgeAnywhere_ACU, recoverProvisionalBridgeSession_ACU } from '../table/manual-catch-up-provisional-bridge';
 import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
@@ -584,6 +585,20 @@ export function shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU(): boolean
 export async function ensureV2BoundaryCheckpointForRetainedBuffer_ACU(
     options: BoundaryCheckpointEnsureOptions_ACU = {},
 ): Promise<BoundaryCheckpointEnsureResult_ACU> {
+    // provisional bridge 活跃期间禁止 compaction：compaction 会直接改写帧、绕过
+    // persistTableMutationLogV2_ACU 的 bridge 准入，可能把原 full 降级或在新位置写
+    // full checkpoint，破坏"原 full 边界前不得推进锚点"的拓扑冻结约束。
+    // 崩溃残留 bridge（应用重启后触发 auto_update/manual_refill 的 compaction）必须先
+    // 自动恢复（零提交回滚 / 有提交 finalize）；恢复失败则 fail-closed，不进入 compaction。
+    // 注意：recover 自身会开启 exclusive write transaction，必须在 compaction 的
+    // transaction 之外调用，避免嵌套事务死锁。
+    const preflightChat = getChatArray_ACU();
+    if (hasActiveProvisionalBridgeAnywhere_ACU(preflightChat)) {
+        const recovery = await recoverProvisionalBridgeSession_ACU({ isolationKey: getCurrentIsolationKey_ACU() });
+        if (!recovery.ok) {
+            return { success: false, changed: false, error: `检测到 active provisional bridge 且自动恢复失败，已阻止边界 compaction：${(recovery as { ok: false; error: string }).error}` };
+        }
+    }
     return runTableWriteTransaction_ACU({
         source: 'system_cleanup',
         reason: options.reason === 'manual_refill'
@@ -1371,12 +1386,25 @@ type PreservedInitialCheckpointSlot_ACU = {
 export type ManualCatchUpAnchorPreflightResult_ACU =
     | { status: 'ready'; checkpointMessageIndex: number | null }
     | { status: 'repaired'; checkpointMessageIndex: number }
+    | { status: 'provisional_bridge_required'; checkpointMessageIndex: number }
     | { status: 'blocked'; error: string };
 
 function isSafeHeaderOnlyResetCheckpoint_ACU(frame: any): boolean {
     const checkpoint = frame?.checkpoint;
     if (checkpoint?.kind !== 'full' || !['init', 'migration'].includes(checkpoint.reason)) return false;
-    return validateCanonicalCheckpoint_ACU(checkpoint).valid;
+    if (!validateCanonicalCheckpoint_ACU(checkpoint).valid) return false;
+    // 只允许 header-only：checkpoint 数据不能携带任何真实行数据（除 header 外的数据行）。
+    const data = checkpoint.data;
+    if (!data || typeof data !== 'object') return false;
+    for (const [key, sheetValue] of Object.entries(data)) {
+        if (key === 'mate') continue;
+        if (!sheetValue || typeof sheetValue !== 'object') return false;
+        const content = (sheetValue as any).content;
+        if (!Array.isArray(content)) return false;
+        // header-only：最多 1 行（header），不允许 seedRows/data 行。
+        if (content.length > 1) return false;
+    }
+    return true;
 }
 
 function hasV2ReplayArtifact_ACU(frame: any): boolean {
@@ -1425,8 +1453,14 @@ export async function ensureManualCatchUpAnchorBeforeTarget_ACU(
 
         const sourceMessage = chat[checkpointMessageIndex];
         const sourceTagData = readIsolatedTagData_ACU(sourceMessage, isolationKey) as any;
-        if (!isV2TagData_ACU(sourceTagData) || !isSafeHeaderOnlyResetCheckpoint_ACU(sourceTagData.storageFrame)) {
+        if (!isV2TagData_ACU(sourceTagData)) {
             return { status: 'blocked', error: '手动追平目标早于不满足 canonical 契约的 V2 checkpoint；已在调用 AI 前阻止写入，请先执行 V2 恢复诊断。' };
+        }
+        if (!isSafeHeaderOnlyResetCheckpoint_ACU(sourceTagData.storageFrame)) {
+            // 含真实行数据 / migration / compaction / fallback provenance 的正式 full checkpoint
+            // 不能前移（bounded replay 语义可能被污染）；需要 provisional bridge 在不动原根的
+            //前提下从更早楼层建立临时根，追平后再原子汇合回原根。
+            return { status: 'provisional_bridge_required', checkpointMessageIndex };
         }
         if (hasV2ReplayArtifact_ACU(sourceTagData.storageFrame)) {
             return { status: 'blocked', error: '手动追平目标早于携带后缀 replay artifact 的 V2 checkpoint；请先执行 V2 恢复诊断。' };

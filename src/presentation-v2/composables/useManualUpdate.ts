@@ -562,7 +562,7 @@ export function useManualUpdate(): ManualUpdateState {
       ).join('\n');
       const confirmed = await dialogStore.confirm({
         title: '追平所选表未填楼层',
-        message: `锁定目标：AI 第 ${plan.targetAiFloor} 层\n预计 ${plan.waves.length} 个 wave、${totalBuckets} 个 bucket。\n跳过最新楼层：${normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0)} 层。\n\n${waveSummary}\n\n本功能只补每张表已提交连续前沿之后的后缀缺口，不扫描或修复历史前沿之前的内部空洞。执行时会重新读取已提交事实并重新规划，避免重复处理确认期间已完成的 bucket。`,
+        message: `锁定目标：AI 第 ${plan.targetAiFloor} 层\n预计 ${plan.waves.length} 个 wave、${totalBuckets} 个 bucket。\n跳过最新楼层：${normalizeNonNegativeInteger(settings_ACU.skipUpdateFloors, 0)} 层。\n\n${waveSummary}\n\n本功能只补每张表已提交连续前沿之后的后缀缺口，不扫描或修复历史前沿之前的内部空洞。执行时会重新读取已提交事实并重新规划，避免重复处理确认期间已完成的 bucket。\n\n执行前会基于当前已提交事实重新预检存储锚点：若目标楼层早于正式 checkpoint，将自动建立临时锚点并在原边界原子汇合（已提交成果不会丢失，也不会留下第二正式根）；若预检无法证明安全，将在调用 AI 前阻止。`,
         confirmLabel: '确认追平',
         cancelLabel: '取消',
       });

@@ -19,6 +19,7 @@ import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
 import { rebindSheetKeysThroughTableAliases_ACU, resolveHistoricalSheetKeyMigrations_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
+import { establishProvisionalBridge_ACU, finalizeProvisionalBridge_ACU, rollbackProvisionalBridge_ACU, recoverProvisionalBridgeSession_ACU, hasActiveProvisionalBridgeAnywhere_ACU } from './manual-catch-up-provisional-bridge';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
@@ -128,7 +129,7 @@ export interface ManualUpdateResult {
     /** terminal manualRefillProgress 是否已严格保存。 */
     terminalProgressSaved?: boolean;
     /** 面向 UI/恢复诊断的稳定失败分类；不得依赖错误文案解析。 */
-    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed';
+    diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required';
     catchUpPlan?: ManualCatchUpPlan_ACU;
 }
 
@@ -1152,6 +1153,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         manualRefillProgress?: ManualRefillProgressV2_ACU;
         syncAfterCommit?: boolean;
         baseRevision?: string | null;
+        manualCatchUpRunId?: string;
         performanceRunId?: string;
         performanceParentSpanId?: string;
     }
@@ -1322,6 +1324,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             trackAsUpdate: true,
             replaceExistingIncremental: options.replaceExistingIncremental,
             manualRefillProgress: options.manualRefillProgress,
+            manualCatchUpRunId: options.manualCatchUpRunId,
             skipChatSave: options.isImportMode,
         }, async () => {
             const provider = await ensureStorageProviderReady_ACU();
@@ -1585,6 +1588,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             operations: effectiveOperations,
             replaceExistingIncremental: options.replaceExistingIncremental,
             manualRefillProgress: options.manualRefillProgress,
+            manualCatchUpRunId: options.manualCatchUpRunId,
         }, () => ({
             success: true,
             value: { modifiedKeys },
@@ -1685,10 +1689,14 @@ async function processGroupedRuntimeChunkCore_ACU(
         syncAfterCommit?: boolean;
         onProgress?: (event: CardUpdateProgressEvent) => void;
         respectGlobalStop?: boolean;
+        /** 手动追平 run 专用标记：执行阶段再次发生 migration 视为 topology drift 并中止。 */
+        manualCatchUpRun?: boolean;
+        /** 手动追平 run 的 runId，用于 provisional bridge 写入准入（t5）。 */
+        manualCatchUpRunId?: string;
         performanceRunId?: string;
         performanceParentSpanId?: string;
     } = {}
-): Promise<{ success: boolean; failedGroups: string[]; error?: string; aborted?: boolean; committedBucketCount: number }> {
+): Promise<{ success: boolean; failedGroups: string[]; error?: string; aborted?: boolean; committedBucketCount: number; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }> {
     if (!Array.isArray(groups) || groups.length === 0) {
         return { success: true, failedGroups: [], committedBucketCount: 0 };
     }
@@ -1704,6 +1712,21 @@ async function processGroupedRuntimeChunkCore_ACU(
         };
     }
     if (migration.migrated) {
+        // 手动追平 run 已在规划前完成迁移；执行阶段再次发生迁移意味着 preflight 之后
+        // 拓扑被外部改动（聊天切换、另一 run 抢先迁移等）。继续按旧 plan 写入会把
+        // bucket 写到新锚点之前，等价于截图事故的重演，必须视为 topology drift 中止。
+        if (mode === 'manual_independent' && options.manualCatchUpRun === true) {
+            return {
+                success: false,
+                failedGroups: groups.map(group => group.key),
+                error: sanitizeRetryFeedback_ACU(
+                    '手动追平执行阶段检测到 legacy→V2 迁移改变锚点拓扑；已中止，请重新执行追平。',
+                    MAX_WARN_ERROR_LENGTH_ACU,
+                ),
+                committedBucketCount: 0,
+                diagnosticCode: 'catch_up_migration_changed_topology',
+            };
+        }
         await reloadStorageProvider();
     }
 
@@ -2027,6 +2050,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                 isolationKey: executionScope.isolationKey,
                 templateScope: executionScope.templateScope,
                 sqlApplyScope: executionScope.sqlApplyScope,
+                manualCatchUpRunId: options.manualCatchUpRunId,
                 performanceRunId: options.performanceRunId,
                 performanceParentSpanId: options.performanceParentSpanId,
             });
@@ -2801,6 +2825,41 @@ export async function orchestrateManualCatchUp_ACU(
     if (!coreApisAreReady_ACU) {
         return { success: false, error: 'API未就绪。' };
     }
+
+    // 追平规划前必须先完成 legacy→V2 迁移：迁移会按 skipUpdateFloors 在后方楼层创建
+    // migration full checkpoint。若等到 chunk 执行时才迁移，第一 bucket 的目标楼层早于
+    // 新锚点，persist 会以 target < latestFullCheckpoint fail-fast 拒绝，用户已经白白
+    // 支付了一次 AI 调用。迁移成功后必须重载存储运行时与聊天，再重新规划与重新预检。
+    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('orchestrateManualCatchUp:preplan');
+    if (!migration.success) {
+        return {
+            success: false,
+            error: migration.error || '旧存储迁移失败，已阻止手动追平。',
+            committedBucketCount: 0,
+            dataCommitted: false,
+            replayVerified: false,
+            terminalProgressSaved: false,
+            diagnosticCode: 'catch_up_migration_failed',
+        };
+    }
+    if (migration.migrated) {
+        // 迁移改写聊天持久化拓扑：内存 runtime、模板与聊天数组都必须基于新状态重建，
+        // 否则规划会建立在迁移前的陈旧快照上。
+        const reloadResult = await reloadStorageProvider();
+        if (!reloadResult?.ok) {
+            return {
+                success: false,
+                error: reloadResult?.error || reloadResult?.failureCode || '迁移后存储运行时重载失败，已阻止手动追平。',
+                committedBucketCount: 0,
+                dataCommitted: false,
+                replayVerified: false,
+                terminalProgressSaved: false,
+                diagnosticCode: 'catch_up_migration_reload_failed',
+            };
+        }
+        logDebug_ACU('[手动追平] 已前置完成 legacy→V2 迁移并重载运行时，重新规划追平计划。');
+    }
+
     const planningResult = await prepareManualCatchUpPlan_ACU(targetKeys);
     if (!planningResult.success || !planningResult.plan) {
         return { success: false, error: planningResult.error || '无法生成手动追平计划。' };
@@ -2820,6 +2879,14 @@ export async function orchestrateManualCatchUp_ACU(
         };
     }
 
+    // runId 必须在 preflight 之前创建：provisional bridge 建立与 bucket 提交共用同一个
+    // runId，保证写入准入（t5）的 run-scoped 隔离。
+    const runId = createManualCatchUpRunId_ACU();
+    // provisional bridge run 状态：建立后在 bucket 循环内驱动 finalize。
+    // 不能依赖全局状态——必须在 run 内显式跟踪，避免跨 run 串扰。
+    let provisionalBridgeOriginalFullIndex: number | null = null;
+    let provisionalBridgeFinalized = false;
+
     // 旧版“删除全部数据”会将 header-only reset checkpoint 留在原先较晚楼层。
     // 在任何 AI 调用之前修复可证明安全的布局；无法证明安全则阻断，而不是让 bucket
     // 伪提交后由 terminal progress-only 写入兜底报错。
@@ -2837,6 +2904,48 @@ export async function orchestrateManualCatchUp_ACU(
                 diagnosticCode: 'anchor_preflight_blocked',
             };
         }
+        if (anchorPreflight.status === 'provisional_bridge_required') {
+            // 追平目标早于含真实数据的正式 full checkpoint：不能移动原根，必须建立
+            // run-scoped provisional full checkpoint，追平至原 full 边界后原子汇合回原根。
+            // 若已有 active bridge（崩溃残留或并发 run），先尝试自动恢复，恢复失败则阻断。
+            const isolationKey = getCurrentIsolationKey_ACU();
+            const liveChat = getChatArray_ACU();
+            if (hasActiveProvisionalBridgeAnywhere_ACU(liveChat)) {
+                const recovery = await recoverProvisionalBridgeSession_ACU({ isolationKey });
+                if (!recovery.ok) {
+                    return {
+                        success: false,
+                        outcome: 'blocked',
+                        error: `检测到 active provisional bridge 且自动恢复失败：${(recovery as { ok: false; error: string }).error}`,
+                        catchUpPlan: plan,
+                        committedBucketCount: 0,
+                        dataCommitted: false,
+                        diagnosticCode: 'provisional_recovery_required',
+                    };
+                }
+            }
+            const rangeStartMessageIndex = plan.waves[0]?.messageIndices[0] ?? preflightTargetIndex;
+            const selectedSheetKeysForBridge = [...new Set(plan.waves.flatMap(wave => wave.sheetKeys))].sort();
+            const templateData = parseTableTemplateJson_ACU({ stripSeedRows: false }) || {};
+            const establishResult = await establishProvisionalBridge_ACU(runId, selectedSheetKeysForBridge, rangeStartMessageIndex, anchorPreflight.checkpointMessageIndex, {
+                templateData,
+                chatKey: currentChatFileIdentifier_ACU,
+                isolationKey,
+            });
+            if (!establishResult.ok) {
+                return {
+                    success: false,
+                    outcome: 'blocked',
+                    error: `provisional bridge 建立失败：${(establishResult as { ok: false; error: string }).error}`,
+                    catchUpPlan: plan,
+                    committedBucketCount: 0,
+                    dataCommitted: false,
+                    diagnosticCode: (establishResult as { ok: false; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }).diagnosticCode ?? 'provisional_bridge_conflict',
+                };
+            }
+            logDebug_ACU(`[手动追平] 已建立 provisional bridge：runId=${runId}, root=${establishResult.provisionalRootIndex}, originalFull=${anchorPreflight.checkpointMessageIndex}。`);
+            provisionalBridgeOriginalFullIndex = anchorPreflight.checkpointMessageIndex;
+        }
     }
 
     const maxConcurrentGroups = Math.max(1, Math.trunc(Number(settings_ACU.maxConcurrentGroups) || 1));
@@ -2847,7 +2956,6 @@ export async function orchestrateManualCatchUp_ACU(
         }
         return count + waveBuckets;
     }, 0);
-    const runId = createManualCatchUpRunId_ACU();
     let committedBucketCount = 0;
     let activeWaveIndex = 0;
     let lastCommittedBucketTargetIndex: number | null = null;
@@ -2952,6 +3060,7 @@ export async function orchestrateManualCatchUp_ACU(
     const persistCatchUpTerminalProgress = async (
         status: 'complete' | 'stopped' | 'failed' | 'sync_pending',
         lastError?: string,
+
     ): Promise<string | undefined> => {
         try {
             // terminal progress 是纯 metadata，必须写在当前 live chat 中能看到 full
@@ -2988,6 +3097,39 @@ export async function orchestrateManualCatchUp_ACU(
             return error?.message || String(error || `手动追平终态 ${status} 保存异常。`);
         }
     };
+    // provisional bridge 收敛：有已提交 bucket 则 finalize，零提交则 rollback。
+    // 只用于正常收尾与 stopped/failed 路径（计划阶段 7：终态必须在收敛后写入）。
+    const settleProvisionalBridge = async (nextSaveTargetIndex?: number): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }> => {
+        if (provisionalBridgeOriginalFullIndex === null || provisionalBridgeFinalized) return { ok: true };
+        if (committedBucketCount > 0) {
+            // nextSaveTargetIndex 缺省时用计划终点；跨边界段传入边界后首个 bucket 的
+            // saveTargetIndex（>= originalFull），保证 finalize 语义精确落在即将写入的楼层。
+            const effectiveNextSaveTargetIndex = nextSaveTargetIndex !== undefined && nextSaveTargetIndex >= provisionalBridgeOriginalFullIndex
+                ? nextSaveTargetIndex
+                : (terminalTargetMessageIndex >= provisionalBridgeOriginalFullIndex
+                    ? terminalTargetMessageIndex
+                    : provisionalBridgeOriginalFullIndex);
+            const finalizeResult = await finalizeProvisionalBridge_ACU(runId, {
+                chatKey: currentChatFileIdentifier_ACU,
+                isolationKey: getCurrentIsolationKey_ACU(),
+                nextSaveTargetIndex: effectiveNextSaveTargetIndex,
+            });
+            if (!finalizeResult.ok) {
+                return { ok: false, error: (finalizeResult as { ok: false; error: string }).error, diagnosticCode: (finalizeResult as { ok: false; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }).diagnosticCode ?? 'bridge_finalize_failed' };
+            }
+            provisionalBridgeFinalized = true;
+            return { ok: true };
+        }
+        const rollbackResult = await rollbackProvisionalBridge_ACU(runId, {
+            chatKey: currentChatFileIdentifier_ACU,
+            isolationKey: getCurrentIsolationKey_ACU(),
+        });
+        if (!rollbackResult.ok) {
+            return { ok: false, error: (rollbackResult as { ok: false; error: string }).error, diagnosticCode: 'bridge_finalize_failed' };
+        }
+        provisionalBridgeFinalized = true;
+        return { ok: true };
+    };
     const refreshCommittedDataBeforeExit = async (): Promise<void> => {
         if (committedBucketCount <= 0) return;
         try {
@@ -3002,6 +3144,22 @@ export async function orchestrateManualCatchUp_ACU(
         for (let waveIndex = 0; waveIndex < plan.waves.length; waveIndex += 1) {
             activeWaveIndex = waveIndex;
             if (options.abortController?.signal.aborted) {
+                // 终态不变量：stopped 只能在 provisional 会话已 finalize/rollback 后写入。
+                // abort 时若已有已提交 bucket，先收敛 bridge（有提交 finalize、零提交 rollback），
+                // 收敛失败则不写终态，直接返回 integrity_failed。
+                const settleResult = await settleProvisionalBridge();
+                if (!settleResult.ok) {
+                    const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
+                    return {
+                        success: false, outcome: 'integrity_failed',
+                        error: `provisional bridge 收敛失败：${settleError.error}`,
+                        committedBucketCount, catchUpPlan: plan,
+                        dataCommitted: committedBucketCount > 0,
+                        replayVerified: false,
+                        terminalProgressSaved: false,
+                        diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                    };
+                }
                 const terminalError = await persistCatchUpTerminalProgress('stopped', '手动追平已终止。');
                 await refreshCommittedDataBeforeExit();
                 return {
@@ -3014,8 +3172,43 @@ export async function orchestrateManualCatchUp_ACU(
                 };
             }
             const wave = plan.waves[waveIndex];
-            for (let groupStart = 0; groupStart < wave.groups.length; groupStart += maxConcurrentGroups) {
+            // provisional bridge 边界汇合：wave 的 messageIndices 是连续 AI 楼层切片，
+            // 可能同时跨越原 full 边界两侧。若整段一起提交，跨边界 bucket 会先被 persist
+            // 准入拒绝（target >= originalFull 必须先 finalize），且过早 finalize 会让
+            // 边界前 bucket 失去 bridge 授权。因此把 wave 拆成边界前/后两段分别提交：
+            // 边界前段走 provisional（携带 runId），在首个跨边界 bucket 前 finalize，
+            // 边界后段回到原正式根（bridge 已关闭，普通 persist 放行）。
+            const bridgeBoundary = provisionalBridgeOriginalFullIndex;
+            const isBridgeActive = bridgeBoundary !== null && !provisionalBridgeFinalized;
+            const waveSegments: Array<{ indices: number[]; mergeBaseMaxMessageIndex: number }> = [];
+            if (isBridgeActive) {
+                const preBoundaryIndices = wave.messageIndices.filter(index => index < bridgeBoundary!);
+                const postBoundaryIndices = wave.messageIndices.filter(index => index >= bridgeBoundary!);
+                if (preBoundaryIndices.length > 0) {
+                    waveSegments.push({ indices: preBoundaryIndices, mergeBaseMaxMessageIndex: preBoundaryIndices[0] - 1 });
+                }
+                if (postBoundaryIndices.length > 0) {
+                    waveSegments.push({ indices: postBoundaryIndices, mergeBaseMaxMessageIndex: Math.max(postBoundaryIndices[0] - 1, bridgeBoundary!) });
+                }
+            } else {
+                waveSegments.push({ indices: [...wave.messageIndices], mergeBaseMaxMessageIndex: wave.messageIndices[0] - 1 });
+            }
+            for (const segment of waveSegments) {
                 if (options.abortController?.signal.aborted) {
+                    // 终态不变量：stopped 只能在 provisional 会话已 finalize/rollback 后写入。
+                    const settleResult = await settleProvisionalBridge();
+                    if (!settleResult.ok) {
+                        const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
+                        return {
+                            success: false, outcome: 'integrity_failed',
+                            error: `provisional bridge 收敛失败：${settleError.error}`,
+                            committedBucketCount, catchUpPlan: plan,
+                            dataCommitted: committedBucketCount > 0,
+                            replayVerified: false,
+                            terminalProgressSaved: false,
+                            diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                        };
+                    }
                     const terminalError = await persistCatchUpTerminalProgress('stopped', '手动追平已终止。');
                     await refreshCommittedDataBeforeExit();
                     return {
@@ -3027,19 +3220,46 @@ export async function orchestrateManualCatchUp_ACU(
                         terminalProgressSaved: !terminalError,
                     };
                 }
-                const groupChunk = wave.groups.slice(groupStart, groupStart + maxConcurrentGroups);
+                const groupChunk = wave.groups.slice(0, wave.groups.length);
                 const groups: GroupedRuntimeUpdateGroup_ACU[] = groupChunk.map(group => ({
                     key: group.key,
                     groupId: group.groupId,
-                    indices: [...wave.messageIndices],
+                    indices: [...segment.indices],
                     batchSize: group.batchSize,
                     sheetKeys: [...group.sheetKeys],
                     requestOptions: group.requestOptions,
-                    mergeBaseMaxMessageIndex: wave.messageIndices[0] - 1,
+                    mergeBaseMaxMessageIndex: segment.mergeBaseMaxMessageIndex,
                 }));
+                // 首个跨边界段提交前收敛 bridge：边界前段已完成（或本 wave 直接起于边界后，
+                // 前序 wave 已完成），有提交则把 provisional 累计结果原子折叠回原根
+                // （sheet_rebase），零提交则回滚。随后边界后段在正式根上普通写入。
+                // 不能内联假设 committedBucketCount > 0：边界前段可能被模板过滤导致零提交，
+                // 直接把空快照 rebase 进原根是数据丢失。
+                if (isBridgeActive && segment.indices[0] >= bridgeBoundary!) {
+                    const settleResult = await settleProvisionalBridge(segment.indices[0]);
+                    if (!settleResult.ok) {
+                        const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
+                        const terminalError = await persistCatchUpTerminalProgress('failed', `provisional bridge 汇合失败：${settleError.error}`);
+                        await refreshCommittedDataBeforeExit();
+                        return {
+                            success: false,
+                            outcome: 'integrity_failed',
+                            error: terminalError ? `provisional bridge 汇合失败：${settleError.error}；终态进度保存失败：${terminalError}` : `provisional bridge 汇合失败：${settleError.error}`,
+                            committedBucketCount,
+                            catchUpPlan: plan,
+                            dataCommitted: committedBucketCount > 0,
+                            replayVerified: false,
+                            terminalProgressSaved: !terminalError,
+                            diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                        };
+                    }
+                    logDebug_ACU(`[手动追平] provisional bridge 已${provisionalBridgeFinalized ? '汇合回原根' : '回滚'}：originalFull=${provisionalBridgeOriginalFullIndex}。`);
+                }
                 const result = await processGroupedRuntimeChunk_ACU(groups, 'manual_independent', {
                     abortController: options.abortController,
                     respectGlobalStop: false,
+                    manualCatchUpRun: true,
+                    manualCatchUpRunId: runId,
                     replaceExistingIncremental: true,
                     syncAfterCommit: false,
                     onProgress: event => options.onProgress?.({
@@ -3085,6 +3305,23 @@ export async function orchestrateManualCatchUp_ACU(
                 if (!result.success) {
                     const outcome = result.aborted ? 'stopped' : undefined;
                     const primaryError = result.error || (result.aborted ? '手动追平已终止。' : '手动追平失败。');
+                    // 终态不变量：stopped/failed 只能在 provisional 会话已 finalize/rollback 后写入。
+                    // 已有已提交 bucket 时先收敛 bridge；收敛失败则返回 integrity_failed，不写误导性终态。
+                    const settleResult = await settleProvisionalBridge();
+                    if (!settleResult.ok) {
+                        const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
+                        return {
+                            success: false,
+                            outcome: 'integrity_failed',
+                            error: `${primaryError}；provisional bridge 收敛失败：${settleError.error}`,
+                            committedBucketCount,
+                            catchUpPlan: plan,
+                            dataCommitted: committedBucketCount > 0,
+                            replayVerified: false,
+                            terminalProgressSaved: false,
+                            diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                        };
+                    }
                     const terminalError = await persistCatchUpTerminalProgress(result.aborted ? 'stopped' : 'failed', primaryError);
                     await refreshCommittedDataBeforeExit();
                     return {
@@ -3100,6 +3337,28 @@ export async function orchestrateManualCatchUp_ACU(
                 }
             }
             await loadAllChatMessages_ACU();
+        }
+
+        // provisional bridge 收尾：wave 循环结束后 bridge 仍活跃（所有目标都早于原 full
+        // 边界，未触发循环内 finalize）时，必须把已提交成果汇合回原根；零提交则回滚。
+        // 这是 run 的正常终态，不能留下 active bridge 残留等下次启动才恢复。
+        if (provisionalBridgeOriginalFullIndex !== null && !provisionalBridgeFinalized) {
+            const settleResult = await settleProvisionalBridge();
+            if (!settleResult.ok) {
+                const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
+                return {
+                    success: false,
+                    outcome: 'integrity_failed',
+                    error: `provisional bridge 收敛失败：${settleError.error}`,
+                    committedBucketCount,
+                    catchUpPlan: plan,
+                    dataCommitted: committedBucketCount > 0,
+                    replayVerified: false,
+                    terminalProgressSaved: false,
+                    diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+                };
+            }
+            logDebug_ACU(`[手动追平] provisional bridge 收尾${provisionalBridgeFinalized ? '汇合' : '回滚'}完成：originalFull=${provisionalBridgeOriginalFullIndex}。`);
         }
 
         const replayVerification = await verifyCommittedCatchUpReplay();
@@ -3173,6 +3432,22 @@ export async function orchestrateManualCatchUp_ACU(
         return { success: true, outcome: 'complete', committedBucketCount, dataCommitted: committedBucketCount > 0, replayVerified: true, terminalProgressSaved: true, catchUpPlan: plan };
     } catch (error: any) {
         const primaryError = error?.message || String(error || '手动追平执行异常。');
+        // 终态不变量：failed 只能在 provisional 会话已 finalize/rollback 后写入。
+        // 异常路径同样先收敛 bridge；收敛失败则返回 integrity_failed，不写误导性 failed 终态。
+        const settleResult = await settleProvisionalBridge();
+        if (!settleResult.ok) {
+            const settleError = (settleResult as { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] });
+            return {
+                success: false,
+                error: `${primaryError}；provisional bridge 收敛失败：${settleError.error}`,
+                committedBucketCount,
+                catchUpPlan: plan,
+                dataCommitted: committedBucketCount > 0,
+                replayVerified: false,
+                terminalProgressSaved: false,
+                diagnosticCode: settleError.diagnosticCode ?? 'bridge_finalize_failed',
+            };
+        }
         const terminalError = await persistCatchUpTerminalProgress('failed', primaryError);
         await refreshCommittedDataBeforeExit();
         return {

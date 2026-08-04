@@ -1,4 +1,5 @@
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { advanceProvisionalBridgeCommitProgress_ACU, authorizeManualCatchUpBucketWrite_ACU, readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
 import { cloneIsolatedData_ACU, collectSqlTargetTableNamesFromStorageFrameV2_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
@@ -74,6 +75,8 @@ export interface PersistTableMutationV2Options_ACU {
   assumeCommitLock?: boolean;
   /** 对破坏性复合写入要求宿主真实保存；默认保持历史宽松保存语义。 */
   strictSave?: boolean;
+  /** manual catch-up provisional bridge run 的 runId；传入时按 bridge 准入规则校验写入。 */
+  manualCatchUpRunId?: string;
   performanceRunId?: string;
   performanceParentSpanId?: string;
   transactionContext?: Pick<TableWriteTransactionContext_ACU, 'runCommit' | 'baseRevision' | 'writeSet' | 'assertFresh'>;
@@ -1718,6 +1721,23 @@ async function persistTableMutationLogV2Core_ACU(
     logDebug_ACU(`[V2 Persist] 仅更新 manualRefillProgress，不追加 mutation entry: messageIndex=${target.index}`);
   }
 
+  // provisional bridge 提交进度推进：仅当本次是匹配 runId 的 manual catch-up bucket
+  // （准入已放行，目标 < 原 full 边界）时更新 bridge.lastCommittedTargetIndex，并把它
+  // 所在的根消息并入替换集合，与本次 bucket 提交同一次 strict save 原子落盘。
+  // 崩溃后 recover 依赖该进度区分“零提交回滚”与“有提交 finalize”，不能滞后。
+  const activeBridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+  if (activeBridge && options.manualCatchUpRunId && activeBridge.runId === options.manualCatchUpRunId
+    && target.index < activeBridge.originalFullCheckpointIndex) {
+    const progress = advanceProvisionalBridgeCommitProgress_ACU(chat, isolationKey, target.index);
+    if (progress.ok && progress.status === 'advanced') {
+      replacementIsolatedDataByMessageIndex.set(progress.messageIndex, progress.isolatedData);
+    } else if (progress.ok === false) {
+      // 结构性失败（找不到根）才阻断；幂等重试（already_committed）不阻断本次提交。
+      if (progress.code === 'root_missing') {
+        return { saved: false, error: `provisional bridge 提交进度推进失败：${progress.error}` };
+      }
+    }
+  }
   replacementIsolatedDataByMessageIndex.set(target.index, isolatedData);
   if (temporaryBaselineUpgrade || provisionalConvergenceReplay) {
     const candidateChat = buildCandidateChatWithIsolatedDataOverrides_ACU(chat, replacementIsolatedDataByMessageIndex);
@@ -1792,6 +1812,34 @@ export async function persistTableMutationLogV2_ACU(
   });
   if (!options.transactionContext) {
     const result = { saved: false, error: 'V2 operation log write requires TableWriteTransactionContext; direct unsafe writes are not allowed.' };
+    performanceSpan.end({ success: false });
+    return result;
+  }
+  // manual catch-up provisional bridge 写入准入（t5）：
+  // 存在 active bridge 时，任何 V2 写入都必须携带匹配的 runId 且目标早于原 full 边界，
+  // 否则视为无关写入（自动更新/CRUD/导入/其他 run）直接阻断，不能混入 provisional 时间线。
+  // 不用全局布尔：每次写入都基于 live chat 重新读取 bridge 校验。
+  try {
+    const chat = getChatArray_ACU();
+    const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
+    const bridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
+    if (bridge) {
+      const targetIndex = options.targetMessageIndex ?? -1;
+      const auth = authorizeManualCatchUpBucketWrite_ACU(
+        bridge,
+        options.manualCatchUpRunId,
+        targetIndex,
+        getActiveChatStorageIdentity_ACU(chat),
+        isolationKey,
+      );
+      if (!auth.ok) {
+        const result = { saved: false, error: `provisional bridge 写入被拒绝：${(auth as { ok: false; error: string }).error}` };
+        performanceSpan.end({ success: false });
+        return result;
+      }
+    }
+  } catch (bridgeCheckError) {
+    const result = { saved: false, error: `provisional bridge 准入检查失败：${bridgeCheckError instanceof Error ? bridgeCheckError.message : String(bridgeCheckError)}` };
     performanceSpan.end({ success: false });
     return result;
   }

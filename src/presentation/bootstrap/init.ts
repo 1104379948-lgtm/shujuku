@@ -14,6 +14,7 @@ import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injectio
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
 import { reloadStorageProvider, disposeStorageProvider } from '../../service/table/table-storage-strategy';
 import { isSqliteMode } from '../../service/table/storage-mode';
+import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from '../../service/table/manual-catch-up-provisional-bridge';
 import { loadAllChatMessages_ACU } from '../../service/worldbook/pipeline';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
@@ -582,6 +583,15 @@ export   function mainInitialize_ACU() {
           
           // 再次强制刷新数据和UI，确保初始加载时表格显示正确
           await loadAllChatMessages_ACU();
+
+          // [provisional bridge] 启动加载当前聊天后统一恢复门：
+          // 若上次运行崩溃留下 active provisional bridge（原 full 被暂存、临时根在链上），
+          // 在首次读写前自动 finalize（有已提交 bucket）或 rollback（零提交）；
+          // 无法证明安全时记录错误并 fail-closed，避免在残留拓扑上继续写入。
+          const bridgeGate = await ensureNoActiveProvisionalBridgeForCurrentScope_ACU();
+          if (!bridgeGate.ok) {
+            logError_ACU(`[ManualCatchUpBridge] 启动恢复残留 provisional bridge 失败：${(bridgeGate as { ok: false; error: string }).error}`);
+          }
 
           // [修复] SQLite 模式下，启动时初始化内存数据库
           // 老卡（有聊天历史数据）会从聊天记录合并数据建表

@@ -32,6 +32,9 @@ vi.mock('../../../src/service/table/table-storage-strategy', () => ({
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: mocks.transaction,
 }));
+vi.mock('../../../src/service/table/manual-catch-up-provisional-bridge', () => ({
+  ensureNoActiveProvisionalBridgeForCurrentScope_ACU: vi.fn(async () => ({ ok: true, action: 'none' })),
+}));
 
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../src/service/table/table-update-commit';
 

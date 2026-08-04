@@ -1632,7 +1632,7 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
   });
 
-  it('手动追平预检前移 canonical init checkpoint 时保持真实行数据，并保存恢复备份', async () => {
+  it('手动追平预检遇到含真实行数据的 canonical init checkpoint 时返回 provisional_bridge_required 且零写入', async () => {
     const chat: any[] = [
       { is_user: false, mes: 'AI 1' },
       {
@@ -1652,18 +1652,16 @@ describe('deleteLocalDataInChatCore_ACU', () => {
         },
       },
     ];
+    const before = JSON.parse(JSON.stringify(chat));
     mockGetChatArray.mockReturnValue(chat);
 
     const result = await ensureManualCatchUpAnchorBeforeTarget_ACU(0, '');
 
-    expect(result).toEqual({ status: 'repaired', checkpointMessageIndex: 0 });
-    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content).toHaveLength(2);
-    expect(chat[0].TavernDB_ACU_IsolatedData[''].recoveryBackup).toMatchObject({
-      recoveryKind: 'relocated_checkpoint_discarded_prefix',
-      sourceMessageIndex: 1,
-    });
-    expect(chat[1].TavernDB_ACU_IsolatedData).toBeUndefined();
-    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
+    // 含真实行数据的正式 full checkpoint 不能前移（bounded replay 语义会被污染），
+    // 必须走 provisional bridge：不动原根、零写入。
+    expect(result).toEqual({ status: 'provisional_bridge_required', checkpointMessageIndex: 1 });
+    expect(chat).toEqual(before);
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
   });
 
   it('手动追平预检丢弃 checkpoint 前已被 replay 忽略的 artifact，并保留恢复备份', async () => {
