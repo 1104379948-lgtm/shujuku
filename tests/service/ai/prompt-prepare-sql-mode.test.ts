@@ -184,28 +184,38 @@ describe('prepareAIInput_ACU — SQL 模式', () => {
   });
 
   it('飞行模式 SQLite prompt 排除隐藏纪要行且不修改运行时物理数据', async () => {
+    const chronicleRows = Array.from({ length: 20 }, (_, index) => [`c${index + 1}`, `纪要${index + 1}`]);
     mockCurrentJsonTableData = {
       sheet_chronicle: {
         name: '纪要表',
         sourceData: {
           ddl: 'CREATE TABLE chronicle (row_id TEXT PRIMARY KEY, event TEXT);',
         },
-        content: [['row_id', 'event'], ['c1', '可见纪要'], ['c2', '隐藏纪要']],
+        content: [['row_id', 'event'], ...chronicleRows],
+        updateConfig: {},
+      },
+      sheet_da_zong_jie: {
+        name: '大总结',
+        sourceData: { ddl: 'CREATE TABLE big_summary (row_id TEXT PRIMARY KEY, summary_text TEXT);' },
+        content: [['row_id', 'summary_text'], ['s1', '此前大总结']],
         updateConfig: {},
       },
     };
     mockGetCurrentFlightModeState.mockReturnValue({
       enabled: true,
-      hiddenRowIds: ['c2'],
+      hiddenRowIds: chronicleRows.slice(0, 5).map(row => row[0]),
       bigSummarySheetKey: 'sheet_da_zong_jie',
     });
 
     const result = await prepareAIInput_ACU([], 'standard');
 
-    expect(result?.tableDataText).toContain('可见纪要');
-    expect(result?.tableDataText).not.toContain('隐藏纪要');
+    expect(result?.tableDataText).toContain('纪要6');
+    expect(result?.tableDataText).toContain('纪要20');
+    expect(result?.tableDataText).not.toContain('纪要5');
+    expect(result?.tableDataText).not.toContain('summary table fixed limit');
+    expect(result?.tableDataText).toContain('此前大总结');
     expect(mockCurrentJsonTableData.sheet_chronicle.content).toEqual([
-      ['row_id', 'event'], ['c1', '可见纪要'], ['c2', '隐藏纪要'],
+      ['row_id', 'event'], ...chronicleRows,
     ]);
   });
 

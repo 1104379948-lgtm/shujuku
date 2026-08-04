@@ -27,6 +27,48 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flig
 
 const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+interface PromptRowWindow_ACU {
+    rowsToProcess: any[];
+    startIndex: number;
+    limitNote?: string;
+}
+
+function resolvePromptRowWindow_ACU(
+    table: any,
+    effectiveAllRows: any[],
+    flightModeEnabled: boolean,
+): PromptRowWindow_ACU {
+    const tableName = String(table?.name || '').trim();
+    const isChronicleTable = tableName === '纪要表';
+    const isFixedSummaryTable = isChronicleTable || tableName === '总结表';
+    const shouldShowAllVisibleChronicleRows = flightModeEnabled && isChronicleTable;
+
+    if (isFixedSummaryTable && !shouldShowAllVisibleChronicleRows && effectiveAllRows.length > 10) {
+        const rowsToProcess = effectiveAllRows.slice(-10);
+        return {
+            rowsToProcess,
+            startIndex: effectiveAllRows.length - rowsToProcess.length,
+            limitNote: `Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (summary table fixed limit).`,
+        };
+    }
+
+    if (!isFixedSummaryTable) {
+        const sendLatestRows = typeof table?.updateConfig?.sendLatestRows === 'number'
+            ? table.updateConfig.sendLatestRows
+            : -1;
+        if (sendLatestRows > 0 && effectiveAllRows.length > sendLatestRows) {
+            const rowsToProcess = effectiveAllRows.slice(-sendLatestRows);
+            return {
+                rowsToProcess,
+                startIndex: effectiveAllRows.length - rowsToProcess.length,
+                limitNote: `Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (sendLatestRows=${sendLatestRows}).`,
+            };
+        }
+    }
+
+    return { rowsToProcess: effectiveAllRows, startIndex: 0 };
+}
+
   export interface PrepareAIInputFailure_ACU {
     ok: false;
     failureCode: string;
@@ -193,6 +235,7 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
             }
             tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, {
                 allowSeedRowsFallback: false,
+                flightModeEnabled: flightMode.enabled,
                 ...(selectedPromptName as { authoredTableName?: string; runtimeTableName?: string }),
             });
             continue;
@@ -243,22 +286,10 @@ const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
                 tableDataText += `  - SeedRows: 已提供模板基础数据（尚未写入聊天楼层数据；本次填表可直接基于这些行更新）\n`;
             }
 
-            let rowsToProcess = effectiveAllRows;
-            let startIndex = 0;
-
-            const isSummaryTable = (table.name.trim() === '纪要表' || table.name.trim() === '总结表');
-            if (isSummaryTable && effectiveAllRows.length > 10) {
-                startIndex = effectiveAllRows.length - 10;
-                rowsToProcess = effectiveAllRows.slice(-10);
-                tableDataText += `  - Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (summary table fixed limit).\n`;
-            } else if (!isSummaryTable) {
-                const sendLatestRows = (table.updateConfig && typeof table.updateConfig.sendLatestRows === 'number')
-                    ? table.updateConfig.sendLatestRows : -1;
-                if (sendLatestRows > 0 && effectiveAllRows.length > sendLatestRows) {
-                    startIndex = effectiveAllRows.length - sendLatestRows;
-                    rowsToProcess = effectiveAllRows.slice(-sendLatestRows);
-                    tableDataText += `  - Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (sendLatestRows=${sendLatestRows}).\n`;
-                }
+            const rowWindow = resolvePromptRowWindow_ACU(table, effectiveAllRows, flightMode.enabled);
+            const { rowsToProcess, startIndex } = rowWindow;
+            if (rowWindow.limitNote) {
+                tableDataText += `  - Note: ${rowWindow.limitNote}\n`;
             }
 
             if (rowsToProcess.length > 0) {
@@ -482,7 +513,13 @@ function resolvePromptTableNameForSheet_ACU(
  * SQLite 模式下的表格格式化
  * 输出 DDL + Note/Trigger 注释 + 当前数据（注释格式）
  */
-export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKey: string, guideData: any, options: { allowSeedRowsFallback?: boolean; runtimeTableName?: string; authoredTableName?: string } = {}): string {
+export function formatTableForSqliteMode(
+    table: any,
+    tableIndex: number,
+    sheetKey: string,
+    guideData: any,
+    options: { allowSeedRowsFallback?: boolean; runtimeTableName?: string; authoredTableName?: string; flightModeEnabled?: boolean } = {},
+): string {
     let text = '';
     const projection = getSheetColumnProjection_ACU(table);
     const hasHiddenPhysicalColumns = projection.hiddenPhysicalColumns.length > 0;
@@ -570,21 +607,10 @@ export function formatTableForSqliteMode(table: any, tableIndex: number, sheetKe
     }
 
     // 行数限制逻辑（与原生模式一致）
-    let rowsToProcess = effectiveAllRows;
-    let startIndex = 0;
-    const isSummaryTable = (table.name.trim() === '纪要表' || table.name.trim() === '总结表');
-    if (isSummaryTable && effectiveAllRows.length > 10) {
-        startIndex = effectiveAllRows.length - 10;
-        rowsToProcess = effectiveAllRows.slice(-10);
-        text += `-- Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (summary table fixed limit).\n`;
-    } else if (!isSummaryTable) {
-        const sendLatestRows = (table.updateConfig && typeof table.updateConfig.sendLatestRows === 'number')
-            ? table.updateConfig.sendLatestRows : -1;
-        if (sendLatestRows > 0 && effectiveAllRows.length > sendLatestRows) {
-            startIndex = effectiveAllRows.length - sendLatestRows;
-            rowsToProcess = effectiveAllRows.slice(-sendLatestRows);
-            text += `-- Note: Showing last ${rowsToProcess.length} of ${effectiveAllRows.length} entries (sendLatestRows=${sendLatestRows}).\n`;
-        }
+    const rowWindow = resolvePromptRowWindow_ACU(table, effectiveAllRows, options.flightModeEnabled === true);
+    const { rowsToProcess, startIndex } = rowWindow;
+    if (rowWindow.limitNote) {
+        text += `-- Note: ${rowWindow.limitNote}\n`;
     }
 
     // 输出当前数据（注释格式的表格）

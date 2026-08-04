@@ -597,18 +597,47 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
   });
 
   it('飞行模式对填表 prompt 仅输出可见纪要行，不修改调用方快照', async () => {
+    mockIsSqliteMode = false;
+    const chronicleRows = Array.from({ length: 20 }, (_, index) => [`c${index + 1}`, `纪要${index + 1}`]);
     const data = {
       sheet_chronicle: {
-        uid: 'sheet_chronicle', name: '纪要表', content: [['row_id', '事件'], ['c1', '可见纪要'], ['c2', '隐藏纪要']], updateConfig: {},
+        uid: 'sheet_chronicle', name: '纪要表', content: [['row_id', '事件'], ...chronicleRows], updateConfig: {},
+      },
+      sheet_da_zong_jie: {
+        uid: 'sheet_da_zong_jie', name: '大总结', content: [['row_id', '总结'], ['s1', '此前大总结']], updateConfig: {},
       },
     };
-    mockGetCurrentFlightModeState.mockReturnValue({ enabled: true, hiddenRowIds: ['c2'], bigSummarySheetKey: 'sheet_da_zong_jie' });
+    mockGetCurrentFlightModeState.mockReturnValue({
+      enabled: true,
+      hiddenRowIds: chronicleRows.slice(0, 5).map(row => row[0]),
+      bigSummarySheetKey: 'sheet_da_zong_jie',
+    });
 
     const result = await prepareAIInput_ACU([], 'standard', null, { tableData: data });
 
-    expect(result?.tableDataText).toContain('可见纪要');
-    expect(result?.tableDataText).not.toContain('隐藏纪要');
-    expect(data.sheet_chronicle.content).toEqual([['row_id', '事件'], ['c1', '可见纪要'], ['c2', '隐藏纪要']]);
+    expect(result?.tableDataText).toContain('纪要6');
+    expect(result?.tableDataText).toContain('纪要20');
+    expect(result?.tableDataText).not.toContain('纪要5');
+    expect(result?.tableDataText).not.toContain('summary table fixed limit');
+    expect(result?.tableDataText).toContain('此前大总结');
+    expect(data.sheet_chronicle.content).toEqual([['row_id', '事件'], ...chronicleRows]);
+  });
+
+  it('关闭飞行模式后纪要表恢复最新 10 条窗口', async () => {
+    mockIsSqliteMode = false;
+    const chronicleRows = Array.from({ length: 15 }, (_, index) => [`c${index + 1}`, `纪要${index + 1}`]);
+    const result = await prepareAIInput_ACU([], 'standard', null, {
+      tableData: {
+        sheet_chronicle: {
+          uid: 'sheet_chronicle', name: '纪要表', content: [['row_id', '事件'], ...chronicleRows], updateConfig: {},
+        },
+      },
+    });
+
+    expect(result?.tableDataText).toContain('Showing last 10 of 15 entries (summary table fixed limit).');
+    expect(result?.tableDataText).toContain('纪要6');
+    expect(result?.tableDataText).toContain('纪要15');
+    expect(result?.tableDataText).not.toContain('纪要5');
   });
 
   it('传入显式 tableData 且存在 guideData 时不调用全局 attach helper，且不污染原始显式对象', async () => {
