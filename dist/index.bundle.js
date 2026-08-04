@@ -7449,80 +7449,6 @@ $CONTENT
         msg.TavernDB_ACU_IsolatedData[isolationKey] = tagData;
     }
     /**
-     * 受控的隔离槽 metadata patch。
-     *
-     * 只允许更新向量 metadata 字段（vectorMemoryState / summaryVectorIndexState /
-     * summaryVectorIndexManifest / _acu_base_state），绝不携带或续写 V1 表格 payload。
-     * 调用方传入的 patch 中若包含任何表数据形态字段（independentData /
-     * incrementalData / modifiedKeys / updateGroupKeys / _acu_storage_version === 1），
-     * 直接 fail-closed 拒绝，message 保持原样。
-     *
-     * 该函数替代“clone 现有整槽后整槽回写”的写法，避免旧 V1 payload 被原样续写。
-     *
-     * @throws {Error} 携带 LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU 错误码。
-     */
-    function patchIsolatedTagDataMetadata_ACU(msg, isolationKey, patch) {
-        if (!msg)
-            return;
-        const forbidden = [
-            'independentData',
-            'incrementalData',
-            'modifiedKeys',
-            'updateGroupKeys',
-            '_acu_storage_version',
-        ];
-        for (const key of forbidden) {
-            if (Object.prototype.hasOwnProperty.call(patch, key)) {
-                const error = new Error(`[write-barrier] 拒绝 metadata patch 携带 V1 表字段：${LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU} `
-                    + `isolationKey=${String(isolationKey)} field=${key}`);
-                error.code = LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU;
-                throw error;
-            }
-        }
-        if (!msg.TavernDB_ACU_IsolatedData || typeof msg.TavernDB_ACU_IsolatedData !== 'object') {
-            msg.TavernDB_ACU_IsolatedData = {};
-        }
-        const container = msg.TavernDB_ACU_IsolatedData;
-        const existing = isObjectRecord_ACU$3(container[isolationKey]) ? container[isolationKey] : {};
-        if (isV1TablePayloadCandidate_ACU(existing)) {
-            const error = new Error(`[write-barrier] 拒绝在 Legacy-V1 payload 槽上执行 metadata patch：`
-                + `${LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU} isolationKey=${String(isolationKey)}`);
-            error.code = LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU;
-            throw error;
-        }
-        // 必须替换整个 IsolatedData 字段为新对象，而不是原地改槽：
-        // 调用方（向量发布/回滚）依赖“捕获旧字段引用 → 保存失败时整字段回滚”的语义，
-        // 原地改槽会使捕获的引用与变更后的引用相同，导致回滚失效。
-        const nextContainer = { ...container };
-        const next = { ...existing };
-        if (Object.prototype.hasOwnProperty.call(patch, 'vectorMemoryState')) {
-            if (patch.vectorMemoryState == null)
-                delete next.vectorMemoryState;
-            else
-                next.vectorMemoryState = patch.vectorMemoryState;
-        }
-        if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexState')) {
-            if (patch.summaryVectorIndexState == null)
-                delete next.summaryVectorIndexState;
-            else
-                next.summaryVectorIndexState = patch.summaryVectorIndexState;
-        }
-        if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexManifest')) {
-            if (patch.summaryVectorIndexManifest == null)
-                delete next.summaryVectorIndexManifest;
-            else
-                next.summaryVectorIndexManifest = patch.summaryVectorIndexManifest;
-        }
-        if (Object.prototype.hasOwnProperty.call(patch, '_acu_base_state')) {
-            if (patch._acu_base_state == null)
-                delete next._acu_base_state;
-            else
-                next._acu_base_state = patch._acu_base_state;
-        }
-        nextContainer[isolationKey] = next;
-        msg.TavernDB_ACU_IsolatedData = nextContainer;
-    }
-    /**
      * 根据隔离配置设置或删除 Identity 字段。
      * - 隔离启用：设置 Identity 为隔离代码
      * - 隔离关闭：删除 Identity 字段
@@ -80631,9 +80557,25 @@ $CONTENT
             modifiedKeys: [],
             updateGroupKeys: [],
         };
+        const nextIsolatedData = cloneIsolatedData_ACU(message);
+        const existingStorageFrame = existingTagData.storageFrame;
+        const existingTagDataIsV2 = !!existingStorageFrame;
+        const nextTagData = {
+            ...(existingTagDataIsV2
+                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
+                : {
+                    independentData: existingTagData.independentData || {},
+                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
+                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
+                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
+                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
+                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
+                }),
+            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
+            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
+        };
         let uploadedFiles = [];
         let publishedManifest = null;
-        let publishedState = null;
         let publishMessageState = null;
         if (nextState) {
             const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
@@ -80659,18 +80601,17 @@ $CONTENT
             });
             uploadedFiles = persisted.uploadedFiles;
             publishedManifest = persisted.manifest;
-            publishedState = persisted.state;
+            assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
             logDebug_ACU(`[纪要向量索引] 已写入最新层内容寻址 manifest：rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}, chunkRefs=${persisted.manifest.contentAddressed?.chunkRefs?.length || 0}`);
         }
         else {
-            publishedManifest = null;
+            assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
         }
         publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
-            patchIsolatedTagDataMetadata_ACU(message, tagIsolationKey, {
-                summaryVectorIndexState: publishedState,
-                summaryVectorIndexManifest: publishedManifest || null,
-            });
+            nextIsolatedData[tagIsolationKey] = nextTagData;
+            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+            writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
             const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
             if (anchorForMessage?.anchor) {
                 persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
@@ -80706,15 +80647,32 @@ $CONTENT
         const manifest = existingTagData?.summaryVectorIndexManifest || existingTagData?.summaryVectorIndexState?.manifest || null;
         if (!existingTagData?.summaryVectorIndexState && !existingTagData?.summaryVectorIndexManifest)
             return !!manifest;
+        const nextIsolatedData = cloneIsolatedData_ACU(message);
+        const existingStorageFrame = existingTagData.storageFrame;
+        const existingTagDataIsV2 = !!existingStorageFrame;
+        const nextTagData = {
+            ...(existingTagDataIsV2
+                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
+                : {
+                    independentData: existingTagData.independentData || {},
+                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
+                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
+                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
+                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
+                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
+                }),
+            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
+            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
+        };
+        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
         const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
             if (params.expectedFlushScopeKey && params.expectedFlushGeneration != null) {
                 await assertSummaryVectorFlushGenerationCurrent_ACU(params.expectedFlushScopeKey, params.expectedFlushGeneration);
             }
-            patchIsolatedTagDataMetadata_ACU(message, isolationKey, {
-                summaryVectorIndexState: null,
-                summaryVectorIndexManifest: null,
-            });
+            nextIsolatedData[isolationKey] = nextTagData;
+            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+            writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
             writeMessageIdentity_ACU(message, {
                 enabled: settings_ACU.dataIsolationEnabled,
                 code: settings_ACU.dataIsolationCode,
@@ -80841,12 +80799,29 @@ $CONTENT
             snapshotRevision: manifest.snapshot?.revision || 0,
             sourceMessageIndex: latestLayer.messageIndex,
         });
+        const nextIsolatedData = cloneIsolatedData_ACU(message);
+        const existingStorageFrame = existingTagData.storageFrame;
+        const existingTagDataIsV2 = !!existingStorageFrame;
+        const nextTagData = {
+            ...(existingTagDataIsV2
+                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
+                : {
+                    independentData: existingTagData.independentData || {},
+                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
+                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
+                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
+                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
+                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
+                }),
+            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
+            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
+        };
+        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
         const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
-            patchIsolatedTagDataMetadata_ACU(message, tagIsolationKey, {
-                summaryVectorIndexState: persisted.state,
-                summaryVectorIndexManifest: persisted.manifest,
-            });
+            nextIsolatedData[tagIsolationKey] = nextTagData;
+            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+            writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
             writeMessageIdentity_ACU(message, {
                 enabled: settings_ACU.dataIsolationEnabled,
                 code: settings_ACU.dataIsolationCode,
@@ -95614,9 +95589,11 @@ $CONTENT
                 exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
                 value: message.TavernDB_ACU_IsolatedData,
             };
+            const nextIsolatedData = cloneIsolatedData_ACU(message);
+            const tagData = nextIsolatedData[isolationKey] || { independentData: {}, modifiedKeys: {}, updateGroupKeys: {} };
             const rows = Array.isArray(blob.rows) ? blob.rows : [];
             const chunks = Array.isArray(blob.chunks) ? blob.chunks : [];
-            const nextState = {
+            assignSummaryVectorIndexStateToTagData_ACU(tagData, {
                 manifest, rows, chunks,
                 rowCount: rows.filter((row) => row.status !== 'removed').length,
                 chunkCount: chunks.length,
@@ -95625,12 +95602,10 @@ $CONTENT
                 sourceTableName: String(manifest.sourceTableName || sourceTableKey),
                 indexedAt: String(manifest.indexedAt || new Date().toISOString()),
                 skippedRowCount: 0,
-            };
+            });
             try {
-                patchIsolatedTagDataMetadata_ACU(message, isolationKey, {
-                    summaryVectorIndexState: nextState,
-                    summaryVectorIndexManifest: manifest,
-                });
+                message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+                writeIsolatedTagData_ACU(message, isolationKey, tagData);
                 await saveChatToHostStrict_ACU();
                 console.log(`[ACU交火向量索引] 已从外部快照自动恢复 state 到消息 #${targetIndex}（indexId=${manifest.indexId}，${rows.length} 行，${chunks.length} 块，sourceTableKey=${sourceTableKey}）`);
                 return true;
@@ -95745,10 +95720,8 @@ $CONTENT
                     };
                     scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
                 }
-                patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
-                    summaryVectorIndexState: null,
-                    summaryVectorIndexManifest: null,
-                });
+                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
                 changed = true;
             }
         }
@@ -103282,11 +103255,10 @@ $CONTENT
             exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
             value: message.TavernDB_ACU_IsolatedData,
         };
+        assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
         try {
-            patchIsolatedTagDataMetadata_ACU(message, params.isolationKey, {
-                summaryVectorIndexState: null,
-                summaryVectorIndexManifest: null,
-            });
+            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+            writeIsolatedTagData_ACU(message, params.isolationKey, tagData);
             await saveChatToHostStrict_ACU();
             return true;
         }
@@ -103320,10 +103292,8 @@ $CONTENT
                     };
                     scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
                 }
-                patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
-                    summaryVectorIndexState: null,
-                    summaryVectorIndexManifest: null,
-                });
+                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
                 changed = true;
             }
         }
@@ -104093,15 +104063,14 @@ $CONTENT
         const message = layer ? chat[layer.messageIndex] : null;
         if (!layer || !message)
             return null;
+        const nextTagData = { ...(readIsolatedTagData_ACU(message, layer.isolationKey) || layer.tagData || {}) };
         const previousIsolatedData = {
             exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
             value: message.TavernDB_ACU_IsolatedData,
         };
+        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, alignedState, alignedManifest);
         try {
-            patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
-                summaryVectorIndexState: alignedState,
-                summaryVectorIndexManifest: alignedManifest,
-            });
+            writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
             await saveChatToHostStrict_ACU();
         }
         catch (error) {

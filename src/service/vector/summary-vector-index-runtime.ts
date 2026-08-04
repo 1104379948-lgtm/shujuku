@@ -1,6 +1,6 @@
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
-import { patchIsolatedTagDataMetadata_ACU } from '../../data/repositories/chat-message-data-repo';
+import { readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { loadVectorIndexRegistry_ACU, readVectorIndexJsonFile_ACU } from '../../data/storage/vector-index-st-files-storage';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKey_ACU } from '../../shared/summary-vector-index-scope';
@@ -17,6 +17,7 @@ import {
 } from '../worldbook/worldbook-service';
 import { getEffectiveSummaryVectorIndexConfig_ACU, validateSummaryVectorIndexConfig_ACU } from './vector-memory-config';
 import {
+    assignSummaryVectorIndexStateToTagData_ACU,
     getLatestSummaryVectorIndexSnapshotState_ACU,
 } from './summary-vector-index-state-service';
 import {
@@ -537,15 +538,14 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
     const chat = getChatArray_ACU();
     const message = layer ? chat[layer.messageIndex] : null;
     if (!layer || !message) return null;
+    const nextTagData = { ...(readIsolatedTagData_ACU(message, layer.isolationKey) || layer.tagData || {}) } as any;
     const previousIsolatedData = {
         exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
         value: message.TavernDB_ACU_IsolatedData,
     };
+    assignSummaryVectorIndexStateToTagData_ACU(nextTagData, alignedState, alignedManifest);
     try {
-        patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
-            summaryVectorIndexState: alignedState,
-            summaryVectorIndexManifest: alignedManifest,
-        });
+        writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
         await saveChatToHostStrict_ACU();
     } catch (error) {
         if (previousIsolatedData.exists) message.TavernDB_ACU_IsolatedData = previousIsolatedData.value;

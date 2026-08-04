@@ -10,7 +10,7 @@ const {
   mockCreateEmbeddings,
   mockPersistSummaryVectorIndexSnapshot,
   mockReadIsolatedTagData,
-  mockPatchIsolatedTagDataMetadata,
+  mockWriteIsolatedTagData,
   mockSaveChatToHost,
   mockSaveChatToHostStrict,
   mockAbortSummaryVectorIndexSnapshotPublication,
@@ -31,31 +31,7 @@ const {
     mockCreateEmbeddings: vi.fn(),
     mockPersistSummaryVectorIndexSnapshot: vi.fn(),
     mockReadIsolatedTagData: vi.fn((message: any, isolationKey: string) => message?.TavernDB_ACU_IsolatedData?.[isolationKey || ''] || null),
-    mockPatchIsolatedTagDataMetadata: vi.fn((message: any, isolationKey: string, patch: any) => {
-      if (!message) return;
-      if (!message.TavernDB_ACU_IsolatedData || typeof message.TavernDB_ACU_IsolatedData !== 'object') {
-        message.TavernDB_ACU_IsolatedData = {};
-      }
-      const container = message.TavernDB_ACU_IsolatedData;
-      const nextContainer = { ...container };
-      const existing = (container[isolationKey] && typeof container[isolationKey] === 'object') ? container[isolationKey] : {};
-      const next = { ...existing };
-      if (Object.prototype.hasOwnProperty.call(patch, 'vectorMemoryState')) next.vectorMemoryState = patch.vectorMemoryState;
-      if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexState')) {
-        if (patch.summaryVectorIndexState == null) delete next.summaryVectorIndexState;
-        else next.summaryVectorIndexState = patch.summaryVectorIndexState;
-      }
-      if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexManifest')) {
-        if (patch.summaryVectorIndexManifest == null) delete next.summaryVectorIndexManifest;
-        else next.summaryVectorIndexManifest = patch.summaryVectorIndexManifest;
-      }
-      if (Object.prototype.hasOwnProperty.call(patch, '_acu_base_state')) {
-        if (patch._acu_base_state == null) delete next._acu_base_state;
-        else next._acu_base_state = patch._acu_base_state;
-      }
-      nextContainer[isolationKey] = next;
-      message.TavernDB_ACU_IsolatedData = nextContainer;
-    }),
+    mockWriteIsolatedTagData: vi.fn(),
     mockSaveChatToHost: vi.fn().mockResolvedValue(undefined),
     mockSaveChatToHostStrict: vi.fn().mockResolvedValue(undefined),
     mockAbortSummaryVectorIndexSnapshotPublication: vi.fn(),
@@ -133,7 +109,7 @@ vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () =
 vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   cloneIsolatedData_ACU: vi.fn((message: any) => JSON.parse(JSON.stringify(message?.TavernDB_ACU_IsolatedData || {}))),
   readIsolatedTagData_ACU: (...args: any[]) => mockReadIsolatedTagData(...args),
-  patchIsolatedTagDataMetadata_ACU: (...args: any[]) => mockPatchIsolatedTagDataMetadata(...args),
+  writeIsolatedTagData_ACU: (...args: any[]) => mockWriteIsolatedTagData(...args),
   writeMessageIdentity_ACU: vi.fn((message: any, isolationConfig: any) => {
     if (!message) return;
     if (isolationConfig?.enabled) message.TavernDB_ACU_Identity = isolationConfig.code;
@@ -280,7 +256,7 @@ describe('summary-vector-index-archive-service pending 归档', () => {
       sourceTableKey: 'sheet_summary',
     }));
     expect(mockReadIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '');
-    expect(mockPatchIsolatedTagDataMetadata).toHaveBeenCalledWith(mockChat[0], '', expect.objectContaining({ summaryVectorIndexManifest: expect.any(Object) }));
+    expect(mockWriteIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '', expect.any(Object));
   });
 
   it('拒绝未激活 isolation 的归档，不能将当前表数据写入其他 scope', async () => {
@@ -459,7 +435,7 @@ describe('summary-vector-index-archive-service pending 归档', () => {
 
     expect(mockPersistSummaryVectorIndexSnapshot).toHaveBeenCalledWith(expect.objectContaining({ isolationKey: 'default' }));
     expect(mockReadIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '');
-    expect(mockPatchIsolatedTagDataMetadata).toHaveBeenCalledWith(mockChat[0], '', expect.objectContaining({ summaryVectorIndexManifest: expect.any(Object) }));
+    expect(mockWriteIsolatedTagData).toHaveBeenCalledWith(mockChat[0], '', expect.any(Object));
     expect(mockChat[0].TavernDB_ACU_IsolatedData[''].summaryVectorIndexManifest.indexId).toBe('idx-1');
     expect(mockChat[0].TavernDB_ACU_IsolatedData.default).toBeUndefined();
   });

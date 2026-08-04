@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   chatKey: 'chat-a', isolationKey: 'iso-a', tables: { summary: { name: '纪要表' } } as any,
   chat: [{ is_user: false, mesId: 'm-1' }] as any[], tagData: null as any,
-  registry: [] as any[], reads: vi.fn(), validate: vi.fn(), assign: vi.fn(), write: vi.fn(), patch: vi.fn(), save: vi.fn(), saveStrict: vi.fn(),
+  registry: [] as any[], reads: vi.fn(), validate: vi.fn(), assign: vi.fn(), write: vi.fn(), save: vi.fn(), saveStrict: vi.fn(),
 }));
 
 vi.mock('../../src/service/runtime/state-manager', () => ({
@@ -34,7 +34,6 @@ vi.mock('../../src/data/repositories/chat-message-data-repo', () => ({
   cloneIsolatedData_ACU: (message: any) => structuredClone(message.TavernDB_ACU_IsolatedData || {}),
   readIsolatedTagData_ACU: () => h.tagData,
   writeIsolatedTagData_ACU: (...args: any[]) => h.write(...args),
-  patchIsolatedTagDataMetadata_ACU: (...args: any[]) => h.patch(...args),
 }));
 
 import { tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU } from '../../src/presentation/pages/popup-bindings-data';
@@ -51,25 +50,9 @@ beforeEach(() => {
   h.validate.mockReset();
   h.assign.mockReset();
   h.write.mockReset();
-  h.patch.mockReset();
   h.save.mockReset();
   h.saveStrict.mockReset();
   h.assign.mockImplementation((tagData: any, state: any) => { tagData.summaryVectorIndexState = state; });
-  h.patch.mockImplementation((message: any, isolationKey: string, patch: any) => {
-    if (!message) return;
-    if (!message.TavernDB_ACU_IsolatedData || typeof message.TavernDB_ACU_IsolatedData !== 'object') {
-      message.TavernDB_ACU_IsolatedData = {};
-    }
-    const container = message.TavernDB_ACU_IsolatedData;
-    const nextContainer = { ...container };
-    const existing = (container[isolationKey] && typeof container[isolationKey] === 'object') ? container[isolationKey] : {};
-    const next = { ...existing };
-    if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexState')) next.summaryVectorIndexState = patch.summaryVectorIndexState;
-    if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexManifest')) next.summaryVectorIndexManifest = patch.summaryVectorIndexManifest;
-    nextContainer[isolationKey] = next;
-    message.TavernDB_ACU_IsolatedData = nextContainer;
-
-  });
   h.save.mockResolvedValue(undefined);
   h.saveStrict.mockResolvedValue(undefined);
 });
@@ -81,7 +64,7 @@ describe('popup external vector snapshot recovery', () => {
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(true);
     expect(h.reads).toHaveBeenCalledWith('TavernDB_ACU_vector_v2_scope-chat-a-iso-a-summary_idx-1_write_snapshot');
     expect(h.validate).toHaveBeenCalledWith(expect.objectContaining({ indexId: 'idx-1' }), expect.anything(), expect.stringContaining('vector_v2_'));
-    expect(h.patch).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({ summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-1' }) }) }));
+    expect(h.write).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({ summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-1' }) }) }));
     expect(h.saveStrict).toHaveBeenCalledTimes(1);
     expect(h.save).not.toHaveBeenCalled();
   });
@@ -104,7 +87,7 @@ describe('popup external vector snapshot recovery', () => {
 
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(true);
 
-    expect(h.patch).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({ summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-new' }) }) }));
+    expect(h.write).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({ summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-new' }) }) }));
   });
 
   it('拒绝同 scope 同 revision 的多个 published V2 候选，不能伪造 generation 顺序', async () => {
@@ -118,7 +101,7 @@ describe('popup external vector snapshot recovery', () => {
 
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(false);
 
-    expect(h.patch).not.toHaveBeenCalled();
+    expect(h.write).not.toHaveBeenCalled();
     expect(h.saveStrict).not.toHaveBeenCalled();
   });
 
@@ -133,7 +116,7 @@ describe('popup external vector snapshot recovery', () => {
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(false);
 
     expect(h.reads).not.toHaveBeenCalled();
-    expect(h.patch).not.toHaveBeenCalled();
+    expect(h.write).not.toHaveBeenCalled();
     expect(h.saveStrict).not.toHaveBeenCalled();
   });
 
@@ -142,7 +125,7 @@ describe('popup external vector snapshot recovery', () => {
     h.reads.mockResolvedValue({ ok: true, data: blob() });
     h.validate.mockImplementation(() => { throw new Error('embedded identity mismatch'); });
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(false);
-    expect(h.patch).not.toHaveBeenCalled(); expect(h.saveStrict).not.toHaveBeenCalled();
+    expect(h.write).not.toHaveBeenCalled(); expect(h.saveStrict).not.toHaveBeenCalled();
   });
 
   it('拒绝 manifest scope 不匹配并继续尝试同 scope 的后续 legacy 候选', async () => {
@@ -156,7 +139,7 @@ describe('popup external vector snapshot recovery', () => {
 
     expect(h.reads.mock.calls.map(([path]: [string]) => path).slice(0, 2)).toEqual(['named-summary', 'unnamed-summary']);
     expect(h.validate).toHaveBeenCalledTimes(1);
-    expect(h.patch).toHaveBeenCalledTimes(1); expect(h.saveStrict).toHaveBeenCalledTimes(1);
+    expect(h.write).toHaveBeenCalledTimes(1); expect(h.saveStrict).toHaveBeenCalledTimes(1);
   });
 
   it('在 V2 registry 没有可信快照时兼容恢复 legacy 路径', async () => {
@@ -167,7 +150,7 @@ describe('popup external vector snapshot recovery', () => {
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(true);
 
     expect(h.reads.mock.calls.map(([path]: [string]) => path)).toEqual(['named-summary', 'unnamed-summary', 'legacy-summary']);
-    expect(h.patch).toHaveBeenCalledTimes(1); expect(h.saveStrict).toHaveBeenCalledTimes(1);
+    expect(h.write).toHaveBeenCalledTimes(1); expect(h.saveStrict).toHaveBeenCalledTimes(1);
   });
 
   it('多个可信 legacy 快照候选并存时拒绝按路径顺序猜测恢复', async () => {
@@ -180,7 +163,7 @@ describe('popup external vector snapshot recovery', () => {
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(false);
 
     expect(h.reads.mock.calls.map(([path]: [string]) => path)).toEqual(['named-summary', 'unnamed-summary', 'legacy-summary']);
-    expect(h.patch).not.toHaveBeenCalled();
+    expect(h.write).not.toHaveBeenCalled();
     expect(h.saveStrict).not.toHaveBeenCalled();
   });
 
@@ -204,6 +187,6 @@ describe('popup external vector snapshot recovery', () => {
     h.tagData = { summaryVectorIndexState: { manifest: { indexId: 'existing' } } };
     h.reads.mockResolvedValue({ ok: true, data: blob() });
     await expect(tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU()).resolves.toBe(false);
-    expect(h.assign).not.toHaveBeenCalled(); expect(h.patch).not.toHaveBeenCalled(); expect(h.saveStrict).not.toHaveBeenCalled();
+    expect(h.assign).not.toHaveBeenCalled(); expect(h.write).not.toHaveBeenCalled(); expect(h.saveStrict).not.toHaveBeenCalled();
   });
 });

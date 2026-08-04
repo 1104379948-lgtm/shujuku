@@ -20,7 +20,6 @@ import {
   readUpdateGroupKeys_ACU,
   isLegacyMatchForIsolation_ACU,
   writeIsolatedTagData_ACU,
-  patchIsolatedTagDataMetadata_ACU,
   isV1TablePayloadCandidate_ACU,
   LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU,
   writeMessageIdentity_ACU,

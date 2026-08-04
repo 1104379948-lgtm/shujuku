@@ -93,10 +93,8 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   readUpdateGroupKeys_ACU: vi.fn(() => []),
   readMessageIdentity_ACU: vi.fn(() => null),
   isLegacyMatchForIsolation_ACU: vi.fn(() => false),
-  initIsolatedTagSlot_ACU: vi.fn(() => ({ independentData: {}, modifiedKeys: [], updateGroupKeys: [] })),
   cloneIsolatedData_ACU: vi.fn((message: any) => JSON.parse(JSON.stringify(message?.TavernDB_ACU_IsolatedData || {}))),
   writeMessageIdentity_ACU: vi.fn(),
-  writeLegacyCompatData_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/template-preset-utils', () => ({
@@ -844,7 +842,6 @@ import { formatJsonToReadable_ACU, fillFirstLayerWithTemplateData_ACU, shouldSup
 import { settings_ACU, suppressWorldbookInjectionInGreeting_ACU, _set_suppressWorldbookInjectionInGreeting_ACU } from '../../../src/service/runtime/state-manager';
 import { saveChatToHost_ACU } from '../../../src/data/gateways/chat-gateway';
 import { persistTableMutationLogV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
-import { initIsolatedTagSlot_ACU, writeLegacyCompatData_ACU } from '../../../src/data/repositories/chat-message-data-repo';
 import { buildChatSheetGuideDataFromTemplateObj_ACU, setChatSheetGuideDataForIsolationKey_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../../../src/service/template/chat-scope';
 import { applyTemplateScopeForCurrentChat_ACU } from '../../../src/service/settings/settings-service';
 
@@ -1042,11 +1039,6 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
       { is_user: false, mes: '你好，欢迎来到冒险世界！' },
     ]);
     vi.mocked(getCurrentIsolationKey_ACU).mockReturnValue('');
-    vi.mocked(initIsolatedTagSlot_ACU).mockReturnValue({
-      independentData: {},
-      modifiedKeys: [],
-      updateGroupKeys: [],
-    });
     vi.mocked(getSortedSheetKeys_ACU).mockImplementation((data: any) =>
       data ? Object.keys(data).filter((k: string) => k.startsWith('sheet_')).sort() : [],
     );
@@ -1145,8 +1137,6 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
     expect(result).toEqual({ success: true, messageIndex: 0, sheetCount: 1 });
     // 验证写入了 V2 checkpoint，不再同步旧格式
     expect(vi.mocked(persistTableMutationLogV2_ACU)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(initIsolatedTagSlot_ACU)).not.toHaveBeenCalled();
-    expect(vi.mocked(writeLegacyCompatData_ACU)).not.toHaveBeenCalled();
     expect(vi.mocked(saveChatToHost_ACU)).toHaveBeenCalledTimes(1);
     // 验证更新了内存数据
     expect(vi.mocked(_set_currentJsonTableData_ACU)).toHaveBeenCalledTimes(1);
@@ -1603,8 +1593,6 @@ describe('ensureInitialSeedCheckpoint_ACU', () => {
     vi.mocked(getChatArray_ACU).mockReturnValue([greetingMsg, { is_user: true, mes: '用户消息' }]);
     const result = await ensureInitialSeedCheckpoint_ACU();
     expect(result).toBe(false);
-    // 不应调用任何写入函数
-    expect(vi.mocked(initIsolatedTagSlot_ACU)).not.toHaveBeenCalled();
   });
 
   it('模板为 null 时返回 false', async () => {
@@ -1627,8 +1615,6 @@ describe('ensureInitialSeedCheckpoint_ACU', () => {
     const result = await ensureInitialSeedCheckpoint_ACU();
 
     expect(result).toEqual({ success: true, messageIndex: 0 });
-    expect(vi.mocked(initIsolatedTagSlot_ACU)).not.toHaveBeenCalled();
-    expect(vi.mocked(writeLegacyCompatData_ACU)).not.toHaveBeenCalled();
     const tagData = greetingMsg.TavernDB_ACU_IsolatedData?.[''];
     expect(tagData?._acu_storage_version).toBe(2);
     expect(tagData?.storageFrame?.version).toBe(2);
@@ -1646,9 +1632,6 @@ describe('ensureInitialSeedCheckpoint_ACU', () => {
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
       sheet_0: { name: '表', content: [['row_id', 'col'], ['1', 'val']] },
     });
-    vi.mocked(initIsolatedTagSlot_ACU).mockReturnValue({
-      independentData: {}, modifiedKeys: [], updateGroupKeys: [], _acu_base_state: '',
-    });
 
     const result = await ensureInitialSeedCheckpoint_ACU({ allowPendingFirstUserMessage: true });
 
@@ -1660,9 +1643,6 @@ describe('ensureInitialSeedCheckpoint_ACU', () => {
     vi.mocked(getChatArray_ACU).mockReturnValue([greetingMsg, { is_user: true, mes: '用户消息' }]);
     vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
       sheet_0: { name: '表', content: [['row_id', 'col'], ['1', 'val']] },
-    });
-    vi.mocked(initIsolatedTagSlot_ACU).mockReturnValue({
-      independentData: {}, modifiedKeys: [], updateGroupKeys: [], _acu_base_state: '',
     });
     vi.mocked(deleteAllGeneratedEntries_ACU).mockRejectedValue(new Error('世界书清理失败'));
 

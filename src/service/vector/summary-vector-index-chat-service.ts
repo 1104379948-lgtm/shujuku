@@ -1,4 +1,4 @@
-import { cloneIsolatedData_ACU, patchIsolatedTagDataMetadata_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { cloneIsolatedData_ACU, readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import {
     clearSummaryVectorFlushTasksByScope_ACU,
     deleteSummaryVectorHotCacheByScope_ACU,
@@ -7,6 +7,7 @@ import { isSummaryOrOutlineTable_ACU } from '../../shared/utils';
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../chat/chat-service';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU } from '../runtime/state-manager';
 import {
+    assignSummaryVectorIndexStateToTagData_ACU,
     getAggregatedSummaryVectorIndexSnapshot_ACU,
 } from './summary-vector-index-state-service';
 import { cleanupUnreachableSummaryVectorIndexFiles_ACU } from './summary-vector-index-storage-service';
@@ -41,11 +42,10 @@ export async function clearSummaryVectorIndexLayerFromChat_ACU(params: {
         exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
         value: message.TavernDB_ACU_IsolatedData,
     };
+    assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
     try {
-        patchIsolatedTagDataMetadata_ACU(message, params.isolationKey, {
-            summaryVectorIndexState: null,
-            summaryVectorIndexManifest: null,
-        });
+        message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+        writeIsolatedTagData_ACU(message, params.isolationKey, tagData);
         await saveChatToHostStrict_ACU();
         return true;
     } catch (error) {
@@ -76,10 +76,8 @@ export async function deleteCurrentSummaryVectorIndexFromChat_ACU(): Promise<boo
                 };
                 scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
             }
-            patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
-                summaryVectorIndexState: null,
-                summaryVectorIndexManifest: null,
-            });
+            assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+            writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
             changed = true;
         }
     }

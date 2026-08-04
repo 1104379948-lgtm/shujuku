@@ -32,7 +32,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-d
 import { populateImportWorldbookTargetSelector_ACU } from '../components/worldbook-selector';
 import { saveApiConfig_ACU, clearApiConfig_ACU, fetchModelsAndConnect_ACU, loadApiPreset_ACU, saveApiPreset_ACU, deleteApiPreset_ACU, saveCustomCharCardPrompt_ACU, saveImportSplitSize_ACU, resetDefaultCharCardPrompt_ACU, updateCustomApiInputsState_ACU, refreshApiPresetSelectors_ACU } from '../triggers/settings-ui-sync';
 import { handleImportSelectAll_ACU, handleImportSelectNone_ACU } from '../components/table-selector';
-import { getAggregatedSummaryVectorIndexSnapshot_ACU, getLatestSummaryVectorIndexSnapshotState_ACU } from '../../service/vector/summary-vector-index-state-service';
+import { getAggregatedSummaryVectorIndexSnapshot_ACU, getLatestSummaryVectorIndexSnapshotState_ACU, assignSummaryVectorIndexStateToTagData_ACU } from '../../service/vector/summary-vector-index-state-service';
 import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-rebuild-service';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
 import { syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
@@ -46,7 +46,7 @@ import {
 import { clearVectorIndexTempCache_ACU } from '../../data/storage/vector-index-temp-cache';
 import { clearSummaryVectorFlushTasksByScope_ACU, clearSummaryVectorHotCache_ACU, deleteSummaryVectorHotCacheByScope_ACU } from '../../data/storage/vector-index-hot-cache';
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../service/chat/chat-service';
-import { patchIsolatedTagDataMetadata_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { cloneIsolatedData_ACU, readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import {
     buildLegacyVectorIndexSingleSnapshotFilePath_ACU,
     buildVectorIndexSingleSnapshotFilePath_ACU,
@@ -139,9 +139,11 @@ export async function tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU(): Pr
             exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
             value: message.TavernDB_ACU_IsolatedData,
         };
+        const nextIsolatedData = cloneIsolatedData_ACU(message);
+        const tagData = nextIsolatedData[isolationKey] || { independentData: {}, modifiedKeys: {}, updateGroupKeys: {} } as any;
         const rows = Array.isArray(blob.rows) ? blob.rows : [];
         const chunks = Array.isArray(blob.chunks) ? blob.chunks : [];
-        const nextState = {
+        assignSummaryVectorIndexStateToTagData_ACU(tagData, {
             manifest, rows, chunks,
             rowCount: rows.filter((row: any) => row.status !== 'removed').length,
             chunkCount: chunks.length,
@@ -150,12 +152,10 @@ export async function tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU(): Pr
             sourceTableName: String(manifest.sourceTableName || sourceTableKey),
             indexedAt: String(manifest.indexedAt || new Date().toISOString()),
             skippedRowCount: 0,
-        } as any;
+        } as any);
         try {
-            patchIsolatedTagDataMetadata_ACU(message, isolationKey, {
-                summaryVectorIndexState: nextState,
-                summaryVectorIndexManifest: manifest,
-            });
+            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
+            writeIsolatedTagData_ACU(message, isolationKey, tagData);
             await saveChatToHostStrict_ACU();
             console.log(`[ACU交火向量索引] 已从外部快照自动恢复 state 到消息 #${targetIndex}（indexId=${manifest.indexId}，${rows.length} 行，${chunks.length} 块，sourceTableKey=${sourceTableKey}）`);
             return true;
@@ -260,10 +260,8 @@ async function deleteCurrentVectorIndexFromChat_ACU(): Promise<boolean> {
                 };
                 scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
             }
-            patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
-                summaryVectorIndexState: null,
-                summaryVectorIndexManifest: null,
-            });
+            assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
+            writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
             changed = true;
         }
     }
