@@ -164,7 +164,6 @@ const extensionConfig = {
         const distExtensionDir = join(__dirname, 'dist', 'extension');
         const distIndex = join(distExtensionDir, 'index.js');
         const distManifest = join(distExtensionDir, 'manifest.json');
-        const rootIndex = join(__dirname, 'index.js');
         const rootManifest = join(__dirname, 'manifest.json');
 
         mkdirSync(distExtensionDir, { recursive: true });
@@ -183,7 +182,6 @@ const extensionConfig = {
           throw new Error(`extension manifest 复制失败: ${distManifest}`);
         }
 
-        copyFileSync(distIndex, rootIndex);
         copyFileSync(distManifest, rootManifest);
       },
     },
