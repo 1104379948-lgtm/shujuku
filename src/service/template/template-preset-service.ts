@@ -36,6 +36,7 @@ import { getCurrentStorageMode, isSqliteMode } from '../table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../table/table-storage-strategy';
 import { normalizeTemplateRowIds_ACU } from './template-row-id-normalizer';
 import { abortableDelay } from '../../shared/abortable-delay';
+import { notifyTemplateRuntimeCommitted_ACU } from '../../shared/template-runtime-change';
 
 // ═══ 预设存储 CRUD（内部辅助） ═══
 
@@ -107,8 +108,15 @@ export function getTemplatePresetDisplayName_ACU(presetName: string) {
 export function resolveActiveTemplatePresetName_ACU({ fallbackToGlobal = true, isolationKey = getCurrentIsolationKey_ACU() } = {}) {
     const normalizedKey = String(isolationKey ?? '');
     const chatScopeState = getCurrentChatTemplateScopeState_ACU({ isolationKey: normalizedKey }) || migrateLegacyTemplateScopeForCurrentChat_ACU({ isolationKey: normalizedKey });
-    const chatPresetName = normalizeTemplatePresetSelectionValue_ACU(chatScopeState?.presetName || '');
-    if (chatPresetName) return chatPresetName;
+    const mode = normalizeTemplateScopeMode_ACU(chatScopeState?.mode);
+
+    // chat_override / preset_link 一旦存在就拥有名称解析权：空 presetName 并不表示
+    // “未选择”，而是聊天快照明确选择默认模板。若在此处按 truthiness 回退全局，
+    // 下拉框、导出和可视化标签会把当前聊天误显示为旧全局命名预设。
+    if (chatScopeState && (mode === 'chat_override' || mode === 'preset_link')) {
+        return normalizeTemplatePresetSelectionValue_ACU(chatScopeState.presetName ?? '');
+    }
+
     if (!fallbackToGlobal) return '';
     return getCurrentTemplatePresetName_ACU(settings_ACU, { requireExisting: false });
 }
@@ -365,6 +373,7 @@ export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { sc
     applyTemplateScopeForCurrentChat_ACU();
 
     try { await refreshMergedDataAndNotify_ACU(); } catch (e) {}
+    notifyTemplateRuntimeCommitted_ACU();
     return {
         scope: normalizedScope,
         presetName: normalizedPresetName,
@@ -640,6 +649,7 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
 
     _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));
     applyTemplateScopeForCurrentChat_ACU();
+    notifyTemplateRuntimeCommitted_ACU();
     // checkpoint 已落盘，但 SQLite runtime 仍是切换前的旧快照。
     // 必须按 checkpoint 重建 runtime，否则新引入表自带的数据在编辑器/查询里读不到（显示 0 行）。
     const postCommitWarnings: string[] = [];

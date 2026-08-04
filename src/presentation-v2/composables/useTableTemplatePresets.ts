@@ -174,8 +174,9 @@ export function useTableTemplatePresets() {
     }
     if (activeMeta.mode === 'chat_override') {
       const currentScope = getCurrentChatTemplateScopeState_ACU();
+      // 空 presetName 是当前聊天选择“默认模板”的有效标识，不能用 || 回退旧全局预设。
       const normalized = normalizeTemplatePresetSelectionValue_ACU(
-        currentScope?.presetName || activeMeta.presetName || resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true }),
+        currentScope?.presetName ?? activeMeta.presetName,
       );
       const value = encodeChatPresetValue('snapshot', normalized);
       if (!seen.has(value)) {
@@ -194,9 +195,7 @@ export function useTableTemplatePresets() {
     activeMeta: ReturnType<typeof getActiveTemplatePresetMeta_ACU>,
     currentGlobalPreset: string,
   ): string {
-    const activeName = normalizeTemplatePresetSelectionValue_ACU(
-      activeMeta.presetName || resolveActiveTemplatePresetName_ACU({ fallbackToGlobal: true }),
-    );
+    const activeName = normalizeTemplatePresetSelectionValue_ACU(activeMeta.presetName);
     if (activeMeta.mode === 'chat_override') return encodeChatPresetValue('snapshot', activeName);
     if (activeMeta.mode === 'preset_link') return encodeChatPresetValue('global', activeName);
     return encodeChatPresetValue('global', currentGlobalPreset || '');

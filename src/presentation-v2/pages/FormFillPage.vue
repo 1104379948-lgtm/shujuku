@@ -212,6 +212,7 @@ import FormFillUpdateSettingsPanel from "../components/FormFillUpdateSettingsPan
 import TableTemplatePresetPanel from "../components/TableTemplatePresetPanel.vue";
 import TableSelector from "../components/TableSelector.vue";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
+import { useTemplateRuntimeChangeTick } from "../composables/useTemplateRuntimeChangeListener";
 import { useDashboardPage } from "../composables/useDashboardPage";
 import { useManualUpdate } from "../composables/useManualUpdate";
 import { formFillCopy } from "../copy/form-fill-copy";
@@ -235,6 +236,9 @@ onMounted(() => {
   void refreshAll();
 });
 watch(useChatChangedTick(), () => {
+  void refreshAll();
+});
+watch(useTemplateRuntimeChangeTick(), () => {
   void refreshAll();
 });
 </script>

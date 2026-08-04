@@ -11,6 +11,7 @@ import { NativeTableServiceAdapter } from './native-table-service-adapter';
 import { SqlTableService } from './sql-table-service';
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from './table-service';
+import { _set_currentJsonTableData_ACU, _set_independentTableStates_ACU } from '../runtime/state-manager';
 import { invalidateTableRuntimeRevision_ACU, runTableWriteTransaction_ACU } from './table-write-transaction';
 
 /** 当前活跃的 Provider 实例 */
@@ -320,6 +321,24 @@ export function disposeStorageProvider(): void {
     currentProvider = null;
   }
   setRuntimeHealth_ACU({ status: 'disposed', expectedMode: getCurrentStorageMode(), activeMode: null });
+}
+
+/**
+ * 受控清空当前表格运行时，专用于“当前聊天级硬清空”成功后的收尾。
+ *
+ * 此函数只清运行时：canonical JSON、独立表状态、活跃 Native/SQLite provider 与
+ * provider 持有的 NameMapper，并推进当前 scope 的 runtime revision；它绝不读取聊天、
+ * 绝不解析模板/Guide、更不会通过 getStorageProvider() 懒创建新实例。
+ *
+ * 调用方必须已完成聊天严格保存。若保存未成功就清 runtime，会制造“内存是空、磁盘仍有
+ * 数据”的假状态，因此该顺序不允许被颠倒。
+ */
+export function clearTableRuntimeWithoutReload_ACU(): void {
+  _set_currentJsonTableData_ACU(null);
+  _set_independentTableStates_ACU({});
+  disposeStorageProvider();
+  invalidateTableRuntimeRevision_ACU({ reason: 'database_purged' });
+  logDebug_ACU('[StorageStrategy] 当前聊天表格运行时已受控清空，未触发 reload。');
 }
 
 /** 让已在锁外启动的初始化候选失去发布资格，避免其覆盖排队中的受控重载。 */

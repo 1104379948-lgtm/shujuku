@@ -29,6 +29,10 @@ import {
   clearAllTableFields_ACU,
   hasAnyTableData_ACU,
   cloneIsolatedData_ACU,
+  scanResidualTableFields_ACU,
+  scanResidualFirstMessageScopeFields_ACU,
+  MESSAGE_TABLE_FIELDS_ACU,
+  FIRST_MESSAGE_SCOPE_GUIDE_FIELDS_ACU,
 } from '../../../src/data/repositories/chat-message-data-repo';
 
 // ═══ 读取类 ═══
@@ -1486,6 +1490,90 @@ describe('clearAllTableFields_ACU', () => {
     expect(msg.TavernDB_ACU_UpdateGroupKeys).toBeUndefined();
     expect(msg._acu_local_template_base_state_seeded).toBeUndefined();
     // 非 ACU 字段保留
+
+describe('scanResidualTableFields_ACU', () => {
+  it('null / 非对象返回空数组', () => {
+    expect(scanResidualTableFields_ACU(null)).toEqual([]);
+    expect(scanResidualTableFields_ACU(undefined)).toEqual([]);
+  });
+
+  it('字符串/损坏值形态的字段同样被识别为残留', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: 'not-json',
+      TavernDB_ACU_ModifiedKeys: 'corrupted',
+      TavernDB_ACU_Identity: '',
+    };
+    expect(scanResidualTableFields_ACU(msg)).toEqual([
+      'TavernDB_ACU_IsolatedData',
+      'TavernDB_ACU_ModifiedKeys',
+      'TavernDB_ACU_Identity',
+    ]);
+  });
+
+  it('无残留返回空数组，且不因非清单字段误报', () => {
+    expect(scanResidualTableFields_ACU({ mes: 'x', otherField: 1 })).toEqual([]);
+  });
+
+  it('clearAllTableFields_ACU 后残留为空（含字符串形态）', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: 'bad-json',
+      TavernDB_ACU_Data: { sheet_0: {} },
+      _acu_local_template_base_state_seeded: true,
+      mes: '正文保留',
+    };
+    clearAllTableFields_ACU(msg);
+    expect(scanResidualTableFields_ACU(msg)).toEqual([]);
+    expect(msg.mes).toBe('正文保留');
+  });
+
+  it('字段清单包含全部硬清空目标字段', () => {
+    expect([...MESSAGE_TABLE_FIELDS_ACU]).toEqual([
+      'TavernDB_ACU_IsolatedData',
+      'TavernDB_ACU_IndependentData',
+      'TavernDB_ACU_Data',
+      'TavernDB_ACU_SummaryData',
+      'TavernDB_ACU_Identity',
+      'TavernDB_ACU_LocalMessageAnchor',
+      'TavernDB_ACU_ModifiedKeys',
+      'TavernDB_ACU_UpdateGroupKeys',
+      '_acu_local_template_base_state_seeded',
+    ]);
+  });
+});
+
+describe('scanResidualFirstMessageScopeFields_ACU', () => {
+  it('空聊天 / 无首消息返回空数组', () => {
+    expect(scanResidualFirstMessageScopeFields_ACU([])).toEqual([]);
+    expect(scanResidualFirstMessageScopeFields_ACU([null])).toEqual([]);
+  });
+
+  it('识别 chat[0] 上的 scope/Guide 镜像残留', () => {
+    const chat: any[] = [{
+      mes: '正文',
+      TavernDB_ACU_ScopedConfig: { version: 1 },
+      TavernDB_ACU_InternalSheetGuide: { tags: {} },
+      TavernDB_ACU_TableHeaderGuide: 'raw',
+    }];
+    expect(scanResidualFirstMessageScopeFields_ACU(chat)).toEqual([
+      'TavernDB_ACU_ScopedConfig',
+      'TavernDB_ACU_InternalSheetGuide',
+      'TavernDB_ACU_TableHeaderGuide',
+    ]);
+  });
+
+  it('无镜像残留返回空数组', () => {
+    expect(scanResidualFirstMessageScopeFields_ACU([{ mes: 'x' }])).toEqual([]);
+  });
+
+  it('常量清单含全部 scope/Guide 字段', () => {
+    expect([...FIRST_MESSAGE_SCOPE_GUIDE_FIELDS_ACU]).toEqual([
+      'TavernDB_ACU_ScopedConfig',
+      'TavernDB_ACU_InternalSheetGuide',
+      'TavernDB_ACU_TableHeaderGuide',
+    ]);
+  });
+});
+
     expect(msg.otherField).toBe('保留');
   });
 });

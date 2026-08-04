@@ -126,6 +126,21 @@ describe('useTableTemplatePresets', () => {
     expect(presets.selectedChatPresetLabel.value).toBe('global-A（当前聊天快照）');
   });
 
+  it('默认聊天快照保留空 presetName，不回退旧全局预设名称', async () => {
+    const { useTableTemplatePresets, setSelectedChat, setSelectedGlobal, setActiveMode } = await importComposable();
+    setSelectedGlobal('global-A');
+    setSelectedChat('');
+    setActiveMode('chat_override');
+
+    const presets = useTableTemplatePresets();
+
+    expect(presets.selectedChatPreset.value).toBe('snapshot:');
+    expect(presets.selectedChatPresetLabel.value).toBe('默认预设（当前聊天快照）');
+    expect(presets.chatPresetItems.value).toEqual(expect.arrayContaining([
+      expect.objectContaining({ value: 'snapshot:', label: '默认预设（当前聊天快照）' }),
+    ]));
+  });
+
   it('选择同名全局项时按全局来源切换，不被本地快照抢占', async () => {
     const { useTableTemplatePresets, applyTemplatePresetToCurrent_ACU, setChatEntries } = await importComposable();
     setChatEntries([{ presetName: 'global-A', templateStr: '{"sheet_1":{"name":"本地"}}' }]);

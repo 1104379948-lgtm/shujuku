@@ -107,6 +107,63 @@ function readContainer_ACU(raw: unknown): Record<string, unknown> | null {
     return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj as Record<string, unknown> : null;
 }
 
+/** 聊天 metadata 字段精确快照（包含 owner 字段），供跨字段严格保存事务回滚使用。 */
+export type ChatMetadataFieldsSnapshot_ACU = {
+    metadata: Record<string, unknown> | null;
+    fields: Array<{
+        field: string;
+        ownerField: string;
+        fieldExisted: boolean;
+        fieldValue: unknown;
+        ownerExisted: boolean;
+        ownerValue: unknown;
+    }>;
+};
+
+/**
+ * 精确快照指定 metadata 容器及其 owner 字段；不读写、不触发宿主同步。
+ * 空 metadata 也显式记录，避免回滚时凭空创建容器。
+ */
+export function snapshotChatMetadataFields_ACU(fields: readonly string[]): ChatMetadataFieldsSnapshot_ACU {
+    const metadata = getChatMetadata_ACU();
+    return {
+        metadata,
+        fields: fields.map(field => {
+            const ownerField = getChatMetadataOwnerField_ACU(field);
+            return {
+                field,
+                ownerField,
+                fieldExisted: !!metadata && Object.prototype.hasOwnProperty.call(metadata, field),
+                fieldValue: metadata?.[field],
+                ownerExisted: !!metadata && Object.prototype.hasOwnProperty.call(metadata, ownerField),
+                ownerValue: metadata?.[ownerField],
+            };
+        }),
+    };
+}
+
+/**
+ * 按精确快照恢复 metadata 容器及 owner 字段，并同步宿主缓存。
+ * 仅用于严格保存失败或身份切换中止后的回滚，调用方必须持有对应聊天写事务。
+ */
+export function restoreChatMetadataFields_ACU(snapshot: ChatMetadataFieldsSnapshot_ACU): void {
+    const metadata = snapshot.metadata;
+    if (!metadata) return;
+    const hostPayload: Record<string, unknown> = {};
+    for (const entry of snapshot.fields) {
+        if (entry.fieldExisted) metadata[entry.field] = entry.fieldValue;
+        else delete metadata[entry.field];
+        if (entry.ownerExisted) metadata[entry.ownerField] = entry.ownerValue;
+        else delete metadata[entry.ownerField];
+        hostPayload[entry.field] = entry.fieldExisted ? entry.fieldValue : undefined;
+        hostPayload[entry.ownerField] = entry.ownerExisted ? entry.ownerValue : undefined;
+    }
+    try {
+        const updater = (SillyTavern_API_ACU as any)?.updateChatMetadata;
+        if (typeof updater === 'function') updater(hostPayload, false);
+    } catch (_) {}
+}
+
 function writeChatMetadataField_ACU(field: string, value: Record<string, unknown> | null): void {
     const metadata = getChatMetadata_ACU();
     if (!metadata) return;

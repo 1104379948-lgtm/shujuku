@@ -21,6 +21,36 @@ import type {
 } from '../models/chat-message-data';
 
 // ════════════════════════════════════════════════════════════════
+// 字段清单常量（单一事实来源）
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * 消息上全部本地表格数据字段清单。
+ * 硬清空、残留扫描与事务快照必须基于此清单；新增存储字段必须同步更新。
+ */
+export const MESSAGE_TABLE_FIELDS_ACU: readonly string[] = [
+    'TavernDB_ACU_IsolatedData',
+    'TavernDB_ACU_IndependentData',
+    'TavernDB_ACU_Data',
+    'TavernDB_ACU_SummaryData',
+    'TavernDB_ACU_Identity',
+    'TavernDB_ACU_LocalMessageAnchor',
+    'TavernDB_ACU_ModifiedKeys',
+    'TavernDB_ACU_UpdateGroupKeys',
+    '_acu_local_template_base_state_seeded',
+] as const;
+
+/**
+ * chat[0] 上额外挂载的聊天级 scope/Guide 镜像字段（含旧版表头清单）。
+ * 仅在首条消息上清空；chatMetadata 侧的对应字段由 storage 层 setter 清空。
+ */
+export const FIRST_MESSAGE_SCOPE_GUIDE_FIELDS_ACU: readonly string[] = [
+    'TavernDB_ACU_ScopedConfig',
+    'TavernDB_ACU_InternalSheetGuide',
+    'TavernDB_ACU_TableHeaderGuide',
+] as const;
+
+// ════════════════════════════════════════════════════════════════
 // 内部辅助
 // ════════════════════════════════════════════════════════════════
 
@@ -1157,15 +1187,53 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
  */
 export function clearAllTableFields_ACU(msg: any): void {
     if (!msg) return;
-    delete msg.TavernDB_ACU_IsolatedData;
-    delete msg.TavernDB_ACU_IndependentData;
-    delete msg.TavernDB_ACU_Data;
-    delete msg.TavernDB_ACU_SummaryData;
-    delete msg.TavernDB_ACU_Identity;
-    delete msg.TavernDB_ACU_LocalMessageAnchor;
-    delete msg.TavernDB_ACU_ModifiedKeys;
-    delete msg.TavernDB_ACU_UpdateGroupKeys;
-    delete msg._acu_local_template_base_state_seeded;
+    MESSAGE_TABLE_FIELDS_ACU.forEach(field => {
+        delete msg[field];
+    });
+}
+
+/**
+ * 只读残留扫描：返回消息上仍存在的本地表格数据字段名（含字符串/损坏值形态）。
+ *
+ * 硬清空事务必须：
+ * 1. 保存前调用本函数，若存在残留则拒绝严格保存（fail-closed）；
+ * 2. 保存成功后再次调用，复核 post-condition，任一字段残留视为清空未生效。
+ *
+ * 与 hasAnyTableData_ACU 的区别：本函数按字段名精确判定，覆盖 LocalMessageAnchor、
+ * ModifiedKeys、UpdateGroupKeys 与 `_acu_local_template_base_state_seeded` 等
+ * 非表格 payload 的本地数据痕迹，且不依赖隔离匹配。
+ *
+ * @param msg 聊天消息对象
+ * @returns 仍存在的本地表格数据字段名列表（无残留时为空数组）
+ */
+export function scanResidualTableFields_ACU(msg: any): string[] {
+    if (!msg || typeof msg !== 'object') return [];
+    const residual: string[] = [];
+    MESSAGE_TABLE_FIELDS_ACU.forEach(field => {
+        if (Object.prototype.hasOwnProperty.call(msg, field)) {
+            residual.push(field);
+        }
+    });
+    return residual;
+}
+
+/**
+ * 只读残留扫描：返回 chat[0] 上仍存在的聊天级 scope/Guide 镜像字段名。
+ * 硬清空后与 peek*Container 的 null 断言配合使用，覆盖 legacy 与 metadata 镜像。
+ *
+ * @param chat 聊天消息数组
+ * @returns 仍存在的首条消息 scope/Guide 字段名列表
+ */
+export function scanResidualFirstMessageScopeFields_ACU(chat: unknown[]): string[] {
+    const first = Array.isArray(chat) && chat.length > 0 ? chat[0] : null;
+    if (!first || typeof first !== 'object') return [];
+    const residual: string[] = [];
+    FIRST_MESSAGE_SCOPE_GUIDE_FIELDS_ACU.forEach(field => {
+        if (Object.prototype.hasOwnProperty.call(first, field)) {
+            residual.push(field);
+        }
+    });
+    return residual;
 }
 
 /**

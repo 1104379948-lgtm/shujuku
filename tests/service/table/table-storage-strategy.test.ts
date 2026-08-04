@@ -100,6 +100,7 @@ import {
   switchStorageMode,
   reloadStorageProvider,
   disposeStorageProvider,
+  clearTableRuntimeWithoutReload_ACU,
   getCurrentProviderMode,
   getStorageRuntimeHealth_ACU,
   didSqliteFallbackAfterReload_ACU,
@@ -671,6 +672,23 @@ describe('table-storage-strategy', () => {
       disposeStorageProvider();
       expect(provider.dispose).toHaveBeenCalled();
       expect(getCurrentProviderMode()).toBeNull();
+    });
+  });
+
+  describe('clearTableRuntimeWithoutReload_ACU', () => {
+    it('销毁当前 provider 且不从聊天或模板重建运行时', async () => {
+      mockStorageMode = 'sqlite';
+      await initStorageProvider();
+      const provider = getActiveStorageProvider()!;
+      mockLoadOrCreateJsonTableFromChatHistory.mockClear();
+
+      clearTableRuntimeWithoutReload_ACU();
+
+      expect(provider.dispose).toHaveBeenCalledOnce();
+      expect(getActiveStorageProvider()).toBeNull();
+      expect(getCurrentProviderMode()).toBeNull();
+      expect(mockLoadOrCreateJsonTableFromChatHistory).not.toHaveBeenCalled();
+      expect(getStorageRuntimeHealth_ACU()).toMatchObject({ status: 'disposed', activeMode: null });
     });
   });
 

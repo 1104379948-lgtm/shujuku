@@ -147,6 +147,7 @@ import AcuToastViewport from "./components/_lib/AcuToastViewport.vue";
 import MainArea from "./components/MainArea.vue";
 import Sidebar from "./components/Sidebar.vue";
 import { useChatChangedListener } from "./composables/useChatChangedListener";
+import { useTemplateRuntimeChangeListener } from "./composables/useTemplateRuntimeChangeListener";
 import { useDevOptions } from "./composables/useDevOptions";
 import { canCloseUi } from "./composables/useUiCloseGuard";
 import { useDialogStore } from "./stores/dialog-store";
@@ -306,6 +307,7 @@ onMounted(() => {
 });
 
 useChatChangedListener();
+useTemplateRuntimeChangeListener();
 
 // 关掉"启用开发者选项"且当前页是开发者一级页时，回退到默认页（plan §D24）
 const devOptions = useDevOptions();

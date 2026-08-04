@@ -1,5 +1,6 @@
 import { TABLE_ORDER_FIELD_ACU } from '../../../shared/constants';
 import { topLevelWindow_ACU } from '../../../shared/env';
+import { notifyTemplateRuntimeCommitted_ACU } from '../../../shared/template-runtime-change';
 import {
   applySheetOrderNumbers_ACU,
   ensureSheetOrderNumbers_ACU,
@@ -801,6 +802,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       } else {
         visualizer.markSaved('template-chat');
       }
+      notifyTemplateRuntimeCommitted_ACU();
       const removedCount = preparation.removedNullRowCount + (commitResult.removedNullRowCount || 0);
       toastStore.success(
         removedCount > 0

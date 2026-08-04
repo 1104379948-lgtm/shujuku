@@ -381,6 +381,28 @@ describe('useVisualizerSave', () => {
     );
   });
 
+  it('当前聊天模板原子提交成功后发布一次运行时刷新通知', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const { subscribeTemplateRuntimeChanges_ACU } = await import('../../../src/shared/template-runtime-change');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('旧表名'),
+    }, ['sheet_test_vz2']);
+    store.currentSheet.name = '新表名';
+    store.setDirty(true);
+    const received = vi.fn();
+    const unsubscribe = subscribeTemplateRuntimeChanges_ACU(received);
+
+    try {
+      await expect(useVisualizerSave().saveTemplateToCurrentChat()).resolves.toBe(true);
+      expect(received).toHaveBeenCalledOnce();
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('pristine 模板保存接受 template_only 结果并只提交一次核心请求，不触发历史 recovery guard', async () => {
     const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
     const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');

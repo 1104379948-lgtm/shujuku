@@ -112,6 +112,7 @@ import {
   clearManualRefillIncrementalDataInRange_ACU,
   clearTableDataAtFloors_ACU,
   deleteLocalDataInChatCore_ACU,
+  purgeCurrentChatDatabaseState_ACU,
   ensureManualCatchUpAnchorBeforeTarget_ACU,
   overrideLatestLayerWithTemplateCore_ACU,
   saveCurrentDataForTable_ACU,

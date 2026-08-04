@@ -95,6 +95,7 @@ import AcuPresetDropdown from './_lib/AcuPresetDropdown.vue';
 import AcuText from './_lib/AcuText.vue';
 import TablePresetDrawer from './TablePresetDrawer.vue';
 import { useChatChangedTick } from '../composables/useChatChangedListener';
+import { useTemplateRuntimeChangeTick } from '../composables/useTemplateRuntimeChangeListener';
 import { useTablePresetManagement } from '../composables/useTablePresetManagement';
 import { useTableTemplatePresets } from '../composables/useTableTemplatePresets';
 import { tableCopy } from '../copy/table-copy';
@@ -109,6 +110,7 @@ function refreshAll(): void {
 
 onMounted(refreshAll);
 watch(useChatChangedTick(), refreshAll);
+watch(useTemplateRuntimeChangeTick(), refreshAll);
 </script>
 
 <style scoped>
