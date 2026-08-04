@@ -38,12 +38,25 @@ export interface SchemaMigrationPreflightDecision_ACU {
   choices?: SchemaMigrationPlannerChoice_ACU[];
 }
 
+/**
+ * 每个 schema-changed Sheet 的可持久化执行模式。
+ * `migration`：生成精确的 sheet_schema_migrate operation，保留历史列值。
+ * `rebase`：候选本身合法，但无法安全构造精确 migration 时，以编辑器候选整表作为新边界快照。
+ */
+export type SchemaMigrationApplyMode_ACU = 'migration' | 'rebase';
+
 export interface SchemaMigrationPreflightResult_ACU {
   changedSheetKeys: string[];
   blockers: string[];
   issues: SchemaMigrationPreflightIssue_ACU[];
   operations: TableSheetSchemaMigrateOperation_ACU[];
   decisions: SchemaMigrationPreflightDecision_ACU[];
+  /**
+   * 逐 Sheet 执行模式；只有 status 为 auto_apply 的 Sheet 才有对应 action。
+   * migration 的 action 在 operations 中按 sheetKey 一一对应；
+   * rebase 的 action 由调用方以候选 Sheet 整表构造，不伪造空 migration operation。
+   */
+  applyModes?: Record<string, SchemaMigrationApplyMode_ACU>;
 }
 
 function isSheet_ACU(value: unknown): value is Sheet_ACU {
@@ -82,17 +95,21 @@ function getDestructiveDropIssue_ACU(sheetKey: string, before: Sheet_ACU, after:
 }
 
 /**
- * Read-only validation for editor candidates. It never creates a frame entry or
- * mutates either input. V1-compatible changes remain V1 contracts; changes
- * outside that subset may use the semantic planner's uniquely provable V2
- * intent; ambiguous or unsupported changes remain blocked until explicitly resolved.
+ * Read-only validation for editor candidates. It never creates frame entry or
+ * mutates either input.
+ *
+ * 每个 schema-changed Sheet 只允许三种结局：
+ *  1. migration：V1/V2 精确迁移 operation（保留历史列值）。
+ *  2. rebase：候选本身合法， planner 无法或无需构造精确 migration 时，
+ *     以编辑器候选整表作为新边界快照（不伪造空 migration operation）。
+ *  3. invalid：候选不合法、身份协议损坏、strict hydrate 失败或提交上下文已陈旧。
+ *
+ * `UNSUPPORTED_SCHEMA_CHANGE` 不再是最终 blocker；它只作为选择 rebase 的原因。
  */
 export async function preflightSchemaMigrations_ACU(input: {
   baselineData: TableDataObject_ACU;
   candidateData: TableDataObject_ACU;
   intents?: Record<string, SchemaMigrationPreflightIntent_ACU | undefined>;
-  /** These sheets require their explicit V2 contract even when V1 would accept the diff. */
-  forceV2SheetKeys?: readonly string[];
   /** Authorizes only this preflight invocation to construct destructive drop operations. */
   destructiveChangeConfirmed?: boolean;
 }): Promise<SchemaMigrationPreflightResult_ACU> {
@@ -108,38 +125,66 @@ export async function preflightSchemaMigrations_ACU(input: {
   const issues: SchemaMigrationPreflightIssue_ACU[] = [];
   const operations: SchemaMigrationPreflightResult_ACU['operations'] = [];
   const decisions: SchemaMigrationPreflightDecision_ACU[] = [];
-  const forceV2SheetKeys = new Set(input.forceV2SheetKeys || []);
+  const applyModes: Record<string, SchemaMigrationApplyMode_ACU> = {};
   for (const sheetKey of changedSheetKeys) {
     const before = input.baselineData[sheetKey] as Sheet_ACU;
     const after = input.candidateData[sheetKey] as Sheet_ACU;
     try {
-      if (forceV2SheetKeys.has(sheetKey)) throw new Error('schema migration requires explicit V2 intent。');
       operations.push(await buildSheetSchemaMigrationOperation_ACU(sheetKey, before, after, {
         destructiveChangeConfirmed: input.destructiveChangeConfirmed === true,
       }));
       decisions.push({ sheetKey, status: 'auto_apply', code: 'V1_SAFE_SUBSET' });
+      applyModes[sheetKey] = 'migration';
       continue;
     } catch (v1Error: any) {
       const explicitIntent = input.intents?.[sheetKey];
-      const planned = explicitIntent || forceV2SheetKeys.has(sheetKey)
-        ? null
-        : planSheetSchemaMigration_ACU(before, after);
+      const planned = explicitIntent ? null : planSheetSchemaMigration_ACU(before, after);
       const inferredIntent = planned?.status === 'auto_apply' ? planned.intent : undefined;
       const inferredReason = planned && planned.status !== 'auto_apply' ? planned.message : undefined;
       const intent = explicitIntent || inferredIntent;
       if (!intent) {
+        // 真实 schema 无效（DDL/表头/身份）是最终 blocker，不得降级为删列确认或 rebase。
+        if (planned?.status === 'invalid') {
+          decisions.push({
+            sheetKey,
+            status: 'invalid',
+            code: planned.code,
+            message: planned.message,
+          });
+          blockers.push(`${sheetKey}: ${planned.message || v1Error?.message || 'schema 无效。'}`);
+          continue;
+        }
         const issue = input.destructiveChangeConfirmed === true ? null : getDestructiveDropIssue_ACU(sheetKey, before, after);
-        if (issue && String(v1Error?.message || '').includes('删除列需要显式确认')) {
+        const isNeedsChoice = planned?.status === 'needs_choice';
+        if (isNeedsChoice && Array.isArray(planned.choices) && planned.choices.length > 0) {
+          // 可提供唯一列身份映射：让用户在 mapping 中选择。
+          decisions.push({
+            sheetKey,
+            status: 'needs_choice',
+            code: planned.code,
+            message: planned.message,
+            choices: planned.choices,
+          });
+          blockers.push(`${sheetKey}: ${planned.message}`);
+          continue;
+        }
+        if (issue) {
+          // 存在实际删除列：必须显式确认（无论走 migration 还是 rebase）。
           issues.push(issue);
           decisions.push({ sheetKey, status: 'needs_confirmation', code: issue.code, message: issue.message });
           blockers.push(`${sheetKey}: ${issue.message}`);
+          continue;
+        }
+        if (planned?.status === 'rebase_available' || isNeedsChoice) {
+          // 约束放宽 / 无唯一映射 / planner 能力不足：候选合法即可 rebase。
+          decisions.push({ sheetKey, status: 'auto_apply', code: 'REBASE_AVAILABLE', message: planned?.message });
+          applyModes[sheetKey] = 'rebase';
         } else {
           decisions.push({
             sheetKey,
-            status: planned?.status === 'needs_choice' ? 'needs_choice' : 'invalid',
+            status: 'invalid',
             code: planned?.code || 'V1_AND_V2_UNRESOLVED',
             message: inferredReason || v1Error?.message,
-            choices: planned?.status === 'needs_choice' ? planned.choices : undefined,
           });
           blockers.push(`${sheetKey}: ${inferredReason || v1Error?.message || 'schema migration 缺少显式 V2 intent。'}`);
         }
@@ -158,9 +203,10 @@ export async function preflightSchemaMigrations_ACU(input: {
         };
         operations.push(await buildSheetSchemaMigrationOperationV2_ACU(sheetKey, before, after, v2Intent));
         decisions.push({ sheetKey, status: 'auto_apply', code: explicitIntent ? 'EXPLICIT_V2_INTENT' : 'UNIQUE_V2_INTENT' });
+        applyModes[sheetKey] = 'migration';
       } catch (v2Error: any) {
         const issue = input.destructiveChangeConfirmed === true ? null : getDestructiveDropIssue_ACU(sheetKey, before, after);
-        if (issue && String(v2Error?.message || '').includes('destructiveChangeConfirmed')) {
+        if (issue) {
           issues.push(issue);
           decisions.push({ sheetKey, status: 'needs_confirmation', code: issue.code, message: issue.message });
           blockers.push(`${sheetKey}: ${issue.message}`);
@@ -171,13 +217,22 @@ export async function preflightSchemaMigrations_ACU(input: {
       }
     }
   }
-  if (blockers.length > 0) return { changedSheetKeys, blockers, issues, operations: [], decisions };
+  if (blockers.length > 0) return { changedSheetKeys, blockers, issues, operations: [], decisions, applyModes };
+
+  // 先严格校验完整 candidate，再决定 migration/rebase，避免用“无法规划”掩盖真实 SQLite 错误。
+  try {
+    await hydrateTableDataStrict_ACU(input.candidateData);
+  } catch (error: any) {
+    return { changedSheetKeys, operations: [], issues: [], blockers: [`完整 candidate SQLite hydrate 失败: ${error?.message || String(error)}`], decisions: decisions.map(decision => ({ ...decision, status: 'invalid', code: 'CANDIDATE_SQLITE_HYDRATE_FAILED', message: error?.message || String(error) })) };
+  }
+
   try {
     let appliedState = input.baselineData;
     for (const operation of operations) {
       appliedState = await applySheetSchemaMigrationOperation_ACU(appliedState, operation);
     }
     for (const sheetKey of changedSheetKeys) {
+      if (applyModes[sheetKey] !== 'migration') continue;
       const applied = appliedState[sheetKey] as Sheet_ACU | undefined;
       const candidate = input.candidateData[sheetKey] as Sheet_ACU | undefined;
       const appliedProjection = applied ? JSON.stringify({
@@ -193,10 +248,5 @@ export async function preflightSchemaMigrations_ACU(input: {
   } catch (error: any) {
     return { changedSheetKeys, operations: [], issues: [], blockers: [error?.message || String(error)], decisions: decisions.map(decision => ({ ...decision, status: 'invalid', code: 'OPERATION_CANDIDATE_MISMATCH', message: error?.message || String(error) })) };
   }
-  try {
-    await hydrateTableDataStrict_ACU(input.candidateData);
-  } catch (error: any) {
-    return { changedSheetKeys, operations: [], issues: [], blockers: [`完整 candidate SQLite hydrate 失败: ${error?.message || String(error)}`], decisions: decisions.map(decision => ({ ...decision, status: 'invalid', code: 'CANDIDATE_SQLITE_HYDRATE_FAILED', message: error?.message || String(error) })) };
-  }
-  return { changedSheetKeys, blockers: [], issues: [], operations, decisions };
+  return { changedSheetKeys, blockers: [], issues: [], operations, decisions, applyModes };
 }

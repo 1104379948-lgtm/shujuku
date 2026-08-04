@@ -42,7 +42,7 @@ describe('schema migration semantic planner', () => {
       status: 'auto_apply', intent: { fills: { quality: { kind: 'ddl_literal_default' } } },
     });
     expect(planSheetSchemaMigration_ACU(before, expressionTarget)).toMatchObject({
-      status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: expect.stringContaining('literal DEFAULT'),
+      status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: expect.stringContaining('literal DEFAULT'),
     });
   });
 
@@ -68,7 +68,7 @@ describe('schema migration semantic planner', () => {
     const before = sheet(['row_id', 'name'], 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);');
     const target = sheet(['row_id', 'name'], 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT NOT NULL);');
 
-    expect(planSheetSchemaMigration_ACU(before, target)).toMatchObject({ status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE' });
+    expect(planSheetSchemaMigration_ACU(before, target)).toMatchObject({ status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE' });
   });
 
   it('无法证明同一身份的 add/drop 返回 needs_choice，不擅自迁移', () => {

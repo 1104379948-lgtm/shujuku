@@ -538,6 +538,42 @@ describe('useVisualizerSave', () => {
     expect(sheetChanges[0].operations[1].meta.sourceData).not.toHaveProperty('ddl');
   });
 
+  it('schema 变更 Sheet 在 preflight 判定为 rebase 时以整表 rebase action 下传，不伪造 migration operation', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('旧表名'),
+    }, ['sheet_test_vz2']);
+    store.currentSheet.content = [['row_id', '姓名'], ['1', 'A']];
+    store.currentSheet.sourceData.ddl = `CREATE TABLE sheet_test_vz2 (
+  row_id INTEGER PRIMARY KEY, -- 行号
+  col_1 TEXT -- 姓名
+);`;
+    serviceMock.preflightSchemaMigrations_ACU.mockResolvedValueOnce({
+      changedSheetKeys: ['sheet_test_vz2'],
+      blockers: [],
+      issues: [],
+      operations: [],
+      decisions: [{ sheetKey: 'sheet_test_vz2', status: 'auto_apply', code: 'REBASE_AVAILABLE' }],
+      applyModes: { sheet_test_vz2: 'rebase' },
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    const [[{ sheetChanges }]] = serviceMock.commitCurrentFloorTemplateChanges_ACU.mock.calls;
+    expect(sheetChanges).toHaveLength(1);
+    expect(sheetChanges[0]).toMatchObject({
+      kind: 'rebase',
+      sheetKey: 'sheet_test_vz2',
+      sheetData: expect.objectContaining({ name: '旧表名' }),
+    });
+    expect(sheetChanges[0]).not.toHaveProperty('operations');
+  });
+
+
   it.each([
     ['缺少 operation', { changedSheetKeys: ['sheet_test_vz2'], blockers: [], operations: [] }],
     ['重复 operation', {
@@ -563,7 +599,7 @@ describe('useVisualizerSave', () => {
 
     expect(saved).toBe(false);
     expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
-    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('一一对应'), { muteable: false });
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('migration 或 rebase action'), { muteable: false });
   });
 
   it('schema migration preflight 阻断时不创建 checkpoint 或推进模板状态', async () => {

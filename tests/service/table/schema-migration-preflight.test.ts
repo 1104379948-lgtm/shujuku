@@ -200,3 +200,110 @@ describe('schema migration preflight', () => {
     expect(result.blockers.join('\n')).toContain('完整 candidate SQLite hydrate 失败');
   });
 });
+
+  it('retained 列 definition/constraint 变更（如删除 UNIQUE）降级为 rebase 而非 blocker', async () => {
+    const baseline = state(sheet({
+      content: [['row_id', 'name'], ['1', 'iron sword']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT UNIQUE);' },
+    }));
+    const candidate = state(sheet({
+      content: [['row_id', 'name'], ['1', 'iron sword']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.operations).toEqual([]);
+    expect(result.applyModes).toEqual({ sheet_inventory: 'rebase' });
+    expect(result.decisions[0]).toMatchObject({ sheetKey: 'sheet_inventory', status: 'auto_apply', code: 'REBASE_AVAILABLE' });
+  });
+
+  it('表级 constraint 变更（添加 UNIQUE 且候选数据合法）降级为 rebase', async () => {
+    const baseline = state(sheet({
+      content: [['row_id', 'name'], ['1', 'iron sword']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);' },
+    }));
+    const candidate = state(sheet({
+      content: [['row_id', 'name'], ['1', 'iron sword']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT, UNIQUE(name));' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.applyModes).toEqual({ sheet_inventory: 'rebase' });
+  });
+
+  it('suffix 变更（STRICT）在候选 hydrate 成功时降级为 rebase', async () => {
+    const baseline = state(sheet({
+      content: [['row_id', 'name'], ['1', 'iron sword']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT);' },
+    }));
+    const candidate = state(sheet({
+      content: [['row_id', 'name'], ['1', 'iron sword']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT) STRICT;' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.applyModes).toEqual({ sheet_inventory: 'rebase' });
+  });
+
+  it('新增带表达式 DEFAULT 的列，编辑器候选给出完整行值时降级为 rebase', async () => {
+    const baseline = state(sheet());
+    const candidate = state(sheet({
+      content: [['row_id', 'name', 'created_at'], ['1', 'iron sword', '2025-01-01']],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.applyModes).toEqual({ sheet_inventory: 'rebase' });
+  });
+
+  it('多 Sheet 混合：精确 migration 与 rebase 同时出现，各自携带正确 applyMode', async () => {
+    const baseline: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_inventory: sheet(),
+      sheet_quality: sheet({
+        uid: 'quality', name: '品质',
+        content: [['row_id', 'level'], ['1', '5']],
+        sourceData: { ddl: 'CREATE TABLE quality (row_id INTEGER PRIMARY KEY, level INTEGER);' },
+      }),
+    };
+    const candidate: any = {
+      mate: { type: 'acu', version: 1 },
+      sheet_inventory: sheet({
+        content: [['row_id', 'name', 'quality'], ['1', 'iron sword', null]],
+        sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT, quality TEXT);' },
+      }),
+      sheet_quality: sheet({
+        uid: 'quality', name: '品质',
+        content: [['row_id', 'level'], ['1', '5']],
+        sourceData: { ddl: 'CREATE TABLE quality (row_id INTEGER PRIMARY KEY, level INTEGER NOT NULL);' },
+      }),
+    };
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.blockers).toEqual([]);
+    expect(result.applyModes).toEqual({ sheet_inventory: 'migration', sheet_quality: 'rebase' });
+    expect(result.operations).toHaveLength(1);
+    expect(result.operations[0]).toMatchObject({ kind: 'sheet_schema_migrate', sheetKey: 'sheet_inventory' });
+  });
+
+  it('新增 NOT NULL 约束后候选行违反约束时真实 hydrate 失败为 blocker', async () => {
+    const baseline = state(sheet());
+    const candidate = state(sheet({
+      content: [['row_id', 'name', 'quality'], ['1', 'iron sword', null]],
+      sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, name TEXT, quality TEXT NOT NULL);' },
+    }));
+
+    const result = await preflightSchemaMigrations_ACU({ baselineData: baseline, candidateData: candidate });
+
+    expect(result.operations).toEqual([]);
+    expect(result.blockers.join('\n')).toContain('完整 candidate SQLite hydrate 失败');
+  });

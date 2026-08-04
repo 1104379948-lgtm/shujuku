@@ -518,6 +518,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         { isolationKey: guideIsolationKey },
       );
       let schemaOperations: any[] = [];
+      const rebaseSheetKeys = new Set<string>();
       if (changes.schemaChangedSheetKeys.length > 0 && visualizer.templateBaseData) {
         const preflightSnapshot = {
           tempData: cloneData(visualizer.tempData),
@@ -616,17 +617,27 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
             return false;
           }
         }
+        // 每个 schema-changed Sheet 必须恰有一个可持久化 action：migration operation 或 rebase。
+        // 不允许“schema 变了但既没有 migration 也没有 rebase”的静默放行。
         const operationKeys = preflight.operations.map(operation => String(operation?.sheetKey || ''));
         const preflightChangedKeys = [...preflight.changedSheetKeys].sort();
         const expectedSchemaKeys = [...changes.schemaChangedSheetKeys].sort();
-        if (
-          !sameTemplateValue_ACU(preflightChangedKeys, expectedSchemaKeys)
-          || operationKeys.length !== expectedSchemaKeys.length
-          || new Set(operationKeys).size !== operationKeys.length
-          || operationKeys.some(sheetKey => !expectedSchemaKeys.includes(sheetKey))
-        ) {
-          toastStore.error('模板结构预检未返回与变更 Sheet 一一对应的 migration operation，已拒绝保存。', { muteable: false });
+        const applyModes = preflight.applyModes || {};
+        const actionKeys = [...new Set([...operationKeys, ...Object.keys(applyModes)])].sort();
+        const operationKeysUnique = new Set(operationKeys).size === operationKeys.length;
+        const noModeOverlap = operationKeys.every(sheetKey => !Object.prototype.hasOwnProperty.call(applyModes, sheetKey));
+        const actionValid = operationKeysUnique
+          && noModeOverlap
+          && sameTemplateValue_ACU(preflightChangedKeys, expectedSchemaKeys)
+          && actionKeys.length === expectedSchemaKeys.length
+          && new Set(actionKeys).size === actionKeys.length
+          && actionKeys.every(sheetKey => expectedSchemaKeys.includes(sheetKey));
+        if (!actionValid) {
+          toastStore.error('模板结构预检未为每个变更 Sheet 返回 migration 或 rebase action，已拒绝保存。', { muteable: false });
           return false;
+        }
+        for (const [sheetKey, mode] of Object.entries(applyModes)) {
+          if (mode === 'rebase') rebaseSheetKeys.add(sheetKey);
         }
         schemaOperations = preflight.operations.map(operation => cloneData(operation));
         const currentPreflightSnapshot = {
@@ -659,6 +670,10 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       const sheetChanges = changedSheetKeys.map(sheetKey => {
         if (changes.addedSheetKeys.includes(sheetKey)) {
           return { kind: 'introduction' as const, sheetKey, sheetData: orderedData[sheetKey] };
+        }
+        if (rebaseSheetKeys.has(sheetKey)) {
+          // rebase 以编辑器候选整表作为新边界快照；不伪造空 migration operation。
+          return { kind: 'rebase' as const, sheetKey, sheetData: orderedData[sheetKey] };
         }
         const operations: any[] = [];
         const schemaOperation = schemaOperationBySheetKey.get(sheetKey);

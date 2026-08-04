@@ -18,7 +18,8 @@ export interface SchemaMigrationPlannerChoice_ACU {
 export type SchemaMigrationPlanDecision_ACU =
   | { status: 'auto_apply'; code: 'UNIQUE_V2_INTENT'; intent: SchemaMigrationPlannerIntent_ACU }
   | { status: 'needs_choice'; code: 'AMBIGUOUS_COLUMN_IDENTITY'; message: string; choices: SchemaMigrationPlannerChoice_ACU[] }
-  | { status: 'invalid'; code: 'INVALID_SCHEMA' | 'UNSUPPORTED_SCHEMA_CHANGE'; message: string };
+  | { status: 'rebase_available'; code: 'UNSUPPORTED_SCHEMA_CHANGE'; message: string }
+  | { status: 'invalid'; code: 'INVALID_SCHEMA'; message: string };
 
 function semanticDefinition_ACU(column: { physicalName: string; normalizedDefinition: string }): string {
   return column.normalizedDefinition.slice(column.physicalName.length).trim();
@@ -39,10 +40,10 @@ export function planSheetSchemaMigration_ACU(before: Sheet_ACU, after: Sheet_ACU
   }
   if (beforeSchema.uid !== targetSchema.uid) return { status: 'invalid', code: 'INVALID_SCHEMA', message: 'sheet uid 发生变化。' };
   if (JSON.stringify(beforeSchema.tableConstraints) !== JSON.stringify(targetSchema.tableConstraints)) {
-    return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: '表级 constraint 变更需要独立语义判定。' };
+    return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: '表级 constraint 变更无法安全精确迁移，可选择按候选整表 rebase。' };
   }
   if (beforeSchema.tableSuffix !== targetSchema.tableSuffix) {
-    return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: 'CREATE TABLE suffix 变更需要独立语义判定。' };
+    return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: 'CREATE TABLE suffix 变更无法安全精确迁移，可选择按候选整表 rebase。' };
   }
 
   const beforeByPhysical = new Map(beforeSchema.columns.map(column => [column.physicalName, column]));
@@ -72,7 +73,7 @@ export function planSheetSchemaMigration_ACU(before: Sheet_ACU, after: Sheet_ACU
       });
       continue;
     }
-    return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: `列「${source.displayHeader}」definition/constraint 变更需要独立 conversion 判定。` };
+    return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: `列「${source.displayHeader}」definition/constraint 变更无法安全精确迁移，可选择按候选整表 rebase。` };
   }
 
   const mappings: SchemaMigrationPlannerIntent_ACU['physicalColumnMappings'] = [];
@@ -139,7 +140,7 @@ export function planSheetSchemaMigration_ACU(before: Sheet_ACU, after: Sheet_ACU
     const target = targetByPhysical.get(physicalName)!;
     const literal = parseDDLSafeDefaultLiteral_ACU(target.defaultExpression);
     if (!literal) {
-      return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: `新增列「${target.displayHeader}」缺少可安全静态求值的 literal DEFAULT。` };
+      return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: `新增列「${target.displayHeader}」缺少可安全静态求值的 literal DEFAULT，可选择按候选整表 rebase。` };
     }
     fills[physicalName] = { kind: 'ddl_literal_default', literal };
   }
@@ -154,7 +155,7 @@ export function planSheetSchemaMigration_ACU(before: Sheet_ACU, after: Sheet_ACU
     && added.length === 0
     && JSON.stringify(beforeRetainedOrder) !== JSON.stringify(targetRetainedOrder);
   if (mappings.length === 0 && Object.keys(fills).length === 0 && conversions.length === 0 && !isPureReorder) {
-    return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: '该变更不属于当前可自动推导的 V2 安全子集。' };
+    return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: '该变更不属于当前可自动推导的精确迁移子集，可选择按候选整表 rebase。' };
   }
 
   return {

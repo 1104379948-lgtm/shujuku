@@ -37607,6 +37607,10 @@ $CONTENT
         const resolvedAliases = new Map();
         for (const [alias, physicalName] of aliases)
             resolvedAliases.set(decodeSqlIdentifier_ACU(alias).toLowerCase(), physicalName);
+        const normalizedAmbiguous = new Set();
+        for (const alias of options.ambiguousAliases || []) {
+            normalizedAmbiguous.add(decodeSqlIdentifier_ACU(alias).toLowerCase());
+        }
         return statements.map(statement => {
             try {
                 const values = tokens(statement);
@@ -37614,6 +37618,17 @@ $CONTENT
                 if (!target)
                     return statement;
                 const tableReferences = references(statement, values, target);
+                for (const reference of tableReferences) {
+                    if (normalizedAmbiguous.has(reference.value.toLowerCase())) {
+                        const role = reference.start === target.start ? '目标表' : '关联表';
+                        const error = new Error(`SQL 写入引用了歧义表名「${reference.value}」：该名称同时指向多张物理表，无法安全路由。请改用各表当前唯一物理表名，或只针对唯一英文表名编写 SQL。`);
+                        Object.defineProperty(error, 'code', {
+                            value: 'SQL_ALIAS_AMBIGUOUS_ACU',
+                            enumerable: false,
+                        });
+                        throw error;
+                    }
+                }
                 if (options.requireKnownTables) {
                     for (const reference of tableReferences) {
                         if (!resolvedAliases.has(reference.value.toLowerCase())) {
@@ -39496,15 +39511,17 @@ $CONTENT
             if (target)
                 addAlias(operation.tableName, target);
         }
-        return aliases;
+        return { aliases, conflicts };
     }
     async function applySqlBatchOperationV2_ACU(state, operation, runtime) {
         const statements = normalizeSqlStatementsForReplay_ACU(operation.statements || []);
         if (statements.length === 0)
             return;
         await ensureSqlReplayRuntime_ACU(runtime, state);
-        const replayStatements = rebindSqlMutationTableReferences_ACU(statements, buildReplaySqlTableAliases_ACU(state, operation), {
+        const { aliases, conflicts } = buildReplaySqlTableAliases_ACU(state, operation);
+        const replayStatements = rebindSqlMutationTableReferences_ACU(statements, aliases, {
             lenient: true,
+            ambiguousAliases: conflicts,
         });
         const params = Array.isArray(operation.params) ? operation.params : undefined;
         runtime.engine.runBatch(replayStatements, params);
@@ -49701,8 +49718,11 @@ $CONTENT
         // 生成路径和 Strict JSON/调度使用同一份显式身份别名契约。SQL token 一旦
         // 被唯一解析，必须立即替换为物理名；不能因 AI 使用显示名或历史名称而
         // 原样交给 SQLite，再在提交阶段误判为未知/跨表。
-        const { aliases } = buildSheetTableAliasMap_ACU([templateSource, tableData], { includeExtendedAliases: true, skipInvalidSources: true });
-        return rebindSqlMutationTableReferences_ACU(statements, aliases, options);
+        const { aliases, conflicts } = buildSheetTableAliasMap_ACU([templateSource, tableData], { includeExtendedAliases: true, skipInvalidSources: true });
+        return rebindSqlMutationTableReferences_ACU(statements, aliases, {
+            ...options,
+            ambiguousAliases: conflicts,
+        });
     }
     /**
      * 解析当前聊天生效模板，仅用于 rebind 别名补充。
@@ -49940,20 +49960,25 @@ $CONTENT
      * comments cannot masquerade as identifiers.
      */
     function assertNoHiddenPhysicalColumnMutations_ACU(statements, tableData) {
-        const physicalNames = resolvePhysicalTableNames_ACU(tableData);
+        // 与 rebind/调度共享同一表身份规范化与冲突结论（canonicalizeDisplayName_ACU），
+        // 避免隐藏列保护与执行层对英文名唯一性的判断不一致。
+        const { aliases, conflicts } = buildSheetTableAliasMap_ACU([tableData], { includeExtendedAliases: false });
+        const sheetKeyByPhysicalName = new Map();
+        for (const [sheetKey, physicalName] of resolvePhysicalTableNames_ACU(tableData)) {
+            sheetKeyByPhysicalName.set(canonicalizeTableAliasForHiddenProtection_ACU(physicalName), sheetKey);
+        }
         const sheetsByAlias = new Map();
-        for (const [sheetKey, physicalName] of physicalNames) {
-            const sheet = tableData[sheetKey];
-            for (const alias of [parseDDLTableName(sheet?.sourceData?.ddl || ''), physicalName]) {
-                const normalized = String(alias || '').trim().toLowerCase();
-                if (!normalized)
-                    continue;
-                const existing = sheetsByAlias.get(normalized);
-                if (existing && existing.sheetKey !== sheetKey)
-                    sheetsByAlias.set(normalized, null);
-                else if (existing !== null)
-                    sheetsByAlias.set(normalized, { sheetKey, sheet });
-            }
+        for (const [alias, physicalName] of aliases) {
+            const normalized = canonicalizeTableAliasForHiddenProtection_ACU(alias);
+            if (conflicts.has(normalized) || !normalized)
+                continue;
+            const sheetKey = sheetKeyByPhysicalName.get(canonicalizeTableAliasForHiddenProtection_ACU(physicalName));
+            if (!sheetKey)
+                continue;
+            sheetsByAlias.set(normalized, { sheetKey, sheet: tableData[sheetKey] });
+        }
+        for (const conflictKey of conflicts) {
+            sheetsByAlias.set(canonicalizeTableAliasForHiddenProtection_ACU(conflictKey), null);
         }
         for (const statement of statements) {
             const tokens = tokenizeSqlMutationIdentifiers_ACU(statement);
@@ -49964,11 +49989,14 @@ $CONTENT
                 throw new Error(`SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE 数据变更语句，收到：${action?.value || 'empty'}。禁止输出 CREATE、ALTER、DROP、事务或查询语句。`);
             }
             const target = getSqlMutationTargetToken_ACU(statement, tokens);
-            const resolved = sheetsByAlias.get(target.value.toLowerCase());
+            const resolved = sheetsByAlias.get(canonicalizeTableAliasForHiddenProtection_ACU(target.value));
             if (resolved === undefined)
                 continue;
-            if (resolved === null)
-                throw new Error(`无法唯一解析隐藏列保护的 SQL 目标表：${target.value}。`);
+            if (resolved === null) {
+                const error = new Error(`无法唯一解析隐藏列保护的 SQL 目标表：${target.value}。该名称同时指向多张物理表。`);
+                Object.defineProperty(error, 'code', { value: 'SQL_ALIAS_AMBIGUOUS_ACU', enumerable: false });
+                throw error;
+            }
             const hidden = new Set(getSheetColumnProjection_ACU(resolved.sheet).hiddenPhysicalColumns.map(name => name.toLowerCase()));
             if (hidden.size === 0)
                 continue;
@@ -49990,6 +50018,9 @@ $CONTENT
                 }
             }
         }
+    }
+    function canonicalizeTableAliasForHiddenProtection_ACU(value) {
+        return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
     }
     function mapSqlTableNamesToSheetKeys_ACU(tableData, tableNames) {
         if (!tableData || !Array.isArray(tableNames) || tableNames.length === 0)
@@ -57292,29 +57323,23 @@ $CONTENT
             ? options.templateScope ?? null
             : resolveTemplateScope_ACU(options.isolationKey);
         const tableIndexes = filterSheetKeysByTemplateScope_ACU(getSortedSheetKeys_ACU(workingTableData), templateScope);
-        // 作者 DDL 名是 AI 写入契约；冲突时不能让异常越过编排器，也不能继续构造无法安全路由的 prompt。
+        // 作者 DDL 名是 AI 写入契约。以本次请求捕获的完整模板作用域建立英文名归属索引：
+        // 唯一英文名优先；冲突/缺失回退到当前拼音物理名；当前物理名碰撞必须 fail-loud。
+        // 显式 sqlApplyScope 必须使用请求前模板快照，不能读取请求后变化的全局模板。
         const promptIdentifierSource = options.sqlApplyScope?.templateData || workingTableData;
-        const authoredTableNames = new Map();
-        if (sqlMode) {
-            try {
-                for (const sheetKey of tableIndexes) {
-                    authoredTableNames.set(sheetKey, resolveAuthoredTableNameForPrompt_ACU(promptIdentifierSource, sheetKey));
-                }
-            }
-            catch (error) {
-                const message = error?.message || String(error);
-                return createPromptRuntimeFailure_ACU('authored_table_name_conflict', message, false);
-            }
-        }
-        tableIndexes.forEach((sheetKey, tableIndex) => {
+        const promptTableNameForSheet = sqlMode
+            ? resolvePromptTableNameForSheet_ACU(promptIdentifierSource, tableIndexes)
+            : null;
+        for (let tableIndex = 0; tableIndex < tableIndexes.length; tableIndex += 1) {
+            const sheetKey = tableIndexes[tableIndex];
             const rawTable = workingTableData[sheetKey];
             if (!rawTable || !rawTable.name || !rawTable.content)
-                return;
+                continue;
             // 模板未声明的列合并进 hiddenPhysicalColumns，只影响投影，不改写持久化数据。
             const table = projectSheetForTemplateScope_ACU(rawTable, templateScope, sheetKey);
             if (targetSheetKeys && Array.isArray(targetSheetKeys)) {
                 if (!targetSheetKeys.includes(sheetKey))
-                    return;
+                    continue;
             }
             const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
             let shouldShowData = true;
@@ -57333,17 +57358,19 @@ $CONTENT
                 }
             }
             if (!shouldShowData) {
-                return;
+                continue;
             }
             // SQLite 模式：输出 DDL + 注释数据格式；数据只来自运行时 DB，不再从模板 seedRows 兜底。
             if (sqlMode) {
-                // 作者 DDL 名必须与提交阶段使用同一请求前模板快照解析；运行时数据可能仍保留旧模板显示名。
+                const selectedPromptName = promptTableNameForSheet?.(sheetKey);
+                if (selectedPromptName && typeof selectedPromptName === 'object' && 'ok' in selectedPromptName) {
+                    return selectedPromptName;
+                }
                 tableDataText += formatTableForSqliteMode(table, tableIndex, sheetKey, _seedGuideDataForThisPrepare_ACU, {
                     allowSeedRowsFallback: false,
-                    authoredTableName: authoredTableNames.get(sheetKey),
-                    runtimeTableName: resolveRuntimeTableNameForPrompt_ACU(promptIdentifierSource, sheetKey),
+                    ...selectedPromptName,
                 });
-                return;
+                continue;
             }
             const allRows = table.content.slice(1);
             const seedRows = sqlMode ? [] : getEffectiveSeedRowsForSheet_ACU(sheetKey, { guideData: _seedGuideDataForThisPrepare_ACU, allowTemplateFallback: true });
@@ -57421,7 +57448,7 @@ $CONTENT
                 }
                 tableDataText += '\n';
             }
-        });
+        }
         if (_seedRowsTablesUsed_ACU.length > 0) {
             logDebug_ACU(`[SeedRows] $0 使用 seedRows 作为基础数据：${_seedRowsTablesUsed_ACU.join('、')}`);
         }
@@ -57501,11 +57528,12 @@ $CONTENT
         const manualExtraHintText = manualExtraHint_ACU || '';
         // SQLite 模式下追加 SQL 编辑格式兜底说明（Q17 确认：$0 自带格式说明）
         if (isSqliteMode() && tableDataText) {
+            const identifierContract = 'SQL 表名和列名必须严格照抄上方对应 CREATE TABLE 中提供的标识符，不得翻译、缩写、猜测或改写。';
             if (settings_ACU.strictJsonTableFillEnabled === true) {
-                tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在响应 JSON 的 sql 字符串中仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句\n-- SQL 表名和列名必须严格使用上方 CREATE TABLE 中的英文标识符；禁止使用中文名、sheet key、uid 或自行拼音化的内部表名\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- 普通 INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- INSERT OR REPLACE / REPLACE INTO 按 SQLite 原生整行替换语义执行，应显式提供目标列及用于冲突定位的 row_id 或 UNIQUE 列\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
+                tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在响应 JSON 的 sql 字符串中仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句\n-- ${identifierContract}\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- 普通 INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- INSERT OR REPLACE / REPLACE INTO 按 SQLite 原生整行替换语义执行，应显式提供目标列及用于冲突定位的 row_id 或 UNIQUE 列\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
             }
             else {
-                tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在 <tableEdit> 标签内仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句\n-- SQL 表名和列名必须严格使用上方 CREATE TABLE 中的英文标识符；禁止使用中文名、sheet key、uid 或自行拼音化的内部表名\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- 普通 INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- INSERT OR REPLACE / REPLACE INTO 按 SQLite 原生整行替换语义执行，应显式提供目标列及用于冲突定位的 row_id 或 UNIQUE 列\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
+                tableDataText += `\n-- [SQL 编辑格式说明]\n-- 请在 <tableEdit> 标签内仅使用 INSERT INTO / INSERT OR REPLACE INTO / REPLACE INTO / UPDATE / DELETE FROM 数据变更语句\n-- ${identifierContract}\n-- 上方 CREATE TABLE 仅用于说明表结构，严禁复制或输出 CREATE、ALTER、DROP、SELECT、PRAGMA、VACUUM、BEGIN、COMMIT、ROLLBACK 等语句\n-- 所有 UPDATE 和 DELETE 必须带 WHERE 条件，优先参考各表 Note 中的 SQL 示例和 DDL 中的 UNIQUE 约束选择定位方式\n-- 普通 INSERT 必须显式列出业务列，不得包含 row_id；row_id 由系统在执行前分配稳定身份\n-- INSERT OR REPLACE / REPLACE INTO 按 SQLite 原生整行替换语义执行，应显式提供目标列及用于冲突定位的 row_id 或 UNIQUE 列\n-- 支持表达式更新（如 SET quantity = quantity + 1）、条件批量更新、CASE 条件更新等标准 SQL 写法\n-- 每条语句以分号结尾，多条语句用换行分隔\n`;
             }
         }
         return {
@@ -57522,24 +57550,43 @@ $CONTENT
      * Resolves the user-authored DDL identifier that AI must use for mutations.
      * Runtime names are deliberately excluded from the prompt: they are an
      * implementation detail rebound at the write boundary.
+     *
+     * Returns the unique author DDL name, or undefined when the name is missing,
+     * invalid, or shared by more than one sheet in the same request scope.
      */
     function resolveAuthoredTableNameForPrompt_ACU(data, sheetKey) {
         const sheet = data?.[sheetKey];
-        const tableName = parseDDLTableName(String(sheet?.sourceData?.ddl || ''));
+        const rawTableName = parseDDLTableName(String(sheet?.sourceData?.ddl || ''));
+        // 执行层 rebind 用 decodeSqlIdentifier_ACU 剥引号后做规范化比较；Prompt 层必须一致，
+        // 否则带引号的 "Shared_Legacy" 会被当成无合法英文名而漏判冲突。
+        const tableName = decodeSqlIdentifier_ACU(rawTableName);
         if (!tableName || !AUTHOR_SQL_TABLE_IDENTIFIER_ACU.test(tableName))
             return undefined;
-        const normalized = tableName.toLowerCase();
-        for (const [candidateKey, candidate] of Object.entries(data || {})) {
-            if (candidateKey === sheetKey || !candidateKey.startsWith('sheet_'))
-                continue;
-            const candidateName = parseDDLTableName(String(candidate?.sourceData?.ddl || ''));
-            if (candidateName && candidateName.toLowerCase() === normalized) {
-                throw new Error(`模板中多个表共用作者 DDL 表名「${tableName}」，无法安全路由 AI SQL。`);
-            }
+        let ownedPhysicalName;
+        try {
+            const registry = buildSheetTableAliasMap_ACU([data], { includeExtendedAliases: false });
+            const normalized = canonicalizeAliasForPrompt_ACU(tableName);
+            if (registry.conflicts.has(normalized))
+                return undefined;
+            // owner index 的 key 可能带引号，需剥引号后匹配；冲突集同样按剥引号后的规范比较。
+            const conflictKey = [...registry.conflicts].find(key => canonicalizeAliasForPrompt_ACU(decodeSqlIdentifier_ACU(key)) === normalized);
+            if (conflictKey)
+                return undefined;
+            ownedPhysicalName = [...registry.aliases.entries()]
+                .find(([key]) => canonicalizeAliasForPrompt_ACU(decodeSqlIdentifier_ACU(key)) === normalized)?.[1];
         }
+        catch {
+            return undefined;
+        }
+        const physicalName = resolvePhysicalNameForSheet_ACU(data, sheetKey);
+        if (!ownedPhysicalName || !physicalName || ownedPhysicalName !== physicalName)
+            return undefined;
         return tableName;
     }
-    function resolveRuntimeTableNameForPrompt_ACU(data, sheetKey) {
+    function canonicalizeAliasForPrompt_ACU(value) {
+        return String(value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+    }
+    function resolvePhysicalNameForSheet_ACU(data, sheetKey) {
         try {
             return getPhysicalTableNameForSheet_ACU(data, sheetKey);
         }
@@ -57547,6 +57594,53 @@ $CONTENT
             logWarn_ACU(`[AI输入准备] 无法解析 runtime 物理表名: ${sheetKey}: ${error?.message || error}`);
             return undefined;
         }
+    }
+    /**
+     * Builds a per-request, per-sheet prompt table-name selector from the complete
+     * request template scope. The selector returns the chosen prompt identifier
+     * plus its authored counterpart:
+     *
+     * - unique author DDL name  -> { authoredTableName, runtimeTableName }
+     * - missing/ambiguous name  -> { runtimeTableName } (current pinyin physical name)
+     * - physical-name collision -> structured precondition failure that must not
+     *                              be hidden by falling back to the author name.
+     */
+    function resolvePromptTableNameForSheet_ACU(data, _sheetKeys) {
+        let registry;
+        let registryFailure = null;
+        try {
+            registry = buildSheetTableAliasMap_ACU([data], { includeExtendedAliases: false });
+        }
+        catch (error) {
+            // 当前拼音物理名自身碰撞：结构化前置失败，绝不回退英文名掩盖真实 SQLite 冲突。
+            registryFailure = createPromptRuntimeFailure_ACU('authored_table_name_conflict', `表身份解析失败：${error?.message || String(error)}`, false);
+            registry = { aliases: new Map(), conflicts: new Set() };
+        }
+        const ambiguousEnglishNames = new Set([...registry.conflicts].map(key => canonicalizeAliasForPrompt_ACU(decodeSqlIdentifier_ACU(key))));
+        const ownerByEnglishName = new Map();
+        for (const [alias, physicalName] of registry.aliases) {
+            const normalized = canonicalizeAliasForPrompt_ACU(decodeSqlIdentifier_ACU(alias));
+            if (!normalized || ambiguousEnglishNames.has(normalized))
+                continue;
+            ownerByEnglishName.set(normalized, physicalName);
+        }
+        return (sheetKey) => {
+            if (registryFailure)
+                return registryFailure;
+            const authoredName = resolveAuthoredTableNameForPrompt_ACU(data, sheetKey);
+            const runtimeName = resolvePhysicalNameForSheet_ACU(data, sheetKey);
+            if (authoredName && runtimeName) {
+                const normalized = canonicalizeAliasForPrompt_ACU(authoredName);
+                if (!ambiguousEnglishNames.has(normalized)
+                    && ownerByEnglishName.get(normalized) === runtimeName) {
+                    return { authoredTableName: authoredName, runtimeTableName: runtimeName };
+                }
+            }
+            if (!runtimeName) {
+                return createPromptRuntimeFailure_ACU('authored_table_name_conflict', `无法为表 ${sheetKey} 解析当前拼音物理名，已阻止构造可能误写的 AI prompt。`, false);
+            }
+            return { runtimeTableName: runtimeName };
+        };
     }
     /**
      * SQLite 模式下的表格格式化
@@ -57584,7 +57678,7 @@ $CONTENT
             text += `-- WARNING: ${resolvedDDL.diagnostics[0]} 原始 DDL 未被改写。\n`;
         }
         if (options.authoredTableName) {
-            text += `-- SQL 写入必须使用表名 ${options.authoredTableName}；系统会在执行时映射到内部表。\n`;
+            text += `-- SQL 写入必须严格使用本表上方 CREATE TABLE 中的表名 ${options.authoredTableName}；不得使用其他名称。\n`;
         }
         // 输出 Note 和 Trigger（作为 SQL 注释）
         if (table.sourceData) {
@@ -82538,11 +82632,16 @@ $CONTENT
                     assertNoHiddenPhysicalColumnMutations_ACU(reboundStatements, baseSnapshot);
                 }
                 catch (error) {
+                    // 歧义英文表名属于前置条件失败：AI 无法通过重试解决，回灌错误只会浪费模型调用并等待 5 秒。
+                    // 分类为 precondition，不包装 ModelOutputRetryError_ACU、不回灌、不重试。
+                    const isAliasAmbiguous = error?.code === 'SQL_ALIAS_AMBIGUOUS_ACU';
                     return {
                         success: false,
                         modifiedKeys: [],
-                        error: `统一提交失败：${formatResponseGroupReference_ACU(response)} SQL 校验失败。${sanitizeRetryFeedback_ACU(error?.message || String(error))}`,
-                        errorCategory: 'model',
+                        error: isAliasAmbiguous
+                            ? `统一提交失败：${formatResponseGroupReference_ACU(response)} ${sanitizeRetryFeedback_ACU(error?.message || String(error))}`
+                            : `统一提交失败：${formatResponseGroupReference_ACU(response)} SQL 校验失败。${sanitizeRetryFeedback_ACU(error?.message || String(error))}`,
+                        errorCategory: isAliasAmbiguous ? 'precondition' : 'model',
                     };
                 }
                 if (Array.isArray(response.job.targetSheetKeys) && response.job.targetSheetKeys.length > 0) {
@@ -109191,10 +109290,10 @@ $CONTENT
         if (beforeSchema.uid !== targetSchema.uid)
             return { status: 'invalid', code: 'INVALID_SCHEMA', message: 'sheet uid 发生变化。' };
         if (JSON.stringify(beforeSchema.tableConstraints) !== JSON.stringify(targetSchema.tableConstraints)) {
-            return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: '表级 constraint 变更需要独立语义判定。' };
+            return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: '表级 constraint 变更无法安全精确迁移，可选择按候选整表 rebase。' };
         }
         if (beforeSchema.tableSuffix !== targetSchema.tableSuffix) {
-            return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: 'CREATE TABLE suffix 变更需要独立语义判定。' };
+            return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: 'CREATE TABLE suffix 变更无法安全精确迁移，可选择按候选整表 rebase。' };
         }
         const beforeByPhysical = new Map(beforeSchema.columns.map(column => [column.physicalName, column]));
         const targetByPhysical = new Map(targetSchema.columns.map(column => [column.physicalName, column]));
@@ -109224,7 +109323,7 @@ $CONTENT
                 });
                 continue;
             }
-            return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: `列「${source.displayHeader}」definition/constraint 变更需要独立 conversion 判定。` };
+            return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: `列「${source.displayHeader}」definition/constraint 变更无法安全精确迁移，可选择按候选整表 rebase。` };
         }
         const mappings = [];
         const unmatchedRemoved = new Set(removed.map(column => column.physicalName));
@@ -109288,7 +109387,7 @@ $CONTENT
             const target = targetByPhysical.get(physicalName);
             const literal = parseDDLSafeDefaultLiteral_ACU(target.defaultExpression);
             if (!literal) {
-                return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: `新增列「${target.displayHeader}」缺少可安全静态求值的 literal DEFAULT。` };
+                return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: `新增列「${target.displayHeader}」缺少可安全静态求值的 literal DEFAULT，可选择按候选整表 rebase。` };
             }
             fills[physicalName] = { kind: 'ddl_literal_default', literal };
         }
@@ -109302,7 +109401,7 @@ $CONTENT
             && added.length === 0
             && JSON.stringify(beforeRetainedOrder) !== JSON.stringify(targetRetainedOrder);
         if (mappings.length === 0 && Object.keys(fills).length === 0 && conversions.length === 0 && !isPureReorder) {
-            return { status: 'invalid', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: '该变更不属于当前可自动推导的 V2 安全子集。' };
+            return { status: 'rebase_available', code: 'UNSUPPORTED_SCHEMA_CHANGE', message: '该变更不属于当前可自动推导的精确迁移子集，可选择按候选整表 rebase。' };
         }
         return {
             status: 'auto_apply',
@@ -109351,10 +109450,16 @@ $CONTENT
         };
     }
     /**
-     * Read-only validation for editor candidates. It never creates a frame entry or
-     * mutates either input. V1-compatible changes remain V1 contracts; changes
-     * outside that subset may use the semantic planner's uniquely provable V2
-     * intent; ambiguous or unsupported changes remain blocked until explicitly resolved.
+     * Read-only validation for editor candidates. It never creates frame entry or
+     * mutates either input.
+     *
+     * 每个 schema-changed Sheet 只允许三种结局：
+     *  1. migration：V1/V2 精确迁移 operation（保留历史列值）。
+     *  2. rebase：候选本身合法， planner 无法或无需构造精确 migration 时，
+     *     以编辑器候选整表作为新边界快照（不伪造空 migration operation）。
+     *  3. invalid：候选不合法、身份协议损坏、strict hydrate 失败或提交上下文已陈旧。
+     *
+     * `UNSUPPORTED_SCHEMA_CHANGE` 不再是最终 blocker；它只作为选择 rebase 的原因。
      */
     async function preflightSchemaMigrations_ACU(input) {
         const changedSheetKeys = Object.keys(input.candidateData || {}).filter(sheetKey => {
@@ -109370,41 +109475,68 @@ $CONTENT
         const issues = [];
         const operations = [];
         const decisions = [];
-        const forceV2SheetKeys = new Set(input.forceV2SheetKeys || []);
+        const applyModes = {};
         for (const sheetKey of changedSheetKeys) {
             const before = input.baselineData[sheetKey];
             const after = input.candidateData[sheetKey];
             try {
-                if (forceV2SheetKeys.has(sheetKey))
-                    throw new Error('schema migration requires explicit V2 intent。');
                 operations.push(await buildSheetSchemaMigrationOperation_ACU(sheetKey, before, after, {
                     destructiveChangeConfirmed: input.destructiveChangeConfirmed === true,
                 }));
                 decisions.push({ sheetKey, status: 'auto_apply', code: 'V1_SAFE_SUBSET' });
+                applyModes[sheetKey] = 'migration';
                 continue;
             }
             catch (v1Error) {
                 const explicitIntent = input.intents?.[sheetKey];
-                const planned = explicitIntent || forceV2SheetKeys.has(sheetKey)
-                    ? null
-                    : planSheetSchemaMigration_ACU(before, after);
+                const planned = explicitIntent ? null : planSheetSchemaMigration_ACU(before, after);
                 const inferredIntent = planned?.status === 'auto_apply' ? planned.intent : undefined;
                 const inferredReason = planned && planned.status !== 'auto_apply' ? planned.message : undefined;
                 const intent = explicitIntent || inferredIntent;
                 if (!intent) {
+                    // 真实 schema 无效（DDL/表头/身份）是最终 blocker，不得降级为删列确认或 rebase。
+                    if (planned?.status === 'invalid') {
+                        decisions.push({
+                            sheetKey,
+                            status: 'invalid',
+                            code: planned.code,
+                            message: planned.message,
+                        });
+                        blockers.push(`${sheetKey}: ${planned.message || v1Error?.message || 'schema 无效。'}`);
+                        continue;
+                    }
                     const issue = input.destructiveChangeConfirmed === true ? null : getDestructiveDropIssue_ACU(sheetKey, before, after);
-                    if (issue && String(v1Error?.message || '').includes('删除列需要显式确认')) {
+                    const isNeedsChoice = planned?.status === 'needs_choice';
+                    if (isNeedsChoice && Array.isArray(planned.choices) && planned.choices.length > 0) {
+                        // 可提供唯一列身份映射：让用户在 mapping 中选择。
+                        decisions.push({
+                            sheetKey,
+                            status: 'needs_choice',
+                            code: planned.code,
+                            message: planned.message,
+                            choices: planned.choices,
+                        });
+                        blockers.push(`${sheetKey}: ${planned.message}`);
+                        continue;
+                    }
+                    if (issue) {
+                        // 存在实际删除列：必须显式确认（无论走 migration 还是 rebase）。
                         issues.push(issue);
                         decisions.push({ sheetKey, status: 'needs_confirmation', code: issue.code, message: issue.message });
                         blockers.push(`${sheetKey}: ${issue.message}`);
+                        continue;
+                    }
+                    if (planned?.status === 'rebase_available' || isNeedsChoice) {
+                        // 约束放宽 / 无唯一映射 / planner 能力不足：候选合法即可 rebase。
+                        decisions.push({ sheetKey, status: 'auto_apply', code: 'REBASE_AVAILABLE', message: planned?.message });
+                        applyModes[sheetKey] = 'rebase';
                     }
                     else {
                         decisions.push({
                             sheetKey,
-                            status: planned?.status === 'needs_choice' ? 'needs_choice' : 'invalid',
+                            status: 'invalid',
                             code: planned?.code || 'V1_AND_V2_UNRESOLVED',
                             message: inferredReason || v1Error?.message,
-                            choices: planned?.status === 'needs_choice' ? planned.choices : undefined,
                         });
                         blockers.push(`${sheetKey}: ${inferredReason || v1Error?.message || 'schema migration 缺少显式 V2 intent。'}`);
                     }
@@ -109423,10 +109555,11 @@ $CONTENT
                     };
                     operations.push(await buildSheetSchemaMigrationOperationV2_ACU(sheetKey, before, after, v2Intent));
                     decisions.push({ sheetKey, status: 'auto_apply', code: explicitIntent ? 'EXPLICIT_V2_INTENT' : 'UNIQUE_V2_INTENT' });
+                    applyModes[sheetKey] = 'migration';
                 }
                 catch (v2Error) {
                     const issue = input.destructiveChangeConfirmed === true ? null : getDestructiveDropIssue_ACU(sheetKey, before, after);
-                    if (issue && String(v2Error?.message || '').includes('destructiveChangeConfirmed')) {
+                    if (issue) {
                         issues.push(issue);
                         decisions.push({ sheetKey, status: 'needs_confirmation', code: issue.code, message: issue.message });
                         blockers.push(`${sheetKey}: ${issue.message}`);
@@ -109439,13 +109572,22 @@ $CONTENT
             }
         }
         if (blockers.length > 0)
-            return { changedSheetKeys, blockers, issues, operations: [], decisions };
+            return { changedSheetKeys, blockers, issues, operations: [], decisions, applyModes };
+        // 先严格校验完整 candidate，再决定 migration/rebase，避免用“无法规划”掩盖真实 SQLite 错误。
+        try {
+            await hydrateTableDataStrict_ACU(input.candidateData);
+        }
+        catch (error) {
+            return { changedSheetKeys, operations: [], issues: [], blockers: [`完整 candidate SQLite hydrate 失败: ${error?.message || String(error)}`], decisions: decisions.map(decision => ({ ...decision, status: 'invalid', code: 'CANDIDATE_SQLITE_HYDRATE_FAILED', message: error?.message || String(error) })) };
+        }
         try {
             let appliedState = input.baselineData;
             for (const operation of operations) {
                 appliedState = await applySheetSchemaMigrationOperation_ACU(appliedState, operation);
             }
             for (const sheetKey of changedSheetKeys) {
+                if (applyModes[sheetKey] !== 'migration')
+                    continue;
                 const applied = appliedState[sheetKey];
                 const candidate = input.candidateData[sheetKey];
                 const appliedProjection = applied ? JSON.stringify({
@@ -109462,13 +109604,7 @@ $CONTENT
         catch (error) {
             return { changedSheetKeys, operations: [], issues: [], blockers: [error?.message || String(error)], decisions: decisions.map(decision => ({ ...decision, status: 'invalid', code: 'OPERATION_CANDIDATE_MISMATCH', message: error?.message || String(error) })) };
         }
-        try {
-            await hydrateTableDataStrict_ACU(input.candidateData);
-        }
-        catch (error) {
-            return { changedSheetKeys, operations: [], issues: [], blockers: [`完整 candidate SQLite hydrate 失败: ${error?.message || String(error)}`], decisions: decisions.map(decision => ({ ...decision, status: 'invalid', code: 'CANDIDATE_SQLITE_HYDRATE_FAILED', message: error?.message || String(error) })) };
-        }
-        return { changedSheetKeys, blockers: [], issues: [], operations, decisions };
+        return { changedSheetKeys, blockers: [], issues: [], operations, decisions, applyModes };
     }
 
     const joinLines_ACU = (...lines) => lines.join('\n');
@@ -152171,6 +152307,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU([...new Set([...changedSheetKeys, ...deletedSheetKeys])]
                     .map(sheetKey => ({ kind: 'schema', sheetKey })), { isolationKey: guideIsolationKey });
                 let schemaOperations = [];
+                const rebaseSheetKeys = new Set();
                 if (changes.schemaChangedSheetKeys.length > 0 && visualizer.templateBaseData) {
                     const preflightSnapshot = {
                         tempData: cloneData$1(visualizer.tempData),
@@ -152271,15 +152408,28 @@ Expected function or array of functions, received type ${typeof value}.`
                             return false;
                         }
                     }
+                    // 每个 schema-changed Sheet 必须恰有一个可持久化 action：migration operation 或 rebase。
+                    // 不允许“schema 变了但既没有 migration 也没有 rebase”的静默放行。
                     const operationKeys = preflight.operations.map(operation => String(operation?.sheetKey || ''));
                     const preflightChangedKeys = [...preflight.changedSheetKeys].sort();
                     const expectedSchemaKeys = [...changes.schemaChangedSheetKeys].sort();
-                    if (!sameTemplateValue_ACU(preflightChangedKeys, expectedSchemaKeys)
-                        || operationKeys.length !== expectedSchemaKeys.length
-                        || new Set(operationKeys).size !== operationKeys.length
-                        || operationKeys.some(sheetKey => !expectedSchemaKeys.includes(sheetKey))) {
-                        toastStore.error('模板结构预检未返回与变更 Sheet 一一对应的 migration operation，已拒绝保存。', { muteable: false });
+                    const applyModes = preflight.applyModes || {};
+                    const actionKeys = [...new Set([...operationKeys, ...Object.keys(applyModes)])].sort();
+                    const operationKeysUnique = new Set(operationKeys).size === operationKeys.length;
+                    const noModeOverlap = operationKeys.every(sheetKey => !Object.prototype.hasOwnProperty.call(applyModes, sheetKey));
+                    const actionValid = operationKeysUnique
+                        && noModeOverlap
+                        && sameTemplateValue_ACU(preflightChangedKeys, expectedSchemaKeys)
+                        && actionKeys.length === expectedSchemaKeys.length
+                        && new Set(actionKeys).size === actionKeys.length
+                        && actionKeys.every(sheetKey => expectedSchemaKeys.includes(sheetKey));
+                    if (!actionValid) {
+                        toastStore.error('模板结构预检未为每个变更 Sheet 返回 migration 或 rebase action，已拒绝保存。', { muteable: false });
                         return false;
+                    }
+                    for (const [sheetKey, mode] of Object.entries(applyModes)) {
+                        if (mode === 'rebase')
+                            rebaseSheetKeys.add(sheetKey);
                     }
                     schemaOperations = preflight.operations.map(operation => cloneData$1(operation));
                     const currentPreflightSnapshot = {
@@ -152312,6 +152462,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 const sheetChanges = changedSheetKeys.map(sheetKey => {
                     if (changes.addedSheetKeys.includes(sheetKey)) {
                         return { kind: 'introduction', sheetKey, sheetData: orderedData[sheetKey] };
+                    }
+                    if (rebaseSheetKeys.has(sheetKey)) {
+                        // rebase 以编辑器候选整表作为新边界快照；不伪造空 migration operation。
+                        return { kind: 'rebase', sheetKey, sheetData: orderedData[sheetKey] };
                     }
                     const operations = [];
                     const schemaOperation = schemaOperationBySheetKey.get(sheetKey);
