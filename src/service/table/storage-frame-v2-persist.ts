@@ -916,7 +916,8 @@ function manualRefillProgressIsValidForIntroductionHistory_ACU(value: unknown): 
 function timelineIsValidForIntroductionHistory_ACU(value: unknown): boolean {
   return value === undefined || (
     isObjectRecord_ACU(value)
-    && (value.kind === 'sheet_introduction' || value.kind === 'sheet_rebase')
+    && (value.kind === 'sheet_introduction' || value.kind === 'sheet_rebase'
+      || value.kind === 'sheet_reveal' || value.kind === 'sheet_hide')
     && Number.isInteger(value.activateAtMessageIndex) && value.activateAtMessageIndex >= 0
     && Number.isInteger(value.afterSeq) && value.afterSeq >= 0
   );
@@ -1103,52 +1104,121 @@ function patchContainsOrCannotDisproveSheet_ACU(patch: unknown, sheetKey: string
  * persisted V2 history rather than trusting the final replay state, because a
  * later data_replace may have removed a table that existed earlier.
  */
-function historyContainsOrCannotDisproveSheet_ACU(
+type IntroductionHistoryEvidence_ACU = {
+  status: 'absent' | 'present' | 'indeterminate';
+  sheetKey: string;
+  messageIndex?: number;
+  artifactKind?: 'frame' | 'checkpoint' | 'per_sheet_checkpoint' | 'operation' | 'patch';
+  reason?: string;
+};
+
+function introductionHistoryEvidence_ACU(
   chat: any[],
   isolationKey: string,
   maxMessageIndex: number,
   sheetKey: string,
-): boolean {
+): IntroductionHistoryEvidence_ACU {
+  const absent = (): IntroductionHistoryEvidence_ACU => ({ status: 'absent', sheetKey });
+  const present = (messageIndex: number, artifactKind: IntroductionHistoryEvidence_ACU['artifactKind']): IntroductionHistoryEvidence_ACU => (
+    { status: 'present', sheetKey, messageIndex, artifactKind }
+  );
+  const indeterminate = (
+    messageIndex: number,
+    artifactKind: IntroductionHistoryEvidence_ACU['artifactKind'],
+    reason: string,
+  ): IntroductionHistoryEvidence_ACU => ({ status: 'indeterminate', sheetKey, messageIndex, artifactKind, reason });
+
   for (let messageIndex = 0; messageIndex <= maxMessageIndex; messageIndex += 1) {
     const tagData = chat[messageIndex]?.TavernDB_ACU_IsolatedData?.[isolationKey];
     if (!hasV2HistoryMarker_ACU(tagData)) continue;
 
     const frame = tagData.storageFrame as unknown;
-    if (!isObjectRecord_ACU(frame) || frame.version !== 2 || !Array.isArray(frame.logEntries)) return true;
-    if (frame.checkpoint !== undefined && !checkpointIsValidForIntroductionHistory_ACU(frame.checkpoint)) return true;
-    if (checkpointDataContainsSheet_ACU(frame.checkpoint, sheetKey)) return true;
-    if (frame.perSheetCheckpoints !== undefined && !sheetCheckpointMapIsValidForIntroductionHistory_ACU(frame.perSheetCheckpoints)) return true;
-    if (recordContainsSheet_ACU(frame.perSheetCheckpoints, sheetKey)) return true;
+    if (!isObjectRecord_ACU(frame) || frame.version !== 2 || !Array.isArray(frame.logEntries)) {
+      return indeterminate(messageIndex, 'frame', 'V2 storage frame 无法解析');
+    }
+    if (frame.checkpoint !== undefined && !checkpointIsValidForIntroductionHistory_ACU(frame.checkpoint)) {
+      return indeterminate(messageIndex, 'checkpoint', 'full checkpoint 无法验证');
+    }
+    if (checkpointDataContainsSheet_ACU(frame.checkpoint, sheetKey)) return present(messageIndex, 'checkpoint');
+    if (frame.perSheetCheckpoints !== undefined && !isObjectRecord_ACU(frame.perSheetCheckpoints)) {
+      return indeterminate(messageIndex, 'per_sheet_checkpoint', 'per-sheet checkpoint map 无法解析');
+    }
+    if (recordContainsSheet_ACU(frame.perSheetCheckpoints, sheetKey)) {
+      const checkpoint = (frame.perSheetCheckpoints as Record<string, unknown>)[sheetKey];
+      if (!sheetCheckpointMapIsValidForIntroductionHistory_ACU({ [sheetKey]: checkpoint })) {
+        return indeterminate(messageIndex, 'per_sheet_checkpoint', '目标 sheet checkpoint 无法验证');
+      }
+      return present(messageIndex, 'per_sheet_checkpoint');
+    }
 
     for (const entry of frame.logEntries) {
-      if (!logEntryIsValidForIntroductionHistory_ACU(entry)) return true;
+      if (!logEntryIsValidForIntroductionHistory_ACU(entry)) {
+        return indeterminate(messageIndex, 'operation', 'mutation log entry 无法验证');
+      }
 
       for (const operation of entry.operations) {
-        if (operationContainsOrCannotDisproveSheet_ACU(operation, sheetKey)) return true;
+        const operationEvidence = scopedHistoryArtifactEvidence_ACU(operation, sheetKey, operationContainsOrCannotDisproveSheet_ACU);
+        if (operationEvidence === 'present') return present(messageIndex, 'operation');
+        if (operationEvidence === 'indeterminate') return indeterminate(messageIndex, 'operation', '目标相关 operation 无法验证');
       }
 
       if (entry.patches === undefined) continue;
-      if (!Array.isArray(entry.patches)) return true;
+      if (!Array.isArray(entry.patches)) return indeterminate(messageIndex, 'patch', 'patch 列表无法解析');
       for (const patch of entry.patches) {
-        if (patchContainsOrCannotDisproveSheet_ACU(patch, sheetKey)) return true;
+        const patchEvidence = scopedHistoryArtifactEvidence_ACU(patch, sheetKey, patchContainsOrCannotDisproveSheet_ACU);
+        if (patchEvidence === 'present') return present(messageIndex, 'patch');
+        if (patchEvidence === 'indeterminate') return indeterminate(messageIndex, 'patch', '目标相关 patch 无法验证');
       }
     }
   }
-  return false;
+  return absent();
+}
+
+function scopedHistoryArtifactEvidence_ACU(
+  artifact: unknown,
+  sheetKey: string,
+  containsOrCannotDisprove: (artifact: unknown, sheetKey: string) => boolean,
+): 'absent' | 'present' | 'indeterminate' {
+  if (!isObjectRecord_ACU(artifact)) return 'indeterminate';
+  if (artifact.kind === 'data_replace') {
+    if (!isObjectRecord_ACU(artifact.data)) return 'indeterminate';
+    return recordContainsSheet_ACU(artifact.data, sheetKey) ? 'present' : 'absent';
+  }
+  if (typeof artifact.sheetKey !== 'string') return 'indeterminate';
+  if (artifact.sheetKey !== sheetKey) {
+    // 这些 mutation/patch 是严格按 sheetKey 定位的；另一个 sheet 的局部损坏
+    // 不能伪造目标表曾存在的证据。全局或未知 kind 仍保持 fail-closed。
+    if (['sheet_replace', 'sheet_schema_migrate', 'row_upsert', 'row_delete', 'meta_update'].includes(artifact.kind)) {
+      return 'absent';
+    }
+    return 'indeterminate';
+  }
+  if (!containsOrCannotDisprove(artifact, sheetKey)) return 'absent';
+  return containsOrCannotDisprove(artifact, '__acu_history_evidence_sentinel__')
+    ? 'indeterminate'
+    : 'present';
 }
 /**
  * 定位 reveal 数据来源（语义1：恢复"离开时最新状态"）。
  *
  * 关键数据安全约束：不取任何单一 checkpoint 的静态快照（可能是中间态/过期态），
  * 而是从 target.index 向前逐楼层做 bounded replay，找到该 sheet 仍可见的"最高楼层"，
- * 其 replay 结果即为该表最后一次可见时的完整状态。找不到任何可见状态则返回 null（fail closed）。
+ * 其 replay 结果即为该表最后一次可见时的完整状态。当前 frame 的精确同 key checkpoint
+ * 仅在 bounded replay 找不到来源时作为同楼层回退；调用方必须在收敛重写前传入其副本。
  */
-async function locateRevealSourceSheetData_ACU(
+type RevealSourceResolution_ACU =
+  | { status: 'resolved'; sheetData: Sheet_ACU; sourceKind: 'bounded_replay' | 'current_sheet_checkpoint'; messageIndex: number }
+  | { status: 'not_found' }
+  | { status: 'indeterminate'; reason: string };
+
+async function resolveRevealSource_ACU(
   chat: any[],
   isolationKey: string,
   maxMessageIndex: number,
   sheetKey: string,
-): Promise<Sheet_ACU | null> {
+  currentSheetCheckpoint?: unknown,
+): Promise<RevealSourceResolution_ACU> {
+  let replayFailureCount = 0;
   for (let boundary = maxMessageIndex; boundary >= 0; boundary -= 1) {
     const tagData = chat[boundary]?.TavernDB_ACU_IsolatedData?.[isolationKey];
     if (!hasV2HistoryMarker_ACU(tagData)) continue;
@@ -1161,16 +1231,38 @@ async function locateRevealSourceSheetData_ACU(
       });
     } catch {
       // 该边界 replay 失败不代表更早边界不可用；继续向前寻找可信可见状态。
+      replayFailureCount += 1;
       continue;
     }
     if (replayed && Object.prototype.hasOwnProperty.call(replayed.data, sheetKey)) {
       const candidate = (replayed.data as Record<string, unknown>)[sheetKey];
       if (isObjectRecord_ACU(candidate)) {
-        return deepClone_ACU(candidate) as Sheet_ACU;
+        return {
+          status: 'resolved',
+          sheetData: deepClone_ACU(candidate) as Sheet_ACU,
+          sourceKind: 'bounded_replay',
+          messageIndex: boundary,
+        };
       }
+      return { status: 'indeterminate', reason: `bounded replay 返回了非对象 sheet：messageIndex=${boundary}` };
     }
   }
-  return null;
+  if (isObjectRecord_ACU(currentSheetCheckpoint)) {
+    const checkpointData = currentSheetCheckpoint.data;
+    if (isObjectRecord_ACU(checkpointData)) {
+      return {
+        status: 'resolved',
+        sheetData: deepClone_ACU(checkpointData) as Sheet_ACU,
+        sourceKind: 'current_sheet_checkpoint',
+        messageIndex: maxMessageIndex,
+      };
+    }
+    return { status: 'indeterminate', reason: '当前目标 sheet checkpoint 缺少对象 data' };
+  }
+  if (replayFailureCount > 0) {
+    return { status: 'indeterminate', reason: `无法完成 ${replayFailureCount} 个 bounded replay 边界` };
+  }
+  return { status: 'not_found' };
 }
 
 
@@ -1535,7 +1627,14 @@ async function persistTableMutationLogV2Core_ACU(
           if (!sheetCheckpointResult.checkpoint) {
             return { saved: false, error: sheetCheckpointResult.error };
           }
-          const timelineKind = historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, sheetKey)
+          const historyEvidence = introductionHistoryEvidence_ACU(chat, isolationKey, target.index, sheetKey);
+          if (historyEvidence.status === 'indeterminate') {
+            return {
+              saved: false,
+              error: `V2 sheet introduction history is indeterminate: sheetKey=${sheetKey}, messageIndex=${historyEvidence.messageIndex ?? 'unknown'}, reason=${historyEvidence.reason || 'unknown'}.`,
+            };
+          }
+          const timelineKind = historyEvidence.status === 'present'
             ? 'sheet_reveal' as const
             : 'sheet_introduction' as const;
           // timeline 决定回放时该表在本楼何时进入 state：必须早于本次追加的增量。
@@ -2651,6 +2750,13 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     if (!activeReplay) {
       throw new Error('V2 当前楼层模板提交无法解析 active full checkpoint replay state。');
     }
+    // 收敛会清空候选 frame 的 per-sheet checkpoints；先按目标 key 捕获不可变副本，
+    // 仅供同楼层 reveal 在 bounded replay 找不到可见来源时使用。
+    const revealCheckpointSources = new Map<string, unknown>();
+    for (const change of requestedChanges.filter(item => item.kind === 'introduction')) {
+      const checkpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+      if (checkpoint !== undefined) revealCheckpointSources.set(change.sheetKey, deepClone_ACU(checkpoint));
+    }
     if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
       if (!activeReplay.compatibilityRepairs?.length
         || hasStructuralReplayCompatibilityRepairs_ACU(activeReplay.compatibilityRepairs)) {
@@ -2702,42 +2808,47 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       // perSheetCheckpoints 只是历史痕迹：表可能经由 hide、data_replace 或早期删除逻辑
       // 离开 active state，却仍留下一个没有 hide timeline 的 sheet checkpoint。
       // 把这种痕迹当作“仍活跃”，会让重新切回带该表的模板时走不到下面的唤醒分支，
-      // 被误判成“重复引入”直接拒绝。历史里存在过的表由 historyHas 分支负责唤醒。
-      const existingSheetCheckpoint = (frame.perSheetCheckpoints || {})[change.sheetKey] as TableSheetCheckpointV2_ACU | undefined;
+      // 被误判成“重复引入”直接拒绝。历史里存在过的表由 history evidence 分支负责唤醒。
       const activeHas = Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey);
-      const historyHas = historyContainsOrCannotDisproveSheet_ACU(chat, isolationKey, target.index, change.sheetKey);
+      const historyEvidence = introductionHistoryEvidence_ACU(chat, isolationKey, target.index, change.sheetKey);
+      logDebug_ACU(`[V2 Persist] introduction_lifecycle_decision: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, activeHas=${activeHas}, history=${historyEvidence.status}, historyMessageIndex=${historyEvidence.messageIndex ?? 'none'}, historyArtifact=${historyEvidence.artifactKind || 'none'}。`);
       if (activeHas) {
         // 仍活跃：既非全新，也非可恢复的隐藏表。绝不能让模板 introduction 覆盖活数据。
         // 正常的 stale plan 应先被 baseRevision 拦截；保留这里作为跨入口/异常状态的最终保险。
+        logDebug_ACU(`[V2 Persist] active_introduction_conflict: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, messageIndex=${target.index}, baseRevision=${options.baseRevision ?? transactionContext.baseRevision ?? 'unknown'}。`);
         throw new Error(
-          `当前模板计划尝试将仍在使用的表作为新表引入，已拒绝覆盖已有数据：sheetKey=${change.sheetKey}，requestId=${options.requestId || 'unknown'}。请重新读取当前表格后重试。 `
-          + `V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`,
+          `V2 active_introduction_conflict: 当前模板计划尝试将仍在使用的表作为新表引入，已拒绝覆盖已有数据：sheetKey=${change.sheetKey}，requestId=${options.requestId || 'unknown'}。请重新读取当前表格后重试。`,
         );
       }
-      if (historyHas) {
-        // historyHas 有两种含义：(1) 历史确实曾有该表（可恢复的隐藏表）；
-        // (2) 历史 frame 畸形/无法证伪（`cannot disprove`）——此时并非真的曾有该表，
-        // 不能凭损坏历史臆造 reveal 数据。二者的区分依据：能否 bounded replay 定位到可信数据。
-        const revealSource = await locateRevealSourceSheetData_ACU(chat, isolationKey, target.index, change.sheetKey);
+      if (historyEvidence.status === 'indeterminate') {
+        logDebug_ACU(`[V2 Persist] history_indeterminate: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, messageIndex=${historyEvidence.messageIndex ?? 'unknown'}, artifact=${historyEvidence.artifactKind || 'unknown'}, reason=${historyEvidence.reason || 'unknown'}。`);
+        throw new Error(
+          `V2 history_indeterminate: sheetKey=${change.sheetKey}, messageIndex=${historyEvidence.messageIndex ?? 'unknown'}, `
+          + `artifact=${historyEvidence.artifactKind || 'unknown'}, reason=${historyEvidence.reason || 'unknown'}.`,
+        );
+      }
+      if (historyEvidence.status === 'present') {
+        // 历史确实曾有该表（可恢复的隐藏表）；bounded replay 用于定位离开时的可信数据。
+        const revealSource = await resolveRevealSource_ACU(
+          chat,
+          isolationKey,
+          target.index,
+          change.sheetKey,
+          revealCheckpointSources.get(change.sheetKey),
+        );
         assertTemplateCommitChatContext_ACU(chat, options);
-        if (revealSource) {
+        if (revealSource.status === 'resolved') {
           // 能定位到可信历史可见数据 → 曾被隐藏的表，reveal 恢复"离开时最新状态"（语义1）。
-          revealDataBySheet.set(change.sheetKey, revealSource);
+          logDebug_ACU(`[V2 Persist] reveal_source_resolved: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, sourceKind=${revealSource.sourceKind}, sourceMessageIndex=${revealSource.messageIndex}。`);
+          revealDataBySheet.set(change.sheetKey, revealSource.sheetData);
           continue;
         }
-        // bounded replay 粒度是楼层：同一楼内离开 active state 的表无法靠“更早楼层”找回可见状态。
-        // 此时改用本 frame 里该表 sheet checkpoint 的 data —— 它就是该表离开前的完整状态，
-        // 是提交时写入的可信来源，不是臆造。
-        //
-        // 不要求它带 hide timeline：表也可能经由 data_replace 或早期删除逻辑离开，
-        // 只留下无 timeline 的残留 checkpoint；那种 data 同样是可信的离开前状态。
-        if (isObjectRecord_ACU(existingSheetCheckpoint?.data)) {
-          revealDataBySheet.set(change.sheetKey, deepClone_ACU(existingSheetCheckpoint!.data) as Sheet_ACU);
-          continue;
+        if (revealSource.status === 'indeterminate') {
+          logDebug_ACU(`[V2 Persist] reveal_source_indeterminate: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, historyMessageIndex=${historyEvidence.messageIndex ?? 'unknown'}, reason=${revealSource.reason}。`);
+          throw new Error(`V2 reveal_source_indeterminate: sheetKey=${change.sheetKey}, reason=${revealSource.reason}。`);
         }
-        // 定位不到可信数据（含历史畸形、无法证伪）→ 保持 introduction 保守拒绝，绝不基于损坏历史覆盖。
-        // 若强行按全新表引入，新写的空 checkpoint 会在回放时盖掉历史上曾存在的同名表数据。
-        throw new Error(`V2 sheet introduction requires a genuinely new sheet: sheetKey=${change.sheetKey} already exists in the active checkpoint state.`);
+        logDebug_ACU(`[V2 Persist] reveal_source_missing: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, historyMessageIndex=${historyEvidence.messageIndex ?? 'unknown'}。`);
+        throw new Error(`V2 reveal_source_missing: sheetKey=${change.sheetKey} 有历史存在证据但无法定位可信恢复来源，已拒绝写入。`);
       }
       // 真正全新表：走 introduction。
       const existingCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
@@ -2830,9 +2941,12 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       if (deletedSheetKeys.includes(sheetKey)) {
         throw new Error(`V2 sheet hide 不能与删除同一 sheetKey 组合：${sheetKey}。`);
       }
-      const hideSource = await locateRevealSourceSheetData_ACU(chat, isolationKey, target.index, sheetKey);
+      const hideSource = await resolveRevealSource_ACU(chat, isolationKey, target.index, sheetKey);
       assertTemplateCommitChatContext_ACU(chat, options);
-      if (!hideSource) {
+      if (hideSource.status === 'indeterminate') {
+        throw new Error(`V2 sheet hide 数据来源无法确认：sheetKey=${sheetKey}，reason=${hideSource.reason}。`);
+      }
+      if (hideSource.status === 'not_found') {
         throw new Error(`V2 sheet hide 无法定位待隐藏表的当前数据：sheetKey=${sheetKey}。`);
       }
       const existingCheckpoint = frame.perSheetCheckpoints?.[sheetKey];
@@ -2845,7 +2959,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         createdAt,
         reason: 'schema_change',
         sheetKey,
-        data: hideSource,
+        data: hideSource.sheetData,
         ...(scheduleSummary ? { scheduleSummary: deepClone_ACU(scheduleSummary) } : {}),
         event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
         timeline: {
@@ -2975,7 +3089,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       assertTemplateCommitChatContext_ACU(chat, options);
       primarySaveAttempted = true;
       await saveChatToHostStrict_ACU();
-      logDebug_ACU(`[V2 Persist] 当前楼层模板提交完成: requestId=${options.requestId || 'unknown'}, messageIndex=${target.index}, checkpoints=${checkpoints.length}, operations=${operations.length}, isolationKey=${isolationKey}`);
+      logDebug_ACU(`[V2 Persist] 当前楼层模板提交完成: requestId=${options.requestId || 'unknown'}, messageIndex=${target.index}, checkpoints=${checkpoints.length}, checkpointTimelines=${checkpoints.map(checkpoint => `${checkpoint.sheetKey}:${checkpoint.timeline?.kind || 'none'}@${checkpoint.timeline?.afterSeq ?? 'none'}`).join(',') || 'none'}, operations=${operations.length}, baseRevision=${options.baseRevision ?? transactionContext.baseRevision ?? 'unknown'}, commitRevision=${frame.headRevision ?? 'unknown'}, isolationKey=${isolationKey}`);
       return {
         saved: true,
         mode: 'v2_commit',
@@ -3001,7 +3115,12 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     }
   }, writeSet));
   } catch (error: any) {
-    return { saved: false, error: error?.message || String(error) };
+    const message = error?.message || String(error);
+    if (/runtime revision conflict/i.test(message)) {
+      logDebug_ACU(`[V2 Persist] stale_revision_conflict: requestId=${options.requestId || 'unknown'}, baseRevision=${options.baseRevision ?? 'unknown'}。`);
+      return { saved: false, error: `V2 stale_revision_conflict: ${message}` };
+    }
+    return { saved: false, error: message };
   }
 }
 

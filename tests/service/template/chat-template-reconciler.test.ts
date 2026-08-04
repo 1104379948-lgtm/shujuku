@@ -877,6 +877,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.candidateData.sheet_global_data).toBeUndefined();
     // rebase change 落在旧 key 上。
     expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'rebase', sheetKey: 'sheet_dCudvUnH' })]);
+    expect(plan.audit[0]).toMatchObject({ templateSheetKey: 'sheet_global_data', resolvedSheetKey: 'sheet_dCudvUnH' });
     // audit 如实记录：旧列全部丢弃，无隐藏列，零行受影响。
     expect(plan.audit[0]).toMatchObject({
       sheetKey: 'sheet_dCudvUnH',

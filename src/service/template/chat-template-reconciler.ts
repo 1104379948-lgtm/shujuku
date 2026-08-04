@@ -27,6 +27,7 @@ export interface ChatTemplateReconcileAudit_ACU {
   match: 'matched' | 'introduced' | 'deleted';
   baselineSheetKey?: string;
   templateSheetKey?: string;
+  resolvedSheetKey: string;
   baselineName?: string;
   templateName?: string;
   canonicalName?: string;
@@ -132,7 +133,7 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
       try {
         const introduced = asIntroducedSheet_ACU(templateEntry.sheet, introducedKey);
         candidateData[introducedKey] = introduced;
-        audit.push({ sheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
+        audit.push({ sheetKey: introducedKey, resolvedSheetKey: introducedKey, match: 'introduced', templateSheetKey: templateEntry.key, templateName: templateEntry.sheet.name, canonicalName, inheritedColumns: [], addedColumns: headers_ACU(introduced).slice(1), deletedColumns: [], hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, introduced.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: false, operations: [] });
       } catch (error: any) {
         blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」(${introducedKey}) 无法引入：${error?.message || String(error)}`);
       }
@@ -161,11 +162,11 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
       if (!input.destructiveChangeConfirmed) blockers.push(`删除表「${sheet.name || key}」需要显式确认。`);
       deletedSheetKeys.push(key);
       delete (candidateData as any)[key];
-      audit.push({ sheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
+      audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: headers_ACU(sheet).slice(1), hiddenColumns: [], physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
     } else {
       hiddenSheetKeys.push(key);
       delete (candidateData as any)[key];
-      audit.push({ sheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: [], hiddenColumns: headers_ACU(sheet).slice(1), physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
+      audit.push({ sheetKey: key, resolvedSheetKey: key, match: 'deleted', baselineSheetKey: key, baselineName: sheet.name, canonicalName: canonicalizeDisplayName_ACU(sheet.name), inheritedColumns: [], addedColumns: [], deletedColumns: [], hiddenColumns: headers_ACU(sheet).slice(1), physicalColumnMappings: [], fills: [], affectedRowCount: Math.max(0, sheet.content.length - 1), metadataChanged: false, metadataChangedFields: [], destructiveChangeConfirmed: input.destructiveChangeConfirmed, operations: [] });
     }
   }
   if (blockers.length > 0) return emptyPlan_ACU(baselineData, audit, blockers);
@@ -506,6 +507,7 @@ function reconcileMatchedSheetNative_ACU(before: Sheet_ACU, template: Sheet_ACU,
     meta,
     audit: {
       sheetKey,
+      resolvedSheetKey: sheetKey,
       match: 'matched',
       baselineSheetKey: sheetKey,
       templateSheetKey,
@@ -586,6 +588,7 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
       meta,
       audit: {
         sheetKey,
+        resolvedSheetKey: sheetKey,
         match: 'matched',
         baselineSheetKey: sheetKey,
         templateSheetKey,
@@ -764,7 +767,7 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
   const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
   const beforeProjection = clone_ACU(before); delete beforeProjection.seedRows;
   const changed = JSON.stringify(beforeProjection) !== JSON.stringify(sheet);
-  return { sheet, changed, meta, audit: { sheetKey, match: 'matched', baselineSheetKey: sheetKey, templateSheetKey, baselineName: before.name,
+  return { sheet, changed, meta, audit: { sheetKey, resolvedSheetKey: sheetKey, match: 'matched', baselineSheetKey: sheetKey, templateSheetKey, baselineName: before.name,
     templateName: template.name, canonicalName: canonicalizeDisplayName_ACU(before.name), inheritedColumns, addedColumns, deletedColumns: [], hiddenColumns,
     physicalColumnMappings: mappings, fills: fillAudit,
     affectedRowCount: before.content.length - 1, metadataChanged: !!meta, metadataChangedFields: meta ? Object.keys(meta) : [], destructiveChangeConfirmed: false, operations: [] } };

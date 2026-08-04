@@ -101,6 +101,27 @@ function downloadJson(jsonData: Record<string, any>, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+function isStaleRevisionConflict(result: unknown): boolean {
+  return !!result
+    && typeof result === 'object'
+    && (result as { saved?: unknown }).saved === false
+    && /^V2 stale_revision_conflict(?:\b|:)/.test(String((result as { error?: unknown }).error || ''));
+}
+
+function formatTemplateOperationError(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error || '操作失败。');
+  if (/^V2 stale_revision_conflict(?:\b|:)/.test(text)) {
+    return '表格状态在提交时已更新；系统重新读取后仍无法完成切换。请刷新当前聊天后重试。';
+  }
+  if (/^V2 history_indeterminate(?:\b|:)/.test(text)) {
+    return '表格历史状态不完整或顺序异常，已拒绝覆盖数据。请先在数据管理中检查并恢复 V2 历史后重试。';
+  }
+  if (/^V2 reveal_source_(?:missing|indeterminate)(?:\b|:)/.test(text)) {
+    return '历史表的可信恢复来源不可用，已拒绝写入。请先在数据管理中检查并恢复 V2 历史后重试。';
+  }
+  return text;
+}
+
 function resolveGuideDataForPresetSelection(selection: { kind: ChatPresetSelectionKind; name: string }): Record<string, any> | null {
   const normalized = normalizeTemplatePresetSelectionValue_ACU(selection.name);
   const chatScopeState = selection.kind === 'snapshot' ? getCurrentChatTemplateScopeState_ACU() : null;
@@ -222,7 +243,7 @@ export function useTableTemplatePresets() {
     try {
       return await action();
     } catch (error: any) {
-      const text = error?.message || '操作失败。';
+      const text = formatTemplateOperationError(error);
       message.value = { kind: 'error', text };
       toast.error(text);
       return null;
@@ -255,7 +276,16 @@ export function useTableTemplatePresets() {
   async function applyChatTemplateWithDestructiveConfirmation(
     apply: (destructiveChangeConfirmed: boolean) => Promise<any>,
   ): Promise<any> {
-    const firstResult = await apply(false);
+    const applyWithSingleStaleRetry = async (destructiveChangeConfirmed: boolean): Promise<any> => {
+      const firstAttempt = await apply(destructiveChangeConfirmed);
+      // stale revision 表示本次计划的 read-plan-commit 窗口已失效。重新进入 service
+      // 才会读取新基线；其它 V2 历史错误绝不能通过重试伪装成可恢复状态。
+      if (!isStaleRevisionConflict(firstAttempt)) return firstAttempt;
+      if (templateOperationController.signal.aborted) return firstAttempt;
+      return apply(destructiveChangeConfirmed);
+    };
+
+    const firstResult = await applyWithSingleStaleRetry(false);
     if (!firstResult || firstResult.saved !== false || !Array.isArray(firstResult.blockers) || firstResult.blockers.length === 0) {
       return firstResult;
     }
@@ -271,7 +301,7 @@ export function useTableTemplatePresets() {
       cancelLabel: '取消',
       confirmVariant: 'danger',
     });
-    return confirmed ? apply(true) : firstResult;
+    return confirmed ? applyWithSingleStaleRetry(true) : firstResult;
   }
 
   async function selectChatPreset(name: string): Promise<void> {

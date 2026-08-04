@@ -589,6 +589,9 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
         return { saved: false, blockers: plan.blockers, error: plan.blockers.join('；') };
     }
     logDebug_ACU(`[TemplateScope] 模板协调计划已生成: requestId=${requestId}, baseRevision=${baseRevision}, changes=${plan.sheetChanges.map(change => `${change.kind}:${change.sheetKey}`).join(',') || 'none'}, deleted=${plan.deletedSheetKeys.join(',') || 'none'}`);
+    logDebug_ACU(`[TemplateScope] 模板 Sheet identity 已解析: requestId=${requestId}, mappings=${plan.audit
+        .filter(item => item.templateSheetKey)
+        .map(item => `${item.templateSheetKey}->${item.resolvedSheetKey}`).join(',') || 'none'}`);
     const guideData = buildChatSheetGuideDataFromData_ACU(plan.candidateData, {
         preserveSeedRowsFromGuideData: pristineChat ? null : getChatSheetGuideDataForIsolationKey_ACU(isolationKey),
         seedRowsFromTemplateObj: targetTemplateData,

@@ -246,6 +246,56 @@ describe('useTableTemplatePresets', () => {
     expect(toast.items.at(-1)).toMatchObject({ kind: 'warning', text: '模板已保存，但 SQLite 运行时重建失败。' });
   });
 
+  it('stale revision 时只重新读取并重试一次，成功后不显示错误', async () => {
+    const { useTableTemplatePresets, toast, applyTemplatePresetToCurrent_ACU } = await importComposable();
+    const presets = useTableTemplatePresets();
+    applyTemplatePresetToCurrent_ACU
+      .mockResolvedValueOnce({ saved: false, error: 'V2 stale_revision_conflict: runtime revision conflict' })
+      .mockResolvedValueOnce({ saved: true, mode: 'v2_commit' });
+
+    await presets.selectChatPreset('chat-A');
+
+    expect(applyTemplatePresetToCurrent_ACU).toHaveBeenCalledTimes(2);
+    expect(applyTemplatePresetToCurrent_ACU).toHaveBeenNthCalledWith(1, 'chat-A', expect.objectContaining({
+      destructiveChangeConfirmed: false,
+    }));
+    expect(applyTemplatePresetToCurrent_ACU).toHaveBeenNthCalledWith(2, 'chat-A', expect.objectContaining({
+      destructiveChangeConfirmed: false,
+    }));
+    expect(presets.message.value).toBeNull();
+    expect(toast.items.some(item => item.kind === 'error')).toBe(false);
+  });
+
+  it('连续 stale revision 在一次重试后停止，并给出可操作提示', async () => {
+    const { useTableTemplatePresets, toast, applyTemplatePresetToCurrent_ACU } = await importComposable();
+    const presets = useTableTemplatePresets();
+    applyTemplatePresetToCurrent_ACU
+      .mockResolvedValueOnce({ saved: false, error: 'V2 stale_revision_conflict: runtime revision conflict' })
+      .mockResolvedValueOnce({ saved: false, error: 'V2 stale_revision_conflict: runtime revision conflict' });
+
+    await presets.selectChatPreset('chat-A');
+
+    const expected = '表格状态在提交时已更新；系统重新读取后仍无法完成切换。请刷新当前聊天后重试。';
+    expect(applyTemplatePresetToCurrent_ACU).toHaveBeenCalledTimes(2);
+    expect(presets.message.value).toMatchObject({ kind: 'error', text: expected });
+    expect(toast.items.at(-1)).toMatchObject({ kind: 'error', text: expected });
+  });
+
+  it.each([
+    ['V2 history_indeterminate: sheetKey=sheet_a', '表格历史状态不完整或顺序异常，已拒绝覆盖数据。请先在数据管理中检查并恢复 V2 历史后重试。'],
+    ['V2 reveal_source_missing: sheetKey=sheet_a', '历史表的可信恢复来源不可用，已拒绝写入。请先在数据管理中检查并恢复 V2 历史后重试。'],
+  ])('历史恢复错误不自动重试，并展示可操作提示', async (error, expected) => {
+    const { useTableTemplatePresets, toast, applyTemplatePresetToCurrent_ACU } = await importComposable();
+    const presets = useTableTemplatePresets();
+    applyTemplatePresetToCurrent_ACU.mockResolvedValueOnce({ saved: false, error });
+
+    await presets.selectChatPreset('chat-A');
+
+    expect(applyTemplatePresetToCurrent_ACU).toHaveBeenCalledOnce();
+    expect(presets.message.value).toMatchObject({ kind: 'error', text: expected });
+    expect(toast.items.at(-1)).toMatchObject({ kind: 'error', text: expected });
+  });
+
   it('操作失败时保留局部错误并显示短 toast', async () => {
     const { useTableTemplatePresets, toast, applyTemplatePresetToCurrent_ACU } = await importComposable();
     const presets = useTableTemplatePresets();
