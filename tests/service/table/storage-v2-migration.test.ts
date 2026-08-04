@@ -437,8 +437,9 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     expect(mockChatRef.value[1].TavernDB_ACU_IsolatedData[''].storageFrame).toEqual(v2Before);
   });
 
-  it('合成 spv7.9 mixed legacy/V2 fixture 无 provenance 时保持 fail-closed 且零写入', async () => {
+  it('合成 spv7.9 mixed legacy/V2 fixture 中 legacy 来源晚于无后继 V2 时静默收敛为新 checkpoint', async () => {
     const data = structuredClone(mixedLegacyV2Fixture.legacy) as any;
+    const beforeProjection = getBusinessDataProjection_ACU(data);
     mockChatRef.value = [
       {
         is_user: false,
@@ -454,17 +455,77 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
       { is_user: true },
       { is_user: false, mes: 'latest ai' },
     ];
-    const before = structuredClone(mockChatRef.value);
 
     const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
 
-    expect(result).toEqual(expect.objectContaining({ migrated: false }));
+    expect(result).toEqual(expect.objectContaining({ migrated: true, messageIndex: 3 }));
     expect(result.mixedDecision?.kind).toBe('conflict_requires_user_choice');
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(mockChatRef.value[1].TavernDB_ACU_IndependentData).toBeUndefined();
+    const migratedTag = mockChatRef.value[3].TavernDB_ACU_IsolatedData[''];
+    expect(migratedTag.storageFrame.checkpoint.reason).toBe('migration');
+    expect(getBusinessDataProjection_ACU(migratedTag.storageFrame.checkpoint.data)).toEqual(beforeProjection);
+    expect(getBusinessDataProjection_ACU(result.data)).toEqual(beforeProjection);
+    expect(migratedTag.migrationAuditBackup.supersededV2Frames).toEqual([
+      expect.objectContaining({ messageIndex: 0, isolationKey: '', storageFrame: mixedLegacyV2Fixture.v2Frame }),
+    ]);
+    expect(resolveTableStorageStrategy_ACU(mockChatRef.value, '', { enabled: false, code: '' })).toEqual({ mode: 'v2' });
+
+    mockSaveChatToHost.mockClear();
+    const reopened = await migrateLegacyStorageToV2OnLoad_ACU({
+      data: result.data!,
+      isolationKey: '',
+      isolationConfig: { enabled: false, code: '' },
+    });
+
+    expect(reopened).toEqual({ migrated: false });
     expect(mockSaveChatToHost).not.toHaveBeenCalled();
-    expect(mockChatRef.value).toEqual(before);
+    expect(resolveTableStorageStrategy_ACU(mockChatRef.value, '', { enabled: false, code: '' })).toEqual({ mode: 'v2' });
   });
 
-  it('mixed legacy/V2 缺少已验证 provenance 时只按决策协议阻止自动迁移，不再比较 candidate 与 replay', async () => {
+  it('mixed 升级残留的 legacy 旧 key 按 V2 规范名命名空间写入新 checkpoint', async () => {
+    const legacyData = {
+      sheet_legacy_random: { ...sheet('背包物品表', [['row_id', '名称'], ['1', 'legacy 新值']]), uid: 'sheet_legacy_random' },
+    } as any;
+    const v2Data = {
+      sheet_bei_bao_wu_pin_biao: { ...sheet('背包物品表', [['row_id', '名称'], ['1', 'V2 旧值']]), uid: 'sheet_bei_bao_wu_pin_biao' },
+    } as any;
+    mockChatRef.value = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': { _acu_storage_version: 2, storageFrame: {
+            version: 2,
+            headRevision: 'checkpoint:old-key-residual',
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: v2Data },
+            logEntries: [],
+          } },
+        },
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: { sheet_legacy_random: legacyData.sheet_legacy_random },
+        TavernDB_ACU_ModifiedKeys: ['sheet_legacy_random'],
+      },
+      { is_user: false, mes: 'latest ai' },
+    ];
+
+    const result = await migrateLegacyStorageToV2OnLoad_ACU({ data: legacyData, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+    expect(result.migrated).toBe(true);
+    expect(result.data).not.toHaveProperty('sheet_legacy_random');
+    expect(result.data?.sheet_bei_bao_wu_pin_biao).toMatchObject({
+      uid: 'sheet_bei_bao_wu_pin_biao',
+      content: [['row_id', '名称'], ['1', 'legacy 新值']],
+    });
+    const checkpoint = mockChatRef.value[2].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint;
+    expect(checkpoint.data).toEqual(result.data);
+    expect(checkpoint.scheduleSummary).toHaveProperty('sheet_bei_bao_wu_pin_biao');
+    expect(checkpoint.scheduleSummary).not.toHaveProperty('sheet_legacy_random');
+    expect(checkpoint.migrationProvenance.legacySourceMessageIndices).toEqual([1]);
+  });
+
+  it('mixed legacy/V2 无 provenance 且 legacy 来源晚于无后继 V2 时以 legacy 静默重建 V2', async () => {
     const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'legacy 铁剑']]) } as any;
     mockChatRef.value = [
       {
@@ -486,7 +547,6 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
       { is_user: true },
       { is_user: false, mes: 'latest ai' },
     ];
-    const before = structuredClone(mockChatRef.value);
 
     const result = await migrateLegacyStorageToV2OnLoad_ACU({
       data,
@@ -495,10 +555,229 @@ describe('migrateLegacyStorageToV2OnLoad_ACU', () => {
     });
 
     expect(result.mixedDecision?.kind).toBe('conflict_requires_user_choice');
-    expect(result).toEqual(expect.objectContaining({ migrated: false, error: 'mixed legacy-v1 and V2 data detected: conflict_requires_user_choice; automatic migration remains blocked' }));
+    expect(result).toEqual(expect.objectContaining({ migrated: true, messageIndex: 3, data }));
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(mockChatRef.value[1].TavernDB_ACU_IndependentData).toBeUndefined();
+    expect(mockChatRef.value[3].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data).toEqual(data);
+    expect(mockChatRef.value[3].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.migrationProvenance).toBeDefined();
+    expect(resolveTableStorageStrategy_ACU(mockChatRef.value, '', { enabled: false, code: '' })).toEqual({ mode: 'v2' });
+  });
+
+  it('mixed V2 anchor 晚于 legacy 来源时不得静默用 legacy 覆盖', async () => {
+    const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'legacy 铁剑']]) } as any;
+    mockChatRef.value = [
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0'],
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': { _acu_storage_version: 2, storageFrame: {
+            version: 2,
+            headRevision: 'checkpoint:newer-v2',
+            checkpoint: { kind: 'full', createdAt: 2, reason: 'init', data: { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'V2 新数据']]) } },
+            logEntries: [],
+          } },
+        },
+      },
+    ];
+    const before = structuredClone(mockChatRef.value);
+
+    const result = await migrateLegacyStorageToV2OnLoad_ACU({
+      data,
+      isolationKey: '',
+      isolationConfig: { enabled: false, code: '' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      migrated: false,
+      error: 'mixed legacy-v1 and V2 data detected: conflict_requires_user_choice; automatic migration remains blocked',
+    }));
     expect(mockSaveChatToHost).not.toHaveBeenCalled();
-    expect(mockChatRef.value.flatMap(message => Object.values(message?.TavernDB_ACU_IsolatedData || {})).some((tagData: any) => tagData?.storageFrame?.checkpoint?.migrationProvenance)).toBe(false);
     expect(mockChatRef.value).toEqual(before);
+  });
+
+  it('V2 anchor 同 frame 已有业务日志时不得按升级残留静默覆盖', async () => {
+    const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'legacy 铁剑']]) } as any;
+    mockChatRef.value = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': { _acu_storage_version: 2, storageFrame: {
+            version: 2,
+            headRevision: 'checkpoint:v2-with-log',
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'V2 基底']]) } },
+            logEntries: [{
+              seq: 1,
+              entryId: 'v2-successor-in-anchor-frame',
+              createdAt: 2,
+              source: 'manual_crud',
+              targetMessageIndex: 0,
+              aiFloor: 1,
+              filledSheetKeys: [],
+              changedSheetKeys: ['sheet_0'],
+              groupKeys: [],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', 'V2 后继数据'] }],
+            }],
+          } },
+        },
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0'],
+      },
+    ];
+    const before = structuredClone(mockChatRef.value);
+
+    const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+    expect(result.migrated).toBe(false);
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(mockChatRef.value).toEqual(before);
+  });
+
+  it('V2 replay 含 legacy 候选缺失的业务表时不得静默删除该表', async () => {
+    const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'legacy 铁剑']]) } as any;
+    mockChatRef.value = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': { _acu_storage_version: 2, storageFrame: {
+            version: 2,
+            headRevision: 'checkpoint:v2-extra-sheet',
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: {
+                sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'V2 旧值']]),
+                sheet_v2_only: sheet('V2 独有表', [['row_id', '名称'], ['1', '不得静默删除']]),
+              },
+            },
+            logEntries: [],
+          } },
+        },
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0'],
+      },
+    ];
+    const before = structuredClone(mockChatRef.value);
+
+    const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+    expect(result.migrated).toBe(false);
+    expect(result.error).toContain('automatic migration remains blocked');
+    expect(result.mixedDecision?.evidence.v2.replay.data).toHaveProperty('sheet_v2_only');
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(mockChatRef.value).toEqual(before);
+  });
+
+  it('mixed 升级残留收敛严格保存失败时恢复 legacy 与旧 V2', async () => {
+    const data = structuredClone(mixedLegacyV2Fixture.legacy) as any;
+    mockChatRef.value = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': { _acu_storage_version: 2, storageFrame: structuredClone(mixedLegacyV2Fixture.v2Frame) },
+        },
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0'],
+      },
+    ];
+    const before = structuredClone(mockChatRef.value);
+    mockSaveChatToHost.mockRejectedValueOnce(new Error('mixed host write failed'));
+
+    const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+    expect(result).toEqual(expect.objectContaining({ migrated: false, error: expect.stringContaining('mixed host write failed') }));
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+    expect(mockChatRef.value).toEqual(before);
+  });
+
+  it('存在畸形 V2 历史标记时禁止绕过 mixed 检查并清理 legacy', async () => {
+    const data = { sheet_0: sheet('背包', [['row_id', '名称'], ['1', 'legacy 铁剑']]) } as any;
+    mockChatRef.value = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              headRevision: 'checkpoint:malformed',
+              checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data },
+              logEntries: 'broken',
+            },
+          },
+        },
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 },
+        TavernDB_ACU_ModifiedKeys: ['sheet_0'],
+      },
+    ];
+    const before = structuredClone(mockChatRef.value);
+
+    const result = await migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+
+    expect(result).toEqual(expect.objectContaining({
+      migrated: false,
+      error: 'mixed legacy-v1 and V2 data detected: blocked_replay_unavailable; automatic migration remains blocked',
+    }));
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(mockChatRef.value).toEqual(before);
+  });
+
+  it('候选构建期间 isolation scope 漂移时零写入并保留原聊天', async () => {
+    const data = structuredClone(mixedLegacyV2Fixture.legacy) as any;
+    mockChatRef.value = [
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: structuredClone(mixedLegacyV2Fixture.v2Frame) } } },
+      { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+    ];
+    const before = structuredClone(mockChatRef.value);
+
+    const pending = migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+    mockRuntimeScope.isolationKey = 'drifted-isolation';
+    const result = await pending;
+
+    expect(result).toEqual(expect.objectContaining({
+      migrated: false,
+      error: 'legacy migration aborted: active isolation changed before commit',
+    }));
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(mockChatRef.value).toEqual(before);
+  });
+
+  it('候选构建期间活动聊天漂移时零写入且不改写原聊天', async () => {
+    const data = structuredClone(mixedLegacyV2Fixture.legacy) as any;
+    const originalChat = [
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: structuredClone(mixedLegacyV2Fixture.v2Frame) } } },
+      { is_user: false, TavernDB_ACU_IndependentData: { sheet_0: data.sheet_0 }, TavernDB_ACU_ModifiedKeys: ['sheet_0'] },
+    ];
+    mockChatRef.value = originalChat;
+    const before = structuredClone(originalChat);
+
+    const pending = migrateLegacyStorageToV2OnLoad_ACU({ data, isolationKey: '', isolationConfig: { enabled: false, code: '' } });
+    mockChatRef.value = [{ is_user: false, mes: 'other chat' }];
+    const result = await pending;
+
+    expect(result).toEqual(expect.objectContaining({
+      migrated: false,
+      error: 'legacy migration aborted: active chat changed before commit',
+    }));
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+    expect(originalChat).toEqual(before);
+    expect(mockChatRef.value).toEqual([{ is_user: false, mes: 'other chat' }]);
   });
 
 

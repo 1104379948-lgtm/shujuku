@@ -6,6 +6,16 @@
 
 迁移只改变存储结构，不改变业务可见数据：迁移前旧合并链路看到什么，迁移后的 V2 checkpoint 就保存什么。
 
+SPv7.9 升级过程中若同时检测到 legacy 与旧 V2 痕迹，不得仅因 mixed 状态让整库不可见。满足以下条件时，以可无损修复的 legacy 合并结果作为升级源，静默重建单一 V2 full checkpoint：
+
+- legacy 来源楼层不早于 V2 full anchor；
+- V2 没有合法 migration provenance；
+- V2 full anchor 所在 frame 及其后续 frame 没有 operation 或 per-sheet checkpoint 等业务后继活动；
+- V2 replay 不包含 legacy 候选中不存在的业务表；否则静默重建会删除 V2 专有表；
+- legacy audit/repair 可以无损完成。
+
+畸形或不完整的 V2 marker 同样属于历史证据，不能绕过 mixed 检查后清理 legacy；其 replay 不可用时必须 fail closed。被替换的旧 V2 frame 必须写入迁移审计备份。新 checkpoint、备份与 legacy 清理必须在同一个候选聊天中一次严格保存；成功后再次打开聊天只能进入 V2 replay，不得再次进入 mixed migration。
+
 ## 业务触发点
 
 迁移只发生在一个业务时机：
@@ -20,6 +30,7 @@
 → 加载聊天数据库
 → 检测存储策略
 → legacy-v1：合并旧数据并迁移为 V2 checkpoint
+→ mixed 升级残留：验证无 V2 后继活动后，以 legacy 重建 V2 checkpoint
 → v2：回放 V2 storageFrame
 ```
 
@@ -106,6 +117,15 @@ V2 checkpoint 写入成功后，必须清理当前隔离标签下的旧字段，
 - 保留其他隔离标签的数据。
 - 保留已写入的 V2 `storageFrame`。
 - 顶层旧字段只在 `TavernDB_ACU_Identity` 匹配当前隔离配置时清理。
+- mixed 升级收敛时，旧 V2 frame 先复制到 `migrationAuditBackup.supersededV2Frames`，再从普通 replay 路径移除。
+- checkpoint、backup 与 cleanup 不能拆成多次宿主保存。
+
+以下 mixed 状态不得静默覆盖：
+
+- V2 anchor 比最后 legacy 来源更新；
+- V2 anchor 所在 frame 或后续 frame 已包含业务日志或单表 checkpoint；
+- V2 provenance 能证明它已继承 legacy 并产生了后继状态；
+- legacy 修复需要用户确认或无法恢复。
 
 ## 失败语义
 
@@ -116,5 +136,6 @@ V2 checkpoint 写入成功后，必须清理当前隔离标签下的旧字段，
 - 写入或保存失败：失败。
 - 失败时不清理旧字段。
 - 写入阶段检测到 legacy-v1：失败。
+- mixed 收敛严格保存失败时，必须同时恢复 legacy 与被替换的旧 V2 frame。
 
 不允许在失败时悄悄初始化新库、继续写 V1、或通过快照 diff 猜测 operations。

@@ -4,8 +4,9 @@ import { cloneIsolatedData_ACU, isLegacyMatchForIsolation_ACU, readIsolatedTagDa
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { validateMigrationProvenanceV1_ACU } from '../../shared/canonical-checkpoint-validator';
+import { resolveHistoricalSheetKeyMigrations_ACU } from '../../shared/sql-read-resolver';
 import { logDebug_ACU } from '../../shared/utils';
-import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
+import { hasV2TableHistoryEvidence_ACU, isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 import type { TableCheckpointScheduleSummaryV2_ACU, TableMigrationAuditBackupV1_ACU, TableMigrationProvenanceV1_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { commitMixedStorageDecision_ACU } from './mixed-storage-commit';
 import { evaluateMixedStorageDecision_ACU, type MixedStorageDecision_ACU } from './mixed-storage-decision';
@@ -239,6 +240,84 @@ function cleanupLegacyFieldsAfterV2Write_ACU(chat: any[], isolationKey: string, 
   }
 }
 
+function hasV2SuccessorActivityForMigration_ACU(decision: MixedStorageDecision_ACU): boolean {
+  const anchorIndex = decision.evidence.v2.anchor.messageIndex;
+  return anchorIndex !== null && decision.evidence.v2.frames.some(frame => frame.messageIndex >= anchorIndex
+    && (frame.logEntryCount > 0 || frame.perSheetCheckpointKeys.length > 0));
+}
+
+function v2ReplayContainsSheetsMissingFromLegacyCandidate_ACU(
+  decision: MixedStorageDecision_ACU,
+  legacyCandidateData: TableDataObject_ACU,
+): boolean {
+  const replayedV2Data = decision.evidence.v2.replay.data;
+  if (!replayedV2Data) return false;
+  const legacySheetKeys = new Set(sheetKeysOfData_ACU(legacyCandidateData));
+  return sheetKeysOfData_ACU(replayedV2Data).some(sheetKey => !legacySheetKeys.has(sheetKey));
+}
+
+function canSupersedeUpgradeResidualV2_ACU(decision: MixedStorageDecision_ACU, latestLegacySourceIndex: number | undefined, legacyCandidateData: TableDataObject_ACU): boolean {
+  const anchorIndex = decision.evidence.v2.anchor.messageIndex;
+  if (anchorIndex === null || decision.evidence.v2.provenance.validation?.valid === true) return false;
+  if (hasV2SuccessorActivityForMigration_ACU(decision)) return false;
+  if (v2ReplayContainsSheetsMissingFromLegacyCandidate_ACU(decision, legacyCandidateData)) return false;
+  return latestLegacySourceIndex !== undefined && latestLegacySourceIndex >= anchorIndex;
+}
+
+function normalizeLegacyCandidateToV2Namespace_ACU(
+  data: TableDataObject_ACU,
+  replayedV2Data: TableDataObject_ACU | undefined,
+): { data: TableDataObject_ACU; migrations: Map<string, string> } {
+  if (!replayedV2Data) return { data, migrations: new Map() };
+  const migrations = resolveHistoricalSheetKeyMigrations_ACU(data, replayedV2Data);
+  if (migrations.size === 0) return { data, migrations };
+  const normalized = deepClone_ACU(data);
+  for (const [sourceKey, targetKey] of migrations) {
+    normalized[targetKey] = normalized[sourceKey];
+    const targetSheet = normalized[targetKey] as any;
+    if (targetSheet && typeof targetSheet === 'object') targetSheet.uid = targetKey;
+    delete normalized[sourceKey];
+  }
+  return { data: normalized, migrations };
+}
+
+function remapLegacyScheduleSummary_ACU(
+  summary: LegacyScheduleSummary_ACU,
+  migrations: Map<string, string>,
+): LegacyScheduleSummary_ACU {
+  if (migrations.size === 0) return summary;
+  const remapped: LegacyScheduleSummary_ACU = {};
+  for (const [sheetKey, value] of Object.entries(summary)) {
+    remapped[migrations.get(sheetKey) || sheetKey] = value;
+  }
+  return remapped;
+}
+
+function collectSupersededV2Frames_ACU(chat: any[], isolationKey: string): NonNullable<TableMigrationAuditBackupV1_ACU['supersededV2Frames']> {
+  const result: NonNullable<TableMigrationAuditBackupV1_ACU['supersededV2Frames']> = [];
+  chat.forEach((message, messageIndex) => {
+    if (!message || message.is_user) return;
+    const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
+    if (!isV2TagData_ACU(tagData)) return;
+    result.push({ messageIndex, isolationKey, storageFrame: deepClone_ACU(tagData.storageFrame) });
+  });
+  return result;
+}
+
+function removeSupersededV2Frames_ACU(chat: any[], isolationKey: string): void {
+  for (const message of chat) {
+    if (!message || message.is_user) continue;
+    const isolatedData = cloneIsolatedData_ACU(message) as Record<string, any>;
+    const tagData = isolatedData?.[isolationKey];
+    if (!isV2TagData_ACU(tagData)) continue;
+    delete tagData.storageFrame;
+    delete tagData._acu_storage_version;
+    if (Object.keys(tagData).length === 0) delete isolatedData[isolationKey];
+    if (Object.keys(isolatedData).length === 0) delete message.TavernDB_ACU_IsolatedData;
+    else message.TavernDB_ACU_IsolatedData = isolatedData;
+  }
+}
+
 function buildMigrationRevision_ACU(): string {
   return `checkpoint:migration:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -306,49 +385,66 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
   if (repair.requiresConfirmation) {
     return { migrated: false, error: `legacy migration requires confirmation: ${audit.issues.map(issue => issue.code).join(', ')}` };
   }
-  const candidateData = repair.candidateData as TableDataObject_ACU;
-  const hasV2Data = chat.some(message => !message?.is_user
-    && isV2TagData_ACU(readIsolatedTagData_ACU(message, options.isolationKey)));
-  if (hasV2Data) {
-    const mixedDecision = await evaluateMixedStorageDecision_ACU({
-      chat,
-      isolationKey: options.isolationKey,
-      isolationConfig: options.isolationConfig,
-      legacyData: candidateData,
-    });
-    if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'equivalent_projection_verified' && mixedDecision.kind !== 'v2_successor_verified') {
-      registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
-      return {
-        migrated: false,
-        mixedDecision,
-        error: `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
-      };
-    }
-    const commit = await commitMixedStorageDecision_ACU({
-      decision: mixedDecision,
-      action: 'keep_v2',
-      isolationConfig: options.isolationConfig,
-    });
-    if (commit.status !== 'committed') {
-      return {
-        migrated: false,
-        mixedDecision,
-        error: `mixed legacy-v1 and V2 verified cleanup failed: ${commit.error || commit.status}`,
-      };
-    }
-    const data = mixedDecision.evidence.v2.replay.data || candidateData;
-    return { migrated: true, data, mixedDecision };
-  }
-  const candidateChat = deepClone_ACU(chat);
-  const candidateTarget = candidateChat[target.index];
-  const existingTargetTagData = readIsolatedTagData_ACU(candidateTarget, options.isolationKey) as any;
-  const legacyEvidence = collectLegacyMigrationSourceEvidence_ACU(
-    candidateChat,
+  let candidateData = repair.candidateData as TableDataObject_ACU;
+  const sourceEvidenceBeforeNormalization = collectLegacyMigrationSourceEvidence_ACU(
+    chat,
     options.isolationKey,
     options.isolationConfig,
     candidateData,
     { maxMessageIndex: target.index },
   );
+  let mixedDecision: MixedStorageDecision_ACU | undefined;
+  let keyMigrations = new Map<string, string>();
+  let supersededV2Frames: NonNullable<TableMigrationAuditBackupV1_ACU['supersededV2Frames']> = [];
+  const hasV2History = chat.some(message => !message?.is_user
+    && hasV2TableHistoryEvidence_ACU(readIsolatedTagData_ACU(message, options.isolationKey)));
+  if (hasV2History) {
+    mixedDecision = await evaluateMixedStorageDecision_ACU({
+      chat,
+      isolationKey: options.isolationKey,
+      isolationConfig: options.isolationConfig,
+      legacyData: candidateData,
+    });
+    const normalized = normalizeLegacyCandidateToV2Namespace_ACU(candidateData, mixedDecision.evidence.v2.replay.data);
+    candidateData = normalized.data;
+    keyMigrations = normalized.migrations;
+    if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'equivalent_projection_verified' && mixedDecision.kind !== 'v2_successor_verified') {
+      const sourceIndices = sourceEvidenceBeforeNormalization.sourceMessageIndices;
+      const latestLegacySourceIndex = sourceIndices.length > 0 ? sourceIndices[sourceIndices.length - 1] : undefined;
+      if (!canSupersedeUpgradeResidualV2_ACU(mixedDecision, latestLegacySourceIndex, candidateData)) {
+        registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
+        return {
+          migrated: false,
+          mixedDecision,
+          error: `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
+        };
+      }
+      supersededV2Frames = collectSupersededV2Frames_ACU(chat, options.isolationKey);
+    } else {
+      const commit = await commitMixedStorageDecision_ACU({
+        decision: mixedDecision,
+        action: 'keep_v2',
+        isolationConfig: options.isolationConfig,
+      });
+      if (commit.status !== 'committed') {
+        return {
+          migrated: false,
+          mixedDecision,
+          error: `mixed legacy-v1 and V2 verified cleanup failed: ${commit.error || commit.status}`,
+        };
+      }
+      const data = mixedDecision.evidence.v2.replay.data || candidateData;
+      return { migrated: true, data, mixedDecision };
+    }
+  }
+  const candidateChat = deepClone_ACU(chat);
+  if (supersededV2Frames.length > 0) removeSupersededV2Frames_ACU(candidateChat, options.isolationKey);
+  const candidateTarget = candidateChat[target.index];
+  const existingTargetTagData = readIsolatedTagData_ACU(candidateTarget, options.isolationKey) as any;
+  const legacyEvidence: LegacyMigrationSourceEvidence_ACU = {
+    ...sourceEvidenceBeforeNormalization,
+    scheduleSummary: remapLegacyScheduleSummary_ACU(sourceEvidenceBeforeNormalization.scheduleSummary, keyMigrations),
+  };
   const migratedAt = Date.now();
   const targetAiFloor = countAiFloor_ACU(candidateChat, target.index);
   const migrationProvenance: TableMigrationProvenanceV1_ACU = {
@@ -404,6 +500,7 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
     issues: deepClone_ACU(audit.issues),
     repairPlan: deepClone_ACU(audit.repairPlan),
     idRemap: deepClone_ACU(repair.idRemap),
+    ...(supersededV2Frames.length > 0 ? { supersededV2Frames: deepClone_ACU(supersededV2Frames) } : {}),
   };
   isolatedData[options.isolationKey] = {
     ...(existingTargetTagData?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTargetTagData.summaryVectorIndexState } : {}),
@@ -430,5 +527,5 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
   }
   logDebug_ACU(`[V2 Migration] legacy-v1 migrated to V2 checkpoint: messageIndex=${target.index}, skipUpdateFloors=${skipUpdateFloors}, isolationKey=[${options.isolationKey || '无标签'}], sheets=${sheetKeys.length}`);
 
-  return { migrated: true, messageIndex: target.index, data: candidateData };
+  return { migrated: true, messageIndex: target.index, data: candidateData, ...(mixedDecision ? { mixedDecision } : {}) };
 }

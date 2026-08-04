@@ -422,6 +422,12 @@ export interface TableMigrationAuditBackupV1_ACU {
   issues: unknown[];
   repairPlan: unknown[];
   idRemap: unknown[];
+  /** Mixed 升级收敛时被新 migration checkpoint 取代的旧 V2 帧；仅用于恢复与审计。 */
+  supersededV2Frames?: Array<{
+    messageIndex: number;
+    isolationKey: string;
+    storageFrame: TableStorageFrameV2_ACU;
+  }>;
 }
 
 /** 显式恢复在覆盖目标 V2 frame 前保留的原始持久化证据。 */
