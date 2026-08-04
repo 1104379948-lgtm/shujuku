@@ -44132,6 +44132,83 @@ $CONTENT
             removeLegacyTopLevelFields_ACU(message, isolationConfig);
         }
     }
+    function hasV2SuccessorActivityForMigration_ACU(decision) {
+        const anchorIndex = decision.evidence.v2.anchor.messageIndex;
+        return anchorIndex !== null && decision.evidence.v2.frames.some(frame => frame.messageIndex >= anchorIndex
+            && (frame.logEntryCount > 0 || frame.perSheetCheckpointKeys.length > 0));
+    }
+    function v2ReplayContainsSheetsMissingFromLegacyCandidate_ACU(decision, legacyCandidateData) {
+        const replayedV2Data = decision.evidence.v2.replay.data;
+        if (!replayedV2Data)
+            return false;
+        const legacySheetKeys = new Set(sheetKeysOfData_ACU(legacyCandidateData));
+        return sheetKeysOfData_ACU(replayedV2Data).some(sheetKey => !legacySheetKeys.has(sheetKey));
+    }
+    function canSupersedeUpgradeResidualV2_ACU(decision, latestLegacySourceIndex, legacyCandidateData) {
+        const anchorIndex = decision.evidence.v2.anchor.messageIndex;
+        if (anchorIndex === null || decision.evidence.v2.provenance.validation?.valid === true)
+            return false;
+        if (hasV2SuccessorActivityForMigration_ACU(decision))
+            return false;
+        if (v2ReplayContainsSheetsMissingFromLegacyCandidate_ACU(decision, legacyCandidateData))
+            return false;
+        return latestLegacySourceIndex !== undefined && latestLegacySourceIndex >= anchorIndex;
+    }
+    function normalizeLegacyCandidateToV2Namespace_ACU(data, replayedV2Data) {
+        if (!replayedV2Data)
+            return { data, migrations: new Map() };
+        const migrations = resolveHistoricalSheetKeyMigrations_ACU(data, replayedV2Data);
+        if (migrations.size === 0)
+            return { data, migrations };
+        const normalized = deepClone_ACU(data);
+        for (const [sourceKey, targetKey] of migrations) {
+            normalized[targetKey] = normalized[sourceKey];
+            const targetSheet = normalized[targetKey];
+            if (targetSheet && typeof targetSheet === 'object')
+                targetSheet.uid = targetKey;
+            delete normalized[sourceKey];
+        }
+        return { data: normalized, migrations };
+    }
+    function remapLegacyScheduleSummary_ACU(summary, migrations) {
+        if (migrations.size === 0)
+            return summary;
+        const remapped = {};
+        for (const [sheetKey, value] of Object.entries(summary)) {
+            remapped[migrations.get(sheetKey) || sheetKey] = value;
+        }
+        return remapped;
+    }
+    function collectSupersededV2Frames_ACU(chat, isolationKey) {
+        const result = [];
+        chat.forEach((message, messageIndex) => {
+            if (!message || message.is_user)
+                return;
+            const tagData = readIsolatedTagData_ACU(message, isolationKey);
+            if (!isV2TagData_ACU(tagData))
+                return;
+            result.push({ messageIndex, isolationKey, storageFrame: deepClone_ACU(tagData.storageFrame) });
+        });
+        return result;
+    }
+    function removeSupersededV2Frames_ACU(chat, isolationKey) {
+        for (const message of chat) {
+            if (!message || message.is_user)
+                continue;
+            const isolatedData = cloneIsolatedData_ACU(message);
+            const tagData = isolatedData?.[isolationKey];
+            if (!isV2TagData_ACU(tagData))
+                continue;
+            delete tagData.storageFrame;
+            delete tagData._acu_storage_version;
+            if (Object.keys(tagData).length === 0)
+                delete isolatedData[isolationKey];
+            if (Object.keys(isolatedData).length === 0)
+                delete message.TavernDB_ACU_IsolatedData;
+            else
+                message.TavernDB_ACU_IsolatedData = isolatedData;
+        }
+    }
     function buildMigrationRevision_ACU() {
         return `checkpoint:migration:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
     }
@@ -44184,43 +44261,62 @@ $CONTENT
         if (repair.requiresConfirmation) {
             return { migrated: false, error: `legacy migration requires confirmation: ${audit.issues.map(issue => issue.code).join(', ')}` };
         }
-        const candidateData = repair.candidateData;
-        const hasV2Data = chat.some(message => !message?.is_user
-            && isV2TagData_ACU(readIsolatedTagData_ACU(message, options.isolationKey)));
-        if (hasV2Data) {
-            const mixedDecision = await evaluateMixedStorageDecision_ACU({
+        let candidateData = repair.candidateData;
+        const sourceEvidenceBeforeNormalization = collectLegacyMigrationSourceEvidence_ACU(chat, options.isolationKey, options.isolationConfig, candidateData, { maxMessageIndex: target.index });
+        let mixedDecision;
+        let keyMigrations = new Map();
+        let supersededV2Frames = [];
+        const hasV2History = chat.some(message => !message?.is_user
+            && hasV2TableHistoryEvidence_ACU(readIsolatedTagData_ACU(message, options.isolationKey)));
+        if (hasV2History) {
+            mixedDecision = await evaluateMixedStorageDecision_ACU({
                 chat,
                 isolationKey: options.isolationKey,
                 isolationConfig: options.isolationConfig,
                 legacyData: candidateData,
             });
+            const normalized = normalizeLegacyCandidateToV2Namespace_ACU(candidateData, mixedDecision.evidence.v2.replay.data);
+            candidateData = normalized.data;
+            keyMigrations = normalized.migrations;
             if (mixedDecision.kind !== 'equivalent_provenance_verified' && mixedDecision.kind !== 'equivalent_projection_verified' && mixedDecision.kind !== 'v2_successor_verified') {
-                registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
-                return {
-                    migrated: false,
-                    mixedDecision,
-                    error: `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
-                };
+                const sourceIndices = sourceEvidenceBeforeNormalization.sourceMessageIndices;
+                const latestLegacySourceIndex = sourceIndices.length > 0 ? sourceIndices[sourceIndices.length - 1] : undefined;
+                if (!canSupersedeUpgradeResidualV2_ACU(mixedDecision, latestLegacySourceIndex, candidateData)) {
+                    registerMixedStorageDecision_ACU(mixedDecision, options.isolationConfig);
+                    return {
+                        migrated: false,
+                        mixedDecision,
+                        error: `mixed legacy-v1 and V2 data detected: ${mixedDecision.kind}; automatic migration remains blocked`,
+                    };
+                }
+                supersededV2Frames = collectSupersededV2Frames_ACU(chat, options.isolationKey);
             }
-            const commit = await commitMixedStorageDecision_ACU({
-                decision: mixedDecision,
-                action: 'keep_v2',
-                isolationConfig: options.isolationConfig,
-            });
-            if (commit.status !== 'committed') {
-                return {
-                    migrated: false,
-                    mixedDecision,
-                    error: `mixed legacy-v1 and V2 verified cleanup failed: ${commit.error || commit.status}`,
-                };
+            else {
+                const commit = await commitMixedStorageDecision_ACU({
+                    decision: mixedDecision,
+                    action: 'keep_v2',
+                    isolationConfig: options.isolationConfig,
+                });
+                if (commit.status !== 'committed') {
+                    return {
+                        migrated: false,
+                        mixedDecision,
+                        error: `mixed legacy-v1 and V2 verified cleanup failed: ${commit.error || commit.status}`,
+                    };
+                }
+                const data = mixedDecision.evidence.v2.replay.data || candidateData;
+                return { migrated: true, data, mixedDecision };
             }
-            const data = mixedDecision.evidence.v2.replay.data || candidateData;
-            return { migrated: true, data, mixedDecision };
         }
         const candidateChat = deepClone_ACU(chat);
+        if (supersededV2Frames.length > 0)
+            removeSupersededV2Frames_ACU(candidateChat, options.isolationKey);
         const candidateTarget = candidateChat[target.index];
         const existingTargetTagData = readIsolatedTagData_ACU(candidateTarget, options.isolationKey);
-        const legacyEvidence = collectLegacyMigrationSourceEvidence_ACU(candidateChat, options.isolationKey, options.isolationConfig, candidateData, { maxMessageIndex: target.index });
+        const legacyEvidence = {
+            ...sourceEvidenceBeforeNormalization,
+            scheduleSummary: remapLegacyScheduleSummary_ACU(sourceEvidenceBeforeNormalization.scheduleSummary, keyMigrations),
+        };
         const migratedAt = Date.now();
         const targetAiFloor = countAiFloor_ACU(candidateChat, target.index);
         const migrationProvenance = {
@@ -44273,6 +44369,7 @@ $CONTENT
             issues: deepClone_ACU(audit.issues),
             repairPlan: deepClone_ACU(audit.repairPlan),
             idRemap: deepClone_ACU(repair.idRemap),
+            ...(supersededV2Frames.length > 0 ? { supersededV2Frames: deepClone_ACU(supersededV2Frames) } : {}),
         };
         isolatedData[options.isolationKey] = {
             ...(existingTargetTagData?.summaryVectorIndexState !== undefined ? { summaryVectorIndexState: existingTargetTagData.summaryVectorIndexState } : {}),
@@ -44297,7 +44394,7 @@ $CONTENT
             return { migrated: false, error: `legacy migration save failed: ${error instanceof Error ? error.message : String(error)}` };
         }
         logDebug_ACU(`[V2 Migration] legacy-v1 migrated to V2 checkpoint: messageIndex=${target.index}, skipUpdateFloors=${skipUpdateFloors}, isolationKey=[${options.isolationKey || '无标签'}], sheets=${sheetKeys.length}`);
-        return { migrated: true, messageIndex: target.index, data: candidateData };
+        return { migrated: true, messageIndex: target.index, data: candidateData, ...(mixedDecision ? { mixedDecision } : {}) };
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -109874,6 +109971,7 @@ $CONTENT
         const operations = [];
         const decisions = [];
         const applyModes = {};
+        const requestedRebaseSheetKeys = new Set(input.rebaseSheetKeys || []);
         for (const sheetKey of changedSheetKeys) {
             const before = input.baselineData[sheetKey];
             const after = input.candidateData[sheetKey];
@@ -109905,8 +110003,21 @@ $CONTENT
                     }
                     const issue = input.destructiveChangeConfirmed === true ? null : getDestructiveDropIssue_ACU(sheetKey, before, after);
                     const isNeedsChoice = planned?.status === 'needs_choice';
+                    if (requestedRebaseSheetKeys.has(sheetKey)) {
+                        if (issue) {
+                            // 存在实际删除列：即使用户明确选择 rebase，也必须先确认数据丢弃。
+                            issues.push(issue);
+                            decisions.push({ sheetKey, status: 'needs_confirmation', code: issue.code, message: issue.message });
+                            blockers.push(`${sheetKey}: ${issue.message}`);
+                            continue;
+                        }
+                        decisions.push({ sheetKey, status: 'auto_apply', code: 'USER_REQUESTED_REBASE', message: '用户选择按候选整表 rebase。' });
+                        applyModes[sheetKey] = 'rebase';
+                        continue;
+                    }
                     if (isNeedsChoice && Array.isArray(planned.choices) && planned.choices.length > 0) {
-                        // 可提供唯一列身份映射：让用户在 mapping 中选择。
+                        // 可精确保留历史值的 mapping 仍交由用户确认；若不存在候选 mapping，
+                        // 也可由调用方显式要求按候选整表 rebase，而不是永久阻断模板保存。
                         decisions.push({
                             sheetKey,
                             status: 'needs_choice',
@@ -109918,14 +110029,14 @@ $CONTENT
                         continue;
                     }
                     if (issue) {
-                        // 存在实际删除列：必须显式确认（无论走 migration 还是 rebase）。
+                        // 不存在可选 mapping 时，删除列仍必须显式确认。
                         issues.push(issue);
                         decisions.push({ sheetKey, status: 'needs_confirmation', code: issue.code, message: issue.message });
                         blockers.push(`${sheetKey}: ${issue.message}`);
                         continue;
                     }
                     if (planned?.status === 'rebase_available' || isNeedsChoice) {
-                        // 约束放宽 / 无唯一映射 / planner 能力不足：候选合法即可 rebase。
+                        // 无可选 mapping 时，候选 Sheet 本身就是用户明确给出的新边界，按整表 rebase。
                         decisions.push({ sheetKey, status: 'auto_apply', code: 'REBASE_AVAILABLE', message: planned?.message });
                         applyModes[sheetKey] = 'rebase';
                     }
@@ -152744,6 +152855,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         lockDirty: visualizer.lockDirty,
                     };
                     const schemaMigrationIntents = {};
+                    const requestedRebaseSheetKeys = new Set();
                     let preflight = await preflightSchemaMigrations_ACU({
                         baselineData: visualizer.templateBaseData,
                         candidateData: orderedData,
@@ -152756,13 +152868,19 @@ Expected function or array of functions, received type ${typeof value}.`
                             && decisions.every(decision => Array.isArray(decision.choices) && decision.choices.length > 0);
                         if (onlyChoiceBlockers && interactions.requestSchemaMigrationChoice) {
                             for (const decision of decisions) {
+                                const rebaseChoiceId = `rebase:${decision.sheetKey}`;
                                 const selectedId = await interactions.requestSchemaMigrationChoice({
                                     sheetKey: decision.sheetKey,
                                     message: decision.message || '请选择该 Sheet 的历史列映射。',
                                     choices: (decision.choices || []).map(choice => ({ id: choice.id, label: choice.label })),
+                                    rebaseChoiceId,
                                 });
                                 if (!selectedId)
                                     return false;
+                                if (selectedId === rebaseChoiceId) {
+                                    requestedRebaseSheetKeys.add(decision.sheetKey);
+                                    continue;
+                                }
                                 const selected = (decision.choices || []).find(choice => choice.id === selectedId);
                                 if (!selected) {
                                     toastStore.error(`schema migration 返回了无效选择：${decision.sheetKey}。`, { muteable: false });
@@ -152782,7 +152900,9 @@ Expected function or array of functions, received type ${typeof value}.`
                             }
                             preflight = await preflightSchemaMigrations_ACU({
                                 baselineData: visualizer.templateBaseData, candidateData: orderedData,
-                                intents: schemaMigrationIntents, destructiveChangeConfirmed: false,
+                                intents: schemaMigrationIntents,
+                                rebaseSheetKeys: [...requestedRebaseSheetKeys],
+                                destructiveChangeConfirmed: false,
                             });
                         }
                     }
@@ -152825,6 +152945,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             baselineData: visualizer.templateBaseData,
                             candidateData: orderedData,
                             intents: schemaMigrationIntents,
+                            rebaseSheetKeys: [...requestedRebaseSheetKeys],
                             destructiveChangeConfirmed: true,
                         });
                         if (preflight.blockers.length > 0) {
@@ -152837,12 +152958,22 @@ Expected function or array of functions, received type ${typeof value}.`
                     const operationKeys = preflight.operations.map(operation => String(operation?.sheetKey || ''));
                     const preflightChangedKeys = [...preflight.changedSheetKeys].sort();
                     const expectedSchemaKeys = [...changes.schemaChangedSheetKeys].sort();
-                    const applyModes = preflight.applyModes || {};
-                    const actionKeys = [...new Set([...operationKeys, ...Object.keys(applyModes)])].sort();
+                    // 兼容旧 preflight 返回值：没有 applyModes 时，operation 自然就是 migration。
+                    // 新契约中 applyModes 必须和 operation 的归属一致；不能把 rebase 和 migration
+                    // 同时用于一个 Sheet，更不能让未声明的 mode 绕过 action 校验。
+                    const declaredApplyModes = preflight.applyModes || {};
+                    const applyModes = { ...declaredApplyModes };
+                    for (const sheetKey of operationKeys) {
+                        if (!applyModes[sheetKey])
+                            applyModes[sheetKey] = 'migration';
+                    }
+                    const actionKeys = Object.keys(applyModes).sort();
                     const operationKeysUnique = new Set(operationKeys).size === operationKeys.length;
-                    const noModeOverlap = operationKeys.every(sheetKey => !Object.prototype.hasOwnProperty.call(applyModes, sheetKey));
+                    const operationModesAreMigration = operationKeys.every(sheetKey => applyModes[sheetKey] === 'migration');
+                    const modesAreSupported = Object.values(applyModes).every(mode => mode === 'migration' || mode === 'rebase');
                     const actionValid = operationKeysUnique
-                        && noModeOverlap
+                        && operationModesAreMigration
+                        && modesAreSupported
                         && sameTemplateValue_ACU(preflightChangedKeys, expectedSchemaKeys)
                         && actionKeys.length === expectedSchemaKeys.length
                         && new Set(actionKeys).size === actionKeys.length
@@ -154990,12 +155121,19 @@ Expected function or array of functions, received type ${typeof value}.`
                 requestSchemaMigrationChoice(summary) {
                     return dialogStore.choose({
                         title: "确认历史列对应关系",
-                        message: `${summary.message}。选择只绑定当前模板草稿；草稿变化后必须重新选择。`,
-                        actions: summary.choices.map(choice => ({
-                            value: choice.id,
-                            label: choice.label,
-                            variant: "primary",
-                        })),
+                        message: `${summary.message}。可保留历史列值进行映射，或以当前编辑器候选整表作为新边界。草稿变化后必须重新选择。`,
+                        actions: [
+                            ...summary.choices.map(choice => ({
+                                value: choice.id,
+                                label: choice.label,
+                                variant: "primary",
+                            })),
+                            {
+                                value: summary.rebaseChoiceId,
+                                label: "按当前表结构重建",
+                                variant: "danger",
+                            },
+                        ],
                         cancelLabel: "取消保存",
                     });
                 },
@@ -155630,8 +155768,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-visualizer-surface[data-v-2c628a29] {\n  flex: 1 1 auto;\n  min-width: 0;\n  min-height: 0;\n  display: grid;\n  grid-template-columns: 260px minmax(0, 1fr);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__sidebar[data-v-2c628a29] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 1px solid var(--acu-border-2);\n  background: var(--acu-sidebar-bg);\n}\n.acu-visualizer-surface__main[data-v-2c628a29] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar[data-v-2c628a29] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  min-height: 50px;\n  padding: 8px 12px 8px 16px;\n  border-bottom: 1px solid var(--acu-border-2);\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar-context[data-v-2c628a29] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  gap: 10px;\n}\n.acu-visualizer-surface__mobile-menu[data-v-2c628a29] {\n  display: none;\n  flex: 0 0 auto;\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-visualizer-surface__mobile-menu[data-v-2c628a29]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__context-items[data-v-2c628a29] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  justify-content: flex-start;\n  gap: 16px;\n}\n.acu-visualizer-surface__context-item[data-v-2c628a29] {\n  min-width: 0;\n  display: grid;\n  gap: 2px;\n}\n.acu-visualizer-surface__context-item[data-v-2c628a29]:first-child {\n  flex: 0 1 auto;\n  max-width: min(560px, 42vw);\n}\n.acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-2c628a29] {\n  flex: 0 0 auto;\n  max-width: min(260px, 20vw);\n}\n.acu-visualizer-surface__context-item span[data-v-2c628a29] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.2;\n}\n.acu-visualizer-surface__context-item strong[data-v-2c628a29] {\n  min-width: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.25;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__context-item:first-child strong[data-v-2c628a29] {\n  overflow: visible;\n  text-overflow: clip;\n  white-space: normal;\n  word-break: break-word;\n}\n.acu-visualizer-surface__context-badge[data-v-2c628a29] {\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__conflict[data-v-2c628a29] {\n  flex: 0 0 auto;\n  margin: 12px 16px 0;\n}\n.acu-visualizer-surface__conflict-actions[data-v-2c628a29] {\n  display: inline-flex;\n  flex-wrap: wrap;\n  gap: 6px;\n  margin-left: 8px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-2c628a29],\n.acu-visualizer-surface__data-toolbar-actions[data-v-2c628a29],\n.acu-visualizer-surface__database-toolbar[data-v-2c628a29],\n.acu-visualizer-surface__pagination[data-v-2c628a29],\n.acu-visualizer-surface__pagination-pages[data-v-2c628a29],\n.acu-visualizer-surface__card-header[data-v-2c628a29] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-visualizer-surface__workspace[data-v-2c628a29] {\n  flex: 1 1 auto;\n  min-height: 0;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  overflow: auto;\n  padding: 16px;\n}\n.acu-visualizer-surface__loading[data-v-2c628a29] {\n  min-height: 140px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  gap: 8px;\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__mode-tabs[data-v-2c628a29] {\n  flex: 0 0 auto;\n  width: min(360px, 42vw);\n}\n.acu-visualizer-surface__close[data-v-2c628a29] {\n  width: 30px;\n  height: 30px;\n  flex: 0 0 auto;\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-visualizer-surface__close[data-v-2c628a29]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__data-toolbar[data-v-2c628a29] {\n  flex: 0 0 auto;\n  justify-content: space-between;\n  padding: 4px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-2c628a29] {\n  flex: 0 0 auto;\n  justify-content: flex-end;\n}\n.acu-visualizer-surface__pagination[data-v-2c628a29] {\n  flex: 0 0 auto;\n  justify-content: center;\n  gap: 14px;\n  padding: 6px 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-visualizer-surface__pagination-pages[data-v-2c628a29] {\n  min-width: 0;\n  flex-wrap: wrap;\n  justify-content: center;\n  gap: 8px;\n}\n.acu-visualizer-surface__page-button[data-v-2c628a29] {\n  width: 34px;\n  min-width: 34px;\n  height: 34px;\n  padding: 0;\n  border: 1px solid var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n}\n.acu-visualizer-surface__page-button[data-v-2c628a29]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__page-button--active[data-v-2c628a29],\n.acu-visualizer-surface__page-button--active[data-v-2c628a29]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-visualizer-surface__page-button[data-v-2c628a29]:disabled:not(\n    .acu-visualizer-surface__page-button--active\n  ) {\n  border-color: var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-2);\n  opacity: 1;\n  cursor: default;\n}\n.acu-visualizer-surface__page-jump[data-v-2c628a29] {\n  flex: 0 0 64px;\n  width: 64px;\n}\n.acu-visualizer-surface__page-jump[data-v-2c628a29] .acu-input {\n  min-height: 34px;\n  border: 1px solid var(--acu-border) !important;\n  background: var(--acu-bg-0) !important;\n  text-align: center;\n  font-size: var(--acu-font-size-body-lg, 13px) !important;\n  font-variant-numeric: tabular-nums;\n}\n.acu-visualizer-surface__data-range[data-v-2c628a29] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__database-toolbar[data-v-2c628a29] {\n  flex: 0 0 auto;\n  padding: 0 0 4px;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__database-toolbar h2[data-v-2c628a29] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n}\n.acu-visualizer-surface__database-toolbar p[data-v-2c628a29] {\n  margin: 5px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-readable, 1.55);\n}\n.acu-visualizer-surface__empty[data-v-2c628a29] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-visualizer-surface__card-grid[data-v-2c628a29] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));\n  gap: 12px;\n}\n.acu-visualizer-surface__data-card[data-v-2c628a29] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  height: 100%;\n  padding: 16px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-visualizer-surface__card-header strong[data-v-2c628a29] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-panel-title, 15px);\n}\n.acu-visualizer-surface__card-header span[data-v-2c628a29] {\n  min-width: 0;\n  margin-right: auto;\n  overflow: hidden;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__card-header[data-v-2c628a29] .acu-icon-btn {\n  background: transparent;\n}\n.acu-visualizer-surface__card-header[data-v-2c628a29]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n}\n.acu-visualizer-surface__card-header[data-v-2c628a29] .acu-icon-btn--accent {\n  background: var(--acu-accent-glow);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__card-header[data-v-2c628a29]\n  .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-visualizer-surface__fields[data-v-2c628a29] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-visualizer-surface__field-row[data-v-2c628a29] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  align-items: stretch;\n}\n.acu-visualizer-surface__field-row.is-wide[data-v-2c628a29] {\n  grid-template-columns: minmax(0, 1fr);\n}\n.acu-visualizer-surface__field[data-v-2c628a29] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  padding: 2px;\n  border: 1px solid transparent;\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n  transition:\n    background 0.15s ease,\n    border-color 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field[data-v-2c628a29] .acu-textarea {\n  flex: 1 1 auto;\n  min-height: 34px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n}\n.acu-visualizer-surface__field-preview[data-v-2c628a29] {\n  width: 100%;\n  min-height: 34px;\n  box-sizing: border-box;\n  padding: 8px 10px;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-1);\n  cursor: text;\n  display: block;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n  transition:\n    background 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field-preview[data-v-2c628a29]:hover,\n.acu-visualizer-surface__field-preview[data-v-2c628a29]:focus-visible {\n  outline: none;\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    var(--acu-bg-2);\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-visualizer-surface__field-preview.is-empty[data-v-2c628a29] {\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__field-label[data-v-2c628a29] {\n  min-width: 0;\n  min-height: 24px;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-visualizer-surface__field-label > span[data-v-2c628a29]:first-child {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__field-locks[data-v-2c628a29] {\n  flex: 0 0 auto;\n  min-width: 51px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  opacity: 0.44;\n  transition: opacity 0.15s ease;\n}\n.acu-visualizer-surface__field:hover .acu-visualizer-surface__field-locks[data-v-2c628a29],\n.acu-visualizer-surface__field:focus-within\n  .acu-visualizer-surface__field-locks[data-v-2c628a29],\n.acu-visualizer-surface__field.is-actions-active\n  .acu-visualizer-surface__field-locks[data-v-2c628a29],\n.acu-visualizer-surface__field.is-locked .acu-visualizer-surface__field-locks[data-v-2c628a29],\n.acu-visualizer-surface__field.is-special-index\n  .acu-visualizer-surface__field-locks[data-v-2c628a29] {\n  opacity: 1;\n}\n.acu-visualizer-surface__field-locks[data-v-2c628a29] .acu-icon-btn {\n  --acu-icon-btn-size: 24px;\n  --acu-icon-btn-font-size: 11px;\n  width: 24px;\n  height: 24px;\n  background: transparent !important;\n}\n.acu-visualizer-surface__field-locks[data-v-2c628a29]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__field-locks[data-v-2c628a29] .acu-icon-btn--accent {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 16%, transparent) !important;\n}\n.acu-visualizer-surface__field-locks[data-v-2c628a29]\n  .acu-icon-btn--accent:hover:not(:disabled) {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 22%, transparent) !important;\n}\n.acu-visualizer-surface__field.is-locked[data-v-2c628a29] {\n  border-color: var(--acu-border);\n  background: color-mix(in srgb, var(--acu-warning) 8%, transparent);\n}\n.acu-visualizer-surface__field.is-actions-active[data-v-2c628a29]:not(.is-locked) {\n  background: color-mix(in srgb, var(--acu-accent) 6%, transparent);\n}\n.acu-visualizer-surface__footer[data-v-2c628a29] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 16px;\n  border-top: 1px solid var(--acu-border-2);\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__footer-actions[data-v-2c628a29] {\n  display: flex;\n  gap: 8px;\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__footer-actions[data-v-2c628a29] .acu-btn {\n  min-width: 132px;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-2c628a29] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9350;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: visualizer-mobile-nav-layer-in-2c628a29 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing[data-v-2c628a29] {\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-layer-out-2c628a29 0.15s ease-in both;\n}\n.acu-visualizer-surface__mobile-nav[data-v-2c628a29] {\n  width: 360px;\n  max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 360px;\n  display: flex;\n  flex-direction: column;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 0;\n  background: var(--acu-sidebar-bg);\n  box-shadow: var(--acu-shadow);\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-drawer-in-2c628a29 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing\n  .acu-visualizer-surface__mobile-nav[data-v-2c628a29] {\n  animation: visualizer-mobile-nav-drawer-out-2c628a29 0.15s ease-in both;\n}\n@supports (width: min(360px, calc(100% - 24px))) {\n.acu-visualizer-surface__mobile-nav[data-v-2c628a29] {\n    width: min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-visualizer-surface__mobile-nav[data-v-2c628a29] {\n    max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-visualizer-surface__mobile-nav[data-v-2c628a29] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n@keyframes visualizer-mobile-nav-layer-in-2c628a29 {\nfrom {\n    opacity: 0;\n}\nto {\n    opacity: 1;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-in-2c628a29 {\nfrom {\n    transform: translateX(-100%);\n}\nto {\n    transform: translateX(0);\n}\n}\n@keyframes visualizer-mobile-nav-layer-out-2c628a29 {\nfrom {\n    opacity: 1;\n}\nto {\n    opacity: 0;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-out-2c628a29 {\nfrom {\n    transform: translateX(0);\n}\nto {\n    transform: translateX(-100%);\n}\n}\n@media (max-width: 1024px) {\n.acu-visualizer-surface[data-v-2c628a29] {\n    grid-template-columns: 220px minmax(0, 1fr);\n}\n.acu-visualizer-surface__card-grid[data-v-2c628a29] {\n    grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));\n}\n.acu-visualizer-surface__topbar[data-v-2c628a29] {\n    flex-wrap: wrap;\n}\n.acu-visualizer-surface__mode-tabs[data-v-2c628a29] {\n    order: 3;\n    width: min(420px, 100%);\n}\n}\n@media (max-width: 767px) {\n.acu-visualizer-surface[data-v-2c628a29] {\n    grid-template-columns: 1fr;\n    grid-template-rows: minmax(0, 1fr);\n}\n.acu-visualizer-surface__sidebar[data-v-2c628a29] {\n    display: none;\n}\n.acu-visualizer-surface__topbar[data-v-2c628a29] {\n    display: grid;\n    grid-template-columns: minmax(0, 1fr) auto;\n    gap: 8px;\n    min-height: 0;\n    padding: 8px;\n}\n.acu-visualizer-surface__topbar-context[data-v-2c628a29] {\n    grid-column: 1;\n    display: grid;\n    grid-template-columns: auto minmax(0, 1fr) auto;\n    align-items: center;\n    gap: 8px;\n    min-width: 0;\n}\n.acu-visualizer-surface__mobile-menu[data-v-2c628a29] {\n    display: inline-flex;\n}\n.acu-visualizer-surface__context-items[data-v-2c628a29] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n.acu-visualizer-surface__context-item[data-v-2c628a29]:first-child,\n  .acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-2c628a29] {\n    max-width: none;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-2c628a29] {\n    display: flex;\n}\n.acu-visualizer-surface__close[data-v-2c628a29] {\n    grid-column: 2;\n    grid-row: 1;\n    align-self: center;\n}\n.acu-visualizer-surface__mode-tabs[data-v-2c628a29] {\n    grid-column: 1 / -1;\n    width: 100%;\n}\n.acu-visualizer-surface__workspace[data-v-2c628a29] {\n    padding: 10px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-2c628a29],\n  .acu-visualizer-surface__database-toolbar[data-v-2c628a29] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__data-toolbar[data-v-2c628a29] .acu-btn,\n  .acu-visualizer-surface__database-toolbar[data-v-2c628a29] .acu-btn {\n    width: 100%;\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-2c628a29] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__pagination[data-v-2c628a29] {\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 6px;\n    padding: 2px 0 6px;\n}\n.acu-visualizer-surface__pagination-pages[data-v-2c628a29] {\n    flex: 0 1 auto;\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n.acu-visualizer-surface__page-button[data-v-2c628a29] {\n    width: 36px;\n    min-width: 36px;\n    height: 34px;\n    flex: 0 0 36px;\n}\n.acu-visualizer-surface__page-jump[data-v-2c628a29] {\n    flex: 0 0 54px;\n    width: 54px;\n}\n.acu-visualizer-surface__footer[data-v-2c628a29] {\n    display: grid;\n    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);\n    align-items: center;\n    gap: 8px;\n    padding: 8px;\n}\n.acu-visualizer-surface__footer > span[data-v-2c628a29] {\n    min-width: 0;\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n.acu-visualizer-surface__footer-actions[data-v-2c628a29] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n.acu-visualizer-surface__footer-actions[data-v-2c628a29] .acu-btn {\n    min-width: 0;\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-visualizer-surface__card-grid[data-v-2c628a29] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__fields[data-v-2c628a29] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__mode-tabs[data-v-2c628a29] {\n    width: 100%;\n}\n.acu-visualizer-surface__conflict-actions[data-v-2c628a29] {\n    display: flex;\n    margin: 8px 0 0;\n}\n.acu-visualizer-surface__footer[data-v-2c628a29] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__footer > span[data-v-2c628a29] {\n    display: none;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue#style-0-2c628a29");
-    var VisualizerSurface_vue_vue_type_style_index_0_scoped_2c628a29_lang = null;
+    injectSfcStyle("\n.acu-visualizer-surface[data-v-feb3f59e] {\n  flex: 1 1 auto;\n  min-width: 0;\n  min-height: 0;\n  display: grid;\n  grid-template-columns: 260px minmax(0, 1fr);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__sidebar[data-v-feb3f59e] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 1px solid var(--acu-border-2);\n  background: var(--acu-sidebar-bg);\n}\n.acu-visualizer-surface__main[data-v-feb3f59e] {\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  overflow: hidden;\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  min-height: 50px;\n  padding: 8px 12px 8px 16px;\n  border-bottom: 1px solid var(--acu-border-2);\n  background: var(--acu-bg-0);\n}\n.acu-visualizer-surface__topbar-context[data-v-feb3f59e] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  gap: 10px;\n}\n.acu-visualizer-surface__mobile-menu[data-v-feb3f59e] {\n  display: none;\n  flex: 0 0 auto;\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-visualizer-surface__mobile-menu[data-v-feb3f59e]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__context-items[data-v-feb3f59e] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  flex: 1 1 auto;\n  justify-content: flex-start;\n  gap: 16px;\n}\n.acu-visualizer-surface__context-item[data-v-feb3f59e] {\n  min-width: 0;\n  display: grid;\n  gap: 2px;\n}\n.acu-visualizer-surface__context-item[data-v-feb3f59e]:first-child {\n  flex: 0 1 auto;\n  max-width: min(560px, 42vw);\n}\n.acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  max-width: min(260px, 20vw);\n}\n.acu-visualizer-surface__context-item span[data-v-feb3f59e] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.2;\n}\n.acu-visualizer-surface__context-item strong[data-v-feb3f59e] {\n  min-width: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.25;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__context-item:first-child strong[data-v-feb3f59e] {\n  overflow: visible;\n  text-overflow: clip;\n  white-space: normal;\n  word-break: break-word;\n}\n.acu-visualizer-surface__context-badge[data-v-feb3f59e] {\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__conflict[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  margin: 12px 16px 0;\n}\n.acu-visualizer-surface__conflict-actions[data-v-feb3f59e] {\n  display: inline-flex;\n  flex-wrap: wrap;\n  gap: 6px;\n  margin-left: 8px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-feb3f59e],\n.acu-visualizer-surface__data-toolbar-actions[data-v-feb3f59e],\n.acu-visualizer-surface__database-toolbar[data-v-feb3f59e],\n.acu-visualizer-surface__pagination[data-v-feb3f59e],\n.acu-visualizer-surface__pagination-pages[data-v-feb3f59e],\n.acu-visualizer-surface__card-header[data-v-feb3f59e] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-visualizer-surface__workspace[data-v-feb3f59e] {\n  flex: 1 1 auto;\n  min-height: 0;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  overflow: auto;\n  padding: 16px;\n}\n.acu-visualizer-surface__loading[data-v-feb3f59e] {\n  min-height: 140px;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  gap: 8px;\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__mode-tabs[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  width: min(360px, 42vw);\n}\n.acu-visualizer-surface__close[data-v-feb3f59e] {\n  width: 30px;\n  height: 30px;\n  flex: 0 0 auto;\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-visualizer-surface__close[data-v-feb3f59e]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__data-toolbar[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  justify-content: space-between;\n  padding: 4px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  justify-content: flex-end;\n}\n.acu-visualizer-surface__pagination[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  justify-content: center;\n  gap: 14px;\n  padding: 6px 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-visualizer-surface__pagination-pages[data-v-feb3f59e] {\n  min-width: 0;\n  flex-wrap: wrap;\n  justify-content: center;\n  gap: 8px;\n}\n.acu-visualizer-surface__page-button[data-v-feb3f59e] {\n  width: 34px;\n  min-width: 34px;\n  height: 34px;\n  padding: 0;\n  border: 1px solid var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 500;\n}\n.acu-visualizer-surface__page-button[data-v-feb3f59e]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__page-button--active[data-v-feb3f59e],\n.acu-visualizer-surface__page-button--active[data-v-feb3f59e]:hover:not(:disabled) {\n  border-color: var(--acu-accent);\n  background: var(--acu-accent);\n  color: var(--acu-on-accent);\n}\n.acu-visualizer-surface__page-button[data-v-feb3f59e]:disabled:not(\n    .acu-visualizer-surface__page-button--active\n  ) {\n  border-color: var(--acu-border);\n  background: var(--acu-bg-0);\n  color: var(--acu-text-2);\n  opacity: 1;\n  cursor: default;\n}\n.acu-visualizer-surface__page-jump[data-v-feb3f59e] {\n  flex: 0 0 64px;\n  width: 64px;\n}\n.acu-visualizer-surface__page-jump[data-v-feb3f59e] .acu-input {\n  min-height: 34px;\n  border: 1px solid var(--acu-border) !important;\n  background: var(--acu-bg-0) !important;\n  text-align: center;\n  font-size: var(--acu-font-size-body-lg, 13px) !important;\n  font-variant-numeric: tabular-nums;\n}\n.acu-visualizer-surface__data-range[data-v-feb3f59e] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__database-toolbar[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  padding: 0 0 4px;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__database-toolbar h2[data-v-feb3f59e] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n}\n.acu-visualizer-surface__database-toolbar p[data-v-feb3f59e] {\n  margin: 5px 0 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-readable, 1.55);\n}\n.acu-visualizer-surface__empty[data-v-feb3f59e] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  line-height: 1.55;\n}\n.acu-visualizer-surface__card-grid[data-v-feb3f59e] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));\n  gap: 12px;\n}\n.acu-visualizer-surface__data-card[data-v-feb3f59e] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  height: 100%;\n  padding: 16px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n}\n.acu-visualizer-surface__card-header strong[data-v-feb3f59e] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono);\n  font-size: var(--acu-font-size-panel-title, 15px);\n}\n.acu-visualizer-surface__card-header span[data-v-feb3f59e] {\n  min-width: 0;\n  margin-right: auto;\n  overflow: hidden;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__card-header[data-v-feb3f59e] .acu-icon-btn {\n  background: transparent;\n}\n.acu-visualizer-surface__card-header[data-v-feb3f59e]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n}\n.acu-visualizer-surface__card-header[data-v-feb3f59e] .acu-icon-btn--accent {\n  background: var(--acu-accent-glow);\n  color: var(--acu-accent);\n}\n.acu-visualizer-surface__card-header[data-v-feb3f59e]\n  .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-visualizer-surface__fields[data-v-feb3f59e] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-visualizer-surface__field-row[data-v-feb3f59e] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  align-items: stretch;\n}\n.acu-visualizer-surface__field-row.is-wide[data-v-feb3f59e] {\n  grid-template-columns: minmax(0, 1fr);\n}\n.acu-visualizer-surface__field[data-v-feb3f59e] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  padding: 2px;\n  border: 1px solid transparent;\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n  transition:\n    background 0.15s ease,\n    border-color 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field[data-v-feb3f59e] .acu-textarea {\n  flex: 1 1 auto;\n  min-height: 34px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n}\n.acu-visualizer-surface__field-preview[data-v-feb3f59e] {\n  width: 100%;\n  min-height: 34px;\n  box-sizing: border-box;\n  padding: 8px 10px;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-1);\n  cursor: text;\n  display: block;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.45;\n  white-space: pre-wrap;\n  word-break: break-word;\n  overflow-wrap: break-word;\n  transition:\n    background 0.15s ease,\n    box-shadow 0.15s ease;\n}\n.acu-visualizer-surface__field-preview[data-v-feb3f59e]:hover,\n.acu-visualizer-surface__field-preview[data-v-feb3f59e]:focus-visible {\n  outline: none;\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    var(--acu-bg-2);\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-visualizer-surface__field-preview.is-empty[data-v-feb3f59e] {\n  color: var(--acu-text-3);\n}\n.acu-visualizer-surface__field-label[data-v-feb3f59e] {\n  min-width: 0;\n  min-height: 24px;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-visualizer-surface__field-label > span[data-v-feb3f59e]:first-child {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  min-width: 51px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  opacity: 0.44;\n  transition: opacity 0.15s ease;\n}\n.acu-visualizer-surface__field:hover .acu-visualizer-surface__field-locks[data-v-feb3f59e],\n.acu-visualizer-surface__field:focus-within\n  .acu-visualizer-surface__field-locks[data-v-feb3f59e],\n.acu-visualizer-surface__field.is-actions-active\n  .acu-visualizer-surface__field-locks[data-v-feb3f59e],\n.acu-visualizer-surface__field.is-locked .acu-visualizer-surface__field-locks[data-v-feb3f59e],\n.acu-visualizer-surface__field.is-special-index\n  .acu-visualizer-surface__field-locks[data-v-feb3f59e] {\n  opacity: 1;\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e] .acu-icon-btn {\n  --acu-icon-btn-size: 24px;\n  --acu-icon-btn-font-size: 11px;\n  width: 24px;\n  height: 24px;\n  background: transparent !important;\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e]\n  .acu-icon-btn--default:hover:not(:disabled) {\n  background:\n    linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)),\n    transparent;\n  color: var(--acu-text-1);\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e] .acu-icon-btn--accent {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 16%, transparent) !important;\n}\n.acu-visualizer-surface__field-locks[data-v-feb3f59e]\n  .acu-icon-btn--accent:hover:not(:disabled) {\n  color: var(--acu-warning) !important;\n  background: color-mix(in srgb, var(--acu-warning) 22%, transparent) !important;\n}\n.acu-visualizer-surface__field.is-locked[data-v-feb3f59e] {\n  border-color: var(--acu-border);\n  background: color-mix(in srgb, var(--acu-warning) 8%, transparent);\n}\n.acu-visualizer-surface__field.is-actions-active[data-v-feb3f59e]:not(.is-locked) {\n  background: color-mix(in srgb, var(--acu-accent) 6%, transparent);\n}\n.acu-visualizer-surface__footer[data-v-feb3f59e] {\n  flex: 0 0 auto;\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 16px;\n  border-top: 1px solid var(--acu-border-2);\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-visualizer-surface__footer-actions[data-v-feb3f59e] {\n  display: flex;\n  gap: 8px;\n  flex: 0 0 auto;\n}\n.acu-visualizer-surface__footer-actions[data-v-feb3f59e] .acu-btn {\n  min-width: 132px;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-feb3f59e] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9350;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: visualizer-mobile-nav-layer-in-feb3f59e 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing[data-v-feb3f59e] {\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-layer-out-feb3f59e 0.15s ease-in both;\n}\n.acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n  width: 360px;\n  max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 360px;\n  display: flex;\n  flex-direction: column;\n  padding: 24px 12px 16px;\n  overflow-y: auto;\n  border-right: 0;\n  background: var(--acu-sidebar-bg);\n  box-shadow: var(--acu-shadow);\n  pointer-events: auto;\n  animation: visualizer-mobile-nav-drawer-in-feb3f59e 0.18s ease-out both;\n}\n.acu-visualizer-surface__mobile-nav-layer.is-closing\n  .acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n  animation: visualizer-mobile-nav-drawer-out-feb3f59e 0.15s ease-in both;\n}\n@supports (width: min(360px, calc(100% - 24px))) {\n.acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n    width: min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(360px, calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n    max-width: calc(100% - 24px - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-visualizer-surface__mobile-nav[data-v-feb3f59e] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n@keyframes visualizer-mobile-nav-layer-in-feb3f59e {\nfrom {\n    opacity: 0;\n}\nto {\n    opacity: 1;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-in-feb3f59e {\nfrom {\n    transform: translateX(-100%);\n}\nto {\n    transform: translateX(0);\n}\n}\n@keyframes visualizer-mobile-nav-layer-out-feb3f59e {\nfrom {\n    opacity: 1;\n}\nto {\n    opacity: 0;\n}\n}\n@keyframes visualizer-mobile-nav-drawer-out-feb3f59e {\nfrom {\n    transform: translateX(0);\n}\nto {\n    transform: translateX(-100%);\n}\n}\n@media (max-width: 1024px) {\n.acu-visualizer-surface[data-v-feb3f59e] {\n    grid-template-columns: 220px minmax(0, 1fr);\n}\n.acu-visualizer-surface__card-grid[data-v-feb3f59e] {\n    grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));\n}\n.acu-visualizer-surface__topbar[data-v-feb3f59e] {\n    flex-wrap: wrap;\n}\n.acu-visualizer-surface__mode-tabs[data-v-feb3f59e] {\n    order: 3;\n    width: min(420px, 100%);\n}\n}\n@media (max-width: 767px) {\n.acu-visualizer-surface[data-v-feb3f59e] {\n    grid-template-columns: 1fr;\n    grid-template-rows: minmax(0, 1fr);\n}\n.acu-visualizer-surface__sidebar[data-v-feb3f59e] {\n    display: none;\n}\n.acu-visualizer-surface__topbar[data-v-feb3f59e] {\n    display: grid;\n    grid-template-columns: minmax(0, 1fr) auto;\n    gap: 8px;\n    min-height: 0;\n    padding: 8px;\n}\n.acu-visualizer-surface__topbar-context[data-v-feb3f59e] {\n    grid-column: 1;\n    display: grid;\n    grid-template-columns: auto minmax(0, 1fr) auto;\n    align-items: center;\n    gap: 8px;\n    min-width: 0;\n}\n.acu-visualizer-surface__mobile-menu[data-v-feb3f59e] {\n    display: inline-flex;\n}\n.acu-visualizer-surface__context-items[data-v-feb3f59e] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n.acu-visualizer-surface__context-item[data-v-feb3f59e]:first-child,\n  .acu-visualizer-surface__context-item + .acu-visualizer-surface__context-item[data-v-feb3f59e] {\n    max-width: none;\n}\n.acu-visualizer-surface__mobile-nav-layer[data-v-feb3f59e] {\n    display: flex;\n}\n.acu-visualizer-surface__close[data-v-feb3f59e] {\n    grid-column: 2;\n    grid-row: 1;\n    align-self: center;\n}\n.acu-visualizer-surface__mode-tabs[data-v-feb3f59e] {\n    grid-column: 1 / -1;\n    width: 100%;\n}\n.acu-visualizer-surface__workspace[data-v-feb3f59e] {\n    padding: 10px;\n}\n.acu-visualizer-surface__data-toolbar[data-v-feb3f59e],\n  .acu-visualizer-surface__database-toolbar[data-v-feb3f59e] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__data-toolbar[data-v-feb3f59e] .acu-btn,\n  .acu-visualizer-surface__database-toolbar[data-v-feb3f59e] .acu-btn {\n    width: 100%;\n}\n.acu-visualizer-surface__data-toolbar-actions[data-v-feb3f59e] {\n    align-items: stretch;\n    flex-direction: column;\n}\n.acu-visualizer-surface__pagination[data-v-feb3f59e] {\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 6px;\n    padding: 2px 0 6px;\n}\n.acu-visualizer-surface__pagination-pages[data-v-feb3f59e] {\n    flex: 0 1 auto;\n    align-items: center;\n    flex-direction: row;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n.acu-visualizer-surface__page-button[data-v-feb3f59e] {\n    width: 36px;\n    min-width: 36px;\n    height: 34px;\n    flex: 0 0 36px;\n}\n.acu-visualizer-surface__page-jump[data-v-feb3f59e] {\n    flex: 0 0 54px;\n    width: 54px;\n}\n.acu-visualizer-surface__footer[data-v-feb3f59e] {\n    display: grid;\n    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);\n    align-items: center;\n    gap: 8px;\n    padding: 8px;\n}\n.acu-visualizer-surface__footer > span[data-v-feb3f59e] {\n    min-width: 0;\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n.acu-visualizer-surface__footer-actions[data-v-feb3f59e] {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n.acu-visualizer-surface__footer-actions[data-v-feb3f59e] .acu-btn {\n    min-width: 0;\n    width: 100%;\n}\n}\n@media (max-width: 480px) {\n.acu-visualizer-surface__card-grid[data-v-feb3f59e] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__fields[data-v-feb3f59e] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__mode-tabs[data-v-feb3f59e] {\n    width: 100%;\n}\n.acu-visualizer-surface__conflict-actions[data-v-feb3f59e] {\n    display: flex;\n    margin: 8px 0 0;\n}\n.acu-visualizer-surface__footer[data-v-feb3f59e] {\n    grid-template-columns: 1fr;\n}\n.acu-visualizer-surface__footer > span[data-v-feb3f59e] {\n    display: none;\n}\n}\n", "src/presentation-v2/surfaces/visualizer/VisualizerSurface.vue#style-0-feb3f59e");
+    var VisualizerSurface_vue_vue_type_style_index_0_scoped_feb3f59e_lang = null;
 
     const _hoisted_1$1 = {
 	class: "acu-visualizer-surface__sidebar",
@@ -156254,7 +156392,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		/* NEED_HYDRATION */
 	);
     }
-    var VisualizerSurface = /*#__PURE__*/ _export_sfc(_sfc_main$1, [["render", _sfc_render$1], ["__scopeId", "data-v-2c628a29"]]);
+    var VisualizerSurface = /*#__PURE__*/ _export_sfc(_sfc_main$1, [["render", _sfc_render$1], ["__scopeId", "data-v-feb3f59e"]]);
 
     /**
      * appearance-store — 新 UI 外观偏好。
