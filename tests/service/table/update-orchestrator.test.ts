@@ -93,6 +93,13 @@ vi.mock('../../../src/service/ai/prompt-builder', () => ({
     return impl ? mockParseAndApplyTableEditsToData(...args) : mockParseAndApplyTableEdits(...args);
   },
   prepareAIInput_ACU: (...args: any[]) => mockPrepareAIInput(...args),
+  RetryableAiResponseError_ACU: class RetryableAiResponseError_ACU extends Error {
+    readonly code = 'empty_or_invalid_api_response';
+    constructor(message = 'API响应格式不正确或内容为空。') {
+      super(message);
+      this.name = 'RetryableAiResponseError';
+    }
+  },
 }));
 
 const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_ACU, mockCaptureManualRefillSessionSnapshot, mockClearManualRefillIncrementalDataInRange, mockClearManualRefillSheetDataInRange, mockCommitManualRefillSheetSnapshot, mockRestoreManualRefillSessionSnapshot, mockEnsureManualCatchUpAnchor, mockEnsureBoundaryCheckpoint, mockShouldRotateBoundaryCheckpoint, mockPurgeSheetKeysFromChatHistoryHard } = vi.hoisted(() => {
@@ -3063,6 +3070,54 @@ describe('collectGroupFillResponse_ACU', () => {
     expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
     expect(mockParseAndApplyTableEdits).not.toHaveBeenCalled();
     expect(mockSaveIndependentTable).not.toHaveBeenCalled();
+  });
+
+  it('空 API 响应按模型错误重试，成功后不注入 SQLite SQL 错误反馈', async () => {
+    vi.useFakeTimers();
+    try {
+      const { RetryableAiResponseError_ACU } = await import('../../../src/service/ai/prompt-builder');
+      const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      const job = createJob();
+      mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
+      mockCallCustomOpenAI
+        .mockRejectedValueOnce(new RetryableAiResponseError_ACU())
+        .mockImplementationOnce(async (dynamicContent: any) => {
+          expect(dynamicContent.tableDataText).not.toContain('SQL_ERROR_FEEDBACK');
+          return '<tableEdit>UPDATE test SET value = 1;</tableEdit>';
+        });
+
+      const resultPromise = collectGroupFillResponse_ACU(job);
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(result).toMatchObject({ success: true, attempt: 2 });
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('空 API 响应重试耗尽后保留模型错误分类', async () => {
+    vi.useFakeTimers();
+    try {
+      const { RetryableAiResponseError_ACU } = await import('../../../src/service/ai/prompt-builder');
+      const job = createJob();
+      mockSettings.tableMaxRetries = 2;
+      mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+      mockCallCustomOpenAI.mockRejectedValue(new RetryableAiResponseError_ACU());
+
+      const resultPromise = collectGroupFillResponse_ACU(job);
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(result).toMatchObject({ success: false, attempt: 2, errorCategory: 'model' });
+      expect(result.error).toContain('2 次尝试后仍失败');
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('SQL 模式下携带上轮错误反馈时，将 SQL_ERROR_FEEDBACK 注入到 prompt', async () => {

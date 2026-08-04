@@ -15,6 +15,20 @@ import { DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_
 import { isSqliteMode } from '../../table/storage-mode';
 import { cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
 
+/**
+ * The request reached a provider successfully, but its body contained no
+ * usable model output. This is retryable without treating configuration,
+ * authentication, or transport failures as model-output failures.
+ */
+export class RetryableAiResponseError_ACU extends Error {
+  readonly code = 'empty_or_invalid_api_response';
+
+  constructor(message = 'API响应格式不正确或内容为空。') {
+    super(message);
+    this.name = 'RetryableAiResponseError';
+  }
+}
+
   function normalizeRoleForApi_ACU(role: any) {
     const ru = String(role || '').toUpperCase();
     const rl = String(role || '').toLowerCase();
@@ -322,7 +336,7 @@ import { cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
             if (content) {
                 return content.trim();
             }
-            throw new Error('API响应格式不正确或内容为空。');
+            throw new RetryableAiResponseError_ACU();
         }
         }
     } finally {

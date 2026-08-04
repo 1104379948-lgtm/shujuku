@@ -5,7 +5,7 @@
  */
 
 import { currentChatFileIdentifier_ACU, isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
-import { callCustomOpenAI_ACU } from '../ai/prompt-builder';
+import { callCustomOpenAI_ACU, RetryableAiResponseError_ACU } from '../ai/prompt-builder';
 import { captureManualRefillSessionSnapshot_ACU, clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, getChatArray_ACU, restoreManualRefillSessionSnapshotAtomic_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
@@ -946,7 +946,10 @@ export async function collectGroupFillResponse_ACU(
             return { job, success: true, attempt, aiResponse: normalizedAiResponse, tableEditText };
         } catch (error: any) {
             lastErrorMessage = error?.message || '未知错误';
-            lastErrorCategory = error instanceof ModelOutputRetryError_ACU ? 'model' : 'infrastructure';
+            lastErrorCategory = error instanceof ModelOutputRetryError_ACU
+                || error instanceof RetryableAiResponseError_ACU
+                ? 'model'
+                : 'infrastructure';
             const warnMessage = sanitizeRetryFeedback_ACU(lastErrorMessage, MAX_WARN_ERROR_LENGTH_ACU);
             logWarn_ACU(`[${formatGroupAttemptLabel_ACU(job)}] 第 ${attempt} 次尝试失败: ${warnMessage}`);
             if (error?.name === 'AbortError' || String(lastErrorMessage).toLowerCase().includes('aborted') || isStopped()) {

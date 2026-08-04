@@ -132,6 +132,7 @@ vi.stubGlobal('fetch', mockFetch);
 import {
   callCustomOpenAI_ACU,
   handleApiResponse_ACU,
+  RetryableAiResponseError_ACU,
 } from '../../../src/service/ai/prompt-builder/prompt-api-call';
 
 beforeEach(() => {
@@ -446,12 +447,17 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
     await expect(callCustomOpenAI_ACU({})).rejects.toThrow('500');
   });
 
-  it('handleApiResponse 返回 null 时抛错', async () => {
+  it('handleApiResponse 返回 null 时抛出可重试的模型响应错误', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({ unknownFormat: true }),
     });
-    await expect(callCustomOpenAI_ACU({})).rejects.toThrow('内容为空');
+    const request = callCustomOpenAI_ACU({});
+    await expect(request).rejects.toMatchObject({
+      name: 'RetryableAiResponseError',
+      code: 'empty_or_invalid_api_response',
+    });
+    await expect(request).rejects.toBeInstanceOf(RetryableAiResponseError_ACU);
   });
 
   it('custom fetch overrides 不含 temperature/topP/maxTokens', async () => {
