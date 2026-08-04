@@ -96,6 +96,7 @@ describe('flight-mode-transition', () => {
     expect(h.container.flightModeByIsolationKey[''].archive).toMatchObject({
       templateScopeWasAbsent: true,
       chronicleExportConfig: { entryType: 'keyword', extraIndexEnabled: true },
+      templateScope: { templateStr: JSON.stringify(chronicleTemplate()), presetName: '预设' },
     });
     expect(h.setLock).toHaveBeenCalledWith('sheet_da_zong_jie', false);
   });
@@ -179,13 +180,39 @@ describe('flight-mode-transition', () => {
     expect(h.deleteLock).not.toHaveBeenCalled();
   });
 
-  it('归档缺少可还原模板时拒绝停用', async () => {
+  it('兼容旧归档缺少 templateScope 时，从当前启用态模板移除大总结并恢复纪要配置', async () => {
+    const enabledTemplate = chronicleTemplate() as any;
+    enabledTemplate.sheet_chronicle.exportConfig = { entryType: 'constant', extraIndexEnabled: false };
+    enabledTemplate.sheet_da_zong_jie = { name: '大总结', content: [['row_id', '总结'], ['1', '阶段总结']] };
+    h.scopeState = { templateStr: JSON.stringify(enabledTemplate), presetName: '飞行模式模板' };
+    h.container = { version: 1, flightMode: {
+      enabled: true, hiddenRowIds: ['1'], bigSummarySheetKey: 'sheet_da_zong_jie',
+      archive: {
+        templateScopeWasAbsent: true,
+        chronicleExportConfig: { entryType: 'keyword', extraIndexEnabled: true },
+      },
+    } };
+
+    await expect(disableFlightMode_ACU()).resolves.toEqual({ ok: true });
+
+    const [submitted, options] = h.commit.mock.calls[0];
+    expect(submitted.sheet_da_zong_jie).toBeUndefined();
+    expect(submitted.sheet_chronicle.exportConfig).toEqual({ entryType: 'keyword', extraIndexEnabled: true });
+    expect(options).toMatchObject({ presetName: '飞行模式模板', hardDeleteMissingSheets: true, destructiveChangeConfirmed: true });
+    expect(h.container.flightModeByIsolationKey['']).toMatchObject({ enabled: false, hiddenRowIds: [] });
+  });
+
+  it('归档和当前模板都不足以安全恢复时返回明确错误', async () => {
     h.container = { version: 1, flightMode: {
       enabled: true, hiddenRowIds: [], bigSummarySheetKey: 'sheet_da_zong_jie',
       archive: { templateScopeWasAbsent: true },
     } };
 
-    await expect(disableFlightMode_ACU()).resolves.toEqual({ ok: false, reason: 'restore_archive_missing' });
+    await expect(disableFlightMode_ACU()).resolves.toEqual({
+      ok: false,
+      reason: 'restore_archive_missing',
+      error: expect.stringContaining('缺少可验证的启用前模板归档'),
+    });
     expect(h.commit).not.toHaveBeenCalled();
   });
 });

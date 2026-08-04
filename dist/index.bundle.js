@@ -137821,8 +137821,7 @@ Expected function or array of functions, received type ${typeof value}.`
         return getCurrentChatTemplateScopeState_ACU({ isolationKey: getCurrentIsolationKey_ACU() })
             || getGlobalTemplateSnapshotForCurrentProfile_ACU();
     }
-    function parseEffectiveTemplate_ACU() {
-        const scope = getEffectiveTemplateScope_ACU();
+    function parseTemplateScope_ACU(scope) {
         if (!scope?.templateStr)
             return null;
         try {
@@ -137832,6 +137831,29 @@ Expected function or array of functions, received type ${typeof value}.`
         catch (_) {
             return null;
         }
+    }
+    function recoverRestoreTemplateFromEnabledScope_ACU(currentState) {
+        const archive = currentState.archive;
+        if (!archive?.templateScopeWasAbsent || !archive.chronicleExportConfig)
+            return null;
+        const effectiveScope = getEffectiveTemplateScope_ACU();
+        const template = parseTemplateScope_ACU(effectiveScope);
+        if (!template)
+            return null;
+        const summaryKeys = Object.entries(template)
+            .filter(([key, sheet]) => key === currentState.bigSummarySheetKey || (key.startsWith('sheet_') && sheet?.name === FLIGHT_MODE_BIG_SUMMARY_SHEET_NAME_ACU))
+            .map(([key]) => key);
+        if (summaryKeys.length === 0)
+            return null;
+        summaryKeys.forEach(key => delete template[key]);
+        const chronicle = findSheetByName_ACU(template, '纪要表');
+        if (!chronicle)
+            return null;
+        chronicle.sheet.exportConfig = cloneValue_ACU(archive.chronicleExportConfig);
+        return { template, presetName: String(effectiveScope?.presetName || '') };
+    }
+    function parseEffectiveTemplate_ACU() {
+        return parseTemplateScope_ACU(getEffectiveTemplateScope_ACU());
     }
     function getCurrentEffectiveTemplateText_ACU() {
         return getEffectiveTemplateScope_ACU()?.templateStr || null;
@@ -137880,6 +137902,7 @@ Expected function or array of functions, received type ${typeof value}.`
         };
         nextTemplate[FLIGHT_MODE_BIG_SUMMARY_SHEET_KEY_ACU] = buildFlightModeBigSummarySheet_ACU(nextChronicle, nextTemplate);
         const scopeBeforeEnable = getCurrentChatTemplateScopeState_ACU({ isolationKey: getCurrentIsolationKey_ACU() });
+        const effectiveScopeBeforeEnable = getEffectiveTemplateScope_ACU();
         const committed = await applyChatTemplateSnapshotWithReconciliation_ACU(nextTemplate, {
             source: 'flight_mode_enable',
             presetName: getEffectiveTemplateScope_ACU()?.presetName || '',
@@ -137904,7 +137927,7 @@ Expected function or array of functions, received type ${typeof value}.`
             bigSummarySheetKey: resolved.key,
             archive: {
                 chronicleExportConfig: originalExportConfig,
-                templateScope: scopeBeforeEnable === null ? undefined : cloneValue_ACU(scopeBeforeEnable),
+                templateScope: effectiveScopeBeforeEnable === null ? undefined : cloneValue_ACU(effectiveScopeBeforeEnable),
                 templateScopeWasAbsent: scopeBeforeEnable === null,
                 // 必须记录正式提交后的作用域文本，而不是 nextTemplate：协调层会重派 key 并规范化结构。
                 enabledTemplateStr: getCurrentEffectiveTemplateText_ACU() || undefined,
@@ -137919,19 +137942,22 @@ Expected function or array of functions, received type ${typeof value}.`
             return { ok: true, reason: 'already_disabled' };
         const archive = currentState.archive;
         const archivedScope = archive?.templateScope;
-        const restoreTemplate = (() => {
-            if (!archivedScope?.templateStr)
-                return null;
-            try {
-                const parsed = JSON.parse(archivedScope.templateStr);
-                return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-            }
-            catch (_) {
-                return null;
-            }
-        })();
-        if (!restoreTemplate)
-            return { ok: false, reason: 'restore_archive_missing' };
+        let restoreTemplate = parseTemplateScope_ACU(archivedScope);
+        let restorePresetName = String(archivedScope?.presetName || '');
+        if (!restoreTemplate) {
+            // 旧版本在启用前没有聊天级 scope 时只记录了 templateScopeWasAbsent，遗漏了实际生效的全局模板。
+            // 此时从当前启用态模板中精确移除大总结，并恢复已归档的纪要导出配置，避免用户永久无法关闭。
+            const recovered = recoverRestoreTemplateFromEnabledScope_ACU(currentState);
+            restoreTemplate = recovered?.template || null;
+            restorePresetName = recovered?.presetName || '';
+        }
+        if (!restoreTemplate) {
+            return {
+                ok: false,
+                reason: 'restore_archive_missing',
+                error: '飞行模式缺少可验证的启用前模板归档，无法安全恢复纪要配置并删除大总结表。',
+            };
+        }
         const enabledTemplateStr = String(archive?.enabledTemplateStr || '');
         const currentTemplateStr = getCurrentEffectiveTemplateText_ACU();
         if (enabledTemplateStr && currentTemplateStr && enabledTemplateStr !== currentTemplateStr && !options.confirmTemplateScopeChange) {
@@ -137942,7 +137968,7 @@ Expected function or array of functions, received type ${typeof value}.`
         // 因此这里显式硬删而非隐藏保留；hardDeleteMissingSheets 必须与破坏性确认成对出现。
         const committed = await applyChatTemplateSnapshotWithReconciliation_ACU(restoreTemplate, {
             source: 'flight_mode_disable',
-            presetName: archivedScope?.presetName || '',
+            presetName: restorePresetName,
             hardDeleteMissingSheets: true,
             destructiveChangeConfirmed: true,
         });
