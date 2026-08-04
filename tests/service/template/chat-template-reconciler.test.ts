@@ -1047,3 +1047,103 @@ describe('reconcileChatTemplate_ACU', () => {
   });
 
 });
+
+  describe('SQLite 缺失 DDL fallback', () => {
+    function noDdlSheet(key: string, name: string, headers: string[], rows: Array<Array<string | null>> = []): any {
+      const s = sheet(key, name, headers, 'row_id INTEGER PRIMARY KEY, placeholder TEXT', rows);
+      s.sourceData = { note: '无 DDL，依赖运行时 fallback' };
+      return s;
+    }
+
+    it('baseline 有数据且无 DDL、template 有合法 DDL 时生成 fallback DDL 并保留数据', async () => {
+      const baseline = state({
+        sheet_legacy: noDdlSheet('sheet_legacy', '背包', ['row_id', '名称'], [['1', '铁剑']]),
+      });
+      const template = state({
+        sheet_imported: sheet('sheet_imported', '背包', ['row_id', '名称', '品质'], 'row_id INTEGER PRIMARY KEY,\n  item_name TEXT, -- 名称\n  quality TEXT -- 品质', []),
+      });
+      const original = structuredClone({ baseline, template });
+
+      const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'sqlite' });
+
+      expect(plan.blockers).toEqual([]);
+      // 数据保留：名称列继承，新品质列填 null。
+      expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', null]]);
+      // 原无 DDL 表获得合法 fallback DDL：首列 row_id INTEGER PRIMARY KEY。
+      const ddl = plan.candidateData.sheet_legacy.sourceData.ddl as string;
+      expect(ddl).toContain('row_id INTEGER PRIMARY KEY');
+      expect(ddl).toContain('TEXT');
+      // 输出为 rebase，而非 introduction / hide。
+      expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'rebase', sheetKey: 'sheet_legacy' })]);
+      // 输入不被修改。
+      expect({ baseline, template }).toEqual(original);
+    });
+
+    it('baseline 与 template 都无 DDL 时两侧均生成 fallback 后成功协调', async () => {
+      const baseline = state({
+        sheet_legacy: noDdlSheet('sheet_legacy', '背包', ['row_id', '名称'], [['1', '铁剑']]),
+      });
+      const template = state({
+        sheet_imported: noDdlSheet('sheet_imported', '背包', ['row_id', '名称', '品质']),
+      });
+
+      const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'sqlite' });
+
+      expect(plan.blockers).toEqual([]);
+      expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', null]]);
+      expect(plan.candidateData.sheet_legacy.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+    });
+
+    it('多个已有数据表同时无 DDL 时不再逐表报“列数不一致”', async () => {
+      const baseline = state({
+        sheet_a: noDdlSheet('sheet_a', '全局数据表', ['row_id', '值'], [['1', 'A']]),
+        sheet_b: noDdlSheet('sheet_b', '重要角色表', ['row_id', '名称'], [['2', 'B']]),
+        sheet_c: noDdlSheet('sheet_c', '主角状态表', ['row_id', '状态'], [['3', 'C']]),
+      });
+      const template = state({
+        sheet_a2: sheet('sheet_a2', '全局数据表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, value TEXT', []),
+        sheet_b2: sheet('sheet_b2', '重要角色表', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY, name TEXT', []),
+        sheet_c2: sheet('sheet_c2', '主角状态表', ['row_id', '状态'], 'row_id INTEGER PRIMARY KEY, status TEXT', []),
+      });
+
+      const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'sqlite' });
+
+      expect(plan.blockers).toEqual([]);
+      expect(plan.candidateData.sheet_a.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+      expect(plan.candidateData.sheet_b.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+      expect(plan.candidateData.sheet_c.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+      expect(plan.candidateData.sheet_a.content[1]).toEqual(['1', 'A']);
+    });
+
+    it('非空非法 DDL 不被覆盖，仍 fail closed', async () => {
+      const bad = sheet('sheet_legacy', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY, item_name TEXT', [['1', '铁剑']]);
+      bad.sourceData.ddl = 'CREATE TABLE inventory (item_name TEXT);'; // 缺 row_id INTEGER PRIMARY KEY
+      const template = state({
+        sheet_imported: sheet('sheet_imported', '背包', ['row_id', '名称'], 'row_id INTEGER PRIMARY KEY, item_name TEXT', []),
+      });
+
+      const plan = await reconcileChatTemplate_ACU({ baselineData: state({ sheet_legacy: bad }), templateData: template, destructiveChangeConfirmed: false, storageMode: 'sqlite' });
+
+      expect(plan.blockers).not.toEqual([]);
+      expect(plan.blockers.join('\n')).toContain('DDL 与表头列数不一致');
+      expect(plan.sheetChanges).toEqual([]);
+      // 原 DDL 未被 fallback 覆盖。
+      expect(bad.sourceData.ddl).toBe('CREATE TABLE inventory (item_name TEXT);');
+    });
+
+    it('native 模式不生成 DDL', async () => {
+      const baseline = state({
+        sheet_legacy: noDdlSheet('sheet_legacy', '背包', ['row_id', '名称'], [['1', '铁剑']]),
+      });
+      const template = state({
+        sheet_imported: noDdlSheet('sheet_imported', '背包', ['row_id', '名称', '品质']),
+      });
+
+      const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
+
+      expect(plan.blockers).toEqual([]);
+      expect(plan.candidateData.sheet_legacy.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', null]]);
+      // native 不写 DDL：sourceData.ddl 保持 undefined（原 helper 只在 sourceData 有 note）。
+      expect(plan.candidateData.sheet_legacy.sourceData.ddl).toBeUndefined();
+    });
+  });

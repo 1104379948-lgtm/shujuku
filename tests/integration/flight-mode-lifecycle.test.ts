@@ -190,4 +190,94 @@ describe.each(['native', 'sqlite'] as const)('flight mode lifecycle (%s)', (mode
       expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints[summaryKey]).toBeUndefined();
     }
   });
+
+  describe('sqlite + 已有数据且无 DDL 时飞行模式启停', () => {
+    function noDdlSheet(key: string, name: string, rows: string[][] = []): any {
+      const s = sheet(key, name, '', rows);
+      s.sourceData = { note: '无 DDL，依赖运行时 fallback' };
+      return s;
+    }
+
+    function initialNoDdlData(): any {
+      return {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_chronicle: noDdlSheet('sheet_chronicle', '纪要表', [['1', '第一段纪要'], ['2', '第二段纪要']]),
+        sheet_quan_ju: noDdlSheet('sheet_quan_ju', '全局数据表', [['1', '御苑']]),
+      };
+    }
+
+    it('开启飞行模式成功，纪要表与普通表均获得 fallback DDL 且数据保留，停用后可恢复', async () => {
+      h.mode = 'sqlite';
+      h.scope = null;
+      h.guide = null;
+      const initial = initialNoDdlData();
+      h.scopeTemplate = { templateStr: JSON.stringify(initial), presetName: '飞行模式集成' };
+      h.data = clone(initial);
+      h.chat.splice(0, h.chat.length, {
+        is_user: false,
+        mes: '初始 AI 楼层',
+        TavernDB_ACU_IsolatedData: { '': makeFrame(h.data) },
+      });
+      h.save.mockClear();
+      h.strictSave.mockClear();
+
+      await expect(enableFlightMode_ACU()).resolves.toEqual({ ok: true, visibleChronicleRowCount: 2 });
+
+      const enabled = getCurrentFlightModeState_ACU();
+      expect(enabled).toMatchObject({ enabled: true, hiddenRowIds: [] });
+      const summaryKey = enabled.bigSummarySheetKey;
+      expect(h.data[summaryKey]).toMatchObject({ name: '大总结' });
+      expect(h.data.sheet_chronicle.exportConfig).toMatchObject({ entryType: 'constant', extraIndexEnabled: false });
+
+      // 原无 DDL 表在提交后的权威状态中获得合法 fallback DDL，数据保留。
+      expect(h.data.sheet_chronicle.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+      expect(h.data.sheet_quan_ju.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+      expect(h.data.sheet_chronicle.content).toEqual([['row_id', '事件'], ['1', '第一段纪要'], ['2', '第二段纪要']]);
+      expect(h.data.sheet_quan_ju.content).toEqual([['row_id', '总结'], ['1', '御苑']]);
+
+      // 写入大总结并执行隐藏纪要逻辑，确认无回归。
+      const beforeWrite = clone(h.data);
+      const afterWrite = clone(h.data);
+      afterWrite.sheet_chronicle.content.push(['3', '同批新增纪要']);
+      afterWrite[summaryKey].content.push(['1', '阶段总结']);
+      const hiddenRowIds = getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU(beforeWrite, afterWrite, enabled);
+      expect(hiddenRowIds).toEqual(['1', '2', '3']);
+      const roll = stageFlightModeHiddenRowIds_ACU(hiddenRowIds!);
+
+      const persisted = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: 0,
+        source: 'group_fill',
+        afterData: afterWrite,
+        operations: [
+          { kind: 'sheet_replace', sheetKey: 'sheet_chronicle', sheet: afterWrite.sheet_chronicle, reason: 'system' },
+          { kind: 'sheet_replace', sheetKey: summaryKey, sheet: afterWrite[summaryKey], reason: 'system' },
+        ],
+        candidateChangedSheetKeys: ['sheet_chronicle', summaryKey],
+        isolationKey: '',
+        baseRevision: 'flight-mode-revision',
+        writeSet: [{ kind: 'sheet', sheetKey: summaryKey }],
+        transactionContext: { baseRevision: 'flight-mode-revision', runCommit: async (work: any) => work(), assertFresh: vi.fn() },
+      });
+      expect(persisted.saved).toBe(true);
+      expect(roll).toEqual(expect.any(Function));
+      h.data = afterWrite;
+
+      const replayed = await loadTableStateFromFramesV2_ACU(h.chat, '');
+      expect(replayed?.sheet_chronicle.content).toEqual(afterWrite.sheet_chronicle.content);
+
+      h.chat.push({ is_user: false, mes: '后续 AI 楼层', TavernDB_ACU_IsolatedData: { '': clone(h.chat[0].TavernDB_ACU_IsolatedData['']) } });
+      await expect(disableFlightMode_ACU()).resolves.toEqual({ ok: true });
+
+      expect(getCurrentFlightModeState_ACU()).toMatchObject({ enabled: false, hiddenRowIds: [] });
+      expect(h.data.sheet_chronicle.exportConfig).toMatchObject({ entryType: 'keyword', extraIndexEnabled: true });
+      // 停用后原表仍有效：fallback DDL 保留、数据不变。
+      expect(h.data.sheet_chronicle.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+      expect(h.data.sheet_quan_ju.sourceData.ddl).toContain('row_id INTEGER PRIMARY KEY');
+      for (const message of h.chat) {
+        expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data[summaryKey]).toBeUndefined();
+        expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints[summaryKey]).toBeUndefined();
+      }
+    });
+  });
+
 });

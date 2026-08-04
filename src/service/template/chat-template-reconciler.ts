@@ -2,6 +2,7 @@ import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-d
 import { buildStableSheetKeyCandidate_ACU, canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU, parseDDLTableConstraints_ACU, parseDDLTableName, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
+import { generateDDL } from '../../data/sqlite/schema-mapper';
 import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist';
 import { hydrateTableDataStrict_ACU } from '../table/sqlite-template-validation';
 import { normalizeTemplateRowIds_ACU } from './template-row-id-normalizer';
@@ -70,7 +71,24 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
   if (normalization.blockers.length > 0) {
     return emptyPlan_ACU(baselineData, audit, normalization.blockers.map(item => item.message));
   }
+
   const templateData = normalization.templateData;
+  if (input.storageMode !== 'native') {
+    // SQLite 模式下，已有数据的聊天表可能没有持久化 DDL（运行时依赖 fallback）。
+    // 协调层是唯一没有接入缺失 DDL fallback 的入口，导致空 DDL 被解析为零列、
+    // 与含 row_id 的表头必然不等，所有匹配表都被误判为“DDL 与表头列数不一致”。
+    // 在进入表身份匹配与 schema 协调前，为 baseline 与规范化后的 template 补齐
+    // 缺失 DDL（仅缺失/全空白，绝不覆盖非空 DDL），使后续逻辑看到同一份合法契约。
+    const baselineFallback = applyMissingDdlFallback_ACU(baselineData, '当前聊天基线');
+    if (baselineFallback.blockers.length > 0) {
+      return emptyPlan_ACU(baselineData, audit, baselineFallback.blockers);
+    }
+    const templateFallback = applyMissingDdlFallback_ACU(templateData, '目标模板');
+    if (templateFallback.blockers.length > 0) {
+      return emptyPlan_ACU(baselineData, audit, templateFallback.blockers);
+    }
+  }
+
   const candidateData = stripRuntimeSeedRows_ACU(baselineData);
   candidateData.mate = clone_ACU(templateData.mate || baselineData.mate);
   for (const [key, sheet] of listSheets_ACU(baselineData)) {
@@ -312,6 +330,38 @@ function accumulateTableAliases_ACU(sheet: Sheet_ACU, before: Sheet_ACU, templat
   });
   if (normalized.length > 0) sheet.sourceData.tableAliases = normalized;
   else delete sheet.sourceData.tableAliases;
+}
+
+/**
+ * SQLite 协调输入的缺失 DDL fallback（方案 A）。
+ * 只处理缺失或全空白 DDL 的 Sheet；非空 DDL 保持原值，绝不覆盖。
+ * 只在调用方传入的克隆对象上运行，不修改外部输入。
+ */
+function applyMissingDdlFallback_ACU(data: TableDataObject_ACU, sourceLabel: string): { blockers: string[] } {
+  const blockers: string[] = [];
+  for (const [key, sheet] of listSheets_ACU(data)) {
+    if (!sheet || typeof sheet !== 'object') continue;
+    const rawDdl = (sheet as any).sourceData?.ddl;
+    const hasNonEmptyDdl = typeof rawDdl === 'string' && rawDdl.trim().length > 0;
+    if (hasNonEmptyDdl) continue;
+    if (!(sheet as any).sourceData || typeof (sheet as any).sourceData !== 'object') {
+      (sheet as any).sourceData = {};
+    }
+    try {
+      const tableName = (sheet as any).uid || key;
+      (sheet as any).sourceData.ddl = generateDDL(sheet, tableName);
+      const headers = Array.isArray((sheet as any).content?.[0])
+        ? (sheet as any).content[0].map((value: unknown) => String(value ?? ''))
+        : [];
+      const validation = validateDDLTextAgainstHeaders_ACU((sheet as any).sourceData.ddl, headers);
+      if (!validation.valid) {
+        blockers.push(`${sourceLabel} 表「${(sheet as any).name || key}」（${key}）生成的 fallback DDL 校验失败：${validation.message}`);
+      }
+    } catch (error: any) {
+      blockers.push(`${sourceLabel} 表「${(sheet as any).name || key}」（${key}）缺失 DDL fallback 失败：${error?.message || String(error)}`);
+    }
+  }
+  return { blockers };
 }
 
 function headers_ACU(sheet: Sheet_ACU): string[] {
