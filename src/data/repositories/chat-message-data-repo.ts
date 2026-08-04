@@ -74,6 +74,41 @@ function isObjectRecord_ACU(value: any): value is Record<string, any> {
     return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function hasSheetKeyInRecord_ACU(record: any): boolean {
+    return isObjectRecord_ACU(record) && Object.keys(record).some(k => k.startsWith('sheet_'));
+}
+
+function hasSheetKeyInArray_ACU(value: any): boolean {
+    return Array.isArray(value) && value.some(item => typeof item === 'string' && item.startsWith('sheet_'));
+}
+
+/**
+ * 判断候选 tagData 是否携带 Legacy-V1 表格 payload。
+ *
+ * 判定覆盖 V1 的表数据形态（independentData/incrementalData 含 sheet_ 键、
+ * modifiedKeys/updateGroupKeys 含 sheet_ 键、_acu_storage_version === 1 且存在
+ * 表字段）。合法 V2 slot（storageFrame.version === 2）与纯向量 metadata
+ * （vectorMemoryState / summaryVectorIndexState / summaryVectorIndexManifest）
+ * 不在此列，但“V2 frame + V1 payload 混合”仍会被拒绝。
+ *
+ * 该判定只识别 V1 表数据形态；是否放行由写入 barrier 结合 V2 结构统一裁决。
+ */
+export function isV1TablePayloadCandidate_ACU(tagData: unknown): boolean {
+    if (!isObjectRecord_ACU(tagData)) return false;
+    if (hasSheetKeyInRecord_ACU(tagData.independentData)) return true;
+    if (hasSheetKeyInRecord_ACU(tagData.incrementalData)) return true;
+    if (hasSheetKeyInArray_ACU(tagData.modifiedKeys)) return true;
+    if (hasSheetKeyInArray_ACU(tagData.updateGroupKeys)) return true;
+    if (tagData._acu_storage_version === 1) {
+        if (Object.prototype.hasOwnProperty.call(tagData, 'independentData')
+            || Object.prototype.hasOwnProperty.call(tagData, 'incrementalData')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
 function deleteSheetKeysFromRecord_ACU(record: any, sheetKeys: Set<string>): boolean {
     if (!isObjectRecord_ACU(record)) return false;
     let changed = false;
@@ -885,8 +920,38 @@ export function isLegacyMatchForIsolation_ACU(msg: any, isolationConfig: Isolati
  * @param isolationKey 隔离标签键名
  * @param tagData 要写入的标签数据
  */
+/**
+ * Legacy-V1 表格写入被写入屏障拒绝时的稳定错误码。
+ *
+ * 业务层必须 fail-closed：遇到该错误码不得降级为普通 V1 写入，
+ * 也不得通过自动选边、删除检测或覆盖任一侧数据“修复” mixed 冲突。
+ * 诊断日志只能包含字段名、isolationKey、source 等安全元信息，
+ * 不得记录表格单元格内容。
+ */
+export const LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU = 'LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU' as const;
+
+/**
+ * 原子写入指定隔离标签的数据到 IsolatedData 容器。
+ *
+ * 写入屏障：候选 tagData 若携带 Legacy-V1 表格 payload（含“V2 frame + V1
+ * payload”混合形态），则拒绝写入并抛出稳定错误码，message 保持原样。
+ * 合法 V2 slot（storageFrame.version === 2）与纯向量 metadata 更新不受影响。
+ *
+ * 屏障验证发生在对真实 message 的任何赋值之前；调用方必须自行 clone
+ * 候选，避免把内存中的引用直接挂到宿主消息上。
+ *
+ * @throws {Error} 携带 LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU 错误码，当候选为 V1 表 payload。
+ */
 export function writeIsolatedTagData_ACU(msg: any, isolationKey: string, tagData: IsolationTagData_ACU): void {
     if (!msg) return;
+    if (isV1TablePayloadCandidate_ACU(tagData)) {
+        const error = new Error(
+            `[write-barrier] 拒绝写入 Legacy-V1 表格 payload：${LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU} `
+            + `isolationKey=${String(isolationKey)}`,
+        );
+        (error as any).code = LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU;
+        throw error;
+    }
     if (!msg.TavernDB_ACU_IsolatedData || typeof msg.TavernDB_ACU_IsolatedData !== 'object') {
         msg.TavernDB_ACU_IsolatedData = {};
     }
@@ -894,103 +959,79 @@ export function writeIsolatedTagData_ACU(msg: any, isolationKey: string, tagData
 }
 
 /**
- * 确保 IsolatedData[isolationKey] 存在（初始化空槽）。
- * 如果已存在则不覆盖。
+ * 受控的隔离槽 metadata patch。
  *
- * @param msg 聊天消息对象
- * @param isolationKey 隔离标签键名
- * @returns 该标签槽的引用
+ * 只允许更新向量 metadata 字段（vectorMemoryState / summaryVectorIndexState /
+ * summaryVectorIndexManifest / _acu_base_state），绝不携带或续写 V1 表格 payload。
+ * 调用方传入的 patch 中若包含任何表数据形态字段（independentData /
+ * incrementalData / modifiedKeys / updateGroupKeys / _acu_storage_version === 1），
+ * 直接 fail-closed 拒绝，message 保持原样。
+ *
+ * 该函数替代“clone 现有整槽后整槽回写”的写法，避免旧 V1 payload 被原样续写。
+ *
+ * @throws {Error} 携带 LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU 错误码。
  */
-export function initIsolatedTagSlot_ACU(msg: any, isolationKey: string): IsolationTagData_ACU {
+export function patchIsolatedTagDataMetadata_ACU(
+    msg: any,
+    isolationKey: string,
+    patch: Partial<Pick<IsolationTagData_ACU, 'vectorMemoryState' | 'summaryVectorIndexState' | 'summaryVectorIndexManifest' | '_acu_base_state'>>,
+): void {
+    if (!msg) return;
+    const forbidden = [
+        'independentData',
+        'incrementalData',
+        'modifiedKeys',
+        'updateGroupKeys',
+        '_acu_storage_version',
+    ] as const;
+    for (const key of forbidden) {
+        if (Object.prototype.hasOwnProperty.call(patch, key)) {
+            const error = new Error(
+                `[write-barrier] 拒绝 metadata patch 携带 V1 表字段：${LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU} `
+                + `isolationKey=${String(isolationKey)} field=${key}`,
+            );
+            (error as any).code = LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU;
+            throw error;
+        }
+    }
     if (!msg.TavernDB_ACU_IsolatedData || typeof msg.TavernDB_ACU_IsolatedData !== 'object') {
         msg.TavernDB_ACU_IsolatedData = {};
     }
-    if (!msg.TavernDB_ACU_IsolatedData[isolationKey]) {
-        msg.TavernDB_ACU_IsolatedData[isolationKey] = {
-            independentData: {},
-            modifiedKeys: [],
-            updateGroupKeys: [],
-        };
+    const container = msg.TavernDB_ACU_IsolatedData;
+    const existing = isObjectRecord_ACU(container[isolationKey]) ? container[isolationKey] : {};
+    if (isV1TablePayloadCandidate_ACU(existing)) {
+        const error = new Error(
+            `[write-barrier] 拒绝在 Legacy-V1 payload 槽上执行 metadata patch：`
+            + `${LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU} isolationKey=${String(isolationKey)}`,
+        );
+        (error as any).code = LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU;
+        throw error;
     }
-    return msg.TavernDB_ACU_IsolatedData[isolationKey];
+    // 必须替换整个 IsolatedData 字段为新对象，而不是原地改槽：
+    // 调用方（向量发布/回滚）依赖“捕获旧字段引用 → 保存失败时整字段回滚”的语义，
+    // 原地改槽会使捕获的引用与变更后的引用相同，导致回滚失效。
+    const nextContainer = { ...container };
+    const next = { ...existing };
+    if (Object.prototype.hasOwnProperty.call(patch, 'vectorMemoryState')) {
+        if (patch.vectorMemoryState == null) delete next.vectorMemoryState;
+        else next.vectorMemoryState = patch.vectorMemoryState;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexState')) {
+        if (patch.summaryVectorIndexState == null) delete next.summaryVectorIndexState;
+        else next.summaryVectorIndexState = patch.summaryVectorIndexState;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexManifest')) {
+        if (patch.summaryVectorIndexManifest == null) delete next.summaryVectorIndexManifest;
+        else next.summaryVectorIndexManifest = patch.summaryVectorIndexManifest;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, '_acu_base_state')) {
+        if (patch._acu_base_state == null) delete next._acu_base_state;
+        else next._acu_base_state = patch._acu_base_state;
+    }
+    nextContainer[isolationKey] = next;
+    msg.TavernDB_ACU_IsolatedData = nextContainer;
 }
 
-/**
- * 统一的 checkpoint 写入接口。
- * 将完整表格快照写入指定消息的指定隔离标签槽位，并标记 _acu_storage_mode='checkpoint'。
- * 用于播种、导入、模板覆盖、清理边界兆底等场景。
- *
- * @param msg 聊天消息对象
- * @param isolationKey 隔离标签键名
- * @param independentData 完整表格快照
- * @param options 可选配置（modifiedKeys/updateGroupKeys/baseState）
- */
-export function writeTableCheckpointToMessage_ACU(
-    msg: any,
-    isolationKey: string,
-    independentData: Record<string, Sheet_ACU>,
-    options: {
-        legacyConfirmed: true;
-        modifiedKeys?: string[];
-        updateGroupKeys?: string[];
-        baseState?: string;
-    },
-): void {
-    if (!msg || options?.legacyConfirmed !== true) return;
-    const tagData = initIsolatedTagSlot_ACU(msg, isolationKey);
-    tagData.independentData = independentData;
-    tagData.modifiedKeys = options?.modifiedKeys ?? [];
-    tagData.updateGroupKeys = options?.updateGroupKeys ?? [];
-    tagData._acu_storage_mode = 'checkpoint';
-    tagData._acu_storage_version = 1;
-    if (options?.baseState !== undefined) {
-        tagData._acu_base_state = options.baseState;
-    }
-}
-
-
-/**
- * 同步写入旧版兼容字段（IndependentData/ModifiedKeys/UpdateGroupKeys）。
- *
- * @param msg 聊天消息对象
- * @param independentData 独立表格数据
- * @param modifiedKeys 修改键列表
- * @param updateGroupKeys 更新组键列表
- */
-export function writeLegacyCompatData_ACU(
-    msg: any,
-    independentData: Record<string, Sheet_ACU>,
-    modifiedKeys: string[],
-    updateGroupKeys: string[],
-    options: { legacyConfirmed: true },
-): void {
-    if (!msg || options?.legacyConfirmed !== true) return;
-    msg.TavernDB_ACU_IndependentData = independentData;
-    msg.TavernDB_ACU_ModifiedKeys = modifiedKeys;
-    msg.TavernDB_ACU_UpdateGroupKeys = updateGroupKeys;
-}
-
-/**
- * 写入旧版 Data 和 SummaryData 字段。
- *
- * @param msg 聊天消息对象
- * @param standardData 标准表数据（可选，null 则不写入）
- * @param summaryData 摘要表数据（可选，null 则不写入）
- */
-export function writeLegacyStandardAndSummary_ACU(
-    msg: any,
-    standardData: LegacyTableContainer_ACU | null,
-    summaryData: LegacyTableContainer_ACU | null,
-    options: { legacyConfirmed: true },
-): void {
-    if (!msg || options?.legacyConfirmed !== true) return;
-    if (standardData && hasAnySheetKey(standardData)) {
-        msg.TavernDB_ACU_Data = standardData;
-    }
-    if (summaryData && hasAnySheetKey(summaryData)) {
-        msg.TavernDB_ACU_SummaryData = summaryData;
-    }
-}
 
 /**
  * 根据隔离配置设置或删除 Identity 字段。

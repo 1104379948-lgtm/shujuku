@@ -1074,66 +1074,22 @@ async function purgeOldLayerDataCore_ACU() {
             }
         }
 
-        // 将 orphaned 数据写入边界保留楼层
+        // ── [兜底快照] 不再把 orphaned 数据复制到边界楼层 ──
+        // Legacy-V1 表数据不得复制到新消息/边界层（禁止新增/复制 V1 payload）。
+        // 任一 isoKey 存在 orphaned Legacy-V1 数据时，fail-closed 中止清理，保留原楼层。
         if (orphanedData.size > 0) {
-            let totalSheets = 0;
-            for (const [, sheetMap] of orphanedData) {
-                totalSheets += sheetMap.size;
-            }
-
-            logDebug_ACU(`[数据清理] 检测到 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）仅存在于待清理楼层，将写入边界保留楼层 #${anchorIndex} 作为兜底...`);
-
-            const anchorMsg = chat[anchorIndex];
-            const anchorSnapshot = messageFieldSnapshot_ACU(anchorMsg);
-
-            // 初始化 IsolatedData 容器
-            if (!anchorMsg.TavernDB_ACU_IsolatedData || typeof anchorMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(anchorMsg.TavernDB_ACU_IsolatedData)) {
-                anchorMsg.TavernDB_ACU_IsolatedData = {};
-            }
-
             for (const [isoKey, sheetMap] of orphanedData) {
                 const strategy = resolveTableStorageStrategy_ACU(chat, isoKey, {
                     enabled: settings_ACU.dataIsolationEnabled,
                     code: settings_ACU.dataIsolationCode,
                 });
-                if (strategy.mode !== 'legacy-v1') {
-                    logDebug_ACU(`[数据清理] isolationKey=[${isoKey || '无标签'}] 未确认为 legacy-v1，跳过 V1 兜底快照写入。`);
-                    continue;
+                if (strategy.mode === 'legacy-v1') {
+                    logWarn_ACU(`[数据清理] isolationKey=[${isoKey || '无标签'}] 存在 orphaned Legacy-V1 表数据（${sheetMap.size} 张表），`
+                        + `不得复制到边界楼层；迁移完成前中止清理，保留原楼层数据。reason=${strategy.reason}`);
+                    return;
                 }
-
-                // 初始化该 isolationKey 槽（如果不存在）
-                if (!anchorMsg.TavernDB_ACU_IsolatedData[isoKey]) {
-                    anchorMsg.TavernDB_ACU_IsolatedData[isoKey] = {
-                        independentData: {},
-                        modifiedKeys: [],
-                        updateGroupKeys: [],
-                    };
-                }
-
-                const anchorTagData = anchorMsg.TavernDB_ACU_IsolatedData[isoKey];
-                if (!anchorTagData.independentData || typeof anchorTagData.independentData !== 'object') {
-                    anchorTagData.independentData = {};
-                }
-
-                // 写入表数据（不修改 modifiedKeys/updateGroupKeys，避免干扰自动更新门禁）
-                for (const [sheetKey, sheetData] of sheetMap) {
-                    anchorTagData.independentData[sheetKey] = JSON.parse(JSON.stringify(sheetData));
-                }
-                anchorTagData._acu_storage_mode = 'checkpoint';
-                anchorTagData._acu_storage_version = 1;
             }
-
-            // 兜底数据必须先严格持久化；失败时不能继续破坏性删除旧楼层。
-            try {
-                await saveChatToHostStrict_ACU();
-                logDebug_ACU(`[数据清理] 已将 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）的兜底数据写入楼层 #${anchorIndex}，聊天已严格保存。`);
-            } catch (e) {
-                restoreMessageFieldSnapshot_ACU(anchorMsg, anchorSnapshot);
-                logError_ACU('[数据清理] 兜底数据严格保存失败，已回滚并中止清理:', e);
-                return;
-            }
-        } else {
-            logDebug_ACU('[数据清理] 未检测到需要兜底的表数据。');
+            logDebug_ACU(`[数据清理] orphaned 表数据（${orphanedData.size} 个隔离标签）均为非 legacy-v1，已跳过 V1 兜底复制，继续清理。`);
         }
     } else {
         logWarn_ACU(`[数据清理] 边界保留楼层索引无效（anchorIndex=${anchorIndex}），跳过兜底快照。`);

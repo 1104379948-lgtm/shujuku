@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
   saveChatStrict: vi.fn(),
   tagData: null as any,
   writeTagData: vi.fn(),
+  patchTagData: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
@@ -33,6 +34,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({ saveChatToHostStrict
 vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
   readIsolatedTagData_ACU: () => h.tagData,
   writeIsolatedTagData_ACU: (...a: any[]) => h.writeTagData(...a),
+  patchIsolatedTagDataMetadata_ACU: (...a: any[]) => h.patchTagData(...a),
 }));
 vi.mock('../../../src/data/storage/vector-index-st-files-storage', () => ({
   loadVectorIndexRegistry_ACU: async () => ({ files: h.registry }),
@@ -172,6 +174,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     h.saveChatStrict.mockResolvedValue(undefined);
     h.tagData = {};
     h.writeTagData.mockReset();
+    h.patchTagData.mockReset();
     vi.stubGlobal('fetch', vi.fn());
     setFixture_ACU();
   });
@@ -398,6 +401,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
     h.saveChatStrict.mockResolvedValue(undefined);
     h.tagData = {};
     h.writeTagData.mockReset();
+    h.patchTagData.mockReset();
   });
 
   it('严格删除身份无效 pointer 后交由 UI 普通重建，不再入 flush 队列', async () => {
@@ -444,7 +448,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-newer', source: 'realign-test' });
 
     expect(h.readSnapshot).toHaveBeenCalledWith('v2-newer');
-    expect(h.writeTagData).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({
+    expect(h.patchTagData).toHaveBeenCalledWith(h.chat[0], 'iso-a', expect.objectContaining({
       summaryVectorIndexState: expect.objectContaining({ manifest: expect.objectContaining({ indexId: 'idx-newer' }) }),
     }));
     expect(h.saveChatStrict).toHaveBeenCalledTimes(1);
@@ -469,8 +473,8 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
     h.readSnapshot.mockResolvedValue({ ok: true, data: realignBlob_ACU(disk) });
     h.loadChunks.mockRejectedValueOnce(new Error('交火向量单文件快照身份不匹配: stale pointer'));
     h.saveChatStrict.mockRejectedValueOnce(new Error('host save failed'));
-    h.writeTagData.mockImplementation((message: any, isolationKey: string, tagData: any) => {
-      message.TavernDB_ACU_IsolatedData = { [isolationKey]: tagData };
+    h.patchTagData.mockImplementation((message: any, isolationKey: string, patch: any) => {
+      message.TavernDB_ACU_IsolatedData = { [isolationKey]: { ...(message.TavernDB_ACU_IsolatedData?.[isolationKey] || {}), ...patch } };
     });
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-save-failure', source: 'realign-test' });
@@ -500,7 +504,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
 
     const result = await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-stale', source: 'realign-test' });
 
-    expect(h.writeTagData).not.toHaveBeenCalled();
+    expect(h.patchTagData).not.toHaveBeenCalled();
     expect(h.saveChatStrict).not.toHaveBeenCalled();
     expect(h.clearInvalid).toHaveBeenCalledTimes(1);
     expect(result.reason).toBe('external_vector_identity_invalid_rebuild_required');
@@ -528,7 +532,7 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU invalid snapshot recover
 
     await processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'recover-realign-duplicate', source: 'realign-test' });
 
-    expect(h.writeTagData).not.toHaveBeenCalled();
+    expect(h.patchTagData).not.toHaveBeenCalled();
     expect(h.saveChatStrict).not.toHaveBeenCalled();
     expect(h.clearInvalid).toHaveBeenCalledTimes(1);
   });

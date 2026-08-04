@@ -13,7 +13,7 @@ import { deleteAllGeneratedEntries_ACU } from '../worldbook/pipeline';
 import { ensureSheetOrderNumbers_ACU, isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { getTemplateSheetKeys_ACU } from '../template/chat-scope';
 import { upsertTemplatePreset_ACU } from '../template/template-preset-service';
-import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU, readModifiedKeys_ACU, readUpdateGroupKeys_ACU, readMessageIdentity_ACU, isLegacyMatchForIsolation_ACU, initIsolatedTagSlot_ACU, writeLegacyCompatData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU, readModifiedKeys_ACU, readUpdateGroupKeys_ACU, readMessageIdentity_ACU, isLegacyMatchForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
 import { applyTableDelta_ACU, isDeltaTagData_ACU, isCheckpointTagData_ACU } from '../table/table-delta';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { loadTableStateFromFramesV2_ACU } from '../table/storage-frame-v2-replay';
@@ -652,20 +652,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       });
 
       if (strategy.mode === 'legacy-v1') {
-          const tagData = initIsolatedTagSlot_ACU(firstMsg, isolationKey);
-          const indep: Record<string, any> = {};
-          Object.keys(baseData).forEach(k => {
-              if (!k.startsWith('sheet_')) return;
-              indep[k] = JSON.parse(JSON.stringify(baseData[k]));
-          });
-          tagData.independentData = indep;
-          tagData.modifiedKeys = [];
-          tagData.updateGroupKeys = [];
-          tagData._acu_base_state = GREETING_LOCAL_BASE_STATE_MARKER_ACU;
-          tagData._acu_storage_mode = 'checkpoint';
-          tagData._acu_storage_version = 1;
-          writeLegacyCompatData_ACU(firstMsg, JSON.parse(JSON.stringify(indep)), [], [], { legacyConfirmed: true });
-          await saveChatToHost_ACU();
+          // 前置 preStrategy 已 fail-closed；此处再兜底：legacy-v1 不得新建 V1 slot/兼容字段。
+          logWarn_ACU(`[InitialCheckpoint] 检测到旧存储（strategy.mode=legacy-v1），拒绝写入 init checkpoint。reason=${strategy.reason}`);
+          return false;
       } else {
           const saveResult = await runTableWriteTransaction_ACU({
               source: normalizeInitialCheckpointV2Source_ACU(normalizedSource),

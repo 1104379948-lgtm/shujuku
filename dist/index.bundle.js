@@ -6573,6 +6573,42 @@ $CONTENT
     function isObjectRecord_ACU$3(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
     }
+    function hasSheetKeyInRecord_ACU(record) {
+        return isObjectRecord_ACU$3(record) && Object.keys(record).some(k => k.startsWith('sheet_'));
+    }
+    function hasSheetKeyInArray_ACU(value) {
+        return Array.isArray(value) && value.some(item => typeof item === 'string' && item.startsWith('sheet_'));
+    }
+    /**
+     * 判断候选 tagData 是否携带 Legacy-V1 表格 payload。
+     *
+     * 判定覆盖 V1 的表数据形态（independentData/incrementalData 含 sheet_ 键、
+     * modifiedKeys/updateGroupKeys 含 sheet_ 键、_acu_storage_version === 1 且存在
+     * 表字段）。合法 V2 slot（storageFrame.version === 2）与纯向量 metadata
+     * （vectorMemoryState / summaryVectorIndexState / summaryVectorIndexManifest）
+     * 不在此列，但“V2 frame + V1 payload 混合”仍会被拒绝。
+     *
+     * 该判定只识别 V1 表数据形态；是否放行由写入 barrier 结合 V2 结构统一裁决。
+     */
+    function isV1TablePayloadCandidate_ACU(tagData) {
+        if (!isObjectRecord_ACU$3(tagData))
+            return false;
+        if (hasSheetKeyInRecord_ACU(tagData.independentData))
+            return true;
+        if (hasSheetKeyInRecord_ACU(tagData.incrementalData))
+            return true;
+        if (hasSheetKeyInArray_ACU(tagData.modifiedKeys))
+            return true;
+        if (hasSheetKeyInArray_ACU(tagData.updateGroupKeys))
+            return true;
+        if (tagData._acu_storage_version === 1) {
+            if (Object.prototype.hasOwnProperty.call(tagData, 'independentData')
+                || Object.prototype.hasOwnProperty.call(tagData, 'incrementalData')) {
+                return true;
+            }
+        }
+        return false;
+    }
     function deleteSheetKeysFromRecord_ACU(record, sheetKeys) {
         if (!isObjectRecord_ACU$3(record))
             return false;
@@ -7377,89 +7413,114 @@ $CONTENT
      * @param isolationKey 隔离标签键名
      * @param tagData 要写入的标签数据
      */
+    /**
+     * Legacy-V1 表格写入被写入屏障拒绝时的稳定错误码。
+     *
+     * 业务层必须 fail-closed：遇到该错误码不得降级为普通 V1 写入，
+     * 也不得通过自动选边、删除检测或覆盖任一侧数据“修复” mixed 冲突。
+     * 诊断日志只能包含字段名、isolationKey、source 等安全元信息，
+     * 不得记录表格单元格内容。
+     */
+    const LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU = 'LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU';
+    /**
+     * 原子写入指定隔离标签的数据到 IsolatedData 容器。
+     *
+     * 写入屏障：候选 tagData 若携带 Legacy-V1 表格 payload（含“V2 frame + V1
+     * payload”混合形态），则拒绝写入并抛出稳定错误码，message 保持原样。
+     * 合法 V2 slot（storageFrame.version === 2）与纯向量 metadata 更新不受影响。
+     *
+     * 屏障验证发生在对真实 message 的任何赋值之前；调用方必须自行 clone
+     * 候选，避免把内存中的引用直接挂到宿主消息上。
+     *
+     * @throws {Error} 携带 LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU 错误码，当候选为 V1 表 payload。
+     */
     function writeIsolatedTagData_ACU(msg, isolationKey, tagData) {
         if (!msg)
             return;
+        if (isV1TablePayloadCandidate_ACU(tagData)) {
+            const error = new Error(`[write-barrier] 拒绝写入 Legacy-V1 表格 payload：${LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU} `
+                + `isolationKey=${String(isolationKey)}`);
+            error.code = LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU;
+            throw error;
+        }
         if (!msg.TavernDB_ACU_IsolatedData || typeof msg.TavernDB_ACU_IsolatedData !== 'object') {
             msg.TavernDB_ACU_IsolatedData = {};
         }
         msg.TavernDB_ACU_IsolatedData[isolationKey] = tagData;
     }
     /**
-     * 确保 IsolatedData[isolationKey] 存在（初始化空槽）。
-     * 如果已存在则不覆盖。
+     * 受控的隔离槽 metadata patch。
      *
-     * @param msg 聊天消息对象
-     * @param isolationKey 隔离标签键名
-     * @returns 该标签槽的引用
+     * 只允许更新向量 metadata 字段（vectorMemoryState / summaryVectorIndexState /
+     * summaryVectorIndexManifest / _acu_base_state），绝不携带或续写 V1 表格 payload。
+     * 调用方传入的 patch 中若包含任何表数据形态字段（independentData /
+     * incrementalData / modifiedKeys / updateGroupKeys / _acu_storage_version === 1），
+     * 直接 fail-closed 拒绝，message 保持原样。
+     *
+     * 该函数替代“clone 现有整槽后整槽回写”的写法，避免旧 V1 payload 被原样续写。
+     *
+     * @throws {Error} 携带 LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU 错误码。
      */
-    function initIsolatedTagSlot_ACU(msg, isolationKey) {
+    function patchIsolatedTagDataMetadata_ACU(msg, isolationKey, patch) {
+        if (!msg)
+            return;
+        const forbidden = [
+            'independentData',
+            'incrementalData',
+            'modifiedKeys',
+            'updateGroupKeys',
+            '_acu_storage_version',
+        ];
+        for (const key of forbidden) {
+            if (Object.prototype.hasOwnProperty.call(patch, key)) {
+                const error = new Error(`[write-barrier] 拒绝 metadata patch 携带 V1 表字段：${LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU} `
+                    + `isolationKey=${String(isolationKey)} field=${key}`);
+                error.code = LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU;
+                throw error;
+            }
+        }
         if (!msg.TavernDB_ACU_IsolatedData || typeof msg.TavernDB_ACU_IsolatedData !== 'object') {
             msg.TavernDB_ACU_IsolatedData = {};
         }
-        if (!msg.TavernDB_ACU_IsolatedData[isolationKey]) {
-            msg.TavernDB_ACU_IsolatedData[isolationKey] = {
-                independentData: {},
-                modifiedKeys: [],
-                updateGroupKeys: [],
-            };
+        const container = msg.TavernDB_ACU_IsolatedData;
+        const existing = isObjectRecord_ACU$3(container[isolationKey]) ? container[isolationKey] : {};
+        if (isV1TablePayloadCandidate_ACU(existing)) {
+            const error = new Error(`[write-barrier] 拒绝在 Legacy-V1 payload 槽上执行 metadata patch：`
+                + `${LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU} isolationKey=${String(isolationKey)}`);
+            error.code = LEGACY_V1_TABLE_WRITE_FORBIDDEN_ACU;
+            throw error;
         }
-        return msg.TavernDB_ACU_IsolatedData[isolationKey];
-    }
-    /**
-     * 统一的 checkpoint 写入接口。
-     * 将完整表格快照写入指定消息的指定隔离标签槽位，并标记 _acu_storage_mode='checkpoint'。
-     * 用于播种、导入、模板覆盖、清理边界兆底等场景。
-     *
-     * @param msg 聊天消息对象
-     * @param isolationKey 隔离标签键名
-     * @param independentData 完整表格快照
-     * @param options 可选配置（modifiedKeys/updateGroupKeys/baseState）
-     */
-    function writeTableCheckpointToMessage_ACU(msg, isolationKey, independentData, options) {
-        if (!msg || options?.legacyConfirmed !== true)
-            return;
-        const tagData = initIsolatedTagSlot_ACU(msg, isolationKey);
-        tagData.independentData = independentData;
-        tagData.modifiedKeys = options?.modifiedKeys ?? [];
-        tagData.updateGroupKeys = options?.updateGroupKeys ?? [];
-        tagData._acu_storage_mode = 'checkpoint';
-        tagData._acu_storage_version = 1;
-        if (options?.baseState !== undefined) {
-            tagData._acu_base_state = options.baseState;
+        // 必须替换整个 IsolatedData 字段为新对象，而不是原地改槽：
+        // 调用方（向量发布/回滚）依赖“捕获旧字段引用 → 保存失败时整字段回滚”的语义，
+        // 原地改槽会使捕获的引用与变更后的引用相同，导致回滚失效。
+        const nextContainer = { ...container };
+        const next = { ...existing };
+        if (Object.prototype.hasOwnProperty.call(patch, 'vectorMemoryState')) {
+            if (patch.vectorMemoryState == null)
+                delete next.vectorMemoryState;
+            else
+                next.vectorMemoryState = patch.vectorMemoryState;
         }
-    }
-    /**
-     * 同步写入旧版兼容字段（IndependentData/ModifiedKeys/UpdateGroupKeys）。
-     *
-     * @param msg 聊天消息对象
-     * @param independentData 独立表格数据
-     * @param modifiedKeys 修改键列表
-     * @param updateGroupKeys 更新组键列表
-     */
-    function writeLegacyCompatData_ACU(msg, independentData, modifiedKeys, updateGroupKeys, options) {
-        if (!msg || options?.legacyConfirmed !== true)
-            return;
-        msg.TavernDB_ACU_IndependentData = independentData;
-        msg.TavernDB_ACU_ModifiedKeys = modifiedKeys;
-        msg.TavernDB_ACU_UpdateGroupKeys = updateGroupKeys;
-    }
-    /**
-     * 写入旧版 Data 和 SummaryData 字段。
-     *
-     * @param msg 聊天消息对象
-     * @param standardData 标准表数据（可选，null 则不写入）
-     * @param summaryData 摘要表数据（可选，null 则不写入）
-     */
-    function writeLegacyStandardAndSummary_ACU(msg, standardData, summaryData, options) {
-        if (!msg || options?.legacyConfirmed !== true)
-            return;
-        if (standardData && hasAnySheetKey(standardData)) {
-            msg.TavernDB_ACU_Data = standardData;
+        if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexState')) {
+            if (patch.summaryVectorIndexState == null)
+                delete next.summaryVectorIndexState;
+            else
+                next.summaryVectorIndexState = patch.summaryVectorIndexState;
         }
-        if (summaryData && hasAnySheetKey(summaryData)) {
-            msg.TavernDB_ACU_SummaryData = summaryData;
+        if (Object.prototype.hasOwnProperty.call(patch, 'summaryVectorIndexManifest')) {
+            if (patch.summaryVectorIndexManifest == null)
+                delete next.summaryVectorIndexManifest;
+            else
+                next.summaryVectorIndexManifest = patch.summaryVectorIndexManifest;
         }
+        if (Object.prototype.hasOwnProperty.call(patch, '_acu_base_state')) {
+            if (patch._acu_base_state == null)
+                delete next._acu_base_state;
+            else
+                next._acu_base_state = patch._acu_base_state;
+        }
+        nextContainer[isolationKey] = next;
+        msg.TavernDB_ACU_IsolatedData = nextContainer;
     }
     /**
      * 根据隔离配置设置或删除 Identity 字段。
@@ -7806,232 +7867,6 @@ $CONTENT
         if (!container)
             return {};
         return safeClone(container);
-    }
-
-    /**
-     * service/table/table-delta.ts — 表格增量(delta)纯函数
-     *
-     * 职责：
-     * 1. buildTableDelta_ACU — 对比 base/next 两版 Sheet_ACU，生成行级增量
-     * 2. applyTableDelta_ACU — 将增量应用到 base Sheet_ACU，重建 next
-     * 3. isDeltaTagData_ACU / isCheckpointTagData_ACU — 存储模式判定
-     *
-     * 约定：content[i][0] 为 row_id；缺失/重复/列结构变化时退化为 checkpoint。
-     */
-    // ── 常量 ──
-    const LOG_TAG_DELTA = '[表格增量]';
-    const LOG_TAG_CHECKPOINT = '[表格Checkpoint]';
-    const LOG_TAG_REBUILD = '[表格重建]';
-    // ── 退化判定 ──
-    /**
-     * 检查一张表的 content 是否具备稳定 row_id（content[i][0] 非空且无重复）。
-     * 返回 true 表示可以安全做行级 delta；false 表示必须退化为 checkpoint。
-     */
-    function hasStableRowIds_ACU(content) {
-        if (!content || content.length === 0)
-            return true; // 空表视为可 delta（delta 为空）
-        const ids = new Set();
-        for (let i = 0; i < content.length; i++) {
-            const row = content[i];
-            if (!row || row.length === 0)
-                return false;
-            const id = row[0];
-            if (id == null || id === '')
-                return false;
-            if (ids.has(id))
-                return false;
-            ids.add(id);
-        }
-        return true;
-    }
-    /**
-     * 检查两张表的列结构是否一致（以第一行列数为准）。
-     * 列数变化意味着结构变更，必须退化。
-     */
-    function hasStructureChanged_ACU(baseContent, nextContent) {
-        const baseColCount = baseContent.length > 0 ? (baseContent[0]?.length ?? 0) : 0;
-        const nextColCount = nextContent.length > 0 ? (nextContent[0]?.length ?? 0) : 0;
-        return baseColCount !== nextColCount;
-    }
-    // ── 元数据变更检测 ──
-    /** 需要追踪的元数据字段 */
-    const META_KEYS = [
-        'name', 'orderNo', 'updateConfig', 'exportConfig', 'sourceData',
-    ];
-    function detectMetaChanges_ACU(base, next) {
-        const changes = {};
-        let hasChange = false;
-        for (const key of META_KEYS) {
-            if (JSON.stringify(base[key]) !== JSON.stringify(next[key])) {
-                changes[key] = next[key];
-                hasChange = true;
-            }
-        }
-        return hasChange ? changes : undefined;
-    }
-    /**
-     * 对比 base 和 next 两版 Sheet_ACU，生成行级增量。
-     * 如果无法安全生成增量（row_id 缺失/重复/列结构变化），返回 degraded=true。
-     *
-     * @param base 上一版快照（undefined 表示首次写入，直接退化为 checkpoint）
-     * @param next 当前版本
-     * @param sheetKey 表键名（用于日志）
-     */
-    function buildTableDelta_ACU(base, next, sheetKey) {
-        // 首次写入 → checkpoint
-        if (!base) {
-            logDebug_ACU(`${LOG_TAG_DELTA} ${sheetKey}: 无基底，退化为 checkpoint`);
-            return { degraded: true, degradeReason: 'no_base' };
-        }
-        const baseContent = base.content ?? [];
-        const nextContent = next.content ?? [];
-        // 列结构变化 → checkpoint
-        if (hasStructureChanged_ACU(baseContent, nextContent)) {
-            logWarn_ACU(`${LOG_TAG_DELTA} ${sheetKey}: 列结构变化，退化为 checkpoint`);
-            return { degraded: true, degradeReason: 'structure_changed' };
-        }
-        // row_id 稳定性检查
-        if (!hasStableRowIds_ACU(baseContent)) {
-            logWarn_ACU(`${LOG_TAG_DELTA} ${sheetKey}: base 缺少稳定 row_id，退化为 checkpoint`);
-            return { degraded: true, degradeReason: 'base_no_stable_row_id' };
-        }
-        if (!hasStableRowIds_ACU(nextContent)) {
-            logWarn_ACU(`${LOG_TAG_DELTA} ${sheetKey}: next 缺少稳定 row_id，退化为 checkpoint`);
-            return { degraded: true, degradeReason: 'next_no_stable_row_id' };
-        }
-        // 构建 base 行索引 map: row_id → 完整行
-        const baseMap = new Map();
-        for (const row of baseContent) {
-            baseMap.set(row[0], row);
-        }
-        // 构建 next 行索引 map
-        const nextMap = new Map();
-        for (const row of nextContent) {
-            nextMap.set(row[0], row);
-        }
-        const rowDeltas = [];
-        // 检测 upsert（新增或修改的行）
-        for (const [rowId, nextRow] of nextMap) {
-            const baseRow = baseMap.get(rowId);
-            if (!baseRow) {
-                // 新增行
-                rowDeltas.push({ row_id: rowId, op: 'upsert', cells: nextRow });
-            }
-            else if (JSON.stringify(baseRow) !== JSON.stringify(nextRow)) {
-                // 修改行
-                rowDeltas.push({ row_id: rowId, op: 'upsert', cells: nextRow });
-            }
-        }
-        // 检测 delete（base 中有但 next 中没有的行）
-        for (const rowId of baseMap.keys()) {
-            if (!nextMap.has(rowId)) {
-                rowDeltas.push({ row_id: rowId, op: 'delete' });
-            }
-        }
-        // 元数据变更
-        const metaChanged = detectMetaChanges_ACU(base, next);
-        // 判断是否为 noop
-        if (rowDeltas.length === 0 && !metaChanged) {
-            logDebug_ACU(`${LOG_TAG_DELTA} ${sheetKey}: 无变化，noop`);
-        }
-        else {
-            logDebug_ACU(`${LOG_TAG_DELTA} ${sheetKey}: ${rowDeltas.length} 行变更, meta=${metaChanged ? 'changed' : 'unchanged'}`);
-        }
-        return {
-            degraded: false,
-            delta: {
-                sheetUid: next.uid,
-                rowDeltas,
-                metaChanged,
-                structureChanged: false,
-            },
-        };
-    }
-    /**
-     * 将增量应用到 base Sheet_ACU，重建出 next 版本。
-     * 纯函数，不修改 base。
-     *
-     * @param base 基底快照
-     * @param delta 增量描述
-     * @param sheetKey 表键名（用于日志）
-     * @returns 重建后的 Sheet_ACU
-     */
-    function applyTableDelta_ACU(base, delta, sheetKey) {
-        logDebug_ACU(`${LOG_TAG_REBUILD} ${sheetKey}: 应用 ${delta.rowDeltas.length} 行变更`);
-        // 深拷贝 base 避免副作用
-        const result = JSON.parse(JSON.stringify(base));
-        // 应用元数据变更
-        if (delta.metaChanged) {
-            if (delta.metaChanged.name !== undefined)
-                result.name = delta.metaChanged.name;
-            if (delta.metaChanged.orderNo !== undefined)
-                result.orderNo = delta.metaChanged.orderNo;
-            if (delta.metaChanged.updateConfig !== undefined)
-                result.updateConfig = delta.metaChanged.updateConfig;
-            if (delta.metaChanged.exportConfig !== undefined)
-                result.exportConfig = delta.metaChanged.exportConfig;
-            if (delta.metaChanged.sourceData !== undefined)
-                result.sourceData = delta.metaChanged.sourceData;
-        }
-        // 构建当前行索引 map: row_id → index
-        const rowIndexMap = new Map();
-        for (let i = 0; i < result.content.length; i++) {
-            const row = result.content[i];
-            if (row && row[0]) {
-                rowIndexMap.set(row[0], i);
-            }
-        }
-        // 应用行级变更
-        const toDelete = new Set();
-        for (const rd of delta.rowDeltas) {
-            if (rd.op === 'delete') {
-                const idx = rowIndexMap.get(rd.row_id);
-                if (idx !== undefined) {
-                    toDelete.add(idx);
-                }
-                else {
-                    logWarn_ACU(`${LOG_TAG_REBUILD} ${sheetKey}: 删除目标 row_id=${rd.row_id} 不存在，跳过`);
-                }
-            }
-            else if (rd.op === 'upsert') {
-                const idx = rowIndexMap.get(rd.row_id);
-                if (idx !== undefined) {
-                    // 更新已有行
-                    result.content[idx] = rd.cells;
-                }
-                else {
-                    // 新增行追加到末尾
-                    result.content.push(rd.cells);
-                    // 更新索引以处理同批次多次 upsert 同一新 row_id 的情况
-                    rowIndexMap.set(rd.row_id, result.content.length - 1);
-                }
-            }
-        }
-        // 执行删除（从后往前删避免索引偏移）
-        if (toDelete.size > 0) {
-            const sortedIndices = [...toDelete].sort((a, b) => b - a);
-            for (const idx of sortedIndices) {
-                result.content.splice(idx, 1);
-            }
-        }
-        return result;
-    }
-    // ── 存储模式判定 ──
-    /**
-     * 判断一个 IsolationTagData_ACU 是否为 delta 模式存储。
-     */
-    function isDeltaTagData_ACU(tagData) {
-        return tagData._acu_storage_mode === 'delta';
-    }
-    /**
-     * 判断一个 IsolationTagData_ACU 是否为 checkpoint 模式存储。
-     * checkpoint 包含完整 independentData 快照。
-     * legacy（无标记）也视为 checkpoint（旧版完整快照）。
-     */
-    function isCheckpointTagData_ACU(tagData) {
-        return tagData._acu_storage_mode === 'checkpoint'
-            || tagData._acu_storage_mode === 'legacy'
-            || !tagData._acu_storage_mode;
     }
 
     function isObjectRecord_ACU$2(value) {
@@ -44621,233 +44456,6 @@ $CONTENT
         };
         return persistCore();
     }
-    async function persistTablesToChatMessageLegacyV1WithLockOption_ACU(options = {}) {
-        const { targetMessageIndex = -1, targetSheetKeys = null, updateGroupKeys = null, trackingSheetKeys = targetSheetKeys, tableData: explicitTableData, trackAsUpdate = true, } = options;
-        /**
-         * 保存独立表格数据到聊天记录。
-         * 返回 { saved: boolean, messageIndex?: number, error?: string }
-         * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
-         */
-        const _skipPostRefresh = false;
-        const effectiveTableData = explicitTableData !== undefined ? explicitTableData : currentJsonTableData_ACU;
-        if (!effectiveTableData) {
-            logError_ACU('Save aborted: currentJsonTableData_ACU is null.');
-            return { saved: false, error: 'currentJsonTableData is null' };
-        }
-        const currentIsolationKey = getCurrentIsolationKey_ACU();
-        const persistCore = async () => {
-            const chat = getChatArray_ACU();
-            if (!chat || chat.length === 0) {
-                logError_ACU('Save failed: Chat history is empty.');
-                return { saved: false, error: 'chat history is empty' };
-            }
-            let targetMessage = null;
-            let finalIndex = -1;
-            if (targetMessageIndex !== -1 && chat[targetMessageIndex] && !chat[targetMessageIndex].is_user) {
-                targetMessage = chat[targetMessageIndex];
-                finalIndex = targetMessageIndex;
-            }
-            else {
-                for (let i = chat.length - 1; i >= 0; i--) {
-                    if (!chat[i].is_user) {
-                        targetMessage = chat[i];
-                        finalIndex = i;
-                        break;
-                    }
-                }
-            }
-            if (!targetMessage) {
-                logWarn_ACU('Save failed: No AI message found.');
-                return { saved: false, error: 'no AI message found' };
-            }
-            const transactionContext = options.transactionContext;
-            transactionContext?.assertFresh?.('persistTablesToChatMessage:before_legacy_persist');
-            if (finalIndex < 0 || !chat[finalIndex] || chat[finalIndex] !== targetMessage || targetMessage.is_user) {
-                return { saved: false, error: 'target AI message changed before legacy persist; abort stale table write.' };
-            }
-            // 查找上一个 AI 楼层的 tagData 作为 delta 的 base
-            let prevTagData = null;
-            for (let i = finalIndex - 1; i >= 0; i--) {
-                if (!chat[i].is_user) {
-                    const td = readIsolatedTagData_ACU(chat[i], currentIsolationKey);
-                    if (td && td.independentData && Object.keys(td.independentData).some(k => k.startsWith('sheet_'))) {
-                        prevTagData = td;
-                    }
-                    break;
-                }
-            }
-            try {
-                const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
-                if (!existingGuide || !Object.keys(existingGuide).some(k => k.startsWith('sheet_'))) {
-                    const templateObjForSeed = parseTableTemplateJson_ACU({ stripSeedRows: false });
-                    const guideData = buildChatSheetGuideDataFromData_ACU(effectiveTableData, {
-                        preserveSeedRowsFromGuideData: null,
-                        seedRowsFromTemplateObj: templateObjForSeed,
-                    });
-                    if (guideData && Object.keys(guideData).some(k => k.startsWith('sheet_'))) {
-                        setChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey, guideData, { reason: 'first_fill' });
-                        logDebug_ACU(`[SheetGuide] Created chat sheet guide for tag [${currentIsolationKey || '无标签'}] (tables=${Object.keys(guideData).filter(k => k.startsWith('sheet_')).length}).`);
-                    }
-                }
-            }
-            catch (e) {
-                logWarn_ACU('[SheetGuide] Failed to create sheet guide on first fill:', e);
-            }
-            const isolatedData = cloneIsolatedData_ACU(targetMessage);
-            if (!isolatedData[currentIsolationKey]) {
-                isolatedData[currentIsolationKey] = {
-                    independentData: {},
-                    modifiedKeys: [],
-                    updateGroupKeys: [],
-                };
-            }
-            const currentTagData = isolatedData[currentIsolationKey];
-            let independentData = {};
-            if (isDeltaTagData_ACU(currentTagData) && currentTagData.incrementalData) {
-                independentData = prevTagData?.independentData
-                    ? JSON.parse(JSON.stringify(prevTagData.independentData))
-                    : JSON.parse(JSON.stringify(currentTagData.independentData || {}));
-                const existingCheckpointData = JSON.parse(JSON.stringify(currentTagData.independentData || {}));
-                for (const [sheetKey, delta] of Object.entries(currentTagData.incrementalData)) {
-                    const baseSheet = independentData[sheetKey] || existingCheckpointData[sheetKey];
-                    if (!baseSheet) {
-                        logWarn_ACU(`[表格增量] 楼层 #${finalIndex} 既有 delta 表 ${sheetKey} 缺少 base，回退保留当前楼层已存快照`);
-                        if (existingCheckpointData[sheetKey]) {
-                            independentData[sheetKey] = existingCheckpointData[sheetKey];
-                        }
-                        continue;
-                    }
-                    const normalizedBaseSheet = JSON.parse(JSON.stringify(baseSheet));
-                    if (Array.isArray(normalizedBaseSheet.content)) {
-                        normalizedBaseSheet.content = ensureStableRowIdsForSheetContent_ACU(normalizedBaseSheet.content);
-                    }
-                    independentData[sheetKey] = applyTableDelta_ACU(normalizedBaseSheet, delta, sheetKey);
-                }
-            }
-            else {
-                independentData = JSON.parse(JSON.stringify(currentTagData.independentData || {}));
-            }
-            let keysToSave = Array.isArray(targetSheetKeys)
-                ? targetSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.length > 0)
-                : getSortedSheetKeys_ACU(effectiveTableData);
-            keysToSave = [...new Set(keysToSave.filter(sheetKey => Boolean(effectiveTableData[sheetKey])))];
-            const trackingCandidateKeys = [
-                ...keysToSave,
-                ...(Array.isArray(trackingSheetKeys)
-                    ? trackingSheetKeys.filter((sheetKey) => typeof sheetKey === 'string' && sheetKey.length > 0)
-                    : []),
-            ];
-            const trackingKeySet = new Set(trackingCandidateKeys.filter(sheetKey => Boolean(effectiveTableData[sheetKey])));
-            const actuallyModifiedKeys = [...trackingKeySet];
-            const metadataOnlyUpdateGroupKeys = Array.isArray(updateGroupKeys)
-                ? [...new Set(updateGroupKeys.filter(sheetKey => trackingKeySet.has(sheetKey) && Boolean(effectiveTableData[sheetKey])))]
-                : [];
-            if (keysToSave.length === 0 && trackAsUpdate && actuallyModifiedKeys.length > 0) {
-                const existingModifiedKeys = currentTagData.modifiedKeys || [];
-                currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...actuallyModifiedKeys])];
-                if (metadataOnlyUpdateGroupKeys.length > 0) {
-                    const existingGroupKeys = currentTagData.updateGroupKeys || [];
-                    currentTagData.updateGroupKeys = [...new Set([...existingGroupKeys, ...metadataOnlyUpdateGroupKeys])];
-                }
-                writeIsolatedTagData_ACU(targetMessage, currentIsolationKey, currentTagData);
-                writeMessageIdentity_ACU(targetMessage, {
-                    enabled: settings_ACU.dataIsolationEnabled,
-                    code: settings_ACU.dataIsolationCode,
-                });
-                await saveChatToHost_ACU();
-                return { saved: true, messageIndex: finalIndex };
-            }
-            keysToSave.forEach(sheetKey => {
-                const table = effectiveTableData[sheetKey];
-                if (table) {
-                    const normalizedTable = JSON.parse(JSON.stringify(table));
-                    if (Array.isArray(normalizedTable.content)) {
-                        normalizedTable.content = ensureStableRowIdsForSheetContent_ACU(normalizedTable.content);
-                    }
-                    independentData[sheetKey] = sanitizeSheetForStorage_ACU(normalizedTable);
-                }
-            });
-            currentTagData.independentData = independentData;
-            // ── 增量/checkpoint 模式判定 ──
-            let persistedChangedKeySet = new Set();
-            if (prevTagData && prevTagData.independentData) {
-                // 尝试对目标楼层已合并后的表构建 delta。
-                // 同一楼层可能由多个更新组分批写入，必须保留此前组已写入的 incrementalData。
-                const incrementalData = {};
-                let anyDegraded = false;
-                for (const sheetKey of Object.keys(independentData).filter(k => k.startsWith('sheet_'))) {
-                    const nextSheet = independentData[sheetKey];
-                    if (!nextSheet)
-                        continue;
-                    const normalizedBaseSheet = JSON.parse(JSON.stringify(prevTagData.independentData[sheetKey] || null));
-                    if (normalizedBaseSheet && Array.isArray(normalizedBaseSheet.content)) {
-                        normalizedBaseSheet.content = ensureStableRowIdsForSheetContent_ACU(normalizedBaseSheet.content);
-                    }
-                    const result = buildTableDelta_ACU(normalizedBaseSheet, nextSheet, sheetKey);
-                    if (result.degraded) {
-                        anyDegraded = true;
-                        logDebug_ACU(`[表格增量] ${sheetKey} 退化: ${result.degradeReason}，本楼层将使用 checkpoint 模式`);
-                        break;
-                    }
-                    if (result.delta && (result.delta.rowDeltas.length > 0 || result.delta.metaChanged)) {
-                        incrementalData[sheetKey] = result.delta;
-                    }
-                }
-                if (!anyDegraded) {
-                    // delta 模式：写入增量数据，independentData 清空以节省存储空间
-                    currentTagData.incrementalData = incrementalData;
-                    currentTagData.independentData = {};
-                    currentTagData._acu_storage_mode = 'delta';
-                    currentTagData._acu_storage_version = 1;
-                    persistedChangedKeySet = new Set(Object.keys(incrementalData));
-                    logDebug_ACU(`[表格增量] 楼层 #${finalIndex} 使用 delta 模式，${Object.keys(incrementalData).length} 张表有变更`);
-                }
-                else {
-                    // checkpoint 模式：退化，写完整快照
-                    delete currentTagData.incrementalData;
-                    currentTagData._acu_storage_mode = 'checkpoint';
-                    currentTagData._acu_storage_version = 1;
-                    persistedChangedKeySet = new Set(actuallyModifiedKeys.filter(sheetKey => Boolean(independentData[sheetKey])));
-                    logDebug_ACU(`[表格Checkpoint] 楼层 #${finalIndex} 使用 checkpoint 模式`);
-                }
-            }
-            else {
-                // 无上一楼层 base → checkpoint 模式（首楼层或首次出现该标签）
-                delete currentTagData.incrementalData;
-                currentTagData._acu_storage_mode = 'checkpoint';
-                currentTagData._acu_storage_version = 1;
-                persistedChangedKeySet = new Set(actuallyModifiedKeys.filter(sheetKey => Boolean(independentData[sheetKey])));
-                logDebug_ACU(`[表格Checkpoint] 楼层 #${finalIndex} 无 base，使用 checkpoint 模式`);
-            }
-            const trackingModifiedKeys = actuallyModifiedKeys;
-            const trackingUpdateGroupKeys = metadataOnlyUpdateGroupKeys;
-            if (trackAsUpdate && trackingModifiedKeys.length > 0) {
-                const existingModifiedKeys = currentTagData.modifiedKeys || [];
-                currentTagData.modifiedKeys = [...new Set([...existingModifiedKeys, ...trackingModifiedKeys])];
-                logDebug_ACU(`[Tracking] Recorded modified keys for tag [${currentIsolationKey || '无标签'}] at index ${finalIndex}: ${currentTagData.modifiedKeys.join(', ')}`);
-            }
-            if (trackAsUpdate && trackingUpdateGroupKeys.length > 0 && trackingModifiedKeys.length > 0) {
-                const existingGroupKeys = currentTagData.updateGroupKeys || [];
-                currentTagData.updateGroupKeys = [...new Set([...existingGroupKeys, ...trackingUpdateGroupKeys])];
-                logDebug_ACU(`[Merge Update Success] Group keys for tag [${currentIsolationKey || '无标签'}] recorded at index ${finalIndex}: ${currentTagData.updateGroupKeys.join(', ')}`);
-            }
-            else if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && actuallyModifiedKeys.length === 0) {
-                logDebug_ACU(`[Merge Update Failed] No tables were modified for tag [${currentIsolationKey || '无标签'}]. Group keys NOT recorded: ${updateGroupKeys.join(', ')}`);
-            }
-            else if (trackAsUpdate && updateGroupKeys && updateGroupKeys.length > 0 && trackingUpdateGroupKeys.length === 0) {
-                logDebug_ACU(`[Merge Update Skipped] No tracked group keys intersected for tag [${currentIsolationKey || '无标签'}]. Group keys NOT recorded: ${updateGroupKeys.join(', ')}`);
-            }
-            writeIsolatedTagData_ACU(targetMessage, currentIsolationKey, currentTagData);
-            writeMessageIdentity_ACU(targetMessage, {
-                enabled: settings_ACU.dataIsolationEnabled,
-                code: settings_ACU.dataIsolationCode,
-            });
-            logDebug_ACU(`Saved ${keysToSave.length} tables for tag [${currentIsolationKey || '无标签'}] to message at index ${finalIndex}. Actually modified: ${actuallyModifiedKeys.length} tables.`);
-            await saveChatToHost_ACU();
-            return { saved: true, messageIndex: finalIndex };
-        };
-        return persistCore();
-    }
     /**
      * @deprecated 旧兼容写入口已收口禁用。所有表格写入必须走 runTableUpdateCommit_ACU。
      */
@@ -48585,6 +48193,232 @@ $CONTENT
     }
 
     /**
+     * service/table/table-delta.ts — 表格增量(delta)纯函数
+     *
+     * 职责：
+     * 1. buildTableDelta_ACU — 对比 base/next 两版 Sheet_ACU，生成行级增量
+     * 2. applyTableDelta_ACU — 将增量应用到 base Sheet_ACU，重建 next
+     * 3. isDeltaTagData_ACU / isCheckpointTagData_ACU — 存储模式判定
+     *
+     * 约定：content[i][0] 为 row_id；缺失/重复/列结构变化时退化为 checkpoint。
+     */
+    // ── 常量 ──
+    const LOG_TAG_DELTA = '[表格增量]';
+    const LOG_TAG_CHECKPOINT = '[表格Checkpoint]';
+    const LOG_TAG_REBUILD = '[表格重建]';
+    // ── 退化判定 ──
+    /**
+     * 检查一张表的 content 是否具备稳定 row_id（content[i][0] 非空且无重复）。
+     * 返回 true 表示可以安全做行级 delta；false 表示必须退化为 checkpoint。
+     */
+    function hasStableRowIds_ACU(content) {
+        if (!content || content.length === 0)
+            return true; // 空表视为可 delta（delta 为空）
+        const ids = new Set();
+        for (let i = 0; i < content.length; i++) {
+            const row = content[i];
+            if (!row || row.length === 0)
+                return false;
+            const id = row[0];
+            if (id == null || id === '')
+                return false;
+            if (ids.has(id))
+                return false;
+            ids.add(id);
+        }
+        return true;
+    }
+    /**
+     * 检查两张表的列结构是否一致（以第一行列数为准）。
+     * 列数变化意味着结构变更，必须退化。
+     */
+    function hasStructureChanged_ACU(baseContent, nextContent) {
+        const baseColCount = baseContent.length > 0 ? (baseContent[0]?.length ?? 0) : 0;
+        const nextColCount = nextContent.length > 0 ? (nextContent[0]?.length ?? 0) : 0;
+        return baseColCount !== nextColCount;
+    }
+    // ── 元数据变更检测 ──
+    /** 需要追踪的元数据字段 */
+    const META_KEYS = [
+        'name', 'orderNo', 'updateConfig', 'exportConfig', 'sourceData',
+    ];
+    function detectMetaChanges_ACU(base, next) {
+        const changes = {};
+        let hasChange = false;
+        for (const key of META_KEYS) {
+            if (JSON.stringify(base[key]) !== JSON.stringify(next[key])) {
+                changes[key] = next[key];
+                hasChange = true;
+            }
+        }
+        return hasChange ? changes : undefined;
+    }
+    /**
+     * 对比 base 和 next 两版 Sheet_ACU，生成行级增量。
+     * 如果无法安全生成增量（row_id 缺失/重复/列结构变化），返回 degraded=true。
+     *
+     * @param base 上一版快照（undefined 表示首次写入，直接退化为 checkpoint）
+     * @param next 当前版本
+     * @param sheetKey 表键名（用于日志）
+     */
+    function buildTableDelta_ACU(base, next, sheetKey) {
+        // 首次写入 → checkpoint
+        if (!base) {
+            logDebug_ACU(`${LOG_TAG_DELTA} ${sheetKey}: 无基底，退化为 checkpoint`);
+            return { degraded: true, degradeReason: 'no_base' };
+        }
+        const baseContent = base.content ?? [];
+        const nextContent = next.content ?? [];
+        // 列结构变化 → checkpoint
+        if (hasStructureChanged_ACU(baseContent, nextContent)) {
+            logWarn_ACU(`${LOG_TAG_DELTA} ${sheetKey}: 列结构变化，退化为 checkpoint`);
+            return { degraded: true, degradeReason: 'structure_changed' };
+        }
+        // row_id 稳定性检查
+        if (!hasStableRowIds_ACU(baseContent)) {
+            logWarn_ACU(`${LOG_TAG_DELTA} ${sheetKey}: base 缺少稳定 row_id，退化为 checkpoint`);
+            return { degraded: true, degradeReason: 'base_no_stable_row_id' };
+        }
+        if (!hasStableRowIds_ACU(nextContent)) {
+            logWarn_ACU(`${LOG_TAG_DELTA} ${sheetKey}: next 缺少稳定 row_id，退化为 checkpoint`);
+            return { degraded: true, degradeReason: 'next_no_stable_row_id' };
+        }
+        // 构建 base 行索引 map: row_id → 完整行
+        const baseMap = new Map();
+        for (const row of baseContent) {
+            baseMap.set(row[0], row);
+        }
+        // 构建 next 行索引 map
+        const nextMap = new Map();
+        for (const row of nextContent) {
+            nextMap.set(row[0], row);
+        }
+        const rowDeltas = [];
+        // 检测 upsert（新增或修改的行）
+        for (const [rowId, nextRow] of nextMap) {
+            const baseRow = baseMap.get(rowId);
+            if (!baseRow) {
+                // 新增行
+                rowDeltas.push({ row_id: rowId, op: 'upsert', cells: nextRow });
+            }
+            else if (JSON.stringify(baseRow) !== JSON.stringify(nextRow)) {
+                // 修改行
+                rowDeltas.push({ row_id: rowId, op: 'upsert', cells: nextRow });
+            }
+        }
+        // 检测 delete（base 中有但 next 中没有的行）
+        for (const rowId of baseMap.keys()) {
+            if (!nextMap.has(rowId)) {
+                rowDeltas.push({ row_id: rowId, op: 'delete' });
+            }
+        }
+        // 元数据变更
+        const metaChanged = detectMetaChanges_ACU(base, next);
+        // 判断是否为 noop
+        if (rowDeltas.length === 0 && !metaChanged) {
+            logDebug_ACU(`${LOG_TAG_DELTA} ${sheetKey}: 无变化，noop`);
+        }
+        else {
+            logDebug_ACU(`${LOG_TAG_DELTA} ${sheetKey}: ${rowDeltas.length} 行变更, meta=${metaChanged ? 'changed' : 'unchanged'}`);
+        }
+        return {
+            degraded: false,
+            delta: {
+                sheetUid: next.uid,
+                rowDeltas,
+                metaChanged,
+                structureChanged: false,
+            },
+        };
+    }
+    /**
+     * 将增量应用到 base Sheet_ACU，重建出 next 版本。
+     * 纯函数，不修改 base。
+     *
+     * @param base 基底快照
+     * @param delta 增量描述
+     * @param sheetKey 表键名（用于日志）
+     * @returns 重建后的 Sheet_ACU
+     */
+    function applyTableDelta_ACU(base, delta, sheetKey) {
+        logDebug_ACU(`${LOG_TAG_REBUILD} ${sheetKey}: 应用 ${delta.rowDeltas.length} 行变更`);
+        // 深拷贝 base 避免副作用
+        const result = JSON.parse(JSON.stringify(base));
+        // 应用元数据变更
+        if (delta.metaChanged) {
+            if (delta.metaChanged.name !== undefined)
+                result.name = delta.metaChanged.name;
+            if (delta.metaChanged.orderNo !== undefined)
+                result.orderNo = delta.metaChanged.orderNo;
+            if (delta.metaChanged.updateConfig !== undefined)
+                result.updateConfig = delta.metaChanged.updateConfig;
+            if (delta.metaChanged.exportConfig !== undefined)
+                result.exportConfig = delta.metaChanged.exportConfig;
+            if (delta.metaChanged.sourceData !== undefined)
+                result.sourceData = delta.metaChanged.sourceData;
+        }
+        // 构建当前行索引 map: row_id → index
+        const rowIndexMap = new Map();
+        for (let i = 0; i < result.content.length; i++) {
+            const row = result.content[i];
+            if (row && row[0]) {
+                rowIndexMap.set(row[0], i);
+            }
+        }
+        // 应用行级变更
+        const toDelete = new Set();
+        for (const rd of delta.rowDeltas) {
+            if (rd.op === 'delete') {
+                const idx = rowIndexMap.get(rd.row_id);
+                if (idx !== undefined) {
+                    toDelete.add(idx);
+                }
+                else {
+                    logWarn_ACU(`${LOG_TAG_REBUILD} ${sheetKey}: 删除目标 row_id=${rd.row_id} 不存在，跳过`);
+                }
+            }
+            else if (rd.op === 'upsert') {
+                const idx = rowIndexMap.get(rd.row_id);
+                if (idx !== undefined) {
+                    // 更新已有行
+                    result.content[idx] = rd.cells;
+                }
+                else {
+                    // 新增行追加到末尾
+                    result.content.push(rd.cells);
+                    // 更新索引以处理同批次多次 upsert 同一新 row_id 的情况
+                    rowIndexMap.set(rd.row_id, result.content.length - 1);
+                }
+            }
+        }
+        // 执行删除（从后往前删避免索引偏移）
+        if (toDelete.size > 0) {
+            const sortedIndices = [...toDelete].sort((a, b) => b - a);
+            for (const idx of sortedIndices) {
+                result.content.splice(idx, 1);
+            }
+        }
+        return result;
+    }
+    // ── 存储模式判定 ──
+    /**
+     * 判断一个 IsolationTagData_ACU 是否为 delta 模式存储。
+     */
+    function isDeltaTagData_ACU(tagData) {
+        return tagData._acu_storage_mode === 'delta';
+    }
+    /**
+     * 判断一个 IsolationTagData_ACU 是否为 checkpoint 模式存储。
+     * checkpoint 包含完整 independentData 快照。
+     * legacy（无标记）也视为 checkpoint（旧版完整快照）。
+     */
+    function isCheckpointTagData_ACU(tagData) {
+        return tagData._acu_storage_mode === 'checkpoint'
+            || tagData._acu_storage_mode === 'legacy'
+            || !tagData._acu_storage_mode;
+    }
+
+    /**
      * service/runtime/helpers-data-merge.ts — 数据合并/格式化/首楼初始化/阈值
      * 从 helpers-remaining.ts 拆出
      */
@@ -49197,21 +49031,9 @@ $CONTENT
             code: settings_ACU.dataIsolationCode,
         });
         if (strategy.mode === 'legacy-v1') {
-            const tagData = initIsolatedTagSlot_ACU(firstMsg, isolationKey);
-            const indep = {};
-            Object.keys(baseData).forEach(k => {
-                if (!k.startsWith('sheet_'))
-                    return;
-                indep[k] = JSON.parse(JSON.stringify(baseData[k]));
-            });
-            tagData.independentData = indep;
-            tagData.modifiedKeys = [];
-            tagData.updateGroupKeys = [];
-            tagData._acu_base_state = GREETING_LOCAL_BASE_STATE_MARKER_ACU;
-            tagData._acu_storage_mode = 'checkpoint';
-            tagData._acu_storage_version = 1;
-            writeLegacyCompatData_ACU(firstMsg, JSON.parse(JSON.stringify(indep)), [], [], { legacyConfirmed: true });
-            await saveChatToHost_ACU();
+            // 前置 preStrategy 已 fail-closed；此处再兜底：legacy-v1 不得新建 V1 slot/兼容字段。
+            logWarn_ACU(`[InitialCheckpoint] 检测到旧存储（strategy.mode=legacy-v1），拒绝写入 init checkpoint。reason=${strategy.reason}`);
+            return false;
         }
         else {
             const saveResult = await runTableWriteTransaction_ACU({
@@ -70072,60 +69894,22 @@ $CONTENT
                     }
                 }
             }
-            // 将 orphaned 数据写入边界保留楼层
+            // ── [兜底快照] 不再把 orphaned 数据复制到边界楼层 ──
+            // Legacy-V1 表数据不得复制到新消息/边界层（禁止新增/复制 V1 payload）。
+            // 任一 isoKey 存在 orphaned Legacy-V1 数据时，fail-closed 中止清理，保留原楼层。
             if (orphanedData.size > 0) {
-                let totalSheets = 0;
-                for (const [, sheetMap] of orphanedData) {
-                    totalSheets += sheetMap.size;
-                }
-                logDebug_ACU(`[数据清理] 检测到 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）仅存在于待清理楼层，将写入边界保留楼层 #${anchorIndex} 作为兜底...`);
-                const anchorMsg = chat[anchorIndex];
-                const anchorSnapshot = messageFieldSnapshot_ACU(anchorMsg);
-                // 初始化 IsolatedData 容器
-                if (!anchorMsg.TavernDB_ACU_IsolatedData || typeof anchorMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(anchorMsg.TavernDB_ACU_IsolatedData)) {
-                    anchorMsg.TavernDB_ACU_IsolatedData = {};
-                }
                 for (const [isoKey, sheetMap] of orphanedData) {
                     const strategy = resolveTableStorageStrategy_ACU(chat, isoKey, {
                         enabled: settings_ACU.dataIsolationEnabled,
                         code: settings_ACU.dataIsolationCode,
                     });
-                    if (strategy.mode !== 'legacy-v1') {
-                        logDebug_ACU(`[数据清理] isolationKey=[${isoKey || '无标签'}] 未确认为 legacy-v1，跳过 V1 兜底快照写入。`);
-                        continue;
+                    if (strategy.mode === 'legacy-v1') {
+                        logWarn_ACU(`[数据清理] isolationKey=[${isoKey || '无标签'}] 存在 orphaned Legacy-V1 表数据（${sheetMap.size} 张表），`
+                            + `不得复制到边界楼层；迁移完成前中止清理，保留原楼层数据。reason=${strategy.reason}`);
+                        return;
                     }
-                    // 初始化该 isolationKey 槽（如果不存在）
-                    if (!anchorMsg.TavernDB_ACU_IsolatedData[isoKey]) {
-                        anchorMsg.TavernDB_ACU_IsolatedData[isoKey] = {
-                            independentData: {},
-                            modifiedKeys: [],
-                            updateGroupKeys: [],
-                        };
-                    }
-                    const anchorTagData = anchorMsg.TavernDB_ACU_IsolatedData[isoKey];
-                    if (!anchorTagData.independentData || typeof anchorTagData.independentData !== 'object') {
-                        anchorTagData.independentData = {};
-                    }
-                    // 写入表数据（不修改 modifiedKeys/updateGroupKeys，避免干扰自动更新门禁）
-                    for (const [sheetKey, sheetData] of sheetMap) {
-                        anchorTagData.independentData[sheetKey] = JSON.parse(JSON.stringify(sheetData));
-                    }
-                    anchorTagData._acu_storage_mode = 'checkpoint';
-                    anchorTagData._acu_storage_version = 1;
                 }
-                // 兜底数据必须先严格持久化；失败时不能继续破坏性删除旧楼层。
-                try {
-                    await saveChatToHostStrict_ACU();
-                    logDebug_ACU(`[数据清理] 已将 ${totalSheets} 张表（${orphanedData.size} 个隔离标签）的兜底数据写入楼层 #${anchorIndex}，聊天已严格保存。`);
-                }
-                catch (e) {
-                    restoreMessageFieldSnapshot_ACU(anchorMsg, anchorSnapshot);
-                    logError_ACU('[数据清理] 兜底数据严格保存失败，已回滚并中止清理:', e);
-                    return;
-                }
-            }
-            else {
-                logDebug_ACU('[数据清理] 未检测到需要兜底的表数据。');
+                logDebug_ACU(`[数据清理] orphaned 表数据（${orphanedData.size} 个隔离标签）均为非 legacy-v1，已跳过 V1 兜底复制，继续清理。`);
             }
         }
         else {
@@ -80847,26 +80631,9 @@ $CONTENT
             modifiedKeys: [],
             updateGroupKeys: [],
         };
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const existingStorageFrame = existingTagData.storageFrame;
-        const existingTagDataIsV2 = !!existingStorageFrame;
-        const nextTagData = {
-            ...(existingTagDataIsV2
-                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-                : {
-                    independentData: existingTagData.independentData || {},
-                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-                }),
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        };
-        const shouldWriteLegacyCompat = !existingTagDataIsV2 && isLegacyV1TagData_ACU(existingTagData);
         let uploadedFiles = [];
         let publishedManifest = null;
+        let publishedState = null;
         let publishMessageState = null;
         if (nextState) {
             const previousManifest = existingTagData.summaryVectorIndexManifest || previousState?.manifest || null;
@@ -80892,17 +80659,18 @@ $CONTENT
             });
             uploadedFiles = persisted.uploadedFiles;
             publishedManifest = persisted.manifest;
-            assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
+            publishedState = persisted.state;
             logDebug_ACU(`[纪要向量索引] 已写入最新层内容寻址 manifest：rows=${persisted.manifest.rowCount}, chunks=${persisted.manifest.chunkCount}, chunkRefs=${persisted.manifest.contentAddressed?.chunkRefs?.length || 0}`);
         }
         else {
-            assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
+            publishedManifest = null;
         }
         publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
-            nextIsolatedData[tagIsolationKey] = nextTagData;
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
+            patchIsolatedTagDataMetadata_ACU(message, tagIsolationKey, {
+                summaryVectorIndexState: publishedState,
+                summaryVectorIndexManifest: publishedManifest || null,
+            });
             const anchorForMessage = resolveRemoteMemorySnapshotAnchor_ACU(options.chat, options.targetMessageIndex);
             if (anchorForMessage?.anchor) {
                 persistRemoteMemorySnapshotAnchorIfNeeded_ACU(message, anchorForMessage);
@@ -80911,9 +80679,6 @@ $CONTENT
                 enabled: settings_ACU.dataIsolationEnabled,
                 code: settings_ACU.dataIsolationCode,
             });
-            if (shouldWriteLegacyCompat) {
-                writeLegacyCompatData_ACU(message, nextTagData.independentData || {}, nextTagData.modifiedKeys || [], nextTagData.updateGroupKeys || [], { legacyConfirmed: true });
-            }
             if (options.expectedFlushScopeKey && options.expectedFlushGeneration != null) {
                 await assertSummaryVectorFlushGenerationCurrent_ACU(options.expectedFlushScopeKey, options.expectedFlushGeneration);
             }
@@ -80941,40 +80706,19 @@ $CONTENT
         const manifest = existingTagData?.summaryVectorIndexManifest || existingTagData?.summaryVectorIndexState?.manifest || null;
         if (!existingTagData?.summaryVectorIndexState && !existingTagData?.summaryVectorIndexManifest)
             return !!manifest;
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const existingStorageFrame = existingTagData.storageFrame;
-        const existingTagDataIsV2 = !!existingStorageFrame;
-        const nextTagData = {
-            ...(existingTagDataIsV2
-                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-                : {
-                    independentData: existingTagData.independentData || {},
-                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-                }),
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        };
-        const shouldWriteLegacyCompat = !existingTagDataIsV2 && isLegacyV1TagData_ACU(existingTagData);
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, null);
         const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
             if (params.expectedFlushScopeKey && params.expectedFlushGeneration != null) {
                 await assertSummaryVectorFlushGenerationCurrent_ACU(params.expectedFlushScopeKey, params.expectedFlushGeneration);
             }
-            nextIsolatedData[isolationKey] = nextTagData;
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, isolationKey, nextTagData);
+            patchIsolatedTagDataMetadata_ACU(message, isolationKey, {
+                summaryVectorIndexState: null,
+                summaryVectorIndexManifest: null,
+            });
             writeMessageIdentity_ACU(message, {
                 enabled: settings_ACU.dataIsolationEnabled,
                 code: settings_ACU.dataIsolationCode,
             });
-            if (shouldWriteLegacyCompat) {
-                writeLegacyCompatData_ACU(message, nextTagData.independentData || {}, nextTagData.modifiedKeys || [], nextTagData.updateGroupKeys || [], { legacyConfirmed: true });
-            }
             await saveChatToHostStrict_ACU();
         }
         catch (error) {
@@ -81097,37 +80841,16 @@ $CONTENT
             snapshotRevision: manifest.snapshot?.revision || 0,
             sourceMessageIndex: latestLayer.messageIndex,
         });
-        const nextIsolatedData = cloneIsolatedData_ACU(message);
-        const existingStorageFrame = existingTagData.storageFrame;
-        const existingTagDataIsV2 = !!existingStorageFrame;
-        const nextTagData = {
-            ...(existingTagDataIsV2
-                ? { storageFrame: existingStorageFrame, _acu_storage_version: 2 }
-                : {
-                    independentData: existingTagData.independentData || {},
-                    modifiedKeys: Array.isArray(existingTagData.modifiedKeys) ? [...existingTagData.modifiedKeys] : [],
-                    updateGroupKeys: Array.isArray(existingTagData.updateGroupKeys) ? [...existingTagData.updateGroupKeys] : [],
-                    ...(existingTagData.incrementalData ? { incrementalData: existingTagData.incrementalData } : {}),
-                    ...(existingTagData._acu_storage_mode ? { _acu_storage_mode: existingTagData._acu_storage_mode } : {}),
-                    ...(existingTagData._acu_storage_version != null ? { _acu_storage_version: existingTagData._acu_storage_version } : {}),
-                }),
-            ...(existingTagData.vectorMemoryState ? { vectorMemoryState: existingTagData.vectorMemoryState } : {}),
-            ...(existingTagData._acu_base_state ? { _acu_base_state: existingTagData._acu_base_state } : {}),
-        };
-        const shouldWriteLegacyCompat = !existingTagDataIsV2 && isLegacyV1TagData_ACU(existingTagData);
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, persisted.state, persisted.manifest);
         const publishMessageState = captureSummaryVectorIndexPublishMessageState_ACU(message);
         try {
-            nextIsolatedData[tagIsolationKey] = nextTagData;
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, tagIsolationKey, nextTagData);
+            patchIsolatedTagDataMetadata_ACU(message, tagIsolationKey, {
+                summaryVectorIndexState: persisted.state,
+                summaryVectorIndexManifest: persisted.manifest,
+            });
             writeMessageIdentity_ACU(message, {
                 enabled: settings_ACU.dataIsolationEnabled,
                 code: settings_ACU.dataIsolationCode,
             });
-            if (shouldWriteLegacyCompat) {
-                writeLegacyCompatData_ACU(message, nextTagData.independentData || {}, nextTagData.modifiedKeys || [], nextTagData.updateGroupKeys || [], { legacyConfirmed: true });
-            }
             await saveChatToHostStrict_ACU();
             await finalizeSummaryVectorIndexSnapshotPublication_ACU(persisted.uploadedFiles);
         }
@@ -95891,11 +95614,9 @@ $CONTENT
                 exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
                 value: message.TavernDB_ACU_IsolatedData,
             };
-            const nextIsolatedData = cloneIsolatedData_ACU(message);
-            const tagData = nextIsolatedData[isolationKey] || { independentData: {}, modifiedKeys: {}, updateGroupKeys: {} };
             const rows = Array.isArray(blob.rows) ? blob.rows : [];
             const chunks = Array.isArray(blob.chunks) ? blob.chunks : [];
-            assignSummaryVectorIndexStateToTagData_ACU(tagData, {
+            const nextState = {
                 manifest, rows, chunks,
                 rowCount: rows.filter((row) => row.status !== 'removed').length,
                 chunkCount: chunks.length,
@@ -95904,10 +95625,12 @@ $CONTENT
                 sourceTableName: String(manifest.sourceTableName || sourceTableKey),
                 indexedAt: String(manifest.indexedAt || new Date().toISOString()),
                 skippedRowCount: 0,
-            });
+            };
             try {
-                message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-                writeIsolatedTagData_ACU(message, isolationKey, tagData);
+                patchIsolatedTagDataMetadata_ACU(message, isolationKey, {
+                    summaryVectorIndexState: nextState,
+                    summaryVectorIndexManifest: manifest,
+                });
                 await saveChatToHostStrict_ACU();
                 console.log(`[ACU交火向量索引] 已从外部快照自动恢复 state 到消息 #${targetIndex}（indexId=${manifest.indexId}，${rows.length} 行，${chunks.length} 块，sourceTableKey=${sourceTableKey}）`);
                 return true;
@@ -96022,8 +95745,10 @@ $CONTENT
                     };
                     scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
                 }
-                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
-                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
+                patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
+                    summaryVectorIndexState: null,
+                    summaryVectorIndexManifest: null,
+                });
                 changed = true;
             }
         }
@@ -103557,10 +103282,11 @@ $CONTENT
             exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
             value: message.TavernDB_ACU_IsolatedData,
         };
-        assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
         try {
-            message.TavernDB_ACU_IsolatedData = nextIsolatedData;
-            writeIsolatedTagData_ACU(message, params.isolationKey, tagData);
+            patchIsolatedTagDataMetadata_ACU(message, params.isolationKey, {
+                summaryVectorIndexState: null,
+                summaryVectorIndexManifest: null,
+            });
             await saveChatToHostStrict_ACU();
             return true;
         }
@@ -103594,8 +103320,10 @@ $CONTENT
                     };
                     scopeHints.set(`${hint.chatKey || ''}\n${hint.isolationKey}\n${hint.sourceTableKey}`, hint);
                 }
-                assignSummaryVectorIndexStateToTagData_ACU(tagData, null);
-                writeIsolatedTagData_ACU(message, layer.isolationKey, tagData);
+                patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
+                    summaryVectorIndexState: null,
+                    summaryVectorIndexManifest: null,
+                });
                 changed = true;
             }
         }
@@ -104365,14 +104093,15 @@ $CONTENT
         const message = layer ? chat[layer.messageIndex] : null;
         if (!layer || !message)
             return null;
-        const nextTagData = { ...(readIsolatedTagData_ACU(message, layer.isolationKey) || layer.tagData || {}) };
         const previousIsolatedData = {
             exists: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
             value: message.TavernDB_ACU_IsolatedData,
         };
-        assignSummaryVectorIndexStateToTagData_ACU(nextTagData, alignedState, alignedManifest);
         try {
-            writeIsolatedTagData_ACU(message, layer.isolationKey, nextTagData);
+            patchIsolatedTagDataMetadata_ACU(message, layer.isolationKey, {
+                summaryVectorIndexState: alignedState,
+                summaryVectorIndexManifest: alignedManifest,
+            });
             await saveChatToHostStrict_ACU();
         }
         catch (error) {
