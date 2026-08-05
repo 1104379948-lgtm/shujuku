@@ -121,6 +121,8 @@ import {
 } from '../../../src/service/chat/chat-service';
 import { resolveTableHistoryStateFromChat_ACU } from '../../../src/service/table/table-history';
 import { resolveTableStorageStrategy_ACU } from '../../../src/service/table/storage-strategy-resolver';
+import { getTableDataFingerprint_ACU } from '../../../src/service/table/table-data-upgrade-audit';
+import { assertSingleActiveFullCheckpointV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -1590,6 +1592,100 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
 
 
 
+
+
+  it.each([
+    ['periodic', '定期基线'],
+    ['manual', '手动基线'],
+    ['schema_change', '结构变更基线'],
+    ['compaction', '旧压缩基线'],
+    ['import', '导入基线'],
+    ['migration', '迁移基线'],
+    ['integrity_repair', '修复基线'],
+  ] as const)('compaction 降级 pre-anchor 非 init full（reason=%s）为 data_replace，且指纹不变', async (reason, label) => {
+    mockSettings.retainRecentLayers = 2;
+    const preAnchorData = {
+      sheet_0: { name: `物品表-${label}`, content: [['row_id', '物品名'], ['1', '剑']] },
+    };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          storageFrame: {
+            version: 2,
+            ...(index === 0
+              ? { checkpoint: { kind: 'full', createdAt: 1, reason, data: structuredClone(preAnchorData) } }
+              : {}),
+            logEntries: [],
+          },
+          _acu_storage_version: 2,
+        },
+      },
+    }));
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    // anchor 前唯一 full 被无损降级为 data_replace fallback，同帧不再保留 full checkpoint。
+    const formerRoot = chat[0].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(formerRoot.checkpoint).toBeUndefined();
+    expect(formerRoot.logEntries[0]).toEqual(expect.objectContaining({
+      source: 'system',
+      targetMessageIndex: 0,
+      operations: [{
+        kind: 'data_replace',
+        data: expect.objectContaining({ sheet_0: preAnchorData.sheet_0 }),
+        reason: 'checkpoint_fallback',
+      }],
+    }));
+    // 指纹一致：降级 entry 的 data 与降级前 checkpoint.data 指纹完全相同，证明无损。
+    expect(getTableDataFingerprint_ACU(formerRoot.logEntries[0].operations[0].data))
+      .toBe(getTableDataFingerprint_ACU(preAnchorData));
+    // 单根不变量：降级后全局只剩 anchor 的 compaction full。
+    expect(chat[23].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toEqual(expect.objectContaining({
+      kind: 'full',
+      reason: 'compaction',
+    }));
+    expect(assertSingleActiveFullCheckpointV2_ACU(chat, '', 'test:p5-3')).toBeNull();
+  });
+
+  it('compaction 降级 pre-anchor full 后，真实回放指纹与降级前完全一致（无损举证）', async () => {
+    mockSettings.retainRecentLayers = 2;
+    const preAnchorData = {
+      sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '剑'], ['2', '盾']] },
+    };
+    const chat = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          storageFrame: {
+            version: 2,
+            ...(index === 0
+              ? { checkpoint: { kind: 'full', createdAt: 1, reason: 'periodic', data: structuredClone(preAnchorData) } }
+              : {}),
+            logEntries: [],
+          },
+          _acu_storage_version: 2,
+        },
+      },
+    }));
+    const before = structuredClone(chat);
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'manual_refill', save: true });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
+    const formerRoot = chat[0].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(formerRoot.checkpoint).toBeUndefined();
+    expect(formerRoot.logEntries[0].operations[0]).toMatchObject({ kind: 'data_replace', reason: 'checkpoint_fallback' });
+    // 降级前后全链数据指纹一致：
+    // - 降级前：pre-anchor full 的 checkpoint.data（before[0]）
+    // - 降级后：同楼层 data_replace fallback entry 的 data（chat[0]）
+    const beforeFingerprint = getTableDataFingerprint_ACU(before[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data);
+    const afterFingerprint = getTableDataFingerprint_ACU(formerRoot.logEntries[0].operations[0].data);
+    expect(afterFingerprint).toBe(beforeFingerprint);
+  });
 
 });
 

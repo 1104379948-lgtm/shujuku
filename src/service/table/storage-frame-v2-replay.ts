@@ -322,7 +322,7 @@ function findLastUsableReplacementAnchor_ACU(frameRefs: V2FrameRef_ACU[]): Repla
   return anchor;
 }
 
-function resolveHeaderOnlyTemplateSnapshot_ACU(chat: any[], isolationKey: string): TableDataObject_ACU | null {
+export function resolveHeaderOnlyTemplateSnapshot_ACU(chat: any[], isolationKey: string): TableDataObject_ACU | null {
   const scopeState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey });
   const globalSnapshot = scopeState ? null : getGlobalTemplateSnapshotForCurrentProfile_ACU();
   const effectiveTemplate = scopeState?.templateStr || scopeState?.templateObj

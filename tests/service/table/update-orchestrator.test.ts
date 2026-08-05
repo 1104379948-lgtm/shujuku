@@ -1626,6 +1626,39 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
   });
 
+  it('双 full checkpoint 时锚点预检阻断手动重填，且不触发 AI 调用', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const makeFullFrame = (data: any) => ({
+      version: 2,
+      logEntries: [],
+      headRevision: 'r1',
+      checkpoint: { kind: 'full', reason: 'init', data },
+    });
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true },
+      {
+        is_user: false,
+        mes: 'AI回复1',
+        TavernDB_ACU_IsolatedData: { '': { storageFrame: makeFullFrame({ sheet_0: { name: '测试表', content: [['row_id', 'v1']] } }) } },
+      },
+      { is_user: true },
+      {
+        is_user: false,
+        mes: 'AI回复2',
+        TavernDB_ACU_IsolatedData: { '': { storageFrame: makeFullFrame({ sheet_0: { name: '测试表', content: [['row_id', 'v2']] } }) } },
+      },
+    ]);
+    mockCurrentJsonTableData = { sheet_0: { name: '测试表', updateConfig: {}, content: [['row_id', 'v2']] } };
+
+    const processBatch = vi.fn().mockResolvedValue({ success: true });
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], processBatch, mockRefreshData);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('锚点预检');
+    expect(processBatch).not.toHaveBeenCalled();
+  });
+
+
   it('手动重填启动前无条件清理重填范围内选中表历史数据', async () => {
     const { getChatArray_ACU, clearManualRefillIncrementalDataInRange_ACU, clearManualRefillSheetDataInRange_ACU, clearTableDataAtFloors_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([

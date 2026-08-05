@@ -1185,6 +1185,33 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it('双 full checkpoint 收敛诊断渲染提交按钮与专属告警文案', async () => {
+    const { mount, prepareV2Recovery } = await mountDataMgmtPage();
+    prepareV2Recovery.mockResolvedValueOnce({
+      planId: 'recovery-redundant-full-plan',
+      status: 'recoverable_redundant_full_checkpoint',
+      isolationKey: 'alpha',
+      sourceMessageIndex: 0,
+      affectedSheetKeys: ['sheet_global'],
+      requiresConfirmation: false,
+      message: '检测到多个整层 full checkpoint (0, 10)；将保留末位 full 并无损降级其余。',
+    });
+    const diagnosticButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('诊断 V2 数据恢复'))!;
+
+    diagnosticButton.click();
+    await new Promise(r => setTimeout(r, 0));
+    const section = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-data-mgmt-page__checkpoint-section'))
+      .find(item => item.textContent?.includes('V2 数据恢复诊断'))!;
+
+    // P4 的恢复出口必须在 UI 可点击；否则服务层诊断出的收敛计划永远无法提交。
+    expect(section.textContent).toContain('应用 Checkpoint 修复/收敛');
+    expect(section.textContent).not.toContain('确认无锚点 data_replace 恢复');
+    const warningToasts = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-toast--warning'));
+    expect(warningToasts.at(-1)?.textContent).toContain('回放只认最后一个');
+    mount.__resetAcuV2MountForTests();
+  });
+
   it('V2 orphan 恢复需两次确认，页面仅向服务传递冻结 planId 与确认布尔值', async () => {
     const { mount, prepareV2Recovery, commitV2Recovery } = await mountDataMgmtPage();
     const diagnosticButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))

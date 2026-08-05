@@ -928,6 +928,88 @@ describe('manual catch-up provisional bridge 写入准入（t5）', () => {
     if (!broken.ok) expect(broken.code).toBe('root_missing');
   });
 
+
+  it('P6-4 双 full 拒绝建立 provisional bridge，绝不当唯一根', async () => {
+    mocks.chat.push(...buildV2ChatWithFormalFull());
+    const isolationKey = mocks.isolationKey;
+    // 在楼层 0 额外造一个 full（reason='integrity_repair'），模拟存量双 full 拓扑。
+    const redundantCheckpoint = buildCanonicalFullCheckpoint_ACU({
+      createdAt: 500,
+      reason: 'integrity_repair',
+      data: { mate: { type: 'acu' }, sheet_a: sheet('表A', [['row_id', '值']]) },
+      event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+      context: { messageIndex: 0, aiFloor: 1, isolationKey, reason: 'integrity_repair' },
+    });
+    if (!redundantCheckpoint.checkpoint) throw new Error('构造冗余 full 失败');
+    mocks.chat[0].TavernDB_ACU_IsolatedData[isolationKey].storageFrame = {
+      version: 2,
+      checkpoint: redundantCheckpoint.checkpoint,
+      headRevision: 'redundant-root',
+      logEntries: [],
+    };
+
+    const result = await establishProvisionalBridge_ACU('run-bridge-multi-full', ['sheet_a'], 0, 6, {
+      selectedSheetBaselines: { sheet_a: { lastCompletedAiFloor: 0, headerOnly: true } },
+      templateData: { sheet_a: sheet('表A', [['row_id', '值']]) },
+      chatKey: mocks.chatIdentifier,
+      isolationKey,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnosticCode).toBe('provisional_bridge_multiple_full_checkpoints');
+      expect(result.error).toContain('2 个 full checkpoint');
+    }
+    // 未建立任何临时根，原 full 未被改写。
+    expect(mocks.chat[0]?.TavernDB_ACU_IsolatedData?.[isolationKey]?.manualCatchUpProvisionalBridge).toBeUndefined();
+    expect(mocks.chat[6]?.TavernDB_ACU_IsolatedData?.[isolationKey]?.storageFrame?.checkpoint?.kind).toBe('full');
+  });
+
+  it('P6-4 provisional root 漂移（headRevision 非本 run）时 finalize/rollback/recover 均 fail-closed', async () => {
+    mocks.chat.push(...buildV2ChatWithFormalFull());
+    const isolationKey = mocks.isolationKey;
+    const runId = 'run-bridge-root-drift';
+
+    const establish = await establishProvisionalBridge_ACU(runId, ['sheet_a'], 0, 6, {
+      selectedSheetBaselines: { sheet_a: { lastCompletedAiFloor: 0, headerOnly: true } },
+      templateData: { sheet_a: sheet('表A', [['row_id', '值']]) },
+      chatKey: mocks.chatIdentifier,
+      isolationKey,
+    });
+    expect(establish.ok).toBe(true);
+    if (!establish.ok) return;
+
+    // 篡改临时根：headRevision 不再是 provisional:runId（外部改写/残留他 run）。
+    const rootTag = mocks.chat[0]?.TavernDB_ACU_IsolatedData?.[isolationKey];
+    rootTag.storageFrame.headRevision = 'foreign-revision';
+
+    // finalize：拓扑不匹配 → 拒绝并进入 recovery-required。
+    const finalize = await finalizeProvisionalBridge_ACU(runId, {
+      chatKey: mocks.chatIdentifier,
+      isolationKey,
+      nextSaveTargetIndex: 6,
+    });
+    expect(finalize.ok).toBe(false);
+    if (!finalize.ok) {
+      expect(finalize.diagnosticCode).toBe('provisional_recovery_required');
+      expect(finalize.error).toContain('临时根拓扑不匹配');
+    }
+
+    // rollback：同样被 scope 校验拒绝。
+    const rollback = await rollbackProvisionalBridge_ACU(runId, { isolationKey });
+    expect(rollback.ok).toBe(false);
+    if (!rollback.ok) {
+      expect(rollback.error).toContain('临时根拓扑不匹配');
+    }
+
+    // recover：同样进入 recovery-required。
+    const recovery = await recoverProvisionalBridgeSession_ACU({ isolationKey });
+    expect(recovery.ok).toBe(false);
+    if (!recovery.ok) {
+      expect(recovery.recoveryRequired).toBe(true);
+      expect(recovery.error).toContain('临时根拓扑不匹配');
+    }
+  });
+
 });
 
 });

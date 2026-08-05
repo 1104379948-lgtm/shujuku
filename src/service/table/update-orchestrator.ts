@@ -47,7 +47,7 @@ function resolveTableApiPresetOverride_ACU(tableName: any): string {
     return (typeof preset === 'string' && preset.trim()) ? preset.trim() : '';
 }
 import { checkIfFirstTimeInit_ACU, ensureLegacyStorageMigratedBeforeWrite_ACU } from './table-service';
-import { hasAnyV2Checkpoint_ACU } from './storage-frame-v2-persist';
+import { assertSingleActiveFullCheckpointV2_ACU, hasAnyV2Checkpoint_ACU } from './storage-frame-v2-persist';
 import { parseAndApplyTableEditsToData_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
 import { extractStrictJsonTableFillResponse_ACU } from '../ai/prompt-builder/strict-json-table-fill';
 import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
@@ -3565,6 +3565,19 @@ export async function orchestrateManualUpdate_ACU(
 
         if (!targetKeys.length) {
             return { success: false, error: '未选择需要更新的表格。' };
+        }
+
+        // 锚点预检：同一隔离键下必须至多一个 full checkpoint，否则手动重填会把
+        // 增量写到错误的回放根上（回放只认最后一个 full，之前增量全部失效）。
+        // 在首次 AI 调用（processBatch）前阻断，避免先付完 AI 费用才撞 persist 层 fail-fast。
+        const preflightIsolationKey = getCurrentIsolationKey_ACU();
+        const preflightViolation = assertSingleActiveFullCheckpointV2_ACU(
+            liveChat,
+            preflightIsolationKey,
+            'orchestrateManualUpdate:anchor_preflight',
+        );
+        if (preflightViolation) {
+            return { success: false, error: `手动重填被锚点预检阻断：${preflightViolation}` };
         }
 
         const uiThreshold = settings_ACU.autoUpdateThreshold || 3;

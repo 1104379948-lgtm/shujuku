@@ -119,23 +119,27 @@ export function getOriginalFullFrameFingerprint_ACU(frame: TableStorageFrameV2_A
 
 /**
  * 定位原正式 full checkpoint 所在消息与 frame。
- * 返回最后一个 full checkpoint（replay 的正式根）。
+ * 返回全部 full checkpoint（正序）+ 最后一个（replay 的正式根）。
+ * 调用方必须校验唯一性；存在多个 full 时不得把任一当作唯一根。
  */
 export function findOriginalFullCheckpoint_ACU(
   chat: any[],
   isolationKey: string,
-): { messageIndex: number; message: any; tagData: any; frame: TableStorageFrameV2_ACU } | null {
-  let result: { messageIndex: number; message: any; tagData: any; frame: TableStorageFrameV2_ACU } | null = null;
+): {
+  all: Array<{ messageIndex: number; message: any; tagData: any; frame: TableStorageFrameV2_ACU }>;
+  latest: { messageIndex: number; message: any; tagData: any; frame: TableStorageFrameV2_ACU } | null;
+} {
+  const all: Array<{ messageIndex: number; message: any; tagData: any; frame: TableStorageFrameV2_ACU }> = [];
   chat.forEach((message, messageIndex) => {
     if (!message || message.is_user) return;
     const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
     if (!isV2TagData_ACU(tagData)) return;
     const checkpoint = tagData.storageFrame?.checkpoint;
     if (checkpoint?.kind === 'full') {
-      result = { messageIndex, message, tagData, frame: tagData.storageFrame as TableStorageFrameV2_ACU };
+      all.push({ messageIndex, message, tagData, frame: tagData.storageFrame as TableStorageFrameV2_ACU });
     }
   });
-  return result;
+  return { all, latest: all.length > 0 ? all[all.length - 1] : null };
 }
 
 /**
@@ -282,6 +286,26 @@ export function assertBridgeScopeMatchesLiveChat_ACU(
   if (!isV2TagData_ACU(originalTagData)) {
     return { ok: false, error: 'provisional bridge 原 full 楼层缺少 V2 标签数据，拒绝自动恢复。' };
   }
+  // provisional 根拓扑校验：临时根楼层必须仍是本 bridge 的 provisional full。
+  // 根楼层不存在、已被改写为非 provisional full、或 headRevision 不匹配本 runId，
+  // 都说明 bridge 拓扑已被外部篡改，fail-closed。
+  const provisionalMessage = chat[bridge.provisionalRootIndex];
+  if (!provisionalMessage) {
+    return { ok: false, error: `provisional bridge 临时根楼层 ${bridge.provisionalRootIndex} 不存在，拒绝自动恢复。` };
+  }
+  const provisionalTagData = readIsolatedTagData_ACU(provisionalMessage, bridge.isolationKey) as any;
+  const provisionalFrame = isV2TagData_ACU(provisionalTagData)
+    ? provisionalTagData.storageFrame
+    : null;
+  if (!provisionalFrame || provisionalFrame.checkpoint?.kind !== 'full'
+    || !String(provisionalFrame.headRevision ?? '').startsWith('provisional:')
+    || !String(provisionalFrame.headRevision ?? '').includes(bridge.runId)) {
+    return { ok: false, error: 'provisional bridge 临时根拓扑不匹配（缺少 provisional full 或 headRevision 非本 run），拒绝自动恢复。' };
+  }
+  // 原 full 楼层不得同时存在第二个 full（provisional 建立后原 full 已移到 recoveryBackup）。
+  if (originalTagData.storageFrame?.checkpoint?.kind === 'full') {
+    return { ok: false, error: 'provisional bridge 原 full 楼层仍存在 replay full，拓扑冲突，拒绝自动恢复。' };
+  }
 
   // 原 full 可能处于两种持久化形态：
   //  - 已建立 bridge：storageFrame 被清空，原帧在 recoveryBackup；
@@ -402,9 +426,18 @@ export async function establishProvisionalBridge_ACU(
       return { ok: false, error: 'provisional bridge 需要至少一个 selected sheet。' };
     }
 
-    const original = findOriginalFullCheckpoint_ACU(chat, isolationKey);
+    const { all: allOriginalFulls, latest: original } = findOriginalFullCheckpoint_ACU(chat, isolationKey);
     if (!original) {
       return { ok: false, error: '未找到正式 full checkpoint，无法建立 provisional bridge。' };
+    }
+    // 唯一正式 full 承诺（本文件顶部不变量 §3.2）：存在多个 full 时拒绝建立，
+    // 绝不把任一 full 当作唯一根，避免 provisional 基线与冗余 full 竞争回放根。
+    if (allOriginalFulls.length !== 1) {
+      return {
+        ok: false,
+        error: `存在 ${allOriginalFulls.length} 个 full checkpoint（${allOriginalFulls.map(item => item.messageIndex).join('、')}），provisional bridge 只允许基于唯一正式 full 建立。`,
+        diagnosticCode: 'provisional_bridge_multiple_full_checkpoints',
+      };
     }
     if (original.messageIndex !== originalFullCheckpointIndex) {
       return { ok: false, error: `原 full checkpoint 楼层与请求不一致：expected=${originalFullCheckpointIndex}, actual=${original.messageIndex}。` };

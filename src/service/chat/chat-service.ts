@@ -36,6 +36,7 @@ import { assignSummaryVectorIndexStateToTagData_ACU, readSummaryVectorIndexState
 import type { ChatSummaryVectorIndexManifest_ACU, ChatSummaryVectorIndexState_ACU, SummaryVectorIndexSafeGcScopeHint_ACU } from '../vector/summary-vector-index-types';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import { assertSingleActiveFullCheckpointV2_ACU } from '../table/storage-frame-v2-persist';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { hasActiveProvisionalBridgeAnywhere_ACU, recoverProvisionalBridgeSession_ACU } from '../table/manual-catch-up-provisional-bridge';
 import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
@@ -494,12 +495,14 @@ function downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat: any
             const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
             if (!isV2TagData_ACU(tagData)) continue;
             const checkpoint = tagData.storageFrame.checkpoint;
-            const isTemplateFallbackRoot = checkpoint?.fallbackProvenance?.kind === 'manual_refill_template_root';
-            // compaction 已在新边界固化真实 replay 结果。模板临时根也必须随之降级，
-            // 否则同一 isolationKey 会遗留两个 full checkpoint，后续手动重填会 fail closed。
-            if (checkpoint?.kind !== 'full' || (checkpoint.reason !== 'init' && !isTemplateFallbackRoot)) {
-                continue;
-            }
+            // compaction 已在新边界固化真实 replay 结果。anchor 前的任何旧 full
+            // （init / periodic / manual / schema_change / compaction / import /
+            // migration / integrity_repair / 模板临时根）都必须随之降级，否则同一
+            // isolationKey 会遗留两个 full checkpoint：回放只认最后一个 full，
+            // 之前增量全部失效，后续手动重填也会 fail closed。
+            // 降级是无损的（checkpoint.data → seq ≤ 0 的 data_replace fallback entry），
+            // 数学上不改变回放输出，P5-3 用指纹比对实测举证。
+            if (checkpoint?.kind !== 'full') continue;
             if (downgradeV2FullCheckpointAtIndex_ACU(chat, isolationKey, i)) downgradedCount += 1;
         }
     }
@@ -544,6 +547,14 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
             const changed = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex);
             const downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
             const obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
+            // 单根不变量：降级后同一隔离键必须至多一个 full checkpoint，
+            // 否则写新边界基线前就把历史搞成多根，回放只认最后一个，之前增量全部失效。
+            for (const isolationKey of collectIsolationKeysWithV2Frames_ACU(chat)) {
+                const invariantViolation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'compaction_boundary');
+                if (invariantViolation) {
+                    throw new Error(invariantViolation);
+                }
+            }
             if ((changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0) && options.save !== false) {
                 await saveChatToHostStrict_ACU();
             }

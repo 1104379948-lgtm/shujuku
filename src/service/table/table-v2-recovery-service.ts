@@ -13,8 +13,8 @@ import { loadTableStateFromFramesV2Detailed_ACU, type TableReplayCompatibilityRe
 import type { TableMutationOperationV2_ACU, TablePatchV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
-type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence';
-export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable';
+type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence' | 'redundant_full_checkpoint_convergence';
+export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_redundant_full_checkpoint' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable';
 export type V2RecoveryCommitStatus_ACU = 'committed' | 'committed_postcondition_failed' | 'commit_failed_rolled_back';
 
 export interface V2RecoveryCommitResult_ACU {
@@ -49,6 +49,8 @@ interface RecoveryPlan_ACU extends V2RecoverySummary_ACU {
   chat: any[];
   chatKey: string;
   sourceFrameFingerprint: string;
+  redundantFullIndices?: number[];
+  redundantFrameFingerprints?: Array<{ messageIndex: number; fingerprint: string }>;
   candidateData: TableDataObject_ACU;
 }
 const plans_ACU = new Map<string, RecoveryPlan_ACU>();
@@ -215,10 +217,77 @@ function getPlanSourceFrame_ACU(plan: RecoveryPlan_ACU): TableStorageFrameV2_ACU
   const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
   return isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
 }
+function planAffectedFramesUnchanged_ACU(plan: RecoveryPlan_ACU): string | null {
+  // 单根收敛会改写多个 full 帧：任一受影响帧在计划创建后变化，计划即失效。
+  // 校验全部冗余 full 帧 + 根帧指纹，缺一即拒绝（P4-5）。
+  for (const item of plan.redundantFrameFingerprints || []) {
+    const message = plan.chat[item.messageIndex as number];
+    const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
+    const frame = isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
+    if (!frame || getFrameFingerprint_ACU(frame) !== item.fingerprint) {
+      return `受影响帧已变化：messageIndex=${item.messageIndex}。`;
+    }
+  }
+  const sourceFrame = getPlanSourceFrame_ACU(plan);
+  if (!sourceFrame || getFrameFingerprint_ACU(sourceFrame) !== plan.sourceFrameFingerprint) {
+    return '恢复源 frame 已变化，请重新诊断。';
+  }
+  return null;
+}
 function buildRecoveredCandidateChat_ACU(plan: RecoveryPlan_ACU): any[] {
   const sourceMessageIndex = plan.sourceMessageIndex;
   if (!Number.isInteger(sourceMessageIndex)) throw new Error('恢复计划缺少 sourceMessageIndex。');
   const candidateChat = clone_ACU(plan.chat);
+  if (plan.kind === 'redundant_full_checkpoint_convergence') {
+    // 多消息降级：保留末位 full（回放根）不动，其余 full 帧无损降级为
+    // data_replace fallback entry，原帧整体入 recoveryBackup。
+    // 根帧 data 已含全部累计状态（convergence full 由该根之上的 replay 构造），
+    // 降级多余 full 后回放输出必须与降级前完全一致（P4-6 强校验）。
+    const redundantIndices = plan.redundantFullIndices || [];
+    if (redundantIndices.length === 0) throw new Error('单 full 收敛计划缺少冗余 full 帧索引。');
+    for (const messageIndex of redundantIndices) {
+      const message = candidateChat[messageIndex as number];
+      if (!message) throw new Error(`降级目标消息缺失：messageIndex=${messageIndex}。`);
+      const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
+      if (!isV2TagData_ACU(tagData)) throw new Error(`降级目标消息不再包含 V2 storage frame：messageIndex=${messageIndex}。`);
+      const originalFrame = clone_ACU(tagData.storageFrame);
+      const fallbackEntry = {
+        seq: 1,
+        entryId: `redundant-full-fallback-${messageIndex}`,
+        createdAt: Date.now(),
+        source: 'system' as const,
+        targetMessageIndex: messageIndex,
+        aiFloor: 1,
+        filledSheetKeys: [] as string[],
+        changedSheetKeys: [] as string[],
+        groupKeys: [] as string[],
+        operations: [{ kind: 'data_replace' as const, data: clone_ACU(originalFrame.checkpoint?.data || {}) as TableDataObject_ACU, reason: 'checkpoint_fallback' as const }],
+      };
+      const downgradedFrame: TableStorageFrameV2_ACU = {
+        version: 2,
+        headRevision: 'redundant-full-downgraded',
+        logEntries: [fallbackEntry],
+      };
+      const isolatedData = cloneIsolatedData_ACU(message);
+      const recoveryBackup: TableV2RecoveryBackup_ACU = {
+        version: 1,
+        createdAt: Date.now(),
+        recoveryKind: plan.kind,
+        sourceMessageIndex,
+        failedMessageIndex: messageIndex,
+        storageFrame: originalFrame,
+      };
+      isolatedData[plan.isolationKey] = {
+        ...isolatedData[plan.isolationKey],
+        _acu_storage_version: 2 as const,
+        storageFrame: downgradedFrame,
+        recoveryBackup,
+      };
+      message.TavernDB_ACU_IsolatedData = isolatedData;
+    }
+    return candidateChat;
+  }
+
   const sourceMessage = candidateChat[sourceMessageIndex as number];
   const sourceTagData = readIsolatedTagData_ACU(sourceMessage, plan.isolationKey);
   if (!isV2TagData_ACU(sourceTagData)) throw new Error('恢复源消息不再包含 V2 storage frame。');
@@ -261,6 +330,21 @@ async function validateRecoveredCandidateReplay_ACU(plan: RecoveryPlan_ACU, cand
   });
   if (!replay) throw new Error('恢复候选未产生可回放表数据。');
   if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) throw new Error('恢复候选仍依赖临时 Sheet 补锚。');
+  // 单 full 收敛：收敛前（原始 chat）必须可完整回放，且收敛前后 replay 指纹必须完全一致，否则拒绝提交。
+  // 在 validate 内重算基线而非依赖诊断期存档，可覆盖 diagnose 与 commit 之间任何帧的外部改动。
+  if (plan.kind === 'redundant_full_checkpoint_convergence') {
+    const baselineReplay = await loadTableStateFromFramesV2Detailed_ACU(plan.chat, plan.isolationKey, {
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    });
+    if (!baselineReplay) throw new Error('收敛前原始历史不可回放，拒绝执行单 full 收敛。');
+    if (baselineReplay.requiresCheckpointConvergence || baselineReplay.compatibilityRepairs?.length) {
+      throw new Error('收敛前原始历史仍依赖临时 Sheet 补锚，拒绝执行单 full 收敛。');
+    }
+    if (getTableDataFingerprint_ACU(baselineReplay.data) !== getTableDataFingerprint_ACU(replay.data)) {
+      throw new Error('单 full 收敛前后 replay 结果不一致，拒绝提交。');
+    }
+  }
   // 基底修复后的 suffix 必须被严格回放；其结果不应再与修复时的基底本身相等。
   if (plan.kind !== 'repaired_full_checkpoint'
     && getTableDataFingerprint_ACU(replay.data) !== getTableDataFingerprint_ACU(plan.candidateData)) {
@@ -289,6 +373,39 @@ async function diagnoseV2Recovery_ACU(chat: any[], isolationKey: string): Promis
   if (frames.length === 0) return { summary: { status: 'unrecoverable_no_base', isolationKey, requiresConfirmation: false, message: '当前隔离标识不存在 V2 storage frame。' } };
   const latestFull = [...frames].reverse().find(item => item.frame.checkpoint?.kind === 'full');
   if (latestFull?.frame.checkpoint) {
+    // 单根不变量：同一隔离键下同一时刻只能存在一个 full checkpoint。
+    // 双 full（如 convergence 旧缺陷在 (0,10) 落盘）会让 findLateCheckpointWithSuffixArtifacts_ACU
+    // 因 fullCheckpoints.length !== 1 返回 null，导致下方走到「无需恢复」死锁。
+    // 必须在其它判定之前识别并给出可恢复路径：保留末位 full（回放根），其余无损降级。
+    const fullCheckpoints = frames.filter(item => item.frame.checkpoint?.kind === 'full');
+    if (fullCheckpoints.length >=2) {
+      const rootIndex = fullCheckpoints[fullCheckpoints.length - 1].messageIndex;
+      const redundantIndices = fullCheckpoints.slice(0, -1).map(item => item.messageIndex);
+      // 末位 full 是回放根；其 data 已含之前全部累计状态（convergence full 由该根之上的 replay 构造）。
+      // 降级多余 full 在数学上不可能改变回放输出 —— 降级前后指纹必须一致，由 P4-6 强校验。
+      const rootReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
+      const summary: V2RecoverySummary_ACU = {
+        status: 'recoverable_redundant_full_checkpoint',
+        isolationKey,
+        sourceMessageIndex: rootIndex,
+        affectedSheetKeys: [],
+        requiresConfirmation: false,
+        message: `检测到 ${fullCheckpoints.length} 个 full checkpoint（#${fullCheckpoints.map(item => item.messageIndex).join('、')}）；将保留末位 #${rootIndex} 为唯一回放根，其余（#${redundantIndices.join('、')}）无损降级为 data_replace fallback 并各自原帧入 recoveryBackup。`,
+      };
+      return { summary, plan: {
+        ...summary,
+        kind: 'redundant_full_checkpoint_convergence',
+        chat,
+        chatKey: String(currentChatFileIdentifier_ACU || '').trim(),
+        sourceFrameFingerprint: getFrameFingerprint_ACU(latestFull.frame),
+        redundantFullIndices: redundantIndices,
+        redundantFrameFingerprints: fullCheckpoints.slice(0, -1).map(item => ({
+          messageIndex: item.messageIndex,
+          fingerprint: getFrameFingerprint_ACU(item.frame),
+        })),
+        candidateData: rootReplay?.data || latestFull.frame.checkpoint.data,
+      } };
+    }
     const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
     if (repair.status === 'clean') {
       let replay;
@@ -400,10 +517,10 @@ export async function commitPreparedV2Recovery_ACU(
     plans_ACU.delete(planId);
     return failure('恢复计划作用域已变化，请重新诊断。');
   }
-  const currentSourceFrame = getPlanSourceFrame_ACU(plan);
-  if (!currentSourceFrame || getFrameFingerprint_ACU(currentSourceFrame) !== plan.sourceFrameFingerprint) {
+  const affectedChanged = planAffectedFramesUnchanged_ACU(plan);
+  if (affectedChanged) {
     plans_ACU.delete(planId);
-    return failure('恢复源 frame 已变化，请重新诊断。');
+    return failure(affectedChanged);
   }
 
   let candidateChat: any[];
@@ -431,10 +548,10 @@ export async function commitPreparedV2Recovery_ACU(
           plans_ACU.delete(planId);
           return failure('恢复计划作用域已变化，请重新诊断。');
         }
-        const frameBeforeCommit = getPlanSourceFrame_ACU(plan);
-        if (!frameBeforeCommit || getFrameFingerprint_ACU(frameBeforeCommit) !== plan.sourceFrameFingerprint) {
+        const affectedChanged = planAffectedFramesUnchanged_ACU(plan);
+        if (affectedChanged) {
           plans_ACU.delete(planId);
-          return failure('恢复源 frame 已变化，请重新诊断。');
+          return failure(affectedChanged);
         }
 
         const beforeChat = clone_ACU(plan.chat);

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   runTransaction: vi.fn(),
   runCommit: vi.fn(),
   chatIdentity: 'chat-a',
+  templateObj: null as any,
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
@@ -41,7 +42,8 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', async importOri
     }
   }),
 }));
-vi.mock('../../../src/shared/utils', () => ({
+vi.mock('../../../src/shared/utils', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../../src/shared/utils')>()),
   logDebug_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
   logError_ACU: vi.fn(),
@@ -94,7 +96,8 @@ vi.mock('../../../src/data/storage/chat-history', () => ({
   setChatScopedConfigContainer_ACU: vi.fn((_chat: any[], value: any) => { mocks.scopeContainer = value; }),
   setChatSheetGuideContainer_ACU: vi.fn((_chat: any[], value: any) => { mocks.guideContainer = value; }),
 }));
-vi.mock('../../../src/service/template/chat-scope', () => ({
+vi.mock('../../../src/service/template/chat-scope', async importOriginal => ({
+  ...(await importOriginal<typeof import('../../../src/service/template/chat-scope')>()),
   normalizeGuideData_ACU: vi.fn((data: any) => {
     if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
     const normalized: Record<string, any> = { mate: data.mate && typeof data.mate === 'object' ? data.mate : { type: 'chatSheets', version: 1 } };
@@ -109,7 +112,10 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
     return normalized;
   }),
   setChatSheetGuideDataForIsolationKey_ACU: mocks.setGuide,
+  getCurrentChatTemplateScopeState_ACU: vi.fn(() => (mocks.templateObj ? { templateObj: mocks.templateObj } : null)),
+  getGlobalTemplateSnapshotForCurrentProfile_ACU: vi.fn(() => (mocks.templateObj ? { templateObj: mocks.templateObj } : null)),
 }));
+
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: mocks.runTransaction,
 }));
@@ -546,7 +552,7 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     expect(mocks.saveChat).toHaveBeenCalledOnce();
   });
 
-  it('provisional Sheet 补锚在同一严格提交中先收敛为 checkpoint、保留 backup，再追加当前 SQL 写入', async () => {
+  it('provisional Sheet 补锚在同一严格提交中先收敛为根帧 per-sheet 锚点、保留 backup，再追加当前 SQL 写入', async () => {
     const message = seedFrame({ logEntries: [] });
     const preWriteData = {
       mate: { type: 'acu' },
@@ -558,11 +564,21 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
       },
       sheet_b: sheetB,
     } as any;
+    // 模板必须是可解析的 header-only 快照，指纹与 repair 记录一致，收敛才能通过。
+    mocks.templateObj = {
+      mate: { type: 'acu' },
+      sheet_a: { ...sheetA, uid: 'inventory', sourceData: { ddl: 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT);' }, content: [['row_id', 'value']] },
+    } as any;
+    const { resolveHeaderOnlyTemplateSnapshot_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const resolvedTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, '');
+    expect(resolvedTemplate).toBeTruthy();
+    const fingerprint = getTableDataFingerprint_ACU(resolvedTemplate);
     const provisionalRepair = {
       kind: 'temporary_sheet_anchor' as const,
       severity: 'provisional' as const,
       sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0,
-      templateFingerprint: 'template-fingerprint', reason: 'missing_at_operation' as const,
+      templateFingerprint: fingerprint, reason: 'missing_at_operation' as const,
     };
     mocks.loadReplayDetailed
       .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] })
@@ -589,7 +605,14 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
 
     const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
     expect(result.saved).toBe(true);
-    expect(frame.checkpoint).toMatchObject({ kind: 'full', reason: 'integrity_repair', data: preWriteData });
+    // 收敛不再写第二个 full：目标帧 checkpoint 保持既有 init full 不变。
+    expect(frame.checkpoint).toMatchObject({ kind: 'full', reason: 'init' });
+    expect(frame.checkpoint.data).toEqual(beforeFrame.checkpoint.data);
+    // 锚点落在根帧（此处目标即根帧）的 perSheetCheckpoints，为 sheet_full 而非 full。
+    expect(frame.perSheetCheckpoints?.sheet_a).toMatchObject({ kind: 'sheet_full', reason: 'integrity_repair', sheetKey: 'sheet_a' });
+    // 全局仍只有 1 个 full checkpoint。
+    const { collectV2FullCheckpointIndices_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([0]);
     expect(message.TavernDB_ACU_IsolatedData[''].recoveryBackup).toEqual(expect.objectContaining({
       recoveryKind: 'temporary_sheet_anchor_convergence',
       sourceMessageIndex: 0,
@@ -601,15 +624,23 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     expect(mocks.saveChat).not.toHaveBeenCalled();
   });
 
+
   it('provisional 收敛候选未达到严格回放时取消本次写入且不修改原 frame', async () => {
     const message = seedFrame({ logEntries: [] });
     const beforeIsolatedData = message.TavernDB_ACU_IsolatedData;
     const preWriteData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    // 收敛必须能解析模板锚点，候选验证才会走到 suffix 拦截。
+    mocks.templateObj = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value']] } } as any;
+    const { resolveHeaderOnlyTemplateSnapshot_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const resolvedTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, '');
+    expect(resolvedTemplate).toBeTruthy();
+    const fingerprint = getTableDataFingerprint_ACU(resolvedTemplate);
     const provisionalRepair = {
       kind: 'temporary_sheet_anchor' as const,
       severity: 'provisional' as const,
       sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0,
-      templateFingerprint: 'template-fingerprint', reason: 'missing_at_operation' as const,
+      templateFingerprint: fingerprint, reason: 'missing_at_operation' as const,
     };
     mocks.loadReplayDetailed
       .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] })
@@ -635,6 +666,101 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     expect(mocks.saveChatStrict).not.toHaveBeenCalled();
     expect(mocks.saveChat).not.toHaveBeenCalled();
   });
+
+  it('既有 full 在第 0 层、convergence 目标在第 5 层时，锚点落在第 0 层根帧且全局仍单 full', async () => {
+    const root = seedFrame({ logEntries: [] });
+    const target = { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: { version: 2, headRevision: null, logEntries: [] } } } };
+    mocks.chat.splice(0, mocks.chat.length, root, { is_user: false }, { is_user: false }, { is_user: false }, { is_user: false }, target);
+    const preWriteData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    // 收敛需要可解析的模板锚点；指纹与 repair 一致。
+    mocks.templateObj = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value']] } } as any;
+    const { resolveHeaderOnlyTemplateSnapshot_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const resolvedTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, '');
+    expect(resolvedTemplate).toBeTruthy();
+    const fingerprint = getTableDataFingerprint_ACU(resolvedTemplate);
+    const provisionalRepair = {
+      kind: 'temporary_sheet_anchor' as const, severity: 'provisional' as const,
+      sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0,
+      templateFingerprint: fingerprint, reason: 'missing_at_operation' as const,
+    };
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] })
+      .mockResolvedValue({ baseKind: 'full_checkpoint', data: preWriteData });
+    const beforeRootFrame = JSON.parse(JSON.stringify(root.TavernDB_ACU_IsolatedData[''].storageFrame));
+ const beforeTargetFrame = JSON.parse(JSON.stringify(target.TavernDB_ACU_IsolatedData[''].storageFrame));
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 5,
+      source: 'manual_fill',
+      afterData: { ...preWriteData, sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', '本次写入']] } },
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_a', tableName: 'inventory', reason: 'manual_crud', statements: ['UPDATE inventory SET value = ? WHERE row_id = ?'], params: [['本次写入', 1]] }],
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+
+    expect(result.saved, JSON.stringify(result)).toBe(true);
+    // 锚点落在第 0 层根帧，产物为 sheet_full 而非 full。
+    const rootFrame = root.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(rootFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'init' });
+    expect(rootFrame.perSheetCheckpoints?.sheet_a).toMatchObject({ kind: 'sheet_full', reason: 'integrity_repair', sheetKey: 'sheet_a' });
+    // 目标帧 checkpoint 不被改写，只保留 recoveryBackup证据。
+    const targetFrame = target.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(targetFrame.checkpoint).toBeUndefined();
+    expect(targetFrame.logEntries).toHaveLength(1);
+    expect(target.TavernDB_ACU_IsolatedData[''].recoveryBackup).toEqual(expect.objectContaining({
+      recoveryKind: 'temporary_sheet_anchor_convergence', sourceMessageIndex: 5, storageFrame: beforeTargetFrame,
+    }));
+    // 全局仍只有 1 个 full checkpoint（第 0 层）。
+    const { collectV2FullCheckpointIndices_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([0]);
+    // 根帧与目标帧同一次 strict save 原子落盘。
+    expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
+    expect(rootFrame.perSheetCheckpoints?.sheet_a.data.content[0]).toEqual(['row_id', 'value']);
+    // 根帧原有 sheet_b per-sheet checkpoint 保留，sheet_a 锚点为新增。
+    expect(rootFrame.perSheetCheckpoints?.sheet_b).toEqual(beforeRootFrame.perSheetCheckpoints?.sheet_b);
+  });
+
+
+  it('收敛模板指纹不一致时拒绝写入，零落盘且消息字段还原', async () => {
+    const message = seedFrame({ logEntries: [] });
+    const beforeIsolatedData = message.TavernDB_ACU_IsolatedData;
+    const preWriteData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    // 模板存在但指纹与 repair 记录不一致：模拟模板在补锚后被修改。
+    mocks.templateObj = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value']] } } as any;
+    const { resolveHeaderOnlyTemplateSnapshot_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const resolvedTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, '');
+    expect(resolvedTemplate).toBeTruthy();
+    const fingerprint = getTableDataFingerprint_ACU(resolvedTemplate);
+    const provisionalRepair = {
+      kind: 'temporary_sheet_anchor' as const, severity: 'provisional' as const,
+      sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0,
+      templateFingerprint: 'stale-fingerprint-from-replay', reason: 'missing_at_operation' as const,
+    };
+    expect(fingerprint).not.toBe(provisionalRepair.templateFingerprint);
+    mocks.loadReplayDetailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] });
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'manual_fill',
+      afterData: { ...preWriteData, sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', '不会保存']] } },
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      operations: [{ kind: 'sql_sheet_batch', sheetKey: 'sheet_a', tableName: 'inventory', reason: 'manual_crud', statements: ['UPDATE inventory SET value = ? WHERE row_id = ?'], params: [['不会保存', 1]] }],
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+
+    expect(result).toEqual({ saved: false, error: expect.stringContaining('模板指纹不一致') });
+    expect(message.TavernDB_ACU_IsolatedData).toBe(beforeIsolatedData);
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+  });
+
 
   it('跨 replacement 范围裁剪旧 bucket 增量、追加新 entry，并只严格保存一次', async () => {
     const first = seedFrame({
@@ -2562,6 +2688,13 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', '收敛前值']] },
       sheet_b: sheetB,
     } as any;
+    // 收敛必须能解析模板锚点；指纹与 repair 一致。
+    mocks.templateObj = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value']] } } as any;
+    const { resolveHeaderOnlyTemplateSnapshot_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const resolvedTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, '');
+    expect(resolvedTemplate).toBeTruthy();
+    const fingerprint = getTableDataFingerprint_ACU(resolvedTemplate);
     const beforeFrame = JSON.parse(JSON.stringify(message.TavernDB_ACU_IsolatedData[''].storageFrame));
     mocks.loadReplayDetailed.mockResolvedValueOnce({
       baseKind: 'full_checkpoint',
@@ -2574,7 +2707,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
         messageIndex: 384,
         seq: 1,
         operationIndex: 0,
-        templateFingerprint: 'test-fingerprint',
+        templateFingerprint: fingerprint,
         reason: 'missing_at_operation',
       }],
     }).mockResolvedValue({ baseKind: 'full_checkpoint', data: preCommitData });
@@ -2593,9 +2726,12 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
 
     expect(result).toMatchObject({ saved: true, messageIndex: 0 });
     const tagData = message.TavernDB_ACU_IsolatedData[''];
-    expect(tagData.storageFrame.checkpoint).toMatchObject({
-      kind: 'full', reason: 'integrity_repair', data: preCommitData,
-    });
+    // 收敛不再写第二个 full：根帧（此处即目标帧）checkpoint 保持既有 init full。
+    expect(tagData.storageFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'init' });
+    // 锚点以 per-sheet checkpoint（sheet_full）落在根帧。
+    expect(tagData.storageFrame.perSheetCheckpoints?.sheet_a).toMatchObject({ kind: 'sheet_full', reason: 'integrity_repair', sheetKey: 'sheet_a' });
+    const { collectV2FullCheckpointIndices_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([0]);
     expect(tagData.recoveryBackup).toEqual(expect.objectContaining({
       recoveryKind: 'temporary_sheet_anchor_convergence',
       sourceMessageIndex: 0,
@@ -2688,6 +2824,14 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       },
     });
     const activeData = message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data;
+    // 收敛需要可解析的模板锚点（repair.sheetKey=sheet_a），指纹与 repair 一致。
+    mocks.templateObj = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value']] } } as any;
+    const { resolveHeaderOnlyTemplateSnapshot_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const resolvedTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, '');
+    expect(resolvedTemplate).toBeTruthy();
+    const fingerprint = getTableDataFingerprint_ACU(resolvedTemplate);
+
     mocks.loadReplayDetailed
       .mockResolvedValueOnce({
         baseKind: 'full_checkpoint',
@@ -2695,7 +2839,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
         requiresCheckpointConvergence: true,
         compatibilityRepairs: [{
           kind: 'temporary_sheet_anchor', severity: 'provisional', sheetKey: 'sheet_a', messageIndex: 0,
-          seq: 1, operationIndex: 0, templateFingerprint: 'test-fingerprint', reason: 'missing_at_operation',
+          seq: 1, operationIndex: 0, templateFingerprint: fingerprint, reason: 'missing_at_operation',
         }],
       })
       .mockResolvedValue({ baseKind: 'full_checkpoint', data: activeData });
@@ -3683,12 +3827,19 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
       sheet_a: { ...sheetA, content: [['row_id', 'value'], ['1', '收敛前值']] },
       sheet_b: sheetB,
     } as any;
+    // 收敛需要可解析的模板锚点，指纹与 repair 一致。
+    mocks.templateObj = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value']] } } as any;
+    const { resolveHeaderOnlyTemplateSnapshot_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const resolvedTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, '');
+    expect(resolvedTemplate).toBeTruthy();
+    const fingerprint = getTableDataFingerprint_ACU(resolvedTemplate);
     const beforeFrame = JSON.parse(JSON.stringify(first.TavernDB_ACU_IsolatedData[''].storageFrame));
     const provisionalRepair = {
       kind: 'temporary_sheet_anchor' as const,
       severity: 'provisional' as const,
       sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0,
-      templateFingerprint: 'test-fingerprint', reason: 'missing_at_operation' as const,
+      templateFingerprint: fingerprint, reason: 'missing_at_operation' as const,
     };
     mocks.loadReplayDetailed
       .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true, compatibilityRepairs: [provisionalRepair] })
@@ -3706,9 +3857,12 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
 
     expect(result).toMatchObject({ saved: true, messageIndices: [0, 1] });
     const firstTagData = first.TavernDB_ACU_IsolatedData[''];
-    expect(firstTagData.storageFrame.checkpoint).toMatchObject({
-      kind: 'full', reason: 'integrity_repair', data: preWriteData,
-    });
+    // 收敛不再写第二个 full：根帧 checkpoint 保持既有 init full。
+    expect(firstTagData.storageFrame.checkpoint).toMatchObject({ kind: 'full', reason: 'init' });
+    // 锚点以 per-sheet checkpoint（sheet_full）落在根帧。
+    expect(firstTagData.storageFrame.perSheetCheckpoints?.sheet_a).toMatchObject({ kind: 'sheet_full', reason: 'integrity_repair', sheetKey: 'sheet_a' });
+    const { collectV2FullCheckpointIndices_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([0]);
     expect(firstTagData.recoveryBackup).toEqual(expect.objectContaining({
       recoveryKind: 'temporary_sheet_anchor_convergence', sourceMessageIndex: 0, storageFrame: beforeFrame,
     }));
@@ -3737,10 +3891,17 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     const firstBefore = first.TavernDB_ACU_IsolatedData;
     const secondBefore = second.TavernDB_ACU_IsolatedData;
     const preWriteData = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    // 收敛必须能解析模板锚点；指纹与 repair 一致，收敛成功后才进入 strict save。
+    mocks.templateObj = { mate: { type: 'acu' }, sheet_a: { ...sheetA, content: [['row_id', 'value']] } } as any;
+    const { resolveHeaderOnlyTemplateSnapshot_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const resolvedTemplate = resolveHeaderOnlyTemplateSnapshot_ACU(mocks.chat, '');
+    expect(resolvedTemplate).toBeTruthy();
+    const fingerprint = getTableDataFingerprint_ACU(resolvedTemplate);
     mocks.loadReplayDetailed
       .mockResolvedValueOnce({
         baseKind: 'full_checkpoint', data: preWriteData, requiresCheckpointConvergence: true,
-        compatibilityRepairs: [{ kind: 'temporary_sheet_anchor', severity: 'provisional', sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0, templateFingerprint: 'test-fingerprint', reason: 'missing_at_operation' }],
+        compatibilityRepairs: [{ kind: 'temporary_sheet_anchor', severity: 'provisional', sheetKey: 'sheet_a', messageIndex: 0, seq: 1, operationIndex: 0, templateFingerprint: fingerprint, reason: 'missing_at_operation' }],
       })
       .mockResolvedValue({ baseKind: 'full_checkpoint', data: preWriteData });
     mocks.settings.dataIsolationEnabled = true;
@@ -4245,6 +4406,9 @@ describe('阶段0红测试：introduction history evidence 与模板提交 frame
     // 有 V2 历史 marker（hasV2TableHistoryEvidence_ACU=true）却非合法 V2：
     // 说明是损坏的存储痕迹，绝不能当作缺 frame 静默初始化覆盖。
     // 构造：tagData._acu_storage_version=2（marker）但 storageFrame 非法（logEntries 非数组）。
+
+
+
     // 前置 classify 会先拦截"全 chat 范围内唯一畸形 marker"为 orphan_v2_artifacts；
     // 要测到 2798 守卫，需构造"旧楼层有合法 checkpoint（existing_full_checkpoint）+
     // 最新楼层是畸形 marker"的组合，绕过前置拦截。
@@ -4320,5 +4484,154 @@ describe('阶段0红测试：introduction history evidence 与模板提交 frame
     expect(replayCall[0]).toEqual([checkpointMessage, newAiMessage]);
     expect(replayCall[1]).toBe(isolationKey);
     expect(replayCall[2]).toMatchObject({ maxMessageIndex: 1 });
+  });
+});
+
+
+
+describe('collectV2FullCheckpointIndices_ACU / assertSingleActiveFullCheckpointV2_ACU', () => {
+  let collectV2FullCheckpointIndices_ACU: typeof import('../../../src/service/table/storage-frame-v2-persist')['collectV2FullCheckpointIndices_ACU'];
+  let assertSingleActiveFullCheckpointV2_ACU: typeof import('../../../src/service/table/storage-frame-v2-persist')['assertSingleActiveFullCheckpointV2_ACU'];
+  beforeAll(async () => {
+    ({ collectV2FullCheckpointIndices_ACU, assertSingleActiveFullCheckpointV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist'));
+  });
+
+  function makeFullMessage(messageIndex: number, reason: string): any {
+    return {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: messageIndex + 1, reason, data: { mate: { type: 'acu' }, sheet_a: sheetA } },
+            logEntries: [],
+          },
+        },
+      },
+    };
+  }
+  function makeV2FrameWithoutFull(messageIndex: number): any {
+    return {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: { version: 2, logEntries: [makeEntry({ seq: 1, entryId: `entry-${messageIndex}` })] },
+        },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    mocks.chat.length = 0;
+    mocks.saveChat.mockReset().mockResolvedValue(undefined);
+    mocks.saveChatStrict.mockReset().mockResolvedValue(undefined);
+  });
+
+  it('空聊天返回空数组，断言通过', () => {
+    expect(collectV2FullCheckpointIndices_ACU([], '')).toEqual([]);
+    expect(assertSingleActiveFullCheckpointV2_ACU([], '', 'test')).toBeNull();
+  });
+
+  it('0 个 full：仅 V2 frame 与 user 楼层不产生索引', () => {
+    mocks.chat.splice(0, mocks.chat.length,
+      { is_user: true, mes: 'user' },
+      makeV2FrameWithoutFull(1),
+      { is_user: false, mes: 'no-frame' },
+    );
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([]);
+    expect(assertSingleActiveFullCheckpointV2_ACU(mocks.chat, '', 'test')).toBeNull();
+  });
+
+  it('1 个 full：返回该索引且断言通过', () => {
+    mocks.chat.splice(0, mocks.chat.length,
+      { is_user: false, mes: 'a' },
+      makeFullMessage(1, 'init'),
+      makeV2FrameWithoutFull(2),
+    );
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([1]);
+    expect(assertSingleActiveFullCheckpointV2_ACU(mocks.chat, '', 'test')).toBeNull();
+  });
+
+  it('2 个 full：按楼层正序返回两个索引，断言返回含全部索引与各自 reason 的错误', () => {
+    mocks.chat.splice(0, mocks.chat.length,
+      makeFullMessage(0, 'init'),
+      makeFullMessage(1, 'integrity_repair'),
+    );
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([0, 1]);
+    const violation = assertSingleActiveFullCheckpointV2_ACU(mocks.chat, '', 'persist');
+    expect(violation).toContain('2 个 full checkpoint');
+    expect(violation).toContain('#0(init)');
+    expect(violation).toContain('#1(integrity_repair)');
+  });
+
+  it('3 个 full：全部收集，断言计数为 3', () => {
+    mocks.chat.splice(0, mocks.chat.length,
+      makeFullMessage(0, 'init'),
+      makeFullMessage(1, 'periodic'),
+      makeFullMessage(2, 'manual'),
+    );
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([0, 1, 2]);
+    expect(assertSingleActiveFullCheckpointV2_ACU(mocks.chat, '', 'test')).toContain('3 个 full checkpoint');
+  });
+
+  it('跨 isolationKey：只统计目标隔离键的 full', () => {
+    const message = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': { _acu_storage_version: 2, storageFrame: { version: 2, checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' } } }, logEntries: [] } },
+        'other-key': { _acu_storage_version: 2, storageFrame: { version: 2, checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' } } }, logEntries: [] } },
+      },
+    };
+    mocks.chat.splice(0, mocks.chat.length, message);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([0]);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, 'other-key')).toEqual([0]);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, 'missing-key')).toEqual([]);
+  });
+
+  it('user 楼层不计入，但非 V2 frame 不阻断楼层编号', () => {
+    mocks.chat.splice(0, mocks.chat.length,
+      { is_user: true, mes: 'user' },
+      makeFullMessage(1, 'init'),
+      makeFullMessage(2, 'compaction'),
+    );
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([1, 2]);
+  });
+
+  it('maxMessageIndex 边界：只统计该楼层及之前', () => {
+    mocks.chat.splice(0, mocks.chat.length,
+      makeFullMessage(0, 'init'),
+      makeFullMessage(1, 'periodic'),
+      makeFullMessage(2, 'manual'),
+    );
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '', 0)).toEqual([0]);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '', 1)).toEqual([0, 1]);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '', 2)).toEqual([0, 1, 2]);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '', 99)).toEqual([0, 1, 2]);
+  });
+
+  it('非 V2 tag（version 非 2 或 logEntries 非数组）不计入 full', () => {
+    const legacyTag = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 1,
+          storageFrame: { checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' } } }, logEntries: [] },
+        },
+      },
+    };
+    const badLogEntries = {
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: { version: 2, checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: { type: 'acu' } } }, logEntries: { seq: 1 } },
+        },
+      },
+    };
+    mocks.chat.splice(0, mocks.chat.length, legacyTag, badLogEntries);
+    expect(collectV2FullCheckpointIndices_ACU(mocks.chat, '')).toEqual([]);
+    expect(assertSingleActiveFullCheckpointV2_ACU(mocks.chat, '', 'test')).toBeNull();
   });
 });

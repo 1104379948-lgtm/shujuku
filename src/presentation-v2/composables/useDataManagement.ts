@@ -428,6 +428,8 @@ export function useDataManagement() {
         toast.warning('检测到无锚点 data_replace。该恢复必须经过两次明确确认。', { muteable: false, durationMs: 6000 });
       } else if (summary.status === 'recoverable_temporary_sheet_anchor') {
         toast.warning('检测到历史回放依赖临时 Sheet 补锚。请提交恢复，将兼容状态固化为 integrity_repair checkpoint。', { muteable: false, durationMs: 6000 });
+      } else if (summary.status === 'recoverable_redundant_full_checkpoint') {
+        toast.warning('检测到同一隔离键下存在多个 full checkpoint（回放只认最后一个，之前增量已失效）。请先导出原始 frame 备份，再提交收敛。', { muteable: false, durationMs: 6000 });
       } else if (summary.status === 'unrecoverable_late_checkpoint_artifacts') {
         toast.warning('检测到较晚 checkpoint 两侧均有 V2 artifact。自动前移会改变后缀回放语义；请先导出恢复备份，再人工核对。', { muteable: false, durationMs: 6000 });
       } else {

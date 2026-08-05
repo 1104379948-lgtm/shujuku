@@ -30,6 +30,8 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
 import { commitPreparedV2Recovery_ACU, prepareV2Recovery_ACU, scanV2IsolationDiagnostics_ACU } from '../../../src/service/table/table-v2-recovery-service';
 import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import * as storageFrameV2Replay from '../../../src/service/table/storage-frame-v2-replay';
+import { getTableDataFingerprint_ACU } from '../../../src/service/table/table-data-upgrade-audit';
+
 
 function data(rows: any[][] = [['1', '铁剑']]) {
   return { mate: { type: 'acu', version: 1 }, sheet_0: { uid: 'inventory', name: '背包', content: [['row_id', '名称'], ...rows], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 } } as any;
@@ -457,6 +459,60 @@ describe('table-v2-recovery-service', () => {
     h.chat = chatWithFrame(frame(undefined, [{ seq: 1, entryId: 'log-only', createdAt: 1, source: 'system', targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: [], groupKeys: [], operations: [{ kind: 'row_delete', sheetKey: 'sheet_0', rowId: '1' }] }]));
     expect(await prepareV2Recovery_ACU()).toMatchObject({ status: 'unrecoverable_no_base' });
     expect(h.save).not.toHaveBeenCalled();
+  });
+
+
+
+  it('P4-8 双 full (0,10) 收敛：仅保留末位 full，冗余帧降级为 data_replace fallback 且回放结果不变', async () => {
+    const rootData = data([['1', '根层数据']]);
+    const convergedData = data([['1', '根层数据'], ['2', '10 层累积']]);
+    const rootFrame = frame({ kind: 'full', createdAt: 1, reason: 'init', data: rootData }, []);
+    const lateFrame = frame({ kind: 'full', createdAt: 2, reason: 'integrity_repair', data: convergedData }, []);
+    const beforeFingerprint = getTableDataFingerprint_ACU(await loadTableStateFromFramesV2_ACU([
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: rootFrame } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: lateFrame } } },
+    ], '', { updateRuntimeState: false }));
+    h.chat = [
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: rootFrame } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame(undefined, []) } } },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: lateFrame } } },
+    ];
+
+    const prepared = await prepareV2Recovery_ACU();
+    expect(prepared.status).toBe('recoverable_redundant_full_checkpoint');
+    expect(prepared.planId).toBeDefined();
+    expect(prepared.message).toContain('保留末位');
+    expect(prepared.message).toContain('无损降级');
+
+    await expect(commitPreparedV2Recovery_ACU(prepared.planId!)).resolves.toEqual({ status: 'committed', planId: prepared.planId });
+
+    const rootTag = h.chat[0].TavernDB_ACU_IsolatedData[''];
+    expect(rootTag.storageFrame.checkpoint).toBeUndefined();
+    expect(rootTag.storageFrame.logEntries[0].operations[0]).toMatchObject({ kind: 'data_replace', data: rootData });
+    expect(rootTag.recoveryBackup).toMatchObject({ recoveryKind: 'redundant_full_checkpoint_convergence', storageFrame: rootFrame });
+
+    const lateTag = h.chat[10].TavernDB_ACU_IsolatedData[''];
+    expect(lateTag.storageFrame.checkpoint).toMatchObject({ kind: 'full', data: convergedData });
+
+    const afterFingerprint = getTableDataFingerprint_ACU(await loadTableStateFromFramesV2_ACU(h.chat, '', { updateRuntimeState: false }));
+    expect(afterFingerprint).toBe(beforeFingerprint);
   });
 
 });
