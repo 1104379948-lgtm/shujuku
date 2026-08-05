@@ -25,7 +25,7 @@ import {
 } from '../../service/settings/settings-service';
 import { getCurrentStorageMode, isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
-import { getChatArray_ACU, deleteLocalDataInChatCore_ACU, overrideLatestLayerWithTemplateCore_ACU, purgeCurrentChatDatabaseState_ACU } from '../../service/chat/chat-service';
+import { getChatArray_ACU, deleteLocalDataWithScope_ACU, isFullRangeDeletionRequest_ACU, overrideLatestLayerWithTemplateCore_ACU } from '../../service/chat/chat-service';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../../service/table/table-service';
 import { cleanupWorldbookEntriesAfterDataDeletion_ACU } from '../../service/worldbook/worldbook-cleanup';
 import { deleteAllGeneratedEntries_ACU, refreshMergedDataAndNotify_ACU } from '../../service/worldbook/pipeline';
@@ -660,8 +660,22 @@ export function useDataManagement() {
     }
   }
 
+  /**
+   * 预判当前范围输入会走哪条删除路径，供页面生成确认文案。
+   * 与服务层 deleteLocalDataWithScope_ACU 使用同一判定函数，不重复实现规则。
+   */
+  function resolveDeletionPath(mode: 'current' | 'all'): 'purge' | 'range' {
+    if (mode !== 'all') return 'range';
+    const start = normalizeFloorValue(deleteRange.startFloor);
+    const end = normalizeFloorValue(deleteRange.endFloor);
+    return isFullRangeDeletionRequest_ACU(start, end, getAiMessageCount()) ? 'purge' : 'range';
+  }
+
   async function deleteLocalData(mode: 'current' | 'all'): Promise<void> {
-    busyAction.value = mode === 'current' ? 'delete-current-local' : 'delete-all-local';
+    const expectedPath = resolveDeletionPath(mode);
+    busyAction.value = expectedPath === 'purge'
+      ? 'purge-all-local'
+      : (mode === 'current' ? 'delete-current-local' : 'delete-all-local');
     try {
       const start = normalizeFloorValue(deleteRange.startFloor);
       const end = normalizeFloorValue(deleteRange.endFloor);
@@ -669,25 +683,18 @@ export function useDataManagement() {
       settings_ACU.deleteEndFloor = end;
       saveSettings_ACU();
 
-      const deletedCount = await deleteLocalDataInChatCore_ACU(mode, start, end);
-      if (deletedCount > 0) {
-        await loadOrCreateJsonTableFromChatHistory_ACU();
-        if (isSqliteMode()) await reloadStorageProvider();
-        await refreshMergedDataAndNotify_ACU();
-        const worldbookDeleted = await cleanupWorldbookEntriesAfterDataDeletion_ACU();
-        refresh();
-        setMessage(
-          message,
-          'success',
-          `已删除 ${deletedCount} 条消息中的本地数据${worldbookDeleted ? `，并清理 ${worldbookDeleted} 个世界书条目` : ''}。`,
-        );
-        const text = message.value?.text || '';
+      const outcome = await deleteLocalDataWithScope_ACU(mode, start, end, expectedPath);
+
+      if (outcome.path === 'aborted') {
         message.value = null;
-        toast.success(text, { muteable: false });
-      } else {
-        message.value = null;
-        toast.info('没有发现符合当前范围的数据。', { muteable: false });
+        toast.warning(outcome.reason, { muteable: false, durationMs: 6000 });
+        return;
       }
+      if (outcome.path === 'purge') {
+        applyPurgeOutcome(outcome.result);
+        return;
+      }
+      await applyRangeDeletionOutcome(outcome.deletedCount);
     } catch (e: any) {
       logError_ACU('[ACU-V2] deleteLocalData failed', e);
       message.value = null;
@@ -697,11 +704,31 @@ export function useDataManagement() {
     }
   }
 
+  async function applyRangeDeletionOutcome(deletedCount: number): Promise<void> {
+    if (deletedCount > 0) {
+      await loadOrCreateJsonTableFromChatHistory_ACU();
+      if (isSqliteMode()) await reloadStorageProvider();
+      await refreshMergedDataAndNotify_ACU();
+      const worldbookDeleted = await cleanupWorldbookEntriesAfterDataDeletion_ACU();
+      refresh();
+      setMessage(
+        message,
+        'success',
+        `已删除 ${deletedCount} 条消息中的本地数据${worldbookDeleted ? `，并清理 ${worldbookDeleted} 个世界书条目` : ''}。`,
+      );
+      const text = message.value?.text || '';
+      message.value = null;
+      toast.success(text, { muteable: false });
+    } else {
+      message.value = null;
+      toast.info('没有发现符合当前范围的数据。', { muteable: false });
+    }
+  }
 
   /**
-   * 硬清空当前聊天的全部本地数据库状态（C 方案接线 purge）。
+   * 应用硬清空（purge）结果到 UI（C 方案接线 purge 的收尾）。
    *
-   * 与 deleteLocalData 的收尾刻意不同：
+   * 与 applyRangeDeletionOutcome 的收尾刻意不同：
    * - 不调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider（C2）：
    *   purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
    *   clearTableRuntimeWithoutReload_ACU 把运行时置为空态，并明令绝不加载聊天/模板/Guide；
@@ -712,28 +739,18 @@ export function useDataManagement() {
    *   mergeAllIndependentTables_ACU，并在无历史数据时从指导表/模板重建 currentJsonTableData_ACU
    *   （pipeline.ts:617-629），等价于重新物化。因此只调 refresh() 做 settings/isolation/count 级刷新。
    */
-  async function purgeAllLocalData(): Promise<void> {
-    busyAction.value = 'purge-all-local';
-    try {
-      const result = await purgeCurrentChatDatabaseState_ACU();
-      if (!result.saved) {
-        message.value = null;
-        toast.error(result.error || '硬清空失败，详情见运行日志。', { muteable: false });
-        return;
-      }
-      refresh();
-      if (result.cleanupWarnings?.length) {
-        toast.warning(`本地数据已全部硬清空（${result.clearedMessageCount} 条消息）。警告：${result.cleanupWarnings[0]}`, { muteable: false, durationMs: 6000 });
-      } else {
-        const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
-        toast.success(`已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`, { muteable: false });
-      }
-    } catch (e: any) {
-      logError_ACU('[ACU-V2] purgeAllLocalData failed', e);
+  async function applyPurgeOutcome(result: { saved: boolean; clearedMessageCount: number; removedMetadata: string[]; cleanupWarnings?: string[]; error?: string }): Promise<void> {
+    if (!result.saved) {
       message.value = null;
-      toast.error('硬清空失败，详情见运行日志。', { muteable: false });
-    } finally {
-      busyAction.value = '';
+      toast.error(result.error || '硬清空失败，详情见运行日志。', { muteable: false });
+      return;
+    }
+    refresh();
+    if (result.cleanupWarnings?.length) {
+      toast.warning(`本地数据已全部硬清空（${result.clearedMessageCount} 条消息）。警告：${result.cleanupWarnings[0]}`, { muteable: false, durationMs: 6000 });
+    } else {
+      const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
+      toast.success(`已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`, { muteable: false });
     }
   }
 
@@ -781,7 +798,7 @@ export function useDataManagement() {
     resetAllDefaults,
     overrideLatestLayerWithTemplate,
     deleteLocalData,
-    purgeAllLocalData,
+    resolveDeletionPath,
     setRetainRecentLayers,
   };
 }

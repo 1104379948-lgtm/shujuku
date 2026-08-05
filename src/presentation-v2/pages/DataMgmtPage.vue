@@ -355,7 +355,7 @@
 
 
             <p class="acu-v2-data-mgmt-page__meta">
-              楼层范围仅作用于「删除当前标识本地数据」；「删除所有数据」忽略该设置，作用于全部 AI 楼层。
+              楼层范围同时作用于两个删除按钮。「删除所有本地数据」在范围覆盖全部 AI 楼层时执行硬清空，范围为局部时只删除对应楼层的填表数据。
             </p>
 
           <div
@@ -373,8 +373,8 @@
               block
               variant="danger"
               :disabled="runtimeDiagnostic.busy.value"
-              :loading="flow.busyAction.value === 'purge-all-local'"
-              @click="onPurgeAllLocalData"
+              :loading="flow.busyAction.value === 'purge-all-local' || flow.busyAction.value === 'delete-all-local'"
+              @click="onDeleteLocalData('all')"
             >
               删除所有本地数据
             </AcuButton>
@@ -532,36 +532,36 @@ async function onImportTableCheckpoint(file: File): Promise<void> {
 
 async function onDeleteLocalData(mode: "current" | "all"): Promise<void> {
   if (runtimeDiagnostic.busy.value) return;
-  // 按钮已改接 onPurgeAllLocalData；此处仅保留 current 路径，all 分支防御性回退到 purge，
-  // 避免任何残留调用仍走旧的「楼层范围 + 漏删字段」路径。
-  if (mode === "all") {
-    await onPurgeAllLocalData();
+  const path = flow.resolveDeletionPath(mode);
+
+  if (path === "range") {
+    const scopeText = mode === "current" ? "属于当前标识的" : "所有标识的";
+    const confirmed = await dialogStore.confirm({
+      title: mode === "current" ? "删除当前标识本地数据" : "删除指定楼层本地数据",
+      message:
+        `删除当前聊天中 ${flow.rangeLabel.value} ${scopeText}数据库数据？\n` +
+        "仅清除该范围内楼层的填表数据；聊天级模板 scope 与 guide 容器保留，\n" +
+        "未覆盖的楼层数据不受影响。此操作不可恢复。",
+      confirmLabel: "删除数据",
+      confirmVariant: "danger",
+    });
+    if (!confirmed) return;
+    if (runtimeDiagnostic.busy.value) return;
+    void flow.deleteLocalData(mode);
     return;
   }
-  const message =
-    `删除当前聊天中 ${flow.rangeLabel.value} 属于当前标识的数据库数据？此操作不可恢复。`;
-  const confirmed = await dialogStore.confirm({
-    title: "删除当前标识本地数据",
-    message,
-    confirmLabel: "删除数据",
-    confirmVariant: "danger",
-  });
-  if (!confirmed) return;
-  if (runtimeDiagnostic.busy.value) return;
-  void flow.deleteLocalData("current");
-}
 
-async function onPurgeAllLocalData(): Promise<void> {
-  if (runtimeDiagnostic.busy.value) return;
+  // path === 'purge'：范围覆盖全部 AI 楼层，将执行硬清空，保留两级确认。
   const confirmed = await dialogStore.confirm({
     title: "删除所有本地数据",
     message:
-      "此操作将硬清空当前聊天的全部本地数据库状态，且与上方起止楼层设置无关，作用于所有 AI 楼层：\n" +
+      "当前删除范围覆盖全部 AI 楼层，将硬清空当前聊天的全部本地数据库状态：\n" +
       "· 清除所有隔离标识的本地数据（不只当前标识）；\n" +
       "· 含用户首条消息上的字段；\n" +
       "· 清除聊天级模板 scope 与 guide 容器（模板选择回到继承全局）；\n" +
       "· 不保留 init 锚点，重新填表时 sheetKey 会重新分配；\n" +
       "· 结果等价于全新会话，不可恢复。\n" +
+      "若只想删除部分楼层，请先在上方设置起止楼层范围。\n" +
       "全局模板、提示词与聊天正文不受影响。确认继续？",
     confirmLabel: "删除所有本地数据",
     confirmVariant: "danger",
@@ -574,8 +574,9 @@ async function onPurgeAllLocalData(): Promise<void> {
     confirmVariant: "danger",
   }))) return;
   if (runtimeDiagnostic.busy.value) return;
-  void flow.purgeAllLocalData();
+  void flow.deleteLocalData("all");
 }
+
 
 async function onCommitMixedStorageDecision(action: MixedStorageCommitAction_ACU): Promise<void> {
   if (runtimeDiagnostic.busy.value) return;

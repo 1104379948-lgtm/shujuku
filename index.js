@@ -73355,6 +73355,35 @@ $CONTENT
         });
     }
     /**
+     * 判定一次删除请求是否覆盖全部 AI 楼层。
+     *
+     * 这是「是否触发硬清空」的唯一判定真源：服务层编排入口、v2 UI 预判文案、
+     * legacy UI 预判文案三处共用，避免各自实现导致语义漂移。
+     *
+     * 与 deleteLocalDataInChatCoreInner_ACU 内部原有的 isFullRangeDeletion 表达式
+     * 完全等价（该处已改为调用本函数），保证「是否清 guide/scope」与
+     * 「是否走 purge」永远基于同一判定。
+     *
+     * @param startFloor 起始 AI 楼层（1-based）；null 表示从第一层开始
+     * @param endFloor   终止 AI 楼层（1-based，含）；null 表示到最后一层
+     * @param aiMessageCount 当前聊天的 AI 楼层总数
+     */
+    function isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageCount) {
+        return (startFloor === null || startFloor <= 1)
+            && (endFloor === null || endFloor >= aiMessageCount);
+    }
+    /** 统计当前聊天的 AI 楼层总数（与 deleteLocalDataInChatCoreInner_ACU 的口径一致）。 */
+    function countAiMessages_ACU$1(chat) {
+        return Array.isArray(chat) ? chat.filter((msg) => !msg?.is_user).length : 0;
+    }
+    /**
+     * 删除聊天记录中的本地数据（核心业务逻辑）
+     * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
+     *
+     * 只负责数据操作（遍历 chat 删除字段 + saveChatToHost），不涉及 UI（toast/status display）。
+     * @returns 删除的消息数量
+     */
+    /**
      * 删除聊天记录中的本地数据（核心业务逻辑）
      * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
      *
@@ -73381,8 +73410,7 @@ $CONTENT
         const endAiIndex = endFloor ? Math.min(aiMessageIndices.length - 1, endFloor - 1) : aiMessageIndices.length - 1;
         // 获取要处理的AI消息的物理索引
         const targetIndices = aiMessageIndices.slice(startAiIndex, endAiIndex + 1);
-        const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
-            && (endFloor === null || endFloor >= aiMessageIndices.length);
+        const isFullRangeDeletion = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageIndices.length);
         for (const physicalIndex of targetIndices) {
             const msg = chat[physicalIndex];
             let shouldDelete = false;
@@ -73502,6 +73530,41 @@ $CONTENT
             writeSet: [{ kind: 'all' }],
             maintenanceMode: 'exclusive',
         }, () => deleteLocalDataInChatCoreInner_ACU(mode, startFloor, endFloor));
+    }
+    /**
+     * 范围感知的本地数据删除编排入口。
+     *
+     * 判定规则（唯一真源，见 isFullRangeDeletionRequest_ACU）：
+     *   mode === 'all' 且删除范围覆盖全部 AI 楼层 → 硬清空 purgeCurrentChatDatabaseState_ACU；
+     *   其余一切情况                              → 范围删除 deleteLocalDataInChatCore_ACU。
+     *
+     * 【绝不在此包裹事务】purgeCurrentChatDatabaseState_ACU 与
+     * deleteLocalDataInChatCore_ACU 各自已用 runTableWriteTransaction_ACU 包裹且
+     * maintenanceMode='exclusive'；此处再包一层会造成独占事务嵌套（死锁或断言失败）。
+     * 本函数只做「读 chat 算判定 + 分派」，自身不写任何数据。
+     *
+     * @param expectedPath 可选安全闸门。调用方在弹确认框时已按当时的 AI 楼层数预判过路径；
+     *   用户停留期间若聊天新增 AI 楼层，实际判定可能翻转（例如原本只删 1-5 层，
+     *   新增第 6 层后仍是 range，但原本 end=5 覆盖全部的场景会变成局部）。
+     *   传入预判值后，一旦实际判定与预判不一致即返回 aborted，由调用方提示用户重新确认，
+     *   避免「用户以为只删部分，实际被硬清空」这类破坏性误判。
+     */
+    async function deleteLocalDataWithScope_ACU(mode = 'current', startFloor = null, endFloor = null, expectedPath) {
+        const chat = getChatArray_ACU();
+        const aiMessageCount = countAiMessages_ACU$1(chat);
+        const isFullRange = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageCount);
+        const path = (mode === 'all' && isFullRange) ? 'purge' : 'range';
+        if (expectedPath && expectedPath !== path) {
+            return {
+                path: 'aborted',
+                reason: `删除范围在确认期间发生变化（预期${expectedPath === 'purge' ? '完全清空' : '按范围删除'}，`
+                    + `实际为${path === 'purge' ? '完全清空' : '按范围删除'}）。为避免误删已中止，请重新确认。`,
+            };
+        }
+        if (path === 'purge') {
+            return { path: 'purge', result: await purgeCurrentChatDatabaseState_ACU() };
+        }
+        return { path: 'range', deletedCount: await deleteLocalDataInChatCore_ACU(mode, startFloor, endFloor) };
     }
     /**
      * 使用模板覆盖最新层的表格数据（核心业务逻辑）
@@ -98621,23 +98684,32 @@ $CONTENT
         input.click();
     }
     // [新增] 删除聊天记录中的本地数据
-    // [重要] 此函数只删除各楼层的表格数据（TavernDB_ACU_Data/IsolatedData等），
-    //        不会删除聊天第一层的"空白指导表"（TavernDB_ACU_InternalSheetGuide），
-    //        指导表用于保存表头结构和填表参数，作为该聊天的总指导。
+    // 范围感知：mode='all' 且范围覆盖全部 AI 楼层时由服务层编排入口切换为硬清空 purge，
+    // 其余情况走范围删除（deleteLocalDataInChatCore_ACU）。
     async function deleteLocalDataInChat_ACU(mode = 'current', startFloor = null, endFloor = null) {
         const chat = getChatArray_ACU();
         if (!chat || chat.length === 0) {
             showToastr_ACU('warning', '聊天记录为空，无法执行删除操作。');
             return;
         }
-        // 计算AI消息数量，用于前置校验
         const aiMessageCount = chat.filter((msg) => !msg.is_user).length;
-        if (aiMessageCount === 0) {
-            showToastr_ACU('warning', '聊天记录中没有AI消息，无法执行删除操作。');
+        const outcome = await deleteLocalDataWithScope_ACU(mode, startFloor, endFloor);
+        // aiCount === 0 时不再提前 return：范围覆盖全部（含 0 层）的 all 请求会走 purge，
+        // purge 仍需清理用户首条消息字段与 chat[0] scope/guide 镜像。
+        // 只有走 range 路径且确实没有 AI 楼层时才提示无可删数据。
+        if (outcome.path === 'range' && aiMessageCount === 0) {
+            showToastr_ACU('warning', '聊天记录中没有AI消息，无法执行范围删除。');
             return;
         }
-        // 调用 service 层核心逻辑执行数据删除
-        const deletedCount = await deleteLocalDataInChatCore_ACU(mode, startFloor, endFloor);
+        if (outcome.path === 'aborted') {
+            showToastr_ACU('warning', outcome.reason, { timeOut: 10000 });
+            return;
+        }
+        if (outcome.path === 'purge') {
+            applyPurgeResultToUi_ACU(outcome.result);
+            return;
+        }
+        const deletedCount = outcome.deletedCount;
         if (deletedCount > 0) {
             // 刷新内存和UI：删除楼层数据后，SQLite 运行时必须从当前聊天持久化模板/guide 重建
             await loadOrCreateJsonTableFromChatHistory_ACU();
@@ -98649,16 +98721,16 @@ $CONTENT
             if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
                 updateCardUpdateStatusDisplay_ACU();
             }
-            showToastr_ACU('success', `已成功删除 ${deletedCount} 条消息中的本地数据 (${mode === 'all' ? '所有数据' : '当前标识'})。`);
+            showToastr_ACU('success', `已成功删除 ${deletedCount} 条消息中的本地数据 (${mode === 'all' ? '所有标识' : '当前标识'})。`);
         }
         else {
             showToastr_ACU('info', '没有发现符合删除条件的数据。');
         }
     }
     /**
-     * 硬清空当前聊天全部本地数据库状态（legacy popup 入口）。
+     * 硬清空（purge）结果落 UI（legacy 入口共用）。
      *
-     * 与 deleteLocalDataInChat_ACU 的收尾刻意不同（C 方案 C2/C3）：
+     * 与 range 删除的收尾刻意不同（C 方案 C2/C3）：
      * purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
      * clearTableRuntimeWithoutReload_ACU 置为空态，并明令绝不加载聊天/模板/Guide；
      * 此处不再调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider /
@@ -98666,27 +98738,20 @@ $CONTENT
      * 世界书条目清理也由 purge 内部完成（cleanupDatabaseGeneratedWorldbookEntries_ACU），
      * 结果进入 result.cleanupWarnings。
      */
-    async function purgeAllLocalDataInChat_ACU() {
-        try {
-            const result = await purgeCurrentChatDatabaseState_ACU();
-            if (!result.saved) {
-                showToastr_ACU('error', result.error || '硬清空失败，详情见运行日志。', { timeOut: 10000 });
-                return;
-            }
-            if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
-                updateCardUpdateStatusDisplay_ACU();
-            }
-            const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
-            if (result.cleanupWarnings?.length) {
-                showToastr_ACU('warning', `已硬清空全部本地数据（${result.clearedMessageCount} 条消息）${removed}。警告：${result.cleanupWarnings[0]}`, { timeOut: 10000 });
-            }
-            else {
-                showToastr_ACU('success', `已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`);
-            }
+    function applyPurgeResultToUi_ACU(result) {
+        if (!result.saved) {
+            showToastr_ACU('error', result.error || '硬清空失败，详情见运行日志。', { timeOut: 10000 });
+            return;
         }
-        catch (error) {
-            logError_ACU('硬清空全部本地数据失败。', error);
-            showToastr_ACU('error', `硬清空失败：${error?.message || '未知错误'}`, { timeOut: 10000 });
+        if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
+            updateCardUpdateStatusDisplay_ACU();
+        }
+        const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
+        if (result.cleanupWarnings?.length) {
+            showToastr_ACU('warning', `已硬清空全部本地数据（${result.clearedMessageCount} 条消息）${removed}。警告：${result.cleanupWarnings[0]}`, { timeOut: 10000 });
+        }
+        else {
+            showToastr_ACU('success', `已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`);
         }
     }
     async function migrateLegacySummaryVectorIndex_ACU() {
@@ -100158,18 +100223,38 @@ $CONTENT
         }
         if ($deleteAllLocalDataButton.length) {
             $deleteAllLocalDataButton.on('click', function () {
-                // C 方案：all 入口改接硬清空服务，与楼层范围设置无关（C1/C6）。
-                // 不再读楼层输入框、不再回写 settings_ACU.deleteStartFloor/deleteEndFloor。
-                const scopeText = "全部 AI 楼层、所有隔离标识";
-                if (confirm(`严重警告：此操作将硬清空当前聊天的全部本地数据库状态，与上方楼层范围设置无关，作用于${scopeText}。\n\n` +
-                    "· 含用户首条消息上的字段；\n" +
-                    "· 清除聊天级模板 scope 与 guide 容器（模板选择回到继承全局）；\n" +
-                    "· 不保留 init 锚点，重新填表时 sheetKey 会重新分配；\n" +
-                    "· 结果等价于全新会话，不可恢复。\n\n" +
-                    "全局模板、提示词与聊天正文不受影响。确定要继续吗？")) {
-                    // 二次确认
-                    if (confirm(`再次确认：您真的要清空当前聊天的${scopeText}所有数据库存档吗？此操作不可撤销。`)) {
-                        purgeAllLocalDataInChat_ACU();
+                const $startFloor = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-delete-start-floor`);
+                const $endFloor = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-delete-end-floor`);
+                const startFloor = $startFloor.length ? parseInt($startFloor.val()) || null : null;
+                const endFloor = $endFloor.length && $endFloor.val() ? parseInt($endFloor.val()) || null : null;
+                // 保存楼层范围设置：all 现在也依赖楼层范围判定（是否触发硬清空）
+                settings_ACU.deleteStartFloor = startFloor;
+                settings_ACU.deleteEndFloor = endFloor;
+                saveSettingsAndNotify_ACU();
+                const chat = getChatArray_ACU();
+                const aiMessageCount = Array.isArray(chat) ? chat.filter((msg) => !msg?.is_user).length : 0;
+                const isFullRange = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageCount);
+                if (!isFullRange) {
+                    const rangeText = startFloor && endFloor ? `第${startFloor}到${endFloor}AI楼层`
+                        : startFloor ? `从第${startFloor}AI楼层开始`
+                            : `到第${endFloor}AI楼层结束`;
+                    if (confirm(`警告：这将永久删除${rangeText}所有标识的数据库数据。\n\n`
+                        + '仅清除该范围内楼层的填表数据；聊天级模板 scope 与 guide 容器保留。\n\n'
+                        + '此操作不可恢复！确定要继续吗？')) {
+                        deleteLocalDataInChat_ACU('all', startFloor, endFloor);
+                    }
+                    return;
+                }
+                if (confirm('严重警告：当前删除范围覆盖全部 AI 楼层，将硬清空当前聊天的全部本地数据库状态。\n\n'
+                    + '· 清除所有隔离标识的本地数据；\n'
+                    + '· 含用户首条消息上的字段；\n'
+                    + '· 清除聊天级模板 scope 与 guide 容器（模板选择回到继承全局）；\n'
+                    + '· 不保留 init 锚点，重新填表时 sheetKey 会重新分配；\n'
+                    + '· 结果等价于全新会话，不可恢复。\n\n'
+                    + '若只想删除部分楼层，请先设置上方起止楼层范围。\n'
+                    + '全局、提示词与聊天正文不受影响。确定要继续吗？')) {
+                    if (confirm('再次确认：您真的要清空当前聊天所有数据库存档吗？此操作不可撤销。')) {
+                        deleteLocalDataInChat_ACU('all', startFloor, endFloor);
                     }
                 }
             });
@@ -104422,7 +104507,7 @@ $CONTENT
                                 </div>
                             </div>
                             <div style="margin-top: 6px; font-size: 0.8em; color: var(--acu-text-3);">
-                                默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）。楼层范围仅作用于「删除当前标识本地数据」；「删除所有本地数据」忽略此设置，作用于全部 AI 楼层。
+                                默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）。楼层范围同时作用于两个删除按钮；「删除所有本地数据」仅在范围覆盖全部 AI 楼层时执行完全清空。
                             </div>
                         </div>
 
@@ -151125,31 +151210,39 @@ Expected function or array of functions, received type ${typeof value}.`
                 busyAction.value = '';
             }
         }
+        /**
+         * 预判当前范围输入会走哪条删除路径，供页面生成确认文案。
+         * 与服务层 deleteLocalDataWithScope_ACU 使用同一判定函数，不重复实现规则。
+         */
+        function resolveDeletionPath(mode) {
+            if (mode !== 'all')
+                return 'range';
+            const start = normalizeFloorValue(deleteRange.startFloor);
+            const end = normalizeFloorValue(deleteRange.endFloor);
+            return isFullRangeDeletionRequest_ACU(start, end, getAiMessageCount()) ? 'purge' : 'range';
+        }
         async function deleteLocalData(mode) {
-            busyAction.value = mode === 'current' ? 'delete-current-local' : 'delete-all-local';
+            const expectedPath = resolveDeletionPath(mode);
+            busyAction.value = expectedPath === 'purge'
+                ? 'purge-all-local'
+                : (mode === 'current' ? 'delete-current-local' : 'delete-all-local');
             try {
                 const start = normalizeFloorValue(deleteRange.startFloor);
                 const end = normalizeFloorValue(deleteRange.endFloor);
                 settings_ACU.deleteStartFloor = start;
                 settings_ACU.deleteEndFloor = end;
                 saveSettings_ACU();
-                const deletedCount = await deleteLocalDataInChatCore_ACU(mode, start, end);
-                if (deletedCount > 0) {
-                    await loadOrCreateJsonTableFromChatHistory_ACU();
-                    if (isSqliteMode())
-                        await reloadStorageProvider();
-                    await refreshMergedDataAndNotify_ACU();
-                    const worldbookDeleted = await cleanupWorldbookEntriesAfterDataDeletion_ACU();
-                    refresh();
-                    setMessage$1(message, 'success', `已删除 ${deletedCount} 条消息中的本地数据${worldbookDeleted ? `，并清理 ${worldbookDeleted} 个世界书条目` : ''}。`);
-                    const text = message.value?.text || '';
+                const outcome = await deleteLocalDataWithScope_ACU(mode, start, end, expectedPath);
+                if (outcome.path === 'aborted') {
                     message.value = null;
-                    toast.success(text, { muteable: false });
+                    toast.warning(outcome.reason, { muteable: false, durationMs: 6000 });
+                    return;
                 }
-                else {
-                    message.value = null;
-                    toast.info('没有发现符合当前范围的数据。', { muteable: false });
+                if (outcome.path === 'purge') {
+                    applyPurgeOutcome(outcome.result);
+                    return;
                 }
+                await applyRangeDeletionOutcome(outcome.deletedCount);
             }
             catch (e) {
                 logError_ACU('[ACU-V2] deleteLocalData failed', e);
@@ -151160,10 +151253,28 @@ Expected function or array of functions, received type ${typeof value}.`
                 busyAction.value = '';
             }
         }
+        async function applyRangeDeletionOutcome(deletedCount) {
+            if (deletedCount > 0) {
+                await loadOrCreateJsonTableFromChatHistory_ACU();
+                if (isSqliteMode())
+                    await reloadStorageProvider();
+                await refreshMergedDataAndNotify_ACU();
+                const worldbookDeleted = await cleanupWorldbookEntriesAfterDataDeletion_ACU();
+                refresh();
+                setMessage$1(message, 'success', `已删除 ${deletedCount} 条消息中的本地数据${worldbookDeleted ? `，并清理 ${worldbookDeleted} 个世界书条目` : ''}。`);
+                const text = message.value?.text || '';
+                message.value = null;
+                toast.success(text, { muteable: false });
+            }
+            else {
+                message.value = null;
+                toast.info('没有发现符合当前范围的数据。', { muteable: false });
+            }
+        }
         /**
-         * 硬清空当前聊天的全部本地数据库状态（C 方案接线 purge）。
+         * 应用硬清空（purge）结果到 UI（C 方案接线 purge 的收尾）。
          *
-         * 与 deleteLocalData 的收尾刻意不同：
+         * 与 applyRangeDeletionOutcome 的收尾刻意不同：
          * - 不调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider（C2）：
          *   purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
          *   clearTableRuntimeWithoutReload_ACU 把运行时置为空态，并明令绝不加载聊天/模板/Guide；
@@ -151174,31 +151285,19 @@ Expected function or array of functions, received type ${typeof value}.`
          *   mergeAllIndependentTables_ACU，并在无历史数据时从指导表/模板重建 currentJsonTableData_ACU
          *   （pipeline.ts:617-629），等价于重新物化。因此只调 refresh() 做 settings/isolation/count 级刷新。
          */
-        async function purgeAllLocalData() {
-            busyAction.value = 'purge-all-local';
-            try {
-                const result = await purgeCurrentChatDatabaseState_ACU();
-                if (!result.saved) {
-                    message.value = null;
-                    toast.error(result.error || '硬清空失败，详情见运行日志。', { muteable: false });
-                    return;
-                }
-                refresh();
-                if (result.cleanupWarnings?.length) {
-                    toast.warning(`本地数据已全部硬清空（${result.clearedMessageCount} 条消息）。警告：${result.cleanupWarnings[0]}`, { muteable: false, durationMs: 6000 });
-                }
-                else {
-                    const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
-                    toast.success(`已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`, { muteable: false });
-                }
-            }
-            catch (e) {
-                logError_ACU('[ACU-V2] purgeAllLocalData failed', e);
+        async function applyPurgeOutcome(result) {
+            if (!result.saved) {
                 message.value = null;
-                toast.error('硬清空失败，详情见运行日志。', { muteable: false });
+                toast.error(result.error || '硬清空失败，详情见运行日志。', { muteable: false });
+                return;
             }
-            finally {
-                busyAction.value = '';
+            refresh();
+            if (result.cleanupWarnings?.length) {
+                toast.warning(`本地数据已全部硬清空（${result.clearedMessageCount} 条消息）。警告：${result.cleanupWarnings[0]}`, { muteable: false, durationMs: 6000 });
+            }
+            else {
+                const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
+                toast.success(`已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`, { muteable: false });
             }
         }
         function setRetainRecentLayers(value) {
@@ -151244,7 +151343,7 @@ Expected function or array of functions, received type ${typeof value}.`
             resetAllDefaults,
             overrideLatestLayerWithTemplate,
             deleteLocalData,
-            purgeAllLocalData,
+            resolveDeletionPath,
             setRetainRecentLayers,
         };
     }
@@ -151361,36 +151460,34 @@ Expected function or array of functions, received type ${typeof value}.`
             async function onDeleteLocalData(mode) {
                 if (runtimeDiagnostic.busy.value)
                     return;
-                // 按钮已改接 onPurgeAllLocalData；此处仅保留 current 路径，all 分支防御性回退到 purge，
-                // 避免任何残留调用仍走旧的「楼层范围 + 漏删字段」路径。
-                if (mode === "all") {
-                    await onPurgeAllLocalData();
+                const path = flow.resolveDeletionPath(mode);
+                if (path === "range") {
+                    const scopeText = mode === "current" ? "属于当前标识的" : "所有标识的";
+                    const confirmed = await dialogStore.confirm({
+                        title: mode === "current" ? "删除当前标识本地数据" : "删除指定楼层本地数据",
+                        message: `删除当前聊天中 ${flow.rangeLabel.value} ${scopeText}数据库数据？\n` +
+                            "仅清除该范围内楼层的填表数据；聊天级模板 scope 与 guide 容器保留，\n" +
+                            "未覆盖的楼层数据不受影响。此操作不可恢复。",
+                        confirmLabel: "删除数据",
+                        confirmVariant: "danger",
+                    });
+                    if (!confirmed)
+                        return;
+                    if (runtimeDiagnostic.busy.value)
+                        return;
+                    void flow.deleteLocalData(mode);
                     return;
                 }
-                const message = `删除当前聊天中 ${flow.rangeLabel.value} 属于当前标识的数据库数据？此操作不可恢复。`;
-                const confirmed = await dialogStore.confirm({
-                    title: "删除当前标识本地数据",
-                    message,
-                    confirmLabel: "删除数据",
-                    confirmVariant: "danger",
-                });
-                if (!confirmed)
-                    return;
-                if (runtimeDiagnostic.busy.value)
-                    return;
-                void flow.deleteLocalData("current");
-            }
-            async function onPurgeAllLocalData() {
-                if (runtimeDiagnostic.busy.value)
-                    return;
+                // path === 'purge'：范围覆盖全部 AI 楼层，将执行硬清空，保留两级确认。
                 const confirmed = await dialogStore.confirm({
                     title: "删除所有本地数据",
-                    message: "此操作将硬清空当前聊天的全部本地数据库状态，且与上方起止楼层设置无关，作用于所有 AI 楼层：\n" +
+                    message: "当前删除范围覆盖全部 AI 楼层，将硬清空当前聊天的全部本地数据库状态：\n" +
                         "· 清除所有隔离标识的本地数据（不只当前标识）；\n" +
                         "· 含用户首条消息上的字段；\n" +
                         "· 清除聊天级模板 scope 与 guide 容器（模板选择回到继承全局）；\n" +
                         "· 不保留 init 锚点，重新填表时 sheetKey 会重新分配；\n" +
                         "· 结果等价于全新会话，不可恢复。\n" +
+                        "若只想删除部分楼层，请先在上方设置起止楼层范围。\n" +
                         "全局模板、提示词与聊天正文不受影响。确认继续？",
                     confirmLabel: "删除所有本地数据",
                     confirmVariant: "danger",
@@ -151406,7 +151503,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     return;
                 if (runtimeDiagnostic.busy.value)
                     return;
-                void flow.purgeAllLocalData();
+                void flow.deleteLocalData("all");
             }
             async function onCommitMixedStorageDecision(action) {
                 if (runtimeDiagnostic.busy.value)
@@ -151511,14 +151608,14 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             onMounted(refreshAll);
             watch(useChatChangedTick(), refreshAll);
-            const __returned__ = { resetDefaultsCleanupOptions, dialogStore, flow, runtimeDiagnostic, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onPurgeAllLocalData, onCommitMixedStorageDecision, onCommitV2Recovery, onReloadSqliteRuntime, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, get dataMgmtCopy() { return dataMgmtCopy; } };
+            const __returned__ = { resetDefaultsCleanupOptions, dialogStore, flow, runtimeDiagnostic, historyExpanded, isolationCodeHint, historyMetaLabel, selectHistory, onApplyIsolation, onRemoveHistory, onDeleteCurrentIsolationEntries, onOverrideLatestLayer, onImportTableCheckpoint, onDeleteLocalData, onCommitMixedStorageDecision, onCommitV2Recovery, onReloadSqliteRuntime, onResetAllDefaults, refreshAll, AcuButton, AcuDisclosureGroup, AcuFileButton, AcuFormRow, AcuIconButton, AcuInput, AcuMessage, AcuPanel, AcuPanelGrid, get dataMgmtCopy() { return dataMgmtCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-f1818959] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-f1818959] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-f1818959] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-f1818959] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-f1818959] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\r\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-f1818959] {\r\n  margin-top: 4px;\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-f1818959] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 600;\r\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-f1818959] {\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-f1818959] .acu-disclosure-group__header {\r\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-f1818959] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 8px;\r\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-f1818959] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-f1818959] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-align: left;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-f1818959] {\r\n  flex-shrink: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-f1818959] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-f1818959] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-f1818959],\r\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] {\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-f1818959] {\r\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-f1818959] {\r\n  margin-top: 16px;\r\n  padding-top: 16px;\r\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-f1818959] {\r\n  min-width: 0;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-f1818959] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-f1818959] {\r\n  margin: 4px 0 0;\r\n  overflow-wrap: anywhere;\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-f1818959] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-f1818959] .acu-file-button,\r\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-f1818959] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] .acu-file-button,\r\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] .acu-btn {\r\n  width: 100%;\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-f1818959] {\r\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-f1818959] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-f1818959] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-f1818959] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-f1818959] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-f1818959");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_f1818959_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-fbcec47b] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-fbcec47b] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-fbcec47b] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-fbcec47b] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-fbcec47b] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-fbcec47b] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-fbcec47b] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-fbcec47b] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-fbcec47b] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-fbcec47b] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-fbcec47b] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-fbcec47b] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-fbcec47b] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-fbcec47b] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-fbcec47b] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-fbcec47b] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-fbcec47b] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-fbcec47b],\n.acu-v2-data-mgmt-page__command-grid[data-v-fbcec47b] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-fbcec47b] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-fbcec47b] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-fbcec47b] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-fbcec47b] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-fbcec47b] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-fbcec47b] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-fbcec47b] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fbcec47b] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fbcec47b] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fbcec47b] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-fbcec47b] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-fbcec47b] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-fbcec47b] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-fbcec47b] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-fbcec47b] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-fbcec47b] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-fbcec47b] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-fbcec47b");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_fbcec47b_lang = null;
 
     const _hoisted_1$f = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$e = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -151681,7 +151778,7 @@ Expected function or array of functions, received type ${typeof value}.`
     				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
     				onClick: $setup.onDeleteCurrentIsolationEntries
     			}, {
-    				default: withCtx(() => [..._cache[10] || (_cache[10] = [createTextVNode(
+    				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
     					" 删除当前标识注入条目 ",
     					-1
     					/* CACHED */
@@ -151693,7 +151790,7 @@ Expected function or array of functions, received type ${typeof value}.`
     				loading: $setup.flow.busyAction.value === "apply-isolation",
     				onClick: $setup.onApplyIsolation
     			}, {
-    				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
+    				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
     					" 保存并应用 ",
     					-1
     					/* CACHED */
@@ -151714,7 +151811,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onFile: $setup.flow.importCombinedSettings
     					}, {
-    						default: withCtx(() => [..._cache[12] || (_cache[12] = [createBaseVNode(
+    						default: withCtx(() => [..._cache[13] || (_cache[13] = [createBaseVNode(
     							"i",
     							{ class: "fa-solid fa-download" },
     							null,
@@ -151732,7 +151829,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onClick: $setup.flow.exportCombinedSettings
     					}, {
-    						default: withCtx(() => [..._cache[13] || (_cache[13] = [createBaseVNode(
+    						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
     							"i",
     							{ class: "fa-solid fa-upload" },
     							null,
@@ -151750,7 +151847,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onClick: $setup.flow.exportJsonData
     					}, {
-    						default: withCtx(() => [..._cache[14] || (_cache[14] = [createBaseVNode(
+    						default: withCtx(() => [..._cache[15] || (_cache[15] = [createBaseVNode(
     							"i",
     							{ class: "fa-solid fa-upload" },
     							null,
@@ -151769,7 +151866,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						loading: $setup.flow.busyAction.value === "override-latest",
     						onClick: $setup.onOverrideLatestLayer
     					}, {
-    						default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
+    						default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
     							" 模板覆盖最新层数据 ",
     							-1
     							/* CACHED */
@@ -151778,7 +151875,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					}, 8, ["disabled", "loading"])
     				]),
     				createBaseVNode("section", _hoisted_10$6, [
-    					_cache[18] || (_cache[18] = createBaseVNode(
+    					_cache[19] || (_cache[19] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-checkpoint-title",
@@ -151788,7 +151885,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						-1
     						/* CACHED */
     					)),
-    					_cache[19] || (_cache[19] = createBaseVNode(
+    					_cache[20] || (_cache[20] = createBaseVNode(
     						"p",
     						{ class: "acu-v2-data-mgmt-page__section-description" },
     						" 导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据， 仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。 全局模板和聊天正文不变。 ",
@@ -151800,7 +151897,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onClick: $setup.flow.exportTableCheckpoint
     					}, {
-    						default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
+    						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
     							" 导出 Checkpoint ",
     							-1
     							/* CACHED */
@@ -151812,7 +151909,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     						onFile: $setup.onImportTableCheckpoint
     					}, {
-    						default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
+    						default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
     							" 导入 Checkpoint ",
     							-1
     							/* CACHED */
@@ -151821,7 +151918,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					}, 8, ["disabled"])])
     				]),
     				$setup.flow.mixedStorageDecision.value ? (openBlock(), createElementBlock("section", _hoisted_12$6, [
-    					_cache[24] || (_cache[24] = createBaseVNode(
+    					_cache[25] || (_cache[25] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-mixed-storage-title",
@@ -151848,7 +151945,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							64
     							/* STABLE_FRAGMENT */
     						)) : createCommentVNode("v-if", true),
-    						_cache[20] || (_cache[20] = createTextVNode(
+    						_cache[21] || (_cache[21] = createTextVNode(
     							" 可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。 ",
     							-1
     							/* CACHED */
@@ -151861,7 +151958,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "export-mixed-storage-snapshots",
     							onClick: $setup.flow.exportMixedStorageSnapshots
     						}, {
-    							default: withCtx(() => [..._cache[21] || (_cache[21] = [createTextVNode(
+    							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
     								" 导出 legacy/V2 快照 ",
     								-1
     								/* CACHED */
@@ -151879,7 +151976,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "commit-mixed-storage-keep_v2",
     							onClick: _cache[2] || (_cache[2] = ($event) => $setup.onCommitMixedStorageDecision("keep_v2"))
     						}, {
-    							default: withCtx(() => [..._cache[22] || (_cache[22] = [createTextVNode(
+    							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
     								" 保留 V2 并清理 legacy ",
     								-1
     								/* CACHED */
@@ -151893,7 +151990,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "commit-mixed-storage-commit_merge_candidate",
     							onClick: _cache[3] || (_cache[3] = ($event) => $setup.onCommitMixedStorageDecision("commit_merge_candidate"))
     						}, {
-    							default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+    							default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
     								" 提交受限合并候选 ",
     								-1
     								/* CACHED */
@@ -151903,7 +152000,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					])
     				])) : createCommentVNode("v-if", true),
     				$setup.flow.v2RecoverySummary.value ? (openBlock(), createElementBlock("section", _hoisted_15$5, [
-    					_cache[28] || (_cache[28] = createBaseVNode(
+    					_cache[29] || (_cache[29] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-v2-recovery-title",
@@ -151926,7 +152023,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							disabled: !!$setup.flow.busyAction.value || $setup.runtimeDiagnostic.busy.value,
     							onClick: $setup.flow.exportV2RecoveryBackups
     						}, {
-    							default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
+    							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
     								" 导出已保存的原始 frame 备份 ",
     								-1
     								/* CACHED */
@@ -151941,7 +152038,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
     							onClick: _cache[4] || (_cache[4] = ($event) => $setup.onCommitV2Recovery(false))
     						}, {
-    							default: withCtx(() => [..._cache[26] || (_cache[26] = [createTextVNode(
+    							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
     								" 应用 Checkpoint 修复/收敛 ",
     								-1
     								/* CACHED */
@@ -151956,7 +152053,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							loading: $setup.flow.busyAction.value === "commit-v2-recovery",
     							onClick: _cache[5] || (_cache[5] = ($event) => $setup.onCommitV2Recovery(true))
     						}, {
-    							default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
+    							default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
     								" 确认无锚点 data_replace 恢复 ",
     								-1
     								/* CACHED */
@@ -151965,7 +152062,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						}, 8, ["disabled", "loading"])) : createCommentVNode("v-if", true)
     					])
     				])) : createCommentVNode("v-if", true),
-    				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[29] || (_cache[29] = createBaseVNode(
+    				$setup.flow.v2IsolationDiagnostics.value.length ? (openBlock(), createElementBlock("section", _hoisted_18$4, [_cache[30] || (_cache[30] = createBaseVNode(
     					"h3",
     					{
     						id: "acu-v2-isolation-diagnostics-title",
@@ -152118,7 +152215,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					loading: $setup.flow.busyAction.value === "scan-v2-isolation-diagnostics",
     					onClick: $setup.flow.scanV2IsolationDiagnostics
     				}, {
-    					default: withCtx(() => [..._cache[30] || (_cache[30] = [createTextVNode(
+    					default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
     						" 扫描全部 V2 隔离域 ",
     						-1
     						/* CACHED */
@@ -152134,7 +152231,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					loading: $setup.flow.busyAction.value === "prepare-v2-recovery",
     					onClick: $setup.flow.prepareV2Recovery
     				}, {
-    					default: withCtx(() => [..._cache[31] || (_cache[31] = [createTextVNode(
+    					default: withCtx(() => [..._cache[32] || (_cache[32] = [createTextVNode(
     						" 诊断 V2 数据恢复 ",
     						-1
     						/* CACHED */
@@ -152152,7 +152249,7 @@ Expected function or array of functions, received type ${typeof value}.`
     			description: $setup.dataMgmtCopy.panels.cleanup.description
     		}, {
     			default: withCtx(() => [
-    				createBaseVNode("section", _hoisted_29$1, [_cache[32] || (_cache[32] = createBaseVNode(
+    				createBaseVNode("section", _hoisted_29$1, [_cache[33] || (_cache[33] = createBaseVNode(
     					"h3",
     					{
     						id: "acu-cleanup-auto-title",
@@ -152176,7 +152273,7 @@ Expected function or array of functions, received type ${typeof value}.`
     					_: 1
     				})])]),
     				createBaseVNode("section", _hoisted_31, [
-    					_cache[33] || (_cache[33] = createBaseVNode(
+    					_cache[34] || (_cache[34] = createBaseVNode(
     						"h3",
     						{
     							id: "acu-cleanup-manual-title",
@@ -152220,10 +152317,10 @@ Expected function or array of functions, received type ${typeof value}.`
     						_: 1
     					})])
     				]),
-    				_cache[37] || (_cache[37] = createBaseVNode(
+    				_cache[38] || (_cache[38] = createBaseVNode(
     					"p",
     					{ class: "acu-v2-data-mgmt-page__meta" },
-    					" 楼层范围仅作用于「删除当前标识本地数据」；「删除所有数据」忽略该设置，作用于全部 AI 楼层。 ",
+    					" 楼层范围同时作用于两个删除按钮。「删除所有本地数据」在范围覆盖全部 AI 楼层时执行硬清空，范围为局部时只删除对应楼层的填表数据。 ",
     					-1
     					/* CACHED */
     				)),
@@ -152234,7 +152331,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						loading: $setup.flow.busyAction.value === "delete-current-local",
     						onClick: _cache[9] || (_cache[9] = ($event) => $setup.onDeleteLocalData("current"))
     					}, {
-    						default: withCtx(() => [..._cache[34] || (_cache[34] = [createTextVNode(
+    						default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
     							" 删除当前标识本地数据 ",
     							-1
     							/* CACHED */
@@ -152245,10 +152342,10 @@ Expected function or array of functions, received type ${typeof value}.`
     						block: "",
     						variant: "danger",
     						disabled: $setup.runtimeDiagnostic.busy.value,
-    						loading: $setup.flow.busyAction.value === "purge-all-local",
-    						onClick: $setup.onPurgeAllLocalData
+    						loading: $setup.flow.busyAction.value === "purge-all-local" || $setup.flow.busyAction.value === "delete-all-local",
+    						onClick: _cache[10] || (_cache[10] = ($event) => $setup.onDeleteLocalData("all"))
     					}, {
-    						default: withCtx(() => [..._cache[35] || (_cache[35] = [createTextVNode(
+    						default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
     							" 删除所有本地数据 ",
     							-1
     							/* CACHED */
@@ -152261,7 +152358,7 @@ Expected function or array of functions, received type ${typeof value}.`
     						loading: $setup.flow.busyAction.value === "reset-defaults",
     						onClick: $setup.onResetAllDefaults
     					}, {
-    						default: withCtx(() => [..._cache[36] || (_cache[36] = [createTextVNode(
+    						default: withCtx(() => [..._cache[37] || (_cache[37] = [createTextVNode(
     							" 恢复默认配置 ",
     							-1
     							/* CACHED */
@@ -152275,7 +152372,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		_: 1
     	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-f1818959"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-fbcec47b"]]);
 
     var _sfc_main$e = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',

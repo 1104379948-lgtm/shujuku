@@ -71,6 +71,12 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   currentJsonTableData_ACU: mockCurrentJsonTableData,
   currentChatFileIdentifier_ACU: 'chat-test',
   getCurrentIsolationKey_ACU: mockGetCurrentIsolationKey,
+  // purgeCurrentChatDatabaseState_ACU 经 clearTableRuntimeWithoutReload_ACU 依赖这些 setter；
+  // 不补则真实 purge 在单测基建下无法运行。
+  _set_currentJsonTableData_ACU: vi.fn(),
+  _set_independentTableStates_ACU: vi.fn(),
+  disposeStorageProvider: vi.fn(),
+  invalidateTableRuntimeRevision_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/service/template/chat-scope', () => ({
@@ -87,6 +93,7 @@ vi.mock('../../../src/service/table/table-update-commit', () => ({
 
 vi.mock('../../../src/service/table/table-write-transaction', () => ({
   runTableWriteTransaction_ACU: mockRunTableWriteTransaction,
+  invalidateTableRuntimeRevision_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/service/table/storage-frame-v2-replay', () => ({
@@ -114,6 +121,8 @@ import {
   clearManualRefillIncrementalDataInRange_ACU,
   clearTableDataAtFloors_ACU,
   deleteLocalDataInChatCore_ACU,
+  deleteLocalDataWithScope_ACU,
+  isFullRangeDeletionRequest_ACU,
   purgeCurrentChatDatabaseState_ACU,
   ensureManualCatchUpAnchorBeforeTarget_ACU,
   overrideLatestLayerWithTemplateCore_ACU,
@@ -2094,6 +2103,143 @@ describe('deleteLocalDataInChatCore_ACU', () => {
     expect(chat[1]._acu_local_template_base_state_seeded).toBeUndefined();
     expect(mockSaveChatToHost).toHaveBeenCalledOnce();
   });
+
+
+// ═══ deleteLocalDataWithScope_ACU（范围感知分派） ═══
+describe('deleteLocalDataWithScope_ACU', () => {
+  it('S1 all + (null, null) 全范围留空 → purge 分支（真实 purge 清空 chat）', async () => {
+    const chat: any[] = [
+      { is_user: true },
+      { is_user: false, TavernDB_ACU_Data: { sheet_0: {} } },
+      { is_user: false, TavernDB_ACU_Data: { sheet_0: {} } },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const outcome = await deleteLocalDataWithScope_ACU('all', null, null);
+    expect(outcome.path).toBe('purge');
+    if (outcome.path === 'purge') {
+      expect(outcome.result.saved).toBe(true);
+    }
+    expect(chat[1].TavernDB_ACU_Data).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_Data).toBeUndefined();
+  });
+
+  it('S2 all + (1, aiCount) 显式覆盖全部 → purge 分支', async () => {
+    const chat: any[] = [
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const outcome = await deleteLocalDataWithScope_ACU('all', 1, 3);
+    expect(outcome.path).toBe('purge');
+    expect(chat[0].TavernDB_ACU_Data).toBeUndefined();
+    expect(chat[1].TavernDB_ACU_Data).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_Data).toBeUndefined();
+  });
+
+  it('S3 all + (1, 999) end 超上界 → purge 分支', async () => {
+    const chat: any[] = [
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const outcome = await deleteLocalDataWithScope_ACU('all', 1, 999);
+    expect(outcome.path).toBe('purge');
+  });
+
+  it('S4 all + (1, aiCount-1) 未覆盖最后一层 → range 分支，core 被调用', async () => {
+    mockRunTableWriteTransaction.mockImplementation(async (_opts: any, fn: any) => fn());
+    const chat: any[] = [
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const outcome = await deleteLocalDataWithScope_ACU('all', 1, 2);
+    expect(outcome.path).toBe('range');
+    if (outcome.path === 'range') {
+      expect(outcome.deletedCount).toBe(2);
+    }
+    expect(mockRunTableWriteTransaction).toHaveBeenCalled();
+    // 第 3 层不在范围内，数据保留
+    expect(chat[2].TavernDB_ACU_Data).toBeDefined();
+  });
+
+  it('S5 all + (2, null) 未覆盖第一层 → range 分支', async () => {
+    mockRunTableWriteTransaction.mockImplementation(async (_opts: any, fn: any) => fn());
+    const chat: any[] = [
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const outcome = await deleteLocalDataWithScope_ACU('all', 2, null);
+    expect(outcome.path).toBe('range');
+    expect(chat[0].TavernDB_ACU_Data).toBeDefined();
+  });
+
+  it('S6 current + (null, null) 永不 purge（C5 回归闸门）', async () => {
+    mockRunTableWriteTransaction.mockImplementation(async (_opts: any, fn: any) => fn());
+    const chat: any[] = [
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const outcome = await deleteLocalDataWithScope_ACU('current', null, null);
+    expect(outcome.path).toBe('range');
+    if (outcome.path === 'range') {
+      expect(outcome.deletedCount).toBeGreaterThanOrEqual(0);
+    }
+    expect(mockRunTableWriteTransaction).toHaveBeenCalled();
+  });
+
+  it('S7 aiCount=0（只有用户消息）+ all + (null, null) → purge 分支', async () => {
+    const chat: any[] = [{ is_user: true }];
+    mockGetChatArray.mockReturnValue(chat);
+    const outcome = await deleteLocalDataWithScope_ACU('all', null, null);
+    expect(outcome.path).toBe('purge');
+  });
+
+  it('S8 expectedPath 与实际判定不一致 → aborted，且不触发任何服务', async () => {
+    mockRunTableWriteTransaction.mockClear();
+    const chat: any[] = [
+      { is_user: false, TavernDB_ACU_Data: {} },
+      { is_user: false, TavernDB_ACU_Data: {} },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    // 实际判定是 purge，但调用方预判为 range
+    const outcome = await deleteLocalDataWithScope_ACU('all', null, null, 'range');
+    expect(outcome.path).toBe('aborted');
+    expect(mockRunTableWriteTransaction).not.toHaveBeenCalled();
+    // purge 也不应执行：aborted 时 chat 保持原样
+    expect(chat[0].TavernDB_ACU_Data).toBeDefined();
+  });
+
+  it('S9 isFullRangeDeletionRequest_ACU 纯函数判定表全覆盖', () => {
+    // aiMessageCount = 5
+    expect(isFullRangeDeletionRequest_ACU(null, null, 5)).toBe(true);
+    expect(isFullRangeDeletionRequest_ACU(1, null, 5)).toBe(true);
+    expect(isFullRangeDeletionRequest_ACU(1, 5, 5)).toBe(true);
+    expect(isFullRangeDeletionRequest_ACU(1, 999, 5)).toBe(true);
+    expect(isFullRangeDeletionRequest_ACU(1, 4, 5)).toBe(false);
+    expect(isFullRangeDeletionRequest_ACU(2, null, 5)).toBe(false);
+    expect(isFullRangeDeletionRequest_ACU(3, 5, 5)).toBe(false);
+    // aiCount = 0（只有用户消息）：空范围视为覆盖全部
+    expect(isFullRangeDeletionRequest_ACU(null, null, 0)).toBe(true);
+  });
+
+  it('S10 编排入口自身不包裹事务：deleteLocalDataWithScope_ACU 内部不会额外调用 runTableWriteTransaction', async () => {
+    mockRunTableWriteTransaction.mockClear();
+    const chat: any[] = [{ is_user: false, TavernDB_ACU_Data: {} }];
+    mockGetChatArray.mockReturnValue(chat);
+    // purge 分支：真实 purge 内部会调 runTableWriteTransaction（1 次），但编排入口本身不应再包一层
+    const outcome = await deleteLocalDataWithScope_ACU('all', null, null);
+    expect(outcome.path).toBe('purge');
+    // 编排入口自身的判定/分派不应直接调用事务包装；真实 purge 内部调用恰好 1 次
+    expect(mockRunTableWriteTransaction.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+});
 
 });
 

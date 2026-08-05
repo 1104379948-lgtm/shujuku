@@ -44,6 +44,7 @@ import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-d
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from '../table/canonical-checkpoint-builder';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
+import { purgeCurrentChatDatabaseState_ACU, type ChatDatabasePurgeResult_ACU } from './chat-database-purge';
 
 // ─── 业务逻辑函数（从 presentation 层搬迁） ───
 
@@ -1656,6 +1657,42 @@ export async function ensureManualCatchUpAnchorBeforeTarget_ACU(
     });
 }
 
+
+/**
+ * 判定一次删除请求是否覆盖全部 AI 楼层。
+ *
+ * 这是「是否触发硬清空」的唯一判定真源：服务层编排入口、v2 UI 预判文案、
+ * legacy UI 预判文案三处共用，避免各自实现导致语义漂移。
+ *
+ * 与 deleteLocalDataInChatCoreInner_ACU 内部原有的 isFullRangeDeletion 表达式
+ * 完全等价（该处已改为调用本函数），保证「是否清 guide/scope」与
+ * 「是否走 purge」永远基于同一判定。
+ *
+ * @param startFloor 起始 AI 楼层（1-based）；null 表示从第一层开始
+ * @param endFloor   终止 AI 楼层（1-based，含）；null 表示到最后一层
+ * @param aiMessageCount 当前聊天的 AI 楼层总数
+ */
+export function isFullRangeDeletionRequest_ACU(
+    startFloor: number | null,
+    endFloor: number | null,
+    aiMessageCount: number
+): boolean {
+    return (startFloor === null || startFloor <= 1)
+        && (endFloor === null || endFloor >= aiMessageCount);
+}
+
+/** 统计当前聊天的 AI 楼层总数（与 deleteLocalDataInChatCoreInner_ACU 的口径一致）。 */
+export function countAiMessages_ACU(chat: any[] | null | undefined): number {
+    return Array.isArray(chat) ? chat.filter((msg: any) => !msg?.is_user).length : 0;
+}
+
+/**
+ * 删除聊天记录中的本地数据（核心业务逻辑）
+ * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
+ * 
+ * 只负责数据操作（遍历 chat 删除字段 + saveChatToHost），不涉及 UI（toast/status display）。
+ * @returns 删除的消息数量
+ */
 /**
  * 删除聊天记录中的本地数据（核心业务逻辑）
  * 从 presentation/triggers/data-admin-ui.ts 的 deleteLocalDataInChat_ACU 中提取
@@ -1692,8 +1729,7 @@ async function deleteLocalDataInChatCoreInner_ACU(
 
     // 获取要处理的AI消息的物理索引
     const targetIndices = aiMessageIndices.slice(startAiIndex, endAiIndex + 1);
-    const isFullRangeDeletion = (startFloor === null || startFloor <= 1)
-        && (endFloor === null || endFloor >= aiMessageIndices.length);
+    const isFullRangeDeletion = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageIndices.length);
 
     for (const physicalIndex of targetIndices) {
         const msg = chat[physicalIndex];
@@ -1824,6 +1860,56 @@ export async function deleteLocalDataInChatCore_ACU(
         maintenanceMode: 'exclusive',
     }, () => deleteLocalDataInChatCoreInner_ACU(mode, startFloor, endFloor));
 }
+
+/** 范围感知删除的分派结果。path 决定调用方必须执行哪套收尾。 */
+export type ScopedDeletionOutcome_ACU =
+    | { path: 'purge'; result: ChatDatabasePurgeResult_ACU }
+    | { path: 'range'; deletedCount: number }
+    | { path: 'aborted'; reason: string };
+
+/**
+ * 范围感知的本地数据删除编排入口。
+ *
+ * 判定规则（唯一真源，见 isFullRangeDeletionRequest_ACU）：
+ *   mode === 'all' 且删除范围覆盖全部 AI 楼层 → 硬清空 purgeCurrentChatDatabaseState_ACU；
+ *   其余一切情况                              → 范围删除 deleteLocalDataInChatCore_ACU。
+ *
+ * 【绝不在此包裹事务】purgeCurrentChatDatabaseState_ACU 与
+ * deleteLocalDataInChatCore_ACU 各自已用 runTableWriteTransaction_ACU 包裹且
+ * maintenanceMode='exclusive'；此处再包一层会造成独占事务嵌套（死锁或断言失败）。
+ * 本函数只做「读 chat 算判定 + 分派」，自身不写任何数据。
+ *
+ * @param expectedPath 可选安全闸门。调用方在弹确认框时已按当时的 AI 楼层数预判过路径；
+ *   用户停留期间若聊天新增 AI 楼层，实际判定可能翻转（例如原本只删 1-5 层，
+ *   新增第 6 层后仍是 range，但原本 end=5 覆盖全部的场景会变成局部）。
+ *   传入预判值后，一旦实际判定与预判不一致即返回 aborted，由调用方提示用户重新确认，
+ *   避免「用户以为只删部分，实际被硬清空」这类破坏性误判。
+ */
+export async function deleteLocalDataWithScope_ACU(
+    mode: 'current' | 'all' = 'current',
+    startFloor: number | null = null,
+    endFloor: number | null = null,
+    expectedPath?: 'purge' | 'range'
+): Promise<ScopedDeletionOutcome_ACU> {
+    const chat = getChatArray_ACU();
+    const aiMessageCount = countAiMessages_ACU(chat);
+    const isFullRange = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageCount);
+    const path: 'purge' | 'range' = (mode === 'all' && isFullRange) ? 'purge' : 'range';
+
+    if (expectedPath && expectedPath !== path) {
+        return {
+            path: 'aborted',
+            reason: `删除范围在确认期间发生变化（预期${expectedPath === 'purge' ? '完全清空' : '按范围删除'}，`
+                + `实际为${path === 'purge' ? '完全清空' : '按范围删除'}）。为避免误删已中止，请重新确认。`,
+        };
+    }
+
+    if (path === 'purge') {
+        return { path: 'purge', result: await purgeCurrentChatDatabaseState_ACU() };
+    }
+    return { path: 'range', deletedCount: await deleteLocalDataInChatCore_ACU(mode, startFloor, endFloor) };
+}
+
 
 /**
  * 使用模板覆盖最新层的表格数据（核心业务逻辑）

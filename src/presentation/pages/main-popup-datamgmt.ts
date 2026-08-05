@@ -67,7 +67,7 @@ export function generateDataMgmtTabHTML(): string {
                                 </div>
                             </div>
                             <div style="margin-top: 6px; font-size: 0.8em; color: var(--acu-text-3);">
-                                默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）。楼层范围仅作用于「删除当前标识本地数据」；「删除所有本地数据」忽略此设置，作用于全部 AI 楼层。
+                                默认全选所有AI楼层，可设置范围精确删除（只计算AI回复）。楼层范围同时作用于两个删除按钮；「删除所有本地数据」仅在范围覆盖全部 AI 楼层时执行完全清空。
                             </div>
                         </div>
 

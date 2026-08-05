@@ -24,7 +24,7 @@ import { getTemplatePreset_ACU, applyChatTemplateSnapshotWithReconciliation_ACU,
 import { getCurrentChatTemplateScopeState_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../../service/template/chat-scope';
 import { loadTemplatePresetSelect_ACU } from '../components/template-preset-ui';
 import { openNewVisualizer_ACU } from './visualizer';
-import { deleteLocalDataInChat_ACU, exportCurrentJsonData_ACU, exportTableTemplate_ACU, importTableTemplate_ACU, migrateLegacySummaryVectorIndex_ACU, overrideLatestLayerWithTemplate_ACU, purgeAllLocalDataInChat_ACU, resetAllToDefaults_ACU, resetTableTemplate_ACU } from '../triggers/data-admin-ui';
+import { deleteLocalDataInChat_ACU, exportCurrentJsonData_ACU, exportTableTemplate_ACU, importTableTemplate_ACU, migrateLegacySummaryVectorIndex_ACU, overrideLatestLayerWithTemplate_ACU, resetAllToDefaults_ACU, resetTableTemplate_ACU } from '../triggers/data-admin-ui';
 import { exportCombinedSettings_ACU, handleManualMergeSummary_ACU } from '../triggers/update-trigger';
 import { formatJsonToReadable_ACU } from '../../service/runtime/helpers-remaining';
 import { appendExcludeRuleRow_ACU, readExcludeRulesFromRows_ACU } from '../components/optimization-ui';
@@ -45,7 +45,7 @@ import {
 } from '../../service/vector/summary-vector-index-storage-service';
 import { clearVectorIndexTempCache_ACU } from '../../data/storage/vector-index-temp-cache';
 import { clearSummaryVectorFlushTasksByScope_ACU, clearSummaryVectorHotCache_ACU, deleteSummaryVectorHotCacheByScope_ACU } from '../../data/storage/vector-index-hot-cache';
-import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../service/chat/chat-service';
+import { getChatArray_ACU, isFullRangeDeletionRequest_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../service/chat/chat-service';
 import { cloneIsolatedData_ACU, readIsolatedTagData_ACU, writeIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import {
     buildLegacyVectorIndexSingleSnapshotFilePath_ACU,
@@ -1131,18 +1131,42 @@ export async function bindDataEvents_ACU(): Promise<void> {
 
         if ($deleteAllLocalDataButton.length) {
             $deleteAllLocalDataButton.on('click', function() {
-                // C 方案：all 入口改接硬清空服务，与楼层范围设置无关（C1/C6）。
-                // 不再读楼层输入框、不再回写 settings_ACU.deleteStartFloor/deleteEndFloor。
-                const scopeText = "全部 AI 楼层、所有隔离标识";
-                if (confirm(`严重警告：此操作将硬清空当前聊天的全部本地数据库状态，与上方楼层范围设置无关，作用于${scopeText}。\n\n` +
-                        "· 含用户首条消息上的字段；\n" +
-                        "· 清除聊天级模板 scope 与 guide 容器（模板选择回到继承全局）；\n" +
-                        "· 不保留 init 锚点，重新填表时 sheetKey 会重新分配；\n" +
-                        "· 结果等价于全新会话，不可恢复。\n\n" +
-                        "全局模板、提示词与聊天正文不受影响。确定要继续吗？")) {
-                    // 二次确认
-                    if (confirm(`再次确认：您真的要清空当前聊天的${scopeText}所有数据库存档吗？此操作不可撤销。`)) {
-                        purgeAllLocalDataInChat_ACU();
+                const $startFloor = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-delete-start-floor`);
+                const $endFloor = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-delete-end-floor`);
+                const startFloor = $startFloor.length ? parseInt($startFloor.val() as string) || null : null;
+                const endFloor = $endFloor.length && $endFloor.val() ? parseInt($endFloor.val() as string) || null : null;
+
+                // 保存楼层范围设置：all 现在也依赖楼层范围判定（是否触发硬清空）
+                settings_ACU.deleteStartFloor = startFloor;
+                settings_ACU.deleteEndFloor = endFloor;
+                saveSettingsAndNotify_ACU();
+
+                const chat = getChatArray_ACU();
+                const aiMessageCount = Array.isArray(chat) ? chat.filter((msg: any) => !msg?.is_user).length : 0;
+                const isFullRange = isFullRangeDeletionRequest_ACU(startFloor, endFloor, aiMessageCount);
+
+                if (!isFullRange) {
+                    const rangeText = startFloor && endFloor ? `第${startFloor}到${endFloor}AI楼层`
+                        : startFloor ? `从第${startFloor}AI楼层开始`
+                        : `到第${endFloor}AI楼层结束`;
+                    if (confirm(`警告：这将永久删除${rangeText}所有标识的数据库数据。\n\n`
+                         + '仅清除该范围内楼层的填表数据；聊天级模板 scope 与 guide 容器保留。\n\n'
+                            + '此操作不可恢复！确定要继续吗？')) {
+                        deleteLocalDataInChat_ACU('all', startFloor, endFloor);
+                    }
+                    return;
+                }
+
+                if (confirm('严重警告：当前删除范围覆盖全部 AI 楼层，将硬清空当前聊天的全部本地数据库状态。\n\n'
+                        + '· 清除所有隔离标识的本地数据；\n'
+                        + '· 含用户首条消息上的字段；\n'
+                        + '· 清除聊天级模板 scope 与 guide 容器（模板选择回到继承全局）；\n'
+                        + '· 不保留 init 锚点，重新填表时 sheetKey 会重新分配；\n'
+                        + '· 结果等价于全新会话，不可恢复。\n\n'
+                        + '若只想删除部分楼层，请先设置上方起止楼层范围。\n'
+                        + '全局、提示词与聊天正文不受影响。确定要继续吗？')) {
+                    if (confirm('再次确认：您真的要清空当前聊天所有数据库存档吗？此操作不可撤销。')) {
+                        deleteLocalDataInChat_ACU('all', startFloor, endFloor);
                     }
                 }
             });

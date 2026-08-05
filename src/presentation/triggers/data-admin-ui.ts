@@ -6,7 +6,7 @@ import { showToastr_ACU } from '../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
-import { getChatArray_ACU, saveChatToHost_ACU, deleteLocalDataInChatCore_ACU, overrideLatestLayerWithTemplateCore_ACU, purgeCurrentChatDatabaseState_ACU } from '../../service/chat/chat-service';
+import { getChatArray_ACU, deleteLocalDataWithScope_ACU, overrideLatestLayerWithTemplateCore_ACU } from '../../service/chat/chat-service';
 import { isWorldbookApiAvailable_ACU } from '../../service/worldbook/worldbook-service';
 import { cleanupWorldbookEntriesAfterDataDeletion_ACU } from '../../service/worldbook/worldbook-cleanup';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../../service/runtime/state-manager';
@@ -114,9 +114,8 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
   }
 
   // [新增] 删除聊天记录中的本地数据
-  // [重要] 此函数只删除各楼层的表格数据（TavernDB_ACU_Data/IsolatedData等），
-  //        不会删除聊天第一层的"空白指导表"（TavernDB_ACU_InternalSheetGuide），
-  //        指导表用于保存表头结构和填表参数，作为该聊天的总指导。
+  // 范围感知：mode='all' 且范围覆盖全部 AI 楼层时由服务层编排入口切换为硬清空 purge，
+  // 其余情况走范围删除（deleteLocalDataInChatCore_ACU）。
   export async function deleteLocalDataInChat_ACU(mode: 'current' | 'all' = 'current', startFloor: any = null, endFloor: any = null) {
       const chat = getChatArray_ACU();
       if (!chat || chat.length === 0) {
@@ -124,16 +123,28 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
           return;
       }
 
-      // 计算AI消息数量，用于前置校验
       const aiMessageCount = chat.filter((msg: any) => !msg.is_user).length;
-      if (aiMessageCount === 0) {
-          showToastr_ACU('warning', '聊天记录中没有AI消息，无法执行删除操作。');
+      const outcome = await deleteLocalDataWithScope_ACU(mode, startFloor, endFloor);
+
+      // aiCount === 0 时不再提前 return：范围覆盖全部（含 0 层）的 all 请求会走 purge，
+      // purge 仍需清理用户首条消息字段与 chat[0] scope/guide 镜像。
+      // 只有走 range 路径且确实没有 AI 楼层时才提示无可删数据。
+      if (outcome.path === 'range' && aiMessageCount === 0) {
+          showToastr_ACU('warning', '聊天记录中没有AI消息，无法执行范围删除。');
           return;
       }
 
-      // 调用 service 层核心逻辑执行数据删除
-      const deletedCount = await deleteLocalDataInChatCore_ACU(mode, startFloor, endFloor);
+      if (outcome.path === 'aborted') {
+          showToastr_ACU('warning', outcome.reason, { timeOut: 10000 });
+          return;
+      }
 
+      if (outcome.path === 'purge') {
+          applyPurgeResultToUi_ACU(outcome.result);
+          return;
+      }
+
+      const deletedCount = outcome.deletedCount;
       if (deletedCount > 0) {
           // 刷新内存和UI：删除楼层数据后，SQLite 运行时必须从当前聊天持久化模板/guide 重建
           await loadOrCreateJsonTableFromChatHistory_ACU();
@@ -146,17 +157,17 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
           if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
               updateCardUpdateStatusDisplay_ACU();
           }
-          
-          showToastr_ACU('success', `已成功删除 ${deletedCount} 条消息中的本地数据 (${mode === 'all' ? '所有数据' : '当前标识'})。`);
+
+          showToastr_ACU('success', `已成功删除 ${deletedCount} 条消息中的本地数据 (${mode === 'all' ? '所有标识' : '当前标识'})。`);
       } else {
           showToastr_ACU('info', '没有发现符合删除条件的数据。');
       }
   }
 
   /**
-   * 硬清空当前聊天全部本地数据库状态（legacy popup 入口）。
+   * 硬清空（purge）结果落 UI（legacy 入口共用）。
    *
-   * 与 deleteLocalDataInChat_ACU 的收尾刻意不同（C 方案 C2/C3）：
+   * 与 range 删除的收尾刻意不同（C 方案 C2/C3）：
    * purgeCurrentChatDatabaseState_ACU 内部已在严格保存与 post-condition 通过后调用
    * clearTableRuntimeWithoutReload_ACU 置为空态，并明令绝不加载聊天/模板/Guide；
    * 此处不再调用 loadOrCreateJsonTableFromChatHistory_ACU / reloadStorageProvider /
@@ -164,27 +175,22 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
    * 世界书条目清理也由 purge 内部完成（cleanupDatabaseGeneratedWorldbookEntries_ACU），
    * 结果进入 result.cleanupWarnings。
    */
-  export async function purgeAllLocalDataInChat_ACU(): Promise<void> {
-      try {
-          const result = await purgeCurrentChatDatabaseState_ACU();
-          if (!result.saved) {
-              showToastr_ACU('error', result.error || '硬清空失败，详情见运行日志。', { timeOut: 10000 });
-              return;
-          }
-          if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
-              updateCardUpdateStatusDisplay_ACU();
-          }
-          const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
-          if (result.cleanupWarnings?.length) {
-              showToastr_ACU('warning', `已硬清空全部本地数据（${result.clearedMessageCount} 条消息）${removed}。警告：${result.cleanupWarnings[0]}`, { timeOut: 10000 });
-          } else {
-              showToastr_ACU('success', `已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`);
-          }
-      } catch (error) {
-          logError_ACU('硬清空全部本地数据失败。', error);
-          showToastr_ACU('error', `硬清空失败：${error?.message || '未知错误'}`, { timeOut: 10000 });
+  export function applyPurgeResultToUi_ACU(result: { saved: boolean; clearedMessageCount: number; removedMetadata: string[]; cleanupWarnings?: string[]; error?: string }): void {
+      if (!result.saved) {
+          showToastr_ACU('error', result.error || '硬清空失败，详情见运行日志。', { timeOut: 10000 });
+          return;
+      }
+      if (typeof updateCardUpdateStatusDisplay_ACU === 'function') {
+          updateCardUpdateStatusDisplay_ACU();
+      }
+      const removed = result.removedMetadata.length ? `，移除元数据：${result.removedMetadata.join('、')}` : '';
+      if (result.cleanupWarnings?.length) {
+          showToastr_ACU('warning', `已硬清空全部本地数据（${result.clearedMessageCount} 条消息）${removed}。警告：${result.cleanupWarnings[0]}`, { timeOut: 10000 });
+      } else {
+          showToastr_ACU('success', `已删除所有本地数据（${result.clearedMessageCount} 条消息）${removed}。`);
       }
   }
+
 
 
   export async function migrateLegacySummaryVectorIndex_ACU() {

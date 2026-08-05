@@ -86,8 +86,12 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     if (index >= 0) isolationHistory.splice(index, 1);
   });
   const deleteGenerated = vi.fn(async () => undefined);
-  const deleteLocalData = vi.fn(async () => 2);
-  const purgeAllLocalData = vi.fn(async () => ({ saved: true, clearedMessageCount: 2, removedMetadata: ['TavernDB_ACU_InternalSheetGuide'] }));
+  const deleteLocalDataWithScope = vi.fn(async (_mode: string, _start: number | null, _end: number | null, expectedPath?: 'purge' | 'range') => {
+    if (expectedPath === 'purge') {
+      return { path: 'purge' as const, result: { saved: true, clearedMessageCount: 2, removedMetadata: ['TavernDB_ACU_InternalSheetGuide'] } };
+    }
+    return { path: 'range' as const, deletedCount: 2 };
+  });
   const cleanupWorldbook = vi.fn(async () => 1);
   const overrideLatest = vi.fn(async () => 3);
   const loadOrCreate = vi.fn(async () => ({ ok: true }));
@@ -213,12 +217,16 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     switchIsolationProfile_ACU: switchIsolation,
     applyCombinedSettingsImport_ACU: vi.fn(() => ['charCardPrompt']),
   }));
-  vi.doMock('../../../src/service/chat/chat-service', () => ({
-    getChatArray_ACU: () => chat,
-    deleteLocalDataInChatCore_ACU: deleteLocalData,
-    overrideLatestLayerWithTemplateCore_ACU: overrideLatest,
-    purgeCurrentChatDatabaseState_ACU: purgeAllLocalData,
-  }));
+  vi.doMock('../../../src/service/chat/chat-service', async () => {
+    const actual = await vi.importActual<any>('../../../src/service/chat/chat-service');
+    return {
+      ...actual,
+      getChatArray_ACU: () => chat,
+      // 真实实现保留（resolveDeletionPath 用它做预判）；分派函数用 mock。
+      deleteLocalDataWithScope_ACU: deleteLocalDataWithScope,
+      overrideLatestLayerWithTemplateCore_ACU: overrideLatest,
+    };
+  });
   vi.doMock('../../../src/service/table/table-service', () => ({
     loadOrCreateJsonTableFromChatHistory_ACU: loadOrCreate,
   }));
@@ -278,8 +286,7 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
     switchIsolation,
     removeHistory,
     deleteGenerated,
-    deleteLocalData,
-    purgeAllLocalData,
+    deleteLocalDataWithScope,
     cleanupWorldbook,
     overrideLatest,
     loadOrCreate,
@@ -610,7 +617,7 @@ describe('DataMgmtPage', () => {
   });
 
   it('删除当前标识本地数据会保存范围并调用清理链路', async () => {
-    const { mount, deleteLocalData, cleanupWorldbook, loadOrCreate, refreshMerged, saveSettings } = await mountDataMgmtPage();
+    const { mount, deleteLocalDataWithScope, cleanupWorldbook, loadOrCreate, refreshMerged, saveSettings } = await mountDataMgmtPage();
 
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
       .find(button => button.textContent?.includes('删除当前标识本地数据'));
@@ -621,7 +628,7 @@ describe('DataMgmtPage', () => {
     await new Promise(r => setTimeout(r, 0));
 
     expect(saveSettings).toHaveBeenCalled();
-    expect(deleteLocalData).toHaveBeenCalledWith('current', 1, null);
+    expect(deleteLocalDataWithScope).toHaveBeenCalledWith('current', 1, null, 'range');
     expect(loadOrCreate).toHaveBeenCalled();
     expect(refreshMerged).toHaveBeenCalled();
     expect(cleanupWorldbook).toHaveBeenCalled();
@@ -630,8 +637,8 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('T5 删除所有本地数据按钮触发 purgeCurrentChatDatabaseState_ACU，不再触发旧 core', async () => {
-    const { mount, purgeAllLocalData, deleteLocalData } = await mountDataMgmtPage();
+  it('T5 范围留空点删除所有本地数据 → 走 purge 分支（两级确认后 deleteLocalDataWithScope 收到 all/null/null/purge）', async () => {
+    const { mount, deleteLocalDataWithScope } = await mountDataMgmtPage();
 
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
       .find(item => item.textContent?.includes('删除所有本地数据'));
@@ -642,14 +649,14 @@ describe('DataMgmtPage', () => {
     await new Promise(r => setTimeout(r, 0));
     await new Promise(r => setTimeout(r, 0));
 
-    expect(purgeAllLocalData).toHaveBeenCalledTimes(1);
-    expect(deleteLocalData).not.toHaveBeenCalled();
+    // 页面 refresh() 会把 settings.deleteStartFloor 回退为 1，因此实际 start=1（仍全范围）
+    expect(deleteLocalDataWithScope).toHaveBeenCalledWith('all', 1, null, 'purge');
 
     mount.__resetAcuV2MountForTests();
   });
 
   it('T6 purge 成功后不调用 loadOrCreateJsonTableFromChatHistory 与 reloadStorageProvider（C2 no-reload 契约）', async () => {
-    const { mount, purgeAllLocalData, loadOrCreate, reloadStorageProvider } = await mountDataMgmtPage();
+    const { mount, deleteLocalDataWithScope, loadOrCreate, reloadStorageProvider } = await mountDataMgmtPage();
 
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
       .find(item => item.textContent?.includes('删除所有本地数据'));
@@ -659,7 +666,7 @@ describe('DataMgmtPage', () => {
     await new Promise(r => setTimeout(r, 0));
     await new Promise(r => setTimeout(r, 0));
 
-    expect(purgeAllLocalData).toHaveBeenCalledTimes(1);
+    expect(deleteLocalDataWithScope).toHaveBeenCalledTimes(1);
     expect(loadOrCreate).not.toHaveBeenCalled();
     expect(reloadStorageProvider).not.toHaveBeenCalled();
 
@@ -667,25 +674,25 @@ describe('DataMgmtPage', () => {
   });
 
   it('T7 purge 成功后不调用 cleanupWorldbookEntriesAfterDataDeletion（C3）', async () => {
-    const { mount, purgeAllLocalData, cleanupWorldbook } = await mountDataMgmtPage();
+    const { mount, deleteLocalDataWithScope, cleanupWorldbook } = await mountDataMgmtPage();
 
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
       .find(item => item.textContent?.includes('删除所有本地数据'));
     button!.click();
-    await clickDialogButton('删除所有本地');
+    await clickDialogButton('删除所有本地数据');
     await clickDialogButton('确认硬清空');
     await new Promise(r => setTimeout(r, 0));
     await new Promise(r => setTimeout(r, 0));
 
-    expect(purgeAllLocalData).toHaveBeenCalledTimes(1);
+    expect(deleteLocalDataWithScope).toHaveBeenCalledTimes(1);
     expect(cleanupWorldbook).not.toHaveBeenCalled();
 
     mount.__resetAcuV2MountForTests();
   });
 
-  it('T8 saved=false 时显示 error toast 且不显示成功文案', async () => {
-    const { mount, purgeAllLocalData } = await mountDataMgmtPage();
-    purgeAllLocalData.mockResolvedValueOnce({ saved: false, clearedMessageCount: 0, removedMetadata: [], error: '当前聊天记录为空。' });
+  it('T8 purge 结果 saved=false 时显示 error toast 且不显示成功文案', async () => {
+    const { mount, deleteLocalDataWithScope } = await mountDataMgmtPage();
+    deleteLocalDataWithScope.mockResolvedValueOnce({ path: 'purge', result: { saved: false, clearedMessageCount: 0, removedMetadata: [], error: '当前聊天记录为空。' } });
 
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
       .find(item => item.textContent?.includes('删除所有本地数据'));
@@ -701,19 +708,17 @@ describe('DataMgmtPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('T9 saved=true + cleanupWarnings 时显示 warning toast', async () => {
-    const { mount, purgeAllLocalData } = await mountDataMgmtPage();
-    purgeAllLocalData.mockResolvedValueOnce({
-      saved: true,
-      clearedMessageCount: 2,
-      removedMetadata: [],
-      cleanupWarnings: ['世界书清理失败'],
+  it('T9 purge 结果 saved=true + cleanupWarnings 时显示 warning toast', async () => {
+    const { mount, deleteLocalDataWithScope } = await mountDataMgmtPage();
+    deleteLocalDataWithScope.mockResolvedValueOnce({
+      path: 'purge',
+      result: { saved: true, clearedMessageCount: 2, removedMetadata: [], cleanupWarnings: ['世界书清理失败'] },
     });
 
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
       .find(item => item.textContent?.includes('删除所有本地数据'));
     button!.click();
-    await clickDialogButton('所有本地数据');
+    await clickDialogButton('删除所有本地数据');
     await clickDialogButton('确认硬清空');
     await new Promise(r => setTimeout(r, 0));
     await new Promise(r => setTimeout(r, 0));
@@ -725,7 +730,7 @@ describe('DataMgmtPage', () => {
   });
 
   it('T10 all 按钮两级确认；任一级取消则不调用服务', async () => {
-    const { mount, purgeAllLocalData } = await mountDataMgmtPage();
+    const { mount, deleteLocalDataWithScope } = await mountDataMgmtPage();
 
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
       .find(item => item.textContent?.includes('删除所有本地数据'));
@@ -739,7 +744,84 @@ describe('DataMgmtPage', () => {
     cancelButton!.click();
     await new Promise(r => setTimeout(r, 0));
 
-    expect(purgeAllLocalData).not.toHaveBeenCalled();
+    expect(deleteLocalDataWithScope).not.toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T11 局部范围（start=2）点删除所有本地数据 → range 分支单级确认，且必须 reload + cleanupWorldbook', async () => {
+    const { mount, deleteLocalDataWithScope, loadOrCreate, cleanupWorldbook, reloadStorageProvider, refreshMerged } = await mountDataMgmtPage('chat-data', null, true);
+    // 通过起始楼层输入框驱动 deleteRange.startFloor = 2 → 未覆盖第 1 层 → range
+    const startFloorInput = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="number"]'))
+      .find(input => input.closest('.acu-form-row')?.textContent?.includes('起始楼层'))!;
+    startFloorInput.value = '2';
+    startFloorInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    // range 分支是单级确认：点「删除数据」即执行
+    await clickDialogButton('删除数据');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    // 预判 path='range'，服务层 mock 默认返回 range 分支
+    expect(deleteLocalDataWithScope).toHaveBeenCalledWith('all', 2, null, 'range');
+    expect(loadOrCreate).toHaveBeenCalled();
+    expect(reloadStorageProvider).toHaveBeenCalled();
+    expect(refreshMerged).toHaveBeenCalled();
+    expect(cleanupWorldbook).toHaveBeenCalled();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T12 局部范围点 all 时确认弹窗为 range 语义（单级），不出现硬清空两级文案', async () => {
+    const { mount } = await mountDataMgmtPage();
+    // 通过起始楼层输入框驱动 deleteRange.startFloor = 2 → 局部范围
+    const startFloorInput = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="number"]'))
+      .find(input => input.closest('.acu-form-row')?.textContent?.includes('起始楼层'))!;
+    startFloorInput.value = '2';
+    startFloorInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 0));
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    // range 分支单级确认弹窗出现（标题「删除指定楼层本地数据」，无「再次确认删除」第二级）
+    expect(document.body.textContent || '').toContain('删除指定楼层本地数据');
+    expect(document.body.textContent || '').toContain('仅清除该范围内楼层的填表数据');
+    expect(document.body.textContent || '').not.toContain('再次确认删除');
+
+    // 关闭弹窗
+    const layer = document.querySelector<HTMLElement>('.acu-dialog-layer');
+    const cancelButton = Array.from(layer!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('取消'));
+    cancelButton!.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('T13 服务返回 aborted（确认期范围变化）时显示 warning toast，无成功', async () => {
+    const { mount, deleteLocalDataWithScope } = await mountDataMgmtPage();
+    deleteLocalDataWithScope.mockResolvedValueOnce({
+      path: 'aborted',
+      reason: '删除范围在确认期间发生变化（预期完全清空，实际为按范围删除）。为避免误删已中止，请重新确认。',
+    });
+
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('删除所有本地数据'));
+    button!.click();
+    await clickDialogButton('删除所有本地数据');
+    await clickDialogButton('确认硬清空');
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('为避免误删已中止');
+    expect(document.body.textContent || '').not.toContain('已删除所有本地数据');
 
     mount.__resetAcuV2MountForTests();
   });
