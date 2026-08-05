@@ -737,17 +737,23 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
       }
       let commitResult;
       if (switchMode.mode === 'pristine') {
-        // 已损坏聊天的自愈降级：resolveTemplateSwitchMode_ACU 只判 pristine/inherit/blocked，
-        // 但聊天可能处于「pristine 判定 + 残留 header-only template root」的夹缝（F7）。
-        // 此时降级函数内部会重新按 7 项条件分类：非 template_only_root 返回 ok:false 且
-        // 零写入，仅「真的是可降级 root」才移除。因此这里无条件尝试降级，失败但属于
-        // 「不是 template_only_root」则跳过，继续 scope-only。
+        // pristine 会话的模板保存只写聊天级 guide + template scope（见
+        // commitCurrentFloorTemplateScopeOnly_ACU + pristineOverride），不写任何
+        // storage frame。因此这里唯一需要防的是「聊天里残留的回放根会在 replay 中
+        // 重建旧结构、与新模板 scope 冲突」。
+        //
+        // 降级是机会性清理，不是保存的前置条件：
+        // - noReplayRoot: true → 聊天无 full checkpoint，结构零冲突，直接继续 scope-only
+        // - 其余 ok: false → 有根但清不掉，或状态危险，fail-closed 阻止，零写入
+        //
+        // 不得改回按 reason 文案匹配，也不得把「降级没做成」当作「保存不允许」：
+        // 两者任一都会让最正常的 pristine 会话永久无法保存模板（历史缺陷即此）。
         const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({
           isolationKey: guideIsolationKey,
           requestId: `visualizer_v2_save:${guideIsolationKey}`,
         });
-        if (!demotion.ok && demotion.demoted === false && /不是 template_only_root/.test(demotion.reason || '')) {
-          logDebug_ACU(`[ACU-V2 Visualizer] 非 template_only_root，跳过降级：${demotion.reason}`);
+        if (!demotion.ok && demotion.noReplayRoot === true) {
+          logDebug_ACU(`[ACU-V2 Visualizer] 聊天无回放根，跳过降级直接 scope-only：${demotion.reason}`);
         } else if (!demotion.ok) {
           toastStore.error(`模板保存被降级预检阻止：${demotion.reason || 'template_only_root 降级失败。'}`, { muteable: false });
           return false;

@@ -1140,11 +1140,27 @@ function classifyTemplateCommitStorageStateAfterDeletedSheets_ACU(
  *   content 等价，不等价则拒绝、零写入
  * - 原 frame 完整备份到 recoveryBackup（recoveryKind: 'demoted_template_only_root'）
  * - saveChatToHostStrict_ACU 失败则完整还原内存并返回失败
+ *
+ * 返回值契约（调用方必须依赖字段，不得匹配 reason 文案）：
+ * - { ok: true, demoted: true }
+ *     确实存在可降级 root 且已移除并落盘。
+ * - { ok: false, demoted: false, noReplayRoot: true }
+ *     聊天中不存在 full checkpoint（空聊天 / pristine / 悬空 artifact），
+ *     replay 无根，结构零冲突。降级无事可做，**不构成任何写入阻断理由**：
+ *     调用方应继续 scope-only 提交（scope-only 本身不写 storage frame）。
+ * - { ok: false, demoted: false, noReplayRoot 缺省/false }
+ *     聊天中存在回放根但无法安全移除，或状态危险（真实数据根 / legacy 漂移）。
+ *     残留根会在 replay 中重建旧结构、与新模板 scope 冲突，
+ *     调用方必须 fail-closed 中止，零写入。
+ *
+ * 注意：本函数是「机会性清理」，不是保存的前置条件。禁止调用方把
+ * 「降级没做成」等同于「保存不允许」——那会让最正常的 pristine 会话
+ * 永久无法保存模板（历史缺陷即此）。
  */
 export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
   isolationKey?: string;
   requestId?: string;
-} = {}): Promise<{ ok: boolean; reason?: string; demoted?: boolean }> {
+} = {}): Promise<{ ok: boolean; reason?: string; demoted?: boolean; noReplayRoot?: boolean }> {
   const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
   try {
     return await runTableWriteTransaction_ACU({
@@ -1156,15 +1172,35 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
     }, async () => {
       const chat = getChatArray_ACU();
       if (!Array.isArray(chat) || chat.length === 0) {
-        return { ok: false, reason: '聊天记录为空，无法执行 template_only_root 降级。' };
+        // 空聊天没有任何 frame，replay 无根：属「无需清理」，不是失败。
+        return {
+          ok: false,
+          demoted: false,
+          noReplayRoot: true,
+          reason: '聊天记录为空，不存在任何回放根，无需降级。',
+        };
       }
       const storageState = classifyTemplateCommitStorageState_ACU(chat, isolationKey);
       if (storageState.kind !== 'template_only_root') {
+        // 判据是「聊天里有没有 full checkpoint（回放根）」，不是「降级动作是否适用」：
+        // - 无根 → replay 退化为模板临时基线，scope-only 不写 frame，结构零冲突 → 放行
+        // - 有根但不可安全移除 → 残留根会重建旧结构 → fail-closed
+        const noReplayRoot = storageState.kind === 'pristine_without_checkpoint'
+          || storageState.kind === 'orphan_v2_artifacts';
+        if (storageState.kind === 'orphan_v2_artifacts') {
+          // 悬空 artifact 不阻止模板保存（无 full checkpoint，scope-only 不写 frame），
+          // 但会让后续追平 preflight blocked，留痕以便事故复盘。
+          logWarn_ACU(`[V2 Persist] 无回放根可降级，但检测到悬空 V2 artifact: isolationKey=${isolationKey}, details=${storageState.details.join(', ')}。`);
+        }
         return {
           ok: false,
+          demoted: false,
+          noReplayRoot,
           reason: storageState.kind === 'existing_full_checkpoint'
-            ? '检测到含真实数据或后缀 artifact 的 full checkpoint，拒绝降级，零写入。'
-            : `当前状态不是 template_only_root（实际：${storageState.kind}），拒绝降级，零写入。`,
+            ? '检测到含真实数据或后缀 artifact 的 full checkpoint，无法安全移除回放根，拒绝降级，零写入。'
+            : storageState.kind === 'legacy_persisted_data'
+              ? `检测到 legacy 表格数据（${storageState.details.join(', ')}）与 pristine 判定冲突，拒绝降级，零写入。`
+              : `当前状态为 ${storageState.kind}，不存在需要降级的回放根。`,
         };
       }
 
@@ -1172,7 +1208,7 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
       const isolatedContainer = readIsolatedDataContainer_ACU(rootMessage) || {};
       const tagData = isolatedContainer[isolationKey] as any;
       if (!isV2TagData_ACU(tagData) || !isObjectRecord_ACU(tagData.storageFrame)) {
-        return { ok: false, reason: 'template_only_root 帧结构异常，拒绝降级，零写入。' };
+        return { ok: false, demoted: false, reason: 'template_only_root 帧结构异常，拒绝降级，零写入。' };
       }
       const sourceFrame = tagData.storageFrame as TableStorageFrameV2_ACU;
       const backupFrame = deepClone_ACU(sourceFrame);
@@ -1186,7 +1222,7 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
       // 安放，fail-closed 拒绝降级。先写 backup 消除对判空顺序的依赖。
       const backupTagData = candidateContainer[isolationKey];
       if (!backupTagData || typeof backupTagData !== 'object' || !isObjectRecord_ACU(backupTagData.storageFrame)) {
-        return { ok: false, reason: 'template_only_root 降级候选 tagData 缺失，拒绝写入，零写入。' };
+        return { ok: false, demoted: false, reason: 'template_only_root 降级候选 tagData 缺失，拒绝写入，零写入。' };
       }
       backupTagData.recoveryBackup = {
         version: 1,
@@ -1197,7 +1233,7 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
       } satisfies TableV2RecoveryBackup_ACU;
       const candidateTagData = candidateContainer[isolationKey] as any;
       if (!isV2TagData_ACU(candidateTagData) || !isObjectRecord_ACU(candidateTagData.storageFrame)) {
-        return { ok: false, reason: 'template_only_root 候选帧结构异常，拒绝降级，零写入。' };
+        return { ok: false, demoted: false, reason: 'template_only_root 候选帧结构异常，拒绝降级，零写入。' };
       }
       const candidateFrame = candidateTagData.storageFrame as TableStorageFrameV2_ACU;
       delete candidateFrame.checkpoint;
@@ -1229,17 +1265,17 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
           compatibilityMode: 'disabled',
         });
       } catch (error: any) {
-        return { ok: false, reason: `template_only_root 降级后候选 replay 校验失败：${error?.message || String(error)}` };
+        return { ok: false, demoted: false, reason: `template_only_root 降级后候选 replay 校验失败：${error?.message || String(error)}` };
       }
       if (!replayAfter) {
         const templateBaseline = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
         if (!templateBaseline) {
-          return { ok: false, reason: 'template_only_root 降级后候选 replay 无法校验，且当前模板基线不可得，拒绝降级，零写入。' };
+          return { ok: false, demoted: false, reason: 'template_only_root 降级后候选 replay 无法校验，且当前模板基线不可得，拒绝降级，零写入。' };
         }
         replayAfter = { data: templateBaseline, baseKind: 'temporary_template_baseline' };
       }
       if (replayAfter.requiresCheckpointConvergence || replayAfter.compatibilityRepairs?.length) {
-        return { ok: false, reason: 'template_only_root 降级后候选 replay 仍依赖兼容修复，拒绝降级，零写入。' };
+        return { ok: false, demoted: false, reason: 'template_only_root 降级后候选 replay 仍依赖兼容修复，拒绝降级，零写入。' };
       }
 
       // 指纹比对（fail-closed）：候选回放的每张表 content 必须与原 checkpoint 的
@@ -1256,7 +1292,7 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
       }
       const expectedFingerprint = getTableDataFingerprint_ACU(projectReplayComparableData_ACU(headerOnlyProjection as TableDataObject_ACU));
       if (afterFingerprint !== expectedFingerprint) {
-        return { ok: false, reason: 'template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。' };
+        return { ok: false, demoted: false, reason: 'template_only_root 降级后候选 replay 与原 checkpoint 表结构不一致，已拒绝写入；请先执行 V2 恢复诊断。' };
       }
 
       // 真实写回：直接应用候选的最终容器形态，避免在真实对象上重复判空造成双写不一致。
@@ -1275,7 +1311,7 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
       return { ok: true, demoted: true };
     });
   } catch (error: any) {
-    return { ok: false, reason: error?.message || String(error) };
+    return { ok: false, demoted: false, reason: error?.message || String(error) };
   }
 }
 

@@ -67,7 +67,12 @@ const serviceMock = vi.hoisted(() => ({
   ensureTemplateRecoveryOrDeleteCurrentIsolationData_ACU: vi.fn(async () => ({ success: true, dataWasReset: false })),
   commitCurrentFloorTemplateChanges_ACU: vi.fn(async () => ({ saved: true, mode: 'template_only', messageIndex: 0, checkpoints: [], removedNullRowCount: 0 })),
   commitCurrentFloorTemplateScopeOnly_ACU: vi.fn(async () => ({ saved: true, mode: 'scope_only', messageIndex: 0, checkpoints: [], removedNullRowCount: 0 })),
-  demoteTemplateOnlyRootToScopeOnly_ACU: vi.fn(async () => ({ ok: true, demoted: false, reason: '不是 template_only_root' })),
+  demoteTemplateOnlyRootToScopeOnly_ACU: vi.fn(async () => ({
+    ok: false,
+    demoted: false,
+    noReplayRoot: true,
+    reason: '当前状态为 pristine_without_checkpoint，不存在需要降级的回放根。',
+  })),
   resolveTemplateSwitchMode_ACU: vi.fn(() => ({ mode: 'inherit' })),
   reloadStorageProvider: vi.fn(async () => undefined),
   applyTemplateScopeForCurrentChat_ACU: vi.fn(() => ({ mode: 'chat_override' })),
@@ -227,6 +232,12 @@ describe('useVisualizerSave', () => {
     vi.clearAllMocks();
     serviceMock.preflightSchemaMigrations_ACU.mockReset();
     serviceMock.preflightSchemaMigrations_ACU.mockResolvedValue({ changedSheetKeys: [], blockers: [], operations: [] });
+    // once 队列跨用例泄漏会污染后续用例（mockReturnValueOnce/mockRejectedValueOnce
+    // 不清除即残留），因此这里重置受影响 mock 并恢复默认实现。
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReset();
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValue({ mode: 'inherit' });
+    serviceMock.purgeSheetKeysFromChatHistoryHard_ACU.mockReset();
+    serviceMock.purgeSheetKeysFromChatHistoryHard_ACU.mockResolvedValue({ changed: true });
     serviceMock.replayData = null;
   });
 
@@ -411,7 +422,7 @@ describe('useVisualizerSave', () => {
     }
   });
 
-  it('pristine 模板保存接受 template_only 结果并只提交一次核心请求，不触发历史 recovery guard', async () => {
+  it('inherit 模板保存只提交一次核心请求，不触发历史 recovery guard', async () => {
     const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
     const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
     const store = useVisualizerStore();
@@ -455,6 +466,112 @@ describe('useVisualizerSave', () => {
     expect(serviceMock.refreshMergedDataAndNotify_ACU).toHaveBeenCalled();
     expect(store.lastSavedTarget).toBe('template-chat');
   });
+
+  it('pristine 无回放根 → 放行并走 scope-only，零 storage frame 写入（助手场景回归哨兵）', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('旧表名'),
+    }, ['sheet_test_vz2']);
+    store.currentSheet.name = '新表名';
+    store.setDirty(true);
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValueOnce({ mode: 'pristine' });
+    serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU.mockResolvedValueOnce({
+      ok: false,
+      demoted: false,
+      noReplayRoot: true,
+      reason: '当前状态为 pristine_without_checkpoint，不存在需要降级的回放根。',
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledTimes(1);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledWith(expect.objectContaining({
+      isolationKey: 'iso-test',
+      pristineOverride: true,
+    }));
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it('pristine 有根但清不掉 → 阻止且零提交', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('旧表名'),
+    }, ['sheet_test_vz2']);
+    store.currentSheet.name = '新表名';
+    store.setDirty(true);
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValueOnce({ mode: 'pristine' });
+    serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU.mockResolvedValueOnce({
+      ok: false,
+      demoted: false,
+      reason: '检测到含真实数据或后缀 artifact 的 full checkpoint，无法安全移除回放根，拒绝降级，零写入。',
+    });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(false);
+    expect(serviceMock.commitCurrentFloorTemplateChanges_ACU).not.toHaveBeenCalled();
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith(
+      expect.stringContaining('模板保存被降级预检阻止'),
+      expect.any(Object),
+    );
+  });
+
+  it('pristine 降级成功 → 继续 scope-only', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_test_vz2: sheet('旧表名'),
+    }, ['sheet_test_vz2']);
+    store.currentSheet.name = '新表名';
+    store.setDirty(true);
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValueOnce({ mode: 'pristine' });
+    serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU.mockResolvedValueOnce({ ok: true, demoted: true });
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledTimes(1);
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it('pristine + 删表时 purge 失败仅 warning 不回滚（R1）', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const { useVisualizerSave } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerSave');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
+      sheet_delete: { ...sheet('删除'), uid: 'sheet_delete' },
+    }, ['sheet_keep', 'sheet_delete']);
+    store.deleteSheet('sheet_delete');
+    serviceMock.resolveTemplateSwitchMode_ACU.mockReturnValueOnce({ mode: 'pristine' });
+    serviceMock.demoteTemplateOnlyRootToScopeOnly_ACU.mockResolvedValueOnce({
+      ok: false,
+      demoted: false,
+      noReplayRoot: true,
+      reason: '当前状态为 pristine_without_checkpoint，不存在需要降级的回放根。',
+    });
+    serviceMock.purgeSheetKeysFromChatHistoryHard_ACU.mockRejectedValueOnce(new Error('purge failed'));
+
+    const saved = await useVisualizerSave().saveTemplateToCurrentChat();
+
+    expect(saved).toBe(true);
+    expect(serviceMock.commitCurrentFloorTemplateScopeOnly_ACU).toHaveBeenCalledTimes(1);
+    expect(toastMock.warning).toHaveBeenCalled();
+    expect(serviceMock.purgeSheetKeysFromChatHistoryHard_ACU).toHaveBeenCalledWith(['sheet_delete']);
+  });
+
 
   it('新增表保存时只将新增表提交给 V2 当前楼层 writer', async () => {
     const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');

@@ -348,6 +348,8 @@ describe('pristine 模板提交复现路径（复查点 1）', () => {
     };
     const demotion = await demoteTemplateOnlyRootToScopeOnly_ACU({ isolationKey });
     expect(demotion.ok).toBe(false);
+    expect(demotion.demoted).toBe(false);
+    expect(demotion.noReplayRoot).toBe(false);
     expect(collectV2FullCheckpointIndices_ACU(mocks.chat, isolationKey).length).toBe(1);
   });
 });
