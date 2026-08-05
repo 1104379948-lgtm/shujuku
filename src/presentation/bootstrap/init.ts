@@ -213,8 +213,13 @@ export   function mainInitialize_ACU() {
 
                 if (shouldProcessSummaryVectorIndexForGeneration_ACU('tavernhelper', { quiet_prompt: options.quiet_prompt, automatic_trigger: options.automatic_trigger }, false)) {
                   const userInput = String(options.user_input || options.prompt || getSendTextareaValue_ACU() || '').trim();
-                  const summaryVectorResult = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput, source: 'tavernhelper' });
-                  logDebug_ACU(`[交火模式纪要索引] TavernHelper.generate 发送前处理完成：success=${summaryVectorResult.success}, skipped=${summaryVectorResult.skipped === true}, reason=${summaryVectorResult.reason || 'none'}, keywords=${summaryVectorResult.keywordCount ?? 0}, injected=${summaryVectorResult.injectedCount ?? 0}`);
+                  try {
+                    const summaryVectorResult = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput, source: 'tavernhelper' });
+                    logDebug_ACU(`[交火模式纪要索引] TavernHelper.generate 发送前处理完成：success=${summaryVectorResult.success}, skipped=${summaryVectorResult.skipped === true}, reason=${summaryVectorResult.reason || 'none'}, keywords=${summaryVectorResult.keywordCount ?? 0}, injected=${summaryVectorResult.injectedCount ?? 0}`);
+                  } catch (error) {
+                    // T5：发送前注入失败不得中断宿主生成（与 GENERATION_AFTER_COMMANDS 的降级一致）。
+                    logWarn_ACU('[交火模式纪要索引] TavernHelper.generate 发送前注入失败，继续原始生成:', error);
+                  }
                 }
 
                 // [重构] 调用 service 层编排函数，传入 UI 规划回调

@@ -12,6 +12,9 @@ const m = vi.hoisted(() => ({
   setChatMutationTimer: vi.fn(),
   notify: vi.fn(), resetScript: vi.fn(), loadPreset: vi.fn(), loadMessages: vi.fn(), refresh: vi.fn(),
   preload: vi.fn(), shouldRebuild: vi.fn(), rebuild: vi.fn(), restoreFlush: vi.fn(),
+  processBeforeGen: vi.fn(),
+  orchestrate: vi.fn(),
+  shouldProcessSummary: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: m.api }));
@@ -22,7 +25,7 @@ vi.mock('../../../src/presentation/triggers/settings-ui-sync', () => ({ attemptT
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: vi.fn(), handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   chatMutationDebounceTimer_ACU: null, _set_chatMutationDebounceTimer_ACU: m.setChatMutationTimer, generationGate_ACU: m.gate,
-  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: vi.fn(), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: vi.fn(), recordLastUserSend_ACU: vi.fn(), settings_ACU: { plotSettings: {} }, shouldProcessAutoTableUpdateForGenerationEnded_ACU: vi.fn(), shouldProcessPlotForGeneration_ACU: vi.fn(), shouldProcessSummaryVectorIndexForGeneration_ACU: vi.fn(),
+  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: vi.fn(), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: vi.fn(), recordLastUserSend_ACU: vi.fn(), settings_ACU: { plotSettings: {} }, shouldProcessAutoTableUpdateForGenerationEnded_ACU: vi.fn(), shouldProcessPlotForGeneration_ACU: vi.fn(), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
   _set_allChatMessages_ACU: m.setMessages, _set_currentChatFileIdentifier_ACU: (value: string) => { m.currentChatKey = value; m.setChat(value); }, _set_currentJsonTableData_ACU: m.setData, _set_independentTableStates_ACU: m.setTables, _set_isProcessing_Plot_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: m.setTotal,
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
@@ -36,12 +39,12 @@ vi.mock('../../../src/presentation/components/pipeline-ui-helpers', () => ({ ref
 vi.mock('../../../src/shared/defaults-json.js', () => ({ DEFAULT_PLOT_SETTINGS_ACU: { loopSettings: {} } }));
 vi.mock('../../../src/shared/utils', () => ({ cleanChatName_ACU: vi.fn((name: string) => name), logDebug_ACU: vi.fn(), logError_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
 vi.mock('../../../src/service/plot/plot-logic', () => ({ shouldSkipPlotIntercept_ACU: vi.fn() }));
-vi.mock('../../../src/service/plot/plot-orchestrator', () => ({ orchestrateTavernHelperHook_ACU: vi.fn(), orchestrateAfterCommandsStrategy1_ACU: vi.fn(), orchestrateAfterCommandsStrategy2_ACU: vi.fn() }));
+vi.mock('../../../src/service/plot/plot-orchestrator', () => ({ orchestrateTavernHelperHook_ACU: (...args: any[]) => m.orchestrate(...args), orchestrateAfterCommandsStrategy1_ACU: vi.fn(), orchestrateAfterCommandsStrategy2_ACU: vi.fn() }));
 vi.mock('../../../src/presentation/components/status-display', () => ({ getSendTextareaValue_ACU: vi.fn(), setSendTextareaValue_ACU: vi.fn() }));
 vi.mock('../../../src/presentation/components/update-status-display', () => ({ updateCardUpdateStatusDisplay_ACU: vi.fn() }));
 vi.mock('../../../src/presentation/triggers/auto-loop', () => ({ enterLoopRetryFlow_ACU: vi.fn(), onLoopGenerationEnded_ACU: vi.fn(), stopAutoLoop_ACU: vi.fn() }));
 vi.mock('../../../src/presentation/components/plot-planning-ui', () => ({ runOptimizationLogicWithUI_ACU: vi.fn() }));
-vi.mock('../../../src/presentation/components/summary-vector-index-ui', () => ({ processSummaryVectorIndexBeforeGenerationWithUI_ACU: vi.fn(), shouldRebuildSummaryVectorIndexWithUI_ACU: (...args: any[]) => m.shouldRebuild(...args), rebuildCurrentSummaryVectorIndexWithUI_ACU: (...args: any[]) => m.rebuild(...args) }));
+vi.mock('../../../src/presentation/components/summary-vector-index-ui', () => ({ processSummaryVectorIndexBeforeGenerationWithUI_ACU: (...args: any[]) => m.processBeforeGen(...args), shouldRebuildSummaryVectorIndexWithUI_ACU: (...args: any[]) => m.shouldRebuild(...args), rebuildCurrentSummaryVectorIndexWithUI_ACU: (...args: any[]) => m.rebuild(...args) }));
 vi.mock('../../../src/service/vector/summary-vector-index-cache-service', () => ({ preloadSummaryVectorIndexCacheForCurrentChat_ACU: (...args: any[]) => m.preload(...args) }));
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({ restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU: (...args: any[]) => m.restoreFlush(...args) }));
 vi.mock('../../../src/service/vector/summary-vector-index-realign-state', () => ({ markSummaryVectorIndexDirtyForRealign_ACU: vi.fn() }));
@@ -49,6 +52,8 @@ vi.mock('../../../src/service/vector/summary-vector-index-realign-state', () => 
 beforeAll(async () => {
   document.body.innerHTML = '<button id="send_but"></button><textarea id="send_textarea"></textarea>';
   vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
+  // T5：TavernHelper.generate 钩子测试需要宿主 API 在 mainInitialize 前就绪，钩子才会被安装。
+  (window as any).TavernHelper = { generate: vi.fn(async (...args: any[]) => ({ handled: true, args })) };
   m.api.eventSource.on.mockImplementation((event: string, callback: any) => {
     if (event === 'chat') m.chatChanged = callback;
     if (event === 'deleted' || event === 'swiped') m.chatMutationHandler = callback;
@@ -69,6 +74,9 @@ beforeEach(() => {
   m.shouldRebuild.mockReturnValue(false);
   m.rebuild.mockResolvedValue(undefined);
   m.restoreFlush.mockResolvedValue(0);
+  m.processBeforeGen.mockResolvedValue({ success: true, skipped: true, reason: 'no_index_state' });
+  m.orchestrate.mockResolvedValue({ action: 'passthrough' });
+  m.shouldProcessSummary.mockReturnValue(false);
   Object.assign(m.gate, { lastUserMessageId: 7, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true }, generationSeq: 3, activeGenerations: [{ seq: 3 }] });
 });
 
@@ -152,3 +160,26 @@ describe('mainInitialize_ACU 聊天变更防抖', () => {
     vi.useRealTimers();
   });
 });
+
+// T5：TavernHelper.generate 钩子内发送前注入失败不得中断宿主生成（对齐 GENERATION_AFTER_COMMANDS 降级）。
+// 钩子由 mainInitialize_ACU 在 beforeAll 时安装（window.TavernHelper 已就绪）。
+describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
+  it('processSummaryVectorIndexBeforeGenerationWithUI_ACU 抛异常时，钩子不中断并继续原始生成', async () => {
+    const original = (window as any).TavernHelper.generate;
+    expect(typeof original).toBe('function');
+
+    m.shouldProcessSummary.mockReturnValue(true);
+    m.processBeforeGen.mockRejectedValueOnce(new Error('Embedding 请求失败 403: insufficient balance'));
+    const args = [{ user_input: 'find relic', quiet_prompt: undefined }];
+
+    // 钩子应吞掉异常：不 reject，且后续编排与原始 generate 都继续执行。
+    const result = await (window as any).TavernHelper.generate(...args);
+
+    expect(m.processBeforeGen).toHaveBeenCalledTimes(1);
+    expect(m.orchestrate).toHaveBeenCalledTimes(1);
+    // 原始 generate 在编排后仍被调用（宿主生成未中断）。
+    expect((window as any).original_TavernHelper_generate_ACU).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ handled: true, args });
+  });
+});
+

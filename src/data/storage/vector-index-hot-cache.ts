@@ -74,6 +74,7 @@ interface VectorIndexHotCacheChunkRecord_ACU {
     sourceTableKey: string;
     indexId: string;
     checkpointId: string;
+    writeGeneration: string;
     chunkKey: string;
     chunkId: string;
     rowKey: string;
@@ -160,6 +161,7 @@ function isRecordCompatible_ACU(record: VectorIndexHotCacheChunkRecord_ACU | nul
     if (record.sourceTableKey !== normalizeKeyPart_ACU(manifest.sourceTableKey)) return false;
     if (record.indexId !== normalizeKeyPart_ACU(manifest.indexId)) return false;
     if (record.checkpointId !== getManifestCheckpointId_ACU(manifest)) return false;
+    if (record.writeGeneration !== normalizeKeyPart_ACU(manifest.storageIdentity?.writeGeneration || '')) return false;
     if (record.chunkKey !== normalizeKeyPart_ACU(ref.chunkKey)) return false;
     if (record.chunkId !== normalizeKeyPart_ACU(ref.chunkId)) return false;
     if (record.rowKey !== normalizeKeyPart_ACU(ref.rowKey)) return false;
@@ -199,6 +201,7 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
                         sourceTableKey: normalizeKeyPart_ACU(manifest.sourceTableKey),
                         indexId: normalizeKeyPart_ACU(manifest.indexId),
                         checkpointId: getManifestCheckpointId_ACU(manifest),
+                        writeGeneration: normalizeKeyPart_ACU(manifest.storageIdentity?.writeGeneration || ''),
                         chunkKey,
                         chunkId,
                         rowKey: normalizeKeyPart_ACU(chunk.rowKey),
@@ -246,6 +249,7 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
                     sourceTableKey: normalizeKeyPart_ACU(manifest.sourceTableKey),
                     indexId: normalizeKeyPart_ACU(manifest.indexId),
                     checkpointId: getManifestCheckpointId_ACU(manifest),
+                    writeGeneration: normalizeKeyPart_ACU(manifest.storageIdentity?.writeGeneration || ''),
                     chunkKey,
                     chunkId: normalizeKeyPart_ACU(ref.chunkId),
                     rowKey: normalizeKeyPart_ACU(ref.rowKey),
@@ -302,6 +306,7 @@ export async function getSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
                             && record.isolationKey === targetIsolationKey
                             && record.sourceTableKey === targetSourceTableKey
                             && record.checkpointId === targetCheckpointId
+                            && record.writeGeneration === normalizeKeyPart_ACU(manifest.storageIdentity?.writeGeneration || '')
                             && record.chunk?.vector?.length > 0) {
                             record.lastAccessAt = now;
                             store.put(record);

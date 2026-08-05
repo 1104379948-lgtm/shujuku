@@ -24,6 +24,8 @@ import { normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-norm
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
+import { applyGuideMetadataToSheet_ACU, isSameSheetHeader_ACU } from '../template/guide-metadata-overlay';
+import { repairLegacyAutoMergedRowTails_ACU } from '../../shared/canonical-row-normalizer';
 
 /**
  * Legacy entry point retained for callers that need in-place normalization.
@@ -47,7 +49,25 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
           && canonicalizeDisplayName_ACU(guideData[key]?.name) === canonicalName);
   }
 
-  function mergeSheetGuideStructureIntoData_ACU(mergedData: Record<string, any>, sheetGuideData: any): Record<string, any> {
+  /**
+   * 将 Sheet Guide 的结构/元数据叠加到合并数据上。
+   *
+   * structuralAuthority 决定结构权归属：
+   * - 'data'：checkpoint/历史数据持结构权（V2 路径）。guide 只叠加非结构元数据；
+   *   表头不一致时保留历史结构，不 padding、不截断、不抛错，仅记录 warning，
+   *   并拒绝继承该表的 guide sourceData.ddl。
+   * - 'guide'：guide 持结构权（legacy-v1 路径），行为与旧版一致（含 padding）。
+   *
+   * 返回 { data, quarantinedSheetKeys, warnings }：
+   * - data：合并结果（guide 键集驱动过滤与排序语义不变）。
+   * - quarantinedSheetKeys：单表处理异常被隔离的表键，不会拖垮整体加载。
+   * - warnings：结构不一致等可定位的结构性提示。
+   */
+  function mergeSheetGuideStructureIntoData_ACU(
+      mergedData: Record<string, any>,
+      sheetGuideData: any,
+      options: { structuralAuthority: 'data' | 'guide' } = { structuralAuthority: 'guide' },
+  ): { data: Record<string, any>; quarantinedSheetKeys: string[]; warnings: string[] } {
       const guided = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
       const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
       const historicalKeysByCanonicalName = new Map<string, string[]>();
@@ -59,51 +79,96 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
           keys.push(key);
           historicalKeysByCanonicalName.set(canonicalName, keys);
       });
+      const quarantinedSheetKeys: string[] = [];
+      const warnings: string[] = [];
       guideKeys.forEach(k => {
           if (!k || !k.startsWith('sheet_')) return;
-          const guideSheet = guided[k];
-          const canonicalName = canonicalizeDisplayName_ACU(guideSheet?.name);
-          const historicalKeys = canonicalName ? (historicalKeysByCanonicalName.get(canonicalName) || []) : [];
-          if (historicalKeys.length > 1) {
-              logWarn_ACU(`[Merge] 指导表「${guideSheet?.name || k}」匹配多个历史 Sheet (${historicalKeys.join(', ')})，拒绝自动继承。`);
-          }
-          const historicalKey = historicalKeys.length === 1 ? historicalKeys[0] : null;
-          const hist = historicalKey ? mergedData[historicalKey] : undefined;
-          if (hist && typeof hist === 'object') {
-              const next = JSON.parse(JSON.stringify(hist));
-              next.uid = k;
-              if (guideSheet?.name) next.name = guideSheet.name;
-              if (guideSheet?.sourceData) next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
-              if (guideSheet?.updateConfig) next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
-              if (guideSheet?.exportConfig) next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
-              const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
-                  ? JSON.parse(JSON.stringify(guideSheet.content[0]))
-                  : null;
-              if (guideHeader && String(guideHeader[0] ?? '') !== 'row_id') {
-                  throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || k)}`);
+          try {
+              const guideSheet = guided[k];
+              const canonicalName = canonicalizeDisplayName_ACU(guideSheet?.name);
+              const historicalKeys = canonicalName ? (historicalKeysByCanonicalName.get(canonicalName) || []) : [];
+              if (historicalKeys.length > 1) {
+                  logWarn_ACU(`[Merge] 指导表「${guideSheet?.name || k}」匹配多个历史 Sheet (${historicalKeys.join(', ')})，拒绝自动继承。`);
               }
-              if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [['row_id']];
-              if (guideHeader) {
-                  next.content[0] = guideHeader;
-                  const targetLen = guideHeader.length;
-                  for (let r = 1; r < next.content.length; r++) {
-                      const row = next.content[r];
-                      if (!Array.isArray(row)) continue;
-                      if (row.length < targetLen) {
-                          while (row.length < targetLen) row.push(null);
-                      } else if (row.length > targetLen) {
-                          throw new Error(`历史表「${String(guideSheet?.name || k)}」行宽度超过 Sheet Guide 表头，拒绝截断数据。`);
+              const historicalKey = historicalKeys.length === 1 ? historicalKeys[0] : null;
+              const hist = historicalKey ? mergedData[historicalKey] : undefined;
+              if (hist && typeof hist === 'object') {
+                  const next = JSON.parse(JSON.stringify(hist));
+                  next.uid = k;
+
+                  const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
+                      ? guideSheet.content[0]
+                      : null;
+                  const histHeader = Array.isArray(next.content) && Array.isArray(next.content[0])
+                      ? next.content[0]
+                      : null;
+
+                  if (options.structuralAuthority === 'data') {
+                      // ── V2：checkpoint 持结构权 ──
+                      // content 原样保留：不覆盖表头、不 padding、不截断。
+                      if (!Array.isArray(next.content) || next.content.length === 0) {
+                          next.content = [histHeader || ['row_id']];
+                      }
+                      const headerMatches = !!guideHeader && !!histHeader && isSameSheetHeader_ACU(guideHeader, histHeader);
+                      if (guideHeader && histHeader && !headerMatches) {
+                          const msg = `[Merge] 表「${String(next.name || guideSheet?.name || k)}」(${k}) 的 Sheet Guide 表头与历史权威数据不一致，`
+                              + `已保留历史结构：guide=${guideHeader.length} 列, data=${histHeader.length} 列。`
+                              + `如需变更列结构，请通过模板提交触发 schema migration。`;
+                          logWarn_ACU(msg);
+                          warnings.push(msg);
+                      }
+                      applyGuideMetadataToSheet_ACU(next, guideSheet, { inheritDdl: headerMatches });
+                      if (Array.isArray(guideSheet?.seedRows)) next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
+                      guided[k] = next;
+                  } else {
+                      // ── legacy-v1：guide 持结构权（旧行为，含 padding）──
+                      if (guideSheet?.name) next.name = guideSheet.name;
+                      if (guideSheet?.sourceData) next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+                      if (guideSheet?.updateConfig) next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
+                      if (guideSheet?.exportConfig) next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
+                      if (guideHeader && String(guideHeader[0] ?? '') !== 'row_id') {
+                          throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || k)}`);
+                      }
+                      if (!Array.isArray(next.content)) next.content = guideHeader ? [guideHeader] : [['row_id']];
+                      if (guideHeader) {
+                          next.content[0] = guideHeader;
+                          const targetLen = guideHeader.length;
+                          for (let r = 1; r < next.content.length; r++) {
+                              const row = next.content[r];
+                              if (!Array.isArray(row)) continue;
+                              if (row.length < targetLen) {
+                                  while (row.length < targetLen) row.push(null);
+                              } else if (row.length > targetLen) {
+                                  throw new Error(`历史表「${String(guideSheet?.name || k)}」行宽度超过 Sheet Guide 表头，拒绝截断数据。`);
+                              }
+                          }
+                      }
+                      if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) next[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                      if (Array.isArray(guideSheet?.seedRows)) next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
+                      guided[k] = next;
+                  }
+              } else {
+                  // guide-only 表（checkpoint 中不存在）：guide 是唯一结构来源。
+                  if (options.structuralAuthority === 'data') {
+                      // V2：校验 row_id 首列后完整物化 guide（含 sourceData.ddl）。
+                      const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
+                          ? guideSheet.content[0]
+                          : null;
+                      if (guideHeader && String(guideHeader[0] ?? '') !== 'row_id') {
+                          throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || k)}`);
                       }
                   }
+                  if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) {
+                      guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                  }
               }
-              if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) next[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
-              if (Array.isArray(guideSheet?.seedRows)) next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
-              guided[k] = next;
-          } else if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) {
-              guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+          } catch (e) {
+              logError_ACU(`[Merge] 表「${k}」合并失败，已隔离：`, e);
+              delete guided[k];
+              quarantinedSheetKeys.push(k);
           }
       });
-      return guided;
+      return { data: guided, quarantinedSheetKeys, warnings };
   }
 
   export async function mergeAllIndependentTablesLegacyV1_ACU() {
@@ -346,7 +411,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       // 2) 对指导表中缺失的表：使用指导表结构作为初始值（seedRows 仅保留字段，不默认展开到 content）
       // 3) 对于存在历史数据的表：以历史数据为主，但表名/表头/参数/顺序以指导表为准；不把 seedRows 合并进真实数据行
       if (hasSheetGuide) {
-          mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);
+          mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData).data;
       }
 
       // [修复] 合并结果按"用户手动顺序/模板顺序"重排，避免合并过程导致的随机乱序
@@ -354,6 +419,31 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       mergedData = reorderDataBySheetKeys_ACU(mergedData, orderedKeys);
       return migrateContentNullToRowId(mergedData);
   }
+
+  // ── 单表隔离信息暂存（模块级，无状态污染）──
+  // mergeSheetGuideStructureIntoData_ACU 的隔离表键与结构 warning 通过这里透出，
+  // 由 refreshMergedDataAndNotify_ACU 紧随合并调用之后读取并清空，避免污染数据对象。
+  let lastMergeQuarantinedSheetKeys: string[] = [];
+  let lastMergeWarnings: string[] = [];
+
+  /**
+   * 读取并清空上一次合并产生的隔离表键（供加载路径报告单表故障隔离）。
+   */
+  export function consumeLastMergeQuarantinedSheetKeys_ACU(): string[] {
+      const keys = lastMergeQuarantinedSheetKeys;
+      lastMergeQuarantinedSheetKeys = [];
+      return keys;
+  }
+
+  /**
+   * 读取并清空上一次合并产生的结构 warning（供加载路径记录可定位提示）。
+   */
+  export function consumeLastMergeWarnings_ACU(): string[] {
+      const warnings = lastMergeWarnings;
+      lastMergeWarnings = [];
+      return warnings;
+  }
+
 
   export async function mergeAllIndependentTables_ACU() {
       const chat = getChatArray_ACU();
@@ -372,11 +462,23 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
           let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, {
               allowTemporaryTemplateBaseline: true,
           }) as Record<string, any> | null;
+          // [修复顺序] 历史 auto_merged 越界尾列（行宽 = 表头 + 1 且尾格为 'auto_merged'）
+          // 必须在 guide 结构比较之前剥离，否则 +1 宽度差会被误判为结构不一致。
+          if (mergedData) {
+              const repaired = repairLegacyAutoMergedRowTails_ACU(mergedData);
+              if (repaired.length > 0) {
+                  logDebug_ACU(`[数据修复] 已移除历史 auto_merged 越界尾列：${repaired.join('、')}`);
+              }
+          }
           const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
           if (mergedData && hasUsableSheetGuide_ACU(sheetGuideData)) {
-              mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);
-              const orderedKeys = getSortedSheetKeys_ACU(mergedData);
-              return migrateContentNullToRowId(reorderDataBySheetKeys_ACU(mergedData, orderedKeys));
+              const mergeResult = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData, {
+                  structuralAuthority: 'data',
+              });
+              lastMergeQuarantinedSheetKeys = mergeResult.quarantinedSheetKeys;
+              lastMergeWarnings = mergeResult.warnings;
+              const orderedKeys = getSortedSheetKeys_ACU(mergeResult.data);
+              return migrateContentNullToRowId(reorderDataBySheetKeys_ACU(mergeResult.data, orderedKeys));
           }
           return migrateContentNullToRowId(mergedData);
       }

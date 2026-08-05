@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  clearBm25CorpusCache_ACU,
   reciprocalRankFusion_ACU,
   sparseSearchBm25_ACU,
   tokenizeBm25Text_ACU,
@@ -130,5 +131,40 @@ describe('summary-vector-hybrid-retrieval', () => {
     expect(results).toHaveLength(1);
     expect(results[0].bm25Score).toBe(1.1);
     expect(results[0].denseScore).toBe(0.7);
+  });
+
+  it('T10：相同 cacheKey 复用缓存语料，结果与重建一致', () => {
+    clearBm25CorpusCache_ACU();
+    const candidates = [candidate_ACU('1', 'dragon relic hidden'), candidate_ACU('2', 'garden tea party')];
+    const first = sparseSearchBm25_ACU('dragon relic', candidates, 5, 'idx::wg1::c1|c2');
+    const second = sparseSearchBm25_ACU('dragon relic', candidates, 5, 'idx::wg1::c1|c2');
+
+    expect(first).toHaveLength(1);
+    expect(second).toEqual(first);
+  });
+
+  it('T10：候选集变化（cacheKey 变化）时使用新语料，不误用旧缓存', () => {
+    clearBm25CorpusCache_ACU();
+    const first = sparseSearchBm25_ACU('dragon', [candidate_ACU('1', 'dragon appears once')], 5, 'idx::wg1::c1');
+    const second = sparseSearchBm25_ACU('dragon', [candidate_ACU('2', 'dragon dragon dragon')], 5, 'idx::wg1::c2');
+
+    // 两次命中不同候选：语料未串用。
+    expect(first).toHaveLength(1);
+    expect(first[0].chunk.chunkId).toBe('chunk-1');
+    expect(second).toHaveLength(1);
+    expect(second[0].chunk.chunkId).toBe('chunk-2');
+    expect(second[0].bm25Score || 0).toBeGreaterThan(first[0].bm25Score || 0);
+  });
+
+  it('T10：clearBm25CorpusCache_ACU 清空缓存后强制重建', () => {
+    clearBm25CorpusCache_ACU();
+    const candidates = [candidate_ACU('1', 'dragon relic hidden')];
+    sparseSearchBm25_ACU('dragon', candidates, 5, 'idx::wg1::c1');
+    clearBm25CorpusCache_ACU();
+
+    // 清空后再次调用（同 key）仍返回正确结果，说明缓存被重建而非残留。
+    const after = sparseSearchBm25_ACU('dragon', candidates, 5, 'idx::wg1::c1');
+    expect(after).toHaveLength(1);
+    expect(after[0].chunk.chunkId).toBe('chunk-1');
   });
 });

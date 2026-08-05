@@ -233,6 +233,28 @@ describe('hashUserInput_ACU', () => {
   it('换行符归一化', () => {
     expect(hashUserInput_ACU('a\r\nb')).toBe(hashUserInput_ACU('a\nb'));
   });
+
+  // T0b 依赖：preflight 的 indexId 占位 13 = 'snap_'(5) + 本函数输出上界(8)。
+  // 本函数末轮不再 `^=` 截回 32 位，返回值可能为负，toString(36) 会带 `-` 号，
+  // 因此上界是 8 而不是 7。若此不变量被破坏（输出更长），
+  // preflightVectorIndexSnapshotPath_ACU 的占位将不再是上界，
+  // 临界 scope 会通过 preflight 后在 persist 抛错（先烧 embedding 再失败）。
+  it('输出长度不超过 8 字符（含负号），保证 V2 路径 preflight 占位为真实上界', () => {
+    let maxLength = 0;
+    let longestSample = '';
+    for (let index = 0; index < 20000; index += 1) {
+      // 覆盖真实 indexId 输入形状：chatKey\nisolationKey\nsourceTableKey\nrevision
+      const hash = hashUserInput_ACU(`chat-${index}-中文名字\niso-${index % 7}\nsheet_summary\n${(index % 50) + 1}`);
+      if (hash.length > maxLength) {
+        maxLength = hash.length;
+        longestSample = hash;
+      }
+    }
+
+    expect(maxLength).toBeLessThanOrEqual(8);
+    expect(`snap_${longestSample}`.length).toBeLessThanOrEqual(13);
+  });
+
 });
 
 // ═══════════════════════════════════════════════════════════════

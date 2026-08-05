@@ -24,7 +24,12 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentChatFileIdentifier_ACU() { return h.chatKey; },
   getCurrentIsolationKey_ACU: () => h.isolationKey,
 }));
-vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
+vi.mock('../../../src/shared/utils', () => ({
+  logDebug_ACU: vi.fn(),
+  logWarn_ACU: vi.fn(),
+  // T4：cooldown 指纹用稳定哈希，保证 flush 侧与 archive mock 的 credentialFingerprint 一致。
+  hashUserInput_ACU: (text: string) => `hash:${text}`,
+}));
 vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
   SummaryVectorFlushGenerationInvalidatedError_ACU: h.GenerationInvalidatedError,
   deleteSummaryVectorFlushTask_ACU: (...args: any[]) => h.remove(...args),
@@ -46,9 +51,17 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
   logSummaryVectorIndexIdentityEvent_ACU: (...args: any[]) => h.logIdentityEvent(...args),
 }));
+vi.mock('../../../src/service/vector/vector-memory-config', () => ({
+  getEffectiveSummaryVectorIndexConfig_ACU: () => ({
+    embeddingEndpoint: 'https://embedding.test',
+    embeddingModel: 'test-model',
+    embeddingApiKey: 'test-key',
+  }),
+}));
 
 import {
   buildSummaryVectorIndexFlushScopeKey_ACU,
+  clearSummaryVectorIndexCredentialCooldowns_ACU,
   clearSummaryVectorIndexFlushQueueForCurrentScope_ACU,
   enqueueSummaryVectorIndexFlush_ACU,
   flushSummaryVectorIndexTaskNow_ACU,
@@ -59,6 +72,7 @@ import {
   isSummaryVectorIndexDirtyForRealign_ACU,
   markSummaryVectorIndexDirtyForRealign_ACU,
 } from '../../../src/service/vector/summary-vector-index-realign-state';
+import { hashUserInput_ACU } from '../../../src/shared/utils';
 
 function task(scopeKey: string, overrides: any = {}) {
   return { scopeKey, chatKey: 'chat-a', isolationKey: 'iso-a', sourceTableKey: 'summary-a', targetMessageIndex: 3, mode: 'sync', status: 'queued', requestedAt: 1, debounceUntil: Date.now(), attemptCount: 0, updatedAt: Date.now(), ...overrides };
@@ -71,6 +85,7 @@ describe('summary-vector-index flush queue scope', () => {
     h.chatKey = 'chat-a'; h.isolationKey = 'iso-a'; h.summaryKey = 'summary-a';
     h.get.mockImplementation(async () => h.task);
     h.getStrict.mockImplementation(async () => h.task);
+    clearSummaryVectorIndexCredentialCooldowns_ACU();
     h.upsert.mockImplementation(async (input: any) => ({ ...input, attemptCount: 0, updatedAt: Date.now() }));
     h.list.mockResolvedValue([]); h.remove.mockResolvedValue(undefined); h.markReadyIfGenerationMatches.mockResolvedValue(true); h.removeStrict.mockResolvedValue(undefined);
     h.reconcileLegacy.mockResolvedValue({ outcome: 'migrated', task: null });
@@ -351,4 +366,120 @@ describe('summary-vector-index flush queue scope', () => {
     await clearSummaryVectorIndexFlushQueueForCurrentScope_ACU({ isolationKey: 'iso-a', sourceTableKey: 'summary-a' });
     expect(h.archive).toHaveBeenCalledWith(expect.objectContaining({ expectedFlushScopeKey: scope, expectedFlushGeneration: 0 }));
   });
+
+  it('T0c：路径超长（retryability=terminal）时 flush task 置 failed_terminal，restore 不重挂定时器', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      indexedRowCount: 0,
+      skippedRowCount: 0,
+      chunkCount: 0,
+      errors: ['V2 快照对象路径超长: length=247, max=240'],
+      reason: 'vector_index_path_too_long',
+      retryability: 'terminal',
+    });
+    const capturedUpserts: any[] = [];
+    h.upsert.mockImplementation(async (input: any) => {
+      capturedUpserts.push(input);
+      return { ...input, attemptCount: 0, updatedAt: Date.now() };
+    });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({
+      success: false,
+      reason: 'vector_index_path_too_long',
+    });
+
+    expect(capturedUpserts.at(-1)).toMatchObject({ scopeKey: scope, status: 'failed_terminal' });
+    expect(h.logIdentityEvent).toHaveBeenCalledWith(
+      'warn',
+      'flush',
+      'failed_terminal',
+      expect.objectContaining({ scopeFingerprint: scope }),
+    );
+    // 已 failed_terminal 的 task 在 restore 时不会重挂定时器
+    h.list.mockResolvedValue([capturedUpserts.at(-1)]);
+    await expect(restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU()).resolves.toBe(0);
+  });
+
+  it('T4：credential 403（retryability=terminal + credentialFingerprint）→ failed_terminal，restore 不重挂，且同凭据 cooldown 拦截后续 scope', async () => {
+    const scopeA = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scopeA);
+    const fingerprint = hashUserInput_ACU('https://embedding.test|test-model|test-key');
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      indexedRowCount: 0,
+      skippedRowCount: 0,
+      chunkCount: 0,
+      errors: ['Embedding 请求失败（credential, HTTP 403）: insufficient balance'],
+      reason: 'embedding_request_failed',
+      retryability: 'terminal',
+      credentialFingerprint: fingerprint,
+    });
+    const capturedUpserts: any[] = [];
+    h.upsert.mockImplementation(async (input: any) => {
+      capturedUpserts.push(input);
+      return { ...input, attemptCount: 0, updatedAt: Date.now() };
+    });
+
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scopeA)).resolves.toMatchObject({
+      success: false,
+      reason: 'embedding_request_failed',
+    });
+
+    expect(capturedUpserts.at(-1)).toMatchObject({ scopeKey: scopeA, status: 'failed_terminal' });
+    expect(h.logIdentityEvent).toHaveBeenCalledWith(
+      'warn', 'flush', 'credential_cooldown_armed',
+      expect.objectContaining({ scopeFingerprint: 'credential-fingerprint' }),
+    );
+    // 同凭据但不同 scope：cooldown 生效，不再发起 archive（避免重复扣费）。
+    // 切到另一个聊天（chat-b）：其 scope 独立，但同凭据 cooldown 拦截。
+    h.chatKey = 'chat-b';
+    const scopeB = buildSummaryVectorIndexFlushScopeKey_ACU('chat-b', 'iso-a', 'summary-a');
+    h.task = task(scopeB, { chatKey: 'chat-b' });
+    h.archive.mockClear();
+    const cooldownUpserts: any[] = [];
+    h.upsert.mockImplementation(async (input: any) => {
+      cooldownUpserts.push(input);
+      return { ...input, attemptCount: 0, updatedAt: Date.now() };
+    });
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scopeB)).resolves.toMatchObject({
+      success: false,
+      reason: 'credential_cooldown',
+    });
+    expect(h.archive).not.toHaveBeenCalled();
+    expect(cooldownUpserts.at(-1)).toMatchObject({ scopeKey: scopeB, status: 'failed_terminal' });
+  });
+
+  it('T4：手动重建成功清除 cooldown 后，同凭据后续 flush 恢复正常', async () => {
+    const scope = buildSummaryVectorIndexFlushScopeKey_ACU('chat-a', 'iso-a', 'summary-a');
+    h.task = task(scope);
+    const fingerprint = hashUserInput_ACU('https://embedding.test|test-model|test-key');
+    h.archive.mockResolvedValueOnce({
+      success: false,
+      skipped: false,
+      indexedRowCount: 0,
+      skippedRowCount: 0,
+      chunkCount: 0,
+      errors: ['Embedding 请求失败（credential, HTTP 401）: bad key'],
+      reason: 'embedding_request_failed',
+      retryability: 'terminal',
+      credentialFingerprint: fingerprint,
+    });
+    h.upsert.mockImplementation(async (input: any) => ({ ...input, attemptCount: 0, updatedAt: Date.now() }));
+    await flushSummaryVectorIndexTaskNow_ACU(scope);
+
+    // 手动重建成功（rebuild-service 调用 clearSummaryVectorIndexCredentialCooldowns_ACU）。
+    clearSummaryVectorIndexCredentialCooldowns_ACU();
+
+    // 同凭据重新 flush：cooldown 已清除，archive 正常执行。
+    h.archive.mockClear();
+    h.archive.mockResolvedValueOnce({ success: true, skipped: false, errors: [] });
+    h.task = task(scope);
+    await expect(flushSummaryVectorIndexTaskNow_ACU(scope)).resolves.toMatchObject({ success: true });
+    expect(h.archive).toHaveBeenCalledTimes(1);
+  });
+
 });

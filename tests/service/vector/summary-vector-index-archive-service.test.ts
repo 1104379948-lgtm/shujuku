@@ -21,10 +21,14 @@ const {
   mockIsLegacySummaryVectorIndexManifest,
   mockLogSummaryVectorIndexIdentityEvent,
   mockIsolationKeyRef,
+  mockIsVectorEmbeddingError,
+  mockGetEffectiveSummaryVectorIndexConfig,
 } = vi.hoisted(() => {
   const mockChat = [{ is_user: false, mes: 'AI回复', id: 'msg-1' }] as any[];
   const mockCurrentJsonTableDataRef = { value: {} as any };
   const mockIsolationKeyRef = { value: 'runtime-isolation' };
+  const mockIsVectorEmbeddingError = vi.fn(() => false);
+  const mockGetEffectiveSummaryVectorIndexConfig = vi.fn();
   return {
     mockChat,
     mockCurrentJsonTableDataRef,
@@ -42,6 +46,8 @@ const {
     mockIsLegacySummaryVectorIndexManifest: vi.fn(() => false),
     mockLogSummaryVectorIndexIdentityEvent: vi.fn(),
     mockIsolationKeyRef,
+    mockIsVectorEmbeddingError,
+    mockGetEffectiveSummaryVectorIndexConfig,
   };
 });
 
@@ -63,6 +69,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
 
 vi.mock('../../../src/data/gateways/vector-embedding-gateway', () => ({
   createEmbeddings_ACU: (...args: any[]) => mockCreateEmbeddings(...args),
+  isVectorEmbeddingError_ACU: (...args: any[]) => mockIsVectorEmbeddingError(...args),
 }));
 
 
@@ -74,12 +81,17 @@ vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
 }));
 
 vi.mock('../../../src/service/vector/vector-memory-config', () => ({
-  getEffectiveSummaryVectorIndexConfig_ACU: vi.fn(() => ({
+  getEffectiveSummaryVectorIndexConfig_ACU: (...args: any[]) => mockGetEffectiveSummaryVectorIndexConfig(...args),
+  validateSummaryVectorIndexConfig_ACU: vi.fn(() => ({ valid: true, errors: [] })),
+}));
+
+const mockDefaultSummaryVectorIndexConfig_ACU = {
     embeddingEndpoint: 'https://embedding.test',
     embeddingApiKey: 'test-key',
     embeddingModel: 'test-model',
     summaryIndexChunkSentenceCount: 1,
     summaryIndexArchiveMaxConcurrency: 10,
+    summaryIndexArchiveEmbeddingConcurrency: 3,
     summaryIndexV2WriteEnabled: true,
     threshold: 1,
     archiveTriggerCount: 1,
@@ -91,9 +103,7 @@ vi.mock('../../../src/service/vector/vector-memory-config', () => ({
     summaryPromptGroupId: 'summary',
     entryComment: 'entry',
     entryKey: 'key',
-  })),
-  validateSummaryVectorIndexConfig_ACU: vi.fn(() => ({ valid: true, errors: [] })),
-}));
+};
 
 vi.mock('../../../src/service/vector/summary-vector-index-storage-service', () => ({
   loadSummaryVectorIndexChunksFromManifest_ACU: vi.fn(async (manifest: any) => persistedChunksByIndexId.get(manifest.indexId) || []),
@@ -178,6 +188,8 @@ describe('summary-vector-index-archive-service pending 归档', () => {
       };
     });
     mockAssertFlushGeneration.mockResolvedValue(undefined);
+    mockIsVectorEmbeddingError.mockReturnValue(false);
+    mockGetEffectiveSummaryVectorIndexConfig.mockReturnValue(mockDefaultSummaryVectorIndexConfig_ACU);
   });
 
 
@@ -637,4 +649,277 @@ describe('summary-vector-index-archive-service pending 归档', () => {
     expect(mockSaveChatToHost).not.toHaveBeenCalled();
     expect(mockDeleteSummaryVectorIndexExternal).not.toHaveBeenCalled();
   });
+
+  it('T0b：scope 超长时在 embedding 之前被 preflight 拦截，createEmbeddings_ACU 调用次数为 0', async () => {
+    // 超长 isolationKey：normalizeSummaryVectorIndexScope_ACU 不做长度截断，
+    // scopeToken = base64url(JSON([chatKey, isolationKey, sourceTableKey])) 必然膨胀超 240。
+    mockIsolationKeyRef.value = 'x'.repeat(200);
+
+    const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe('vector_index_path_too_long');
+    expect(mockCreateEmbeddings).not.toHaveBeenCalled();
+    expect(mockPersistSummaryVectorIndexSnapshot).not.toHaveBeenCalled();
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+  });
+
+  it('T0b：正常 scope 的归档仍正常完成（preflight 不误伤），embedding 照常执行', async () => {
+    mockIsolationKeyRef.value = 'runtime-isolation';
+    const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+    expect(result.success).toBe(true);
+    expect(mockCreateEmbeddings).toHaveBeenCalled();
+  });
+
+  it('T2：existing manifest 的 embeddingModel 与当前配置不同时，判为全量重算并记录 identity 事件', async () => {
+    const existingState = {
+      version: 1,
+      backend: 'st-files',
+      status: 'ready',
+      indexId: 'idx-old',
+      snapshotMessageId: 'snap-old',
+      sourceTableKey: 'sheet_summary',
+      sourceTableName: '纪要表',
+      indexedAt: '2025-01-01T00:00:00.000Z',
+      rowCount: 1,
+      chunkCount: 0,
+      skippedRowCount: 0,
+      rows: [{
+        rowKey: 'row-1',
+        rowId: '1',
+        timeSpan: '上午',
+        location: '甲地',
+        summary: '第一次事件。',
+        indexCode: 'AM-0001',
+        vectorSourceText: '第一次事件。',
+        status: 'active',
+        chunkIds: [],
+      }],
+      manifest: {
+        indexId: 'idx-old',
+        status: 'ready',
+        embeddingModel: 'old-model',
+        snapshotMessageId: 'snap-old',
+        sourceTableKey: 'sheet_summary',
+        sourceTableName: '纪要表',
+        rowCount: 1,
+        chunkCount: 0,
+        skippedRowCount: 0,
+        snapshot: { activeRowKeys: ['row-1'], revision: 1 },
+      },
+    };
+    mockChat[0].TavernDB_ACU_IsolatedData = {
+      'runtime-isolation': {
+        independentData: {},
+        modifiedKeys: [],
+        updateGroupKeys: [],
+        summaryVectorIndexState: existingState,
+        summaryVectorIndexManifest: existingState.manifest,
+      },
+    };
+
+    const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+
+    expect(result.success).toBe(true);
+    expect(mockLogSummaryVectorIndexIdentityEvent).toHaveBeenCalledWith(
+      'warn', 'archive', 'embedding_identity_changed_full_rebuild',
+      expect.objectContaining({ error: 'model=old-model → test-model' }),
+    );
+    // 全量重算：所有 prepared 行都进入 embedding，不因已有快照而减少 embedding 输入。
+    expect(mockCreateEmbeddings).toHaveBeenCalled();
+    const embeddingInputs = mockCreateEmbeddings.mock.calls.flatMap((call: any) => call[0]?.input || []);
+    expect(embeddingInputs.length).toBeGreaterThanOrEqual(1);
+    // 对照组：模型一致（test-model）时不触发该事件。
+    mockLogSummaryVectorIndexIdentityEvent.mockClear();
+    mockChat[0].TavernDB_ACU_IsolatedData = {
+      'runtime-isolation': {
+        independentData: {},
+        modifiedKeys: [],
+        updateGroupKeys: [],
+        summaryVectorIndexState: {
+          ...existingState,
+          manifest: { ...existingState.manifest, embeddingModel: 'test-model' },
+        },
+        summaryVectorIndexManifest: { ...existingState.manifest, embeddingModel: 'test-model' },
+      },
+    };
+    const normalResult = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+    expect(normalResult.success).toBe(true);
+    expect(mockLogSummaryVectorIndexIdentityEvent).not.toHaveBeenCalled();
+
+  });
+  it('T4：embedding credential 403 时，归档结果标记 terminal + credentialFingerprint（archive 层真实覆盖）', async () => {
+    // archive 层 T4 分支：仅由 flush-queue 侧 mock archive 间接覆盖过，这里直接打真实 catch 分支。
+    mockIsVectorEmbeddingError.mockReturnValue(true);
+    mockCreateEmbeddings.mockRejectedValueOnce({
+      kind: 'credential',
+      httpStatus: 403,
+      providerCode: '30001',
+      providerMessage: 'insufficient balance',
+      message: 'Embedding 请求失败 403: insufficient balance',
+    });
+
+    const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+
+    expect(result.success).toBe(false);
+    expect(result.skipped).toBe(false);
+    expect(result.reason).toBe('embedding_request_failed');
+    expect(result.retryability).toBe('terminal');
+    expect(typeof result.credentialFingerprint).toBe('string');
+    expect(result.credentialFingerprint!.length).toBeGreaterThan(0);
+    // errors 是单元素数组：`Embedding 请求失败（kind, HTTP status）: detail`，detail = providerMessage || message。
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('Embedding 请求失败（credential, HTTP 403）');
+    expect(result.errors[0]).toContain('insufficient balance');
+    // 指纹只应包含哈希，不应泄漏 apiKey 明文。
+    expect(result.credentialFingerprint).not.toContain('test-key');
+  });
+
+
+
+  it('T9：多批次有界并发归档时，最终 chunks 的 sequence 序与串行一致', async () => {
+    // 4 行纪要表，每行 1 chunk；批大小 2 → 2 批；并发度 2 → 两批并行。
+    mockCurrentJsonTableDataRef.value = {
+      sheet_summary: {
+        name: '纪要表',
+        content: [
+          ['row_id', '时间跨度', '地点', '概要', '编码索引'],
+          ['1', '上午', '甲地', '事件一。', 'AM-0001'],
+          ['2', '下午', '乙地', '事件二。', 'PM-0002'],
+          ['3', '晚上', '丙地', '事件三。', 'EV-0003'],
+          ['4', '深夜', '丁地', '事件四。', 'NI-0004'],
+        ],
+      },
+    };
+    mockChat.length = 0;
+    mockChat.push({ is_user: false, mes: 'AI回复', id: 'msg-1' });
+    // 直接覆盖 config mock 返回值：批大小 2、并发 2。
+    mockGetEffectiveSummaryVectorIndexConfig.mockReturnValue({
+      embeddingEndpoint: 'https://embedding.test',
+      embeddingApiKey: 'test-key',
+      embeddingModel: 'test-model',
+      summaryIndexChunkSentenceCount: 1,
+      summaryIndexArchiveMaxConcurrency: 2,
+      summaryIndexArchiveEmbeddingConcurrency: 2,
+      summaryIndexV2WriteEnabled: true,
+      threshold: 1,
+      archiveTriggerCount: 1,
+      archiveBatchSize: 1,
+      archiveMaxConcurrency: 1,
+      topK: 1,
+      minScore: 0,
+      recallCandidateLimit: 1,
+      summaryPromptGroupId: 'summary',
+      entryComment: 'entry',
+      entryKey: 'key',
+    });
+
+    const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+
+    expect(result.success).toBe(true);
+    // 2 批 → 2 次 embedding 请求。
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(2);
+    // 最终 chunks 的 sequence 必须为 0..3（与串行一致），证明 sequence 预分配正确。
+    const persistedChunks = Array.from(persistedChunksByIndexId.values()).at(-1) || [];
+    expect(persistedChunks.map((chunk: any) => chunk.sequence).sort((a: number, b: number) => a - b))
+      .toEqual([0, 1, 2, 3]);
+  });
+
+  it('T9：并发度设为 1 时行为与串行逐步等价', async () => {
+    mockCurrentJsonTableDataRef.value = {
+      sheet_summary: {
+        name: '纪要表',
+        content: [
+          ['row_id', '时间跨度', '地点', '概要', '编码索引'],
+          ['1', '上午', '甲地', '事件一。', 'AM-0001'],
+          ['2', '下午', '乙地', '事件二。', 'PM-0002'],
+          ['3', '晚上', '丙地', '事件三。', 'EV-0003'],
+          ['4', '深夜', '丁地', '事件四。', 'NI-0004'],
+        ],
+      },
+    };
+    mockChat.length = 0;
+    mockChat.push({ is_user: false, mes: 'AI回复', id: 'msg-1' });
+    mockGetEffectiveSummaryVectorIndexConfig.mockReturnValue({
+      embeddingEndpoint: 'https://embedding.test',
+      embeddingApiKey: 'test-key',
+      embeddingModel: 'test-model',
+      summaryIndexChunkSentenceCount: 1,
+      summaryIndexArchiveMaxConcurrency: 2,
+      summaryIndexArchiveEmbeddingConcurrency: 1,
+      summaryIndexV2WriteEnabled: true,
+      threshold: 1,
+      archiveTriggerCount: 1,
+      archiveBatchSize: 1,
+      archiveMaxConcurrency: 1,
+      topK: 1,
+      minScore: 0,
+      recallCandidateLimit: 1,
+      summaryPromptGroupId: 'summary',
+      entryComment: 'entry',
+      entryKey: 'key',
+    });
+
+    const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+
+    expect(result.success).toBe(true);
+    expect(mockCreateEmbeddings).toHaveBeenCalledTimes(2);
+    const persistedChunks = Array.from(persistedChunksByIndexId.values()).at(-1) || [];
+    expect(persistedChunks.map((chunk: any) => chunk.sequence).sort((a: number, b: number) => a - b))
+      .toEqual([0, 1, 2, 3]);
+  });
+
+  it('T9：任一批次 embedding 失败时错误按 T3 分类传导，不静默吞掉', async () => {
+    mockCurrentJsonTableDataRef.value = {
+      sheet_summary: {
+        name: '纪要表',
+        content: [
+          ['row_id', '时间跨度', '地点', '概要', '编码索引'],
+          ['1', '上午', '甲地', '事件一。', 'AM-0001'],
+          ['2', '下午', '乙地', '事件二。', 'PM-0002'],
+          ['3', '晚上', '丙地', '事件三。', 'EV-0003'],
+          ['4', '深夜', '丁地', '事件四。', 'NI-0004'],
+        ],
+      },
+    };
+    mockChat.length = 0;
+    mockChat.push({ is_user: false, mes: 'AI回复', id: 'msg-1' });
+    mockGetEffectiveSummaryVectorIndexConfig.mockReturnValue({
+      embeddingEndpoint: 'https://embedding.test',
+      embeddingApiKey: 'test-key',
+      embeddingModel: 'test-model',
+      summaryIndexChunkSentenceCount: 1,
+      summaryIndexArchiveMaxConcurrency: 2,
+      summaryIndexArchiveEmbeddingConcurrency: 2,
+      summaryIndexV2WriteEnabled: true,
+      threshold: 1,
+      archiveTriggerCount: 1,
+      archiveBatchSize: 1,
+      archiveMaxConcurrency: 1,
+      topK: 1,
+      minScore: 0,
+      recallCandidateLimit: 1,
+      summaryPromptGroupId: 'summary',
+      entryComment: 'entry',
+      entryKey: 'key',
+    });
+    mockIsVectorEmbeddingError.mockReturnValue(true);
+    mockCreateEmbeddings.mockRejectedValue({
+      kind: 'credential',
+      httpStatus: 403,
+      providerCode: '30001',
+      providerMessage: 'insufficient balance',
+      message: 'Embedding 请求失败 403: insufficient balance',
+    });
+
+    const result = await archiveSummaryVectorIndexNow_ACU({ targetMessageIndex: 0, force: true });
+
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe('embedding_request_failed');
+    expect(result.retryability).toBe('terminal');
+    expect(typeof result.credentialFingerprint).toBe('string');
+    expect(mockPersistSummaryVectorIndexSnapshot).not.toHaveBeenCalled();
+  });
+
+
 });

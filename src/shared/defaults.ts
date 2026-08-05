@@ -193,6 +193,7 @@ export const defaultVectorMemoryConfig_ACU = {
   archiveBatchSize: 3,
   archiveMaxConcurrency: 3,
   summaryIndexArchiveMaxConcurrency: 30,
+  summaryIndexArchiveEmbeddingConcurrency: 3,
   topK: 200,
   minScore: 0.45,
   embeddingEndpoint: '',

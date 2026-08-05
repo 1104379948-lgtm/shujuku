@@ -5,6 +5,9 @@ import {
   registerVectorIndexFiles_ACU,
 } from '../../../src/data/storage/vector-index-st-files-storage';
 
+import { buildVectorIndexSnapshotWriteGeneration_ACU } from '../../../src/service/vector/summary-vector-index-storage-service';
+
+
 afterEach(() => vi.unstubAllGlobals());
 
 const base = {
@@ -57,6 +60,31 @@ describe('向量索引 V2 物理路径', () => {
       sourceTableKey: 'summary-'.repeat(40),
     })).toThrow('V2 快照对象路径超长');
   });
+
+  it('T0d：超长错误消息给出各段长度与差额，且不含无法执行的缩 key 建议', () => {
+    let error: Error | null = null;
+    try {
+      buildVectorIndexSingleSnapshotV2FilePath_ACU({
+        ...base,
+        chatKey: 'chat-'.repeat(40),
+        isolationKey: 'isolation-'.repeat(40),
+        sourceTableKey: 'summary-'.repeat(40),
+      });
+    } catch (caught: any) {
+      error = caught;
+    }
+    expect(error).not.toBeNull();
+    const message = String(error?.message || '');
+    expect(message).toContain('V2 快照对象路径超长');
+    expect(message).toMatch(/length=\d+, max=\d+/);
+    expect(message).toMatch(/超出 \d+ 字符/);
+    expect(message).toMatch(/scopeToken 占用 \d+ 字符/);
+    expect(message).toMatch(/indexId 占用 \d+ 字符/);
+    expect(message).toMatch(/writeGeneration 占用 \d+ 字符/);
+    expect(message).toMatch(/约 \d+ 个中文字/);
+    expect(message).not.toContain('请缩短 chatKey、isolationKey 或 sourceTableKey');
+    expect(message).toContain('仅在当前没有任何已建成的纪要向量索引时');
+  });
 });
 
 describe('向量索引 registry 持久化', () => {
@@ -79,4 +107,105 @@ describe('向量索引 registry 持久化', () => {
       role: 'manifest', path: 'orphan-v2-path', byteSize: 1, checksum: 'checksum', createdAt: '', updatedAt: '', status: 'ready',
     }])).rejects.toThrow('registry 保存失败');
   });
+});
+
+
+describe('T0a writeGeneration 紧凑化', () => {
+  it('生成结果长度 ≤ 24 且字符集 [a-zA-Z0-9]，不被 normalizeFileNamePart_ACU 改写', () => {
+    const entropy = new Uint32Array([0, 0]);
+    const gen = buildVectorIndexSnapshotWriteGeneration_ACU(1234567890123, entropy);
+    expect(gen.length).toBeLessThanOrEqual(24);
+    expect(gen).toMatch(/^[a-zA-Z0-9]+$/);
+    // 与路径规范化一致：不含下划线/连字符外的非法字符，且 round-trip 后不变
+    const normalized = gen.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+    expect(normalized).toBe(gen);
+  });
+
+  it('同一毫秒内连续生成 1000 次无重复（64 位熵 + 时间戳兜底）', () => {
+    const now = 1700000000000;
+    const seen = new Set<string>();
+    // 模拟 1000 个不同熵值：前 1000 个 Uint32 组合
+    for (let i = 0; i < 1000; i += 1) {
+      const entropy = new Uint32Array([i, i * 2654435761]);
+      const gen = buildVectorIndexSnapshotWriteGeneration_ACU(now, entropy);
+      expect(seen.has(gen)).toBe(false);
+      seen.add(gen);
+    }
+    expect(seen.size).toBe(1000);
+  });
+
+  it('熵值定宽 7 位，无分隔符也可无歧义解析', () => {
+    const entropy = new Uint32Array([1, 2]);
+    const gen = buildVectorIndexSnapshotWriteGeneration_ACU(1700000000000, entropy);
+    // 时间戳 1700000000000 的 base36 为 8 位 + 7 + 7 = 22
+    expect(gen).toMatch(/^[a-z0-9]{8}[a-z0-9]{7}[a-z0-9]{7}$/);
+  });
+
+  it('旧格式 writeGeneration 的路径构造不受影响（旧快照兼容）', () => {
+    // 旧格式：时间戳base36-4×Uint32base36（连字符分隔），~40 字符
+    const legacyWriteGeneration = 'm3o6k5a1-2gk3-4m5o-6p7q-8r9s';
+    const path = buildVectorIndexSingleSnapshotV2FilePath_ACU({
+      ...base,
+      writeGeneration: legacyWriteGeneration,
+    });
+    expect(path).toContain(legacyWriteGeneration);
+    expect(path.length).toBeLessThanOrEqual(240);
+  });
+
+  it('报障用户规模 scope（三 key UTF-8 合计 110 字节）：T0a 新格式 ≤ 240，旧格式 40 字符超长抛错', () => {
+    // 反推：scopeToken = base64url(JSON([chatKey, isolationKey, sourceTableKey]))
+    // 110 内容字节 + 10 结构字节 = 120 → base64 160 字符（120 整除 3，无 padding）
+    // 路径 = 前缀 23 + scopeToken 160 + indexId 12 + writeGeneration + 后缀 10
+    const longChatKey = '中文角色名A-2025-11-5@14h30m12s345ms'; // 39 UTF-8 字节
+    const longIsolation = 'isolation-'.repeat(5); // 50 字节
+    const longSourceTable = 'source-'.repeat(3); // 21 字节
+    const indexId = 'snap_zzzzzzz'; // 12
+
+    // T0a 前：40 字符旧格式 writeGeneration → 路径 246 > 240，必须拒绝
+    const legacyGeneration = 'm3o6k5a1-2gk3abc-4m5odef-6p7qghi-8r9sjkl'; // 40
+    expect(() => buildVectorIndexSingleSnapshotV2FilePath_ACU({
+      chatKey: longChatKey,
+      isolationKey: longIsolation,
+      sourceTableKey: longSourceTable,
+      indexId,
+      writeGeneration: legacyGeneration,
+    })).toThrow('V2 快照对象路径超长');
+
+    // T0a 后：22 字符新格式 → 路径 228 ≤ 240，可写入
+    const gen = buildVectorIndexSnapshotWriteGeneration_ACU(1700000000000, new Uint32Array([4294967295, 4294967295]));
+    const path = buildVectorIndexSingleSnapshotV2FilePath_ACU({
+      chatKey: longChatKey,
+      isolationKey: longIsolation,
+      sourceTableKey: longSourceTable,
+      indexId,
+      writeGeneration: gen,
+    });
+    expect(path.length).toBeLessThanOrEqual(240);
+  });
+
+  // 预算不变量：路径 = 前缀(23) + scopeToken + '_' + indexId + '_' + writeGeneration + '_snapshot'(9)。
+  // 本用例锁住“固定段 + 两个变长段上界”所占预算，反推出 scopeToken 的可用上限。
+  // 若未来有人动前缀/后缀/分隔符，或放宽 indexId / writeGeneration 长度，
+  // scopeToken 预算会被静默吞掉（直接表现为用户聊天名突然建不了索引），本用例会先失败。
+  it('路径固定段预算不变：scopeToken 可用上限 169 字符（240 - 固定 34 - indexId 13 - writeGeneration 24）', () => {
+    const FIXED_PREFIX = 'TavernDB_ACU_vector_v2_';
+    const FIXED_SUFFIX = '_snapshot';
+    const MAX_INDEX_ID = 13; // 'snap_'(5) + hashUserInput_ACU 上界 8（含负号）
+    const MAX_WRITE_GENERATION = 24; // T0a 格式：时间戳 base36 8 + 7 + 7 = 22，留2 字符余量
+    const SEPARATORS = 2; // scopeToken_indexId_writeGeneration
+
+    expect(FIXED_PREFIX.length).toBe(23);
+    expect(FIXED_SUFFIX.length).toBe(9);
+
+    const fixedCost = FIXED_PREFIX.length + FIXED_SUFFIX.length + SEPARATORS;
+    const scopeTokenBudget = 240 - fixedCost - MAX_INDEX_ID - MAX_WRITE_GENERATION;
+    expect(fixedCost).toBe(34);
+    expect(scopeTokenBudget).toBe(169);
+
+    // 正向验证：恰好用完预算的真实路径可构造且 = 240。
+    // scopeToken 长度由 scope 内容决定，这里直接用各段上界拼出长度等价的路径做长度断言。
+    const syntheticPath = `${FIXED_PREFIX}${'z'.repeat(scopeTokenBudget)}_${'z'.repeat(MAX_INDEX_ID)}_${'z'.repeat(MAX_WRITE_GENERATION)}${FIXED_SUFFIX}`;
+    expect(syntheticPath.length).toBe(240);
+  });
+
 });

@@ -9,7 +9,7 @@ import { getChatSheetGuideDataForIsolationKey_ACU, getSortedSheetKeys_ACU, mater
 import { getImportBatchPrefix_ACU, getImportStablePrefix_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { isEntryBlocked_ACU } from '../../shared/utils';
-import { formatJsonToReadable_ACU, maybeLiftWorldbookSuppression_ACU, mergeAllIndependentTables_ACU, shouldSuppressWorldbookInjection_ACU } from '../runtime/helpers-remaining';
+import { consumeLastMergeQuarantinedSheetKeys_ACU, consumeLastMergeWarnings_ACU, formatJsonToReadable_ACU, maybeLiftWorldbookSuppression_ACU, mergeAllIndependentTables_ACU, shouldSuppressWorldbookInjection_ACU } from '../runtime/helpers-remaining';
 import { normalizeCanonicalTableRows_ACU, repairLegacyAutoMergedRowTails_ACU } from '../../shared/canonical-row-normalizer';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { persistNullRowCleanupShards_ACU, type NullRowCleanupPersistStatus_ACU } from '../table/storage-frame-v2-persist';
@@ -592,7 +592,24 @@ export   async function refreshMergedDataAndNotify_ACU() {
     let nullRowCleanupMessageIndex: number | undefined;
       
     // 合并数据 (使用新的独立表合并逻辑)
-    let mergedData = await mergeAllIndependentTables_ACU();
+    let mergedData: Record<string, any> | null = null;
+    try {
+        mergedData = await mergeAllIndependentTables_ACU();
+        // 单表隔离信息在合并函数内已做逐表 try/catch，正常路径下不会整体抛错。
+        // 这里仅用于捕获非预期异常并补充诊断上下文，不吞掉异常。
+        const quarantined = consumeLastMergeQuarantinedSheetKeys_ACU();
+        if (quarantined.length > 0) {
+            degraded = true;
+            logWarn_ACU(`[数据加载] 表格合并已隔离 ${quarantined.length} 张异常表：${quarantined.join('、')}，其余表正常加载。`);
+        }
+        const mergeWarnings = consumeLastMergeWarnings_ACU();
+        mergeWarnings.forEach(w => logWarn_ACU(w));
+    } catch (error) {
+        degraded = true;
+        logError_ACU('[数据加载] 表格合并失败，已保留可用数据并降级。', error);
+        // 不吞掉异常：吞掉会让 _set_currentJsonTableData_ACU 停留在旧状态，产生更隐蔽的不一致。
+        throw error;
+    }
 
     // 当回溯找不到任何表格数据时（mergedData 为 null），
     // 优先用"已保存指导表的物化结构（不展开 seedRows）"作为基底；

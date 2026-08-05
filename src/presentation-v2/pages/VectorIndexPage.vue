@@ -364,7 +364,7 @@
         </div>
         <AcuFormRow
           label="V2 写入闸门"
-          hint="默认关闭。关闭只会阻止新的 V2 快照写入；已发布 V2 快照仍可读取，绝不会回退覆盖旧路径。"
+          hint="默认开启（新装或未显式配置的用户默认走 V2 归档路径）。关闭只会阻止新的 V2 快照写入；已发布 V2 快照仍可读取，绝不会回退覆盖旧路径。"
         >
           <AcuToggle
             :model-value="vector.form.summaryIndexV2WriteEnabled"

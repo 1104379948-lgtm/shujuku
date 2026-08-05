@@ -671,8 +671,10 @@ describe('buildBatchMergeBase_ACU', () => {
       expect(result.data?.sheet_bei_bao_wu_pin_biao).toMatchObject({
         uid: 'sheet_bei_bao_wu_pin_biao',
         name: '背包物品表',
-        sourceData: { ddl: legacyDdl, note: 'guide-structure' },
-        content: [['row_id', '物品名称', '数量'], ['1', '铁剑', '1']],
+        // restoreGuideStructure 只恢复结构：note 保留 runtime 值
+        sourceData: { ddl: legacyDdl, note: 'legacy-structure' },
+        // 新契约：表头内容不一致（'物品名称' vs '旧物品名'）时保留权威表头，不覆盖
+        content: [['row_id', '旧物品名', '数量'], ['1', '铁剑', '1']],
       });
     } finally {
       vi.mocked(isSqliteMode).mockReturnValue(false);
@@ -847,6 +849,110 @@ describe('buildBatchMergeBase_ACU', () => {
     }
   });
 
+
+  it('restoreGuideStructure：guide 表头与权威数据宽度不一致时不覆盖表头、不继承 guide ddl、记录 warning', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
+    const { logWarn_ACU } = await import('../../../src/shared/utils');
+    const legacyDdl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, item_name TEXT, quantity INTEGER, weight REAL);';
+    const guideDdl = 'CREATE TABLE inventory_guide (row_id INTEGER PRIMARY KEY, item_name TEXT);';
+    const guide = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_bei_bao_wu_pin_biao: {
+        uid: 'sheet_bei_bao_wu_pin_biao',
+        name: '背包物品表',
+        sourceData: { ddl: guideDdl, note: 'guide-note' },
+        // guide 只有 2 列
+        content: [['row_id', '物品名称']],
+      },
+    } as any;
+    try {
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      vi.mocked(getChatArray_ACU).mockReturnValue([]);
+      vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(guide);
+      vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(structuredClone(guide));
+      mockCurrentJsonTableData = {
+        mate: { type: 'acu' },
+        sheet_in05z9vz: {
+          uid: 'sheet_in05z9vz',
+          name: '背包物品表',
+          // runtime 权威数据有 4 列
+          sourceData: { ddl: legacyDdl, note: 'legacy-note' },
+          content: [['row_id', '旧物品名', '数量', '重量'], ['1', '铁剑', '1', '2.5']],
+        },
+      };
+
+      const result = await buildBatchMergeBase_ACU(1);
+
+      expect(result.error).toBeNull();
+      // 表头宽度不一致：保留权威 4 列结构，不覆盖为 guide 2 列
+      expect(result.data?.sheet_bei_bao_wu_pin_biao.content[0]).toEqual(['row_id', '旧物品名', '数量', '重量']);
+      expect(result.data?.sheet_bei_bao_wu_pin_biao.content[0].length).toBe(4);
+      // 数据行完整保留
+      expect(result.data?.sheet_bei_bao_wu_pin_biao.content[1]).toEqual(['1', '铁剑', '1', '2.5']);
+      // 不继承 guide ddl（inheritDdl=false），ddl 保留权威值
+      expect(result.data?.sheet_bei_bao_wu_pin_biao.sourceData.ddl).toContain('quantity INTEGER');
+      // restoreGuideStructure 只恢复结构：note 保留 runtime 值（聊天过程中可能被合法修改）
+      expect(result.data?.sheet_bei_bao_wu_pin_biao.sourceData.note).toBe('legacy-note');
+      // 记录结构不一致 warning
+      expect(logWarn_ACU).toHaveBeenCalledWith(expect.stringContaining('基底表头与权威数据不一致'));
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+      vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
+      vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(undefined as any);
+      mockCurrentJsonTableData = null;
+    }
+  });
+
+  it('贯通：历史 checkpoint 12 列 + guide 8 列 → 基底 content[0] 为 12 列且可提交', async () => {
+    const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { getChatSheetGuideDataForIsolationKey_ACU, buildGuidedBaseDataFromSheetGuide_ACU } = await import('../../../src/service/template/chat-scope');
+    const { logWarn_ACU } = await import('../../../src/shared/utils');
+    const guideHeader = ['row_id', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7'];
+    const guide = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_important: {
+        uid: 'sheet_important',
+        name: '重要角色表',
+        sourceData: { ddl: 'CREATE TABLE important (row_id TEXT, c1 TEXT, c2 TEXT, c3 TEXT, c4 TEXT, c5 TEXT, c6 TEXT, c7 TEXT);' },
+        content: [guideHeader],
+      },
+    } as any;
+    const histHeader = ['row_id', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7', 'h8', 'h9', 'h10', 'h11'];
+    const histRows = [histHeader, ['1', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11']];
+    try {
+      vi.mocked(isSqliteMode).mockReturnValue(true);
+      vi.mocked(getChatArray_ACU).mockReturnValue([]);
+      vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(guide);
+      vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(structuredClone(guide));
+      mockCurrentJsonTableData = {
+        mate: { type: 'acu' },
+        sheet_important: {
+          uid: 'sheet_important',
+          name: '重要角色表',
+          sourceData: { ddl: 'CREATE TABLE important_hist (row_id TEXT, h1 TEXT, h2 TEXT, h3 TEXT, h4 TEXT, h5 TEXT, h6 TEXT, h7 TEXT, h8 TEXT, h9 TEXT, h10 TEXT, h11 TEXT);' },
+          content: histRows,
+        },
+      };
+
+      const result = await buildBatchMergeBase_ACU(1);
+
+      expect(result.error).toBeNull();
+      // 基底表头为权威 12 列（checkpoint 持结构权），guide 8 列不得覆盖
+      expect(result.data?.sheet_important.content[0].length).toBe(12);
+      expect(result.data?.sheet_important.content[0]).toEqual(histHeader);
+      expect(result.data?.sheet_important.content[1]).toEqual(['1', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9', 'v10', 'v11']);
+      // 记录 warning
+      expect(logWarn_ACU).toHaveBeenCalledWith(expect.stringContaining('基底表头与权威数据不一致'));
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+      vi.mocked(getChatSheetGuideDataForIsolationKey_ACU).mockReturnValue(null);
+      vi.mocked(buildGuidedBaseDataFromSheetGuide_ACU).mockReturnValue(undefined as any);
+      mockCurrentJsonTableData = null;
+    }
+  });
 
 });
 

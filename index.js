@@ -4044,6 +4044,7 @@ $CONTENT
         archiveBatchSize: 3,
         archiveMaxConcurrency: 3,
         summaryIndexArchiveMaxConcurrency: 30,
+        summaryIndexArchiveEmbeddingConcurrency: 3,
         topK: 200,
         minScore: 0.45,
         embeddingEndpoint: '',
@@ -4910,6 +4911,15 @@ $CONTENT
     function cloneDefaultVectorMemoryConfig_ACU() {
         return JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU));
     }
+    // T10：defaultVectorMemoryConfig_ACU 是编译期常量，运行时不变。
+    // effective config 只读取其标量默认值，无需每次调用都 JSON 深拷贝。
+    // 模块级只读缓存：任何调用方不得修改该对象；需要可变副本请用 cloneDefaultVectorMemoryConfig_ACU()。
+    const defaultEffectiveConfigFallback_ACU = (() => {
+        const clone = cloneDefaultVectorMemoryConfig_ACU();
+        // 防误改：冻结后任何写操作在严格模式下抛错，普通模式下静默失败，能尽早暴露误用。
+        Object.freeze(clone);
+        return clone;
+    })();
     function normalizeMinScore_ACU(value, fallbackValue) {
         const num = Number(value);
         if (!Number.isFinite(num))
@@ -5140,12 +5150,14 @@ $CONTENT
     }
     function getEffectiveSummaryVectorIndexConfig_ACU(configInput) {
         const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
-        const defaults = cloneDefaultVectorMemoryConfig_ACU();
+        const defaults = defaultEffectiveConfigFallback_ACU;
         const topK = normalizePositiveInteger_ACU$1(config.topK, defaults.topK);
         const minScore = normalizeMinScore_ACU(config.minScore, defaults.minScore);
         const recallCandidateLimit = Math.max(topK, normalizePositiveInteger_ACU$1(config.recallCandidateLimit, defaults.recallCandidateLimit || topK));
         const summaryChunkSentenceCount = normalizePositiveInteger_ACU$1(config.summaryChunkSentenceCount, defaults.summaryChunkSentenceCount || 2);
         const summaryIndexArchiveMaxConcurrency = normalizePositiveInteger_ACU$1(config.summaryIndexArchiveMaxConcurrency, Number(defaults.summaryIndexArchiveMaxConcurrency) || 30);
+        // T9：归档 embedding 批次的有界并发度（同时进行中的批次上限）。独立于 summaryIndexArchiveMaxConcurrency（批大小）。
+        const summaryIndexArchiveEmbeddingConcurrency = normalizePositiveInteger_ACU$1(config.summaryIndexArchiveEmbeddingConcurrency, Number(defaults.summaryIndexArchiveEmbeddingConcurrency) || 3);
         const summaryIndexKeywordMinRows = normalizePositiveInteger_ACU$1(config.summaryIndexKeywordMinRows, Number(defaults.summaryIndexKeywordMinRows) || 100);
         const recentFixedInjectCount = normalizePositiveInteger_ACU$1(config.recentFixedInjectCount, Number(defaults.recentFixedInjectCount) || 50);
         const bm25CandidateLimit = Math.max(1, normalizePositiveInteger_ACU$1(config.bm25CandidateLimit, Number(defaults.bm25CandidateLimit) || recallCandidateLimit));
@@ -5162,6 +5174,7 @@ $CONTENT
             summaryIndexCandidateLimit: recallCandidateLimit,
             summaryIndexChunkSentenceCount: summaryChunkSentenceCount,
             summaryIndexArchiveMaxConcurrency,
+            summaryIndexArchiveEmbeddingConcurrency,
             summaryIndexKeywordMinRows,
             summaryIndexRecentFixedInjectCount: recentFixedInjectCount,
             summaryIndexHybridRetrievalEnabled: config.hybridRetrievalEnabled !== false,
@@ -40574,10 +40587,11 @@ $CONTENT
     }
     /**
      * 定位原正式 full checkpoint 所在消息与 frame。
-     * 返回最后一个 full checkpoint（replay 的正式根）。
+     * 返回全部 full checkpoint（正序）+ 最后一个（replay 的正式根）。
+     * 调用方必须校验唯一性；存在多个 full 时不得把任一当作唯一根。
      */
     function findOriginalFullCheckpoint_ACU(chat, isolationKey) {
-        let result = null;
+        const all = [];
         chat.forEach((message, messageIndex) => {
             if (!message || message.is_user)
                 return;
@@ -40586,10 +40600,10 @@ $CONTENT
                 return;
             const checkpoint = tagData.storageFrame?.checkpoint;
             if (checkpoint?.kind === 'full') {
-                result = { messageIndex, message, tagData, frame: tagData.storageFrame };
+                all.push({ messageIndex, message, tagData, frame: tagData.storageFrame });
             }
         });
-        return result;
+        return { all, latest: all.length > 0 ? all[all.length - 1] : null };
     }
     /**
      * 检查当前聊天是否存在 active provisional bridge session（任何消息、任何隔离键）。
@@ -40718,6 +40732,26 @@ $CONTENT
         if (!isV2TagData_ACU(originalTagData)) {
             return { ok: false, error: 'provisional bridge 原 full 楼层缺少 V2 标签数据，拒绝自动恢复。' };
         }
+        // provisional 根拓扑校验：临时根楼层必须仍是本 bridge 的 provisional full。
+        // 根楼层不存在、已被改写为非 provisional full、或 headRevision 不匹配本 runId，
+        // 都说明 bridge 拓扑已被外部篡改，fail-closed。
+        const provisionalMessage = chat[bridge.provisionalRootIndex];
+        if (!provisionalMessage) {
+            return { ok: false, error: `provisional bridge 临时根楼层 ${bridge.provisionalRootIndex} 不存在，拒绝自动恢复。` };
+        }
+        const provisionalTagData = readIsolatedTagData_ACU(provisionalMessage, bridge.isolationKey);
+        const provisionalFrame = isV2TagData_ACU(provisionalTagData)
+            ? provisionalTagData.storageFrame
+            : null;
+        if (!provisionalFrame || provisionalFrame.checkpoint?.kind !== 'full'
+            || !String(provisionalFrame.headRevision ?? '').startsWith('provisional:')
+            || !String(provisionalFrame.headRevision ?? '').includes(bridge.runId)) {
+            return { ok: false, error: 'provisional bridge 临时根拓扑不匹配（缺少 provisional full 或 headRevision 非本 run），拒绝自动恢复。' };
+        }
+        // 原 full 楼层不得同时存在第二个 full（provisional 建立后原 full 已移到 recoveryBackup）。
+        if (originalTagData.storageFrame?.checkpoint?.kind === 'full') {
+            return { ok: false, error: 'provisional bridge 原 full 楼层仍存在 replay full，拓扑冲突，拒绝自动恢复。' };
+        }
         // 原 full 可能处于两种持久化形态：
         //  - 已建立 bridge：storageFrame 被清空，原帧在 recoveryBackup；
         //  - 尚未建立（首次校验）：storageFrame 仍是原 full。
@@ -40808,9 +40842,18 @@ $CONTENT
             if (!Array.isArray(selectedSheetKeys) || selectedSheetKeys.length === 0) {
                 return { ok: false, error: 'provisional bridge 需要至少一个 selected sheet。' };
             }
-            const original = findOriginalFullCheckpoint_ACU(chat, isolationKey);
+            const { all: allOriginalFulls, latest: original } = findOriginalFullCheckpoint_ACU(chat, isolationKey);
             if (!original) {
                 return { ok: false, error: '未找到正式 full checkpoint，无法建立 provisional bridge。' };
+            }
+            // 唯一正式 full 承诺（本文件顶部不变量 §3.2）：存在多个 full 时拒绝建立，
+            // 绝不把任一 full 当作唯一根，避免 provisional 基线与冗余 full 竞争回放根。
+            if (allOriginalFulls.length !== 1) {
+                return {
+                    ok: false,
+                    error: `存在 ${allOriginalFulls.length} 个 full checkpoint（${allOriginalFulls.map(item => item.messageIndex).join('、')}），provisional bridge 只允许基于唯一正式 full 建立。`,
+                    diagnosticCode: 'provisional_bridge_multiple_full_checkpoints',
+                };
             }
             if (original.messageIndex !== originalFullCheckpointIndex) {
                 return { ok: false, error: `原 full checkpoint 楼层与请求不一致：expected=${originalFullCheckpointIndex}, actual=${original.messageIndex}。` };
@@ -41539,6 +41582,11 @@ $CONTENT
             || await validateReplay('suffix', {});
     }
     async function validateProvisionalConvergenceCandidate_ACU(candidateChat, isolationKey, targetMessageIndex) {
+        // 单根不变量显式守护：候选 chat 同一隔离键下至多一个 full checkpoint。
+        // convergence 只允许把临时锚点固化到既有唯一根，绝不允许候选再造出第二个基线。
+        const invariantViolation = assertSingleActiveFullCheckpointV2_ACU(candidateChat, isolationKey, 'convergence_candidate');
+        if (invariantViolation)
+            return invariantViolation;
         for (const [scope, options] of [
             ['boundary', { maxMessageIndex: targetMessageIndex }],
             ['suffix', {}],
@@ -41562,6 +41610,66 @@ $CONTENT
             }
         }
         return null;
+    }
+    /**
+     * 从当前模板重新解析 header-only snapshot，并校验与 replay 当时记录一致。
+     *
+     * 锚点数据不随 compatibilityRepairs 持久化（replay 只记录了 templateFingerprint），
+     * 因此收敛侧必须重新解析模板；用指纹校验可防止模板在两次解析之间被改，
+     * 不一致即 fail-closed，绝不基于不可信的模板数据写锚点。
+     */
+    function resolveConvergenceAnchorSheetData_ACU(chat, isolationKey, repairs) {
+        const headerOnly = resolveHeaderOnlyTemplateSnapshot_ACU(chat, isolationKey);
+        if (!headerOnly) {
+            return { error: 'V2 收敛无法从当前聊天模板重新解析 header-only 锚点数据，已拒绝自动收敛。' };
+        }
+        const fingerprint = getTableDataFingerprint_ACU(headerOnly);
+        const bySheetKey = new Map();
+        for (const repair of repairs) {
+            if (repair.templateFingerprint && repair.templateFingerprint !== fingerprint) {
+                return { error: `V2 收敛模板指纹不一致（replay 时 ${repair.templateFingerprint}，当前 ${fingerprint}），模板已在补锚后被修改，拒绝按不可信模板写锚点。` };
+            }
+            const sheet = headerOnly[repair.sheetKey];
+            if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet) || !('content' in sheet)) {
+                return { error: `V2 收敛锚点缺少目标表 ${repair.sheetKey} 的模板数据，已拒绝自动收敛。` };
+            }
+            const sheetData = sheet;
+            bySheetKey.set(repair.sheetKey, deepClone_ACU$1(sheetData));
+        }
+        return { bySheetKey };
+    }
+    /**
+     * 把 per-sheet 锚点写入目标帧的 perSheetCheckpoints（untimed）。
+     *
+     * - timeline 取 untimed（undefined）：回放循环在帧开头对 untimed checkpoint
+     *   整表写入 state，无需引入 introduction/rebase 等时序标记；锚点落在 full
+     *   根帧时在 state 初始化后立即生效（storage-frame-v2-replay.ts:1349）。
+     * - 目标帧若已有同表 log entry，按 logEntryConflictsWithSheetCheckpoint_ACU 语义拒绝
+     *   （对齐 persistTableSheetCheckpointV2Core_ACU 的冲突守卫），不新造规则。
+     */
+    function writeSheetAnchorCheckpointsToFrame_ACU(frame, bySheetKey, createdAt, baseRevision, context) {
+        for (const [sheetKey, sheet] of bySheetKey) {
+            const conflictingEntry = (frame.logEntries || []).find(entry => logEntryConflictsWithSheetCheckpoint_ACU(entry, sheetKey));
+            if (conflictingEntry) {
+                return { ok: false, error: `V2 收敛锚点无法写入：根帧已有同表 log entry（sheetKey=${sheetKey}, entryId=${conflictingEntry.entryId}），请先恢复。` };
+            }
+            const checkpointResult = buildCanonicalSheetCheckpoint_ACU({
+                createdAt,
+                reason: 'integrity_repair',
+                sheetKey,
+                data: sheet,
+                baseRevision,
+                context,
+            });
+            if (checkpointResult.checkpoint === undefined) {
+                return { ok: false, error: `V2 收敛锚点构建失败（${sheetKey}）：${checkpointResult.error}` };
+            }
+            frame.perSheetCheckpoints = {
+                ...(frame.perSheetCheckpoints || {}),
+                [sheetKey]: checkpointResult.checkpoint,
+            };
+        }
+        return { ok: true };
     }
     async function validateHardDeleteCandidate_ACU(candidateChat, isolationKey, targetMessageIndex, deletedSheetKeys, expectedData) {
         let replay;
@@ -41604,16 +41712,57 @@ $CONTENT
         }
         return headRevision;
     }
+    /**
+     * 按楼层正序收集同一隔离键下全部 full checkpoint 的 message index。
+     *
+     * 同一隔离键下同一时刻只能存在一个 full checkpoint（见 persistTableMutationLogV2Core_ACU
+     * 的不变量注释）：回放只认最后一个 full checkpoint，多出来的基线会让它之前的
+     * 所有增量失效。本原语用于显式计数与断言该不变量，供 convergence / recovery / compaction
+     * 等写入路径共用，避免各路径各自重复扫描。
+     *
+     * @param maxMessageIndex 只统计该楼层及之前；缺省为聊天末尾。
+     */
+    function collectV2FullCheckpointIndices_ACU(chat, isolationKey, maxMessageIndex) {
+        if (!Array.isArray(chat) || chat.length === 0)
+            return [];
+        const upperBound = maxMessageIndex === undefined
+            ? chat.length - 1
+            : Math.max(-1, Math.min(chat.length - 1, Math.floor(maxMessageIndex)));
+        const indices = [];
+        for (let i = 0; i <= upperBound; i += 1) {
+            const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
+            if (isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full') {
+                indices.push(i);
+            }
+        }
+        return indices;
+    }
+    /**
+     * 断言同一隔离键下至多存在一个 full checkpoint（单根不变量）。
+     *
+     * 违反时返回带全部索引与各自 reason 的失败信息，便于事故复盘直接定位是哪些
+     * 楼层、以什么理由写了多余基线；命中不变量时返回 null。
+     */
+    function assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, context) {
+        const indices = collectV2FullCheckpointIndices_ACU(chat, isolationKey);
+        if (indices.length <= 1)
+            return null;
+        const detail = indices.map(index => {
+            const tagData = readIsolatedTagData_ACU(chat?.[index], isolationKey);
+            const checkpoint = isV2TagData_ACU(tagData) ? tagData.storageFrame.checkpoint : undefined;
+            return `#${index}(${checkpoint?.reason ?? 'unknown'})`;
+        }).join('、');
+        return `V2 ${context} 违反单根不变量：同一隔离键下存在 ${indices.length} 个 full checkpoint（${detail}），回放只认最后一个，多余基线会使之前增量失效。`;
+    }
     function findLatestFullCheckpoint_ACU(chat, isolationKey) {
         if (!Array.isArray(chat) || chat.length === 0)
             return null;
-        for (let i = chat.length - 1; i >= 0; i -= 1) {
-            const tagData = readIsolatedTagData_ACU(chat[i], isolationKey);
-            if (isV2TagData_ACU(tagData) && tagData.storageFrame.checkpoint?.kind === 'full') {
-                return { message: chat[i], index: i, checkpoint: tagData.storageFrame.checkpoint };
-            }
-        }
-        return null;
+        const indices = collectV2FullCheckpointIndices_ACU(chat, isolationKey);
+        if (indices.length === 0)
+            return null;
+        const index = indices[indices.length - 1];
+        const tagData = readIsolatedTagData_ACU(chat[index], isolationKey);
+        return { message: chat[index], index, checkpoint: tagData.storageFrame.checkpoint };
     }
     function getLogEntriesAfterLatestCheckpoint_ACU(chat, isolationKey) {
         const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
@@ -42518,38 +42667,53 @@ $CONTENT
         const now = Date.now();
         const aiFloor = countAiFloor_ACU$1(chat, target.index);
         let entry;
+        // 临时补锚收敛：把 replay 期间的 compatibility 锚点固化为根帧 per-sheet checkpoint。
+        // 锚点只依赖当前模板（未持久化），所以必须在写入前用同一候选提交里 *写入前* 的
+        // replay state 固化它；afterData 会捕获本次操作并二次追加。
+        //
+        // 不变量：同一隔离键同一时刻只有一个 full checkpoint。既有 full 是回放根，
+        // 这里只能往 latestFullCheckpoint.index 那层写 per-sheet 锚点（untimed），
+        // 绝不写第二个 full —— 否则回放根被抢占，旧根之前的全部增量失效。
         if (provisionalConvergenceReplay) {
-            if (!targetExistingFrame) {
-                return { saved: false, error: 'V2 provisional replay 缺少可备份的目标 storage frame，已拒绝自动收敛。' };
+            const invariantViolation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'persistTableMutationLogV2:single_target_convergence');
+            if (invariantViolation)
+                return { saved: false, error: invariantViolation };
+            if (!latestFullCheckpoint) {
+                return { saved: false, error: 'V2 临时补锚收敛缺少既有 full checkpoint 根，已拒绝。' };
             }
-            const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
-            const checkpointResult = buildCanonicalFullCheckpoint_ACU({
-                createdAt: now,
-                reason: 'integrity_repair',
-                data: provisionalConvergenceReplay.data,
-                scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
-                context: { messageIndex: target.index, aiFloor, isolationKey },
-            });
-            if (!checkpointResult.checkpoint) {
-                return { saved: false, error: `V2 provisional replay 无法构建 canonical 收敛 checkpoint：${checkpointResult.error}` };
+            const anchorData = resolveConvergenceAnchorSheetData_ACU(chat, isolationKey, provisionalConvergenceReplay.compatibilityRepairs || []);
+            if (anchorData.error) {
+                return { saved: false, error: anchorData.error };
             }
-            frame.checkpoint = checkpointResult.checkpoint;
-            frame.headRevision = checkpointRevision;
-            frame.logEntries = [];
-            delete frame.perSheetCheckpoints;
-            const tagData = isolatedData[isolationKey];
-            if (!tagData || typeof tagData !== 'object' || Array.isArray(tagData)) {
-                return { saved: false, error: 'V2 provisional replay 目标标签在收敛准备期间无效。' };
-            }
-            tagData.recoveryBackup = {
+            const recoveryBackup = {
                 version: 1,
                 createdAt: now,
                 recoveryKind: 'temporary_sheet_anchor_convergence',
                 sourceMessageIndex: target.index,
-                storageFrame: targetExistingFrame,
+                storageFrame: targetExistingFrame || frame,
             };
-            logDebug_ACU(`[V2 Persist] 已在候选提交中将 provisional Sheet 补锚收敛为 full checkpoint：`
-                + `messageIndex=${target.index}, sheets=${Object.keys(provisionalConvergenceReplay.data).filter(key => key.startsWith('sheet_')).length}。`);
+            const tagData = isolatedData[isolationKey];
+            if (tagData && typeof tagData === 'object' && !Array.isArray(tagData)) {
+                tagData.recoveryBackup = recoveryBackup;
+            }
+            if (latestFullCheckpoint.index !== target.index) {
+                // 既有 full 在更早楼层：锚点必须落在那层（回放根），而不是当前目标层。
+                const rootIsolatedData = cloneIsolatedData_ACU(latestFullCheckpoint.message);
+                const rootFrame = getOrInitV2Frame_ACU(rootIsolatedData, isolationKey);
+                const rootWrite = writeSheetAnchorCheckpointsToFrame_ACU(rootFrame, anchorData.bySheetKey, now, undefined, // 根帧锚点不接续任何 revision；untimed 在 state 初始化后立即生效
+                { messageIndex: latestFullCheckpoint.index, aiFloor: countAiFloor_ACU$1(chat, latestFullCheckpoint.index), isolationKey });
+                if (rootWrite.ok === false) {
+                    return { saved: false, error: rootWrite.error };
+                }
+                replacementIsolatedDataByMessageIndex.set(latestFullCheckpoint.index, rootIsolatedData);
+            }
+            else {
+                // 既有 full 就在当前目标层：直接在本次候选帧上写锚点。
+                const write = writeSheetAnchorCheckpointsToFrame_ACU(frame, anchorData.bySheetKey, now, requestedBaseRevision, { messageIndex: target.index, aiFloor, isolationKey });
+                if (write.ok === false) {
+                    return { saved: false, error: write.error };
+                }
+            }
         }
         if (shouldCheckpoint) {
             const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
@@ -42920,27 +43084,42 @@ $CONTENT
         const candidateChat = deepClone_ACU$1(chat);
         for (const [targetIndex, target] of targetByIndex) {
             const message = candidateChat[targetIndex];
-            const isolatedData = cloneIsolatedData_ACU(message);
-            const tagData = isolatedData[isolationKey];
+            let isolatedData = cloneIsolatedData_ACU(message);
+            let tagData = isolatedData[isolationKey];
             if (!isV2TagData_ACU(tagData))
                 return { saved: false, error: `V2 batch write target ${targetIndex} has no V2 storage frame.` };
-            const frame = tagData.storageFrame;
+            let frame = tagData.storageFrame;
             if (provisionalConvergenceReplay && targetIndex === convergenceTargetIndex) {
-                const checkpointResult = buildCanonicalFullCheckpoint_ACU({
-                    createdAt: Date.now(),
-                    reason: 'integrity_repair',
-                    data: provisionalConvergenceReplay.data,
-                    scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: targetIndex }),
-                    context: { messageIndex: targetIndex, aiFloor: countAiFloor_ACU$1(candidateChat, targetIndex), isolationKey },
-                });
-                if (!checkpointResult.checkpoint) {
-                    return { saved: false, error: `V2 batch provisional replay 无法构建 canonical 收敛 checkpoint：${checkpointResult.error}` };
+                const invariantViolation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'persistTableMutationLogBatchV2:convergence');
+                if (invariantViolation)
+                    return { saved: false, error: invariantViolation };
+                // 同一隔离键同一时刻只有一个 full checkpoint：convergence 只允许在既有 full
+                // 根帧（latestCheckpoint.index）写 per-sheet 锚点，绝不写第二个 full。
+                const anchorData = resolveConvergenceAnchorSheetData_ACU(chat, isolationKey, provisionalConvergenceReplay.compatibilityRepairs || []);
+                if (anchorData.error) {
+                    return { saved: false, error: anchorData.error };
                 }
+                const rootMessage = candidateChat[latestCheckpoint.index];
+                if (!rootMessage) {
+                    return { saved: false, error: `V2 batch 收敛缺少既有 full checkpoint 根消息（index=${latestCheckpoint.index}），已拒绝。` };
+                }
+                const rootIsolatedData = cloneIsolatedData_ACU(rootMessage);
+                const rootFrame = getOrInitV2Frame_ACU(rootIsolatedData, isolationKey);
+                const rootWrite = writeSheetAnchorCheckpointsToFrame_ACU(rootFrame, anchorData.bySheetKey, Date.now(), undefined, { messageIndex: latestCheckpoint.index, aiFloor: countAiFloor_ACU$1(candidateChat, latestCheckpoint.index), isolationKey });
+                if (rootWrite.ok === false) {
+                    return { saved: false, error: rootWrite.error };
+                }
+                // recoveryBackup 必须备份收敛前的原始帧（不含锚点），证据不掺入本次修改。
                 const previousFrame = deepClone_ACU$1(frame);
-                frame.checkpoint = checkpointResult.checkpoint;
-                frame.headRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
-                frame.logEntries = [];
-                delete frame.perSheetCheckpoints;
+                rootMessage.TavernDB_ACU_IsolatedData = rootIsolatedData;
+                if (latestCheckpoint.index === targetIndex) {
+                    // 根帧就是当前目标：锚点与本次 log entry 必须落在同一 isolatedData 拷贝上，
+                    // 否则落盘时 isolatedData 覆盖会把锚点丢弃。
+                    isolatedData = rootIsolatedData;
+                    tagData = isolatedData[isolationKey];
+                    frame = tagData.storageFrame;
+                }
+                // 目标帧只保留 recoveryBackup 证据，checkpoint/perSheetCheckpoints 不被改写。
                 tagData.recoveryBackup = {
                     version: 1,
                     createdAt: Date.now(),
@@ -42987,7 +43166,12 @@ $CONTENT
                 return { saved: false, error: candidateValidationError };
             options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:before_convergence_save');
         }
-        const snapshots = [...targetByIndex.keys()].map(index => ({
+        // convergence 会把锚点写入根帧（latestCheckpoint.index）；若根帧不是 batch target，
+        // 必须把根帧一并纳入原子落盘集合，否则锚点只在内存候选里、落盘即丢失。
+        const persistIndices = provisionalConvergenceReplay && !targetByIndex.has(latestCheckpoint.index)
+            ? [...targetByIndex.keys(), latestCheckpoint.index]
+            : [...targetByIndex.keys()];
+        const snapshots = persistIndices.map(index => ({
             index,
             message: chat[index],
             hadIsolatedData: Object.prototype.hasOwnProperty.call(chat[index], 'TavernDB_ACU_IsolatedData'),
@@ -43722,6 +43906,7 @@ $CONTENT
                 const previousGuideContainer = cloneOptionalJson_ACU(peekChatSheetGuideContainer_ACU(chat));
                 let primarySaveAttempted = false;
                 let sharedStateMutated = false;
+                let convergenceRootSnapshot = null;
                 let purgedMessageCount = 0;
                 let hardDeleteCheckpointCreated = false;
                 try {
@@ -43769,7 +43954,7 @@ $CONTENT
                         else if (change.kind === 'reveal')
                             revealSheets.set(change.sheetKey, targetSheetData);
                     }
-                    const isolatedData = cloneIsolatedData_ACU(target.message);
+                    let isolatedData = cloneIsolatedData_ACU(target.message);
                     // 缺 frame 时由 getOrInitV2Frame_ACU 初始化空 frame（version:2, logEntries:[]），
                     // 保留既有 summaryVectorIndexState / summaryVectorIndexManifest。
                     const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
@@ -43795,28 +43980,44 @@ $CONTENT
                             const affectedSheetKeys = [...new Set((activeReplay.compatibilityRepairs || []).map(repair => repair.sheetKey))];
                             throw new Error(`V2 当前楼层模板提交检测到结构性 replay repair，不能自动收敛或继续写入：${affectedSheetKeys.join('、') || '未知 Sheet'}。`);
                         }
-                        const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
-                        const checkpointResult = buildCanonicalFullCheckpoint_ACU({
-                            createdAt,
-                            reason: 'integrity_repair',
-                            // 必须捕获本次模板修改前的回放状态；若写入目标状态后再追加 operation，
-                            // 回放会把同一模板 operation 应用两次。
-                            data: activeReplay.data,
-                            scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
-                            context: { messageIndex: target.index, aiFloor: countAiFloor_ACU$1(chat, target.index), isolationKey },
-                        });
-                        if (!checkpointResult.checkpoint) {
-                            throw new Error(`V2 当前楼层模板提交无法构建 provisional 收敛 checkpoint：${checkpointResult.error}`);
+                        const invariantViolation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'commitCurrentFloorTemplateChanges_ACU:convergence');
+                        if (invariantViolation)
+                            throw new Error(invariantViolation);
+                        if (!latestFullCheckpoint) {
+                            throw new Error('V2 当前楼层模板提交收敛缺少既有 full checkpoint 根，已拒绝。');
+                        }
+                        const anchorData = resolveConvergenceAnchorSheetData_ACU(chat, isolationKey, activeReplay.compatibilityRepairs || []);
+                        if (anchorData.error) {
+                            throw new Error(anchorData.error);
+                        }
+                        // 同一隔离键同一时刻只有一个 full checkpoint：convergence 只在既有 full 根帧
+                        // 写 per-sheet 锚点（untimed），绝不第二个 full，否则回放根被抢占。
+                        // recoveryBackup 必须备份收敛前的原始帧（不含锚点），证据不掺入本次修改。
+                        const previousFrame = deepClone_ACU$1(frame);
+                        const rootIsolatedData = latestFullCheckpoint.index === target.index
+                            ? isolatedData
+                            : cloneIsolatedData_ACU(chat[latestFullCheckpoint.index]);
+                        const rootFrame = getOrInitV2Frame_ACU(rootIsolatedData, isolationKey);
+                        const rootWrite = writeSheetAnchorCheckpointsToFrame_ACU(rootFrame, anchorData.bySheetKey, createdAt, undefined, { messageIndex: latestFullCheckpoint.index, aiFloor: countAiFloor_ACU$1(chat, latestFullCheckpoint.index), isolationKey });
+                        if (rootWrite.ok === false) {
+                            throw new Error(rootWrite.error);
+                        }
+                        if (latestFullCheckpoint.index !== target.index) {
+                            // 根帧不在当前目标：把带锚点的 isolatedData 挂回真实根消息，随候选保存落盘。
+                            const rootMessage = chat[latestFullCheckpoint.index];
+                            convergenceRootSnapshot = { message: rootMessage, hadIsolatedData: Object.prototype.hasOwnProperty.call(rootMessage, 'TavernDB_ACU_IsolatedData'), isolatedData: rootMessage.TavernDB_ACU_IsolatedData };
+                            chat[latestFullCheckpoint.index].TavernDB_ACU_IsolatedData = rootIsolatedData;
+                            // 根消息已实际修改：若后续（候选验证等）抛错，必须参与回滚还原。
+                            sharedStateMutated = true;
+                        }
+                        else {
+                            // 根帧即目标帧：锚点已写入 frame（isolatedData 同一对象），无需额外挂回。
+                            isolatedData = rootIsolatedData;
                         }
                         const tagData = isolatedData[isolationKey];
                         if (!isV2TagData_ACU(tagData)) {
                             throw new Error('V2 当前楼层模板提交在 provisional 收敛准备期间缺少有效 storage frame。');
                         }
-                        const previousFrame = deepClone_ACU$1(frame);
-                        frame.checkpoint = checkpointResult.checkpoint;
-                        frame.headRevision = checkpointRevision;
-                        frame.logEntries = [];
-                        delete frame.perSheetCheckpoints;
                         tagData.recoveryBackup = {
                             version: 1,
                             createdAt,
@@ -43824,7 +44025,7 @@ $CONTENT
                             sourceMessageIndex: target.index,
                             storageFrame: previousFrame,
                         };
-                        logDebug_ACU(`[V2 Persist] 当前楼层模板提交已在候选中收敛 provisional Sheet 补锚：messageIndex=${target.index}。`);
+                        logDebug_ACU(`[V2 Persist] 当前楼层模板提交已在既有 full 根帧收敛 provisional Sheet 补锚：messageIndex=${target.index}, rootIndex=${latestFullCheckpoint.index}。`);
                     }
                     const activeReplayState = activeReplay.data;
                     const checkpoints = [];
@@ -44155,6 +44356,12 @@ $CONTENT
                 catch (error) {
                     if (sharedStateMutated) {
                         restoreTemplateDeleteMessageSnapshots_ACU(messageSnapshots);
+                        if (convergenceRootSnapshot) {
+                            if (convergenceRootSnapshot.hadIsolatedData)
+                                convergenceRootSnapshot.message.TavernDB_ACU_IsolatedData = convergenceRootSnapshot.isolatedData;
+                            else
+                                delete convergenceRootSnapshot.message.TavernDB_ACU_IsolatedData;
+                        }
                         setChatScopedConfigContainer_ACU(chat, previousScopeContainer);
                         setChatSheetGuideContainer_ACU(chat, previousGuideContainer);
                     }
@@ -49919,6 +50126,92 @@ $CONTENT
     }
 
     /**
+     * service/template/guide-metadata-overlay.ts — guide 元数据投影纯函数
+     *
+     * Sheet Guide 对“已存在于权威 checkpoint 的表”只允许叠加非结构元数据，
+     * 字段集与 V2 meta_update 白名单（storage-frame-v2-persist.ts:2709）一致，
+     * 并同样排除 sourceData.ddl：ddl 与 content[0] 绑定，属于结构，须跟随权威数据。
+     *
+     * 本模块为纯函数：无 I/O、无宿主读写、无 UI 依赖。
+     */
+    /**
+     * 逐元素严格比较表头（长度 + 每个单元格 String(x ?? '')）。
+     * 用于决定是否继承 guide 的 sourceData.ddl 以及是否记录结构不一致 warning。
+     */
+    function isSameSheetHeader_ACU(left, right) {
+        if (!Array.isArray(left) || !Array.isArray(right))
+            return false;
+        if (left.length !== right.length)
+            return false;
+        for (let i = 0; i < left.length; i++) {
+            if (String(left[i] ?? '') !== String(right[i] ?? ''))
+                return false;
+        }
+        return true;
+    }
+    /**
+     * 将 guide 的非结构元数据叠加到 target 副本上。
+     *
+     * 规则：
+     * - name：guide 非空则覆盖。
+     * - updateConfig / exportConfig：guide 为对象则深拷贝覆盖。
+     * - orderNo（TABLE_ORDER_FIELD_ACU）：guide 为有限数则 Math.trunc 后覆盖。
+     * - sourceData：以 guide 的 sourceData 深拷贝为基础，删除 ddl 键，再与 target
+     *   现有 sourceData 合并（target 的 ddl 优先保留）；仅当 options.inheritDdl === true
+     *   且 target 无 ddl 时，才采用 guide 的 ddl。
+     * - 不触碰 content、不触碰 seedRows、不触碰 uid。
+     *
+     * 纯函数语义：只改传入的 target 副本，不读聊天、不写宿主、不调 UI。
+     */
+    function applyGuideMetadataToSheet_ACU(targetSheet, guideSheet, options) {
+        if (!targetSheet || typeof targetSheet !== 'object') {
+            return { changed: false };
+        }
+        if (!guideSheet || typeof guideSheet !== 'object') {
+            return { changed: false };
+        }
+        let changed = false;
+        if (typeof guideSheet.name === 'string' && guideSheet.name.trim() !== '') {
+            targetSheet.name = guideSheet.name;
+            changed = true;
+        }
+        if (guideSheet.updateConfig && typeof guideSheet.updateConfig === 'object') {
+            targetSheet.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
+            changed = true;
+        }
+        if (guideSheet.exportConfig && typeof guideSheet.exportConfig === 'object') {
+            targetSheet.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
+            changed = true;
+        }
+        if (Number.isFinite(guideSheet[TABLE_ORDER_FIELD_ACU])) {
+            targetSheet[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+            changed = true;
+        }
+        if (guideSheet.sourceData && typeof guideSheet.sourceData === 'object') {
+            const targetSourceData = (targetSheet.sourceData && typeof targetSheet.sourceData === 'object')
+                ? JSON.parse(JSON.stringify(targetSheet.sourceData))
+                : {};
+            const merged = { ...targetSourceData };
+            // 非结构字段：以 guide 为准（覆盖 target）
+            Object.entries(guideSheet.sourceData).forEach(([key, value]) => {
+                if (key === 'ddl')
+                    return;
+                merged[key] = JSON.parse(JSON.stringify(value));
+            });
+            // ddl 属于结构：inheritDdl=true 且 guide 提供 ddl 时采用 guide 的（用户最新编辑），否则保留 target（checkpoint）ddl。
+            if (options.inheritDdl && guideSheet.sourceData.ddl !== undefined) {
+                merged.ddl = JSON.parse(JSON.stringify(guideSheet.sourceData.ddl));
+            }
+            else if (targetSourceData.ddl !== undefined) {
+                merged.ddl = targetSourceData.ddl;
+            }
+            targetSheet.sourceData = merged;
+            changed = true;
+        }
+        return { changed };
+    }
+
+    /**
      * service/runtime/helpers-data-merge.ts — 数据合并/格式化/首楼初始化/阈值
      * 从 helpers-remaining.ts 拆出
      */
@@ -49943,7 +50236,21 @@ $CONTENT
         return Object.keys(guideData).some(key => key.startsWith('sheet_')
             && canonicalizeDisplayName_ACU(guideData[key]?.name) === canonicalName);
     }
-    function mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData) {
+    /**
+     * 将 Sheet Guide 的结构/元数据叠加到合并数据上。
+     *
+     * structuralAuthority 决定结构权归属：
+     * - 'data'：checkpoint/历史数据持结构权（V2 路径）。guide 只叠加非结构元数据；
+     *   表头不一致时保留历史结构，不 padding、不截断、不抛错，仅记录 warning，
+     *   并拒绝继承该表的 guide sourceData.ddl。
+     * - 'guide'：guide 持结构权（legacy-v1 路径），行为与旧版一致（含 padding）。
+     *
+     * 返回 { data, quarantinedSheetKeys, warnings }：
+     * - data：合并结果（guide 键集驱动过滤与排序语义不变）。
+     * - quarantinedSheetKeys：单表处理异常被隔离的表键，不会拖垮整体加载。
+     * - warnings：结构不一致等可定位的结构性提示。
+     */
+    function mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData, options = { structuralAuthority: 'guide' }) {
         const guided = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
         const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
         const historicalKeysByCanonicalName = new Map();
@@ -49957,63 +50264,109 @@ $CONTENT
             keys.push(key);
             historicalKeysByCanonicalName.set(canonicalName, keys);
         });
+        const quarantinedSheetKeys = [];
+        const warnings = [];
         guideKeys.forEach(k => {
             if (!k || !k.startsWith('sheet_'))
                 return;
-            const guideSheet = guided[k];
-            const canonicalName = canonicalizeDisplayName_ACU(guideSheet?.name);
-            const historicalKeys = canonicalName ? (historicalKeysByCanonicalName.get(canonicalName) || []) : [];
-            if (historicalKeys.length > 1) {
-                logWarn_ACU(`[Merge] 指导表「${guideSheet?.name || k}」匹配多个历史 Sheet (${historicalKeys.join(', ')})，拒绝自动继承。`);
-            }
-            const historicalKey = historicalKeys.length === 1 ? historicalKeys[0] : null;
-            const hist = historicalKey ? mergedData[historicalKey] : undefined;
-            if (hist && typeof hist === 'object') {
-                const next = JSON.parse(JSON.stringify(hist));
-                next.uid = k;
-                if (guideSheet?.name)
-                    next.name = guideSheet.name;
-                if (guideSheet?.sourceData)
-                    next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
-                if (guideSheet?.updateConfig)
-                    next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
-                if (guideSheet?.exportConfig)
-                    next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
-                const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
-                    ? JSON.parse(JSON.stringify(guideSheet.content[0]))
-                    : null;
-                if (guideHeader && String(guideHeader[0] ?? '') !== 'row_id') {
-                    throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || k)}`);
+            try {
+                const guideSheet = guided[k];
+                const canonicalName = canonicalizeDisplayName_ACU(guideSheet?.name);
+                const historicalKeys = canonicalName ? (historicalKeysByCanonicalName.get(canonicalName) || []) : [];
+                if (historicalKeys.length > 1) {
+                    logWarn_ACU(`[Merge] 指导表「${guideSheet?.name || k}」匹配多个历史 Sheet (${historicalKeys.join(', ')})，拒绝自动继承。`);
                 }
-                if (!Array.isArray(next.content))
-                    next.content = guideHeader ? [guideHeader] : [['row_id']];
-                if (guideHeader) {
-                    next.content[0] = guideHeader;
-                    const targetLen = guideHeader.length;
-                    for (let r = 1; r < next.content.length; r++) {
-                        const row = next.content[r];
-                        if (!Array.isArray(row))
-                            continue;
-                        if (row.length < targetLen) {
-                            while (row.length < targetLen)
-                                row.push(null);
+                const historicalKey = historicalKeys.length === 1 ? historicalKeys[0] : null;
+                const hist = historicalKey ? mergedData[historicalKey] : undefined;
+                if (hist && typeof hist === 'object') {
+                    const next = JSON.parse(JSON.stringify(hist));
+                    next.uid = k;
+                    const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
+                        ? guideSheet.content[0]
+                        : null;
+                    const histHeader = Array.isArray(next.content) && Array.isArray(next.content[0])
+                        ? next.content[0]
+                        : null;
+                    if (options.structuralAuthority === 'data') {
+                        // ── V2：checkpoint 持结构权 ──
+                        // content 原样保留：不覆盖表头、不 padding、不截断。
+                        if (!Array.isArray(next.content) || next.content.length === 0) {
+                            next.content = [histHeader || ['row_id']];
                         }
-                        else if (row.length > targetLen) {
-                            throw new Error(`历史表「${String(guideSheet?.name || k)}」行宽度超过 Sheet Guide 表头，拒绝截断数据。`);
+                        const headerMatches = !!guideHeader && !!histHeader && isSameSheetHeader_ACU(guideHeader, histHeader);
+                        if (guideHeader && histHeader && !headerMatches) {
+                            const msg = `[Merge] 表「${String(next.name || guideSheet?.name || k)}」(${k}) 的 Sheet Guide 表头与历史权威数据不一致，`
+                                + `已保留历史结构：guide=${guideHeader.length} 列, data=${histHeader.length} 列。`
+                                + `如需变更列结构，请通过模板提交触发 schema migration。`;
+                            logWarn_ACU(msg);
+                            warnings.push(msg);
                         }
+                        applyGuideMetadataToSheet_ACU(next, guideSheet, { inheritDdl: headerMatches });
+                        if (Array.isArray(guideSheet?.seedRows))
+                            next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
+                        guided[k] = next;
+                    }
+                    else {
+                        // ── legacy-v1：guide 持结构权（旧行为，含 padding）──
+                        if (guideSheet?.name)
+                            next.name = guideSheet.name;
+                        if (guideSheet?.sourceData)
+                            next.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
+                        if (guideSheet?.updateConfig)
+                            next.updateConfig = JSON.parse(JSON.stringify(guideSheet.updateConfig));
+                        if (guideSheet?.exportConfig)
+                            next.exportConfig = JSON.parse(JSON.stringify(guideSheet.exportConfig));
+                        if (guideHeader && String(guideHeader[0] ?? '') !== 'row_id') {
+                            throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || k)}`);
+                        }
+                        if (!Array.isArray(next.content))
+                            next.content = guideHeader ? [guideHeader] : [['row_id']];
+                        if (guideHeader) {
+                            next.content[0] = guideHeader;
+                            const targetLen = guideHeader.length;
+                            for (let r = 1; r < next.content.length; r++) {
+                                const row = next.content[r];
+                                if (!Array.isArray(row))
+                                    continue;
+                                if (row.length < targetLen) {
+                                    while (row.length < targetLen)
+                                        row.push(null);
+                                }
+                                else if (row.length > targetLen) {
+                                    throw new Error(`历史表「${String(guideSheet?.name || k)}」行宽度超过 Sheet Guide 表头，拒绝截断数据。`);
+                                }
+                            }
+                        }
+                        if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU]))
+                            next[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                        if (Array.isArray(guideSheet?.seedRows))
+                            next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
+                        guided[k] = next;
                     }
                 }
-                if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU]))
-                    next[TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
-                if (Array.isArray(guideSheet?.seedRows))
-                    next.seedRows = JSON.parse(JSON.stringify(guideSheet.seedRows));
-                guided[k] = next;
+                else {
+                    // guide-only 表（checkpoint 中不存在）：guide 是唯一结构来源。
+                    if (options.structuralAuthority === 'data') {
+                        // V2：校验 row_id 首列后完整物化 guide（含 sourceData.ddl）。
+                        const guideHeader = (guideSheet && Array.isArray(guideSheet.content) && Array.isArray(guideSheet.content[0]))
+                            ? guideSheet.content[0]
+                            : null;
+                        if (guideHeader && String(guideHeader[0] ?? '') !== 'row_id') {
+                            throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || k)}`);
+                        }
+                    }
+                    if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) {
+                        guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+                    }
+                }
             }
-            else if (Number.isFinite(guideSheet?.[TABLE_ORDER_FIELD_ACU])) {
-                guided[k][TABLE_ORDER_FIELD_ACU] = Math.trunc(guideSheet[TABLE_ORDER_FIELD_ACU]);
+            catch (e) {
+                logError_ACU(`[Merge] 表「${k}」合并失败，已隔离：`, e);
+                delete guided[k];
+                quarantinedSheetKeys.push(k);
             }
         });
-        return guided;
+        return { data: guided, quarantinedSheetKeys, warnings };
     }
     async function mergeAllIndependentTablesLegacyV1_ACU() {
         const chat = getChatArray_ACU();
@@ -50244,12 +50597,33 @@ $CONTENT
         // 2) 对指导表中缺失的表：使用指导表结构作为初始值（seedRows 仅保留字段，不默认展开到 content）
         // 3) 对于存在历史数据的表：以历史数据为主，但表名/表头/参数/顺序以指导表为准；不把 seedRows 合并进真实数据行
         if (hasSheetGuide) {
-            mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);
+            mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData).data;
         }
         // [修复] 合并结果按"用户手动顺序/模板顺序"重排，避免合并过程导致的随机乱序
         const orderedKeys = getSortedSheetKeys_ACU(mergedData);
         mergedData = reorderDataBySheetKeys_ACU(mergedData, orderedKeys);
         return migrateContentNullToRowId(mergedData);
+    }
+    // ── 单表隔离信息暂存（模块级，无状态污染）──
+    // mergeSheetGuideStructureIntoData_ACU 的隔离表键与结构 warning 通过这里透出，
+    // 由 refreshMergedDataAndNotify_ACU 紧随合并调用之后读取并清空，避免污染数据对象。
+    let lastMergeQuarantinedSheetKeys = [];
+    let lastMergeWarnings = [];
+    /**
+     * 读取并清空上一次合并产生的隔离表键（供加载路径报告单表故障隔离）。
+     */
+    function consumeLastMergeQuarantinedSheetKeys_ACU() {
+        const keys = lastMergeQuarantinedSheetKeys;
+        lastMergeQuarantinedSheetKeys = [];
+        return keys;
+    }
+    /**
+     * 读取并清空上一次合并产生的结构 warning（供加载路径记录可定位提示）。
+     */
+    function consumeLastMergeWarnings_ACU() {
+        const warnings = lastMergeWarnings;
+        lastMergeWarnings = [];
+        return warnings;
     }
     async function mergeAllIndependentTables_ACU() {
         const chat = getChatArray_ACU();
@@ -50266,11 +50640,23 @@ $CONTENT
             let mergedData = await loadTableStateFromFramesV2_ACU(chat, currentIsolationKey, {
                 allowTemporaryTemplateBaseline: true,
             });
+            // [修复顺序] 历史 auto_merged 越界尾列（行宽 = 表头 + 1 且尾格为 'auto_merged'）
+            // 必须在 guide 结构比较之前剥离，否则 +1 宽度差会被误判为结构不一致。
+            if (mergedData) {
+                const repaired = repairLegacyAutoMergedRowTails_ACU(mergedData);
+                if (repaired.length > 0) {
+                    logDebug_ACU(`[数据修复] 已移除历史 auto_merged 越界尾列：${repaired.join('、')}`);
+                }
+            }
             const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
             if (mergedData && hasUsableSheetGuide_ACU(sheetGuideData)) {
-                mergedData = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);
-                const orderedKeys = getSortedSheetKeys_ACU(mergedData);
-                return migrateContentNullToRowId(reorderDataBySheetKeys_ACU(mergedData, orderedKeys));
+                const mergeResult = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData, {
+                    structuralAuthority: 'data',
+                });
+                lastMergeQuarantinedSheetKeys = mergeResult.quarantinedSheetKeys;
+                lastMergeWarnings = mergeResult.warnings;
+                const orderedKeys = getSortedSheetKeys_ACU(mergeResult.data);
+                return migrateContentNullToRowId(reorderDataBySheetKeys_ACU(mergeResult.data, orderedKeys));
             }
             return migrateContentNullToRowId(mergedData);
         }
@@ -64021,7 +64407,25 @@ $CONTENT
         let nullRowCleanupError;
         let nullRowCleanupMessageIndex;
         // 合并数据 (使用新的独立表合并逻辑)
-        let mergedData = await mergeAllIndependentTables_ACU();
+        let mergedData = null;
+        try {
+            mergedData = await mergeAllIndependentTables_ACU();
+            // 单表隔离信息在合并函数内已做逐表 try/catch，正常路径下不会整体抛错。
+            // 这里仅用于捕获非预期异常并补充诊断上下文，不吞掉异常。
+            const quarantined = consumeLastMergeQuarantinedSheetKeys_ACU();
+            if (quarantined.length > 0) {
+                degraded = true;
+                logWarn_ACU(`[数据加载] 表格合并已隔离 ${quarantined.length} 张异常表：${quarantined.join('、')}，其余表正常加载。`);
+            }
+            const mergeWarnings = consumeLastMergeWarnings_ACU();
+            mergeWarnings.forEach(w => logWarn_ACU(w));
+        }
+        catch (error) {
+            degraded = true;
+            logError_ACU('[数据加载] 表格合并失败，已保留可用数据并降级。', error);
+            // 不吞掉异常：吞掉会让 _set_currentJsonTableData_ACU 停留在旧状态，产生更隐蔽的不一致。
+            throw error;
+        }
         // 当回溯找不到任何表格数据时（mergedData 为 null），
         // 优先用"已保存指导表的物化结构（不展开 seedRows）"作为基底；
         // 若不存在指导表，才使用"模板结构（不展开预置数据）"。
@@ -65623,8 +66027,16 @@ $CONTENT
         const writeGeneration = normalizePathSegment_ACU(parts.writeGeneration || 'write');
         const path = `TavernDB_ACU_vector_v2_${scopeToken}_${indexId}_${writeGeneration}_snapshot`;
         if (path.length > VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU) {
-            throw new Error(`[纪要向量索引] V2 快照对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}。`
-                + '请缩短 chatKey、isolationKey 或 sourceTableKey；禁止截断 canonical scope 后继续写入。');
+            const excess = path.length - VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU;
+            // 每个中文 UTF-8 编码占 3 字节，经 base64 后约 4 字符；ASCII 每字符 1 字节 → base64 约 1.33 字符。
+            const chineseCharsToShorten = Math.ceil(excess / 4);
+            throw new Error(`[纪要向量索引] V2 快照对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}，`
+                + `超出 ${excess} 字符。其中 scopeToken 占用 ${scopeToken.length} 字符，`
+                + `indexId 占用 ${indexId.length} 字符，writeGeneration 占用 ${writeGeneration.length} 字符，其余固定前缀/后缀共 ${path.length - scopeToken.length - indexId.length - writeGeneration.length} 字符。`
+                + `请缩短当前聊天名约 ${chineseCharsToShorten} 个中文字（或缩短数据隔离码），使路径回到上限内。`
+                + '仅在当前没有任何已建成的纪要向量索引时，重命名聊天才不会使旧索引失联；'
+                + '若已有索引，请勿直接改名，否则旧索引将无法再被寻址。'
+                + '禁止截断 canonical scope 后继续写入。');
         }
         return path;
     }
@@ -66111,6 +66523,8 @@ $CONTENT
             return false;
         if (record.checkpointId !== getManifestCheckpointId_ACU(manifest))
             return false;
+        if (record.writeGeneration !== normalizeKeyPart_ACU(manifest.storageIdentity?.writeGeneration || ''))
+            return false;
         if (record.chunkKey !== normalizeKeyPart_ACU(ref.chunkKey))
             return false;
         if (record.chunkId !== normalizeKeyPart_ACU(ref.chunkId))
@@ -66156,6 +66570,7 @@ $CONTENT
                             sourceTableKey: normalizeKeyPart_ACU(manifest.sourceTableKey),
                             indexId: normalizeKeyPart_ACU(manifest.indexId),
                             checkpointId: getManifestCheckpointId_ACU(manifest),
+                            writeGeneration: normalizeKeyPart_ACU(manifest.storageIdentity?.writeGeneration || ''),
                             chunkKey,
                             chunkId,
                             rowKey: normalizeKeyPart_ACU(chunk.rowKey),
@@ -66204,6 +66619,7 @@ $CONTENT
                         sourceTableKey: normalizeKeyPart_ACU(manifest.sourceTableKey),
                         indexId: normalizeKeyPart_ACU(manifest.indexId),
                         checkpointId: getManifestCheckpointId_ACU(manifest),
+                        writeGeneration: normalizeKeyPart_ACU(manifest.storageIdentity?.writeGeneration || ''),
                         chunkKey,
                         chunkId: normalizeKeyPart_ACU(ref.chunkId),
                         rowKey: normalizeKeyPart_ACU(ref.rowKey),
@@ -66260,6 +66676,7 @@ $CONTENT
                                 && record.isolationKey === targetIsolationKey
                                 && record.sourceTableKey === targetSourceTableKey
                                 && record.checkpointId === targetCheckpointId
+                                && record.writeGeneration === normalizeKeyPart_ACU(manifest.storageIdentity?.writeGeneration || '')
                                 && record.chunk?.vector?.length > 0) {
                                 record.lastAccessAt = now;
                                 store.put(record);
@@ -67006,6 +67423,21 @@ $CONTENT
     function buildVersionedSnapshotIndexId_ACU(params) {
         const revision = Math.max(1, Math.floor(Number(params.snapshotRevision) || 0));
         return `snap_${hashUserInput_ACU(`${params.chatKey}\n${params.isolationKey}\n${params.sourceTableKey}\n${revision}`)}`;
+    }
+    /**
+     * [T0a] 生成 V2 单文件快照的 writeGeneration（紧凑格式）。
+     * 格式：时间戳base36 + 2×Uint32 定宽 base36（无分隔符）。
+     * - 时间戳 base36 通常 8 字符（毫秒级），2×Uint32 定宽各 7 字符 → 总长约 22，上限 24。
+     * - 字符集 [a-zA-Z0-9]，不会被 normalizeFileNamePart_ACU 改写。
+     * - 熵 64 位：唯一职责是"同 scope 同 revision 同毫秒内两次写入不撞路径"，毫秒时间戳已兜底。
+     * - Uint32 最大值 4294967295 的 base36 恰好 7 位，padStart(7, '0') 保证无分隔符亦可无歧义解析。
+     */
+    function buildVectorIndexSnapshotWriteGeneration_ACU(now = Date.now(), entropySource = new Uint32Array(2)) {
+        const entropy = entropySource;
+        if (entropy.length < 2) {
+            throw new Error('交火向量 V2 writeGeneration 需要至少 2 个 Uint32 熵值。');
+        }
+        return `${now.toString(36)}${Array.from(entropy.slice(0, 2), (value) => value.toString(36).padStart(7, '0')).join('')}`;
     }
     function buildVersionedSnapshotScopePrefix_ACU(chatKey, isolationKey, sourceTableKey) {
         return `${buildVectorIndexStableDirectory_ACU({ chatKey, isolationKey, sourceTableKey })}_`;
@@ -68183,6 +68615,12 @@ $CONTENT
         if (dimension <= 0) {
             throw new Error('交火向量快照索引缺少有效向量维度。');
         }
+        // T2：收紧——校验全部 chunk 的向量维度与首 chunk 一致，拒绝混维写入。
+        // 混维快照在召回时会被 cosineSimilarity_ACU 判 0 分（静默召回失败），必须在写入前拦住。
+        const mixedDimensionChunk = chunks.find((chunk) => (chunk.vector?.length || 0) !== dimension);
+        if (mixedDimensionChunk) {
+            throw new Error(`交火向量快照索引存在维度不一致的 chunk（期望 ${dimension}，实际 ${mixedDimensionChunk.vector?.length || 0}），拒绝写入外置文件。`);
+        }
         // rolling-delta 仍使用可覆盖的 legacy 物理路径，尚未具备 V2 的 immutable identity
         // 与 prepared/published 生命周期。不得让实验开关绕过本函数后续的安全发布流程。
         if (summaryVectorIndexConfig.summaryIndexRollingDeltaEnabled) {
@@ -68190,14 +68628,19 @@ $CONTENT
         }
         const rowsByKey = new Map(rows.map((row) => [row.rowKey, row]));
         const chunkKeysByChunkId = new Map();
-        for (const chunk of chunks) {
+        // T6：仅需 chunkKey，不再序列化 blob / 计算 SHA256 / 分配 Blob（结果全部被丢弃）。
+        // 输入与 prepareVectorChunkBlob_ACU 的 chunkKey 计算完全一致，写出的 manifest/blob 逐字节不变。
+        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+            const chunk = chunks[chunkIndex];
             const row = rowsByKey.get(chunk.rowKey);
-            const prepared = await prepareVectorChunkBlob_ACU(chunk, {
+            const chunkKey = buildVectorChunkKey_ACU({
                 embeddingModel: options.embeddingModel,
                 dimension,
                 sourceFingerprint: row?.sourceFingerprint,
+                rowKey: chunk.rowKey,
+                text: chunk.text,
             });
-            chunkKeysByChunkId.set(chunk.chunkId, prepared.chunkKey);
+            chunkKeysByChunkId.set(chunk.chunkId, chunkKey);
         }
         const rowsWithShardIds = rows.map((row) => ({
             ...row,
@@ -68216,12 +68659,12 @@ $CONTENT
         });
         const replacedRowKeys = Array.from(new Set(options.replacedRowKeys || []));
         const parentIndexIds = Array.from(new Set([...(options.parentIndexIds || []), ...(options.previousManifest?.indexId ? [options.previousManifest.indexId] : [])].filter(Boolean)));
-        const entropy = new Uint32Array(4);
+        const entropy = new Uint32Array(2);
         if (!globalThis.crypto?.getRandomValues) {
             throw new Error('交火向量 V2 快照写入需要 crypto.getRandomValues，以避免物理路径覆盖。');
         }
         globalThis.crypto.getRandomValues(entropy);
-        const writeGeneration = `${Date.now().toString(36)}-${Array.from(entropy, (value) => value.toString(36)).join('-')}`;
+        const writeGeneration = buildVectorIndexSnapshotWriteGeneration_ACU(Date.now(), entropy);
         const storageIdentity = {
             layoutVersion: 2,
             scopeFingerprint,
@@ -68669,9 +69112,10 @@ $CONTENT
         if (!manifest)
             return [];
         if (isSingleFileSnapshotManifest_ACU$1(manifest)) {
-            // V2 immutable snapshot 的 authority 是外置 blob。热缓存未绑定 writeGeneration，
-            // 因此不能在未验证当前 blob 身份时作为返回来源。
-            if (options.preferExternalFiles !== true && !manifest.storageIdentity) {
+            // V2 immutable snapshot 的 authority 是外置 blob。热缓存已绑定 writeGeneration
+            // （T8a），读侧强校验 record.writeGeneration === manifest.storageIdentity.writeGeneration，
+            // 身份不匹配或旧 record（无该字段）一律判不兼容并回落远端。
+            if (options.preferExternalFiles !== true) {
                 const cachedChunks = await getSummaryVectorHotCacheChunks_ACU({ manifest });
                 if (cachedChunks?.length) {
                     logSummaryVectorIndexIdentityEvent_ACU('debug', 'load', 'legacy_hot_cache_fallback', {
@@ -71383,12 +71827,15 @@ $CONTENT
                 if (!isV2TagData_ACU(tagData))
                     continue;
                 const checkpoint = tagData.storageFrame.checkpoint;
-                const isTemplateFallbackRoot = checkpoint?.fallbackProvenance?.kind === 'manual_refill_template_root';
-                // compaction 已在新边界固化真实 replay 结果。模板临时根也必须随之降级，
-                // 否则同一 isolationKey 会遗留两个 full checkpoint，后续手动重填会 fail closed。
-                if (checkpoint?.kind !== 'full' || (checkpoint.reason !== 'init' && !isTemplateFallbackRoot)) {
+                // compaction 已在新边界固化真实 replay 结果。anchor 前的任何旧 full
+                // （init / periodic / manual / schema_change / compaction / import /
+                // migration / integrity_repair / 模板临时根）都必须随之降级，否则同一
+                // isolationKey 会遗留两个 full checkpoint：回放只认最后一个 full，
+                // 之前增量全部失效，后续手动重填也会 fail closed。
+                // 降级是无损的（checkpoint.data → seq ≤ 0 的 data_replace fallback entry），
+                // 数学上不改变回放输出，P5-3 用指纹比对实测举证。
+                if (checkpoint?.kind !== 'full')
                     continue;
-                }
                 if (downgradeV2FullCheckpointAtIndex_ACU(chat, isolationKey, i))
                     downgradedCount += 1;
             }
@@ -71430,6 +71877,14 @@ $CONTENT
                 const changed = await writeV2BoundaryCheckpointBeforePurge_ACU(chat, anchorIndex);
                 const downgradedCount = downgradeCoveredV2FullCheckpointsAfterAnchor_ACU(chat, anchorIndex);
                 const obsoleteInitDowngradedCount = downgradeObsoleteInitialV2FullCheckpointsBeforeCompaction_ACU(chat, anchorIndex);
+                // 单根不变量：降级后同一隔离键必须至多一个 full checkpoint，
+                // 否则写新边界基线前就把历史搞成多根，回放只认最后一个，之前增量全部失效。
+                for (const isolationKey of collectIsolationKeysWithV2Frames_ACU(chat)) {
+                    const invariantViolation = assertSingleActiveFullCheckpointV2_ACU(chat, isolationKey, 'compaction_boundary');
+                    if (invariantViolation) {
+                        throw new Error(invariantViolation);
+                    }
+                }
                 if ((changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0) && options.save !== false) {
                     await saveChatToHostStrict_ACU();
                 }
@@ -75076,6 +75531,16 @@ $CONTENT
         }
         return true;
     }
+    // 读写容器不对称是有意的，不要"修复"成让 getter 直接读 guide 容器：
+    // setter 把数据写进 guide 容器（container.tags[key]），只有 shouldSyncTemplateScope
+    // 为真时才同步 template scope；而本 getter 读的是 template scope 的 guideData，
+    // inherit_global 下 getCurrentChatTemplateScopeState_ACU 返回 null
+    // （chat-scope-template.ts:423-425），因此会一路回退到全局模板快照。
+    //
+    // 结构真相不依赖这条读回路径：填表基底优先取 V2 checkpoint 回放，
+    // guide 仅在无 checkpoint 时充当结构源（buildBatchMergeBase_ACU 的分支顺序，
+    // update-orchestrator.ts:747-804）。让 getter 读 guide 容器会使未显式覆盖模板的
+    // 聊天被隐式写入悄悄改变视图，反而破坏"跟随全局模板"的语义。
     function getChatSheetGuideDataForIsolationKey_ACU(isolationKey) {
         const chat = getChatArray_ACU();
         const normalizedKey = String(isolationKey ?? '');
@@ -81856,6 +82321,22 @@ $CONTENT
         return undefined; // 不需要更新
     }
 
+    class VectorEmbeddingError_ACU extends Error {
+        constructor(options) {
+            super(options.message);
+            this.name = 'VectorEmbeddingError_ACU';
+            this.kind = options.kind;
+            this.httpStatus = options.httpStatus ?? null;
+            this.providerCode = options.providerCode ?? null;
+            this.providerMessage = options.providerMessage ?? null;
+            this.retryAfterMs = options.retryAfterMs ?? null;
+            this.endpoint = options.endpoint;
+            this.model = options.model;
+        }
+    }
+    function isVectorEmbeddingError_ACU(value) {
+        return value instanceof VectorEmbeddingError_ACU;
+    }
     function normalizeEmbeddingVector_ACU(value) {
         if (!Array.isArray(value))
             return [];
@@ -81876,6 +82357,71 @@ $CONTENT
             embedding: normalizeEmbeddingVector_ACU(item?.embedding ?? item),
         }))
             .filter((item) => item.embedding.length > 0);
+    }
+    /** 按分类表决定 HTTP 状态对应的错误种类（T3）。 */
+    function classifyEmbeddingHttpError_ACU(status) {
+        switch (status) {
+            case 401: return 'credential';
+            case 403: return 'credential';
+            case 400:
+            case 404:
+            case 422: return 'request';
+            case 413: return 'limited-retryable';
+            case 408:
+            case 429: return 'retryable';
+            default: return status >= 500 ? 'retryable' : 'request';
+        }
+    }
+    /** 解析 Retry-After：秒（数字或 HTTP-date）→ ms。无法解析返回 null。 */
+    function parseRetryAfterMs_ACU(value) {
+        if (!value)
+            return null;
+        const trimmed = value.trim();
+        if (/^\d+$/.test(trimmed)) {
+            const seconds = Number(trimmed);
+            return Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds * 1000) : null;
+        }
+        const parsed = Date.parse(trimmed);
+        if (Number.isFinite(parsed)) {
+            return Math.max(0, parsed - Date.now());
+        }
+        return null;
+    }
+    /** 解析错误响应体：优先 JSON 的 error.code / error.message，否则取原始文本。 */
+    function parseEmbeddingErrorBody_ACU(raw) {
+        const trimmed = String(raw || '').trim();
+        if (!trimmed)
+            return { providerCode: null, providerMessage: null };
+        try {
+            const payload = JSON.parse(trimmed);
+            const code = payload?.error?.code ?? payload?.code ?? null;
+            const message = payload?.error?.message ?? payload?.message ?? null;
+            return {
+                providerCode: code != null ? String(code) : null,
+                providerMessage: message != null ? String(message) : null,
+            };
+        }
+        catch (_error) {
+            return { providerCode: null, providerMessage: trimmed.slice(0, 500) };
+        }
+    }
+    async function throwEmbeddingHttpErrorAsync_ACU(response, endpoint, model) {
+        const raw = await response.text().catch(() => response.statusText);
+        const { providerCode, providerMessage } = parseEmbeddingErrorBody_ACU(raw);
+        const kind = classifyEmbeddingHttpError_ACU(response.status);
+        const retryAfterMs = parseRetryAfterMs_ACU(response.headers.get('Retry-After'));
+        const status = response.status;
+        const detail = providerMessage || raw || response.statusText;
+        throw new VectorEmbeddingError_ACU({
+            kind,
+            message: `Embedding 请求失败 ${status}: ${detail}`,
+            httpStatus: status,
+            providerCode,
+            providerMessage: providerMessage || detail,
+            retryAfterMs,
+            endpoint,
+            model,
+        });
     }
     async function createEmbeddings_ACU(request) {
         const endpoint = String(request.endpoint || '').trim();
@@ -81901,13 +82447,18 @@ $CONTENT
             body: JSON.stringify({ model, input }),
         });
         if (!response.ok) {
-            const detail = await response.text().catch(() => response.statusText);
-            throw new Error(`Embedding 请求失败 ${response.status}: ${detail}`);
+            await throwEmbeddingHttpErrorAsync_ACU(response, endpoint, model);
         }
         const payload = await response.json();
         const normalized = normalizeEmbeddingResponse_ACU(payload);
         if (normalized.length === 0) {
-            throw new Error('Embedding 响应中没有可用向量。');
+            throw new VectorEmbeddingError_ACU({
+                kind: 'provider-contract',
+                message: 'Embedding 响应中没有可用向量。',
+                httpStatus: response.status,
+                endpoint,
+                model,
+            });
         }
         return normalized;
     }
@@ -82078,9 +82629,40 @@ $CONTENT
             indexedRowCount: 0,
             skippedRowCount: 0,
             chunkCount: 0,
+            retryability: 'retryable',
             errors: [],
             ...partial,
         };
+    }
+    /**
+     * T0b：归档入口路径 preflight。
+     * 在发起任何 embedding 请求之前，用长度上界占位值试算 V2 快照对象路径的可构造性。
+     * 真实 indexId / writeGeneration 在 persist 内部生成，这里无法取得，因此占位必须取上界：
+     *   - indexId：`snap_`(5) + hashUserInput_ACU 输出最长 8 字符 = 13。
+     *     hashUserInput_ACU（utils.ts:91）末轮不再 `^=` 截回 32 位，返回值可能为负，
+     *     `toString(36)` 会带 `-` 号（实测 20 万样本：50.3% 为负、21.1% 长度为 8，最坏如 `-10tp0s0`）。
+     *     而 normalizeFileNamePart_ACU 的字符集 [a-zA-Z0-9_-] 保留 `-`，不会被吃掉。
+     *     取 12 会让临界 scope 通过 preflight 后在 persist 抛错（先烧 embedding 再失败），故必须取 13。
+     *   - writeGeneration：T0a 后最大长度 24（时间戳 base36 8 + 7 + 7 = 22，留 2 字符余量）
+     * preflight 通过 ⇒ 真实构造必通过（不允许 preflight 放过、persist 再抛）。
+     * 返回 { ok: true } 或 { ok: false, error }，不 throw。
+     */
+    function preflightVectorIndexSnapshotPath_ACU(parts) {
+        const indexIdPlaceholder = 'snap_' + 'z'.repeat(8);
+        const writeGenerationPlaceholder = 'z'.repeat(24);
+        try {
+            buildVectorIndexSingleSnapshotV2FilePath_ACU({
+                chatKey: parts.chatKey,
+                isolationKey: parts.isolationKey,
+                sourceTableKey: parts.sourceTableKey,
+                indexId: indexIdPlaceholder,
+                writeGeneration: writeGenerationPlaceholder,
+            });
+            return { ok: true };
+        }
+        catch (error) {
+            return { ok: false, error: String(error?.message || error || '快照路径长度超出宿主安全上限') };
+        }
     }
     const SUMMARY_VECTOR_INDEX_PUBLISH_MUTATED_MESSAGE_FIELDS_ACU = [
         'TavernDB_ACU_IsolatedData',
@@ -82116,15 +82698,22 @@ $CONTENT
         const source = `${summaryKey}:${rowId}:${indexCode}`;
         return `summary-row:${hashUserInput_ACU(source)}`;
     }
-    function buildPreparedRowFingerprint_ACU(row) {
+    /**
+     * 单一指纹公式：所有行指纹必须经由这里计算，避免三处内联公式漂移。
+     * 输入字段顺序与 join 分隔符与历史实现逐字符一致（T1，零行为变化）。
+     */
+    function buildSummaryRowFingerprint_ACU(source) {
         return hashUserInput_ACU([
-            row.rowId,
-            row.timeSpan,
-            row.location,
-            row.summary,
-            row.indexCode,
-            row.vectorSourceText,
+            source.rowId,
+            source.timeSpan,
+            source.location,
+            source.summary,
+            source.indexCode,
+            source.vectorSourceText,
         ].join('\n'));
+    }
+    function buildPreparedRowFingerprint_ACU(row) {
+        return buildSummaryRowFingerprint_ACU(row);
     }
     function findSummaryTable_ACU(sourceTableKey) {
         if (!currentJsonTableData_ACU || typeof currentJsonTableData_ACU !== 'object') {
@@ -82236,14 +82825,14 @@ $CONTENT
         }
     }
     function getSummaryRowFingerprintFromStateRow_ACU(row) {
-        return hashUserInput_ACU([
-            row.rowId,
-            row.timeSpan,
-            row.location,
-            row.summary,
-            row.indexCode,
-            row.vectorSourceText,
-        ].join('\n'));
+        return buildSummaryRowFingerprint_ACU({
+            rowId: row.rowId,
+            timeSpan: row.timeSpan,
+            location: row.location,
+            summary: row.summary,
+            indexCode: row.indexCode,
+            vectorSourceText: row.vectorSourceText,
+        });
     }
     function buildLayerStateWithRows_ACU(baseState, rows, chunks, options) {
         const normalizedRows = (Array.isArray(rows) ? rows : [])
@@ -82316,14 +82905,14 @@ $CONTENT
         existingRows.forEach((existingRow) => {
             const prepared = preparedByKey.get(existingRow.rowKey);
             const chunks = existingChunksByRowKey.get(existingRow.rowKey) || [];
-            const existingFingerprint = hashUserInput_ACU([
-                existingRow.rowId,
-                existingRow.timeSpan,
-                existingRow.location,
-                existingRow.summary,
-                existingRow.indexCode,
-                existingRow.vectorSourceText,
-            ].join('\n'));
+            const existingFingerprint = buildSummaryRowFingerprint_ACU({
+                rowId: existingRow.rowId,
+                timeSpan: existingRow.timeSpan,
+                location: existingRow.location,
+                summary: existingRow.summary,
+                indexCode: existingRow.indexCode,
+                vectorSourceText: existingRow.vectorSourceText,
+            });
             if (!prepared || chunks.length === 0 || existingFingerprint !== prepared.sourceFingerprint) {
                 return;
             }
@@ -83020,9 +83609,28 @@ $CONTENT
             logDebug_ACU(`[纪要向量索引] 本次归档模式: ${archiveMode}`);
             const aggregatedSnapshot = await hydrateAggregatedSummaryVectorIndexSnapshot_ACU(getAggregatedSummaryVectorIndexSnapshot_ACU());
             const existingState = cloneSummaryVectorIndexState_ACU(aggregatedSnapshot?.summaryVectorIndexState);
-            const reusable = buildExistingReusableRows_ACU(prepared.rows, existingState);
-            const reusableRowKeySet = new Set(reusable.reusableRows.map((row) => row.rowKey));
-            const rowsNeedingEmbedding = prepared.rows.filter((row) => !reusableRowKeySet.has(row.rowKey));
+            // T2：embedding 模型失效闸门。
+            // 指纹公式不含模型身份（D1），若模型已变而静默复用旧行，召回会用旧模型向量打分。
+            // 比对 existingState.manifest.embeddingModel 与当前 config；不一致则整个 scope 判不可复用、全量重算。
+            // 旧 manifest 缺 embeddingModel 字段时视为相同，避免历史索引误判全量重算。
+            // 维度一致性由 persist 在写入前收紧校验（混维拒绝写入）。
+            const existingManifestModel = existingState?.manifest?.embeddingModel;
+            const embeddingIdentityChanged = existingManifestModel != null
+                && String(existingManifestModel).trim() !== String(config.embeddingModel).trim();
+            if (embeddingIdentityChanged) {
+                logSummaryVectorIndexIdentityEvent_ACU('warn', 'archive', 'embedding_identity_changed_full_rebuild', {
+                    scopeFingerprint: buildSummaryVectorIndexArchiveScopeKey_ACU({
+                        chatKey: currentChatFileIdentifier_ACU,
+                        isolationKey,
+                        sourceTableKey: selectedSummary.summaryKey,
+                    }),
+                    error: `model=${String(existingManifestModel).trim()} → ${String(config.embeddingModel).trim()}`,
+                });
+            }
+            const reusable = embeddingIdentityChanged
+                ? { reusableRows: [], reusableChunks: [], rowsNeedingEmbedding: prepared.rows }
+                : buildExistingReusableRows_ACU(prepared.rows, existingState);
+            const rowsNeedingEmbedding = reusable.rowsNeedingEmbedding;
             const activeRowKeysUnchanged = areSummaryVectorActiveRowKeysSame_ACU(prepared.rows, existingState);
             const existingActiveRowCount = existingState?.manifest?.snapshot?.activeRowKeys?.length || existingState?.rows?.length || 0;
             logDebug_ACU(`[纪要向量索引] 增量归档判定：prepared=${prepared.rows.length}, existingActive=${existingActiveRowCount}, reused=${reusable.reusableRows.length}, embedding=${rowsNeedingEmbedding.length}, activeRowsUnchanged=${activeRowKeysUnchanged}, skippedRows=${prepared.skippedRowCount}`);
@@ -83043,24 +83651,78 @@ $CONTENT
             const indexedAt = new Date().toISOString();
             const sourceTableName = normalizeText_ACU$1(selectedSummary.table?.name) || '纪要表';
             const maxRowsPerBatch = Math.max(1, Math.floor(Number(config.summaryIndexArchiveMaxConcurrency) || 30));
+            // T0b：在任何 embedding 请求之前做路径 preflight，用长度上界占位值试算。
+            // 若失败（scope 本身超长），立即返回结构化失败，不发起任何 embedding 请求。
+            const pathPreflight = preflightVectorIndexSnapshotPath_ACU({
+                chatKey: currentChatFileIdentifier_ACU,
+                isolationKey,
+                sourceTableKey: selectedSummary.summaryKey,
+            });
+            if (!pathPreflight.ok) {
+                logWarn_ACU(`[纪要向量索引] 归档前路径 preflight 失败，未发起 embedding：${pathPreflight.error}`);
+                return buildResult_ACU({
+                    success: false,
+                    skipped: false,
+                    summaryKey: selectedSummary.summaryKey,
+                    messageIndex: targetMessageIndex,
+                    reason: 'vector_index_path_too_long',
+                    retryability: 'terminal',
+                    errors: [pathPreflight.error || '快照路径长度超出宿主安全上限'],
+                });
+            }
             const embeddedRows = [];
             const embeddedChunks = [];
-            let checkpointResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU(reusable.reusableRows, reusable.reusableChunks);
+            // T9：归档 embedding 批次有界并发。
+            // 串行时批次 k 的 existingSequenceBase = 前 k 批的 chunk 总数；并发下无法等前批完成再算，
+            // 因此按批预分配 sequence 区间：批次 k 的 base = sum(前 k 批的 chunk 数)。
+            // chunk 切分是确定性函数（chunkTextBySentenceCount_ACU），可精确预计算每批 chunk 数，
+            // 保证并发下最终 chunks 的 sequence 序与串行完全一致。
+            const batchConcurrency = Math.max(1, Math.floor(Number(config.summaryIndexArchiveEmbeddingConcurrency) || 3));
+            const batchChunkCounts = [];
+            const batchRowGroups = [];
             for (let startIndex = 0; startIndex < rowsNeedingEmbedding.length; startIndex += maxRowsPerBatch) {
                 const rowBatch = rowsNeedingEmbedding.slice(startIndex, startIndex + maxRowsPerBatch);
                 if (rowBatch.length === 0)
                     continue;
-                const batchResult = await buildChunksWithEmbeddings_ACU(rowBatch, {
-                    snapshotMessageId,
-                    sentenceCount: config.summaryIndexChunkSentenceCount,
-                    embeddingEndpoint: config.embeddingEndpoint,
-                    embeddingApiKey: config.embeddingApiKey,
-                    embeddingModel: config.embeddingModel,
-                    existingSequenceBase: embeddedChunks.length,
-                });
+                batchRowGroups.push(rowBatch);
+                let chunkCount = 0;
+                for (const row of rowBatch) {
+                    chunkCount += chunkTextBySentenceCount_ACU(row.vectorSourceText, config.summaryIndexChunkSentenceCount).length;
+                }
+                batchChunkCounts.push(chunkCount);
+            }
+            // 有界并发：同时最多 batchConcurrency 个批次在飞。取批次 + 分配 sequence base 在同一同步块内完成
+            // （JS 单线程，nextBatchIndex++ / sequenceBase 读改写之间无 await），无竞争。
+            const batchResults = new Array(batchRowGroups.length).fill(null);
+            let nextBatchIndex = 0;
+            let sequenceBase = 0;
+            const workerCount = Math.max(1, Math.min(batchConcurrency, batchRowGroups.length));
+            const workers = Array.from({ length: workerCount }, async () => {
+                while (true) {
+                    const batchIndex = nextBatchIndex;
+                    if (batchIndex >= batchRowGroups.length)
+                        break;
+                    nextBatchIndex += 1;
+                    const mySequenceBase = sequenceBase;
+                    sequenceBase += batchChunkCounts[batchIndex];
+                    const batchResult = await buildChunksWithEmbeddings_ACU(batchRowGroups[batchIndex], {
+                        snapshotMessageId,
+                        sentenceCount: config.summaryIndexChunkSentenceCount,
+                        embeddingEndpoint: config.embeddingEndpoint,
+                        embeddingApiKey: config.embeddingApiKey,
+                        embeddingModel: config.embeddingModel,
+                        existingSequenceBase: mySequenceBase,
+                    });
+                    batchResults[batchIndex] = batchResult;
+                }
+            });
+            await Promise.all(workers);
+            // 按批号顺序合并，保证 embeddedRows / embeddedChunks 顺序与串行一致。
+            for (const batchResult of batchResults) {
+                if (!batchResult)
+                    continue;
                 embeddedRows.push(...batchResult.rows);
                 embeddedChunks.push(...batchResult.chunks);
-                checkpointResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU([...reusable.reusableRows, ...embeddedRows], [...reusable.reusableChunks, ...embeddedChunks]);
             }
             const finalResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU([...reusable.reusableRows, ...embeddedRows], [...reusable.reusableChunks, ...embeddedChunks]);
             if (finalResult.rows.length === 0 || finalResult.chunks.length === 0) {
@@ -83155,6 +83817,30 @@ $CONTENT
                     errors: [],
                 });
             }
+            // T4：识别结构化 embedding 错误，把 terminal / retryable 分类传导给 flush runner。
+            // terminal（credential / request / provider-contract）→ 停止重排；retryable → 继续有限重试。
+            if (isVectorEmbeddingError_ACU(error)) {
+                const terminalKinds = new Set(['credential', 'request', 'provider-contract']);
+                const embeddingRetryability = terminalKinds.has(error.kind) ? 'terminal' : 'retryable';
+                const detail = error.providerMessage || error.message;
+                const credentialFingerprint = error.kind === 'credential'
+                    ? hashUserInput_ACU([
+                        String(config.embeddingEndpoint || '').trim(),
+                        String(config.embeddingModel || '').trim(),
+                        String(config.embeddingApiKey || '').trim(),
+                    ].join('|'))
+                    : undefined;
+                return buildResult_ACU({
+                    success: false,
+                    skipped: false,
+                    summaryKey: selectedSummary.summaryKey,
+                    messageIndex: targetMessageIndex,
+                    reason: 'embedding_request_failed',
+                    retryability: embeddingRetryability,
+                    ...(credentialFingerprint ? { credentialFingerprint } : {}),
+                    errors: [`Embedding 请求失败（${error.kind}${error.httpStatus != null ? `, HTTP ${error.httpStatus}` : ''}）: ${detail}`],
+                });
+            }
             return buildResult_ACU({
                 success: false,
                 skipped: false,
@@ -83199,8 +83885,12 @@ $CONTENT
 
     const SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU = 2500;
     const SUMMARY_VECTOR_INDEX_FLUSHING_STALE_MS_ACU = 60000;
+    /** T4：credential cooldown 默认时长（毫秒）。403/401 后同凭据在其他 scope 也停止重试。 */
+    const SUMMARY_VECTOR_INDEX_CREDENTIAL_COOLDOWN_MS_ACU = 30 * 60000;
     const summaryVectorFlushTimers_ACU = new Map();
     const summaryVectorFlushRunning_ACU = new Set();
+    /** T4：credential 指纹 → cooldown 截止时间。仅存哈希不存明文 apiKey。 */
+    const summaryVectorCredentialCooldowns_ACU = new Map();
     /** 与 archive lock、realign state 复用同一三元 canonical scope。 */
     function buildSummaryVectorIndexFlushScopeKey_ACU(chatKey, isolationKey, sourceTableKey) {
         return buildSummaryVectorIndexArchiveScopeKey_ACU(normalizeSummaryVectorIndexScope_ACU({ chatKey, isolationKey, sourceTableKey }));
@@ -83280,6 +83970,40 @@ $CONTENT
             void flushSummaryVectorIndexTaskNow_ACU(task.scopeKey);
         }, delay);
         summaryVectorFlushTimers_ACU.set(task.scopeKey, timer);
+    }
+    /** T4：查询 credential cooldown 是否仍生效。命中返回 reason，否则返回 null。 */
+    function getActiveCredentialCooldown_ACU(credentialFingerprint) {
+        if (!credentialFingerprint)
+            return null;
+        const entry = summaryVectorCredentialCooldowns_ACU.get(credentialFingerprint);
+        if (!entry)
+            return null;
+        if (Date.now() >= entry.until) {
+            summaryVectorCredentialCooldowns_ACU.delete(credentialFingerprint);
+            return null;
+        }
+        return entry;
+    }
+    /** T4：记录 credential cooldown（仅存指纹，不存明文）。换 key（指纹变化）自动失效。 */
+    function recordCredentialCooldown_ACU(credentialFingerprint, reason) {
+        if (!credentialFingerprint)
+            return;
+        summaryVectorCredentialCooldowns_ACU.set(credentialFingerprint, {
+            until: Date.now() + SUMMARY_VECTOR_INDEX_CREDENTIAL_COOLDOWN_MS_ACU,
+            reason,
+        });
+        logSummaryVectorIndexIdentityEvent_ACU('warn', 'flush', 'credential_cooldown_armed', {
+            scopeFingerprint: 'credential-fingerprint',
+            error: reason,
+        });
+    }
+    /** T4：显式解除全部 credential cooldown（手动重建成功 / 用户换 key 后）。 */
+    function clearSummaryVectorIndexCredentialCooldowns_ACU() {
+        summaryVectorCredentialCooldowns_ACU.clear();
+        logSummaryVectorIndexIdentityEvent_ACU('debug', 'flush', 'credential_cooldown_cleared', {
+            scopeFingerprint: 'credential-fingerprint',
+            error: 'manual rebuild or credential change cleared cooldowns',
+        });
     }
     async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey, completedGeneration) {
         const current = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
@@ -83440,6 +84164,26 @@ $CONTENT
         summaryVectorFlushRunning_ACU.add(task.scopeKey);
         clearFlushTimer_ACU(task.scopeKey);
         try {
+            // T4：credential cooldown 检查——同一凭据（endpoint+model+apiKey 指纹）近期
+            // 401/403 后，其他 scope 的 flush 也不再发起 embedding 请求，避免重复扣费。
+            try {
+                const cooldownConfig = getEffectiveSummaryVectorIndexConfig_ACU();
+                const cooldownFingerprint = hashUserInput_ACU([
+                    String(cooldownConfig.embeddingEndpoint || '').trim(),
+                    String(cooldownConfig.embeddingModel || '').trim(),
+                    String(cooldownConfig.embeddingApiKey || '').trim(),
+                ].join('|'));
+                const activeCooldown = getActiveCredentialCooldown_ACU(cooldownFingerprint);
+                if (activeCooldown) {
+                    const cooldownError = `凭据冷却中（${activeCooldown.reason}），停止重复扣费重试。`;
+                    logWarn_ACU(`[交火向量索引] 防抖 flush 因 credential cooldown 跳过：scope=${task.scopeKey}`);
+                    await markFlushTaskFailure_ACU(task, cooldownError, true);
+                    return { success: false, reason: 'credential_cooldown', result: undefined, error: cooldownError };
+                }
+            }
+            catch (_cooldownConfigError) {
+                // config 不可用时不做 cooldown 检查，退回原路径（cooldown 是防重复扣费的增强，不阻断正常 flush）。
+            }
             // [spv3.6.9] force=true：填表完成后必须强制写入外部文件，跳过"无变更"检测
             // 因为填表后数据已变化，但 fingerprint 比对可能误判为无变更
             const result = await archiveSummaryVectorIndexNow_ACU({
@@ -83464,7 +84208,18 @@ $CONTENT
                 return { success: true, skipped: result.skipped, reason: result.reason, result };
             }
             const error = result.errors?.join('; ') || result.reason || 'summary_vector_index_flush_failed';
-            await markFlushTaskFailure_ACU(task, error, result.reason === 'summary_vector_index_config_invalid' || result.reason === 'target_message_invalid' || result.reason === 'target_message_not_found');
+            // T4：credential 类失败（401/403）记录跨 scope cooldown，
+            // 同一凭据在其他聊天（scope）也停止立即重试，避免重复扣费。
+            if (result.credentialFingerprint) {
+                recordCredentialCooldown_ACU(result.credentialFingerprint, error);
+            }
+            // T0c：优先采用 archive 返回的结构化重试性分类（如路径超长 → terminal），
+            // 保留既有 reason 硬编码作为兜底，避免 T4 结构化失败落地前遗漏。
+            const isTerminalFailure = result.retryability === 'terminal'
+                || result.reason === 'summary_vector_index_config_invalid'
+                || result.reason === 'target_message_invalid'
+                || result.reason === 'target_message_not_found';
+            await markFlushTaskFailure_ACU(task, error, isTerminalFailure);
             logWarn_ACU('[交火向量索引] 防抖 flush 失败:', error);
             return { success: false, reason: result.reason, result, error };
         }
@@ -83820,28 +84575,44 @@ $CONTENT
      * [辅助] 从聊天记录加载旧数据覆盖 sheet 后，恢复指导表基底中的关键结构字段。
      *
      * 背景：loadBatchBaseData_ACU 从聊天记录中加载旧数据时，会整体覆盖 mergedBatchData[sheetKey]。
-     * 但指导表基底中可能包含用户在可视化编辑器中修改过的 sourceData.ddl 和表头（content[0]），
-     * 这些结构信息不应该被聊天记录中的旧数据覆盖。
+     * 基底（guideSnapshots）中可能包含用户在可视化编辑器中修改过的 sourceData.ddl 和表头（content[0]），
+     * 这些结构信息不应该被聊天记录中的旧数据覆盖；而 name/uid/updateConfig/exportConfig 保留聊天记录中的值，
+     * 因为它们可能在聊天过程中被合法修改。
      *
-     * 只恢复 sourceData（含 DDL）和表头（content[0]），其他字段（name/uid/updateConfig/exportConfig）
-     * 保留聊天记录中的值，因为它们可能在聊天过程中被合法修改。
+     * 结构权归属：运行时/回放数据持结构权。表头（content[0]）是数据形状定义，不是元数据；
+     * 无校验地用基底表头覆盖运行时会产出「表头 N 列 + 数据行 M 列」的错位填表基底。
+     * 仅当表头与权威数据完全一致时才继承基底的 sourceData.ddl；不一致时保留权威 ddl 并记录 warning。
      */
     function restoreGuideStructure(mergedSheet, guideSheet) {
         if (!guideSheet || typeof guideSheet !== 'object')
             return;
         if (!mergedSheet || typeof mergedSheet !== 'object')
             return;
-        // 恢复 sourceData（包含 DDL、note 等用户在可视化编辑器中修改的关键配置）
-        if (guideSheet.sourceData)
-            mergedSheet.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
-        // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的
+        // 基底表头若存在，必须校验首列为 row_id
         const guideHeader = Array.isArray(guideSheet.content) ? guideSheet.content[0] : null;
         if (guideHeader && (!Array.isArray(guideHeader) || String(guideHeader[0] ?? '') !== 'row_id')) {
             throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || 'unknown')}`);
         }
-        if (Array.isArray(guideHeader)
-            && Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
+        const mergedHeader = Array.isArray(mergedSheet.content) ? mergedSheet.content[0] : null;
+        const headerMatches = !!guideHeader && !!mergedHeader && isSameSheetHeader_ACU(guideHeader, mergedHeader);
+        // 表头不一致时：保留权威结构，不覆盖、不 padding、不截断，仅记录 warning。
+        if (guideHeader && mergedHeader && !headerMatches) {
+            logWarn_ACU(`[MergeBase] 表「${String(mergedSheet.name || guideSheet.name || mergedSheet.uid)}」的基底表头`
+                + `与权威数据不一致，已保留权威结构：guide=${guideHeader.length} 列, data=${mergedHeader.length} 列。`);
+        }
+        // 仅当合并数据完全没有表头时，才用基底表头补位（无权威结构可循）。
+        if (!mergedHeader && Array.isArray(guideHeader) && Array.isArray(mergedSheet.content)) {
             mergedSheet.content[0] = JSON.parse(JSON.stringify(guideHeader));
+        }
+        // 只恢复结构字段 sourceData.ddl：表头一致时继承基底 ddl，否则保留权威 ddl。
+        // 不触碰 name/uid/updateConfig/exportConfig/orderNo（保留聊天记录中的值）。
+        if (guideSheet.sourceData && typeof guideSheet.sourceData === 'object') {
+            const targetSourceData = (mergedSheet.sourceData && typeof mergedSheet.sourceData === 'object')
+                ? mergedSheet.sourceData
+                : (mergedSheet.sourceData = {});
+            if (headerMatches && guideSheet.sourceData.ddl !== undefined) {
+                targetSourceData.ddl = JSON.parse(JSON.stringify(guideSheet.sourceData.ddl));
+            }
         }
     }
     function loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData) {
@@ -86719,6 +87490,14 @@ $CONTENT
             }
             if (!targetKeys.length) {
                 return { success: false, error: '未选择需要更新的表格。' };
+            }
+            // 锚点预检：同一隔离键下必须至多一个 full checkpoint，否则手动重填会把
+            // 增量写到错误的回放根上（回放只认最后一个 full，之前增量全部失效）。
+            // 在首次 AI 调用（processBatch）前阻断，避免先付完 AI 费用才撞 persist 层 fail-fast。
+            const preflightIsolationKey = getCurrentIsolationKey_ACU();
+            const preflightViolation = assertSingleActiveFullCheckpointV2_ACU(liveChat, preflightIsolationKey, 'orchestrateManualUpdate:anchor_preflight');
+            if (preflightViolation) {
+                return { success: false, error: `手动重填被锚点预检阻断：${preflightViolation}` };
             }
             const uiThreshold = settings_ACU.autoUpdateThreshold || 3;
             const uiBatchSize = settings_ACU.updateBatchSize || 3;
@@ -97746,6 +98525,9 @@ $CONTENT
         }
         const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
         if (result.success && !result.skipped) {
+            // T4：手动/自愈重建成功 = 显式解除入口，清除 credential cooldown，
+            // 避免换 key 或配置修复后仍被旧 cooldown 拦住。
+            clearSummaryVectorIndexCredentialCooldowns_ACU();
             try {
                 await updateReadableLorebookEntry_ACU(true);
             }
@@ -105811,6 +106593,32 @@ $CONTENT
             documentCount: documents.length,
         };
     }
+    // T10：BM25 语料缓存。键由调用方提供（runtime 用 indexId + writeGeneration + 候选 chunk 集合指纹），
+    // 索引切换 / 聊天切换 / 重新归档导致 chunk 集合变化时键自然变化，不会误用旧语料。
+    // 容量设上限：长期运行下 writeGeneration 每次归档都变，若无上限会累积旧键。
+    const BM25_CORPUS_CACHE_MAX_ACU = 4;
+    const bm25CorpusCache_ACU = new Map();
+    function clearBm25CorpusCache_ACU() {
+        bm25CorpusCache_ACU.clear();
+    }
+    function getOrBuildBm25Corpus_ACU(candidates, cacheKey) {
+        if (cacheKey) {
+            const cached = bm25CorpusCache_ACU.get(cacheKey);
+            if (cached)
+                return cached;
+        }
+        const built = buildCorpus_ACU(candidates);
+        if (cacheKey) {
+            bm25CorpusCache_ACU.set(cacheKey, built);
+            // 超过上限时淘汰最旧键（Map 迭代顺序即插入顺序）。
+            if (bm25CorpusCache_ACU.size > BM25_CORPUS_CACHE_MAX_ACU) {
+                const oldestKey = bm25CorpusCache_ACU.keys().next().value;
+                if (oldestKey !== undefined)
+                    bm25CorpusCache_ACU.delete(oldestKey);
+            }
+        }
+        return built;
+    }
     function scoreBm25Document_ACU(queryTokens, document, corpus) {
         if (queryTokens.length === 0 || corpus.documentCount === 0 || document.tokens.length === 0)
             return 0;
@@ -105826,12 +106634,12 @@ $CONTENT
         }
         return score;
     }
-    function sparseSearchBm25_ACU(query, candidates, limit) {
+    function sparseSearchBm25_ACU(query, candidates, limit, cacheKey) {
         const queryTokens = tokenizeBm25Text_ACU(query);
         const normalizedLimit = Math.max(1, Math.floor(Number(limit) || 1));
         if (queryTokens.length === 0 || candidates.length === 0)
             return [];
-        const corpus = buildCorpus_ACU(candidates);
+        const corpus = getOrBuildBm25Corpus_ACU(candidates, cacheKey);
         return corpus.documents
             .map((document) => {
             const bm25Score = scoreBm25Document_ACU(queryTokens, document, corpus);
@@ -105956,23 +106764,36 @@ $CONTENT
         }
         return [];
     }
-    function cosineSimilarity_ACU(left, right) {
-        const length = Math.min(left.length, right.length);
-        if (length <= 0)
+    // T10：query 向量模长预计算。与 cosineSimilarity_ACU 内部的 leftNorm 算法逐位一致，
+    // 外提后循环内不再重复累加 query 的平方和。
+    function computeVectorNorm_ACU(vector) {
+        if (!Array.isArray(vector) || vector.length <= 0)
             return 0;
+        let norm = 0;
+        for (const value of vector) {
+            const num = Number(value) || 0;
+            norm += num * num;
+        }
+        return Math.sqrt(norm);
+    }
+    // T10：cosine 相似度，query 模长由调用方预计算传入（循环内只算点积与候选模长）。
+    // T2：维度不一致直接返回 0，不再截断后照常打分——截断会把混维向量静默当成相似，
+    // 产生错误召回且难以察觉。维度一致的路径与改动前逐项等价。
+    function cosineSimilarity_ACU(left, right, leftNorm) {
+        if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length || left.length <= 0)
+            return 0;
+        const length = left.length;
         let dot = 0;
-        let leftNorm = 0;
         let rightNorm = 0;
         for (let index = 0; index < length; index += 1) {
             const a = Number(left[index]) || 0;
             const b = Number(right[index]) || 0;
             dot += a * b;
-            leftNorm += a * a;
             rightNorm += b * b;
         }
         if (leftNorm <= 0 || rightNorm <= 0)
             return 0;
-        return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+        return dot / (leftNorm * Math.sqrt(rightNorm));
     }
     async function rerankCandidates_ACU(config, query, candidates) {
         const endpoint = normalizeText_ACU(config.rerankEndpoint);
@@ -106346,6 +107167,25 @@ $CONTENT
         logWarn_ACU(`[交火模式纪要索引] 已从 single_file_snapshot 磁盘文件对齐索引指针：indexId=${alignedManifest.indexId}, revision=${diskRevision}`);
         return alignedState;
     }
+    // T5：query embedding 失败时的降级路径 —— 仅注入最近固定行，不依赖向量检索。
+    // 仅在 recentFixedRows 非空时调用；调用方负责确认 recentFixedRows.length > 0。
+    async function injectRecentFixedRowsOnly_ACU(recentFixedRows) {
+        const selected = recentFixedRows
+            .map((row) => ({ kind: 'recent_fixed', row }))
+            .sort((left, right) => (Number(left.row.rowOrder) || 0) - (Number(right.row.rowOrder) || 0));
+        const content = buildSummaryIndexOverwriteContent_ACU(selected);
+        await upsertOriginalSummaryIndexEntry_ACU(content);
+        return {
+            success: true,
+            reason: 'query_embedding_failed_recent_fixed_only',
+            keywordCount: 0,
+            candidateCount: 0,
+            injectedCount: selected.length,
+            denseCandidateCount: 0,
+            sparseCandidateCount: 0,
+            fusionCandidateCount: 0,
+        };
+    }
     async function processSummaryVectorIndexBeforeGeneration_ACU(options = {}) {
         const worldbookConfig = getCurrentWorldbookConfig_ACU();
         const globalEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
@@ -106490,17 +107330,36 @@ $CONTENT
         const recentFixedRowKeys = new Set(recentFixedRows.map((row) => row.rowKey));
         // 较早的行（不参与排序的候选池）
         const olderRows = rows.filter((row) => !recentFixedRowKeys.has(row.rowKey));
-        const keywords = await generateKeywords_ACU(config, userInput);
-        const queryText = [userInput, keywords.join('，')].filter(Boolean).join('\n关键词：');
-        const embeddings = await createEmbeddings_ACU({
-            endpoint: config.embeddingEndpoint,
-            apiKey: config.embeddingApiKey,
-            model: config.embeddingModel,
-            input: [queryText],
-        });
-        const queryVector = embeddings[0]?.embedding || [];
-        if (queryVector.length === 0) {
-            return { success: false, skipped: true, reason: 'empty_query_embedding' };
+        // T5：query embedding 失败不中断宿主生成。generateKeywords/createEmbeddings 抛异常或返回空向量时，
+        // 若存在最近固定行（recentFixedRows），降级为仅注入固定行（不依赖向量），继续原始生成；
+        // 否则保持原行为（空向量返回 empty_query_embedding；异常穿透给上层 init.ts 的 try/catch 兜底）。
+        let keywords = [];
+        let queryText = '';
+        let queryVector = [];
+        try {
+            keywords = await generateKeywords_ACU(config, userInput);
+            queryText = [userInput, keywords.join('，')].filter(Boolean).join('\n关键词：');
+            const embeddings = await createEmbeddings_ACU({
+                endpoint: config.embeddingEndpoint,
+                apiKey: config.embeddingApiKey,
+                model: config.embeddingModel,
+                input: [queryText],
+            });
+            queryVector = embeddings[0]?.embedding || [];
+            if (queryVector.length === 0) {
+                if (recentFixedRows.length > 0) {
+                    logWarn_ACU('[交火模式纪要索引] query embedding 返回空向量，降级为仅注入最近固定行:', userInput);
+                    return await injectRecentFixedRowsOnly_ACU(recentFixedRows);
+                }
+                return { success: false, skipped: true, reason: 'empty_query_embedding' };
+            }
+        }
+        catch (error) {
+            if (recentFixedRows.length > 0) {
+                logWarn_ACU('[交火模式纪要索引] query embedding 失败，降级为仅注入最近固定行，继续原始生成:', error);
+                return await injectRecentFixedRowsOnly_ACU(recentFixedRows);
+            }
+            throw error;
         }
         // 只对较早行的 chunks 做向量匹配
         const olderRowKeys = new Set(olderRows.map((row) => row.rowKey));
@@ -106513,12 +107372,14 @@ $CONTENT
             return { chunk, row, score: 0 };
         })
             .filter((candidate) => !!candidate);
+        // T10：query 模长只算一次，循环内只做点积与候选模长（与原实现逐位等价）。
+        const queryNorm = computeVectorNorm_ACU(queryVector);
         const denseCandidates = searchableCandidates
             .map((candidate) => {
             const chunk = candidate.chunk;
             if (!Array.isArray(chunk.vector) || chunk.vector.length === 0)
                 return null;
-            const score = cosineSimilarity_ACU(queryVector, chunk.vector);
+            const score = cosineSimilarity_ACU(queryVector, chunk.vector, queryNorm);
             if (score < config.summaryIndexMinScore)
                 return null;
             return { ...candidate, score, denseScore: score };
@@ -106526,8 +107387,14 @@ $CONTENT
             .filter((candidate) => !!candidate)
             .sort((left, right) => right.score - left.score)
             .slice(0, config.summaryIndexCandidateLimit);
+        // T10：BM25 语料缓存键。候选集（searchableCandidates）的 chunk 集合指纹保证
+        // recentFixedCount / config 变化导致候选集变化时缓存自然失效；V2 快照的
+        // writeGeneration 唯一标识一次归档内容（不可变身份），作为前缀避免跨快照误用。
+        const bm25CacheKey = `${state.manifest?.storageIdentity?.writeGeneration || 'legacy'}::${state.manifest?.indexId || ''}::${searchableCandidates
+        .map((candidate) => candidate.chunk.textHash || candidate.chunk.chunkId || candidate.chunk.text)
+        .join('|')}`;
         const sparseCandidates = config.summaryIndexHybridRetrievalEnabled
-            ? sparseSearchBm25_ACU(queryText, searchableCandidates, config.summaryIndexBm25CandidateLimit)
+            ? sparseSearchBm25_ACU(queryText, searchableCandidates, config.summaryIndexBm25CandidateLimit, bm25CacheKey)
             : [];
         const fusionLimit = Math.max(config.summaryIndexCandidateLimit, config.topK);
         const candidates = config.summaryIndexHybridRetrievalEnabled
@@ -106544,14 +107411,14 @@ $CONTENT
         const selectedByRow = new Map();
         for (const candidate of reranked) {
             if (!selectedByRow.has(candidate.row.rowKey))
-                selectedByRow.set(candidate.row.rowKey, candidate);
+                selectedByRow.set(candidate.row.rowKey, { kind: 'ranked', chunk: candidate.chunk, row: candidate.row, score: candidate.score, rerankScore: candidate.rerankScore });
             if (selectedByRow.size >= config.topK)
                 break;
         }
         // 合并：最近固定行 + TopK 排序行（去重，固定行优先）
         for (const row of recentFixedRows) {
             if (!selectedByRow.has(row.rowKey)) {
-                selectedByRow.set(row.rowKey, { chunk: null, row, score: 1.0 });
+                selectedByRow.set(row.rowKey, { kind: 'recent_fixed', row });
             }
         }
         const selected = Array.from(selectedByRow.values())
@@ -106827,8 +107694,14 @@ $CONTENT
                                 }
                                 if (shouldProcessSummaryVectorIndexForGeneration_ACU('tavernhelper', { quiet_prompt: options.quiet_prompt, automatic_trigger: options.automatic_trigger }, false)) {
                                     const userInput = String(options.user_input || options.prompt || getSendTextareaValue_ACU() || '').trim();
-                                    const summaryVectorResult = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput, source: 'tavernhelper' });
-                                    logDebug_ACU(`[交火模式纪要索引] TavernHelper.generate 发送前处理完成：success=${summaryVectorResult.success}, skipped=${summaryVectorResult.skipped === true}, reason=${summaryVectorResult.reason || 'none'}, keywords=${summaryVectorResult.keywordCount ?? 0}, injected=${summaryVectorResult.injectedCount ?? 0}`);
+                                    try {
+                                        const summaryVectorResult = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput, source: 'tavernhelper' });
+                                        logDebug_ACU(`[交火模式纪要索引] TavernHelper.generate 发送前处理完成：success=${summaryVectorResult.success}, skipped=${summaryVectorResult.skipped === true}, reason=${summaryVectorResult.reason || 'none'}, keywords=${summaryVectorResult.keywordCount ?? 0}, injected=${summaryVectorResult.injectedCount ?? 0}`);
+                                    }
+                                    catch (error) {
+                                        // T5：发送前注入失败不得中断宿主生成（与 GENERATION_AFTER_COMMANDS 的降级一致）。
+                                        logWarn_ACU('[交火模式纪要索引] TavernHelper.generate 发送前注入失败，继续原始生成:', error);
+                                    }
                                 }
                                 // [重构] 调用 service 层编排函数，传入 UI 规划回调
                                 const result = await orchestrateTavernHelperHook_ACU(options, runOptimizationLogicWithUI_ACU);
@@ -109560,11 +110433,80 @@ $CONTENT
         const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
         return isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
     }
+    function planAffectedFramesUnchanged_ACU(plan) {
+        // 单根收敛会改写多个 full 帧：任一受影响帧在计划创建后变化，计划即失效。
+        // 校验全部冗余 full 帧 + 根帧指纹，缺一即拒绝（P4-5）。
+        for (const item of plan.redundantFrameFingerprints || []) {
+            const message = plan.chat[item.messageIndex];
+            const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
+            const frame = isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
+            if (!frame || getFrameFingerprint_ACU(frame) !== item.fingerprint) {
+                return `受影响帧已变化：messageIndex=${item.messageIndex}。`;
+            }
+        }
+        const sourceFrame = getPlanSourceFrame_ACU(plan);
+        if (!sourceFrame || getFrameFingerprint_ACU(sourceFrame) !== plan.sourceFrameFingerprint) {
+            return '恢复源 frame 已变化，请重新诊断。';
+        }
+        return null;
+    }
     function buildRecoveredCandidateChat_ACU(plan) {
         const sourceMessageIndex = plan.sourceMessageIndex;
         if (!Number.isInteger(sourceMessageIndex))
             throw new Error('恢复计划缺少 sourceMessageIndex。');
         const candidateChat = clone_ACU$3(plan.chat);
+        if (plan.kind === 'redundant_full_checkpoint_convergence') {
+            // 多消息降级：保留末位 full（回放根）不动，其余 full 帧无损降级为
+            // data_replace fallback entry，原帧整体入 recoveryBackup。
+            // 根帧 data 已含全部累计状态（convergence full 由该根之上的 replay 构造），
+            // 降级多余 full 后回放输出必须与降级前完全一致（P4-6 强校验）。
+            const redundantIndices = plan.redundantFullIndices || [];
+            if (redundantIndices.length === 0)
+                throw new Error('单 full 收敛计划缺少冗余 full 帧索引。');
+            for (const messageIndex of redundantIndices) {
+                const message = candidateChat[messageIndex];
+                if (!message)
+                    throw new Error(`降级目标消息缺失：messageIndex=${messageIndex}。`);
+                const tagData = readIsolatedTagData_ACU(message, plan.isolationKey);
+                if (!isV2TagData_ACU(tagData))
+                    throw new Error(`降级目标消息不再包含 V2 storage frame：messageIndex=${messageIndex}。`);
+                const originalFrame = clone_ACU$3(tagData.storageFrame);
+                const fallbackEntry = {
+                    seq: 1,
+                    entryId: `redundant-full-fallback-${messageIndex}`,
+                    createdAt: Date.now(),
+                    source: 'system',
+                    targetMessageIndex: messageIndex,
+                    aiFloor: 1,
+                    filledSheetKeys: [],
+                    changedSheetKeys: [],
+                    groupKeys: [],
+                    operations: [{ kind: 'data_replace', data: clone_ACU$3(originalFrame.checkpoint?.data || {}), reason: 'checkpoint_fallback' }],
+                };
+                const downgradedFrame = {
+                    version: 2,
+                    headRevision: 'redundant-full-downgraded',
+                    logEntries: [fallbackEntry],
+                };
+                const isolatedData = cloneIsolatedData_ACU(message);
+                const recoveryBackup = {
+                    version: 1,
+                    createdAt: Date.now(),
+                    recoveryKind: plan.kind,
+                    sourceMessageIndex,
+                    failedMessageIndex: messageIndex,
+                    storageFrame: originalFrame,
+                };
+                isolatedData[plan.isolationKey] = {
+                    ...isolatedData[plan.isolationKey],
+                    _acu_storage_version: 2,
+                    storageFrame: downgradedFrame,
+                    recoveryBackup,
+                };
+                message.TavernDB_ACU_IsolatedData = isolatedData;
+            }
+            return candidateChat;
+        }
         const sourceMessage = candidateChat[sourceMessageIndex];
         const sourceTagData = readIsolatedTagData_ACU(sourceMessage, plan.isolationKey);
         if (!isV2TagData_ACU(sourceTagData))
@@ -109609,6 +110551,22 @@ $CONTENT
             throw new Error('恢复候选未产生可回放表数据。');
         if (replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length)
             throw new Error('恢复候选仍依赖临时 Sheet 补锚。');
+        // 单 full 收敛：收敛前（原始 chat）必须可完整回放，且收敛前后 replay 指纹必须完全一致，否则拒绝提交。
+        // 在 validate 内重算基线而非依赖诊断期存档，可覆盖 diagnose 与 commit 之间任何帧的外部改动。
+        if (plan.kind === 'redundant_full_checkpoint_convergence') {
+            const baselineReplay = await loadTableStateFromFramesV2Detailed_ACU(plan.chat, plan.isolationKey, {
+                updateRuntimeState: false,
+                compatibilityMode: 'disabled',
+            });
+            if (!baselineReplay)
+                throw new Error('收敛前原始历史不可回放，拒绝执行单 full 收敛。');
+            if (baselineReplay.requiresCheckpointConvergence || baselineReplay.compatibilityRepairs?.length) {
+                throw new Error('收敛前原始历史仍依赖临时 Sheet 补锚，拒绝执行单 full 收敛。');
+            }
+            if (getTableDataFingerprint_ACU(baselineReplay.data) !== getTableDataFingerprint_ACU(replay.data)) {
+                throw new Error('单 full 收敛前后 replay 结果不一致，拒绝提交。');
+            }
+        }
         // 基底修复后的 suffix 必须被严格回放；其结果不应再与修复时的基底本身相等。
         if (plan.kind !== 'repaired_full_checkpoint'
             && getTableDataFingerprint_ACU(replay.data) !== getTableDataFingerprint_ACU(plan.candidateData)) {
@@ -109641,6 +110599,39 @@ $CONTENT
             return { summary: { status: 'unrecoverable_no_base', isolationKey, requiresConfirmation: false, message: '当前隔离标识不存在 V2 storage frame。' } };
         const latestFull = [...frames].reverse().find(item => item.frame.checkpoint?.kind === 'full');
         if (latestFull?.frame.checkpoint) {
+            // 单根不变量：同一隔离键下同一时刻只能存在一个 full checkpoint。
+            // 双 full（如 convergence 旧缺陷在 (0,10) 落盘）会让 findLateCheckpointWithSuffixArtifacts_ACU
+            // 因 fullCheckpoints.length !== 1 返回 null，导致下方走到「无需恢复」死锁。
+            // 必须在其它判定之前识别并给出可恢复路径：保留末位 full（回放根），其余无损降级。
+            const fullCheckpoints = frames.filter(item => item.frame.checkpoint?.kind === 'full');
+            if (fullCheckpoints.length >= 2) {
+                const rootIndex = fullCheckpoints[fullCheckpoints.length - 1].messageIndex;
+                const redundantIndices = fullCheckpoints.slice(0, -1).map(item => item.messageIndex);
+                // 末位 full 是回放根；其 data 已含之前全部累计状态（convergence full 由该根之上的 replay 构造）。
+                // 降级多余 full 在数学上不可能改变回放输出 —— 降级前后指纹必须一致，由 P4-6 强校验。
+                const rootReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, { updateRuntimeState: false });
+                const summary = {
+                    status: 'recoverable_redundant_full_checkpoint',
+                    isolationKey,
+                    sourceMessageIndex: rootIndex,
+                    affectedSheetKeys: [],
+                    requiresConfirmation: false,
+                    message: `检测到 ${fullCheckpoints.length} 个 full checkpoint（#${fullCheckpoints.map(item => item.messageIndex).join('、')}）；将保留末位 #${rootIndex} 为唯一回放根，其余（#${redundantIndices.join('、')}）无损降级为 data_replace fallback 并各自原帧入 recoveryBackup。`,
+                };
+                return { summary, plan: {
+                        ...summary,
+                        kind: 'redundant_full_checkpoint_convergence',
+                        chat,
+                        chatKey: String(currentChatFileIdentifier_ACU || '').trim(),
+                        sourceFrameFingerprint: getFrameFingerprint_ACU(latestFull.frame),
+                        redundantFullIndices: redundantIndices,
+                        redundantFrameFingerprints: fullCheckpoints.slice(0, -1).map(item => ({
+                            messageIndex: item.messageIndex,
+                            fingerprint: getFrameFingerprint_ACU(item.frame),
+                        })),
+                        candidateData: rootReplay?.data || latestFull.frame.checkpoint.data,
+                    } };
+            }
             const repair = repairCandidate_ACU(latestFull.frame.checkpoint.data);
             if (repair.status === 'clean') {
                 let replay;
@@ -109758,10 +110749,10 @@ $CONTENT
             plans_ACU.delete(planId);
             return failure('恢复计划作用域已变化，请重新诊断。');
         }
-        const currentSourceFrame = getPlanSourceFrame_ACU(plan);
-        if (!currentSourceFrame || getFrameFingerprint_ACU(currentSourceFrame) !== plan.sourceFrameFingerprint) {
+        const affectedChanged = planAffectedFramesUnchanged_ACU(plan);
+        if (affectedChanged) {
             plans_ACU.delete(planId);
-            return failure('恢复源 frame 已变化，请重新诊断。');
+            return failure(affectedChanged);
         }
         let candidateChat;
         try {
@@ -109789,10 +110780,10 @@ $CONTENT
                         plans_ACU.delete(planId);
                         return failure('恢复计划作用域已变化，请重新诊断。');
                     }
-                    const frameBeforeCommit = getPlanSourceFrame_ACU(plan);
-                    if (!frameBeforeCommit || getFrameFingerprint_ACU(frameBeforeCommit) !== plan.sourceFrameFingerprint) {
+                    const affectedChanged = planAffectedFramesUnchanged_ACU(plan);
+                    if (affectedChanged) {
                         plans_ACU.delete(planId);
-                        return failure('恢复源 frame 已变化，请重新诊断。');
+                        return failure(affectedChanged);
                     }
                     const beforeChat = clone_ACU$3(plan.chat);
                     plan.chat.splice(0, plan.chat.length, ...candidateChat);
@@ -147967,8 +148958,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-42db6401] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-42db6401] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-42db6401] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-42db6401] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-42db6401] {\n  min-width: 0;\n  margin: 0;\n  padding: 0 0 18px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-42db6401]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-42db6401] {\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-42db6401] {\n  width: 100%;\n  margin: 0 0 2px;\n  padding: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 700;\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-42db6401] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-42db6401] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-42db6401] {\n  flex: 1 1 auto;\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-42db6401] {\n  display: flex;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-42db6401] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-42db6401] {\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-42db6401] {\n  width: 100%;\n  min-height: 60px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-42db6401] {\n  width: 100%;\n  min-height: 72px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: var(--acu-font-size-small, 11px);\n  line-height: 1.5;\n  resize: vertical;\n}\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-42db6401");
-    var VectorIndexPage_vue_vue_type_style_index_0_scoped_42db6401_lang = null;
+    injectSfcStyle("\n.acu-v2-vector-index-page[data-v-1b58146c] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-vector-index-page__panel-stack[data-v-1b58146c] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-1b58146c] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-1b58146c] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-1b58146c] {\n  min-width: 0;\n  margin: 0;\n  padding: 0 0 18px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-1b58146c]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-1b58146c] {\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-1b58146c] {\n  width: 100%;\n  margin: 0 0 2px;\n  padding: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 700;\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-1b58146c] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-1b58146c] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-1b58146c] {\n  flex: 1 1 auto;\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-1b58146c] {\n  display: flex;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-1b58146c] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-vector-index-page[data-v-1b58146c] {\n    padding: 14px;\n}\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-1b58146c] {\n  width: 100%;\n  min-height: 60px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-1b58146c] {\n  width: 100%;\n  min-height: 72px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: var(--acu-font-size-small, 11px);\n  line-height: 1.5;\n  resize: vertical;\n}\n", "src/presentation-v2/pages/VectorIndexPage.vue#style-0-1b58146c");
+    var VectorIndexPage_vue_vue_type_style_index_0_scoped_1b58146c_lang = null;
 
     const _hoisted_1$g = { class: "acu-v2-vector-index-page" };
     const _hoisted_2$f = { class: "acu-v2-vector-index-page__panel-stack" };
@@ -148448,7 +149439,7 @@ Expected function or array of functions, received type ${typeof value}.`
 					]),
 					createVNode($setup["AcuFormRow"], {
 						label: "V2 写入闸门",
-						hint: "默认关闭。关闭只会阻止新的 V2 快照写入；已发布 V2 快照仍可读取，绝不会回退覆盖旧路径。"
+						hint: "默认开启（新装或未显式配置的用户默认走 V2 归档路径）。关闭只会阻止新的 V2 快照写入；已发布 V2 快照仍可读取，绝不会回退覆盖旧路径。"
 					}, {
 						default: withCtx(() => [createVNode($setup["AcuToggle"], {
 							"model-value": $setup.vector.form.summaryIndexV2WriteEnabled,
@@ -148498,7 +149489,7 @@ Expected function or array of functions, received type ${typeof value}.`
 		])
 	]);
     }
-    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-42db6401"]]);
+    var VectorIndexPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-1b58146c"]]);
 
     const dataMgmtCopy = {
         panels: {
@@ -149329,6 +150320,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 else if (summary.status === 'recoverable_temporary_sheet_anchor') {
                     toast.warning('检测到历史回放依赖临时 Sheet 补锚。请提交恢复，将兼容状态固化为 integrity_repair checkpoint。', { muteable: false, durationMs: 6000 });
                 }
+                else if (summary.status === 'recoverable_redundant_full_checkpoint') {
+                    toast.warning('检测到同一隔离键下存在多个 full checkpoint（回放只认最后一个，之前增量已失效）。请先导出原始 frame 备份，再提交收敛。', { muteable: false, durationMs: 6000 });
+                }
                 else if (summary.status === 'unrecoverable_late_checkpoint_artifacts') {
                     toast.warning('检测到较晚 checkpoint 两侧均有 V2 artifact。自动前移会改变后缀回放语义；请先导出恢复备份，再人工核对。', { muteable: false, durationMs: 6000 });
                 }
@@ -149897,8 +150891,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
     });
 
-    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-d28dfadb] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-d28dfadb] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-d28dfadb] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-d28dfadb] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-d28dfadb] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-d28dfadb] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-d28dfadb] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-d28dfadb] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-d28dfadb] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-d28dfadb] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-d28dfadb] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-d28dfadb] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-d28dfadb] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-d28dfadb] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-d28dfadb] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-d28dfadb] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-d28dfadb] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-d28dfadb],\n.acu-v2-data-mgmt-page__command-grid[data-v-d28dfadb] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-d28dfadb] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-d28dfadb] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-d28dfadb] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-d28dfadb] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-d28dfadb] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-d28dfadb] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-d28dfadb] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-d28dfadb] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-d28dfadb] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-d28dfadb] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-d28dfadb] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-d28dfadb] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-d28dfadb] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-d28dfadb] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-d28dfadb] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-d28dfadb] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-d28dfadb] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-d28dfadb");
-    var DataMgmtPage_vue_vue_type_style_index_0_scoped_d28dfadb_lang = null;
+    injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-de90426c] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-de90426c] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-de90426c] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-de90426c] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-de90426c] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-de90426c] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-de90426c] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-de90426c] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-de90426c] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-de90426c] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-de90426c] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-de90426c] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-de90426c] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-de90426c] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-de90426c] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-de90426c],\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-de90426c] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-de90426c] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-de90426c] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-de90426c] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-de90426c] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-de90426c] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-de90426c] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-de90426c] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-de90426c] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-de90426c] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-de90426c] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-de90426c] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-de90426c] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-de90426c");
+    var DataMgmtPage_vue_vue_type_style_index_0_scoped_de90426c_lang = null;
 
     const _hoisted_1$f = { class: "acu-v2-data-mgmt-page" };
     const _hoisted_2$e = { class: "acu-v2-data-mgmt-page__panel-stack" };
@@ -150313,7 +151307,7 @@ Expected function or array of functions, received type ${typeof value}.`
     							)])]),
     							_: 1
     						}, 8, ["disabled", "onClick"]),
-    						$setup.flow.v2RecoverySummary.value.status === "recoverable_repaired_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_temporary_sheet_anchor" ? (openBlock(), createBlock($setup["AcuButton"], {
+    						$setup.flow.v2RecoverySummary.value.status === "recoverable_repaired_checkpoint" || $setup.flow.v2RecoverySummary.value.status === "recoverable_temporary_sheet_anchor" || $setup.flow.v2RecoverySummary.value.status === "recoverable_redundant_full_checkpoint" ? (openBlock(), createBlock($setup["AcuButton"], {
     							key: 0,
     							block: "",
     							variant: "danger",
@@ -150648,7 +151642,7 @@ Expected function or array of functions, received type ${typeof value}.`
     		_: 1
     	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-d28dfadb"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-de90426c"]]);
 
     var _sfc_main$e = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',

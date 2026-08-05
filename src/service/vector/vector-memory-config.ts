@@ -62,6 +62,16 @@ function cloneDefaultVectorMemoryConfig_ACU(): VectorMemoryConfig_ACU {
     return JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU));
 }
 
+// T10：defaultVectorMemoryConfig_ACU 是编译期常量，运行时不变。
+// effective config 只读取其标量默认值，无需每次调用都 JSON 深拷贝。
+// 模块级只读缓存：任何调用方不得修改该对象；需要可变副本请用 cloneDefaultVectorMemoryConfig_ACU()。
+const defaultEffectiveConfigFallback_ACU: any = (() => {
+    const clone = cloneDefaultVectorMemoryConfig_ACU() as any;
+    // 防误改：冻结后任何写操作在严格模式下抛错，普通模式下静默失败，能尽早暴露误用。
+    Object.freeze(clone);
+    return clone;
+})();
+
 function normalizeMinScore_ACU(value: any, fallbackValue: number): number {
     const num = Number(value);
     if (!Number.isFinite(num)) return fallbackValue;
@@ -335,6 +345,7 @@ export interface SummaryVectorIndexEffectiveConfig_ACU extends VectorMemoryConfi
     summaryIndexCandidateLimit: number;
     summaryIndexChunkSentenceCount: number;
     summaryIndexArchiveMaxConcurrency: number;
+    summaryIndexArchiveEmbeddingConcurrency: number;
     summaryIndexKeywordMinRows: number;
     summaryIndexRecentFixedInjectCount: number;
     summaryIndexHybridRetrievalEnabled: boolean;
@@ -348,7 +359,7 @@ export interface SummaryVectorIndexEffectiveConfig_ACU extends VectorMemoryConfi
 
 export function getEffectiveSummaryVectorIndexConfig_ACU(configInput?: any): SummaryVectorIndexEffectiveConfig_ACU {
     const config = normalizeVectorMemoryConfig_ACU(configInput ?? getCurrentVectorMemoryConfig_ACU());
-    const defaults = cloneDefaultVectorMemoryConfig_ACU() as any;
+    const defaults = defaultEffectiveConfigFallback_ACU;
     const topK = normalizePositiveInteger_ACU(config.topK, defaults.topK);
     const minScore = normalizeMinScore_ACU(config.minScore, defaults.minScore);
     const recallCandidateLimit = Math.max(
@@ -362,6 +373,11 @@ export function getEffectiveSummaryVectorIndexConfig_ACU(configInput?: any): Sum
     const summaryIndexArchiveMaxConcurrency = normalizePositiveInteger_ACU(
         (config as any).summaryIndexArchiveMaxConcurrency,
         Number(defaults.summaryIndexArchiveMaxConcurrency) || 30,
+    );
+    // T9：归档 embedding 批次的有界并发度（同时进行中的批次上限）。独立于 summaryIndexArchiveMaxConcurrency（批大小）。
+    const summaryIndexArchiveEmbeddingConcurrency = normalizePositiveInteger_ACU(
+        (config as any).summaryIndexArchiveEmbeddingConcurrency,
+        Number((defaults as any).summaryIndexArchiveEmbeddingConcurrency) || 3,
     );
     const summaryIndexKeywordMinRows = normalizePositiveInteger_ACU(
         (config as any).summaryIndexKeywordMinRows,
@@ -394,6 +410,7 @@ export function getEffectiveSummaryVectorIndexConfig_ACU(configInput?: any): Sum
         summaryIndexCandidateLimit: recallCandidateLimit,
         summaryIndexChunkSentenceCount: summaryChunkSentenceCount,
         summaryIndexArchiveMaxConcurrency,
+        summaryIndexArchiveEmbeddingConcurrency,
         summaryIndexKeywordMinRows,
         summaryIndexRecentFixedInjectCount: recentFixedInjectCount,
         summaryIndexHybridRetrievalEnabled: config.hybridRetrievalEnabled !== false,

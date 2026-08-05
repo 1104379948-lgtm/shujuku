@@ -190,6 +190,23 @@ function buildVersionedSnapshotIndexId_ACU(params: { chatKey: string; isolationK
     return `snap_${hashUserInput_ACU(`${params.chatKey}\n${params.isolationKey}\n${params.sourceTableKey}\n${revision}`)}`;
 }
 
+/**
+ * [T0a] 生成 V2 单文件快照的 writeGeneration（紧凑格式）。
+ * 格式：时间戳base36 + 2×Uint32 定宽 base36（无分隔符）。
+ * - 时间戳 base36 通常 8 字符（毫秒级），2×Uint32 定宽各 7 字符 → 总长约 22，上限 24。
+ * - 字符集 [a-zA-Z0-9]，不会被 normalizeFileNamePart_ACU 改写。
+ * - 熵 64 位：唯一职责是"同 scope 同 revision 同毫秒内两次写入不撞路径"，毫秒时间戳已兜底。
+ * - Uint32 最大值 4294967295 的 base36 恰好 7 位，padStart(7, '0') 保证无分隔符亦可无歧义解析。
+ */
+export function buildVectorIndexSnapshotWriteGeneration_ACU(now: number = Date.now(), entropySource: Uint32Array = new Uint32Array(2)): string {
+    const entropy = entropySource;
+    if (entropy.length < 2) {
+        throw new Error('交火向量 V2 writeGeneration 需要至少 2 个 Uint32 熵值。');
+    }
+    return `${now.toString(36)}${Array.from(entropy.slice(0, 2), (value) => value.toString(36).padStart(7, '0')).join('')}`;
+}
+
+
 function buildVersionedSnapshotScopePrefix_ACU(chatKey: string, isolationKey: string, sourceTableKey: string): string {
     return `${buildVectorIndexStableDirectory_ACU({ chatKey, isolationKey, sourceTableKey })}_`;
 }
@@ -1527,6 +1544,12 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
     if (dimension <= 0) {
         throw new Error('交火向量快照索引缺少有效向量维度。');
     }
+    // T2：收紧——校验全部 chunk 的向量维度与首 chunk 一致，拒绝混维写入。
+    // 混维快照在召回时会被 cosineSimilarity_ACU 判 0 分（静默召回失败），必须在写入前拦住。
+    const mixedDimensionChunk = chunks.find((chunk) => (chunk.vector?.length || 0) !== dimension);
+    if (mixedDimensionChunk) {
+        throw new Error(`交火向量快照索引存在维度不一致的 chunk（期望 ${dimension}，实际 ${mixedDimensionChunk.vector?.length || 0}），拒绝写入外置文件。`);
+    }
     // rolling-delta 仍使用可覆盖的 legacy 物理路径，尚未具备 V2 的 immutable identity
     // 与 prepared/published 生命周期。不得让实验开关绕过本函数后续的安全发布流程。
     if (summaryVectorIndexConfig.summaryIndexRollingDeltaEnabled) {
@@ -1535,14 +1558,19 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
 
     const rowsByKey = new Map(rows.map((row) => [row.rowKey, row]));
     const chunkKeysByChunkId = new Map<string, string>();
-    for (const chunk of chunks) {
+    // T6：仅需 chunkKey，不再序列化 blob / 计算 SHA256 / 分配 Blob（结果全部被丢弃）。
+    // 输入与 prepareVectorChunkBlob_ACU 的 chunkKey 计算完全一致，写出的 manifest/blob 逐字节不变。
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+        const chunk = chunks[chunkIndex];
         const row = rowsByKey.get(chunk.rowKey);
-        const prepared = await prepareVectorChunkBlob_ACU(chunk, {
+        const chunkKey = buildVectorChunkKey_ACU({
             embeddingModel: options.embeddingModel,
             dimension,
             sourceFingerprint: row?.sourceFingerprint,
+            rowKey: chunk.rowKey,
+            text: chunk.text,
         });
-        chunkKeysByChunkId.set(chunk.chunkId, prepared.chunkKey);
+        chunkKeysByChunkId.set(chunk.chunkId, chunkKey);
     }
 
     const rowsWithShardIds = rows.map((row) => ({
@@ -1562,12 +1590,12 @@ export async function persistSummaryVectorIndexSnapshot_ACU(
     });
     const replacedRowKeys = Array.from(new Set(options.replacedRowKeys || []));
     const parentIndexIds = Array.from(new Set([...(options.parentIndexIds || []), ...(options.previousManifest?.indexId ? [options.previousManifest.indexId] : [])].filter(Boolean)));
-    const entropy = new Uint32Array(4);
+    const entropy = new Uint32Array(2);
     if (!globalThis.crypto?.getRandomValues) {
         throw new Error('交火向量 V2 快照写入需要 crypto.getRandomValues，以避免物理路径覆盖。');
     }
     globalThis.crypto.getRandomValues(entropy);
-    const writeGeneration = `${Date.now().toString(36)}-${Array.from(entropy, (value) => value.toString(36)).join('-')}`;
+    const writeGeneration = buildVectorIndexSnapshotWriteGeneration_ACU(Date.now(), entropy);
     const storageIdentity: SummaryVectorIndexStorageIdentity_ACU = {
         layoutVersion: 2,
         scopeFingerprint,
@@ -2051,9 +2079,10 @@ export async function loadSummaryVectorIndexChunksFromManifest_ACU(
     manifest = normalizeSummaryVectorIndexManifestForRead_ACU(manifest);
     if (!manifest) return [];
     if (isSingleFileSnapshotManifest_ACU(manifest)) {
-        // V2 immutable snapshot 的 authority 是外置 blob。热缓存未绑定 writeGeneration，
-        // 因此不能在未验证当前 blob 身份时作为返回来源。
-        if (options.preferExternalFiles !== true && !manifest.storageIdentity) {
+        // V2 immutable snapshot 的 authority 是外置 blob。热缓存已绑定 writeGeneration
+        // （T8a），读侧强校验 record.writeGeneration === manifest.storageIdentity.writeGeneration，
+        // 身份不匹配或旧 record（无该字段）一律判不兼容并回落远端。
+        if (options.preferExternalFiles !== true) {
             const cachedChunks = await getSummaryVectorHotCacheChunks_ACU({ manifest });
             if (cachedChunks?.length) {
                 logSummaryVectorIndexIdentityEvent_ACU('debug', 'load', 'legacy_hot_cache_fallback', {

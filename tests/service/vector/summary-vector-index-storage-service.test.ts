@@ -118,12 +118,36 @@ describe('summary-vector-index-storage-service V2 单文件读取', () => {
     expect(h.putHot).toHaveBeenCalledWith(expect.objectContaining({ manifest }));
   });
 
-  it('V2 默认读取不接受未验证热缓存，必须回源校验当前 blob', async () => {
+  it('T8：V2 默认读取先查热缓存，writeGeneration 校验由缓存层负责，命中直接返回', async () => {
     const manifest = manifest_ACU();
-    h.getHot.mockResolvedValue([{ chunkId: 'stale-chunk', vector: [9, 9] }]);
+    h.getHot.mockResolvedValue([{ chunkId: 'cached-chunk', vector: [3, 4] }]);
+
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest))
+      .resolves.toMatchObject([{ chunkId: 'cached-chunk', vector: [3, 4] }]);
+    // T8b 放开闸门后，V2 manifest（带 storageIdentity）默认读取也会查热缓存。
+    expect(h.getHot).toHaveBeenCalledWith({ manifest });
+    // 缓存命中时不回源。
+    expect(h.read).not.toHaveBeenCalled();
+  });
+
+  it('T8：V2 默认读取缓存未命中（null）时回源并回填热缓存', async () => {
+    const manifest = manifest_ACU();
+    h.getHot.mockResolvedValue(null);
     h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
 
     await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest))
+      .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
+    expect(h.getHot).toHaveBeenCalledWith({ manifest });
+    expect(h.read).toHaveBeenCalledWith(manifest.manifestFile);
+    expect(h.putHot).toHaveBeenCalledWith(expect.objectContaining({ manifest }));
+  });
+
+  it('T8：preferExternalFiles: true 始终跳过热缓存直接回源', async () => {
+    const manifest = manifest_ACU();
+    h.getHot.mockResolvedValue([{ chunkId: 'cached-chunk', vector: [3, 4] }]);
+    h.read.mockResolvedValue({ ok: true, data: blob_ACU(manifest) });
+
+    await expect(loadSummaryVectorIndexChunksFromManifest_ACU(manifest, { preferExternalFiles: true }))
       .resolves.toMatchObject([{ chunkId: 'chunk-a', vector: [1, 2] }]);
     expect(h.getHot).not.toHaveBeenCalled();
     expect(h.read).toHaveBeenCalledWith(manifest.manifestFile);
@@ -909,5 +933,19 @@ describe('summary-vector-index-storage-service V2 单文件写入', () => {
       .rejects.toThrow('需要 crypto.getRandomValues');
     expect(h.upload).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  it('T2：混维 chunks 被 persist 拒绝，不写入外置文件', async () => {
+    const mixed = options();
+    mixed.chunks = [
+      { chunkId: 'chunk-a', rowKey: 'row-a', rowOrder: 0, sequence: 0, text: 'summary', vector: [1, 2] },
+      { chunkId: 'chunk-b', rowKey: 'row-a', rowOrder: 1, sequence: 1, text: 'other', vector: [1, 2, 3] },
+    ];
+    mixed.rows = [{
+      rowKey: 'row-a', rowId: '1', rowOrder: 0, timeSpan: '', location: '', summary: 'summary', indexCode: 'A', vectorSourceText: 'summary', chunkIds: ['chunk-a', 'chunk-b'],
+    }];
+    await expect(persistSummaryVectorIndexSnapshot_ACU(mixed as any))
+      .rejects.toThrow('维度不一致');
+    expect(h.upload).not.toHaveBeenCalled();
   });
 });

@@ -74,6 +74,12 @@ interface RankedSummaryCandidate_ACU extends SummaryHybridCandidate_ACU {
     rerankScore?: number;
 }
 
+// T12：recent-fixed 注入项与排序候选的判别联合。recent_fixed 项不携带 chunk（无向量，
+// 不参与 rerank / 排序），只提供 row 用于覆盖内容输出；ranked 项来自 dense/sparse/fusion。
+type SummaryIndexSelectedCandidate_ACU =
+    | { kind: 'recent_fixed'; row: ChatSummaryVectorIndexRow_ACU }
+    | { kind: 'ranked'; chunk: ChatSummaryVectorIndexChunk_ACU; row: ChatSummaryVectorIndexRow_ACU; score: number; rerankScore?: number };
+
 let lastRuntimeSignature_ACU = '';
 let lastRuntimeAt_ACU = 0;
 const SUMMARY_VECTOR_INDEX_RUNTIME_DEDUPE_MS_ACU = 8000;
@@ -166,21 +172,34 @@ async function generateKeywords_ACU(config: any, userInput: string): Promise<str
     return [];
 }
 
-function cosineSimilarity_ACU(left: number[], right: number[]): number {
-    const length = Math.min(left.length, right.length);
-    if (length <= 0) return 0;
+// T10：query 向量模长预计算。与 cosineSimilarity_ACU 内部的 leftNorm 算法逐位一致，
+// 外提后循环内不再重复累加 query 的平方和。
+function computeVectorNorm_ACU(vector: number[]): number {
+    if (!Array.isArray(vector) || vector.length <= 0) return 0;
+    let norm = 0;
+    for (const value of vector) {
+        const num = Number(value) || 0;
+        norm += num * num;
+    }
+    return Math.sqrt(norm);
+}
+
+// T10：cosine 相似度，query 模长由调用方预计算传入（循环内只算点积与候选模长）。
+// T2：维度不一致直接返回 0，不再截断后照常打分——截断会把混维向量静默当成相似，
+// 产生错误召回且难以察觉。维度一致的路径与改动前逐项等价。
+function cosineSimilarity_ACU(left: number[], right: number[], leftNorm: number): number {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length || left.length <= 0) return 0;
+    const length = left.length;
     let dot = 0;
-    let leftNorm = 0;
     let rightNorm = 0;
     for (let index = 0; index < length; index += 1) {
         const a = Number(left[index]) || 0;
         const b = Number(right[index]) || 0;
         dot += a * b;
-        leftNorm += a * a;
         rightNorm += b * b;
     }
     if (leftNorm <= 0 || rightNorm <= 0) return 0;
-    return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
+    return dot / (leftNorm * Math.sqrt(rightNorm));
 }
 
 async function rerankCandidates_ACU(config: any, query: string, candidates: RankedSummaryCandidate_ACU[]): Promise<RankedSummaryCandidate_ACU[]> {
@@ -227,7 +246,7 @@ function escapeMarkdownTableCell_ACU(value: any): string {
         .replace(/\|/g, '\\|');
 }
 
-function buildSummaryIndexOverwriteContent_ACU(candidates: RankedSummaryCandidate_ACU[]): string {
+function buildSummaryIndexOverwriteContent_ACU(candidates: SummaryIndexSelectedCandidate_ACU[]): string {
     const selectedRows = (Array.isArray(candidates) ? candidates : [])
         .map((candidate) => candidate.row)
         .filter((row): row is ChatSummaryVectorIndexRow_ACU => !!row)
@@ -559,6 +578,27 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
     return alignedState;
 }
 
+// T5：query embedding 失败时的降级路径 —— 仅注入最近固定行，不依赖向量检索。
+// 仅在 recentFixedRows 非空时调用；调用方负责确认 recentFixedRows.length > 0。
+async function injectRecentFixedRowsOnly_ACU(recentFixedRows: ChatSummaryVectorIndexRow_ACU[]): Promise<SummaryVectorIndexRuntimeResult_ACU> {
+    const selected = recentFixedRows
+        .map((row): SummaryIndexSelectedCandidate_ACU => ({ kind: 'recent_fixed', row }))
+        .sort((left, right) => (Number(left.row.rowOrder) || 0) - (Number(right.row.rowOrder) || 0));
+    const content = buildSummaryIndexOverwriteContent_ACU(selected);
+    await upsertOriginalSummaryIndexEntry_ACU(content);
+    return {
+        success: true,
+        reason: 'query_embedding_failed_recent_fixed_only',
+        keywordCount: 0,
+        candidateCount: 0,
+        injectedCount: selected.length,
+        denseCandidateCount: 0,
+        sparseCandidateCount: 0,
+        fusionCandidateCount: 0,
+    };
+}
+
+
 export async function processSummaryVectorIndexBeforeGeneration_ACU(
     options: SummaryVectorIndexRuntimeOptions_ACU = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
@@ -708,17 +748,35 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     // 较早的行（不参与排序的候选池）
     const olderRows = rows.filter((row) => !recentFixedRowKeys.has(row.rowKey));
 
-    const keywords = await generateKeywords_ACU(config, userInput);
-    const queryText = [userInput, keywords.join('，')].filter(Boolean).join('\n关键词：');
-    const embeddings = await createEmbeddings_ACU({
-        endpoint: config.embeddingEndpoint,
-        apiKey: config.embeddingApiKey,
-        model: config.embeddingModel,
-        input: [queryText],
-    });
-    const queryVector = embeddings[0]?.embedding || [];
-    if (queryVector.length === 0) {
-        return { success: false, skipped: true, reason: 'empty_query_embedding' };
+    // T5：query embedding 失败不中断宿主生成。generateKeywords/createEmbeddings 抛异常或返回空向量时，
+    // 若存在最近固定行（recentFixedRows），降级为仅注入固定行（不依赖向量），继续原始生成；
+    // 否则保持原行为（空向量返回 empty_query_embedding；异常穿透给上层 init.ts 的 try/catch 兜底）。
+    let keywords: string[] = [];
+    let queryText = '';
+    let queryVector: number[] = [];
+    try {
+        keywords = await generateKeywords_ACU(config, userInput);
+        queryText = [userInput, keywords.join('，')].filter(Boolean).join('\n关键词：');
+        const embeddings = await createEmbeddings_ACU({
+            endpoint: config.embeddingEndpoint,
+            apiKey: config.embeddingApiKey,
+            model: config.embeddingModel,
+            input: [queryText],
+        });
+        queryVector = embeddings[0]?.embedding || [];
+        if (queryVector.length === 0) {
+            if (recentFixedRows.length > 0) {
+                logWarn_ACU('[交火模式纪要索引] query embedding 返回空向量，降级为仅注入最近固定行:', userInput);
+                return await injectRecentFixedRowsOnly_ACU(recentFixedRows);
+            }
+            return { success: false, skipped: true, reason: 'empty_query_embedding' };
+        }
+    } catch (error) {
+        if (recentFixedRows.length > 0) {
+            logWarn_ACU('[交火模式纪要索引] query embedding 失败，降级为仅注入最近固定行，继续原始生成:', error);
+            return await injectRecentFixedRowsOnly_ACU(recentFixedRows);
+        }
+        throw error;
     }
 
     // 只对较早行的 chunks 做向量匹配
@@ -733,11 +791,13 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         })
         .filter((candidate): candidate is RankedSummaryCandidate_ACU => !!candidate);
 
+    // T10：query 模长只算一次，循环内只做点积与候选模长（与原实现逐位等价）。
+    const queryNorm = computeVectorNorm_ACU(queryVector);
     const denseCandidates = searchableCandidates
         .map((candidate): RankedSummaryCandidate_ACU | null => {
             const chunk = candidate.chunk;
             if (!Array.isArray(chunk.vector) || chunk.vector.length === 0) return null;
-            const score = cosineSimilarity_ACU(queryVector, chunk.vector);
+            const score = cosineSimilarity_ACU(queryVector, chunk.vector, queryNorm);
             if (score < config.summaryIndexMinScore) return null;
             return { ...candidate, score, denseScore: score };
         })
@@ -745,8 +805,14 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         .sort((left, right) => right.score - left.score)
         .slice(0, config.summaryIndexCandidateLimit);
 
+    // T10：BM25 语料缓存键。候选集（searchableCandidates）的 chunk 集合指纹保证
+    // recentFixedCount / config 变化导致候选集变化时缓存自然失效；V2 快照的
+    // writeGeneration 唯一标识一次归档内容（不可变身份），作为前缀避免跨快照误用。
+    const bm25CacheKey = `${state.manifest?.storageIdentity?.writeGeneration || 'legacy'}::${state.manifest?.indexId || ''}::${searchableCandidates
+        .map((candidate) => candidate.chunk.textHash || candidate.chunk.chunkId || candidate.chunk.text)
+        .join('|')}`;
     const sparseCandidates = config.summaryIndexHybridRetrievalEnabled
-        ? sparseSearchBm25_ACU(queryText, searchableCandidates, config.summaryIndexBm25CandidateLimit)
+        ? sparseSearchBm25_ACU(queryText, searchableCandidates, config.summaryIndexBm25CandidateLimit, bm25CacheKey)
         : [];
 
     const fusionLimit = Math.max(config.summaryIndexCandidateLimit, config.topK);
@@ -766,16 +832,16 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     const reranked = candidates.length > 0
         ? await rerankCandidates_ACU(config, queryText, candidates)
         : [];
-    const selectedByRow = new Map<string, RankedSummaryCandidate_ACU>();
+    const selectedByRow = new Map<string, SummaryIndexSelectedCandidate_ACU>();
     for (const candidate of reranked) {
-        if (!selectedByRow.has(candidate.row.rowKey)) selectedByRow.set(candidate.row.rowKey, candidate);
+        if (!selectedByRow.has(candidate.row.rowKey)) selectedByRow.set(candidate.row.rowKey, { kind: 'ranked', chunk: candidate.chunk, row: candidate.row, score: candidate.score, rerankScore: candidate.rerankScore });
         if (selectedByRow.size >= config.topK) break;
     }
 
     // 合并：最近固定行 + TopK 排序行（去重，固定行优先）
     for (const row of recentFixedRows) {
         if (!selectedByRow.has(row.rowKey)) {
-            selectedByRow.set(row.rowKey, { chunk: null as any, row, score: 1.0 });
+            selectedByRow.set(row.rowKey, { kind: 'recent_fixed', row });
         }
     }
     const selected = Array.from(selectedByRow.values())

@@ -72,6 +72,33 @@ function buildCorpus_ACU(candidates: SummaryHybridCandidate_ACU[]): Bm25Corpus_A
     };
 }
 
+// T10：BM25 语料缓存。键由调用方提供（runtime 用 indexId + writeGeneration + 候选 chunk 集合指纹），
+// 索引切换 / 聊天切换 / 重新归档导致 chunk 集合变化时键自然变化，不会误用旧语料。
+// 容量设上限：长期运行下 writeGeneration 每次归档都变，若无上限会累积旧键。
+const BM25_CORPUS_CACHE_MAX_ACU = 4;
+const bm25CorpusCache_ACU = new Map<string, Bm25Corpus_ACU>();
+
+export function clearBm25CorpusCache_ACU(): void {
+    bm25CorpusCache_ACU.clear();
+}
+
+function getOrBuildBm25Corpus_ACU(candidates: SummaryHybridCandidate_ACU[], cacheKey?: string): Bm25Corpus_ACU {
+    if (cacheKey) {
+        const cached = bm25CorpusCache_ACU.get(cacheKey);
+        if (cached) return cached;
+    }
+    const built = buildCorpus_ACU(candidates);
+    if (cacheKey) {
+        bm25CorpusCache_ACU.set(cacheKey, built);
+        // 超过上限时淘汰最旧键（Map 迭代顺序即插入顺序）。
+        if (bm25CorpusCache_ACU.size > BM25_CORPUS_CACHE_MAX_ACU) {
+            const oldestKey = bm25CorpusCache_ACU.keys().next().value as string | undefined;
+            if (oldestKey !== undefined) bm25CorpusCache_ACU.delete(oldestKey);
+        }
+    }
+    return built;
+}
+
 function scoreBm25Document_ACU(queryTokens: string[], document: Bm25Document_ACU, corpus: Bm25Corpus_ACU): number {
     if (queryTokens.length === 0 || corpus.documentCount === 0 || document.tokens.length === 0) return 0;
     let score = 0;
@@ -86,11 +113,11 @@ function scoreBm25Document_ACU(queryTokens: string[], document: Bm25Document_ACU
     return score;
 }
 
-export function sparseSearchBm25_ACU(query: string, candidates: SummaryHybridCandidate_ACU[], limit: number): SummaryHybridCandidate_ACU[] {
+export function sparseSearchBm25_ACU(query: string, candidates: SummaryHybridCandidate_ACU[], limit: number, cacheKey?: string): SummaryHybridCandidate_ACU[] {
     const queryTokens = tokenizeBm25Text_ACU(query);
     const normalizedLimit = Math.max(1, Math.floor(Number(limit) || 1));
     if (queryTokens.length === 0 || candidates.length === 0) return [];
-    const corpus = buildCorpus_ACU(candidates);
+    const corpus = getOrBuildBm25Corpus_ACU(candidates, cacheKey);
     return corpus.documents
         .map((document) => {
             const bm25Score = scoreBm25Document_ACU(queryTokens, document, corpus);

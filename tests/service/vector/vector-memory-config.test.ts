@@ -79,4 +79,17 @@ describe('vector-memory-config hybrid retrieval fields', () => {
     expect(config.summaryIndexCandidateLimit).toBe(8);
     expect(config.summaryIndexV2WriteEnabled).toBe(true);
   });
+
+  it('T10：模块级 defaults 冻结常量只读，误改不生效（有效配置不受污染）', () => {
+    // 首次调用会构建模块级冻结缓存；随后任何对 effective config 的写尝试不得污染全局默认。
+    const before = getEffectiveSummaryVectorIndexConfig_ACU({ topK: 7 });
+    expect(before.topK).toBe(7);
+    expect(before.summaryIndexCandidateLimit).toBeGreaterThanOrEqual(7);
+
+    // 尝试修改返回对象的标量字段（普通模式下静默失败）。
+    (before as any).topK = 999;
+    const after = getEffectiveSummaryVectorIndexConfig_ACU({ topK: 7 });
+    expect(after.topK).toBe(7);
+    expect(after.summaryIndexCandidateLimit).toBeGreaterThanOrEqual(7);
+  });
 });

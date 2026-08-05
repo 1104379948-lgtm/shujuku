@@ -329,6 +329,7 @@ describe('VectorIndexPage', () => {
     expect(text).toContain('归档批次');
     expect(text).toContain('滚动增量写入暂不可用');
     expect(text).toContain('历史配置已开启，归档仍会安全地写入 V2 单文件快照');
+    expect(text).toContain('默认开启（新装或未显式配置的用户默认走 V2 归档路径）');
     const rollingDeltaToggle = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-vector-index-page .acu-toggle'))
       .find((button) => button.textContent?.includes('滚动增量写入暂不可用'));
     expect(rollingDeltaToggle).toBeDefined();

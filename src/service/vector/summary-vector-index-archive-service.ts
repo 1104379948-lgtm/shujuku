@@ -14,8 +14,9 @@ import {
     assertSummaryVectorFlushGenerationCurrent_ACU,
     SummaryVectorFlushGenerationInvalidatedError_ACU,
 } from '../../data/storage/vector-index-hot-cache';
-import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
+import { createEmbeddings_ACU, isVectorEmbeddingError_ACU } from '../../data/gateways/vector-embedding-gateway';
 import type { VectorEmbeddingResult_ACU } from '../../data/gateways/vector-embedding-gateway';
+import { buildVectorIndexSingleSnapshotV2FilePath_ACU } from '../../data/storage/vector-index-st-files-storage';
 import { saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { getChatArray_ACU } from '../chat/chat-service';
@@ -81,6 +82,16 @@ export interface SummaryVectorIndexArchiveResult_ACU {
     messageIndex?: number;
     summaryKey?: string;
     reason?: string;
+    /**
+     * T0c：结构化重试性分类。'terminal' 表示重试不可能成功（如路径超长），
+     * 调用方（flush runner）必须停止重排并标记 failed_terminal，不再重复扣费。
+     */
+    retryability?: 'retryable' | 'terminal';
+    /**
+     * T4：credential 类失败（401/403）时，按 endpoint + model + apiKey 计算的哈希指纹。
+     * 仅存哈希不存明文，供 flush runner 做跨 scope cooldown（同一凭据在其他聊天也停止重试）。
+     */
+    credentialFingerprint?: string;
     errors: string[];
 }
 
@@ -247,11 +258,45 @@ function buildResult_ACU(partial: Partial<SummaryVectorIndexArchiveResult_ACU> =
         indexedRowCount: 0,
         skippedRowCount: 0,
         chunkCount: 0,
+        retryability: 'retryable' as const,
         errors: [],
         ...partial,
     };
 }
 
+/**
+ * T0b：归档入口路径 preflight。
+ * 在发起任何 embedding 请求之前，用长度上界占位值试算 V2 快照对象路径的可构造性。
+ * 真实 indexId / writeGeneration 在 persist 内部生成，这里无法取得，因此占位必须取上界：
+ *   - indexId：`snap_`(5) + hashUserInput_ACU 输出最长 8 字符 = 13。
+ *     hashUserInput_ACU（utils.ts:91）末轮不再 `^=` 截回 32 位，返回值可能为负，
+ *     `toString(36)` 会带 `-` 号（实测 20 万样本：50.3% 为负、21.1% 长度为 8，最坏如 `-10tp0s0`）。
+ *     而 normalizeFileNamePart_ACU 的字符集 [a-zA-Z0-9_-] 保留 `-`，不会被吃掉。
+ *     取 12 会让临界 scope 通过 preflight 后在 persist 抛错（先烧 embedding 再失败），故必须取 13。
+ *   - writeGeneration：T0a 后最大长度 24（时间戳 base36 8 + 7 + 7 = 22，留 2 字符余量）
+ * preflight 通过 ⇒ 真实构造必通过（不允许 preflight 放过、persist 再抛）。
+ * 返回 { ok: true } 或 { ok: false, error }，不 throw。
+ */
+function preflightVectorIndexSnapshotPath_ACU(parts: {
+    chatKey: string;
+    isolationKey: string;
+    sourceTableKey: string;
+}): { ok: boolean; error?: string } {
+    const indexIdPlaceholder = 'snap_' + 'z'.repeat(8);
+    const writeGenerationPlaceholder = 'z'.repeat(24);
+    try {
+        buildVectorIndexSingleSnapshotV2FilePath_ACU({
+            chatKey: parts.chatKey,
+            isolationKey: parts.isolationKey,
+            sourceTableKey: parts.sourceTableKey,
+            indexId: indexIdPlaceholder,
+            writeGeneration: writeGenerationPlaceholder,
+        });
+        return { ok: true };
+    } catch (error: any) {
+        return { ok: false, error: String(error?.message || error || '快照路径长度超出宿主安全上限') };
+    }
+}
 const SUMMARY_VECTOR_INDEX_PUBLISH_MUTATED_MESSAGE_FIELDS_ACU = [
     'TavernDB_ACU_IsolatedData',
     'TavernDB_ACU_Identity',
@@ -290,15 +335,30 @@ function buildStableSummaryRowKey_ACU(summaryKey: string, rowId: string, indexCo
     return `summary-row:${hashUserInput_ACU(source)}`;
 }
 
-function buildPreparedRowFingerprint_ACU(row: SummaryVectorArchivePreparedRow_ACU): string {
+/**
+ * 单一指纹公式：所有行指纹必须经由这里计算，避免三处内联公式漂移。
+ * 输入字段顺序与 join 分隔符与历史实现逐字符一致（T1，零行为变化）。
+ */
+function buildSummaryRowFingerprint_ACU(source: {
+    rowId: string;
+    timeSpan: string;
+    location: string;
+    summary: string;
+    indexCode: string;
+    vectorSourceText: string;
+}): string {
     return hashUserInput_ACU([
-        row.rowId,
-        row.timeSpan,
-        row.location,
-        row.summary,
-        row.indexCode,
-        row.vectorSourceText,
+        source.rowId,
+        source.timeSpan,
+        source.location,
+        source.summary,
+        source.indexCode,
+        source.vectorSourceText,
     ].join('\n'));
+}
+
+function buildPreparedRowFingerprint_ACU(row: SummaryVectorArchivePreparedRow_ACU): string {
+    return buildSummaryRowFingerprint_ACU(row);
 }
 
 export function findSummaryTable_ACU(sourceTableKey?: string): SummaryTableSelection_ACU | null {
@@ -422,14 +482,14 @@ function cloneSummaryVectorIndexState_ACU(state: ChatSummaryVectorIndexState_ACU
 }
 
 function getSummaryRowFingerprintFromStateRow_ACU(row: ChatSummaryVectorIndexRow_ACU): string {
-    return hashUserInput_ACU([
-        row.rowId,
-        row.timeSpan,
-        row.location,
-        row.summary,
-        row.indexCode,
-        row.vectorSourceText,
-    ].join('\n'));
+    return buildSummaryRowFingerprint_ACU({
+        rowId: row.rowId,
+        timeSpan: row.timeSpan,
+        location: row.location,
+        summary: row.summary,
+        indexCode: row.indexCode,
+        vectorSourceText: row.vectorSourceText,
+    });
 }
 
 function buildLayerStateWithRows_ACU(
@@ -520,14 +580,14 @@ function buildExistingReusableRows_ACU(
     existingRows.forEach((existingRow) => {
         const prepared = preparedByKey.get(existingRow.rowKey);
         const chunks = existingChunksByRowKey.get(existingRow.rowKey) || [];
-        const existingFingerprint = hashUserInput_ACU([
-            existingRow.rowId,
-            existingRow.timeSpan,
-            existingRow.location,
-            existingRow.summary,
-            existingRow.indexCode,
-            existingRow.vectorSourceText,
-        ].join('\n'));
+        const existingFingerprint = buildSummaryRowFingerprint_ACU({
+            rowId: existingRow.rowId,
+            timeSpan: existingRow.timeSpan,
+            location: existingRow.location,
+            summary: existingRow.summary,
+            indexCode: existingRow.indexCode,
+            vectorSourceText: existingRow.vectorSourceText,
+        });
         if (!prepared || chunks.length === 0 || existingFingerprint !== prepared.sourceFingerprint) {
             return;
         }
@@ -1290,9 +1350,28 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         logDebug_ACU(`[纪要向量索引] 本次归档模式: ${archiveMode}`);
         const aggregatedSnapshot = await hydrateAggregatedSummaryVectorIndexSnapshot_ACU(getAggregatedSummaryVectorIndexSnapshot_ACU());
         const existingState = cloneSummaryVectorIndexState_ACU(aggregatedSnapshot?.summaryVectorIndexState);
-        const reusable = buildExistingReusableRows_ACU(prepared.rows, existingState);
-        const reusableRowKeySet = new Set(reusable.reusableRows.map((row) => row.rowKey));
-        const rowsNeedingEmbedding = prepared.rows.filter((row) => !reusableRowKeySet.has(row.rowKey));
+        // T2：embedding 模型失效闸门。
+        // 指纹公式不含模型身份（D1），若模型已变而静默复用旧行，召回会用旧模型向量打分。
+        // 比对 existingState.manifest.embeddingModel 与当前 config；不一致则整个 scope 判不可复用、全量重算。
+        // 旧 manifest 缺 embeddingModel 字段时视为相同，避免历史索引误判全量重算。
+        // 维度一致性由 persist 在写入前收紧校验（混维拒绝写入）。
+        const existingManifestModel = existingState?.manifest?.embeddingModel;
+        const embeddingIdentityChanged = existingManifestModel != null
+            && String(existingManifestModel).trim() !== String(config.embeddingModel).trim();
+        if (embeddingIdentityChanged) {
+            logSummaryVectorIndexIdentityEvent_ACU('warn', 'archive', 'embedding_identity_changed_full_rebuild', {
+                scopeFingerprint: buildSummaryVectorIndexArchiveScopeKey_ACU({
+                    chatKey: currentChatFileIdentifier_ACU,
+                    isolationKey,
+                    sourceTableKey: selectedSummary.summaryKey,
+                }),
+                error: `model=${String(existingManifestModel).trim()} → ${String(config.embeddingModel).trim()}`,
+            });
+        }
+        const reusable = embeddingIdentityChanged
+            ? { reusableRows: [] as ChatSummaryVectorIndexRow_ACU[], reusableChunks: [] as ChatSummaryVectorIndexChunk_ACU[], rowsNeedingEmbedding: prepared.rows }
+            : buildExistingReusableRows_ACU(prepared.rows, existingState);
+        const rowsNeedingEmbedding = reusable.rowsNeedingEmbedding;
         const activeRowKeysUnchanged = areSummaryVectorActiveRowKeysSame_ACU(prepared.rows, existingState);
         const existingActiveRowCount = existingState?.manifest?.snapshot?.activeRowKeys?.length || existingState?.rows?.length || 0;
         logDebug_ACU(`[纪要向量索引] 增量归档判定：prepared=${prepared.rows.length}, existingActive=${existingActiveRowCount}, reused=${reusable.reusableRows.length}, embedding=${rowsNeedingEmbedding.length}, activeRowsUnchanged=${activeRowKeysUnchanged}, skippedRows=${prepared.skippedRowCount}`);
@@ -1313,27 +1392,77 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
         const indexedAt = new Date().toISOString();
         const sourceTableName = normalizeText_ACU(selectedSummary.table?.name) || '纪要表';
         const maxRowsPerBatch = Math.max(1, Math.floor(Number(config.summaryIndexArchiveMaxConcurrency) || 30));
+        // T0b：在任何 embedding 请求之前做路径 preflight，用长度上界占位值试算。
+        // 若失败（scope 本身超长），立即返回结构化失败，不发起任何 embedding 请求。
+        const pathPreflight = preflightVectorIndexSnapshotPath_ACU({
+            chatKey: currentChatFileIdentifier_ACU,
+            isolationKey,
+            sourceTableKey: selectedSummary.summaryKey,
+        });
+        if (!pathPreflight.ok) {
+            logWarn_ACU(`[纪要向量索引] 归档前路径 preflight 失败，未发起 embedding：${pathPreflight.error}`);
+            return buildResult_ACU({
+                success: false,
+                skipped: false,
+                summaryKey: selectedSummary.summaryKey,
+                messageIndex: targetMessageIndex,
+                reason: 'vector_index_path_too_long',
+                retryability: 'terminal',
+                errors: [pathPreflight.error || '快照路径长度超出宿主安全上限'],
+            });
+        }
         const embeddedRows: ChatSummaryVectorIndexRow_ACU[] = [];
         const embeddedChunks: ChatSummaryVectorIndexChunk_ACU[] = [];
-        let checkpointResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU(reusable.reusableRows, reusable.reusableChunks);
 
+        // T9：归档 embedding 批次有界并发。
+        // 串行时批次 k 的 existingSequenceBase = 前 k 批的 chunk 总数；并发下无法等前批完成再算，
+        // 因此按批预分配 sequence 区间：批次 k 的 base = sum(前 k 批的 chunk 数)。
+        // chunk 切分是确定性函数（chunkTextBySentenceCount_ACU），可精确预计算每批 chunk 数，
+        // 保证并发下最终 chunks 的 sequence 序与串行完全一致。
+        const batchConcurrency = Math.max(1, Math.floor(Number(config.summaryIndexArchiveEmbeddingConcurrency) || 3));
+        const batchChunkCounts: number[] = [];
+        const batchRowGroups: SummaryVectorArchivePreparedRow_ACU[][] = [];
         for (let startIndex = 0; startIndex < rowsNeedingEmbedding.length; startIndex += maxRowsPerBatch) {
             const rowBatch = rowsNeedingEmbedding.slice(startIndex, startIndex + maxRowsPerBatch);
             if (rowBatch.length === 0) continue;
-            const batchResult = await buildChunksWithEmbeddings_ACU(rowBatch, {
-                snapshotMessageId,
-                sentenceCount: config.summaryIndexChunkSentenceCount,
-                embeddingEndpoint: config.embeddingEndpoint,
-                embeddingApiKey: config.embeddingApiKey,
-                embeddingModel: config.embeddingModel,
-                existingSequenceBase: embeddedChunks.length,
-            });
+            batchRowGroups.push(rowBatch);
+            let chunkCount = 0;
+            for (const row of rowBatch) {
+                chunkCount += chunkTextBySentenceCount_ACU(row.vectorSourceText, config.summaryIndexChunkSentenceCount).length;
+            }
+            batchChunkCounts.push(chunkCount);
+        }
+        // 有界并发：同时最多 batchConcurrency 个批次在飞。取批次 + 分配 sequence base 在同一同步块内完成
+        // （JS 单线程，nextBatchIndex++ / sequenceBase 读改写之间无 await），无竞争。
+        const batchResults: Array<{ rows: ChatSummaryVectorIndexRow_ACU[]; chunks: ChatSummaryVectorIndexChunk_ACU[] } | null> =
+            new Array(batchRowGroups.length).fill(null);
+        let nextBatchIndex = 0;
+        let sequenceBase = 0;
+        const workerCount = Math.max(1, Math.min(batchConcurrency, batchRowGroups.length));
+        const workers = Array.from({ length: workerCount }, async () => {
+            while (true) {
+                const batchIndex = nextBatchIndex;
+                if (batchIndex >= batchRowGroups.length) break;
+                nextBatchIndex += 1;
+                const mySequenceBase = sequenceBase;
+                sequenceBase += batchChunkCounts[batchIndex];
+                const batchResult = await buildChunksWithEmbeddings_ACU(batchRowGroups[batchIndex], {
+                    snapshotMessageId,
+                    sentenceCount: config.summaryIndexChunkSentenceCount,
+                    embeddingEndpoint: config.embeddingEndpoint,
+                    embeddingApiKey: config.embeddingApiKey,
+                    embeddingModel: config.embeddingModel,
+                    existingSequenceBase: mySequenceBase,
+                });
+                batchResults[batchIndex] = batchResult;
+            }
+        });
+        await Promise.all(workers);
+        // 按批号顺序合并，保证 embeddedRows / embeddedChunks 顺序与串行一致。
+        for (const batchResult of batchResults) {
+            if (!batchResult) continue;
             embeddedRows.push(...batchResult.rows);
             embeddedChunks.push(...batchResult.chunks);
-            checkpointResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU(
-                [...reusable.reusableRows, ...embeddedRows],
-                [...reusable.reusableChunks, ...embeddedChunks],
-            );
         }
 
         const finalResult = buildFinalSummaryVectorIndexRowsAndChunks_ACU(
@@ -1432,6 +1561,30 @@ async function archiveSummaryVectorIndexNowUnlocked_ACU(options: SummaryVectorIn
                 messageIndex: targetMessageIndex,
                 reason: 'flush_scope_invalidated',
                 errors: [],
+            });
+        }
+        // T4：识别结构化 embedding 错误，把 terminal / retryable 分类传导给 flush runner。
+        // terminal（credential / request / provider-contract）→ 停止重排；retryable → 继续有限重试。
+        if (isVectorEmbeddingError_ACU(error)) {
+            const terminalKinds = new Set(['credential', 'request', 'provider-contract']);
+            const embeddingRetryability: 'retryable' | 'terminal' = terminalKinds.has(error.kind) ? 'terminal' : 'retryable';
+            const detail = error.providerMessage || error.message;
+            const credentialFingerprint = error.kind === 'credential'
+                ? hashUserInput_ACU([
+                    String(config.embeddingEndpoint || '').trim(),
+                    String(config.embeddingModel || '').trim(),
+         String(config.embeddingApiKey || '').trim(),
+                ].join('|'))
+                : undefined;
+            return buildResult_ACU({
+                success: false,
+                skipped: false,
+                summaryKey: selectedSummary.summaryKey,
+                messageIndex: targetMessageIndex,
+                reason: 'embedding_request_failed',
+                retryability: embeddingRetryability,
+                ...(credentialFingerprint ? { credentialFingerprint } : {}),
+                errors: [`Embedding 请求失败（${error.kind}${error.httpStatus != null ? `, HTTP ${error.httpStatus}` : ''}）: ${detail}`],
             });
         }
         return buildResult_ACU({

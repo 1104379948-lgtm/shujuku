@@ -163,9 +163,17 @@ export function buildVectorIndexSingleSnapshotV2FilePath_ACU(parts: {
     const writeGeneration = normalizePathSegment_ACU(parts.writeGeneration || 'write');
     const path = `TavernDB_ACU_vector_v2_${scopeToken}_${indexId}_${writeGeneration}_snapshot`;
     if (path.length > VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU) {
+        const excess = path.length - VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU;
+        // 每个中文 UTF-8 编码占 3 字节，经 base64 后约 4 字符；ASCII 每字符 1 字节 → base64 约 1.33 字符。
+        const chineseCharsToShorten = Math.ceil(excess / 4);
         throw new Error(
-            `[纪要向量索引] V2 快照对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}。`
-            + '请缩短 chatKey、isolationKey 或 sourceTableKey；禁止截断 canonical scope 后继续写入。',
+            `[纪要向量索引] V2 快照对象路径超长: length=${path.length}, max=${VECTOR_INDEX_OBJECT_PATH_MAX_LENGTH_ACU}，`
+            + `超出 ${excess} 字符。其中 scopeToken 占用 ${scopeToken.length} 字符，`
+            + `indexId 占用 ${indexId.length} 字符，writeGeneration 占用 ${writeGeneration.length} 字符，其余固定前缀/后缀共 ${path.length - scopeToken.length - indexId.length - writeGeneration.length} 字符。`
+            + `请缩短当前聊天名约 ${chineseCharsToShorten} 个中文字（或缩短数据隔离码），使路径回到上限内。`
+            + '仅在当前没有任何已建成的纪要向量索引时，重命名聊天才不会使旧索引失联；'
+            + '若已有索引，请勿直接改名，否则旧索引将无法再被寻址。'
+            + '禁止截断 canonical scope 后继续写入。',
         );
     }
     return path;

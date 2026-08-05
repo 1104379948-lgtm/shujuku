@@ -58,6 +58,7 @@ import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutat
 import { hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
+import { isSameSheetHeader_ACU } from '../template/guide-metadata-overlay';
 import { captureTableRuntimeRevisionForWriteSet_ACU } from './table-write-transaction';
 import { runTableUpdateCommit_ACU, type TableUpdateCommitErrorCategory_ACU } from './table-update-commit';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
@@ -338,27 +339,48 @@ function formatResponseGroupReference_ACU(response: GroupFillResponse_ACU): stri
  * [辅助] 从聊天记录加载旧数据覆盖 sheet 后，恢复指导表基底中的关键结构字段。
  *
  * 背景：loadBatchBaseData_ACU 从聊天记录中加载旧数据时，会整体覆盖 mergedBatchData[sheetKey]。
- * 但指导表基底中可能包含用户在可视化编辑器中修改过的 sourceData.ddl 和表头（content[0]），
- * 这些结构信息不应该被聊天记录中的旧数据覆盖。
+ * 基底（guideSnapshots）中可能包含用户在可视化编辑器中修改过的 sourceData.ddl 和表头（content[0]），
+ * 这些结构信息不应该被聊天记录中的旧数据覆盖；而 name/uid/updateConfig/exportConfig 保留聊天记录中的值，
+ * 因为它们可能在聊天过程中被合法修改。
  *
- * 只恢复 sourceData（含 DDL）和表头（content[0]），其他字段（name/uid/updateConfig/exportConfig）
- * 保留聊天记录中的值，因为它们可能在聊天过程中被合法修改。
+ * 结构权归属：运行时/回放数据持结构权。表头（content[0]）是数据形状定义，不是元数据；
+ * 无校验地用基底表头覆盖运行时会产出「表头 N 列 + 数据行 M 列」的错位填表基底。
+ * 仅当表头与权威数据完全一致时才继承基底的 sourceData.ddl；不一致时保留权威 ddl 并记录 warning。
  */
 function restoreGuideStructure(mergedSheet: any, guideSheet: any): void {
     if (!guideSheet || typeof guideSheet !== 'object') return;
     if (!mergedSheet || typeof mergedSheet !== 'object') return;
 
-    // 恢复 sourceData（包含 DDL、note 等用户在可视化编辑器中修改的关键配置）
-    if (guideSheet.sourceData) mergedSheet.sourceData = JSON.parse(JSON.stringify(guideSheet.sourceData));
-
-    // 恢复表头（content[0]）——指导表中的表头是用户最新编辑的
+    // 基底表头若存在，必须校验首列为 row_id
     const guideHeader = Array.isArray(guideSheet.content) ? guideSheet.content[0] : null;
     if (guideHeader && (!Array.isArray(guideHeader) || String(guideHeader[0] ?? '') !== 'row_id')) {
         throw new Error(`Sheet Guide 表头缺少 row_id 首列：${String(guideSheet.uid || guideSheet.name || 'unknown')}`);
     }
-    if (Array.isArray(guideHeader)
-        && Array.isArray(mergedSheet.content) && mergedSheet.content.length > 0) {
+
+    const mergedHeader = Array.isArray(mergedSheet.content) ? mergedSheet.content[0] : null;
+    const headerMatches = !!guideHeader && !!mergedHeader && isSameSheetHeader_ACU(guideHeader, mergedHeader);
+
+    // 表头不一致时：保留权威结构，不覆盖、不 padding、不截断，仅记录 warning。
+    if (guideHeader && mergedHeader && !headerMatches) {
+        logWarn_ACU(
+            `[MergeBase] 表「${String(mergedSheet.name || guideSheet.name || mergedSheet.uid)}」的基底表头`
+            + `与权威数据不一致，已保留权威结构：guide=${guideHeader.length} 列, data=${mergedHeader.length} 列。`,
+        );
+    }
+    // 仅当合并数据完全没有表头时，才用基底表头补位（无权威结构可循）。
+    if (!mergedHeader && Array.isArray(guideHeader) && Array.isArray(mergedSheet.content)) {
         mergedSheet.content[0] = JSON.parse(JSON.stringify(guideHeader));
+    }
+
+    // 只恢复结构字段 sourceData.ddl：表头一致时继承基底 ddl，否则保留权威 ddl。
+    // 不触碰 name/uid/updateConfig/exportConfig/orderNo（保留聊天记录中的值）。
+    if (guideSheet.sourceData && typeof guideSheet.sourceData === 'object') {
+        const targetSourceData = (mergedSheet.sourceData && typeof mergedSheet.sourceData === 'object')
+            ? mergedSheet.sourceData
+            : (mergedSheet.sourceData = {});
+        if (headerMatches && guideSheet.sourceData.ddl !== undefined) {
+            targetSourceData.ddl = JSON.parse(JSON.stringify(guideSheet.sourceData.ddl));
+        }
     }
 }
 

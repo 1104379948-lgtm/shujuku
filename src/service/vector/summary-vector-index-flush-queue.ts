@@ -24,11 +24,17 @@ import {
 import { clearSummaryVectorIndexDirtyForRealign_ACU } from './summary-vector-index-realign-state';
 import { logSummaryVectorIndexIdentityEvent_ACU } from './summary-vector-index-storage-service';
 import { normalizeSummaryVectorIndexScope_ACU } from '../../shared/summary-vector-index-scope';
+import { getEffectiveSummaryVectorIndexConfig_ACU } from './vector-memory-config';
+import { hashUserInput_ACU } from '../../shared/utils';
 
 const SUMMARY_VECTOR_INDEX_FLUSH_DEBOUNCE_MS_ACU = 2500;
 const SUMMARY_VECTOR_INDEX_FLUSHING_STALE_MS_ACU = 60_000;
+/** T4：credential cooldown 默认时长（毫秒）。403/401 后同凭据在其他 scope 也停止重试。 */
+const SUMMARY_VECTOR_INDEX_CREDENTIAL_COOLDOWN_MS_ACU = 30 * 60_000;
 const summaryVectorFlushTimers_ACU = new Map<string, ReturnType<typeof setTimeout>>();
 const summaryVectorFlushRunning_ACU = new Set<string>();
+/** T4：credential 指纹 → cooldown 截止时间。仅存哈希不存明文 apiKey。 */
+const summaryVectorCredentialCooldowns_ACU = new Map<string, { until: number; reason: string }>();
 
 export interface SummaryVectorIndexFlushQueueOptions_ACU {
     targetMessageIndex?: number;
@@ -145,8 +151,10 @@ async function markFlushTaskFailure_ACU(task: SummaryVectorIndexFlushTaskRecord_
     });
 }
 
+
 function scheduleFlushTaskTimer_ACU(task: SummaryVectorIndexFlushTaskRecord_ACU): void {
     clearFlushTimer_ACU(task.scopeKey);
+
     const delay = Math.max(0, Math.min(Math.max(0, task.debounceUntil - Date.now()), 2_147_483_647));
     logDebug_ACU(`[交火向量索引] 防抖定时器已设置：scope=${task.scopeKey}, delay=${delay}ms, mode=${task.mode}`);
     const timer = setTimeout(() => {
@@ -156,6 +164,41 @@ function scheduleFlushTaskTimer_ACU(task: SummaryVectorIndexFlushTaskRecord_ACU)
     }, delay);
     summaryVectorFlushTimers_ACU.set(task.scopeKey, timer);
 }
+
+/** T4：查询 credential cooldown 是否仍生效。命中返回 reason，否则返回 null。 */
+function getActiveCredentialCooldown_ACU(credentialFingerprint: string): { until: number; reason: string } | null {
+    if (!credentialFingerprint) return null;
+    const entry = summaryVectorCredentialCooldowns_ACU.get(credentialFingerprint);
+    if (!entry) return null;
+    if (Date.now() >= entry.until) {
+        summaryVectorCredentialCooldowns_ACU.delete(credentialFingerprint);
+        return null;
+    }
+    return entry;
+}
+
+/** T4：记录 credential cooldown（仅存指纹，不存明文）。换 key（指纹变化）自动失效。 */
+function recordCredentialCooldown_ACU(credentialFingerprint: string, reason: string): void {
+    if (!credentialFingerprint) return;
+    summaryVectorCredentialCooldowns_ACU.set(credentialFingerprint, {
+        until: Date.now() + SUMMARY_VECTOR_INDEX_CREDENTIAL_COOLDOWN_MS_ACU,
+        reason,
+    });
+    logSummaryVectorIndexIdentityEvent_ACU('warn', 'flush', 'credential_cooldown_armed', {
+        scopeFingerprint: 'credential-fingerprint',
+        error: reason,
+    });
+}
+
+/** T4：显式解除全部 credential cooldown（手动重建成功 / 用户换 key 后）。 */
+export function clearSummaryVectorIndexCredentialCooldowns_ACU(): void {
+    summaryVectorCredentialCooldowns_ACU.clear();
+    logSummaryVectorIndexIdentityEvent_ACU('debug', 'flush', 'credential_cooldown_cleared', {
+        scopeFingerprint: 'credential-fingerprint',
+        error: 'manual rebuild or credential change cleared cooldowns',
+    });
+}
+
 
 async function resumeQueuedFlushTaskAfterRunner_ACU(scopeKey: string, completedGeneration: number): Promise<void> {
     const current = await getSummaryVectorFlushTaskStrict_ACU(scopeKey);
@@ -323,6 +366,25 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
     summaryVectorFlushRunning_ACU.add(task.scopeKey);
     clearFlushTimer_ACU(task.scopeKey);
     try {
+        // T4：credential cooldown 检查——同一凭据（endpoint+model+apiKey 指纹）近期
+        // 401/403 后，其他 scope 的 flush 也不再发起 embedding 请求，避免重复扣费。
+        try {
+            const cooldownConfig = getEffectiveSummaryVectorIndexConfig_ACU();
+            const cooldownFingerprint = hashUserInput_ACU([
+                String(cooldownConfig.embeddingEndpoint || '').trim(),
+                String(cooldownConfig.embeddingModel || '').trim(),
+                String(cooldownConfig.embeddingApiKey || '').trim(),
+            ].join('|'));
+            const activeCooldown = getActiveCredentialCooldown_ACU(cooldownFingerprint);
+            if (activeCooldown) {
+                const cooldownError = `凭据冷却中（${activeCooldown.reason}），停止重复扣费重试。`;
+                logWarn_ACU(`[交火向量索引] 防抖 flush 因 credential cooldown 跳过：scope=${task.scopeKey}`);
+                await markFlushTaskFailure_ACU(task, cooldownError, true);
+                return { success: false, reason: 'credential_cooldown', result: undefined, error: cooldownError };
+            }
+        } catch (_cooldownConfigError) {
+            // config 不可用时不做 cooldown 检查，退回原路径（cooldown 是防重复扣费的增强，不阻断正常 flush）。
+        }
         // [spv3.6.9] force=true：填表完成后必须强制写入外部文件，跳过"无变更"检测
         // 因为填表后数据已变化，但 fingerprint 比对可能误判为无变更
         const result = await archiveSummaryVectorIndexNow_ACU({
@@ -347,7 +409,18 @@ export async function flushSummaryVectorIndexTaskNow_ACU(scopeKey: string): Prom
             return { success: true, skipped: result.skipped, reason: result.reason, result };
         }
         const error = result.errors?.join('; ') || result.reason || 'summary_vector_index_flush_failed';
-        await markFlushTaskFailure_ACU(task, error, result.reason === 'summary_vector_index_config_invalid' || result.reason === 'target_message_invalid' || result.reason === 'target_message_not_found');
+        // T4：credential 类失败（401/403）记录跨 scope cooldown，
+        // 同一凭据在其他聊天（scope）也停止立即重试，避免重复扣费。
+        if (result.credentialFingerprint) {
+            recordCredentialCooldown_ACU(result.credentialFingerprint, error);
+        }
+        // T0c：优先采用 archive 返回的结构化重试性分类（如路径超长 → terminal），
+        // 保留既有 reason 硬编码作为兜底，避免 T4 结构化失败落地前遗漏。
+        const isTerminalFailure = result.retryability === 'terminal'
+            || result.reason === 'summary_vector_index_config_invalid'
+            || result.reason === 'target_message_invalid'
+            || result.reason === 'target_message_not_found';
+        await markFlushTaskFailure_ACU(task, error, isTerminalFailure);
         logWarn_ACU('[交火向量索引] 防抖 flush 失败:', error);
         return { success: false, reason: result.reason, result, error };
     } catch (error) {

@@ -25,7 +25,8 @@ const {
   mockGetCurrentCharacterId,
   mockParseTableTemplateJson, mockIsEntryBlocked,
   mockFormatJsonToReadable, mockMaybeLiftWorldbookSuppression,
-  mockMergeAllIndependentTables, mockShouldSuppressWorldbookInjection,
+  mockMergeAllIndependentTables, mockConsumeLastMergeQuarantinedSheetKeys,
+  mockConsumeLastMergeWarnings, mockShouldSuppressWorldbookInjection,
   mockAllocConsecutiveOrderBlock, mockApplyPlacementToEntry,
   mockBuildDefaultGlobalInjectionConfig, mockBuildUsedOrderSet,
   mockEnsureExportConfigDefaults, mockEnsureGlobalInjectionConfigDefaults,
@@ -100,6 +101,8 @@ const {
     })),
     mockMaybeLiftWorldbookSuppression: vi.fn(),
     mockMergeAllIndependentTables: vi.fn(async () => null),
+    mockConsumeLastMergeQuarantinedSheetKeys: vi.fn(() => []),
+    mockConsumeLastMergeWarnings: vi.fn(() => []),
     mockShouldSuppressWorldbookInjection: vi.fn(() => false),
     mockAllocConsecutiveOrderBlock: vi.fn(() => 100),
     mockApplyPlacementToEntry: vi.fn((entry: any, placement: any) => ({ ...entry, ...placement })),
@@ -208,6 +211,8 @@ vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
   formatJsonToReadable_ACU: mockFormatJsonToReadable,
   maybeLiftWorldbookSuppression_ACU: mockMaybeLiftWorldbookSuppression,
   mergeAllIndependentTables_ACU: mockMergeAllIndependentTables,
+  consumeLastMergeQuarantinedSheetKeys_ACU: mockConsumeLastMergeQuarantinedSheetKeys,
+  consumeLastMergeWarnings_ACU: mockConsumeLastMergeWarnings,
   shouldSuppressWorldbookInjection_ACU: mockShouldSuppressWorldbookInjection,
 }));
 

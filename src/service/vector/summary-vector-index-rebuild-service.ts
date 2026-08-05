@@ -8,7 +8,10 @@ import {
     findSummaryTable_ACU,
     type SummaryVectorIndexArchiveResult_ACU,
 } from './summary-vector-index-archive-service';
-import { clearSummaryVectorIndexFlushQueueForCurrentScope_ACU } from './summary-vector-index-flush-queue';
+import {
+    clearSummaryVectorIndexCredentialCooldowns_ACU,
+    clearSummaryVectorIndexFlushQueueForCurrentScope_ACU,
+} from './summary-vector-index-flush-queue';
 
 /**
  * 立即重建当前聊天的交火纪要索引。
@@ -56,6 +59,9 @@ export async function rebuildCurrentSummaryVectorIndexNow_ACU(): Promise<Summary
 
     const result = await archiveSummaryVectorIndexNow_ACU({ mode: 'sync' });
     if (result.success && !result.skipped) {
+        // T4：手动/自愈重建成功 = 显式解除入口，清除 credential cooldown，
+        // 避免换 key 或配置修复后仍被旧 cooldown 拦住。
+        clearSummaryVectorIndexCredentialCooldowns_ACU();
         try {
             await updateReadableLorebookEntry_ACU(true);
         } catch {

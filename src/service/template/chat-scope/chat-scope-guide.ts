@@ -329,6 +329,16 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
       return true;
   }
 
+  // 读写容器不对称是有意的，不要"修复"成让 getter 直接读 guide 容器：
+  // setter 把数据写进 guide 容器（container.tags[key]），只有 shouldSyncTemplateScope
+  // 为真时才同步 template scope；而本 getter 读的是 template scope 的 guideData，
+  // inherit_global 下 getCurrentChatTemplateScopeState_ACU 返回 null
+  // （chat-scope-template.ts:423-425），因此会一路回退到全局模板快照。
+  //
+  // 结构真相不依赖这条读回路径：填表基底优先取 V2 checkpoint 回放，
+  // guide 仅在无 checkpoint 时充当结构源（buildBatchMergeBase_ACU 的分支顺序，
+  // update-orchestrator.ts:747-804）。让 getter 读 guide 容器会使未显式覆盖模板的
+  // 聊天被隐式写入悄悄改变视图，反而破坏"跟随全局模板"的语义。
   export function getChatSheetGuideDataForIsolationKey_ACU(isolationKey: string) {
       const chat = getChatArray_ACU();
       const normalizedKey = String(isolationKey ?? '');
